@@ -30,6 +30,6 @@ A orquestração é **event-driven**. Agentes comunicam-se via eventos padroniza
 
 ## Referências
 
-- docs/ORCHESTRATOR_BLUEPRINT.md
-- orchestrator/events/schemas/
-- docs/TASK_STATE_MACHINE.md
+- [docs/ORCHESTRATOR_BLUEPRINT.md](../ORCHESTRATOR_BLUEPRINT.md)
+- [orchestrator/events/schemas/](../../orchestrator/events/schemas/)
+- [docs/TASK_STATE_MACHINE.md](../TASK_STATE_MACHINE.md)

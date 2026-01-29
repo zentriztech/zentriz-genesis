@@ -7,7 +7,7 @@ The project implements an **autonomous software factory**, specification-oriente
 
 ## 🎯 Project Objective
 
-Allow a single specification document (`PRODUCT_SPEC.md`) to be sufficient to:
+Allow a single specification document ([`PRODUCT_SPEC.md`](spec/PRODUCT_SPEC.md)) to be sufficient to:
 
 - Plan complex projects (API, Web, Mobile, Infrastructure)
 - Automatically assemble virtual squads by specialty
@@ -77,29 +77,29 @@ Zentriz-Genesis/
 The Zentriz Genesis project is extensive, with dozens of documents and multiple layers. To facilitate **continuity between sessions** and **onboarding of new chats** (AI assistants) or developers:
 
 - **`context/` folder**: Stores context documents that summarize the full project scenario.
-- **New chat starting work?** Read `context/PROJECT_OVERVIEW.md` to load the full context without traversing all .md files in the repository.
-- **Quick reference?** See `context/QUICK_REFERENCE.md`.
-- **Details**: See `context/README.md` for the purpose and usage of this folder.
+- **New chat starting work?** Read [context/PROJECT_OVERVIEW.md](context/PROJECT_OVERVIEW.md) to load the full context without traversing all .md files in the repository.
+- **Quick reference?** See [context/QUICK_REFERENCE.md](context/QUICK_REFERENCE.md).
+- **Details**: See [context/README.md](context/README.md) for the purpose and usage of this folder.
 
 This approach allows **new chats to leverage context from previous chats**, maintaining consistency and avoiding knowledge loss between work sessions.
 
 ## 📜 Core Documents
 
-- PRODUCT_SPEC.md
-- PROJECT_CHARTER.md
-- ARCHITECTURE.md
-- BACKLOG_*.md
-- ORCHESTRATOR_BLUEPRINT.md
-- TASK_STATE_MACHINE.md
-- DEPLOYMENT.md
-- STATUS.md
-- **context/PROJECT_OVERVIEW.md** — Full context for new chats and onboarding
+- [PRODUCT_SPEC.md](spec/PRODUCT_SPEC.md)
+- [PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md)
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [BACKLOG_*.md](docs/BACKLOG_BACKEND.md)
+- [ORCHESTRATOR_BLUEPRINT.md](docs/ORCHESTRATOR_BLUEPRINT.md)
+- [TASK_STATE_MACHINE.md](docs/TASK_STATE_MACHINE.md)
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [STATUS.md](docs/STATUS.md)
+- **[context/PROJECT_OVERVIEW.md](context/PROJECT_OVERVIEW.md)** — Full context for new chats and onboarding
 
 ## ✅ Quality and Governance
 
-- Global Definition of Done (including DevOps)
-- Stack checklists (React, RN, Backend)
-- Automated tests and post-deploy smoke tests
+- [Global Definition of Done](contracts/global_definition_of_done.md) (including [DevOps](contracts/devops_definition_of_done.md))
+- [Stack checklists](contracts/checklists/) (React, RN, Backend)
+- Automated tests and [post-deploy smoke tests](tests/smoke/)
 
 ## 🌐 Supported Clouds
 

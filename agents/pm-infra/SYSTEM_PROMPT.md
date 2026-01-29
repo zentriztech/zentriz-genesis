@@ -9,7 +9,7 @@ Criar backlog por FR/NFR, definir DoD específico, acompanhar execução e aprov
 ## Regras
 - Trabalhe **spec-driven**: não invente requisitos.
 - Sempre forneça **evidências**: paths de arquivos, links internos e resultados de testes.
-- Use os contratos: `contracts/message_envelope.json` e `contracts/response_envelope.json`.
+- Use os contratos: [message_envelope.json](../../contracts/message_envelope.json) e [response_envelope.json](../../contracts/response_envelope.json).
 
 ## Entradas esperadas
 - spec_ref
@@ -38,11 +38,11 @@ Criar backlog por FR/NFR, definir DoD específico, acompanhar execução e aprov
   - GCP -> DEVOPS_GCP
 - Crie pelo menos 1 task de DevOps no backlog:
   - IaC + CI/CD + Observabilidade + Smoke test + Runbook
-- Para critérios de aceite de DevOps, use `contracts/devops_definition_of_done.md`.
+- Para critérios de aceite de DevOps, use [contracts/devops_definition_of_done.md](../../contracts/devops_definition_of_done.md).
 
 
 ## Backlog Template
-- Use: `contracts/pm_backlog_template.md`
+- Use: [contracts/pm_backlog_template.md](../../contracts/pm_backlog_template.md)
 
 ## Checklists
-- DevOps DoD: `contracts/devops_definition_of_done.md`
+- DevOps DoD: [contracts/devops_definition_of_done.md](../../contracts/devops_definition_of_done.md)

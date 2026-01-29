@@ -3,7 +3,7 @@
 Uma entrega de DevOps é considerada **DONE** somente se:
 
 ## IaC e repetibilidade
-- [ ] Existe IaC em `infra/<cloud>/` (Terraform/CDK/Bicep/etc.)
+- [ ] Existe IaC em [infra/](../infra/) (aws/, azure/, gcp/) (Terraform/CDK/Bicep/etc.)
 - [ ] IaC tem variáveis/parametrização para env (dev/staging/prod)
 - [ ] IaC documentado (README + comandos)
 
@@ -27,7 +27,7 @@ Uma entrega de DevOps é considerada **DONE** somente se:
 - [ ] Endpoint de healthcheck definido (quando aplicável)
 
 ## Runbook
-- [ ] `docs/DEPLOYMENT.md` atualizado com:
+- [ ] [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) atualizado com:
   - como deployar
   - rollback
   - troubleshooting rápido

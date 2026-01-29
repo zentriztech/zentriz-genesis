@@ -16,4 +16,4 @@
 
 - TSK-BE-005: Provisionar deploy (AWS) + smoke — DEVOPS_AWS — P1
   - Requisitos: NFR-03, NFR-04
-  - DoD: contracts/devops_definition_of_done.md
+  - DoD: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)

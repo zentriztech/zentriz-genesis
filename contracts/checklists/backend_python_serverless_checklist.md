@@ -1,7 +1,7 @@
 # Checklist Backend (Python Serverless)
 
 ## API
-- [ ] Contrato em `docs/API_CONTRACT.md`
+- [ ] Contrato em [docs/API_CONTRACT.md](../../docs/API_CONTRACT.md)
 - [ ] Validação (Pydantic)
 - [ ] Erros padronizados com `request_id`
 

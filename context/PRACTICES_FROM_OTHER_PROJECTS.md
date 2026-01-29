@@ -27,7 +27,7 @@
 
 **Por que adotar**: Zentriz Genesis tem decisões importantes (spec-driven, event-driven, cloud-agnostic) que não estão formalmente documentadas. ADRs preservam o "porquê" para futuros desenvolvedores e chats.
 
-**Implementado**: `docs/adr/` com template e ADRs iniciais.
+**Implementado**: [docs/adr/](../docs/adr/) com template e ADRs iniciais.
 
 ---
 
@@ -37,7 +37,7 @@
 
 **Por que adotar**: O projeto tem "próximos passos" (Dashboard, Orchestrator real, SaaS). RFCs permitem discutir e aprovar propostas antes de codificar.
 
-**Implementado**: `docs/rfc/` com template.
+**Implementado**: [docs/rfc/](../docs/rfc/) com template.
 
 ---
 
@@ -57,7 +57,7 @@
 
 **Por que adotar**: O projeto educacional tinha latência <2s, 50+ QPS, 85%+ cobertura. Zentriz tem NFR-01 (p95 <500ms) no spec, mas não tem métricas consolidadas para o sistema de agentes.
 
-**Implementado**: `docs/PERFORMANCE_METRICS.md` com targets por camada.
+**Implementado**: [docs/PERFORMANCE_METRICS.md](../docs/PERFORMANCE_METRICS.md) com targets por camada.
 
 ---
 
@@ -75,7 +75,7 @@
 
 **O que é**: Índice JSON com keywords, conceitos, mapeamento de documentos.
 
-**Por que adotar**: O projeto educacional tinha `indice-ia.json` para busca inteligente. Zentriz tem `context/PROJECT_OVERVIEW.md` — um índice JSON poderia permitir busca programática e integração com LLMs.
+**Por que adotar**: O projeto educacional tinha `indice-ia.json` para busca inteligente. Zentriz tem [context/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) — um índice JSON poderia permitir busca programática e integração com LLMs.
 
 **Status**: Recomendado para fase posterior (quando houver execução real do Orchestrator).
 
@@ -105,10 +105,10 @@
 
 | Prática | Status | Localização |
 |---------|--------|-------------|
-| ADRs | ✅ Implementado | `docs/adr/` |
-| RFCs | ✅ Implementado | `docs/rfc/` |
-| Documentação consolidada de agentes | ✅ Implementado | `docs/AGENTS_CAPABILITIES.md` |
-| Métricas de performance | ✅ Implementado | `docs/PERFORMANCE_METRICS.md` |
+| ADRs | ✅ Implementado | [docs/adr/](../docs/adr/) |
+| RFCs | ✅ Implementado | [docs/rfc/](../docs/rfc/) |
+| Documentação consolidada de agentes | ✅ Implementado | [docs/AGENTS_CAPABILITIES.md](../docs/AGENTS_CAPABILITIES.md) |
+| Métricas de performance | ✅ Implementado | [docs/PERFORMANCE_METRICS.md](../docs/PERFORMANCE_METRICS.md) |
 | Scripts de manutenção | ✅ Implementado | `scripts/` |
 | Índice JSON | 🔄 Futuro | — |
 | MCP | 🔄 Futuro | — |

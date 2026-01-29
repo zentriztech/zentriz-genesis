@@ -4,22 +4,23 @@
 
 | O que | Onde |
 |-------|------|
-| Entrada do projeto | `spec/PRODUCT_SPEC.md` |
-| Guia de orquestração | `docs/ORCHESTRATION_GUIDE.md` |
-| Blueprint de eventos | `docs/ORCHESTRATOR_BLUEPRINT.md` |
-| State machine de tasks | `docs/TASK_STATE_MACHINE.md` |
-| PM gera backlog | `docs/PM_AUTOBACKLOG_GUIDE.md` |
-| DevOps por cloud | `docs/DEVOPS_SELECTION.md` |
-| DoD global | `contracts/global_definition_of_done.md` |
-| DoD DevOps | `contracts/devops_definition_of_done.md` |
-| Próximos passos | `docs/NEXT_STEPS_REMINDER.md` |
-| Status atual | `docs/STATUS.md` |
-| **ADRs** (decisões arquiteturais) | `docs/adr/` |
-| **RFCs** (propostas) | `docs/rfc/` |
-| **Agentes consolidados** | `docs/AGENTS_CAPABILITIES.md` |
-| **Métricas de performance** | `docs/PERFORMANCE_METRICS.md` |
-| **Scripts de manutenção** | `scripts/` |
-| **Práticas de outros projetos** | `context/PRACTICES_FROM_OTHER_PROJECTS.md` |
+| Entrada do projeto | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) |
+| Guia de orquestração | [docs/ORCHESTRATION_GUIDE.md](../docs/ORCHESTRATION_GUIDE.md) |
+| Blueprint de eventos | [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md) |
+| State machine de tasks | [docs/TASK_STATE_MACHINE.md](../docs/TASK_STATE_MACHINE.md) |
+| PM gera backlog | [docs/PM_AUTOBACKLOG_GUIDE.md](../docs/PM_AUTOBACKLOG_GUIDE.md) |
+| DevOps por cloud | [docs/DEVOPS_SELECTION.md](../docs/DEVOPS_SELECTION.md) |
+| DoD global | [contracts/global_definition_of_done.md](../contracts/global_definition_of_done.md) |
+| DoD DevOps | [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md) |
+| Próximos passos | [docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md) |
+| Status atual | [docs/STATUS.md](../docs/STATUS.md) |
+| **ADRs** (decisões arquiteturais) | [docs/adr/](../docs/adr/) |
+| **RFCs** (propostas) | [docs/rfc/](../docs/rfc/) |
+| **Agentes consolidados** | [docs/AGENTS_CAPABILITIES.md](../docs/AGENTS_CAPABILITIES.md) |
+| **Métricas de performance** | [docs/PERFORMANCE_METRICS.md](../docs/PERFORMANCE_METRICS.md) |
+| **Scripts de manutenção** | [scripts/](../scripts/) |
+| **Práticas de outros projetos** | [context/PRACTICES_FROM_OTHER_PROJECTS.md](PRACTICES_FROM_OTHER_PROJECTS.md) |
+| **Navegação (índice de links)** | [docs/NAVIGATION.md](../docs/NAVIGATION.md) |
 
 ## Eventos do Orchestrator
 
@@ -39,4 +40,4 @@ NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS | QA_FAIL → DO
 
 ## Schemas de Eventos
 
-`orchestrator/events/schemas/*.json`
+[orchestrator/events/schemas/](../orchestrator/events/schemas/) — [event_envelope.json](../orchestrator/events/schemas/event_envelope.json), [project.created.json](../orchestrator/events/schemas/project.created.json), [task.assigned.json](../orchestrator/events/schemas/task.assigned.json), etc.

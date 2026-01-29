@@ -9,6 +9,6 @@ Template mínimo para API server-side (Node.js).
 
 ## Próximos passos (Dev Backend)
 1) Gerar projeto (ex.: `npm init` + tsconfig)
-2) Implementar endpoints do `docs/API_CONTRACT.md`
+2) Implementar endpoints do [docs/API_CONTRACT.md](../docs/API_CONTRACT.md)
 3) Adicionar testes por FR
 4) Integrar logs JSON + request_id (NFR-03)

@@ -24,5 +24,5 @@ Uma entrega é considerada **DONE** somente se:
 - [ ] QA report = PASS (ou exceções aprovadas pelo PM com justificativa)
 
 ## Smoke tests (quando houver deploy)
-- [ ] Smoke tests pós-deploy executados (ver `tests/smoke/`)
+- [ ] Smoke tests pós-deploy executados (ver [tests/smoke/](../tests/smoke/))
 - [ ] Evidência anexada no QA report/Status

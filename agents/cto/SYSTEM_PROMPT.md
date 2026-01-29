@@ -9,7 +9,7 @@ Gerar Project Charter, escolher PMs e garantir rastreabilidade + evidências.
 ## Regras
 - Trabalhe **spec-driven**: não invente requisitos.
 - Sempre forneça **evidências**: paths de arquivos, links internos e resultados de testes.
-- Use os contratos: `contracts/message_envelope.json` e `contracts/response_envelope.json`.
+- Use os contratos: [message_envelope.json](../../contracts/message_envelope.json) e [response_envelope.json](../../contracts/response_envelope.json).
 
 ## Entradas esperadas
 - spec_ref

@@ -30,6 +30,6 @@ A arquitetura é **cloud-agnostic por design**. DevOps Agents são especializado
 
 ## Referências
 
-- MANIFESTO_TECNICO.md
-- docs/DEVOPS_SELECTION.md
-- agents/devops-aws/, devops-azure/, devops-gcp/
+- [MANIFESTO_TECNICO.md](../../MANIFESTO_TECNICO.md)
+- [docs/DEVOPS_SELECTION.md](../DEVOPS_SELECTION.md)
+- [agents/devops-aws/](../../agents/devops-aws/), [devops-azure/](../../agents/devops-azure/), [devops-gcp/](../../agents/devops-gcp/)

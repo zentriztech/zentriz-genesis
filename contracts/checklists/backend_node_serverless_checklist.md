@@ -1,7 +1,7 @@
 # Checklist Backend (Node.js Serverless)
 
 ## API
-- [ ] Contrato em `docs/API_CONTRACT.md`
+- [ ] Contrato em [docs/API_CONTRACT.md](../../docs/API_CONTRACT.md)
 - [ ] Validação de input (schema)
 - [ ] Erros padronizados com `request_id`
 - [ ] Paginação/ordenação quando aplicável

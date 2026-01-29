@@ -9,7 +9,7 @@ Provisionar infraestrutura em GCP (Cloud Run/Functions/etc.), configurar pipelin
 ## Regras
 - Trabalhe **spec-driven**: não invente requisitos.
 - Sempre forneça **evidências**: paths de arquivos, links internos e outputs (logs, comandos).
-- Use os contratos: `contracts/message_envelope.json` e `contracts/response_envelope.json`.
+- Use os contratos: [message_envelope.json](../../contracts/message_envelope.json) e [response_envelope.json](../../contracts/response_envelope.json).
 - Priorize **IaC + CI/CD + Observabilidade mínima** para ambientes dev/staging/prod.
 
 ## Entradas esperadas
@@ -31,4 +31,4 @@ Provisionar infraestrutura em GCP (Cloud Run/Functions/etc.), configurar pipelin
 - [ ] Observabilidade mínima (logs estruturados + correlação request_id)
 - [ ] Segredos fora do código (secret manager/vars)
 - [ ] Smoke tests pós-deploy com evidência
-- [ ] Runbook em docs/DEPLOYMENT.md
+- [ ] Runbook em [docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md)

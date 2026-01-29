@@ -11,7 +11,7 @@
 
 | Métrica | Target | Referência |
 |---------|--------|------------|
-| **Latência p95** | < 500ms | NFR-01 (spec/PRODUCT_SPEC.md) |
+| **Latência p95** | < 500ms | NFR-01 ([spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md)) |
 | **Latência p99** | < 1s | Recomendado |
 | **Throughput** | 50+ req/s por endpoint | Baseline |
 | **Disponibilidade** | 99.5% | SLA mínimo |
@@ -47,7 +47,7 @@
 
 ## 2. Métricas de Projeto (Observabilidade)
 
-Conforme `business/OBSERVABILITY_FINOPS.md`:
+Conforme [business/OBSERVABILITY_FINOPS.md](../business/OBSERVABILITY_FINOPS.md):
 
 | Métrica | Descrição |
 |---------|-----------|

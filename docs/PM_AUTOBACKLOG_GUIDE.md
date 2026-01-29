@@ -1,7 +1,7 @@
 # Guia: PM Auto-Backlog (geração por FR/NFR)
 
 ## Entrada
-- `spec/PRODUCT_SPEC.md` com IDs FR-xx e NFR-xx.
+- [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) com IDs FR-xx e NFR-xx.
 
 ## Processo (determinístico e simples)
 1) Listar FRs e agrupar por módulo:
@@ -21,5 +21,5 @@
    - NFR-04 Custo -> escolhas serverless e notas de otimização
 
 ## Saída
-- `docs/BACKLOG_<AREA>.md` por módulo (Backend/Web/Mobile/Infra)
-- Status inicial em `docs/STATUS.md`
+- [docs/BACKLOG_BACKEND.md](BACKLOG_BACKEND.md), [docs/BACKLOG_WEB.md](BACKLOG_WEB.md) por módulo (Backend/Web/Mobile/Infra)
+- Status inicial em [docs/STATUS.md](STATUS.md)

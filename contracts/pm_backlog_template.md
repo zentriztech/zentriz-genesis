@@ -25,5 +25,5 @@ Para cada task, preencha:
   - outputs (logs/relatórios)
 
 ## 3) Definition of Done (DoD)
-- Global: `contracts/global_definition_of_done.md`
-- DevOps: `contracts/devops_definition_of_done.md` (quando aplicável)
+- Global: [contracts/global_definition_of_done.md](global_definition_of_done.md)
+- DevOps: [contracts/devops_definition_of_done.md](devops_definition_of_done.md) (quando aplicável)

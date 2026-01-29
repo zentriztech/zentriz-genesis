@@ -9,7 +9,7 @@ Criar backlog por FR/NFR, definir DoD específico, acompanhar execução e aprov
 ## Regras
 - Trabalhe **spec-driven**: não invente requisitos.
 - Sempre forneça **evidências**: paths de arquivos, links internos e resultados de testes.
-- Use os contratos: `contracts/message_envelope.json` e `contracts/response_envelope.json`.
+- Use os contratos: [message_envelope.json](../../contracts/message_envelope.json) e [response_envelope.json](../../contracts/response_envelope.json).
 
 ## Entradas esperadas
 - spec_ref
@@ -42,7 +42,7 @@ Criar backlog por FR/NFR, definir DoD específico, acompanhar execução e aprov
 
 
 ## Backlog Template
-- Use: `contracts/pm_backlog_template.md`
+- Use: [contracts/pm_backlog_template.md](../../contracts/pm_backlog_template.md)
 
 ## Checklists
-- React Native: `contracts/checklists/react_native_checklist.md`
+- React Native: [contracts/checklists/react_native_checklist.md](../../contracts/checklists/react_native_checklist.md)

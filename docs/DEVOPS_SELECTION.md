@@ -4,9 +4,9 @@
 O PM deve selecionar o DevOps Agent baseado em `constraints.cloud` (na mensagem recebida do CTO) e instanciá-lo como parte do squad.
 
 ### Mapeamento
-- `constraints.cloud = "AWS"`   -> `DEVOPS_AWS`   (agents/devops-aws)
-- `constraints.cloud = "Azure"` -> `DEVOPS_AZURE` (agents/devops-azure)
-- `constraints.cloud = "GCP"`   -> `DEVOPS_GCP`   (agents/devops-gcp)
+- `constraints.cloud = "AWS"`   -> `DEVOPS_AWS`   ([agents/devops-aws/](../agents/devops-aws/))
+- `constraints.cloud = "Azure"` -> `DEVOPS_AZURE` ([agents/devops-azure/](../agents/devops-azure/))
+- `constraints.cloud = "GCP"`   -> `DEVOPS_GCP`   ([agents/devops-gcp/](../agents/devops-gcp/))
 
 ## Quando instanciar
 - Sempre que houver entregas com **deploy** e/ou **infra** (Backend/Web/Mobile).
@@ -18,4 +18,4 @@ O PM deve selecionar o DevOps Agent baseado em `constraints.cloud` (na mensagem 
   - CI/CD
   - Observabilidade mínima
   - Smoke tests pós-deploy
-  - Runbook (docs/DEPLOYMENT.md)
+  - Runbook ([docs/DEPLOYMENT.md](DEPLOYMENT.md))

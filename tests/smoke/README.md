@@ -9,6 +9,6 @@ Validar rapidamente, pós-deploy, que o serviço/cliente está funcionando.
 - Deve ser rápido (< 2 min)
 
 ## Templates
-- `api_smoke_test.sh` (curl)
-- `web_smoke_test.sh` (curl + checagem de HTML/health)
-- `mobile_smoke_test.md` (checklist de build e sanity)
+- [api_smoke_test.sh](api_smoke_test.sh) (curl)
+- [web_smoke_test.sh](web_smoke_test.sh) (curl + checagem de HTML/health)
+- [mobile_smoke_test.md](mobile_smoke_test.md) (checklist de build e sanity)

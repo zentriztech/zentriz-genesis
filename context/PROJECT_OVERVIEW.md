@@ -8,7 +8,7 @@
 
 **Zentriz Genesis** é uma **plataforma de orquestração de Agentes de IA** — uma **fábrica de software autônoma** que:
 
-- Recebe um documento de especificação (`PRODUCT_SPEC.md`)
+- Recebe um documento de especificação ([PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md))
 - Planeja, desenvolve, valida, provisiona e monitora sistemas completos
 - Opera com agentes especializados: **CTO, PMs, Devs, QA, DevOps, Monitors**
 - É **spec-driven**, **event-driven** e **cloud-agnostic** (AWS, Azure, GCP)
@@ -70,30 +70,30 @@ zentriz-genesis/
 
 | Documento | Localização | Propósito |
 |-----------|-------------|-----------|
-| Product Spec | spec/PRODUCT_SPEC.md | Entrada do projeto (FR/NFR) |
-| Project Charter | docs/PROJECT_CHARTER.md | Escopo e módulos |
-| Architecture | docs/ARCHITECTURE.md | Componentes e responsabilidades |
-| Orchestrator Blueprint | docs/ORCHESTRATOR_BLUEPRINT.md | Eventos e implementação |
-| Task State Machine | docs/TASK_STATE_MACHINE.md | Estados e transições |
-| Backlogs | docs/BACKLOG_*.md | Tasks por módulo |
-| API Contract | docs/API_CONTRACT.md | Endpoints e convenções |
-| Deployment | docs/DEPLOYMENT.md | Ambientes, CI/CD, runbook |
-| Status | docs/STATUS.md | Estado atual do projeto |
-| Next Steps | docs/NEXT_STEPS_REMINDER.md | Próximos caminhos naturais |
-| **ADRs** | docs/adr/ | Decisões arquiteturais |
-| **RFCs** | docs/rfc/ | Propostas formais |
-| **Agents Capabilities** | docs/AGENTS_CAPABILITIES.md | Documentação consolidada de agentes |
-| **Performance Metrics** | docs/PERFORMANCE_METRICS.md | Targets de latência, cobertura, etc. |
-| **Práticas de outros projetos** | context/PRACTICES_FROM_OTHER_PROJECTS.md | Análise e recomendações |
+| Product Spec | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) | Entrada do projeto (FR/NFR) |
+| Project Charter | [docs/PROJECT_CHARTER.md](../docs/PROJECT_CHARTER.md) | Escopo e módulos |
+| Architecture | [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) | Componentes e responsabilidades |
+| Orchestrator Blueprint | [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
+| Task State Machine | [docs/TASK_STATE_MACHINE.md](../docs/TASK_STATE_MACHINE.md) | Estados e transições |
+| Backlogs | [docs/BACKLOG_BACKEND.md](../docs/BACKLOG_BACKEND.md), [docs/BACKLOG_WEB.md](../docs/BACKLOG_WEB.md) | Tasks por módulo |
+| API Contract | [docs/API_CONTRACT.md](../docs/API_CONTRACT.md) | Endpoints e convenções |
+| Deployment | [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) | Ambientes, CI/CD, runbook |
+| Status | [docs/STATUS.md](../docs/STATUS.md) | Estado atual do projeto |
+| Next Steps | [docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md) | Próximos caminhos naturais |
+| **ADRs** | [docs/adr/](../docs/adr/) | Decisões arquiteturais |
+| **RFCs** | [docs/rfc/](../docs/rfc/) | Propostas formais |
+| **Agents Capabilities** | [docs/AGENTS_CAPABILITIES.md](../docs/AGENTS_CAPABILITIES.md) | Documentação consolidada de agentes |
+| **Performance Metrics** | [docs/PERFORMANCE_METRICS.md](../docs/PERFORMANCE_METRICS.md) | Targets de latência, cobertura, etc. |
+| **Práticas de outros projetos** | [context/PRACTICES_FROM_OTHER_PROJECTS.md](PRACTICES_FROM_OTHER_PROJECTS.md) | Análise e recomendações |
 
 ---
 
 ## 6. Contratos e Governança
 
-- **DoD Global**: `contracts/global_definition_of_done.md`
-- **DoD DevOps**: `contracts/devops_definition_of_done.md`
-- **Checklists**: `contracts/checklists/` (React, RN, Backend Node/Python)
-- **Envelopes**: `contracts/message_envelope.json`, `response_envelope.json`
+- **DoD Global**: [contracts/global_definition_of_done.md](../contracts/global_definition_of_done.md)
+- **DoD DevOps**: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)
+- **Checklists**: [contracts/checklists/](../contracts/checklists/) (React, RN, Backend Node/Python)
+- **Envelopes**: [contracts/message_envelope.json](../contracts/message_envelope.json), [contracts/response_envelope.json](../contracts/response_envelope.json)
 
 ---
 
@@ -101,11 +101,11 @@ zentriz-genesis/
 
 **Fase atual**: Construção da fundação de agentes.
 
-**Decisão registrada** (docs/NEXT_STEPS_REMINDER.md):
+**Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)):
 - Primeiro: concluir integralmente a fundação (CTO, PMs, Devs, QA, DevOps, Monitors, contratos, orquestração)
 - Depois: Dashboard, execução real do Orchestrator, SaaS, Whitepaper, Marketplace de agentes
 
-**Produto de exemplo**: Voucher MVP (API + Web) — spec em spec/PRODUCT_SPEC.md, backlogs em docs/BACKLOG_BACKEND.md e docs/BACKLOG_WEB.md.
+**Produto de exemplo**: Voucher MVP (API + Web) — spec em [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md), backlogs em [docs/BACKLOG_BACKEND.md](../docs/BACKLOG_BACKEND.md) e [docs/BACKLOG_WEB.md](../docs/BACKLOG_WEB.md).
 
 ---
 
@@ -133,12 +133,12 @@ zentriz-genesis/
 
 ## 10. Referência Rápida de Caminhos
 
-- `spec/PRODUCT_SPEC.md` — entrada
-- `docs/ORCHESTRATION_GUIDE.md` — fluxo CTO→PM→Dev/QA→Monitor
-- `docs/PM_AUTOBACKLOG_GUIDE.md` — como PM gera backlog de FR/NFR
-- `docs/DEVOPS_SELECTION.md` — qual DevOps instanciar
-- `orchestrator/events/schemas/` — schemas JSON dos eventos
-- `agents/*/SYSTEM_PROMPT.md` — prompt de cada agente
+- [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) — entrada
+- [docs/ORCHESTRATION_GUIDE.md](../docs/ORCHESTRATION_GUIDE.md) — fluxo CTO→PM→Dev/QA→Monitor
+- [docs/PM_AUTOBACKLOG_GUIDE.md](../docs/PM_AUTOBACKLOG_GUIDE.md) — como PM gera backlog de FR/NFR
+- [docs/DEVOPS_SELECTION.md](../docs/DEVOPS_SELECTION.md) — qual DevOps instanciar
+- [orchestrator/events/schemas/](../orchestrator/events/schemas/) — schemas JSON dos eventos
+- [agents/](../agents/) — prompt de cada agente (SYSTEM_PROMPT.md)
 
 ---
 

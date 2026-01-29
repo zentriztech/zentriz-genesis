@@ -14,12 +14,12 @@ Cada módulo (Backend, Web, Mobile) pode operar com o seguinte squad padrão:
 
 ## Regras
 - O PM escolhe o provedor com base em `constraints.cloud` do spec/charter.
-- DevOps deve entregar: IaC + CI/CD + Observabilidade mínima + runbook (docs/DEPLOYMENT.md).
+- DevOps deve entregar: IaC + CI/CD + Observabilidade mínima + runbook ([docs/DEPLOYMENT.md](DEPLOYMENT.md)).
 - QA valida também o deploy (smoke tests e evidências).
 
 ## Definition of Done DevOps
-- Referência: `contracts/devops_definition_of_done.md`
+- Referência: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)
 
 ## Smoke tests
-- Templates: `tests/smoke/`
+- Templates: [tests/smoke/](../tests/smoke/)
 - DevOps deve plugar smoke tests no pipeline após deploy.

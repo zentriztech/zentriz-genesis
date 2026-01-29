@@ -13,7 +13,7 @@ RFCs são **propostas formais** para mudanças significativas no projeto. Permit
 
 ## Formato
 
-Cada RFC segue o template em `0000-template.md`.
+Cada RFC segue o template em [0000-template.md](0000-template.md).
 
 ## Índice
 

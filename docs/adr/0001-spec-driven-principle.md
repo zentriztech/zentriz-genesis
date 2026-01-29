@@ -14,7 +14,7 @@ O Zentriz Genesis é uma fábrica de software autônoma com múltiplos agentes (
 
 ## Decisão
 
-**Especificação é lei.** Toda decisão técnica nasce de uma especificação explícita, versionada e auditável (`spec/PRODUCT_SPEC.md`). O documento de spec contém FR (Functional Requirements) e NFR (Non-Functional Requirements) que são a única fonte de verdade para planejamento, desenvolvimento e validação.
+**Especificação é lei.** Toda decisão técnica nasce de uma especificação explícita, versionada e auditável ([spec/PRODUCT_SPEC.md](../../spec/PRODUCT_SPEC.md)). O documento de spec contém FR (Functional Requirements) e NFR (Non-Functional Requirements) que são a única fonte de verdade para planejamento, desenvolvimento e validação.
 
 ## Alternativas Consideradas
 
@@ -30,6 +30,6 @@ O Zentriz Genesis é uma fábrica de software autônoma com múltiplos agentes (
 
 ## Referências
 
-- MANIFESTO_TECNICO.md
-- spec/PRODUCT_SPEC.md
-- docs/PM_AUTOBACKLOG_GUIDE.md
+- [MANIFESTO_TECNICO.md](../../MANIFESTO_TECNICO.md)
+- [spec/PRODUCT_SPEC.md](../../spec/PRODUCT_SPEC.md)
+- [docs/PM_AUTOBACKLOG_GUIDE.md](../PM_AUTOBACKLOG_GUIDE.md)

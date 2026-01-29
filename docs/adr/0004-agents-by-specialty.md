@@ -37,6 +37,6 @@ O CTO orquestra e delega para PMs; PMs instanciam Dev, QA e DevOps por módulo.
 
 ## Referências
 
-- docs/TEAM_COMPOSITION.md
-- docs/ORCHESTRATION_GUIDE.md
-- agents/
+- [docs/TEAM_COMPOSITION.md](../TEAM_COMPOSITION.md)
+- [docs/ORCHESTRATION_GUIDE.md](../ORCHESTRATION_GUIDE.md)
+- [agents/](../../agents/)
