@@ -1,0 +1,9 @@
+{
+  "payload": {
+    "status": "DONE",
+    "evidence_refs": [
+      "reports/QA_REPORT_backend.md",
+      "docs/STATUS.md"
+    ]
+  }
+}

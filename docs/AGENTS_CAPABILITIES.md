@@ -1,0 +1,147 @@
+# Documentação Consolidada de Agentes — Zentriz Genesis
+
+> **Propósito**: Índice único de todos os agentes e suas capacidades, facilitando onboarding e referência rápida.  
+> **Inspirado em**: Prática do projeto de agentes educacionais (documentação consolidada).
+
+---
+
+## 1. Visão Geral
+
+| Papel | Agentes | Módulos/Clouds | Responsabilidade |
+|-------|---------|----------------|------------------|
+| **CTO** | 1 | — | Orquestração, Charter, delegação |
+| **PM** | 4 | Backend, Web, Mobile, Infra | Backlog, aprovação, instanciação |
+| **Dev** | 4 | Backend, Web, Mobile, Infra | Implementação |
+| **QA** | 4 | Backend, Web, Mobile, Infra | Validação, QA Report |
+| **DevOps** | 3 | AWS, Azure, GCP | IaC, CI/CD, deploy |
+| **Monitor** | 4 | Backend, Web, Mobile, Infra | Saúde, alertas |
+
+**Total**: 20 agentes.
+
+---
+
+## 2. CTO Agent
+
+| Atributo | Valor |
+|----------|-------|
+| **Pasta** | `agents/cto/` |
+| **Papel** | Orquestra o projeto: interpreta spec, define módulos, delega PMs |
+| **Objetivo** | Gerar Project Charter, escolher PMs, garantir rastreabilidade + evidências |
+| **Entradas** | spec_ref, task, constraints, artifacts |
+| **Saídas** | status, summary, artifacts, evidence, next_actions |
+| **Contratos** | message_envelope.json, response_envelope.json |
+| **Checklist** | PROJECT_CHARTER, PMs atribuídos, critérios de aceite, STATUS consolidado |
+
+---
+
+## 3. PM Agents
+
+| Agente | Pasta | Objetivo | DevOps selecionado |
+|--------|-------|----------|--------------------|
+| PM Backend | `agents/pm-backend/` | Backlog backend, Dev+QA+DevOps | Por constraints.cloud |
+| PM Web | `agents/pm-web/` | Backlog web, Dev+QA+DevOps | Por constraints.cloud |
+| PM Mobile | `agents/pm-mobile/` | Backlog mobile, Dev+QA+DevOps | Por constraints.cloud |
+| PM Infra | `agents/pm-infra/` | Backlog infra, Dev+QA+DevOps | Por constraints.cloud |
+
+**Regras comuns**:
+- Criar backlog por FR/NFR
+- Instanciar Dev, QA e DevOps
+- Selecionar DevOps por `constraints.cloud` (AWS/Azure/GCP)
+- Usar `contracts/pm_backlog_template.md`
+- Checklists: `contracts/checklists/` (backend_node, backend_python, react_web, react_native)
+
+---
+
+## 4. Dev Agents
+
+| Agente | Pasta | Stack | Objetivo |
+|--------|-------|-------|----------|
+| Dev Backend | `agents/dev-backend/` | Node.js/Python, serverless | Endpoints, modelos, validações, testes |
+| Dev Web | `agents/dev-web/` | React | Páginas, fluxos, testes, build |
+| Dev Mobile | `agents/dev-mobile/` | React Native | Telas, fluxos, API, build |
+| Dev Infra | `agents/dev-infra/` | IaC | Infraestrutura, pipelines |
+
+**Regras comuns**:
+- Entregar com evidências (arquivos, testes, logs)
+- Usar message_envelope e response_envelope
+- Atender FR/NFR do spec
+
+---
+
+## 5. QA Agents
+
+| Agente | Pasta | Objetivo |
+|--------|-------|----------|
+| QA Backend | `agents/qa-backend/` | Validar backend, QA Report |
+| QA Web | `agents/qa-web/` | Validar web, QA Report |
+| QA Mobile | `agents/qa-mobile/` | Validar mobile, QA Report |
+| QA Infra | `agents/qa-infra/` | Validar infra, QA Report |
+
+**Regras comuns**:
+- Rodar testes, validar requisitos
+- Produzir relatório com severidade e evidências acionáveis
+- Bloquear regressões (QA_FAIL com referência FR/NFR)
+- Template: `reports/QA_REPORT_TEMPLATE.md`
+
+---
+
+## 6. DevOps Agents
+
+| Agente | Pasta | Cloud | Objetivo |
+|--------|-------|-------|----------|
+| DevOps AWS | `agents/devops-aws/` | AWS | Lambda, API Gateway, DynamoDB, S3, CloudFront |
+| DevOps Azure | `agents/devops-azure/` | Azure | Functions, API Management, Cosmos/SQL |
+| DevOps GCP | `agents/devops-gcp/` | GCP | Cloud Functions/Run, Firestore, Cloud SQL |
+
+**Regras comuns**:
+- IaC em `infra/<cloud>/`
+- CI/CD: lint → test → build → deploy
+- Observabilidade mínima (logs estruturados, request_id)
+- Smoke tests pós-deploy
+- Runbook em docs/DEPLOYMENT.md
+- DoD: `contracts/devops_definition_of_done.md`
+
+---
+
+## 7. Monitor Agents
+
+| Agente | Pasta | Objetivo |
+|--------|-------|----------|
+| Monitor Backend | `agents/monitor-backend/` | Saúde backend, alertas PM/CTO |
+| Monitor Web | `agents/monitor-web/` | Saúde web, alertas PM/CTO |
+| Monitor Mobile | `agents/monitor-mobile/` | Saúde mobile, alertas PM/CTO |
+| Monitor Infra | `agents/monitor-infra/` | Saúde infra, alertas PM/CTO |
+
+**Regras comuns**:
+- Detectar travas, loops, falhas recorrentes
+- Produzir snapshots de saúde e alertas
+- Template: `reports/MONITOR_HEALTH_TEMPLATE.md`
+
+---
+
+## 8. Pipeline de Orquestração
+
+```
+SPEC → CTO → PM(s) → Dev + QA + DevOps (por módulo) → Monitor → CTO
+```
+
+- **CTO**: Recebe spec, gera Charter, delega PMs
+- **PM**: Recebe módulo, gera backlog, instancia Dev/QA/DevOps
+- **Dev**: Implementa tasks
+- **QA**: Valida e emite QA_PASS/QA_FAIL
+- **DevOps**: Provisiona e deploya
+- **Monitor**: Observa e alerta
+
+---
+
+## 9. Referências
+
+- `docs/ORCHESTRATION_GUIDE.md` — Fluxo detalhado
+- `docs/DEVOPS_SELECTION.md` — Regra de seleção DevOps
+- `docs/TEAM_COMPOSITION.md` — Squad por módulo
+- `contracts/message_envelope.json` — Contrato de entrada
+- `contracts/response_envelope.json` — Contrato de saída
+
+---
+
+*Documento criado em 2026-01-29 — Zentriz Genesis*

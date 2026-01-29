@@ -1,0 +1,47 @@
+name: deploy-aws-serverless
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # OIDC recomendado (configure AWS_ROLE_ARN e AWS_REGION como secrets)
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy (Serverless Framework)
+        run: npx serverless deploy --stage prod
+
+      - name: Smoke Test API
+        env:
+          BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          REQUEST_ID: ${{ github.run_id }}
+        run: bash tests/smoke/api_smoke_test.sh

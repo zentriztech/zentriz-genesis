@@ -1,0 +1,37 @@
+{
+  "request_id": "55555555-5555-5555-5555-555555555555",
+  "role": "PM_WEB",
+  "input": {
+    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "context": {
+      "module": "Web"
+    },
+    "task": {
+      "name": "Selecionar DevOps por Cloud e provisionar Web",
+      "requirements": [
+        "NFR-03",
+        "NFR-04"
+      ],
+      "deliverables": [
+        "Pipeline",
+        "Deploy",
+        "Smoke Web"
+      ]
+    },
+    "constraints": {
+      "cloud": "AWS",
+      "deployment": "S3 + CloudFront"
+    },
+    "artifacts": [
+      {
+        "type": "file",
+        "path": "tests/smoke/web_smoke_test.sh",
+        "purpose": "Smoke test Web"
+      }
+    ]
+  },
+  "selection": {
+    "devops_role": "DEVOPS_AWS",
+    "reason": "constraints.cloud=AWS"
+  }
+}

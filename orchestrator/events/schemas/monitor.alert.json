@@ -1,0 +1,7 @@
+{
+  "payload": {
+    "area": "backend",
+    "level": "AT_RISK",
+    "health_ref": "reports/MONITOR_HEALTH_backend.md"
+  }
+}

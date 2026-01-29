@@ -1,0 +1,37 @@
+{
+  "request_id": "44444444-4444-4444-4444-444444444444",
+  "role": "PM_BACKEND",
+  "input": {
+    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "context": {
+      "module": "Backend",
+      "cloud": "AWS"
+    },
+    "task": {
+      "name": "Provisionar infraestrutura e pipeline para API",
+      "requirements": [
+        "NFR-03",
+        "NFR-04",
+        "NFR-02"
+      ],
+      "deliverables": [
+        "IaC",
+        "CI/CD",
+        "Observabilidade",
+        "Runbook"
+      ]
+    },
+    "constraints": {
+      "cloud": "AWS",
+      "deployment": "Lambda + API Gateway",
+      "region": "us-east-1"
+    },
+    "artifacts": [
+      {
+        "type": "file",
+        "path": "docs/DEPLOYMENT.md",
+        "purpose": "Runbook e instru\u00e7\u00f5es de deploy"
+      }
+    ]
+  }
+}

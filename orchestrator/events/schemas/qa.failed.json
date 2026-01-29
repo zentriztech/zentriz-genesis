@@ -1,0 +1,7 @@
+{
+  "payload": {
+    "task_id": "TSK-BE-001",
+    "severity": "HIGH",
+    "report_ref": "reports/QA_REPORT_backend.md"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "request_id": "22222222-2222-2222-2222-222222222222",
+  "role": "PM_BACKEND",
+  "input": {
+    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "context": {
+      "module": "Backend"
+    },
+    "task": {
+      "name": "Implementar FR-01..FR-03",
+      "requirements": [
+        "FR-01",
+        "FR-02",
+        "FR-03",
+        "NFR-02",
+        "NFR-03"
+      ],
+      "definition_of_done_ref": "contracts/global_definition_of_done.md"
+    },
+    "constraints": {
+      "runtime": "Node.js",
+      "framework": "Fastify ou NestJS",
+      "deployment": "AWS Lambda + API Gateway"
+    },
+    "artifacts": [
+      {
+        "type": "file",
+        "path": "docs/API_CONTRACT.md",
+        "purpose": "Contrato da API"
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "states": [
+    "NEW",
+    "ASSIGNED",
+    "IN_PROGRESS",
+    "WAITING_REVIEW",
+    "QA_FAIL",
+    "QA_PASS",
+    "BLOCKED",
+    "DONE",
+    "CANCELLED"
+  ],
+  "transitions": {
+    "NEW": [
+      "ASSIGNED"
+    ],
+    "ASSIGNED": [
+      "IN_PROGRESS"
+    ],
+    "IN_PROGRESS": [
+      "WAITING_REVIEW",
+      "BLOCKED",
+      "CANCELLED"
+    ],
+    "WAITING_REVIEW": [
+      "QA_PASS",
+      "QA_FAIL"
+    ],
+    "QA_FAIL": [
+      "IN_PROGRESS",
+      "BLOCKED",
+      "CANCELLED"
+    ],
+    "QA_PASS": [
+      "DONE"
+    ],
+    "BLOCKED": [
+      "IN_PROGRESS",
+      "CANCELLED"
+    ],
+    "DONE": [],
+    "CANCELLED": []
+  }
+}

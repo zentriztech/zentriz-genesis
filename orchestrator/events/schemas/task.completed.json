@@ -1,0 +1,11 @@
+{
+  "payload": {
+    "task_id": "TSK-BE-001",
+    "artifacts": [
+      {
+        "type": "file",
+        "path": "services/api/src/..."
+      }
+    ]
+  }
+}

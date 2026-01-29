@@ -1,0 +1,25 @@
+{
+  "request_id": "uuid",
+  "status": "OK|NEEDS_INFO|BLOCKED|FAIL",
+  "summary": "string",
+  "artifacts": [
+    {
+      "type": "file|link|cmd|diff",
+      "path": "string",
+      "purpose": "string"
+    }
+  ],
+  "evidence": [
+    {
+      "type": "spec_link|test_result|log|screenshot",
+      "ref": "string"
+    }
+  ],
+  "next_actions": [
+    {
+      "owner": "ROLE",
+      "action": "string",
+      "priority": "P1|P2|P3"
+    }
+  ]
+}

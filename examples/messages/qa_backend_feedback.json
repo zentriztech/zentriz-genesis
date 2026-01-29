@@ -1,0 +1,29 @@
+{
+  "request_id": "33333333-3333-3333-3333-333333333333",
+  "status": "FAIL",
+  "summary": "FR-03 falha em cen\u00e1rio de voucher j\u00e1 resgatado; falta valida\u00e7\u00e3o de status.",
+  "artifacts": [
+    {
+      "type": "file",
+      "path": "reports/QA_REPORT_backend.md",
+      "purpose": "Relat\u00f3rio QA atualizado"
+    }
+  ],
+  "evidence": [
+    {
+      "type": "spec_link",
+      "ref": "FR-03"
+    },
+    {
+      "type": "test_result",
+      "ref": "Jest: 1 failing test"
+    }
+  ],
+  "next_actions": [
+    {
+      "owner": "DEV_BACKEND",
+      "action": "Adicionar valida\u00e7\u00e3o de status e ajustar teste FR-03",
+      "priority": "P1"
+    }
+  ]
+}

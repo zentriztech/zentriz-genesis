@@ -1,0 +1,8 @@
+{
+  "payload": {
+    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "constraints": {
+      "cloud": "AWS"
+    }
+  }
+}

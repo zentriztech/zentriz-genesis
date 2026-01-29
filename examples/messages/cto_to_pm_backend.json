@@ -1,0 +1,26 @@
+{
+  "request_id": "11111111-1111-1111-1111-111111111111",
+  "role": "CTO",
+  "input": {
+    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "context": {
+      "project": "Voucher MVP"
+    },
+    "task": {
+      "name": "Planejar m\u00f3dulo Backend",
+      "deliverables": [
+        "API contract",
+        "backlog FR/NFR"
+      ],
+      "owners": [
+        "PM_BACKEND"
+      ]
+    },
+    "constraints": {
+      "cloud": "AWS",
+      "runtime": "Node.js",
+      "style": "serverless-first"
+    },
+    "artifacts": []
+  }
+}

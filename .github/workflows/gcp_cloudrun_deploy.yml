@@ -1,0 +1,52 @@
+name: deploy-gcp-cloudrun
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Workload Identity Federation recomendado (ajuste conforme sua conta)
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy (placeholder)
+        run: |
+          echo "Substitua por: gcloud run deploy ..."
+          echo "Ou Cloud Functions deploy, conforme spec."
+
+      - name: Smoke Test API
+        env:
+          BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          REQUEST_ID: ${{ github.run_id }}
+        run: bash tests/smoke/api_smoke_test.sh

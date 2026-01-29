@@ -1,0 +1,8 @@
+{
+  "event_id": "uuid",
+  "event_type": "project.created|task.assigned|qa.failed|devops.deployed|...",
+  "timestamp": "ISO-8601",
+  "project_id": "PRJ-xxxx",
+  "request_id": "uuid",
+  "payload": {}
+}

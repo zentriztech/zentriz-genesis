@@ -1,0 +1,9 @@
+{
+  "payload": {
+    "module": "backend",
+    "cloud": "AWS",
+    "env": "prod",
+    "base_url": "https://...",
+    "smoke_ref": "tests/smoke/api_smoke_test.sh"
+  }
+}
