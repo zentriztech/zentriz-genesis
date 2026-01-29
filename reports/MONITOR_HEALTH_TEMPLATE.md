@@ -2,8 +2,13 @@
 
 ## Snapshot
 - Projetos monitorados:
-- Agentes ativos:
+- Agentes monitorados: Dev_<AREA>, QA_<AREA>
 - Status geral: (OK | AT_RISK | BLOCKED)
+
+## Progresso e Status de Andamento
+- Tasks em execução (Dev/QA):
+- Evidências recebidas:
+- Bloqueios identificados:
 
 ## Sinais
 - Falhas repetidas:

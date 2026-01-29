@@ -45,7 +45,7 @@ AWS, Azure e GCP.
 Provisionam infraestrutura, CI/CD, observabilidade e executam smoke tests.
 
 ### Monitor Agents
-Monitoram saúde dos agentes, detectam falhas e alertam PMs/CTO.
+Monitoram **Dev/QA** por módulo (Backend, Web, Mobile, Infra) — progresso, status de andamento — e **informam o PM responsável** (que escala ao CTO quando crítico).
 
 ## 🔄 Orquestração Event-Driven
 

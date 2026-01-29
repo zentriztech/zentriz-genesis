@@ -22,17 +22,17 @@
 ```
 SPEC (Product Spec) → CTO → PMs (Backend/Web/Mobile/Infra)
                             ↓
-                    Dev + QA + DevOps (por módulo)
+                    Dev + QA + DevOps + Monitor (por módulo)
                             ↓
-                    Monitor → CTO (consolidação)
+                    Monitor_<AREA> → PM_<AREA> → CTO (fluxo de alertas)
 ```
 
 - **CTO**: Interpreta spec, cria Project Charter, define módulos, delega PMs
-- **PMs** (por área): Backend, Web, Mobile, Infra — geram backlog, instanciam Dev/QA/DevOps
+- **PMs** (por área): Backend, Web, Mobile, Infra — geram backlog, instanciam Dev/QA/DevOps/Monitor
 - **Dev**: Implementa código, testes, documentação
 - **QA**: Validação contínua, QA Reports, bloqueia regressões
 - **DevOps** (por cloud): AWS, Azure, GCP — IaC, CI/CD, observabilidade, smoke tests
-- **Monitor**: Saúde dos agentes, alertas para PM/CTO
+- **Monitor_<AREA>**: Monitora **Dev_<AREA>** e **QA_<AREA>** do módulo (progresso, status de andamento), **informa PM_<AREA>** → PM escala ao CTO quando crítico
 
 ---
 

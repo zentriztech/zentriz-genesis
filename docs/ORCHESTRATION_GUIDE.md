@@ -22,9 +22,13 @@
 - Mantém [reports/QA_REPORT_TEMPLATE.md](../reports/QA_REPORT_TEMPLATE.md) (por área).
 - Bloqueia (FAIL) se requisitos não atendidos.
 
-## 6) Monitor
-- Observa histórico de respostas/relatórios.
-- Gera [reports/MONITOR_HEALTH_TEMPLATE.md](../reports/MONITOR_HEALTH_TEMPLATE.md) (por área) e alerta PM/CTO.
+## 6) Monitor (por módulo)
+- **Monitor_<AREA>** (Backend, Web, Mobile, Infra): monitora **Dev_<AREA>** e **QA_<AREA>** do seu módulo.
+- Objetivo: entender **progresso**, **status de andamento** das atividades, evidências, bloqueios.
+- Detecta travas, loops, falhas recorrentes.
+- **Informa ao PM_<AREA>** responsável pelo módulo (progresso, status, alertas).
+- Gera [reports/MONITOR_HEALTH_TEMPLATE.md](../reports/MONITOR_HEALTH_TEMPLATE.md) (por área).
+- **Fluxo**: Monitor → PM_<AREA> → CTO. PM avalia, toma ação ou escala ao CTO quando crítico.
 
 ## 7) Encerramento
 - PM aprova módulo.

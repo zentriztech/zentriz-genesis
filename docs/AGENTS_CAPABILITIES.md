@@ -107,14 +107,15 @@
 
 | Agente | Pasta | Objetivo |
 |--------|-------|----------|
-| Monitor Backend | [agents/monitor-backend/](../agents/monitor-backend/) | Saúde backend, alertas PM/CTO |
-| Monitor Web | [agents/monitor-web/](../agents/monitor-web/) | Saúde web, alertas PM/CTO |
-| Monitor Mobile | [agents/monitor-mobile/](../agents/monitor-mobile/) | Saúde mobile, alertas PM/CTO |
-| Monitor Infra | [agents/monitor-infra/](../agents/monitor-infra/) | Saúde infra, alertas PM/CTO |
+| Monitor Backend | [agents/monitor-backend/](../agents/monitor-backend/) | Monitora Dev/QA backend, informa PM_Backend |
+| Monitor Web | [agents/monitor-web/](../agents/monitor-web/) | Monitora Dev/QA web, informa PM_Web |
+| Monitor Mobile | [agents/monitor-mobile/](../agents/monitor-mobile/) | Monitora Dev/QA mobile, informa PM_Mobile |
+| Monitor Infra | [agents/monitor-infra/](../agents/monitor-infra/) | Monitora Dev/QA infra, informa PM_Infra |
 
 **Regras comuns**:
+- Monitorar **Dev_<AREA>** e **QA_<AREA>** do módulo (progresso, status de andamento, evidências)
 - Detectar travas, loops, falhas recorrentes
-- Produzir snapshots de saúde e alertas
+- **Informar ao PM_<AREA>** (progresso, status, alertas). PM escala ao CTO quando crítico
 - Template: [reports/MONITOR_HEALTH_TEMPLATE.md](../reports/MONITOR_HEALTH_TEMPLATE.md)
 
 ---
@@ -122,15 +123,16 @@
 ## 8. Pipeline de Orquestração
 
 ```
-SPEC → CTO → PM(s) → Dev + QA + DevOps (por módulo) → Monitor → CTO
+SPEC → CTO → PM(s) → Dev + QA + DevOps (por módulo) → Monitor_<AREA> → PM_<AREA> → CTO
 ```
 
 - **CTO**: Recebe spec, gera Charter, delega PMs
-- **PM**: Recebe módulo, gera backlog, instancia Dev/QA/DevOps
+- **PM**: Recebe módulo, gera backlog, instancia Dev/QA/DevOps/Monitor
 - **Dev**: Implementa tasks
 - **QA**: Valida e emite QA_PASS/QA_FAIL
 - **DevOps**: Provisiona e deploya
-- **Monitor**: Observa e alerta
+- **Monitor_<AREA>**: Monitora Dev/QA do módulo (progresso, status), informa **PM_<AREA>**
+- **PM → CTO**: Consolida status, escala alertas críticos
 
 ---
 

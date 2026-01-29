@@ -19,7 +19,7 @@ Agentes são **especializados por papel e módulo**:
 - **DEV_<AREA>**: Implementa código, testes, documentação
 - **QA_<AREA>**: Valida requisitos, gera QA report, bloqueia regressões
 - **DEVOPS_<CLOUD>**: AWS, Azure, GCP — IaC, CI/CD, observabilidade
-- **MONITOR_<AREA>**: Observa saúde, alerta PM/CTO
+- **MONITOR_<AREA>**: Monitora Dev_<AREA> e QA_<AREA> (progresso, status de andamento), informa PM_<AREA> (que escala ao CTO quando crítico)
 
 O CTO orquestra e delega para PMs; PMs instanciam Dev, QA e DevOps por módulo.
 

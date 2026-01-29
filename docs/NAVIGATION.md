@@ -30,9 +30,10 @@
 
 | Documento | Descrição |
 |-----------|-----------|
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagrama Mermaid (Monitor→PM→CTO) |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
-| [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor |
+| [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor→PM→CTO |
 | [docs/TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) | Estados e transições |
 | [orchestrator/events/schemas/](../orchestrator/events/schemas/) | Schemas JSON dos eventos |
 

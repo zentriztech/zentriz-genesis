@@ -1,7 +1,9 @@
 {
   "payload": {
-    "area": "backend",
-    "level": "AT_RISK",
-    "health_ref": "reports/MONITOR_HEALTH_backend.md"
+    "area": "backend|web|mobile|infra",
+    "level": "OK|AT_RISK|BLOCKED",
+    "health_ref": "reports/MONITOR_HEALTH_<area>.md",
+    "pm_target": "PM_BACKEND|PM_WEB|PM_MOBILE|PM_INFRA",
+    "escalate_to_cto": false
   }
 }

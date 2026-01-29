@@ -24,7 +24,11 @@
 
 ## Eventos do Orchestrator
 
-`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` → `project.completed`
+`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`
+
+## Fluxo de Alertas
+
+Monitor_<AREA> monitora Dev/QA (progresso, status) → informa PM_<AREA> → PM escala ao CTO quando crítico
 
 ## Estados de Task
 
