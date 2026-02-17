@@ -17,13 +17,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!hydrated || pathname === "/login") return;
+    if (!hydrated || pathname.startsWith("/login")) return;
     if (!authStore.isAuthenticated) {
       router.replace("/login");
     }
   }, [hydrated, pathname, router]);
 
-  if (!hydrated || (!authStore.isAuthenticated && pathname !== "/login")) {
+  if (!hydrated || (!authStore.isAuthenticated && !pathname.startsWith("/login"))) {
     return null;
   }
 

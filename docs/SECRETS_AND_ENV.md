@@ -21,6 +21,10 @@
 | **API_BASE_URL** | Não (local) | URL base da API do produto (Voucher) para smoke tests e integrações. | `http://localhost:3000` |
 | **LOG_LEVEL** | Não | Nível de log do runtime dos agentes (Python). | `INFO` |
 | **REQUEST_TIMEOUT** | Não | Timeout em segundos para chamadas à API Claude. | `120` |
+| **JWT_SECRET** | Não (dev) | Segredo para assinatura dos tokens JWT da API. | `zentriz-genesis-jwt-secret` |
+| **PGHOST / PGUSER / PGPASSWORD / PGDATABASE** | Sim (API) | Conexão PostgreSQL. | Ver [docker-compose.yml](../docker-compose.yml) |
+
+**Usuários padrão (portal):** criados/atualizados pelo seed da API. **Em produção, altere as senhas.** Ver tabela em [services/api-node/README.md](../services/api-node/README.md): Zentriz Admin `admin@zentriz.com` / `#Jean@2026!` (login/genesis); Admin tenant `admin@tenant.com` / `#Tenant@2026!` (login/tenant); Usuário `user@tenant.com` / `#User@2026!` (login).
 
 Template: [.env.example](../.env.example). Copie para `.env` e preencha os valores.
 

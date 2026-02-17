@@ -49,6 +49,10 @@ export interface Project {
   charterSummary?: string;
   createdAt: string;
   updatedAt: string;
+  /** Início do processo (ex.: quando spec foi aceita / pipeline iniciou). */
+  startedAt?: string;
+  /** Fim do processo (ex.: quando status passou a completed). */
+  completedAt?: string;
 }
 
 export interface Notification {

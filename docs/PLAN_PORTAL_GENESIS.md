@@ -29,7 +29,7 @@
 - Roteamento protegido por role (middleware ou HOC).
 
 ### Fase 3 — Telas usuário (por tenant)
-- **Envio de spec**: formulário para enviar spec ao CTO (respeitando plano).
+- **Envio de spec**: formulário para enviar spec ao CTO (respeitando plano). Suporte a **mais de um arquivo**; formatos **.md (preferencial), .txt, .doc, .pdf**; quando não for .md, o orquestrador usa um **conversor** para gerar .md formatado. Ver [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 - **Meus projetos**: listagem com status, filtros; link para detalhe.
 - **Detalhe do projeto**: status, etapas, timeline (CTO → PM → Dev/QA/Monitor/DevOps), artefatos, estado de provisionamento.
 - **Notificações**: lista/feed de alertas (projeto finalizado, provisionamento concluído, bloqueio).
@@ -50,6 +50,7 @@
 - Cliente HTTP para API (fetch ou axios) com base em `NEXT_PUBLIC_API_BASE_URL`.
 - Tipos TypeScript alinhados a tenants, users, projects, plans.
 - Mock ou endpoints reais: auth, tenants, users, projects, specs (conforme API existente ou stubs).
+- Envio de spec com **mais de um arquivo**, formatos .md (preferencial), .txt, .doc, .pdf; conversor no orquestrador para .md quando necessário; referência: [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 
 ### Fase 7 — Docker e documentação
 - **Dockerfile** para `genesis-web` (Node, build Next, run standalone).

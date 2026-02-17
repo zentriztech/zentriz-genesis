@@ -15,8 +15,16 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - API_BASE_URL=${API_BASE_URL:-http://localhost:3000}
+      - PGHOST=postgres
+      - PGUSER=genesis
+      - PGPASSWORD=genesis_dev
+      - PGDATABASE=zentriz_genesis
+      - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
     env_file:
       - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
       interval: 10s

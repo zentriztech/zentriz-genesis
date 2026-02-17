@@ -19,17 +19,17 @@ const cardMotion = {
   transition: { duration: 0.35 },
 };
 
-function LoginPageInner() {
+function LoginTenantPageInner() {
   const router = useRouter();
-  const [email, setEmail] = useState("user@tenant.com");
-  const [password, setPassword] = useState("#User@2026!");
+  const [email, setEmail] = useState("admin@tenant.com");
+  const [password, setPassword] = useState("#Tenant@2026!");
 
   const [submitting, setSubmitting] = useState(false);
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await authStore.login(email, password, "user");
+      await authStore.login(email, password, "tenant_admin");
       router.push("/dashboard");
     } catch {
       setSubmitting(false);
@@ -49,7 +49,7 @@ function LoginPageInner() {
       <MotionCard sx={{ maxWidth: 400, width: "100%" }} {...cardMotion}>
         <CardContent sx={{ p: 3 }}>
           <Typography variant="h5" gutterBottom>
-            Acesso — Usuário
+            Acesso — Admin do tenant
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             genesis.zentriz.com.br
@@ -97,4 +97,4 @@ function LoginPageInner() {
 const MotionCard = motion(Card);
 const MotionButton = motion(Button);
 
-export default observer(LoginPageInner);
+export default observer(LoginTenantPageInner);

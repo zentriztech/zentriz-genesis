@@ -2,35 +2,13 @@
 
 import { makeAutoObservable } from "mobx";
 import type { Project } from "@/types";
-
-const mockProjects: Project[] = [
-  {
-    id: "p1",
-    tenantId: "t1",
-    createdBy: "u1",
-    title: "API Voucher",
-    specRef: "spec/PRODUCT_SPEC.md",
-    status: "completed",
-    charterSummary: "Charter gerado pelo CTO.",
-    createdAt: new Date(Date.now() - 86400000).toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: "p2",
-    tenantId: "t1",
-    createdBy: "u1",
-    title: "Portal Genesis",
-    specRef: "spec/PORTAL_SPEC.md",
-    status: "pm_backlog",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
+import { apiGet } from "@/lib/api";
 
 class ProjectsStore {
-  list: Project[] = mockProjects;
+  list: Project[] = [];
   loading = false;
   error: string | null = null;
+  loaded = false;
 
   constructor() {
     makeAutoObservable(this);
@@ -50,6 +28,34 @@ class ProjectsStore {
 
   getById(id: string) {
     return this.list.find((p) => p.id === id) ?? null;
+  }
+
+  async loadProjects() {
+    if (this.loading) return;
+    this.loading = true;
+    this.error = null;
+    try {
+      const data = await apiGet<Project[]>("/api/projects");
+      this.list = Array.isArray(data) ? data : [];
+      this.loaded = true;
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : "Falha ao carregar projetos";
+      this.list = [];
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  async loadProject(id: string): Promise<Project | null> {
+    try {
+      const data = await apiGet<Project>(`/api/projects/${id}`);
+      const existing = this.list.findIndex((p) => p.id === id);
+      if (existing >= 0) this.list[existing] = data;
+      else this.list.push(data);
+      return data;
+    } catch {
+      return null;
+    }
   }
 }
 

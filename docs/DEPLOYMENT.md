@@ -101,7 +101,18 @@ pip install -r orchestrator/agents/requirements.txt
 python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md
 ```
 
+Quando o runner for invocado por um job associado a um projeto do portal, defina as variáveis **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN** (JWT de um usuário com permissão no projeto). O runner enviará `PATCH /api/projects/:id` com `started_at` ao iniciar o pipeline e com `completed_at` e `status: completed` ao concluir. Ver [orchestrator/runner.py](../orchestrator/runner.py).
+
 Ver [orchestrator/README.md](../orchestrator/README.md).
+
+### Fluxo de spec (upload → conversão → CTO)
+
+1. **Portal (genesis-web):** o usuário envia um ou mais arquivos de spec (.md, .txt, .doc, .docx, .pdf) na tela "Enviar spec ao CTO".
+2. **API:** `POST /api/specs` recebe os arquivos (multipart), persiste em disco e registra o projeto; se houver arquivos não-.md, o status do projeto fica `pending_conversion`.
+3. **Conversor (orquestrador):** um job ou pipeline processa arquivos não-.md e gera Markdown (módulo [orchestrator/spec_converter](../orchestrator/spec_converter)).
+4. **Runner/CTO:** o fluxo CTO (e demais agentes) consome sempre o conteúdo em Markdown.
+
+Detalhes dos formatos aceitos, boas práticas e referência ao conversor: [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 
 ---
 

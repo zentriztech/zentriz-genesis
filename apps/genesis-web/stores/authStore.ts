@@ -2,6 +2,7 @@
 
 import { makeAutoObservable } from "mobx";
 import type { User, Tenant } from "@/types";
+import { apiPost } from "@/lib/api";
 
 export const PLANS = [
   { id: "prata", slug: "prata" as const, name: "Prata", maxProjects: 3, maxUsersPerTenant: 5 },
@@ -9,11 +10,18 @@ export const PLANS = [
   { id: "diamante", slug: "diamante" as const, name: "Diamante", maxProjects: 50, maxUsersPerTenant: 100 },
 ];
 
+type LoginResponse = {
+  token: string;
+  user: User;
+  tenant: Tenant | null;
+};
+
 class AuthStore {
   user: User | null = null;
   tenant: Tenant | null = null;
   token: string | null =
     typeof window !== "undefined" ? localStorage.getItem("genesis_token") : null;
+  loginError: string | null = null;
 
   constructor() {
     makeAutoObservable(this);
@@ -31,33 +39,35 @@ class AuthStore {
     return !!this.token && !!this.user;
   }
 
-  login(email: string, password: string, role: "user" | "tenant_admin" | "zentriz_admin" = "user") {
-    this.token = "mock-jwt-" + Math.random().toString(36).slice(2);
-    const user = {
-      id: "u1",
-      email,
-      name: email.split("@")[0],
-      tenantId: role === "zentriz_admin" ? null : "t1",
-      role,
-      status: "active" as const,
-      createdAt: new Date().toISOString(),
-    };
-    this.user = user;
-    if (user.tenantId) {
-      this.tenant = {
-        id: "t1",
-        name: "Tenant Demo",
-        planId: "ouro",
-        plan: PLANS[1],
-        status: "active",
-        createdAt: new Date().toISOString(),
-      };
-    } else {
-      this.tenant = null;
-    }
-    if (typeof window !== "undefined") {
-      localStorage.setItem("genesis_token", this.token);
-      localStorage.setItem("genesis_user", JSON.stringify({ email: user.email, role: user.role, tenantId: user.tenantId }));
+  /** expectedRole: se informado, exige que o usuário retornado tenha esse role; caso contrário falha com mensagem. */
+  async login(
+    email: string,
+    password: string,
+    expectedRole?: "user" | "tenant_admin" | "zentriz_admin"
+  ) {
+    this.loginError = null;
+    try {
+      const data = await apiPost<LoginResponse>("/api/auth/login", { email, password });
+      if (expectedRole && data.user.role !== expectedRole) {
+        this.loginError =
+          expectedRole === "zentriz_admin"
+            ? "Use a tela de login Zentriz (Portal Genesis)."
+            : expectedRole === "tenant_admin"
+              ? "Use a tela de login Admin do tenant."
+              : "Use a tela de login Usuário.";
+        throw new Error(this.loginError);
+      }
+      this.token = data.token;
+      this.user = data.user;
+      this.tenant = data.tenant ?? null;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("genesis_token", data.token);
+        localStorage.setItem("genesis_user", JSON.stringify(data.user));
+        localStorage.setItem("genesis_tenant", data.tenant ? JSON.stringify(data.tenant) : "");
+      }
+    } catch (err) {
+      if (!this.loginError) this.loginError = err instanceof Error ? err.message : "Falha no login";
+      throw err;
     }
   }
 
@@ -65,24 +75,12 @@ class AuthStore {
     if (typeof window === "undefined") return;
     const t = localStorage.getItem("genesis_token");
     const u = localStorage.getItem("genesis_user");
+    const tn = localStorage.getItem("genesis_tenant");
     if (t && u) {
       try {
-        const { email, role, tenantId } = JSON.parse(u);
         this.token = t;
-        this.user = {
-          id: "u1",
-          email,
-          name: email.split("@")[0],
-          tenantId: tenantId ?? null,
-          role: role ?? "user",
-          status: "active",
-          createdAt: new Date().toISOString(),
-        };
-        if (this.user.tenantId) {
-          this.tenant = { id: "t1", name: "Tenant Demo", planId: "ouro", plan: PLANS[1], status: "active", createdAt: new Date().toISOString() };
-        } else {
-          this.tenant = null;
-        }
+        this.user = JSON.parse(u) as User;
+        this.tenant = tn ? (JSON.parse(tn) as Tenant) : null;
       } catch {
         this.token = null;
         this.user = null;
@@ -95,7 +93,12 @@ class AuthStore {
     this.user = null;
     this.tenant = null;
     this.token = null;
-    if (typeof window !== "undefined") localStorage.removeItem("genesis_token");
+    this.loginError = null;
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("genesis_token");
+      localStorage.removeItem("genesis_user");
+      localStorage.removeItem("genesis_tenant");
+    }
   }
 
   setUser(user: User | null) {

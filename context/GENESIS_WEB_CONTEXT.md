@@ -29,7 +29,7 @@
 
 ## 3. Roles e telas
 
-- **Usuário (por tenant)**: envio de spec ao CTO, meus projetos (listagem/detalhe), notificações.
+- **Usuário (por tenant)**: envio de spec ao CTO (múltiplos arquivos; formatos .md, .txt, .doc, .pdf; preferido .md; conversão para .md a cargo do orquestrador — ver [docs/SPEC_SUBMISSION_AND_FORMATS.md](../docs/SPEC_SUBMISSION_AND_FORMATS.md)), meus projetos (listagem/detalhe), notificações.
 - **Tenant admin**: gestão de usuários do tenant, gestão de projetos do tenant, visão do plano e uso, configurações do tenant.
 - **Zentriz admin**: gestão de tenants (CRUD, plano), gestão de usuários globais, gestão de projetos (visão global), controle por plano (limites, funcionalidades).
 
@@ -69,6 +69,7 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 
 | Documento | Uso |
 |-----------|-----|
+| [docs/SPEC_SUBMISSION_AND_FORMATS.md](../docs/SPEC_SUBMISSION_AND_FORMATS.md) | Envio de spec: formatos aceitos (.md, .txt, .doc, .pdf), múltiplos arquivos, conversor |
 | [docs/PLAN_PORTAL_GENESIS.md](../docs/PLAN_PORTAL_GENESIS.md) | Plano de construção do portal (fases, critérios) |
 | [docs/PORTAL_TENANTS_AND_PLANS.md](../docs/PORTAL_TENANTS_AND_PLANS.md) | Telas, roles, planos, multi-tenant |
 | [docs/TECHNICAL_REQUIREMENTS.md](../docs/TECHNICAL_REQUIREMENTS.md) | Stack (React+Next, MUI), domínio, URLs |

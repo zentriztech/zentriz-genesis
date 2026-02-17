@@ -2,6 +2,20 @@
 
 API do produto de exemplo (Voucher MVP). Stack: TypeScript, Fastify, Vitest.
 
+## Banco de dados
+
+A API usa **PostgreSQL** (fonte de verdade). Tabelas: `plans`, `tenants`, `users`, `projects`, `project_spec_files`. Schema em `src/db/schema.sql`. Na subida, `initDb()` aplica o schema e `seedIfEmpty()` cria um tenant demo e usuários iniciais.
+
+**Usuários padrão (senhas hasheadas; alterar em produção):**
+
+| Tela           | E-mail             | Senha         | Role          |
+|----------------|--------------------|---------------|---------------|
+| `/login/genesis` | `admin@zentriz.com` | `#Jean@2026!` | zentriz_admin |
+| `/login/tenant`  | `admin@tenant.com` | `#Tenant@2026!` | tenant_admin  |
+| `/login`         | `user@tenant.com`  | `#User@2026!`  | user          |
+
+O seed garante que esses usuários existam com senhas hasheadas (cria ou atualiza a cada subida). `user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Ver [SECRETS_AND_ENV.md](../../docs/SECRETS_AND_ENV.md). Em produção, use `POST /api/users` para cadastro com **regras de segurança**: senha mínimo 8 caracteres, hash bcrypt; apenas tenant_admin ou zentriz_admin podem criar usuários.
+
 ## Endpoints
 
 - `POST /api/vouchers` — criar voucher (FR-01)

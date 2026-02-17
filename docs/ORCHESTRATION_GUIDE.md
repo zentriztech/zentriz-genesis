@@ -6,7 +6,7 @@
 
 ## 1) Entrada
 
-- **SPEC** (pessoa real) fornece a especificação em [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) com FR/NFR.
+- **SPEC** (pessoa real) fornece a especificação em [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) com FR/NFR, ou via **upload no portal** (genesis-web). O portal aceita formatos **.md, .txt, .doc/.docx e .pdf**; quando não for .md, um **conversor** do orquestrador gera Markdown formatado e o CTO recebe apenas esse .md. Detalhes: [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 - SPEC comunica-se **apenas** com o CTO.
 
 ---

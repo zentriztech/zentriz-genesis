@@ -47,7 +47,7 @@
 
 ## 5. Fluxo do projeto (do start à finalização e provisionamento)
 
-1. **Usuário (do tenant)** envia a **spec** pelo portal (genesis.zentriz.com.br), dentro do plano contratado.
+1. **Usuário (do tenant)** envia a **spec** pelo portal (genesis.zentriz.com.br), dentro do plano contratado. O envio de spec ao CTO permite **mais de um arquivo**; os formatos aceitos são **.md (preferencial), .txt, .doc/.docx e .pdf**. Detalhes em [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 2. O sistema **registra o projeto** e dispara o fluxo de agentes: **CTO** (Charter) → **PM** (backlog) → **Dev / QA / Monitor / DevOps** conforme orquestração existente ([ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md)).
 3. **Tenants e usuários** podem **gerenciar e acompanhar** todo o processo no portal: status do projeto, etapas, artefatos, alertas (Monitor), até a **finalização**.
 4. O **agente DevOps** (seguindo a spec e o DoD) realiza o **provisionamento automático** (Docker, Terraform, k8s conforme [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md)); o portal deve refletir o estado “provisionado” / deploy realizado quando aplicável.
@@ -62,7 +62,7 @@ As telas devem cobrir **todo o gerenciamento e controle** que tenants e usuário
 ### 6.1 Para o usuário (dentro de um tenant)
 
 - **Login / autenticação** (e recuperação de acesso quando aplicável).
-- **Envio de spec** para iniciar projeto (respeitando plano Prata/Ouro/Diamante).
+- **Envio de spec** para iniciar projeto (respeitando plano Prata/Ouro/Diamante): múltiplos arquivos aceitos (.md, .txt, .doc, .pdf); ver [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
 - **Listagem e detalhe dos meus projetos** (status, etapas, artefatos, histórico).
 - **Acompanhamento do fluxo** do projeto: CTO → PM → Dev/QA/Monitor/DevOps (timeline, logs, evidências, estado de provisionamento).
 - **Notificações/alertas** relevantes ao usuário (ex.: projeto finalizado, provisionamento concluído, bloqueio).

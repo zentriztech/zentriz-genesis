@@ -67,10 +67,19 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
 
   return (
     <Box sx={{ display: "flex" }}>
-      <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
+      <AppBar
+        position="fixed"
+        sx={{
+          zIndex: (theme) => theme.zIndex.drawer + 1,
+          backgroundColor: "#0d47a1",
+        }}
+      >
         <Toolbar>
-          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1 }}>
-            Genesis — genesis.zentriz.com.br
+          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1, fontWeight: 600 }}>
+            Genesis
+          </Typography>
+          <Typography variant="body2" sx={{ opacity: 0.9, mr: 1 }}>
+            genesis.zentriz.com.br
           </Typography>
           <IconButton
             size="large"
@@ -125,7 +134,7 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
           },
         }}
       >
-        <List>
+        <List sx={{ "& .MuiListItemButton-root": { borderRadius: 1, mx: 1, "&:hover": { bgcolor: "action.hover" } } }}>
           {nav.map((item) => (
             <ListItemButton
               key={item.href}

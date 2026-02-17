@@ -2,12 +2,17 @@
 Runner do orquestrador: spec -> CTO (Charter) -> PM Backend (backlog).
 Persiste estado em orchestrator/state/ e emite eventos conforme schemas.
 Uso: python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md
+
+Quando as variáveis API_BASE_URL, PROJECT_ID e GENESIS_API_TOKEN estiverem
+definidas, o runner atualiza o projeto na API: started_at ao iniciar e
+completed_at + status ao concluir (PATCH /api/projects/:id).
 """
 import argparse
 import json
 import logging
 import os
 import sys
+import urllib.request
 from pathlib import Path
 from datetime import datetime
 
@@ -96,6 +101,34 @@ def emit_event(event_type: str, payload: dict, request_id: str) -> None:
     logger.info("Evento emitido: %s", event_type)
 
 
+def _patch_project(body: dict) -> bool:
+    """Envia PATCH /api/projects/:id quando API_BASE_URL, PROJECT_ID e GENESIS_API_TOKEN estão definidos."""
+    base = os.environ.get("API_BASE_URL")
+    project_id = os.environ.get("PROJECT_ID")
+    token = os.environ.get("GENESIS_API_TOKEN")
+    if not base or not project_id or not token:
+        return False
+    url = f"{base.rstrip('/')}/api/projects/{project_id}"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="PATCH",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if 200 <= resp.status < 300:
+                logger.info("Projeto atualizado na API: %s", body)
+                return True
+    except Exception as e:
+        logger.warning("Falha ao atualizar projeto na API: %s", e)
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Runner: spec -> CTO -> PM Backend -> backlog")
     parser.add_argument("--spec", "-s", default="spec/PRODUCT_SPEC.md", help="Caminho para o spec (FR/NFR)")
@@ -110,6 +143,9 @@ def main() -> int:
 
     logger.info("Lendo spec: %s", spec_ref)
     load_spec(Path(spec_ref))
+
+    now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _patch_project({"started_at": now_iso})
 
     # 1) CTO -> Charter
     logger.info("Chamando agente CTO...")
@@ -144,6 +180,9 @@ def main() -> int:
         events=["project.created", "module.planned"],
     )
     logger.info("Estado persistido em orchestrator/state/current_project.json")
+
+    completed_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _patch_project({"status": "completed", "completed_at": completed_at_iso})
 
     print(json.dumps({
         "request_id": request_id,
