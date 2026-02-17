@@ -27,6 +27,7 @@
 | [docs/STATUS.md](STATUS.md) | Estado atual do projeto |
 | [docs/NEXT_STEPS_REMINDER.md](NEXT_STEPS_REMINDER.md) | Próximos caminhos naturais |
 | [docs/TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Linguagens, infra e requisitos técnicos para desenvolver |
+| [docs/PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md) | Portal genesis.zentriz.com.br, multi-tenant, planos (Prata/Ouro/Diamante), telas e gestão |
 
 ---
 

@@ -88,7 +88,7 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 - [BACKLOG_*.md](docs/BACKLOG_BACKEND.md)
 - [ORCHESTRATOR_BLUEPRINT.md](docs/ORCHESTRATOR_BLUEPRINT.md)
 - [TASK_STATE_MACHINE.md](docs/TASK_STATE_MACHINE.md)
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Deploy local (inclui uso do script [deploy-docker.sh](deploy-docker.sh)), Kubernetes, CI/CD
 - [STATUS.md](docs/STATUS.md)
 - **[context/PROJECT_OVERVIEW.md](context/PROJECT_OVERVIEW.md)** — Contexto completo para novos chats e onboarding
 - **[docs/adr/](docs/adr/)** — Architecture Decision Records (decisões arquiteturais)

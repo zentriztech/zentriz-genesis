@@ -1,0 +1,80 @@
+# Zentriz Genesis — ambiente local
+# Namespace: zentriz-genesis (project name = namespace para recursos Docker)
+# Uso: docker compose up -d | Variáveis: .env (DOCKER_NAMESPACE, etc.)
+
+name: zentriz-genesis
+
+services:
+  api:
+    build:
+      context: ./services/api-node
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - API_BASE_URL=${API_BASE_URL:-http://localhost:3000}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: genesis
+      POSTGRES_PASSWORD: genesis_dev
+      POSTGRES_DB: zentriz_genesis
+    ports:
+      - "5432:5432"
+    volumes:
+      - zentriz-genesis_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genesis -d zentriz_genesis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - zentriz-genesis_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  agents-backend:
+    build:
+      context: .
+      dockerfile: orchestrator/agents/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  zentriz-genesis_pgdata:
+  zentriz-genesis_redis:

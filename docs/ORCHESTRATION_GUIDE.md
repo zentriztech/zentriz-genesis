@@ -20,6 +20,8 @@
 - Delega cada stack ao PM responsável (CTO não atribui tarefas a Dev/QA/DevOps/Monitor).
 - Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
 
+**Implementação:** Agente CTO em [orchestrator/agents/cto_agent.py](../orchestrator/agents/cto_agent.py). Runner que executa o fluxo spec → CTO → PM Backend: `python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md` ([orchestrator/README.md](../orchestrator/README.md)).
+
 ---
 
 ## 3) PM (por stack)

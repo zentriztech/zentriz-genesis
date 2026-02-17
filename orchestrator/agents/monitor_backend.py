@@ -1,0 +1,61 @@
+"""
+Agente Monitor Backend — analisa saúde da stack Backend, gera relatórios e alertas.
+Uso: python -m orchestrator.agents.monitor_backend --input message.json
+      ou POST /invoke/monitor (serviço HTTP).
+"""
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+from .runtime import run_agent
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SYSTEM_PROMPT_PATH = REPO_ROOT / "agents" / "monitor" / "backend" / "SYSTEM_PROMPT.md"
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Monitor Backend Agent — health e alertas da stack Backend")
+    parser.add_argument("--input", "-i", help="Arquivo JSON com message_envelope", default="-")
+    parser.add_argument("--output", "-o", help="Arquivo de saída (response_envelope)", default="-")
+    args = parser.parse_args()
+
+    if args.input == "-":
+        raw = sys.stdin.read()
+    else:
+        raw = Path(args.input).read_text(encoding="utf-8")
+
+    try:
+        message = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("JSON inválido: %s", e)
+        return 1
+
+    if "request_id" not in message:
+        message["request_id"] = "monitor-backend-cli"
+    if "input" not in message:
+        message["input"] = message.get("context", {})
+
+    logger.info("Chamando agente Monitor Backend (SYSTEM_PROMPT: %s)", SYSTEM_PROMPT_PATH)
+    response = run_agent(
+        system_prompt_path=SYSTEM_PROMPT_PATH,
+        message=message,
+        role="MONITOR_BACKEND",
+    )
+
+    out = json.dumps(response, ensure_ascii=False, indent=2)
+    if args.output == "-":
+        print(out)
+    else:
+        Path(args.output).write_text(out, encoding="utf-8")
+
+    return 0 if response.get("status") in ("OK", "NEEDS_INFO") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

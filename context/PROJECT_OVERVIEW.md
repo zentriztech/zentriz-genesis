@@ -15,6 +15,8 @@
 
 **Princípio Zero**: Especificação é lei. Toda decisão nasce de spec explícita, versionada e auditável.
 
+**Portal e multi-tenant**: O portal **genesis.zentriz.com.br** oferece controle de usuários por plano (Prata, Ouro, Diamante), modelo multi-tenant (tenant cadastra usuários e projetos), envio de specs ao CTO, acompanhamento do fluxo até a finalização e provisionamento automático pelo DevOps; a Zentriz gerencia todos os tenants, usuários e projetos. Detalhes: [docs/PORTAL_TENANTS_AND_PLANS.md](../docs/PORTAL_TENANTS_AND_PLANS.md).
+
 ---
 
 ## 2. Atores e Arquitetura

@@ -41,7 +41,7 @@ O projeto opera sob o **domínio raiz zentriz.com.br**, hospedado na **AWS**. To
 
 | URL | Uso |
 |-----|-----|
-| **https://genesis.zentriz.com.br** | **Portal web** — entrada de specs, gerenciamento e acompanhamento dos agentes (CTO, PM, Dev, QA, DevOps, Monitor). |
+| **https://genesis.zentriz.com.br** | **Portal web** — controle de usuários por plano (Prata, Ouro, Diamante); multi-tenant; envio de specs ao CTO; registro e acompanhamento de projetos do start à finalização e provisionamento automático pelo DevOps; gestão Zentriz (tenants, usuários, projetos). Detalhes: [PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md). |
 | **https://genesis.zentriz.com.br/api** | API principal (BFF / gateway) — chamadas de leitura e comando vindas do portal e de integrações. |
 | **https://genesis.zentriz.com.br/api/...** | Demais endpoints (ex.: `/api/v1/specs`, `/api/v1/agents`, `/api/health`). |
 | *(outros subdomínios sob `genesis.*` ou paths podem ser definidos conforme necessidade)* | Ex.: webhooks, APIs de agentes/LLM, documentação (ex.: `genesis.zentriz.com.br/docs`). |
@@ -86,6 +86,7 @@ O projeto opera sob o **domínio raiz zentriz.com.br**, hospedado na **AWS**. To
 ### 6.1 Backend (APIs)
 
 - **Node.js (TypeScript)**: APIs de chamada simples, BFF, gateway. Ex.: Fastify ou NestJS. Containers.
+- **Persistência Postgres (Node)**: ORM **Drizzle** para acesso a PostgreSQL (schema, migrations, queries). Fonte de verdade transacional conforme seção 7.
 - **Python**: APIs pesadas, agentes (CTO, PM, Dev, QA, DevOps, Monitor), integração LLM, jobs. Ex.: FastAPI. Containers.
 - **Testes**: Vitest/Jest (Node); pytest (Python). Cobertura e qualidade conforme [PERFORMANCE_METRICS.md](PERFORMANCE_METRICS.md).
 
@@ -106,7 +107,7 @@ O projeto opera sob o **domínio raiz zentriz.com.br**, hospedado na **AWS**. To
 
 | Componente | Uso | Local (Docker) | AWS (exemplo) |
 |------------|-----|----------------|----------------|
-| **PostgreSQL** | Fonte de verdade **transacional e de domínio** (agregados, entidades, consistência forte). | Container Postgres no namespace `zentriz-genesis`. | **RDS (Postgres)**. |
+| **PostgreSQL** | Fonte de verdade **transacional e de domínio** (agregados, entidades, consistência forte). Acesso via **Drizzle** (ORM) no Node.js. | Container Postgres no namespace `zentriz-genesis`. | **RDS (Postgres)**. |
 | **MongoDB** | **Entrada de dados** (ingestão), event log, dados semi-estruturados ou de alto volume de escrita. | Container MongoDB no namespace `zentriz-genesis`. | **DocumentDB** (compatível MongoDB) ou MongoDB Atlas. |
 | **Redis** | **Caches**, read models, sessões, rate limit. | Container Redis no namespace `zentriz-genesis`. | **ElastiCache (Redis)**. |
 | **RabbitMQ** | **Filas** (comandos assíncronos, eventos, workers). | Container RabbitMQ no namespace `zentriz-genesis`. | **Amazon MQ (RabbitMQ)** ou RabbitMQ em k8s. |
@@ -150,6 +151,7 @@ Para começar a implementar o projeto, a ordem recomendada é a seguinte (funda�
 
 | # | Agente | Descrição |
 |---|--------|------------|
+| **0** | **Variáveis de Ambiente (.env)** | Definir todas as variáveis de ambiente iniciais; template em [.env.example](../.env.example), lista em [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md). |
 | **1** | **devops::docker** | Base: Docker (namespace `zentriz-genesis`), Terraform e Kubernetes em qualquer infra (AWS, GCP, Azure). Sem isso não há ambiente para rodar nem fazer deploy. Ver [agents/devops/docker/](../agents/devops/docker/). |
 | 2 | dev::backend::nodejs | API (ex.: Node/TypeScript); consome a base Docker/k8s. |
 | 3 | qa::backend::nodejs | Testes e validação do backend Node. |
@@ -197,6 +199,17 @@ Detalhes e justificativas: [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPME
 - **kubectl** (e acesso a um cluster k8s) — quando for deploy em Kubernetes
 - **Editor/IDE** (ex.: VS Code / Cursor)
 - (Quando for deploy AWS) **AWS CLI** e credenciais configuradas
+- **Variáveis de ambiente**: copiar [.env.example](../.env.example) para `.env` e preencher `CLAUDE_API_KEY` (API Anthropic para os agentes acessarem o LLM). O arquivo `.env` **não** é commitado (está no .gitignore). Ver [docs/SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
+
+---
+
+## 13. Secrets e variáveis de ambiente
+
+- **Local**: Segredos (ex.: chave da Claude API) ficam em **`.env`** na raiz do projeto. O `.env` está no [.gitignore](../.gitignore) e **nunca** deve ser commitado.
+- **Template**: Use [.env.example](../.env.example) como referência; copie para `.env` e preencha os valores.
+- **Lista completa**: Todas as variáveis de ambiente iniciais (LLM, infra, API, runtime dos agentes) estão documentadas em [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
+- **Variável para o LLM**: `CLAUDE_API_KEY` — usada pelos agentes para chamadas à API Anthropic (Claude).
+- **Em cloud**: usar gerenciador de segredos do provedor (AWS Secrets Manager, Parameter Store, etc.) e injetar como variáveis de ambiente no runtime (ex.: k8s Secrets, Lambda env).
 
 ---
 

@@ -1,0 +1,57 @@
+# CI — lint, test, build (base para itens 2+)
+# Item 2 adiciona steps para services/api-node; agentes Python podem ter job separado.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose config
+        run: docker compose config --quiet
+
+      - name: Validate Terraform (AWS)
+        run: |
+          cd infra/aws && terraform init -backend=false && terraform validate
+
+  # Job para api-node (ativado quando services/api-node/package.json existir)
+  api-node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for api-node package
+        id: check
+        run: test -f package.json && echo "has_package=true" >> $GITHUB_OUTPUT || echo "has_package=false" >> $GITHUB_OUTPUT
+
+      - name: Setup Node
+        if: steps.check.outputs.has_package == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        if: steps.check.outputs.has_package == 'true'
+        run: npm ci
+
+      - name: Lint
+        if: steps.check.outputs.has_package == 'true'
+        run: npm run lint --if-present
+
+      - name: Test
+        if: steps.check.outputs.has_package == 'true'
+        run: npm test --if-present
+
+      - name: Build
+        if: steps.check.outputs.has_package == 'true'
+        run: npm run build --if-present
