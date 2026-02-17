@@ -1,0 +1,86 @@
+# Plano: Portal Genesis (genesis.zentriz.com.br)
+
+> Plano de construção do portal web de controle de tenants, planos (Prata/Ouro/Diamante), usuários e projetos. Referência: [PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md), [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md).
+
+---
+
+## 1. Escopo
+
+- **URL**: genesis.zentriz.com.br (local: localhost:3001 ou porta dedicada).
+- **Stack**: React + Next.js (App Router) + TypeScript + Material UI (MUI) + MobX.
+- **Nome do serviço Docker**: `genesis-web`.
+- **Entregas**: aplicação web completa com todas as telas descritas em PORTAL_TENANTS_AND_PLANS.md; integração com API existente; containerização e inclusão no docker-compose.
+
+---
+
+## 2. Fases
+
+### Fase 1 — Projeto base
+- Criar app Next.js 14+ (App Router) em `apps/genesis-web`.
+- Configurar TypeScript, ESLint, Prettier.
+- Instalar e configurar: `@mui/material`, `@emotion/react`, `@emotion/styled`, `mobx`, `mobx-react-lite`.
+- Estrutura de pastas: `app/`, `components/`, `stores/`, `lib/`, `types/`.
+- Variável `NEXT_PUBLIC_API_BASE_URL` para a API (ex.: http://localhost:3000).
+
+### Fase 2 — Autenticação e layout
+- Tela de **login** (e recuperação de acesso placeholder).
+- Store MobX para auth (user, tenant, role, token).
+- Layout principal: AppBar, drawer (nav por role: usuário, tenant admin, Zentriz admin).
+- Roteamento protegido por role (middleware ou HOC).
+
+### Fase 3 — Telas usuário (por tenant)
+- **Envio de spec**: formulário para enviar spec ao CTO (respeitando plano).
+- **Meus projetos**: listagem com status, filtros; link para detalhe.
+- **Detalhe do projeto**: status, etapas, timeline (CTO → PM → Dev/QA/Monitor/DevOps), artefatos, estado de provisionamento.
+- **Notificações**: lista/feed de alertas (projeto finalizado, provisionamento concluído, bloqueio).
+
+### Fase 4 — Telas tenant (admin do tenant)
+- **Gestão de usuários do tenant**: CRUD, edição, desativação, roles.
+- **Gestão de projetos do tenant**: listagem global, filtros, status.
+- **Visão do plano**: plano contratado (Prata/Ouro/Diamante) e uso (projetos ativos, cota).
+- **Configurações do tenant** (opcional): nome, contato.
+
+### Fase 5 — Telas Zentriz (admin da plataforma)
+- **Gestão de tenants**: CRUD, suspender, atribuir/alterar plano.
+- **Gestão de usuários**: admin globais; visão/gestão de usuários dos tenants.
+- **Gestão de projetos**: listagem global, filtro por tenant/usuário/status; auditoria.
+- **Controle por plano**: ativar/desativar funcionalidades por plano, limites.
+
+### Fase 6 — Integração e dados
+- Cliente HTTP para API (fetch ou axios) com base em `NEXT_PUBLIC_API_BASE_URL`.
+- Tipos TypeScript alinhados a tenants, users, projects, plans.
+- Mock ou endpoints reais: auth, tenants, users, projects, specs (conforme API existente ou stubs).
+
+### Fase 7 — Docker e documentação
+- **Dockerfile** para `genesis-web` (Node, build Next, run standalone).
+- **docker-compose.yml**: adicionar serviço `genesis-web`, porta (ex.: 3001), variáveis, dependências (api).
+- **deploy-docker.sh**: já sobe todos os serviços; garantir que `genesis-web` está no compose.
+- Atualizar **docs/DEPLOYMENT.md** com serviço genesis-web e porta.
+- Testes manuais; correções; rodar `./deploy-docker.sh` e validar.
+
+---
+
+## 3. Referências
+
+| Documento | Uso |
+|-----------|-----|
+| [PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md) | Telas, roles, fluxo, planos. |
+| [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Stack (React+Next, MUI), domínio, URLs, CQRS. |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Deploy local, script deploy-docker.sh. |
+| [docker-compose.yml](../docker-compose.yml) | Serviços existentes (api, postgres, redis, agents-backend). |
+
+---
+
+## 4. Critérios de conclusão
+
+- [x] App Next.js rodando localmente (npm run dev).
+- [x] Login e layout por role (usuário, tenant admin, Zentriz).
+- [x] Telas usuário: envio spec, listagem/detalhe projetos, notificações.
+- [x] Telas tenant: gestão usuários, gestão projetos, plano e uso.
+- [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano.
+- [x] genesis-web no [docker-compose.yml](../docker-compose.yml); [Dockerfile](../apps/genesis-web/Dockerfile) e [.dockerignore](../apps/genesis-web/.dockerignore).
+- [ ] deploy-docker.sh sobe todo o stack incluindo genesis-web (requer espaço em disco suficiente no host; em caso de "no space left on device", executar `docker system prune -a` e liberar espaço).
+
+---
+
+*Plano criado em 2026-02-17. Portal implementado em apps/genesis-web (React, Next.js, MUI, MobX).*

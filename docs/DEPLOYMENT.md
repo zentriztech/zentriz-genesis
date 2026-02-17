@@ -46,11 +46,24 @@ chmod +x deploy-docker.sh
 
 ### Comandos manuais (docker compose)
 
+**Importante:** execute sempre na **raiz do repositório** (onde está o `docker-compose.yml`). Assim o Compose usa o project name **zentriz-genesis** definido no arquivo e os containers aparecem com esse prefixo.
+
 Se preferir não usar o script:
 
 ```bash
+# Na raiz do repo
+cd /caminho/para/zentriz-genesis
+
 # Subir todos os serviços
-docker compose up -d
+docker compose up -d --build
+
+# Listar containers do projeto (devem aparecer zentriz-genesis-api-1, zentriz-genesis-genesis-web-1, etc.)
+docker compose ps
+# ou, de qualquer pasta, com project name explícito:
+docker compose -f docker-compose.yml --project-name zentriz-genesis ps
+
+# Ver todos os containers do projeto no Docker
+docker ps --filter "label=com.docker.compose.project=zentriz-genesis"
 
 # Ver logs
 docker compose logs -f
@@ -59,11 +72,14 @@ docker compose logs -f
 docker compose down
 ```
 
+**Se os containers não aparecem:** confirme que está na raiz do repo e que o project name é `zentriz-genesis`. Se você subiu de outra pasta, o project name pode ser o nome da pasta; use `docker ps -a` e procure por nomes como `zentriz-genesis-genesis-web-1` ou rode `./deploy-docker.sh` na raiz.
+
 ### Serviços e portas
 
 | Serviço          | Porta | Descrição |
 |------------------|-------|-----------|
 | api              | 3000  | API do produto (Voucher) |
+| genesis-web      | 3001  | Portal web (genesis.zentriz.com.br) — React, Next.js, MUI, MobX |
 | agents-backend   | 8000  | Agentes da stack Backend (CTO, PM, Monitor, Dev, QA, DevOps Docker) — LLM |
 | postgres         | 5432  | PostgreSQL (fonte de verdade) |
 | redis            | 6379  | Cache / sessões |

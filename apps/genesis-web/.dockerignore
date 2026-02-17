@@ -1,0 +1,23 @@
+# Dependências e build local — instalados/gerados no container
+node_modules
+.next
+
+# Controle de versão e ambiente
+.git
+.gitignore
+.env*
+
+# Desenvolvimento, testes e documentação (não necessários para o build)
+*.log
+.DS_Store
+README*
+docs
+**/*.test.*
+**/*.spec.*
+**/__tests__
+**/__mocks__
+coverage
+.husky
+.vscode
+.idea
+*.md

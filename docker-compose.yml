@@ -75,6 +75,17 @@ services:
       retries: 3
     restart: unless-stopped
 
+  genesis-web:
+    build:
+      context: ./apps/genesis-web
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3000}
+    restart: unless-stopped
+
 volumes:
   zentriz-genesis_pgdata:
   zentriz-genesis_redis:

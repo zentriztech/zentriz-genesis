@@ -1,0 +1,19 @@
+# Dependências e build local
+node_modules
+dist
+
+# Controle e ambiente
+.git
+.gitignore
+.env*
+*.log
+.DS_Store
+
+# Testes e dev
+coverage
+**/*.test.*
+**/*.spec.*
+**/__tests__
+.vscode
+.idea
+*.md

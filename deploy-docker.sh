@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # deploy-docker.sh — Criar, destruir ou atualizar o ambiente Docker do Zentriz Genesis.
-# Uso: ./deploy-docker.sh [--create | --destroy]
+# Uso: ./deploy-docker.sh [--create | --destroy | --prune]
 #   --destroy  Remove containers, redes e (opcional) volumes do projeto.
 #   --create   Garante .env, depois sobe o stack (build + up).
-#   (sem flag) Atualiza: rebuild e up (pull/build/up).
+#   --prune    Limpa cache do Docker (builder prune) e depois faz create/update. Use se der "no space left on device".
+#   (sem flag) Atualiza: rebuild e up (pull/build/up). Build é sequencial para reduzir pico de uso de disco.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,13 +71,30 @@ destroy() {
   log "Ambiente destruído (volumes preservados)."
 }
 
+# Limpar cache do builder (libera disco; use se der "no space left on device")
+run_prune() {
+  log "Limpando cache do Docker builder..."
+  docker builder prune -f || true
+  log "Cache limpo."
+}
+
+# Build sequencial (um serviço por vez) para reduzir pico de uso de disco
+build_sequential() {
+  log "Build sequencial (api -> genesis-web -> agents-backend)..."
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build api) || die "Build do api falhou."
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build genesis-web) || die "Build do genesis-web falhou."
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build agents-backend) || die "Build do agents-backend falhou."
+  log "Build concluído."
+}
+
 # Build e up
 create_or_update() {
-  log "Build e início dos serviços..."
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d --build) || {
+  log "Build e início dos serviços (build sequencial para economizar disco)..."
+  build_sequential
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d) || {
     err "Falha no up. Tentando down e up novamente..."
     (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" down --remove-orphans) || true
-    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d --build) || die "Falha ao subir o stack."
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d) || die "Falha ao subir o stack."
   }
   log "Stack no ar. Verificando containers..."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" ps)
@@ -85,20 +103,30 @@ create_or_update() {
 # --- main ---
 main() {
   local mode="update"
-  if [[ "${1:-}" == "--destroy" ]]; then
-    mode="destroy"
-  elif [[ "${1:-}" == "--create" ]]; then
-    mode="create"
-  elif [[ -n "${1:-}" ]]; then
-    log "Uso: $0 [--create | --destroy]"
-    log "  --create   Criar ambiente (garante .env, build e up)"
-    log "  --destroy  Destruir ambiente (down)"
-    log "  (vazio)    Atualizar (build e up)"
-    exit 0
-  fi
+  local do_prune=false
+  while [[ -n "${1:-}" ]]; do
+    case "$1" in
+      --destroy) mode="destroy"; shift ;;
+      --create)  mode="create"; shift ;;
+      --prune)   do_prune=true; shift ;;
+      -h|--help)
+        log "Uso: $0 [--create | --destroy | --prune]"
+        log "  --create   Criar ambiente (garante .env, build e up)"
+        log "  --destroy  Destruir ambiente (down)"
+        log "  --prune    Limpar cache do Docker e depois build+up (use se der 'no space left on device')"
+        log "  (vazio)    Atualizar (build sequencial e up)"
+        exit 0
+        ;;
+      *) log "Opção desconhecida: $1"; exit 1 ;;
+    esac
+  done
 
   check_repo
   check_docker
+
+  if [[ "$do_prune" == true ]]; then
+    run_prune
+  fi
 
   case "$mode" in
     destroy)
