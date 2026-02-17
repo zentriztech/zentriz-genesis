@@ -15,7 +15,7 @@ O Zentriz Genesis precisa simular uma fábrica de software com papéis claros. U
 ## Decisão
 
 Agentes são **especializados por papel e módulo**:
-- **PM_<AREA>**: Backend, Web, Mobile, Infra — define backlog, aprova entregas
+- **PM_<AREA>**: Backend, Web, Mobile — define backlog, aprova entregas (infra é responsabilidade do DevOps em cada stack)
 - **DEV_<AREA>**: Implementa código, testes, documentação
 - **QA_<AREA>**: Valida requisitos, gera QA report, bloqueia regressões
 - **DEVOPS_<CLOUD>**: AWS, Azure, GCP — IaC, CI/CD, observabilidade

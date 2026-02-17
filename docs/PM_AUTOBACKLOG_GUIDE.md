@@ -21,5 +21,5 @@
    - NFR-04 Custo -> escolhas serverless e notas de otimização
 
 ## Saída
-- [docs/BACKLOG_BACKEND.md](BACKLOG_BACKEND.md), [docs/BACKLOG_WEB.md](BACKLOG_WEB.md) por módulo (Backend/Web/Mobile/Infra)
+- [docs/BACKLOG_BACKEND.md](BACKLOG_BACKEND.md), [docs/BACKLOG_WEB.md](BACKLOG_WEB.md) por stack (Backend/Web/Mobile)
 - Status inicial em [docs/STATUS.md](STATUS.md)

@@ -16,7 +16,10 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 |---------|-----|
 | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | Visão completa do projeto — leia primeiro em novos chats |
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Referência rápida de caminhos e conceitos-chave |
+| [DEVELOPMENT_CONTEXT.md](DEVELOPMENT_CONTEXT.md) | Por que "Voucher" é citado; análise do que falta; checklist e por onde começar |
 | [PRACTICES_FROM_OTHER_PROJECTS.md](PRACTICES_FROM_OTHER_PROJECTS.md) | Análise de práticas de outros projetos (ADRs, RFCs, etc.) |
+
+**Documento de atores (na raiz docs/)**: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) — responsabilidades, hierarquia de comunicação e comportamentos de SPEC, CTO, PM, Dev, QA, DevOps e Monitor.
 
 ## Como Usar (para Assistentes de IA)
 

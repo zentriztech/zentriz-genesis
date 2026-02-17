@@ -9,8 +9,11 @@
 | Documento | Descrição |
 |-----------|-----------|
 | [README.md](../README.md) | Visão geral do projeto |
+| **[ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md)** | Atores, responsabilidades, hierarquia de comunicação e comportamentos |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (fluxo, stacks, etapas) |
 | [context/PROJECT_OVERVIEW.md](../context/PROJECT_OVERVIEW.md) | Contexto completo para novos chats |
 | [context/QUICK_REFERENCE.md](../context/QUICK_REFERENCE.md) | Referência rápida de caminhos |
+| [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPMENT_CONTEXT.md) | Por que "Voucher"; análise; checklist e por onde começar |
 
 ---
 
@@ -23,6 +26,7 @@
 | [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) | Escopo e módulos |
 | [docs/STATUS.md](STATUS.md) | Estado atual do projeto |
 | [docs/NEXT_STEPS_REMINDER.md](NEXT_STEPS_REMINDER.md) | Próximos caminhos naturais |
+| [docs/TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Linguagens, infra e requisitos técnicos para desenvolver |
 
 ---
 
@@ -30,7 +34,8 @@
 
 | Documento | Descrição |
 |-----------|-----------|
-| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagrama Mermaid (Monitor→PM→CTO) |
+| [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md) | Atores, responsabilidades, hierarquia e diagramas |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (hierarquia, fluxo, stacks, etapas) |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
 | [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor→PM→CTO |
@@ -44,26 +49,13 @@
 | Documento | Descrição |
 |-----------|-----------|
 | [docs/AGENTS_CAPABILITIES.md](AGENTS_CAPABILITIES.md) | Documentação consolidada de agentes |
+| [agents/README.md](../agents/README.md) | Estrutura hierárquica (dev, qa, devops, pm, monitor por área/skill) |
 | [agents/cto/](../agents/cto/) | CTO Agent |
-| [agents/pm-backend/](../agents/pm-backend/) | PM Backend |
-| [agents/pm-web/](../agents/pm-web/) | PM Web |
-| [agents/pm-mobile/](../agents/pm-mobile/) | PM Mobile |
-| [agents/pm-infra/](../agents/pm-infra/) | PM Infra |
-| [agents/dev-backend/](../agents/dev-backend/) | Dev Backend |
-| [agents/dev-web/](../agents/dev-web/) | Dev Web |
-| [agents/dev-mobile/](../agents/dev-mobile/) | Dev Mobile |
-| [agents/dev-infra/](../agents/dev-infra/) | Dev Infra |
-| [agents/qa-backend/](../agents/qa-backend/) | QA Backend |
-| [agents/qa-web/](../agents/qa-web/) | QA Web |
-| [agents/qa-mobile/](../agents/qa-mobile/) | QA Mobile |
-| [agents/qa-infra/](../agents/qa-infra/) | QA Infra |
-| [agents/devops-aws/](../agents/devops-aws/) | DevOps AWS |
-| [agents/devops-azure/](../agents/devops-azure/) | DevOps Azure |
-| [agents/devops-gcp/](../agents/devops-gcp/) | DevOps GCP |
-| [agents/monitor-backend/](../agents/monitor-backend/) | Monitor Backend |
-| [agents/monitor-web/](../agents/monitor-web/) | Monitor Web |
-| [agents/monitor-mobile/](../agents/monitor-mobile/) | Monitor Mobile |
-| [agents/monitor-infra/](../agents/monitor-infra/) | Monitor Infra |
+| [agents/pm/](../agents/pm/) | PM (backend, web, mobile) |
+| [agents/dev/](../agents/dev/) | Dev (backend/nodejs, web/react-next-materialui, mobile/react-native) |
+| [agents/qa/](../agents/qa/) | QA (backend/nodejs, backend/lambdas, web/react, mobile/react-native) |
+| [agents/devops/](../agents/devops/) | DevOps (docker — base; aws, azure, gcp) |
+| [agents/monitor/](../agents/monitor/) | Monitor (backend, web, mobile) |
 
 ---
 

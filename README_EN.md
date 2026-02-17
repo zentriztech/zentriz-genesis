@@ -45,7 +45,7 @@ AWS, Azure, and GCP.
 They provision infrastructure, CI/CD, observability, and execute smoke tests.
 
 ### Monitor Agents
-Monitor **Dev/QA** per module (Backend, Web, Mobile, Infra) — progress, activity status — and **inform the responsible PM** (who escalates to CTO when critical).
+Monitor **Dev/QA** per stack (Backend, Web, Mobile) — progress, activity status — and **inform the responsible PM** (who escalates to CTO when critical).
 
 ## 🔄 Event-Driven Orchestration
 
@@ -60,7 +60,7 @@ Each task follows a formal **State Machine**, ensuring traceability and control.
 Zentriz-Genesis/
 ├─ spec/
 ├─ docs/
-├─ agents/
+├─ agents/           # Hierarchical: cto/, pm/, dev/, qa/, devops/, monitor/ (see agents/README.md)
 ├─ contracts/
 ├─ reports/
 ├─ tests/smoke/

@@ -17,22 +17,19 @@
 
 ---
 
-## 2. Arquitetura de Agentes
+## 2. Atores e Arquitetura
 
-```
-SPEC (Product Spec) → CTO → PMs (Backend/Web/Mobile/Infra)
-                            ↓
-                    Dev + QA + DevOps + Monitor (por módulo)
-                            ↓
-                    Monitor_<AREA> → PM_<AREA> → CTO (fluxo de alertas)
-```
+- **SPEC** (pessoa real): Dono do projeto; fornece especificação (FR/NFR); comunica-se apenas com o CTO; recebe conclusão ou bloqueios.
+- **CTO**: Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; delega stacks; informa SPEC quando finalizado ou bloqueado.
+- **PM** (por stack): Backlog por FR/NFR; gerencia a stack; **contrata** Dev(s), QA(s) em par (1 QA por Dev), **um** DevOps e **um** Monitor; atribui atividades; recebe status do Monitor.
+- **Dev**: Implementação contínua; acompanhado pelo Monitor; refaz/melhora quando QA indica (via Monitor).
+- **QA**: Testes, documentação, validação, QA Report; **acionado pelo Monitor** para testar atividades finalizadas; bloqueia regressões.
+- **DevOps**: IaC, CI/CD, deploy, banco de dados, smoke tests; **acionado pelo Monitor** para provisionamento total ou parcial.
+- **Monitor**: Acompanha Dev/QA; aciona QA para testes e DevOps para provisionamento; informa PM → PM escala ao CTO quando crítico.
 
-- **CTO**: Interpreta spec, cria Project Charter, define módulos, delega PMs
-- **PMs** (por área): Backend, Web, Mobile, Infra — geram backlog, instanciam Dev/QA/DevOps/Monitor
-- **Dev**: Implementa código, testes, documentação
-- **QA**: Validação contínua, QA Reports, bloqueia regressões
-- **DevOps** (por cloud): AWS, Azure, GCP — IaC, CI/CD, observabilidade, smoke tests
-- **Monitor_<AREA>**: Monitora **Dev_<AREA>** e **QA_<AREA>** do módulo (progresso, status de andamento), **informa PM_<AREA>** → PM escala ao CTO quando crítico
+**Hierarquia**: SPEC ↔ CTO ↔ PM. PM atribui atividades a Dev, QA, DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
+
+Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md). Diagramas: [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md).
 
 ---
 
@@ -50,7 +47,7 @@ SPEC (Product Spec) → CTO → PMs (Backend/Web/Mobile/Infra)
 zentriz-genesis/
 ├─ spec/              # PRODUCT_SPEC.md (entrada principal)
 ├─ docs/              # Charters, backlogs, arquitetura, guias, adr/, rfc/
-├─ agents/            # SYSTEM_PROMPT.md por agente (CTO, PM, Dev, QA, DevOps, Monitor)
+├─ agents/            # Por tipo e skill: cto/, pm/, dev/, qa/, devops/, monitor/ (ver agents/README.md)
 ├─ contracts/         # DoD global, DoD DevOps, checklists, envelopes
 ├─ reports/           # Templates QA_REPORT, MONITOR_HEALTH
 ├─ tests/smoke/       # Smoke tests pós-deploy
@@ -72,6 +69,7 @@ zentriz-genesis/
 |-----------|-------------|-----------|
 | Product Spec | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) | Entrada do projeto (FR/NFR) |
 | Project Charter | [docs/PROJECT_CHARTER.md](../docs/PROJECT_CHARTER.md) | Escopo e módulos |
+| **Atores e Responsabilidades** | [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) | Atores, hierarquia, comportamentos |
 | Architecture | [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) | Componentes e responsabilidades |
 | Orchestrator Blueprint | [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
 | Task State Machine | [docs/TASK_STATE_MACHINE.md](../docs/TASK_STATE_MACHINE.md) | Estados e transições |

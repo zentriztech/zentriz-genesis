@@ -1,32 +1,59 @@
-# Composição de Times (por Módulo)
+# Composição de Times (por Stack) — Zentriz Genesis
 
-Cada módulo (Backend, Web, Mobile, Infra) opera com o seguinte squad padrão:
+> Regras alinhadas a [docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md).
 
-- **PM_<AREA>**: define backlog, aprova entregas e recebe alertas do Monitor
-- **DEV_<AREA>**: implementa features
-- **QA_<AREA>**: valida continuamente e gera QA report
-- **MONITOR_<AREA>**: monitora **Dev_<AREA>** e **QA_<AREA>** do módulo (progresso, status de andamento), informa ao PM_<AREA> (que escala ao CTO quando necessário)
-- **DEVOPS_<CLOUD>**: provisiona e opera o deploy no provedor alvo
+---
+
+## Regras de composição
+
+Cada **stack** (Backend, Web, Mobile) é formada **apenas por atores com as mesmas skills**. A infraestrutura (IaC, CI/CD) faz parte de cada stack via **DevOps**; não existe stack "Infra" nem atores PM/Dev/QA/Monitor Infra. O **PM** da stack é responsável por **contratar** (instanciar) os atores.
+
+| Papel | Quantidade por stack | Observação |
+|-------|----------------------|------------|
+| **PM_<AREA>** | 1 | Gerencia a stack; cria backlog; atribui atividades. |
+| **Dev_<AREA>** | 1 ou N | Sempre em par com QA (1 QA por 1 Dev). |
+| **QA_<AREA>** | 1 ou N | Um QA para cada Dev (par Dev–QA). |
+| **Monitor_<AREA>** | 1 | Acompanha Dev/QA; aciona QA e DevOps; informa PM. |
+| **DevOps_<CLOUD>** | 1 | Por projeto/stack; escolhido por cloud (AWS, Azure ou GCP). |
+
+---
+
+## Exemplo: Stack Backend
+
+- **PM Backend**: 1
+- **Dev Backend**: 1 ou mais (conforme complexidade)
+- **QA Backend**: mesmo número de Devs (par Dev–QA)
+- **Monitor Backend**: 1
+- **DevOps** (AWS ou Azure ou GCP): 1
+
+O PM atribui atividades aos Devs e QAs; não recebe resultado de testes diretamente do QA — o **Monitor** aciona o QA para testes e recebe OK ou “volta para Dev”, e informa o PM sobre status e andamento.
+
+---
 
 ## DevOps por Cloud
-- **DEVOPS_AWS**: AWS (Lambda, API Gateway, DynamoDB/RDS, S3, CloudFront, IAM, CloudWatch, etc.)
-- **DEVOPS_AZURE**: Azure (Functions, API Management, Cosmos/SQL, Storage, Front Door, Entra ID, App Insights, etc.)
-- **DEVOPS_GCP**: GCP (Cloud Functions/Run, API Gateway, Firestore/Cloud SQL, Storage, Cloud CDN, IAM, Cloud Logging, etc.)
 
-## Fluxo de alertas (Monitor → PM → CTO)
-- **Monitor_<AREA>** monitora **Dev_<AREA>** e **QA_<AREA>** (progresso, status, evidências).
-- Monitor informa ao **PM_<AREA>** responsável pelo módulo. Emite `monitor.alert` quando há risco ou bloqueio.
-- PM avalia, toma ação ou escala ao CTO quando crítico.
-- CTO recebe consolidação dos PMs e alertas escalados.
+- **devops/aws**: AWS (Lambda, API Gateway, DynamoDB/RDS, S3, CloudFront, IAM, CloudWatch, etc.)
+- **devops/azure**: Azure (Functions, API Management, Cosmos/SQL, Storage, Front Door, Entra ID, App Insights, etc.)
+- **devops/gcp**: GCP (Cloud Functions/Run, API Gateway, Firestore/Cloud SQL, Storage, Cloud CDN, IAM, Cloud Logging, etc.)
 
-## Regras
-- O PM escolhe o provedor com base em `constraints.cloud` do spec/charter.
-- DevOps deve entregar: IaC + CI/CD + Observabilidade mínima + runbook ([docs/DEPLOYMENT.md](DEPLOYMENT.md)).
-- QA valida também o deploy (smoke tests e evidências).
+O PM escolhe o provedor com base em `constraints.cloud` do spec/charter — [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md). Agentes em [agents/devops/](../agents/devops/).
 
-## Definition of Done DevOps
-- Referência: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)
+---
 
-## Smoke tests
-- Templates: [tests/smoke/](../tests/smoke/)
-- DevOps deve plugar smoke tests no pipeline após deploy.
+## Fluxo de comunicação na stack
+
+- **PM → Dev, QA, DevOps**: atribui atividades.
+- **Monitor ↔ Dev**: acompanha desenvolvimento; informa refazer/melhorar quando QA indica.
+- **Monitor ↔ QA**: Monitor aciona testes; QA retorna OK ou volta para Dev.
+- **Monitor ↔ DevOps**: Monitor aciona provisionamento (total ou parcial).
+- **Monitor → PM**: status de andamento, finalização, alertas (`monitor.alert`).
+- **PM → CTO**: conclusão da stack ou bloqueios.
+
+---
+
+## Regras técnicas
+
+- DevOps entrega: IaC + CI/CD + Observabilidade mínima + runbook ([docs/DEPLOYMENT.md](DEPLOYMENT.md)); também responsável por banco de dados (esquema, migrações quando aplicável).
+- QA valida com smoke tests e evidências pós-deploy.
+- Definition of Done DevOps: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)
+- Smoke tests: [tests/smoke/](../tests/smoke/) — DevOps pluga no pipeline após deploy.

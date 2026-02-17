@@ -16,9 +16,9 @@
 - alarmes básicos
 
 ## Responsável (DevOps por Cloud)
-- AWS: agents/devops-aws
-- Azure: agents/devops-azure
-- GCP: agents/devops-gcp
+- AWS: agents/devops/aws
+- Azure: agents/devops/azure
+- GCP: agents/devops/gcp
 
 ## Evidências mínimas do DevOps
 - Output de deploy (log/print)

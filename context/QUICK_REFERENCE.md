@@ -4,6 +4,7 @@
 
 | O que | Onde |
 |-------|------|
+| Atores e responsabilidades | [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) |
 | Entrada do projeto | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) |
 | Guia de orquestração | [docs/ORCHESTRATION_GUIDE.md](../docs/ORCHESTRATION_GUIDE.md) |
 | Blueprint de eventos | [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md) |
@@ -26,6 +27,18 @@
 
 `project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`
 
+## Atores (resumo)
+
+- **SPEC** (pessoa): fornece spec; recebe conclusão/bloqueios do CTO.
+- **CTO**: Charter, contrata PM(s); informa SPEC.
+- **PM**: Backlog, contrata Dev/QA (par), 1 DevOps, 1 Monitor; atribui atividades; recebe status do Monitor.
+- **Dev**: Implementação; Monitor acompanha e devolve refazer (via QA).
+- **QA**: Testes, doc, QA Report; acionado pelo Monitor.
+- **DevOps**: IaC, CI/CD, deploy, DB, smoke; acionado pelo Monitor.
+- **Monitor**: Acompanha Dev/QA; aciona QA e DevOps; informa PM → CTO se crítico.
+
+Ref.: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md)
+
 ## Fluxo de Alertas
 
 Monitor_<AREA> monitora Dev/QA (progresso, status) → informa PM_<AREA> → PM escala ao CTO quando crítico
@@ -34,13 +47,18 @@ Monitor_<AREA> monitora Dev/QA (progresso, status) → informa PM_<AREA> → PM 
 
 NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS | QA_FAIL → DONE
 
-## Agentes por Módulo
+## Agentes (estrutura hierárquica)
 
-- **PM**: pm-backend, pm-web, pm-mobile, pm-infra
-- **Dev**: dev-backend, dev-web, dev-mobile, dev-infra
-- **QA**: qa-backend, qa-web, qa-mobile, qa-infra
-- **DevOps**: devops-aws, devops-azure, devops-gcp
-- **Monitor**: monitor-backend, monitor-web, monitor-mobile, monitor-infra
+Stacks: **Backend**, **Web**, **Mobile** (infra faz parte de cada stack via DevOps).
+
+- **CTO**: agents/cto/
+- **PM**: agents/pm/ (backend, web, mobile)
+- **Dev**: agents/dev/ (backend/nodejs, web/react-next-materialui, mobile/react-native)
+- **QA**: agents/qa/ (backend/nodejs, backend/lambdas, web/react, mobile/react-native)
+- **DevOps**: agents/devops/ (aws, azure, gcp)
+- **Monitor**: agents/monitor/ (backend, web, mobile)
+
+Ver [agents/README.md](../agents/README.md) para escalar com novas skills.
 
 ## Schemas de Eventos
 

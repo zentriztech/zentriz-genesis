@@ -9,7 +9,7 @@ O projeto implementa uma **fábrica de software autônoma**, orientada por espec
 
 Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](spec/PRODUCT_SPEC.md)) seja suficiente para:
 
-- Planejar projetos complexos (API, Web, Mobile, Infra)
+- Planejar projetos complexos (API, Web, Mobile)
 - Montar automaticamente squads virtuais por especialidade
 - Desenvolver aplicações completas (backend, frontend, mobile)
 - Provisionar infraestrutura em **AWS, Azure ou GCP**
@@ -25,27 +25,21 @@ Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](spec/PR
 - **Cloud-Agnostic / Serverless-First**
 - **Governança e Qualidade por Design**
 
-## 🏗️ Arquitetura de Agentes
+## 🏗️ Atores e Responsabilidades
 
-### CTO Agent (Orquestrador)
-Responsável por interpretar o Product Spec, criar o Project Charter, definir módulos, delegar PMs e consolidar o status final do projeto.
+| Ator | Responsabilidade |
+|------|------------------|
+| **SPEC** (pessoa real) | Dono do projeto; fornece especificação (FR/NFR); recebe do CTO conclusão ou bloqueios. |
+| **CTO** | Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; informa SPEC quando finalizado ou bloqueado. |
+| **PM** | Backlog por FR/NFR; gerencia sua stack; **contrata** Dev(s), QA(s) — sempre em par (1 QA por Dev) —, **um** DevOps e **um** Monitor por stack; atribui atividades; recebe status do Monitor. |
+| **Dev** | Especialista em implementação contínua; desenvolve tarefas conforme skills; é acompanhado pelo Monitor; refaz/melhora quando QA indica (via Monitor). |
+| **QA** | Especialista em testes, documentação, validação contínua, QA Report; é **acionado pelo Monitor** para testar atividades finalizadas; bloqueia regressões. |
+| **DevOps** | Especialista em IaC, CI/CD, deploy, banco de dados, smoke tests; é **acionado pelo Monitor** para provisionamento total ou parcial. |
+| **Monitor** | Acompanha Dev/QA; **aciona** QA para testes e DevOps para provisionamento; informa PM (PM escala ao CTO quando crítico). |
 
-### PM Agents (por especialidade)
-Backend, Web, Mobile e Infra.
-Criam backlog automaticamente a partir de FR/NFR, instanciam Dev/QA/DevOps e aprovam entregas.
+**Hierarquia de comunicação**: SPEC ↔ CTO ↔ PM. PM atribui atividades a Dev, QA e DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
 
-### Dev Agents
-Implementam código, testes e documentação conforme backlog.
-
-### QA Agents
-Executam validação contínua, geram QA Reports e bloqueiam regressões.
-
-### DevOps Agents (por Cloud)
-AWS, Azure e GCP.
-Provisionam infraestrutura, CI/CD, observabilidade e executam smoke tests.
-
-### Monitor Agents
-Monitoram **Dev/QA** por módulo (Backend, Web, Mobile, Infra) — progresso, status de andamento — e **informam o PM responsável** (que escala ao CTO quando crítico).
+Documentação completa (comportamentos, hierarquia e diagramas Mermaid): **[docs/ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md)**. Diagramas visuais: **[ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md)**.
 
 ## 🔄 Orquestração Event-Driven
 
@@ -60,7 +54,7 @@ Cada task segue uma **State Machine** formal garantindo rastreabilidade e contro
 Zentriz-Genesis/
 ├─ spec/
 ├─ docs/             # Inclui adr/, rfc/, guias
-├─ agents/
+├─ agents/           # Estrutura por tipo e skill: cto/, pm/, dev/, qa/, devops/, monitor/ (ver agents/README.md)
 ├─ contracts/
 ├─ reports/
 ├─ tests/smoke/
@@ -87,6 +81,8 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 ## 📜 Documentos Fundamentais
 
 - [PRODUCT_SPEC.md](spec/PRODUCT_SPEC.md)
+- **[ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades e hierarquia de comunicação
+- [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid (fluxo, stacks, etapas)
 - [PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md)
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [BACKLOG_*.md](docs/BACKLOG_BACKEND.md)

@@ -1,12 +1,15 @@
 # Seleção automática do DevOps Agent (por PM)
 
 ## Regra
-O PM deve selecionar o DevOps Agent baseado em `constraints.cloud` (na mensagem recebida do CTO) e instanciá-lo como parte do squad.
+O PM deve instanciar o **DevOps Docker** como base em todo projeto (provisionamento via Docker, Terraform e k8s em qualquer infra). Em seguida, quando houver deploy em cloud, selecionar o DevOps da cloud conforme `constraints.cloud`.
 
-### Mapeamento
-- `constraints.cloud = "AWS"`   -> `DEVOPS_AWS`   ([agents/devops-aws/](../agents/devops-aws/))
-- `constraints.cloud = "Azure"` -> `DEVOPS_AZURE` ([agents/devops-azure/](../agents/devops-azure/))
-- `constraints.cloud = "GCP"`   -> `DEVOPS_GCP`   ([agents/devops-gcp/](../agents/devops-gcp/))
+### DevOps Docker (sempre primeiro)
+- **devops/docker** ([agents/devops/docker/](../agents/devops/docker/)) — Base: Docker (namespace `zentriz-genesis`), Terraform e Kubernetes. Deve ser acionado **antes** dos demais; toda a stack local e a IaC (Terraform/k8s) partem daqui. Ver [docs/TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) e [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPMENT_CONTEXT.md).
+
+### Mapeamento por cloud (quando deploy em cloud)
+- `constraints.cloud = "AWS"`   -> DevOps AWS   ([agents/devops/aws/](../agents/devops/aws/))
+- `constraints.cloud = "Azure"` -> DevOps Azure ([agents/devops/azure/](../agents/devops/azure/))
+- `constraints.cloud = "GCP"`   -> DevOps GCP   ([agents/devops/gcp/](../agents/devops/gcp/))
 
 ## Quando instanciar
 - Sempre que houver entregas com **deploy** e/ou **infra** (Backend/Web/Mobile).

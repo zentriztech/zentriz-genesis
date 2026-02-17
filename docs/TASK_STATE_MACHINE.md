@@ -32,7 +32,7 @@
 ```json
 {
   "task_id": "TSK-BE-001",
-  "module": "backend|web|mobile|infra",
+  "module": "backend|web|mobile",
   "owner_role": "DEV_BACKEND|QA_WEB|DEVOPS_AWS",
   "requirements": ["FR-01","NFR-03"],
   "status": "NEW|ASSIGNED|...",

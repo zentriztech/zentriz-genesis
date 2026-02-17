@@ -10,13 +10,13 @@ Aceito
 
 ## Contexto
 
-O Zentriz Genesis possui **Monitor Agents** por módulo (Backend, Web, Mobile, Infra) que monitoram **Dev_<AREA>** e **QA_<AREA>** para entender progresso, status de andamento das atividades, evidências e bloqueios. A documentação original indicava que Monitores "alertam PM/CTO" de forma indistinta, sem definir a cadeia de responsabilidade. O diagrama de arquitetura original mostrava Monitor reportando diretamente ao CTO, omitindo os Monitores por módulo e a hierarquia PM → CTO.
+O Zentriz Genesis possui **Monitor Agents** por stack (Backend, Web, Mobile) que monitoram **Dev_<AREA>** e **QA_<AREA>** para entender progresso, status de andamento das atividades, evidências e bloqueios. A documentação original indicava que Monitores "alertam PM/CTO" de forma indistinta, sem definir a cadeia de responsabilidade. O diagrama de arquitetura original mostrava Monitor reportando diretamente ao CTO, omitindo os Monitores por módulo e a hierarquia PM → CTO.
 
 ## Decisão
 
 **Fluxo de alertas em cascata**: Monitor_<AREA> → PM_<AREA> → CTO.
 
-1. **Monitor_<AREA>** (Backend, Web, Mobile, Infra) monitora **Dev_<AREA>** e **QA_<AREA>** (progresso, status). Informa ao **PM_<AREA>** responsável. Emite `monitor.alert` quando há risco ou bloqueio.
+1. **Monitor_<AREA>** (Backend, Web, Mobile) monitora **Dev_<AREA>** e **QA_<AREA>** (progresso, status). Informa ao **PM_<AREA>** responsável. Emite `monitor.alert` quando há risco ou bloqueio.
 2. **PM_<AREA>** recebe o alerta, avalia, toma ação ou **escala ao CTO** quando o alerta é crítico.
 3. **CTO** recebe consolidação dos PMs e alertas escalados, marca `project.completed` quando apropriado.
 
