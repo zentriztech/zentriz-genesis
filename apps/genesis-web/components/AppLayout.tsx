@@ -153,7 +153,7 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
           flexGrow: 1,
           p: 3,
           mt: 8,
-          ml: `${DRAWER_WIDTH}px`,
+          ml: `10px`,
           minHeight: "100vh",
         }}
       >

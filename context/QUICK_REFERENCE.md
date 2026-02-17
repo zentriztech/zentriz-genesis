@@ -4,6 +4,9 @@
 
 | O que | Onde |
 |-------|------|
+| **Estado atual do projeto (atividades, credenciais, como rodar)** | [context/CONTEXT.md](CONTEXT.md) |
+| Portal genesis-web (stack, login por role, integração API) | [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) |
+| API (usuários padrão, endpoints, banco) | [services/api-node/README.md](../services/api-node/README.md) |
 | Atores e responsabilidades | [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) |
 | Entrada do projeto | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) |
 | Guia de orquestração | [docs/ORCHESTRATION_GUIDE.md](../docs/ORCHESTRATION_GUIDE.md) |
@@ -38,6 +41,12 @@
 - **Monitor**: Acompanha Dev/QA; aciona QA e DevOps; informa PM → CTO se crítico.
 
 Ref.: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md)
+
+## Portal e API (local)
+
+- **genesis-web**: http://localhost:3001 — login `/login` (user), `/login/tenant` (tenant_admin), `/login/genesis` (zentriz_admin). Credenciais padrão: [context/CONTEXT.md](CONTEXT.md) ou [services/api-node/README.md](../services/api-node/README.md).
+- **API**: http://localhost:3000 — auth, projects, specs, users, tenants. Postgres (seed com usuários hasheados).
+- **Deploy local**: `./deploy-docker.sh` na raiz ([docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md)).
 
 ## Fluxo de Alertas
 

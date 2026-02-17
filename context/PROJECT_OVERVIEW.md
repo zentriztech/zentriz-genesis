@@ -54,13 +54,13 @@ zentriz-genesis/
 ├─ reports/           # Templates QA_REPORT, MONITOR_HEALTH
 ├─ tests/smoke/       # Smoke tests pós-deploy
 ├─ infra/             # IaC por cloud (aws/, azure/, gcp/)
-├─ orchestrator/      # Event schemas, handlers (node/python), state machine
-├─ services/          # api-node/, api-python/
-├─ apps/              # web-react/, mobile-react-native/
+├─ orchestrator/      # Runner (spec→CTO→PM), spec_converter (txt/doc/pdf→md), events, state
+├─ services/          # api-node/ (Fastify, Postgres, auth, projects, specs, users, tenants)
+├─ apps/              # genesis-web/ (portal Next.js+MUI+MobX), web-react/, mobile-react-native/
 ├─ examples/          # Mensagens e outputs de exemplo
 ├─ business/          # Roadmap, FinOps, Investor overview
 ├─ scripts/           # Scripts de manutenção (validação, geração)
-└─ context/           # ← Esta pasta: contexto para novos chats
+└─ context/           # CONTEXT.md (estado atual), GENESIS_WEB_CONTEXT, PROJECT_OVERVIEW, etc.
 ```
 
 ---
@@ -99,11 +99,14 @@ zentriz-genesis/
 
 ## 7. Estado Atual e Decisão Estratégica
 
-**Fase atual**: Construção da fundação de agentes.
+**Fase atual**: Fundação de agentes + **portal Genesis e API integrados**.
 
-**Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)):
-- Primeiro: concluir integralmente a fundação (CTO, PMs, Devs, QA, DevOps, Monitors, contratos, orquestração)
-- Depois: Dashboard, execução real do Orchestrator, SaaS, Whitepaper, Marketplace de agentes
+**Realizado (portal e API):**
+- **API** (services/api-node): Postgres (plans, tenants, users, projects, project_spec_files), auth JWT, `POST /api/auth/login`, `GET/POST/PATCH /api/projects`, `POST /api/specs` (multipart, multi-arquivo .md/.txt/.doc/.docx/.pdf), `GET/POST /api/users`, `GET /api/tenants`. Seed cria usuários padrão com senhas hasheadas (Zentriz Admin, tenant admin, user). Ver [context/CONTEXT.md](CONTEXT.md) e [services/api-node/README.md](../services/api-node/README.md).
+- **Portal** (apps/genesis-web): três telas de login por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API, envio de spec multi-arquivo, listagem/detalhe de projetos. Ver [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md).
+- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../orchestrator/spec_converter)); runner com `started_at`/`completed_at` via PATCH na API quando `API_BASE_URL`, `PROJECT_ID`, `GENESIS_API_TOKEN` definidos.
+
+**Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)): concluir fundação de agentes; depois Dashboard, execução real do Orchestrator, SaaS.
 
 **Produto de exemplo**: Voucher MVP (API + Web) — spec em [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md), backlogs em [docs/BACKLOG_BACKEND.md](../docs/BACKLOG_BACKEND.md) e [docs/BACKLOG_WEB.md](../docs/BACKLOG_WEB.md).
 
@@ -142,4 +145,4 @@ zentriz-genesis/
 
 ---
 
-*Última atualização: 2026-01-29 — Zentriz Genesis*
+*Última atualização: 2026-02-17 — Zentriz Genesis. Estado detalhado: [CONTEXT.md](CONTEXT.md).*

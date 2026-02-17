@@ -95,4 +95,6 @@ As telas devem cobrir **todo o gerenciamento e controle** que tenants e usuário
 
 ---
 
+**Implementação atual:** três telas de login discriminadas por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API (auth, projetos, upload de spec multi-arquivo). Credenciais e estado do projeto: [context/CONTEXT.md](../context/CONTEXT.md), [context/GENESIS_WEB_CONTEXT.md](../context/GENESIS_WEB_CONTEXT.md).
+
 *Documento criado em 2026-02-17 — Zentriz Genesis. Deve ser alinhado ao [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) (domínio, stack) e ao [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) (fluxo de agentes).*

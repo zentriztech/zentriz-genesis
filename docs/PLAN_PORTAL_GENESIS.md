@@ -74,14 +74,16 @@
 
 ## 4. Critérios de conclusão
 
-- [x] App Next.js rodando localmente (npm run dev).
+- [x] App Next.js rodando localmente (npm run dev; Docker porta 3001).
+- [x] Três telas de login discriminadas por role (`/login`, `/login/tenant`, `/login/genesis`); validação pós-login.
 - [x] Login e layout por role (usuário, tenant admin, Zentriz).
-- [x] Telas usuário: envio spec, listagem/detalhe projetos, notificações.
+- [x] Telas usuário: envio spec (multi-arquivo), listagem/detalhe projetos, notificações.
 - [x] Telas tenant: gestão usuários, gestão projetos, plano e uso.
 - [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano.
 - [x] genesis-web no [docker-compose.yml](../docker-compose.yml); [Dockerfile](../apps/genesis-web/Dockerfile) e [.dockerignore](../apps/genesis-web/.dockerignore).
-- [ ] deploy-docker.sh sobe todo o stack incluindo genesis-web (requer espaço em disco suficiente no host; em caso de "no space left on device", executar `docker system prune -a` e liberar espaço).
+- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents-backend).
+- [x] Integração com API real (auth, projetos, upload de spec); usuários padrão documentados em [services/api-node/README.md](../services/api-node/README.md) e [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
 
 ---
 
-*Plano criado em 2026-02-17. Portal implementado em apps/genesis-web (React, Next.js, MUI, MobX).*
+*Plano criado em 2026-02-17. Portal implementado em apps/genesis-web (React, Next.js, MUI, MobX). Atualizado 2026-02-17.*

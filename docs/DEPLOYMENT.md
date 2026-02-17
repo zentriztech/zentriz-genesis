@@ -84,7 +84,7 @@ docker compose down
 | postgres         | 5432  | PostgreSQL (fonte de verdade) |
 | redis            | 6379  | Cache / sessões |
 
-Variáveis de ambiente vêm do [.env](../.env) na raiz (copie de [.env.example](../.env.example)); ver [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
+Variáveis de ambiente vêm do [.env](../.env) na raiz (copie de [.env.example](../.env.example)); ver [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md). Usuários padrão do portal e credenciais: [context/CONTEXT.md](../context/CONTEXT.md) ou [services/api-node/README.md](../services/api-node/README.md).
 
 ### Conceitos do ambiente local
 

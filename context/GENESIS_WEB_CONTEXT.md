@@ -27,13 +27,21 @@
 
 ---
 
-## 3. Roles e telas
+## 3. Roles e telas de login (discriminação por role)
+
+Cada tela de login exige o **role** correspondente; se o usuário logar com credenciais de outro perfil, a mensagem orienta a usar a tela correta.
+
+| Rota | Título | Role exigido | E-mail padrão | Senha padrão |
+|------|--------|--------------|---------------|--------------|
+| `/login` | Acesso — Usuário | `user` | user@tenant.com | #User@2026! |
+| `/login/tenant` | Acesso — Admin do tenant | `tenant_admin` | admin@tenant.com | #Tenant@2026! |
+| `/login/genesis` | Portal Genesis (Zentriz) | `zentriz_admin` | admin@zentriz.com | #Jean@2026! |
 
 - **Usuário (por tenant)**: envio de spec ao CTO (múltiplos arquivos; formatos .md, .txt, .doc, .pdf; preferido .md; conversão para .md a cargo do orquestrador — ver [docs/SPEC_SUBMISSION_AND_FORMATS.md](../docs/SPEC_SUBMISSION_AND_FORMATS.md)), meus projetos (listagem/detalhe), notificações.
 - **Tenant admin**: gestão de usuários do tenant, gestão de projetos do tenant, visão do plano e uso, configurações do tenant.
 - **Zentriz admin**: gestão de tenants (CRUD, plano), gestão de usuários globais, gestão de projetos (visão global), controle por plano (limites, funcionalidades).
 
-Layout principal: AppBar, drawer com navegação por role; roteamento protegido por role (middleware/HOC).
+Layout principal: AppBar, drawer com navegação por role; roteamento protegido por role (middleware/HOC). Integração com API real: auth (`POST /api/auth/login`), projetos (`GET /api/projects`, etc.), upload de spec (`POST /api/specs` multipart). Erros da API exibem apenas o campo `message` (não o JSON bruto). CORS configurado com `credentials: true` na API.
 
 ---
 
@@ -55,13 +63,15 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 
 ## 5. Entregas (estado atual)
 
-- [x] App Next.js rodando localmente
+- [x] App Next.js rodando localmente (porta 3001 no Docker)
+- [x] Três telas de login discriminadas por role (`/login`, `/login/tenant`, `/login/genesis`) com validação pós-login
+- [x] Integração com API real (auth Bearer, projetos, upload de spec multipart)
 - [x] Login e layout por role (usuário, tenant admin, Zentriz)
-- [x] Telas usuário: envio spec, listagem/detalhe projetos, notificações
+- [x] Telas usuário: envio spec (multi-arquivo .md/.txt/.doc/.docx/.pdf), listagem/detalhe projetos (com startedAt/completedAt), notificações
 - [x] Telas tenant: gestão usuários, gestão projetos, plano e uso
 - [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano
 - [x] genesis-web no docker-compose; Dockerfile e .dockerignore em apps/genesis-web
-- [ ] deploy-docker.sh sobe todo o stack incluindo genesis-web (validar em ambiente com espaço em disco)
+- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents-backend)
 
 ---
 
@@ -76,5 +86,7 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 | [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) | Deploy local, script deploy-docker.sh, porta genesis-web |
 
 ---
+
+**Resumo de atividades realizadas:** Integração API (auth, projects, specs), CORS com credentials, exibição apenas da mensagem de erro da API, seed com usuários hasheados (Zentriz Admin, tenant admin, user), login por role com discriminação nas três telas. Ver [CONTEXT.md](CONTEXT.md) para estado geral do projeto.
 
 *Documento criado em 2026-02-17 — Zentriz Genesis. Atualize quando houver mudanças no portal ou no plano.*

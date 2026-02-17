@@ -14,10 +14,11 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 
 | Arquivo | Uso |
 |---------|-----|
+| [CONTEXT.md](CONTEXT.md) | **Estado atual do projeto** — atividades realizadas, stack, credenciais, como rodar (leia para contexto operacional) |
 | [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | Visão completa do projeto — leia primeiro em novos chats |
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Referência rápida de caminhos e conceitos-chave |
 | [DEVELOPMENT_CONTEXT.md](DEVELOPMENT_CONTEXT.md) | Por que "Voucher" é citado; análise do que falta; checklist e por onde começar |
-| [GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) | Contexto do portal genesis-web (stack, roles, telas, como rodar, referências) |
+| [GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) | Contexto do portal genesis-web (stack, roles, telas de login, como rodar, referências) |
 | [PRACTICES_FROM_OTHER_PROJECTS.md](PRACTICES_FROM_OTHER_PROJECTS.md) | Análise de práticas de outros projetos (ADRs, RFCs, etc.) |
 
 **Documento de atores (na raiz docs/)**: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) — responsabilidades, hierarquia de comunicação e comportamentos de SPEC, CTO, PM, Dev, QA, DevOps e Monitor.
@@ -25,13 +26,13 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 ## Como Usar (para Assistentes de IA)
 
 1. **Novo chat iniciando trabalho no Zentriz Genesis?**  
-   Leia [context/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) para carregar o contexto completo.
+   Leia [context/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) para a visão completa e [context/CONTEXT.md](CONTEXT.md) para o estado atual (o que foi feito, credenciais, como rodar).
 
 2. **Precisa de referência rápida?**  
    Consulte [context/QUICK_REFERENCE.md](QUICK_REFERENCE.md).
 
 3. **Contexto desatualizado?**  
-   Atualize os arquivos desta pasta quando houver mudanças significativas no projeto.
+   Atualize os arquivos desta pasta quando houver mudanças significativas no projeto (em especial CONTEXT.md e GENESIS_WEB_CONTEXT.md).
 
 ## Manutenção
 
