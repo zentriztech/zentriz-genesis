@@ -6,12 +6,16 @@ from pathlib import Path
 import os
 import json
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 # Raiz das aplicações: no host = repo/applications, no container = /app
 _r = Path(__file__).resolve().parent.parent.parent
 APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
+
+# Retry: número de tentativas (default 2 = 1 inicial + 1 retry)
+CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "2"))
 
 
 def load_system_prompt(system_prompt_path: Path) -> str:
@@ -20,6 +24,22 @@ def load_system_prompt(system_prompt_path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"SYSTEM_PROMPT não encontrado: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def _normalize_response_envelope(out: dict, request_id: str, raw_text: str) -> dict:
+    """Garante que o dict tenha pelo menos status e summary; preenche defaults e loga aviso se necessário."""
+    if "request_id" not in out:
+        out["request_id"] = request_id
+    if not isinstance(out.get("status"), str):
+        logger.warning("Claude devolveu response_envelope sem status válido; preenchendo default.")
+        out["status"] = "OK"
+    if "summary" not in out or not isinstance(out.get("summary"), str):
+        logger.warning("Claude devolveu response_envelope sem summary; preenchendo a partir do texto.")
+        out["summary"] = (raw_text[:500] if raw_text else "Resposta sem summary.")
+    for key in ("artifacts", "evidence", "next_actions"):
+        if key not in out or not isinstance(out.get(key), list):
+            out[key] = out.get(key) if isinstance(out.get(key), list) else []
+    return out
 
 
 def run_agent(
@@ -52,16 +72,30 @@ def run_agent(
     )
 
     client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=system_content,
-        messages=[{"role": "user", "content": user_content}],
-        timeout=timeout,
-    )
-
-    text = response.content[0].text if response.content else ""
     request_id = message.get("request_id", "unknown")
+    last_error = None
+    for attempt in range(CLAUDE_RETRY_ATTEMPTS):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=system_content,
+                messages=[{"role": "user", "content": user_content}],
+                timeout=timeout,
+            )
+            break
+        except Exception as e:
+            last_error = e
+            is_retryable = getattr(e, "status_code", None) in (429, 500, 502, 503) or "timeout" in str(e).lower()
+            if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
+                wait = 1 + attempt
+                logger.warning("Tentativa %s falhou (%s); aguardando %s s antes de retry.", attempt + 1, e, wait)
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"Falha ao chamar Claude após {attempt + 1} tentativa(s): {e}") from e
+
+    raw_text = response.content[0].text if response.content else ""
+    text = raw_text
 
     # Tentar extrair JSON da resposta (pode vir com markdown code block)
     if "```json" in text:
@@ -75,12 +109,10 @@ def run_agent(
         out = {
             "request_id": request_id,
             "status": "OK",
-            "summary": text[:500] if text else "Resposta sem JSON válido.",
+            "summary": raw_text[:500] if raw_text else "Resposta sem JSON válido.",
             "artifacts": [],
             "evidence": [],
             "next_actions": [],
         }
 
-    if "request_id" not in out:
-        out["request_id"] = request_id
-    return out
+    return _normalize_response_envelope(out, request_id, raw_text)

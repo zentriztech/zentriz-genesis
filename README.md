@@ -92,6 +92,14 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 - [ORCHESTRATOR_BLUEPRINT.md](project/docs/ORCHESTRATOR_BLUEPRINT.md)
 - [TASK_STATE_MACHINE.md](project/docs/TASK_STATE_MACHINE.md)
 - [DEPLOYMENT.md](project/docs/DEPLOYMENT.md) — Deploy local (inclui uso do script [deploy-docker.sh](deploy-docker.sh)), Kubernetes, CI/CD
+
+### Testar tudo no Docker (portal + pipeline)
+
+1. Configure `.env` na raiz com pelo menos `CLAUDE_API_KEY` (e opcionalmente `JWT_SECRET`).
+2. Execute `./deploy-docker.sh --create` (ou `./deploy-docker.sh` para atualizar).
+3. Acesse o portal em **http://localhost:3001**; a API em **http://localhost:3000**.
+4. Faça login (usuários do seed: ver `applications/services/api-node/README.md`), crie um projeto e envie uma spec em **Markdown**.
+5. Na página do projeto, clique em **Iniciar pipeline**. O runner (serviço `runner`) executa o fluxo Engineer → CTO → PM em background; o diálogo e o status são atualizados na página (polling).
 - [STATUS.md](project/docs/STATUS.md)
 - **[project/context/PROJECT_OVERVIEW.md](project/context/PROJECT_OVERVIEW.md)** — Contexto completo para novos chats e onboarding
 - **[project/docs/adr/](project/docs/adr/)** — Architecture Decision Records (decisões arquiteturais)

@@ -85,8 +85,18 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
     <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
       {entries.map((entry) => {
         const fromProfile = getAgentProfile(entry.fromAgent);
+        const isStep = entry.eventType === "step";
+        const isError = entry.eventType === "error";
         return (
-          <Card key={entry.id} variant="outlined" sx={{ overflow: "visible" }}>
+          <Card
+            key={entry.id}
+            variant="outlined"
+            sx={{
+              overflow: "visible",
+              borderLeft: isError ? "4px solid #c62828" : isStep ? "4px solid #546e7a" : undefined,
+              bgcolor: isError ? "error.light" : isStep ? "action.hover" : undefined,
+            }}
+          >
             <CardContent sx={{ display: "flex", gap: 2, alignItems: "flex-start", py: 1.5, "&:last-child": { pb: 1.5 } }}>
               <Avatar
                 sx={{
@@ -101,7 +111,7 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
               <Box sx={{ flex: 1, minWidth: 0 }}>
                 <Typography variant="subtitle2" sx={{ color: fromProfile.color }}>
                   {fromProfile.name}
-                  {entry.toAgent && (
+                  {entry.toAgent && entry.toAgent !== entry.fromAgent && (
                     <>
                       {" → "}
                       <Typography component="span" variant="body2" color="text.secondary">
@@ -110,7 +120,16 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
                     </>
                   )}
                 </Typography>
-                <Typography variant="body2" sx={{ mt: 0.5 }}>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    mt: 0.5,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    fontFamily: isError ? "monospace" : undefined,
+                    fontSize: isError ? "0.8rem" : undefined,
+                  }}
+                >
                   {entry.summaryHuman}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>

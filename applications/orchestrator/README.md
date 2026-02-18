@@ -12,7 +12,12 @@ pip install -r applications/orchestrator/agents/requirements.txt
 
 # Executar fluxo (PYTHONPATH=applications para encontrar o módulo orchestrator)
 PYTHONPATH=applications python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
+
+# Com spec por path absoluto (ex.: spec de um projeto do portal)
+PYTHONPATH=applications python -m orchestrator.runner --spec-file /caminho/absoluto/para/spec.md
 ```
+
+**Variáveis:** `API_AGENTS_URL` — se definida, o runner chama os agentes via HTTP (serviço agents); caso contrário usa import local. `API_BASE_URL`, `PROJECT_ID`, `GENESIS_API_TOKEN` — quando definidas, o runner atualiza o projeto e o diálogo na API.
 
 **Saída:**
 - Charter em `applications/orchestrator/state/PROJECT_CHARTER.md`

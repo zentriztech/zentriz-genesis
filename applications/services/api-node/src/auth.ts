@@ -32,8 +32,13 @@ export type TokenPayload = {
   tenantId: string | null;
 };
 
-export function signToken(payload: TokenPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+export function signToken(payload: TokenPayload, expiresIn: string = "7d"): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn } as jwt.SignOptions);
+}
+
+/** Token de curta duração para o runner (ex.: 1h). */
+export function signTokenWithExpiry(payload: TokenPayload, expiresIn: string = "1h"): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn } as jwt.SignOptions);
 }
 
 export function verifyToken(token: string): TokenPayload | null {

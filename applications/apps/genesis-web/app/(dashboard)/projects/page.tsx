@@ -63,7 +63,27 @@ function ProjectsPageInner() {
                 <TableCell>{p.title}</TableCell>
                 <TableCell>{p.specRef}</TableCell>
                 <TableCell>
-                  <Chip label={p.status} size="small" color={p.status === "completed" ? "success" : "default"} />
+                  <Chip
+                  label={
+                    p.status === "running"
+                      ? "Em execução"
+                      : p.status === "stopped"
+                        ? "Parado"
+                        : p.status === "failed"
+                          ? "Falhou"
+                          : p.status
+                  }
+                  size="small"
+                  color={
+                    p.status === "completed"
+                      ? "success"
+                      : p.status === "failed" || p.status === "stopped"
+                        ? "error"
+                        : p.status === "running"
+                          ? "info"
+                          : "default"
+                  }
+                />
                 </TableCell>
                 <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
                 <TableCell align="right">

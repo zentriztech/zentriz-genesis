@@ -17,10 +17,25 @@ import Typography from "@mui/material/Typography";
 import Schedule from "@mui/icons-material/Schedule";
 import CalendarToday from "@mui/icons-material/CalendarToday";
 import ArrowBack from "@mui/icons-material/ArrowBack";
+import PlayArrow from "@mui/icons-material/PlayArrow";
+import Stop from "@mui/icons-material/Stop";
+import Replay from "@mui/icons-material/Replay";
 import { projectsStore } from "@/stores/projectsStore";
 import { ProjectDialogue } from "@/components/ProjectDialogue";
+import { apiPost } from "@/lib/api";
 
 const STEPS = ["Spec enviada", "Engineer (proposta)", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
+
+const STATUSES_ALLOW_RUN = new Set([
+  "draft",
+  "spec_submitted",
+  "pending_conversion",
+  "cto_charter",
+  "pm_backlog",
+  "stopped",
+  "failed",
+]);
+const STATUS_RUNNING = "running";
 
 function formatDateTime(iso: string) {
   return new Date(iso).toLocaleString("pt-BR", {
@@ -60,6 +75,9 @@ function ProjectDetailPageInner() {
   const router = useRouter();
   const id = params.id as string;
   const [triedLoad, setTriedLoad] = useState(false);
+  const [runPipelineLoading, setRunPipelineLoading] = useState(false);
+  const [runPipelineError, setRunPipelineError] = useState<string | null>(null);
+  const [runPipelineSuccess, setRunPipelineSuccess] = useState(false);
   const project = projectsStore.getById(id);
 
   useEffect(() => {
@@ -69,6 +87,12 @@ function ProjectDetailPageInner() {
       projectsStore.loadProject(id).then(() => setTriedLoad(true));
     }
   }, [id, project]);
+
+  useEffect(() => {
+    if (!id || project?.status !== "running") return;
+    const t = setInterval(() => projectsStore.loadProject(id), 5000);
+    return () => clearInterval(t);
+  }, [id, project?.status]);
 
   if (!project) {
     return (
@@ -88,19 +112,21 @@ function ProjectDetailPageInner() {
   }
 
   const stepIndex =
-    project.status === "spec_submitted"
+    project.status === "running"
       ? 1
-      : project.status === "cto_charter"
-        ? 2
-        : project.status === "pm_backlog"
-          ? 3
-          : project.status === "dev_qa"
-            ? 4
-            : project.status === "devops"
-              ? 5
-              : project.status === "completed"
-                ? 6
-                : 0;
+      : project.status === "spec_submitted"
+        ? 1
+        : project.status === "cto_charter"
+          ? 2
+          : project.status === "pm_backlog"
+            ? 3
+            : project.status === "dev_qa"
+              ? 4
+              : project.status === "devops"
+                ? 5
+                : project.status === "completed"
+                  ? 6
+                  : 0;
 
   const hasProcessDates = project.startedAt || project.completedAt;
   const duration =
@@ -124,8 +150,16 @@ function ProjectDetailPageInner() {
           {project.title}
         </Typography>
         <Chip
-          label={project.status}
-          color={project.status === "completed" ? "success" : project.status === "failed" ? "error" : "default"}
+          label={project.status === "running" ? "Em execução" : project.status}
+          color={
+            project.status === "completed"
+              ? "success"
+              : project.status === "failed" || project.status === "stopped"
+                ? "error"
+                : project.status === "running"
+                  ? "info"
+                  : "default"
+          }
           sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
         />
       </Stack>
@@ -133,6 +167,81 @@ function ProjectDetailPageInner() {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Spec: {project.specRef} • Criado em {formatDateTime(project.createdAt)}
       </Typography>
+
+      <Box sx={{ mb: 2, display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+        {project.status === STATUS_RUNNING && (
+          <>
+            <Button
+              variant="outlined"
+              color="error"
+              startIcon={<Stop />}
+              disabled={runPipelineLoading}
+              onClick={async () => {
+                setRunPipelineError(null);
+                setRunPipelineLoading(true);
+                try {
+                  await apiPost<{ ok: boolean; message?: string }>(`/api/projects/${id}/stop`, {});
+                  await projectsStore.loadProject(id);
+                } catch (err) {
+                  setRunPipelineError(err instanceof Error ? err.message : "Falha ao parar pipeline");
+                } finally {
+                  setRunPipelineLoading(false);
+                }
+              }}
+            >
+              {runPipelineLoading ? "Parando…" : "Parar pipeline"}
+            </Button>
+            <Typography variant="body2" color="text.secondary">
+              Pipeline em andamento. O log é atualizado abaixo.
+            </Typography>
+          </>
+        )}
+        {STATUSES_ALLOW_RUN.has(project.status) && project.status !== STATUS_RUNNING && (
+          <>
+            <Button
+              variant="contained"
+              color="primary"
+              startIcon={project.status === "stopped" || project.status === "failed" ? <Replay /> : <PlayArrow />}
+              disabled={runPipelineLoading}
+              onClick={async () => {
+                setRunPipelineError(null);
+                setRunPipelineSuccess(false);
+                setRunPipelineLoading(true);
+                try {
+                  await apiPost<{ ok: boolean; message?: string }>(`/api/projects/${id}/run`, {});
+                  setRunPipelineSuccess(true);
+                  await projectsStore.loadProject(id);
+                } catch (err) {
+                  setRunPipelineError(err instanceof Error ? err.message : "Falha ao iniciar pipeline");
+                } finally {
+                  setRunPipelineLoading(false);
+                }
+              }}
+            >
+              {runPipelineLoading
+                ? "Iniciando…"
+                : project.status === "stopped" || project.status === "failed"
+                  ? "Reiniciar do início"
+                  : "Iniciar pipeline"}
+            </Button>
+            {(project.status === "stopped" || project.status === "failed") && (
+              <Typography variant="body2" color="text.secondary">
+                Reinicia o fluxo do zero (Spec → Engineer → CTO → PM).
+              </Typography>
+            )}
+          </>
+        )}
+        {runPipelineSuccess && project.status !== STATUS_RUNNING && (
+          <Typography variant="body2" color="success.main">
+            Pipeline iniciado. O log será atualizado em breve.
+          </Typography>
+        )}
+        {runPipelineError && (
+          <Typography variant="body2" color="error.main">
+            {runPipelineError}
+          </Typography>
+        )}
+      </Box>
 
       {hasProcessDates && (
         <MotionCard variant="outlined" sx={{ mb: 3, p: 2 }} {...blockMotion}>
@@ -186,6 +295,17 @@ function ProjectDetailPageInner() {
         </MotionCard>
       )}
 
+      {project.backlogSummary && (
+        <MotionCard sx={{ mt: 2 }} variant="outlined" {...blockMotion}>
+          <CardContent>
+            <Typography variant="h6" gutterBottom fontWeight={600}>
+              Backlog (PM)
+            </Typography>
+            <Typography variant="body2">{project.backlogSummary}</Typography>
+          </CardContent>
+        </MotionCard>
+      )}
+
       <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
         <Typography variant="h6" gutterBottom fontWeight={600}>
           Diálogo da equipe
@@ -193,7 +313,10 @@ function ProjectDetailPageInner() {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           O que os agentes estão fazendo (atualização automática).
         </Typography>
-        <ProjectDialogue projectId={id} pollIntervalMs={10000} />
+        <ProjectDialogue
+          projectId={id}
+          pollIntervalMs={project.status === STATUS_RUNNING ? 5000 : 10000}
+        />
       </MotionCard>
 
       <Box sx={{ mt: 3 }}>

@@ -14,7 +14,9 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - API_BASE_URL=${API_BASE_URL:-http://localhost:3000}
+      - API_BASE_URL=${API_BASE_URL:-http://api:3000}
+      - UPLOAD_DIR=/shared/uploads
+      - RUNNER_SERVICE_URL=http://runner:8001
       - PGHOST=postgres
       - PGUSER=genesis
       - PGPASSWORD=genesis_dev
@@ -22,9 +24,13 @@ services:
       - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
     env_file:
       - .env
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
     depends_on:
       postgres:
         condition: service_healthy
+      runner:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
       interval: 10s
@@ -83,6 +89,31 @@ services:
       retries: 3
     restart: unless-stopped
 
+  runner:
+    build:
+      context: .
+      dockerfile: applications/orchestrator/Dockerfile.runner
+    ports:
+      - "8001:8001"
+    environment:
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
+      - API_AGENTS_URL=http://agents:8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+    env_file:
+      - .env
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
+    depends_on:
+      - agents
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   genesis-web:
     build:
       context: ./applications/apps/genesis-web
@@ -97,3 +128,4 @@ services:
 volumes:
   zentriz-genesis_pgdata:
   zentriz-genesis_redis:
+  zentriz-genesis_uploads:

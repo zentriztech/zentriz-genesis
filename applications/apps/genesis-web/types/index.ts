@@ -32,12 +32,15 @@ export interface User {
 export type ProjectStatus =
   | "draft"
   | "spec_submitted"
+  | "pending_conversion"
   | "cto_charter"
   | "pm_backlog"
   | "dev_qa"
   | "devops"
   | "completed"
-  | "failed";
+  | "failed"
+  | "running"
+  | "stopped";
 
 export interface Project {
   id: string;
@@ -47,6 +50,7 @@ export interface Project {
   specRef: string;
   status: ProjectStatus;
   charterSummary?: string;
+  backlogSummary?: string;
   createdAt: string;
   updatedAt: string;
   /** Início do processo (ex.: quando spec foi aceita / pipeline iniciou). */

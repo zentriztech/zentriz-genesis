@@ -88,6 +88,20 @@ export const agentProfiles: Record<string, AgentProfile> = {
     avatar: "👁️",
     color: "#5e35b1",
   },
+  system: {
+    id: "system",
+    name: "Sistema",
+    personality: "Log de passos do pipeline.",
+    avatar: "📋",
+    color: "#546e7a",
+  },
+  error: {
+    id: "error",
+    name: "Erro",
+    personality: "Falha de processamento.",
+    avatar: "⚠️",
+    color: "#c62828",
+  },
 };
 
 /** Retorna perfil do agente ou um fallback com id como nome. */

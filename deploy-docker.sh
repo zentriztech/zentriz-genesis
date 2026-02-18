@@ -80,10 +80,11 @@ run_prune() {
 
 # Build sequencial (um serviço por vez) para reduzir pico de uso de disco
 build_sequential() {
-  log "Build sequencial (api -> genesis-web -> agents)..."
+  log "Build sequencial (api -> genesis-web -> agents -> runner)..."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build api) || die "Build do api falhou."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build genesis-web) || die "Build do genesis-web falhou."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build agents) || die "Build do agents falhou."
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build runner) || die "Build do runner falhou."
   log "Build concluído."
 }
 

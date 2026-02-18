@@ -43,6 +43,7 @@ export async function projectRoutes(app: FastifyInstance) {
         specRef: row.spec_ref,
         status: row.status,
         charterSummary: row.charter_summary,
+        backlogSummary: row.backlog_summary ?? undefined,
         createdAt: (row.created_at as Date)?.toISOString(),
         updatedAt: (row.updated_at as Date)?.toISOString(),
         startedAt: (row.started_at as Date)?.toISOString() ?? undefined,
@@ -76,6 +77,7 @@ export async function projectRoutes(app: FastifyInstance) {
         specRef: row.spec_ref,
         status: row.status,
         charterSummary: row.charter_summary,
+        backlogSummary: (row as Record<string, unknown>).backlog_summary as string | undefined,
         createdAt: (row.created_at as Date).toISOString(),
         updatedAt: (row.updated_at as Date).toISOString(),
         startedAt: (row.started_at as Date)?.toISOString() ?? undefined,
@@ -86,12 +88,12 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch<{ Params: { id: string }; Body: { status?: string; started_at?: string; completed_at?: string; charter_summary?: string } }>(
+  app.patch<{ Params: { id: string }; Body: { status?: string; started_at?: string; completed_at?: string; charter_summary?: string; backlog_summary?: string } }>(
     "/api/projects/:id",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
-      const { status, started_at, completed_at, charter_summary } = request.body ?? {};
+      const { status, started_at, completed_at, charter_summary, backlog_summary } = request.body ?? {};
       const client = await pool.connect();
       try {
         const check = await client.query("SELECT tenant_id, created_by FROM projects WHERE id = $1", [id]);
@@ -119,6 +121,10 @@ export async function projectRoutes(app: FastifyInstance) {
         if (charter_summary !== undefined) {
           updates.push(`charter_summary = $${i++}`);
           values.push(charter_summary);
+        }
+        if (backlog_summary !== undefined) {
+          updates.push(`backlog_summary = $${i++}`);
+          values.push(backlog_summary);
         }
         if (updates.length === 0) return reply.send({ ok: true });
 

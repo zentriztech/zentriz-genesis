@@ -27,8 +27,9 @@ export async function specRoutes(app: FastifyInstance) {
 
     let title = "Spec sem título";
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
-    let part: { filename?: string; fieldname?: string; mimetype: string; toBuffer(): Promise<Buffer>; value?: string } | undefined;
-    const req = request as unknown as { file: () => Promise<typeof part> };
+    type Part = { filename?: string; fieldname?: string; mimetype: string; toBuffer(): Promise<Buffer> };
+    const req = request as unknown as { file: () => Promise<Part | undefined> };
+    let part: Part | undefined;
     while ((part = await req.file()) !== undefined) {
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -39,9 +40,10 @@ export async function specRoutes(app: FastifyInstance) {
         }
         const buffer = await part.toBuffer();
         files.push({ filename: part.filename, buffer, mimeType: part.mimetype });
-      } else {
-        const raw = (part as unknown as { value?: string }).value;
-        if (typeof raw === "string" && part.fieldname === "title") title = raw.trim() || title;
+      } else if (part.fieldname === "title") {
+        const buf = await part.toBuffer();
+        const raw = buf.toString("utf-8").trim();
+        if (raw) title = raw;
       }
     }
 

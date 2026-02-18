@@ -48,11 +48,15 @@ CREATE TABLE IF NOT EXISTS projects (
     'draft', 'spec_submitted', 'pending_conversion', 'cto_charter', 'pm_backlog', 'dev_qa', 'devops', 'completed', 'failed'
   )),
   charter_summary TEXT,
+  backlog_summary  TEXT,
   started_at      TIMESTAMPTZ,
   completed_at    TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Migration: backlog_summary (runner envia no PATCH ao concluir)
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS backlog_summary TEXT;
 
 -- Arquivos de spec por projeto (paths no servidor)
 CREATE TABLE IF NOT EXISTS project_spec_files (
@@ -86,3 +90,9 @@ CREATE INDEX IF NOT EXISTS idx_project_spec_files_project ON project_spec_files(
 -- Migration: permitir status inactive em tenants (cadastro antes do pagamento)
 ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_status_check;
 ALTER TABLE tenants ADD CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'inactive'));
+
+-- Migration: status running (pipeline em execução) e stopped (usuário parou)
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check;
+ALTER TABLE projects ADD CONSTRAINT projects_status_check CHECK (status IN (
+  'draft', 'spec_submitted', 'pending_conversion', 'cto_charter', 'pm_backlog', 'dev_qa', 'devops', 'completed', 'failed', 'running', 'stopped'
+));
