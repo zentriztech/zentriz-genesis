@@ -147,7 +147,7 @@ function ProjectDetailPageInner() {
 
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mb: 2 }}>
         <Typography variant="h4" fontWeight={600}>
-          {project.title}
+          {project.title ?? "Spec sem título"}
         </Typography>
         <Chip
           label={project.status === "running" ? "Em execução" : project.status}

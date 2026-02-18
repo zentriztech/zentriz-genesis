@@ -11,6 +11,8 @@ COPY . .
 # Garante que public existe (Next.js pode não ter a pasta)
 RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
+# Evita falha no patch do lockfile (swc) em ambiente Docker/CI — see Next.js #65182, #36816
+ENV NEXT_IGNORE_INCORRECT_LOCKFILE=1
 RUN npm run build
 
 FROM base AS runner

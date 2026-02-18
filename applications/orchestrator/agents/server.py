@@ -74,6 +74,9 @@ def invoke_pm_backend(body: dict):
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_pm_backend: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/invoke/engineer")
@@ -93,6 +96,9 @@ def invoke_engineer(body: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_engineer: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -114,6 +120,9 @@ def invoke_cto(body: dict):
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_cto: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/invoke/monitor")
@@ -133,6 +142,9 @@ def invoke_monitor_backend(body: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_monitor_backend: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -154,6 +166,9 @@ def invoke_dev_backend(body: dict):
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_dev_backend: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/invoke/qa-backend")
@@ -174,6 +189,9 @@ def invoke_qa_backend(body: dict):
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_qa_backend: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/invoke/devops-docker")
@@ -193,6 +211,9 @@ def invoke_devops_docker(body: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception("invoke_devops_docker: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

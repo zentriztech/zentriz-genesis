@@ -1,14 +1,66 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Typography from "@mui/material/Typography";
 import Avatar from "@mui/material/Avatar";
+import Collapse from "@mui/material/Collapse";
+import Button from "@mui/material/Button";
+import Alert from "@mui/material/Alert";
+import AlertTitle from "@mui/material/AlertTitle";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
+
+/** Separa mensagem explicativa (fonte/API) do stack para exibir em destaque no portal. */
+function parseErrorContent(fullText: string): { message: string; stack: string } {
+  const traceStart =
+    fullText.search(/\nTraceback \(stack\):?\s*\n/i) >= 0
+      ? fullText.search(/\nTraceback \(stack\):?\s*\n/i)
+      : fullText.search(/\nTraceback \(most recent call last\):?\s*\n/i);
+  if (traceStart >= 0) {
+    const message = fullText.slice(0, traceStart).trim();
+    const stack = fullText.slice(traceStart).trim();
+    return { message: message || fullText, stack };
+  }
+  const detalleMatch = fullText.match(/Detalhe:\s*([\s\S]+?)(?=\n\n|$)/);
+  const apiMatch = fullText.match(/Claude API:\s*([\s\S]+?)(?=\n\n|$)/);
+  const main = detalleMatch?.[1]?.trim() ?? apiMatch?.[1]?.trim() ?? fullText;
+  return { message: main, stack: "" };
+}
+
+function ErrorStackBlock({ stack }: { stack: string }) {
+  const [open, setOpen] = useState(false);
+  if (!stack) return null;
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Button size="small" onClick={() => setOpen((o) => !o)} sx={{ textTransform: "none" }}>
+        {open ? "Ocultar" : "Mostrar"} traceback (stack)
+      </Button>
+      <Collapse in={open}>
+        <Box
+          component="pre"
+          sx={{
+            mt: 0.5,
+            p: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+            fontSize: "0.75rem",
+            fontFamily: "monospace",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            overflow: "auto",
+            maxHeight: 280,
+          }}
+        >
+          {stack}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
 
 export interface DialogueEntry {
   id: string;
@@ -38,7 +90,7 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchDialogue = async () => {
+  const fetchDialogue = useCallback(async () => {
     try {
       const data = await apiGet<DialogueEntry[]>(`/api/projects/${projectId}/dialogue`);
       setEntries(Array.isArray(data) ? data : []);
@@ -49,7 +101,7 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
     } finally {
       setLoading(false);
     }
-  };
+  }, [projectId]);
 
   useEffect(() => {
     fetchDialogue();
@@ -57,7 +109,7 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
       const t = setInterval(fetchDialogue, pollIntervalMs);
       return () => clearInterval(t);
     }
-  }, [projectId, pollIntervalMs]);
+  }, [fetchDialogue, pollIntervalMs]);
 
   if (loading) {
     return (
@@ -87,6 +139,10 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
         const fromProfile = getAgentProfile(entry.fromAgent);
         const isStep = entry.eventType === "step";
         const isError = entry.eventType === "error";
+        const { message: errorMessage, stack: errorStack } = isError
+          ? parseErrorContent(entry.summaryHuman)
+          : { message: "", stack: "" };
+
         return (
           <Card
             key={entry.id}
@@ -120,18 +176,32 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
                     </>
                   )}
                 </Typography>
-                <Typography
-                  variant="body2"
-                  sx={{
-                    mt: 0.5,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    fontFamily: isError ? "monospace" : undefined,
-                    fontSize: isError ? "0.8rem" : undefined,
-                  }}
-                >
-                  {entry.summaryHuman}
-                </Typography>
+                {isError && errorMessage ? (
+                  <>
+                    <Alert severity="error" sx={{ mt: 0.5 }} variant="outlined">
+                      <AlertTitle>[FONTE — Mensagem da API / erro]</AlertTitle>
+                      <Typography component="span" variant="body2" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        {errorMessage}
+                      </Typography>
+                    </Alert>
+                    {errorStack && (
+                      <ErrorStackBlock stack={errorStack} />
+                    )}
+                  </>
+                ) : (
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      mt: 0.5,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      fontFamily: isError ? "monospace" : undefined,
+                      fontSize: isError ? "0.8rem" : undefined,
+                    }}
+                  >
+                    {entry.summaryHuman}
+                  </Typography>
+                )}
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
                   {formatTime(entry.createdAt)}
                 </Typography>

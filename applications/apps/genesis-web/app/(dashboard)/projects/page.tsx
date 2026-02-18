@@ -60,7 +60,7 @@ function ProjectsPageInner() {
                 custom={i}
                 sx={{ "&:hover": { bgcolor: "action.hover" } }}
               >
-                <TableCell>{p.title}</TableCell>
+                <TableCell>{p.title ?? "Spec sem título"}</TableCell>
                 <TableCell>{p.specRef}</TableCell>
                 <TableCell>
                   <Chip

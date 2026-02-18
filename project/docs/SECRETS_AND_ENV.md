@@ -68,7 +68,7 @@ Template: [.env.example](../.env.example). Copie para `.env` e preencha os valor
 ## Troubleshooting (Docker / pipeline)
 
 - **Pipeline “parou” no Engineer ou erro "Connection error" / "SSL: UNEXPECTED_EOF_WHILE_READING"**  
-  O container **agents** (ou o processo que chama a API Claude) não conseguiu estabelecer conexão TLS com a API da Anthropic. Possíveis causas: rede instável, proxy corporativo ou firewall alterando TLS, DNS. Verifique conectividade de dentro do container (`docker compose exec agents curl -sI https://api.anthropic.com`) e se `CLAUDE_API_KEY` está definida no `.env` e repassada aos serviços (api e runner usam `env_file: .env`). Os logs do agente aparecem em `docker compose logs agents`.
+  O container **agents** (ou o processo que chama a API Claude) não conseguiu estabelecer conexão com a API da Anthropic. Possíveis causas: rede instável, proxy corporativo, firewall ou DNS. O runtime já faz retry automático para erros de conexão/SSL (até 3 tentativas com backoff). **O que fazer:** (1) Verificar conectividade de dentro do container: `docker compose exec agents curl -sI https://api.anthropic.com`. (2) Se atrás de proxy, definir no `.env` (e no serviço agents) `HTTPS_PROXY` / `HTTP_PROXY`; a SDK Anthropic (httpx) respeita essas variáveis. (3) Confirmar que `CLAUDE_API_KEY` está definida no `.env` e repassada aos serviços (`env_file: .env`). (4) Ver logs: `docker compose logs agents`.
 
 - **Ver logs do pipeline**  
   O runner dispara o fluxo em background. Erros do processo filho (Python) aparecem em `docker compose logs runner`. Para o serviço que chama o Claude: `docker compose logs agents`.

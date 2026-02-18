@@ -81,5 +81,14 @@ describe("API integration (auth, projects, specs)", () => {
     expect(body).toHaveProperty("projectId");
     expect(body.status).toBeDefined();
     expect(body.message).toBeDefined();
+    const projectId = body.projectId;
+    const getRes = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}`,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(getRes.statusCode).toBe(200);
+    const project = JSON.parse(getRes.body);
+    expect(project.title).toBe("Integration Test Spec");
   });
 });

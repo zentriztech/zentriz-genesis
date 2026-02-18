@@ -80,6 +80,8 @@ services:
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
     env_file:
       - .env
     healthcheck:

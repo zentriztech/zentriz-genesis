@@ -14,8 +14,35 @@ logger = logging.getLogger(__name__)
 _r = Path(__file__).resolve().parent.parent.parent
 APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
 
-# Retry: número de tentativas (default 2 = 1 inicial + 1 retry)
-CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "2"))
+# Retry: número de tentativas (default 3 = 1 inicial + 2 retries; útil para connection errors)
+CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "3"))
+
+
+def _extract_api_message(exc: BaseException) -> str | None:
+    """
+    Extrai a mensagem explicativa da API (ex.: Anthropic) quando disponível,
+    para exibir no portal em vez de só o texto genérico da exceção.
+    """
+    if hasattr(exc, "body") and isinstance(getattr(exc, "body"), dict):
+        body = getattr(exc, "body")
+        if isinstance(body.get("error"), dict) and isinstance(body["error"].get("message"), str):
+            return body["error"]["message"]
+        if isinstance(body.get("message"), str):
+            return body["message"]
+    if hasattr(exc, "message") and isinstance(getattr(exc, "message"), str):
+        return getattr(exc, "message")
+    if hasattr(exc, "response"):
+        try:
+            r = getattr(exc, "response")
+            if hasattr(r, "json"):
+                data = r.json()
+                if isinstance(data.get("error"), dict) and isinstance(data["error"].get("message"), str):
+                    return data["error"]["message"]
+                if isinstance(data.get("message"), str):
+                    return data["message"]
+        except Exception:
+            pass
+    return None
 
 
 def load_system_prompt(system_prompt_path: Path) -> str:
@@ -86,12 +113,24 @@ def run_agent(
             break
         except Exception as e:
             last_error = e
-            is_retryable = getattr(e, "status_code", None) in (429, 500, 502, 503) or "timeout" in str(e).lower()
+            err_lower = str(e).lower()
+            is_retryable = (
+                getattr(e, "status_code", None) in (429, 500, 502, 503)
+                or "timeout" in err_lower
+                or "connection" in err_lower
+                or "ssl" in err_lower
+            )
             if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
-                wait = 1 + attempt
-                logger.warning("Tentativa %s falhou (%s); aguardando %s s antes de retry.", attempt + 1, e, wait)
+                wait = 2 + attempt * 2  # 2s, 4s para dar tempo à rede/proxy
+                logger.warning(
+                    "Tentativa %s falhou (%s); aguardando %s s antes de retry.",
+                    attempt + 1, e, wait,
+                )
                 time.sleep(wait)
             else:
+                api_msg = _extract_api_message(e)
+                if api_msg:
+                    raise RuntimeError(f"Claude API: {api_msg}") from e
                 raise RuntimeError(f"Falha ao chamar Claude após {attempt + 1} tentativa(s): {e}") from e
 
     raw_text = response.content[0].text if response.content else ""

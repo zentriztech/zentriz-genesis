@@ -1,0 +1,4 @@
+# Dependências para testes avulsos em tests/python
+# Uso: pip install -r tests/python/requirements.txt
+anthropic>=0.39.0
+python-dotenv>=1.0.0
