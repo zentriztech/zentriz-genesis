@@ -14,7 +14,7 @@ A API usa **PostgreSQL** (fonte de verdade). Tabelas: `plans`, `tenants`, `users
 | `/login/tenant`  | `admin@tenant.com` | `#Tenant@2026!` | tenant_admin  |
 | `/login`         | `user@tenant.com`  | `#User@2026!`  | user          |
 
-O seed garante que esses usuários existam com senhas hasheadas (cria ou atualiza a cada subida). `user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Ver [SECRETS_AND_ENV.md](../../docs/SECRETS_AND_ENV.md). Em produção, use `POST /api/users` para cadastro com **regras de segurança**: senha mínimo 8 caracteres, hash bcrypt; apenas tenant_admin ou zentriz_admin podem criar usuários.
+O seed garante que esses usuários existam com senhas hasheadas (cria ou atualiza a cada subida). `user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Ver [SECRETS_AND_ENV.md](../../../project/docs/SECRETS_AND_ENV.md). Em produção, use `POST /api/users` para cadastro com **regras de segurança**: senha mínimo 8 caracteres, hash bcrypt; apenas tenant_admin ou zentriz_admin podem criar usuários.
 
 ## Endpoints
 
@@ -24,7 +24,7 @@ O seed garante que esses usuários existam com senhas hasheadas (cria ou atualiz
 - `GET /api/admin/vouchers?page=&pageSize=` — listar vouchers paginado (FR-04)
 - `GET /health`, `GET /api/health` — healthcheck
 
-Contrato: [docs/API_CONTRACT.md](../../docs/API_CONTRACT.md). Erros: `{ code, message, details?, request_id }`.
+Contrato: [docs/API_CONTRACT.md](../../../project/docs/API_CONTRACT.md). Erros: `{ code, message, details?, request_id }`.
 
 ## Desenvolvimento
 
@@ -39,7 +39,7 @@ npm test             # vitest run
 
 ## Docker
 
-Build e run via [docker-compose](../../docker-compose.yml) na raiz do projeto:
+Build e run via [docker-compose](../../../docker-compose.yml) na raiz do projeto:
 
 ```bash
 docker compose up -d api
@@ -55,4 +55,4 @@ Ou build local: `docker build -t zentriz-genesis-api .` e `docker run -p 3000:30
 
 ## Smoke test
 
-Ver [tests/smoke/api_smoke_test.sh](../../tests/smoke/api_smoke_test.sh). Use `API_BASE_URL=http://localhost:3000` (ou a URL do container) para rodar contra a API.
+Ver [tests/smoke/api_smoke_test.sh](../../../project/tests/smoke/api_smoke_test.sh). Use `API_BASE_URL=http://localhost:3000` (ou a URL do container) para rodar contra a API.

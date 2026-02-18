@@ -10,7 +10,7 @@ kubectl apply -f namespace.yaml
 kubectl apply -f api-deployment.yaml
 
 # Ou tudo de uma vez (namespace deve vir antes)
-kubectl apply -f k8s/
+kubectl apply -f project/k8s/
 ```
 
 ## Integração com Terraform

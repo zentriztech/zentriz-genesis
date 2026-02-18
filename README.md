@@ -7,7 +7,7 @@ O projeto implementa uma **fábrica de software autônoma**, orientada por espec
 
 ## 🎯 Objetivo do Projeto
 
-Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](spec/PRODUCT_SPEC.md)) seja suficiente para:
+Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](project/spec/PRODUCT_SPEC.md)) seja suficiente para:
 
 - Planejar projetos complexos (API, Web, Mobile)
 - Montar automaticamente squads virtuais por especialidade
@@ -39,7 +39,7 @@ Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](spec/PR
 
 **Hierarquia de comunicação**: SPEC ↔ CTO ↔ PM. PM atribui atividades a Dev, QA e DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
 
-Documentação completa (comportamentos, hierarquia e diagramas Mermaid): **[docs/ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md)**. Diagramas visuais: **[ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md)**.
+Documentação completa (comportamentos, hierarquia e diagramas Mermaid): **[project/docs/ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md)**. Diagramas visuais: **[ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md)**.
 
 ## 🔄 Orquestração Event-Driven
 
@@ -52,56 +52,60 @@ Cada task segue uma **State Machine** formal garantindo rastreabilidade e contro
 
 ```
 Zentriz-Genesis/
-├─ spec/
-├─ docs/             # Inclui adr/, rfc/, guias
-├─ agents/           # Estrutura por tipo e skill: cto/, pm/, dev/, qa/, devops/, monitor/ (ver agents/README.md)
-├─ contracts/
-├─ reports/
-├─ tests/smoke/
-├─ infra/
-├─ orchestrator/
-├─ services/
-├─ apps/
-├─ examples/
-├─ scripts/          ← Scripts de manutenção (validação, geração)
-└─ context/          ← Contexto para novos chats e onboarding
+├─ project/              # Documentação e artefatos do projeto (não distribuição)
+│   ├─ docs/             # adr/, rfc/, guias (ver project/docs/PROJECT_STRUCTURE_AND_REFACTORING.md)
+│   ├─ context/          # Contexto para novos chats e onboarding
+│   ├─ spec/             # PRODUCT_SPEC.md, template
+│   ├─ reports/          # Templates de relatório
+│   ├─ tests/            # smoke, etc.
+│   ├─ infra/            # IaC (aws/, azure/, gcp/)
+│   ├─ k8s/              # Manifests Kubernetes
+│   ├─ examples/         # Exemplos
+│   └─ scripts/          # Scripts de manutenção
+└─ applications/         # Produto final
+    ├─ agents/           # cto/, pm/, dev/, qa/, devops/, monitor/
+    ├─ orchestrator/     # Runner, agents server
+    ├─ contracts/        # DoD, envelopes, checklists
+    ├─ services/         # api-node
+    └─ apps/             # genesis-web
 ```
 
 ## 📚 Contexto para Novos Chats e Onboarding
 
 O projeto Zentriz Genesis é extenso, com dezenas de documentos e múltiplas camadas. Para facilitar a **continuidade entre sessões** e o **onboarding de novos chats** (assistentes de IA) ou desenvolvedores:
 
-- **Pasta `context/`**: Armazena documentos de contexto que condensam o cenário completo do projeto.
-- **Novo chat iniciando trabalho?** Leia [context/PROJECT_OVERVIEW.md](context/PROJECT_OVERVIEW.md) para carregar o contexto completo sem percorrer todos os .md do repositório.
-- **Referência rápida?** Consulte [context/QUICK_REFERENCE.md](context/QUICK_REFERENCE.md).
-- **Detalhes**: Veja [context/README.md](context/README.md) para entender o propósito e uso da pasta.
+- **Pasta `project/context/`**: Armazena documentos de contexto que condensam o cenário completo do projeto.
+- **Novo chat iniciando trabalho?** Leia [project/context/PROJECT_OVERVIEW.md](project/context/PROJECT_OVERVIEW.md) para carregar o contexto completo sem percorrer todos os .md do repositório.
+- **Referência rápida?** Consulte [project/context/QUICK_REFERENCE.md](project/context/QUICK_REFERENCE.md).
+- **Detalhes**: Veja [project/context/README.md](project/context/README.md) para entender o propósito e uso da pasta.
 
 Essa abordagem permite que **novos chats aproveitem o contexto dos chats anteriores**, mantendo consistência e evitando perda de conhecimento entre sessões de trabalho.
 
 ## 📜 Documentos Fundamentais
 
-- [PRODUCT_SPEC.md](spec/PRODUCT_SPEC.md)
-- **[ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades e hierarquia de comunicação
+- [PRODUCT_SPEC.md](project/spec/PRODUCT_SPEC.md)
+- **[ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades e hierarquia de comunicação
 - [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid (fluxo, stacks, etapas)
-- [PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md)
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [BACKLOG_*.md](docs/BACKLOG_BACKEND.md)
-- [ORCHESTRATOR_BLUEPRINT.md](docs/ORCHESTRATOR_BLUEPRINT.md)
-- [TASK_STATE_MACHINE.md](docs/TASK_STATE_MACHINE.md)
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — Deploy local (inclui uso do script [deploy-docker.sh](deploy-docker.sh)), Kubernetes, CI/CD
-- [STATUS.md](docs/STATUS.md)
-- **[context/PROJECT_OVERVIEW.md](context/PROJECT_OVERVIEW.md)** — Contexto completo para novos chats e onboarding
-- **[docs/adr/](docs/adr/)** — Architecture Decision Records (decisões arquiteturais)
-- **[docs/rfc/](docs/rfc/)** — Request for Comments (propostas formais)
-- **[docs/AGENTS_CAPABILITIES.md](docs/AGENTS_CAPABILITIES.md)** — Documentação consolidada de agentes
-- **[docs/PERFORMANCE_METRICS.md](docs/PERFORMANCE_METRICS.md)** — Targets de latência, cobertura e qualidade
-- **[docs/NAVIGATION.md](docs/NAVIGATION.md)** — Índice central de links para navegação
+- [PROJECT_CHARTER.md](project/docs/PROJECT_CHARTER.md)
+- [ARCHITECTURE.md](project/docs/ARCHITECTURE.md)
+- [BACKLOG_*.md](project/docs/BACKLOG_BACKEND.md)
+- [ORCHESTRATOR_BLUEPRINT.md](project/docs/ORCHESTRATOR_BLUEPRINT.md)
+- [TASK_STATE_MACHINE.md](project/docs/TASK_STATE_MACHINE.md)
+- [DEPLOYMENT.md](project/docs/DEPLOYMENT.md) — Deploy local (inclui uso do script [deploy-docker.sh](deploy-docker.sh)), Kubernetes, CI/CD
+- [STATUS.md](project/docs/STATUS.md)
+- **[project/context/PROJECT_OVERVIEW.md](project/context/PROJECT_OVERVIEW.md)** — Contexto completo para novos chats e onboarding
+- **[project/docs/adr/](project/docs/adr/)** — Architecture Decision Records (decisões arquiteturais)
+- **[project/docs/rfc/](project/docs/rfc/)** — Request for Comments (propostas formais)
+- **[project/docs/AGENTS_CAPABILITIES.md](project/docs/AGENTS_CAPABILITIES.md)** — Documentação consolidada de agentes
+- **[project/docs/PERFORMANCE_METRICS.md](project/docs/PERFORMANCE_METRICS.md)** — Targets de latência, cobertura e qualidade
+- **[project/docs/NAVIGATION.md](project/docs/NAVIGATION.md)** — Índice central de links para navegação
+- **[project/docs/PROJECT_STRUCTURE_AND_REFACTORING.md](project/docs/PROJECT_STRUCTURE_AND_REFACTORING.md)** — Estrutura e refatoração project/ e applications/
 
 ## ✅ Qualidade e Governança
 
-- [Definition of Done](contracts/global_definition_of_done.md) global e [DevOps](contracts/devops_definition_of_done.md)
-- [Checklists](contracts/checklists/) por stack (React, RN, Backend)
-- Testes automatizados e [smoke tests](tests/smoke/) pós-deploy
+- [Definition of Done](applications/contracts/global_definition_of_done.md) global e [DevOps](applications/contracts/devops_definition_of_done.md)
+- [Checklists](applications/contracts/checklists/) por stack (React, RN, Backend)
+- Testes automatizados e [smoke tests](project/tests/smoke/) pós-deploy
 
 ## 🌐 Clouds Suportadas
 
@@ -111,6 +115,15 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 
 ## 🧬 O que é o Zentriz Genesis
 - Um framework de engenharia orientado a agentes
+
+---
+
+## Ativar agente git ssh
+```
+$ eval "$(ssh-agent -s)"
+
+$ ssh-add
+```
 
 ---
 

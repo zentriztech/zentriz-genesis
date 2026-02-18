@@ -9,13 +9,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Repo root (orchestrator/agents -> repo root = parent of orchestrator)
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# Raiz das aplicações: no host = repo/applications, no container = /app
+_r = Path(__file__).resolve().parent.parent.parent
+APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
 
 
 def load_system_prompt(system_prompt_path: Path) -> str:
     """Carrega o conteúdo do SYSTEM_PROMPT (arquivo .md)."""
-    path = system_prompt_path if system_prompt_path.is_absolute() else REPO_ROOT / system_prompt_path
+    path = system_prompt_path if system_prompt_path.is_absolute() else APPLICATIONS_ROOT / system_prompt_path
     if not path.exists():
         raise FileNotFoundError(f"SYSTEM_PROMPT não encontrado: {path}")
     return path.read_text(encoding="utf-8")

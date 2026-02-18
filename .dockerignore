@@ -1,16 +1,12 @@
 # Usado pelo build do agents-backend (contexto = raiz do repo).
-# Incluir apenas: agents/, contracts/, docs/, orchestrator/
+# Incluir apenas: applications/agents, applications/contracts, applications/orchestrator
 
-# Apps e serviços (não usados pelo agents-backend)
-apps/
-services/
+# Projeto (não faz parte da imagem do produto)
+project/
 
-# Outros diretórios desnecessários para o build
-context/
-spec/
-infra/
-k8s/
-tests/
+# Outras aplicações (api e genesis-web têm build próprio)
+applications/apps/
+applications/services/
 
 # Controle de versão e cache
 .git

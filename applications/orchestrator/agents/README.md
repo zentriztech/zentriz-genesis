@@ -53,7 +53,7 @@ echo '{"request_id":"cli","input":{"spec_ref":"spec/PRODUCT_SPEC.md","context":{
 
 ## Docker
 
-O serviço **agents-backend** (stack Backend) expõe os seis agentes em uma única instância. Build a partir da raiz: `docker compose build agents-backend`. Para subir todo o ambiente: [deploy-docker.sh](../../deploy-docker.sh) ou [docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md).
+O serviço **agents-backend** (stack Backend) expõe os seis agentes em uma única instância. Build a partir da raiz: `docker compose build agents-backend`. Para subir todo o ambiente: [deploy-docker.sh](../../deploy-docker.sh) ou [docs/DEPLOYMENT.md](../../../project/docs/DEPLOYMENT.md).
 
 ---
 

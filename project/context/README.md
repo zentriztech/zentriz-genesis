@@ -21,7 +21,7 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 | [GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) | Contexto do portal genesis-web (stack, roles, telas de login, como rodar, referências) |
 | [PRACTICES_FROM_OTHER_PROJECTS.md](PRACTICES_FROM_OTHER_PROJECTS.md) | Análise de práticas de outros projetos (ADRs, RFCs, etc.) |
 
-**Documento de atores (na raiz docs/)**: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) — responsabilidades, hierarquia de comunicação e comportamentos de SPEC, CTO, PM, Dev, QA, DevOps e Monitor.
+**Documento de atores (na raiz docs/)**: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md) (em project/docs/) — responsabilidades, hierarquia de comunicação e comportamentos de SPEC, CTO, PM, Dev, QA, DevOps e Monitor.
 
 ## Como Usar (para Assistentes de IA)
 

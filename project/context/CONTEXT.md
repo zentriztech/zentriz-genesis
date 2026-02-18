@@ -28,8 +28,8 @@
 - **Erros da API**: exibição apenas do campo `message` (não JSON bruto).
 
 ### Runner e datas — Fase 4
-- **Runner** ([orchestrator/runner.py](../orchestrator/runner.py)): quando `API_BASE_URL`, `PROJECT_ID` e `GENESIS_API_TOKEN` estão definidos, envia `PATCH /api/projects/:id` com `started_at` ao iniciar e `completed_at` + `status: completed` ao concluir.
-- **Testes**: API (Vitest — login, projects, upload spec); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../tests/smoke/api_smoke_test.sh).
+- **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): quando `API_BASE_URL`, `PROJECT_ID` e `GENESIS_API_TOKEN` estão definidos, envia `PATCH /api/projects/:id` com `started_at` ao iniciar e `completed_at` + `status: completed` ao concluir.
+- **Testes**: API (Vitest — login, projects, upload spec); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh).
 - **Docs**: DEPLOYMENT e API_CONTRACT atualizados com fluxo de spec e referência a SPEC_SUBMISSION_AND_FORMATS.
 
 ---
@@ -58,7 +58,7 @@ Criados/atualizados pelo seed da API na subida. **Alterar senhas em produção.*
 | `/login/tenant` | admin@tenant.com  | #Tenant@2026! | tenant_admin  |
 | `/login`        | user@tenant.com   | #User@2026!   | user          |
 
-`user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Detalhes: [services/api-node/README.md](../services/api-node/README.md), [docs/SECRETS_AND_ENV.md](../docs/SECRETS_AND_ENV.md).
+`user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Detalhes: [services/api-node/README.md](../../applications/services/api-node/README.md), [docs/SECRETS_AND_ENV.md](../docs/SECRETS_AND_ENV.md).
 
 ---
 
@@ -75,7 +75,7 @@ open http://localhost:3001  # login conforme role (use uma das três URLs de log
 curl http://localhost:3000/health
 ```
 
-Variáveis: [.env](../.env) (copiar de [.env.example](../.env.example)); ver [docs/SECRETS_AND_ENV.md](../docs/SECRETS_AND_ENV.md).
+Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); ver [docs/SECRETS_AND_ENV.md](../docs/SECRETS_AND_ENV.md).
 
 ---
 
@@ -85,7 +85,7 @@ Variáveis: [.env](../.env) (copiar de [.env.example](../.env.example)); ver [do
 |----------------------|-----------|
 | Visão geral do projeto | [context/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) |
 | Portal genesis-web   | [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) |
-| API e usuários       | [services/api-node/README.md](../services/api-node/README.md) |
+| API e usuários       | [services/api-node/README.md](../../applications/services/api-node/README.md) |
 | Contrato da API      | [docs/API_CONTRACT.md](../docs/API_CONTRACT.md) |
 | Deploy               | [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) |
 | Envio de spec        | [docs/SPEC_SUBMISSION_AND_FORMATS.md](../docs/SPEC_SUBMISSION_AND_FORMATS.md) |

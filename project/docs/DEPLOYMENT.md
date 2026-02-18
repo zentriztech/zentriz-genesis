@@ -10,18 +10,18 @@
 
 ## Deploy local (Docker Compose)
 
-Todo o stack roda em Docker com namespace **zentriz-genesis** (project name do Compose). Configuração: [docker-compose.yml](../docker-compose.yml).
+Todo o stack roda em Docker com namespace **zentriz-genesis** (project name do Compose). Configuração: [docker-compose.yml](../../docker-compose.yml).
 
 ### Script deploy-docker.sh (recomendado)
 
-O script [deploy-docker.sh](../deploy-docker.sh) na raiz do repositório cria, destrói ou atualiza o ambiente Docker de forma resiliente (valida compose, garante `.env`, trata falhas de subida).
+O script [deploy-docker.sh](../../deploy-docker.sh) na raiz do repositório cria, destrói ou atualiza o ambiente Docker de forma resiliente (valida compose, garante `.env`, trata falhas de subida).
 
 **Uso** (execute na raiz do repo):
 
 | Parâmetro    | Ação |
 |-------------|------|
-| *(nenhum)*  | **Atualizar**: garante `.env`, valida [docker-compose.yml](../docker-compose.yml), faz `up -d --build`. Use após mudanças no código ou no compose. |
-| `--create`  | **Criar**: garante [.env](SECRETS_AND_ENV.md) (cópia de [.env.example](../.env.example) se não existir), valida o compose e sobe o stack (build + up). |
+| *(nenhum)*  | **Atualizar**: garante `.env`, valida [docker-compose.yml](../../docker-compose.yml), faz `up -d --build`. Use após mudanças no código ou no compose. |
+| `--create`  | **Criar**: garante [.env](SECRETS_AND_ENV.md) (cópia de [.env.example](../../.env.example) se não existir), valida o compose e sobe o stack (build + up). |
 | `--destroy`| **Destruir**: para e remove containers e redes do projeto (volumes preservados). |
 
 **Exemplos:**
@@ -40,7 +40,7 @@ chmod +x deploy-docker.sh
 ./deploy-docker.sh --destroy
 ```
 
-**Pré-requisitos:** Docker e Docker Compose instalados; o script usa `docker compose` (v2) com fallback para `docker-compose` (v1). Variáveis: [.env.example](../.env.example) e [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
+**Pré-requisitos:** Docker e Docker Compose instalados; o script usa `docker compose` (v2) com fallback para `docker-compose` (v1). Variáveis: [.env.example](../../.env.example) e [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
 
 ---
 
@@ -84,12 +84,12 @@ docker compose down
 | postgres         | 5432  | PostgreSQL (fonte de verdade) |
 | redis            | 6379  | Cache / sessões |
 
-Variáveis de ambiente vêm do [.env](../.env) na raiz (copie de [.env.example](../.env.example)); ver [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md). Usuários padrão do portal e credenciais: [context/CONTEXT.md](../context/CONTEXT.md) ou [services/api-node/README.md](../services/api-node/README.md).
+Variáveis de ambiente vêm do [.env](../../.env) na raiz (copie de [.env.example](../../.env.example)); ver [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md). Usuários padrão do portal e credenciais: [context/CONTEXT.md](../context/CONTEXT.md) ou [services/api-node/README.md](../../applications/services/api-node/README.md).
 
 ### Conceitos do ambiente local
 
-- **Quem inicia o fluxo:** o **CTO** inicia a orquestração. O [runner](../orchestrator/runner.py) executa o fluxo spec → CTO (Charter) → PM Backend (backlog). Ver [orchestrator/README.md](../orchestrator/README.md).
-- **Serviço agents-backend:** um único serviço Docker ([agents-backend](../docker-compose.yml)) expõe **todos os seis agentes** da stack Backend na mesma instância (CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker). Endpoints HTTP em [orchestrator/agents/server.py](../orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../orchestrator/agents/README.md).
+- **Quem inicia o fluxo:** o **CTO** inicia a orquestração. O [runner](../../applications/orchestrator/runner.py) executa o fluxo spec → CTO (Charter) → PM Backend (backlog). Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
+- **Serviço agents-backend:** um único serviço Docker ([agents-backend](../docker-compose.yml)) expõe **todos os seis agentes** da stack Backend na mesma instância (CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker). Endpoints HTTP em [orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../../applications/orchestrator/agents/README.md).
 - **Nomes dos containers (ex.: postgres-1):** o Docker Compose nomeia cada container como `{project}-{service}-{réplica}`. O sufixo `-1` é o índice da réplica (primeira instância). Com múltiplas réplicas (ex.: `docker compose up -d --scale api=3`) surgiriam api-1, api-2, api-3.
 
 ### Runner do orquestrador (CLI)
@@ -97,19 +97,19 @@ Variáveis de ambiente vêm do [.env](../.env) na raiz (copie de [.env.example](
 Fluxo spec → CTO → Charter → PM Backend → backlog, com estado persistido em `orchestrator/state/`. Na raiz do repo (com `CLAUDE_API_KEY` no `.env`):
 
 ```bash
-pip install -r orchestrator/agents/requirements.txt
-python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md
+pip install -r applications/orchestrator/agents/requirements.txt
+PYTHONPATH=applications python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
 ```
 
-Quando o runner for invocado por um job associado a um projeto do portal, defina as variáveis **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN** (JWT de um usuário com permissão no projeto). O runner enviará `PATCH /api/projects/:id` com `started_at` ao iniciar o pipeline e com `completed_at` e `status: completed` ao concluir. Ver [orchestrator/runner.py](../orchestrator/runner.py).
+Quando o runner for invocado por um job associado a um projeto do portal, defina as variáveis **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN** (JWT de um usuário com permissão no projeto). O runner enviará `PATCH /api/projects/:id` com `started_at` ao iniciar o pipeline e com `completed_at` e `status: completed` ao concluir. Ver [orchestrator/runner.py](../../applications/orchestrator/runner.py).
 
-Ver [orchestrator/README.md](../orchestrator/README.md).
+Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
 
 ### Fluxo de spec (upload → conversão → CTO)
 
 1. **Portal (genesis-web):** o usuário envia um ou mais arquivos de spec (.md, .txt, .doc, .docx, .pdf) na tela "Enviar spec ao CTO".
 2. **API:** `POST /api/specs` recebe os arquivos (multipart), persiste em disco e registra o projeto; se houver arquivos não-.md, o status do projeto fica `pending_conversion`.
-3. **Conversor (orquestrador):** um job ou pipeline processa arquivos não-.md e gera Markdown (módulo [orchestrator/spec_converter](../orchestrator/spec_converter)).
+3. **Conversor (orquestrador):** um job ou pipeline processa arquivos não-.md e gera Markdown (módulo [orchestrator/spec_converter](../../applications/orchestrator/spec_converter)).
 4. **Runner/CTO:** o fluxo CTO (e demais agentes) consome sempre o conteúdo em Markdown.
 
 Detalhes dos formatos aceitos, boas práticas e referência ao conversor: [SPEC_SUBMISSION_AND_FORMATS.md](SPEC_SUBMISSION_AND_FORMATS.md).
@@ -118,24 +118,24 @@ Detalhes dos formatos aceitos, boas práticas e referência ao conversor: [SPEC_
 
 ## Deploy em Kubernetes (staging / prod)
 
-Manifests em [k8s/](../k8s/). Namespace: **zentriz-genesis**.
+Manifests em [k8s/](../../project/k8s/). Namespace: **zentriz-genesis**.
 
 ### Aplicar manifests
 
 ```bash
 # Namespace primeiro
-kubectl apply -f k8s/namespace.yaml
+kubectl apply -f project/k8s/namespace.yaml
 
 # Demais recursos (Deployment, Service, etc.)
-kubectl apply -f k8s/api-deployment.yaml
+kubectl apply -f project/k8s/api-deployment.yaml
 
 # Ou aplicar tudo
-kubectl apply -f k8s/
+kubectl apply -f project/k8s/
 ```
 
 ### Integração com Terraform
 
-O Terraform em [infra/aws/](../infra/aws/) (e futuramente azure/, gcp/) provisiona a infra (VPC, EKS/AKS/GKE, etc.). Os manifests em `k8s/` podem ser aplicados manualmente ou via Terraform/Helm após o cluster existir.
+O Terraform em [infra/aws/](../../project/infra/aws/) (e futuramente azure/, gcp/) provisiona a infra (VPC, EKS/AKS/GKE, etc.). Os manifests em `k8s/` podem ser aplicados manualmente ou via Terraform/Helm após o cluster existir.
 
 ---
 
@@ -143,7 +143,7 @@ O Terraform em [infra/aws/](../infra/aws/) (e futuramente azure/, gcp/) provisio
 
 Pipeline mínimo: **lint → test → build** (e opcionalmente build de imagem e push).
 
-- Workflows em [.github/workflows/](../.github/workflows/) (quando existirem).
+- Workflows em [.github/workflows/](../../.github/workflows/) (quando existirem).
 - Cada serviço (api-node, agentes Python) deve ter lint e testes; o pipeline executa em cada push/PR.
 
 ---
@@ -152,7 +152,7 @@ Pipeline mínimo: **lint → test → build** (e opcionalmente build de imagem e
 
 - Logs estruturados (JSON) e correlação por `request_id` (NFR-03).
 - Endpoint de healthcheck: `/health` ou `/api/health` na API.
-- **Smoke test pós-deploy**: [tests/smoke/api_smoke_test.sh](../tests/smoke/api_smoke_test.sh).
+- **Smoke test pós-deploy**: [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh).
   - Rode com a API no ar (local ou Docker): `./tests/smoke/api_smoke_test.sh`
   - Ou com URL explícita: `API_BASE_URL=http://localhost:3000 ./tests/smoke/api_smoke_test.sh`
   - Evidência de smoke pós-deploy atende ao DoD DevOps.
@@ -168,9 +168,9 @@ Pipeline mínimo: **lint → test → build** (e opcionalmente build de imagem e
 
 ## Responsável (DevOps por cloud)
 
-- Base (Docker, Terraform, k8s): [agents/devops/docker/](../agents/devops/docker/)
-- AWS: [agents/devops/aws/](../agents/devops/aws/)
-- Azure: [agents/devops/azure/](../agents/devops/azure/)
-- GCP: [agents/devops/gcp/](../agents/devops/gcp/)
+- Base (Docker, Terraform, k8s): [agents/devops/docker/](../../applications/agents/devops/docker/)
+- AWS: [agents/devops/aws/](../../applications/agents/devops/aws/)
+- Azure: [agents/devops/azure/](../../applications/agents/devops/azure/)
+- GCP: [agents/devops/gcp/](../../applications/agents/devops/gcp/)
 
-DoD: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md).
+DoD: [contracts/devops_definition_of_done.md](../../applications/contracts/devops_definition_of_done.md).

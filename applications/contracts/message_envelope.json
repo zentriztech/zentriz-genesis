@@ -2,7 +2,7 @@
   "request_id": "uuid",
   "role": "CTO|PM_BACKEND|PM_WEB|PM_MOBILE|DEV_BACKEND|DEV_WEB|DEV_MOBILE|QA_BACKEND|QA_WEB|QA_MOBILE|DEVOPS_AWS|DEVOPS_AZURE|DEVOPS_GCP|MONITOR_BACKEND|MONITOR_WEB|MONITOR_MOBILE",
   "input": {
-    "spec_ref": "spec/PRODUCT_SPEC.md",
+    "spec_ref": "project/spec/PRODUCT_SPEC.md",
     "context": {},
     "task": {},
     "constraints": {},

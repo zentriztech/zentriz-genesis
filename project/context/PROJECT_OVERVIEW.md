@@ -31,7 +31,7 @@
 
 **Hierarquia**: SPEC ↔ CTO ↔ PM. PM atribui atividades a Dev, QA, DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
 
-Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md). Diagramas: [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md).
+Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md). Diagramas: [ARCHITECTURE_DIAGRAM.md](../../ARCHITECTURE_DIAGRAM.md).
 
 ---
 
@@ -90,10 +90,10 @@ zentriz-genesis/
 
 ## 6. Contratos e Governança
 
-- **DoD Global**: [contracts/global_definition_of_done.md](../contracts/global_definition_of_done.md)
-- **DoD DevOps**: [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md)
-- **Checklists**: [contracts/checklists/](../contracts/checklists/) (React, RN, Backend Node/Python)
-- **Envelopes**: [contracts/message_envelope.json](../contracts/message_envelope.json), [contracts/response_envelope.json](../contracts/response_envelope.json)
+- **DoD Global**: [contracts/global_definition_of_done.md](../../applications/contracts/global_definition_of_done.md)
+- **DoD DevOps**: [contracts/devops_definition_of_done.md](../../applications/contracts/devops_definition_of_done.md)
+- **Checklists**: [contracts/checklists/](../../applications/contracts/checklists/) (React, RN, Backend Node/Python)
+- **Envelopes**: [contracts/message_envelope.json](../../applications/contracts/message_envelope.json), [contracts/response_envelope.json](../../applications/contracts/response_envelope.json)
 
 ---
 
@@ -102,9 +102,9 @@ zentriz-genesis/
 **Fase atual**: Fundação de agentes + **portal Genesis e API integrados**.
 
 **Realizado (portal e API):**
-- **API** (services/api-node): Postgres (plans, tenants, users, projects, project_spec_files), auth JWT, `POST /api/auth/login`, `GET/POST/PATCH /api/projects`, `POST /api/specs` (multipart, multi-arquivo .md/.txt/.doc/.docx/.pdf), `GET/POST /api/users`, `GET /api/tenants`. Seed cria usuários padrão com senhas hasheadas (Zentriz Admin, tenant admin, user). Ver [context/CONTEXT.md](CONTEXT.md) e [services/api-node/README.md](../services/api-node/README.md).
+- **API** (services/api-node): Postgres (plans, tenants, users, projects, project_spec_files), auth JWT, `POST /api/auth/login`, `GET/POST/PATCH /api/projects`, `POST /api/specs` (multipart, multi-arquivo .md/.txt/.doc/.docx/.pdf), `GET/POST /api/users`, `GET /api/tenants`. Seed cria usuários padrão com senhas hasheadas (Zentriz Admin, tenant admin, user). Ver [context/CONTEXT.md](CONTEXT.md) e [services/api-node/README.md](../../applications/services/api-node/README.md).
 - **Portal** (apps/genesis-web): três telas de login por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API, envio de spec multi-arquivo, listagem/detalhe de projetos. Ver [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md).
-- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../orchestrator/spec_converter)); runner com `started_at`/`completed_at` via PATCH na API quando `API_BASE_URL`, `PROJECT_ID`, `GENESIS_API_TOKEN` definidos.
+- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../../applications/orchestrator/spec_converter)); runner com `started_at`/`completed_at` via PATCH na API quando `API_BASE_URL`, `PROJECT_ID`, `GENESIS_API_TOKEN` definidos.
 
 **Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)): concluir fundação de agentes; depois Dashboard, execução real do Orchestrator, SaaS.
 
@@ -140,8 +140,8 @@ zentriz-genesis/
 - [docs/ORCHESTRATION_GUIDE.md](../docs/ORCHESTRATION_GUIDE.md) — fluxo CTO→PM→Dev/QA→Monitor
 - [docs/PM_AUTOBACKLOG_GUIDE.md](../docs/PM_AUTOBACKLOG_GUIDE.md) — como PM gera backlog de FR/NFR
 - [docs/DEVOPS_SELECTION.md](../docs/DEVOPS_SELECTION.md) — qual DevOps instanciar
-- [orchestrator/events/schemas/](../orchestrator/events/schemas/) — schemas JSON dos eventos
-- [agents/](../agents/) — prompt de cada agente (SYSTEM_PROMPT.md)
+- [orchestrator/events/schemas/](../../applications/orchestrator/events/schemas/) — schemas JSON dos eventos
+- [agents/](../../applications/agents/) — prompt de cada agente (SYSTEM_PROMPT.md)
 
 ---
 

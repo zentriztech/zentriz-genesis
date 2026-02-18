@@ -11,7 +11,7 @@
 - **URL**: genesis.zentriz.com.br (produção); local: **localhost:3001**
 - **Serviço Docker**: `genesis-web` (porta 3001 no docker-compose)
 - **Stack**: React + **Next.js 14+** (App Router) + TypeScript + **Material UI (MUI)** + **MobX**
-- **Localização no repo**: [apps/genesis-web](../apps/genesis-web)
+- **Localização no repo**: [apps/genesis-web](../../applications/apps/genesis-web)
 
 ---
 
@@ -56,7 +56,7 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 
 **Docker** (com stack completa):
 
-- Serviço `genesis-web` no [docker-compose.yml](../docker-compose.yml); porta **3001**.
+- Serviço `genesis-web` no [docker-compose.yml](../../docker-compose.yml); porta **3001**.
 - Build: `docker compose build genesis-web`; subir: `docker compose up genesis-web` ou `./deploy-docker.sh`.
 
 ---

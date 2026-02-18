@@ -16,8 +16,13 @@ import urllib.request
 from pathlib import Path
 from datetime import datetime
 
-# Carregar .env da raiz
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# Raiz do repo: runner está em applications/orchestrator/ (host) ou orchestrator/ (container)
+_here = Path(__file__).resolve().parent  # applications/orchestrator ou /app/orchestrator
+_repo = _here.parent.parent  # applications ou repo root
+REPO_ROOT = _repo.parent if _repo.name == "applications" else _repo
+# No host: applications/ existe; no container: layout é /app/agents, /app/orchestrator
+APPLICATIONS_ROOT = REPO_ROOT / "applications" if (REPO_ROOT / "applications").exists() else REPO_ROOT
+
 _dotenv = REPO_ROOT / ".env"
 if _dotenv.exists():
     from dotenv import load_dotenv
@@ -26,8 +31,8 @@ if _dotenv.exists():
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-STATE_DIR = REPO_ROOT / "orchestrator" / "state"
-EVENTS_DIR = REPO_ROOT / "orchestrator" / "events" / "schemas"
+STATE_DIR = APPLICATIONS_ROOT / "orchestrator" / "state"
+EVENTS_DIR = APPLICATIONS_ROOT / "orchestrator" / "events" / "schemas"
 
 
 def ensure_state_dir() -> None:
@@ -41,9 +46,13 @@ def load_spec(spec_path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _agents_root() -> Path:
+    return APPLICATIONS_ROOT / "agents"
+
+
 def call_cto(spec_ref: str, request_id: str) -> dict:
     from orchestrator.agents.runtime import run_agent
-    cto_prompt = REPO_ROOT / "agents" / "cto" / "SYSTEM_PROMPT.md"
+    cto_prompt = _agents_root() / "cto" / "SYSTEM_PROMPT.md"
     message = {
         "request_id": request_id,
         "input": {
@@ -59,7 +68,7 @@ def call_cto(spec_ref: str, request_id: str) -> dict:
 
 def call_pm_backend(spec_ref: str, charter_summary: str, request_id: str) -> dict:
     from orchestrator.agents.runtime import run_agent
-    pm_prompt = REPO_ROOT / "agents" / "pm" / "backend" / "SYSTEM_PROMPT.md"
+    pm_prompt = _agents_root() / "pm" / "backend" / "SYSTEM_PROMPT.md"
     message = {
         "request_id": request_id,
         "input": {
@@ -131,7 +140,8 @@ def _patch_project(body: dict) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Runner: spec -> CTO -> PM Backend -> backlog")
-    parser.add_argument("--spec", "-s", default="spec/PRODUCT_SPEC.md", help="Caminho para o spec (FR/NFR)")
+    default_spec = "project/spec/PRODUCT_SPEC.md" if (REPO_ROOT / "project" / "spec" / "PRODUCT_SPEC.md").exists() else "spec/PRODUCT_SPEC.md"
+    parser.add_argument("--spec", "-s", default=default_spec, help="Caminho para o spec (FR/NFR)")
     args = parser.parse_args()
 
     spec_ref = args.spec
@@ -154,10 +164,10 @@ def main() -> int:
     charter_artifacts = cto_response.get("artifacts", [])
     logger.info("CTO status: %s", cto_response.get("status"))
 
-    # Persistir Charter (se o CTO retornou conteúdo em artifacts)
-    charter_path = REPO_ROOT / "docs" / "PROJECT_CHARTER.md"
+    # Persistir Charter em orchestrator/state/ (não em project/docs/)
+    charter_path = STATE_DIR / "PROJECT_CHARTER.md"
     if charter_artifacts and charter_summary:
-        charter_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_state_dir()
         charter_path.write_text(f"# Project Charter (gerado pelo CTO)\n\n{charter_summary}\n", encoding="utf-8")
         logger.info("Charter persistido: %s", charter_path)
 

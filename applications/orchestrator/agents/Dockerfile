@@ -1,13 +1,13 @@
 # Agentes (PM, Monitor, CTO) — Python + Claude
 # Build a partir da raiz: docker compose build agents-backend
+# Contexto = raiz; copia apenas applications/ necessários (sem project/docs).
 FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY agents/ agents/
-COPY contracts/ contracts/
-COPY docs/ docs/
-COPY orchestrator/ orchestrator/
+COPY applications/agents/ agents/
+COPY applications/contracts/ contracts/
+COPY applications/orchestrator/ orchestrator/
 
 RUN pip install --no-cache-dir -r orchestrator/agents/requirements.txt
 

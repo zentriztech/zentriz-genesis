@@ -19,14 +19,14 @@ jobs:
 
       - name: Validate Terraform (AWS)
         run: |
-          cd infra/aws && terraform init -backend=false && terraform validate
+          cd project/infra/aws && terraform init -backend=false && terraform validate
 
-  # Job para api-node (ativado quando services/api-node/package.json existir)
+  # Job para api-node (ativado quando applications/services/api-node/package.json existir)
   api-node:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/api-node
+        working-directory: applications/services/api-node
     steps:
       - uses: actions/checkout@v4
 
