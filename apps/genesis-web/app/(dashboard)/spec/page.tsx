@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -8,6 +8,13 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import Link from "@mui/material/Link";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import IconButton from "@mui/material/IconButton";
+import Stack from "@mui/material/Stack";
+import { motion, AnimatePresence } from "framer-motion";
+import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import CloseIcon from "@mui/icons-material/Close";
 import { apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 
@@ -15,22 +22,42 @@ const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
 
 type SubmitResponse = { projectId: string; status: string; message: string };
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileExtension(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+}
+
 export default function SpecPage() {
   const router = useRouter();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState("");
-  const [files, setFiles] = useState<FileList | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SubmitResponse | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFiles(e.target.files ?? null);
-    setError(null);
+    const chosen = e.target.files;
+    if (chosen?.length) {
+      setFiles((prev) => [...prev, ...Array.from(chosen)]);
+      setError(null);
+    }
+    e.target.value = "";
+  };
+
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!files?.length) {
+    if (!files.length) {
       setError("Selecione pelo menos um arquivo.");
       return;
     }
@@ -40,9 +67,7 @@ export default function SpecPage() {
     try {
       const formData = new FormData();
       formData.append("title", title.trim() || "Spec sem título");
-      for (let i = 0; i < files.length; i++) {
-        formData.append("files", files[i]);
-      }
+      files.forEach((file) => formData.append("files", file));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       setResult(data);
       projectsStore.loadProjects();
@@ -79,7 +104,7 @@ export default function SpecPage() {
           )}
           {result.status === "pending_conversion" && (
             <Typography variant="body2" sx={{ mt: 1 }}>
-            Arquivos não-.md serão convertidos para Markdown pelo orquestrador; o fluxo será iniciado em seguida.
+              Arquivos não-.md serão convertidos para Markdown pelo orquestrador; o fluxo será iniciado em seguida.
             </Typography>
           )}
         </Alert>
@@ -98,22 +123,75 @@ export default function SpecPage() {
         />
         <Box sx={{ mt: 2, mb: 2 }}>
           <Typography variant="body2" color="text.secondary" gutterBottom>
-            Arquivo(s) de spec — pode enviar mais de um (ex.: principal + anexos)
+            Arquivo(s) de spec — adicione um ou mais (ex.: principal + anexos)
           </Typography>
-          <input
-            accept={ACCEPT}
-            type="file"
-            multiple
-            onChange={handleFileChange}
-            style={{ display: "block", marginTop: 8 }}
-          />
-          {files?.length ? (
-            <Typography variant="caption" display="block" sx={{ mt: 1 }}>
-              {files.length} arquivo(s) selecionado(s): {Array.from(files).map((f) => f.name).join(", ")}
-            </Typography>
-          ) : null}
+          <Button
+            component="label"
+            variant="outlined"
+            size="small"
+            sx={{ mt: 1 }}
+          >
+            Adicionar arquivos
+            <input
+              ref={inputRef}
+              accept={ACCEPT}
+              type="file"
+              multiple
+              hidden
+              onChange={handleFileChange}
+            />
+          </Button>
+          <Stack direction="row" flexWrap="wrap" useFlexGap spacing={1.5} sx={{ mt: 2 }}>
+            <AnimatePresence mode="popLayout">
+              {files.map((file, index) => (
+                <motion.div
+                  key={`${file.name}-${index}`}
+                  layout
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.9 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <Card
+                    variant="outlined"
+                    sx={{
+                      width: 220,
+                      borderRadius: 2,
+                      borderColor: "divider",
+                      "&:hover": { borderColor: "primary.main", boxShadow: 1 },
+                      transition: "border-color 0.2s, box-shadow 0.2s",
+                    }}
+                  >
+                    <CardContent sx={{ py: 1.5, px: 1.5, "&:last-child": { pb: 1.5 } }}>
+                      <Box sx={{ display: "flex", alignItems: "flex-start", gap: 0.5 }}>
+                        <InsertDriveFileOutlinedIcon
+                          sx={{ color: "primary.main", fontSize: 28, mt: 0.25 }}
+                        />
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          <Typography variant="body2" noWrap title={file.name}>
+                            {file.name}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {getFileExtension(file.name).toUpperCase()} · {formatFileSize(file.size)}
+                          </Typography>
+                        </Box>
+                        <IconButton
+                          size="small"
+                          aria-label="Remover arquivo"
+                          onClick={() => removeFile(index)}
+                          sx={{ color: "text.secondary", "&:hover": { color: "error.main" } }}
+                        >
+                          <CloseIcon fontSize="small" />
+                        </IconButton>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </Stack>
         </Box>
-        <Button type="submit" variant="contained" sx={{ mt: 2 }} disabled={submitting}>
+        <Button type="submit" variant="contained" sx={{ mt: 2 }} disabled={submitting || files.length === 0}>
           {submitting ? "Enviando…" : "Enviar para o CTO"}
         </Button>
       </form>

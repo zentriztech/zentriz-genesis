@@ -16,12 +16,12 @@ INSERT INTO plans (id, name, slug, max_projects, max_users_per_tenant) VALUES
   ('plan_diamante', 'Diamante', 'diamante', 50, 100)
 ON CONFLICT (id) DO NOTHING;
 
--- Tenants
+-- Tenants (status inactive = cadastrado, aguardando confirmação de pagamento)
 CREATE TABLE IF NOT EXISTS tenants (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name       TEXT NOT NULL,
   plan_id    TEXT NOT NULL REFERENCES plans(id),
-  status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended')),
+  status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'inactive')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -67,3 +67,7 @@ CREATE TABLE IF NOT EXISTS project_spec_files (
 CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_projects_created_by ON projects(created_by);
 CREATE INDEX IF NOT EXISTS idx_project_spec_files_project ON project_spec_files(project_id);
+
+-- Migration: permitir status inactive em tenants (cadastro antes do pagamento)
+ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_status_check;
+ALTER TABLE tenants ADD CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'inactive'));
