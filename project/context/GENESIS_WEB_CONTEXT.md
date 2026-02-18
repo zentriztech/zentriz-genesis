@@ -71,7 +71,7 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 - [x] Telas tenant: gestão usuários, gestão projetos, plano e uso
 - [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano
 - [x] genesis-web no docker-compose; Dockerfile e .dockerignore em apps/genesis-web
-- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents-backend)
+- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents)
 
 ---
 

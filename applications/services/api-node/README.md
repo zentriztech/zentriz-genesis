@@ -16,6 +16,17 @@ A API usa **PostgreSQL** (fonte de verdade). Tabelas: `plans`, `tenants`, `users
 
 O seed garante que esses usuários existam com senhas hasheadas (cria ou atualiza a cada subida). `user@tenant.com` e `admin@tenant.com` pertencem ao mesmo tenant (Tenant Demo). Ver [SECRETS_AND_ENV.md](../../../project/docs/SECRETS_AND_ENV.md). Em produção, use `POST /api/users` para cadastro com **regras de segurança**: senha mínimo 8 caracteres, hash bcrypt; apenas tenant_admin ou zentriz_admin podem criar usuários.
 
+### Projetos de exemplo (Genesis-Web)
+
+Para popular 2 projetos de exemplo (um em desenvolvimento e um concluído) e logs de diálogo para testar a tela do Genesis-Web:
+
+```bash
+# Com Postgres acessível (ex.: docker compose up -d postgres)
+PGHOST=localhost PGUSER=genesis PGPASSWORD=genesis_dev PGDATABASE=zentriz_genesis npm run seed:examples
+```
+
+Cria: **Portal de Vouchers (em desenvolvimento)** (status `dev_qa`) e **Sistema de Cadastro MVP (concluído)** (status `completed`), com várias entradas em `project_dialogue`. Faça login no portal (admin@tenant.com ou user@tenant.com) e abra os projetos para ver o diálogo da equipe.
+
 ## Endpoints
 
 - `POST /api/vouchers` — criar voucher (FR-01)

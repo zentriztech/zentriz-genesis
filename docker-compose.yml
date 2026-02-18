@@ -63,7 +63,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  agents-backend:
+  agents:
     build:
       context: .
       dockerfile: applications/orchestrator/agents/Dockerfile

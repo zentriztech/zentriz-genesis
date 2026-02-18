@@ -36,4 +36,7 @@ Especialista na **fundação de infraestrutura** do projeto. É o **primeiro** a
 ## Referências
 - [docs/TECHNICAL_REQUIREMENTS.md](../../../docs/TECHNICAL_REQUIREMENTS.md) — namespace, domínio, Terraform, Docker, k8s
 - [contracts/devops_definition_of_done.md](../../../contracts/devops_definition_of_done.md)
+
+## Competências
+Suas competências estão em [skills.md](skills.md).
 - [docs/ACTORS_AND_RESPONSIBILITIES.md](../../../docs/ACTORS_AND_RESPONSIBILITIES.md)

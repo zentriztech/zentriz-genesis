@@ -27,4 +27,4 @@ Especialista em **acompanhamento e monitoramento** da stack Backend. **Acompanha
 - [ ] Fluxo Dev → QA (acionado por você) → resultado → Dev (se refazer) e DevOps documentado
 
 ## Referência
-[docs/ACTORS_AND_RESPONSIBILITIES.md](../../../docs/ACTORS_AND_RESPONSIBILITIES.md)
+Suas competências estão em [skills.md](skills.md). Referência: [docs/ACTORS_AND_RESPONSIBILITIES.md](../../../../project/docs/ACTORS_AND_RESPONSIBILITIES.md)

@@ -7,7 +7,7 @@
 - **WAITING_REVIEW**: pronto para validação (QA/PM)
 - **QA_FAIL**: QA reprovou (reabre)
 - **QA_PASS**: QA aprovou
-- **BLOCKED**: impedimento (dependência externa)
+- **BLOCKED**: impedimento (dependência externa ou **cross-team** — ex.: Web bloqueada esperando endpoint do Backend; PM reporta ao CTO, CTO/Engineer/PM responsável resolve e repassa ao Dev)
 - **DONE**: aprovado pelo PM (ou CTO para tasks do charter)
 - **CANCELLED**: cancelado (fora de escopo/decisão)
 

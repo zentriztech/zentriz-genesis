@@ -1,4 +1,4 @@
-# Usado pelo build do agents-backend (contexto = raiz do repo).
+# Usado pelo build do serviço agents (contexto = raiz do repo).
 # Incluir apenas: applications/agents, applications/contracts, applications/orchestrator
 
 # Projeto (não faz parte da imagem do produto)

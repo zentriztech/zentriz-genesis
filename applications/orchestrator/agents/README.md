@@ -1,6 +1,6 @@
-# Agentes (runtime + CTO, PM, Monitor, Dev, QA, DevOps Docker)
+# Agentes (runtime + Engineer, CTO, PM, Monitor, Dev, QA, DevOps Docker)
 
-Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente é definido por um `SYSTEM_PROMPT.md` em [agents/](../../agents/) e recebe/saída nos formatos message_envelope e response_envelope.
+Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente é definido por um `SYSTEM_PROMPT.md` em [agents/](../../agents/) e recebe/saída nos formatos message_envelope e response_envelope. O **Engineer** e os demais agentes são expostos pelo **mesmo** serviço Docker `agents` (container `zentriz-genesis-agents-1`; não há container separado por stack).
 
 ## Variáveis de ambiente
 
@@ -13,8 +13,9 @@ Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente �
 
 | Agente | Endpoint | Definição (SYSTEM_PROMPT) |
 |--------|----------|---------------------------|
-| PM Backend | `POST /invoke` | [agents/pm/backend/SYSTEM_PROMPT.md](../../agents/pm/backend/SYSTEM_PROMPT.md) |
+| **Engineer** | `POST /invoke/engineer` | [agents/engineer/SYSTEM_PROMPT.md](../../agents/engineer/SYSTEM_PROMPT.md) |
 | CTO | `POST /invoke/cto` | [agents/cto/SYSTEM_PROMPT.md](../../agents/cto/SYSTEM_PROMPT.md) |
+| PM Backend | `POST /invoke` | [agents/pm/backend/SYSTEM_PROMPT.md](../../agents/pm/backend/SYSTEM_PROMPT.md) |
 | Monitor Backend | `POST /invoke/monitor` | [agents/monitor/backend/SYSTEM_PROMPT.md](../../agents/monitor/backend/SYSTEM_PROMPT.md) |
 | Dev Backend | `POST /invoke/dev-backend` | [agents/dev/backend/nodejs/SYSTEM_PROMPT.md](../../agents/dev/backend/nodejs/SYSTEM_PROMPT.md) |
 | QA Backend | `POST /invoke/qa-backend` | [agents/qa/backend/nodejs/SYSTEM_PROMPT.md](../../agents/qa/backend/nodejs/SYSTEM_PROMPT.md) |
@@ -31,6 +32,7 @@ pip install -r orchestrator/agents/requirements.txt
 | Agente | Comando CLI |
 |--------|-------------|
 | PM Backend | `python -m orchestrator.agents.pm_backend --input message.json` |
+| Engineer | `python -m orchestrator.agents.engineer_agent --input message.json` |
 | CTO | `python -m orchestrator.agents.cto_agent` (stdin JSON) |
 | Monitor Backend | `python -m orchestrator.agents.monitor_backend --input message.json` |
 | Dev Backend | `python -m orchestrator.agents.dev_backend --input message.json` |
@@ -44,6 +46,7 @@ echo '{"request_id":"cli","input":{"spec_ref":"spec/PRODUCT_SPEC.md","context":{
 
 ## Resumo por agente
 
+- **Engineer** — Proposta técnica (stacks, equipes, dependências) para o CTO; agents/engineer/
 - **CTO** — Charter, contrata PM(s); definição em agents/cto/
 - **PM Backend** — Backlog da stack Backend; agents/pm/backend/
 - **Monitor Backend** — Health e alertas da stack Backend; agents/monitor/backend/
@@ -53,7 +56,7 @@ echo '{"request_id":"cli","input":{"spec_ref":"spec/PRODUCT_SPEC.md","context":{
 
 ## Docker
 
-O serviço **agents-backend** (stack Backend) expõe os seis agentes em uma única instância. Build a partir da raiz: `docker compose build agents-backend`. Para subir todo o ambiente: [deploy-docker.sh](../../deploy-docker.sh) ou [docs/DEPLOYMENT.md](../../../project/docs/DEPLOYMENT.md).
+O serviço **agents** expõe o **Engineer** e todos os agentes (CTO, PM, Monitor, Dev, QA, DevOps Docker; futuramente Web, Mobile, etc.) em uma única instância. Build a partir da raiz: `docker compose build agents`. Para subir todo o ambiente: [deploy-docker.sh](../../deploy-docker.sh) ou [docs/DEPLOYMENT.md](../../../project/docs/DEPLOYMENT.md).
 
 ---
 
@@ -61,7 +64,7 @@ O serviço **agents-backend** (stack Backend) expõe os seis agentes em uma úni
 
 A **única** parte do código que chama a API do Claude é a função **`run_agent()`** em [runtime.py](runtime.py). Ela usa a variável de ambiente `CLAUDE_API_KEY`, o SDK Anthropic (`client.messages.create`) e envia ao Claude: (1) o texto do `SYSTEM_PROMPT.md` do agente (system) e (2) o message_envelope em JSON (user). A resposta é tratada e devolvida no formato response_envelope.
 
-Todos os seis agentes (CTO, PM, Monitor, Dev, QA, DevOps Docker) apenas preparam a entrada e chamam `run_agent()` — ou seja, **tudo que usa o runtime está de fato falando com o Claude**.
+Todos os agentes (Engineer, CTO, PM, Monitor, Dev, QA, DevOps Docker) apenas preparam a entrada e chamam `run_agent()` — ou seja, **tudo que usa o runtime está de fato falando com o Claude**.
 
 ---
 
@@ -69,7 +72,7 @@ Todos os seis agentes (CTO, PM, Monitor, Dev, QA, DevOps Docker) apenas preparam
 
 1. **Um único “cérebro” (runtime)** — [runtime.py](runtime.py) carrega o manual do agente (SYSTEM_PROMPT), monta a pergunta e **chama o Claude**; devolve a resposta no formato combinado.
 
-2. **Seis agentes** — Cada um é: (a) um “manual” em texto em `agents/` (SYSTEM_PROMPT.md) e (b) um módulo Python aqui que só indica qual manual usar e chama `run_agent()`. Os seis já conectados ao Claude: CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker.
+2. **Sete agentes** — Cada um é: (a) um “manual” em texto em `agents/` (SYSTEM_PROMPT.md) e (b) um módulo Python aqui que só indica qual manual usar e chama `run_agent()`. Todos conectados ao Claude: Engineer, CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker.
 
 3. **Duas formas de uso** — **CLI** (entrada JSON por arquivo ou stdin) e **HTTP** (serviço FastAPI com um endpoint por agente). Em ambos os casos a chamada real ao LLM acontece dentro de `run_agent()`.
 

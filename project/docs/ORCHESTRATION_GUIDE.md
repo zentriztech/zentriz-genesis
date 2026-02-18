@@ -11,20 +11,31 @@
 
 ---
 
-## 2) CTO
+## 2) Engineer (antes do CTO)
 
-- Recebe a spec e interpreta requisitos e constraints.
-- Gera [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md).
-- **Contrata** um ou mais PMs conforme as skills necessárias (Backend, Web, Mobile).
-- Cria [docs/STATUS.md](STATUS.md) inicial.
-- Delega cada stack ao PM responsável (CTO não atribui tarefas a Dev/QA/DevOps/Monitor).
-- Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
+- **CTO** envia a spec (e contexto) ao **Engineer**.
+- **Engineer** analisa e devolve **proposta técnica**: quais stacks/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
+- Engineer comunica-se **apenas** com o CTO. Competências em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
-**Implementação:** Agente CTO em [orchestrator/agents/cto_agent.py](../orchestrator/agents/cto_agent.py). Runner que executa o fluxo spec → CTO → PM Backend: `python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md` ([orchestrator/README.md](../orchestrator/README.md)).
+**Implementação:** Agente Engineer em [orchestrator/agents/engineer_agent.py](../../applications/orchestrator/agents/engineer_agent.py). Endpoint `POST /invoke/engineer`.
 
 ---
 
-## 3) PM (por stack)
+## 3) CTO
+
+- Recebe a spec e **primeiro fala com o Engineer**; usa a proposta técnica para decidir stacks e dependências.
+- Gera [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) com base na proposta do Engineer.
+- **Contrata** um ou mais PMs conforme as stacks/equipes definidas pelo Engineer (Backend, Web Básica, Web Avançada, Mobile).
+- Cria [docs/STATUS.md](STATUS.md) inicial.
+- Delega cada stack ao PM e informa **dependências** (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”). PMs **conversam entre si via CTO** (não diretamente).
+- Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
+- Em **bloqueios cross-team** (ex.: endpoint falhou), CTO pode consultar o Engineer para solução e repassar ao PM responsável.
+
+**Implementação:** Agente CTO em [orchestrator/agents/cto_agent.py](../../applications/orchestrator/agents/cto_agent.py). Runner: spec → **Engineer** → CTO → PM Backend (`python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md`).
+
+---
+
+## 4) PM (por stack)
 
 - Recebe do CTO o escopo da stack.
 - Cria backlog: lista de tasks com FR/NFR (usa [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md)).
@@ -40,7 +51,7 @@
 
 ---
 
-## 4) Dev
+## 5) Dev
 
 - Recebe **atividades do PM** (não do CTO nem do SPEC).
 - Desenvolve de forma contínua (implementação, testes, documentação).
@@ -51,7 +62,7 @@
 
 ---
 
-## 5) QA
+## 6) QA
 
 - Recebe **atividades do PM** (o que validar).
 - É **acionado pelo Monitor** para realizar testes em atividades finalizadas pelo Dev.
@@ -61,7 +72,7 @@
 
 ---
 
-## 6) Monitor (por stack)
+## 7) Monitor (por stack)
 
 - **Acompanha** Dev_<AREA> e QA_<AREA> do módulo (progresso, status de andamento, evidências).
 - **Aciona o QA** para realizar testes quando o Dev finaliza uma atividade.
@@ -73,7 +84,7 @@
 
 ---
 
-## 7) DevOps (por cloud)
+## 8) DevOps (por cloud)
 
 - Recebe **atividades do PM**.
 - É **acionado pelo Monitor** para realizar provisionamento (total ou parcial).
@@ -82,7 +93,7 @@
 
 ---
 
-## 8) Encerramento
+## 9) Encerramento
 
 - PM aprova módulo com base nas informações do Monitor e evidências (QA Report, etc.).
 - CTO consolida status de todos os PMs e marca projeto como DONE (ou registra bloqueios).

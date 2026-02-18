@@ -19,11 +19,11 @@ PYTHONPATH=applications python -m orchestrator.runner --spec project/spec/PRODUC
 - Estado em `applications/orchestrator/state/current_project.json`
 - Eventos em `applications/orchestrator/state/events.jsonl` (project.created, module.planned)
 
-**Via Docker (serviço agents-backend precisa estar no ar para chamadas HTTP; o runner usa imports locais):**
+**Via Docker (serviço agents precisa estar no ar para chamadas HTTP; o runner usa imports locais):**
 ```bash
-docker compose run --rm -e CLAUDE_API_KEY agents-backend python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
+docker compose run --rm -e CLAUDE_API_KEY agents python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
 ```
-(Se o runner chamar os agentes via HTTP em vez de import, use `API_AGENTS_URL=http://agents-backend:8000` e ajuste o runner.)
+(Se o runner chamar os agentes via HTTP em vez de import, use `API_AGENTS_URL=http://agents:8000` e ajuste o runner.)
 
 Por padrão o runner chama os agentes por **import** (mesmo processo), então rode a partir do host com `python -m orchestrator.runner` após `pip install -r applications/orchestrator/agents/requirements.txt`.
 

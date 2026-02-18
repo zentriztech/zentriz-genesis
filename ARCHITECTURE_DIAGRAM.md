@@ -1,13 +1,13 @@
 # Zentriz Genesis — Diagramas de Arquitetura (Mermaid)
 
 > Diagramas para compreensão visual do projeto, etapas e responsabilidades dos atores.  
-> Detalhamento completo dos atores: [docs/ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md).
+> Detalhamento completo dos atores: [project/docs/ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md).
 
 ---
 
 ## 1. Hierarquia de comunicação
 
-Quem se comunica com quem. SPEC (pessoa real) ↔ CTO ↔ PM; PM atribui atividades a Dev, QA e DevOps; Monitor acompanha Dev/QA, aciona QA e DevOps, informa PM.
+Quem se comunica com quem. SPEC ↔ CTO ↔ **Engineer** (técnico); CTO ↔ PM(s); PMs conversam **via CTO** (dependências). PM atribui atividades a Dev, QA e DevOps; Monitor acompanha Dev/QA, aciona QA e DevOps, informa PM.
 
 ```mermaid
 flowchart TB
@@ -15,8 +15,9 @@ flowchart TB
         SPEC["👤 SPEC (Pessoa real)<br/>Dono do projeto"]
     end
 
-    subgraph ORQUESTRAÇÃO
-        CTO["CTO Agent"]
+    subgraph ORQUESTRAÇÃO["Orquestração"]
+        CTO["CTO Agent<br/>Produto"]
+        ENG["Engineer Agent<br/>Técnico"]
     end
 
     subgraph STACK["Stack (ex.: Backend)"]
@@ -28,6 +29,7 @@ flowchart TB
     end
 
     SPEC <--> CTO
+    CTO <--> ENG
     CTO <--> PM
     PM -->|atribui atividades| DEV
     PM -->|atribui atividades| QA
@@ -43,7 +45,7 @@ flowchart TB
 
 ## 2. Arquitetura completa por módulos
 
-Múltiplas stacks (Backend, Web, Mobile). Cada stack: 1 PM, N pares Dev–QA, 1 Monitor, 1 DevOps (por cloud). Infra faz parte de cada stack via DevOps; não existe stack "Infra". Monitor observa Dev/QA, aciona QA e DevOps, informa PM. PM informa CTO.
+Múltiplas stacks (Backend, Web, Mobile) definidas pelo **Engineer**. CTO (produto) e Engineer (técnico) no mesmo nível. Cada stack: 1 PM, N pares Dev–QA, 1 Monitor, 1 DevOps. PMs conversam via CTO (dependências). Monitor observa Dev/QA, aciona QA e DevOps, informa PM.
 
 ```mermaid
 flowchart TB
@@ -51,8 +53,9 @@ flowchart TB
         SPEC["👤 SPEC"]
     end
 
-    subgraph ORQUESTRAÇÃO
+    subgraph ORQUESTRAÇÃO["Orquestração"]
         CTO["CTO Agent"]
+        ENG["Engineer Agent"]
     end
 
     subgraph MÓDULO_BACKEND["Stack Backend"]
@@ -86,6 +89,7 @@ flowchart TB
     end
 
     SPEC <--> CTO
+    CTO <--> ENG
     CTO <--> PM_BE
     CTO <--> PM_WEB
     CTO <--> PM_MOB
@@ -131,12 +135,13 @@ flowchart TB
 
 ## 3. Fluxo de etapas (sequência)
 
-Da spec à conclusão: SPEC → CTO → PM → atividades (Dev, Monitor aciona QA e DevOps) → Monitor → PM → CTO → SPEC.
+Da spec à conclusão: SPEC → CTO → **Engineer** (proposta técnica) → CTO (Charter, contrata PM(s)) → PM → atividades → Monitor → PM → CTO → SPEC.
 
 ```mermaid
 sequenceDiagram
     participant SPEC as 👤 SPEC
     participant CTO as CTO
+    participant ENG as Engineer
     participant PM as PM
     participant MON as Monitor
     participant DEV as Dev
@@ -144,8 +149,10 @@ sequenceDiagram
     participant DO as DevOps
 
     SPEC->>CTO: Especificação (FR/NFR)
+    CTO->>ENG: Spec + contexto
+    ENG->>CTO: Proposta (stacks, equipes, dependências)
     CTO->>CTO: Project Charter, contrata PM(s)
-    CTO->>PM: Delega stack(s)
+    CTO->>PM: Delega stack(s) + dependências
 
     PM->>DEV: Atribui atividades
     PM->>QA: Atribui atividades
@@ -209,8 +216,9 @@ flowchart LR
 | Ator | Responsabilidade principal | Comunica com |
 |------|----------------------------|--------------|
 | **SPEC** | Fornece spec; recebe conclusão/bloqueios | CTO |
-| **CTO** | Interpreta spec, Charter, contrata PM(s) | SPEC, PM(s) |
-| **PM** | Backlog, gerencia stack, contrata Dev/QA/DevOps/Monitor, atribui atividades | CTO, Dev, QA, DevOps, Monitor (recebe) |
+| **CTO** | Produto: Charter, contrata PM(s), ponte entre PMs (dependências) | SPEC, **Engineer**, PM(s) |
+| **Engineer** | Técnico: stacks, equipes, dependências; analisa spec | CTO |
+| **PM** | Backlog, gerencia stack, contrata Dev/QA/DevOps/Monitor; conversa com outros PMs **via CTO** | CTO, Dev, QA, DevOps, Monitor (recebe) |
 | **Dev** | Implementação contínua | PM (recebe tasks), Monitor (acompanhamento/refazer) |
 | **QA** | Testes, documentação, validação, QA Report | PM (recebe tasks), Monitor (acionado para testes) |
 | **DevOps** | IaC, CI/CD, deploy, DB, smoke tests | PM (recebe tasks), Monitor (acionado para provisionamento) |
@@ -237,4 +245,4 @@ flowchart LR
 
 ---
 
-*Última atualização: 2026-02-17 — Zentriz Genesis. Ver [docs/ACTORS_AND_RESPONSIBILITIES.md](docs/ACTORS_AND_RESPONSIBILITIES.md) para detalhes completos.*
+*Última atualização: 2026-02-18 — Zentriz Genesis. Ver [project/docs/ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md) para detalhes completos.*

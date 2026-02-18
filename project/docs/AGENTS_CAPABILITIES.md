@@ -10,14 +10,15 @@
 | Papel | Tipo | Agentes | Responsabilidade em uma frase |
 |-------|------|---------|------------------------------|
 | **SPEC** | Pessoa real | — | Dono do projeto; fornece spec; recebe conclusão/bloqueios do CTO. |
-| **CTO** | Agente | 1 | Interpreta spec, gera Charter, **contrata** PM(s); informa SPEC. |
-| **PM** | Agente | 3 (Backend, Web, Mobile) | Backlog por FR/NFR; gerencia stack; **contrata** Dev/QA (par), 1 DevOps, 1 Monitor; atribui atividades. |
+| **CTO** | Agente | 1 | **Produto**: interpreta spec com apoio do Engineer; gera Charter; **contrata** PM(s); ponte entre PMs (dependências); informa SPEC. |
+| **Engineer** | Agente | 1 | **Técnico**: analisa spec; define stacks/equipes (web básica, web avançada, backend API) e dependências; comunica-se apenas com CTO. |
+| **PM** | Agente | 3 (Backend, Web, Mobile) | Backlog por FR/NFR; gerencia stack; **contrata** Dev/QA (par), 1 DevOps, 1 Monitor; conversa com outros PMs **via CTO**. |
 | **Dev** | Agente | 3 stacks × skills | Implementação contínua; acompanhado pelo Monitor; refaz quando QA indica (via Monitor). |
 | **QA** | Agente | 3 stacks × skills | Testes, doc, validação, QA Report; **acionado pelo Monitor**; bloqueia regressões. |
 | **DevOps** | Agente | 3 (AWS, Azure, GCP) | IaC, CI/CD, deploy, DB, smoke tests; **acionado pelo Monitor** (total ou parcial). Infra faz parte de cada stack. |
 | **Monitor** | Agente | 3 (Backend, Web, Mobile) | Acompanha Dev/QA; aciona QA e DevOps; informa PM (PM escala ao CTO). |
 
-**Total**: 1 papel humano (SPEC) + agentes por área/skill (estrutura escalável em [agents/README.md](../agents/README.md)). **Hierarquia**: SPEC ↔ CTO ↔ PM; PM atribui a Dev/QA/DevOps; Monitor ↔ Dev/QA/DevOps; Monitor → PM.
+**Total**: 1 papel humano (SPEC) + agentes por área/skill. **Hierarquia**: SPEC ↔ CTO ↔ **Engineer** (mesmo nível CTO/Engineer); CTO ↔ PM(s); PMs conversam **via CTO**; PM atribui a Dev/QA/DevOps; Monitor ↔ Dev/QA/DevOps; Monitor → PM.
 
 ---
 
@@ -27,11 +28,25 @@
 |----------|-------|
 | **Pasta** | [agents/cto/](../agents/cto/) |
 | **Papel** | Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; informa SPEC quando projeto finalizado ou bloqueado. |
-| **Objetivo** | Gerar Charter, contratar PM(s), delegar stacks, consolidar STATUS, comunicar-se apenas com SPEC e PM(s). |
-| **Entradas** | spec_ref, task, constraints, artifacts |
+| **Objetivo** | Receber proposta do Engineer; gerar Charter; contratar PM(s); delegar stacks e dependências; ponte entre PMs; consolidar STATUS; comunicar-se com SPEC, Engineer e PM(s). |
+| **Entradas** | spec_ref, context (pode incluir engineer_stack_proposal), task, constraints, artifacts |
 | **Saídas** | status, summary, artifacts, evidence, next_actions |
 | **Contratos** | message_envelope.json, response_envelope.json |
-| **Checklist** | PROJECT_CHARTER, PM(s) contratados por stack, critérios de aceite, STATUS consolidado, notificação a SPEC (conclusão/bloqueios) |
+| **Checklist** | PROJECT_CHARTER (com base na proposta do Engineer), PM(s) contratados por stack, dependências informadas aos PMs, STATUS consolidado, notificação a SPEC (conclusão/bloqueios) |
+
+---
+
+## 2.5. Engineer Agent
+
+| Atributo | Valor |
+|----------|-------|
+| **Pasta** | [agents/engineer/](../../applications/agents/engineer/) |
+| **Papel** | Staff Engineer / Software Architect Full-Stack. Analisa a spec e define **stacks/equipes** (ex.: web básica, web avançada, backend API) e **dependências** entre equipes. Comunica-se **apenas** com o CTO. |
+| **Objetivo** | Devolver proposta técnica ao CTO (lista de stacks/equipes, dependências, ex.: “Web depende de Backend API — obter endpoints via CTO”) para o CTO gerar Charter e contratar PM(s). |
+| **Entradas** | spec_ref, spec_content (ou resumo), context, constraints |
+| **Saídas** | status, summary, artifacts (engineer_stack_proposal: stacks, dependências, recomendações), evidence, next_actions |
+| **Contratos** | message_envelope.json, response_envelope.json; saída estruturada: [contracts/engineer_stack_proposal.md](../../applications/contracts/engineer_stack_proposal.md) |
+| **Competências** | [agents/engineer/skills.md](../../applications/agents/engineer/skills.md) |
 
 ---
 

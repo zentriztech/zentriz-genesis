@@ -11,9 +11,9 @@ Estrutura na raiz do repositório até a data desta refatoração:
 ```
 zentriz-genesis/
 ├─ .github/           # CI (workflows)
-├─ .dockerignore      # Usado pelo build agents-backend (contexto = raiz)
+├─ .dockerignore      # Usado pelo build agents (contexto = raiz)
 ├─ .env.example
-├─ docker-compose.yml # Stack: api, postgres, redis, agents-backend, genesis-web
+├─ docker-compose.yml # Stack: api, postgres, redis, agents, genesis-web
 ├─ deploy-docker.sh   # Script de deploy local
 ├─ README.md
 ├─ README_EN.md
@@ -36,9 +36,9 @@ zentriz-genesis/
 
 ### Referências importantes na definição atual
 
-- **Docker (agents-backend):** build context = raiz; Dockerfile em `orchestrator/agents/Dockerfile`; copia `agents/`, `contracts/`, `docs/`, `orchestrator/`.
+- **Docker (agents):** build context = raiz; Dockerfile em `orchestrator/agents/Dockerfile`; copia `agents/`, `contracts/`, `docs/`, `orchestrator/`.
 - **Python:** `REPO_ROOT = Path(__file__).resolve().parent.parent.parent` (raiz do repo). Paths: `spec/`, `docs/` (persistência de PROJECT_CHARTER.md), `agents/`, `orchestrator/state/`.
-- **docker-compose:** `context: ./services/api-node`, `context: ./apps/genesis-web`, `context: .` para agents-backend.
+- **docker-compose:** `context: ./services/api-node`, `context: ./apps/genesis-web`, `context: .` para agents.
 - **CI:** `working-directory: services/api-node`, `cd infra/aws`.
 - **Links em Markdown:** relativos a `docs/`, `context/`, `spec/`, `contracts/`, `infra/`, `k8s/`, etc.
 
@@ -74,7 +74,7 @@ Ficam na raiz: `.github/`, `.dockerignore`, `.env.example`, `docker-compose.yml`
 
 ### Ajustes técnicos da refatoração
 
-1. **Docker (agents-backend)**  
+1. **Docker (agents)**  
    - Context pode permanecer raiz; Dockerfile em `applications/orchestrator/agents/Dockerfile`.  
    - COPY: `applications/agents/` → `agents/`, `applications/contracts/` → `contracts/`, `applications/orchestrator/` → `orchestrator/`.  
    - **Remover** `COPY docs/ docs/` (doc do projeto não entra na imagem).  
@@ -83,7 +83,7 @@ Ficam na raiz: `.github/`, `.dockerignore`, `.env.example`, `docker-compose.yml`
 2. **docker-compose.yml**  
    - `api`: context `./applications/services/api-node`.  
    - `genesis-web`: context `./applications/apps/genesis-web`.  
-   - `agents-backend`: context `.`, dockerfile `applications/orchestrator/agents/Dockerfile`.
+   - `agents`: context `.`, dockerfile `applications/orchestrator/agents/Dockerfile`.
 
 3. **Python (REPO_ROOT e paths)**  
    - Manter REPO_ROOT = raiz do repositório.  
@@ -95,7 +95,7 @@ Ficam na raiz: `.github/`, `.dockerignore`, `.env.example`, `docker-compose.yml`
    - Terraform: `cd project/infra/aws` (ou `infra/aws` se infra permanecer acessível a partir da raiz; como infra vai para project/, usar `project/infra/aws`).
 
 5. **.dockerignore**  
-   - Incluir apenas o necessário para o build do agents-backend (applications/agents, applications/contracts, applications/orchestrator).  
+   - Incluir apenas o necessário para o build do agents (applications/agents, applications/contracts, applications/orchestrator).  
    - Excluir project/ e demais pastas não usadas no build.
 
 6. **Links em Markdown**  
@@ -114,8 +114,8 @@ Ficam na raiz: `.github/`, `.dockerignore`, `.env.example`, `docker-compose.yml`
 ### Docker e deploy
 
 - [x] Atualizar `applications/orchestrator/agents/Dockerfile`: COPY de `applications/agents/`, `applications/contracts/`, `applications/orchestrator/`; remover `COPY docs/`.
-- [x] Atualizar `docker-compose.yml`: context api → `./applications/services/api-node`, genesis-web → `./applications/apps/genesis-web`, agents-backend dockerfile → `applications/orchestrator/agents/Dockerfile`.
-- [x] Atualizar `.dockerignore`: incluir apenas conteúdo de `applications/` necessário ao agents-backend; excluir `project/`, `applications/apps/`, `applications/services/`.
+- [x] Atualizar `docker-compose.yml`: context api → `./applications/services/api-node`, genesis-web → `./applications/apps/genesis-web`, agents dockerfile → `applications/orchestrator/agents/Dockerfile`.
+- [x] Atualizar `.dockerignore`: incluir apenas conteúdo de `applications/` necessário ao agents; excluir `project/`, `applications/apps/`, `applications/services/`.
 
 ### Python (orchestrator e agentes)
 

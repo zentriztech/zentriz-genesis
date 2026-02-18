@@ -80,7 +80,7 @@ docker compose down
 |------------------|-------|-----------|
 | api              | 3000  | API do produto (Voucher) |
 | genesis-web      | 3001  | Portal web (genesis.zentriz.com.br) — React, Next.js, MUI, MobX |
-| agents-backend   | 8000  | Agentes da stack Backend (CTO, PM, Monitor, Dev, QA, DevOps Docker) — LLM |
+| agents           | 8000  | Agentes (Engineer, CTO, PM, Monitor, Dev, QA, DevOps; futuramente Web, Mobile) — LLM |
 | postgres         | 5432  | PostgreSQL (fonte de verdade) |
 | redis            | 6379  | Cache / sessões |
 
@@ -89,7 +89,7 @@ Variáveis de ambiente vêm do [.env](../../.env) na raiz (copie de [.env.exampl
 ### Conceitos do ambiente local
 
 - **Quem inicia o fluxo:** o **CTO** inicia a orquestração. O [runner](../../applications/orchestrator/runner.py) executa o fluxo spec → CTO (Charter) → PM Backend (backlog). Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
-- **Serviço agents-backend:** um único serviço Docker ([agents-backend](../docker-compose.yml)) expõe **todos os seis agentes** da stack Backend na mesma instância (CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker). Endpoints HTTP em [orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../../applications/orchestrator/agents/README.md).
+- **Serviço agents:** um único serviço Docker ([agents](../docker-compose.yml)) expõe **todos os agentes** (Engineer, CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker; futuramente Web, Mobile) na mesma instância. Endpoints HTTP em [orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../../applications/orchestrator/agents/README.md).
 - **Nomes dos containers (ex.: postgres-1):** o Docker Compose nomeia cada container como `{project}-{service}-{réplica}`. O sufixo `-1` é o índice da réplica (primeira instância). Com múltiplas réplicas (ex.: `docker compose up -d --scale api=3`) surgiriam api-1, api-2, api-3.
 
 ### Runner do orquestrador (CLI)

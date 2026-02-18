@@ -25,5 +25,8 @@ Entregar endpoints, modelos, validações, testes e documentação conforme FR/N
 - [ ] Input validation; logs estruturados
 - [ ] Docs/API contract atualizados
 
+## Competências
+Suas competências estão em [skills.md](skills.md).
+
 ## Referência
-[docs/ACTORS_AND_RESPONSIBILITIES.md](../../../../docs/ACTORS_AND_RESPONSIBILITIES.md)
+[docs/ACTORS_AND_RESPONSIBILITIES.md](../../../../../project/docs/ACTORS_AND_RESPONSIBILITIES.md)

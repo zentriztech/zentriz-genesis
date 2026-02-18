@@ -64,6 +64,21 @@ CREATE TABLE IF NOT EXISTS project_spec_files (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Log de diálogo entre agentes (linguagem humana para exibição no Genesis-Web)
+CREATE TABLE IF NOT EXISTS project_dialogue (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  from_agent TEXT NOT NULL,
+  to_agent   TEXT NOT NULL,
+  event_type TEXT,
+  summary_human TEXT NOT NULL,
+  request_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_dialogue_project ON project_dialogue(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_dialogue_created ON project_dialogue(project_id, created_at);
+
 CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_projects_created_by ON projects(created_by);
 CREATE INDEX IF NOT EXISTS idx_project_spec_files_project ON project_spec_files(project_id);

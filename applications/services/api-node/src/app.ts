@@ -8,6 +8,7 @@ import { specRoutes } from "./routes/specs.js";
 import { tenantRoutes } from "./routes/tenants.js";
 import { userRoutes } from "./routes/users.js";
 import { signupRoutes } from "./routes/signup.js";
+import { dialogueRoutes } from "./routes/dialogue.js";
 
 export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? true });
@@ -41,6 +42,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(specRoutes);
   await app.register(tenantRoutes);
   await app.register(userRoutes);
+  await app.register(dialogueRoutes);
 
   return app;
 }

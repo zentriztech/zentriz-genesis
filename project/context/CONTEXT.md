@@ -40,7 +40,7 @@
 |----------------|-------|-----------|
 | api            | 3000  | API Node (Fastify, Postgres, auth, projects, specs, users, tenants) |
 | genesis-web    | 3001  | Portal Next.js + MUI + MobX |
-| agents-backend | 8000  | Agentes (CTO, PM, Dev, QA, DevOps, Monitor) — LLM |
+| agents | 8000  | Agentes (Engineer, CTO, PM, Dev, QA, DevOps, Monitor; futuramente Web, Mobile) — LLM |
 | postgres       | 5432  | PostgreSQL |
 | redis          | 6379  | Cache / sessões |
 

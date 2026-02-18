@@ -18,8 +18,9 @@ import Schedule from "@mui/icons-material/Schedule";
 import CalendarToday from "@mui/icons-material/CalendarToday";
 import ArrowBack from "@mui/icons-material/ArrowBack";
 import { projectsStore } from "@/stores/projectsStore";
+import { ProjectDialogue } from "@/components/ProjectDialogue";
 
-const STEPS = ["Spec enviada", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
+const STEPS = ["Spec enviada", "Engineer (proposta)", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
 
 function formatDateTime(iso: string) {
   return new Date(iso).toLocaleString("pt-BR", {
@@ -184,6 +185,16 @@ function ProjectDetailPageInner() {
           </CardContent>
         </MotionCard>
       )}
+
+      <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
+        <Typography variant="h6" gutterBottom fontWeight={600}>
+          Diálogo da equipe
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          O que os agentes estão fazendo (atualização automática).
+        </Typography>
+        <ProjectDialogue projectId={id} pollIntervalMs={10000} />
+      </MotionCard>
 
       <Box sx={{ mt: 3 }}>
         <Button variant="outlined" disabled size="small" sx={{ mr: 1 }}>

@@ -34,5 +34,8 @@ Gerente de projeto da stack **Backend**. Cria backlog por FR/NFR, **contrata** o
 - Backend Node: [contracts/checklists/backend_node_serverless_checklist.md](../../../contracts/checklists/backend_node_serverless_checklist.md)
 - Backend Python: [contracts/checklists/backend_python_serverless_checklist.md](../../../contracts/checklists/backend_python_serverless_checklist.md)
 
+## Competências
+Suas competências estão em [skills.md](skills.md).
+
 ## Referência
-[docs/ACTORS_AND_RESPONSIBILITIES.md](../../../docs/ACTORS_AND_RESPONSIBILITIES.md)
+[docs/ACTORS_AND_RESPONSIBILITIES.md](../../../../project/docs/ACTORS_AND_RESPONSIBILITIES.md)

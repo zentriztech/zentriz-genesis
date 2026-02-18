@@ -68,7 +68,7 @@
 | [PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md) | Telas, roles, fluxo, planos. |
 | [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Stack (React+Next, MUI), domínio, URLs, CQRS. |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Deploy local, script deploy-docker.sh. |
-| [docker-compose.yml](../../docker-compose.yml) | Serviços existentes (api, postgres, redis, agents-backend). |
+| [docker-compose.yml](../../docker-compose.yml) | Serviços existentes (api, postgres, redis, agents). |
 
 ---
 
@@ -81,7 +81,7 @@
 - [x] Telas tenant: gestão usuários, gestão projetos, plano e uso.
 - [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano.
 - [x] genesis-web no [docker-compose.yml](../../docker-compose.yml); [Dockerfile](../../applications/apps/genesis-web/Dockerfile) e [.dockerignore](../../applications/apps/genesis-web/.dockerignore).
-- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents-backend).
+- [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents).
 - [x] Integração com API real (auth, projetos, upload de spec); usuários padrão documentados em [services/api-node/README.md](../../applications/services/api-node/README.md) e [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
 
 ---

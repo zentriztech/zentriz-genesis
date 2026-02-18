@@ -40,6 +40,8 @@
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
 | [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor→PM→CTO |
+| **[docs/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)** | Plano: Engineer, novo fluxo CTO↔Engineer, PMs via CTO, logs em linguagem humana, skills por agente, Genesis-Web dinâmico |
+| [docs/IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) | Resumo do que foi implementado: Engineer, diálogo, skills, serviço agents, projetos de exemplo |
 | [docs/TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) | Estados e transições |
 | [orchestrator/events/schemas/](../orchestrator/events/schemas/) | Schemas JSON dos eventos |
 

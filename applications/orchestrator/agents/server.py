@@ -20,6 +20,7 @@ from .runtime import run_agent
 from .pm_backend import SYSTEM_PROMPT_PATH as PM_SYSTEM_PROMPT
 from .monitor_backend import SYSTEM_PROMPT_PATH as MONITOR_SYSTEM_PROMPT
 from .cto_agent import CTO_SYSTEM_PROMPT_PATH
+from .engineer_agent import ENGINEER_SYSTEM_PROMPT_PATH
 from .dev_backend import SYSTEM_PROMPT_PATH as DEV_BACKEND_SYSTEM_PROMPT
 from .qa_backend import SYSTEM_PROMPT_PATH as QA_BACKEND_SYSTEM_PROMPT
 from .devops_docker import SYSTEM_PROMPT_PATH as DEVOPS_DOCKER_SYSTEM_PROMPT
@@ -28,10 +29,11 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 
-# Endpoints de agentes: POST /invoke (PM), /invoke/cto, /invoke/monitor, /invoke/dev-backend, /invoke/qa-backend, /invoke/devops-docker
+# Endpoints de agentes: POST /invoke (PM), /invoke/cto, /invoke/engineer, /invoke/monitor, ...
 AGENT_ENDPOINTS = [
     "POST /invoke",
     "POST /invoke/cto",
+    "POST /invoke/engineer",
     "POST /invoke/monitor",
     "POST /invoke/dev-backend",
     "POST /invoke/qa-backend",
@@ -66,6 +68,26 @@ def invoke_pm_backend(body: dict):
             system_prompt_path=PM_SYSTEM_PROMPT,
             message=message,
             role="PM_BACKEND",
+        )
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/invoke/engineer")
+def invoke_engineer(body: dict):
+    """
+    Invoca o agente Engineer. Body = message_envelope (spec_ref, spec_content, context, constraints).
+    Saída: proposta técnica (stacks/equipes, dependências) para o CTO usar no Charter e contratação de PM(s).
+    """
+    try:
+        message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
+        response = run_agent(
+            system_prompt_path=ENGINEER_SYSTEM_PROMPT_PATH,
+            message=message,
+            role="ENGINEER",
         )
         return response
     except ValueError as e:
