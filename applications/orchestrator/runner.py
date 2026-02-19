@@ -1,6 +1,6 @@
 """
-Runner do orquestrador: spec -> Engineer -> CTO (Charter) -> PM Backend (backlog).
-Quando API e PROJECT_ID estão definidos: após PM Backend faz seed de tarefas e
+Runner do orquestrador: spec -> Engineer -> CTO (Charter) -> PM (backlog).
+Quando API e PROJECT_ID estão definidos: após PM faz seed de tarefas e
 entra no Monitor Loop (Fase 2), que aciona Dev/QA/DevOps conforme estado das tasks
 até o usuário aceitar o projeto (POST /accept) ou parar (SIGTERM/stopped).
 Persiste estado em orchestrator/state/ e emite eventos conforme schemas.
@@ -116,7 +116,7 @@ def call_cto(spec_ref: str, request_id: str, engineer_proposal: str = "") -> dic
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
-def call_pm_backend(spec_ref: str, charter_summary: str, request_id: str) -> dict:
+def call_pm(spec_ref: str, charter_summary: str, request_id: str) -> dict:
     message = {
         "request_id": request_id,
         "input": {
@@ -129,13 +129,13 @@ def call_pm_backend(spec_ref: str, charter_summary: str, request_id: str) -> dic
     }
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
-        return run_agent_http("pm_backend", message)
+        return run_agent_http("pm", message)
     from orchestrator.agents.runtime import run_agent
     pm_prompt = _agents_root() / "pm" / "backend" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=pm_prompt, message=message, role="PM_BACKEND")
+    return run_agent(system_prompt_path=pm_prompt, message=message, role="PM")
 
 
-def call_dev_backend(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
+def call_dev(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
     message = {
         "request_id": request_id,
         "input": {
@@ -148,13 +148,13 @@ def call_dev_backend(spec_ref: str, charter_summary: str, backlog_summary: str, 
     }
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
-        return run_agent_http("dev_backend", message)
+        return run_agent_http("dev", message)
     from orchestrator.agents.runtime import run_agent
     dev_prompt = _agents_root() / "dev" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV_BACKEND")
+    return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV")
 
 
-def call_qa_backend(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, request_id: str) -> dict:
+def call_qa(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, request_id: str) -> dict:
     message = {
         "request_id": request_id,
         "input": {
@@ -162,7 +162,7 @@ def call_qa_backend(spec_ref: str, charter_summary: str, backlog_summary: str, d
             "context": {
                 "charter_summary": charter_summary,
                 "backlog_summary": backlog_summary,
-                "dev_backend_summary": dev_summary,
+                "dev_summary": dev_summary,
             },
             "task": {},
             "constraints": {},
@@ -171,13 +171,13 @@ def call_qa_backend(spec_ref: str, charter_summary: str, backlog_summary: str, d
     }
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
-        return run_agent_http("qa_backend", message)
+        return run_agent_http("qa", message)
     from orchestrator.agents.runtime import run_agent
     qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=qa_prompt, message=message, role="QA_BACKEND")
+    return run_agent(system_prompt_path=qa_prompt, message=message, role="QA")
 
 
-def call_monitor_backend(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, qa_summary: str, request_id: str) -> dict:
+def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, qa_summary: str, request_id: str) -> dict:
     message = {
         "request_id": request_id,
         "input": {
@@ -185,8 +185,8 @@ def call_monitor_backend(spec_ref: str, charter_summary: str, backlog_summary: s
             "context": {
                 "charter_summary": charter_summary,
                 "backlog_summary": backlog_summary,
-                "dev_backend_summary": dev_summary,
-                "qa_backend_summary": qa_summary,
+                "dev_summary": dev_summary,
+                "qa_summary": qa_summary,
             },
             "task": {},
             "constraints": {},
@@ -195,13 +195,13 @@ def call_monitor_backend(spec_ref: str, charter_summary: str, backlog_summary: s
     }
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
-        return run_agent_http("monitor_backend", message)
+        return run_agent_http("monitor", message)
     from orchestrator.agents.runtime import run_agent
     monitor_prompt = _agents_root() / "monitor" / "backend" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=monitor_prompt, message=message, role="MONITOR_BACKEND")
+    return run_agent(system_prompt_path=monitor_prompt, message=message, role="MONITOR")
 
 
-def call_devops_docker(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
+def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
     message = {
         "request_id": request_id,
         "input": {
@@ -214,10 +214,10 @@ def call_devops_docker(spec_ref: str, charter_summary: str, backlog_summary: str
     }
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
-        return run_agent_http("devops_docker", message)
+        return run_agent_http("devops", message)
     from orchestrator.agents.runtime import run_agent
     devops_prompt = _agents_root() / "devops" / "docker" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS_DOCKER")
+    return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS")
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +272,23 @@ def _post_step(step_message: str, request_id: str) -> None:
     """Registra um passo no log do portal. Mensagem deve ser em linguagem humana."""
     logger.info("[Pipeline] %s", step_message)
     _post_dialogue("system", "system", "step", step_message, request_id)
+
+
+def _post_agent_working(agent_key: str, activity_message: str, request_id: str) -> None:
+    """Registra que um agente está em execução (LLM processando). Portal pode exibir loading no passo correspondente."""
+    logger.info("[Pipeline] %s", activity_message)
+    _post_dialogue(agent_key, "system", "agent_working", activity_message, request_id)
+
+
+def _is_qa_pass(qa_response: dict) -> bool:
+    """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM)."""
+    status = (qa_response.get("status") or "").strip().lower()
+    summary = (qa_response.get("summary") or "").lower()
+    if any(k in status for k in ("pass", "ok", "aprovado", "success", "done")):
+        return True
+    if any(k in summary for k in ("aprovado", "passou", "ok", "sem problemas", "approved")):
+        return True
+    return False
 
 
 def _post_error(message: str, request_id: str, exc: BaseException | None = None) -> None:
@@ -420,6 +437,8 @@ def _run_monitor_loop(
     qa_summary = ""
     devops_done = False
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
+    max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
+    qa_fail_count: dict[str, int] = {}
     while True:
         if _shutdown_requested:
             _post_step("Monitor Loop encerrado (sinal recebido).", request_id)
@@ -440,25 +459,44 @@ def _run_monitor_loop(
         if need_qa and waiting_review:
             task = waiting_review[0]
             task_id = task.get("taskId") or task.get("task_id")
-            _post_step("O Monitor acionou o QA Backend para revisar a tarefa.", request_id)
+            _post_step("O Monitor acionou o QA para revisar a tarefa.", request_id)
+            _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
             try:
-                qa_response = call_qa_backend(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
+                qa_response = call_qa(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
                 qa_summary = qa_response.get("summary", "")
                 qa_status = qa_response.get("status", "?")
                 _post_dialogue(
-                    "dev_backend", "qa_backend", "qa.review",
-                    _get_summary_human("qa.review", "qa_backend", "monitor_backend", qa_summary[:200]),
+                    "dev", "qa", "qa.review",
+                    _get_summary_human("qa.review", "qa", "monitor", qa_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "qa_backend", "report", qa_summary, title="QA Backend report")
-                new_status = "QA_PASS" if (qa_status and "pass" in str(qa_status).lower()) else "QA_FAIL"
-                _update_task(project_id, task_id, status=new_status)
-                if new_status == "QA_PASS":
+                    storage.write_doc(project_id, "qa", "report", qa_summary, title="QA report")
+                passed = _is_qa_pass(qa_response)
+                if passed:
+                    new_status = "QA_PASS"
+                    _update_task(project_id, task_id, status=new_status)
                     _update_task(project_id, task_id, status="DONE")
-                _post_step(f"QA Backend concluiu. Status: {qa_status}. Task atualizada para {new_status}.", request_id)
+                    qa_fail_count[task_id] = 0
+                    _post_step(f"QA concluiu. Status: {qa_status}. Task aprovada (DONE).", request_id)
+                else:
+                    current_fails = qa_fail_count.get(task_id, 0) + 1
+                    qa_fail_count[task_id] = current_fails
+                    if current_fails >= max_qa_rework:
+                        _update_task(project_id, task_id, status="DONE")
+                        _post_step(
+                            f"QA reportou QA_FAIL (reatempto {current_fails}/{max_qa_rework}). "
+                            "Máximo de reworks atingido; tarefa marcada como DONE.",
+                            request_id,
+                        )
+                    else:
+                        _update_task(project_id, task_id, status="QA_FAIL")
+                        _post_step(
+                            f"QA concluiu. Status: {qa_status}. Task em QA_FAIL (reatempto {current_fails}/{max_qa_rework}); Dev será acionado para rework.",
+                            request_id,
+                        )
             except Exception as e:
-                logger.exception("[Monitor Loop] QA Backend falhou")
+                logger.exception("[Monitor Loop] QA falhou")
                 _post_error(str(e), request_id, e)
             time.sleep(2)
             continue
@@ -471,48 +509,50 @@ def _run_monitor_loop(
             if dev_task:
                 task_id = dev_task.get("taskId") or dev_task.get("task_id")
                 _update_task(project_id, task_id, status="IN_PROGRESS")
-                _post_step("O Monitor acionou o Dev Backend para implementar ou rework.", request_id)
+                _post_step("O Monitor acionou o Dev para implementar ou rework.", request_id)
+                _post_agent_working("dev", "O Dev está implementando ou corrigindo a tarefa.", request_id)
                 try:
-                    dev_response = call_dev_backend(spec_ref, charter_summary, backlog_summary, request_id)
+                    dev_response = call_dev(spec_ref, charter_summary, backlog_summary, request_id)
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
                     _post_dialogue(
-                        "pm_backend", "dev_backend", "task.assigned",
-                        _get_summary_human("task.assigned", "pm_backend", "dev_backend", backlog_summary[:200]),
+                        "pm", "dev", "task.assigned",
+                        _get_summary_human("task.assigned", "pm", "dev", backlog_summary[:200]),
                         request_id,
                     )
                     _post_dialogue(
-                        "dev_backend", "qa_backend", "task.completed",
-                        _get_summary_human("task.completed", "dev_backend", "qa_backend", dev_summary[:200]),
+                        "dev", "qa", "task.completed",
+                        _get_summary_human("task.completed", "dev", "qa", dev_summary[:200]),
                         request_id,
                     )
                     if project_id and storage and storage.is_enabled():
-                        storage.write_doc(project_id, "dev_backend", "implementation", dev_summary, title="Dev Backend implementation")
+                        storage.write_doc(project_id, "dev", "implementation", dev_summary, title="Dev implementation")
                     _update_task(project_id, task_id, status="WAITING_REVIEW")
-                    _post_step(f"Dev Backend concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
+                    _post_step(f"Dev concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
                 except Exception as e:
-                    logger.exception("[Monitor Loop] Dev Backend falhou")
+                    logger.exception("[Monitor Loop] Dev falhou")
                     _post_error(str(e), request_id, e)
                     _update_task(project_id, task_id, status="ASSIGNED")
                 time.sleep(2)
                 continue
 
         if all_done and not devops_done:
-            _post_step("O Monitor acionou o DevOps Docker para provisionamento.", request_id)
+            _post_step("O Monitor acionou o DevOps para provisionamento.", request_id)
+            _post_agent_working("devops", "O DevOps está gerando Dockerfile e artefatos de infraestrutura.", request_id)
             try:
-                devops_response = call_devops_docker(spec_ref, charter_summary, backlog_summary, request_id)
+                devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
                 devops_summary = devops_response.get("summary", "")
                 _post_dialogue(
-                    "monitor_backend", "devops_docker", "devops.deploy",
-                    _get_summary_human("devops.deploy", "devops_docker", "cto", devops_summary[:200]),
+                    "monitor", "devops", "devops.deploy",
+                    _get_summary_human("devops.deploy", "devops", "cto", devops_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "devops_docker", "summary", devops_summary, title="DevOps Docker summary")
+                    storage.write_doc(project_id, "devops", "summary", devops_summary, title="DevOps summary")
                 devops_done = True
-                _post_step("DevOps Docker concluiu. Aguardando aceite do usuário ou parada.", request_id)
+                _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
             except Exception as e:
-                logger.exception("[Monitor Loop] DevOps Docker falhou")
+                logger.exception("[Monitor Loop] DevOps falhou")
                 _post_error(str(e), request_id, e)
             time.sleep(2)
             continue
@@ -525,7 +565,7 @@ def _run_monitor_loop(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Runner: spec -> Engineer -> CTO -> PM Backend -> backlog")
+    parser = argparse.ArgumentParser(description="Runner: spec -> Engineer -> CTO -> PM -> backlog")
     default_spec = "project/spec/PRODUCT_SPEC.md" if (REPO_ROOT / "project" / "spec" / "PRODUCT_SPEC.md").exists() else "spec/PRODUCT_SPEC.md"
     parser.add_argument("--spec", "-s", default=None, help="Caminho relativo ao repo para o spec (FR/NFR)")
     parser.add_argument("--spec-file", "--spec-path", dest="spec_file", metavar="PATH", default=None, help="Caminho absoluto do arquivo de spec (ex.: uploads/<projectId>/arquivo.md)")
@@ -549,6 +589,16 @@ def main() -> int:
     request_id = f"runner-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     project_id = _project_id()
     storage = _project_storage()
+    if storage and storage.is_enabled():
+        logger.info(
+            "[Pipeline] Armazenamento por projeto ativo: PROJECT_FILES_ROOT=%s (docs e project em <root>/<project_id>/)",
+            os.environ.get("PROJECT_FILES_ROOT", ""),
+        )
+    else:
+        logger.info(
+            "[Pipeline] Armazenamento por projeto desativado (PROJECT_FILES_ROOT não definido). "
+            "Para gravar artefatos em disco, defina PROJECT_FILES_ROOT e use volume/bind mount no runner."
+        )
 
     logger.info("[Pipeline] Lendo spec: %s", spec_ref)
     spec_content = load_spec(spec_path)
@@ -571,6 +621,7 @@ def main() -> int:
             "as squads técnicas, equipes necessárias e dependências do projeto.",
             request_id,
         )
+        _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
         logger.info("[Pipeline] Chamando agente Engineer...")
         engineer_response = call_engineer(spec_ref, spec_content, request_id)
         engineer_summary = engineer_response.get("summary", "")
@@ -603,6 +654,7 @@ def main() -> int:
             "definindo escopo, prioridades e a estrutura organizacional.",
             request_id,
         )
+        _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
         logger.info("[Pipeline] Chamando agente CTO...")
         cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary)
         charter_summary = cto_response.get("summary", "")
@@ -611,7 +663,7 @@ def main() -> int:
         logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
 
         _post_step(
-            f"O CTO finalizou o Charter do projeto. Agora será repassado ao PM Backend "
+            f"O CTO finalizou o Charter do projeto. Agora será repassado ao PM "
             f"para a geração do backlog. Status: {cto_status}.",
             request_id,
         )
@@ -635,42 +687,43 @@ def main() -> int:
 
         emit_event("project.created", {"spec_ref": spec_ref, "constraints": {}, "engineer_summary": engineer_summary[:300]}, request_id)
         _post_dialogue(
-            "cto", "pm_backend", "project.created",
-            _get_summary_human("project.created", "cto", "pm_backend", charter_summary[:300]),
+            "cto", "pm", "project.created",
+            _get_summary_human("project.created", "cto", "pm", charter_summary[:300]),
             request_id,
         )
 
-        # ── Passo 3: PM Backend ──────────────────────────────────────
+        # ── Passo 3: PM ───────────────────────────────────────────────
         _post_step(
-            "O PM Backend recebeu o Charter e está gerando o backlog completo do módulo, "
+            "O PM recebeu o Charter e está gerando o backlog completo do módulo, "
             "com tarefas, prioridades e critérios de aceitação.",
             request_id,
         )
-        logger.info("[Pipeline] Chamando agente PM Backend...")
-        pm_response = call_pm_backend(spec_ref, charter_summary, request_id)
+        _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
+        logger.info("[Pipeline] Chamando agente PM...")
+        pm_response = call_pm(spec_ref, charter_summary, request_id)
         backlog_summary = pm_response.get("summary", "")
         backlog_artifacts = pm_response.get("artifacts", [])
         pm_status = pm_response.get("status", "?")
-        logger.info("[Pipeline] PM Backend respondeu (status: %s)", pm_status)
+        logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
 
         _post_step(
-            f"O PM Backend concluiu a geração do backlog. O módulo está planejado "
+            f"O PM concluiu a geração do backlog. O módulo está planejado "
             f"com tarefas e prioridades definidas. Status: {pm_status}.",
             request_id,
         )
 
         emit_event("module.planned", {"spec_ref": spec_ref, "backlog_summary": backlog_summary[:200]}, request_id)
         _post_dialogue(
-            "pm_backend", "cto", "module.planned",
-            _get_summary_human("module.planned", "pm_backend", "cto", backlog_summary[:200]),
+            "pm", "cto", "module.planned",
+            _get_summary_human("module.planned", "pm", "cto", backlog_summary[:200]),
             request_id,
         )
         if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "pm_backend", "backlog", backlog_summary, title="Backlog Backend")
+            storage.write_doc(project_id, "pm", "backlog", backlog_summary, title="Backlog")
             for i, art in enumerate(backlog_artifacts):
                 if isinstance(art, dict) and art.get("content"):
                     storage.write_doc(
-                        project_id, "pm_backend", f"artifact_{i}", art.get("content", ""),
+                        project_id, "pm", f"artifact_{i}", art.get("content", ""),
                         title=art.get("purpose", f"Artifact {i}"),
                     )
 
@@ -682,6 +735,7 @@ def main() -> int:
             )
             if not _seed_tasks(project_id):
                 _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
+                _patch_project({"status": "failed"})
             else:
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id)
             persist_state(
@@ -707,7 +761,7 @@ def main() -> int:
             print(json.dumps(out, indent=2))
             return 0
 
-        # ── Passo 4: Dev Backend (fluxo sequencial quando sem API/PROJECT_ID) ──
+        # ── Passo 4: Dev (fluxo sequencial quando sem API/PROJECT_ID) ──
         run_full_stack = os.environ.get("PIPELINE_FULL_STACK", "true").strip().lower() in ("1", "true", "yes")
         dev_status = pm_status
         qa_status = "-"
@@ -720,121 +774,125 @@ def main() -> int:
 
         if run_full_stack:
             _post_step(
-                "O Dev Backend está recebendo o backlog e o charter para gerar a implementação e evidências.",
+                "O Dev está recebendo o backlog e o charter para gerar a implementação e evidências.",
                 request_id,
             )
-            logger.info("[Pipeline] Chamando agente Dev Backend...")
+            _post_agent_working("dev", "O Dev está gerando a implementação e evidências.", request_id)
+            logger.info("[Pipeline] Chamando agente Dev...")
             try:
-                dev_response = call_dev_backend(spec_ref, charter_summary, backlog_summary, request_id)
+                dev_response = call_dev(spec_ref, charter_summary, backlog_summary, request_id)
                 dev_summary = dev_response.get("summary", "")
                 dev_status = dev_response.get("status", "?")
                 dev_artifacts = dev_response.get("artifacts", [])
-                logger.info("[Pipeline] Dev Backend respondeu (status: %s)", dev_status)
+                logger.info("[Pipeline] Dev respondeu (status: %s)", dev_status)
                 _post_step(
-                    f"O Dev Backend concluiu. Status: {dev_status}. Resumo: {dev_summary[:150]}...",
+                    f"O Dev concluiu. Status: {dev_status}. Resumo: {dev_summary[:150]}...",
                     request_id,
                 )
                 _post_dialogue(
-                    "pm_backend", "dev_backend", "task.assigned",
-                    _get_summary_human("task.assigned", "pm_backend", "dev_backend", backlog_summary[:200]),
+                    "pm", "dev", "task.assigned",
+                    _get_summary_human("task.assigned", "pm", "dev", backlog_summary[:200]),
                     request_id,
                 )
                 _post_dialogue(
-                    "dev_backend", "qa_backend", "task.completed",
-                    _get_summary_human("task.completed", "dev_backend", "qa_backend", dev_summary[:200]),
+                    "dev", "qa", "task.completed",
+                    _get_summary_human("task.completed", "dev", "qa", dev_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "dev_backend", "implementation", dev_summary, title="Dev Backend implementation")
+                    storage.write_doc(project_id, "dev", "implementation", dev_summary, title="Dev implementation")
                     for i, art in enumerate(dev_artifacts):
                         if isinstance(art, dict) and art.get("content"):
-                            storage.write_doc(project_id, "dev_backend", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
+                            storage.write_doc(project_id, "dev", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
             except Exception as e:
-                logger.exception("[Pipeline] Dev Backend falhou")
+                logger.exception("[Pipeline] Dev falhou")
                 dev_status = "FAIL"
                 _post_error(str(e), request_id, e)
 
-            # ── Passo 5: QA Backend ─────────────────────────────────────
+            # ── Passo 5: QA ──────────────────────────────────────────────
             _post_step(
-                "O QA Backend está validando o trabalho do Dev e gerando relatório de qualidade.",
+                "O QA está validando o trabalho do Dev e gerando relatório de qualidade.",
                 request_id,
             )
-            logger.info("[Pipeline] Chamando agente QA Backend...")
+            _post_agent_working("qa", "O QA está validando artefatos e gerando relatório de qualidade.", request_id)
+            logger.info("[Pipeline] Chamando agente QA...")
             try:
-                qa_response = call_qa_backend(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
+                qa_response = call_qa(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
                 qa_summary = qa_response.get("summary", "")
                 qa_status = qa_response.get("status", "?")
                 qa_artifacts = qa_response.get("artifacts", [])
-                logger.info("[Pipeline] QA Backend respondeu (status: %s)", qa_status)
+                logger.info("[Pipeline] QA respondeu (status: %s)", qa_status)
                 _post_step(
-                    f"O QA Backend concluiu. Status: {qa_status}. Resumo: {qa_summary[:150]}...",
+                    f"O QA concluiu. Status: {qa_status}. Resumo: {qa_summary[:150]}...",
                     request_id,
                 )
                 _post_dialogue(
-                    "dev_backend", "qa_backend", "qa.review",
-                    _get_summary_human("qa.review", "qa_backend", "monitor_backend", qa_summary[:200]),
+                    "dev", "qa", "qa.review",
+                    _get_summary_human("qa.review", "qa", "monitor", qa_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "qa_backend", "report", qa_summary, title="QA Backend report")
+                    storage.write_doc(project_id, "qa", "report", qa_summary, title="QA report")
                     for i, art in enumerate(qa_artifacts):
                         if isinstance(art, dict) and art.get("content"):
-                            storage.write_doc(project_id, "qa_backend", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
+                            storage.write_doc(project_id, "qa", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
             except Exception as e:
-                logger.exception("[Pipeline] QA Backend falhou")
+                logger.exception("[Pipeline] QA falhou")
                 qa_status = "FAIL"
                 _post_error(str(e), request_id, e)
 
-            # ── Passo 6: Monitor Backend ───────────────────────────────
+            # ── Passo 6: Monitor ──────────────────────────────────────────
             _post_step(
-                "O Monitor Backend está consolidando o status e gerando o health do projeto.",
+                "O Monitor está consolidando o status e gerando o health do projeto.",
                 request_id,
             )
-            logger.info("[Pipeline] Chamando agente Monitor Backend...")
+            _post_agent_working("monitor", "O Monitor está consolidando o status e o health do projeto.", request_id)
+            logger.info("[Pipeline] Chamando agente Monitor...")
             try:
-                monitor_response = call_monitor_backend(spec_ref, charter_summary, backlog_summary, dev_summary, qa_summary, request_id)
+                monitor_response = call_monitor(spec_ref, charter_summary, backlog_summary, dev_summary, qa_summary, request_id)
                 monitor_summary = monitor_response.get("summary", "")
                 monitor_status = monitor_response.get("status", "?")
-                logger.info("[Pipeline] Monitor Backend respondeu (status: %s)", monitor_status)
+                logger.info("[Pipeline] Monitor respondeu (status: %s)", monitor_status)
                 _post_step(
-                    f"O Monitor Backend concluiu. Status: {monitor_status}.",
+                    f"O Monitor concluiu. Status: {monitor_status}.",
                     request_id,
                 )
                 _post_dialogue(
-                    "monitor_backend", "pm_backend", "monitor.health",
-                    _get_summary_human("monitor.health", "monitor_backend", "pm_backend", monitor_summary[:200]),
+                    "monitor", "pm", "monitor.health",
+                    _get_summary_human("monitor.health", "monitor", "pm", monitor_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "monitor_backend", "health", monitor_summary, title="Monitor Backend health")
+                    storage.write_doc(project_id, "monitor", "health", monitor_summary, title="Monitor health")
             except Exception as e:
-                logger.exception("[Pipeline] Monitor Backend falhou")
+                logger.exception("[Pipeline] Monitor falhou")
                 monitor_status = "FAIL"
                 _post_error(str(e), request_id, e)
 
-            # ── Passo 7: DevOps Docker ─────────────────────────────────
+            # ── Passo 7: DevOps ───────────────────────────────────────────
             _post_step(
-                "O DevOps Docker está gerando Dockerfile, docker-compose e artefatos de infraestrutura.",
+                "O DevOps está gerando Dockerfile, docker-compose e artefatos de infraestrutura.",
                 request_id,
             )
-            logger.info("[Pipeline] Chamando agente DevOps Docker...")
+            _post_agent_working("devops", "O DevOps está gerando artefatos de infraestrutura.", request_id)
+            logger.info("[Pipeline] Chamando agente DevOps...")
             try:
-                devops_response = call_devops_docker(spec_ref, charter_summary, backlog_summary, request_id)
+                devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
                 devops_summary = devops_response.get("summary", "")
                 devops_status = devops_response.get("status", "?")
                 devops_artifacts = devops_response.get("artifacts", [])
-                logger.info("[Pipeline] DevOps Docker respondeu (status: %s)", devops_status)
+                logger.info("[Pipeline] DevOps respondeu (status: %s)", devops_status)
                 _post_step(
-                    f"O DevOps Docker concluiu. Status: {devops_status}.",
+                    f"O DevOps concluiu. Status: {devops_status}.",
                     request_id,
                 )
                 _post_dialogue(
-                    "monitor_backend", "devops_docker", "devops.deploy",
-                    _get_summary_human("devops.deploy", "devops_docker", "cto", devops_summary[:200]),
+                    "monitor", "devops", "devops.deploy",
+                    _get_summary_human("devops.deploy", "devops", "cto", devops_summary[:200]),
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "devops_docker", "summary", devops_summary, title="DevOps Docker summary")
+                    storage.write_doc(project_id, "devops", "summary", devops_summary, title="DevOps summary")
                     for i, art in enumerate(devops_artifacts):
                         if isinstance(art, dict):
                             content = art.get("content")
@@ -842,9 +900,9 @@ def main() -> int:
                             if content and path_key:
                                 storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
                             elif content:
-                                storage.write_doc(project_id, "devops_docker", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
+                                storage.write_doc(project_id, "devops", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
             except Exception as e:
-                logger.exception("[Pipeline] DevOps Docker falhou")
+                logger.exception("[Pipeline] DevOps falhou")
                 devops_status = "FAIL"
                 _post_error(str(e), request_id, e)
 
@@ -867,9 +925,9 @@ def main() -> int:
             "charter_summary": charter_summary,
             "backlog_summary": backlog_summary[:2000] if backlog_summary else None,
         })
-        pipeline_desc = "Engineer → CTO → PM Backend"
+        pipeline_desc = "Engineer → CTO → PM"
         if run_full_stack:
-            pipeline_desc += " → Dev Backend → QA Backend → Monitor Backend → DevOps Docker"
+            pipeline_desc += " → Dev → QA → Monitor → DevOps"
         _post_step(
             f"Pipeline concluído com sucesso! A especificação passou por {pipeline_desc}. "
             "Os documentos foram gerados e, quando configurado, salvos em PROJECT_FILES_ROOT.",

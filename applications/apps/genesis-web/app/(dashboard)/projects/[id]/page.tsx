@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { observer } from "mobx-react-lite";
 import { motion } from "framer-motion";
+import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
+import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
 import Stepper from "@mui/material/Stepper";
 import Step from "@mui/material/Step";
@@ -22,7 +24,7 @@ import Stop from "@mui/icons-material/Stop";
 import Replay from "@mui/icons-material/Replay";
 import CheckCircle from "@mui/icons-material/CheckCircle";
 import { projectsStore } from "@/stores/projectsStore";
-import { ProjectDialogue } from "@/components/ProjectDialogue";
+import { ProjectDialogue, type DialogueEntry } from "@/components/ProjectDialogue";
 import { apiPost } from "@/lib/api";
 
 const STEPS = ["Spec enviada", "Engineer (proposta)", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
@@ -37,6 +39,17 @@ const STATUSES_ALLOW_RUN = new Set([
   "failed",
 ]);
 const STATUS_RUNNING = "running";
+
+/** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
+function agentToStepIndex(fromAgent: string): number {
+  const a = (fromAgent || "").toLowerCase();
+  if (a === "engineer") return 1;
+  if (a === "cto") return 2;
+  if (a === "pm") return 3;
+  if (a === "dev" || a === "qa" || a === "monitor") return 4;
+  if (a === "devops") return 5;
+  return -1;
+}
 
 function formatDateTime(iso: string) {
   return new Date(iso).toLocaleString("pt-BR", {
@@ -81,7 +94,21 @@ function ProjectDetailPageInner() {
   const [runPipelineSuccess, setRunPipelineSuccess] = useState(false);
   const [acceptLoading, setAcceptLoading] = useState(false);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
+  const [workingMessage, setWorkingMessage] = useState<string | null>(null);
   const project = projectsStore.getById(id);
+
+  const handleDialogueEntriesLoaded = useCallback((entries: DialogueEntry[]) => {
+    const last = entries.length > 0 ? entries[entries.length - 1] : null;
+    if (last?.eventType === "agent_working") {
+      const step = agentToStepIndex(last.fromAgent);
+      setWorkingStepIndex(step >= 0 ? step : null);
+      setWorkingMessage(last.summaryHuman || null);
+    } else {
+      setWorkingStepIndex(null);
+      setWorkingMessage(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -177,9 +204,21 @@ function ProjectDetailPageInner() {
         Spec: {project.specRef} • Criado em {formatDateTime(project.createdAt)}
       </Typography>
 
+      {runPipelineError && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRunPipelineError(null)}>
+          {runPipelineError}
+        </Alert>
+      )}
+
       <Box sx={{ mb: 2, display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
         {project.status === STATUS_RUNNING && (
           <>
+            <Typography variant="body2" color="text.secondary" sx={{ flexBasis: "100%", mb: 0.5 }}>
+              O pipeline está em execução. Se o log abaixo não atualizar em 1–2 min, verifique os logs do runner:{" "}
+              <Box component="code" sx={{ fontSize: "0.85em", bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>
+                docker compose logs runner --tail=100
+              </Box>
+            </Typography>
             <Button
               variant="outlined"
               color="error"
@@ -217,8 +256,9 @@ function ProjectDetailPageInner() {
                 setRunPipelineSuccess(false);
                 setRunPipelineLoading(true);
                 try {
-                  await apiPost<{ ok: boolean; message?: string }>(`/api/projects/${id}/run`, {});
+                  const data = await apiPost<{ ok: boolean; message?: string; status?: string }>(`/api/projects/${id}/run`, {});
                   setRunPipelineSuccess(true);
+                  if (data?.status === "running") projectsStore.setProjectStatus(id, "running");
                   await projectsStore.loadProject(id);
                 } catch (err) {
                   setRunPipelineError(err instanceof Error ? err.message : "Falha ao iniciar pipeline");
@@ -240,9 +280,7 @@ function ProjectDetailPageInner() {
             )}
           </>
         )}
-        {(project.status === "completed" || project.status === "running") &&
-          project.status !== "accepted" &&
-          project.status !== "stopped" && (
+        {(project.status === "completed" || project.status === "running") && (
             <Button
               variant="contained"
               color="success"
@@ -269,8 +307,7 @@ function ProjectDetailPageInner() {
               {acceptLoading ? "Aceitando…" : "Aceitar projeto"}
             </Button>
           )}
-        {(project.status === "completed" || project.status === "running") &&
-          project.status !== "accepted" && (
+        {(project.status === "completed" || project.status === "running") && (
             <Typography variant="body2" color="text.secondary">
               Ao aceitar, o pipeline será encerrado e o projeto marcado como aceito.
             </Typography>
@@ -320,12 +357,25 @@ function ProjectDetailPageInner() {
 
       <MotionCard variant="outlined" sx={{ p: 2, mb: 3 }} {...blockMotion}>
         <Stepper activeStep={stepIndex} orientation="horizontal" sx={{ flexWrap: "wrap" }}>
-          {STEPS.map((label) => (
+          {STEPS.map((label, idx) => (
             <Step key={label}>
-              <StepLabel>{label}</StepLabel>
+              <StepLabel>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <span>{label}</span>
+                  {workingStepIndex === idx && (
+                    <CircularProgress size={16} color="primary" sx={{ flexShrink: 0 }} />
+                  )}
+                </Stack>
+              </StepLabel>
             </Step>
           ))}
         </Stepper>
+        {workingMessage && workingStepIndex !== null && (
+          <Typography variant="body2" color="primary" sx={{ mt: 1.5, display: "flex", alignItems: "center", gap: 1 }}>
+            <CircularProgress size={16} color="primary" />
+            {workingMessage}
+          </Typography>
+        )}
       </MotionCard>
 
       {project.charterSummary && (
@@ -360,6 +410,7 @@ function ProjectDetailPageInner() {
         <ProjectDialogue
           projectId={id}
           pollIntervalMs={project.status === STATUS_RUNNING ? 5000 : 10000}
+          onEntriesLoaded={handleDialogueEntriesLoaded}
         />
       </MotionCard>
 

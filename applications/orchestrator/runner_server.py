@@ -69,6 +69,26 @@ def run(body: RunBody):
     if not spec_path:
         raise HTTPException(status_code=400, detail="Informe specPath ou specContent")
 
+    # Validar que o arquivo existe (evita runner falhar em silêncio ao ler a spec)
+    spec_file = Path(spec_path)
+    if not spec_file.is_file():
+        logger.error(
+            "[Runner] Arquivo de spec não encontrado: %s (projectId=%s). "
+            "Verifique se o volume de uploads está montado no runner (ex.: zentriz-genesis_uploads:/shared/uploads).",
+            spec_path,
+            body.projectId,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Arquivo de spec não encontrado no runner: {spec_path}. Confira o volume de uploads (API e runner devem compartilhar o mesmo).",
+        )
+
+    logger.info(
+        "[Runner] POST /run projectId=%s specPath=%s apiBaseUrl=%s",
+        body.projectId,
+        spec_path[:100] + ("..." if len(spec_path) > 100 else ""),
+        body.apiBaseUrl,
+    )
     env = {
         **os.environ,
         "API_BASE_URL": body.apiBaseUrl,

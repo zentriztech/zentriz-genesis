@@ -1,7 +1,6 @@
 """
-Agente Engineer — analisa spec e devolve proposta técnica (squads/equipes, dependências).
-Staff Engineer / Software Architect Full-Stack. Comunica-se apenas com o CTO.
-Uso: python -m orchestrator.agents.engineer_agent --input message.json
+Agente CTO — gera Charter e next_actions (ex.: call PM).
+Uso: python -m orchestrator.agents.cto --input message.json
 """
 import json
 import logging
@@ -11,8 +10,8 @@ from pathlib import Path
 
 from .runtime import run_agent
 
-_r = Path(__file__).resolve().parent.parent.parent
-ENGINEER_SYSTEM_PROMPT_PATH = _r / "agents" / "engineer" / "SYSTEM_PROMPT.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+CTO_SYSTEM_PROMPT_PATH = REPO_ROOT / "agents" / "cto" / "SYSTEM_PROMPT.md"
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -26,15 +25,15 @@ def main() -> int:
         logger.error("JSON inválido: %s", e)
         return 1
 
-    message.setdefault("request_id", "engineer-cli")
+    message.setdefault("request_id", "cto-cli")
     if "input" not in message:
         message["input"] = message.get("context", {})
 
-    logger.info("Chamando agente Engineer (SYSTEM_PROMPT: %s)", ENGINEER_SYSTEM_PROMPT_PATH)
+    logger.info("Chamando agente CTO (SYSTEM_PROMPT: %s)", CTO_SYSTEM_PROMPT_PATH)
     response = run_agent(
-        system_prompt_path=ENGINEER_SYSTEM_PROMPT_PATH,
+        system_prompt_path=CTO_SYSTEM_PROMPT_PATH,
         message=message,
-        role="ENGINEER",
+        role="CTO",
     )
     print(json.dumps(response, ensure_ascii=False, indent=2))
     return 0 if response.get("status") in ("OK", "NEEDS_INFO") else 1

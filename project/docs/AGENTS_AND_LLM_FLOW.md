@@ -48,7 +48,7 @@ Quando `API_BASE_URL` e `PROJECT_ID` não estão definidos (ex.: execução loca
 | 6     | Monitor Backend | POST /invoke/monitor | contexto do projeto                | Health / alertas        |
 | 7     | DevOps Docker | POST /invoke/devops-docker | charter + backlog + artefatos  | Dockerfile / compose    |
 
-Cada passo persiste no diálogo (project_dialogue) e, quando `PROJECT_FILES_ROOT` está definido, grava artefatos em `<project_id>/docs/` com criador (spec, engineer, cto, pm_backend, dev_backend, qa_backend, monitor_backend, devops_docker).
+Cada passo persiste no diálogo (project_dialogue) e, quando `PROJECT_FILES_ROOT` está definido, grava artefatos em `<project_id>/docs/` com criador (spec, engineer, cto, pm, dev, qa, monitor, devops).
 
 ---
 
@@ -58,7 +58,7 @@ Cada passo persiste no diálogo (project_dialogue) e, quando `PROJECT_FILES_ROOT
 |------------|-------------------------|-------------------|
 | Portal | genesis-web (Next.js) | UI: upload de spec, botão Iniciar/Parar, exibição do diálogo (passos e erros). |
 | API | api-node (Node/Fastify) | Autenticação, projetos, upload de spec, **POST /api/projects/:id/run** → chama runner; **GET /api/projects/:id/artifacts** → lista docs do projeto (manifest em PROJECT_FILES_ROOT). |
-| Runner | runner (Python) | Orquestração: lê spec, chama **engineer** → **cto** → **pm_backend** → (opcional) **dev_backend** → **qa_backend** → **monitor_backend** → **devops_docker**; persiste passos/erros no diálogo (POST na API) e documentos em disco por project_id. |
+| Runner | runner (Python) | Orquestração: lê spec, chama **engineer** → **cto** → **pm** → (opcional) **dev** → **qa** → **monitor** → **devops**; persiste passos/erros no diálogo (POST na API) e documentos em disco por project_id. |
 | Agentes | agents (Python/FastAPI) | Endpoints `/invoke/engineer`, `/invoke/cto`, `/invoke`, `/invoke/dev-backend`, `/invoke/qa-backend`, `/invoke/monitor`, `/invoke/devops-docker`. Chama **Claude** via `runtime.run_agent()` e devolve `response_envelope`. |
 | Runtime LLM | orchestrator/agents/runtime.py | `run_agent()` → Anthropic SDK → `client.messages.create(model=CLAUDE_MODEL, ...)`. Retry, extrai mensagem de erro. |
 | Diálogo | orchestrator/dialogue.py | Templates em português, POST no endpoint `/api/projects/:id/dialogue`. |

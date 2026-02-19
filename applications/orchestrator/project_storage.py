@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 # Criadores válidos (quem gerou o documento)
 CREATORS = frozenset({
-    "spec", "engineer", "cto", "pm_backend", "dev_backend", "qa_backend",
-    "monitor_backend", "devops_docker", "system",
+    "spec", "engineer", "cto", "pm", "dev", "qa", "monitor", "devops", "system",
+    # Legacy (for reading existing docs)
+    "pm_backend", "dev_backend", "qa_backend", "monitor_backend", "devops_docker",
 })
 
 MANIFEST_FILENAME = "manifest.json"

@@ -7,7 +7,7 @@
 ## 1. Engineer e fluxo CTO ↔ Engineer
 
 - **Agente Engineer** ([applications/agents/engineer/](../../applications/agents/engineer/)): SYSTEM_PROMPT e skills.md; analisa a spec e devolve proposta técnica (squads/equipes, dependências) ao CTO.
-- **Runner** ([applications/orchestrator/runner.py](../../applications/orchestrator/runner.py)): fluxo spec → **call_engineer** → eventos `cto.engineer.request` / `engineer.cto.response` → **call_cto** (com engineer_summary) → Charter → call_pm_backend → persist_state. Quando API e PROJECT_ID estão definidos: após PM Backend faz **seed de tarefas** e entra no **Monitor Loop** (Fase 2): lê projeto + tasks, decide próximo agente (Dev/QA/DevOps), invoca, atualiza task e diálogo; repete até status `accepted` ou `stopped` (ou SIGTERM). Usuário pode **aceitar o projeto** no portal (`POST /api/projects/:id/accept`) ou **parar** o pipeline; sem API/PROJECT_ID o runner segue o fluxo sequencial antigo.
+- **Runner** ([applications/orchestrator/runner.py](../../applications/orchestrator/runner.py)): fluxo spec → **call_engineer** → eventos `cto.engineer.request` / `engineer.cto.response` → **call_cto** (com engineer_summary) → Charter → call_pm → persist_state. Quando API e PROJECT_ID estão definidos: após PM faz **seed de tarefas** e entra no **Monitor Loop** (Fase 2): lê projeto + tasks, decide próximo agente (Dev/QA/DevOps), invoca, atualiza task e diálogo; repete até status `accepted` ou `stopped` (ou SIGTERM). Usuário pode **aceitar o projeto** no portal (`POST /api/projects/:id/accept`) ou **parar** o pipeline; sem API/PROJECT_ID o runner segue o fluxo sequencial antigo.
 - **Contrato** [engineer_stack_proposal](../../applications/contracts/engineer_stack_proposal.md): saída do Engineer (squads_teams, dependencies, recommendations).
 - **Serviço HTTP** ([applications/orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py)): endpoint `POST /invoke/engineer` no mesmo serviço que expõe CTO, PM, Monitor, Dev, QA, DevOps.
 
@@ -49,7 +49,7 @@
 
 - **Nome do serviço**: `agents-backend` → **`agents`** (container ex.: `zentriz-genesis-agents-1`), refletindo que o mesmo serviço expõe todas as squads (Backend hoje; Web/Mobile futuramente).
 - **Alterações**: [docker-compose.yml](../../docker-compose.yml), [deploy-docker.sh](../../deploy-docker.sh), [applications/orchestrator/agents/Dockerfile](../../applications/orchestrator/agents/Dockerfile), [.dockerignore](../../.dockerignore), documentação (DEPLOYMENT, README do orchestrator/agents, CONTEXT, PLAN_PORTAL_GENESIS, GENESIS_WEB_CONTEXT, PROJECT_STRUCTURE_AND_REFACTORING, PENDING_ACTIVITIES).
-- **Correção** no startup: `engineer_agent.py` — adicionado `import os` (NameError corrigido). **Dockerfile**: instalação de `curl` para o healthcheck.
+- **Correção** no startup: `engineer.py` (antes engineer_agent.py) — adicionado `import os` (NameError corrigido). **Dockerfile**: instalação de `curl` para o healthcheck.
 
 ---
 

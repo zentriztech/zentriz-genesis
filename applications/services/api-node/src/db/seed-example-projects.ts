@@ -96,27 +96,27 @@ async function main(): Promise<void> {
       t.setMinutes(t.getMinutes() + 2);
       add(projectDevId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (squads, equipes e dependências) ao CTO.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 3);
-      add(projectDevId, "cto", "pm_backend", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
+      add(projectDevId, "cto", "pm", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
-      add(projectDevId, "pm_backend", "cto", "module.planned", "O PM Backend gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
+      add(projectDevId, "pm", "cto", "module.planned", "O PM gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDevId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da squad: atribuída a tarefa T1 (API de listagem de vouchers) ao Dev Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm", "dev", "pm.stack.hire", "Contratação da squad: atribuída a tarefa T1 (API de listagem de vouchers) ao Dev.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDevId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da squad: atribuída a validação das tarefas da sprint ao QA Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm", "qa", "pm.stack.hire", "Contratação da squad: atribuída a validação das tarefas da sprint ao QA.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDevId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento do progresso e o acionamento do QA ao Monitor Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm", "monitor", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento do progresso e o acionamento do QA ao Monitor.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
-      add(projectDevId, "pm_backend", "dev_backend", "pm.task.assign", "Sprint 1: prioridade nas tasks T1 (API listagem) e T2 (endpoint de resgate); prazo até sexta.", new Date(t.getTime()));
+      add(projectDevId, "pm", "dev", "pm.task.assign", "Sprint 1: prioridade nas tasks T1 (API listagem) e T2 (endpoint de resgate); prazo até sexta.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 30);
-      add(projectDevId, "dev_backend", "pm_backend", "dev.task.done", "T1 concluída; evidências no repositório. Iniciando T2.", new Date(t.getTime()));
+      add(projectDevId, "dev", "pm", "dev.task.done", "T1 concluída; evidências no repositório. Iniciando T2.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDevId, "pm_backend", "monitor_backend", "pm.monitor.request", "Por favor acione o QA para validar a tarefa T1 (API de listagem).", new Date(t.getTime()));
+      add(projectDevId, "pm", "monitor", "pm.monitor.request", "Por favor acione o QA para validar a tarefa T1 (API de listagem).", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDevId, "monitor_backend", "qa_backend", "monitor.qa.request", "Validar tarefa T1 (API listagem) conforme critérios de aceite do backlog.", new Date(t.getTime()));
+      add(projectDevId, "monitor", "qa", "monitor.qa.request", "Validar tarefa T1 (API listagem) conforme critérios de aceite do backlog.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 15);
-      add(projectDevId, "qa_backend", "monitor_backend", "qa.result", "Validação T1: OK. Relatório anexado.", new Date(t.getTime()));
+      add(projectDevId, "qa", "monitor", "qa.result", "Validação T1: OK. Relatório anexado.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDevId, "monitor_backend", "pm_backend", "monitor.status", "QA aprovou T1. Dev segue em T2.", new Date(t.getTime()));
+      add(projectDevId, "monitor", "pm", "monitor.status", "QA aprovou T1. Dev segue em T2.", new Date(t.getTime()));
     }
 
     if (projectDoneId) {
@@ -125,31 +125,31 @@ async function main(): Promise<void> {
       t.setMinutes(t.getMinutes() + 2);
       add(projectDoneId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (squads, equipes e dependências) ao CTO.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 3);
-      add(projectDoneId, "cto", "pm_backend", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
+      add(projectDoneId, "cto", "pm", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 4);
-      add(projectDoneId, "pm_backend", "cto", "module.planned", "O PM Backend gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "cto", "module.planned", "O PM gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDoneId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da squad: atribuídas as tarefas de CRUD e validação ao Dev Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "dev", "pm.stack.hire", "Contratação da squad: atribuídas as tarefas de CRUD e validação ao Dev.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDoneId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da squad: atribuída a validação e testes ao QA Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "qa", "pm.stack.hire", "Contratação da squad: atribuída a validação e testes ao QA.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDoneId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento e o acionamento QA/DevOps ao Monitor Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "monitor", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento e o acionamento QA/DevOps ao Monitor.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 10);
-      add(projectDoneId, "pm_backend", "dev_backend", "pm.task.assign", "Sprint única: entregar CRUD completo e documentação da API.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "dev", "pm.task.assign", "Sprint única: entregar CRUD completo e documentação da API.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 45);
-      add(projectDoneId, "dev_backend", "pm_backend", "dev.task.done", "CRUD e testes de integração concluídos; documentação OpenAPI disponível.", new Date(t.getTime()));
+      add(projectDoneId, "dev", "pm", "dev.task.done", "CRUD e testes de integração concluídos; documentação OpenAPI disponível.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
-      add(projectDoneId, "pm_backend", "monitor_backend", "pm.monitor.request", "Acionar QA para validação final e depois DevOps para provisionamento.", new Date(t.getTime()));
+      add(projectDoneId, "pm", "monitor", "pm.monitor.request", "Acionar QA para validação final e depois DevOps para provisionamento.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 3);
-      add(projectDoneId, "monitor_backend", "qa_backend", "monitor.qa.request", "Validar fluxo completo (CRUD e critérios de aceite) e reportar resultado.", new Date(t.getTime()));
+      add(projectDoneId, "monitor", "qa", "monitor.qa.request", "Validar fluxo completo (CRUD e critérios de aceite) e reportar resultado.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 20);
-      add(projectDoneId, "qa_backend", "monitor_backend", "qa.result", "Validação final: OK. Todos os critérios atendidos.", new Date(t.getTime()));
+      add(projectDoneId, "qa", "monitor", "qa.result", "Validação final: OK. Todos os critérios atendidos.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDoneId, "monitor_backend", "pm_backend", "monitor.status", "QA aprovou. Acionando DevOps para deploy.", new Date(t.getTime()));
+      add(projectDoneId, "monitor", "pm", "monitor.status", "QA aprovou. Acionando DevOps para deploy.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 60);
-      add(projectDoneId, "devops_docker", "monitor_backend", "devops.deployed", "O DevOps Docker concluiu o provisionamento e informou o Monitor.", new Date(t.getTime()));
+      add(projectDoneId, "devops", "monitor", "devops.deployed", "O DevOps concluiu o provisionamento e informou o Monitor.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
-      add(projectDoneId, "monitor_backend", "pm_backend", "monitor.alert", "O Monitor informou ao PM que o pipeline foi concluído com sucesso.", new Date(t.getTime()));
+      add(projectDoneId, "monitor", "pm", "monitor.alert", "O Monitor informou ao PM que o pipeline foi concluído com sucesso.", new Date(t.getTime()));
     }
 
     for (const row of dialogueRows) {

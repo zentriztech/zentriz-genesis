@@ -43,13 +43,13 @@ def test_build_summary_human_engineer_cto_response():
 
 def test_build_summary_human_project_created():
     from orchestrator.dialogue import build_summary_human
-    out = build_summary_human("project.created", "cto", "pm_backend", "")
+    out = build_summary_human("project.created", "cto", "pm", "")
     assert "Charter" in out or "CTO" in out
 
 
 def test_build_summary_human_module_planned():
     from orchestrator.dialogue import build_summary_human
-    out = build_summary_human("module.planned", "pm_backend", "cto", "")
+    out = build_summary_human("module.planned", "pm", "cto", "")
     assert "PM" in out or "backlog" in out
 
 

@@ -23,7 +23,14 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(fastifyCors, {
     origin: true,
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  });
+  // Garante que preflight OPTIONS retorne 204 (evita 404 no portal cross-origin)
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "OPTIONS") {
+      return reply.code(204).send();
+    }
   });
   await app.register(fastifyMultipart, {
     limits: { files: 10, fileSize: 10 * 1024 * 1024 },

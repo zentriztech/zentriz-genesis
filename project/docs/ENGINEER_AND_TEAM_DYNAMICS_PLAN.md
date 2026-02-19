@@ -179,7 +179,7 @@ SPEC → CTO (spec)
 ### 6.3 Especificação de agentes (identidade visual)
 
 - Cada agente (CTO, Engineer, PM Backend, PM Web, PM Mobile, Dev, QA, DevOps, Monitor) deve ter:
-  - **id** (ex.: `cto`, `engineer`, `pm_backend`, `pm_web`, `dev_backend_nodejs`, …).
+  - **id** (ex.: `cto`, `engineer`, `pm`, `pm_web`, `dev`, `dev_backend_nodejs`, …).
   - **nome** (ex.: “Alex CTO”, “Eng. Sam”, “PM Backend”, …).
   - **personalidade** (uma linha para exibição, ex.: “Foco em produto e priorização.”).
   - **avatar**: URL de imagem ou identificador de asset (android, chip, processador, ícone) e **cor** predominante (para borda, badge, etc.).

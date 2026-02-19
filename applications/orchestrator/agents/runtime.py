@@ -21,12 +21,12 @@ SHOW_TRACEBACK = os.environ.get("SHOW_TRACEBACK", "true").strip().lower() in ("1
 AGENT_LABELS = {
     "ENGINEER": "Engineer",
     "CTO": "CTO",
-    "PM_BACKEND": "PM Backend",
+    "PM": "PM",
     "PM_WEB": "PM Web",
-    "DEV_BACKEND": "Dev Backend",
-    "QA_BACKEND": "QA Backend",
-    "DEVOPS_DOCKER": "DevOps Docker",
-    "MONITOR_BACKEND": "Monitor Backend",
+    "DEV": "Dev",
+    "QA": "QA",
+    "MONITOR": "Monitor",
+    "DEVOPS": "DevOps",
 }
 
 
@@ -93,7 +93,7 @@ def _normalize_response_envelope(out: dict, request_id: str, raw_text: str) -> d
 def run_agent(
     system_prompt_path: str | Path,
     message: dict,
-    role: str = "PM_BACKEND",
+    role: str = "PM",
 ) -> dict:
     """
     Executa o agente: system prompt + message -> Claude -> response_envelope.

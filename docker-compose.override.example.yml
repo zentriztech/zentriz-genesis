@@ -1,13 +1,16 @@
-# Exemplo: usar pasta do host para documentos por projeto (ex.: /Users/mac/zentriz-files).
-# Copie para docker-compose.override.yml e descomente/ajuste o path.
-# O runner grava em PROJECT_FILES_ROOT (no container = /project-files); ao montar o host aqui, os arquivos aparecem no host.
+# Exemplo de override para docker-compose.yml.
+# Copie para docker-compose.override.yml:  cp docker-compose.override.example.yml docker-compose.override.yml
+#
+# NOTA: O bind mount de PROJECT_FILES_ROOT já está no docker-compose.yml principal.
+# A variável HOST_PROJECT_FILES_ROOT (no .env, default ./zentriz-files) controla a pasta no host.
+# Use este override apenas para personalizações extras.
 
 services:
   runner:
-    volumes:
-      - zentriz-genesis_uploads:/shared/uploads
-      - /Users/mac/zentriz-files:/project-files
-  api:
-    volumes:
-      - zentriz-genesis_uploads:/shared/uploads
-      - /Users/mac/zentriz-files:/project-files
+    environment:
+      # Exemplo: desabilitar pipeline completo (só Engineer → CTO → PM)
+      # - PIPELINE_FULL_STACK=false
+      # Exemplo: intervalo do monitor loop em segundos
+      # - MONITOR_LOOP_INTERVAL=30
+      # Exemplo: máximo de reworks QA por tarefa
+      # - MAX_QA_REWORK=5

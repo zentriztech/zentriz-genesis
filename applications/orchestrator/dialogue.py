@@ -13,17 +13,23 @@ logger = logging.getLogger(__name__)
 AGENT_LABELS = {
     "cto": "CTO",
     "engineer": "Engineer",
-    "pm_backend": "PM Backend",
+    "pm": "PM",
     "pm_web": "PM Web",
     "pm_mobile": "PM Mobile",
-    "dev_backend": "Dev Backend",
-    "dev_backend_nodejs": "Dev Backend Node.js",
-    "qa_backend": "QA Backend",
-    "qa_backend_nodejs": "QA Backend Node.js",
-    "devops_docker": "DevOps Docker",
-    "monitor_backend": "Monitor Backend",
+    "dev": "Dev",
+    "qa": "QA",
+    "monitor": "Monitor",
+    "devops": "DevOps",
     "system": "Sistema",
     "error": "Erro",
+    # Legacy keys (dados antigos no banco podem usar esses ids)
+    "pm_backend": "PM",
+    "dev_backend": "Dev",
+    "dev_backend_nodejs": "Dev",
+    "qa_backend": "QA",
+    "qa_backend_nodejs": "QA",
+    "devops_docker": "DevOps",
+    "monitor_backend": "Monitor",
 }
 
 
@@ -60,7 +66,7 @@ def build_summary_human(
             + (f" Resumo: {snippet_preview}" if snippet_preview else "")
         ),
         "module.planned": (
-            "O PM Backend gerou o backlog completo do módulo com tarefas, prioridades "
+            "O PM gerou o backlog completo do módulo com tarefas, prioridades "
             "e critérios de aceitação, pronto para os desenvolvedores."
             + (f" Resumo: {snippet_preview}" if snippet_preview else "")
         ),
@@ -77,6 +83,9 @@ def build_summary_human(
         "monitor.health": (
             f"{from_l} consolidou o status e o health do projeto."
             + (f" Resumo: {snippet_preview}" if snippet_preview else "")
+        ),
+        "agent_working": (
+            snippet_preview if snippet_preview else f"{from_l} está processando."
         ),
     }
 

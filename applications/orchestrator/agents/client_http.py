@@ -13,21 +13,21 @@ logger = logging.getLogger(__name__)
 AGENT_ENDPOINTS = {
     "engineer": "/invoke/engineer",
     "cto": "/invoke/cto",
-    "pm_backend": "/invoke",
-    "dev_backend": "/invoke/dev-backend",
-    "qa_backend": "/invoke/qa-backend",
-    "monitor_backend": "/invoke/monitor",
-    "devops_docker": "/invoke/devops-docker",
+    "pm": "/invoke/pm",
+    "dev": "/invoke/dev",
+    "qa": "/invoke/qa",
+    "monitor": "/invoke/monitor",
+    "devops": "/invoke/devops",
 }
 
 AGENT_LABELS = {
     "engineer": "Engineer",
     "cto": "CTO",
-    "pm_backend": "PM Backend",
-    "dev_backend": "Dev Backend",
-    "qa_backend": "QA Backend",
-    "monitor_backend": "Monitor Backend",
-    "devops_docker": "DevOps Docker",
+    "pm": "PM",
+    "dev": "Dev",
+    "qa": "QA",
+    "monitor": "Monitor",
+    "devops": "DevOps",
 }
 
 
@@ -65,7 +65,7 @@ def _parse_error_detail(err_body: str) -> dict:
 
 def run_agent_http(agent_key: str, message: dict) -> dict:
     """
-    Invoca o agente via HTTP. agent_key: 'engineer' | 'cto' | 'pm_backend' | 'dev_backend' | 'qa_backend' | 'monitor_backend' | 'devops_docker'.
+    Invoca o agente via HTTP. agent_key: 'engineer' | 'cto' | 'pm' | 'dev' | 'qa' | 'monitor' | 'devops'.
     message: message_envelope (request_id, input com spec_ref, context, etc.).
     Retorna response_envelope (dict).
     """

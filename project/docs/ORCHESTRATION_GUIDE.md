@@ -17,7 +17,7 @@
 - **Engineer** analisa e devolve **proposta técnica**: quais squads/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
 - Engineer comunica-se **apenas** com o CTO. Competências em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
-**Implementação:** Agente Engineer em [orchestrator/agents/engineer_agent.py](../../applications/orchestrator/agents/engineer_agent.py). Endpoint `POST /invoke/engineer`.
+**Implementação:** Agente Engineer em [orchestrator/agents/engineer.py](../../applications/orchestrator/agents/engineer.py). Endpoint `POST /invoke/engineer`.
 
 ---
 
@@ -31,7 +31,7 @@
 - Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
 - Em **bloqueios cross-team** (ex.: endpoint falhou), CTO pode consultar o Engineer para solução e repassar ao PM responsável.
 
-**Implementação:** Agente CTO em [orchestrator/agents/cto_agent.py](../../applications/orchestrator/agents/cto_agent.py). Runner: spec → **Engineer** → CTO → PM Backend (`python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md`).
+**Implementação:** Agente CTO em [orchestrator/agents/cto.py](../../applications/orchestrator/agents/cto.py). Runner: spec → **Engineer** → CTO → PM (`python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md`).
 
 ---
 

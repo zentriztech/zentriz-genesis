@@ -22,8 +22,8 @@ services:
       - API_BASE_URL=http://api:3000
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
-      # PROJECT_FILES_ROOT: no .env use /Users/mac/zentriz-files (host); aqui default /project-files (monte no override para ver no host)
-      - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
+      # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
+      - PROJECT_FILES_ROOT=/project-files
       - PGHOST=postgres
       - PGUSER=genesis
       - PGPASSWORD=genesis_dev
@@ -31,7 +31,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
-      - zentriz-genesis_projectfiles:/project-files
+      - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,15 +115,14 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
-      # PROJECT_FILES_ROOT: no .env use /Users/mac/zentriz-files (host); default /project-files (monte no override para persistir no host)
-      - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
+      # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
+      - PROJECT_FILES_ROOT=/project-files
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
-      # Documentos por projeto: <PROJECT_FILES_ROOT>/<project_id>/docs e .../project. Para usar pasta do host (ex. /Users/mac/zentriz-files), em compose.override.yml: - /Users/mac/zentriz-files:/project-files
-      - zentriz-genesis_projectfiles:/project-files
+      - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
     depends_on:
       - agents
     healthcheck:
@@ -148,4 +147,3 @@ volumes:
   zentriz-genesis_pgdata:
   zentriz-genesis_redis:
   zentriz-genesis_uploads:
-  zentriz-genesis_projectfiles:

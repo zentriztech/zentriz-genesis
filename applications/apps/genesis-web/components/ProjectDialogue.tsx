@@ -75,6 +75,8 @@ export interface DialogueEntry {
 interface ProjectDialogueProps {
   projectId: string;
   pollIntervalMs?: number;
+  /** Chamado quando as entradas do diálogo são carregadas (para exibir loading no passo em execução). */
+  onEntriesLoaded?: (entries: DialogueEntry[]) => void;
 }
 
 function formatTime(iso: string) {
@@ -85,7 +87,7 @@ function formatTime(iso: string) {
   });
 }
 
-function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDialogueProps) {
+function ProjectDialogueInner({ projectId, pollIntervalMs = 10000, onEntriesLoaded }: ProjectDialogueProps) {
   const [entries, setEntries] = useState<DialogueEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -93,15 +95,18 @@ function ProjectDialogueInner({ projectId, pollIntervalMs = 10000 }: ProjectDial
   const fetchDialogue = useCallback(async () => {
     try {
       const data = await apiGet<DialogueEntry[]>(`/api/projects/${projectId}/dialogue`);
-      setEntries(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setEntries(list);
       setError(null);
+      onEntriesLoaded?.(list);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao carregar diálogo");
       setEntries([]);
+      onEntriesLoaded?.([]);
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, onEntriesLoaded]);
 
   useEffect(() => {
     fetchDialogue();

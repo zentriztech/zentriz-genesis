@@ -117,18 +117,23 @@ create_or_update() {
   local up_args=(-d)
   [[ "${FORCE_RECREATE:-false}" == "true" ]] && up_args+=(--force-recreate)
 
+  local up_services=()
   if [[ ${#SERVICES_TO_UP[@]} -gt 0 ]]; then
-    log "Subindo apenas: ${SERVICES_TO_UP[*]}"
-    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${SERVICES_TO_UP[@]}") || {
-      err "Falha no up. Tentando novamente..."
-      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${SERVICES_TO_UP[@]}") || die "Falha ao subir os serviços."
-    }
+    up_services=("${SERVICES_TO_UP[@]}")
+    log "Subindo apenas: ${up_services[*]}"
   else
-    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}") || {
-      err "Falha no up. Tentando down e up novamente..."
-      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" down --remove-orphans) || true
-      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}") || die "Falha ao subir o stack."
-    }
+    up_services=("${DEFAULT_SERVICES[@]}")
+    log "Subindo serviços: ${up_services[*]}"
+  fi
+  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${up_services[@]}") || {
+    err "Falha no up. Tentando down e up novamente..."
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" down --remove-orphans) || true
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${up_services[@]}") || die "Falha ao subir o stack."
+  }
+  # Em modo host-agents, garantir que o container agents não fique rodando (porta 8000 para o host)
+  if [[ "${HOST_AGENTS:-false}" == "true" ]]; then
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" stop agents 2>/dev/null) || true
+    log "Container 'agents' parado (você usará ./start-agents-host.sh no host)."
   fi
   log "Stack no ar. Verificando containers..."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" ps)
@@ -140,9 +145,10 @@ main() {
   local do_prune=false
   BUILD_NO_CACHE=false
   FORCE_RECREATE=false
-  HOST_AGENTS=false
   SERVICES_TO_BUILD=()
   SERVICES_TO_UP=()
+  # Global para create_or_update (modo host-agents: não subir container agents)
+  HOST_AGENTS=false
 
   while [[ -n "${1:-}" ]]; do
     case "$1" in
@@ -221,6 +227,19 @@ main() {
     SERVICES_TO_BUILD=("${new_build[@]+"${new_build[@]}"}")
     SERVICES_TO_UP=("${new_up[@]+"${new_up[@]}"}")
     FORCE_RECREATE=true
+  fi
+
+  # Garantir que o diretório de project-files no host exista (bind mount no compose)
+  if [[ "$mode" != "destroy" ]]; then
+    local pf_root="${HOST_PROJECT_FILES_ROOT:-}"
+    if [[ -z "$pf_root" ]] && [[ -f "$ENV_FILE" ]]; then
+      pf_root="$(grep -E '^HOST_PROJECT_FILES_ROOT=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)"
+    fi
+    pf_root="${pf_root:-${REPO_ROOT}/zentriz-files}"
+    if [[ -n "$pf_root" ]]; then
+      mkdir -p "$pf_root" 2>/dev/null || true
+      log "Diretório de artefatos: $pf_root"
+    fi
   fi
 
   case "$mode" in

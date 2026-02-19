@@ -97,4 +97,41 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 
 ---
 
-*Criado em 2026-02-17 — Zentriz Genesis. Atualize quando houver mudanças relevantes no estado do projeto.*
+## 6. Contexto de sessão (últimas alterações)
+
+### Deploy e agents
+- **Modo host-agents** (`./deploy-docker.sh --host-agents --force-recreate`): o serviço **agents** não sobe no Docker; sobe apenas api, genesis-web, runner. Após o deploy, rodar no host `./start-agents-host.sh` (porta 8000). O runner no Docker usa `API_AGENTS_URL=http://host.docker.internal:8000`. O script foi corrigido para não subir o container agents e para dar `stop agents` quando em modo host-agents.
+- **CORS**: API trata OPTIONS (preflight) com 204 e `methods`/`allowedHeaders` explícitos em `app.ts`; evita 404 no portal ao chamar login/projects.
+
+### Pipeline: Iniciar / Reiniciar
+- **POST /run** retorna no 202 `{ ok, message, status: "running" }` para o frontend atualizar a UI sem depender do GET do projeto.
+- **Frontend**: ao receber 202 com `status: "running"`, chama `projectsStore.setProjectStatus(id, "running")` para mostrar "Em execução" imediatamente; Alert em destaque para erro ao iniciar/reiniciar; quando status é "running", exibe dica com `docker compose logs runner --tail=100`.
+- **Store**: `projectsStore.setProjectStatus(id, status)` para atualização otimista.
+- **API e runner**: logs de diagnóstico em `[Pipeline]` e `[Runner]` (POST /run, spec path, chamada ao runner, erro se houver). Runner valida se o arquivo de spec existe no path antes de iniciar o subprocess; se não existir, retorna 400 com mensagem clara (volume de uploads deve ser compartilhado entre API e runner).
+
+### QA e Monitor Loop
+- **QA pass**: `_is_qa_pass(qa_response)` considera aprovado se status ou summary contiver "pass", "ok", "aprovado", "success", "done" ou trechos no texto; evita QA_FAIL infinito por variação da resposta do LLM.
+- **MAX_QA_REWORK** (env, default 3): após N vezes QA_FAIL na mesma tarefa, a tarefa é marcada DONE e o loop segue.
+- **Reiniciar** = novo processo do zero: Spec → Engineer → CTO → PM → seed de tarefas → **Monitor Loop** (Dev ↔ QA ↔ DevOps até aceitar ou parar). O "Monitor" é o loop no runner, não um serviço separado.
+
+### Portal: loading e diálogo
+- **agent_working**: antes de cada chamada ao LLM, o runner envia evento de diálogo `agent_working` com mensagem descritiva. O portal usa a última entrada `agent_working` para mostrar CircularProgress no passo correspondente do Stepper e a mensagem abaixo do stepper.
+
+### Artefatos em disco
+- **PROJECT_FILES_ROOT**: para artefatos no host (ex. `/Users/mac/zentriz-files`), usar `docker-compose.override.yml` com bind mount (copiar de `docker-compose.override.example.yml`). Runner loga ao iniciar se o storage está ativo ou desativado.
+- **Código fonte em project/**: ver [docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md](../docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md) para o que falta (artifacts do Dev com path+content em `project/`, contrato e prompts).
+
+### Troubleshooting
+- **[docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md)**: fluxo esperado, cenários (botão não aparece, sem spec, runner não configurado, 202 mas sem diálogo), comandos de logs, seção "Reiniciar/Iniciar sem movimentação", checklist por projeto.
+
+### Arquivos principais
+- API pipeline: `applications/services/api-node/src/routes/pipeline.ts`
+- Runner: `applications/orchestrator/runner.py` (Fase 1 + Monitor Loop em `_run_monitor_loop`)
+- Runner service: `applications/orchestrator/runner_server.py` (POST /run, valida spec path)
+- Frontend projeto: `applications/apps/genesis-web/app/(dashboard)/projects/[id]/page.tsx`
+- Store: `applications/apps/genesis-web/stores/projectsStore.ts`
+- Deploy: `deploy-docker.sh` (--host-agents exclui agents do up e dá stop agents)
+
+---
+
+*Criado em 2026-02-17 — Zentriz Genesis. Atualize quando houver mudanças relevantes no estado do projeto. Seção 6 atualizada em 2026-02-19.*

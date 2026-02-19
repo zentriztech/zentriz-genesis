@@ -38,6 +38,7 @@ export type ProjectStatus =
   | "dev_qa"
   | "devops"
   | "completed"
+  | "accepted"
   | "failed"
   | "running"
   | "stopped";

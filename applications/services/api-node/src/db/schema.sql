@@ -119,3 +119,10 @@ CREATE TABLE IF NOT EXISTS project_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project_status ON project_tasks(project_id, status);
+
+-- Migration: owner_role — aceitar nomes curtos (DEV, QA, DEVOPS, MONITOR) após rename de agentes
+ALTER TABLE project_tasks DROP CONSTRAINT IF EXISTS project_tasks_owner_role_check;
+ALTER TABLE project_tasks ADD CONSTRAINT project_tasks_owner_role_check CHECK (owner_role IN (
+  'DEV_BACKEND', 'QA_BACKEND', 'DEVOPS_DOCKER', 'DEV_WEB', 'QA_WEB', 'DEV_MOBILE', 'QA_MOBILE',
+  'DEV', 'QA', 'DEVOPS', 'MONITOR', 'ENGINEER', 'CTO', 'PM'
+));

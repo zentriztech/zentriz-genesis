@@ -57,6 +57,12 @@ class ProjectsStore {
       return null;
     }
   }
+
+  /** Atualiza o status do projeto na lista (ex.: após POST /run retornar 202 com status "running"). */
+  setProjectStatus(id: string, status: Project["status"]) {
+    const idx = this.list.findIndex((p) => p.id === id);
+    if (idx >= 0) this.list[idx] = { ...this.list[idx], status };
+  }
 }
 
 export const projectsStore = new ProjectsStore();
