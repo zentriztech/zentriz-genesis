@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { readFile } from "fs/promises";
+import path from "path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
@@ -140,4 +142,45 @@ export async function projectRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // Lista documentos/artefatos do projeto (PROJECT_FILES_ROOT/<id>/docs/manifest.json)
+  app.get<{ Params: { id: string } }>("/api/projects/:id/artifacts", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const result = await client.query(
+        "SELECT id, tenant_id, created_by FROM projects WHERE id = $1",
+        [id]
+      );
+      const row = result.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      const root = process.env.PROJECT_FILES_ROOT?.trim();
+      if (!root) {
+        return reply.send({ docs: [], projectDocsRoot: null, projectArtifactsRoot: null });
+      }
+      const docsDir = path.join(root, id, "docs");
+      const projectDir = path.join(root, id, "project");
+      const manifestPath = path.join(docsDir, "manifest.json");
+      let docs: Array<{ filename: string; creator: string; title?: string; created_at?: string }> = [];
+      try {
+        const raw = await readFile(manifestPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        docs = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        // manifest não existe ou inválido
+      }
+      return reply.send({
+        docs,
+        projectDocsRoot: docsDir,
+        projectArtifactsRoot: projectDir,
+      });
+    } finally {
+      client.release();
+    }
+  });
 }

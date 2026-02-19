@@ -11,21 +11,26 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - API_BASE_URL=${API_BASE_URL:-http://api:3000}
+      # IMPORTANTE: dentro do Docker, API_BASE_URL DEVE ser http://api:3000 (nome do serviço).
+      # A API envia esse valor ao runner; se for localhost, o runner não consegue gravar diálogo.
+      # Colocado APÓS env_file para garantir que sobrescreve o valor do .env.
+      - API_BASE_URL=http://api:3000
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
+      - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
       - PGHOST=postgres
       - PGUSER=genesis
       - PGPASSWORD=genesis_dev
       - PGDATABASE=zentriz_genesis
       - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
-    env_file:
-      - .env
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
+      - zentriz-genesis_projectfiles:/project-files
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,9 +82,10 @@ services:
       - "8000:8000"
     environment:
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+      - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
     env_file:
@@ -97,16 +103,25 @@ services:
       dockerfile: applications/orchestrator/Dockerfile.runner
     ports:
       - "8001:8001"
-    environment:
-      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
-      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-3-5-sonnet-20241022}
-      - API_AGENTS_URL=http://agents:8000
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
     env_file:
       - .env
+    environment:
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
+      - API_AGENTS_URL=${API_AGENTS_URL:-http://agents:8000}
+      # APÓS env_file para sobrescrever localhost do .env
+      - API_BASE_URL=http://api:3000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+      - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
+      - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
+      - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
+      # Documentos por projeto: <PROJECT_FILES_ROOT>/<project_id>/docs e .../project. Para usar pasta do host (ex. /Users/mac/zentriz-files), em compose.override.yml: - /Users/mac/zentriz-files:/project-files
+      - zentriz-genesis_projectfiles:/project-files
     depends_on:
       - agents
     healthcheck:
@@ -131,3 +146,4 @@ volumes:
   zentriz-genesis_pgdata:
   zentriz-genesis_redis:
   zentriz-genesis_uploads:
+  zentriz-genesis_projectfiles:

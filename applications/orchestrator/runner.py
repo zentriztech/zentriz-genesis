@@ -1,5 +1,5 @@
 """
-Runner do orquestrador: spec -> CTO (Charter) -> PM Backend (backlog).
+Runner do orquestrador: spec -> Engineer -> CTO (Charter) -> PM Backend (backlog).
 Persiste estado em orchestrator/state/ e emite eventos conforme schemas.
 Uso: python -m orchestrator.runner --spec spec/PRODUCT_SPEC.md
 
@@ -13,21 +13,26 @@ import json
 import logging
 import os
 import sys
-import traceback
+import traceback as _tb
 import urllib.request
 from pathlib import Path
 from datetime import datetime
 
-# Import tardio para evitar dependência circular; usado em main() para diálogo
 def _get_summary_human(*a, **k):
     from orchestrator.dialogue import get_summary_human
     return get_summary_human(*a, **k)
 
-# Raiz do repo: runner está em applications/orchestrator/ (host) ou orchestrator/ (container)
-_here = Path(__file__).resolve().parent  # applications/orchestrator ou /app/orchestrator
-_repo = _here.parent.parent  # applications ou repo root
+
+def _project_storage():
+    try:
+        from orchestrator import project_storage
+        return project_storage
+    except ImportError:
+        return None
+
+_here = Path(__file__).resolve().parent
+_repo = _here.parent.parent
 REPO_ROOT = _repo.parent if _repo.name == "applications" else _repo
-# No host: applications/ existe; no container: layout é /app/agents, /app/orchestrator
 APPLICATIONS_ROOT = REPO_ROOT / "applications" if (REPO_ROOT / "applications").exists() else REPO_ROOT
 
 _dotenv = REPO_ROOT / ".env"
@@ -40,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 STATE_DIR = APPLICATIONS_ROOT / "orchestrator" / "state"
 EVENTS_DIR = APPLICATIONS_ROOT / "orchestrator" / "events" / "schemas"
+
+SHOW_TRACEBACK = os.environ.get("SHOW_TRACEBACK", "true").strip().lower() in ("1", "true", "yes")
 
 
 def ensure_state_dir() -> None:
@@ -57,8 +64,11 @@ def _agents_root() -> Path:
     return APPLICATIONS_ROOT / "agents"
 
 
+# ---------------------------------------------------------------------------
+# Chamadas aos agentes
+# ---------------------------------------------------------------------------
+
 def call_engineer(spec_ref: str, spec_content: str, request_id: str) -> dict:
-    """Engineer analisa spec e devolve proposta técnica (stacks/equipes, dependências)."""
     message = {
         "request_id": request_id,
         "input": {
@@ -116,6 +126,95 @@ def call_pm_backend(spec_ref: str, charter_summary: str, request_id: str) -> dic
     return run_agent(system_prompt_path=pm_prompt, message=message, role="PM_BACKEND")
 
 
+def call_dev_backend(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
+    message = {
+        "request_id": request_id,
+        "input": {
+            "spec_ref": spec_ref,
+            "context": {"charter_summary": charter_summary, "backlog_summary": backlog_summary},
+            "task": {},
+            "constraints": {},
+            "artifacts": [],
+        },
+    }
+    if os.environ.get("API_AGENTS_URL"):
+        from orchestrator.agents.client_http import run_agent_http
+        return run_agent_http("dev_backend", message)
+    from orchestrator.agents.runtime import run_agent
+    dev_prompt = _agents_root() / "dev" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
+    return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV_BACKEND")
+
+
+def call_qa_backend(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, request_id: str) -> dict:
+    message = {
+        "request_id": request_id,
+        "input": {
+            "spec_ref": spec_ref,
+            "context": {
+                "charter_summary": charter_summary,
+                "backlog_summary": backlog_summary,
+                "dev_backend_summary": dev_summary,
+            },
+            "task": {},
+            "constraints": {},
+            "artifacts": [],
+        },
+    }
+    if os.environ.get("API_AGENTS_URL"):
+        from orchestrator.agents.client_http import run_agent_http
+        return run_agent_http("qa_backend", message)
+    from orchestrator.agents.runtime import run_agent
+    qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
+    return run_agent(system_prompt_path=qa_prompt, message=message, role="QA_BACKEND")
+
+
+def call_monitor_backend(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, qa_summary: str, request_id: str) -> dict:
+    message = {
+        "request_id": request_id,
+        "input": {
+            "spec_ref": spec_ref,
+            "context": {
+                "charter_summary": charter_summary,
+                "backlog_summary": backlog_summary,
+                "dev_backend_summary": dev_summary,
+                "qa_backend_summary": qa_summary,
+            },
+            "task": {},
+            "constraints": {},
+            "artifacts": [],
+        },
+    }
+    if os.environ.get("API_AGENTS_URL"):
+        from orchestrator.agents.client_http import run_agent_http
+        return run_agent_http("monitor_backend", message)
+    from orchestrator.agents.runtime import run_agent
+    monitor_prompt = _agents_root() / "monitor" / "backend" / "SYSTEM_PROMPT.md"
+    return run_agent(system_prompt_path=monitor_prompt, message=message, role="MONITOR_BACKEND")
+
+
+def call_devops_docker(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
+    message = {
+        "request_id": request_id,
+        "input": {
+            "spec_ref": spec_ref,
+            "context": {"charter_summary": charter_summary, "backlog_summary": backlog_summary},
+            "task": {},
+            "constraints": {},
+            "artifacts": [],
+        },
+    }
+    if os.environ.get("API_AGENTS_URL"):
+        from orchestrator.agents.client_http import run_agent_http
+        return run_agent_http("devops_docker", message)
+    from orchestrator.agents.runtime import run_agent
+    devops_prompt = _agents_root() / "devops" / "docker" / "SYSTEM_PROMPT.md"
+    return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS_DOCKER")
+
+
+# ---------------------------------------------------------------------------
+# Persistência de estado e eventos
+# ---------------------------------------------------------------------------
+
 def persist_state(spec_ref: str, charter: dict, backlog: dict, events: list) -> None:
     ensure_state_dir()
     state = {
@@ -144,12 +243,15 @@ def emit_event(event_type: str, payload: dict, request_id: str) -> None:
     logger.info("Evento emitido: %s", event_type)
 
 
+# ---------------------------------------------------------------------------
+# Diálogo (log de passos e erros no portal)
+# ---------------------------------------------------------------------------
+
 def _project_id() -> str | None:
     return os.environ.get("PROJECT_ID")
 
 
 def _post_dialogue(from_agent: str, to_agent: str, event_type: str, summary_human: str, request_id: str) -> None:
-    """Persiste entrada no log de diálogo da API quando PROJECT_ID e API estão configurados."""
     pid = _project_id()
     if not pid:
         return
@@ -158,20 +260,37 @@ def _post_dialogue(from_agent: str, to_agent: str, event_type: str, summary_huma
 
 
 def _post_step(step_message: str, request_id: str) -> None:
-    """Registra um passo no log do portal (event_type=step, from/to=system)."""
+    """Registra um passo no log do portal. Mensagem deve ser em linguagem humana."""
+    logger.info("[Pipeline] %s", step_message)
     _post_dialogue("system", "system", "step", step_message, request_id)
 
 
 def _post_error(message: str, request_id: str, exc: BaseException | None = None) -> None:
-    """Registra erro no log do portal com stack trace simples (event_type=error)."""
+    """Registra erro no log do portal. Inclui traceback apenas se SHOW_TRACEBACK=true."""
     body = message
     if exc is not None:
-        body = body + "\n\n" + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[:2000]
+        error_detail = _extract_error_info(exc)
+        if error_detail.get("human_message"):
+            body = error_detail["human_message"]
+        if SHOW_TRACEBACK:
+            tb_text = error_detail.get("traceback", "")
+            if not tb_text:
+                tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+            body += "\n\n--- Traceback (SHOW_TRACEBACK=true) ---\n" + tb_text[:3000]
+    logger.error("[Pipeline] %s", body[:500])
     _post_dialogue("system", "error", "error", body, request_id)
 
 
+def _extract_error_info(exc: BaseException) -> dict:
+    """Extrai informações estruturadas de erros dos agentes (que usam JSON no message)."""
+    msg = str(exc)
+    try:
+        return json.loads(msg)
+    except (json.JSONDecodeError, TypeError):
+        return {"error": msg, "human_message": msg}
+
+
 def _patch_project(body: dict) -> bool:
-    """Envia PATCH /api/projects/:id quando API_BASE_URL, PROJECT_ID e GENESIS_API_TOKEN estão definidos."""
     base = os.environ.get("API_BASE_URL")
     project_id = os.environ.get("PROJECT_ID")
     token = os.environ.get("GENESIS_API_TOKEN")
@@ -198,8 +317,12 @@ def _patch_project(body: dict) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Pipeline principal
+# ---------------------------------------------------------------------------
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Runner: spec -> CTO -> PM Backend -> backlog")
+    parser = argparse.ArgumentParser(description="Runner: spec -> Engineer -> CTO -> PM Backend -> backlog")
     default_spec = "project/spec/PRODUCT_SPEC.md" if (REPO_ROOT / "project" / "spec" / "PRODUCT_SPEC.md").exists() else "spec/PRODUCT_SPEC.md"
     parser.add_argument("--spec", "-s", default=None, help="Caminho relativo ao repo para o spec (FR/NFR)")
     parser.add_argument("--spec-file", "--spec-path", dest="spec_file", metavar="PATH", default=None, help="Caminho absoluto do arquivo de spec (ex.: uploads/<projectId>/arquivo.md)")
@@ -221,67 +344,273 @@ def main() -> int:
         spec_path = REPO_ROOT / spec_ref
 
     request_id = f"runner-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    project_id = _project_id()
+    storage = _project_storage()
 
-    logger.info("Lendo spec: %s", spec_ref)
+    logger.info("[Pipeline] Lendo spec: %s", spec_ref)
     spec_content = load_spec(spec_path)
+
+    # Persistir spec em project_id/docs quando PROJECT_FILES_ROOT estiver definido
+    if project_id and storage and storage.is_enabled():
+        storage.write_spec_doc(project_id, spec_content, spec_ref.replace("/", "_").replace(".", "_")[:80])
 
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
     _patch_project({"started_at": now_iso, "status": "running"})
-    _post_step("Spec enviada. Pipeline iniciado.", request_id)
+    _post_step(
+        "Pipeline iniciado. A especificação do produto foi recebida e será analisada pelos agentes.",
+        request_id,
+    )
 
     try:
-        # 1) Engineer -> proposta técnica (stacks, equipes, dependências)
-        _post_step("CTO repassa a spec ao Engineer para análise de stacks e equipes.", request_id)
-        _post_step("Engineer recebeu a spec. Analisando e criando proposta técnica.", request_id)
-        logger.info("Chamando agente Engineer...")
+        # ── Passo 1: Engineer ─────────────────────────────────────────
+        _post_step(
+            "O CTO está repassando a especificação ao Engineer para que ele analise "
+            "as stacks técnicas, equipes necessárias e dependências do projeto.",
+            request_id,
+        )
+        logger.info("[Pipeline] Chamando agente Engineer...")
         engineer_response = call_engineer(spec_ref, spec_content, request_id)
         engineer_summary = engineer_response.get("summary", "")
-        logger.info("Engineer status: %s", engineer_response.get("status"))
-        _post_step("Engineer respondeu com proposta técnica (stacks, equipes, dependências).", request_id)
+        engineer_status = engineer_response.get("status", "?")
+        logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
+
+        _post_step(
+            f"O Engineer concluiu a análise técnica e entregou a proposta com as stacks "
+            f"e equipes recomendadas. Status: {engineer_status}.",
+            request_id,
+        )
         emit_event("cto.engineer.request", {"spec_ref": spec_ref}, request_id)
         emit_event("engineer.cto.response", {"summary": engineer_summary[:500]}, request_id)
-        _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
-        _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
+        _post_dialogue(
+            "cto", "engineer", "cto.engineer.request",
+            _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]),
+            request_id,
+        )
+        _post_dialogue(
+            "engineer", "cto", "engineer.cto.response",
+            _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]),
+            request_id,
+        )
+        if project_id and storage and storage.is_enabled():
+            storage.write_doc(project_id, "engineer", "proposal", engineer_summary, title="Engineer technical proposal")
 
-        # 2) CTO -> Charter (usando proposta do Engineer)
-        _post_step("CTO recebeu a proposta do Engineer. Analisando e criando Charter.", request_id)
-        logger.info("Chamando agente CTO...")
+        # ── Passo 2: CTO ─────────────────────────────────────────────
+        _post_step(
+            "O CTO recebeu a proposta técnica do Engineer e está elaborando o Charter do projeto, "
+            "definindo escopo, prioridades e a estrutura organizacional.",
+            request_id,
+        )
+        logger.info("[Pipeline] Chamando agente CTO...")
         cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary)
         charter_summary = cto_response.get("summary", "")
         charter_artifacts = cto_response.get("artifacts", [])
-        logger.info("CTO status: %s", cto_response.get("status"))
-        _post_step("CTO criou o Charter. Repassando ao PM Backend.", request_id)
+        cto_status = cto_response.get("status", "?")
+        logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
 
-        # Persistir Charter em orchestrator/state/ (não em project/docs/)
+        _post_step(
+            f"O CTO finalizou o Charter do projeto. Agora será repassado ao PM Backend "
+            f"para a geração do backlog. Status: {cto_status}.",
+            request_id,
+        )
+
         charter_path = STATE_DIR / "PROJECT_CHARTER.md"
-        if charter_artifacts and charter_summary:
+        charter_content = f"# Project Charter (gerado pelo CTO)\n\n{charter_summary}\n"
+        if project_id and storage and storage.is_enabled():
+            p = storage.write_doc(project_id, "cto", "charter", charter_summary, title="Project Charter")
+            if p:
+                charter_path = p
+        if charter_summary:
             ensure_state_dir()
-            charter_path.write_text(f"# Project Charter (gerado pelo CTO)\n\n{charter_summary}\n", encoding="utf-8")
-            logger.info("Charter persistido: %s", charter_path)
+            charter_path.write_text(charter_content, encoding="utf-8")
+            logger.info("[Pipeline] Charter persistido: %s", charter_path)
 
         emit_event("project.created", {"spec_ref": spec_ref, "constraints": {}, "engineer_summary": engineer_summary[:300]}, request_id)
-        _post_dialogue("cto", "pm_backend", "project.created", _get_summary_human("project.created", "cto", "pm_backend", charter_summary[:300]), request_id)
+        _post_dialogue(
+            "cto", "pm_backend", "project.created",
+            _get_summary_human("project.created", "cto", "pm_backend", charter_summary[:300]),
+            request_id,
+        )
 
-        # 3) PM Backend -> backlog
-        _post_step("PM Backend recebeu o Charter. Criando backlog.", request_id)
-        logger.info("Chamando agente PM Backend...")
+        # ── Passo 3: PM Backend ──────────────────────────────────────
+        _post_step(
+            "O PM Backend recebeu o Charter e está gerando o backlog completo do módulo, "
+            "com tarefas, prioridades e critérios de aceitação.",
+            request_id,
+        )
+        logger.info("[Pipeline] Chamando agente PM Backend...")
         pm_response = call_pm_backend(spec_ref, charter_summary, request_id)
         backlog_summary = pm_response.get("summary", "")
         backlog_artifacts = pm_response.get("artifacts", [])
-        logger.info("PM Backend status: %s", pm_response.get("status"))
-        _post_step("PM Backend respondeu com backlog do módulo.", request_id)
+        pm_status = pm_response.get("status", "?")
+        logger.info("[Pipeline] PM Backend respondeu (status: %s)", pm_status)
+
+        _post_step(
+            f"O PM Backend concluiu a geração do backlog. O módulo está planejado "
+            f"com tarefas e prioridades definidas. Status: {pm_status}.",
+            request_id,
+        )
 
         emit_event("module.planned", {"spec_ref": spec_ref, "backlog_summary": backlog_summary[:200]}, request_id)
-        _post_dialogue("pm_backend", "cto", "module.planned", _get_summary_human("module.planned", "pm_backend", "cto", backlog_summary[:200]), request_id)
+        _post_dialogue(
+            "pm_backend", "cto", "module.planned",
+            _get_summary_human("module.planned", "pm_backend", "cto", backlog_summary[:200]),
+            request_id,
+        )
+        if project_id and storage and storage.is_enabled():
+            storage.write_doc(project_id, "pm_backend", "backlog", backlog_summary, title="Backlog Backend")
 
-        # 4) Persistir estado
+        # ── Passo 4: Dev Backend ──────────────────────────────────────
+        run_full_stack = os.environ.get("PIPELINE_FULL_STACK", "true").strip().lower() in ("1", "true", "yes")
+        dev_status = pm_status
+        qa_status = "-"
+        monitor_status = "-"
+        devops_status = "-"
+        dev_summary = ""
+        qa_summary = ""
+        monitor_summary = ""
+        devops_summary = ""
+
+        if run_full_stack:
+            _post_step(
+                "O Dev Backend está recebendo o backlog e o charter para gerar a implementação e evidências.",
+                request_id,
+            )
+            logger.info("[Pipeline] Chamando agente Dev Backend...")
+            try:
+                dev_response = call_dev_backend(spec_ref, charter_summary, backlog_summary, request_id)
+                dev_summary = dev_response.get("summary", "")
+                dev_status = dev_response.get("status", "?")
+                dev_artifacts = dev_response.get("artifacts", [])
+                logger.info("[Pipeline] Dev Backend respondeu (status: %s)", dev_status)
+                _post_step(
+                    f"O Dev Backend concluiu. Status: {dev_status}. Resumo: {dev_summary[:150]}...",
+                    request_id,
+                )
+                _post_dialogue(
+                    "pm_backend", "dev_backend", "task.assigned",
+                    _get_summary_human("task.assigned", "pm_backend", "dev_backend", backlog_summary[:200]),
+                    request_id,
+                )
+                _post_dialogue(
+                    "dev_backend", "qa_backend", "task.completed",
+                    _get_summary_human("task.completed", "dev_backend", "qa_backend", dev_summary[:200]),
+                    request_id,
+                )
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "dev_backend", "implementation", dev_summary, title="Dev Backend implementation")
+                    for i, art in enumerate(dev_artifacts):
+                        if isinstance(art, dict) and art.get("content"):
+                            storage.write_doc(project_id, "dev_backend", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
+            except Exception as e:
+                logger.exception("[Pipeline] Dev Backend falhou")
+                dev_status = "FAIL"
+                _post_error(str(e), request_id, e)
+
+            # ── Passo 5: QA Backend ─────────────────────────────────────
+            _post_step(
+                "O QA Backend está validando o trabalho do Dev e gerando relatório de qualidade.",
+                request_id,
+            )
+            logger.info("[Pipeline] Chamando agente QA Backend...")
+            try:
+                qa_response = call_qa_backend(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
+                qa_summary = qa_response.get("summary", "")
+                qa_status = qa_response.get("status", "?")
+                qa_artifacts = qa_response.get("artifacts", [])
+                logger.info("[Pipeline] QA Backend respondeu (status: %s)", qa_status)
+                _post_step(
+                    f"O QA Backend concluiu. Status: {qa_status}. Resumo: {qa_summary[:150]}...",
+                    request_id,
+                )
+                _post_dialogue(
+                    "dev_backend", "qa_backend", "qa.review",
+                    _get_summary_human("qa.review", "qa_backend", "monitor_backend", qa_summary[:200]),
+                    request_id,
+                )
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "qa_backend", "report", qa_summary, title="QA Backend report")
+                    for i, art in enumerate(qa_artifacts):
+                        if isinstance(art, dict) and art.get("content"):
+                            storage.write_doc(project_id, "qa_backend", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
+            except Exception as e:
+                logger.exception("[Pipeline] QA Backend falhou")
+                qa_status = "FAIL"
+                _post_error(str(e), request_id, e)
+
+            # ── Passo 6: Monitor Backend ───────────────────────────────
+            _post_step(
+                "O Monitor Backend está consolidando o status e gerando o health do projeto.",
+                request_id,
+            )
+            logger.info("[Pipeline] Chamando agente Monitor Backend...")
+            try:
+                monitor_response = call_monitor_backend(spec_ref, charter_summary, backlog_summary, dev_summary, qa_summary, request_id)
+                monitor_summary = monitor_response.get("summary", "")
+                monitor_status = monitor_response.get("status", "?")
+                logger.info("[Pipeline] Monitor Backend respondeu (status: %s)", monitor_status)
+                _post_step(
+                    f"O Monitor Backend concluiu. Status: {monitor_status}.",
+                    request_id,
+                )
+                _post_dialogue(
+                    "monitor_backend", "pm_backend", "monitor.health",
+                    _get_summary_human("monitor.health", "monitor_backend", "pm_backend", monitor_summary[:200]),
+                    request_id,
+                )
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "monitor_backend", "health", monitor_summary, title="Monitor Backend health")
+            except Exception as e:
+                logger.exception("[Pipeline] Monitor Backend falhou")
+                monitor_status = "FAIL"
+                _post_error(str(e), request_id, e)
+
+            # ── Passo 7: DevOps Docker ─────────────────────────────────
+            _post_step(
+                "O DevOps Docker está gerando Dockerfile, docker-compose e artefatos de infraestrutura.",
+                request_id,
+            )
+            logger.info("[Pipeline] Chamando agente DevOps Docker...")
+            try:
+                devops_response = call_devops_docker(spec_ref, charter_summary, backlog_summary, request_id)
+                devops_summary = devops_response.get("summary", "")
+                devops_status = devops_response.get("status", "?")
+                devops_artifacts = devops_response.get("artifacts", [])
+                logger.info("[Pipeline] DevOps Docker respondeu (status: %s)", devops_status)
+                _post_step(
+                    f"O DevOps Docker concluiu. Status: {devops_status}.",
+                    request_id,
+                )
+                _post_dialogue(
+                    "monitor_backend", "devops_docker", "devops.deploy",
+                    _get_summary_human("devops.deploy", "devops_docker", "cto", devops_summary[:200]),
+                    request_id,
+                )
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "devops_docker", "summary", devops_summary, title="DevOps Docker summary")
+                    for i, art in enumerate(devops_artifacts):
+                        if isinstance(art, dict):
+                            content = art.get("content")
+                            path_key = art.get("path") or f"artifact_{i}"
+                            if content and path_key:
+                                storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                            elif content:
+                                storage.write_doc(project_id, "devops_docker", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
+            except Exception as e:
+                logger.exception("[Pipeline] DevOps Docker falhou")
+                devops_status = "FAIL"
+                _post_error(str(e), request_id, e)
+
+        # ── Persistir estado ──────────────────────────────────────────
+        events_list = ["cto.engineer.request", "engineer.cto.response", "project.created", "module.planned"]
+        if run_full_stack:
+            events_list.extend(["task.assigned", "task.completed", "qa.review", "monitor.health", "devops.deploy"])
         persist_state(
             spec_ref=spec_ref,
             charter={"summary": charter_summary, "artifacts": charter_artifacts},
             backlog={"summary": backlog_summary, "artifacts": backlog_artifacts},
-            events=["cto.engineer.request", "engineer.cto.response", "project.created", "module.planned"],
+            events=events_list,
         )
-        logger.info("Estado persistido em orchestrator/state/current_project.json")
+        logger.info("[Pipeline] Estado persistido em orchestrator/state/current_project.json")
 
         completed_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         _patch_project({
@@ -290,22 +619,40 @@ def main() -> int:
             "charter_summary": charter_summary,
             "backlog_summary": backlog_summary[:2000] if backlog_summary else None,
         })
-        _post_step("Pipeline concluído com sucesso.", request_id)
+        pipeline_desc = "Engineer → CTO → PM Backend"
+        if run_full_stack:
+            pipeline_desc += " → Dev Backend → QA Backend → Monitor Backend → DevOps Docker"
+        _post_step(
+            f"Pipeline concluído com sucesso! A especificação passou por {pipeline_desc}. "
+            "Os documentos foram gerados e, quando configurado, salvos em PROJECT_FILES_ROOT.",
+            request_id,
+        )
 
-        print(json.dumps({
+        out = {
             "request_id": request_id,
             "spec_ref": spec_ref,
-            "engineer_status": engineer_response.get("status"),
-            "cto_status": cto_response.get("status"),
-            "pm_status": pm_response.get("status"),
+            "engineer_status": engineer_status,
+            "cto_status": cto_status,
+            "pm_status": pm_status,
             "charter_path": str(charter_path),
             "state_path": str(STATE_DIR / "current_project.json"),
-        }, indent=2))
+        }
+        if run_full_stack:
+            out["dev_status"] = dev_status
+            out["qa_status"] = qa_status
+            out["monitor_status"] = monitor_status
+            out["devops_status"] = devops_status
+        if project_id and storage and storage.is_enabled():
+            out["project_docs_root"] = str(storage.get_docs_dir(project_id))
+            out["project_artifacts_root"] = str(storage.get_project_dir(project_id))
+        print(json.dumps(out, indent=2))
         return 0
 
     except Exception as e:
-        logger.exception("Falha no pipeline")
-        _post_error(f"Erro de processamento: {e}", request_id, e)
+        logger.exception("[Pipeline] Falha no pipeline")
+        error_info = _extract_error_info(e)
+        human_msg = error_info.get("human_message", f"Erro no pipeline: {e}")
+        _post_error(human_msg, request_id, e)
         completed_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
         _patch_project({"status": "failed", "completed_at": completed_at_iso})
         raise

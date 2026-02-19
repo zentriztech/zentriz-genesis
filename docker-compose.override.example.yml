@@ -1,0 +1,13 @@
+# Exemplo: usar pasta do host para documentos por projeto (ex.: /Users/mac/zentriz-files).
+# Copie para docker-compose.override.yml e descomente/ajuste o path.
+# O runner grava em PROJECT_FILES_ROOT (no container = /project-files); ao montar o host aqui, os arquivos aparecem no host.
+
+services:
+  runner:
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
+      - /Users/mac/zentriz-files:/project-files
+  api:
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
+      - /Users/mac/zentriz-files:/project-files

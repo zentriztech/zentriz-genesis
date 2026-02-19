@@ -15,7 +15,7 @@
 | Variável | Obrigatório | Propósito | Exemplo / default |
 |----------|-------------|-----------|-------------------|
 | **CLAUDE_API_KEY** | Sim (para agentes) | Chave da API Anthropic; usada pelos agentes (CTO, PM, QA, DevOps, Monitor) para chamadas ao LLM. | (obter em console.anthropic.com) |
-| **CLAUDE_MODEL** | Não | Modelo Claude a usar. | `claude-3-5-sonnet-20241022` |
+| **CLAUDE_MODEL** | Não | Modelo Claude a usar. | `claude-sonnet-4-6` |
 | **ANTHROPIC_API_URL** | Não | URL base da API Anthropic (override; default da SDK). | (deixar vazio para default) |
 | **DOCKER_NAMESPACE** | Não | Namespace do projeto para Docker e k8s (containers, redes, volumes). | `zentriz-genesis` |
 | **API_BASE_URL** | Não (local) | URL base da API do produto (Voucher) para smoke tests e integrações. Usada pelo runner para PATCH/POST em projetos e diálogo. | `http://localhost:3000` |
@@ -33,8 +33,10 @@
 | **RUNNER_SERVICE_URL** | Não | URL do serviço runner (Opção B, ex.: Docker). A API faz POST a `{RUNNER_SERVICE_URL}/run` com projectId, specPath, apiBaseUrl, token. | (vazio = usar RUNNER_COMMAND) |
 | **UPLOAD_DIR** | Não | Diretório onde a API grava uploads de spec (project_spec_files). Deve ser acessível ao runner se usar Opção A (mesmo host/volume). | `./uploads` ou `process.cwd()/uploads` |
 | **RUNNER_SPEC_DIR** | Não | Opcional: diretório para a API copiar spec antes de passar path ao runner (quando API e runner não compartilham UPLOAD_DIR). | (não usado por padrão) |
-| **API_AGENTS_URL** | Não (runner) | Se definida, o runner chama os agentes via HTTP (ex.: `http://agents:8000`) em vez de import. Endpoints: `/invoke/engineer`, `/invoke/cto`, `/invoke` (PM). | (vazio = runner usa import local) |
+| **API_AGENTS_URL** | Não (runner) | Se definida, o runner chama os agentes via HTTP (ex.: `http://agents:8000`) em vez de import. Endpoints: `/invoke/engineer`, `/invoke/cto`, `/invoke`, `/invoke/dev-backend`, `/invoke/qa-backend`, `/invoke/monitor`, `/invoke/devops-docker`. | (vazio = runner usa import local) |
 | **PROJECT_ID** / **GENESIS_API_TOKEN** | (runner) | Definidos pela API ao disparar o pipeline. Runner usa para PATCH /api/projects/:id e POST /api/projects/:id/dialogue. Token JWT de curta duração (ex.: 1h). | (injetados pela API) |
+| **PROJECT_FILES_ROOT** | Não (runner, API) | Raiz dos arquivos por projeto: `<root>/<project_id>/docs` e `<root>/<project_id>/project`. Documentos gerados pelos agentes são gravados com criador (spec, engineer, cto, pm_backend, dev_backend, qa_backend, monitor_backend, devops_docker). No Docker use `/project-files` com volume; no host ex.: `/Users/mac/zentriz-files`. A API usa para GET /api/projects/:id/artifacts. | (vazio = runner não grava em disco por projeto) |
+| **PIPELINE_FULL_STACK** | Não (runner) | Se `true`, executa após PM Backend também: Dev Backend, QA Backend, Monitor Backend, DevOps Docker. Se `false`, pipeline para em PM Backend. | `true` |
 
 **Usuários padrão (portal):** criados/atualizados pelo seed da API. **Em produção, altere as senhas.** Ver tabela em [services/api-node/README.md](../services/api-node/README.md): Zentriz Admin `admin@zentriz.com` / `#Jean@2026!` (login/genesis); Admin tenant `admin@tenant.com` / `#Tenant@2026!` (login/tenant); Usuário `user@tenant.com` / `#User@2026!` (login).
 
@@ -65,10 +67,33 @@ Template: [.env.example](../.env.example). Copie para `.env` e preencha os valor
 
 ---
 
+## Variáveis mínimas para "Agentes conversando com a LLM"
+
+Para o pipeline (Spec → Engineer → CTO → PM) **com agentes chamando a API Claude**, no ambiente Docker são **obrigatórias** no `.env`:
+
+| Variável | Obrigatório | Valor esperado |
+|----------|-------------|----------------|
+| **CLAUDE_API_KEY** | Sim | Chave da API Anthropic (geralmente começa com `sk-ant-`). Obtenha em https://console.anthropic.com/ |
+| **CLAUDE_MODEL** | Recomendado | Modelo ativo, ex.: `claude-sonnet-4-6` (o antigo `claude-3-5-sonnet-20241022` foi descontinuado em out/2025 e retorna 404) |
+
+As demais variáveis do `.env` (API_BASE_URL, NEXT_PUBLIC_API_BASE_URL, DOCKER_NAMESPACE, LOG_LEVEL, REQUEST_TIMEOUT) são opcionais ou têm default no `docker-compose.yml`. O `docker-compose` define internamente `API_AGENTS_URL` e `RUNNER_SERVICE_URL` para os serviços; não é necessário colocá-los no `.env` para o fluxo Docker.
+
+**Depois de alterar o `.env`:** recrie os containers para que eles recebam as novas variáveis:  
+`docker compose up -d --force-recreate agents runner`  
+(ou `docker compose up -d --force-recreate` para todos os que usam `env_file: .env`).
+
+**Conferir no container:**  
+`docker compose exec agents curl -s http://127.0.0.1:8000/health` deve retornar `claude_model` e `claude_configured: true`. E em `docker compose logs agents` deve aparecer na primeira linha algo como `CLAUDE_MODEL=claude-sonnet-4-6 | CLAUDE_API_KEY (definida)`.
+
+---
+
 ## Troubleshooting (Docker / pipeline)
 
+- **Erro 500 "model: claude-3-5-sonnet-20241022" ou 404 da API Claude**  
+  O modelo foi descontinuado. Defina `CLAUDE_MODEL=claude-sonnet-4-6` no `.env`, recrie os containers: `docker compose up -d --force-recreate agents runner` e inicie um **novo** pipeline (não reuse o diálogo de um run antigo).
+
 - **Pipeline “parou” no Engineer ou erro "Connection error" / "SSL: UNEXPECTED_EOF_WHILE_READING"**  
-  O container **agents** (ou o processo que chama a API Claude) não conseguiu estabelecer conexão com a API da Anthropic. Possíveis causas: rede instável, proxy corporativo, firewall ou DNS. O runtime já faz retry automático para erros de conexão/SSL (até 3 tentativas com backoff). **O que fazer:** (1) Verificar conectividade de dentro do container: `docker compose exec agents curl -sI https://api.anthropic.com`. (2) Se atrás de proxy, definir no `.env` (e no serviço agents) `HTTPS_PROXY` / `HTTP_PROXY`; a SDK Anthropic (httpx) respeita essas variáveis. (3) Confirmar que `CLAUDE_API_KEY` está definida no `.env` e repassada aos serviços (`env_file: .env`). (4) Ver logs: `docker compose logs agents`.
+  O container **agents** não conseguiu completar o TLS até a API da Anthropic. Se no **host** `curl -sI https://api.anthropic.com` funciona mas **dentro do container** falha com o mesmo erro, a saída HTTPS do container está diferente (ex.: Docker Desktop no Mac, VPN, proxy). **O que fazer:** (1) Testar: `docker compose exec agents curl -sI https://api.anthropic.com` — se der TLS error, o problema é rede/SSL do container. (2) **Alternativa:** rodar os agentes **no host** (onde o TLS funciona): na raiz do repo, `PYTHONPATH=applications python -m uvicorn orchestrator.agents.server:app --host 0.0.0.0 --port 8000`; no `docker-compose.yml` no serviço **runner** use `API_AGENTS_URL=http://host.docker.internal:8000` e em **services.runner** adicione `extra_hosts: - "host.docker.internal:host-gateway"`; recrie o runner. Assim o runner (no Docker) chama os agentes no host, que por sua vez chamam a Claude. (3) Se atrás de proxy, definir `HTTPS_PROXY`/`HTTP_PROXY` no `.env` e no serviço agents. (4) Ver logs: `docker compose logs agents`.
 
 - **Ver logs do pipeline**  
   O runner dispara o fluxo em background. Erros do processo filho (Python) aparecem em `docker compose logs runner`. Para o serviço que chama o Claude: `docker compose logs agents`.
