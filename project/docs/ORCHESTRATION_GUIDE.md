@@ -14,7 +14,7 @@
 ## 2) Engineer (antes do CTO)
 
 - **CTO** envia a spec (e contexto) ao **Engineer**.
-- **Engineer** analisa e devolve **proposta técnica**: quais stacks/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
+- **Engineer** analisa e devolve **proposta técnica**: quais squads/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
 - Engineer comunica-se **apenas** com o CTO. Competências em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
 **Implementação:** Agente Engineer em [orchestrator/agents/engineer_agent.py](../../applications/orchestrator/agents/engineer_agent.py). Endpoint `POST /invoke/engineer`.
@@ -23,11 +23,11 @@
 
 ## 3) CTO
 
-- Recebe a spec e **primeiro fala com o Engineer**; usa a proposta técnica para decidir stacks e dependências.
+- Recebe a spec e **primeiro fala com o Engineer**; usa a proposta técnica para decidir squads e dependências.
 - Gera [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) com base na proposta do Engineer.
-- **Contrata** um ou mais PMs conforme as stacks/equipes definidas pelo Engineer (Backend, Web Básica, Web Avançada, Mobile).
+- **Contrata** um ou mais PMs conforme as squads/equipes definidas pelo Engineer (Backend, Web Básica, Web Avançada, Mobile).
 - Cria [docs/STATUS.md](STATUS.md) inicial.
-- Delega cada stack ao PM e informa **dependências** (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”). PMs **conversam entre si via CTO** (não diretamente).
+- Delega cada squad ao PM e informa **dependências** (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”). PMs **conversam entre si via CTO** (não diretamente).
 - Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
 - Em **bloqueios cross-team** (ex.: endpoint falhou), CTO pode consultar o Engineer para solução e repassar ao PM responsável.
 
@@ -35,19 +35,19 @@
 
 ---
 
-## 4) PM (por stack)
+## 4) PM (por squad)
 
-- Recebe do CTO o escopo da stack.
+- Recebe do CTO o escopo da squad.
 - Cria backlog: lista de tasks com FR/NFR (usa [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md)).
-- **Contrata** os atores da stack:
+- **Contrata** os atores da squad:
   - **1 ou N pares Dev–QA** (sempre 1 QA para 1 Dev), conforme tamanho e complexidade;
   - **um** DevOps (por cloud: AWS/Azure/GCP — [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md));
   - **um** Monitor.
-- Stacks formadas **apenas por atores com as mesmas skills** (ex.: stack Backend → dev/backend/nodejs, qa/backend/nodejs ou lambdas, monitor/backend). Estrutura: [agents/README.md](../agents/README.md).
+- Squads formadas **apenas por atores com as mesmas skills** (ex.: squad Backend → dev/backend/nodejs, qa/backend/nodejs ou lambdas, monitor/backend). Estrutura: [agents/README.md](../agents/README.md).
 - **Atribui atividades** a Dev, QA e DevOps (não recebe resultado de testes diretamente do QA — o Monitor orquestra).
 - Define DoD específico (linka o [contracts/global_definition_of_done.md](../contracts/global_definition_of_done.md)).
 - Recebe do **Monitor** o status de andamento e finalização das atividades.
-- Informa ao CTO quando o projeto da stack foi finalizado ou há bloqueios.
+- Informa ao CTO quando o projeto da squad foi finalizado ou há bloqueios.
 
 ---
 
@@ -72,15 +72,17 @@
 
 ---
 
-## 7) Monitor (por stack)
+## 7) Monitor (por squad)
 
 - **Acompanha** Dev_<AREA> e QA_<AREA> do módulo (progresso, status de andamento, evidências).
 - **Aciona o QA** para realizar testes quando o Dev finaliza uma atividade.
-- **Recebe do QA**: está tudo OK ou precisa voltar para o Dev; em caso de refazer, **informa ao Dev** (com base no relatório do QA).
+- **Recebe do QA**: está tudo OK ou precisa voltar para o Dev; em caso de refazer, **informa ao Dev** (com base no relatório do QA). **Após bloqueio resolvido (PM/CTO)**, o **Monitor** reativa o Dev (reaciona o agente para a task desbloqueada).
 - **Aciona o DevOps** para provisionamento da aplicação — **total** ou **parcial** (parcial quando já puder fornecer produto funcional parcialmente).
 - Detecta travas, loops, falhas recorrentes.
 - **Informa ao PM_<AREA>** (progresso, status, alertas). Gera [reports/MONITOR_HEALTH_TEMPLATE.md](../reports/MONITOR_HEALTH_TEMPLATE.md) (por área).
 - PM avalia e **escala ao CTO** quando crítico.
+
+**Implementação (portal + API):** O runner, após PM Backend, entra no **Monitor Loop** (Fase 2): lê estado das tasks na API, decide qual agente acionar (Dev/QA/DevOps), invoca e atualiza tasks; o loop só encerra quando o usuário clica em **Aceitar projeto** no portal (POST `/api/projects/:id/accept`) ou em **Parar**. Ver [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 ---
 
@@ -105,4 +107,4 @@
 
 - [docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md) — Atores, responsabilidades e hierarquia
 - [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid
-- [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) — Composição da stack
+- [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) — Composição da squad

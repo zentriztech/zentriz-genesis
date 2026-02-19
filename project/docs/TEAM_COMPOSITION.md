@@ -1,4 +1,4 @@
-# Composição de Times (por Stack) — Zentriz Genesis
+# Composição de Times (por Squad) — Zentriz Genesis
 
 > Regras alinhadas a [docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md).
 
@@ -6,19 +6,19 @@
 
 ## Regras de composição
 
-Cada **stack** (Backend, Web, Mobile) é formada **apenas por atores com as mesmas skills**. A infraestrutura (IaC, CI/CD) faz parte de cada stack via **DevOps**; não existe stack "Infra" nem atores PM/Dev/QA/Monitor Infra. O **PM** da stack é responsável por **contratar** (instanciar) os atores.
+Cada **squad** (Backend, Web, Mobile) é formada **apenas por atores com as mesmas skills**. A infraestrutura (IaC, CI/CD) faz parte de cada squad via **DevOps**; não existe squad "Infra" nem atores PM/Dev/QA/Monitor Infra. O **PM** da squad é responsável por **contratar** (instanciar) os atores.
 
-| Papel | Quantidade por stack | Observação |
+| Papel | Quantidade por squad | Observação |
 |-------|----------------------|------------|
-| **PM_<AREA>** | 1 | Gerencia a stack; cria backlog; atribui atividades. |
+| **PM_<AREA>** | 1 | Gerencia a squad; cria backlog; atribui atividades. |
 | **Dev_<AREA>** | 1 ou N | Sempre em par com QA (1 QA por 1 Dev). |
 | **QA_<AREA>** | 1 ou N | Um QA para cada Dev (par Dev–QA). |
 | **Monitor_<AREA>** | 1 | Acompanha Dev/QA; aciona QA e DevOps; informa PM. |
-| **DevOps_<CLOUD>** | 1 | Por projeto/stack; escolhido por cloud (AWS, Azure ou GCP). |
+| **DevOps_<CLOUD>** | 1 | Por projeto/squad; escolhido por cloud (AWS, Azure ou GCP). |
 
 ---
 
-## Exemplo: Stack Backend
+## Exemplo: Squad Backend
 
 - **PM Backend**: 1
 - **Dev Backend**: 1 ou mais (conforme complexidade)
@@ -40,14 +40,14 @@ O PM escolhe o provedor com base em `constraints.cloud` do spec/charter — [doc
 
 ---
 
-## Fluxo de comunicação na stack
+## Fluxo de comunicação na squad
 
 - **PM → Dev, QA, DevOps**: atribui atividades.
 - **Monitor ↔ Dev**: acompanha desenvolvimento; informa refazer/melhorar quando QA indica.
 - **Monitor ↔ QA**: Monitor aciona testes; QA retorna OK ou volta para Dev.
 - **Monitor ↔ DevOps**: Monitor aciona provisionamento (total ou parcial).
 - **Monitor → PM**: status de andamento, finalização, alertas (`monitor.alert`).
-- **PM → CTO**: conclusão da stack ou bloqueios.
+- **PM → CTO**: conclusão da squad ou bloqueios.
 
 ---
 

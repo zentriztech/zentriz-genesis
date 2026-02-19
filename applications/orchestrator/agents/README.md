@@ -1,6 +1,6 @@
 # Agentes (runtime + Engineer, CTO, PM, Monitor, Dev, QA, DevOps Docker)
 
-Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente é definido por um `SYSTEM_PROMPT.md` em [agents/](../../agents/) e recebe/saída nos formatos message_envelope e response_envelope. O **Engineer** e os demais agentes são expostos pelo **mesmo** serviço Docker `agents` (container `zentriz-genesis-agents-1`; não há container separado por stack).
+Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente é definido por um `SYSTEM_PROMPT.md` em [agents/](../../agents/) e recebe/saída nos formatos message_envelope e response_envelope. O **Engineer** e os demais agentes são expostos pelo **mesmo** serviço Docker `agents` (container `zentriz-genesis-agents-1`; não há container separado por squad).
 
 ## Variáveis de ambiente
 
@@ -46,10 +46,10 @@ echo '{"request_id":"cli","input":{"spec_ref":"spec/PRODUCT_SPEC.md","context":{
 
 ## Resumo por agente
 
-- **Engineer** — Proposta técnica (stacks, equipes, dependências) para o CTO; agents/engineer/
+- **Engineer** — Proposta técnica (squads, equipes, dependências) para o CTO; agents/engineer/
 - **CTO** — Charter, contrata PM(s); definição em agents/cto/
-- **PM Backend** — Backlog da stack Backend; agents/pm/backend/
-- **Monitor Backend** — Health e alertas da stack Backend; agents/monitor/backend/
+- **PM Backend** — Backlog da squad Backend; agents/pm/backend/
+- **Monitor Backend** — Health e alertas da squad Backend; agents/monitor/backend/
 - **Dev Backend** — Implementação (endpoints, testes, evidências); agents/dev/backend/nodejs/
 - **QA Backend** — Testes, validação, QA report; agents/qa/backend/nodejs/
 - **DevOps Docker** — Docker (namespace zentriz-genesis), Terraform, k8s; agents/devops/docker/

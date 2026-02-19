@@ -10,7 +10,7 @@
 |-----------|-----------|
 | [README.md](../README.md) | Visão geral do projeto |
 | **[ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md)** | Atores, responsabilidades, hierarquia de comunicação e comportamentos |
-| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (fluxo, stacks, etapas) |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (fluxo em duas fases, Monitor Loop, aceite, squads, etapas) |
 | [context/PROJECT_OVERVIEW.md](../context/PROJECT_OVERVIEW.md) | Contexto completo para novos chats |
 | [context/QUICK_REFERENCE.md](../context/QUICK_REFERENCE.md) | Referência rápida de caminhos |
 | [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPMENT_CONTEXT.md) | Por que "Voucher"; análise; checklist e por onde começar |
@@ -36,7 +36,7 @@
 | Documento | Descrição |
 |-----------|-----------|
 | [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md) | Atores, responsabilidades, hierarquia e diagramas |
-| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (hierarquia, fluxo, stacks, etapas) |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (hierarquia, fluxo em duas fases, Monitor Loop, aceite, squads, etapas) |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
 | [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor→PM→CTO |
@@ -71,7 +71,7 @@
 | [contracts/message_envelope.json](../contracts/message_envelope.json) | Contrato de entrada |
 | [contracts/response_envelope.json](../contracts/response_envelope.json) | Contrato de saída |
 | [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md) | Template de backlog |
-| [contracts/checklists/](../contracts/checklists/) | Checklists por stack |
+| [contracts/checklists/](../contracts/checklists/) | Checklists por squad |
 
 ---
 

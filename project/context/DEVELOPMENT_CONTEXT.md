@@ -11,7 +11,7 @@
 - **Onde está**: [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) descreve um mini produto: criar vouchers, consultar, resgatar e listar (admin).
 - **Objetivo**: Ter uma spec concreta (FR/NFR) para:
   - Preencher Charter, backlogs, API Contract e status.
-  - Desenvolver uma API + Web de exemplo (Backend + Web stacks).
+  - Desenvolver uma API + Web de exemplo (Backend + Web squads).
   - Testar smoke tests, orquestração e agentes contra um caso real.
 - **Substituição**: Qualquer outro produto pode ser usado — basta trocar o `PRODUCT_SPEC.md` (ou criar outro spec) e ajustar Charter/backlogs. O Voucher é só o primeiro exemplo.
 
@@ -27,7 +27,7 @@
 |------|--------|
 | Documentação | Completa (README, atores, arquitetura, orquestração, ADRs, NAVIGATION, etc.) |
 | Spec de exemplo | PRODUCT_SPEC.md (Voucher MVP: FR-01 a FR-04, NFR-01 a NFR-04) |
-| Agentes | Estrutura por stack/skill (cto, pm, dev, qa, devops, monitor) com SYSTEM_PROMPT.md |
+| Agentes | Estrutura por squad/skill (cto, pm, dev, qa, devops, monitor) com SYSTEM_PROMPT.md |
 | Contratos | message_envelope, response_envelope, DoD global, DoD DevOps, checklists |
 | Orquestração (desenho) | Schemas de eventos, task_state_machine, handler templates (skeleton) |
 | Backlogs de exemplo | BACKLOG_BACKEND, BACKLOG_WEB (tasks Voucher) |
@@ -40,7 +40,7 @@
 |------|------|
 | Project Charter vazio | Preenchido para o produto de exemplo (Voucher MVP) em docs/PROJECT_CHARTER.md |
 | STATUS.md vazio | Preenchido com estado inicial em docs/STATUS.md |
-| message_envelope com roles Infra | Atualizado: removidos PM_INFRA, DEV_INFRA, QA_INFRA, MONITOR_INFRA (apenas 3 stacks: Backend, Web, Mobile) |
+| message_envelope com roles Infra | Atualizado: removidos PM_INFRA, DEV_INFRA, QA_INFRA, MONITOR_INFRA (apenas 3 squads: Backend, Web, Mobile) |
 
 ### 2.3 O que ainda não existe (próximos passos)
 
@@ -59,7 +59,7 @@
 
 - [x] Spec de produto (ex.: Voucher MVP)
 - [x] Atores e responsabilidades definidos
-- [x] Agentes com SYSTEM_PROMPT por stack/skill
+- [x] Agentes com SYSTEM_PROMPT por squad/skill
 - [x] Contratos (envelope, DoD, checklists)
 - [x] Eventos e state machine definidos
 - [x] Backlogs de exemplo (Backend, Web)
@@ -89,11 +89,11 @@ A ordem abaixo garante que a **infra de execução** exista antes do código das
 | **1** | **devops::docker** | **Fundação.** Todo o projeto é provisionado via Docker (local), Terraform e k8s em qualquer cloud. Sem isso, Dev/QA/PM/Monitor não têm onde rodar nem onde fazer deploy. Namespace `zentriz-genesis`, Compose/Terraform/k8s conforme [TECHNICAL_REQUIREMENTS.md](../docs/TECHNICAL_REQUIREMENTS.md). |
 | 2 | dev::backend::nodejs | Implementa a API (ex.: Voucher) em Node/TypeScript; consome a base Docker/k8s. |
 | 3 | qa::backend::nodejs | Testes e validação do backend Node; depende do dev backend e do ambiente (Docker). |
-| 4 | pm::backend::nodejs | Backlog e planejamento da stack Backend; usa outputs do CTO e contrata Dev/QA/DevOps. |
-| 5 | monitor::backend::nodejs | Acompanhamento, health e alertas da stack Backend; aciona QA e DevOps quando necessário. |
+| 4 | pm::backend::nodejs | Backlog e planejamento da squad Backend; usa outputs do CTO e contrata Dev/QA/DevOps. |
+| 5 | monitor::backend::nodejs | Acompanhamento, health e alertas da squad Backend; aciona QA e DevOps quando necessário. |
 | 6 | cto | Orquestrador: lê spec, gera Charter, contrata PM(s); consolida decisões e estado. Implementar por último, quando os demais agentes estiverem disponíveis. |
 
-**Resumo**: **devops::docker** primeiro; em seguida os agentes da stack Backend (dev → qa → pm → monitor); **cto** por último.
+**Resumo**: **devops::docker** primeiro; em seguida os agentes da squad Backend (dev → qa → pm → monitor); **cto** por último.
 
 - Referência de agentes: [agents/README.md](../agents/README.md). DevOps Docker: [agents/devops/docker/](../agents/devops/docker/).
 - Ordem também registrada em [docs/TECHNICAL_REQUIREMENTS.md](../docs/TECHNICAL_REQUIREMENTS.md) (seção “Ordem de desenvolvimento dos agentes”).

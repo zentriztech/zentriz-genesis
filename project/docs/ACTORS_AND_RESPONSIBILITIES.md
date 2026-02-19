@@ -10,8 +10,8 @@
 |------|------|------------------------------|
 | **SPEC** | Pessoa real | Dono do projeto; fornece especificação e requisitos; recebe status de conclusão ou bloqueios. |
 | **CTO** | Agente | Decisões de **produto**; interpreta spec com apoio do Engineer; gera Charter; contrata PM(s); informa SPEC; ponte entre PMs para dependências. |
-| **Engineer** | Agente | Decisões **técnicas**; analisa spec e define stacks/equipes (web básica, web avançada, backend API) e dependências; comunica-se apenas com CTO. |
-| **PM** | Agente | Gerencia sua stack; backlog por FR/NFR; contrata Dev(s), QA(s), DevOps e Monitor da stack; recebe status do Monitor; conversa com outros PMs **via CTO**. |
+| **Engineer** | Agente | Decisões **técnicas**; analisa spec e define squads/equipes (web básica, web avançada, backend API) e dependências; comunica-se apenas com CTO. |
+| **PM** | Agente | Gerencia sua squad; backlog por FR/NFR; contrata Dev(s), QA(s), DevOps e Monitor da squad; recebe status do Monitor; conversa com outros PMs **via CTO**. |
 | **Dev** | Agente | Especialista em desenvolvimento contínuo; implementação de tarefas conforme skills da atividade. |
 | **QA** | Agente | Especialista em testes, documentação, validação contínua, QA Report; bloqueia regressões. |
 | **DevOps** | Agente | Especialista em IaC, CI/CD, deploy, smoke tests, banco de dados; provisiona infra total ou parcial. |
@@ -84,13 +84,13 @@ flowchart TB
 
 ### 3.2 CTO (Agente)
 
-- **Responsabilidade**: Decisões de **produto**. Interpretar a spec com apoio da **proposta técnica do Engineer**; gerar Project Charter; **contratar** um ou mais PMs com base nas stacks/equipes definidas pelo Engineer; atuar como **ponte** entre PMs (ex.: dependências — PM Web precisa de endpoints do PM Backend).
+- **Responsabilidade**: Decisões de **produto**. Interpretar a spec com apoio da **proposta técnica do Engineer**; gerar Project Charter; **contratar** um ou mais PMs com base nas squads/equipes definidas pelo Engineer; atuar como **ponte** entre PMs (ex.: dependências — PM Web precisa de endpoints do PM Backend).
 - **Comportamentos**:
-  - Recebe a spec e **consulta o Engineer** (spec → Engineer → proposta de stacks, equipes, dependências).
+  - Recebe a spec e **consulta o Engineer** (spec → Engineer → proposta de squads, equipes, dependências).
   - Usa a proposta do Engineer para produzir [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) e contratar PM(s).
-  - Contrata (instancia) um PM por stack/equipe definida pelo Engineer (Backend, Web Básica, Web Avançada, Mobile, etc.). Infraestrutura faz parte de cada stack via DevOps.
+  - Contrata (instancia) um PM por squad/equipe definida pelo Engineer (Backend, Web Básica, Web Avançada, Mobile, etc.). Infraestrutura faz parte de cada squad via DevOps.
   - Delega o escopo ao PM e informa dependências (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”).
-  - Recebe do PM: conclusão da stack ou bloqueios; em bloqueios cross-team (ex.: Web depende de Backend), repassa ao Engineer ou ao PM responsável.
+  - Recebe do PM: conclusão da squad ou bloqueios; em bloqueios cross-team (ex.: Web depende de Backend), repassa ao Engineer ou ao PM responsável.
   - Informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
   - Mantém [docs/STATUS.md](STATUS.md) consolidado.
 
@@ -98,27 +98,27 @@ flowchart TB
 
 ### 3.3 Engineer (Agente)
 
-- **Responsabilidade**: Decisões **técnicas**. Analisar a spec e definir **quais stacks/equipes** o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes.
+- **Responsabilidade**: Decisões **técnicas**. Analisar a spec e definir **quais squads/equipes** o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes.
 - **Comportamentos**:
   - Comunica-se **apenas** com o CTO.
   - Recebe do CTO a spec (ou resumo) e contexto (constraints, cloud).
-  - Devolve **proposta técnica** (lista de stacks/equipes, dependências, ex.: “Web SaaS depende de Backend API — obter URLs e endpoints via CTO”).
+  - Devolve **proposta técnica** (lista de squads/equipes, dependências, ex.: “Web SaaS depende de Backend API — obter URLs e endpoints via CTO”).
   - Em bloqueios reportados (ex.: endpoint falhou), o CTO pode consultar o Engineer para solução técnica; o Engineer devolve recomendação ao CTO, que repassa ao PM responsável.
   - Não contrata PMs nem atribui tarefas. Competências detalhadas em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
 ---
 
-### 3.4 PM (Agente — por stack)
+### 3.4 PM (Agente — por squad)
 
-- **Responsabilidade**: Backlog por FR/NFR; gerenciar sua stack; **contratar** os atores da stack: um ou mais Dev e QA (sempre em par: 1 QA para 1 Dev), **um** DevOps e **um** Monitor por projeto/stack.
+- **Responsabilidade**: Backlog por FR/NFR; gerenciar sua squad; **contratar** os atores da squad: um ou mais Dev e QA (sempre em par: 1 QA para 1 Dev), **um** DevOps e **um** Monitor por projeto/squad.
 - **Comportamentos**:
-  - Cria e mantém o backlog (tasks com FR/NFR) para sua stack.
-  - Contrata atores **com as mesmas skills** da stack (ex.: stack Backend → Dev Backend, QA Backend, DevOps, Monitor Backend).
-  - Tamanho da stack: 1 ou vários Dev(s) e QA(s), conforme complexidade; sempre **pares** Dev–QA. Apenas **um** DevOps e **um** Monitor por stack.
+  - Cria e mantém o backlog (tasks com FR/NFR) para sua squad.
+  - Contrata atores **com as mesmas skills** da squad (ex.: squad Backend → Dev Backend, QA Backend, DevOps, Monitor Backend).
+  - Tamanho da squad: 1 ou vários Dev(s) e QA(s), conforme complexidade; sempre **pares** Dev–QA. Apenas **um** DevOps e **um** Monitor por squad.
   - Comunica-se com Dev, QA e DevOps **apenas para atribuir atividades** (tasks).
   - Recebe do **Monitor** o status do andamento do desenvolvimento e da finalização das atividades.
   - Não recebe resultado de testes diretamente do QA — o Monitor orquestra Dev ↔ QA e informa o PM.
-  - Informa ao CTO quando o projeto da stack foi finalizado ou há bloqueios.
+  - Informa ao CTO quando o projeto da squad foi finalizado ou há bloqueios.
   - Usa [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md) e [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) para escolher DevOps por cloud.
 
 ---
@@ -173,12 +173,12 @@ flowchart TB
 
 ---
 
-## 4. Composição da stack
+## 4. Composição da squad
 
-- Cada **stack** (Backend, Web, Mobile) é formada **apenas por atores com as mesmas skills** (ex.: Backend → dev/backend/nodejs, qa/backend/nodejs ou lambdas, monitor/backend; DevOps por cloud: devops/aws, devops/azure, devops/gcp). Não existe stack "Infra" — a infra está dentro de cada stack (DevOps). Estrutura: [agents/README.md](../agents/README.md).
-- **Dev e QA**: sempre em **par** (1 QA para 1 Dev). Pode haver **1 ou N** pares por stack, conforme tamanho e complexidade.
-- **DevOps**: **um** por projeto/stack (escolhido por cloud: AWS, Azure ou GCP).
-- **Monitor**: **um** por stack.
+- Cada **squad** (Backend, Web, Mobile) é formada **apenas por atores com as mesmas skills** (ex.: Backend → dev/backend/nodejs, qa/backend/nodejs ou lambdas, monitor/backend; DevOps por cloud: devops/aws, devops/azure, devops/gcp). Não existe squad "Infra" — a infra está dentro de cada squad (DevOps). Estrutura: [agents/README.md](../agents/README.md).
+- **Dev e QA**: sempre em **par** (1 QA para 1 Dev). Pode haver **1 ou N** pares por squad, conforme tamanho e complexidade.
+- **DevOps**: **um** por projeto/squad (escolhido por cloud: AWS, Azure ou GCP).
+- **Monitor**: **um** por squad.
 - O **PM** contrata e atribui atividades; não executa tarefas de Dev/QA/DevOps.
 
 ```mermaid
@@ -224,14 +224,14 @@ sequenceDiagram
 
     SPEC->>CTO: Especificação (FR/NFR)
     CTO->>ENG: Spec + contexto
-    ENG->>CTO: Proposta técnica (stacks, equipes, dependências)
+    ENG->>CTO: Proposta técnica (squads, equipes, dependências)
     CTO->>CTO: Project Charter (com base na proposta), contrata PM(s)
-    CTO->>PM: Delega stack(s) + dependências
+    CTO->>PM: Delega squad(s) + dependências
 
     PM->>DEV: Atribui atividades
     PM->>QA: Atribui atividades
     PM->>DO: Atribui atividades
-    PM->>MON: (Monitor já observa stack)
+    PM->>MON: (Monitor já observa squad)
 
     loop Por atividade
         DEV->>DEV: Implementa
@@ -263,14 +263,14 @@ flowchart TB
 
     subgraph ORQ["Orquestração"]
         CTO["CTO: Produto<br/>Charter, contrata PM(s)<br/>Ponte entre PMs"]
-        ENG["Engineer: Técnico<br/>Stacks, equipes, dependências"]
+        ENG["Engineer: Técnico<br/>Squads, equipes, dependências"]
     end
 
-    subgraph PM_BOX["PM (por stack)"]
+    subgraph PM_BOX["PM (por squad)"]
         PM["Backlog FR/NFR<br/>Contrata Dev, QA, DevOps, Monitor<br/>Atribui atividades<br/>Conversa com outros PMs via CTO"]
     end
 
-    subgraph EXECUÇÃO["Execução (por stack)"]
+    subgraph EXECUÇÃO["Execução (por squad)"]
         DEV["Dev: Implementação contínua"]
         QA["QA: Testes, doc, validação, QA Report"]
         DO["DevOps: IaC, CI/CD, deploy, DB, smoke"]

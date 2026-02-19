@@ -4,7 +4,7 @@ O agente **Engineer** devolve ao CTO uma proposta técnica estruturada. O CTO us
 
 ## Estrutura esperada (em artifacts ou summary)
 
-- **stacks_teams**: Lista de stacks/equipes que o projeto precisa, ex.:
+- **squads_teams**: Lista de squads/equipes que o projeto precisa, ex.:
   - "Web Básica" (sites estáticos, landing pages)
   - "Web Avançada" (app web com API, auth, gestão)
   - "Backend API" (REST/GraphQL para consumo pelas outras equipes)
@@ -15,7 +15,7 @@ O agente **Engineer** devolve ao CTO uma proposta técnica estruturada. O CTO us
 
 ## Uso pelo CTO
 
-- Contratar um PM por stack/equipe listada.
+- Contratar um PM por squad/equipe listada.
 - Ao delegar ao PM, informar dependências (ex.: "PM Web: obter lista de endpoints do PM Backend via mim").
 - Incluir na visão do Charter a proposta técnica (resumida) para alinhamento.
 

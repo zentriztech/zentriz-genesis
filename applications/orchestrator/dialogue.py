@@ -47,10 +47,10 @@ def build_summary_human(
     templates = {
         "cto.engineer.request": (
             "O CTO enviou a especificação do projeto ao Engineer para que ele defina "
-            "as equipes, stacks técnicas e dependências necessárias para a implementação."
+            "as equipes, squads técnicas e dependências necessárias para a implementação."
         ),
         "engineer.cto.response": (
-            "O Engineer finalizou a análise técnica e entregou ao CTO a proposta com stacks, "
+            "O Engineer finalizou a análise técnica e entregou ao CTO a proposta com squads, "
             "equipes recomendadas e dependências do projeto."
             + (f" Resumo: {snippet_preview}" if snippet_preview else "")
         ),

@@ -37,6 +37,7 @@
 | **PROJECT_ID** / **GENESIS_API_TOKEN** | (runner) | Definidos pela API ao disparar o pipeline. Runner usa para PATCH /api/projects/:id e POST /api/projects/:id/dialogue. Token JWT de curta duração (ex.: 1h). | (injetados pela API) |
 | **PROJECT_FILES_ROOT** | Não (runner, API) | Raiz dos arquivos por projeto: `<root>/<project_id>/docs` e `<root>/<project_id>/project`. Documentos gerados pelos agentes são gravados com criador (spec, engineer, cto, pm_backend, dev_backend, qa_backend, monitor_backend, devops_docker). No Docker use `/project-files` com volume; no host ex.: `/Users/mac/zentriz-files`. A API usa para GET /api/projects/:id/artifacts. | (vazio = runner não grava em disco por projeto) |
 | **PIPELINE_FULL_STACK** | Não (runner) | Se `true`, executa após PM Backend também: Dev Backend, QA Backend, Monitor Backend, DevOps Docker. Se `false`, pipeline para em PM Backend. | `true` |
+| **MONITOR_LOOP_INTERVAL** | Não (runner) | Intervalo em segundos entre ciclos do Monitor Loop (Fase 2), quando API e PROJECT_ID estão definidos. | `20` |
 
 **Usuários padrão (portal):** criados/atualizados pelo seed da API. **Em produção, altere as senhas.** Ver tabela em [services/api-node/README.md](../services/api-node/README.md): Zentriz Admin `admin@zentriz.com` / `#Jean@2026!` (login/genesis); Admin tenant `admin@tenant.com` / `#Tenant@2026!` (login/tenant); Usuário `user@tenant.com` / `#User@2026!` (login).
 
@@ -69,7 +70,7 @@ Template: [.env.example](../.env.example). Copie para `.env` e preencha os valor
 
 ## Variáveis mínimas para "Agentes conversando com a LLM"
 
-Para o pipeline (Spec → Engineer → CTO → PM) **com agentes chamando a API Claude**, no ambiente Docker são **obrigatórias** no `.env`:
+Para o pipeline (Spec → Engineer → CTO → PM Backend e, opcionalmente, Dev → QA → Monitor → DevOps) **com agentes chamando a API Claude**, no ambiente Docker são **obrigatórias** no `.env`:
 
 | Variável | Obrigatório | Valor esperado |
 |----------|-------------|----------------|

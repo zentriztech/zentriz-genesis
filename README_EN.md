@@ -45,14 +45,14 @@ AWS, Azure, and GCP.
 They provision infrastructure, CI/CD, observability, and execute smoke tests.
 
 ### Monitor Agents
-Monitor **Dev/QA** per stack (Backend, Web, Mobile) — progress, activity status — and **inform the responsible PM** (who escalates to CTO when critical).
+Monitor **Dev/QA** per squad (Backend, Web, Mobile) — progress, activity status — and **inform the responsible PM** (who escalates to CTO when critical).
 
 ## 🔄 Event-Driven Orchestration
 
 Workflow based on standardized events:  
 `project.created`, `task.assigned`, `qa.failed`, `devops.deployed`, `project.completed`, among others.
 
-Each task follows a formal **State Machine**, ensuring traceability and control.
+When the portal starts the pipeline, the **runner** runs **two phases**: **Phase 1** (Spec → Engineer → CTO → PM Backend) and **Phase 2** (**Monitor Loop**), which triggers Dev/QA/DevOps according to task state until the user **accepts the project** in the portal or **stops** the pipeline. Each task follows a formal **State Machine**, ensuring traceability and control.
 
 ## 📂 Project Structure
 

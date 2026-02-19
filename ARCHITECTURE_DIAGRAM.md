@@ -45,7 +45,7 @@ flowchart TB
 
 ## 2. Arquitetura completa por módulos
 
-Múltiplas stacks (Backend, Web, Mobile) definidas pelo **Engineer**. CTO (produto) e Engineer (técnico) no mesmo nível. Cada stack: 1 PM, N pares Dev–QA, 1 Monitor, 1 DevOps. PMs conversam via CTO (dependências). Monitor observa Dev/QA, aciona QA e DevOps, informa PM.
+Múltiplas squads (Backend, Web, Mobile) definidas pelo **Engineer**. CTO (produto) e Engineer (técnico) no mesmo nível. Cada squad: 1 PM, N pares Dev–QA, 1 Monitor, 1 DevOps. PMs conversam via CTO (dependências). Monitor observa Dev/QA, aciona QA e DevOps, informa PM.
 
 ```mermaid
 flowchart TB
@@ -133,9 +133,9 @@ flowchart TB
 
 ---
 
-## 3. Fluxo de etapas (sequência)
+## 3. Fluxo de etapas (sequência conceitual)
 
-Da spec à conclusão: SPEC → CTO → **Engineer** (proposta técnica) → CTO (Charter, contrata PM(s)) → PM → atividades → Monitor → PM → CTO → SPEC.
+Da spec à conclusão: SPEC → CTO → **Engineer** (proposta técnica) → CTO (Charter, contrata PM(s)) → PM → atividades → Monitor aciona Dev/QA/DevOps → PM → CTO → SPEC. O **Monitor** reativa o Dev após bloqueio resolvido (PM/CTO).
 
 ```mermaid
 sequenceDiagram
@@ -150,9 +150,9 @@ sequenceDiagram
 
     SPEC->>CTO: Especificação (FR/NFR)
     CTO->>ENG: Spec + contexto
-    ENG->>CTO: Proposta (stacks, equipes, dependências)
+    ENG->>CTO: Proposta (squads, equipes, dependências)
     CTO->>CTO: Project Charter, contrata PM(s)
-    CTO->>PM: Delega stack(s) + dependências
+    CTO->>PM: Delega squad(s) + dependências
 
     PM->>DEV: Atribui atividades
     PM->>QA: Atribui atividades
@@ -167,6 +167,9 @@ sequenceDiagram
         alt Precisa refazer
             MON->>DEV: Refazer/melhorar (baseado em QA)
         end
+        alt Bloqueio resolvido
+            MON->>DEV: Reativa Dev
+        end
     end
 
     MON->>DO: Aciona provisionamento (total/parcial)
@@ -178,9 +181,74 @@ sequenceDiagram
 
 ---
 
-## 4. Composição da stack (Dev–QA em par, 1 DevOps, 1 Monitor)
+## 3b. Pipeline em duas fases (implementação atual)
 
-Cada stack tem 1 ou N **pares** Dev–QA (1 QA para 1 Dev), **um** DevOps e **um** Monitor. Apenas atores com as mesmas skills.
+Quando o portal inicia o pipeline (API + PROJECT_ID definidos), o **runner** executa **Fase 1** (Spec → Engineer → CTO → PM Backend), faz **seed de tarefas** na API e entra no **Monitor Loop** (Fase 2). O loop só encerra quando o usuário **aceita o projeto** no portal ou **para** o pipeline.
+
+```mermaid
+flowchart LR
+    subgraph Fase1 ["Fase 1 - Criacao da squad"]
+        Spec[Spec] --> Engineer[Engineer]
+        Engineer --> CTO[CTO]
+        CTO --> PM[PM Backend]
+    end
+    subgraph Fase2 ["Fase 2 - Monitor Loop"]
+        PM --> Seed[Seed tasks API]
+        Seed --> Loop[Loop]
+        Loop --> Read[Ler estado]
+        Read --> Decide[Decidir proximo agente]
+        Decide --> Invoke[Invocar Dev/QA/DevOps]
+        Invoke --> Update[Atualizar task + dialogo]
+        Update --> Check{accepted ou stopped?}
+        Check -->|Nao| Loop
+        Check -->|Sim| Fim[Encerrar]
+    end
+    User[Usuario] -->|Aceitar projeto| Accept[POST /accept]
+    Accept --> Check
+```
+
+- **Fase 1**: Runner persiste charter e backlog; chama `POST /api/projects/:id/tasks` para criar tarefas iniciais (ex.: TSK-BE-001).
+- **Fase 2**: No mesmo processo, o runner entra em loop: `GET /api/projects/:id` e `GET /api/projects/:id/tasks`; se status for `accepted` ou `stopped`, sai; senão decide próximo agente (Dev, QA ou DevOps), invoca, atualiza task e diálogo; repete. **Parada**: usuário clica "Aceitar projeto" no portal (`POST /api/projects/:id/accept`) ou "Parar" (SIGTERM).
+
+Referência: [project/docs/AGENTS_AND_LLM_FLOW.md](project/docs/AGENTS_AND_LLM_FLOW.md), [project/docs/ORCHESTRATOR_BLUEPRINT.md](project/docs/ORCHESTRATOR_BLUEPRINT.md).
+
+---
+
+## 3c. Fluxo Portal / API / Runner (com aceite)
+
+```mermaid
+sequenceDiagram
+    participant User as Usuario
+    participant Portal as genesis-web
+    participant API as api-node
+    participant Runner as runner
+    participant Agents as agents
+
+    User->>Portal: Iniciar pipeline
+    Portal->>API: POST /api/projects/:id/run
+    API->>Runner: POST /run (specPath, token)
+    Runner->>Runner: Fase 1: Engineer -> CTO -> PM Backend
+    Runner->>API: POST /api/projects/:id/tasks (seed)
+    loop Monitor Loop
+        Runner->>API: GET /api/projects/:id, GET /api/projects/:id/tasks
+        alt status accepted ou stopped
+            Runner->>Runner: Encerra loop
+        else
+            Runner->>Agents: Invocar Dev ou QA ou DevOps
+            Runner->>API: PATCH task, POST dialogue
+        end
+    end
+    User->>Portal: Aceitar projeto
+    Portal->>API: POST /api/projects/:id/accept
+    API->>API: status = accepted
+    Note over Runner: Proximo ciclo le status e sai
+```
+
+---
+
+## 4. Composição da squad (Dev–QA em par, 1 DevOps, 1 Monitor)
+
+Cada squad tem 1 ou N **pares** Dev–QA (1 QA para 1 Dev), **um** DevOps e **um** Monitor. Apenas atores com as mesmas skills.
 
 ```mermaid
 flowchart LR
@@ -217,8 +285,8 @@ flowchart LR
 |------|----------------------------|--------------|
 | **SPEC** | Fornece spec; recebe conclusão/bloqueios | CTO |
 | **CTO** | Produto: Charter, contrata PM(s), ponte entre PMs (dependências) | SPEC, **Engineer**, PM(s) |
-| **Engineer** | Técnico: stacks, equipes, dependências; analisa spec | CTO |
-| **PM** | Backlog, gerencia stack, contrata Dev/QA/DevOps/Monitor; conversa com outros PMs **via CTO** | CTO, Dev, QA, DevOps, Monitor (recebe) |
+| **Engineer** | Técnico: squads, equipes, dependências; analisa spec | CTO |
+| **PM** | Backlog, gerencia squad, contrata Dev/QA/DevOps/Monitor; conversa com outros PMs **via CTO** | CTO, Dev, QA, DevOps, Monitor (recebe) |
 | **Dev** | Implementação contínua | PM (recebe tasks), Monitor (acompanhamento/refazer) |
 | **QA** | Testes, documentação, validação, QA Report | PM (recebe tasks), Monitor (acionado para testes) |
 | **DevOps** | IaC, CI/CD, deploy, DB, smoke tests | PM (recebe tasks), Monitor (acionado para provisionamento) |
@@ -245,4 +313,34 @@ flowchart LR
 
 ---
 
-*Última atualização: 2026-02-18 — Zentriz Genesis. Ver [project/docs/ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md) para detalhes completos.*
+## 7. Estados do projeto (API / portal)
+
+Ciclo de vida do status do projeto. O pipeline só encerra (Monitor Loop) quando o usuário **aceita** ou **para**.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> draft
+    draft --> spec_submitted: Upload spec
+    spec_submitted --> pending_conversion: Arquivos nao-.md
+    pending_conversion --> cto_charter: Conversao OK
+    spec_submitted --> cto_charter: Spec .md
+    cto_charter --> pm_backlog: Charter OK
+    pm_backlog --> running: POST /run
+    running --> completed: Fluxo sequencial conclui
+    running --> stopped: POST /stop ou SIGTERM
+    running --> accepted: POST /accept (usuario)
+    completed --> accepted: POST /accept (usuario)
+    stopped --> accepted: POST /accept (usuario)
+    running --> failed: Erro no pipeline
+    accepted --> [*]
+    stopped --> [*]
+    failed --> [*]
+```
+
+- **accepted**: Estado final; usuário clicou em "Aceitar projeto" no portal (`POST /api/projects/:id/accept`). Não permite novo Run.
+- **running**: Fase 1 em execução ou Monitor Loop ativo; runner lê tasks e aciona Dev/QA/DevOps até aceite ou parada.
+
+---
+
+*Última atualização: 2026-02-19 — Zentriz Genesis. Ver [project/docs/ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md) e [project/docs/AGENTS_AND_LLM_FLOW.md](project/docs/AGENTS_AND_LLM_FLOW.md) para detalhes completos.*

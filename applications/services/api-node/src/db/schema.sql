@@ -91,8 +91,31 @@ CREATE INDEX IF NOT EXISTS idx_project_spec_files_project ON project_spec_files(
 ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_status_check;
 ALTER TABLE tenants ADD CONSTRAINT tenants_status_check CHECK (status IN ('active', 'suspended', 'inactive'));
 
--- Migration: status running (pipeline em execução) e stopped (usuário parou)
+-- Migration: status running (pipeline em execução), stopped (usuário parou), accepted (aceite pelo usuário = estado final; Monitor Loop encerra)
 ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_status_check;
 ALTER TABLE projects ADD CONSTRAINT projects_status_check CHECK (status IN (
-  'draft', 'spec_submitted', 'pending_conversion', 'cto_charter', 'pm_backlog', 'dev_qa', 'devops', 'completed', 'failed', 'running', 'stopped'
+  'draft', 'spec_submitted', 'pending_conversion', 'cto_charter', 'pm_backlog', 'dev_qa', 'devops', 'completed', 'failed', 'running', 'stopped', 'accepted'
 ));
+
+-- Tabela de tarefas por projeto (Monitor Loop lê/atualiza; alinhado a TASK_STATE_MACHINE.md)
+CREATE TABLE IF NOT EXISTS project_tasks (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id    UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id       TEXT NOT NULL,
+  module        TEXT NOT NULL DEFAULT 'backend' CHECK (module IN ('backend', 'web', 'mobile')),
+  owner_role    TEXT NOT NULL CHECK (owner_role IN (
+    'DEV_BACKEND', 'QA_BACKEND', 'DEVOPS_DOCKER', 'DEV_WEB', 'QA_WEB', 'DEV_MOBILE', 'QA_MOBILE'
+  )),
+  requirements  TEXT,
+  status        TEXT NOT NULL DEFAULT 'NEW' CHECK (status IN (
+    'NEW', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_REVIEW', 'QA_FAIL', 'QA_PASS', 'BLOCKED', 'DONE', 'CANCELLED'
+  )),
+  artifacts_ref TEXT,
+  evidence      TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(project_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_tasks_project_status ON project_tasks(project_id, status);

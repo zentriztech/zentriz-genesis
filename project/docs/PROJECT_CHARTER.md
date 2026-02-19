@@ -12,13 +12,13 @@
   - Documentação de API e instruções de execução/deploy.
 - **Fora de escopo** (nesta fase): Mobile app; autenticação avançada; múltiplos ambientes além de dev/staging.
 
-## Módulos (stacks)
+## Módulos (squads)
 
 - **Backend/API**: Node.js (ou Python), AWS Lambda + API Gateway (ou equivalente), persistência (ex.: DynamoDB ou DB gerenciado). Endpoints: POST/GET /vouchers, POST /vouchers/{id}/redeem, GET /admin/vouchers (paginado).
 - **Web**: React + TypeScript, consumo da API, páginas para criar, consultar, resgatar e listar vouchers; state management e testes (unit/e2e mínimo).
 - **Mobile**: Não incluído neste MVP.
 
-(Infra/DevOps é responsabilidade do DevOps em cada stack: Backend e Web.)
+(Infra/DevOps é responsabilidade do DevOps em cada squad: Backend e Web.)
 
 ## Riscos e suposições
 

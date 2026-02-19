@@ -31,7 +31,7 @@ def test_build_summary_human_cto_engineer_request():
     from orchestrator.dialogue import build_summary_human
     out = build_summary_human("cto.engineer.request", "cto", "engineer", "")
     assert "CTO" in out and "Engineer" in out
-    assert "especificação" in out or "equipes" in out or "stacks" in out
+    assert "especificação" in out or "equipes" in out or "squads" in out
 
 
 def test_build_summary_human_engineer_cto_response():

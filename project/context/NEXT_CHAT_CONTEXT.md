@@ -54,11 +54,11 @@ Sobe todos os serviços, incluindo agents. Funciona em Linux e ambientes onde o 
 
 ### Pipeline e portal
 
-- **Runner** (`applications/orchestrator/runner.py`): fluxo Spec → Engineer → CTO → PM Backend. Registra passos e erros no diálogo (POST dialogue na API).
-  - **IMPORTANTE:** dentro do Docker, `API_BASE_URL` **deve** ser `http://api:3000` (nome do serviço), não `http://localhost:3000`. O `docker-compose.yml` define isso explicitamente no serviço runner.
+- **Runner** (`applications/orchestrator/runner.py`): com API e PROJECT_ID, **Fase 1** (Spec → Engineer → CTO → PM Backend), **seed de tarefas** e **Monitor Loop** (Fase 2): lê projeto e tasks, aciona Dev/QA/DevOps, atualiza task e diálogo; encerra quando status `accepted` (usuário aceitou no portal) ou `stopped` (SIGTERM). Registra passos e erros no diálogo (POST dialogue na API).
+  - **IMPORTANTE:** dentro do Docker, `API_BASE_URL` **deve** ser `http://api:3000` (nome do serviço), não `http://localhost:3000`. O `docker-compose.yml` define isso explicitamente no serviço api/runner.
 - **Runner as service** (`applications/orchestrator/runner_server.py`): POST `/run` e POST `/stop`; usado no Docker com `RUNNER_SERVICE_URL`.
-- **API** (`applications/services/api-node`): POST `/api/projects/:id/run`, POST `/api/projects/:id/stop`, GET/PATCH projetos, diálogo.
-- **Portal (genesis-web)**: botão Iniciar / Parar; polling a cada 10s quando `status === "running"`; diálogo com passos e erros; em erros, mensagem em destaque (Alert) e traceback colapsável.
+- **API** (`applications/services/api-node`): POST `/api/projects/:id/run`, POST `/api/projects/:id/stop`, GET/POST/PATCH `/api/projects/:id/tasks`, POST `/api/projects/:id/accept`, GET/PATCH projetos, diálogo.
+- **Portal (genesis-web)**: botão Iniciar / Parar; **Aceitar projeto** (POST accept) quando status `completed` ou `running`; chip "Aceito" para status `accepted`; polling a cada 10s quando `status === "running"`; diálogo com passos e erros; em erros, mensagem em destaque (Alert) e traceback colapsável.
 
 ### Logging e diálogo
 

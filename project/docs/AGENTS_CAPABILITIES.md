@@ -11,11 +11,11 @@
 |-------|------|---------|------------------------------|
 | **SPEC** | Pessoa real | — | Dono do projeto; fornece spec; recebe conclusão/bloqueios do CTO. |
 | **CTO** | Agente | 1 | **Produto**: interpreta spec com apoio do Engineer; gera Charter; **contrata** PM(s); ponte entre PMs (dependências); informa SPEC. |
-| **Engineer** | Agente | 1 | **Técnico**: analisa spec; define stacks/equipes (web básica, web avançada, backend API) e dependências; comunica-se apenas com CTO. |
-| **PM** | Agente | 3 (Backend, Web, Mobile) | Backlog por FR/NFR; gerencia stack; **contrata** Dev/QA (par), 1 DevOps, 1 Monitor; conversa com outros PMs **via CTO**. |
-| **Dev** | Agente | 3 stacks × skills | Implementação contínua; acompanhado pelo Monitor; refaz quando QA indica (via Monitor). |
-| **QA** | Agente | 3 stacks × skills | Testes, doc, validação, QA Report; **acionado pelo Monitor**; bloqueia regressões. |
-| **DevOps** | Agente | 3 (AWS, Azure, GCP) | IaC, CI/CD, deploy, DB, smoke tests; **acionado pelo Monitor** (total ou parcial). Infra faz parte de cada stack. |
+| **Engineer** | Agente | 1 | **Técnico**: analisa spec; define squads/equipes (web básica, web avançada, backend API) e dependências; comunica-se apenas com CTO. |
+| **PM** | Agente | 3 (Backend, Web, Mobile) | Backlog por FR/NFR; gerencia squad; **contrata** Dev/QA (par), 1 DevOps, 1 Monitor; conversa com outros PMs **via CTO**. |
+| **Dev** | Agente | 3 squads × skills | Implementação contínua; acompanhado pelo Monitor; refaz quando QA indica (via Monitor). |
+| **QA** | Agente | 3 squads × skills | Testes, doc, validação, QA Report; **acionado pelo Monitor**; bloqueia regressões. |
+| **DevOps** | Agente | 3 (AWS, Azure, GCP) | IaC, CI/CD, deploy, DB, smoke tests; **acionado pelo Monitor** (total ou parcial). Infra faz parte de cada squad. |
 | **Monitor** | Agente | 3 (Backend, Web, Mobile) | Acompanha Dev/QA; aciona QA e DevOps; informa PM (PM escala ao CTO). |
 
 **Total**: 1 papel humano (SPEC) + agentes por área/skill. **Hierarquia**: SPEC ↔ CTO ↔ **Engineer** (mesmo nível CTO/Engineer); CTO ↔ PM(s); PMs conversam **via CTO**; PM atribui a Dev/QA/DevOps; Monitor ↔ Dev/QA/DevOps; Monitor → PM.
@@ -28,11 +28,11 @@
 |----------|-------|
 | **Pasta** | [agents/cto/](../agents/cto/) |
 | **Papel** | Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; informa SPEC quando projeto finalizado ou bloqueado. |
-| **Objetivo** | Receber proposta do Engineer; gerar Charter; contratar PM(s); delegar stacks e dependências; ponte entre PMs; consolidar STATUS; comunicar-se com SPEC, Engineer e PM(s). |
+| **Objetivo** | Receber proposta do Engineer; gerar Charter; contratar PM(s); delegar squads e dependências; ponte entre PMs; consolidar STATUS; comunicar-se com SPEC, Engineer e PM(s). |
 | **Entradas** | spec_ref, context (pode incluir engineer_stack_proposal), task, constraints, artifacts |
 | **Saídas** | status, summary, artifacts, evidence, next_actions |
 | **Contratos** | message_envelope.json, response_envelope.json |
-| **Checklist** | PROJECT_CHARTER (com base na proposta do Engineer), PM(s) contratados por stack, dependências informadas aos PMs, STATUS consolidado, notificação a SPEC (conclusão/bloqueios) |
+| **Checklist** | PROJECT_CHARTER (com base na proposta do Engineer), PM(s) contratados por squad, dependências informadas aos PMs, STATUS consolidado, notificação a SPEC (conclusão/bloqueios) |
 
 ---
 
@@ -41,18 +41,18 @@
 | Atributo | Valor |
 |----------|-------|
 | **Pasta** | [agents/engineer/](../../applications/agents/engineer/) |
-| **Papel** | Staff Engineer / Software Architect Full-Stack. Analisa a spec e define **stacks/equipes** (ex.: web básica, web avançada, backend API) e **dependências** entre equipes. Comunica-se **apenas** com o CTO. |
-| **Objetivo** | Devolver proposta técnica ao CTO (lista de stacks/equipes, dependências, ex.: “Web depende de Backend API — obter endpoints via CTO”) para o CTO gerar Charter e contratar PM(s). |
+| **Papel** | Staff Engineer / Software Architect Full-Stack. Analisa a spec e define **squads/equipes** (ex.: web básica, web avançada, backend API) e **dependências** entre equipes. Comunica-se **apenas** com o CTO. |
+| **Objetivo** | Devolver proposta técnica ao CTO (lista de squads/equipes, dependências, ex.: “Web depende de Backend API — obter endpoints via CTO”) para o CTO gerar Charter e contratar PM(s). |
 | **Entradas** | spec_ref, spec_content (ou resumo), context, constraints |
-| **Saídas** | status, summary, artifacts (engineer_stack_proposal: stacks, dependências, recomendações), evidence, next_actions |
+| **Saídas** | status, summary, artifacts (engineer_stack_proposal: squads, dependências, recomendações), evidence, next_actions |
 | **Contratos** | message_envelope.json, response_envelope.json; saída estruturada: [contracts/engineer_stack_proposal.md](../../applications/contracts/engineer_stack_proposal.md) |
 | **Competências** | [agents/engineer/skills.md](../../applications/agents/engineer/skills.md) |
 
 ---
 
-## 3. PM Agents (por stack)
+## 3. PM Agents (por squad)
 
-Stacks: **Backend**, **Web**, **Mobile**. Não existe stack "Infra" — a infraestrutura é responsabilidade do DevOps dentro de cada stack.
+Squads: **Backend**, **Web**, **Mobile**. Não existe squad "Infra" — a infraestrutura é responsabilidade do DevOps dentro de cada squad.
 
 | Agente | Pasta | Objetivo | DevOps selecionado |
 |--------|-------|----------|--------------------|
@@ -61,8 +61,8 @@ Stacks: **Backend**, **Web**, **Mobile**. Não existe stack "Infra" — a infrae
 | PM Mobile | [agents/pm/mobile/](../agents/pm/mobile/) | Backlog mobile; mesma regra de contratação | Por constraints.cloud |
 
 **Regras comuns**:
-- Criar backlog por FR/NFR; gerenciar sua stack.
-- **Contratar** atores da stack: 1 ou N pares Dev–QA (1 QA por 1 Dev), **um** DevOps e **um** Monitor por stack; apenas atores com as mesmas skills.
+- Criar backlog por FR/NFR; gerenciar sua squad.
+- **Contratar** atores da squad: 1 ou N pares Dev–QA (1 QA por 1 Dev), **um** DevOps e **um** Monitor por squad; apenas atores com as mesmas skills.
 - Comunicar-se com Dev, QA e DevOps **apenas para atribuir atividades**; receber status do **Monitor** (não resultado de testes diretamente do QA).
 - Selecionar DevOps por `constraints.cloud` — [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md)
 - Usar [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md)
@@ -120,7 +120,7 @@ Cada nível de Dev pode ter **diversas skills** (ex.: Dev Web: React+Next+Materi
 
 ---
 
-## 7. Monitor Agents (por stack)
+## 7. Monitor Agents (por squad)
 
 | Agente | Pasta | Objetivo |
 |--------|-------|----------|
@@ -164,7 +164,7 @@ SPEC → CTO (Charter, contrata PMs) → PM(s) (backlog, contrata Dev/QA/DevOps/
 - **[docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades, hierarquia e comportamentos
 - [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) — Fluxo detalhado
 - [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) — Regra de seleção DevOps
-- [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) — Composição da stack (pares Dev–QA, 1 DevOps, 1 Monitor)
+- [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) — Composição da squad (pares Dev–QA, 1 DevOps, 1 Monitor)
 - [contracts/message_envelope.json](../contracts/message_envelope.json) — Contrato de entrada
 - [contracts/response_envelope.json](../contracts/response_envelope.json) — Contrato de saída
 

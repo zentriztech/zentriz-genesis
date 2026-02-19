@@ -1,6 +1,6 @@
 # Monitor Backend Agent — Competências e Perfil
 
-**Documento de referência** para o **Monitor** da stack **Backend**. Define competências em acompanhamento de progresso, orquestração Dev↔QA, acionamento de DevOps e comunicação de status e alertas ao PM (que escala ao CTO quando crítico).
+**Documento de referência** para o **Monitor** da squad **Backend**. Define competências em acompanhamento de progresso, orquestração Dev↔QA, acionamento de DevOps e comunicação de status e alertas ao PM (que escala ao CTO quando crítico).
 
 ---
 

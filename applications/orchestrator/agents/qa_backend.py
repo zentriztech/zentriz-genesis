@@ -1,5 +1,5 @@
 """
-Agente QA Backend — testes, validação e QA report da stack Backend (Node.js/TypeScript).
+Agente QA Backend — testes, validação e QA report da squad Backend (Node.js/TypeScript).
 Uso: python -m orchestrator.agents.qa_backend --input message.json
       ou POST /invoke/qa-backend com body message_envelope (quando rodando como serviço).
 """

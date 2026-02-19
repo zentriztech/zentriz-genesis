@@ -72,6 +72,7 @@ npm run dev   # http://localhost:3000 por padrão Next; pode configurar porta 30
 - [x] Telas Zentriz: gestão tenants, usuários, projetos, controle por plano
 - [x] genesis-web no docker-compose; Dockerfile e .dockerignore em apps/genesis-web
 - [x] deploy-docker.sh sobe todo o stack (api, genesis-web, postgres, redis, agents)
+- [x] **Aceitar projeto**: botão "Aceitar projeto" na página do projeto quando status é `completed` ou `running`; chama `POST /api/projects/:id/accept` e exibe chip "Aceito" para status `accepted`. O pipeline (Monitor Loop) encerra quando o usuário aceita ou para.
 
 ---
 

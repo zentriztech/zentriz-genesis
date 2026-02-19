@@ -20,6 +20,7 @@ import ArrowBack from "@mui/icons-material/ArrowBack";
 import PlayArrow from "@mui/icons-material/PlayArrow";
 import Stop from "@mui/icons-material/Stop";
 import Replay from "@mui/icons-material/Replay";
+import CheckCircle from "@mui/icons-material/CheckCircle";
 import { projectsStore } from "@/stores/projectsStore";
 import { ProjectDialogue } from "@/components/ProjectDialogue";
 import { apiPost } from "@/lib/api";
@@ -78,6 +79,8 @@ function ProjectDetailPageInner() {
   const [runPipelineLoading, setRunPipelineLoading] = useState(false);
   const [runPipelineError, setRunPipelineError] = useState<string | null>(null);
   const [runPipelineSuccess, setRunPipelineSuccess] = useState(false);
+  const [acceptLoading, setAcceptLoading] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
   const project = projectsStore.getById(id);
 
   useEffect(() => {
@@ -124,7 +127,7 @@ function ProjectDetailPageInner() {
               ? 4
               : project.status === "devops"
                 ? 5
-                : project.status === "completed"
+                : project.status === "completed" || project.status === "accepted"
                   ? 6
                   : 0;
 
@@ -150,9 +153,15 @@ function ProjectDetailPageInner() {
           {project.title ?? "Spec sem título"}
         </Typography>
         <Chip
-          label={project.status === "running" ? "Em execução" : project.status}
+          label={
+            project.status === "running"
+              ? "Em execução"
+              : project.status === "accepted"
+                ? "Aceito"
+                : project.status
+          }
           color={
-            project.status === "completed"
+            project.status === "completed" || project.status === "accepted"
               ? "success"
               : project.status === "failed" || project.status === "stopped"
                 ? "error"
@@ -231,14 +240,49 @@ function ProjectDetailPageInner() {
             )}
           </>
         )}
+        {(project.status === "completed" || project.status === "running") &&
+          project.status !== "accepted" &&
+          project.status !== "stopped" && (
+            <Button
+              variant="contained"
+              color="success"
+              startIcon={<CheckCircle />}
+              disabled={acceptLoading}
+              onClick={async () => {
+                setAcceptError(null);
+                setAcceptLoading(true);
+                try {
+                  await apiPost<{ ok: boolean; status?: string }>(
+                    `/api/projects/${id}/accept`,
+                    {}
+                  );
+                  await projectsStore.loadProject(id);
+                } catch (err) {
+                  setAcceptError(
+                    err instanceof Error ? err.message : "Falha ao aceitar projeto"
+                  );
+                } finally {
+                  setAcceptLoading(false);
+                }
+              }}
+            >
+              {acceptLoading ? "Aceitando…" : "Aceitar projeto"}
+            </Button>
+          )}
+        {(project.status === "completed" || project.status === "running") &&
+          project.status !== "accepted" && (
+            <Typography variant="body2" color="text.secondary">
+              Ao aceitar, o pipeline será encerrado e o projeto marcado como aceito.
+            </Typography>
+          )}
         {runPipelineSuccess && project.status !== STATUS_RUNNING && (
           <Typography variant="body2" color="success.main">
             Pipeline iniciado. O log será atualizado em breve.
           </Typography>
         )}
-        {runPipelineError && (
+        {(runPipelineError || acceptError) && (
           <Typography variant="body2" color="error.main">
-            {runPipelineError}
+            {runPipelineError ?? acceptError}
           </Typography>
         )}
       </Box>

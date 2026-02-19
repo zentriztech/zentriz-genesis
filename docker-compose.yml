@@ -22,6 +22,7 @@ services:
       - API_BASE_URL=http://api:3000
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
+      # PROJECT_FILES_ROOT: no .env use /Users/mac/zentriz-files (host); aqui default /project-files (monte no override para ver no host)
       - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
       - PGHOST=postgres
       - PGUSER=genesis
@@ -114,6 +115,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
+      # PROJECT_FILES_ROOT: no .env use /Users/mac/zentriz-files (host); default /project-files (monte no override para persistir no host)
       - PROJECT_FILES_ROOT=${PROJECT_FILES_ROOT:-/project-files}
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
     extra_hosts:

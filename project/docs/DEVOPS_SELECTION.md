@@ -1,7 +1,7 @@
 # Seleção automática do DevOps Agent (por PM)
 
-## Contexto: Engineer e stacks do projeto
-A **proposta do Engineer** (stacks/equipes necessárias) define *quais* PMs são acionados pelo CTO (ex.: PM Backend, PM Web). Cada PM é responsável por sua stack e, ao planejar entregas com deploy ou infra, aplica as regras abaixo. O Engineer não escolhe o agente DevOps; a **seleção do agente DevOps** é de responsabilidade do **PM** conforme este documento.
+## Contexto: Engineer e squads do projeto
+A **proposta do Engineer** (squads/equipes necessárias) define *quais* PMs são acionados pelo CTO (ex.: PM Backend, PM Web). Cada PM é responsável por sua squad e, ao planejar entregas com deploy ou infra, aplica as regras abaixo. O Engineer não escolhe o agente DevOps; a **seleção do agente DevOps** é de responsabilidade do **PM** conforme este documento.
 
 ## Regra
 O PM deve instanciar o **DevOps Docker** como base em todo projeto (provisionamento via Docker, Terraform e k8s em qualquer infra). Em seguida, quando houver deploy em cloud, selecionar o DevOps da cloud conforme `constraints.cloud`.

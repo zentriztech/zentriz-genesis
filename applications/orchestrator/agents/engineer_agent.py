@@ -1,5 +1,5 @@
 """
-Agente Engineer — analisa spec e devolve proposta técnica (stacks/equipes, dependências).
+Agente Engineer — analisa spec e devolve proposta técnica (squads/equipes, dependências).
 Staff Engineer / Software Architect Full-Stack. Comunica-se apenas com o CTO.
 Uso: python -m orchestrator.agents.engineer_agent --input message.json
 """

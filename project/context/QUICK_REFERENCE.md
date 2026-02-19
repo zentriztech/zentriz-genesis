@@ -28,7 +28,7 @@
 
 ## Eventos do Orchestrator
 
-`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`
+`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`. **Parada do pipeline**: usuário **aceita** (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM → status `stopped`). O runner usa **Monitor Loop** (Fase 2) para ler tasks e acionar Dev/QA/DevOps até aceite ou parada.
 
 ## Atores (resumo)
 
@@ -56,9 +56,13 @@ Monitor_<AREA> monitora Dev/QA (progresso, status) → informa PM_<AREA> → PM 
 
 NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS | QA_FAIL → DONE
 
+## Estado do Projeto (API)
+
+`draft` | `spec_submitted` | `pending_conversion` | `cto_charter` | `pm_backlog` | `running` | `completed` | `stopped` | **`accepted`** (final; via POST /accept no portal).
+
 ## Agentes (estrutura hierárquica)
 
-Stacks: **Backend**, **Web**, **Mobile** (infra faz parte de cada stack via DevOps).
+Squads: **Backend**, **Web**, **Mobile** (infra faz parte de cada squad via DevOps).
 
 - **CTO**: agents/cto/
 - **PM**: agents/pm/ (backend, web, mobile)

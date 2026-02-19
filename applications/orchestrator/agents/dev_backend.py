@@ -1,5 +1,5 @@
 """
-Agente Dev Backend — implementação da stack Backend (Node.js, endpoints, testes, evidências).
+Agente Dev Backend — implementação da squad Backend (Node.js, endpoints, testes, evidências).
 Uso: python -m orchestrator.agents.dev_backend --input message.json
       ou POST /invoke/dev-backend com body message_envelope (quando rodando como serviço).
 """

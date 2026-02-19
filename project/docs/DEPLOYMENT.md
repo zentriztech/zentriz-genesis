@@ -78,8 +78,9 @@ docker compose down
 
 | Serviço          | Porta | Descrição |
 |------------------|-------|-----------|
-| api              | 3000  | API do produto (Voucher) |
-| genesis-web      | 3001  | Portal web (genesis.zentriz.com.br) — React, Next.js, MUI, MobX |
+| api              | 3000  | API do produto (Voucher) e Genesis (projetos, tasks, accept, diálogo, auth) |
+| genesis-web      | 3001  | Portal web (genesis.zentriz.com.br) — React, Next.js, MUI, MobX; Aceitar projeto / Parar |
+| runner           | 8001  | Orquestrador: Fase 1 (Spec→Engineer→CTO→PM) + Monitor Loop (Dev/QA/DevOps) até aceite ou parada |
 | agents           | 8000  | Agentes (Engineer, CTO, PM, Monitor, Dev, QA, DevOps; futuramente Web, Mobile) — LLM |
 | postgres         | 5432  | PostgreSQL (fonte de verdade) |
 | redis            | 6379  | Cache / sessões |
@@ -88,20 +89,20 @@ Variáveis de ambiente vêm do [.env](../../.env) na raiz (copie de [.env.exampl
 
 ### Conceitos do ambiente local
 
-- **Quem inicia o fluxo:** o **CTO** inicia a orquestração. O [runner](../../applications/orchestrator/runner.py) executa o fluxo spec → CTO (Charter) → PM Backend (backlog). Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
+- **Quem inicia o fluxo:** o usuário inicia pelo portal; a API dispara o [runner](../../applications/orchestrator/runner.py). Com API e PROJECT_ID, o runner executa **Fase 1** (Spec → Engineer → CTO → PM Backend), faz seed de tarefas e entra no **Monitor Loop** (Fase 2), acionando Dev/QA/DevOps até o usuário **aceitar** o projeto ou **parar**. Ver [orchestrator/README.md](../../applications/orchestrator/README.md) e [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 - **Serviço agents:** um único serviço Docker ([agents](../docker-compose.yml)) expõe **todos os agentes** (Engineer, CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker; futuramente Web, Mobile) na mesma instância. Endpoints HTTP em [orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../../applications/orchestrator/agents/README.md).
 - **Nomes dos containers (ex.: postgres-1):** o Docker Compose nomeia cada container como `{project}-{service}-{réplica}`. O sufixo `-1` é o índice da réplica (primeira instância). Com múltiplas réplicas (ex.: `docker compose up -d --scale api=3`) surgiriam api-1, api-2, api-3.
 
 ### Runner do orquestrador (CLI)
 
-Fluxo spec → CTO → Charter → PM Backend → backlog, com estado persistido em `orchestrator/state/`. Na raiz do repo (com `CLAUDE_API_KEY` no `.env`):
+Fluxo sequencial (sem API/PROJECT_ID): spec → Engineer → CTO → PM Backend → (opcionalmente Dev/QA/Monitor/DevOps), com estado em `orchestrator/state/`. Na raiz do repo (com `CLAUDE_API_KEY` no `.env`):
 
 ```bash
 pip install -r applications/orchestrator/agents/requirements.txt
 PYTHONPATH=applications python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
 ```
 
-Quando o runner for invocado por um job associado a um projeto do portal, defina as variáveis **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN** (JWT de um usuário com permissão no projeto). O runner enviará `PATCH /api/projects/:id` com `started_at` ao iniciar o pipeline e com `completed_at` e `status: completed` ao concluir. Ver [orchestrator/runner.py](../../applications/orchestrator/runner.py).
+Quando o runner for invocado pelo portal (job associado a um projeto), a API injeta **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN**. O runner executa **Fase 1** (até PM Backend), faz **seed de tarefas** (`POST /api/projects/:id/tasks`) e entra no **Monitor Loop**: lê projeto e tasks, aciona Dev/QA/DevOps, atualiza task e diálogo; repete até status `accepted` (usuário clicou "Aceitar projeto") ou `stopped` (SIGTERM). Persiste `started_at` ao iniciar e `completed_at`/`status` ao encerrar. Ver [orchestrator/runner.py](../../applications/orchestrator/runner.py) e [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
 

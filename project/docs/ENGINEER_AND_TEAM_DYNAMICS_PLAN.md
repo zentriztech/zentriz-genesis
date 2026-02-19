@@ -11,7 +11,7 @@
 |------|----------------|----------|
 | Atores | CTO, PM, Dev, QA, DevOps, Monitor | **+ Engineer** (Staff Engineer / Software Architect Full-Stack), no mesmo nível que CTO |
 | Fluxo inicial | CTO recebe spec → Charter → contrata PM(s) | CTO recebe spec → **fala com Engineer** → usa retorno para falar com PM(s) |
-| Decisões | CTO define stacks (Backend, Web, Mobile) | **Engineer** analisa spec e define **quais equipes/stacks** (ex.: web básica, web avançada, backend API); CTO foca produto |
+| Decisões | CTO define squads (Backend, Web, Mobile) | **Engineer** analisa spec e define **quais equipes/squads** (ex.: web básica, web avançada, backend API); CTO foca produto |
 | Coordenação PMs | PMs reportam ao CTO | PMs **conversam entre si via CTO** (ex.: dependências; Web precisa de lista de URLs/endpoints da API) |
 | Comunicação | Eventos e estados (task.assigned, qa.failed, etc.) | Agentes **vivos**, comunicação **contínua**; bloqueios repassados em cadeia (ex.: Web → PM → CTO → Engineer → solução → PM responsável → Dev) |
 | Logs | Eventos técnicos (JSON, eventos) | **Log em linguagem humana** (LLM resume diálogos); histórico + tempo real para o usuário |
@@ -25,18 +25,18 @@
 ### 2.1 Papel e posicionamento
 
 - **Engineer** é **Staff Engineer / Software Architect Full-Stack**, com as competências descritas em [applications/agents/engineer/skills.md](../../applications/agents/engineer/skills.md) (Analista, Arquiteto, Desenvolvedor, Engenheiro Full Cycle + soft skills).
-- **CTO** e **Engineer** estão no **mesmo nível**: CTO toma decisões de **produto** (escopo, prioridade, comunicação com SPEC); Engineer toma decisões **técnicas** (arquitetura, stacks, tipos de equipe, dependências técnicas).
-- Engineer **não** contrata PMs nem atribui tarefas; ele **analisa a spec** e devolve ao CTO uma **proposta técnica** (quais equipes/stacks existentes do projeto são necessárias e como se relacionam).
+- **CTO** e **Engineer** estão no **mesmo nível**: CTO toma decisões de **produto** (escopo, prioridade, comunicação com SPEC); Engineer toma decisões **técnicas** (arquitetura, squads, tipos de equipe, dependências técnicas).
+- Engineer **não** contrata PMs nem atribui tarefas; ele **analisa a spec** e devolve ao CTO uma **proposta técnica** (quais equipes/squads existentes do projeto são necessárias e como se relacionam).
 
 ### 2.2 Responsabilidades do Engineer
 
 - Receber a **spec** (ou resumo) do CTO.
 - **Analisar** requisitos e definir:
-  - Quais **stacks/equipes** o projeto precisa (ex.: equipe web básica para sites estáticos/landing pages; equipe web avançada para app web com API, auth, gestão; equipe backend para APIs).
+  - Quais **squads/equipes** o projeto precisa (ex.: equipe web básica para sites estáticos/landing pages; equipe web avançada para app web com API, auth, gestão; equipe backend para APIs).
   - Dependências entre equipes (ex.: Web SaaS depende de Backend API; necessidade de contrato de API: URLs, endpoints).
   - Recomendações técnicas (estilos arquiteturais, APIs, cloud, segurança) alinhadas ao [skills.md](../../applications/agents/engineer/skills.md).
 - Entregar ao CTO um **artefato estruturado** (ex.: `ENGINEER_STACK_PROPOSAL.md` ou JSON) que o CTO usa para:
-  - Contratar os PM(s) corretos (por stack/equipe).
+  - Contratar os PM(s) corretos (por squad/equipe).
   - Informar aos PMs dependências e contratos (ex.: “PM Web: obter lista de endpoints do PM Backend via CTO”).
 
 ### 2.3 Artefatos a criar
@@ -45,16 +45,16 @@
 |----------|-----------|
 | `applications/agents/engineer/SYSTEM_PROMPT.md` | Prompt do agente Engineer (papel, objetivo, regras, entradas/saídas, referência a skills.md). |
 | Manter `applications/agents/engineer/skills.md` | Já existe; referenciado pelo SYSTEM_PROMPT. |
-| Contrato de saída do Engineer | Ex.: `engineer_stack_proposal` (lista de stacks/equipes, dependências, contratos de API sugeridos). |
+| Contrato de saída do Engineer | Ex.: `engineer_stack_proposal` (lista de squads/equipes, dependências, contratos de API sugeridos). |
 
 ### 2.4 Fluxo CTO ↔ Engineer
 
 1. CTO recebe spec do SPEC (ou do portal).
 2. CTO envia para o **Engineer**: spec (ou resumo) + contexto (constraints, cloud, etc.).
-3. Engineer analisa e devolve: proposta de stacks/equipes + dependências + recomendações técnicas.
+3. Engineer analisa e devolve: proposta de squads/equipes + dependências + recomendações técnicas.
 4. CTO usa essa proposta para:
    - Gerar/atualizar Project Charter (visão produto + visão técnica).
-   - Contratar PM(s) por stack/equipe definida pelo Engineer.
+   - Contratar PM(s) por squad/equipe definida pelo Engineer.
    - Delegar a cada PM com contexto de dependências (ex.: “PM Web: dependência do PM Backend; obter endpoints via mim”).
 
 ---
@@ -66,7 +66,7 @@
 ```text
 SPEC → CTO (spec)
        CTO → Engineer (spec/contexto)
-       Engineer → CTO (proposta: stacks, equipes, dependências)
+       Engineer → CTO (proposta: squads, equipes, dependências)
        CTO → Charter + contrata PM(s) com base na proposta
        CTO → PM(s) (escopo + dependências; ex.: “PM Web precisa de endpoints do PM Backend; coordenar via mim”)
 ```
@@ -145,8 +145,8 @@ SPEC → CTO (spec)
 | Agente | Arquivo sugerido | Conteúdo (resumo) |
 |--------|------------------|-------------------|
 | CTO | `applications/agents/cto/skills.md` | Produto, visão de negócio, priorização, comunicação com SPEC e PMs, decisão de escopo. |
-| Engineer | Já existe | Staff Engineer, arquitetura, stacks, dependências técnicas. |
-| PM (por stack) | `applications/agents/pm/backend/skills.md` (e web, mobile) | Backlog, FR/NFR, gestão de equipe virtual, DoD, coordenação com CTO e Monitor. |
+| Engineer | Já existe | Staff Engineer, arquitetura, squads, dependências técnicas. |
+| PM (por squad) | `applications/agents/pm/backend/skills.md` (e web, mobile) | Backlog, FR/NFR, gestão de equipe virtual, DoD, coordenação com CTO e Monitor. |
 | Dev (por skill) | ex. `applications/agents/dev/backend/nodejs/skills.md` | Clean code, testes, stack específica (Node, React, etc.). |
 | QA (por skill) | ex. `applications/agents/qa/backend/nodejs/skills.md` | Testes, automação, critérios de aceite, relatório de bugs. |
 | DevOps (por cloud) | ex. `applications/agents/devops/docker/skills.md` | IaC, CI/CD, containers, observabilidade. |
@@ -212,7 +212,7 @@ SPEC → CTO (spec)
 ### Fase 1: Engineer e fluxo CTO ↔ Engineer
 
 - [x] Criar `applications/agents/engineer/SYSTEM_PROMPT.md` (referenciando [skills.md](../../applications/agents/engineer/skills.md)).
-- [x] Definir contrato de saída do Engineer (ex.: `engineer_stack_proposal` com stacks, equipes, dependências).
+- [x] Definir contrato de saída do Engineer (ex.: `engineer_stack_proposal` com squads, equipes, dependências).
 - [x] Implementar agente Engineer no orquestrador (módulo Python + endpoint HTTP se aplicável).
 - [x] Alterar fluxo do runner (ou serviço equivalente): CTO recebe spec → chama Engineer → usa resposta para Charter e contratação de PM(s).
 - [x] Atualizar [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md): adicionar Engineer, hierarquia CTO ↔ Engineer, tabela de comunicação.
@@ -235,7 +235,7 @@ SPEC → CTO (spec)
 
 ### Fase 4: skills.md por agente
 
-- [x] Criar `skills.md` para CTO, PM (backend/web/mobile), Dev (por skill), QA (por skill), DevOps (por tipo), Monitor (por stack).
+- [x] Criar `skills.md` para CTO, PM (backend/web/mobile), Dev (por skill), QA (por skill), DevOps (por tipo), Monitor (por squad).
 - [x] Atualizar cada `SYSTEM_PROMPT.md` para referenciar o `skills.md` correspondente.
 
 ### Fase 5: Genesis-Web – diálogo e avatares
@@ -249,7 +249,7 @@ SPEC → CTO (spec)
 ### Fase 6: Documentação e testes
 
 - [x] Atualizar [NAVIGATION.md](NAVIGATION.md) e índices com link para este plano.
-- [x] Revisar [DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) e outros docs se o Engineer influenciar escolha de stacks (contexto Engineer + PM; seleção DevOps permanece com o PM).
+- [x] Revisar [DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) e outros docs se o Engineer influenciar escolha de squads (contexto Engineer + PM; seleção DevOps permanece com o PM).
 - [x] Testes de integração: módulo de diálogo e resumos em português ([orchestrator/tests/test_runner_dialogue.py](../../applications/orchestrator/tests/test_runner_dialogue.py)); fluxo completo CTO → Engineer → CTO → PM(s) pode ser validado com mocks em testes futuros.
 
 ---

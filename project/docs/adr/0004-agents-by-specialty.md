@@ -15,7 +15,7 @@ O Zentriz Genesis precisa simular uma fábrica de software com papéis claros. U
 ## Decisão
 
 Agentes são **especializados por papel e módulo**:
-- **PM_<AREA>**: Backend, Web, Mobile — define backlog, aprova entregas (infra é responsabilidade do DevOps em cada stack)
+- **PM_<AREA>**: Backend, Web, Mobile — define backlog, aprova entregas (infra é responsabilidade do DevOps em cada squad)
 - **DEV_<AREA>**: Implementa código, testes, documentação
 - **QA_<AREA>**: Valida requisitos, gera QA report, bloqueia regressões
 - **DEVOPS_<CLOUD>**: AWS, Azure, GCP — IaC, CI/CD, observabilidade
@@ -31,7 +31,7 @@ O CTO orquestra e delega para PMs; PMs instanciam Dev, QA e DevOps por módulo.
 
 ## Consequências
 
-- **Positivas**: Separação clara de responsabilidades, especialização por stack, escalabilidade (mais instâncias por papel), alinhamento com práticas de mercado.
+- **Positivas**: Separação clara de responsabilidades, especialização por squad, escalabilidade (mais instâncias por papel), alinhamento com práticas de mercado.
 - **Negativas**: Mais agentes para manter (20+); coordenação via eventos é essencial.
 - **Neutras**: Contratos (message_envelope, response_envelope) devem ser comuns a todos.
 

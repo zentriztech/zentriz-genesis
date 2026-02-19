@@ -1,6 +1,6 @@
 # QA Backend (Node.js) Agent — Competências e Perfil
 
-**Documento de referência** para o especialista em **qualidade** da stack **Backend Node.js**. Define competências em testes, critérios de aceite, relatórios de bugs, QA Report e integração com Monitor e Dev.
+**Documento de referência** para o especialista em **qualidade** da squad **Backend Node.js**. Define competências em testes, critérios de aceite, relatórios de bugs, QA Report e integração com Monitor e Dev.
 
 ---
 

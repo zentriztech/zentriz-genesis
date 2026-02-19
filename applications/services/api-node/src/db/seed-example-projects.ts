@@ -92,19 +92,19 @@ async function main(): Promise<void> {
 
     if (projectDevId) {
       let t = new Date(now.getTime() - 60 * 60 * 1000);
-      add(projectDevId, "cto", "engineer", "cto.engineer.request", "O CTO enviou a especificação do projeto ao Engineer para definir as equipes e stacks técnicas necessárias.", new Date(t.getTime()));
+      add(projectDevId, "cto", "engineer", "cto.engineer.request", "O CTO enviou a especificação do projeto ao Engineer para definir as equipes e squads técnicas necessárias.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDevId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (stacks, equipes e dependências) ao CTO.", new Date(t.getTime()));
+      add(projectDevId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (squads, equipes e dependências) ao CTO.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 3);
       add(projectDevId, "cto", "pm_backend", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
       add(projectDevId, "pm_backend", "cto", "module.planned", "O PM Backend gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDevId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da stack: atribuída a tarefa T1 (API de listagem de vouchers) ao Dev Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da squad: atribuída a tarefa T1 (API de listagem de vouchers) ao Dev Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDevId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da stack: atribuída a validação das tarefas da sprint ao QA Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da squad: atribuída a validação das tarefas da sprint ao QA Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDevId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da stack: atribuído o acompanhamento do progresso e o acionamento do QA ao Monitor Backend.", new Date(t.getTime()));
+      add(projectDevId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento do progresso e o acionamento do QA ao Monitor Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 5);
       add(projectDevId, "pm_backend", "dev_backend", "pm.task.assign", "Sprint 1: prioridade nas tasks T1 (API listagem) e T2 (endpoint de resgate); prazo até sexta.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 30);
@@ -121,19 +121,19 @@ async function main(): Promise<void> {
 
     if (projectDoneId) {
       let t = new Date(completedDone.getTime() - 120 * 60 * 1000);
-      add(projectDoneId, "cto", "engineer", "cto.engineer.request", "O CTO enviou a especificação do projeto ao Engineer para definir as equipes e stacks técnicas necessárias.", new Date(t.getTime()));
+      add(projectDoneId, "cto", "engineer", "cto.engineer.request", "O CTO enviou a especificação do projeto ao Engineer para definir as equipes e squads técnicas necessárias.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDoneId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (stacks, equipes e dependências) ao CTO.", new Date(t.getTime()));
+      add(projectDoneId, "engineer", "cto", "engineer.cto.response", "O Engineer entregou a proposta técnica (squads, equipes e dependências) ao CTO.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 3);
       add(projectDoneId, "cto", "pm_backend", "project.created", "O CTO consolidou o Charter do projeto com base na proposta do Engineer.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 4);
       add(projectDoneId, "pm_backend", "cto", "module.planned", "O PM Backend gerou o backlog do módulo com base no Charter.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 2);
-      add(projectDoneId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da stack: atribuídas as tarefas de CRUD e validação ao Dev Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm_backend", "dev_backend", "pm.stack.hire", "Contratação da squad: atribuídas as tarefas de CRUD e validação ao Dev Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDoneId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da stack: atribuída a validação e testes ao QA Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm_backend", "qa_backend", "pm.stack.hire", "Contratação da squad: atribuída a validação e testes ao QA Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 1);
-      add(projectDoneId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da stack: atribuído o acompanhamento e o acionamento QA/DevOps ao Monitor Backend.", new Date(t.getTime()));
+      add(projectDoneId, "pm_backend", "monitor_backend", "pm.stack.hire", "Contratação da squad: atribuído o acompanhamento e o acionamento QA/DevOps ao Monitor Backend.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 10);
       add(projectDoneId, "pm_backend", "dev_backend", "pm.task.assign", "Sprint única: entregar CRUD completo e documentação da API.", new Date(t.getTime()));
       t.setMinutes(t.getMinutes() + 45);

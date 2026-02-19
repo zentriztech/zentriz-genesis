@@ -1,15 +1,18 @@
 # Plano: Pipeline Stack Completa e Armazenamento por Projeto
 
 > Objetivo: implementar no runner os agentes Dev, QA, Monitor e DevOps; e persistir todos os documentos em disco organizados por `project_id` com atribuição de criador.
+>
+> **Status:** Implementação concluída. Fluxo detalhado e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 ---
 
 ## 1. Visão geral
 
 - **Pipeline atual:** Spec → Engineer → CTO → PM Backend (3 agentes).
-- **Pipeline alvo:** Spec → Engineer → CTO → PM Backend → **Dev Backend** → **QA Backend** → **Monitor Backend** → **DevOps Docker** (7 agentes na stack backend).
+- **Pipeline alvo:** Spec → Engineer → CTO → PM Backend → **Dev Backend** → **QA Backend** → **Monitor Backend** → **DevOps Docker** (7 agentes na squad backend).
+- **Com API e PROJECT_ID:** o runner executa **Fase 1** (até PM Backend), faz **seed de tarefas** na API e entra no **Monitor Loop** (Fase 2), acionando Dev/QA/DevOps conforme o estado das tasks até o usuário **aceitar o projeto** (`POST /api/projects/:id/accept`) ou **parar** o pipeline. Ver [ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) e [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 - **Armazenamento:** Raiz configurável (`PROJECT_FILES_ROOT`, default `/Users/mac/zentriz-files`):
-  - `<project_id>/docs/` — documentos gerados por cada membro da stack (Spec, CTO, Engineer, PM Backend, Dev, QA, Monitor, DevOps), com identificação do criador.
+  - `<project_id>/docs/` — documentos gerados por cada membro da squad (Spec, CTO, Engineer, PM Backend, Dev, QA, Monitor, DevOps), com identificação do criador.
   - `<project_id>/project/` — artefatos do projeto final (código, configs) quando produzidos.
   - Manifesto opcional em `docs/manifest.json`: lista de arquivos com `creator`, `created_at`, `filename`.
 
@@ -25,7 +28,9 @@ PROJECT_FILES_ROOT/
     │   ├── spec_product_spec.md       # criador: spec (cópia ou ref da spec enviada)
     │   ├── engineer_proposal.md       # criador: engineer
     │   ├── cto_charter.md             # criador: cto
+    │   ├── cto_artifact_*.md          # artefatos do CTO (quando retornados)
     │   ├── pm_backend_backlog.md      # criador: pm_backend
+    │   ├── pm_backend_artifact_*.md    # artefatos do PM (quando retornados)
     │   ├── dev_backend_*.md           # criador: dev_backend
     │   ├── qa_backend_*.md            # criador: qa_backend
     │   ├── monitor_backend_*.md       # criador: monitor_backend
@@ -38,7 +43,7 @@ Criadores padronizados: `spec`, `engineer`, `cto`, `pm_backend`, `dev_backend`, 
 
 ---
 
-## 3. Ordem do pipeline (stack completa)
+## 3. Ordem do pipeline (squad completa)
 
 | Ordem | Agente        | Entrada principal                    | Saída principal        | Documentos em docs/          |
 |------|---------------|--------------------------------------|-------------------------|-----------------------------|
@@ -76,8 +81,8 @@ Cada passo persiste no diálogo (project_dialogue) e grava artefatos em `<projec
 - Obter `PROJECT_ID` do ambiente; se existir e `PROJECT_FILES_ROOT` definido, usar `project_storage` para todos os writes.
 - **Spec:** ao iniciar, copiar conteúdo da spec para `write_doc(project_id, "spec", "product_spec", spec_content)`.
 - **Engineer:** após resposta, gravar summary em `write_doc(project_id, "engineer", "proposal", engineer_summary)`.
-- **CTO:** gravar charter em `write_doc(project_id, "cto", "charter", charter_summary)` (e artifacts se houver).
-- **PM Backend:** gravar backlog em `write_doc(project_id, "pm_backend", "backlog", backlog_summary)`.
+- **CTO:** gravar charter em `write_doc(project_id, "cto", "charter", charter_summary)` e cada item de `charter_artifacts` em `docs/` (cto_artifact_0.md, …).
+- **PM Backend:** gravar backlog em `write_doc(project_id, "pm_backend", "backlog", backlog_summary)` e cada item de `backlog_artifacts` em `docs/` (pm_backend_artifact_0.md, …).
 - **Dev Backend:** chamar `call_dev_backend(spec_ref, charter_summary, backlog_summary, request_id)`; gravar summary e artifacts em docs com creator `dev_backend`; post diálogo.
 - **QA Backend:** chamar `call_qa_backend(...)` com contexto (backlog, dev summary); gravar em docs com creator `qa_backend`; post diálogo.
 - **Monitor Backend:** chamar `call_monitor_backend(...)` com contexto; gravar em docs com creator `monitor_backend`; post diálogo.
@@ -87,7 +92,7 @@ Cada passo persiste no diálogo (project_dialogue) e grava artefatos em `<projec
 
 ### 4.4 Diálogo (`orchestrator/dialogue.py`)
 
-- Incluir templates para: `task.assigned`, `dev.implementation`, `qa.review`, `monitor.health`, `devops.deploy` (ou equivalentes).
+- Templates em uso: `task.assigned`, `task.completed`, `qa.review`, `monitor.health`, `devops.deploy` (e eventos anteriores: `cto.engineer.request`, `engineer.cto.response`, `project.created`, `module.planned`).
 - Runner chama `_post_dialogue(from_agent, to_agent, event_type, summary, request_id)` para cada novo agente.
 
 ### 4.5 Variáveis de ambiente
@@ -122,16 +127,18 @@ Cada passo persiste no diálogo (project_dialogue) e grava artefatos em `<projec
 
 ---
 
-## 7. Status da implementação
+## 7. Status da implementação (100%)
 
-- **Plano:** este documento.
-- **project_storage.py:** módulo de armazenamento por `project_id` (docs/ e project/) com criador e manifest.
-- **runner.py:** pipeline estendido (Engineer → CTO → PM Backend → Dev → QA → Monitor → DevOps); uso de project_storage quando `PROJECT_FILES_ROOT` e `PROJECT_ID` estão definidos; variável `PIPELINE_FULL_STACK` (default true) para rodar ou não os 4 agentes adicionais.
-- **client_http.py:** endpoints dev_backend, qa_backend, monitor_backend, devops_docker.
-- **dialogue.py:** templates para qa.review, devops.deploy, monitor.health.
-- **.env.example:** PROJECT_FILES_ROOT, PIPELINE_FULL_STACK.
-- **docker-compose:** PROJECT_FILES_ROOT e PIPELINE_FULL_STACK no runner; volume `zentriz-genesis_projectfiles`; API com PROJECT_FILES_ROOT e volume para GET /api/projects/:id/artifacts.
-- **docker-compose.override.example.yml:** exemplo para montar pasta do host (ex.: `/Users/mac/zentriz-files`) em `/project-files`.
-- **API:** GET /api/projects/:id/artifacts retorna lista de documentos (manifest) e paths de docs/project.
+| Item | Status |
+|------|--------|
+| **Plano** | Este documento. |
+| **project_storage.py** | Implementado: `get_project_root`, `get_docs_dir`, `get_project_dir`, `write_doc`, `write_spec_doc`, `write_project_artifact`, `append_manifest`, `is_enabled`; criadores válidos conforme §4.1. |
+| **runner.py** | Implementado: pipeline completo (Engineer → CTO → PM Backend → Dev → QA → Monitor → DevOps); uso de project_storage quando `PROJECT_FILES_ROOT` e `PROJECT_ID` definidos; `PIPELINE_FULL_STACK` (default true) controla os 4 agentes adicionais. |
+| **client_http.py** | Implementado: `AGENT_ENDPOINTS` com engineer, cto, pm_backend (`/invoke`), dev_backend, qa_backend, monitor_backend, devops_docker. |
+| **dialogue.py** | Implementado: templates para task.assigned, task.completed, qa.review, monitor.health, devops.deploy e eventos anteriores. |
+| **.env.example** | PROJECT_FILES_ROOT, PIPELINE_FULL_STACK documentados. |
+| **docker-compose.yml** | PROJECT_FILES_ROOT e PIPELINE_FULL_STACK no runner; volume `zentriz-genesis_projectfiles`; API com PROJECT_FILES_ROOT e mesmo volume para GET /api/projects/:id/artifacts. |
+| **docker-compose.override.example.yml** | Exemplo para montar pasta do host (ex.: `/Users/mac/zentriz-files`) em `/project-files`. |
+| **API** | GET /api/projects/:id/artifacts implementado em `api-node` (projects.ts): retorna `docs` (do manifest.json), `projectDocsRoot`, `projectArtifactsRoot`. |
 
-Para usar a pasta do host no Mac: copie `docker-compose.override.example.yml` para `docker-compose.override.yml` (path `/Users/mac/zentriz-files` já está no exemplo). Os arquivos gerados ficarão em `/Users/mac/zentriz-files/<project_id>/docs/` e `.../project/`.
+Para usar a pasta do host no Mac: copie `docker-compose.override.example.yml` para `docker-compose.override.yml` (path `/Users/mac/zentriz-files` já está no exemplo). Os arquivos gerados ficarão em `/Users/mac/zentriz-files/<project_id>/docs/` e `.../project/`. Referência de fluxo e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).

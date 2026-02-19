@@ -31,7 +31,7 @@ Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](project
 |------|------------------|
 | **SPEC** (pessoa real) | Dono do projeto; fornece especificação (FR/NFR); recebe do CTO conclusão ou bloqueios. |
 | **CTO** | Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; informa SPEC quando finalizado ou bloqueado. |
-| **PM** | Backlog por FR/NFR; gerencia sua stack; **contrata** Dev(s), QA(s) — sempre em par (1 QA por Dev) —, **um** DevOps e **um** Monitor por stack; atribui atividades; recebe status do Monitor. |
+| **PM** | Backlog por FR/NFR; gerencia sua squad; **contrata** Dev(s), QA(s) — sempre em par (1 QA por Dev) —, **um** DevOps e **um** Monitor por squad; atribui atividades; recebe status do Monitor. |
 | **Dev** | Especialista em implementação contínua; desenvolve tarefas conforme skills; é acompanhado pelo Monitor; refaz/melhora quando QA indica (via Monitor). |
 | **QA** | Especialista em testes, documentação, validação contínua, QA Report; é **acionado pelo Monitor** para testar atividades finalizadas; bloqueia regressões. |
 | **DevOps** | Especialista em IaC, CI/CD, deploy, banco de dados, smoke tests; é **acionado pelo Monitor** para provisionamento total ou parcial. |
@@ -46,7 +46,7 @@ Documentação completa (comportamentos, hierarquia e diagramas Mermaid): **[pro
 Fluxo baseado em eventos padronizados:
 `project.created`, `task.assigned`, `qa.failed`, `devops.deployed`, `project.completed`, entre outros.
 
-Cada task segue uma **State Machine** formal garantindo rastreabilidade e controle.
+Quando o portal inicia o pipeline, o **runner** executa **duas fases**: **Fase 1** (Spec → Engineer → CTO → PM Backend) e **Fase 2** (**Monitor Loop**), que aciona Dev/QA/DevOps conforme o estado das tarefas até o usuário **aceitar o projeto** no portal ou **parar** o pipeline. Cada task segue uma **State Machine** formal garantindo rastreabilidade e controle.
 
 ## 📂 Estrutura do Projeto
 
@@ -85,7 +85,7 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 
 - [PRODUCT_SPEC.md](project/spec/PRODUCT_SPEC.md)
 - **[ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades e hierarquia de comunicação
-- [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid (fluxo, stacks, etapas)
+- [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid (fluxo, squads, etapas)
 - [PROJECT_CHARTER.md](project/docs/PROJECT_CHARTER.md)
 - [ARCHITECTURE.md](project/docs/ARCHITECTURE.md)
 - [BACKLOG_*.md](project/docs/BACKLOG_BACKEND.md)
@@ -112,7 +112,7 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 ## ✅ Qualidade e Governança
 
 - [Definition of Done](applications/contracts/global_definition_of_done.md) global e [DevOps](applications/contracts/devops_definition_of_done.md)
-- [Checklists](applications/contracts/checklists/) por stack (React, RN, Backend)
+- [Checklists](applications/contracts/checklists/) por squad (React, RN, Backend)
 - Testes automatizados e [smoke tests](project/tests/smoke/) pós-deploy
 
 ## 🌐 Clouds Suportadas

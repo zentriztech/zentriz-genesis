@@ -155,8 +155,8 @@ Para começar a implementar o projeto, a ordem recomendada é a seguinte (funda�
 | **1** | **devops::docker** | Base: Docker (namespace `zentriz-genesis`), Terraform e Kubernetes em qualquer infra (AWS, GCP, Azure). Sem isso não há ambiente para rodar nem fazer deploy. Ver [agents/devops/docker/](../agents/devops/docker/). |
 | 2 | dev::backend::nodejs | API (ex.: Node/TypeScript); consome a base Docker/k8s. |
 | 3 | qa::backend::nodejs | Testes e validação do backend Node. |
-| 4 | pm::backend::nodejs | Backlog e planejamento da stack Backend. |
-| 5 | monitor::backend::nodejs | Acompanhamento, health e alertas da stack Backend. |
+| 4 | pm::backend::nodejs | Backlog e planejamento da squad Backend. |
+| 5 | monitor::backend::nodejs | Acompanhamento, health e alertas da squad Backend. |
 | 6 | cto | Orquestrador (spec → Charter → PM → backlogs); implementar por último. |
 
 Detalhes e justificativas: [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPMENT_CONTEXT.md) (seção “Podemos começar a desenvolver?”).

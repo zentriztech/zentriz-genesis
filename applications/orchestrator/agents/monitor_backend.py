@@ -1,5 +1,5 @@
 """
-Agente Monitor Backend — analisa saúde da stack Backend, gera relatórios e alertas.
+Agente Monitor Backend — analisa saúde da squad Backend, gera relatórios e alertas.
 Uso: python -m orchestrator.agents.monitor_backend --input message.json
       ou POST /invoke/monitor (serviço HTTP).
 """
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Monitor Backend Agent — health e alertas da stack Backend")
+    parser = argparse.ArgumentParser(description="Monitor Backend Agent — health e alertas da squad Backend")
     parser.add_argument("--input", "-i", help="Arquivo JSON com message_envelope", default="-")
     parser.add_argument("--output", "-o", help="Arquivo de saída (response_envelope)", default="-")
     args = parser.parse_args()

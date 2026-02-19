@@ -4,7 +4,7 @@ API do produto de exemplo (Voucher MVP). Stack: TypeScript, Fastify, Vitest.
 
 ## Banco de dados
 
-A API usa **PostgreSQL** (fonte de verdade). Tabelas: `plans`, `tenants`, `users`, `projects`, `project_spec_files`. Schema em `src/db/schema.sql`. Na subida, `initDb()` aplica o schema e `seedIfEmpty()` cria um tenant demo e usuários iniciais.
+A API usa **PostgreSQL** (fonte de verdade). Tabelas: `plans`, `tenants`, `users`, `projects`, `project_spec_files`, `project_tasks`, `project_dialogue`. Projetos têm status incluindo `accepted` (aceite pelo usuário no portal). Schema em `src/db/schema.sql`. Na subida, `initDb()` aplica o schema e `seedIfEmpty()` cria um tenant demo e usuários iniciais.
 
 **Usuários padrão (senhas hasheadas; alterar em produção):**
 
@@ -28,6 +28,18 @@ PGHOST=localhost PGUSER=genesis PGPASSWORD=genesis_dev PGDATABASE=zentriz_genesi
 Cria: **Portal de Vouchers (em desenvolvimento)** (status `dev_qa`) e **Sistema de Cadastro MVP (concluído)** (status `completed`), com várias entradas em `project_dialogue`. Faça login no portal (admin@tenant.com ou user@tenant.com) e abra os projetos para ver o diálogo da equipe.
 
 ## Endpoints
+
+### Genesis (portal)
+
+- `POST /api/auth/login` — login (email, password) → token + user
+- `GET/POST/PATCH /api/projects` — projetos; PATCH com started_at, completed_at, status (não aceita `accepted` via PATCH)
+- `GET/POST/PATCH /api/projects/:id/tasks` — tarefas do pipeline (PATCH por task_id)
+- `POST /api/projects/:id/accept` — marcar projeto como aceito pelo usuário (status `accepted`); encerra o Monitor Loop
+- `GET/POST /api/projects/:id/dialogue` — diálogo da equipe
+- `POST /api/specs` — upload de spec (multipart)
+- `GET/POST /api/users`, `GET /api/tenants`
+
+### Voucher (produto de exemplo)
 
 - `POST /api/vouchers` — criar voucher (FR-01)
 - `GET /api/vouchers/:id` — consultar voucher (FR-02)

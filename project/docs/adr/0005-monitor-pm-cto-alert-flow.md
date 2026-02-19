@@ -10,7 +10,7 @@ Aceito
 
 ## Contexto
 
-O Zentriz Genesis possui **Monitor Agents** por stack (Backend, Web, Mobile) que monitoram **Dev_<AREA>** e **QA_<AREA>** para entender progresso, status de andamento das atividades, evidências e bloqueios. A documentação original indicava que Monitores "alertam PM/CTO" de forma indistinta, sem definir a cadeia de responsabilidade. O diagrama de arquitetura original mostrava Monitor reportando diretamente ao CTO, omitindo os Monitores por módulo e a hierarquia PM → CTO.
+O Zentriz Genesis possui **Monitor Agents** por squad (Backend, Web, Mobile) que monitoram **Dev_<AREA>** e **QA_<AREA>** para entender progresso, status de andamento das atividades, evidências e bloqueios. A documentação original indicava que Monitores "alertam PM/CTO" de forma indistinta, sem definir a cadeia de responsabilidade. O diagrama de arquitetura original mostrava Monitor reportando diretamente ao CTO, omitindo os Monitores por módulo e a hierarquia PM → CTO.
 
 ## Decisão
 

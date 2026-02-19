@@ -1,5 +1,5 @@
 """
-Agente PM Backend — gera backlog da stack Backend a partir de spec/Charter.
+Agente PM Backend — gera backlog da squad Backend a partir de spec/Charter.
 Uso: python -m orchestrator.agents.pm_backend --input message.json
       ou POST /invoke com body message_envelope (quando rodando como serviço).
 """

@@ -22,8 +22,8 @@
 ## 2. Atores e Arquitetura
 
 - **SPEC** (pessoa real): Dono do projeto; fornece especificação (FR/NFR); comunica-se apenas com o CTO; recebe conclusão ou bloqueios.
-- **CTO**: Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; delega stacks; informa SPEC quando finalizado ou bloqueado.
-- **PM** (por stack): Backlog por FR/NFR; gerencia a stack; **contrata** Dev(s), QA(s) em par (1 QA por Dev), **um** DevOps e **um** Monitor; atribui atividades; recebe status do Monitor.
+- **CTO**: Interpreta a spec, gera Project Charter, **contrata** um ou mais PMs conforme skills; delega squads; informa SPEC quando finalizado ou bloqueado.
+- **PM** (por squad): Backlog por FR/NFR; gerencia a squad; **contrata** Dev(s), QA(s) em par (1 QA por Dev), **um** DevOps e **um** Monitor; atribui atividades; recebe status do Monitor.
 - **Dev**: Implementação contínua; acompanhado pelo Monitor; refaz/melhora quando QA indica (via Monitor).
 - **QA**: Testes, documentação, validação, QA Report; **acionado pelo Monitor** para testar atividades finalizadas; bloqueia regressões.
 - **DevOps**: IaC, CI/CD, deploy, banco de dados, smoke tests; **acionado pelo Monitor** para provisionamento total ou parcial.
@@ -37,7 +37,7 @@ Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILIT
 
 ## 3. Fluxo de Orquestração (Event-Driven)
 
-**Eventos principais**: `project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` → `project.completed`
+**Eventos principais**: `project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` → `project.completed`. **Parada do pipeline:** usuário **aceita** o projeto no portal (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM); o runner usa **Monitor Loop** (Fase 2) até aceite ou parada.
 
 **Task State Machine**: NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS/QA_FAIL → DONE
 
@@ -104,7 +104,7 @@ zentriz-genesis/
 **Realizado (portal e API):**
 - **API** (services/api-node): Postgres (plans, tenants, users, projects, project_spec_files), auth JWT, `POST /api/auth/login`, `GET/POST/PATCH /api/projects`, `POST /api/specs` (multipart, multi-arquivo .md/.txt/.doc/.docx/.pdf), `GET/POST /api/users`, `GET /api/tenants`. Seed cria usuários padrão com senhas hasheadas (Zentriz Admin, tenant admin, user). Ver [context/CONTEXT.md](CONTEXT.md) e [services/api-node/README.md](../../applications/services/api-node/README.md).
 - **Portal** (apps/genesis-web): três telas de login por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API, envio de spec multi-arquivo, listagem/detalhe de projetos. Ver [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md).
-- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../../applications/orchestrator/spec_converter)); runner com `started_at`/`completed_at` via PATCH na API quando `API_BASE_URL`, `PROJECT_ID`, `GENESIS_API_TOKEN` definidos.
+- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../../applications/orchestrator/spec_converter)); runner em **duas fases** quando `API_BASE_URL`, `PROJECT_ID` e `GENESIS_API_TOKEN` definidos: Fase 1 (Spec → Engineer → CTO → PM Backend), seed de tarefas e **Monitor Loop** (Fase 2) até o usuário **aceitar** o projeto ou **parar**; persiste `started_at`/`completed_at`/`status` e diálogo via API.
 
 **Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)): concluir fundação de agentes; depois Dashboard, execução real do Orchestrator, SaaS.
 
