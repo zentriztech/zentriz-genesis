@@ -5,7 +5,7 @@ Runtime Python reutilizável para agentes que usam o LLM (Claude). Cada agente �
 ## Variáveis de ambiente
 
 - `CLAUDE_API_KEY` (obrigatória)
-- `CLAUDE_MODEL` (default: claude-3-5-sonnet-20241022)
+- `CLAUDE_MODEL` (default: claude-sonnet-4-6)
 - `REQUEST_TIMEOUT` (segundos)
 - `LOG_LEVEL`
 

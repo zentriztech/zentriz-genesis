@@ -14,8 +14,9 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 
 | Arquivo | Uso |
 |---------|-----|
+| [NEXT_CHAT_CONTEXT.md](NEXT_CHAT_CONTEXT.md) | **Contexto para o próximo chat** — estado recente, pipeline, título, erros, Docker, testes; leia primeiro ao iniciar um novo chat |
 | [CONTEXT.md](CONTEXT.md) | **Estado atual do projeto** — atividades realizadas, stack, credenciais, como rodar (leia para contexto operacional) |
-| [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | Visão completa do projeto — leia primeiro em novos chats |
+| [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) | Visão completa do projeto — visão geral e atores |
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Referência rápida de caminhos e conceitos-chave |
 | [DEVELOPMENT_CONTEXT.md](DEVELOPMENT_CONTEXT.md) | Por que "Voucher" é citado; análise do que falta; checklist e por onde começar |
 | [GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) | Contexto do portal genesis-web (stack, roles, telas de login, como rodar, referências) |
@@ -26,13 +27,13 @@ Como o projeto é extenso, com dezenas de documentos e múltiplas camadas (agent
 ## Como Usar (para Assistentes de IA)
 
 1. **Novo chat iniciando trabalho no Zentriz Genesis?**  
-   Leia [context/PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) para a visão completa e [context/CONTEXT.md](CONTEXT.md) para o estado atual (o que foi feito, credenciais, como rodar).
+   Leia primeiro [context/NEXT_CHAT_CONTEXT.md](NEXT_CHAT_CONTEXT.md) para o estado recente e orientação; em seguida [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) para a visão completa e [CONTEXT.md](CONTEXT.md) para credenciais e como rodar.
 
 2. **Precisa de referência rápida?**  
    Consulte [context/QUICK_REFERENCE.md](QUICK_REFERENCE.md).
 
 3. **Contexto desatualizado?**  
-   Atualize os arquivos desta pasta quando houver mudanças significativas no projeto (em especial CONTEXT.md e GENESIS_WEB_CONTEXT.md).
+   Atualize os arquivos desta pasta quando houver mudanças significativas (em especial NEXT_CHAT_CONTEXT.md, CONTEXT.md e GENESIS_WEB_CONTEXT.md).
 
 ## Manutenção
 

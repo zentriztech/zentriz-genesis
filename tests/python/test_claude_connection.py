@@ -35,7 +35,7 @@ def main() -> int:
         print("ERRO: Instale o pacote anthropic: pip install anthropic", file=sys.stderr)
         return 1
 
-    model = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
     print(f"Conectando ao Claude (modelo: {model})...", flush=True)
     client = Anthropic(api_key=api_key)
 

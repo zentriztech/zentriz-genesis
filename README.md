@@ -75,7 +75,7 @@ Zentriz-Genesis/
 O projeto Zentriz Genesis é extenso, com dezenas de documentos e múltiplas camadas. Para facilitar a **continuidade entre sessões** e o **onboarding de novos chats** (assistentes de IA) ou desenvolvedores:
 
 - **Pasta `project/context/`**: Armazena documentos de contexto que condensam o cenário completo do projeto.
-- **Novo chat iniciando trabalho?** Leia [project/context/PROJECT_OVERVIEW.md](project/context/PROJECT_OVERVIEW.md) para carregar o contexto completo sem percorrer todos os .md do repositório.
+- **Próximo chat / novo trabalho?** Leia [project/context/NEXT_CHAT_CONTEXT.md](project/context/NEXT_CHAT_CONTEXT.md) para o estado recente e orientação; depois [project/context/PROJECT_OVERVIEW.md](project/context/PROJECT_OVERVIEW.md) para o contexto completo.
 - **Referência rápida?** Consulte [project/context/QUICK_REFERENCE.md](project/context/QUICK_REFERENCE.md).
 - **Detalhes**: Veja [project/context/README.md](project/context/README.md) para entender o propósito e uso da pasta.
 

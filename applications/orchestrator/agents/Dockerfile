@@ -3,8 +3,11 @@
 # Contexto = raiz; copia apenas applications/ necessários (sem project/docs).
 FROM python:3.12-slim
 
-# Healthcheck do compose usa curl
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# Healthcheck do compose usa curl; ca-certificates atualizados para evitar
+# SSL: UNEXPECTED_EOF_WHILE_READING em saída HTTPS (ex.: api.anthropic.com)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

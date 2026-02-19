@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # deploy-docker.sh — Criar, destruir ou atualizar o ambiente Docker do Zentriz Genesis.
-# Uso: ./deploy-docker.sh [--create | --destroy | --prune]
-#   --destroy  Remove containers, redes e (opcional) volumes do projeto.
-#   --create   Garante .env, depois sobe o stack (build + up).
-#   --prune    Limpa cache do Docker (builder prune) e depois faz create/update. Use se der "no space left on device".
-#   (sem flag) Atualiza: rebuild e up (pull/build/up). Build é sequencial para reduzir pico de uso de disco.
+# Uso: ./deploy-docker.sh [OPÇÕES] [SERVICE...]
+#   --destroy        Remove containers, redes e (opcional) volumes do projeto.
+#   --create         Garante .env, depois sobe o stack (build + up).
+#   --prune          Limpa cache do Docker (builder prune) e depois faz create/update. Use se der "no space left on device".
+#   --no-cache       Build sem usar cache (docker compose build --no-cache).
+#   --force-recreate Recria containers ao subir (docker compose up -d --force-recreate).
+#   SERVICE...       Nomes dos serviços a buildar/rodar (ex.: agents runner). Se omitido, todos.
+#   (sem flag)       Atualiza: rebuild e up. Build é sequencial para reduzir pico de uso de disco.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +16,12 @@ ENV_FILE="${REPO_ROOT}/.env"
 ENV_EXAMPLE="${REPO_ROOT}/.env.example"
 COMPOSE_CMD="docker compose"
 PROJECT_NAME="zentriz-genesis"
+
+# Ordem padrão do build sequencial (usada quando não se passam serviços)
+DEFAULT_SERVICES=(api genesis-web agents runner)
+# Arrays de serviços sobrescritos por main() quando o usuário passa SERVICE... (evita unbound com set -u)
+SERVICES_TO_BUILD=()
+SERVICES_TO_UP=()
 
 # --- helpers ---
 log() { echo "[deploy-docker] $*"; }
@@ -78,25 +87,49 @@ run_prune() {
   log "Cache limpo."
 }
 
-# Build sequencial (um serviço por vez) para reduzir pico de uso de disco
+# Build sequencial (um serviço por vez) para reduzir pico de uso de disco.
+# Uso: build_sequential [--no-cache] [svc1 svc2 ...]
 build_sequential() {
-  log "Build sequencial (api -> genesis-web -> agents -> runner)..."
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build api) || die "Build do api falhou."
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build genesis-web) || die "Build do genesis-web falhou."
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build agents) || die "Build do agents falhou."
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build runner) || die "Build do runner falhou."
+  local build_args=()
+  [[ "${BUILD_NO_CACHE:-false}" == "true" ]] && build_args+=(--no-cache)
+  local services=()
+  if [[ ${#SERVICES_TO_BUILD[@]} -gt 0 ]]; then
+    services=("${SERVICES_TO_BUILD[@]}")
+  else
+    services=("${DEFAULT_SERVICES[@]}")
+  fi
+  log "Build sequencial (${services[*]})..."
+  for svc in "${services[@]}"; do
+    if [[ ${#build_args[@]} -gt 0 ]]; then
+      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build "${build_args[@]}" "$svc") || die "Build do $svc falhou."
+    else
+      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" build "$svc") || die "Build do $svc falhou."
+    fi
+  done
   log "Build concluído."
 }
 
-# Build e up
+# Build e up (usa BUILD_NO_CACHE, FORCE_RECREATE e SERVICES_TO_BUILD/SERVICES_TO_UP se definidos)
 create_or_update() {
-  log "Build e início dos serviços (build sequencial para economizar disco)..."
+  log "Build e início dos serviços..."
   build_sequential
-  (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d) || {
-    err "Falha no up. Tentando down e up novamente..."
-    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" down --remove-orphans) || true
-    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d) || die "Falha ao subir o stack."
-  }
+
+  local up_args=(-d)
+  [[ "${FORCE_RECREATE:-false}" == "true" ]] && up_args+=(--force-recreate)
+
+  if [[ ${#SERVICES_TO_UP[@]} -gt 0 ]]; then
+    log "Subindo apenas: ${SERVICES_TO_UP[*]}"
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${SERVICES_TO_UP[@]}") || {
+      err "Falha no up. Tentando novamente..."
+      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}" "${SERVICES_TO_UP[@]}") || die "Falha ao subir os serviços."
+    }
+  else
+    (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}") || {
+      err "Falha no up. Tentando down e up novamente..."
+      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" down --remove-orphans) || true
+      (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" up -d "${up_args[@]}") || die "Falha ao subir o stack."
+    }
+  fi
   log "Stack no ar. Verificando containers..."
   (cd "$REPO_ROOT" && $COMPOSE_CMD -f "$COMPOSE_FILE" --project-name "$PROJECT_NAME" ps)
 }
@@ -105,20 +138,53 @@ create_or_update() {
 main() {
   local mode="update"
   local do_prune=false
+  BUILD_NO_CACHE=false
+  FORCE_RECREATE=false
+  HOST_AGENTS=false
+  SERVICES_TO_BUILD=()
+  SERVICES_TO_UP=()
+
   while [[ -n "${1:-}" ]]; do
     case "$1" in
-      --destroy) mode="destroy"; shift ;;
-      --create)  mode="create"; shift ;;
-      --prune)   do_prune=true; shift ;;
+      --destroy)        mode="destroy"; shift ;;
+      --create)          mode="create"; shift ;;
+      --prune)           do_prune=true; shift ;;
+      --no-cache)        BUILD_NO_CACHE=true; shift ;;
+      --force-recreate)  FORCE_RECREATE=true; shift ;;
+      --host-agents)     HOST_AGENTS=true; shift ;;
       -h|--help)
-        log "Uso: $0 [--create | --destroy | --prune]"
-        log "  --create   Criar ambiente (garante .env, build e up)"
-        log "  --destroy  Destruir ambiente (down)"
-        log "  --prune    Limpar cache do Docker e depois build+up (use se der 'no space left on device')"
-        log "  (vazio)    Atualizar (build sequencial e up)"
+        echo "Uso: $0 [OPÇÕES] [SERVICE...]"
+        echo ""
+        echo "Modos:"
+        echo "  --create         Criar ambiente (garante .env, build e up)"
+        echo "  --destroy        Destruir ambiente (down)"
+        echo "  --prune          Limpar cache do Docker e depois build+up (use se der 'no space left on device')"
+        echo "  (sem modo)       Atualizar (build sequencial e up)"
+        echo ""
+        echo "Opções de build/up:"
+        echo "  --no-cache       Build sem cache (docker compose build --no-cache)"
+        echo "  --force-recreate Recria containers ao subir (útil após alterar .env)"
+        echo "  --host-agents    Rodar agentes no host (contorna TLS no Docker Desktop Mac)"
+        echo ""
+        echo "Serviços (opcional):"
+        echo "  SERVICE...       Nomes dos serviços a buildar e subir (ex.: agents runner). Se omitido, todos."
+        echo ""
+        echo "Exemplos:"
+        echo "  $0                                    # build e up de todos"
+        echo "  $0 --no-cache --force-recreate        # rebuild completo e recriar containers"
+        echo "  $0 --force-recreate agents runner     # só agents e runner, recriados"
+        echo "  $0 agents                             # só build e up do agents"
         exit 0
         ;;
-      *) log "Opção desconhecida: $1"; exit 1 ;;
+      -*)
+        log "Opção desconhecida: $1"
+        exit 1
+        ;;
+      *)
+        SERVICES_TO_BUILD+=("$1")
+        SERVICES_TO_UP+=("$1")
+        shift
+        ;;
     esac
   done
 
@@ -127,6 +193,34 @@ main() {
 
   if [[ "$do_prune" == true ]]; then
     run_prune
+  fi
+
+  # Se --host-agents: excluir container agents da lista de serviços e configurar runner
+  if [[ "$HOST_AGENTS" == true ]]; then
+    log "Modo host-agents: o serviço 'agents' NÃO será subido no Docker."
+    log "O runner usará API_AGENTS_URL=http://host.docker.internal:8000"
+    log ""
+    log "Após o deploy, rode em outro terminal:"
+    log "  ./start-agents-host.sh"
+    log ""
+    # Garantir que API_AGENTS_URL aponta para o host no .env
+    if [[ -f "$ENV_FILE" ]] && ! grep -q "^API_AGENTS_URL=" "$ENV_FILE"; then
+      echo "API_AGENTS_URL=http://host.docker.internal:8000" >> "$ENV_FILE"
+      log "Adicionado API_AGENTS_URL=http://host.docker.internal:8000 ao .env"
+    fi
+    # Remover agents da lista default e das listas customizadas
+    DEFAULT_SERVICES=(api genesis-web runner)
+    local new_build=()
+    local new_up=()
+    for s in "${SERVICES_TO_BUILD[@]+"${SERVICES_TO_BUILD[@]}"}"; do
+      [[ "$s" != "agents" ]] && new_build+=("$s")
+    done
+    for s in "${SERVICES_TO_UP[@]+"${SERVICES_TO_UP[@]}"}"; do
+      [[ "$s" != "agents" ]] && new_up+=("$s")
+    done
+    SERVICES_TO_BUILD=("${new_build[@]+"${new_build[@]}"}")
+    SERVICES_TO_UP=("${new_up[@]+"${new_up[@]}"}")
+    FORCE_RECREATE=true
   fi
 
   case "$mode" in
@@ -145,6 +239,12 @@ main() {
       create_or_update
       ;;
   esac
+
+  if [[ "$HOST_AGENTS" == true ]]; then
+    log ""
+    log "IMPORTANTE: Agora rode em outro terminal: ./start-agents-host.sh"
+    log "Os agentes no host falarão com a Claude (sem problema de TLS no Docker)."
+  fi
 
   log "Concluído."
 }

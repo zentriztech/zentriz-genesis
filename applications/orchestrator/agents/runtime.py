@@ -7,22 +7,34 @@ import os
 import json
 import logging
 import time
+import traceback as _tb
 
 logger = logging.getLogger(__name__)
 
-# Raiz das aplicações: no host = repo/applications, no container = /app
 _r = Path(__file__).resolve().parent.parent.parent
 APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
 
-# Retry: número de tentativas (default 3 = 1 inicial + 2 retries; útil para connection errors)
 CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "3"))
+
+SHOW_TRACEBACK = os.environ.get("SHOW_TRACEBACK", "true").strip().lower() in ("1", "true", "yes")
+
+AGENT_LABELS = {
+    "ENGINEER": "Engineer",
+    "CTO": "CTO",
+    "PM_BACKEND": "PM Backend",
+    "PM_WEB": "PM Web",
+    "DEV_BACKEND": "Dev Backend",
+    "QA_BACKEND": "QA Backend",
+    "DEVOPS_DOCKER": "DevOps Docker",
+    "MONITOR_BACKEND": "Monitor Backend",
+}
+
+
+def _label(role: str) -> str:
+    return AGENT_LABELS.get(role, role.replace("_", " ").title())
 
 
 def _extract_api_message(exc: BaseException) -> str | None:
-    """
-    Extrai a mensagem explicativa da API (ex.: Anthropic) quando disponível,
-    para exibir no portal em vez de só o texto genérico da exceção.
-    """
     if hasattr(exc, "body") and isinstance(getattr(exc, "body"), dict):
         body = getattr(exc, "body")
         if isinstance(body.get("error"), dict) and isinstance(body["error"].get("message"), str):
@@ -45,8 +57,18 @@ def _extract_api_message(exc: BaseException) -> str | None:
     return None
 
 
+def _build_error_detail(exc: BaseException, api_msg: str | None = None) -> dict:
+    """Constrói um dict com informações do erro, respeitando SHOW_TRACEBACK."""
+    detail: dict = {
+        "error": api_msg or str(exc),
+        "error_type": type(exc).__name__,
+    }
+    if SHOW_TRACEBACK:
+        detail["traceback"] = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+    return detail
+
+
 def load_system_prompt(system_prompt_path: Path) -> str:
-    """Carrega o conteúdo do SYSTEM_PROMPT (arquivo .md)."""
     path = system_prompt_path if system_prompt_path.is_absolute() else APPLICATIONS_ROOT / system_prompt_path
     if not path.exists():
         raise FileNotFoundError(f"SYSTEM_PROMPT não encontrado: {path}")
@@ -54,7 +76,6 @@ def load_system_prompt(system_prompt_path: Path) -> str:
 
 
 def _normalize_response_envelope(out: dict, request_id: str, raw_text: str) -> dict:
-    """Garante que o dict tenha pelo menos status e summary; preenche defaults e loga aviso se necessário."""
     if "request_id" not in out:
         out["request_id"] = request_id
     if not isinstance(out.get("status"), str):
@@ -88,8 +109,9 @@ def run_agent(
     if not api_key:
         raise ValueError("CLAUDE_API_KEY não definida (variável de ambiente)")
 
-    model = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
     timeout = int(os.environ.get("REQUEST_TIMEOUT", "120"))
+    agent_name = _label(role)
 
     system_content = load_system_prompt(Path(system_prompt_path))
     user_content = (
@@ -100,6 +122,9 @@ def run_agent(
 
     client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
+
+    logger.info("[%s] Enviando solicitação à Claude (modelo: %s)...", agent_name, model)
+
     last_error = None
     for attempt in range(CLAUDE_RETRY_ATTEMPTS):
         try:
@@ -121,22 +146,29 @@ def run_agent(
                 or "ssl" in err_lower
             )
             if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
-                wait = 2 + attempt * 2  # 2s, 4s para dar tempo à rede/proxy
+                wait = 2 + attempt * 2
                 logger.warning(
-                    "Tentativa %s falhou (%s); aguardando %s s antes de retry.",
-                    attempt + 1, e, wait,
+                    "[%s] Tentativa %d/%d falhou (%s). Aguardando %ds antes de nova tentativa...",
+                    agent_name, attempt + 1, CLAUDE_RETRY_ATTEMPTS, e, wait,
                 )
                 time.sleep(wait)
             else:
                 api_msg = _extract_api_message(e)
-                if api_msg:
-                    raise RuntimeError(f"Claude API: {api_msg}") from e
-                raise RuntimeError(f"Falha ao chamar Claude após {attempt + 1} tentativa(s): {e}") from e
+                human_msg = api_msg or str(e)
+                error_detail = _build_error_detail(e, api_msg)
+                logger.error(
+                    "[%s] Falha definitiva ao chamar a Claude após %d tentativa(s): %s",
+                    agent_name, attempt + 1, human_msg,
+                )
+                raise RuntimeError(
+                    json.dumps({"agent": role, "model": model, **error_detail}, ensure_ascii=False)
+                ) from e
+
+    logger.info("[%s] Resposta recebida da Claude com sucesso.", agent_name)
 
     raw_text = response.content[0].text if response.content else ""
     text = raw_text
 
-    # Tentar extrair JSON da resposta (pode vir com markdown code block)
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
