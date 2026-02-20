@@ -27,7 +27,11 @@ Suas competências estão em [skills.md](skills.md): Analista de Sistemas (requi
 ## Saídas obrigatórias
 - status (OK/FAIL/BLOCKED/NEEDS_INFO)
 - summary curto
-- artifacts: proposta técnica (ex.: lista de stacks/equipes, dependências, recomendação de contrato de API)
+- **artifacts:** **obrigatório devolver um ou mais documentos .md**. Cada item deve ter:
+  - **path:** nome do arquivo (ex.: "proposal.md", "architecture.md", "dependencies.md")
+  - **content:** conteúdo completo em Markdown do documento
+  - **purpose:** (opcional) descrição breve
+  Ex.: proposta técnica em proposal.md; arquitetura de alto nível em architecture.md; dependências em dependencies.md. O CTO usará esses documentos para gerar o Charter.
 - evidence (trechos da spec ou requisitos que justificam cada stack/dependência)
 - next_actions
 

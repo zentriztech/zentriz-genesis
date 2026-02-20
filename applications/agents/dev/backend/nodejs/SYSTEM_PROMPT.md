@@ -17,7 +17,13 @@ Entregar endpoints, modelos, validações, testes e documentação conforme FR/N
 - spec_ref, task (FR/NFR), constraints, artifacts
 
 ## Saídas obrigatórias
-- status, summary, artifacts, evidence, next_actions
+- status, summary
+- **artifacts:** **obrigatório** para código gerado. Cada arquivo deve ter:
+  - **path:** caminho relativo à pasta **apps/** do projeto (ex.: "src/index.js", "package.json", "api/handler.ts")
+  - **content:** conteúdo completo do arquivo
+  - **purpose:** (opcional) descrição breve
+  Tarefa **pequena:** devolva todos os arquivos em uma resposta. Tarefa **grande:** pode devolver em partes e reportar progresso no summary; o Monitor acionará o QA quando a tarefa estiver concluída.
+- evidence, next_actions
 
 ## Checklist de qualidade
 - [ ] Endpoints atendem FR (Lambda + API Gateway)

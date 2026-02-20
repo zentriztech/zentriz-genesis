@@ -28,7 +28,7 @@
 - **Erros da API**: exibição apenas do campo `message` (não JSON bruto).
 
 ### Runner e pipeline — Fase 4 (fluxo V2)
-- **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): com API e `PROJECT_ID`, executa **fluxo V2**. (1) **CTO spec review**: converte/entende a spec e grava em docs. (2) **Loop CTO↔Engineer** (max 3 rodadas): CTO envia spec ao Engineer; Engineer devolve proposta técnica (squads/skills); CTO valida ou devolve questionamentos; saída = Charter. (3) **PM** (módulo backend, charter + proposta do Engineer): gera backlog; em seguida **seed de tarefas** e **Monitor Loop**. (4) **Monitor Loop**: lê projeto e tasks; aciona Dev, QA ou DevOps conforme estado; não aciona DevOps se houver task DONE por max QA rework; artefatos do **Dev** com `path` são gravados em `<project_id>/apps/`; artefatos do **DevOps** em `<project_id>/project/`. **Parada**: usuário aceita no portal ou SIGTERM. Sem API, fluxo sequencial (Spec → CTO → Engineer loop → PM → Dev → QA → Monitor → DevOps). Ver [docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [docs/AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md), [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md).
+- **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): com API e `PROJECT_ID`, executa **fluxo V2**. (1) **CTO spec review**: usa [PRODUCT_SPEC_TEMPLATE](../spec/PRODUCT_SPEC_TEMPLATE.md), converte/valida a spec e grava em docs. (2) **Loop CTO↔Engineer** (max `MAX_CTO_ENGINEER_ROUNDS`): Engineer devolve 1+ .md; CTO valida; saída = Charter. (3) **Loop CTO↔PM** (max `MAX_CTO_PM_ROUNDS`): PM gera backlog; CTO valida; se OK, seed de tarefas e **Monitor Loop**. (4) **Monitor Loop**: aciona Dev, QA ou DevOps; Dev grava código em `<project_id>/apps/`; DevOps em `<project_id>/project/`; não aciona DevOps se task DONE por max QA rework. **Parada**: usuário aceita ou SIGTERM. Sem API: fluxo sequencial. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md), [AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md).
 - **Testes**: API (Vitest — login, projects, upload spec); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh).
 - **Docs**: DEPLOYMENT e API_CONTRACT atualizados com fluxo de spec e referência a SPEC_SUBMISSION_AND_FORMATS.
 
@@ -40,7 +40,7 @@
 |----------------|-------|-----------|
 | api            | 3000  | API Node (Fastify, Postgres, auth, projects, specs, artifacts, users, tenants) |
 | genesis-web    | 3001  | Portal Next.js + MUI + MobX |
-| runner         | 8001  | Orquestrador: fluxo V2 (CTO spec review → CTO↔Engineer → PM) + Monitor Loop (Dev/QA/DevOps) até aceite ou parada; PROJECT_FILES_ROOT para docs por projeto |
+| runner         | 8001  | Orquestrador: fluxo V2 (CTO spec review + CTO↔Engineer + CTO↔PM) + Monitor Loop; docs/apps/project em PROJECT_FILES_ROOT/<project_id>/ |
 | agents         | 8000  | Agentes (Engineer, CTO, PM, Dev, QA, DevOps, Monitor; futuramente Web, Mobile) — LLM |
 | postgres       | 5432  | PostgreSQL |
 | redis          | 6379  | Cache / sessões |
@@ -130,7 +130,7 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - **Bind mount no compose**: dentro do container `PROJECT_FILES_ROOT` é sempre `/project-files` (fixo no docker-compose.yml). O compose monta `${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files` em api e runner — assim os artefatos gravados pelo runner aparecem no host (ex. `/Users/mac/zentriz-files/<project_id>/docs/`).
 - **.env**: usar `HOST_PROJECT_FILES_ROOT=/Users/mac/zentriz-files` (pasta no host). Não usar mais `PROJECT_FILES_ROOT` no .env para Docker.
 - **Deploy**: `deploy-docker.sh` garante que o diretório de artefatos no host exista (`mkdir -p`) antes do up.
-- **Código fonte em project/**: ver [docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md](../docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md) para o que falta (artifacts do Dev com path+content em `project/`, contrato e prompts).
+- **Estrutura de artefatos**: `<project_id>/docs/` (documentos dos agentes), `<project_id>/apps/` (código gerado pelo Dev), `<project_id>/project/` (infra/DevOps). Paths resilientes: `get_project_root` rejeita `project_id` vazio; `write_apps_artifact` para Dev. Ver [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md).
 
 ### Troubleshooting
 - **[docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md)**: fluxo esperado, cenários (botão não aparece, sem spec, runner não configurado, 202 mas sem diálogo), comandos de logs, seção "Reiniciar/Iniciar sem movimentação", checklist por projeto.
@@ -148,15 +148,16 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - Store: `applications/apps/genesis-web/stores/projectsStore.ts`
 - Deploy: `deploy-docker.sh` (--host-agents exclui agents do up e dá stop agents; garante dir artefatos no host)
 
-### Pipeline V2 (2026-02-19)
-- **Fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3 rodadas, `MAX_CTO_ENGINEER_ROUNDS`) → Charter → PM com `module` e proposta do Engineer → seed tasks → Monitor Loop. Artefatos do Dev com `path` gravados em `project/<project_id>/`; DevOps no Monitor Loop grava artefatos com `path` em `project/`. Contratos em [docs/PIPELINE_V2_HANDOFF_CONTRACTS.md](../docs/PIPELINE_V2_HANDOFF_CONTRACTS.md).
+### Pipeline V2 e extensão IA real (2026-02-19)
+- **Fluxo V2**: CTO spec review (com [PRODUCT_SPEC_TEMPLATE](../spec/PRODUCT_SPEC_TEMPLATE.md)) → loop CTO↔Engineer (max `MAX_CTO_ENGINEER_ROUNDS`) → Charter → **loop CTO↔PM** (max `MAX_CTO_PM_ROUNDS`, CTO valida backlog) → seed tasks → Monitor Loop. Artefatos do **Dev** com `path` em `<project_id>/apps/`; **DevOps** em `<project_id>/project/`. Contratos em [PIPELINE_V2_HANDOFF_CONTRACTS.md](../docs/PIPELINE_V2_HANDOFF_CONTRACTS.md).
+- **Extensão [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md):** CTO converte/valida spec para o template; Engineer devolve 1+ .md; CTO valida backlog do PM; Dev/QA prompts exigem artefatos e QA_PASS/QA_FAIL. Checklist P1–P9 implementado.
 
 ### Artefatos: conteúdo legível e DevOps só com QA aprovado (2026-02-19)
 - **Artefatos .md com JSON**: A LLM às vezes devolve no `summary` um JSON (envelope). O runner passou a usar `_content_for_doc(response)` para extrair só o texto legível ao gravar em docs/ (engineer, cto, pm, dev, qa, devops).
 - **DevOps após QA_FAIL**: Se uma tarefa foi marcada DONE por "máximo de reworks" do QA (não aprovada), o Monitor **não** aciona mais o DevOps; publica no diálogo o motivo e encerra essa linha. Ver [PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md) §6.
 
 ### Repo
-- Último commit relevante: fix seed tasks owner_role + artefatos em /Users/mac/zentriz-files (migration DB, bind mount HOST_PROJECT_FILES_ROOT, runner _seed_tasks DEV_BACKEND, status failed quando seed falha, agentes rename).
+- **Último estado**: fluxo V2 com CTO spec review (PRODUCT_SPEC_TEMPLATE), loop CTO↔Engineer, loop CTO↔PM (validação de backlog), pasta `apps/` para código do Dev, prompts CTO/Engineer/Dev/QA alinhados à extensão IA real (PIPELINE_V2_IA_REAL_AND_PATHS). Variáveis: `MAX_CTO_ENGINEER_ROUNDS`, `MAX_CTO_PM_ROUNDS`, `CLAUDE_MODEL`.
 
 ---
 

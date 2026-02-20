@@ -119,13 +119,13 @@ Cada agente **pede à IA** que execute as tarefas das suas responsabilidades e *
 
 - [x] **P1** Garantir que **nenhuma** escrita em disco use raiz sem `project_id`; validar `project_id` antes de `write_doc` / `write_project_artifact`; se vazio e storage ativo, usar fallback ou skip. (`get_project_root` retorna `None` se `project_id` vazio.)
 - [x] **P2** Implementar `get_apps_dir(project_id)` e `write_apps_artifact(project_id, relative_path, content)` em `project_storage.py`; runner grava artefatos do Dev em `<project_id>/apps/`.
-- [ ] **P3** CTO: carregar [PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) e enviar ao prompt da IA; instruir “converter/validar spec para este modelo; se já estiver no modelo, validar e devolver OK”; gravar spec aceita em `docs/`.
-- [ ] **P4** Engineer: prompt que exija 1+ .md como saída (proposta técnica, squads, etc.); runner grava cada artefato em `docs/` com nome adequado.
-- [ ] **P5** CTO validação: após receber documentos do Engineer, CTO (IA) valida; se não OK, devolve questionamentos e runner repete Engineer (max rodadas); se OK, segue para PM.
-- [ ] **P6** PM: gera backlog com IA; CTO (IA) valida; se OK, acionar squad; senão PM repete (max rodadas).
-- [ ] **P7** Dev: instruir IA a devolver artefatos com `path` (relativo a `apps/`) e `content`; runner grava em `<project_id>/apps/<path>`; tarefas grandes = múltiplas chamadas + checklist.
-- [ ] **P8** QA: instruir IA a validar se código condiz com a tarefa; saída QA_PASS/QA_FAIL; Monitor reage (block/rework ou OK/done).
-- [ ] **P9** Configuração do modelo: suporte a `CLAUDE_MODEL` (ou similar) para escolher o modelo da IA; documentar em CONTEXT e .env.example.
+- [x] **P3** CTO: carregar [PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) e enviar ao prompt da IA; instruir “converter/validar spec para este modelo; se já estiver no modelo, validar e devolver OK”; gravar spec aceita em `docs/`.
+- [x] **P4** Engineer: prompt que exija 1+ .md como saída (proposta técnica, squads, etc.); runner grava cada artefato em `docs/` com nome adequado.
+- [x] **P5** CTO validação: após receber documentos do Engineer, CTO (IA) valida; se não OK, devolve questionamentos e runner repete Engineer (max rodadas); se OK, segue para PM.
+- [x] **P6** PM: gera backlog com IA; CTO (IA) valida; se OK, acionar squad; senão PM repete (max rodadas).
+- [x] **P7** Dev: instruir IA a devolver artefatos com `path` (relativo a `apps/`) e `content`; runner grava em `<project_id>/apps/<path>`; tarefas grandes = múltiplas chamadas + checklist.
+- [x] **P8** QA: instruir IA a validar se código condiz com a tarefa; saída QA_PASS/QA_FAIL; Monitor reage (block/rework ou OK/done).
+- [x] **P9** Configuração do modelo: suporte a `CLAUDE_MODEL` (ou similar) para escolher o modelo da IA; documentar em CONTEXT e .env.example.
 
 ---
 

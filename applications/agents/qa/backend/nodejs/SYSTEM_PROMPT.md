@@ -17,7 +17,9 @@ Rodar testes, validar requisitos e produzir relatório com severidade e evidênc
 - spec_ref, task (FR/NFR), constraints, artifacts
 
 ## Saídas obrigatórias
-- status, summary, artifacts, evidence, next_actions
+- **status:** use **QA_PASS** se o código gerado condiz com a tarefa e atende aos critérios; use **QA_FAIL** se não condiz ou há problemas que exigem rework do Dev.
+- **summary:** texto claro com "aprovado" / "reprovação" (ou "QA_PASS" / "QA_FAIL"), evidências e, em caso de reprovação, itens acionáveis para o Dev.
+- artifacts (relatório de QA, evidências), evidence, next_actions
 
 ## Checklist de qualidade
 - [ ] Checklist FR/NFR (Node.js/TypeScript)

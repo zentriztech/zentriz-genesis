@@ -100,12 +100,40 @@ def call_engineer(spec_ref: str, spec_content: str, request_id: str, cto_questio
     return run_agent(system_prompt_path=engineer_prompt, message=message, role="ENGINEER")
 
 
-def call_cto(spec_ref: str, request_id: str, engineer_proposal: str = "") -> dict:
+def _load_spec_template() -> str:
+    """Carrega o modelo aceitável de spec (PRODUCT_SPEC_TEMPLATE) para o CTO converter/validar."""
+    for rel in ("project/spec/PRODUCT_SPEC_TEMPLATE.md", "spec/PRODUCT_SPEC_TEMPLATE.md"):
+        path = REPO_ROOT / rel
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    return ""
+
+
+def call_cto(
+    spec_ref: str,
+    request_id: str,
+    engineer_proposal: str = "",
+    spec_content: str = "",
+    spec_template: str = "",
+    backlog_summary: str = "",
+    validate_backlog_only: bool = False,
+) -> dict:
+    context: dict = {}
+    if engineer_proposal:
+        context["engineer_stack_proposal"] = engineer_proposal
+    if spec_content:
+        context["spec_content"] = spec_content[:20000]
+    if spec_template:
+        context["spec_template"] = spec_template[:15000]
+    if backlog_summary:
+        context["backlog_summary"] = backlog_summary[:15000]
+    if validate_backlog_only:
+        context["validate_backlog_only"] = True
     message = {
         "request_id": request_id,
         "input": {
             "spec_ref": spec_ref,
-            "context": {"engineer_stack_proposal": engineer_proposal} if engineer_proposal else {},
+            "context": context,
             "task": {},
             "constraints": {},
             "artifacts": [],
@@ -322,7 +350,7 @@ def _is_qa_pass(qa_response: dict) -> bool:
     """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM)."""
     status = (qa_response.get("status") or "").strip().lower()
     summary = (qa_response.get("summary") or "").lower()
-    if any(k in status for k in ("pass", "ok", "aprovado", "success", "done")):
+    if any(k in status for k in ("pass", "qa_pass", "ok", "aprovado", "success", "done")):
         return True
     if any(k in summary for k in ("aprovado", "passou", "ok", "sem problemas", "approved")):
         return True
@@ -687,10 +715,19 @@ def main() -> int:
             "O CTO está analisando a especificação recebida (conversão para .md e entendimento do projeto).",
             request_id,
         )
-        _post_agent_working("cto", "O CTO está revisando e entendendo a spec.", request_id)
-        logger.info("[Pipeline] Chamando CTO para revisão da spec...")
-        cto_spec_response = call_cto(spec_ref, request_id, engineer_proposal="")
+        _post_agent_working("cto", "O CTO está revisando e convertendo a spec para o modelo aceitável.", request_id)
+        logger.info("[Pipeline] Chamando CTO para revisão da spec (com template)...")
+        spec_template_content = _load_spec_template()
+        cto_spec_response = call_cto(
+            spec_ref, request_id, engineer_proposal="",
+            spec_content=spec_content, spec_template=spec_template_content,
+        )
         spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
+        # Se a IA devolveu artefato com spec no formato template, usar o conteúdo do primeiro artefato
+        for art in cto_spec_response.get("artifacts", []):
+            if isinstance(art, dict) and art.get("content"):
+                spec_understood = art.get("content", "").strip() or spec_understood
+                break
         if project_id and storage and storage.is_enabled():
             storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
         _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)
@@ -718,11 +755,15 @@ def main() -> int:
             _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
             if project_id and storage and storage.is_enabled():
                 storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
+                for i, art in enumerate(engineer_response.get("artifacts", [])):
+                    if isinstance(art, dict) and art.get("content"):
+                        name = (Path(art.get("path", "")).stem if art.get("path") else f"artifact_{i}").replace(".", "_") or f"artifact_{i}"
+                        storage.write_doc(project_id, "engineer", name, art.get("content", ""), title=art.get("purpose", name))
 
             _post_step("O CTO está validando a proposta e elaborando o Charter (ou preparando questionamentos).", request_id)
             _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
             logger.info("[Pipeline] Chamando agente CTO (charter/validação)...")
-            cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary)
+            cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary, spec_content=spec_understood)
             charter_summary = cto_response.get("summary", "")
             charter_artifacts = cto_response.get("artifacts", [])
             cto_status = cto_response.get("status", "?")
@@ -762,40 +803,61 @@ def main() -> int:
             request_id,
         )
 
-        # ── Passo 3: PM ───────────────────────────────────────────────
-        _post_step(
-            "O PM recebeu o Charter e está gerando o backlog completo do módulo, "
-            "com tarefas, prioridades e critérios de aceitação.",
-            request_id,
-        )
-        _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-        logger.info("[Pipeline] Chamando agente PM (módulo backend)...")
-        pm_response = call_pm(spec_ref, charter_summary, request_id, module="backend", engineer_proposal=engineer_summary)
-        backlog_summary = pm_response.get("summary", "")
-        backlog_artifacts = pm_response.get("artifacts", [])
-        pm_status = pm_response.get("status", "?")
-        logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
+        # ── Passo 3: PM + loop CTO↔PM (validação do backlog, max 3 rodadas) ──
+        max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
+        pm_response = None
+        cto_pm_questionamentos: str | None = None
+        for pm_round in range(1, max_cto_pm_rounds + 1):
+            _post_step(
+                f"O PM está gerando o backlog do módulo (rodada {pm_round}/{max_cto_pm_rounds}).",
+                request_id,
+            )
+            _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
+            logger.info("[Pipeline] Chamando agente PM (módulo backend, rodada %s)...", pm_round)
+            pm_response = call_pm(
+                spec_ref, charter_summary, request_id,
+                module="backend", engineer_proposal=engineer_summary,
+                cto_questionamentos=cto_pm_questionamentos,
+            )
+            backlog_summary = pm_response.get("summary", "")
+            backlog_artifacts = pm_response.get("artifacts", [])
+            pm_status = pm_response.get("status", "?")
+            logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
+            if project_id and storage and storage.is_enabled():
+                storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
+                for i, art in enumerate(backlog_artifacts):
+                    if isinstance(art, dict) and art.get("content"):
+                        storage.write_doc(
+                            project_id, "pm", f"artifact_{i}", art.get("content", ""),
+                            title=art.get("purpose", f"Artifact {i}"),
+                        )
+            _post_step("O CTO está validando o backlog do PM.", request_id)
+            _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
+            cto_backlog_response = call_cto(
+                spec_ref, request_id,
+                backlog_summary=backlog_summary,
+                validate_backlog_only=True,
+            )
+            cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
+            if cto_backlog_ok:
+                _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
+                break
+            if pm_round == max_cto_pm_rounds:
+                _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
+                break
+            cto_pm_questionamentos = cto_backlog_response.get("summary", "") or _content_for_doc(cto_backlog_response)
+            _post_step("O CTO enviou ajustes ao PM. Nova rodada.", request_id)
 
         _post_step(
-            f"O PM concluiu a geração do backlog. O módulo está planejado "
-            f"com tarefas e prioridades definidas. Status: {pm_status}.",
+            f"O PM concluiu a geração do backlog. O módulo está planejado com tarefas e prioridades. Status: {pm_status}.",
             request_id,
         )
-
         emit_event("module.planned", {"spec_ref": spec_ref, "backlog_summary": backlog_summary[:200]}, request_id)
         _post_dialogue(
             "pm", "cto", "module.planned",
             _get_summary_human("module.planned", "pm", "cto", backlog_summary[:200]),
             request_id,
         )
-        if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
-            for i, art in enumerate(backlog_artifacts):
-                if isinstance(art, dict) and art.get("content"):
-                    storage.write_doc(
-                        project_id, "pm", f"artifact_{i}", art.get("content", ""),
-                        title=art.get("purpose", f"Artifact {i}"),
-                    )
 
         # ── Fase 2: Monitor Loop (quando API e PROJECT_ID definidos) ───
         if project_id and _api_available():

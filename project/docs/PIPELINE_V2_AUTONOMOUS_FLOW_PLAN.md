@@ -91,7 +91,7 @@ Marque com `[x]` ao concluir cada item. Ao finalizar **todas** as tarefas, execu
 
 - [x] **2.1** Runner: para cada squad da proposta (ex.: backend, web, mobile), instanciar um “PM” (ou uma chamada PM com contexto de skill); CTO envia charter + proposta ao PM do módulo.
 - [x] **2.2** PM gera backlog do módulo (tarefas, prioridades, critérios de aceite); devolve ao CTO.
-- [ ] **2.3** Loop CTO ↔ PM por módulo com limite de rodadas; CTO pode questionar; PM responde; sair com OK ou última versão.
+- [x] **2.3** Loop CTO ↔ PM por módulo com limite de rodadas; CTO valida backlog; PM responde a questionamentos; sair com OK ou última versão (MAX_CTO_PM_ROUNDS).
 - [x] **2.4** CTO dá “OK” para o PM; PM “aciona a squad”: criar tasks na API para esse módulo (Monitor + Dev + QA + DevOps) e transitar projeto para estado “squad active” (ou equivalente).
 
 ### Fase 3 — Monitor e Dev/QA/DevOps
