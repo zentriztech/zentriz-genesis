@@ -280,6 +280,36 @@ def _post_agent_working(agent_key: str, activity_message: str, request_id: str) 
     _post_dialogue(agent_key, "system", "agent_working", activity_message, request_id)
 
 
+def _content_for_doc(response: dict) -> str:
+    """
+    Extrai texto adequado para gravar em .md a partir do response_envelope do agente.
+    A LLM às vezes devolve no campo summary um JSON (envelope inteiro); evita gravar isso como .md.
+    """
+    raw = (response.get("summary") or "").strip()
+    if not raw:
+        return ""
+    # Se o summary for um JSON (ex.: envelope inteiro), tenta extrair o summary interno
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data.get("summary"), str):
+                inner = data["summary"].strip()
+                if inner.startswith("{"):
+                    try:
+                        data2 = json.loads(inner)
+                        if isinstance(data2.get("summary"), str):
+                            return data2["summary"]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                return inner
+            # Fallback: se for dict, monta texto legível
+            if isinstance(data, dict) and "summary" not in data:
+                return raw
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return raw
+
+
 def _is_qa_pass(qa_response: dict) -> bool:
     """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM)."""
     status = (qa_response.get("status") or "").strip().lower()
@@ -436,6 +466,8 @@ def _run_monitor_loop(
     dev_summary = ""
     qa_summary = ""
     devops_done = False
+    # Tarefas marcadas DONE por terem atingido o máximo de reworks do QA (não aprovação)
+    tasks_done_after_qa_fail: set[str] = set()
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
     max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
     qa_fail_count: dict[str, int] = {}
@@ -471,7 +503,7 @@ def _run_monitor_loop(
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "qa", "report", qa_summary, title="QA report")
+                    storage.write_doc(project_id, "qa", "report", _content_for_doc(qa_response), title="QA report")
                 passed = _is_qa_pass(qa_response)
                 if passed:
                     new_status = "QA_PASS"
@@ -484,9 +516,10 @@ def _run_monitor_loop(
                     qa_fail_count[task_id] = current_fails
                     if current_fails >= max_qa_rework:
                         _update_task(project_id, task_id, status="DONE")
+                        tasks_done_after_qa_fail.add(task_id)
                         _post_step(
                             f"QA reportou QA_FAIL (reatempto {current_fails}/{max_qa_rework}). "
-                            "Máximo de reworks atingido; tarefa marcada como DONE.",
+                            "Máximo de reworks atingido; tarefa marcada como DONE (não aprovada). DevOps não será acionado.",
                             request_id,
                         )
                     else:
@@ -526,7 +559,7 @@ def _run_monitor_loop(
                         request_id,
                     )
                     if project_id and storage and storage.is_enabled():
-                        storage.write_doc(project_id, "dev", "implementation", dev_summary, title="Dev implementation")
+                        storage.write_doc(project_id, "dev", "implementation", _content_for_doc(dev_response), title="Dev implementation")
                     _update_task(project_id, task_id, status="WAITING_REVIEW")
                     _post_step(f"Dev concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
                 except Exception as e:
@@ -537,23 +570,31 @@ def _run_monitor_loop(
                 continue
 
         if all_done and not devops_done:
-            _post_step("O Monitor acionou o DevOps para provisionamento.", request_id)
-            _post_agent_working("devops", "O DevOps está gerando Dockerfile e artefatos de infraestrutura.", request_id)
-            try:
-                devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
-                devops_summary = devops_response.get("summary", "")
-                _post_dialogue(
-                    "monitor", "devops", "devops.deploy",
-                    _get_summary_human("devops.deploy", "devops", "cto", devops_summary[:200]),
+            if tasks_done_after_qa_fail:
+                _post_step(
+                    "Monitor: uma ou mais tarefas não foram aprovadas pelo QA após o máximo de reworks. "
+                    "DevOps não será acionado. Revise o projeto ou aceite o estado atual no portal.",
                     request_id,
                 )
-                if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "devops", "summary", devops_summary, title="DevOps summary")
-                devops_done = True
-                _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
-            except Exception as e:
-                logger.exception("[Monitor Loop] DevOps falhou")
-                _post_error(str(e), request_id, e)
+                devops_done = True  # Marca para não tentar de novo
+            else:
+                _post_step("O Monitor acionou o DevOps para provisionamento.", request_id)
+                _post_agent_working("devops", "O DevOps está gerando Dockerfile e artefatos de infraestrutura.", request_id)
+                try:
+                    devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
+                    devops_summary = devops_response.get("summary", "")
+                    _post_dialogue(
+                        "monitor", "devops", "devops.deploy",
+                        _get_summary_human("devops.deploy", "devops", "cto", devops_summary[:200]),
+                        request_id,
+                    )
+                    if project_id and storage and storage.is_enabled():
+                        storage.write_doc(project_id, "devops", "summary", _content_for_doc(devops_response), title="DevOps summary")
+                    devops_done = True
+                    _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
+                except Exception as e:
+                    logger.exception("[Monitor Loop] DevOps falhou")
+                    _post_error(str(e), request_id, e)
             time.sleep(2)
             continue
 
@@ -646,7 +687,7 @@ def main() -> int:
             request_id,
         )
         if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "engineer", "proposal", engineer_summary, title="Engineer technical proposal")
+            storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
 
         # ── Passo 2: CTO ─────────────────────────────────────────────
         _post_step(
@@ -669,9 +710,9 @@ def main() -> int:
         )
 
         charter_path = STATE_DIR / "PROJECT_CHARTER.md"
-        charter_content = f"# Project Charter (gerado pelo CTO)\n\n{charter_summary}\n"
+        charter_content = f"# Project Charter (gerado pelo CTO)\n\n{_content_for_doc(cto_response) or charter_summary}\n"
         if project_id and storage and storage.is_enabled():
-            p = storage.write_doc(project_id, "cto", "charter", charter_summary, title="Project Charter")
+            p = storage.write_doc(project_id, "cto", "charter", _content_for_doc(cto_response), title="Project Charter")
             if p:
                 charter_path = p
             for i, art in enumerate(charter_artifacts):
@@ -719,7 +760,7 @@ def main() -> int:
             request_id,
         )
         if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "pm", "backlog", backlog_summary, title="Backlog")
+            storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
             for i, art in enumerate(backlog_artifacts):
                 if isinstance(art, dict) and art.get("content"):
                     storage.write_doc(
@@ -800,7 +841,7 @@ def main() -> int:
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "dev", "implementation", dev_summary, title="Dev implementation")
+                    storage.write_doc(project_id, "dev", "implementation", _content_for_doc(dev_response), title="Dev implementation")
                     for i, art in enumerate(dev_artifacts):
                         if isinstance(art, dict) and art.get("content"):
                             storage.write_doc(project_id, "dev", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
@@ -832,7 +873,7 @@ def main() -> int:
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "qa", "report", qa_summary, title="QA report")
+                    storage.write_doc(project_id, "qa", "report", _content_for_doc(qa_response), title="QA report")
                     for i, art in enumerate(qa_artifacts):
                         if isinstance(art, dict) and art.get("content"):
                             storage.write_doc(project_id, "qa", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
@@ -863,7 +904,7 @@ def main() -> int:
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "monitor", "health", monitor_summary, title="Monitor health")
+                    storage.write_doc(project_id, "monitor", "health", _content_for_doc(monitor_response), title="Monitor health")
             except Exception as e:
                 logger.exception("[Pipeline] Monitor falhou")
                 monitor_status = "FAIL"
@@ -892,7 +933,7 @@ def main() -> int:
                     request_id,
                 )
                 if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "devops", "summary", devops_summary, title="DevOps summary")
+                    storage.write_doc(project_id, "devops", "summary", _content_for_doc(devops_response), title="DevOps summary")
                     for i, art in enumerate(devops_artifacts):
                         if isinstance(art, dict):
                             content = art.get("content")

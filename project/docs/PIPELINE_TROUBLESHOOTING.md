@@ -94,7 +94,27 @@ Para um `project_id` determinado:
 
 ---
 
-## 6. Referências
+## 6. Artefatos e Monitor/DevOps
+
+### 6.1 Arquivos .md com conteúdo JSON (corrigido)
+
+**Sintoma:** Em `PROJECT_FILES_ROOT/<project_id>/docs/` os arquivos (engineer_proposal.md, cto_charter.md, etc.) contêm um trecho JSON (request_id, agent, status, summary) em vez de texto legível.
+
+**Causa:** A LLM às vezes devolve no campo `summary` do response_envelope um JSON (o envelope inteiro serializado). O runner gravava esse valor direto no .md.
+
+**Correção:** O runner passou a usar `_content_for_doc(response)`: extrai o texto do `summary`; se o conteúdo for JSON, faz parse e usa o campo `summary` interno. Os .md passam a receber apenas o texto legível.
+
+### 6.2 DevOps acionado após QA rejeitar 3 vezes (corrigido)
+
+**Sintoma:** O QA rejeitou a tarefa 3 vezes (QA_FAIL, reatempto 1/3, 2/3, 3/3). A tarefa foi marcada DONE por "máximo de reworks atingido", mas o Monitor acionou o DevOps para provisionamento.
+
+**Causa:** A condição para chamar DevOps era apenas "todas as tasks estão DONE". Não havia distinção entre "DONE por aprovação do QA" e "DONE por limite de reworks".
+
+**Correção:** O Monitor mantém o conjunto `tasks_done_after_qa_fail` (task_ids marcadas DONE após atingir MAX_QA_REWORK). Só aciona DevOps quando todas as tasks estão DONE **e** nenhuma está nesse conjunto. Caso contrário, publica no diálogo: "Monitor: uma ou mais tarefas não foram aprovadas pelo QA após o máximo de reworks. DevOps não será acionado. Revise o projeto ou aceite o estado atual no portal."
+
+---
+
+## 7. Referências
 
 - Variáveis de ambiente (runner, API, agents): [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md)
 - Fluxo dos agentes e LLM: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md)

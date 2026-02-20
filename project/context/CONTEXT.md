@@ -88,6 +88,9 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 | Portal genesis-web   | [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md) |
 | Pipeline e agentes (fluxo LLM) | [docs/AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md) |
 | Pipeline squad completa e storage | [docs/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](../docs/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md) |
+| Prontidão E2E e código em project/ | [docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md](../docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md) |
+| **Plano Pipeline V2 (fluxo autônomo)** | [docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md) |
+| Troubleshooting pipeline | [docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md) |
 | API e usuários       | [services/api-node/README.md](../../applications/services/api-node/README.md) |
 | Contrato da API      | [docs/API_CONTRACT.md](../docs/API_CONTRACT.md) |
 | Deploy               | [docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md) |
@@ -109,6 +112,11 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - **Store**: `projectsStore.setProjectStatus(id, status)` para atualização otimista.
 - **API e runner**: logs de diagnóstico em `[Pipeline]` e `[Runner]` (POST /run, spec path, chamada ao runner, erro se houver). Runner valida se o arquivo de spec existe no path antes de iniciar o subprocess; se não existir, retorna 400 com mensagem clara (volume de uploads deve ser compartilhado entre API e runner).
 
+### Seed tasks e banco (corrigido 2026-02-19)
+- **Erro "Falha ao criar tarefas iniciais na API"**: era violação do CHECK `project_tasks_owner_role_check`. O runner enviava `owner_role: "DEV"` e o schema só aceitava `DEV_BACKEND`, `QA_BACKEND`, etc.
+- **Correção**: (1) Migration em `schema.sql` — CHECK ampliado para aceitar também `DEV`, `QA`, `DEVOPS`, `MONITOR`, `ENGINEER`, `CTO`, `PM`. (2) `_seed_tasks` no runner passou a enviar `owner_role: "DEV_BACKEND"` (valor válido).
+- **Resiliência**: quando `_seed_tasks` falha, o runner marca o projeto como `status: "failed"` na API (`_patch_project`) e registra o erro no diálogo, permitindo ao usuário reiniciar pelo portal.
+
 ### QA e Monitor Loop
 - **QA pass**: `_is_qa_pass(qa_response)` considera aprovado se status ou summary contiver "pass", "ok", "aprovado", "success", "done" ou trechos no texto; evita QA_FAIL infinito por variação da resposta do LLM.
 - **MAX_QA_REWORK** (env, default 3): após N vezes QA_FAIL na mesma tarefa, a tarefa é marcada DONE e o loop segue.
@@ -117,20 +125,34 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 ### Portal: loading e diálogo
 - **agent_working**: antes de cada chamada ao LLM, o runner envia evento de diálogo `agent_working` com mensagem descritiva. O portal usa a última entrada `agent_working` para mostrar CircularProgress no passo correspondente do Stepper e a mensagem abaixo do stepper.
 
-### Artefatos em disco
-- **PROJECT_FILES_ROOT**: para artefatos no host (ex. `/Users/mac/zentriz-files`), usar `docker-compose.override.yml` com bind mount (copiar de `docker-compose.override.example.yml`). Runner loga ao iniciar se o storage está ativo ou desativado.
+### Artefatos em disco (corrigido 2026-02-19)
+- **Bind mount no compose**: dentro do container `PROJECT_FILES_ROOT` é sempre `/project-files` (fixo no docker-compose.yml). O compose monta `${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files` em api e runner — assim os artefatos gravados pelo runner aparecem no host (ex. `/Users/mac/zentriz-files/<project_id>/docs/`).
+- **.env**: usar `HOST_PROJECT_FILES_ROOT=/Users/mac/zentriz-files` (pasta no host). Não usar mais `PROJECT_FILES_ROOT` no .env para Docker.
+- **Deploy**: `deploy-docker.sh` garante que o diretório de artefatos no host exista (`mkdir -p`) antes do up.
 - **Código fonte em project/**: ver [docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md](../docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md) para o que falta (artifacts do Dev com path+content em `project/`, contrato e prompts).
 
 ### Troubleshooting
 - **[docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md)**: fluxo esperado, cenários (botão não aparece, sem spec, runner não configurado, 202 mas sem diálogo), comandos de logs, seção "Reiniciar/Iniciar sem movimentação", checklist por projeto.
 
+### Agentes (rename e endpoints)
+- Módulos renomeados: `dev_backend`→`dev`, `pm_backend`→`pm`, `qa_backend`→`qa`, `monitor_backend`→`monitor`, `devops_docker`→`devops`; `cto_agent`→`cto`, `engineer_agent`→`engineer`.
+- Endpoints no serviço agents: `POST /invoke/engineer`, `/invoke/cto`, `/invoke/pm`, `/invoke/dev`, `/invoke/qa`, `/invoke/monitor`, `/invoke/devops`. System prompt por `skill_path` ou default.
+
 ### Arquivos principais
 - API pipeline: `applications/services/api-node/src/routes/pipeline.ts`
-- Runner: `applications/orchestrator/runner.py` (Fase 1 + Monitor Loop em `_run_monitor_loop`)
+- Schema e migration owner_role: `applications/services/api-node/src/db/schema.sql`
+- Runner: `applications/orchestrator/runner.py` (Fase 1 + Monitor Loop, _seed_tasks com DEV_BACKEND)
 - Runner service: `applications/orchestrator/runner_server.py` (POST /run, valida spec path)
 - Frontend projeto: `applications/apps/genesis-web/app/(dashboard)/projects/[id]/page.tsx`
 - Store: `applications/apps/genesis-web/stores/projectsStore.ts`
-- Deploy: `deploy-docker.sh` (--host-agents exclui agents do up e dá stop agents)
+- Deploy: `deploy-docker.sh` (--host-agents exclui agents do up e dá stop agents; garante dir artefatos no host)
+
+### Artefatos: conteúdo legível e DevOps só com QA aprovado (2026-02-19)
+- **Artefatos .md com JSON**: A LLM às vezes devolve no `summary` um JSON (envelope). O runner passou a usar `_content_for_doc(response)` para extrair só o texto legível ao gravar em docs/ (engineer, cto, pm, dev, qa, devops).
+- **DevOps após QA_FAIL**: Se uma tarefa foi marcada DONE por "máximo de reworks" do QA (não aprovada), o Monitor **não** aciona mais o DevOps; publica no diálogo o motivo e encerra essa linha. Ver [PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md) §6.
+
+### Repo
+- Último commit relevante: fix seed tasks owner_role + artefatos em /Users/mac/zentriz-files (migration DB, bind mount HOST_PROJECT_FILES_ROOT, runner _seed_tasks DEV_BACKEND, status failed quando seed falha, agentes rename).
 
 ---
 
