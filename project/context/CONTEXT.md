@@ -27,8 +27,8 @@
 - **Tela "Enviar spec ao CTO"**: upload de um ou mais arquivos (.md, .txt, .doc, .docx, .pdf), título opcional, envio multipart para `POST /api/specs`; feedback com link para o projeto e aviso quando `pending_conversion`.
 - **Erros da API**: exibição apenas do campo `message` (não JSON bruto).
 
-### Runner e pipeline — Fase 4
-- **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): quando `API_BASE_URL`, `PROJECT_ID` e `GENESIS_API_TOKEN` estão definidos, executa **duas fases**. **Fase 1**: Spec → Engineer → CTO → PM Backend (charter e backlog); em seguida faz **seed de tarefas** (`POST /api/projects/:id/tasks`) e entra no **Monitor Loop** (Fase 2). **Fase 2**: no mesmo processo, loop que lê estado do projeto e das tasks (`GET /api/projects/:id`, `GET /api/projects/:id/tasks`); se status for `accepted` ou `stopped` (ou SIGTERM), encerra; senão decide próximo agente (Dev, QA ou DevOps), invoca, atualiza task e diálogo; repete. **Parada**: usuário **aceita o projeto** no portal (`POST /api/projects/:id/accept`) ou **para** o pipeline (SIGTERM). Sem API/PROJECT_ID, o runner segue o fluxo sequencial antigo (Spec → … → PM Backend ou até DevOps conforme `PIPELINE_FULL_STACK`). Persiste `started_at`/`completed_at`/`status` e diálogo em `project_dialogue`; com `PROJECT_FILES_ROOT`, documentos em `<root>/<project_id>/docs/` e artefatos em `.../project/`. Ver [docs/AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md), [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md) e [docs/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](../docs/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md).
+### Runner e pipeline — Fase 4 (fluxo V2)
+- **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): com API e `PROJECT_ID`, executa **fluxo V2**. (1) **CTO spec review**: converte/entende a spec e grava em docs. (2) **Loop CTO↔Engineer** (max 3 rodadas): CTO envia spec ao Engineer; Engineer devolve proposta técnica (squads/skills); CTO valida ou devolve questionamentos; saída = Charter. (3) **PM** (módulo backend, charter + proposta do Engineer): gera backlog; em seguida **seed de tarefas** e **Monitor Loop**. (4) **Monitor Loop**: lê projeto e tasks; aciona Dev, QA ou DevOps conforme estado; não aciona DevOps se houver task DONE por max QA rework; artefatos do Dev e do DevOps com `path` são gravados em `.../project/`. **Parada**: usuário aceita no portal ou SIGTERM. Sem API, fluxo sequencial (Spec → CTO → Engineer loop → PM → Dev → QA → Monitor → DevOps). Ver [docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [docs/AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md), [docs/ORCHESTRATOR_BLUEPRINT.md](../docs/ORCHESTRATOR_BLUEPRINT.md).
 - **Testes**: API (Vitest — login, projects, upload spec); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh).
 - **Docs**: DEPLOYMENT e API_CONTRACT atualizados com fluxo de spec e referência a SPEC_SUBMISSION_AND_FORMATS.
 
@@ -40,7 +40,7 @@
 |----------------|-------|-----------|
 | api            | 3000  | API Node (Fastify, Postgres, auth, projects, specs, artifacts, users, tenants) |
 | genesis-web    | 3001  | Portal Next.js + MUI + MobX |
-| runner         | 8001  | Orquestrador: Fase 1 (Spec→Engineer→CTO→PM) + Monitor Loop (Dev/QA/DevOps) até aceite ou parada; PROJECT_FILES_ROOT para docs por projeto |
+| runner         | 8001  | Orquestrador: fluxo V2 (CTO spec review → CTO↔Engineer → PM) + Monitor Loop (Dev/QA/DevOps) até aceite ou parada; PROJECT_FILES_ROOT para docs por projeto |
 | agents         | 8000  | Agentes (Engineer, CTO, PM, Dev, QA, DevOps, Monitor; futuramente Web, Mobile) — LLM |
 | postgres       | 5432  | PostgreSQL |
 | redis          | 6379  | Cache / sessões |
@@ -120,7 +120,7 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 ### QA e Monitor Loop
 - **QA pass**: `_is_qa_pass(qa_response)` considera aprovado se status ou summary contiver "pass", "ok", "aprovado", "success", "done" ou trechos no texto; evita QA_FAIL infinito por variação da resposta do LLM.
 - **MAX_QA_REWORK** (env, default 3): após N vezes QA_FAIL na mesma tarefa, a tarefa é marcada DONE e o loop segue.
-- **Reiniciar** = novo processo do zero: Spec → Engineer → CTO → PM → seed de tarefas → **Monitor Loop** (Dev ↔ QA ↔ DevOps até aceitar ou parar). O "Monitor" é o loop no runner, não um serviço separado.
+- **Reiniciar** = novo processo do zero: **fluxo V2** (CTO spec review → loop CTO↔Engineer → PM → seed de tarefas → **Monitor Loop** até aceitar ou parar). O "Monitor" é o loop no runner, não um serviço separado.
 
 ### Portal: loading e diálogo
 - **agent_working**: antes de cada chamada ao LLM, o runner envia evento de diálogo `agent_working` com mensagem descritiva. O portal usa a última entrada `agent_working` para mostrar CircularProgress no passo correspondente do Stepper e a mensagem abaixo do stepper.
@@ -141,11 +141,14 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 ### Arquivos principais
 - API pipeline: `applications/services/api-node/src/routes/pipeline.ts`
 - Schema e migration owner_role: `applications/services/api-node/src/db/schema.sql`
-- Runner: `applications/orchestrator/runner.py` (Fase 1 + Monitor Loop, _seed_tasks com DEV_BACKEND)
+- Runner: `applications/orchestrator/runner.py` (fluxo V2 + Monitor Loop, _seed_tasks com DEV_BACKEND)
 - Runner service: `applications/orchestrator/runner_server.py` (POST /run, valida spec path)
 - Frontend projeto: `applications/apps/genesis-web/app/(dashboard)/projects/[id]/page.tsx`
 - Store: `applications/apps/genesis-web/stores/projectsStore.ts`
 - Deploy: `deploy-docker.sh` (--host-agents exclui agents do up e dá stop agents; garante dir artefatos no host)
+
+### Pipeline V2 (2026-02-19)
+- **Fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3 rodadas, `MAX_CTO_ENGINEER_ROUNDS`) → Charter → PM com `module` e proposta do Engineer → seed tasks → Monitor Loop. Artefatos do Dev com `path` gravados em `project/<project_id>/`; DevOps no Monitor Loop grava artefatos com `path` em `project/`. Contratos em [docs/PIPELINE_V2_HANDOFF_CONTRACTS.md](../docs/PIPELINE_V2_HANDOFF_CONTRACTS.md).
 
 ### Artefatos: conteúdo legível e DevOps só com QA aprovado (2026-02-19)
 - **Artefatos .md com JSON**: A LLM às vezes devolve no `summary` um JSON (envelope). O runner passou a usar `_content_for_doc(response)` para extrair só o texto legível ao gravar em docs/ (engineer, cto, pm, dev, qa, devops).

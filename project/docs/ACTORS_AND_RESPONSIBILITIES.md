@@ -86,7 +86,7 @@ flowchart TB
 
 - **Responsabilidade**: Decisões de **produto**. Interpretar a spec com apoio da **proposta técnica do Engineer**; gerar Project Charter; **contratar** um ou mais PMs com base nas squads/equipes definidas pelo Engineer; atuar como **ponte** entre PMs (ex.: dependências — PM Web precisa de endpoints do PM Backend).
 - **Comportamentos**:
-  - Recebe a spec e **consulta o Engineer** (spec → Engineer → proposta de squads, equipes, dependências).
+  - No **fluxo V2** do runner: primeiro **revisa/entende** a spec (CTO spec review); depois **loop com o Engineer** (max 3 rodadas): spec → Engineer → proposta; CTO valida ou questiona até Charter. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
   - Usa a proposta do Engineer para produzir [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) e contratar PM(s).
   - Contrata (instancia) um PM por squad/equipe definida pelo Engineer (Backend, Web Básica, Web Avançada, Mobile, etc.). Infraestrutura faz parte de cada squad via DevOps.
   - Delega o escopo ao PM e informa dependências (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”).

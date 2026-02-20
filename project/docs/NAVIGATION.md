@@ -10,7 +10,7 @@
 |-----------|-----------|
 | [README.md](../README.md) | Visão geral do projeto |
 | **[ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md)** | Atores, responsabilidades, hierarquia de comunicação e comportamentos |
-| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (fluxo em duas fases, Monitor Loop, aceite, squads, etapas) |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (fluxo V2, Monitor Loop, aceite, squads, etapas) |
 | [context/PROJECT_OVERVIEW.md](../context/PROJECT_OVERVIEW.md) | Contexto completo para novos chats |
 | [context/QUICK_REFERENCE.md](../context/QUICK_REFERENCE.md) | Referência rápida de caminhos |
 | [context/DEVELOPMENT_CONTEXT.md](../context/DEVELOPMENT_CONTEXT.md) | Por que "Voucher"; análise; checklist e por onde começar |
@@ -36,10 +36,10 @@
 | Documento | Descrição |
 |-----------|-----------|
 | [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md) | Atores, responsabilidades, hierarquia e diagramas |
-| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (hierarquia, fluxo em duas fases, Monitor Loop, aceite, squads, etapas) |
+| [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) | Diagramas Mermaid (hierarquia, fluxo V2, Monitor Loop, aceite, squads, etapas) |
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
-| [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO→PM→Dev/QA→Monitor→PM→CTO |
+| [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO↔Engineer→PM→Dev/QA→Monitor→PM→CTO |
 | **[docs/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)** | Plano: Engineer, novo fluxo CTO↔Engineer, PMs via CTO, logs em linguagem humana, skills por agente, Genesis-Web dinâmico |
 | [docs/IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) | Resumo do que foi implementado: Engineer, diálogo, skills, serviço agents, projetos de exemplo |
 | [docs/TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) | Estados e transições |
@@ -54,6 +54,7 @@
 | [docs/AGENTS_CAPABILITIES.md](AGENTS_CAPABILITIES.md) | Documentação consolidada de agentes |
 | [agents/README.md](../agents/README.md) | Estrutura hierárquica (dev, qa, devops, pm, monitor por área/skill) |
 | [agents/cto/](../agents/cto/) | CTO Agent |
+| [agents/engineer/](../agents/engineer/) | Engineer Agent (proposta técnica, squads) |
 | [agents/pm/](../agents/pm/) | PM (backend, web, mobile) |
 | [agents/dev/](../agents/dev/) | Dev (backend/nodejs, web/react-next-materialui, mobile/react-native) |
 | [agents/qa/](../agents/qa/) | QA (backend/nodejs, backend/lambdas, web/react, mobile/react-native) |

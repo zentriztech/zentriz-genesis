@@ -1,7 +1,7 @@
 # Plano: Engineer, Novo Fluxo e Dinâmica de Equipe
 
 > **Propósito**: Diretrizes e plano de aplicação para introduzir o ator **Engineer**, novo fluxo CTO ↔ Engineer → PM(s), comunicação contínua entre agentes (simulando equipe humana), logs em linguagem humana e exibição dinâmica no Genesis-Web.  
-> **Referências**: [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md), [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md), [applications/agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
+> **Referências**: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md), [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md), [applications/agents/engineer/skills.md](../../applications/agents/engineer/skills.md). **Fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3 rodadas) → PM por módulo.
 
 ---
 
@@ -47,12 +47,11 @@
 | Manter `applications/agents/engineer/skills.md` | Já existe; referenciado pelo SYSTEM_PROMPT. |
 | Contrato de saída do Engineer | Ex.: `engineer_stack_proposal` (lista de squads/equipes, dependências, contratos de API sugeridos). |
 
-### 2.4 Fluxo CTO ↔ Engineer
+### 2.4 Fluxo CTO ↔ Engineer (implementação V2)
 
-1. CTO recebe spec do SPEC (ou do portal).
-2. CTO envia para o **Engineer**: spec (ou resumo) + contexto (constraints, cloud, etc.).
-3. Engineer analisa e devolve: proposta de squads/equipes + dependências + recomendações técnicas.
-4. CTO usa essa proposta para:
+1. **CTO spec review**: Runner chama CTO com a spec (sem proposta); CTO devolve spec entendida/revisada; grava em docs.
+2. **Loop CTO↔Engineer** (max 3 rodadas): CTO envia spec entendida ao **Engineer** (e, se rodada >1, questionamentos); Engineer devolve proposta técnica; CTO valida ou devolve questionamentos; saída = Charter.
+3. CTO usa a proposta (ou última versão) para:
    - Gerar/atualizar Project Charter (visão produto + visão técnica).
    - Contratar PM(s) por squad/equipe definida pelo Engineer.
    - Delegar a cada PM com contexto de dependências (ex.: “PM Web: dependência do PM Backend; obter endpoints via mim”).
@@ -63,13 +62,17 @@
 
 ### 3.1 Fase inicial (especificação → equipes)
 
-```text
-SPEC → CTO (spec)
-       CTO → Engineer (spec/contexto)
-       Engineer → CTO (proposta: squads, equipes, dependências)
-       CTO → Charter + contrata PM(s) com base na proposta
-       CTO → PM(s) (escopo + dependências; ex.: “PM Web precisa de endpoints do PM Backend; coordenar via mim”)
+```mermaid
+flowchart LR
+    SPEC["SPEC"] -->|spec| CTO["CTO"]
+    CTO -->|spec/contexto| ENG["Engineer"]
+    ENG -->|proposta: squads, equipes, dependências| CTO
+    CTO -->|Charter + contrata PM(s)| PM["PM(s)"]
+    CTO -->|escopo + dependências| PM
 ```
+
+Texto equivalente (referência):
+- SPEC → CTO (spec); CTO → Engineer (spec/contexto); Engineer → CTO (proposta); CTO → Charter + contrata PM(s); CTO → PM(s) (escopo + dependências). Ex.: “PM Web precisa de endpoints do PM Backend; coordenar via mim”).
 
 ### 3.2 PMs conversam via CTO
 

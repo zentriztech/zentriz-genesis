@@ -17,7 +17,7 @@
 - **Engineer** analisa e devolve **proposta técnica**: quais squads/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
 - Engineer comunica-se **apenas** com o CTO. Competências em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
-**Implementação:** Agente Engineer em [orchestrator/agents/engineer.py](../../applications/orchestrator/agents/engineer.py). Endpoint `POST /invoke/engineer`.
+**Implementação (fluxo V2):** Runner faz **CTO spec review** primeiro; depois **loop CTO↔Engineer** (max 3 rodadas): CTO envia spec (e questionamentos se rodada >1) ao Engineer; Engineer devolve proposta; CTO valida ou questiona até Charter. Endpoint `POST /invoke/engineer`; Engineer recebe `context.cto_questionamentos` quando houver. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ---
 
@@ -31,7 +31,7 @@
 - Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
 - Em **bloqueios cross-team** (ex.: endpoint falhou), CTO pode consultar o Engineer para solução e repassar ao PM responsável.
 
-**Implementação:** Agente CTO em [orchestrator/agents/cto.py](../../applications/orchestrator/agents/cto.py). Runner: spec → **Engineer** → CTO → PM (`python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md`).
+**Implementação (fluxo V2):** Runner: **CTO spec review** (entende spec, grava em docs) → **loop CTO↔Engineer** → Charter → **PM** (com module e proposta) → seed tasks → Monitor Loop. Agente CTO: [orchestrator/agents/cto](../../applications/agents/cto). Runner: `python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md` ou via API com PROJECT_ID.
 
 ---
 

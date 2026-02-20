@@ -46,9 +46,11 @@ Permitir execução paralela e rastreável do fluxo:
 - **DevOps** é acionado pelo Monitor; emite `devops.deployed` e dispara smoke tests.
 - **CTO** marca `project.completed` e notifica SPEC.
 
-## Implementação atual (runner em duas fases)
-- **Fase 1**: Runner executa Spec → Engineer → CTO → PM Backend; persiste charter e backlog; quando `API_BASE_URL` e `PROJECT_ID` estão definidos, faz **seed de tarefas** (POST `/api/projects/:id/tasks`) e entra na **Fase 2**.
-- **Fase 2 (Monitor Loop)**: O mesmo processo do runner entra em um loop: lê estado do projeto e das tasks (GET `/api/projects/:id`, GET `/api/projects/:id/tasks`); se status for `accepted` ou `stopped`, encerra; senão decide próximo agente (Dev, QA ou DevOps), invoca, atualiza task (PATCH tasks) e diálogo; repete. O loop só para quando o usuário **aceita o projeto** no portal (POST `/api/projects/:id/accept`) ou **para** o pipeline (SIGTERM). Ver [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+## Implementação atual (runner — fluxo V2)
+- **CTO spec review**: Runner chama CTO com spec (sem proposta); CTO devolve spec entendida; grava em docs.
+- **Loop CTO↔Engineer** (max 3 rodadas): Engineer recebe spec + opcional questionamentos do CTO; CTO valida proposta e devolve Charter ou questionamentos; saída = Charter.
+- **PM**: Chamada com charter, `module` (ex.: backend) e proposta do Engineer; gera backlog.
+- **Seed de tarefas** + **Monitor Loop**: POST tasks; loop lê projeto/tasks; aciona Dev/QA/DevOps; não aciona DevOps se houver task DONE por max QA rework; artefatos com `path` gravados em `project/`. Para quando usuário **aceita** ou **SIGTERM**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 ## Evidência
 - Cada evento carrega `request_id` e links para artifacts/reports.

@@ -1,7 +1,7 @@
 # Documentação Consolidada de Agentes — Zentriz Genesis
 
 > **Propósito**: Índice único de todos os agentes e suas capacidades, facilitando onboarding e referência rápida.  
-> **Documento de referência para responsabilidades e hierarquia**: [docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md).
+> **Documento de referência para responsabilidades e hierarquia**: [docs/ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md). **Fluxo do pipeline (V2)**: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ---
 

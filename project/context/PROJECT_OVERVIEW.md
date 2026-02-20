@@ -10,7 +10,7 @@
 
 - Recebe um documento de especificação ([PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md))
 - Planeja, desenvolve, valida, provisiona e monitora sistemas completos
-- Opera com agentes especializados: **CTO, PMs, Devs, QA, DevOps, Monitors**
+- Opera com agentes especializados: **CTO, Engineer, PMs, Devs, QA, DevOps, Monitors**
 - É **spec-driven**, **event-driven** e **cloud-agnostic** (AWS, Azure, GCP)
 
 **Princípio Zero**: Especificação é lei. Toda decisão nasce de spec explícita, versionada e auditável.
@@ -29,7 +29,7 @@
 - **DevOps**: IaC, CI/CD, deploy, banco de dados, smoke tests; **acionado pelo Monitor** para provisionamento total ou parcial.
 - **Monitor**: Acompanha Dev/QA; aciona QA para testes e DevOps para provisionamento; informa PM → PM escala ao CTO quando crítico.
 
-**Hierarquia**: SPEC ↔ CTO ↔ PM. PM atribui atividades a Dev, QA, DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
+**Hierarquia**: SPEC ↔ CTO ↔ **Engineer** (CTO e Engineer no mesmo nível). CTO ↔ PM. PM atribui atividades a Dev, QA, DevOps. Monitor ↔ Dev, Monitor ↔ QA, Monitor ↔ DevOps; Monitor → PM.
 
 Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILITIES.md). Diagramas: [ARCHITECTURE_DIAGRAM.md](../../ARCHITECTURE_DIAGRAM.md).
 
@@ -37,7 +37,7 @@ Detalhes: [docs/ACTORS_AND_RESPONSIBILITIES.md](../docs/ACTORS_AND_RESPONSIBILIT
 
 ## 3. Fluxo de Orquestração (Event-Driven)
 
-**Eventos principais**: `project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` → `project.completed`. **Parada do pipeline:** usuário **aceita** o projeto no portal (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM); o runner usa **Monitor Loop** (Fase 2) até aceite ou parada.
+**Eventos principais**: `project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` → `project.completed`. **Parada do pipeline:** usuário **aceita** o projeto no portal (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM); o runner usa **Monitor Loop** até aceite ou parada. Fluxo do runner: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 **Task State Machine**: NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS/QA_FAIL → DONE
 
@@ -104,7 +104,7 @@ zentriz-genesis/
 **Realizado (portal e API):**
 - **API** (services/api-node): Postgres (plans, tenants, users, projects, project_spec_files), auth JWT, `POST /api/auth/login`, `GET/POST/PATCH /api/projects`, `POST /api/specs` (multipart, multi-arquivo .md/.txt/.doc/.docx/.pdf), `GET/POST /api/users`, `GET /api/tenants`. Seed cria usuários padrão com senhas hasheadas (Zentriz Admin, tenant admin, user). Ver [context/CONTEXT.md](CONTEXT.md) e [services/api-node/README.md](../../applications/services/api-node/README.md).
 - **Portal** (apps/genesis-web): três telas de login por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API, envio de spec multi-arquivo, listagem/detalhe de projetos. Ver [context/GENESIS_WEB_CONTEXT.md](GENESIS_WEB_CONTEXT.md).
-- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../../applications/orchestrator/spec_converter)); runner em **duas fases** quando `API_BASE_URL`, `PROJECT_ID` e `GENESIS_API_TOKEN` definidos: Fase 1 (Spec → Engineer → CTO → PM Backend), seed de tarefas e **Monitor Loop** (Fase 2) até o usuário **aceitar** o projeto ou **parar**; persiste `started_at`/`completed_at`/`status` e diálogo via API.
+- **Orquestrador**: conversor de spec para Markdown ([orchestrator/spec_converter](../../applications/orchestrator/spec_converter)); runner em **fluxo V2** quando API e PROJECT_ID definidos: **CTO spec review** → **loop CTO↔Engineer** (max 3) → Charter → **PM** (módulo) → seed de tarefas → **Monitor Loop** até o usuário **aceitar** ou **parar**; persiste diálogo e artefatos via API. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 **Decisão registrada** ([docs/NEXT_STEPS_REMINDER.md](../docs/NEXT_STEPS_REMINDER.md)): concluir fundação de agentes; depois Dashboard, execução real do Orchestrator, SaaS.
 

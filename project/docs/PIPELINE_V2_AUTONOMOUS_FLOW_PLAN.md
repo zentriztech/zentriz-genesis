@@ -7,19 +7,42 @@
 
 ## 1. Visão do fluxo alvo
 
-```
-[Portal] Spec (arquivo) → [CTO] converte/entende (.md), salva artefato
-                              ↓
-                    [CTO] ↔ [ENGINEER]  (proposta técnica, squads/skills; validação e questionamentos)
-                              ↓ OK CTO
-                    [CTO] ↔ [PM por skill]  (backlog do módulo; validação e questionamentos; um PM por squad: backend, web, mobile)
-                              ↓ OK CTO
-                    [PM] aciona squad: Monitor + Dev + QA + DevOps
-                              ↓
-                    [PM] ↔ [MONITOR]  (Monitor recebe status e reportes)
-                    [MONITOR] ↔ [DEV / QA / DEVOPS]  (orquestra execução: atribui, recebe entregas, reaciona em QA_FAIL/rework)
-                              ↓
-                    Dev produz código do produto final; QA valida; DevOps age "como se" tivesse provisionado.
+```mermaid
+flowchart TB
+    subgraph ENTRADA["Entrada"]
+        PORTAL["Portal: Spec (arquivo)"]
+    end
+
+    subgraph CTO_REVIEW["CTO spec review"]
+        CTO1["CTO converte/entende (.md), salva artefato"]
+    end
+
+    subgraph CTO_ENG["Alinhamento CTO ↔ Engineer"]
+        ENG["Engineer: proposta técnica, squads/skills"]
+        CTO2["CTO valida ou questiona (max 3 rodadas)"]
+    end
+
+    subgraph CTO_PM["Alinhamento CTO ↔ PM por skill"]
+        PM["PM por módulo: backlog (backend, web, mobile)"]
+        CTO3["CTO valida ou questiona; OK para acionar squad"]
+    end
+
+    subgraph SQUAD["Squad ativa"]
+        MON["Monitor recebe status e reportes"]
+        DEV["Dev produz código"]
+        QA["QA valida"]
+        DEVOPS["DevOps 'como se' provisionado"]
+    end
+
+    PORTAL --> CTO1
+    CTO1 --> ENG
+    ENG <--> CTO2
+    CTO2 --> PM
+    PM <--> CTO3
+    CTO3 --> MON
+    MON <--> DEV
+    MON <--> QA
+    MON <--> DEVOPS
 ```
 
 - **CTO:** Recebe spec do portal; usa IA para converter para .md (quando necessário) e entender o projeto; salva artefato; envia ao Engineer; valida proposta e pode devolver questionamentos; valida backlogs dos PMs e pode questionar; dá OK para o PM acionar a squad.
@@ -49,50 +72,50 @@ Marque com `[x]` ao concluir cada item. Ao finalizar **todas** as tarefas, execu
 
 ### Fase 0 — Fundação (contratos e estado)
 
-- [ ] **0.1** Definir contrato de handoff CTO → Engineer (entrada: spec .md + contexto; saída: proposta técnica estruturada com squads/skills).
-- [ ] **0.2** Definir contrato Engineer → CTO (proposta; CTO pode devolver “questionamentos” ou “OK”).
-- [ ] **0.3** Definir contrato CTO → PM por skill (charter + proposta; saída: backlog do módulo).
-- [ ] **0.4** Definir contrato PM → CTO (backlog; CTO pode devolver questionamentos ou OK para acionar squad).
-- [ ] **0.5** Definir estados do projeto no runner/API (ex.: `spec_received`, `cto_engineer`, `cto_pm`, `squad_active`, `completed`, `stopped`) e quando transitar.
-- [ ] **0.6** Definir modelo de tasks por módulo/skill (task_id, module, owner_role, requirements, status) e garantir que a API/DB suportem múltiplas tasks por projeto e por módulo.
+- [x] **0.1** Definir contrato de handoff CTO → Engineer (entrada: spec .md + contexto; saída: proposta técnica estruturada com squads/skills).
+- [x] **0.2** Definir contrato Engineer → CTO (proposta; CTO pode devolver “questionamentos” ou “OK”).
+- [x] **0.3** Definir contrato CTO → PM por skill (charter + proposta; saída: backlog do módulo).
+- [x] **0.4** Definir contrato PM → CTO (backlog; CTO pode devolver questionamentos ou OK para acionar squad).
+- [x] **0.5** Definir estados do projeto no runner/API (ex.: `spec_received`, `cto_engineer`, `cto_pm`, `squad_active`, `completed`, `stopped`) e quando transitar.
+- [x] **0.6** Definir modelo de tasks por módulo/skill (task_id, module, owner_role, requirements, status) e garantir que a API/DB suportem múltiplas tasks por projeto e por módulo.
 
 ### Fase 1 — CTO e Engineer (ciclo de alinhamento)
 
-- [ ] **1.1** Runner: após receber spec, CTO “converte/entende” e grava artefato em docs (manter uso de `_content_for_doc` e paths atuais).
-- [ ] **1.2** Runner: CTO envia spec (ou spec .md) ao Engineer; Engineer devolve proposta técnica (squads, skills).
-- [ ] **1.3** Runner: loop CTO ↔ Engineer com limite de rodadas (ex.: max 3); CTO pode enviar questionamentos; Engineer responde; sair com “OK” ou “última versão”.
-- [ ] **1.4** Persistir proposta final e charter (CTO) em docs; atualizar estado do projeto.
+- [x] **1.1** Runner: após receber spec, CTO “converte/entende” e grava artefato em docs (manter uso de `_content_for_doc` e paths atuais).
+- [x] **1.2** Runner: CTO envia spec (ou spec .md) ao Engineer; Engineer devolve proposta técnica (squads, skills).
+- [x] **1.3** Runner: loop CTO ↔ Engineer com limite de rodadas (ex.: max 3); CTO pode enviar questionamentos; Engineer responde; sair com “OK” ou “última versão”.
+- [x] **1.4** Persistir proposta final e charter (CTO) em docs; atualizar estado do projeto.
 
 ### Fase 2 — CTO e PM(s) por skill
 
-- [ ] **2.1** Runner: para cada squad da proposta (ex.: backend, web, mobile), instanciar um “PM” (ou uma chamada PM com contexto de skill); CTO envia charter + proposta ao PM do módulo.
-- [ ] **2.2** PM gera backlog do módulo (tarefas, prioridades, critérios de aceite); devolve ao CTO.
+- [x] **2.1** Runner: para cada squad da proposta (ex.: backend, web, mobile), instanciar um “PM” (ou uma chamada PM com contexto de skill); CTO envia charter + proposta ao PM do módulo.
+- [x] **2.2** PM gera backlog do módulo (tarefas, prioridades, critérios de aceite); devolve ao CTO.
 - [ ] **2.3** Loop CTO ↔ PM por módulo com limite de rodadas; CTO pode questionar; PM responde; sair com OK ou última versão.
-- [ ] **2.4** CTO dá “OK” para o PM; PM “aciona a squad”: criar tasks na API para esse módulo (Monitor + Dev + QA + DevOps) e transitar projeto para estado “squad active” (ou equivalente).
+- [x] **2.4** CTO dá “OK” para o PM; PM “aciona a squad”: criar tasks na API para esse módulo (Monitor + Dev + QA + DevOps) e transitar projeto para estado “squad active” (ou equivalente).
 
 ### Fase 3 — Monitor e Dev/QA/DevOps
 
-- [ ] **3.1** Runner (Monitor Loop): ler tasks por projeto/módulo; decidir próximo agente (Dev, QA ou DevOps) conforme estado de cada task (ASSIGNED, IN_PROGRESS, WAITING_REVIEW, QA_FAIL, etc.).
-- [ ] **3.2** Manter regra: não acionar DevOps se existir task DONE por “max QA rework” (já implementado).
-- [ ] **3.3** Dev: receber contexto completo (spec, charter, backlog, task atual) e produzir implementação; gravar artefatos em docs e, quando aplicável, em `project/<project_id>/` (código do produto).
-- [ ] **3.4** QA: receber backlog + artefatos do Dev; emitir QA_PASS ou QA_FAIL com evidência; Monitor reaciona Dev em QA_FAIL até max rework.
-- [ ] **3.5** DevOps: receber charter + backlog + artefatos; gerar Dockerfile, docker-compose, scripts; **não** executar provisionamento real; assinar como “provisionamento feito” (artefatos gravados); runner trata como concluído para esse módulo.
-- [ ] **3.6** Monitor reportar ao “PM” (ou ao estado do projeto) status consolidado; quando todas as tasks do projeto estiverem DONE (e DevOps “as if” feito), permitir conclusão/aceite.
+- [x] **3.1** Runner (Monitor Loop): ler tasks por projeto/módulo; decidir próximo agente (Dev, QA ou DevOps) conforme estado de cada task (ASSIGNED, IN_PROGRESS, WAITING_REVIEW, QA_FAIL, etc.).
+- [x] **3.2** Manter regra: não acionar DevOps se existir task DONE por “max QA rework” (já implementado).
+- [x] **3.3** Dev: receber contexto completo (spec, charter, backlog, task atual) e produzir implementação; gravar artefatos em docs e, quando aplicável, em `project/<project_id>/` (código do produto).
+- [x] **3.4** QA: receber backlog + artefatos do Dev; emitir QA_PASS ou QA_FAIL com evidência; Monitor reaciona Dev em QA_FAIL até max rework.
+- [x] **3.5** DevOps: receber charter + backlog + artefatos; gerar Dockerfile, docker-compose, scripts; **não** executar provisionamento real; assinar como “provisionamento feito” (artefatos gravados); runner trata como concluído para esse módulo.
+- [x] **3.6** Monitor reportar ao “PM” (ou ao estado do projeto) status consolidado; quando todas as tasks do projeto estiverem DONE (e DevOps “as if” feito), permitir conclusão/aceite.
 
 ### Fase 4 — Código do produto final
 
-- [ ] **4.1** Garantir que o Dev grave em `project/<project_id>/` (ou caminho definido) os artefatos de código (ex.: estrutura de pastas, arquivos fonte) conforme spec e backlog.
-- [ ] **4.2** Contrato de artefatos do Dev: lista de arquivos/código com path e conteúdo (ou referência) para consumo do QA e do DevOps “as if”.
+- [x] **4.1** Garantir que o Dev grave em `project/<project_id>/` (ou caminho definido) os artefatos de código (ex.: estrutura de pastas, arquivos fonte) conforme spec e backlog.
+- [x] **4.2** Contrato de artefatos do Dev: lista de arquivos/código com path e conteúdo (ou referência) para consumo do QA e do DevOps “as if”.
 
 ### Fase 5 — Integração e testes E2E
 
-- [ ] **5.1** Teste E2E: spec → CTO → Engineer (com 1 rodada de questionamento) → CTO → PM backend (1 rodada) → squad ativa → Dev → QA (aprovação) → DevOps “as if” → projeto concluível.
-- [ ] **5.2** Teste E2E: cenário com QA_FAIL e max rework; garantir que DevOps não seja acionado e que a mensagem no diálogo apareça.
-- [ ] **5.3** Verificar que os arquivos em `docs/` e em `project/` estão em texto legível (não JSON cru) e que o conteúdo reflete o fluxo.
+- [x] **5.1** Teste E2E: spec → CTO → Engineer (com 1 rodada de questionamento) → CTO → PM backend (1 rodada) → squad ativa → Dev → QA (aprovação) → DevOps “as if” → projeto concluível.
+- [x] **5.2** Teste E2E: cenário com QA_FAIL e max rework; garantir que DevOps não seja acionado e que a mensagem no diálogo apareça.
+- [x] **5.3** Verificar que os arquivos em `docs/` e em `project/` estão em texto legível (não JSON cru) e que o conteúdo reflete o fluxo.
 
 ### Fase 6 — Documentação (obrigatória ao finalizar)
 
-- [ ] **6.1** Atualizar **todos** os documentos que descrevem o fluxo e o funcionamento do projeto zentriz-genesis (ver seção **“Atualização de documentos”** abaixo).
+- [x] **6.1** Atualizar **todos** os documentos que descrevem o fluxo e o funcionamento do projeto zentriz-genesis (ver seção **“Atualização de documentos”** abaixo).
 
 ---
 

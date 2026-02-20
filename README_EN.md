@@ -3,7 +3,7 @@
 
 Zentriz Genesis is an **AI Agent Orchestration Platform** capable of **conceiving, planning, developing, validating, provisioning, and monitoring complete software systems** from **technical specification documents**.
 
-The project implements an **autonomous software factory**, specification-oriented (*spec-driven*), composed of specialized agents acting as **CTO, PMs, Developers, QA, DevOps, and Monitors**, working in a coordinated, traceable, and auditable way.
+The project implements an **autonomous software factory**, specification-oriented (*spec-driven*), composed of specialized agents acting as **CTO, Engineer, PMs, Developers, QA, DevOps, and Monitors**, working in a coordinated, traceable, and auditable way.
 
 ## 🎯 Project Objective
 
@@ -28,7 +28,10 @@ Allow a single specification document ([`PRODUCT_SPEC.md`](project/spec/PRODUCT_
 ## 🏗️ Agent Architecture
 
 ### CTO Agent (Orchestrator)
-Responsible for interpreting the Product Spec, creating the Project Charter, defining modules, delegating PMs, and consolidating the final project status.
+Interprets the spec (with Engineer input), creates the Project Charter, hires PM(s), and consolidates status. In **flow V2**: CTO spec review first, then loop with Engineer (max 3 rounds) until Charter.
+
+### Engineer Agent
+Technical decisions; analyzes the spec and defines squads/teams (backend, web, mobile) and dependencies; communicates **only** with the CTO; delivers technical proposal for the Charter.
 
 ### PM Agents (by specialty)
 Backend, Web, Mobile, and Infrastructure.  
@@ -52,7 +55,7 @@ Monitor **Dev/QA** per squad (Backend, Web, Mobile) — progress, activity statu
 Workflow based on standardized events:  
 `project.created`, `task.assigned`, `qa.failed`, `devops.deployed`, `project.completed`, among others.
 
-When the portal starts the pipeline, the **runner** runs **two phases**: **Phase 1** (Spec → Engineer → CTO → PM Backend) and **Phase 2** (**Monitor Loop**), which triggers Dev/QA/DevOps according to task state until the user **accepts the project** in the portal or **stops** the pipeline. Each task follows a formal **State Machine**, ensuring traceability and control.
+When the portal starts the pipeline, the **runner** runs **flow V2**: **CTO spec review** → **CTO↔Engineer loop** (max 3 rounds) → Charter → **PM** (backend module) → seed tasks → **Monitor Loop** (Dev/QA/DevOps) until the user **accepts** or **stops**. Each task follows a formal **State Machine**. See [project/docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](project/docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ## 📂 Project Structure
 

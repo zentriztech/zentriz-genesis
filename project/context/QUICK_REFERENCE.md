@@ -28,12 +28,13 @@
 
 ## Eventos do Orchestrator
 
-`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`. **Parada do pipeline**: usuário **aceita** (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM → status `stopped`). O runner usa **Monitor Loop** (Fase 2) para ler tasks e acionar Dev/QA/DevOps até aceite ou parada.
+`project.created` → `module.planned` → `task.assigned` → `task.completed` | `qa.failed` | `qa.passed` → `devops.deployed` → `monitor.alert` (→ PM_<AREA> → CTO) → `project.completed`. **Parada do pipeline**: usuário **aceita** (`POST /api/projects/:id/accept` → status `accepted`) ou **para** (SIGTERM → status `stopped`). O runner usa **fluxo V2** (CTO spec review → CTO↔Engineer → PM) e depois **Monitor Loop** para ler tasks e acionar Dev/QA/DevOps até aceite ou parada.
 
 ## Atores (resumo)
 
 - **SPEC** (pessoa): fornece spec; recebe conclusão/bloqueios do CTO.
-- **CTO**: Charter, contrata PM(s); informa SPEC.
+- **CTO**: Interpreta spec (com apoio do Engineer); Charter; contrata PM(s); informa SPEC.
+- **Engineer**: Decisões técnicas; analisa spec e define squads/equipes e dependências; comunica-se apenas com o CTO.
 - **PM**: Backlog, contrata Dev/QA (par), 1 DevOps, 1 Monitor; atribui atividades; recebe status do Monitor.
 - **Dev**: Implementação; Monitor acompanha e devolve refazer (via QA).
 - **QA**: Testes, doc, QA Report; acionado pelo Monitor.
@@ -65,6 +66,7 @@ NEW → ASSIGNED → IN_PROGRESS → WAITING_REVIEW → QA_PASS | QA_FAIL → DO
 Squads: **Backend**, **Web**, **Mobile** (infra faz parte de cada squad via DevOps).
 
 - **CTO**: agents/cto/
+- **Engineer**: agents/engineer/
 - **PM**: agents/pm/ (backend, web, mobile)
 - **Dev**: agents/dev/ (backend/nodejs, web/react-next-materialui, mobile/react-native)
 - **QA**: agents/qa/ (backend/nodejs, backend/lambdas, web/react, mobile/react-native)

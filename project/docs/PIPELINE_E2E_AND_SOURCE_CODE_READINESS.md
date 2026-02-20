@@ -4,14 +4,14 @@
 
 ---
 
-## 1. Estado atual: o que já está pronto
+## 1. Estado atual: o que já está pronto (Pipeline V2)
 
-- **Fluxo do pipeline**: Spec → Engineer → CTO → PM → Dev → QA → Monitor → DevOps está implementado (sequencial sem API, ou Fase 1 + Monitor Loop com API e `PROJECT_ID`).
-- **Portal → API → Runner**: `POST /api/projects/:id/run` chama o runner (serviço ou subprocess) com `projectId`, `specPath`, token; o runner recebe `PROJECT_ID` e `PROJECT_FILES_ROOT` via ambiente e grava em `<PROJECT_FILES_ROOT>/<project_id>/docs/` e `.../project/`.
+- **Fluxo do pipeline (V2)**: Spec → **CTO spec review** (converte/entende, grava em docs) → **loop CTO ↔ Engineer** (max 3 rodadas; proposta técnica, squads/skills; CTO valida ou questiona) → Charter → **PM** (módulo backend, charter + proposta do Engineer) → seed de tasks → **Monitor Loop** (Dev ↔ QA ↔ DevOps até aceite ou parada). Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+- **Portal → API → Runner**: `POST /api/projects/:id/run` chama o runner com `projectId`, `specPath`, token; runner usa `PROJECT_ID` e `PROJECT_FILES_ROOT`; grava em `<root>/<project_id>/docs/` e `.../project/`.
 - **Agentes e Claude**: Runner chama agentes via HTTP; runtime usa Claude e devolve `response_envelope` (status, summary, artifacts).
-- **Persistência**: Spec, engineer, cto, pm, dev (summary + artifacts em docs), qa, monitor, devops são gravados. **Apenas os artifacts do DevOps** com `path` e `content` são escritos em **`project/`** (`write_project_artifact` em `runner.py` ~linha 843).
+- **Persistência**: Spec, CTO spec_review, engineer proposal, cto charter, pm backlog, dev (summary + artifacts em docs **e**, quando artifact tem `path`, em **`project/`**), qa, monitor, devops (summary + artifacts com `path` em `project/`) são gravados. **Dev e DevOps**: artefatos com `path` e `content` são escritos em **`project/<project_id>/`** via `write_project_artifact` (runner: fluxo sequencial e Monitor Loop).
 
-Conclusão: o pipeline **roda do início ao fim** e gera documentos + artefatos de infra (DevOps) em `project/`. O que falta é que o **código da aplicação** (ex.: Node.js) seja tratado como artefatos e escrito em `project/`.
+Conclusão: o pipeline **roda do início ao fim** e gera documentos + código do Dev e artefatos de infra (DevOps) em `project/`, quando os agentes devolvem artifacts com `path` e `content`.
 
 ---
 
@@ -35,13 +35,10 @@ Conclusão: o pipeline **roda do início ao fim** e gera documentos + artefatos 
 
 Para que o **resultado final** seja o **código fonte do produto** gerado em `project/`, é necessário o seguinte.
 
-### 3.1 Runner: persistir artifacts do Dev em `project/`
+### 3.1 Runner: persistir artifacts do Dev em `project/` (implementado V2)
 
-- **Onde**: `applications/orchestrator/runner.py`, no bloco que processa a resposta do Dev (fluxo sequencial e, se aplicável, no Monitor Loop).
-- **O quê**: Para cada item em `dev_response.get("artifacts", [])` que for `dict` e tiver **`path`** e **`content`**, chamar `storage.write_project_artifact(project_id, path, content)` (mesma lógica já usada para DevOps). Opcionalmente manter também a gravação em `docs/` para artefatos que forem apenas documentação (ex.: sem path ou com type diferente).
-- **Exemplo de lógica** (alinhada ao que já existe para DevOps):
-  - Se `art.get("path")` e `art.get("content")`: `write_project_artifact(project_id, path_key, content)`.
-  - Caso contrário (só content, sem path): continuar com `write_doc(project_id, "dev", f"artifact_{i}", content, ...)`.
+- **Onde**: `applications/orchestrator/runner.py`, no bloco que processa a resposta do Dev (fluxo sequencial e no Monitor Loop).
+- **Feito**: Para cada artifact do Dev com `path` e `content`, chama `write_project_artifact(project_id, path_key, content)`; sem `path`, grava em `docs/` com `write_doc`.
 
 ### 3.2 Contrato: artifacts com path e content
 
@@ -85,9 +82,16 @@ Para que o **resultado final** seja o **código fonte do produto** gerado em `pr
 
 ---
 
-## 5. Referências
+## 5. Testes E2E (Pipeline V2)
 
+- **Cenário feliz**: Spec → CTO spec review → CTO↔Engineer (1–3 rodadas) → Charter → PM (módulo backend) → seed tasks → Monitor Loop → Dev → QA (aprovação) → DevOps “as if” → projeto concluível. Rodar com API + PROJECT_ID + PROJECT_FILES_ROOT; verificar docs em `<root>/<project_id>/docs/` e artefatos com `path` em `<root>/<project_id>/project/`.
+- **Cenário QA_FAIL max rework**: Garantir que, após max rework (MAX_QA_REWORK), a tarefa vai para DONE e o DevOps **não** é acionado; mensagem no diálogo deve explicar o motivo.
+- **Conteúdo legível**: `_content_for_doc` no runner extrai texto legível ao gravar em docs; verificar que os .md em docs/ e os arquivos em project/ não são JSON cru.
+
+## 6. Referências
+
+- Fluxo V2: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md)
 - Fluxo e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md)
 - Pipeline e armazenamento: [PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md)
 - Storage por projeto: `applications/orchestrator/project_storage.py` (`write_project_artifact`, `get_project_dir`)
-- Runner e persistência de artifacts: `applications/orchestrator/runner.py` (Dev ~749–751, DevOps ~836–844)
+- Runner e persistência: `applications/orchestrator/runner.py` (CTO spec review, loop CTO↔Engineer, PM com module, Dev/DevOps artifacts com path em project/)

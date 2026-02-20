@@ -2,15 +2,13 @@
 
 > Objetivo: implementar no runner os agentes Dev, QA, Monitor e DevOps; e persistir todos os documentos em disco organizados por `project_id` com atribuição de criador.
 >
-> **Status:** Implementação concluída. Fluxo detalhado e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+> **Status:** Implementação concluída. **Fluxo V2** em vigor: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md). Detalhes e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 ---
 
 ## 1. Visão geral
 
-- **Pipeline atual:** Spec → Engineer → CTO → PM Backend (3 agentes).
-- **Pipeline alvo:** Spec → Engineer → CTO → PM Backend → **Dev Backend** → **QA Backend** → **Monitor Backend** → **DevOps Docker** (7 agentes na squad backend).
-- **Com API e PROJECT_ID:** o runner executa **Fase 1** (até PM Backend), faz **seed de tarefas** na API e entra no **Monitor Loop** (Fase 2), acionando Dev/QA/DevOps conforme o estado das tasks até o usuário **aceitar o projeto** (`POST /api/projects/:id/accept`) ou **parar** o pipeline. Ver [ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) e [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+- **Pipeline V2:** Spec → **CTO spec review** → **loop CTO↔Engineer** (max 3 rodadas) → Charter → **PM** (módulo backend, charter + proposta) → seed de tarefas → **Monitor Loop** (Dev/QA/DevOps) até **aceitar** ou **parar**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 - **Armazenamento:** Raiz configurável (`PROJECT_FILES_ROOT`, default `/Users/mac/zentriz-files`):
   - `<project_id>/docs/` — documentos gerados por cada membro da squad (Spec, CTO, Engineer, PM Backend, Dev, QA, Monitor, DevOps), com identificação do criador.
   - `<project_id>/project/` — artefatos do projeto final (código, configs) quando produzidos.
@@ -43,20 +41,20 @@ Criadores padronizados: `spec`, `engineer`, `cto`, `pm`, `dev`, `qa`, `monitor`,
 
 ---
 
-## 3. Ordem do pipeline (squad completa)
+## 3. Ordem do pipeline (fluxo V2)
 
 | Ordem | Agente        | Entrada principal                    | Saída principal        | Documentos em docs/          |
 |------|---------------|--------------------------------------|-------------------------|-----------------------------|
-| 0    | (Spec)        | Arquivo enviado pelo usuário         | —                       | spec_product_spec.md        |
-| 1    | Engineer      | spec_content                         | Proposta técnica        | engineer_proposal.md        |
-| 2    | CTO           | engineer_proposal                    | Charter                 | cto_charter.md               |
-| 3    | PM    | charter_summary                      | Backlog                 | pm_backlog.md       |
-| 4    | Dev   | backlog_summary + charter            | Implementação / evidências | dev_*.md          |
-| 5    | QA    | backlog + artefatos Dev              | Relatório QA            | qa_*.md             |
-| 6    | Monitor | contexto do projeto                | Health / alertas        | monitor_*.md        |
-| 7    | DevOps | charter + backlog + artefatos        | Dockerfile / compose     | devops_*.md + project/ |
+| 0    | (Spec)        | Arquivo enviado pelo usuário         | —                       | spec_*                       |
+| 1    | CTO           | spec (sem proposta)                   | Spec revisada           | cto/spec_review              |
+| 2–3  | Engineer ↔ CTO | spec_understood (+ questionamentos) | Proposta / Charter      | engineer/proposal, cto/charter |
+| 4    | PM            | charter, module, engineer_proposal   | Backlog                 | pm_backlog                   |
+| 5    | Dev           | backlog + charter                    | Implementação           | dev_* + project/ (se path)   |
+| 6    | QA            | backlog + artefatos Dev              | Relatório QA            | qa_*                          |
+| 7    | Monitor       | (loop) estado projeto/tasks           | Decisão Dev/QA/DevOps   | —                             |
+| 8    | DevOps        | charter + backlog + artefatos        | Dockerfile / compose    | devops_* + project/ (se path)|
 
-Cada passo persiste no diálogo (project_dialogue) e grava artefatos em `<project_id>/docs/` com criador.
+Cada passo persiste no diálogo; artefatos com `path` em `project/`, demais em `docs/`.
 
 ---
 

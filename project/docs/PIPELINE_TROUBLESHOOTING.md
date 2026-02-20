@@ -4,18 +4,18 @@
 
 ---
 
-## 1. Fluxo esperado
+## 1. Fluxo esperado (Pipeline V2)
 
 1. Usuário acessa **Enviar spec** (/spec), envia um arquivo .md (e opcionalmente título).
 2. A API cria o projeto e grava o arquivo em `UPLOAD_DIR/<project_id>/` e insere em `project_spec_files`.
 3. Usuário é redirecionado para **Meus projetos** → projeto → clica em **Iniciar pipeline**.
 4. Frontend chama `POST /api/projects/:id/run`.
 5. API valida acesso, status e existência de spec .md; chama o **runner** (RUNNER_SERVICE_URL ou RUNNER_COMMAND).
-6. Runner inicia o subprocess `orchestrator.runner --spec-file <path>` e responde 202.
+6. Runner inicia o subprocess e executa **fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3) → PM → seed tasks → Monitor Loop (Dev/QA/DevOps); responde 202.
 7. API atualiza o projeto para `status=running` e retorna 202 ao frontend.
 8. O portal faz polling do projeto e do diálogo; o runner grava passos no diálogo via API.
 
-Se algo falha em 4–7, o frontend mostra a mensagem de erro da API em vermelho (abaixo dos botões). Se 7 retorna 202 mas o runner não grava diálogo, o status fica "running" e a tela não avança.
+Se algo falha em 4–7, o frontend mostra a mensagem de erro da API em vermelho. Se 7 retorna 202 mas o runner não grava diálogo, o status fica "running" e a tela não avança. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ---
 

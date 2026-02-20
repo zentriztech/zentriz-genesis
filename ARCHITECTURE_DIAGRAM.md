@@ -183,11 +183,11 @@ sequenceDiagram
 
 ## 3b. Pipeline em duas fases (implementação atual)
 
-Quando o portal inicia o pipeline (API + PROJECT_ID definidos), o **runner** executa **Fase 1** (Spec → Engineer → CTO → PM Backend), faz **seed de tarefas** na API e entra no **Monitor Loop** (Fase 2). O loop só encerra quando o usuário **aceita o projeto** no portal ou **para** o pipeline.
+Quando o portal inicia o pipeline (API + PROJECT_ID definidos), o **runner** executa o **fluxo V2**: **CTO spec review** → **loop CTO↔Engineer** (max 3) → Charter → **PM** (módulo backend) → **seed de tarefas** → **Monitor Loop**. O loop só encerra quando o usuário **aceita o projeto** no portal ou **para** o pipeline. Ver [project/docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](project/docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ```mermaid
 flowchart LR
-    subgraph Fase1 ["Fase 1 - Criacao da squad"]
+    subgraph Fase1 ["Fluxo V2 - CTO spec review, CTO↔Engineer, PM, squad"]
         Spec[Spec] --> Engineer[Engineer]
         Engineer --> CTO[CTO]
         CTO --> PM[PM Backend]
@@ -207,7 +207,7 @@ flowchart LR
     Accept --> Check
 ```
 
-- **Fase 1**: Runner persiste charter e backlog; chama `POST /api/projects/:id/tasks` para criar tarefas iniciais (ex.: TSK-BE-001).
+- **Fluxo V2**: CTO spec review → loop CTO↔Engineer → Charter → PM (module) → Runner persiste charter e backlog; chama `POST /api/projects/:id/tasks` para criar tarefas iniciais (ex.: TSK-BE-001).
 - **Fase 2**: No mesmo processo, o runner entra em loop: `GET /api/projects/:id` e `GET /api/projects/:id/tasks`; se status for `accepted` ou `stopped`, sai; senão decide próximo agente (Dev, QA ou DevOps), invoca, atualiza task e diálogo; repete. **Parada**: usuário clica "Aceitar projeto" no portal (`POST /api/projects/:id/accept`) ou "Parar" (SIGTERM).
 
 Referência: [project/docs/AGENTS_AND_LLM_FLOW.md](project/docs/AGENTS_AND_LLM_FLOW.md), [project/docs/ORCHESTRATOR_BLUEPRINT.md](project/docs/ORCHESTRATOR_BLUEPRINT.md).
@@ -227,7 +227,7 @@ sequenceDiagram
     User->>Portal: Iniciar pipeline
     Portal->>API: POST /api/projects/:id/run
     API->>Runner: POST /run (specPath, token)
-    Runner->>Runner: Fase 1: Engineer -> CTO -> PM Backend
+    Runner->>Runner: Fluxo V2: CTO spec review -> CTO↔Engineer -> PM
     Runner->>API: POST /api/projects/:id/tasks (seed)
     loop Monitor Loop
         Runner->>API: GET /api/projects/:id, GET /api/projects/:id/tasks
@@ -339,7 +339,7 @@ stateDiagram-v2
 ```
 
 - **accepted**: Estado final; usuário clicou em "Aceitar projeto" no portal (`POST /api/projects/:id/accept`). Não permite novo Run.
-- **running**: Fase 1 em execução ou Monitor Loop ativo; runner lê tasks e aciona Dev/QA/DevOps até aceite ou parada.
+- **running**: Fluxo V2 em execução (CTO↔Engineer, PM) ou Monitor Loop ativo; runner lê tasks e aciona Dev/QA/DevOps até aceite ou parada.
 
 ---
 

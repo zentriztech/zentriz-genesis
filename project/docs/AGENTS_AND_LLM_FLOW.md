@@ -6,49 +6,59 @@
 
 ## 1. Visão em uma frase
 
-O **portal (genesis-web)** permite ao usuário enviar uma spec e **iniciar** o pipeline. A **API (api-node)** chama o **Runner**; o Runner executa **duas fases**: (1) **Fase 1** — Spec → Engineer → CTO → PM Backend (criação da squad); (2) **Fase 2** — **Monitor Loop** no mesmo processo: o runner lê o estado das tarefas na API, decide qual agente acionar (Dev, QA ou DevOps), invoca via HTTP, atualiza tarefas e diálogo, e repete até o usuário **aceitar o projeto** (botão no portal, `POST /api/projects/:id/accept`) ou **parar** o pipeline. Cada agente roda no serviço **agents** (Python/FastAPI), que chama a **API da Anthropic (Claude)**. Ou seja: **Agentes conversam com a LLM** no serviço `agents`, via `orchestrator/agents/runtime.py` e SDK `anthropic`.
+O **portal (genesis-web)** permite ao usuário enviar uma spec e **iniciar** o pipeline. A **API (api-node)** chama o **Runner**; o Runner executa o **fluxo V2**: (1) **CTO spec review** — converte/entende a spec e grava em docs; (2) **loop CTO↔Engineer** (max 3 rodadas) — proposta técnica (squads/skills), CTO valida ou questiona até Charter; (3) **PM** (módulo backend, charter + proposta) — gera backlog; (4) **seed de tarefas** e **Monitor Loop** — runner lê estado das tasks, aciona Dev/QA/DevOps, atualiza tarefas e diálogo, grava artefatos com `path` em `project/`, até o usuário **aceitar** ou **parar**. Cada agente roda no serviço **agents** (Python/FastAPI), que chama a **API da Anthropic (Claude)**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
-Quando `API_BASE_URL` e `PROJECT_ID` não estão definidos (ex.: execução local sem portal), o runner pode rodar apenas Fase 1 ou o fluxo sequencial antigo (Dev → QA → Monitor → DevOps em uma tacada). Documentos e artefatos são persistidos por projeto em disco quando `PROJECT_FILES_ROOT` está definido.
+Sem API/PROJECT_ID, o runner usa fluxo sequencial (Spec → CTO → Engineer loop → PM → Dev → QA → Monitor → DevOps). Documentos e artefatos são persistidos em `<PROJECT_FILES_ROOT>/<project_id>/docs/` e `.../project/` quando definido.
 
 ---
 
 ## 2. Sequência completa
 
-```
-[Usuário] → Portal (genesis-web :3001)
-                ↓ POST /api/projects/:id/run (NEXT_PUBLIC_API_BASE_URL → API)
-[API]     → api-node (:3000)
-                ↓ RUNNER_SERVICE_URL → POST http://runner:8001/run
-[Runner]  → runner (:8001)
-                ↓ API_AGENTS_URL → POST http://agents:8000/invoke/<agente>
-[Agents]  → agents (:8000 — host ou container)
-                ↓ runtime.run_agent() → client.messages.create(...)
-[Claude]  → API Anthropic (https://api.anthropic.com)
-                ↓ resposta JSON (response_envelope)
-[Agents]  ← resposta → Runner → grava docs em PROJECT_FILES_ROOT (se definido)
-                → POST diálogo na API → Portal exibe via polling
+```mermaid
+sequenceDiagram
+    participant U as Usuário
+    participant P as Portal (genesis-web :3001)
+    participant API as api-node (:3000)
+    participant R as runner (:8001)
+    participant A as agents (:8000)
+    participant C as Claude (Anthropic)
+
+    U->>P: Iniciar pipeline
+    P->>API: POST /api/projects/:id/run
+    API->>R: POST http://runner:8001/run
+    loop Fluxo V2 (CTO ↔ Engineer ↔ PM → Monitor Loop)
+        R->>A: POST /invoke/<agente>
+        A->>C: client.messages.create(...)
+        C-->>A: response_envelope
+        A-->>R: resposta
+        R->>API: POST diálogo
+        R->>R: grava docs (PROJECT_FILES_ROOT)
+    end
+    P->>API: polling GET /dialogue
+    API-->>P: entradas do diálogo
 ```
 
 - O **único** serviço que usa `CLAUDE_API_KEY` e `CLAUDE_MODEL` para falar com a LLM é o **agents**.
-- O **runner** chama os agents via HTTP e grava passos/erros no diálogo via API (`http://api:3000`). Após PM Backend, quando `PROJECT_ID` e API estão definidos, o runner faz **seed de tarefas** (POST `/api/projects/:id/tasks`) e entra no **Monitor Loop**: a cada ciclo lê GET `/api/projects/:id` e GET `/api/projects/:id/tasks`; se status for `accepted` ou `stopped`, encerra; senão decide próximo agente (Dev/QA/DevOps), invoca, atualiza task (PATCH `/api/projects/:id/tasks/:taskId`) e persiste artefatos em `<PROJECT_FILES_ROOT>/<project_id>/docs/` quando definido. O loop só para quando o usuário clica em **Aceitar projeto** no portal (que chama POST `/api/projects/:id/accept`) ou em **Parar** (SIGTERM no processo).
+- O **runner** chama os agents via HTTP e grava passos/erros no diálogo via API. Fluxo V2: CTO spec review → loop CTO↔Engineer → PM (módulo backend) → seed de tarefas → **Monitor Loop**: a cada ciclo lê projeto e tasks; se `accepted` ou `stopped`, encerra; senão aciona Dev/QA/DevOps, atualiza task e persiste artefatos (Dev e DevOps com `path` em `.../project/`). O loop só para quando o usuário **Aceitar projeto** ou **Parar** (SIGTERM).
 - O **portal** faz polling GET `/api/projects/:id/dialogue` e exibe as entradas; exibe o botão **Aceitar projeto** quando status é `completed` ou `running`, chamando POST `/api/projects/:id/accept`. Pode listar documentos via GET `/api/projects/:id/artifacts` (quando `PROJECT_FILES_ROOT` está definido na API).
 
 ---
 
-## 3. Ordem do pipeline (squad completa)
+## 3. Ordem do pipeline (fluxo V2)
 
 | Ordem | Agente        | Endpoint (agents)     | Entrada principal                    | Saída principal        |
 |-------|---------------|-----------------------|--------------------------------------|-------------------------|
 | 0     | (Spec)        | —                     | Arquivo enviado pelo usuário         | —                       |
-| 1     | Engineer      | POST /invoke/engineer | spec_content                         | Proposta técnica        |
-| 2     | CTO           | POST /invoke/cto      | engineer_proposal                    | Charter                 |
-| 3     | PM Backend    | POST /invoke          | charter_summary                      | Backlog                 |
-| 4     | Dev Backend   | POST /invoke/dev-backend | backlog_summary + charter        | Implementação / evidências |
-| 5     | QA Backend    | POST /invoke/qa-backend | backlog + artefatos Dev           | Relatório QA            |
-| 6     | Monitor Backend | POST /invoke/monitor | contexto do projeto                | Health / alertas        |
-| 7     | DevOps Docker | POST /invoke/devops-docker | charter + backlog + artefatos  | Dockerfile / compose    |
+| 1     | CTO           | POST /invoke/cto      | spec (engineer_proposal vazio)       | Spec entendida / revisada |
+| 2     | Engineer      | POST /invoke/engineer | spec_understood (+ cto_questionamentos se rodada >1) | Proposta técnica |
+| 3     | CTO           | POST /invoke/cto      | engineer_proposal                    | Charter ou questionamentos (loop max 3) |
+| 4     | PM            | POST /invoke/pm       | charter_summary, module, engineer_proposal | Backlog                 |
+| 5     | Dev           | POST /invoke/dev      | backlog + charter                    | Implementação (artifacts com path → project/) |
+| 6     | QA            | POST /invoke/qa       | backlog + artefatos Dev             | Relatório QA            |
+| 7     | Monitor       | (loop no runner)      | estado projeto/tasks                | Decisão Dev/QA/DevOps  |
+| 8     | DevOps        | POST /invoke/devops   | charter + backlog + artefatos       | Dockerfile / compose (artifacts com path → project/) |
 
-Cada passo persiste no diálogo (project_dialogue) e, quando `PROJECT_FILES_ROOT` está definido, grava artefatos em `<project_id>/docs/` com criador (spec, engineer, cto, pm, dev, qa, monitor, devops).
+Cada passo persiste no diálogo; com `PROJECT_FILES_ROOT`, artefatos em `<project_id>/docs/` e, quando têm `path`, em `<project_id>/project/`.
 
 ---
 
@@ -58,7 +68,7 @@ Cada passo persiste no diálogo (project_dialogue) e, quando `PROJECT_FILES_ROOT
 |------------|-------------------------|-------------------|
 | Portal | genesis-web (Next.js) | UI: upload de spec, botão Iniciar/Parar, exibição do diálogo (passos e erros). |
 | API | api-node (Node/Fastify) | Autenticação, projetos, upload de spec, **POST /api/projects/:id/run** → chama runner; **GET /api/projects/:id/artifacts** → lista docs do projeto (manifest em PROJECT_FILES_ROOT). |
-| Runner | runner (Python) | Orquestração: lê spec, chama **engineer** → **cto** → **pm** → (opcional) **dev** → **qa** → **monitor** → **devops**; persiste passos/erros no diálogo (POST na API) e documentos em disco por project_id. |
+| Runner | runner (Python) | Orquestração V2: **CTO spec review** → **loop CTO↔Engineer** (max 3) → **PM** (module + charter) → seed tasks → **Monitor Loop** (Dev/QA/DevOps); persiste diálogo e docs/ + project/ por project_id. |
 | Agentes | agents (Python/FastAPI) | Endpoints `/invoke/engineer`, `/invoke/cto`, `/invoke`, `/invoke/dev-backend`, `/invoke/qa-backend`, `/invoke/monitor`, `/invoke/devops-docker`. Chama **Claude** via `runtime.run_agent()` e devolve `response_envelope`. |
 | Runtime LLM | orchestrator/agents/runtime.py | `run_agent()` → Anthropic SDK → `client.messages.create(model=CLAUDE_MODEL, ...)`. Retry, extrai mensagem de erro. |
 | Diálogo | orchestrator/dialogue.py | Templates em português, POST no endpoint `/api/projects/:id/dialogue`. |

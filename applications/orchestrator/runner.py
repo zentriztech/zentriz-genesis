@@ -77,13 +77,16 @@ def _agents_root() -> Path:
 # Chamadas aos agentes
 # ---------------------------------------------------------------------------
 
-def call_engineer(spec_ref: str, spec_content: str, request_id: str) -> dict:
+def call_engineer(spec_ref: str, spec_content: str, request_id: str, cto_questionamentos: str | None = None) -> dict:
+    context: dict = {}
+    if cto_questionamentos:
+        context["cto_questionamentos"] = cto_questionamentos
     message = {
         "request_id": request_id,
         "input": {
             "spec_ref": spec_ref,
             "spec_content": spec_content[:15000] if spec_content else "",
-            "context": {},
+            "context": context,
             "task": {},
             "constraints": {},
             "artifacts": [],
@@ -116,12 +119,17 @@ def call_cto(spec_ref: str, request_id: str, engineer_proposal: str = "") -> dic
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
-def call_pm(spec_ref: str, charter_summary: str, request_id: str) -> dict:
+def call_pm(spec_ref: str, charter_summary: str, request_id: str, module: str = "backend", engineer_proposal: str = "", cto_questionamentos: str | None = None) -> dict:
+    context: dict = {"charter_summary": charter_summary, "module": module}
+    if engineer_proposal:
+        context["engineer_proposal"] = engineer_proposal
+    if cto_questionamentos:
+        context["cto_questionamentos"] = cto_questionamentos
     message = {
         "request_id": request_id,
         "input": {
             "spec_ref": spec_ref,
-            "context": {"charter_summary": charter_summary},
+            "context": context,
             "task": {},
             "constraints": {},
             "artifacts": [],
@@ -560,6 +568,15 @@ def _run_monitor_loop(
                     )
                     if project_id and storage and storage.is_enabled():
                         storage.write_doc(project_id, "dev", "implementation", _content_for_doc(dev_response), title="Dev implementation")
+                        dev_artifacts = dev_response.get("artifacts", [])
+                        for i, art in enumerate(dev_artifacts):
+                            if isinstance(art, dict) and art.get("content"):
+                                content = art.get("content", "")
+                                path_key = art.get("path") or f"artifact_{i}"
+                                if art.get("path"):
+                                    storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                                else:
+                                    storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
                     _update_task(project_id, task_id, status="WAITING_REVIEW")
                     _post_step(f"Dev concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
                 except Exception as e:
@@ -590,6 +607,15 @@ def _run_monitor_loop(
                     )
                     if project_id and storage and storage.is_enabled():
                         storage.write_doc(project_id, "devops", "summary", _content_for_doc(devops_response), title="DevOps summary")
+                        devops_artifacts = devops_response.get("artifacts", [])
+                        for i, art in enumerate(devops_artifacts):
+                            if isinstance(art, dict):
+                                content = art.get("content")
+                                path_key = art.get("path") or f"artifact_{i}"
+                                if content and art.get("path"):
+                                    storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                                elif content:
+                                    storage.write_doc(project_id, "devops", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
                     devops_done = True
                     _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
                 except Exception as e:
@@ -656,58 +682,61 @@ def main() -> int:
     )
 
     try:
-        # ── Passo 1: Engineer ─────────────────────────────────────────
+        # ── V2: CTO spec review (converte/entende spec, salva artefato) ──
         _post_step(
-            "O CTO está repassando a especificação ao Engineer para que ele analise "
-            "as squads técnicas, equipes necessárias e dependências do projeto.",
+            "O CTO está analisando a especificação recebida (conversão para .md e entendimento do projeto).",
             request_id,
         )
-        _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
-        logger.info("[Pipeline] Chamando agente Engineer...")
-        engineer_response = call_engineer(spec_ref, spec_content, request_id)
-        engineer_summary = engineer_response.get("summary", "")
-        engineer_status = engineer_response.get("status", "?")
-        logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
-
-        _post_step(
-            f"O Engineer concluiu a análise técnica e entregou a proposta com as squads "
-            f"e equipes recomendadas. Status: {engineer_status}.",
-            request_id,
-        )
-        emit_event("cto.engineer.request", {"spec_ref": spec_ref}, request_id)
-        emit_event("engineer.cto.response", {"summary": engineer_summary[:500]}, request_id)
-        _post_dialogue(
-            "cto", "engineer", "cto.engineer.request",
-            _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]),
-            request_id,
-        )
-        _post_dialogue(
-            "engineer", "cto", "engineer.cto.response",
-            _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]),
-            request_id,
-        )
+        _post_agent_working("cto", "O CTO está revisando e entendendo a spec.", request_id)
+        logger.info("[Pipeline] Chamando CTO para revisão da spec...")
+        cto_spec_response = call_cto(spec_ref, request_id, engineer_proposal="")
+        spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
         if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
+            storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
+        _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)
 
-        # ── Passo 2: CTO ─────────────────────────────────────────────
-        _post_step(
-            "O CTO recebeu a proposta técnica do Engineer e está elaborando o Charter do projeto, "
-            "definindo escopo, prioridades e a estrutura organizacional.",
-            request_id,
-        )
-        _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
-        logger.info("[Pipeline] Chamando agente CTO...")
-        cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary)
-        charter_summary = cto_response.get("summary", "")
-        charter_artifacts = cto_response.get("artifacts", [])
-        cto_status = cto_response.get("status", "?")
-        logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
+        # ── V2: Loop CTO ↔ Engineer (max 3 rodadas) ───────────────────
+        max_cto_engineer_rounds = int(os.environ.get("MAX_CTO_ENGINEER_ROUNDS", "3"))
+        engineer_summary = ""
+        engineer_response = None
+        cto_response = None
+        charter_summary = ""
+        charter_artifacts: list = []
 
-        _post_step(
-            f"O CTO finalizou o Charter do projeto. Agora será repassado ao PM "
-            f"para a geração do backlog. Status: {cto_status}.",
-            request_id,
-        )
+        for round_num in range(1, max_cto_engineer_rounds + 1):
+            _post_step(
+                f"Rodada {round_num}/{max_cto_engineer_rounds}: CTO envia spec ao Engineer para proposta técnica (squads e skills).",
+                request_id,
+            )
+            _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
+            logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
+            engineer_response = call_engineer(spec_ref, spec_understood, request_id, cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None))
+            engineer_summary = engineer_response.get("summary", "")
+            engineer_status = engineer_response.get("status", "?")
+            logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
+            _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
+            _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
+            if project_id and storage and storage.is_enabled():
+                storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
+
+            _post_step("O CTO está validando a proposta e elaborando o Charter (ou preparando questionamentos).", request_id)
+            _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
+            logger.info("[Pipeline] Chamando agente CTO (charter/validação)...")
+            cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary)
+            charter_summary = cto_response.get("summary", "")
+            charter_artifacts = cto_response.get("artifacts", [])
+            cto_status = cto_response.get("status", "?")
+            logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
+            if cto_status and str(cto_status).upper() == "OK":
+                _post_step("O CTO aprovou a proposta e finalizou o Charter. Seguindo para o PM.", request_id)
+                break
+            if round_num == max_cto_engineer_rounds:
+                _post_step("Máximo de rodadas CTO↔Engineer atingido. Usando última versão do Charter.", request_id)
+                break
+            _post_step("O CTO enviou questionamentos ao Engineer. Nova rodada.", request_id)
+
+        cto_status = cto_response.get("status", "?") if cto_response else "?"
+        engineer_status = engineer_response.get("status", "?") if engineer_response else "?"
 
         charter_path = STATE_DIR / "PROJECT_CHARTER.md"
         charter_content = f"# Project Charter (gerado pelo CTO)\n\n{_content_for_doc(cto_response) or charter_summary}\n"
@@ -740,8 +769,8 @@ def main() -> int:
             request_id,
         )
         _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-        logger.info("[Pipeline] Chamando agente PM...")
-        pm_response = call_pm(spec_ref, charter_summary, request_id)
+        logger.info("[Pipeline] Chamando agente PM (módulo backend)...")
+        pm_response = call_pm(spec_ref, charter_summary, request_id, module="backend", engineer_proposal=engineer_summary)
         backlog_summary = pm_response.get("summary", "")
         backlog_artifacts = pm_response.get("artifacts", [])
         pm_status = pm_response.get("status", "?")
@@ -844,7 +873,12 @@ def main() -> int:
                     storage.write_doc(project_id, "dev", "implementation", _content_for_doc(dev_response), title="Dev implementation")
                     for i, art in enumerate(dev_artifacts):
                         if isinstance(art, dict) and art.get("content"):
-                            storage.write_doc(project_id, "dev", f"artifact_{i}", art.get("content", ""), title=art.get("purpose", f"Artifact {i}"))
+                            content = art.get("content", "")
+                            path_key = art.get("path") or f"artifact_{i}"
+                            if art.get("path"):
+                                storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                            else:
+                                storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
             except Exception as e:
                 logger.exception("[Pipeline] Dev falhou")
                 dev_status = "FAIL"
