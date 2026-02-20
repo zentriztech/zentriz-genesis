@@ -1,7 +1,8 @@
 # Plano: Pipeline V2 — Fluxo autônomo e inteligente (Zentriz Genesis)
 
 > **Objetivo:** Fluxo em que o **Dev** seja capaz de criar o **código do produto final** especificado pela spec e refinado pelos processos CTO↔Engineer, CTO↔PM (por skill), PM↔Dev/QA/DevOps, PM↔Monitor, Monitor↔Dev/QA/DevOps.  
-> **Manter:** Tudo que já foi feito sobre gravação de artefatos em disco (`_content_for_doc`, bind mount `HOST_PROJECT_FILES_ROOT`, docs em `<project_id>/docs/` e `project/`).
+> **Manter:** Tudo que já foi feito sobre gravação de artefatos em disco (`_content_for_doc`, bind mount `HOST_PROJECT_FILES_ROOT`, docs em `<project_id>/docs/`, código em `<project_id>/apps/`, infra em `<project_id>/project/`).  
+> **Extensão (IA real e paths):** [PIPELINE_V2_IA_REAL_AND_PATHS.md](PIPELINE_V2_IA_REAL_AND_PATHS.md) — spec no formato do template, IA real em cada agente, paths resilientes e pasta `apps/` para o Dev.
 
 ---
 

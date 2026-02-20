@@ -29,11 +29,11 @@ def _root() -> Path | None:
 
 
 def get_project_root(project_id: str) -> Path | None:
-    """Retorna PROJECT_FILES_ROOT / project_id ou None se PROJECT_FILES_ROOT não estiver definido."""
+    """Retorna PROJECT_FILES_ROOT / project_id ou None se PROJECT_FILES_ROOT não estiver definido ou project_id vazio."""
     base = _root()
-    if not base:
+    if not base or not (project_id and str(project_id).strip()):
         return None
-    return base / project_id
+    return base / str(project_id).strip()
 
 
 def get_docs_dir(project_id: str) -> Path | None:
@@ -45,11 +45,19 @@ def get_docs_dir(project_id: str) -> Path | None:
 
 
 def get_project_dir(project_id: str) -> Path | None:
-    """Retorna o diretório project do projeto (project_id/project) para artefatos finais."""
+    """Retorna o diretório project do projeto (project_id/project) para artefatos finais (infra, DevOps)."""
     root = get_project_root(project_id)
     if not root:
         return None
     return root / "project"
+
+
+def get_apps_dir(project_id: str) -> Path | None:
+    """Retorna o diretório apps do projeto (project_id/apps) para código da aplicação gerado pelo Dev."""
+    root = get_project_root(project_id)
+    if not root:
+        return None
+    return root / "apps"
 
 
 def _ensure_docs_dir(project_id: str) -> Path | None:
@@ -142,8 +150,8 @@ def write_spec_doc(project_id: str, spec_content: str, spec_ref: str = "product_
 
 def write_project_artifact(project_id: str, relative_path: str, content: str | bytes) -> Path | None:
     """
-    Grava um artefato em project_id/project/ (código ou config final).
-    relative_path pode ser "Dockerfile", "src/index.js", etc.
+    Grava um artefato em project_id/project/ (infra, DevOps: Dockerfile, configs).
+    relative_path pode ser "Dockerfile", "docker-compose.yml", etc.
     """
     root = get_project_dir(project_id)
     if not root:
@@ -156,6 +164,25 @@ def write_project_artifact(project_id: str, relative_path: str, content: str | b
     else:
         path.write_text(content, encoding="utf-8")
     logger.info("[ProjectStorage] Artefato projeto: %s", path)
+    return path
+
+
+def write_apps_artifact(project_id: str, relative_path: str, content: str | bytes) -> Path | None:
+    """
+    Grava um artefato em project_id/apps/ (código da aplicação gerado pelo Dev).
+    relative_path pode ser "src/index.js", "package.json", "index.html", etc.
+    """
+    root = get_apps_dir(project_id)
+    if not root:
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+    logger.info("[ProjectStorage] Artefato apps: %s", path)
     return path
 
 

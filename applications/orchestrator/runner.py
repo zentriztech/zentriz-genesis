@@ -574,7 +574,7 @@ def _run_monitor_loop(
                                 content = art.get("content", "")
                                 path_key = art.get("path") or f"artifact_{i}"
                                 if art.get("path"):
-                                    storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                                    storage.write_apps_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
                                 else:
                                     storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
                     _update_task(project_id, task_id, status="WAITING_REVIEW")
@@ -876,7 +876,7 @@ def main() -> int:
                             content = art.get("content", "")
                             path_key = art.get("path") or f"artifact_{i}"
                             if art.get("path"):
-                                storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                                storage.write_apps_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
                             else:
                                 storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
             except Exception as e:
