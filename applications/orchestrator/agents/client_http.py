@@ -1,10 +1,12 @@
 """
 Cliente HTTP para invocar agentes via serviço (API_AGENTS_URL).
 Usado pelo runner quando não roda no mesmo processo que o serviço agents.
+Resiliência: timeout 300s (repair loop pode fazer 3 chamadas LLM), retry em timeout.
 """
 import json
 import logging
 import os
+import socket
 import urllib.error
 import urllib.request
 
@@ -88,31 +90,49 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    timeout = int(os.environ.get("REQUEST_TIMEOUT", "120"))
+    # Timeout alto: Enforcer pode fazer até 3 chamadas LLM (inicial + 2 repairs) por requisição
+    timeout = int(os.environ.get("REQUEST_TIMEOUT", "300"))
+    max_attempts = max(1, int(os.environ.get("AGENT_HTTP_RETRY_ON_TIMEOUT", "2")))
 
-    logger.info("[%s] Chamando serviço de agentes em %s...", agent_name, url)
+    logger.info("[%s] Chamando serviço de agentes em %s (timeout=%ss, max_attempts=%s)...", agent_name, url, timeout, max_attempts)
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Agente {agent_name} retornou status {resp.status}")
-            out = json.loads(resp.read().decode("utf-8"))
-        logger.info("[%s] Resposta recebida com sucesso.", agent_name)
-        return out
-    except urllib.error.HTTPError as e:
-        err_body = _read_error_body(e)
-        detail = _parse_error_detail(err_body)
-        error_msg = detail.get("error", detail.get("human_message", err_body[:500]))
-        human_msg = detail.get("human_message", f"O agente {agent_name} retornou erro HTTP {e.code}: {error_msg}")
-        tb = detail.get("traceback", "")
-
-        logger.error("[%s] HTTP %d: %s", agent_name, e.code, error_msg)
-
-        raise RuntimeError(json.dumps({
-            "agent": agent_key,
-            "agent_name": agent_name,
-            "http_code": e.code,
-            "error": error_msg,
-            "human_message": human_msg,
-            "traceback": tb,
-        }, ensure_ascii=False)) from e
+    for attempt in range(max_attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Agente {agent_name} retornou status {resp.status}")
+                out = json.loads(resp.read().decode("utf-8"))
+            logger.info("[%s] Resposta recebida com sucesso.", agent_name)
+            return out
+        except urllib.error.HTTPError as e:
+            err_body = _read_error_body(e)
+            detail = _parse_error_detail(err_body)
+            error_msg = detail.get("error", detail.get("human_message", err_body[:500]))
+            human_msg = detail.get("human_message", f"O agente {agent_name} retornou erro HTTP {e.code}: {error_msg}")
+            tb = detail.get("traceback", "")
+            logger.error("[%s] HTTP %d: %s", agent_name, e.code, error_msg)
+            raise RuntimeError(json.dumps({
+                "agent": agent_key,
+                "agent_name": agent_name,
+                "http_code": e.code,
+                "error": error_msg,
+                "human_message": human_msg,
+                "traceback": tb,
+            }, ensure_ascii=False)) from e
+        except (TimeoutError, socket.timeout, OSError) as e:
+            is_timeout = "timed out" in str(e).lower() or isinstance(e, (TimeoutError, socket.timeout))
+            if is_timeout and attempt < max_attempts - 1:
+                logger.warning("[%s] Timeout (tentativa %s/%s), repetindo...", agent_name, attempt + 1, max_attempts)
+                continue
+            if is_timeout:
+                logger.error("[%s] Timeout após %s tentativa(s). Aumente REQUEST_TIMEOUT (ex.: 300) ou verifique o serviço de agentes.", agent_name, max_attempts)
+                raise RuntimeError(
+                    json.dumps({
+                        "agent": agent_key,
+                        "agent_name": agent_name,
+                        "error": "timed out",
+                        "human_message": "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner.",
+                        "traceback": "",
+                    }, ensure_ascii=False)
+                ) from e
+            raise

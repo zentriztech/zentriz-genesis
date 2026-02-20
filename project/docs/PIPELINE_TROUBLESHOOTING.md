@@ -29,6 +29,7 @@ Se algo falha em 4–7, o frontend mostra a mensagem de erro da API em vermelho.
 | Erro no portal: "Nenhum runner configurado" | API sem `RUNNER_SERVICE_URL` nem `RUNNER_COMMAND`. | No container da API: `RUNNER_SERVICE_URL` (ex.: `http://runner:8001`) deve estar definido. Ver `docker compose logs api` e variáveis. |
 | Erro no portal: "Falha ao chamar serviço runner" ou mensagem do runner | Runner não respondeu 2xx ou arquivo de spec não existe no container do runner. | **Logs da API:** `docker compose logs api --tail=100`. **Logs do runner:** `docker compose logs runner --tail=100`. Se o runner retornar 400 por "Arquivo de spec não encontrado", API e runner não compartilham o mesmo volume de uploads. |
 | Retorna 202 "Pipeline iniciado" mas nada aparece no diálogo | Runner iniciou o processo mas o processo caiu (ex.: spec não encontrada, erro de import, env faltando). | **Logs do runner (stderr do subprocess):** `docker compose logs runner --tail=200`. Procurar por `FileNotFoundError`, `ModuleNotFoundError`, `CLAUDE_API_KEY`, `PROJECT_ID`, etc. |
+| Erro no portal: **"timed out"** ou **"O agente demorou mais que o limite (timeout)"** | O runner cortou a conexão HTTP com o serviço de agentes antes do agente terminar (ex.: CTO com 2 repairs = 3 chamadas LLM). | Defina **`REQUEST_TIMEOUT=300`** no `.env` do runner (e recrie o container). O runner faz até 2 retentativas em timeout; se ainda falhar, o agente pode estar lento — verifique `docker compose logs runner` e o terminal do `start-agents-host.sh`. |
 
 ---
 

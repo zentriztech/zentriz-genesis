@@ -20,7 +20,8 @@
 | **DOCKER_NAMESPACE** | Não | Namespace do projeto para Docker e k8s (containers, redes, volumes). | `zentriz-genesis` |
 | **API_BASE_URL** | Não (local) | URL base da API do produto (Voucher) para smoke tests e integrações. Usada pelo runner para PATCH/POST em projetos e diálogo. | `http://localhost:3000` |
 | **LOG_LEVEL** | Não | Nível de log do runtime dos agentes (Python). | `INFO` |
-| **REQUEST_TIMEOUT** | Não | Timeout em segundos para chamadas à API Claude. | `120` |
+| **REQUEST_TIMEOUT** | Não | Timeout (s): runner→agents HTTP e cada chamada à Claude. Recomendado **300** (repair loop pode fazer 3 chamadas LLM por agente). | `300` |
+| **AGENT_HTTP_RETRY_ON_TIMEOUT** | Não | Número de tentativas do runner ao chamar agents em caso de timeout (retry apenas em timeout). | `2` |
 | **CLAUDE_RETRY_ATTEMPTS** | Não | Número de tentativas (incl. retry) ao chamar Claude em falhas de rede/429/5xx. | `2` |
 | **API_AGENTS_URL** | Não | Se definida, o runner chama os agentes via HTTP (ex.: `http://agents:8000`) em vez de import. | (vazio para import local) |
 | **RUNNER_COMMAND** | Não (API) | Comando para iniciar o runner em background quando o portal dispara o pipeline (ex.: `python -m orchestrator.runner`). Requer Python e PYTHONPATH no ambiente. | (vazio) |

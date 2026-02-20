@@ -25,7 +25,7 @@ import Replay from "@mui/icons-material/Replay";
 import CheckCircle from "@mui/icons-material/CheckCircle";
 import { projectsStore } from "@/stores/projectsStore";
 import { ProjectDialogue, type DialogueEntry } from "@/components/ProjectDialogue";
-import { apiPost } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 
 const STEPS = ["Spec enviada", "Engineer (proposta)", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
 
@@ -39,6 +39,9 @@ const STATUSES_ALLOW_RUN = new Set([
   "failed",
 ]);
 const STATUS_RUNNING = "running";
+
+type ArtifactsResponse = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null; projectArtifactsRoot: string | null };
+type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 
 /** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
 function agentToStepIndex(fromAgent: string): number {
@@ -96,6 +99,8 @@ function ProjectDetailPageInner() {
   const [acceptError, setAcceptError] = useState<string | null>(null);
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
   const [workingMessage, setWorkingMessage] = useState<string | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
+  const [tasks, setTasks] = useState<TaskItem[] | null>(null);
   const project = projectsStore.getById(id);
 
   const handleDialogueEntriesLoaded = useCallback((entries: DialogueEntry[]) => {
@@ -124,6 +129,17 @@ function ProjectDetailPageInner() {
     return () => clearInterval(t);
   }, [id, project?.status]);
 
+  useEffect(() => {
+    if (!id) return;
+    apiGet<ArtifactsResponse>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => setArtifacts(null));
+  }, [id]);
+
+  useEffect(() => {
+    if (!id || !project) return;
+    if (project.status !== "running" && project.status !== "completed" && project.status !== "accepted") return;
+    apiGet<TaskItem[]>(`/api/projects/${id}/tasks`).then((data) => setTasks(Array.isArray(data) ? data : [])).catch(() => setTasks(null));
+  }, [id, project?.status]);
+
   if (!project) {
     return (
       <Box>
@@ -141,22 +157,24 @@ function ProjectDetailPageInner() {
     );
   }
 
-  const stepIndex =
-    project.status === "running"
+  const stepIndexFromStatus =
+    project.status === "spec_submitted"
       ? 1
-      : project.status === "spec_submitted"
-        ? 1
-        : project.status === "cto_charter"
-          ? 2
-          : project.status === "pm_backlog"
-            ? 3
-            : project.status === "dev_qa"
-              ? 4
-              : project.status === "devops"
-                ? 5
-                : project.status === "completed" || project.status === "accepted"
-                  ? 6
-                  : 0;
+      : project.status === "cto_charter"
+        ? 2
+        : project.status === "pm_backlog"
+          ? 3
+          : project.status === "dev_qa"
+            ? 4
+            : project.status === "devops"
+              ? 5
+              : project.status === "completed" || project.status === "accepted"
+                ? 6
+                : 0;
+  const stepIndex =
+    project.status === "running" && workingStepIndex !== null && workingStepIndex >= 0
+      ? workingStepIndex
+      : stepIndexFromStatus;
 
   const hasProcessDates = project.startedAt || project.completedAt;
   const duration =
@@ -275,7 +293,7 @@ function ProjectDetailPageInner() {
             </Button>
             {(project.status === "stopped" || project.status === "failed") && (
               <Typography variant="body2" color="text.secondary">
-                Reinicia o fluxo do zero (Spec → Engineer → CTO → PM).
+                Reinicia o fluxo do zero (Spec → CTO → Engineer → PM → Dev/QA/DevOps).
               </Typography>
             )}
           </>
@@ -413,6 +431,63 @@ function ProjectDetailPageInner() {
           onEntriesLoaded={handleDialogueEntriesLoaded}
         />
       </MotionCard>
+
+      {(project.status === "running" || project.status === "completed" || project.status === "accepted") && tasks !== null && tasks.length > 0 && (
+        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
+          <Typography variant="h6" gutterBottom fontWeight={600}>
+            Tarefas
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Tarefas do backlog (Monitor Loop).
+          </Typography>
+          <Stack component="ul" spacing={0.5} sx={{ listStyle: "none", pl: 0, m: 0 }}>
+            {tasks.map((t) => (
+              <Box
+                key={t.id}
+                component="li"
+                sx={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 1,
+                  py: 0.75,
+                  borderBottom: "1px solid",
+                  borderColor: "divider",
+                }}
+              >
+                <Chip size="small" label={t.status ?? "—"} color={t.status === "DONE" ? "success" : "default"} />
+                <Typography variant="body2">{t.requirements ?? t.taskId ?? t.id}</Typography>
+                {t.module && <Typography variant="caption" color="text.secondary">({t.module})</Typography>}
+              </Box>
+            ))}
+          </Stack>
+        </MotionCard>
+      )}
+
+      {artifacts && (artifacts.docs?.length > 0 || artifacts.projectDocsRoot != null) && (
+        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
+          <Typography variant="h6" gutterBottom fontWeight={600}>
+            Artefatos
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Documentos e artefatos gerados pelo pipeline (docs, apps, project).
+          </Typography>
+          {artifacts.docs?.length > 0 ? (
+            <Stack component="ul" spacing={0.5} sx={{ listStyle: "none", pl: 0, m: 0 }}>
+              {artifacts.docs.map((d, i) => (
+                <Typography key={i} variant="body2" component="li">
+                  {d.title ?? d.filename}
+                  {d.creator && <Typography component="span" variant="caption" color="text.secondary"> — {d.creator}</Typography>}
+                </Typography>
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              Nenhum documento listado no manifest. Os artefatos podem estar em docs/ ou project/ (pasta do projeto).
+            </Typography>
+          )}
+        </MotionCard>
+      )}
 
       <Box sx={{ mt: 3 }}>
         <Button variant="outlined" disabled size="small" sx={{ mr: 1 }}>

@@ -17,7 +17,7 @@ import traceback as _tb
 import urllib.error
 import urllib.request
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 _shutdown_requested = False
 
@@ -78,20 +78,18 @@ def _agents_root() -> Path:
 # ---------------------------------------------------------------------------
 
 def call_engineer(spec_ref: str, spec_content: str, request_id: str, cto_questionamentos: str | None = None) -> dict:
-    context: dict = {}
-    if cto_questionamentos:
-        context["cto_questionamentos"] = cto_questionamentos
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "spec_content": spec_content[:15000] if spec_content else "",
-            "context": context,
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+    inputs = {
+        "spec_ref": spec_ref,
+        "product_spec": spec_content[:15000] if spec_content else "",
+        "constraints": ["spec-driven", "paths-resilient", "no-invent"],
     }
+    if cto_questionamentos:
+        inputs["cto_questionamentos"] = cto_questionamentos
+    message = _build_message_envelope(
+        request_id, "Engineer", "generic", "generate_engineering_docs",
+        task_id=None, task="Gerar proposta técnica (stacks, squads, dependências).",
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("engineer", message)
@@ -118,27 +116,27 @@ def call_cto(
     backlog_summary: str = "",
     validate_backlog_only: bool = False,
 ) -> dict:
-    context: dict = {}
+    inputs = {"spec_ref": spec_ref, "constraints": ["spec-driven", "paths-resilient", "no-invent"]}
     if engineer_proposal:
-        context["engineer_stack_proposal"] = engineer_proposal
+        inputs["engineer_stack_proposal"] = engineer_proposal
     if spec_content:
-        context["spec_content"] = spec_content[:20000]
+        inputs["spec_raw"] = spec_content[:20000]
+        inputs["product_spec"] = spec_content[:20000]
     if spec_template:
-        context["spec_template"] = spec_template[:15000]
+        inputs["spec_template"] = spec_template[:15000]
     if backlog_summary:
-        context["backlog_summary"] = backlog_summary[:15000]
+        inputs["backlog_summary"] = backlog_summary[:15000]
     if validate_backlog_only:
-        context["validate_backlog_only"] = True
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": context,
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
-    }
+        inputs["validate_backlog_only"] = True
+        mode = "validate_backlog"
+    elif engineer_proposal:
+        mode = "validate_engineer_docs" if not backlog_summary else "charter_and_proposal"
+    else:
+        mode = "spec_intake_and_normalize"
+    message = _build_message_envelope(
+        request_id, "CTO", "generic", mode, task_id=None, task="",
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("cto", message)
@@ -148,21 +146,22 @@ def call_cto(
 
 
 def call_pm(spec_ref: str, charter_summary: str, request_id: str, module: str = "backend", engineer_proposal: str = "", cto_questionamentos: str | None = None) -> dict:
-    context: dict = {"charter_summary": charter_summary, "module": module}
-    if engineer_proposal:
-        context["engineer_proposal"] = engineer_proposal
-    if cto_questionamentos:
-        context["cto_questionamentos"] = cto_questionamentos
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": context,
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+    inputs = {
+        "spec_ref": spec_ref,
+        "charter": charter_summary,
+        "charter_summary": charter_summary,
+        "module": module,
+        "constraints": ["spec-driven", "paths-resilient", "no-invent"],
     }
+    if engineer_proposal:
+        inputs["engineer_proposal"] = engineer_proposal
+    if cto_questionamentos:
+        inputs["cto_questionamentos"] = cto_questionamentos
+    message = _build_message_envelope(
+        request_id, "PM", module, "generate_backlog",
+        task_id=None, task=f"Gerar backlog da squad {module}.",
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("pm", message)
@@ -171,17 +170,34 @@ def call_pm(spec_ref: str, charter_summary: str, request_id: str, module: str = 
     return run_agent(system_prompt_path=pm_prompt, message=message, role="PM")
 
 
-def call_dev(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": {"charter_summary": charter_summary, "backlog_summary": backlog_summary},
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+def call_dev(
+    spec_ref: str,
+    charter_summary: str,
+    backlog_summary: str,
+    request_id: str,
+    task_id: str | None = None,
+    task: str = "",
+    code_refs: list | None = None,
+    existing_artifacts: list | None = None,
+) -> dict:
+    inputs = {
+        "spec_ref": spec_ref,
+        "charter": charter_summary,
+        "charter_summary": charter_summary,
+        "backlog": backlog_summary,
+        "backlog_summary": backlog_summary,
+        "constraints": ["spec-driven", "paths-resilient", "no-invent"],
     }
+    if code_refs:
+        inputs["code_refs"] = code_refs
+    message = _build_message_envelope(
+        request_id, "Dev", "backend", "implement_task",
+        task_id=task_id,
+        task=task or "Implementar tarefa conforme backlog e spec.",
+        inputs=inputs,
+        existing_artifacts=existing_artifacts or [],
+        limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("dev", message)
@@ -190,21 +206,34 @@ def call_dev(spec_ref: str, charter_summary: str, backlog_summary: str, request_
     return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV")
 
 
-def call_qa(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, request_id: str) -> dict:
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": {
-                "charter_summary": charter_summary,
-                "backlog_summary": backlog_summary,
-                "dev_summary": dev_summary,
-            },
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+def call_qa(
+    spec_ref: str,
+    charter_summary: str,
+    backlog_summary: str,
+    dev_summary: str,
+    request_id: str,
+    task_id: str | None = None,
+    task: str = "",
+    code_refs: list | None = None,
+    existing_artifacts: list | None = None,
+) -> dict:
+    inputs = {
+        "spec_ref": spec_ref,
+        "charter_summary": charter_summary,
+        "backlog_summary": backlog_summary,
+        "dev_summary": dev_summary,
+        "constraints": ["spec-driven", "paths-resilient"],
     }
+    if code_refs:
+        inputs["code_refs"] = code_refs
+    message = _build_message_envelope(
+        request_id, "QA", "backend", "validate_task",
+        task_id=task_id,
+        task=task or "Validar artefatos do Dev (veredito QA_PASS ou QA_FAIL).",
+        inputs=inputs,
+        existing_artifacts=existing_artifacts or [],
+        limits={"timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
@@ -214,21 +243,19 @@ def call_qa(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summa
 
 
 def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, qa_summary: str, request_id: str) -> dict:
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": {
-                "charter_summary": charter_summary,
-                "backlog_summary": backlog_summary,
-                "dev_summary": dev_summary,
-                "qa_summary": qa_summary,
-            },
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+    inputs = {
+        "spec_ref": spec_ref,
+        "charter_summary": charter_summary,
+        "backlog_summary": backlog_summary,
+        "dev_summary": dev_summary,
+        "qa_summary": qa_summary,
+        "constraints": ["spec-driven"],
     }
+    message = _build_message_envelope(
+        request_id, "Monitor", "backend", "orchestrate",
+        task_id=None, task="Decidir próximo passo (Dev/QA/DevOps) e atualizar estado.",
+        inputs=inputs, existing_artifacts=[], limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("monitor", message)
@@ -238,16 +265,18 @@ def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_
 
 
 def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
-    message = {
-        "request_id": request_id,
-        "input": {
-            "spec_ref": spec_ref,
-            "context": {"charter_summary": charter_summary, "backlog_summary": backlog_summary},
-            "task": {},
-            "constraints": {},
-            "artifacts": [],
-        },
+    inputs = {
+        "spec_ref": spec_ref,
+        "charter": charter_summary,
+        "charter_summary": charter_summary,
+        "backlog_summary": backlog_summary,
+        "constraints": ["spec-driven", "paths-resilient"],
     }
+    message = _build_message_envelope(
+        request_id, "DevOps", "docker", "provision_artifacts",
+        task_id=None, task="Gerar artefatos de infra (Dockerfile, runbook) em project/ e docs/devops/.",
+        inputs=inputs, existing_artifacts=[], limits={"timeout_sec": 120},
+    )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("devops", message)
@@ -267,7 +296,7 @@ def persist_state(spec_ref: str, charter: dict, backlog: dict, events: list) -> 
         "charter": charter,
         "backlog": backlog,
         "events": events,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     (STATE_DIR / "current_project.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -279,7 +308,7 @@ def emit_event(event_type: str, payload: dict, request_id: str) -> None:
     event = {
         "event_type": event_type,
         "request_id": request_id,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "payload": payload,
     }
     events_file = STATE_DIR / "events.jsonl"
@@ -296,6 +325,34 @@ def _project_id() -> str | None:
     return os.environ.get("PROJECT_ID")
 
 
+def _build_message_envelope(
+    request_id: str,
+    agent: str,
+    variant: str,
+    mode: str,
+    task_id: str | None,
+    task: str,
+    inputs: dict,
+    existing_artifacts: list | None = None,
+    limits: dict | None = None,
+) -> dict:
+    """Monta MessageEnvelope completo para o Enforcer (project_id, mode, task_id, inputs, existing_artifacts, limits)."""
+    project_id = _project_id() or "default"
+    return {
+        "request_id": request_id,
+        "project_id": project_id,
+        "agent": agent,
+        "variant": variant or "generic",
+        "mode": mode,
+        "task_id": task_id,
+        "task": task or "",
+        "inputs": inputs,
+        "existing_artifacts": existing_artifacts or [],
+        "limits": limits or {"max_rounds": 3, "max_rework": 3, "timeout_sec": int(os.environ.get("REQUEST_TIMEOUT", "300"))},
+        "input": inputs,  # compatibilidade: runtime pode ler input ou inputs
+    }
+
+
 def _post_dialogue(from_agent: str, to_agent: str, event_type: str, summary_human: str, request_id: str) -> None:
     pid = _project_id()
     if not pid:
@@ -308,6 +365,19 @@ def _post_step(step_message: str, request_id: str) -> None:
     """Registra um passo no log do portal. Mensagem deve ser em linguagem humana."""
     logger.info("[Pipeline] %s", step_message)
     _post_dialogue("system", "system", "step", step_message, request_id)
+
+
+def _audit_log(agent: str, request_id: str, response: dict) -> None:
+    """Audit trail por chamada (Blueprint 6 / Fase 4). Log estruturado para rastreabilidade."""
+    status = response.get("status", "?")
+    artifacts_count = len(response.get("artifacts") or [])
+    validator_pass = response.get("validator_pass")
+    validation_errors = response.get("validation_errors") or []
+    artifacts_paths = response.get("artifacts_paths") or []
+    logger.info(
+        "[Audit] agent=%s request_id=%s status=%s artifacts_count=%d validator_pass=%s validation_errors=%s artifacts_paths=%s",
+        agent, request_id, status, artifacts_count, validator_pass, len(validation_errors), artifacts_paths[:10],
+    )
 
 
 def _post_agent_working(agent_key: str, activity_message: str, request_id: str) -> None:
@@ -357,6 +427,16 @@ def _is_qa_pass(qa_response: dict) -> bool:
     return False
 
 
+def _is_timeout_error(exc: BaseException | None, message: str) -> bool:
+    """Detecta timeout para exibir mensagem amigável (recorrência: runner→agents HTTP)."""
+    if exc is not None:
+        if isinstance(exc, TimeoutError):
+            return True
+        if isinstance(exc, OSError) and "timed out" in str(exc).lower():
+            return True
+    return "timed out" in (message or "").lower() or "timeout" in (message or "").lower()
+
+
 def _post_error(message: str, request_id: str, exc: BaseException | None = None) -> None:
     """Registra erro no log do portal. Inclui traceback apenas se SHOW_TRACEBACK=true."""
     body = message
@@ -364,11 +444,15 @@ def _post_error(message: str, request_id: str, exc: BaseException | None = None)
         error_detail = _extract_error_info(exc)
         if error_detail.get("human_message"):
             body = error_detail["human_message"]
+        if _is_timeout_error(exc, body):
+            body = "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner."
         if SHOW_TRACEBACK:
             tb_text = error_detail.get("traceback", "")
             if not tb_text:
                 tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
             body += "\n\n--- Traceback (SHOW_TRACEBACK=true) ---\n" + tb_text[:3000]
+    elif _is_timeout_error(None, body):
+        body = "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner."
     logger.error("[Pipeline] %s", body[:500])
     _post_dialogue("system", "error", "error", body, request_id)
 
@@ -501,9 +585,14 @@ def _run_monitor_loop(
     storage = _project_storage()
     dev_summary = ""
     qa_summary = ""
+    last_dev_artifacts: list = []
     devops_done = False
     # Tarefas marcadas DONE por terem atingido o máximo de reworks do QA (não aprovação)
     tasks_done_after_qa_fail: set[str] = set()
+    # Tarefas que não devem mais acionar Dev (circuit breaker ou máximo de BLOCKED sem apps/)
+    dev_gave_up_tasks: set[str] = set()
+    consecutive_dev_blocked: dict[str, int] = {}
+    max_consecutive_dev_blocked = int(os.environ.get("MAX_CONSECUTIVE_DEV_BLOCKED", "5"))
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
     max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
     qa_fail_count: dict[str, int] = {}
@@ -527,10 +616,16 @@ def _run_monitor_loop(
         if need_qa and waiting_review:
             task = waiting_review[0]
             task_id = task.get("taskId") or task.get("task_id")
+            task_desc = task.get("title") or task.get("description") or task.get("name") or ""
+            code_refs = [a.get("path") for a in last_dev_artifacts if isinstance(a, dict) and a.get("path")]
             _post_step("O Monitor acionou o QA para revisar a tarefa.", request_id)
             _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
             try:
-                qa_response = call_qa(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
+                qa_response = call_qa(
+                    spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
+                    task_id=task_id, task=task_desc, code_refs=code_refs, existing_artifacts=last_dev_artifacts,
+                )
+                _audit_log("qa", request_id, qa_response)
                 qa_summary = qa_response.get("summary", "")
                 qa_status = qa_response.get("status", "?")
                 _post_dialogue(
@@ -572,18 +667,29 @@ def _run_monitor_loop(
 
         if need_dev:
             dev_task = next(
-                (t for t in tasks if t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL", "BLOCKED")),
+                (
+                    t
+                    for t in tasks
+                    if t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL", "BLOCKED")
+                    and (t.get("taskId") or t.get("task_id")) not in dev_gave_up_tasks
+                ),
                 None,
             )
             if dev_task:
                 task_id = dev_task.get("taskId") or dev_task.get("task_id")
+                task_desc = dev_task.get("title") or dev_task.get("description") or dev_task.get("name") or "Implementar tarefa do backlog."
                 _update_task(project_id, task_id, status="IN_PROGRESS")
                 _post_step("O Monitor acionou o Dev para implementar ou rework.", request_id)
                 _post_agent_working("dev", "O Dev está implementando ou corrigindo a tarefa.", request_id)
                 try:
-                    dev_response = call_dev(spec_ref, charter_summary, backlog_summary, request_id)
+                    dev_response = call_dev(
+                        spec_ref, charter_summary, backlog_summary, request_id,
+                        task_id=task_id, task=task_desc, code_refs=[], existing_artifacts=[],
+                    )
+                    _audit_log("dev", request_id, dev_response)
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
+                    last_dev_artifacts = dev_response.get("artifacts", [])
                     _post_dialogue(
                         "pm", "dev", "task.assigned",
                         _get_summary_human("task.assigned", "pm", "dev", backlog_summary[:200]),
@@ -594,19 +700,70 @@ def _run_monitor_loop(
                         _get_summary_human("task.completed", "dev", "qa", dev_summary[:200]),
                         request_id,
                     )
+                    circuit_breaker = dev_response.get("circuit_breaker_open") or ("Circuit breaker" in (dev_summary or ""))
+                    if circuit_breaker:
+                        _update_task(project_id, task_id, status="DONE")
+                        dev_gave_up_tasks.add(task_id)
+                        _post_step(
+                            "Circuit breaker do Dev aberto. Tarefa marcada como DONE (não aprovada). Intervenção humana necessária.",
+                            request_id,
+                        )
+                        time.sleep(2)
+                        continue
+                    _has_apps_artifact = any(
+                        (a.get("path") or "").strip().startswith("apps/")
+                        for a in (last_dev_artifacts or []) if isinstance(a, dict)
+                    )
                     if project_id and storage and storage.is_enabled():
                         storage.write_doc(project_id, "dev", "implementation", _content_for_doc(dev_response), title="Dev implementation")
-                        dev_artifacts = dev_response.get("artifacts", [])
+                        dev_artifacts = last_dev_artifacts
+                        try:
+                            from orchestrator.envelope import filter_artifacts_by_path_policy
+                            dev_artifacts = filter_artifacts_by_path_policy(dev_artifacts, project_id)
+                        except ImportError:
+                            pass
+                        _has_apps_artifact = any(
+                            (a.get("path") or "").strip().startswith("apps/")
+                            for a in dev_artifacts if isinstance(a, dict)
+                        )
                         for i, art in enumerate(dev_artifacts):
-                            if isinstance(art, dict) and art.get("content"):
-                                content = art.get("content", "")
-                                path_key = art.get("path") or f"artifact_{i}"
-                                if art.get("path"):
-                                    storage.write_apps_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
-                                else:
-                                    storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
-                    _update_task(project_id, task_id, status="WAITING_REVIEW")
-                    _post_step(f"Dev concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
+                            if not isinstance(art, dict) or not art.get("content"):
+                                continue
+                            content = art.get("content", "")
+                            path_val = (art.get("path") or "").strip()
+                            if path_val.startswith("apps/"):
+                                try:
+                                    storage.write_apps_artifact(project_id, path_val[5:].lstrip("/"), content if isinstance(content, str) else str(content))
+                                except Exception as _e:
+                                    logger.warning("[Monitor Loop] Falha ao gravar apps artifact: %s", _e)
+                            elif path_val.startswith("docs/"):
+                                try:
+                                    storage.write_doc_by_path(project_id, "dev", path_val[5:].lstrip("/"), content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                except Exception as _e:
+                                    logger.warning("[Monitor Loop] write_doc_by_path falhou, fallback write_doc: %s", _e)
+                                    storage.write_doc(project_id, "dev", path_val.replace("/", "_").replace(".", "_")[:60] or f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                            elif path_val:
+                                storage.write_doc(project_id, "dev", f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                    if _has_apps_artifact:
+                        consecutive_dev_blocked[task_id] = 0
+                        _update_task(project_id, task_id, status="WAITING_REVIEW")
+                        _post_step(f"Dev concluiu. Status: {dev_status}. Task em WAITING_REVIEW.", request_id)
+                    else:
+                        n = consecutive_dev_blocked.get(task_id, 0) + 1
+                        consecutive_dev_blocked[task_id] = n
+                        if n >= max_consecutive_dev_blocked:
+                            _update_task(project_id, task_id, status="DONE")
+                            dev_gave_up_tasks.add(task_id)
+                            _post_step(
+                                f"Máximo de tentativas do Dev atingido ({n}x sem artefato em apps/). Tarefa marcada como DONE (não aprovada).",
+                                request_id,
+                            )
+                        else:
+                            _update_task(project_id, task_id, status="BLOCKED")
+                            _post_step(
+                                f"Dev não entregou artefato em apps/. Task mantida para rework (tentativa {n}/{max_consecutive_dev_blocked}).",
+                                request_id,
+                            )
                 except Exception as e:
                     logger.exception("[Monitor Loop] Dev falhou")
                     _post_error(str(e), request_id, e)
@@ -627,6 +784,7 @@ def _run_monitor_loop(
                 _post_agent_working("devops", "O DevOps está gerando Dockerfile e artefatos de infraestrutura.", request_id)
                 try:
                     devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
+                    _audit_log("devops", request_id, devops_response)
                     devops_summary = devops_response.get("summary", "")
                     _post_dialogue(
                         "monitor", "devops", "devops.deploy",
@@ -636,14 +794,29 @@ def _run_monitor_loop(
                     if project_id and storage and storage.is_enabled():
                         storage.write_doc(project_id, "devops", "summary", _content_for_doc(devops_response), title="DevOps summary")
                         devops_artifacts = devops_response.get("artifacts", [])
+                        try:
+                            from orchestrator.envelope import filter_artifacts_by_path_policy
+                            devops_artifacts = filter_artifacts_by_path_policy(devops_artifacts, project_id)
+                        except ImportError:
+                            pass
                         for i, art in enumerate(devops_artifacts):
-                            if isinstance(art, dict):
-                                content = art.get("content")
-                                path_key = art.get("path") or f"artifact_{i}"
-                                if content and art.get("path"):
-                                    storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
-                                elif content:
-                                    storage.write_doc(project_id, "devops", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
+                            if not isinstance(art, dict) or not art.get("content"):
+                                continue
+                            content = art.get("content", "")
+                            path_val = (art.get("path") or "").strip()
+                            if path_val.startswith("project/"):
+                                try:
+                                    storage.write_project_artifact(project_id, path_val[8:].lstrip("/"), content if isinstance(content, str) else str(content))
+                                except Exception as _e:
+                                    logger.warning("[Monitor Loop] Falha ao gravar project artifact: %s", _e)
+                            elif path_val.startswith("docs/"):
+                                try:
+                                    storage.write_doc_by_path(project_id, "devops", path_val[5:].lstrip("/"), content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                except Exception as _e:
+                                    logger.warning("[Monitor Loop] write_doc_by_path devops falhou, fallback write_doc: %s", _e)
+                                    storage.write_doc(project_id, "devops", path_val.replace("/", "_").replace(".", "_")[:60] or f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                            elif path_val:
+                                storage.write_doc(project_id, "devops", f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
                     devops_done = True
                     _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
                 except Exception as e:
@@ -681,12 +854,19 @@ def main() -> int:
             return 1
         spec_path = REPO_ROOT / spec_ref
 
-    request_id = f"runner-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    request_id = f"runner-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     project_id = _project_id()
     storage = _project_storage()
     if storage and storage.is_enabled():
+        if project_id:
+            try:
+                from orchestrator.project_storage import ensure_project_dirs
+                if ensure_project_dirs(project_id):
+                    logger.info("[Pipeline] Diretórios garantidos: docs/, project/, apps/ para project_id=%s", project_id)
+            except Exception as e:
+                logger.warning("[Pipeline] ensure_project_dirs: %s", e)
         logger.info(
-            "[Pipeline] Armazenamento por projeto ativo: PROJECT_FILES_ROOT=%s (docs e project em <root>/<project_id>/)",
+            "[Pipeline] Armazenamento por projeto ativo: PROJECT_FILES_ROOT=%s (docs, project, apps em <root>/<project_id>/)",
             os.environ.get("PROJECT_FILES_ROOT", ""),
         )
     else:
@@ -702,7 +882,7 @@ def main() -> int:
     if project_id and storage and storage.is_enabled():
         storage.write_spec_doc(project_id, spec_content, spec_ref.replace("/", "_").replace(".", "_")[:80])
 
-    now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     _patch_project({"started_at": now_iso, "status": "running"})
     _post_step(
         "Pipeline iniciado. A especificação do produto foi recebida e será analisada pelos agentes.",
@@ -722,6 +902,7 @@ def main() -> int:
             spec_ref, request_id, engineer_proposal="",
             spec_content=spec_content, spec_template=spec_template_content,
         )
+        _audit_log("cto", request_id, cto_spec_response)
         spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
         # Se a IA devolveu artefato com spec no formato template, usar o conteúdo do primeiro artefato
         for art in cto_spec_response.get("artifacts", []):
@@ -748,6 +929,7 @@ def main() -> int:
             _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
             logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
             engineer_response = call_engineer(spec_ref, spec_understood, request_id, cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None))
+            _audit_log("engineer", request_id, engineer_response)
             engineer_summary = engineer_response.get("summary", "")
             engineer_status = engineer_response.get("status", "?")
             logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
@@ -764,6 +946,7 @@ def main() -> int:
             _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
             logger.info("[Pipeline] Chamando agente CTO (charter/validação)...")
             cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary, spec_content=spec_understood)
+            _audit_log("cto", request_id, cto_response)
             charter_summary = cto_response.get("summary", "")
             charter_artifacts = cto_response.get("artifacts", [])
             cto_status = cto_response.get("status", "?")
@@ -819,6 +1002,7 @@ def main() -> int:
                 module="backend", engineer_proposal=engineer_summary,
                 cto_questionamentos=cto_pm_questionamentos,
             )
+            _audit_log("pm", request_id, pm_response)
             backlog_summary = pm_response.get("summary", "")
             backlog_artifacts = pm_response.get("artifacts", [])
             pm_status = pm_response.get("status", "?")
@@ -826,11 +1010,19 @@ def main() -> int:
             if project_id and storage and storage.is_enabled():
                 storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
                 for i, art in enumerate(backlog_artifacts):
-                    if isinstance(art, dict) and art.get("content"):
-                        storage.write_doc(
-                            project_id, "pm", f"artifact_{i}", art.get("content", ""),
-                            title=art.get("purpose", f"Artifact {i}"),
-                        )
+                    if not isinstance(art, dict) or not art.get("content"):
+                        continue
+                    path_val = (art.get("path") or "").strip()
+                    content = art.get("content", "")
+                    title = art.get("purpose", f"Artifact {i}")
+                    if path_val.startswith("docs/"):
+                        try:
+                            storage.write_doc_by_path(project_id, "pm", path_val[5:].lstrip("/"), content, title=title)
+                        except Exception as _e:
+                            logger.warning("[Pipeline] write_doc_by_path PM falhou, fallback: %s", _e)
+                            storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
+                    else:
+                        storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
             _post_step("O CTO está validando o backlog do PM.", request_id)
             _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
             cto_backlog_response = call_cto(
@@ -843,7 +1035,14 @@ def main() -> int:
                 _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
                 break
             if pm_round == max_cto_pm_rounds:
-                _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
+                _has_pm_artifacts = any(
+                    (a.get("path") or "").strip().startswith("docs/pm/")
+                    for a in (backlog_artifacts or []) if isinstance(a, dict)
+                )
+                if _has_pm_artifacts:
+                    _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
+                else:
+                    _post_step("Máximo de rodadas CTO↔PM atingido. PM não entregou artefatos formais (docs/pm/); usando resumo disponível.", request_id)
                 break
             cto_pm_questionamentos = cto_backlog_response.get("summary", "") or _content_for_doc(cto_backlog_response)
             _post_step("O CTO enviou ajustes ao PM. Nova rodada.", request_id)
@@ -905,6 +1104,8 @@ def main() -> int:
         devops_summary = ""
 
         if run_full_stack:
+            dev_artifacts: list = []
+            dev_code_refs: list = []
             _post_step(
                 "O Dev está recebendo o backlog e o charter para gerar a implementação e evidências.",
                 request_id,
@@ -916,6 +1117,7 @@ def main() -> int:
                 dev_summary = dev_response.get("summary", "")
                 dev_status = dev_response.get("status", "?")
                 dev_artifacts = dev_response.get("artifacts", [])
+                dev_code_refs = [a.get("path") for a in dev_artifacts if isinstance(a, dict) and a.get("path")]
                 logger.info("[Pipeline] Dev respondeu (status: %s)", dev_status)
                 _post_step(
                     f"O Dev concluiu. Status: {dev_status}. Resumo: {dev_summary[:150]}...",
@@ -954,7 +1156,10 @@ def main() -> int:
             _post_agent_working("qa", "O QA está validando artefatos e gerando relatório de qualidade.", request_id)
             logger.info("[Pipeline] Chamando agente QA...")
             try:
-                qa_response = call_qa(spec_ref, charter_summary, backlog_summary, dev_summary, request_id)
+                qa_response = call_qa(
+                    spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
+                    task_id=None, task="", code_refs=dev_code_refs, existing_artifacts=dev_artifacts,
+                )
                 qa_summary = qa_response.get("summary", "")
                 qa_status = qa_response.get("status", "?")
                 qa_artifacts = qa_response.get("artifacts", [])
@@ -1055,7 +1260,7 @@ def main() -> int:
         )
         logger.info("[Pipeline] Estado persistido em orchestrator/state/current_project.json")
 
-        completed_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        completed_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         _patch_project({
             "status": "completed",
             "completed_at": completed_at_iso,
@@ -1096,7 +1301,7 @@ def main() -> int:
         error_info = _extract_error_info(e)
         human_msg = error_info.get("human_message", f"Erro no pipeline: {e}")
         _post_error(human_msg, request_id, e)
-        completed_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        completed_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         _patch_project({"status": "failed", "completed_at": completed_at_iso})
         raise
 

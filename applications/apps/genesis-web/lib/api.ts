@@ -1,3 +1,8 @@
+/**
+ * URL base da API. No browser usa NEXT_PUBLIC_API_BASE_URL ou localhost:3000.
+ * No SSR (Docker) usa "http://api:3000" (nome do serviço no compose).
+ * Para E2E local: API em :3000, portal em :3001; defina NEXT_PUBLIC_API_BASE_URL=http://localhost:3000.
+ */
 const BASE =
   typeof window !== "undefined"
     ? (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3000")

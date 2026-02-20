@@ -29,7 +29,8 @@
 
 ### Runner e pipeline — Fase 4 (fluxo V2)
 - **Runner** ([orchestrator/runner.py](../../applications/orchestrator/runner.py)): com API e `PROJECT_ID`, executa **fluxo V2**. (1) **CTO spec review**: usa [PRODUCT_SPEC_TEMPLATE](../spec/PRODUCT_SPEC_TEMPLATE.md), converte/valida a spec e grava em docs. (2) **Loop CTO↔Engineer** (max `MAX_CTO_ENGINEER_ROUNDS`): Engineer devolve 1+ .md; CTO valida; saída = Charter. (3) **Loop CTO↔PM** (max `MAX_CTO_PM_ROUNDS`): PM gera backlog; CTO valida; se OK, seed de tarefas e **Monitor Loop**. (4) **Monitor Loop**: aciona Dev, QA ou DevOps; Dev grava código em `<project_id>/apps/`; DevOps em `<project_id>/project/`; não aciona DevOps se task DONE por max QA rework. **Parada**: usuário aceita ou SIGTERM. Sem API: fluxo sequencial. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md), [AGENTS_AND_LLM_FLOW.md](../docs/AGENTS_AND_LLM_FLOW.md).
-- **Testes**: API (Vitest — login, projects, upload spec); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh).
+- **Blueprint V2 REV2** ([BLUEPRINT_ZENTRIZ_GENESIS_AGENTS_FUNCTIONAL_PIPELINE_V2_REV2.md](../docs/BLUEPRINT_ZENTRIZ_GENESIS_AGENTS_FUNCTIONAL_PIPELINE_V2_REV2.md)): contratos ([AGENT_PROTOCOL.md](../../applications/contracts/AGENT_PROTOCOL.md)), validação/repair/path policy ([envelope.py](../../applications/orchestrator/envelope.py)), storage resiliente (project_id obrigatório, atômico, locks, [project_storage.py](../../applications/orchestrator/project_storage.py)), prompts executáveis (Spec Intake CTO, artefatos mínimos por agente), runner com audit trail e modelo por contexto, testes em [orchestrator/tests/test_envelope.py](../../applications/orchestrator/tests/test_envelope.py) e [test_project_storage.py](../../applications/orchestrator/tests/test_project_storage.py).
+- **Testes**: API (Vitest); conversor (pytest); smoke test em [tests/smoke/api_smoke_test.sh](../../project/tests/smoke/api_smoke_test.sh); unit envelope e project_storage (pytest a partir de `applications/`).
 - **Docs**: DEPLOYMENT e API_CONTRACT atualizados com fluxo de spec e referência a SPEC_SUBMISSION_AND_FORMATS.
 
 ---
@@ -91,6 +92,8 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 | Prontidão E2E e código em project/ | [docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md](../docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md) |
 | **Plano Pipeline V2 (fluxo autônomo)** | [docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../docs/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md) |
 | **Extensão: IA real e paths (spec template, apps/)** | [docs/PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md) |
+| **Blueprint V2 REV2 (agentes funcionais, contratos, resiliência)** | [docs/BLUEPRINT_ZENTRIZ_GENESIS_AGENTS_FUNCTIONAL_PIPELINE_V2_REV2.md](../docs/BLUEPRINT_ZENTRIZ_GENESIS_AGENTS_FUNCTIONAL_PIPELINE_V2_REV2.md) |
+| **Contrato operacional (SSOT executável)** | [contracts/AGENT_PROTOCOL.md](../../applications/contracts/AGENT_PROTOCOL.md) |
 | Troubleshooting pipeline | [docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md) |
 | API e usuários       | [services/api-node/README.md](../../applications/services/api-node/README.md) |
 | Contrato da API      | [docs/API_CONTRACT.md](../docs/API_CONTRACT.md) |
@@ -130,7 +133,7 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - **Bind mount no compose**: dentro do container `PROJECT_FILES_ROOT` é sempre `/project-files` (fixo no docker-compose.yml). O compose monta `${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files` em api e runner — assim os artefatos gravados pelo runner aparecem no host (ex. `/Users/mac/zentriz-files/<project_id>/docs/`).
 - **.env**: usar `HOST_PROJECT_FILES_ROOT=/Users/mac/zentriz-files` (pasta no host). Não usar mais `PROJECT_FILES_ROOT` no .env para Docker.
 - **Deploy**: `deploy-docker.sh` garante que o diretório de artefatos no host exista (`mkdir -p`) antes do up.
-- **Estrutura de artefatos**: `<project_id>/docs/` (documentos dos agentes), `<project_id>/apps/` (código gerado pelo Dev), `<project_id>/project/` (infra/DevOps). Paths resilientes: `get_project_root` rejeita `project_id` vazio; `write_apps_artifact` para Dev. Ver [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md).
+- **Estrutura de artefatos**: `<project_id>/docs/` (documentos dos agentes), `<project_id>/apps/` (código gerado pelo Dev), `<project_id>/project/` (infra/DevOps). Path policy (Blueprint): `artifact.path` com prefixo `docs/`, `project/` ou `apps/`; bloqueio de path traversal. Runner chama `ensure_project_dirs(project_id)` no início; storage exige `project_id`, escrita atômica e lock por projeto. Ver [PIPELINE_V2_IA_REAL_AND_PATHS.md](../docs/PIPELINE_V2_IA_REAL_AND_PATHS.md) e [AGENT_PROTOCOL.md](../../applications/contracts/AGENT_PROTOCOL.md).
 
 ### Troubleshooting
 - **[docs/PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md)**: fluxo esperado, cenários (botão não aparece, sem spec, runner não configurado, 202 mas sem diálogo), comandos de logs, seção "Reiniciar/Iniciar sem movimentação", checklist por projeto.
@@ -139,10 +142,19 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - Módulos renomeados: `dev_backend`→`dev`, `pm_backend`→`pm`, `qa_backend`→`qa`, `monitor_backend`→`monitor`, `devops_docker`→`devops`; `cto_agent`→`cto`, `engineer_agent`→`engineer`.
 - Endpoints no serviço agents: `POST /invoke/engineer`, `/invoke/cto`, `/invoke/pm`, `/invoke/dev`, `/invoke/qa`, `/invoke/monitor`, `/invoke/devops`. System prompt por `skill_path` ou default.
 
+### Blueprint V2 REV2 — Agentes realmente funcionais (2026-02-20)
+- **Contratos e validação**: [contracts/AGENT_PROTOCOL.md](../../applications/contracts/AGENT_PROTOCOL.md) centraliza path policy, ResponseEnvelope e artefatos mínimos por agente. [orchestrator/envelope.py](../../applications/orchestrator/envelope.py): `sanitize_artifact_path` (bloqueia `..`, absolutos, `~`), `validate_response_envelope`, `parse_response_envelope`, `repair_prompt()`, `filter_artifacts_by_path_policy`.
+- **Storage resiliente**: [orchestrator/project_storage.py](../../applications/orchestrator/project_storage.py) exige `project_id` em `write_doc`/`write_project_artifact`/`write_apps_artifact`; escrita atômica (temp + rename); lock por `project_id`; `ensure_project_dirs(project_id)` garante docs/, project/, apps/.
+- **Prompts executáveis**: Todos os SYSTEM_PROMPT seguem o template com (1) **seção 0 AGENT CONTRACT** (YAML: name, variant, mission, communicates_with, paths, quality_gates_global, required_artifacts_by_mode); (2) **protocolo compartilhado** incluído via `<!-- INCLUDE: SYSTEM_PROMPT_PROTOCOL_SHARED -->` (contracts/SYSTEM_PROMPT_PROTOCOL_SHARED.md: ROLE, INPUT/OUTPUT contract, path policy, anti-prompt-injection, failure behavior); (3) **MODE SPECS** por agente (modos, artefatos obrigatórios, gates); (4) **GOLDEN EXAMPLES**. CTO com Spec Intake; Engineer 3 docs em `docs/engineer/`; PM backlog em `docs/pm/<squad>/`; Dev artefatos em `apps/`; QA QA_PASS/QA_FAIL e `docs/qa/QA_REPORT_<task_id>.md`; Monitor state machine em `docs/monitor/`; DevOps em `project/` e `docs/devops/RUNBOOK.md`.
+- **Runner E2E**: no início chama `ensure_project_dirs(project_id)`; persiste artefatos do Dev/DevOps após `filter_artifacts_by_path_policy` (prefixos `apps/` e `project/` tratados); **audit trail** `_audit_log(agent, request_id, response)` após cada agente; [agents/runtime.py](../../applications/orchestrator/agents/runtime.py) usa `parse_response_envelope` e seleção de modelo por contexto (`CLAUDE_MODEL_SPEC`, `CLAUDE_MODEL_CODE`, `PIPELINE_LLM_MODEL`).
+- **Testes**: [orchestrator/tests/test_envelope.py](../../applications/orchestrator/tests/test_envelope.py) (validator, sanitizer, parse, filter, repair_prompt); [orchestrator/tests/test_project_storage.py](../../applications/orchestrator/tests/test_project_storage.py) (project_id obrigatório, ensure_project_dirs, path traversal bloqueado). Rodar de `applications/`: `python -m pytest orchestrator/tests/test_envelope.py orchestrator/tests/test_project_storage.py -v`.
+
 ### Arquivos principais
 - API pipeline: `applications/services/api-node/src/routes/pipeline.ts`
 - Schema e migration owner_role: `applications/services/api-node/src/db/schema.sql`
-- Runner: `applications/orchestrator/runner.py` (fluxo V2 + Monitor Loop, _seed_tasks com DEV_BACKEND)
+- Runner: `applications/orchestrator/runner.py` (fluxo V2 + Monitor Loop, ensure_project_dirs, audit trail, path policy na persistência)
+- Envelope e validação: `applications/orchestrator/envelope.py`
+- Contrato operacional: `applications/contracts/AGENT_PROTOCOL.md`
 - Runner service: `applications/orchestrator/runner_server.py` (POST /run, valida spec path)
 - Frontend projeto: `applications/apps/genesis-web/app/(dashboard)/projects/[id]/page.tsx`
 - Store: `applications/apps/genesis-web/stores/projectsStore.ts`
@@ -157,8 +169,8 @@ Variáveis: [.env](../../.env) (copiar de [.env.example](../../.env.example)); v
 - **DevOps após QA_FAIL**: Se uma tarefa foi marcada DONE por "máximo de reworks" do QA (não aprovada), o Monitor **não** aciona mais o DevOps; publica no diálogo o motivo e encerra essa linha. Ver [PIPELINE_TROUBLESHOOTING.md](../docs/PIPELINE_TROUBLESHOOTING.md) §6.
 
 ### Repo
-- **Último estado**: fluxo V2 com CTO spec review (PRODUCT_SPEC_TEMPLATE), loop CTO↔Engineer, loop CTO↔PM (validação de backlog), pasta `apps/` para código do Dev, prompts CTO/Engineer/Dev/QA alinhados à extensão IA real (PIPELINE_V2_IA_REAL_AND_PATHS). Variáveis: `MAX_CTO_ENGINEER_ROUNDS`, `MAX_CTO_PM_ROUNDS`, `CLAUDE_MODEL`.
+- **Último estado**: Blueprint V2 REV2 implementado (Fases 1–5): contratos (AGENT_PROTOCOL, envelope validator/repair/path policy), storage resiliente (project_id obrigatório, atômico, locks, ensure_project_dirs), prompts executáveis com Spec Intake no CTO e artefatos mínimos por agente, runner com audit trail e modelo por contexto, testes unit (envelope + project_storage). Fluxo V2 inalterado; variáveis: `MAX_CTO_ENGINEER_ROUNDS`, `MAX_CTO_PM_ROUNDS`, `CLAUDE_MODEL`, `CLAUDE_MODEL_SPEC`, `CLAUDE_MODEL_CODE`, `PIPELINE_LLM_MODEL`.
 
 ---
 
-*Criado em 2026-02-17 — Zentriz Genesis. Atualize quando houver mudanças relevantes no estado do projeto. Seção 6 atualizada em 2026-02-19.*
+*Criado em 2026-02-17 — Zentriz Genesis. Atualize quando houver mudanças relevantes no estado do projeto. Seção 6 atualizada em 2026-02-20.*

@@ -87,7 +87,7 @@ export default function SpecPage() {
         Enviar spec ao CTO
       </Typography>
       <Typography color="text.secondary" sx={{ mb: 2 }}>
-        Envie um ou mais arquivos de especificação para iniciar o fluxo CTO → PM → Dev/QA/DevOps.
+        Envie um ou mais arquivos de especificação para iniciar o pipeline: Spec → CTO → Engineer → PM → Dev/QA/DevOps.
         Formatos aceitos: <strong>.md</strong> (preferencial), .txt, .doc, .docx, .pdf.
       </Typography>
 
