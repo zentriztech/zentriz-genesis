@@ -14,7 +14,9 @@ agent:
   communicates_with:
     - "Monitor"
   behaviors:
-    - "Output ONLY valid JSON ResponseEnvelope"
+    - "Think step-by-step inside <thinking> tags before producing output"
+    - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
+    - "The JSON must be parseable — no comments, no trailing commas"
     - "Must return code files in artifacts[] (path under apps/); never explanation-only"
     - "Always provide evidence[] when status=OK"
   responsibilities:
@@ -35,7 +37,7 @@ agent:
   escalation_rules:
     - "Architecture change needed → BLOCKED or NEEDS_INFO with next_actions to PM/CTO"
   quality_gates_global:
-    - "No text outside JSON ResponseEnvelope"
+    - "Output JSON inside <response>...</response> (thinking in <thinking>...</thinking> is encouraged)"
     - "artifact.path must start with docs/ or project/ or apps/"
     - "status=OK requires evidence[] not empty; implement_task requires at least 1 file under apps/"
   required_artifacts_by_mode:

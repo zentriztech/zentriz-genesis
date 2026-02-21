@@ -76,6 +76,55 @@ def test_validate_response_artifacts_path_blocked():
     assert any("path" in e or "bloqueado" in e.lower() for e in errs)
 
 
+# --- _extract_double_quoted / resilient_json_parse (LEI 4) ---
+
+
+def test_extract_double_quoted_simple():
+    from orchestrator.envelope import _extract_double_quoted
+    s = '"hello"'
+    val, end = _extract_double_quoted(s, 0)
+    assert val == "hello"
+    assert end == 7
+
+
+def test_extract_double_quoted_with_escapes():
+    from orchestrator.envelope import _extract_double_quoted
+    s = r'"say \"hi\" and \n"'
+    val, end = _extract_double_quoted(s, 0)
+    assert "hi" in val or "\\" in val
+    assert end == len(s)
+
+
+def test_resilient_json_parse_tentativa1_direct():
+    from orchestrator.envelope import resilient_json_parse
+    raw = '{"status":"OK","summary":"x","artifacts":[],"evidence":[{"ref":"a"}],"next_actions":{}}'
+    data, errs = resilient_json_parse(raw, "req-1")
+    assert data["status"] == "OK"
+    assert data["summary"] == "x"
+    assert errs == []
+
+
+def test_resilient_json_parse_with_content_escaped():
+    """LEI 4: JSON válido com content contendo aspas escapadas é parseado pela Tentativa 1."""
+    from orchestrator.envelope import resilient_json_parse
+    raw = '{"status":"OK","summary":"x","artifacts":[{"path":"docs/a.md","content":"const x = \\"hello\\";\\n"}],"evidence":[],"next_actions":{}}'
+    data, errs = resilient_json_parse(raw, "req-2")
+    assert data["status"] == "OK"
+    arts = data.get("artifacts") or []
+    assert len(arts) == 1
+    assert "hello" in arts[0].get("content", "")
+    assert errs == []
+
+
+def test_resilient_json_parse_tentativa3_fallback():
+    from orchestrator.envelope import resilient_json_parse
+    raw = '{"status":"OK","artifacts":[{"path":"docs/x.md","content": invalid}]}'
+    data, errs = resilient_json_parse(raw, "req-3")
+    assert data["status"] == "FAIL"
+    assert "escaping" in data["summary"].lower() or "inválido" in data["summary"].lower()
+    assert len(errs) >= 1
+
+
 # --- parse_response_envelope ---
 
 def test_parse_response_valid_json():
@@ -105,6 +154,22 @@ def test_parse_response_invalid_json_returns_fail_envelope():
     assert len(errs) >= 1
 
 
+def test_parse_response_extracts_json_from_response_tags():
+    """AGENT_LLM_COMMUNICATION_ANALYSIS: JSON pode vir dentro de <response>...</response>."""
+    from orchestrator.envelope import parse_response_envelope
+    raw = """<thinking>
+Analisando a spec...
+</thinking>
+
+<response>
+{"status":"OK","summary":"Spec convertida","artifacts":[],"evidence":[{"ref":"x"}],"next_actions":{}}
+</response>"""
+    data, errs = parse_response_envelope(raw, "req-response-tags")
+    assert data["status"] == "OK"
+    assert data["summary"] == "Spec convertida"
+    assert len(errs) == 0
+
+
 # --- filter_artifacts_by_path_policy ---
 
 def test_filter_artifacts_keeps_allowed():
@@ -131,6 +196,51 @@ def test_filter_artifacts_removes_blocked():
 
 
 # --- repair_prompt ---
+
+def test_validate_response_quality_ok():
+    from orchestrator.envelope import validate_response_quality
+    r = {"status": "OK", "summary": "Done", "artifacts": [{"path": "docs/x.md", "content": "x" * 150}], "evidence": [{}]}
+    ok, errs = validate_response_quality("cto", r)
+    assert ok is True
+    assert len(errs) == 0
+
+
+def test_validate_response_quality_fail_short_artifact():
+    from orchestrator.envelope import validate_response_quality
+    r = {"status": "OK", "summary": "Done", "artifacts": [{"path": "docs/x.md", "content": "short"}], "evidence": [{}]}
+    ok, errs = validate_response_quality("cto", r)
+    assert ok is False
+    assert any("muito curto" in e for e in errs)
+
+
+def test_validate_response_quality_fail_placeholder():
+    from orchestrator.envelope import validate_response_quality
+    r = {"status": "OK", "summary": "Done", "artifacts": [{"path": "apps/x.js", "content": "// TODO implement"}], "evidence": [{}]}
+    ok, errs = validate_response_quality("dev", r)
+    assert ok is False
+    assert any("TODO" in e for e in errs)
+
+
+def test_extract_thinking():
+    from orchestrator.envelope import extract_thinking
+    raw = """<thinking>
+Analisando a spec...
+Vou mapear FR-01 para vitrine.
+</thinking>
+<response>
+{"status":"OK","summary":"Ok","artifacts":[],"evidence":[],"next_actions":{}}
+</response>"""
+    out = extract_thinking(raw)
+    assert "Analisando a spec" in out
+    assert "FR-01" in out
+    assert "vitrine" in out
+
+
+def test_extract_thinking_empty_when_no_tags():
+    from orchestrator.envelope import extract_thinking
+    assert extract_thinking('{"status":"OK"}') == ""
+    assert extract_thinking("") == ""
+
 
 def test_repair_prompt_non_empty():
     from orchestrator.envelope import repair_prompt

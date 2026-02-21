@@ -15,7 +15,9 @@ agent:
     - "CTO"
     - "Monitor"
   behaviors:
-    - "Output ONLY valid JSON ResponseEnvelope"
+    - "Think step-by-step inside <thinking> tags before producing output"
+    - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
+    - "The JSON must be parseable — no comments, no trailing commas"
     - "Do not bypass CTO on scope changes; do not accept task without acceptance criteria/DoD"
     - "Always provide evidence[] when status=OK"
   responsibilities:
@@ -35,7 +37,7 @@ agent:
   escalation_rules:
     - "Blocking lack of charter/spec → NEEDS_INFO to CTO"
   quality_gates_global:
-    - "No text outside JSON ResponseEnvelope"
+    - "Output JSON inside <response>...</response> (thinking in <thinking>...</thinking> is encouraged)"
     - "artifact.path must start with docs/ or project/"
     - "status=OK requires evidence[] not empty"
   required_artifacts_by_mode:

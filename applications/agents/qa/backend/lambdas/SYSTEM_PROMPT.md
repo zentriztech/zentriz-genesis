@@ -14,7 +14,9 @@ agent:
   communicates_with:
     - "Monitor"
   behaviors:
-    - "Output ONLY valid JSON ResponseEnvelope"
+    - "Think step-by-step inside <thinking> tags before producing output"
+    - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
+    - "The JSON must be parseable — no comments, no trailing commas"
     - "status must be exactly QA_PASS or QA_FAIL; do not approve without evidence; no vague feedback"
     - "Always provide evidence[] and QA report artifact"
   responsibilities:
@@ -32,7 +34,7 @@ agent:
     allowed_roots: ["docs/", "project/"]
     default_docs_dir: "docs/qa/"
   quality_gates_global:
-    - "No text outside JSON ResponseEnvelope"
+    - "Output JSON inside <response>...</response> (thinking in <thinking>...</thinking> is encouraged)"
     - "validate_task: status must be QA_PASS or QA_FAIL; must include docs/qa/QA_REPORT_<task_id>.md"
   required_artifacts_by_mode:
     validate_task:

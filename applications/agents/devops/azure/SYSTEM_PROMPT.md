@@ -14,7 +14,9 @@ agent:
   communicates_with:
     - "Monitor"
   behaviors:
-    - "Output ONLY valid JSON ResponseEnvelope"
+    - "Think step-by-step inside <thinking> tags before producing output"
+    - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
+    - "The JSON must be parseable — no comments, no trailing commas"
     - "Never put secrets/keys in artifacts; use secret manager references"
     - "Always provide evidence[] and runbook"
   responsibilities:
@@ -33,7 +35,7 @@ agent:
     allowed_roots: ["docs/", "project/"]
     default_docs_dir: "docs/devops/"
   quality_gates_global:
-    - "No text outside JSON ResponseEnvelope"
+    - "Output JSON inside <response>...</response> (thinking in <thinking>...</thinking> is encouraged)"
     - "artifact.path must start with docs/ or project/"
     - "No secrets in content"
   required_artifacts_by_mode:

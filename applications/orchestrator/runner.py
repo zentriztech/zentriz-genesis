@@ -77,14 +77,25 @@ def _agents_root() -> Path:
 # Chamadas aos agentes
 # ---------------------------------------------------------------------------
 
-def call_engineer(spec_ref: str, spec_content: str, request_id: str, cto_questionamentos: str | None = None) -> dict:
-    inputs = {
-        "spec_ref": spec_ref,
-        "product_spec": spec_content[:15000] if spec_content else "",
-        "constraints": ["spec-driven", "paths-resilient", "no-invent"],
-    }
-    if cto_questionamentos:
-        inputs["cto_questionamentos"] = cto_questionamentos
+def call_engineer(
+    spec_ref: str,
+    spec_content: str,
+    request_id: str,
+    cto_questionamentos: str | None = None,
+    pipeline_ctx: "PipelineContext | None" = None,
+) -> dict:
+    if pipeline_ctx:
+        inputs = pipeline_ctx.build_inputs_for_engineer(cto_questionamentos)
+        if spec_content:
+            inputs["product_spec"] = spec_content[:15000]
+    else:
+        inputs = {
+            "spec_ref": spec_ref,
+            "product_spec": spec_content[:15000] if spec_content else "",
+            "constraints": ["spec-driven", "paths-resilient", "no-invent"],
+        }
+        if cto_questionamentos:
+            inputs["cto_questionamentos"] = cto_questionamentos
     message = _build_message_envelope(
         request_id, "Engineer", "generic", "generate_engineering_docs",
         task_id=None, task="Gerar proposta técnica (stacks, squads, dependências).",
@@ -115,24 +126,39 @@ def call_cto(
     spec_template: str = "",
     backlog_summary: str = "",
     validate_backlog_only: bool = False,
+    pipeline_ctx: "PipelineContext | None" = None,
 ) -> dict:
-    inputs = {"spec_ref": spec_ref, "constraints": ["spec-driven", "paths-resilient", "no-invent"]}
-    if engineer_proposal:
-        inputs["engineer_stack_proposal"] = engineer_proposal
-    if spec_content:
-        inputs["spec_raw"] = spec_content[:20000]
-        inputs["product_spec"] = spec_content[:20000]
-    if spec_template:
-        inputs["spec_template"] = spec_template[:15000]
-    if backlog_summary:
-        inputs["backlog_summary"] = backlog_summary[:15000]
     if validate_backlog_only:
-        inputs["validate_backlog_only"] = True
         mode = "validate_backlog"
     elif engineer_proposal:
         mode = "validate_engineer_docs" if not backlog_summary else "charter_and_proposal"
     else:
         mode = "spec_intake_and_normalize"
+
+    if pipeline_ctx:
+        inputs = pipeline_ctx.build_inputs_for_cto(mode, backlog_summary, validate_backlog_only)
+        if engineer_proposal:
+            inputs["engineer_stack_proposal"] = engineer_proposal[:15000]
+        if spec_content:
+            inputs["spec_raw"] = spec_content[:20000]
+            inputs["product_spec"] = spec_content[:20000]
+        if spec_template:
+            inputs["spec_template"] = spec_template[:15000]
+        if backlog_summary:
+            inputs["backlog_summary"] = backlog_summary[:15000]
+    else:
+        inputs = {"spec_ref": spec_ref, "constraints": ["spec-driven", "paths-resilient", "no-invent"]}
+        if engineer_proposal:
+            inputs["engineer_stack_proposal"] = engineer_proposal
+        if spec_content:
+            inputs["spec_raw"] = spec_content[:20000]
+            inputs["product_spec"] = spec_content[:20000]
+        if spec_template:
+            inputs["spec_template"] = spec_template[:15000]
+        if backlog_summary:
+            inputs["backlog_summary"] = backlog_summary[:15000]
+        if validate_backlog_only:
+            inputs["validate_backlog_only"] = True
     message = _build_message_envelope(
         request_id, "CTO", "generic", mode, task_id=None, task="",
         inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
@@ -145,18 +171,35 @@ def call_cto(
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
-def call_pm(spec_ref: str, charter_summary: str, request_id: str, module: str = "backend", engineer_proposal: str = "", cto_questionamentos: str | None = None) -> dict:
-    inputs = {
-        "spec_ref": spec_ref,
-        "charter": charter_summary,
-        "charter_summary": charter_summary,
-        "module": module,
-        "constraints": ["spec-driven", "paths-resilient", "no-invent"],
-    }
-    if engineer_proposal:
-        inputs["engineer_proposal"] = engineer_proposal
-    if cto_questionamentos:
-        inputs["cto_questionamentos"] = cto_questionamentos
+def call_pm(
+    spec_ref: str,
+    charter_summary: str,
+    request_id: str,
+    module: str = "backend",
+    engineer_proposal: str = "",
+    cto_questionamentos: str | None = None,
+    pipeline_ctx: "PipelineContext | None" = None,
+) -> dict:
+    if pipeline_ctx:
+        pipeline_ctx.current_module = module
+        inputs = pipeline_ctx.build_inputs_for_pm(cto_questionamentos)
+        if engineer_proposal:
+            inputs["engineer_proposal"] = engineer_proposal[:15000]
+        if charter_summary:
+            inputs["charter"] = charter_summary[:15000]
+            inputs["charter_summary"] = charter_summary[:15000]
+    else:
+        inputs = {
+            "spec_ref": spec_ref,
+            "charter": charter_summary,
+            "charter_summary": charter_summary,
+            "module": module,
+            "constraints": ["spec-driven", "paths-resilient", "no-invent"],
+        }
+        if engineer_proposal:
+            inputs["engineer_proposal"] = engineer_proposal
+        if cto_questionamentos:
+            inputs["cto_questionamentos"] = cto_questionamentos
     message = _build_message_envelope(
         request_id, "PM", module, "generate_backlog",
         task_id=None, task=f"Gerar backlog da squad {module}.",
@@ -179,6 +222,9 @@ def call_dev(
     task: str = "",
     code_refs: list | None = None,
     existing_artifacts: list | None = None,
+    task_dict: dict | None = None,
+    dependency_code: dict | None = None,
+    pipeline_ctx: "PipelineContext | None" = None,
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -190,10 +236,22 @@ def call_dev(
     }
     if code_refs:
         inputs["code_refs"] = code_refs
+    if task_dict:
+        inputs["current_task"] = {
+            "id": task_dict.get("taskId") or task_dict.get("task_id") or task_id,
+            "title": task_dict.get("title") or task_dict.get("name") or "",
+            "description": task_dict.get("description") or task or "",
+            "acceptance_criteria": task_dict.get("acceptance_criteria") or task_dict.get("acceptanceCriteria") or [],
+            "fr_ref": task_dict.get("fr_ref") or task_dict.get("frRef") or "",
+        }
+    if dependency_code:
+        inputs["dependency_code"] = dependency_code
+    if pipeline_ctx:
+        inputs["completed_summary"] = [{"task_id": t, "status": "done"} for t in pipeline_ctx.completed_tasks]
     message = _build_message_envelope(
         request_id, "Dev", "backend", "implement_task",
         task_id=task_id,
-        task=task or "Implementar tarefa conforme backlog e spec.",
+        task=task or (task_dict.get("description") if task_dict else "") or "Implementar tarefa conforme backlog e spec.",
         inputs=inputs,
         existing_artifacts=existing_artifacts or [],
         limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": 120},
@@ -416,6 +474,15 @@ def _content_for_doc(response: dict) -> str:
     return raw
 
 
+def _validate_response_quality(agent: str, response: dict) -> tuple[bool, list[str]]:
+    """Delegate para envelope.validate_response_quality (AGENT_LLM_COMMUNICATION_ANALYSIS)."""
+    try:
+        from orchestrator.envelope import validate_response_quality as _v
+        return _v(agent, response)
+    except ImportError:
+        return True, []
+
+
 def _is_qa_pass(qa_response: dict) -> bool:
     """Considera QA como aprovado se status ou summary indicarem sucesso (evita QA_FAIL infinito por variação do LLM)."""
     status = (qa_response.get("status") or "").strip().lower()
@@ -579,6 +646,7 @@ def _run_monitor_loop(
     charter_summary: str,
     backlog_summary: str,
     request_id: str,
+    pipeline_ctx: "PipelineContext | None" = None,
 ) -> None:
     global _shutdown_requested
     signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -605,6 +673,13 @@ def _run_monitor_loop(
             _post_step(f"Monitor Loop encerrado: status do projeto é '{status}'.", request_id)
             break
         tasks = _get_tasks(project_id)
+        try:
+            from orchestrator.pipeline_context import validate_backlog_tasks_max_files
+            lei8_issues = validate_backlog_tasks_max_files(tasks)
+            if lei8_issues:
+                logger.warning("[LEI 8] Tasks com mais de 3 arquivos estimados: %s", lei8_issues[:5])
+        except Exception:
+            pass
         waiting_review = [t for t in tasks if t.get("status") == "WAITING_REVIEW"]
         need_qa = len(waiting_review) > 0
         need_dev = any(
@@ -641,6 +716,12 @@ def _run_monitor_loop(
                     _update_task(project_id, task_id, status=new_status)
                     _update_task(project_id, task_id, status="DONE")
                     qa_fail_count[task_id] = 0
+                    if pipeline_ctx and last_dev_artifacts:
+                        for art in last_dev_artifacts:
+                            if isinstance(art, dict) and art.get("path") and art.get("content"):
+                                path_val = (art.get("path") or "").strip()
+                                if path_val.startswith("apps/") or path_val.startswith("docs/"):
+                                    pipeline_ctx.register_artifact(path_val, art.get("content", ""), task_id)
                     _post_step(f"QA concluiu. Status: {qa_status}. Task aprovada (DONE).", request_id)
                 else:
                     current_fails = qa_fail_count.get(task_id, 0) + 1
@@ -682,9 +763,15 @@ def _run_monitor_loop(
                 _post_step("O Monitor acionou o Dev para implementar ou rework.", request_id)
                 _post_agent_working("dev", "O Dev está implementando ou corrigindo a tarefa.", request_id)
                 try:
+                    dep_code = None
+                    if pipeline_ctx:
+                        depends_on = dev_task.get("depends_on_files") or dev_task.get("dependsOnFiles") or []
+                        dep_code = pipeline_ctx.get_dependency_code(depends_on)
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
-                        task_id=task_id, task=task_desc, code_refs=[], existing_artifacts=[],
+                        task_id=task_id, task=task_desc, code_refs=[],
+                        existing_artifacts=last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else [],
+                        task_dict=dev_task, dependency_code=dep_code, pipeline_ctx=pipeline_ctx,
                     )
                     _audit_log("dev", request_id, dev_response)
                     dev_summary = dev_response.get("summary", "")
@@ -878,6 +965,34 @@ def main() -> int:
     logger.info("[Pipeline] Lendo spec: %s", spec_ref)
     spec_content = load_spec(spec_path)
 
+    spec_template_content = _load_spec_template()
+    # LEI 11: tentar restaurar checkpoint; senão criar contexto novo
+    pipeline_ctx = None
+    try:
+        from orchestrator.pipeline_context import PipelineContext
+        ensure_state_dir()
+        loaded = PipelineContext.load_checkpoint(STATE_DIR, project_id or "default")
+        if loaded is not None:
+            pipeline_ctx = loaded
+            logger.info("[Pipeline] Checkpoint restaurado (LEI 11): step=%s, retomando a partir da próxima fase.", pipeline_ctx.current_step)
+        else:
+            pipeline_ctx = PipelineContext(project_id or "default")
+            pipeline_ctx.set_spec_raw(spec_content)
+            if spec_template_content:
+                pipeline_ctx.set_product_spec_template(spec_template_content)
+    except ImportError:
+        pipeline_ctx = None
+
+    spec_understood = spec_content
+    charter_summary = ""
+    engineer_summary = ""
+    backlog_summary = ""
+    if pipeline_ctx:
+        spec_understood = pipeline_ctx.product_spec or spec_content
+        charter_summary = pipeline_ctx.charter or ""
+        engineer_summary = pipeline_ctx.engineer_proposal or ""
+        backlog_summary = pipeline_ctx.backlog or ""
+
     # Persistir spec em project_id/docs quando PROJECT_FILES_ROOT estiver definido
     if project_id and storage and storage.is_enabled():
         storage.write_spec_doc(project_id, spec_content, spec_ref.replace("/", "_").replace(".", "_")[:80])
@@ -889,95 +1004,117 @@ def main() -> int:
         request_id,
     )
 
+    cto_spec_response = {}
+    cto_response = None
+    engineer_response = None
+    charter_artifacts = []
+    backlog_artifacts = []
+    charter_path = STATE_DIR / "PROJECT_CHARTER.md"
     try:
-        # ── V2: CTO spec review (converte/entende spec, salva artefato) ──
-        _post_step(
-            "O CTO está analisando a especificação recebida (conversão para .md e entendimento do projeto).",
-            request_id,
-        )
-        _post_agent_working("cto", "O CTO está revisando e convertendo a spec para o modelo aceitável.", request_id)
-        logger.info("[Pipeline] Chamando CTO para revisão da spec (com template)...")
-        spec_template_content = _load_spec_template()
-        cto_spec_response = call_cto(
-            spec_ref, request_id, engineer_proposal="",
-            spec_content=spec_content, spec_template=spec_template_content,
-        )
-        _audit_log("cto", request_id, cto_spec_response)
-        spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
-        # Se a IA devolveu artefato com spec no formato template, usar o conteúdo do primeiro artefato
-        for art in cto_spec_response.get("artifacts", []):
-            if isinstance(art, dict) and art.get("content"):
-                spec_understood = art.get("content", "").strip() or spec_understood
-                break
-        if project_id and storage and storage.is_enabled():
-            storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
-        _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)
-
-        # ── V2: Loop CTO ↔ Engineer (max 3 rodadas) ───────────────────
-        max_cto_engineer_rounds = int(os.environ.get("MAX_CTO_ENGINEER_ROUNDS", "3"))
-        engineer_summary = ""
-        engineer_response = None
-        cto_response = None
-        charter_summary = ""
-        charter_artifacts: list = []
-
-        for round_num in range(1, max_cto_engineer_rounds + 1):
+        # ── V2: CTO spec review (LEI 11: pular se current_step >= 1) ──
+        if not pipeline_ctx or pipeline_ctx.current_step < 1:
             _post_step(
-                f"Rodada {round_num}/{max_cto_engineer_rounds}: CTO envia spec ao Engineer para proposta técnica (squads e skills).",
+                "O CTO está analisando a especificação recebida (conversão para .md e entendimento do projeto).",
                 request_id,
             )
-            _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
-            logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
-            engineer_response = call_engineer(spec_ref, spec_understood, request_id, cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None))
-            _audit_log("engineer", request_id, engineer_response)
-            engineer_summary = engineer_response.get("summary", "")
-            engineer_status = engineer_response.get("status", "?")
-            logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
-            _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
-            _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
+            _post_agent_working("cto", "O CTO está revisando e convertendo a spec para o modelo aceitável.", request_id)
+            logger.info("[Pipeline] Chamando CTO para revisão da spec (com template)...")
+            cto_spec_response = call_cto(
+                spec_ref, request_id, engineer_proposal="",
+                spec_content=spec_content, spec_template=spec_template_content,
+                pipeline_ctx=pipeline_ctx,
+            )
+            _audit_log("cto", request_id, cto_spec_response)
+            spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
+            for art in cto_spec_response.get("artifacts", []):
+                if isinstance(art, dict) and art.get("content"):
+                    spec_understood = art.get("content", "").strip() or spec_understood
+                    break
             if project_id and storage and storage.is_enabled():
-                storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
-                for i, art in enumerate(engineer_response.get("artifacts", [])):
-                    if isinstance(art, dict) and art.get("content"):
-                        name = (Path(art.get("path", "")).stem if art.get("path") else f"artifact_{i}").replace(".", "_") or f"artifact_{i}"
-                        storage.write_doc(project_id, "engineer", name, art.get("content", ""), title=art.get("purpose", name))
+                storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
+            if pipeline_ctx:
+                pipeline_ctx.set_product_spec(spec_understood)
+                pipeline_ctx.current_step = 1
+                pipeline_ctx.save_checkpoint(STATE_DIR)
+            _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)
 
-            _post_step("O CTO está validando a proposta e elaborando o Charter (ou preparando questionamentos).", request_id)
-            _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
-            logger.info("[Pipeline] Chamando agente CTO (charter/validação)...")
-            cto_response = call_cto(spec_ref, request_id, engineer_proposal=engineer_summary, spec_content=spec_understood)
-            _audit_log("cto", request_id, cto_response)
-            charter_summary = cto_response.get("summary", "")
-            charter_artifacts = cto_response.get("artifacts", [])
-            cto_status = cto_response.get("status", "?")
-            logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
-            if cto_status and str(cto_status).upper() == "OK":
-                _post_step("O CTO aprovou a proposta e finalizou o Charter. Seguindo para o PM.", request_id)
-                break
-            if round_num == max_cto_engineer_rounds:
-                _post_step("Máximo de rodadas CTO↔Engineer atingido. Usando última versão do Charter.", request_id)
-                break
-            _post_step("O CTO enviou questionamentos ao Engineer. Nova rodada.", request_id)
+        # ── V2: Loop CTO ↔ Engineer (LEI 11: pular se current_step >= 2) ───────────────────
+        max_cto_engineer_rounds = int(os.environ.get("MAX_CTO_ENGINEER_ROUNDS", "3"))
+        engineer_summary = engineer_summary or ""
+        cto_response = None
+        charter_summary = charter_summary or ""
+
+        if not pipeline_ctx or pipeline_ctx.current_step < 2:
+            for round_num in range(1, max_cto_engineer_rounds + 1):
+                _post_step(
+                    f"Rodada {round_num}/{max_cto_engineer_rounds}: CTO envia spec ao Engineer para proposta técnica (squads e skills).",
+                    request_id,
+                )
+                _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
+                logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
+                engineer_response = call_engineer(
+                    spec_ref, spec_understood, request_id,
+                    cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None),
+                    pipeline_ctx=pipeline_ctx,
+                )
+                _audit_log("engineer", request_id, engineer_response)
+                engineer_summary = engineer_response.get("summary", "")
+                engineer_status = engineer_response.get("status", "?")
+                logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
+                _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
+                _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
+                if pipeline_ctx:
+                    pipeline_ctx.set_engineer_proposal(engineer_summary)
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "engineer", "proposal", _content_for_doc(engineer_response), title="Engineer technical proposal")
+                    for i, art in enumerate(engineer_response.get("artifacts", [])):
+                        if isinstance(art, dict) and art.get("content"):
+                            name = (Path(art.get("path", "")).stem if art.get("path") else f"artifact_{i}").replace(".", "_") or f"artifact_{i}"
+                            storage.write_doc(project_id, "engineer", name, art.get("content", ""), title=art.get("purpose", name))
+
+                _post_step("O CTO está validando a proposta e elaborando o Charter (ou preparando questionamentos).", request_id)
+                _post_agent_working("cto", "O CTO está elaborando o Charter do projeto.", request_id)
+                logger.info("[Pipeline] Chamando agente CTO (charter/validação)...")
+                cto_response = call_cto(
+                    spec_ref, request_id, engineer_proposal=engineer_summary, spec_content=spec_understood,
+                    pipeline_ctx=pipeline_ctx,
+                )
+                _audit_log("cto", request_id, cto_response)
+                charter_summary = cto_response.get("summary", "")
+                charter_artifacts = cto_response.get("artifacts", [])
+                cto_status = cto_response.get("status", "?")
+                logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
+                if cto_status and str(cto_status).upper() == "OK":
+                    _post_step("O CTO aprovou a proposta e finalizou o Charter. Seguindo para o PM.", request_id)
+                    break
+                if round_num == max_cto_engineer_rounds:
+                    _post_step("Máximo de rodadas CTO↔Engineer atingido. Usando última versão do Charter.", request_id)
+                    break
+                _post_step("O CTO enviou questionamentos ao Engineer. Nova rodada.", request_id)
+
+            charter_path = STATE_DIR / "PROJECT_CHARTER.md"
+            charter_content = f"# Project Charter (gerado pelo CTO)\n\n{_content_for_doc(cto_response) or charter_summary}\n"
+            if project_id and storage and storage.is_enabled():
+                p = storage.write_doc(project_id, "cto", "charter", _content_for_doc(cto_response), title="Project Charter")
+                if p:
+                    charter_path = p
+                for i, art in enumerate(charter_artifacts):
+                    if isinstance(art, dict) and art.get("content"):
+                        storage.write_doc(
+                            project_id, "cto", f"artifact_{i}", art.get("content", ""),
+                            title=art.get("purpose", f"Artifact {i}"),
+                        )
+            if charter_summary:
+                ensure_state_dir()
+                charter_path.write_text(charter_content, encoding="utf-8")
+                logger.info("[Pipeline] Charter persistido: %s", charter_path)
+            if pipeline_ctx:
+                pipeline_ctx.set_charter(charter_summary)
+                pipeline_ctx.current_step = 2
+                pipeline_ctx.save_checkpoint(STATE_DIR)
 
         cto_status = cto_response.get("status", "?") if cto_response else "?"
         engineer_status = engineer_response.get("status", "?") if engineer_response else "?"
-
-        charter_path = STATE_DIR / "PROJECT_CHARTER.md"
-        charter_content = f"# Project Charter (gerado pelo CTO)\n\n{_content_for_doc(cto_response) or charter_summary}\n"
-        if project_id and storage and storage.is_enabled():
-            p = storage.write_doc(project_id, "cto", "charter", _content_for_doc(cto_response), title="Project Charter")
-            if p:
-                charter_path = p
-            for i, art in enumerate(charter_artifacts):
-                if isinstance(art, dict) and art.get("content"):
-                    storage.write_doc(
-                        project_id, "cto", f"artifact_{i}", art.get("content", ""),
-                        title=art.get("purpose", f"Artifact {i}"),
-                    )
-        if charter_summary:
-            ensure_state_dir()
-            charter_path.write_text(charter_content, encoding="utf-8")
-            logger.info("[Pipeline] Charter persistido: %s", charter_path)
 
         emit_event("project.created", {"spec_ref": spec_ref, "constraints": {}, "engineer_summary": engineer_summary[:300]}, request_id)
         _post_dialogue(
@@ -986,67 +1123,75 @@ def main() -> int:
             request_id,
         )
 
-        # ── Passo 3: PM + loop CTO↔PM (validação do backlog, max 3 rodadas) ──
-        max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
+        # ── Passo 3: PM + loop CTO↔PM (LEI 11: pular se current_step >= 3) ──
         pm_response = None
-        cto_pm_questionamentos: str | None = None
-        for pm_round in range(1, max_cto_pm_rounds + 1):
-            _post_step(
-                f"O PM está gerando o backlog do módulo (rodada {pm_round}/{max_cto_pm_rounds}).",
-                request_id,
-            )
-            _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-            logger.info("[Pipeline] Chamando agente PM (módulo backend, rodada %s)...", pm_round)
-            pm_response = call_pm(
-                spec_ref, charter_summary, request_id,
-                module="backend", engineer_proposal=engineer_summary,
-                cto_questionamentos=cto_pm_questionamentos,
-            )
-            _audit_log("pm", request_id, pm_response)
-            backlog_summary = pm_response.get("summary", "")
-            backlog_artifacts = pm_response.get("artifacts", [])
-            pm_status = pm_response.get("status", "?")
-            logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
-            if project_id and storage and storage.is_enabled():
-                storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
-                for i, art in enumerate(backlog_artifacts):
-                    if not isinstance(art, dict) or not art.get("content"):
-                        continue
-                    path_val = (art.get("path") or "").strip()
-                    content = art.get("content", "")
-                    title = art.get("purpose", f"Artifact {i}")
-                    if path_val.startswith("docs/"):
-                        try:
-                            storage.write_doc_by_path(project_id, "pm", path_val[5:].lstrip("/"), content, title=title)
-                        except Exception as _e:
-                            logger.warning("[Pipeline] write_doc_by_path PM falhou, fallback: %s", _e)
-                            storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
-                    else:
-                        storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
-            _post_step("O CTO está validando o backlog do PM.", request_id)
-            _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
-            cto_backlog_response = call_cto(
-                spec_ref, request_id,
-                backlog_summary=backlog_summary,
-                validate_backlog_only=True,
-            )
-            cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
-            if cto_backlog_ok:
-                _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
-                break
-            if pm_round == max_cto_pm_rounds:
-                _has_pm_artifacts = any(
-                    (a.get("path") or "").strip().startswith("docs/pm/")
-                    for a in (backlog_artifacts or []) if isinstance(a, dict)
+        pm_status = "?"
+        if not pipeline_ctx or pipeline_ctx.current_step < 3:
+            max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
+            cto_pm_questionamentos = None
+            for pm_round in range(1, max_cto_pm_rounds + 1):
+                _post_step(
+                    f"O PM está gerando o backlog do módulo (rodada {pm_round}/{max_cto_pm_rounds}).",
+                    request_id,
                 )
-                if _has_pm_artifacts:
-                    _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
-                else:
-                    _post_step("Máximo de rodadas CTO↔PM atingido. PM não entregou artefatos formais (docs/pm/); usando resumo disponível.", request_id)
-                break
-            cto_pm_questionamentos = cto_backlog_response.get("summary", "") or _content_for_doc(cto_backlog_response)
-            _post_step("O CTO enviou ajustes ao PM. Nova rodada.", request_id)
+                _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
+                logger.info("[Pipeline] Chamando agente PM (módulo backend, rodada %s)...", pm_round)
+                pm_response = call_pm(
+                    spec_ref, charter_summary, request_id,
+                    module="backend", engineer_proposal=engineer_summary,
+                    cto_questionamentos=cto_pm_questionamentos,
+                    pipeline_ctx=pipeline_ctx,
+                )
+                _audit_log("pm", request_id, pm_response)
+                backlog_summary = pm_response.get("summary", "")
+                backlog_artifacts = pm_response.get("artifacts", [])
+                pm_status = pm_response.get("status", "?")
+                logger.info("[Pipeline] PM respondeu (status: %s)", pm_status)
+                if project_id and storage and storage.is_enabled():
+                    storage.write_doc(project_id, "pm", "backlog", _content_for_doc(pm_response), title="Backlog")
+                    for i, art in enumerate(backlog_artifacts):
+                        if not isinstance(art, dict) or not art.get("content"):
+                            continue
+                        path_val = (art.get("path") or "").strip()
+                        content = art.get("content", "")
+                        title = art.get("purpose", f"Artifact {i}")
+                        if path_val.startswith("docs/"):
+                            try:
+                                storage.write_doc_by_path(project_id, "pm", path_val[5:].lstrip("/"), content, title=title)
+                            except Exception as _e:
+                                logger.warning("[Pipeline] write_doc_by_path PM falhou, fallback: %s", _e)
+                                storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
+                        else:
+                            storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
+                _post_step("O CTO está validando o backlog do PM.", request_id)
+                _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
+                cto_backlog_response = call_cto(
+                    spec_ref, request_id,
+                    backlog_summary=backlog_summary,
+                    validate_backlog_only=True,
+                    pipeline_ctx=pipeline_ctx,
+                )
+                cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
+                if cto_backlog_ok:
+                    _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
+                    break
+                if pm_round == max_cto_pm_rounds:
+                    _has_pm_artifacts = any(
+                        (a.get("path") or "").strip().startswith("docs/pm/")
+                        for a in (backlog_artifacts or []) if isinstance(a, dict)
+                    )
+                    if _has_pm_artifacts:
+                        _post_step("Máximo de rodadas CTO↔PM atingido. Usando último backlog.", request_id)
+                    else:
+                        _post_step("Máximo de rodadas CTO↔PM atingido. PM não entregou artefatos formais (docs/pm/); usando resumo disponível.", request_id)
+                    break
+                cto_pm_questionamentos = cto_backlog_response.get("summary", "") or _content_for_doc(cto_backlog_response)
+                _post_step("O CTO enviou ajustes ao PM. Nova rodada.", request_id)
 
+            if pipeline_ctx:
+                pipeline_ctx.set_backlog(backlog_summary)
+                pipeline_ctx.current_step = 3
+                pipeline_ctx.save_checkpoint(STATE_DIR)
         _post_step(
             f"O PM concluiu a geração do backlog. O módulo está planejado com tarefas e prioridades. Status: {pm_status}.",
             request_id,
@@ -1068,7 +1213,7 @@ def main() -> int:
                 _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
                 _patch_project({"status": "failed"})
             else:
-                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id)
+                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
             persist_state(
                 spec_ref=spec_ref,
                 charter={"summary": charter_summary, "artifacts": charter_artifacts},

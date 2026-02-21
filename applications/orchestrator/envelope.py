@@ -105,6 +105,36 @@ def validate_response_envelope(
     return len(errors) == 0, errors
 
 
+def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[str]]:
+    """
+    Valida qualidade mínima do output (AGENT_LLM_COMMUNICATION_ANALYSIS).
+    Retorna (ok, list_of_errors). Usado pelo runtime/runner para retry com feedback.
+    """
+    errors: list[str] = []
+    artifacts = response.get("artifacts") or []
+    status = response.get("status") or ""
+
+    for art in artifacts:
+        if not isinstance(art, dict):
+            continue
+        content = art.get("content", "")
+        path = art.get("path", "")
+        if isinstance(content, str):
+            if len(content) < 100 and status == "OK":
+                errors.append(f"artifact {path!r} muito curto ({len(content)} chars)")
+            if "..." in content or "[...]" in content:
+                errors.append(f"artifact {path!r} contém reticências/abreviações")
+            if "// TODO" in content or "// TODO " in content:
+                errors.append(f"artifact {path!r} contém // TODO")
+
+    if status == "OK" and not response.get("evidence"):
+        summary = (response.get("summary") or "").strip()
+        if len(summary) < 20:
+            errors.append("status=OK sem evidence e summary muito curto")
+
+    return len(errors) == 0, errors
+
+
 def repair_prompt() -> str:
     """Prompt padrão de reparo quando a IA falha em JSON/gates (Blueprint §10)."""
     return (
@@ -116,11 +146,40 @@ def repair_prompt() -> str:
     )
 
 
+def extract_thinking(text: str) -> str:
+    """Extrai o raciocínio do Claude de dentro de <thinking>...</thinking> (útil para debug/log). LEI 10 / doc §10."""
+    if not text or not isinstance(text, str):
+        return ""
+    match = re.search(r"<thinking>\s*(.*?)\s*</thinking>", text, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
 def extract_json_from_text(text: str) -> str | None:
-    """Extrai bloco JSON de texto (markdown code block ou raw)."""
+    """
+    Extrai bloco JSON de texto.
+    Prioridade (AGENT_LLM_COMMUNICATION_ANALYSIS): <response>...</response> permite
+    raciocínio em <thinking> e JSON final parseável; depois code blocks; depois raw.
+    """
     if not text or not isinstance(text, str):
         return None
     text = text.strip()
+    # 1) Conteúdo dentro de <response>...</response> (permite <thinking> antes); depois extrair JSON desse bloco
+    match = re.search(r"<response>\s*(.*?)\s*</response>", text, re.DOTALL)
+    if match:
+        inner = match.group(1).strip()
+        if "```json" in inner:
+            try:
+                return inner.split("```json")[1].split("```")[0].strip()
+            except IndexError:
+                pass
+        if "```" in inner:
+            try:
+                return inner.split("```")[1].split("```")[0].strip()
+            except IndexError:
+                pass
+        if inner.startswith("{"):
+            return inner
+    # 2) Markdown code block ```json
     if "```json" in text:
         try:
             return text.split("```json")[1].split("```")[0].strip()
@@ -136,6 +195,122 @@ def extract_json_from_text(text: str) -> str | None:
     return None
 
 
+def _extract_double_quoted(s: str, start: int) -> tuple[str | None, int]:
+    """Extrai string entre aspas duplas a partir de start (start = índice do \" de abertura). Retorna (valor, posição após o \" de fecho) ou (None, start)."""
+    if start >= len(s) or s[start] != '"':
+        return None, start
+    i = start + 1
+    parts: list[str] = []
+    while i < len(s):
+        if s[i] == "\\":
+            if i + 1 < len(s):
+                parts.append(s[i : i + 2])
+                i += 2
+            else:
+                return None, start
+        elif s[i] == '"':
+            return "".join(parts), i + 1
+        else:
+            parts.append(s[i])
+            i += 1
+    return None, start
+
+
+def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[dict, list[str]]:
+    """
+    LEI 4 (AGENT_LLM_COMMUNICATION_ANALYSIS): parse JSON com fallbacks para escaping quebrado.
+    Tentativa 1: parse direto (após extrair de <response>).
+    Tentativa 2: extrair valores de "content" com _extract_double_quoted, substituir por placeholder, parsear, reinjetar.
+    Tentativa 3: retorna envelope FAIL com mensagem de escaping.
+    Retorna (envelope_dict, parse_errors); parse_errors vazio se sucesso.
+    """
+    json_str = extract_json_from_text(raw_text)
+    if not json_str:
+        json_str = raw_text.strip()
+    if not json_str:
+        return (
+            {
+                "request_id": request_id,
+                "status": "FAIL",
+                "summary": "Resposta sem JSON (ResponseEnvelope).",
+                "artifacts": [],
+                "evidence": [],
+                "next_actions": {},
+            },
+            ["Resposta não contém JSON válido (ResponseEnvelope)."],
+        )
+
+    # Tentativa 1: parse direto
+    try:
+        data = json.loads(json_str)
+        if isinstance(data, dict):
+            return data, []
+    except json.JSONDecodeError:
+        pass
+
+    # Tentativa 2: substituir "content": "..." por placeholders (conteúdo pode ter aspas não escapadas)
+    try:
+        content_blocks: list[str] = []
+        replacements: list[tuple[int, int, str]] = []
+        pattern = re.compile(r'"content"\s*:\s*"')
+        i = 0
+        while i < len(json_str):
+            m = pattern.search(json_str, i)
+            if not m:
+                break
+            value_quote = m.end() - 1
+            content_val, end_pos = _extract_double_quoted(json_str, value_quote)
+            if content_val is None:
+                i = value_quote + 1
+                continue
+            idx = len(content_blocks)
+            content_blocks.append(content_val)
+            replacements.append((value_quote, end_pos, f'"@@PLACEHOLDER_{idx}@@'))
+            i = end_pos
+
+        if not replacements:
+            raise json.JSONDecodeError("no content blocks", "", 0)
+
+        parts: list[str] = []
+        last = 0
+        for start, end, ph in replacements:
+            parts.append(json_str[last:start])
+            parts.append(ph)
+            last = end
+        parts.append(json_str[last:])
+        cleaned = "".join(parts)
+        data = json.loads(cleaned)
+        if not isinstance(data, dict):
+            raise json.JSONDecodeError("not a dict", cleaned, 0)
+        for art in data.get("artifacts") or []:
+            if not isinstance(art, dict):
+                continue
+            content = art.get("content", "")
+            if isinstance(content, str):
+                m = re.match(r"^@@PLACEHOLDER_(\d+)@@$", content.strip())
+                if m:
+                    idx = int(m.group(1))
+                    if 0 <= idx < len(content_blocks):
+                        art["content"] = content_blocks[idx]
+        return data, []
+    except (json.JSONDecodeError, IndexError, KeyError):
+        pass
+
+    # Tentativa 3: fallback
+    logger.error("Falha total no parse JSON (LEI 4). Primeiros 500 chars: %s", json_str[:500])
+    return (
+        {
+            "request_id": request_id,
+            "status": "FAIL",
+            "summary": "Resposta do Claude contém JSON inválido — provável problema de escaping.",
+            "artifacts": [],
+            "evidence": [],
+            "next_actions": {"owner": "system", "items": ["Retry com instrução de escaping reforçada"]},
+        },
+        ["JSON inválido — provável problema de escaping em artifacts[].content"],
+    )
+
+
 def parse_response_envelope(
     raw_text: str,
     request_id: str = "unknown",
@@ -145,36 +320,10 @@ def parse_response_envelope(
 ) -> tuple[dict, list[str]]:
     """
     Parseia raw_text (resposta da LLM) em ResponseEnvelope e valida.
+    Usa resilient_json_parse (LEI 4) com 3 níveis de fallback para escaping.
     Retorna (envelope_dict, list_of_validation_errors).
-    Se JSON inválido, retorna envelope mínimo com status FAIL e errors preenchido.
     """
-    json_str = extract_json_from_text(raw_text)
-    if not json_str:
-        return (
-            {
-                "request_id": request_id,
-                "status": "FAIL",
-                "summary": (raw_text[:500] if raw_text else "Resposta sem JSON válido."),
-                "artifacts": [],
-                "evidence": [],
-                "next_actions": {},
-            },
-            ["Resposta não contém JSON válido (ResponseEnvelope)."],
-        )
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        return (
-            {
-                "request_id": request_id,
-                "status": "FAIL",
-                "summary": f"JSON inválido: {e!s}",
-                "artifacts": [],
-                "evidence": [],
-                "next_actions": {},
-            },
-            [f"JSON inválido: {e!s}"],
-        )
+    data, parse_errors = resilient_json_parse(raw_text, request_id)
     if "request_id" not in data:
         data["request_id"] = request_id
     for key in ("artifacts", "evidence"):
@@ -182,12 +331,12 @@ def parse_response_envelope(
             data[key] = data.get(key) if isinstance(data.get(key), list) else []
     if "next_actions" not in data or not isinstance(data.get("next_actions"), dict):
         data["next_actions"] = data.get("next_actions") if isinstance(data.get("next_actions"), dict) else {}
-    ok, errs = validate_response_envelope(
+    ok, val_errors = validate_response_envelope(
         data,
         require_artifacts=require_artifacts,
         require_evidence_when_ok=require_evidence_when_ok,
     )
-    return data, errs
+    return data, parse_errors + val_errors
 
 
 # ---------------------------------------------------------------------------
