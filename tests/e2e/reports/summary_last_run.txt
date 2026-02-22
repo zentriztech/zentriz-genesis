@@ -1,0 +1,9 @@
+E2E Pipeline Landing — Última execução
+========================================
+Data: 2026-02-21T21:56:35
+Exit status: 1
+Total: 7 | Passed: 0 | Failed: 7 | Skipped: 0
+Causa: HTTP 500 no test_01 — crédito Anthropic insuficiente ("Your credit balance is too low to access the Anthropic API"). Demais falhas em cascata (dependem de product_spec).
+JUnit: tests/e2e/reports/junit.xml
+
+Correções do plano aplicadas: Fase 2 (timeout/max_tokens), Fase 3 (agent/task_id nos payloads), Fase 4 (conftest lê junit.xml). Deploy e agents-host executados com sucesso.

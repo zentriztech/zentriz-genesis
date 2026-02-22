@@ -1,0 +1,64 @@
+Projeto: Landing Page Institucional — Zentriz Consultoria
+
+A Zentriz é uma empresa de consultoria tecnológica e IA. Precisamos de uma
+landing page institucional moderna e responsiva para apresentar a empresa,
+seus serviços e permitir que visitantes entrem em contato.
+
+A página é ESTÁTICA — não há backend, não há banco de dados, não há formulários
+com envio de dados. O único objetivo é apresentar a empresa e direcionar o
+visitante para o WhatsApp ou email.
+
+Seções da página (single page, scroll vertical):
+
+1. HERO (topo):
+   - Logo da Zentriz
+   - Headline principal: texto sobre transformação digital e IA
+   - Subtítulo de apoio
+   - Botão CTA "Fale Conosco" (ancora para seção de contato)
+   - Background com gradiente ou imagem abstrata de tecnologia
+
+2. SOBRE NÓS:
+   - Breve descrição da empresa (2-3 parágrafos)
+   - Missão / Visão / Valores em cards lado a lado (3 cards)
+   - Visual limpo e profissional
+
+3. SERVIÇOS:
+   - Lista de 4-6 serviços oferecidos, cada um com:
+     - Ícone representativo
+     - Título do serviço
+     - Descrição curta (2-3 linhas)
+   - Layout em grid (2x3 ou 3x2)
+
+4. DIFERENCIAIS / NÚMEROS:
+   - 3-4 métricas de impacto (ex: "+50 projetos entregues", "98% satisfação")
+   - Contador animado ou números destacados
+   - Fundo diferenciado (cor sólida ou gradiente)
+
+5. CONTATO:
+   - Texto convidando a conversar
+   - Botão WhatsApp (link wa.me/5511999999999 — abre em nova aba)
+   - Link de email (mailto:contato@zentriz.com.br)
+   - Ícones de redes sociais (LinkedIn, Instagram — links externos)
+   - NÃO há formulário — apenas links diretos
+
+6. FOOTER:
+   - Logo pequeno
+   - Copyright
+   - Links de redes sociais repetidos
+   - Texto LGPD simples: "Este site não coleta dados pessoais."
+
+Requisitos técnicos:
+- Responsivo (mobile-first)
+- Performance: LCP < 2.5s, CLS < 0.1
+- SEO: title, meta description, OG tags, sitemap.xml
+- Acessibilidade: contraste mínimo WCAG AA, alt text em imagens, navegação por teclado
+- Stack: Next.js com export estático (ou HTML/CSS/JS puro)
+- Sem dependência de backend ou serviços externos (exceto links)
+- Hospedagem futura: Vercel ou AWS S3 + CloudFront
+
+Fora de escopo:
+- Blog, área de login, painel admin
+- Formulário de contato com envio de dados
+- Integração com CRM ou email marketing
+- Animações complexas (parallax, 3D)
+- Internacionalização (apenas PT-BR)

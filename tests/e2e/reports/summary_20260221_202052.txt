@@ -1,0 +1,6 @@
+E2E Pipeline Landing — Resumo
+========================================
+Data: 2026-02-21T20:20:52.724668
+Exit status: 0
+Total: 0 | Passed: 0 | Failed: 0 | Skipped: 0
+JUnit: /Users/mac/workspace/current/zentriz/zentriz-genesis/tests/e2e/reports/junit.xml

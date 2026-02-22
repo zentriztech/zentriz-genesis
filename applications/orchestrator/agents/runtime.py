@@ -423,7 +423,7 @@ def run_agent(
         raise ValueError("CLAUDE_API_KEY não definida (variável de ambiente)")
 
     model = _get_model_for_role(role)
-    timeout = int(os.environ.get("REQUEST_TIMEOUT", "120"))
+    timeout = int(os.environ.get("REQUEST_TIMEOUT", "180"))
     agent_name = _label(role)
 
     inp = message.get("inputs") or message.get("input") or {}
@@ -462,6 +462,9 @@ def run_agent(
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
         budget = calculate_token_budget(system_content, user_content, model)
         max_tokens = min(env_max, budget["safe_max_tokens"])
+        # E2E: cap para spec_intake evita resposta gigante e timeout (E2E_CORRECTION_PLAN)
+        if (mode or "").strip().lower() == "spec_intake_and_normalize":
+            max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None

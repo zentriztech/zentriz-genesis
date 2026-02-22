@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="7" skipped="0" tests="7" time="1.635" timestamp="2026-02-21T21:56:34.070605-03:00" hostname="iMac-de-Mac.local"><testcase classname="tests.e2e.test_pipeline_landing" name="test_01_cto_spec_intake" time="1.320"><failure message="AssertionError: HTTP 500: {&quot;detail&quot;:{&quot;agent&quot;:&quot;CTO&quot;,&quot;model&quot;:&quot;claude-sonnet-4-6&quot;,&quot;error&quot;:&quot;Your credit balance is too low to access the Anthropic API. Please go to Plans &amp; Billing to upgrade or purchase credits.&quot;,&quot;error_type&quot;:&quot;BadRequestError&quot;,&quot;traceback&quot;:&quot;Traceback (most recent call last):\n  File \&quot;/Users/mac/workspace/current/zentriz/zentriz-genesis/applications/orchestrator/agents/runtime.py\&quot;, line 488, in run_agent\n    response = client.messages.create(**create_kw)\n  File \&quot;/Users/mac/.pyenv/versions/3.14.2/lib/pyth&#10;assert 500 == 200&#10; +  where 500 = &lt;Response [500 Internal Server Error]&gt;.status_code">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_01_cto_spec_intake(ctx):
+        """ETAPA 1: CTO converte spec TXT para PRODUCT_SPEC.md"""
+        ctx.spec_raw = load_spec()
+        inputs = {
+            "spec_raw": ctx.spec_raw,
+            "product_spec": None,
+            "constraints": ["spec-driven", "no-invent", "paths-resilient"],
+        }
+        body = {
+            "project_id": "e2e-landing-test",
+            "agent": "cto",
+            "mode": "spec_intake_and_normalize",
+            "task_id": None,
+            "task": "Converter spec TXT para formato PRODUCT_SPEC",
+            "inputs": inputs,
+            "input": inputs,
+            "existing_artifacts": [],
+            "limits": {"max_rounds": 3, "round": 1},
+        }
+        start = time.time()
+&gt;       result = await call_agent("cto", body)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/e2e/test_pipeline_landing.py:175: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+agent_name = 'cto'
+body = {'agent': 'cto', 'existing_artifacts': [], 'input': {'constraints': ['spec-driven', 'no-invent', 'paths-resilient'], '...gração com CRM ou email marketing\n- Animações complexas (parallax, 3D)\n- Internacionalização (apenas PT-BR)\n'}, ...}
+
+    async def call_agent(agent_name: str, body: dict) -&gt; dict:
+        """Chama POST /invoke/{agent_name} e retorna ResponseEnvelope. Retry 1x em timeout."""
+        url = "%s/invoke/%s" % (AGENTS_URL.rstrip("/"), agent_name)
+        timeout = TIMEOUTS.get(agent_name, 300)
+        logger.info("CHAMANDO: %s | mode: %s | timeout: %ss", agent_name, body.get("mode"), timeout)
+        start = time.time()
+        last_exc = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(url, json=body)
+                break
+            except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                last_exc = e
+                if attempt == 0:
+                    logger.warning("Timeout %s (tentativa 1/2), repetindo...", agent_name)
+                else:
+                    raise
+        duration = round(time.time() - start, 1)
+&gt;       assert response.status_code == 200, "HTTP %d: %s" % (response.status_code, response.text[:500])
+E       AssertionError: HTTP 500: {"detail":{"agent":"CTO","model":"claude-sonnet-4-6","error":"Your credit balance is too low to access the Anthropic API. Please go to Plans &amp; Billing to upgrade or purchase credits.","error_type":"BadRequestError","traceback":"Traceback (most recent call last):\n  File \"/Users/mac/workspace/current/zentriz/zentriz-genesis/applications/orchestrator/agents/runtime.py\", line 488, in run_agent\n    response = client.messages.create(**create_kw)\n  File \"/Users/mac/.pyenv/versions/3.14.2/lib/pyth
+E       assert 500 == 200
+E        +  where 500 = &lt;Response [500 Internal Server Error]&gt;.status_code
+
+tests/e2e/test_pipeline_landing.py:78: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_02_engineer_propose" time="0.002"><failure message="AssertionError: assert ''&#10; +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_02_engineer_propose(ctx):
+        """ETAPA 2: Engineer propõe arquitetura."""
+&gt;       assert ctx.product_spec
+E       AssertionError: assert ''
+E        +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec
+
+tests/e2e/test_pipeline_landing.py:193: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_03_cto_validate_engineer" time="0.001"><failure message="AssertionError: assert ('')&#10; +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_03_cto_validate_engineer(ctx):
+        """ETAPA 3: CTO valida proposta do Engineer."""
+&gt;       assert ctx.product_spec and ctx.engineer_proposal
+E       AssertionError: assert ('')
+E        +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec
+
+tests/e2e/test_pipeline_landing.py:228: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_04_cto_charter" time="0.001"><failure message="AssertionError: assert ('')&#10; +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_04_cto_charter(ctx):
+        """ETAPA 4: CTO gera Project Charter."""
+&gt;       assert ctx.product_spec and ctx.engineer_proposal
+E       AssertionError: assert ('')
+E        +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec
+
+tests/e2e/test_pipeline_landing.py:260: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_05_pm_backlog" time="0.001"><failure message="AssertionError: assert ('')&#10; +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.charter">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_05_pm_backlog(ctx):
+        """ETAPA 5: PM gera backlog."""
+&gt;       assert ctx.charter and ctx.product_spec
+E       AssertionError: assert ('')
+E        +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.charter
+
+tests/e2e/test_pipeline_landing.py:295: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_06_dev_qa_loop" time="0.001"><failure message="assert []&#10; +  where [] = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.backlog_tasks">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_06_dev_qa_loop(ctx):
+        """ETAPA 6: Loop Dev → QA para as primeiras 3 tasks."""
+&gt;       assert ctx.backlog_tasks
+E       assert []
+E        +  where [] = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.backlog_tasks
+
+tests/e2e/test_pipeline_landing.py:393: AssertionError</failure></testcase><testcase classname="tests.e2e.test_pipeline_landing" name="test_07_final_summary" time="0.002"><failure message="AssertionError: assert ''&#10; +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec">ctx = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;
+
+    @pytest.mark.asyncio
+    async def test_07_final_summary(ctx):
+        """ETAPA 7: Resumo e persistência dos artifacts."""
+        ctx.print_summary()
+&gt;       assert ctx.product_spec
+E       AssertionError: assert ''
+E        +  where '' = &lt;test_pipeline_landing.E2EPipelineContext object at 0x10bf457f0&gt;.product_spec
+
+tests/e2e/test_pipeline_landing.py:474: AssertionError</failure></testcase></testsuite></testsuites>
