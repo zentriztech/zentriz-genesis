@@ -1,6 +1,6 @@
 # Task State Machine (PM/Dev/QA/DevOps)
 
-> No **fluxo V2**, o Monitor Loop do runner lê tasks por projeto/módulo e aciona Dev/QA/DevOps conforme esses estados. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+> No **fluxo V2**, o Monitor Loop do runner lê tasks por projeto/módulo e aciona Dev/QA/DevOps conforme esses estados. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ## Estados
 - **NEW**: criado pelo PM

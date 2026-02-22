@@ -15,7 +15,7 @@
 7. API atualiza o projeto para `status=running` e retorna 202 ao frontend.
 8. O portal faz polling do projeto e do diálogo; o runner grava passos no diálogo via API.
 
-Se algo falha em 4–7, o frontend mostra a mensagem de erro da API em vermelho. Se 7 retorna 202 mas o runner não grava diálogo, o status fica "running" e a tela não avança. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+Se algo falha em 4–7, o frontend mostra a mensagem de erro da API em vermelho. Se 7 retorna 202 mas o runner não grava diálogo, o status fica "running" e a tela não avança. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ---
 
@@ -117,7 +117,7 @@ Para um `project_id` determinado:
 
 ## 7. Referências
 
-- Variáveis de ambiente (runner, API, agents): [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md)
-- Fluxo dos agentes e LLM: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md)
+- Variáveis de ambiente (runner, API, agents): [SECRETS_AND_ENV.md](../SECRETS_AND_ENV.md)
+- Fluxo dos agentes e LLM: [AGENTS_AND_LLM_FLOW.md](../AGENTS_AND_LLM_FLOW.md)
 - API pipeline: `applications/services/api-node/src/routes/pipeline.ts`
 - Runner service: `applications/orchestrator/runner_server.py`

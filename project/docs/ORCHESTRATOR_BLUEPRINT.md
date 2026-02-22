@@ -50,7 +50,7 @@ Permitir execução paralela e rastreável do fluxo:
 - **CTO spec review**: Runner chama CTO com spec (sem proposta); CTO devolve spec entendida; grava em docs.
 - **Loop CTO↔Engineer** (max 3 rodadas): Engineer recebe spec + opcional questionamentos do CTO; CTO valida proposta e devolve Charter ou questionamentos; saída = Charter.
 - **PM**: Chamada com charter, `module` (ex.: backend) e proposta do Engineer; gera backlog.
-- **Seed de tarefas** + **Monitor Loop**: POST tasks; loop lê projeto/tasks; aciona Dev/QA/DevOps; não aciona DevOps se houver task DONE por max QA rework; artefatos com `path` gravados em `project/`. Para quando usuário **aceita** ou **SIGTERM**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+- **Seed de tarefas** + **Monitor Loop**: POST tasks; loop lê projeto/tasks; aciona Dev/QA/DevOps; não aciona DevOps se houver task DONE por max QA rework; artefatos com `path` gravados em `project/`. Para quando usuário **aceita** ou **SIGTERM**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 ## Evidência
 - Cada evento carrega `request_id` e links para artifacts/reports.

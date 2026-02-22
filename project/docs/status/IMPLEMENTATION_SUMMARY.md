@@ -7,7 +7,7 @@
 ## 1. Engineer e fluxo CTO ↔ Engineer
 
 - **Agente Engineer** ([applications/agents/engineer/](../../applications/agents/engineer/)): SYSTEM_PROMPT e skills.md; analisa a spec e devolve proposta técnica (squads/equipes, dependências) ao CTO.
-- **Runner** ([applications/orchestrator/runner.py](../../applications/orchestrator/runner.py)): **fluxo V2** — **CTO spec review** (entende spec, grava em docs) → **loop CTO↔Engineer** (max 3 rodadas; eventos `cto.engineer.request` / `engineer.cto.response`) → Charter → **call_pm** (module + engineer_proposal) → seed de tarefas → **Monitor Loop**: lê projeto/tasks, aciona Dev/QA/DevOps, atualiza task e diálogo, grava artefatos com `path` em `project/`; repete até `accepted` ou `stopped` (ou SIGTERM). Sem API/PROJECT_ID: fluxo sequencial. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+- **Runner** ([applications/orchestrator/runner.py](../../applications/orchestrator/runner.py)): **fluxo V2** — **CTO spec review** (entende spec, grava em docs) → **loop CTO↔Engineer** (max 3 rodadas; eventos `cto.engineer.request` / `engineer.cto.response`) → Charter → **call_pm** (module + engineer_proposal) → seed de tarefas → **Monitor Loop**: lê projeto/tasks, aciona Dev/QA/DevOps, atualiza task e diálogo, grava artefatos com `path` em `project/`; repete até `accepted` ou `stopped` (ou SIGTERM). Sem API/PROJECT_ID: fluxo sequencial. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 - **Contrato** [engineer_stack_proposal](../../applications/contracts/engineer_stack_proposal.md): saída do Engineer (squads_teams, dependencies, recommendations).
 - **Serviço HTTP** ([applications/orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py)): endpoint `POST /invoke/engineer` no mesmo serviço que expõe CTO, PM, Monitor, Dev, QA, DevOps.
 
@@ -65,9 +65,9 @@
 
 ## 8. Documentação e plano
 
-- **Checklist** do [ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md) atualizado (Fases 1–5 e itens da 6 concluídos onde aplicável).
+- **Checklist** do [ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](../plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md) atualizado (Fases 1–5 e itens da 6 concluídos onde aplicável).
 - [DEVOPS_SELECTION.md](DEVOPS_SELECTION.md): seção sobre Engineer e responsabilidade do PM na seleção do DevOps.
-- [PENDING_ACTIVITIES.md](PENDING_ACTIVITIES.md): atividades opcionais ou futuras (LLM para summary, tempo real, PM Web/Mobile skills, fluxo de bloqueio no runner, teste de integração do fluxo completo).
+- [PENDING_ACTIVITIES.md](PENDING_ACTIVITIES.md): atividades opcionais ou futuras ou futuras (LLM para summary, tempo real, PM Web/Mobile skills, fluxo de bloqueio no runner, teste de integração do fluxo completo).
 - [NAVIGATION.md](NAVIGATION.md) já referenciava o plano; diagramas Mermaid em ACTORS_AND_RESPONSIBILITIES, ARCHITECTURE_DIAGRAM, ORCHESTRATION_GUIDE, AGENTS_CAPABILITIES, ORCHESTRATOR_BLUEPRINT e TASK_STATE_MACHINE foram atualizados em ciclos anteriores.
 
 ---

@@ -86,13 +86,13 @@ flowchart TB
 
 - **Responsabilidade**: Decisões de **produto**. Interpretar a spec com apoio da **proposta técnica do Engineer**; gerar Project Charter; **contratar** um ou mais PMs com base nas squads/equipes definidas pelo Engineer; atuar como **ponte** entre PMs (ex.: dependências — PM Web precisa de endpoints do PM Backend).
 - **Comportamentos**:
-  - No **fluxo V2** do runner: primeiro **revisa/entende** a spec (CTO spec review); depois **loop com o Engineer** (max 3 rodadas): spec → Engineer → proposta; CTO valida ou questiona até Charter. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+  - No **fluxo V2** do runner: primeiro **revisa/entende** a spec (CTO spec review); depois **loop com o Engineer** (max 3 rodadas): spec → Engineer → proposta; CTO valida ou questiona até Charter. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
   - Usa a proposta do Engineer para produzir [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) e contratar PM(s).
   - Contrata (instancia) um PM por squad/equipe definida pelo Engineer (Backend, Web Básica, Web Avançada, Mobile, etc.). Infraestrutura faz parte de cada squad via DevOps.
   - Delega o escopo ao PM e informa dependências (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”).
   - Recebe do PM: conclusão da squad ou bloqueios; em bloqueios cross-team (ex.: Web depende de Backend), repassa ao Engineer ou ao PM responsável.
   - Informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
-  - Mantém [docs/STATUS.md](STATUS.md) consolidado.
+  - Mantém [docs/status/STATUS.md](status/STATUS.md) consolidado.
 
 ---
 
@@ -296,14 +296,14 @@ flowchart TB
 | Tema | Documento |
 |------|------------|
 | Charter e módulos | [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) |
-| Backlog e tasks | [docs/PM_AUTOBACKLOG_GUIDE.md](PM_AUTOBACKLOG_GUIDE.md), [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md) |
+| Backlog e tasks | [docs/guides/PM_AUTOBACKLOG_GUIDE.md](guides/PM_AUTOBACKLOG_GUIDE.md), [contracts/pm_backlog_template.md](../contracts/pm_backlog_template.md) |
 | DoD global | [contracts/global_definition_of_done.md](../contracts/global_definition_of_done.md) |
 | DoD DevOps | [contracts/devops_definition_of_done.md](../contracts/devops_definition_of_done.md) |
 | Seleção DevOps | [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) |
 | Eventos e orquestração | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md), [docs/TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) |
 | Diagramas de arquitetura | [ARCHITECTURE_DIAGRAM.md](../ARCHITECTURE_DIAGRAM.md) |
 | Capacidades dos agentes | [docs/AGENTS_CAPABILITIES.md](AGENTS_CAPABILITIES.md) |
-| Engineer e dinâmica de equipe | [docs/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md) |
+| Engineer e dinâmica de equipe | [docs/plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md) |
 
 ---
 

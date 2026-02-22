@@ -1,7 +1,7 @@
 # Plano: Engineer, Novo Fluxo e Dinâmica de Equipe
 
 > **Propósito**: Diretrizes e plano de aplicação para introduzir o ator **Engineer**, novo fluxo CTO ↔ Engineer → PM(s), comunicação contínua entre agentes (simulando equipe humana), logs em linguagem humana e exibição dinâmica no Genesis-Web.  
-> **Referências**: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md), [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md), [applications/agents/engineer/skills.md](../../applications/agents/engineer/skills.md). **Fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3 rodadas) → PM por módulo.
+> **Referências**: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ACTORS_AND_RESPONSIBILITIES.md](../ACTORS_AND_RESPONSIBILITIES.md), [ORCHESTRATION_GUIDE.md](../ORCHESTRATION_GUIDE.md), [applications/agents/engineer/skills.md](../../../applications/agents/engineer/skills.md). **Fluxo V2**: CTO spec review → loop CTO↔Engineer (max 3 rodadas) → PM por módulo.
 
 ---
 
@@ -98,10 +98,10 @@ Texto equivalente (referência):
 
 ### 3.4 Eventos e estado
 
-- Estender o [ORCHESTRATOR_BLUEPRINT](ORCHESTRATOR_BLUEPRINT.md) com:
+- Estender o [ORCHESTRATOR_BLUEPRINT](../ORCHESTRATOR_BLUEPRINT.md) com:
   - Eventos de **diálogo** (ex.: `cto.engineer.request`, `engineer.cto.response`, `pm.cto.dependency_request`, `block.reported`, `block.resolved`).
   - Estado de **bloqueio** por task/equipe (quem reportou, quem é responsável, status da solução).
-- Manter compatibilidade com a [TASK_STATE_MACHINE](TASK_STATE_MACHINE.md) (ex.: BLOCKED quando há bloqueio cross-team).
+- Manter compatibilidade com a [TASK_STATE_MACHINE](../TASK_STATE_MACHINE.md) (ex.: BLOCKED quando há bloqueio cross-team).
 
 ---
 
@@ -218,8 +218,8 @@ Texto equivalente (referência):
 - [x] Definir contrato de saída do Engineer (ex.: `engineer_stack_proposal` com squads, equipes, dependências).
 - [x] Implementar agente Engineer no orquestrador (módulo Python + endpoint HTTP se aplicável).
 - [x] Alterar fluxo do runner (ou serviço equivalente): CTO recebe spec → chama Engineer → usa resposta para Charter e contratação de PM(s).
-- [x] Atualizar [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md): adicionar Engineer, hierarquia CTO ↔ Engineer, tabela de comunicação.
-- [x] Atualizar [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) e [AGENTS_CAPABILITIES.md](AGENTS_CAPABILITIES.md).
+- [x] Atualizar [ACTORS_AND_RESPONSIBILITIES.md](../ACTORS_AND_RESPONSIBILITIES.md): adicionar Engineer, hierarquia CTO ↔ Engineer, tabela de comunicação.
+- [x] Atualizar [ORCHESTRATION_GUIDE.md](../ORCHESTRATION_GUIDE.md) e [AGENTS_CAPABILITIES.md](../AGENTS_CAPABILITIES.md).
 - [x] Atualizar diagramas (Mermaid) em ACTORS e ARCHITECTURE com Engineer.
 
 ### Fase 2: PMs via CTO e bloqueios cross-team
@@ -251,8 +251,8 @@ Texto equivalente (referência):
 
 ### Fase 6: Documentação e testes
 
-- [x] Atualizar [NAVIGATION.md](NAVIGATION.md) e índices com link para este plano.
-- [x] Revisar [DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) e outros docs se o Engineer influenciar escolha de squads (contexto Engineer + PM; seleção DevOps permanece com o PM).
+- [x] Atualizar [NAVIGATION.md](../NAVIGATION.md) e índices com link para este plano.
+- [x] Revisar [DEVOPS_SELECTION.md](../DEVOPS_SELECTION.md) e outros docs se o Engineer influenciar escolha de squads (contexto Engineer + PM; seleção DevOps permanece com o PM).
 - [x] Testes de integração: módulo de diálogo e resumos em português ([orchestrator/tests/test_runner_dialogue.py](../../applications/orchestrator/tests/test_runner_dialogue.py)); fluxo completo CTO → Engineer → CTO → PM(s) pode ser validado com mocks em testes futuros.
 
 ---
@@ -261,12 +261,12 @@ Texto equivalente (referência):
 
 | Documento | Uso |
 |-----------|-----|
-| [ACTORS_AND_RESPONSIBILITIES.md](ACTORS_AND_RESPONSIBILITIES.md) | Atualizar com Engineer e nova hierarquia. |
-| [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Incluir passo CTO ↔ Engineer e PMs via CTO. |
-| [ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Novos eventos e regras de bloqueio. |
-| [AGENTS_CAPABILITIES.md](AGENTS_CAPABILITIES.md) | Adicionar seção Engineer. |
-| [applications/agents/engineer/skills.md](../../applications/agents/engineer/skills.md) | Base do perfil do Engineer. |
-| [TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) | BLOCKED e dependências cross-team. |
+| [ACTORS_AND_RESPONSIBILITIES.md](../ACTORS_AND_RESPONSIBILITIES.md) | Atualizar com Engineer e nova hierarquia. |
+| [ORCHESTRATION_GUIDE.md](../ORCHESTRATION_GUIDE.md) | Incluir passo CTO ↔ Engineer e PMs via CTO. |
+| [ORCHESTRATOR_BLUEPRINT.md](../ORCHESTRATOR_BLUEPRINT.md) | Novos eventos e regras de bloqueio. |
+| [AGENTS_CAPABILITIES.md](../AGENTS_CAPABILITIES.md) | Adicionar seção Engineer. |
+| [applications/agents/engineer/skills.md](../../../applications/agents/engineer/skills.md) | Base do perfil do Engineer. |
+| [TASK_STATE_MACHINE.md](../TASK_STATE_MACHINE.md) | BLOCKED e dependências cross-team. |
 | Genesis-Web [projects/[id]/page.tsx](../../applications/apps/genesis-web/app/(dashboard)/projects/[id]/page.tsx) | Tela a evoluir para diálogo + avatares. |
 
 ---

@@ -1,6 +1,6 @@
 # Pipeline V2 — Contratos de handoff entre agentes
 
-> Referência para o [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md). Cada agente recebe e entrega no formato abaixo.
+> Referência para o [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](../plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md). Cada agente recebe e entrega no formato abaixo.
 
 ---
 

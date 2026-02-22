@@ -3,7 +3,7 @@
 > **Objetivo**: Testar o pipeline completo CTO → Engineer → CTO validate → Charter → PM → Dev → QA → Monitor  
 > **Spec de teste**: Landing page institucional simples (sem API, sem formulários, sem backend)  
 > **Data**: 2026-02-21  
-> **Referência**: [AGENT_LLM_COMMUNICATION_ANALYSIS.md](./AGENT_LLM_COMMUNICATION_ANALYSIS.md)
+> **Referência**: [AGENT_LLM_COMMUNICATION_ANALYSIS.md](../analysis/AGENT_LLM_COMMUNICATION_ANALYSIS.md)
 
 ---
 

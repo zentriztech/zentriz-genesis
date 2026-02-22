@@ -138,10 +138,10 @@ Ao marcar como concluída a **Fase 6** e todas as tarefas anteriores, atualizar 
 | `project/docs/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md` | Alinhar ao plano V2; fases e critérios de conclusão. |
 | `project/docs/ORCHESTRATION_GUIDE.md` | Regras de orquestração e decisão do Monitor; estados do projeto. |
 | `project/docs/ORCHESTRATOR_BLUEPRINT.md` | Implementação atual (runner) com fluxo V2; eventos e estados. |
-| `project/docs/PIPELINE_TROUBLESHOOTING.md` | Cenários e sintomas conforme novo fluxo; referência a múltiplas squads/tasks. |
-| `project/docs/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md` | Pré-requisitos para “código em project/” e E2E conforme V2. |
-| `project/docs/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md` | Alinhar dinâmicas CTO↔Engineer e CTO↔PM ao plano V2. |
-| `project/docs/IMPLEMENTATION_SUMMARY.md` | Resumo do que está implementado (incluindo V2). |
+| `project/docs/troubleshooting/PIPELINE_TROUBLESHOOTING.md` | Cenários e sintomas conforme novo fluxo; referência a múltiplas squads/tasks. |
+| `project/docs/status/PIPELINE_E2E_AND_SOURCE_CODE_READINESS.md` | Pré-requisitos para “código em project/” e E2E conforme V2. |
+| `project/docs/plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md` | Alinhar dinâmicas CTO↔Engineer e CTO↔PM ao plano V2. |
+| `project/docs/status/IMPLEMENTATION_SUMMARY.md` | Resumo do que está implementado (incluindo V2). |
 | `project/docs/ACTORS_AND_RESPONSIBILITIES.md` | Papéis de CTO, Engineer, PM por skill, Monitor, Dev, QA, DevOps no fluxo V2. |
 | `project/docs/AGENTS_CAPABILITIES.md` | Capacidades por agente no fluxo V2. |
 | `project/context/PROJECT_OVERVIEW.md` | Visão geral do produto e do fluxo (V2). |

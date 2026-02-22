@@ -89,7 +89,7 @@ Variáveis de ambiente vêm do [.env](../../.env) na raiz (copie de [.env.exampl
 
 ### Conceitos do ambiente local
 
-- **Quem inicia o fluxo:** o usuário inicia pelo portal; a API dispara o [runner](../../applications/orchestrator/runner.py). Com API e PROJECT_ID, o runner executa o **fluxo V2** (CTO spec review → loop CTO↔Engineer → PM → seed de tarefas → **Monitor Loop**), acionando Dev/QA/DevOps até o usuário **aceitar** ou **parar**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+- **Quem inicia o fluxo:** o usuário inicia pelo portal; a API dispara o [runner](../../applications/orchestrator/runner.py). Com API e PROJECT_ID, o runner executa o **fluxo V2** (CTO spec review → loop CTO↔Engineer → PM → seed de tarefas → **Monitor Loop**), acionando Dev/QA/DevOps até o usuário **aceitar** ou **parar**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 - **Serviço agents:** um único serviço Docker ([agents](../docker-compose.yml)) expõe **todos os agentes** (Engineer, CTO, PM Backend, Monitor Backend, Dev Backend, QA Backend, DevOps Docker; futuramente Web, Mobile) na mesma instância. Endpoints HTTP em [orchestrator/agents/server.py](../../applications/orchestrator/agents/server.py); detalhes em [orchestrator/agents/README.md](../../applications/orchestrator/agents/README.md).
 - **Nomes dos containers (ex.: postgres-1):** o Docker Compose nomeia cada container como `{project}-{service}-{réplica}`. O sufixo `-1` é o índice da réplica (primeira instância). Com múltiplas réplicas (ex.: `docker compose up -d --scale api=3`) surgiriam api-1, api-2, api-3.
 
@@ -102,7 +102,7 @@ pip install -r applications/orchestrator/agents/requirements.txt
 PYTHONPATH=applications python -m orchestrator.runner --spec project/spec/PRODUCT_SPEC.md
 ```
 
-Quando o runner for invocado pelo portal, a API injeta **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN**. O runner executa o **fluxo V2** (CTO spec review → loop CTO↔Engineer → PM), faz **seed de tarefas** e entra no **Monitor Loop**: lê projeto e tasks, aciona Dev/QA/DevOps, atualiza task e diálogo; repete até `accepted` ou `stopped`. Persiste `started_at`/`completed_at`/`status`. Ver [orchestrator/runner.py](../../applications/orchestrator/runner.py), [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+Quando o runner for invocado pelo portal, a API injeta **API_BASE_URL**, **PROJECT_ID** e **GENESIS_API_TOKEN**. O runner executa o **fluxo V2** (CTO spec review → loop CTO↔Engineer → PM), faz **seed de tarefas** e entra no **Monitor Loop**: lê projeto e tasks, aciona Dev/QA/DevOps, atualiza task e diálogo; repete até `accepted` ou `stopped`. Persiste `started_at`/`completed_at`/`status`. Ver [orchestrator/runner.py](../../applications/orchestrator/runner.py), [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
 
 Ver [orchestrator/README.md](../../applications/orchestrator/README.md).
 

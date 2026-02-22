@@ -2,13 +2,13 @@
 
 > Objetivo: implementar no runner os agentes Dev, QA, Monitor e DevOps; e persistir todos os documentos em disco organizados por `project_id` com atribuição de criador.
 >
-> **Status:** Implementação concluída. **Fluxo V2** em vigor: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md). Detalhes e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+> **Status:** Implementação concluída. **Fluxo V2** em vigor: [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md). Detalhes e variáveis: [AGENTS_AND_LLM_FLOW.md](../AGENTS_AND_LLM_FLOW.md).
 
 ---
 
 ## 1. Visão geral
 
-- **Pipeline V2:** Spec → **CTO spec review** → **loop CTO↔Engineer** (max 3 rodadas) → Charter → **PM** (módulo backend, charter + proposta) → seed de tarefas → **Monitor Loop** (Dev/QA/DevOps) até **aceitar** ou **parar**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md), [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+- **Pipeline V2:** Spec → **CTO spec review** → **loop CTO↔Engineer** (max 3 rodadas) → Charter → **PM** (módulo backend, charter + proposta) → seed de tarefas → **Monitor Loop** (Dev/QA/DevOps) até **aceitar** ou **parar**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md), [ORCHESTRATOR_BLUEPRINT.md](../ORCHESTRATOR_BLUEPRINT.md), [AGENTS_AND_LLM_FLOW.md](../AGENTS_AND_LLM_FLOW.md).
 - **Armazenamento:** Raiz configurável (`PROJECT_FILES_ROOT`, default `/Users/mac/zentriz-files`):
   - `<project_id>/docs/` — documentos gerados por cada membro da squad (Spec, CTO, Engineer, PM Backend, Dev, QA, Monitor, DevOps), com identificação do criador.
   - `<project_id>/project/` — artefatos do projeto final (código, configs) quando produzidos.
@@ -139,4 +139,4 @@ Cada passo persiste no diálogo; artefatos com `path` em `project/`, demais em `
 | **docker-compose.override.example.yml** | Exemplo para montar pasta do host (ex.: `/Users/mac/zentriz-files`) em `/project-files`. |
 | **API** | GET /api/projects/:id/artifacts implementado em `api-node` (projects.ts): retorna `docs` (do manifest.json), `projectDocsRoot`, `projectArtifactsRoot`. |
 
-Para usar a pasta do host no Mac: copie `docker-compose.override.example.yml` para `docker-compose.override.yml` (path `/Users/mac/zentriz-files` já está no exemplo). Os arquivos gerados ficarão em `/Users/mac/zentriz-files/<project_id>/docs/` e `.../project/`. Referência de fluxo e variáveis: [AGENTS_AND_LLM_FLOW.md](AGENTS_AND_LLM_FLOW.md).
+Para usar a pasta do host no Mac: copie `docker-compose.override.example.yml` para `docker-compose.override.yml` (path `/Users/mac/zentriz-files` já está no exemplo). Os arquivos gerados ficarão em `/Users/mac/zentriz-files/<project_id>/docs/` e `.../project/`. Referência de fluxo e variáveis: [AGENTS_AND_LLM_FLOW.md](../AGENTS_AND_LLM_FLOW.md).

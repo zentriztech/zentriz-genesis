@@ -17,7 +17,7 @@
 - **Engineer** analisa e devolve **proposta técnica**: quais squads/equipes o projeto precisa (ex.: web básica para landings, web avançada para app com API/auth, backend para APIs) e **dependências** entre equipes (ex.: Web SaaS depende de Backend API — obter URLs e endpoints via CTO).
 - Engineer comunica-se **apenas** com o CTO. Competências em [agents/engineer/skills.md](../../applications/agents/engineer/skills.md).
 
-**Implementação (fluxo V2):** Runner faz **CTO spec review** primeiro; depois **loop CTO↔Engineer** (max 3 rodadas): CTO envia spec (e questionamentos se rodada >1) ao Engineer; Engineer devolve proposta; CTO valida ou questiona até Charter. Endpoint `POST /invoke/engineer`; Engineer recebe `context.cto_questionamentos` quando houver. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+**Implementação (fluxo V2):** Runner faz **CTO spec review** primeiro; depois **loop CTO↔Engineer** (max 3 rodadas): CTO envia spec (e questionamentos se rodada >1) ao Engineer; Engineer devolve proposta; CTO valida ou questiona até Charter. Endpoint `POST /invoke/engineer`; Engineer recebe `context.cto_questionamentos` quando houver. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 ---
 
@@ -26,7 +26,7 @@
 - Recebe a spec e **primeiro fala com o Engineer**; usa a proposta técnica para decidir squads e dependências.
 - Gera [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) com base na proposta do Engineer.
 - **Contrata** um ou mais PMs conforme as squads/equipes definidas pelo Engineer (Backend, Web Básica, Web Avançada, Mobile).
-- Cria [docs/STATUS.md](STATUS.md) inicial.
+- Cria [docs/status/STATUS.md](status/STATUS.md) inicial.
 - Delega cada squad ao PM e informa **dependências** (ex.: “PM Web: obter lista de endpoints do PM Backend via mim”). PMs **conversam entre si via CTO** (não diretamente).
 - Ao final, informa ao **SPEC** quando o projeto está finalizado ou quando há bloqueios que exigem decisão.
 - Em **bloqueios cross-team** (ex.: endpoint falhou), CTO pode consultar o Engineer para solução e repassar ao PM responsável.

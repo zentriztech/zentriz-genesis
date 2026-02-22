@@ -1,7 +1,7 @@
 # Extensão: Pipeline V2 — IA real e paths resilientes
 
 > **Referência:** [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).  
-> **Objetivo:** Tornar o fluxo E2E funcional com **respostas reais da IA** em cada agente, **paths corretos e resilientes** (docs/project/apps sempre sob `<project_id>`), e **modelo de spec** ([PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md)) como entrada aceitável para desenvolvimento.
+> **Objetivo:** Tornar o fluxo E2E funcional com **respostas reais da IA** em cada agente, **paths corretos e resilientes** (docs/project/apps sempre sob `<project_id>`), e **modelo de spec** ([PRODUCT_SPEC_TEMPLATE.md](../../spec/PRODUCT_SPEC_TEMPLATE.md)) como entrada aceitável para desenvolvimento.
 
 ---
 
@@ -11,7 +11,7 @@
 |----------|-----------|---------|
 | **Arquivos no lugar errado** | Artefatos criados em nível acima do esperado; `./docs` fora de `<project_id>`. | Garantir que **toda** gravação use `PROJECT_FILES_ROOT / project_id / docs | project | apps`; nunca gravar em `PROJECT_FILES_ROOT/docs` ou raiz sem `project_id`. |
 | **IA não produz saída utilizável** | Agentes não conseguem executar ou obter da IA resposta real (conteúdo, arquivos). | Prompts e contratos que exijam **sempre** 1+ documento/artefato (.md, .js, .ts, etc.); uso do **melhor modelo** configurável (Claude opus/sonnet); instruções claras de “realizar as tarefas relativas às suas responsabilidades”. |
-| **Spec não padronizada** | Entrada do usuário pode ser livre; desenvolvimento precisa de spec no formato viável. | CTO usa [PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) como **modelo aceitável**; IA converte/valida para esse formato; se já estiver no modelo, CTO apenas valida. |
+| **Spec não padronizada** | Entrada do usuário pode ser livre; desenvolvimento precisa de spec no formato viável. | CTO usa [PRODUCT_SPEC_TEMPLATE.md](../../spec/PRODUCT_SPEC_TEMPLATE.md) como **modelo aceitável**; IA converte/valida para esse formato; se já estiver no modelo, CTO apenas valida. |
 | **Dev não grava onde o usuário espera** | Código do produto deve ir para pasta de apps do projeto. | Dev grava em `<project_id>/apps` (ou `<project_id>/project` conforme já existente); runner e storage expõem `get_apps_dir(project_id)` e usam para artefatos de código. |
 
 ---
@@ -48,7 +48,7 @@ Cada agente **pede à IA** que execute as tarefas das suas responsabilidades e *
 1. **Entrada:** Spec do portal (arquivo anexado; pode ser .md, .txt, .doc, .pdf).
 2. **Responsabilidade da IA (CTO):**
    - Analisar e **converter** o conteúdo para um formato viável para desenvolvimento de qualquer tipo de aplicação (Landing Page, Web App, Backend API ou conjunto).
-   - O formato de saída aceitável é o **[PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md)** (Metadados, Visão, Personas, FR, NFR, Regras de negócio, Integrações, Modelos de dados, Fora de escopo, DoD).
+   - O formato de saída aceitável é o **[PRODUCT_SPEC_TEMPLATE.md](../../spec/PRODUCT_SPEC_TEMPLATE.md)** (Metadados, Visão, Personas, FR, NFR, Regras de negócio, Integrações, Modelos de dados, Fora de escopo, DoD).
 3. **Comportamento:**
    - Se a spec **já estiver** no modelo do template (CTO valida via IA): não precisa enviar para a IA converter; usa como está e grava em `docs/` como spec aceita.
    - Caso contrário: envia para a IA **converter e melhorar** conforme o template; a IA devolve **um documento .md** no formato do template; CTO grava em `docs/` (ex.: `cto_spec_review.md` ou `spec_product_spec.md`).
@@ -119,7 +119,7 @@ Cada agente **pede à IA** que execute as tarefas das suas responsabilidades e *
 
 - [x] **P1** Garantir que **nenhuma** escrita em disco use raiz sem `project_id`; validar `project_id` antes de `write_doc` / `write_project_artifact`; se vazio e storage ativo, usar fallback ou skip. (`get_project_root` retorna `None` se `project_id` vazio.)
 - [x] **P2** Implementar `get_apps_dir(project_id)` e `write_apps_artifact(project_id, relative_path, content)` em `project_storage.py`; runner grava artefatos do Dev em `<project_id>/apps/`.
-- [x] **P3** CTO: carregar [PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) e enviar ao prompt da IA; instruir “converter/validar spec para este modelo; se já estiver no modelo, validar e devolver OK”; gravar spec aceita em `docs/`.
+- [x] **P3** CTO: carregar [PRODUCT_SPEC_TEMPLATE.md](../../spec/PRODUCT_SPEC_TEMPLATE.md) e enviar ao prompt da IA; instruir “converter/validar spec para este modelo; se já estiver no modelo, validar e devolver OK”; gravar spec aceita em `docs/`.
 - [x] **P4** Engineer: prompt que exija 1+ .md como saída (proposta técnica, squads, etc.); runner grava cada artefato em `docs/` com nome adequado.
 - [x] **P5** CTO validação: após receber documentos do Engineer, CTO (IA) valida; se não OK, devolve questionamentos e runner repete Engineer (max rodadas); se OK, segue para PM.
 - [x] **P6** PM: gera backlog com IA; CTO (IA) valida; se OK, acionar squad; senão PM repete (max rodadas).
@@ -132,8 +132,8 @@ Cada agente **pede à IA** que execute as tarefas das suas responsabilidades e *
 ## 7. Referências
 
 - [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md) — Plano base.
-- [PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) — Modelo aceitável de spec para desenvolvimento.
-- [PIPELINE_V2_HANDOFF_CONTRACTS.md](PIPELINE_V2_HANDOFF_CONTRACTS.md) — Contratos entre agentes.
+- [PRODUCT_SPEC_TEMPLATE.md](../../../spec/PRODUCT_SPEC_TEMPLATE.md) — Modelo aceitável de spec para desenvolvimento.
+- [PIPELINE_V2_HANDOFF_CONTRACTS.md](../blueprints/PIPELINE_V2_HANDOFF_CONTRACTS.md) — Contratos entre agentes.
 - `applications/orchestrator/project_storage.py` — Paths e escrita em disco.
 - `applications/orchestrator/runner.py` — Fluxo e chamadas aos agentes.
 

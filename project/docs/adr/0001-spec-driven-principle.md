@@ -32,4 +32,4 @@ O Zentriz Genesis é uma fábrica de software autônoma com múltiplos agentes (
 
 - [MANIFESTO_TECNICO.md](../../MANIFESTO_TECNICO.md)
 - [spec/PRODUCT_SPEC.md](../../spec/PRODUCT_SPEC.md)
-- [docs/PM_AUTOBACKLOG_GUIDE.md](../PM_AUTOBACKLOG_GUIDE.md)
+- [docs/guides/PM_AUTOBACKLOG_GUIDE.md](../guides/PM_AUTOBACKLOG_GUIDE.md)

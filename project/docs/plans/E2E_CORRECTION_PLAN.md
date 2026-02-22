@@ -1,6 +1,6 @@
 # Plano de Correção — Testes E2E Pipeline
 
-> **Fonte**: [E2E_TEST_DIAGNOSIS.md](./E2E_TEST_DIAGNOSIS.md)  
+> **Fonte**: [E2E_TEST_DIAGNOSIS.md](../analysis/E2E_TEST_DIAGNOSIS.md)  
 > **Objetivo**: Corrigir as 5 causas identificadas para que os testes E2E passem (ou falhem com erro claro, não timeout).
 
 ---
@@ -164,8 +164,8 @@ pytest tests/e2e/test_pipeline_landing.py -v -s --junitxml=tests/e2e/reports/jun
 
 ## Referências
 
-- **Diagnóstico completo:** [E2E_TEST_DIAGNOSIS.md](./E2E_TEST_DIAGNOSIS.md)
-- **Guia E2E:** [E2E_PIPELINE_TEST_GUIDE.md](./E2E_PIPELINE_TEST_GUIDE.md)
+- **Diagnóstico completo:** [E2E_TEST_DIAGNOSIS.md](../analysis/E2E_TEST_DIAGNOSIS.md)
+- **Guia E2E:** [E2E_PIPELINE_TEST_GUIDE.md](../guides/E2E_PIPELINE_TEST_GUIDE.md)
 - **Relatórios e ajuda externa:** [tests/e2e/reports/E2E_REPORTS_GUIDE.md](../../tests/e2e/reports/E2E_REPORTS_GUIDE.md)
 
 ---

@@ -1,6 +1,7 @@
 # Navegação — Zentriz Genesis
 
-> Índice central de links para facilitar a navegação entre documentos do projeto.
+> Índice central de links para facilitar a navegação entre documentos do projeto.  
+> A pasta **docs** está organizada por categoria; ver [README.md](README.md) para a estrutura completa (plans/, guides/, status/, backlogs/, etc.).
 
 ---
 
@@ -24,8 +25,8 @@
 | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) | Entrada do projeto (FR/NFR) |
 | [spec/PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) | Template de spec |
 | [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) | Escopo e módulos |
-| [docs/STATUS.md](STATUS.md) | Estado atual do projeto |
-| [docs/NEXT_STEPS_REMINDER.md](NEXT_STEPS_REMINDER.md) | Próximos caminhos naturais |
+| [docs/status/STATUS.md](status/STATUS.md) | Estado atual do projeto |
+| [docs/status/NEXT_STEPS_REMINDER.md](status/NEXT_STEPS_REMINDER.md) | Próximos caminhos naturais |
 | [docs/TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Linguagens, infra e requisitos técnicos para desenvolver |
 | [docs/PORTAL_TENANTS_AND_PLANS.md](PORTAL_TENANTS_AND_PLANS.md) | Portal genesis.zentriz.com.br, multi-tenant, planos (Prata/Ouro/Diamante), telas e gestão |
 
@@ -40,8 +41,8 @@
 | [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [docs/ORCHESTRATOR_BLUEPRINT.md](ORCHESTRATOR_BLUEPRINT.md) | Eventos e implementação |
 | [docs/ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) | Fluxo CTO↔Engineer→PM→Dev/QA→Monitor→PM→CTO |
-| **[docs/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)** | Plano: Engineer, novo fluxo CTO↔Engineer, PMs via CTO, logs em linguagem humana, skills por agente, Genesis-Web dinâmico |
-| [docs/IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) | Resumo do que foi implementado: Engineer, diálogo, skills, serviço agents, projetos de exemplo |
+| **[docs/plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)** | Plano: Engineer, novo fluxo CTO↔Engineer, PMs via CTO, logs em linguagem humana, skills por agente, Genesis-Web dinâmico |
+| [docs/status/IMPLEMENTATION_SUMMARY.md](status/IMPLEMENTATION_SUMMARY.md) | Resumo do que foi implementado: Engineer, diálogo, skills, serviço agents, projetos de exemplo |
 | [docs/TASK_STATE_MACHINE.md](TASK_STATE_MACHINE.md) | Estados e transições |
 | [orchestrator/events/schemas/](../orchestrator/events/schemas/) | Schemas JSON dos eventos |
 
@@ -80,11 +81,27 @@
 
 | Documento | Descrição |
 |-----------|-----------|
-| [docs/BACKLOG_BACKEND.md](BACKLOG_BACKEND.md) | Backlog Backend |
-| [docs/BACKLOG_WEB.md](BACKLOG_WEB.md) | Backlog Web |
-| [docs/PM_AUTOBACKLOG_GUIDE.md](PM_AUTOBACKLOG_GUIDE.md) | Como PM gera backlog |
+| [docs/backlogs/BACKLOG_BACKEND.md](backlogs/BACKLOG_BACKEND.md) | Backlog Backend |
+| [docs/backlogs/BACKLOG_WEB.md](backlogs/BACKLOG_WEB.md) | Backlog Web |
+| [docs/guides/PM_AUTOBACKLOG_GUIDE.md](guides/PM_AUTOBACKLOG_GUIDE.md) | Como PM gera backlog |
 | [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) | Regra de seleção DevOps |
 | [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) | Squad por módulo |
+
+---
+
+## 📁 Documentação por categoria
+
+| Pasta | Conteúdo |
+|-------|----------|
+| [docs/plans/](plans/) | Planos (Pipeline V2, Engineer, E2E, Portal, Full Stack) |
+| [docs/guides/](guides/) | Guias (E2E, PM backlog, prompt execução) |
+| [docs/status/](status/) | Status, pendências, resumos de implementação |
+| [docs/backlogs/](backlogs/) | Backlogs Backend e Web |
+| [docs/analysis/](analysis/) | Análises e diagnósticos (E2E, LLM, de-para API) |
+| [docs/troubleshooting/](troubleshooting/) | Resolução de problemas do pipeline |
+| [docs/blueprints/](blueprints/) | Blueprints e handoff entre agentes |
+| [docs/templates/](templates/) | Templates (system prompt, protocolo agente) |
+| [docs/reference/](reference/) | Referência (task packs, workflows) |
 
 ---
 

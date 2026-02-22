@@ -1,6 +1,6 @@
 # Project Charter — Voucher MVP (produto de exemplo)
 
-> Produto de demonstração do Zentriz Genesis. Spec: [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md).
+> **Nota:** Este arquivo é um **exemplo de charter** gerado pelo pipeline para um produto (Voucher MVP). O **Zentriz Genesis** em si é o orquestrador (portal + API + runner + agents) que produz charters e backlogs a partir de specs. Spec do exemplo: [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md).
 
 ## Escopo
 

@@ -1,7 +1,7 @@
 # Atividades pendentes (pós serviço agents)
 
 > Lista a executar **assim que** estiverem resolvidos: (1) container do serviço `agents` (ex.: zentriz-genesis-agents-1) iniciando corretamente e (2) Engineer disponível no mesmo serviço (já exposto em `POST /invoke/engineer`).  
-> Origem: conclusão do plano Engineer + skills + diálogo ([ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)).
+> Origem: conclusão do plano Engineer + skills + diálogo ([ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](../plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)).
 
 ---
 

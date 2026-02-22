@@ -6,7 +6,7 @@
 
 ## 1. Visão em uma frase
 
-O **portal (genesis-web)** permite ao usuário enviar uma spec e **iniciar** o pipeline. A **API (api-node)** chama o **Runner**; o Runner executa o **fluxo V2**: (1) **CTO spec review** — converte/entende a spec e grava em docs; (2) **loop CTO↔Engineer** (max 3 rodadas) — proposta técnica (squads/skills), CTO valida ou questiona até Charter; (3) **PM** (módulo backend, charter + proposta) — gera backlog; (4) **seed de tarefas** e **Monitor Loop** — runner lê estado das tasks, aciona Dev/QA/DevOps, atualiza tarefas e diálogo, grava artefatos com `path` em `project/`, até o usuário **aceitar** ou **parar**. Cada agente roda no serviço **agents** (Python/FastAPI), que chama a **API da Anthropic (Claude)**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
+O **portal (genesis-web)** permite ao usuário enviar uma spec e **iniciar** o pipeline. A **API (api-node)** chama o **Runner**; o Runner executa o **fluxo V2**: (1) **CTO spec review** — converte/entende a spec e grava em docs; (2) **loop CTO↔Engineer** (max 3 rodadas) — proposta técnica (squads/skills), CTO valida ou questiona até Charter; (3) **PM** (módulo backend, charter + proposta) — gera backlog; (4) **seed de tarefas** e **Monitor Loop** — runner lê estado das tasks, aciona Dev/QA/DevOps, atualiza tarefas e diálogo, grava artefatos com `path` em `project/`, até o usuário **aceitar** ou **parar**. Cada agente roda no serviço **agents** (Python/FastAPI), que chama a **API da Anthropic (Claude)**. Ver [PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md](plans/PIPELINE_V2_AUTONOMOUS_FLOW_PLAN.md).
 
 Sem API/PROJECT_ID, o runner usa fluxo sequencial (Spec → CTO → Engineer loop → PM → Dev → QA → Monitor → DevOps). Documentos e artefatos são persistidos em `<PROJECT_FILES_ROOT>/<project_id>/docs/` e `.../project/` quando definido.
 
@@ -140,7 +140,7 @@ Sobe os agentes no host (porta 8000). Carrega `.env` automaticamente. O runner n
 ## 8. Referências
 
 - Lista completa de variáveis e troubleshooting: [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
-- Plano do pipeline squad completa e armazenamento: [PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md).
+- Plano do pipeline squad completa e armazenamento: [PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](plans/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md).
 - Runner e fluxo spec → CTO → PM → Dev → QA → Monitor → DevOps: [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) e `applications/orchestrator/runner.py`.
 - Runtime e retry: `applications/orchestrator/agents/runtime.py`.
 - Servidor de agentes: `applications/orchestrator/agents/server.py`.
