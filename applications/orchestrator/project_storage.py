@@ -33,14 +33,22 @@ MANIFEST_FILENAME = "manifest.json"
 
 
 def _root() -> Path | None:
+    """Raiz dos projetos. Usa PROJECT_FILES_ROOT ou fallback ~/zentriz-files para resiliência."""
     root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
     if not root:
-        return None
+        root = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
+    if not root:
+        root = str(Path.home() / "zentriz-files")
     return Path(root)
 
 
+def get_files_root() -> Path:
+    """Raiz dos arquivos de projeto (sempre definida: env ou fallback ~/zentriz-files)."""
+    return _root()
+
+
 def get_project_root(project_id: str) -> Path | None:
-    """Retorna PROJECT_FILES_ROOT / project_id ou None se PROJECT_FILES_ROOT não estiver definido ou project_id vazio."""
+    """Retorna PROJECT_FILES_ROOT / project_id ou None se project_id vazio."""
     base = _root()
     if not base or not (project_id and str(project_id).strip()):
         return None

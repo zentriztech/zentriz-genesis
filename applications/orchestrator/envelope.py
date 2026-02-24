@@ -159,26 +159,40 @@ def extract_json_from_text(text: str) -> str | None:
     Extrai bloco JSON de texto.
     Prioridade (AGENT_LLM_COMMUNICATION_ANALYSIS): <response>...</response> permite
     raciocínio em <thinking> e JSON final parseável; depois code blocks; depois raw.
+    Se a resposta estiver truncada (sem </response>), extrai do <response> até o fim.
     """
     if not text or not isinstance(text, str):
         return None
     text = text.strip()
-    # 1) Conteúdo dentro de <response>...</response> (permite <thinking> antes); depois extrair JSON desse bloco
-    match = re.search(r"<response>\s*(.*?)\s*</response>", text, re.DOTALL)
-    if match:
-        inner = match.group(1).strip()
-        if "```json" in inner:
-            try:
-                return inner.split("```json")[1].split("```")[0].strip()
-            except IndexError:
-                pass
-        if "```" in inner:
-            try:
-                return inner.split("```")[1].split("```")[0].strip()
-            except IndexError:
-                pass
-        if inner.startswith("{"):
-            return inner
+    # 1) Conteúdo dentro de <response>...</response> — usar última ocorrência de </response>
+    #    para não truncar quando o JSON contém "</response>" no meio (ex.: em artifact content)
+    start_tag = text.find("<response>")
+    if start_tag >= 0:
+        end_tag = text.rfind("</response>")
+        if end_tag > start_tag:
+            inner = text[start_tag + len("<response>"):end_tag].strip()
+            # Preferir JSON direto quando já começa com { (evita truncar em conteúdo markdown com ```)
+            if inner.startswith("{"):
+                return inner
+            if "```json" in inner:
+                try:
+                    return inner.split("```json")[1].split("```")[0].strip()
+                except IndexError:
+                    pass
+            if "```" in inner:
+                try:
+                    return inner.split("```")[1].split("```")[0].strip()
+                except IndexError:
+                    pass
+    # 1b) Resposta truncada: existe <response> mas não </response> — extrair do primeiro { até o fim
+    start_tag = text.find("<response>")
+    if start_tag >= 0:
+        after = text[start_tag + len("<response>"):]
+        brace = after.find("{")
+        if brace >= 0:
+            partial = after[brace:].strip()
+            if partial:
+                return partial
     # 2) Markdown code block ```json
     if "```json" in text:
         try:
@@ -193,6 +207,20 @@ def extract_json_from_text(text: str) -> str | None:
     if text.startswith("{"):
         return text
     return None
+
+
+def _unescape_json_string(s: str) -> str:
+    r"""
+    Decodifica escapes de string JSON (valor extraído do texto bruto).
+    Converte \n -> newline, \r -> CR, \t -> tab, \" -> ", \\ -> \.
+    Ordem: primeiro \\ para não interpretar \n como escape.
+    """
+    if not s:
+        return s
+    # Placeholder para \\ (dois chars no source) para não confundir com \n, \t, etc.
+    s = s.replace("\\\\", "\x00")
+    s = s.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t").replace('\\"', '"')
+    return s.replace("\x00", "\\")
 
 
 def _extract_double_quoted(s: str, start: int) -> tuple[str | None, int]:
@@ -214,6 +242,51 @@ def _extract_double_quoted(s: str, start: int) -> tuple[str | None, int]:
             parts.append(s[i])
             i += 1
     return None, start
+
+
+def _extract_content_value_robust(s: str, value_quote_pos: int) -> tuple[str | None, int]:
+    """
+    Extrai o valor de "content" mesmo com aspas não escapadas no meio (LEI 4).
+    A partir da aspa de abertura (value_quote_pos), avança até encontrar a aspa de FECHO:
+    uma aspa seguida (após whitespace) de ',' ou '}' ou ']' ou de nova chave '"format"', '"purpose"', '"path"'.
+    Trata \\ e \\" corretamente; aspas internas não escapadas são tratadas como conteúdo.
+    Retorna (valor, posição após a aspa de fecho) ou (None, value_quote_pos).
+    """
+    if value_quote_pos >= len(s) or s[value_quote_pos] != '"':
+        return None, value_quote_pos
+    i = value_quote_pos + 1
+    parts: list[str] = []
+    while i < len(s):
+        if s[i] == "\\":
+            if i + 1 < len(s):
+                parts.append(s[i : i + 2])
+                i += 2
+            else:
+                return None, value_quote_pos
+        elif s[i] == '"':
+            # Verificar se é aspa de fecho: à frente (com whitespace) vem , } ] ou "format"/"purpose"/"path"
+            j = i + 1
+            while j < len(s) and s[j] in " \t\n\r":
+                j += 1
+            if j >= len(s):
+                return "".join(parts), i + 1
+            if s[j] in ",}]":
+                return "".join(parts), i + 1
+            if s[j] == '"':
+                # Próxima chave: "format", "purpose", "path"
+                rest = s[j : j + 20]
+                if re.match(r'"(format|purpose|path|evidence)"\s*:', rest):
+                    return "".join(parts), i + 1
+            # Aspa interna (conteúdo), incluir e continuar
+            parts.append(s[i])
+            i += 1
+        else:
+            parts.append(s[i])
+            i += 1
+    # Resposta truncada: fim da string sem aspa de fecho — retornar conteúdo parcial
+    if parts:
+        return "".join(parts), len(s)
+    return None, value_quote_pos
 
 
 def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[dict, list[str]]:
@@ -259,13 +332,17 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
             if not m:
                 break
             value_quote = m.end() - 1
-            content_val, end_pos = _extract_double_quoted(json_str, value_quote)
+            # Usar extrator robusto para content com aspas internas (markdown, etc.)
+            content_val, end_pos = _extract_content_value_robust(json_str, value_quote)
+            if content_val is None:
+                content_val, end_pos = _extract_double_quoted(json_str, value_quote)
             if content_val is None:
                 i = value_quote + 1
                 continue
+            content_val = _unescape_json_string(content_val)
             idx = len(content_blocks)
             content_blocks.append(content_val)
-            replacements.append((value_quote, end_pos, f'"@@PLACEHOLDER_{idx}@@'))
+            replacements.append((value_quote, end_pos, f'"@@PLACEHOLDER_{idx}@@"'))
             i = end_pos
 
         if not replacements:
@@ -279,6 +356,12 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
             last = end
         parts.append(json_str[last:])
         cleaned = "".join(parts)
+        # Resposta truncada: fechar JSON se o último replacement vai até o fim
+        if replacements and replacements[-1][1] >= len(json_str):
+            if not cleaned.rstrip().endswith("}"):
+                cleaned = cleaned.rstrip()
+                cleaned += "\n    }\n  ]\n}"
+                logger.warning("Resposta IA truncada: JSON fechado para recuperar envelope e artifact parcial.")
         data = json.loads(cleaned)
         if not isinstance(data, dict):
             raise json.JSONDecodeError("not a dict", cleaned, 0)
@@ -296,7 +379,24 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
 
-    # Tentativa 3: fallback
+    # Tentativa 3: se o JSON parece ser do Engineer (3 docs), extrair artifacts um a um do json_str
+    if "docs/engineer/engineer_proposal.md" in json_str and "docs/engineer/engineer_architecture.md" in json_str and "docs/engineer/engineer_dependencies.md" in json_str:
+        artifacts_engineer = _extract_engineer_artifacts_from_json_str(json_str)
+        if len(artifacts_engineer) >= 3:
+            logger.info("[Envelope] Recuperados %d artifacts do Engineer a partir do JSON (fallback).", len(artifacts_engineer))
+            return (
+                {
+                    "request_id": request_id,
+                    "status": "OK",
+                    "summary": "Proposta técnica recuperada (parse parcial por escaping). 3 artefatos Engineer.",
+                    "artifacts": artifacts_engineer[:3],
+                    "evidence": [{"type": "spec_ref", "ref": "FR-01", "note": "Engineer artifacts extraídos do JSON"}],
+                    "next_actions": {"owner": "CTO", "items": ["Validar proposta"], "questions": []},
+                },
+                [],
+            )
+
+    # Tentativa 4: fallback final
     logger.error("Falha total no parse JSON (LEI 4). Primeiros 500 chars: %s", json_str[:500])
     return (
         {
@@ -309,6 +409,47 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
         },
         ["JSON inválido — provável problema de escaping em artifacts[].content"],
     )
+
+
+def _extract_engineer_artifacts_from_json_str(json_str: str) -> list[dict]:
+    """
+    Extrai os 3 artifacts do Engineer (proposal, architecture, dependencies) do texto JSON
+    quando o parse completo falha. Localiza cada "path": "docs/engineer/engineer_XXX.md" e o
+    "content" seguinte, extrai com _extract_content_value_robust e monta a lista.
+    """
+    paths_order = [
+        "docs/engineer/engineer_proposal.md",
+        "docs/engineer/engineer_architecture.md",
+        "docs/engineer/engineer_dependencies.md",
+    ]
+    pattern_path = re.compile(r'"path"\s*:\s*"(' + re.escape("docs/engineer/engineer_proposal.md") + r'|' + re.escape("docs/engineer/engineer_architecture.md") + r'|' + re.escape("docs/engineer/engineer_dependencies.md") + r')"')
+    artifacts: list[dict] = []
+    for m in pattern_path.finditer(json_str):
+        path_val = m.group(1)
+        after = json_str[m.end():]
+        content_label = re.search(r'"content"\s*:\s*"', after)
+        if not content_label:
+            continue
+        # Índice da aspa de abertura do valor (último " do match '"content": "')
+        quote_pos = content_label.end() - 1
+        content_val, _ = _extract_content_value_robust(after, quote_pos)
+        if content_val is None:
+            content_val, _ = _extract_double_quoted(after, quote_pos)
+        if content_val is not None and len(content_val.strip()) > 50:
+            content_val = _unescape_json_string(content_val)
+            artifacts.append({
+                "path": path_val,
+                "content": content_val,
+                "format": "markdown",
+                "purpose": "Engineer doc" if "proposal" in path_val else ("Architecture" if "architecture" in path_val else "Dependencies"),
+            })
+    ordered = []
+    for p in paths_order:
+        for a in artifacts:
+            if a.get("path") == p:
+                ordered.append(a)
+                break
+    return ordered
 
 
 def parse_response_envelope(

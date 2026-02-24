@@ -97,6 +97,202 @@ def health():
     return {"status": "ok", "claude_model": model, "claude_configured": key_ok, "show_traceback": SHOW_TRACEBACK}
 
 
+def _project_id_from_message(body: dict) -> str | None:
+    """Extrai project_id do body (message_envelope)."""
+    pid = body.get("project_id")
+    if pid:
+        return str(pid).strip() or None
+    inp = body.get("input") or body.get("inputs")
+    if isinstance(inp, dict):
+        pid = inp.get("project_id")
+        if pid:
+            return str(pid).strip() or None
+    return None
+
+
+def _request_id_from_message(message: dict) -> str:
+    """Extrai request_id para uso em nome de arquivo (sanitizado)."""
+    rid = message.get("request_id") or (message.get("input") or {}).get("request_id") or "unknown"
+    rid = str(rid).strip()
+    safe = "".join(c for c in rid if c.isalnum() or c in "._-")[:64] or "unknown"
+    return safe
+
+
+def _persist_cto_response_json(message: dict, response: dict) -> None:
+    """
+    Grava a resposta completa da IA (response_envelope) em JSON em docs/cto/ para
+    avaliação, mesmo quando o sistema rejeita (BLOCKED/FAIL). Exige project_id e
+    PROJECT_FILES_ROOT.
+    """
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    try:
+        from orchestrator import project_storage as storage
+    except ImportError:
+        return
+    root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
+    if not root and getattr(storage, "get_files_root", None):
+        root = str(storage.get_files_root())
+    if not root:
+        return
+    if not getattr(storage, "is_enabled", lambda: bool(root))():
+        return
+    request_id = _request_id_from_message(message)
+    filename = f"cto_response_{request_id}.json"
+    try:
+        payload = json.dumps(response, ensure_ascii=False, indent=2)
+        storage.write_doc_by_path(
+            project_id, "cto", f"cto/{filename}", payload,
+            title="CTO response envelope (IA)",
+        )
+        logger.info("[CTO] Resposta da IA gravada em docs/cto/%s para avaliação.", filename)
+    except Exception as e:
+        logger.warning("[CTO] Falha ao gravar resposta JSON: %s", e)
+
+
+def _persist_cto_artifacts_if_enabled(message: dict, response: dict) -> None:
+    """
+    Se PROJECT_FILES_ROOT e project_id estiverem definidos, grava os artifacts
+    do CTO em disco (docs/ ou project/ conforme path). Permite fluxo completo
+    ao chamar POST /invoke/cto sem passar pelo runner.
+    """
+    _persist_artifacts_for_role(message, response, "cto")
+
+
+def _persist_engineer_response_json(message: dict, response: dict) -> None:
+    """
+    Grava a resposta do Engineer (response_envelope) em JSON em docs/engineer/
+    para inspeção. Exige project_id e PROJECT_FILES_ROOT.
+    """
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    try:
+        from orchestrator import project_storage as storage
+    except ImportError:
+        return
+    root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
+    if not root and getattr(storage, "get_files_root", None):
+        root = str(storage.get_files_root())
+    if not root or not getattr(storage, "is_enabled", lambda: bool(root))():
+        return
+    request_id = _request_id_from_message(message)
+    filename = f"engineer_response_{request_id}.json"
+    try:
+        payload = json.dumps(response, ensure_ascii=False, indent=2)
+        storage.write_doc_by_path(
+            project_id, "engineer", f"engineer/{filename}", payload,
+            title="Engineer response envelope (IA)",
+        )
+        logger.info("[Engineer] Resposta da IA gravada em docs/engineer/%s", filename)
+    except Exception as e:
+        logger.warning("[Engineer] Falha ao gravar resposta JSON: %s", e)
+
+
+def _persist_engineer_artifacts_if_enabled(message: dict, response: dict) -> None:
+    """Grava os artifacts do Engineer em disco (docs/engineer/*.md)."""
+    _persist_artifacts_for_role(message, response, "engineer")
+
+
+def _try_persist_engineer_artifacts_from_raw(message: dict, response: dict) -> None:
+    """
+    Se a resposta tiver menos de 3 artifacts, tenta extrair os 3 .md da resposta bruta
+    (raw_response_*.txt) e gravar em docs/engineer/. Assim os 3 arquivos ficam no disco
+    mesmo quando o JSON veio incompleto ou com apenas um artifact.
+    """
+    artifacts = response.get("artifacts") or []
+    if len(artifacts) >= 3:
+        return
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    request_id = _request_id_from_message(message)
+    try:
+        from orchestrator import project_storage as storage
+        if not getattr(storage, "is_enabled", lambda: False)():
+            return
+        docs_dir = storage.get_docs_dir(project_id)
+        if not docs_dir:
+            return
+        raw_path = docs_dir / "engineer" / ("raw_response_%s.txt" % request_id)
+        if not raw_path.exists():
+            return
+        raw_text = raw_path.read_text(encoding="utf-8")
+        from orchestrator.engineer_raw_extract import persist_engineer_artifacts_from_raw
+        n = persist_engineer_artifacts_from_raw(project_id, request_id, raw_text)
+        if n:
+            logger.info("[Engineer] %d artefato(s) gravado(s) a partir do raw (fallback).", n)
+    except Exception as e:
+        logger.warning("[Engineer] Fallback raw extract falhou: %s", e)
+
+
+def _persist_artifacts_for_role(message: dict, response: dict, role_dir: str) -> None:
+    """
+    Grava artifacts da resposta em disco conforme path (docs/, project/, apps/).
+    role_dir: "cto" | "engineer" (usado como creator e subpasta em docs/).
+    """
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    try:
+        from orchestrator import project_storage as storage
+    except ImportError:
+        return
+    root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
+    if not root and getattr(storage, "get_files_root", None):
+        root = str(storage.get_files_root())
+    if not root or not getattr(storage, "is_enabled", lambda: bool(root))():
+        return
+    artifacts = response.get("artifacts") or []
+    if not artifacts:
+        return
+    try:
+        from orchestrator.envelope import filter_artifacts_by_path_policy
+        artifacts = filter_artifacts_by_path_policy(artifacts, project_id)
+    except ImportError:
+        pass
+    for i, art in enumerate(artifacts):
+        if not isinstance(art, dict) or not art.get("content"):
+            continue
+        content = art.get("content", "")
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        else:
+            content = str(content)
+        # Decodificar escapes JSON se o conteúdo veio com \n literal (ex.: fallback Engineer)
+        if "\\n" in content or "\\t" in content:
+            try:
+                from orchestrator.envelope import _unescape_json_string
+                content = _unescape_json_string(content)
+            except ImportError:
+                pass
+        stripped = content.strip()
+        if not stripped or stripped in ("...", "[...]", ".") or len(stripped) < 20:
+            logger.info("[%s] Artefato %s ignorado (conteúdo trivial: %d chars).", role_dir.title(), art.get("path", i), len(stripped))
+            continue
+        path_val = (art.get("path") or "").strip()
+        title = art.get("purpose") or f"Artifact {i}"
+        try:
+            if path_val.startswith("project/"):
+                storage.write_project_artifact(project_id, path_val[8:].lstrip("/"), content)
+            elif path_val.startswith("docs/"):
+                storage.write_doc_by_path(
+                    project_id, role_dir, path_val[5:].lstrip("/"), content, title=title
+                )
+            elif path_val.startswith("apps/"):
+                if getattr(storage, "write_apps_artifact", None):
+                    storage.write_apps_artifact(project_id, path_val[5:].lstrip("/"), content)
+                else:
+                    storage.write_doc_by_path(
+                        project_id, role_dir, path_val[5:].lstrip("/"), content, title=title
+                    )
+            else:
+                storage.write_doc(project_id, role_dir, f"artifact_{i}", content, title=title)
+        except Exception as e:
+            logger.warning("[%s] Falha ao gravar artifact em disco: %s", role_dir.title(), e)
+
+
 def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
     """Handler genérico para endpoints com prompt fixo."""
     agent_name = AGENT_LABELS.get(role, role)
@@ -105,6 +301,13 @@ def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
         logger.info("[%s] Recebeu solicitação. Processando...", agent_name)
         response = run_agent(system_prompt_path=system_prompt, message=message, role=role)
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
+        if role == "CTO":
+            _persist_cto_response_json(message, response)
+            _persist_cto_artifacts_if_enabled(message, response)
+        elif role == "ENGINEER":
+            _persist_engineer_response_json(message, response)
+            _persist_engineer_artifacts_if_enabled(message, response)
+            _try_persist_engineer_artifacts_from_raw(message, response)
         return response
     except ValueError as e:
         logger.warning("[%s] Erro de validação: %s", agent_name, e)

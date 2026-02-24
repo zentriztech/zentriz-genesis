@@ -84,6 +84,7 @@
 | [docs/backlogs/BACKLOG_BACKEND.md](backlogs/BACKLOG_BACKEND.md) | Backlog Backend |
 | [docs/backlogs/BACKLOG_WEB.md](backlogs/BACKLOG_WEB.md) | Backlog Web |
 | [docs/guides/PM_AUTOBACKLOG_GUIDE.md](guides/PM_AUTOBACKLOG_GUIDE.md) | Como PM gera backlog |
+| [docs/guides/CTO_AGENT_FLOW_ANALYSIS.md](guides/CTO_AGENT_FLOW_ANALYSIS.md) | Fluxo completo CTO: comunicação com IA, formato de retorno, gravação em disco |
 | [docs/DEVOPS_SELECTION.md](DEVOPS_SELECTION.md) | Regra de seleção DevOps |
 | [docs/TEAM_COMPOSITION.md](TEAM_COMPOSITION.md) | Squad por módulo |
 

@@ -1032,6 +1032,14 @@ def main() -> int:
                     break
             if project_id and storage and storage.is_enabled():
                 storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
+                try:
+                    storage.write_doc_by_path(
+                        project_id, "cto", "cto/cto_spec_response.json",
+                        json.dumps(cto_spec_response, ensure_ascii=False, indent=2),
+                        title="CTO spec response (IA)",
+                    )
+                except Exception as _e:
+                    logger.warning("[Pipeline] Falha ao gravar CTO spec response JSON: %s", _e)
             if pipeline_ctx:
                 pipeline_ctx.set_product_spec(spec_understood)
                 pipeline_ctx.current_step = 1
@@ -1080,6 +1088,15 @@ def main() -> int:
                     pipeline_ctx=pipeline_ctx,
                 )
                 _audit_log("cto", request_id, cto_response)
+                if project_id and storage and storage.is_enabled():
+                    try:
+                        storage.write_doc_by_path(
+                            project_id, "cto", f"cto/cto_charter_response_round{round_num}.json",
+                            json.dumps(cto_response, ensure_ascii=False, indent=2),
+                            title="CTO charter response (IA)",
+                        )
+                    except Exception as _e:
+                        logger.warning("[Pipeline] Falha ao gravar CTO charter response JSON: %s", _e)
                 charter_summary = cto_response.get("summary", "")
                 charter_artifacts = cto_response.get("artifacts", [])
                 cto_status = cto_response.get("status", "?")

@@ -125,6 +125,24 @@ def test_resilient_json_parse_tentativa3_fallback():
     assert len(errs) >= 1
 
 
+def test_resilient_json_parse_content_with_unescaped_quotes():
+    """LEI 4: content com aspas não escapadas (ex.: markdown do CTO) é extraído por _extract_content_value_robust."""
+    from orchestrator.envelope import resilient_json_parse
+    # JSON inválido: "content" tem aspa interna não escapada (como a IA às vezes devolve)
+    raw = '''{"status":"OK","summary":"Done","artifacts":[{"path":"docs/spec/PRODUCT_SPEC.md","content":"# Spec\\n\\nO produto \\"Landing\\" é estático.","format":"markdown"}],"evidence":[],"next_actions":{}}'''
+    # Simular o que a IA envia (aspas internas NÃO escapadas):
+    raw_bad = '''{"status":"OK","summary":"Done","artifacts":[{"path":"docs/spec/PRODUCT_SPEC.md","content":"# Spec
+
+O produto "Landing" é estático.","format":"markdown"}],"evidence":[],"next_actions":{}}'''
+    data, errs = resilient_json_parse(raw_bad, "req-4")
+    assert data["status"] == "OK", "Tentativa 2 com extrator robusto deve parsear content com aspas internas"
+    arts = data.get("artifacts") or []
+    assert len(arts) == 1
+    assert "Landing" in arts[0].get("content", "")
+    assert "Spec" in arts[0].get("content", "")
+    assert errs == []
+
+
 # --- parse_response_envelope ---
 
 def test_parse_response_valid_json():
@@ -168,6 +186,34 @@ Analisando a spec...
     assert data["status"] == "OK"
     assert data["summary"] == "Spec convertida"
     assert len(errs) == 0
+
+
+def test_resilient_json_parse_truncated_response():
+    """Resposta truncada (sem </response>): extrai JSON parcial e content até o fim."""
+    from orchestrator.envelope import resilient_json_parse
+    # Simula resposta que cortou no meio do "content" (max_tokens)
+    raw = """<thinking>Planejando...</thinking>
+
+<response>
+{
+  "status": "OK",
+  "summary": "Spec convertida.",
+  "artifacts": [
+    {
+      "path": "docs/spec/PRODUCT_SPEC.md",
+      "format": "markdown",
+      "purpose": "Spec",
+      "content": "# PRODUCT SPEC\\n\\n## 0. Metadados\\n- Item 1\\n- Item 2
+"""
+    data, errs = resilient_json_parse(raw, "req-trunc")
+    assert len(errs) == 0
+    assert data["status"] == "OK"
+    assert data["summary"] == "Spec convertida."
+    arts = data.get("artifacts") or []
+    assert len(arts) == 1
+    assert arts[0]["path"] == "docs/spec/PRODUCT_SPEC.md"
+    assert "PRODUCT SPEC" in arts[0].get("content", "")
+    assert "## 0. Metadados" in arts[0].get("content", "")
 
 
 # --- filter_artifacts_by_path_policy ---

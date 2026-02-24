@@ -44,6 +44,11 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
     echo "[agents-host] Variáveis carregadas de .env (CLAUDE_MODEL=${CLAUDE_MODEL:-não definido})"
 fi
 
+# Garantir PROJECT_FILES_ROOT para gravação de respostas/artefatos do CTO (resiliente)
+export PROJECT_FILES_ROOT="${PROJECT_FILES_ROOT:-${HOST_PROJECT_FILES_ROOT:-$HOME/zentriz-files}}"
+mkdir -p "$PROJECT_FILES_ROOT"
+echo "[agents-host] PROJECT_FILES_ROOT=$PROJECT_FILES_ROOT (artefatos e respostas da IA em disco)"
+
 if ! python3 -c "import anthropic, fastapi, uvicorn" 2>/dev/null; then
     echo "[agents-host] Instalando dependências..."
     python3 -m pip install -q -r applications/orchestrator/agents/requirements.txt 2>&1 | grep -v "pyenv.*rehash" || true

@@ -139,6 +139,7 @@ Sobe os agentes no host (porta 8000). Carrega `.env` automaticamente. O runner n
 
 ## 8. Referências
 
+- **Fluxo completo do agente CTO** (comunicação com a IA, template de retorno, gravação em disco): [guides/CTO_AGENT_FLOW_ANALYSIS.md](guides/CTO_AGENT_FLOW_ANALYSIS.md).
 - Lista completa de variáveis e troubleshooting: [SECRETS_AND_ENV.md](SECRETS_AND_ENV.md).
 - Plano do pipeline squad completa e armazenamento: [PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md](plans/PIPELINE_FULL_STACK_IMPLEMENTATION_PLAN.md).
 - Runner e fluxo spec → CTO → PM → Dev → QA → Monitor → DevOps: [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) e `applications/orchestrator/runner.py`.

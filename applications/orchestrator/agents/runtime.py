@@ -393,6 +393,46 @@ def log_agent_call(
     logger.info(json.dumps(log_entry, ensure_ascii=False))
 
 
+def _persist_raw_llm_response(role: str, message: dict, raw_text: str) -> None:
+    """
+    Grava a resposta bruta da IA (exatamente como veio da API) antes de qualquer parse.
+    Permite inspecionar o que o modelo devolveu. Arquivo: docs/<role>/raw_response_<request_id>.txt
+    """
+    if not raw_text:
+        return
+    project_id = message.get("project_id")
+    if not project_id:
+        inp = message.get("input") or message.get("inputs")
+        if isinstance(inp, dict):
+            project_id = inp.get("project_id")
+    if not project_id:
+        return
+    request_id = (message.get("request_id") or "unknown")
+    if isinstance(request_id, str):
+        request_id = "".join(c for c in request_id if c.isalnum() or c in "._-")[:64] or "unknown"
+    else:
+        request_id = "unknown"
+    try:
+        from orchestrator import project_storage as storage
+    except ImportError:
+        return
+    root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
+    if not root and getattr(storage, "get_files_root", None):
+        root = str(storage.get_files_root())
+    if not root or not (getattr(storage, "is_enabled", None) and storage.is_enabled()):
+        return
+    role_dir = (role or "agent").lower().replace("_", "-")
+    filename = f"raw_response_{request_id}.txt"
+    try:
+        storage.write_doc_by_path(
+            project_id, role_dir, f"{role_dir}/{filename}", raw_text,
+            title="Raw LLM response (pre-parse)",
+        )
+        logger.info("[%s] Resposta bruta da IA gravada em docs/%s/%s", role, role_dir, filename)
+    except Exception as e:
+        logger.warning("[%s] Falha ao gravar resposta bruta: %s", role, e)
+
+
 def _get_model_for_role(role: str) -> str:
     """Seleção de modelo por contexto (Blueprint 6.1): spec/charter vs código."""
     role_upper = (role or "").upper()
@@ -465,6 +505,10 @@ def run_agent(
         # E2E: cap para spec_intake evita resposta gigante e timeout (E2E_CORRECTION_PLAN)
         if (mode or "").strip().lower() == "spec_intake_and_normalize":
             max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
+        # Engineer (generate_engineering_docs): resposta longa (3 docs completos) — garantir teto alto para raw completo
+        if (role or "").upper() == "ENGINEER" and (mode or "").strip().lower() == "generate_engineering_docs":
+            engineer_max = int(os.environ.get("CLAUDE_MAX_TOKENS_ENGINEER", "32000"))
+            max_tokens = max(max_tokens, min(engineer_max, env_max))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None
@@ -506,7 +550,14 @@ def run_agent(
                         json.dumps({"agent": role, "model": model, **error_detail}, ensure_ascii=False)
                     ) from e
 
-        raw_text = response.content[0].text if response and response.content else ""
+        # Resposta completa: concatenar todos os blocos de texto (Anthropic pode retornar vários)
+        raw_parts = []
+        for block in (response.content or []) if response else []:
+            text = getattr(block, "text", None) if hasattr(block, "text") else (block.get("text") if isinstance(block, dict) else None)
+            if text:
+                raw_parts.append(text)
+        raw_text = "".join(raw_parts) if raw_parts else (response.content[0].text if response and response.content else "")
+        _persist_raw_llm_response(role, message, raw_text)
         try:
             from orchestrator.envelope import extract_thinking
             last_thinking = extract_thinking(raw_text) or ""
