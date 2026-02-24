@@ -396,6 +396,23 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
                 [],
             )
 
+    # Tentativa 3b: se o JSON parece ser do PM (2 docs), extrair BACKLOG e DOD do json_str
+    if "docs/pm/backend/BACKLOG.md" in json_str and "docs/pm/backend/DOD.md" in json_str:
+        artifacts_pm = _extract_pm_artifacts_from_json_str(json_str)
+        if len(artifacts_pm) >= 2:
+            logger.info("[Envelope] Recuperados %d artifacts do PM a partir do JSON (fallback).", len(artifacts_pm))
+            return (
+                {
+                    "request_id": request_id,
+                    "status": "OK",
+                    "summary": "Backlog recuperado (parse parcial por escaping). 2 artefatos PM.",
+                    "artifacts": artifacts_pm[:2],
+                    "evidence": [{"type": "spec_ref", "ref": "inputs.charter", "note": "PM artifacts extraídos do JSON"}],
+                    "next_actions": {"owner": "CTO", "items": ["Validar backlog"], "questions": []},
+                },
+                [],
+            )
+
     # Tentativa 4: fallback final
     logger.error("Falha total no parse JSON (LEI 4). Primeiros 500 chars: %s", json_str[:500])
     return (
@@ -442,6 +459,46 @@ def _extract_engineer_artifacts_from_json_str(json_str: str) -> list[dict]:
                 "content": content_val,
                 "format": "markdown",
                 "purpose": "Engineer doc" if "proposal" in path_val else ("Architecture" if "architecture" in path_val else "Dependencies"),
+            })
+    ordered = []
+    for p in paths_order:
+        for a in artifacts:
+            if a.get("path") == p:
+                ordered.append(a)
+                break
+    return ordered
+
+
+def _extract_pm_artifacts_from_json_str(json_str: str) -> list[dict]:
+    """
+    Extrai os 2 artifacts do PM (BACKLOG.md, DOD.md) do texto JSON quando o parse completo falha.
+    Localiza cada "path": "docs/pm/backend/XXX.md" e o "content" seguinte, extrai e unescape.
+    """
+    paths_order = [
+        "docs/pm/backend/BACKLOG.md",
+        "docs/pm/backend/DOD.md",
+    ]
+    pattern_path = re.compile(
+        r'"path"\s*:\s*"(docs/pm/backend/BACKLOG\.md|docs/pm/backend/DOD\.md)"'
+    )
+    artifacts: list[dict] = []
+    for m in pattern_path.finditer(json_str):
+        path_val = m.group(1)
+        after = json_str[m.end():]
+        content_label = re.search(r'"content"\s*:\s*"', after)
+        if not content_label:
+            continue
+        quote_pos = content_label.end() - 1
+        content_val, _ = _extract_content_value_robust(after, quote_pos)
+        if content_val is None:
+            content_val, _ = _extract_double_quoted(after, quote_pos)
+        if content_val is not None and len(content_val.strip()) > 30:
+            content_val = _unescape_json_string(content_val)
+            artifacts.append({
+                "path": path_val,
+                "content": content_val,
+                "format": "markdown",
+                "purpose": "Backlog" if "BACKLOG" in path_val else "DoD",
             })
     ordered = []
     for p in paths_order:

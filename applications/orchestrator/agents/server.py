@@ -195,6 +195,73 @@ def _persist_engineer_artifacts_if_enabled(message: dict, response: dict) -> Non
     _persist_artifacts_for_role(message, response, "engineer")
 
 
+def _persist_pm_response_json(message: dict, response: dict) -> None:
+    """Grava a resposta do PM (response_envelope) em JSON em docs/pm/ para inspeção."""
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    try:
+        from orchestrator import project_storage as storage
+    except ImportError:
+        return
+    root = os.environ.get("PROJECT_FILES_ROOT", "").strip()
+    if not root and getattr(storage, "get_files_root", None):
+        root = str(storage.get_files_root())
+    if not root or not getattr(storage, "is_enabled", lambda: bool(root))():
+        return
+    request_id = _request_id_from_message(message)
+    filename = f"pm_response_{request_id}.json"
+    try:
+        payload = json.dumps(response, ensure_ascii=False, indent=2)
+        storage.write_doc_by_path(
+            project_id, "pm", f"pm/{filename}", payload,
+            title="PM response envelope (IA)",
+        )
+        logger.info("[PM] Resposta da IA gravada em docs/pm/%s", filename)
+    except Exception as e:
+        logger.warning("[PM] Falha ao gravar resposta JSON: %s", e)
+
+
+def _persist_pm_artifacts_if_enabled(message: dict, response: dict) -> None:
+    """Grava os artifacts do PM em disco (docs/pm/backend/ ou docs/pm/<variant>/)."""
+    _persist_artifacts_for_role(message, response, "pm")
+
+
+def _try_persist_pm_artifacts_from_raw(message: dict, response: dict) -> None:
+    """
+    Se a resposta do PM tiver menos de 2 artifacts, tenta extrair BACKLOG.md e DOD.md
+    do raw (JSON no raw_response_*.txt) e gravar em docs/pm/backend/.
+    """
+    artifacts = response.get("artifacts") or []
+    if len(artifacts) >= 2:
+        return
+    project_id = _project_id_from_message(message)
+    if not project_id:
+        return
+    request_id = _request_id_from_message(message)
+    try:
+        from orchestrator import project_storage as storage
+        if not getattr(storage, "is_enabled", lambda: False)():
+            return
+        docs_dir = storage.get_docs_dir(project_id)
+        if not docs_dir:
+            return
+        raw_path = docs_dir / "pm" / ("raw_response_%s.txt" % request_id)
+        if not raw_path.exists():
+            return
+        raw_text = raw_path.read_text(encoding="utf-8")
+        from orchestrator.envelope import extract_json_from_text, _extract_pm_artifacts_from_json_str
+        json_str = extract_json_from_text(raw_text)
+        if not json_str or "docs/pm/backend/BACKLOG.md" not in json_str:
+            return
+        pm_artifacts = _extract_pm_artifacts_from_json_str(json_str)
+        if len(pm_artifacts) >= 2:
+            _persist_artifacts_for_role(message, {"artifacts": pm_artifacts}, "pm")
+            logger.info("[PM] %d artefato(s) gravado(s) a partir do raw (fallback).", len(pm_artifacts))
+    except Exception as e:
+        logger.warning("[PM] Fallback raw extract falhou: %s", e)
+
+
 def _try_persist_engineer_artifacts_from_raw(message: dict, response: dict) -> None:
     """
     Se a resposta tiver menos de 3 artifacts, tenta extrair os 3 .md da resposta bruta
@@ -331,6 +398,10 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
         logger.info("[%s] Recebeu solicitação (skill_path=%s). Processando...", agent_name, skill_path or "default")
         response = run_agent(system_prompt_path=prompt_path, message=message, role=role)
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
+        if role == "PM":
+            _persist_pm_response_json(message, response)
+            _persist_pm_artifacts_if_enabled(message, response)
+            _try_persist_pm_artifacts_from_raw(message, response)
         return response
     except ValueError as e:
         logger.warning("[%s] Erro de validação: %s", agent_name, e)

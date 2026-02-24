@@ -428,7 +428,7 @@ def _persist_raw_llm_response(role: str, message: dict, raw_text: str) -> None:
             project_id, role_dir, f"{role_dir}/{filename}", raw_text,
             title="Raw LLM response (pre-parse)",
         )
-        logger.info("[%s] Resposta bruta da IA gravada em docs/%s/%s", role, role_dir, filename)
+        logger.info("[%s] Resposta bruta da IA gravada em docs/%s/%s (%d chars)", role, role_dir, filename, len(raw_text))
     except Exception as e:
         logger.warning("[%s] Falha ao gravar resposta bruta: %s", role, e)
 
@@ -509,6 +509,10 @@ def run_agent(
         if (role or "").upper() == "ENGINEER" and (mode or "").strip().lower() == "generate_engineering_docs":
             engineer_max = int(os.environ.get("CLAUDE_MAX_TOKENS_ENGINEER", "32000"))
             max_tokens = max(max_tokens, min(engineer_max, env_max))
+        # PM (generate_backlog): BACKLOG.md + DOD.md completos — teto alto para raw completo
+        if (role or "").upper() == "PM" and (mode or "").strip().lower() == "generate_backlog":
+            pm_max = int(os.environ.get("CLAUDE_MAX_TOKENS_PM", "32000"))
+            max_tokens = max(max_tokens, min(pm_max, env_max))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None
@@ -557,6 +561,9 @@ def run_agent(
             if text:
                 raw_parts.append(text)
         raw_text = "".join(raw_parts) if raw_parts else (response.content[0].text if response and response.content else "")
+        stop_reason = getattr(response, "stop_reason", None) if response else None
+        if stop_reason == "max_tokens":
+            logger.warning("[%s] Resposta truncada pela API (stop_reason=max_tokens). Raw gravado com %d chars.", agent_name, len(raw_text))
         _persist_raw_llm_response(role, message, raw_text)
         try:
             from orchestrator.envelope import extract_thinking
