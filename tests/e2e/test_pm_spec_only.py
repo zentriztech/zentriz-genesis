@@ -93,6 +93,7 @@ async def test_pm_generate_backlog():
         "charter": charter,
         "engineer_docs": engineer_docs,
         "constraints": ["spec-driven", "paths-resilient", "no-invent"],
+        "context": {"skill_path": "pm/web"},  # Landing page = squad Web (Next.js/Frontend), não backend
     }
     body = {
         "request_id": "pm-spec-test-e2e",

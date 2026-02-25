@@ -230,7 +230,8 @@ def _persist_pm_artifacts_if_enabled(message: dict, response: dict) -> None:
 def _try_persist_pm_artifacts_from_raw(message: dict, response: dict) -> None:
     """
     Se a resposta do PM tiver menos de 2 artifacts, tenta extrair BACKLOG.md e DOD.md
-    do raw (JSON no raw_response_*.txt) e gravar em docs/pm/backend/.
+    do raw (JSON no raw_response_*.txt) e gravar em docs/pm/{web|backend|mobile}/,
+    conforme o path presente no raw.
     """
     artifacts = response.get("artifacts") or []
     if len(artifacts) >= 2:
@@ -252,9 +253,14 @@ def _try_persist_pm_artifacts_from_raw(message: dict, response: dict) -> None:
         raw_text = raw_path.read_text(encoding="utf-8")
         from orchestrator.envelope import extract_json_from_text, _extract_pm_artifacts_from_json_str
         json_str = extract_json_from_text(raw_text)
-        if not json_str or "docs/pm/backend/BACKLOG.md" not in json_str:
+        if not json_str:
             return
-        pm_artifacts = _extract_pm_artifacts_from_json_str(json_str)
+        pm_artifacts = []
+        for subdir in ("web", "backend", "mobile"):
+            if f"docs/pm/{subdir}/BACKLOG.md" in json_str:
+                pm_artifacts = _extract_pm_artifacts_from_json_str(json_str, subdir)
+                if len(pm_artifacts) >= 2:
+                    break
         if len(pm_artifacts) >= 2:
             _persist_artifacts_for_role(message, {"artifacts": pm_artifacts}, "pm")
             logger.info("[PM] %d artefato(s) gravado(s) a partir do raw (fallback).", len(pm_artifacts))

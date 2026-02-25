@@ -396,22 +396,23 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
                 [],
             )
 
-    # Tentativa 3b: se o JSON parece ser do PM (2 docs), extrair BACKLOG e DOD do json_str
-    if "docs/pm/backend/BACKLOG.md" in json_str and "docs/pm/backend/DOD.md" in json_str:
-        artifacts_pm = _extract_pm_artifacts_from_json_str(json_str)
-        if len(artifacts_pm) >= 2:
-            logger.info("[Envelope] Recuperados %d artifacts do PM a partir do JSON (fallback).", len(artifacts_pm))
-            return (
-                {
-                    "request_id": request_id,
-                    "status": "OK",
-                    "summary": "Backlog recuperado (parse parcial por escaping). 2 artefatos PM.",
-                    "artifacts": artifacts_pm[:2],
-                    "evidence": [{"type": "spec_ref", "ref": "inputs.charter", "note": "PM artifacts extraídos do JSON"}],
-                    "next_actions": {"owner": "CTO", "items": ["Validar backlog"], "questions": []},
-                },
-                [],
-            )
+    # Tentativa 3b: se o JSON parece ser do PM (2 docs), extrair BACKLOG e DOD do json_str (backend ou web)
+    for pm_subdir in ("backend", "web", "mobile"):
+        if f"docs/pm/{pm_subdir}/BACKLOG.md" in json_str and f"docs/pm/{pm_subdir}/DOD.md" in json_str:
+            artifacts_pm = _extract_pm_artifacts_from_json_str(json_str, pm_subdir)
+            if len(artifacts_pm) >= 2:
+                logger.info("[Envelope] Recuperados %d artifacts do PM (%s) a partir do JSON (fallback).", len(artifacts_pm), pm_subdir)
+                return (
+                    {
+                        "request_id": request_id,
+                        "status": "OK",
+                        "summary": "Backlog recuperado (parse parcial por escaping). 2 artefatos PM.",
+                        "artifacts": artifacts_pm[:2],
+                        "evidence": [{"type": "spec_ref", "ref": "inputs.charter", "note": "PM artifacts extraídos do JSON"}],
+                        "next_actions": {"owner": "CTO", "items": ["Validar backlog"], "questions": []},
+                    },
+                    [],
+                )
 
     # Tentativa 4: fallback final
     logger.error("Falha total no parse JSON (LEI 4). Primeiros 500 chars: %s", json_str[:500])
@@ -469,17 +470,17 @@ def _extract_engineer_artifacts_from_json_str(json_str: str) -> list[dict]:
     return ordered
 
 
-def _extract_pm_artifacts_from_json_str(json_str: str) -> list[dict]:
+def _extract_pm_artifacts_from_json_str(json_str: str, subdir: str = "backend") -> list[dict]:
     """
     Extrai os 2 artifacts do PM (BACKLOG.md, DOD.md) do texto JSON quando o parse completo falha.
-    Localiza cada "path": "docs/pm/backend/XXX.md" e o "content" seguinte, extrai e unescape.
+    subdir: "backend" | "web" | "mobile" (docs/pm/<subdir>/).
     """
     paths_order = [
-        "docs/pm/backend/BACKLOG.md",
-        "docs/pm/backend/DOD.md",
+        f"docs/pm/{subdir}/BACKLOG.md",
+        f"docs/pm/{subdir}/DOD.md",
     ]
     pattern_path = re.compile(
-        r'"path"\s*:\s*"(docs/pm/backend/BACKLOG\.md|docs/pm/backend/DOD\.md)"'
+        rf'"path"\s*:\s*"(docs/pm/{re.escape(subdir)}/BACKLOG\.md|docs/pm/{re.escape(subdir)}/DOD\.md)"'
     )
     artifacts: list[dict] = []
     for m in pattern_path.finditer(json_str):

@@ -171,6 +171,37 @@ def call_cto(
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
+def infer_pm_module_from_engineer_proposal(engineer_proposal: str) -> str:
+    """
+    Infere o módulo/squad do PM (web, backend, mobile) a partir da proposta do Engineer.
+    O Engineer define squads no engineer_proposal (ex.: 'Squad: Web (Frontend)', 'Backend Squad: Desnecessário').
+    Retorna 'web' | 'backend' | 'mobile'. Default 'web' para landing/estático quando não há backend.
+    """
+    if not (engineer_proposal or "").strip():
+        return "web"
+    text = (engineer_proposal or "").lower()
+    # Backend como squad explícita (equipe/squad de API, servidor)
+    if "squad backend" in text or "equipe backend" in text or "backend squad" in text:
+        if "desnecessário" in text or "desnecessario" in text or "não" in text or "nao" in text:
+            pass  # "Backend Squad: Desnecessário" → não é backend
+        else:
+            return "backend"
+    if "backend api" in text and "squad" in text:
+        return "backend"
+    # Mobile como squad
+    if "squad mobile" in text or "equipe mobile" in text or "mobile squad" in text:
+        return "mobile"
+    # Web/Frontend: único squad, ou squad web, ou next.js/react sem backend
+    if "squad web" in text or "squad: web" in text or "único squad web" in text or "um único squad" in text:
+        return "web"
+    if "frontend" in text and "backend" not in text:
+        return "web"
+    if "next.js" in text or "nextjs" in text:
+        if "backend" not in text or "desnecessário" in text or "zero backend" in text:
+            return "web"
+    return "web"
+
+
 def call_pm(
     spec_ref: str,
     charter_summary: str,
@@ -180,6 +211,10 @@ def call_pm(
     cto_questionamentos: str | None = None,
     pipeline_ctx: "PipelineContext | None" = None,
 ) -> dict:
+    # Garantir que o server carregue o SYSTEM_PROMPT correto (pm/web, pm/backend, pm/mobile)
+    if not (module in ("web", "backend", "mobile")):
+        module = "web"
+    skill_path = f"pm/{module}"
     if pipeline_ctx:
         pipeline_ctx.current_module = module
         inputs = pipeline_ctx.build_inputs_for_pm(cto_questionamentos)
@@ -200,6 +235,8 @@ def call_pm(
             inputs["engineer_proposal"] = engineer_proposal
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
+    inputs["context"] = inputs.get("context") or {}
+    inputs["context"]["skill_path"] = skill_path
     message = _build_message_envelope(
         request_id, "PM", module, "generate_backlog",
         task_id=None, task=f"Gerar backlog da squad {module}.",
@@ -209,7 +246,9 @@ def call_pm(
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("pm", message)
     from orchestrator.agents.runtime import run_agent
-    pm_prompt = _agents_root() / "pm" / "backend" / "SYSTEM_PROMPT.md"
+    pm_prompt = _agents_root() / "pm" / module / "SYSTEM_PROMPT.md"
+    if not pm_prompt.exists():
+        pm_prompt = _agents_root() / "pm" / "backend" / "SYSTEM_PROMPT.md"
     return run_agent(system_prompt_path=pm_prompt, message=message, role="PM")
 
 
@@ -1152,10 +1191,11 @@ def main() -> int:
                     request_id,
                 )
                 _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-                logger.info("[Pipeline] Chamando agente PM (módulo backend, rodada %s)...", pm_round)
+                pm_module = infer_pm_module_from_engineer_proposal(engineer_summary)
+                logger.info("[Pipeline] Chamando agente PM (módulo %s inferido da proposta do Engineer, rodada %s)...", pm_module, pm_round)
                 pm_response = call_pm(
                     spec_ref, charter_summary, request_id,
-                    module="backend", engineer_proposal=engineer_summary,
+                    module=pm_module, engineer_proposal=engineer_summary,
                     cto_questionamentos=cto_pm_questionamentos,
                     pipeline_ctx=pipeline_ctx,
                 )
