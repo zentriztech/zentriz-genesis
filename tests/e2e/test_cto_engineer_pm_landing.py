@@ -241,6 +241,7 @@ async def test_04_pm_backlog(ctx):
         "engineer_proposal": ctx.engineer_proposal,
         "product_spec": ctx.product_spec,
         "module": "web",
+        "context": {"skill_path": "pm/web"},
     }
     body = {
         "project_id": PROJECT_ID,
@@ -252,7 +253,6 @@ async def test_04_pm_backlog(ctx):
         "input": inputs,
         "existing_artifacts": [],
         "limits": {"max_rounds": 1, "round": 1},
-        "context": {"skill_path": "pm/web"},
     }
     result = await call_agent("pm", body)
     assert result["status"] == "OK", "PM: %s" % result["status"]

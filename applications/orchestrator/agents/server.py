@@ -399,7 +399,12 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
     agent_name = AGENT_LABELS.get(role, role)
     try:
         message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
-        skill_path = ((message.get("input") or {}).get("context") or {}).get("skill_path")
+        inp = message.get("input") or {}
+        ctx = inp.get("context") or {}
+        if not ctx and body.get("context"):
+            ctx = body["context"]
+            message.setdefault("input", {})["context"] = ctx
+        skill_path = ctx.get("skill_path")
         prompt_path = get_path_fn(skill_path)
         logger.info("[%s] Recebeu solicitação (skill_path=%s). Processando...", agent_name, skill_path or "default")
         response = run_agent(system_prompt_path=prompt_path, message=message, role=role)
