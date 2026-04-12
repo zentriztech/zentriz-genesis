@@ -32,6 +32,8 @@ Thumbs.db
 npm-debug.log*
 
 # Test / Coverage
+# Resumos E2E com carimbo de data (gerados localmente; não versionar)
+tests/e2e/reports/summary_[0-9]*.txt
 coverage/
 .nyc_output/
 .pytest_cache/

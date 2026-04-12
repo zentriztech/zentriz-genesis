@@ -1,0 +1,170 @@
+# Cursor AI — Model Routing Guide
+# Adicione este arquivo na raiz de qualquer projeto para orientar o Cursor a usar o modelo correto por tarefa.
+# Versão: 1.0 | Atualizado: 2026-03
+
+---
+
+## REGRA GERAL DE SELEÇÃO DE MODELO
+
+Antes de iniciar qualquer tarefa, identifique a categoria abaixo e use o modelo indicado.
+Sempre prefira o modelo de menor custo que consegue entregar a qualidade necessária.
+
+---
+
+## 🟣 COMPOSER 1.5 — Uso diário intenso no IDE
+**Quando usar:** Tarefas rápidas, mecânicas e repetitivas dentro do próprio editor.
+
+Atividades:
+- Tab autocomplete e completions inline
+- Scaffold de novos arquivos e componentes
+- Renomear variáveis ou símbolos em massa
+- Geração de testes unitários básicos para funções já escritas
+- Pequenas correções de sintaxe e formatação
+- Snippets de boilerplate (CRUD simples, interfaces TypeScript)
+
+> ✅ Este modelo fica no **Auto Pool** do Cursor — consome muito menos créditos por request.
+> Use como modelo padrão para o Composer multi-arquivo no IDE.
+
+---
+
+## 🔵 CLAUDE SONNET 4.6 HIGH — Modelo padrão de desenvolvimento
+**Quando usar:** A maioria das tarefas reais de desenvolvimento. Escolha padrão para o Chat do Cursor.
+
+Atividades:
+- Desenvolvimento de Landpages e componentes React (layout, Tailwind, animações)
+- Criação de APIs REST/GraphQL em Node.js, Python ou C#
+- Autenticação, middleware, integração com banco de dados
+- Escrita de documentação técnica (README, OpenAPI/Swagger, changelogs)
+- Code review e detecção de vulnerabilidades (OWASP Top 10)
+- Refatoração preservando lógica de negócio
+- Implementação de pipelines RAG (chunking, indexação, busca híbrida)
+- Criação de servidores MCP e handlers de ferramentas
+- Integração com SDKs de IA (LangChain, LlamaIndex, Anthropic SDK)
+- Debug de erros comuns e stack traces
+
+> ✅ Cobre ~80% de todas as tarefas com excelente custo-benefício.
+> Configure como **modelo padrão do Chat** nas configurações do Cursor.
+
+---
+
+## 🔵 CLAUDE OPUS 4.6 HIGH — Problemas complexos e arquitetura
+**Quando usar:** Quando o Sonnet 4.6 não resolver, ou quando a tarefa exigir contexto muito grande ou raciocínio profundo.
+
+Atividades:
+- Design de arquitetura de sistemas multi-agente (LangChain, CrewAI, AutoGen)
+- Orquestração de fluxos com tool calling e estado persistente
+- Análise de codebase inteiro (arquivos > 200K tokens de contexto)
+- Debugging de bugs sutis cross-service ou race conditions difíceis
+- Arquitetura de RAG com estratégia de chunking e reranking
+- Design de servidores MCP com múltiplos recursos e ferramentas
+- Avaliação e otimização de pipelines de IA (evals, RAGAS)
+- Problemas que o Sonnet tentou 2+ vezes e não resolveu
+
+> ⚠️ Use de forma seletiva — mais caro que o Sonnet.
+> Gatilho: "Sonnet travou → escale para Opus com contexto completo."
+> Suporta até **1M tokens** de contexto (beta) — ideal para repositórios grandes.
+
+---
+
+## 🟢 CODEX 5.3 HIGH — Agentes terminais autônomos
+**Quando usar:** Automação de tarefas no terminal, pipelines de CI/CD e agentes que executam comandos.
+
+Atividades:
+- Agentes que rodam comandos de terminal de forma autônoma
+- Scripts de automação de DevOps e infraestrutura
+- Pipelines de build, teste e deploy automatizados
+- Tarefas bem especificadas que requerem execução em sequência
+- Geração e execução de scripts bash/PowerShell complexos
+
+> ✅ Usa 2–4× menos tokens que o Opus por tarefa de terminal.
+> Prefira para tarefas onde o objetivo é claro e bem definido.
+
+---
+
+## 🟢 GPT 5.4 HIGH — Problemas inéditos e automação de UI
+**Quando usar:** Bugs de engenharia nunca vistos antes, análise crítica de evals ou automação de interface.
+
+Atividades:
+- Bugs de engenharia inéditos sem solução conhecida (SWE-Pro: 57.7%)
+- Computer use — automação de UI em ferramentas de LLMOps
+- Análise crítica de resultados de avaliação de modelos
+- Problemas que tanto Sonnet quanto Opus não resolveram
+- Comparação e seleção de estratégias de arquitetura em cenários ambíguos
+
+> ⚠️ Modelo mais caro da lista — reserve para casos onde os outros falharam.
+
+---
+
+## ⚪ HAIKU 4.5 — Volume e velocidade máxima
+**Quando usar:** Operações em massa onde velocidade importa mais que raciocínio.
+
+Atividades:
+- Adicionar JSDoc/TSDoc em centenas de funções de uma vez
+- Geração de mocks e fixtures de teste em massa
+- Reformatação e padronização de código (lint fix em lote)
+- Perguntas simples e diretas sobre sintaxe
+
+> ✅ 3× mais barato que o Sonnet. Configure manualmente para tab completions se quiser máxima economia.
+
+---
+
+## MATRIZ RÁPIDA DE DECISÃO
+
+| Tarefa                              | Modelo recomendado          |
+|-------------------------------------|-----------------------------|
+| Autocomplete / tab / edição inline  | Composer 1.5                |
+| Landpage / componente React         | Composer 1.5 → Sonnet 4.6   |
+| API Node / Python / CSharp          | Sonnet 4.6                  |
+| Documentação técnica                | Sonnet 4.6                  |
+| Code review / refatoração           | Sonnet 4.6                  |
+| Bug comum                           | Sonnet 4.6                  |
+| Bug difícil / cross-service         | Sonnet 4.6 → Opus 4.6       |
+| Agente de IA (design)               | Opus 4.6                    |
+| Agente de IA (implementação)        | Sonnet 4.6                  |
+| Agente terminal autônomo            | Codex 5.3                   |
+| MCP server (design)                 | Opus 4.6                    |
+| MCP server (código)                 | Sonnet 4.6                  |
+| RAG (arquitetura)                   | Opus 4.6                    |
+| RAG (pipeline / integração)         | Sonnet 4.6                  |
+| LLMOps / evals / observabilidade    | GPT 5.4 → Opus 4.6          |
+| Comentários / docs em massa         | Haiku 4.5                   |
+| Codebase > 200K tokens              | Opus 4.6 (1M ctx)           |
+| Problema inédito que outros falharam| GPT 5.4                     |
+
+---
+
+## ESTRATÉGIA DE ESCALONAMENTO
+
+```
+Tarefa chega
+    │
+    ▼
+É mecânica/repetitiva no IDE?
+    ├── Sim → Composer 1.5 ou Haiku 4.5
+    └── Não ↓
+        │
+        ▼
+    É desenvolvimento padrão (API, UI, docs, review)?
+        ├── Sim → Sonnet 4.6 high  ← PADRÃO
+        └── Não ↓
+            │
+            ▼
+        Precisa de raciocínio profundo ou contexto > 200K?
+            ├── Sim → Opus 4.6 high
+            └── Não ↓
+                │
+                ▼
+            É agente terminal ou CI/CD autônomo?
+                ├── Sim → Codex 5.3 high
+                └── Não → GPT 5.4 high (último recurso)
+```
+
+---
+
+## NOTAS DE CONFIGURAÇÃO
+
+- Este arquivo é lido automaticamente pelo Cursor como contexto de regras do projeto.
+- As regras aqui descritas orientam o modelo ativo no Chat e no Composer.
+- Para trocar de modelo manualmente: use o seletor no canto inferior do painel do Cursor.
+- Recomendação: defina **Sonnet 4.6** como modelo padrão nas configurações globais do Cursor
+  e use este arquivo para escalar pontualmente quando necessário.
