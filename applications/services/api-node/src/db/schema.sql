@@ -142,3 +142,19 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_tenant ON notifications(tenant_id, created_at DESC);
+
+-- GitHub App installations por tenant
+CREATE TABLE IF NOT EXISTS tenant_github_installations (
+  tenant_id          UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+  installation_id    BIGINT NOT NULL,
+  github_login       TEXT NOT NULL,
+  installation_type  TEXT NOT NULL DEFAULT 'Organization' CHECK (installation_type IN ('Organization', 'User')),
+  repos_authorized   TEXT NOT NULL DEFAULT 'all' CHECK (repos_authorized IN ('all', 'selected')),
+  selected_repos     TEXT[] NOT NULL DEFAULT '{}',
+  scope_genesis      BOOLEAN NOT NULL DEFAULT true,
+  scope_deadpool     BOOLEAN NOT NULL DEFAULT true,
+  installed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at         TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_installations_installation ON tenant_github_installations(installation_id);

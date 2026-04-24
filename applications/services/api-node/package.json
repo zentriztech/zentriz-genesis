@@ -20,6 +20,8 @@
   "dependencies": {
     "@fastify/cors": "^8.4.0",
     "@fastify/multipart": "^8.3.1",
+    "@octokit/auth-app": "^8.2.0",
+    "@octokit/rest": "^22.0.1",
     "bcrypt": "^6.0.0",
     "fastify": "^4.28.1",
     "jsonwebtoken": "^9.0.3",
