@@ -87,6 +87,10 @@ MODEL_LIMITS: dict[str, dict[str, int]] = {
     "claude-haiku-4-5": {"context": 200_000, "max_output": 8_192},
     "claude-3-5-sonnet": {"context": 200_000, "max_output": 8_192},
     "claude-3-opus": {"context": 200_000, "max_output": 8_192},
+    # Bedrock cross-region inference profile IDs
+    "us.anthropic.claude-sonnet-4-6": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-sonnet-4-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-haiku-4-5": {"context": 200_000, "max_output": 8_192},
 }
 _DEFAULT_LIMITS = {"context": 200_000, "max_output": 16_000}
 
@@ -455,12 +459,25 @@ def run_agent(
     """
     try:
         from anthropic import Anthropic
+        from anthropic import AnthropicBedrock
     except ImportError:
         raise ImportError("Instale anthropic: pip install anthropic")
 
-    api_key = os.environ.get("CLAUDE_API_KEY")
-    if not api_key:
-        raise ValueError("CLAUDE_API_KEY não definida (variável de ambiente)")
+    provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
+
+    if provider == "bedrock":
+        aws_region = (
+            os.environ.get("GENESIS_AWS_REGION")
+            or os.environ.get("AWS_REGION")
+            or os.environ.get("AWS_DEFAULT_REGION")
+            or "us-east-1"
+        )
+        client = AnthropicBedrock(aws_region=aws_region)
+        api_key = None  # não utilizado no modo bedrock
+    else:
+        api_key = os.environ.get("CLAUDE_API_KEY")
+        if not api_key:
+            raise ValueError("CLAUDE_API_KEY não definida. Para Bedrock, use GENESIS_LLM_PROVIDER=bedrock")
 
     model = _get_model_for_role(role)
     timeout = int(os.environ.get("REQUEST_TIMEOUT", "180"))
@@ -493,7 +510,8 @@ def run_agent(
 
     user_content = build_user_message(message)
 
-    client = Anthropic(api_key=api_key)
+    if provider != "bedrock":
+        client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
     env_max = int(os.environ.get("CLAUDE_MAX_TOKENS", "16000"))
     last_thinking: str = ""
