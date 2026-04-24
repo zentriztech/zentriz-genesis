@@ -22,6 +22,7 @@ import People from "@mui/icons-material/People";
 import Send from "@mui/icons-material/Send";
 import Settings from "@mui/icons-material/Settings";
 import Business from "@mui/icons-material/Business";
+import GitHubIcon from "@mui/icons-material/GitHub";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -40,6 +41,7 @@ const navTenantAdmin = [
   { label: "Usuários do tenant", href: "/tenant/users", icon: <People /> },
   { label: "Projetos do tenant", href: "/tenant/projects", icon: <Folder /> },
   { label: "Plano e uso", href: "/tenant/plan", icon: <Settings /> },
+  { label: "GitHub", href: "/settings/github", icon: <GitHubIcon /> },
 ];
 
 const navZentriz = [
@@ -48,6 +50,7 @@ const navZentriz = [
   { label: "Usuários", href: "/zentriz/users", icon: <People /> },
   { label: "Projetos", href: "/zentriz/projects", icon: <Folder /> },
   { label: "Controle por plano", href: "/zentriz/plans", icon: <Settings /> },
+  { label: "GitHub", href: "/settings/github", icon: <GitHubIcon /> },
 ];
 
 function AppLayoutInner({ children }: { children: React.ReactNode }) {
