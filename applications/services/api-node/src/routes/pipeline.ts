@@ -150,15 +150,24 @@ export async function pipelineRoutes(app: FastifyInstance) {
       if (runnerServiceUrl) {
         try {
           request.log.info({ projectId, runnerUrl: runnerServiceUrl }, "[Pipeline] Chamando runner service");
+          // When RUNNER_UPLOAD_DIR is set, the runner is in Docker and uses a
+          // different path than the host. Translate specPath to the runner's path,
+          // or fall back to specContent (base64) so the runner writes a temp file.
+          const runnerUploadDir = process.env.RUNNER_UPLOAD_DIR?.trim();
+          let runBody: Record<string, string>;
+          if (runnerUploadDir && specFilePath.startsWith(UPLOAD_DIR)) {
+            const relative = specFilePath.slice(UPLOAD_DIR.length);
+            runBody = { projectId, specPath: `${runnerUploadDir}${relative}`, apiBaseUrl, token };
+          } else {
+            // Encode spec as base64 — works regardless of path differences
+            const { readFileSync } = await import("fs");
+            const specB64 = readFileSync(specFilePath).toString("base64");
+            runBody = { projectId, specContent: specB64, apiBaseUrl, token };
+          }
           const res = await fetch(`${runnerServiceUrl.replace(/\/$/, "")}/run`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              projectId,
-              specPath: specFilePath,
-              apiBaseUrl,
-              token,
-            }),
+            body: JSON.stringify(runBody),
           });
           if (res.status >= 200 && res.status < 300) {
             await client.query(

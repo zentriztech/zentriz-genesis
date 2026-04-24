@@ -91,8 +91,13 @@ services:
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - GENESIS_LLM_PROVIDER=${GENESIS_LLM_PROVIDER:-anthropic}
+      - GENESIS_AWS_REGION=${GENESIS_AWS_REGION:-us-east-1}
     env_file:
       - .env
+    volumes:
+      - ${HOME}/.aws:/root/.aws:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
       interval: 10s
@@ -125,6 +130,7 @@ services:
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
+      - ${HOME}/.aws:/root/.aws:ro
     depends_on:
       - agents
     healthcheck:
