@@ -10,23 +10,9 @@ type SignupBody = {
   password?: string;
 };
 
-/** Rotas públicas: listar planos e cadastrar tenant (status=inactive até confirmação de pagamento). */
+/** Rotas públicas: cadastrar tenant (status=inactive até confirmação de pagamento).
+ * GET /api/plans foi movido para routes/plans.ts (canônico). */
 export async function signupRoutes(app: FastifyInstance) {
-  app.get("/api/plans", async (_request, reply) => {
-    const result = await pool.query(
-      `SELECT id, name, slug, max_projects, max_users_per_tenant FROM plans ORDER BY max_projects ASC`
-    );
-    return reply.send(
-      result.rows.map((row: Record<string, unknown>) => ({
-        id: row.id,
-        name: row.name,
-        slug: row.slug,
-        maxProjects: row.max_projects,
-        maxUsersPerTenant: row.max_users_per_tenant,
-      }))
-    );
-  });
-
   app.post<{ Body: SignupBody }>("/api/tenant/signup", async (request, reply) => {
     const body = request.body ?? {};
     const tenantName = typeof body.name === "string" ? body.name.trim() : "";
