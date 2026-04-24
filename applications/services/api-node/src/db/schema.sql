@@ -126,3 +126,19 @@ ALTER TABLE project_tasks ADD CONSTRAINT project_tasks_owner_role_check CHECK (o
   'DEV_BACKEND', 'QA_BACKEND', 'DEVOPS_DOCKER', 'DEV_WEB', 'QA_WEB', 'DEV_MOBILE', 'QA_MOBILE',
   'DEV', 'QA', 'DEVOPS', 'MONITOR', 'ENGINEER', 'CTO', 'PM'
 ));
+
+-- Notificações de sistema (criadas pelo runner ou por eventos internos)
+CREATE TABLE IF NOT EXISTS notifications (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id  UUID REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id    UUID REFERENCES users(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
+  type       TEXT NOT NULL CHECK (type IN ('project_finished', 'provisioning_done', 'blocked', 'alert')),
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
+  read       BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_tenant ON notifications(tenant_id, created_at DESC);

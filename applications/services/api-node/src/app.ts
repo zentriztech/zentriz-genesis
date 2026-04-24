@@ -10,6 +10,8 @@ import { userRoutes } from "./routes/users.js";
 import { signupRoutes } from "./routes/signup.js";
 import { dialogueRoutes } from "./routes/dialogue.js";
 import { pipelineRoutes } from "./routes/pipeline.js";
+import { notificationRoutes } from "./routes/notifications.js";
+import { planRoutes } from "./routes/plans.js";
 
 export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? true });
@@ -52,6 +54,8 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(userRoutes);
   await app.register(dialogueRoutes);
   await app.register(pipelineRoutes);
+  await app.register(notificationRoutes);
+  await app.register(planRoutes);
 
   return app;
 }

@@ -12,14 +12,23 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import traceback as _tb
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 
 _shutdown_requested = False
+
+
+class _NullLock:
+    """No-op context manager used when monitor_parallel=False to avoid branching."""
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+
 
 def _sigterm_handler(_signum, _frame):
     global _shutdown_requested
@@ -576,6 +585,29 @@ def _is_timeout_error(exc: BaseException | None, message: str) -> bool:
     return "timed out" in (message or "").lower() or "timeout" in (message or "").lower()
 
 
+def _post_escalation_event(project_id: str, task_id: str, reason: str, request_id: str) -> None:
+    """Fire a human escalation notification via the notifications API.
+
+    Called when a task exceeds circuit-breaker or rework limits and needs
+    human attention. Non-blocking — failures are logged but not re-raised.
+    """
+    title = f"Intervenção necessária — {task_id}"
+    body_text = f"[{project_id}] {reason} (request_id={request_id})"
+    _post_step(f"[ESCALATION] {reason}", request_id)
+    try:
+        _api_post(
+            "/api/notifications",
+            {
+                "type": "blocked",
+                "title": title,
+                "body": body_text,
+                "project_id": project_id,
+            },
+        )
+    except Exception as exc:
+        logger.warning("[Escalation] Falha ao enviar notificação: %s", exc)
+
+
 def _post_error(message: str, request_id: str, exc: BaseException | None = None) -> None:
     """Registra erro no log do portal. Inclui traceback apenas se SHOW_TRACEBACK=true."""
     body = message
@@ -712,6 +744,19 @@ def _update_task(project_id: str, task_id: str, **kwargs) -> bool:
     return 200 <= status < 300
 
 
+def _update_task_status(project_id: str, task_id: str, current_status: str, new_status: str) -> bool:
+    """Validate state transition (LEI 9) before patching, then delegate to _update_task."""
+    from orchestrator.task_state_machine import VALID_TRANSITIONS
+    allowed = VALID_TRANSITIONS.get(current_status, [])
+    if new_status not in allowed:
+        logging.getLogger(__name__).warning(
+            "[LEI 9] Transição inválida ignorada: task=%s %s → %s (permitidas: %s)",
+            task_id, current_status, new_status, allowed,
+        )
+        return False
+    return _update_task(project_id, task_id, status=new_status)
+
+
 def _run_monitor_loop(
     project_id: str,
     spec_ref: str,
@@ -736,6 +781,10 @@ def _run_monitor_loop(
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
     max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
     qa_fail_count: dict[str, int] = {}
+    # MONITOR_PARALLEL=true enables concurrent processing of multiple tasks of the
+    # same type within a single loop iteration. Default false to preserve behavior.
+    monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
+    _state_lock = threading.Lock() if monitor_parallel else None
     while True:
         if _shutdown_requested:
             _post_step("Monitor Loop encerrado (sinal recebido).", request_id)
@@ -761,60 +810,79 @@ def _run_monitor_loop(
         all_done = bool(tasks) and all(t.get("status") == "DONE" for t in tasks)
 
         if need_qa and waiting_review:
-            task = waiting_review[0]
-            task_id = task.get("taskId") or task.get("task_id")
-            task_desc = task.get("title") or task.get("description") or task.get("name") or ""
-            code_refs = [a.get("path") for a in last_dev_artifacts if isinstance(a, dict) and a.get("path")]
-            _post_step("O Monitor acionou o QA para revisar a tarefa.", request_id)
-            _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
-            try:
-                qa_response = call_qa(
-                    spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
-                    task_id=task_id, task=task_desc, code_refs=code_refs, existing_artifacts=last_dev_artifacts,
-                )
-                _audit_log("qa", request_id, qa_response)
-                qa_summary = qa_response.get("summary", "")
-                qa_status = qa_response.get("status", "?")
-                _post_dialogue(
-                    "dev", "qa", "qa.review",
-                    _get_summary_human("qa.review", "qa", "monitor", qa_summary[:200]),
-                    request_id,
-                )
-                if project_id and storage and storage.is_enabled():
-                    storage.write_doc(project_id, "qa", "report", _content_for_doc(qa_response), title="QA report")
-                passed = _is_qa_pass(qa_response)
-                if passed:
-                    new_status = "QA_PASS"
-                    _update_task(project_id, task_id, status=new_status)
-                    _update_task(project_id, task_id, status="DONE")
-                    qa_fail_count[task_id] = 0
-                    if pipeline_ctx and last_dev_artifacts:
-                        for art in last_dev_artifacts:
-                            if isinstance(art, dict) and art.get("path") and art.get("content"):
-                                path_val = (art.get("path") or "").strip()
-                                if path_val.startswith("apps/") or path_val.startswith("docs/"):
-                                    pipeline_ctx.register_artifact(path_val, art.get("content", ""), task_id)
-                    _post_step(f"QA concluiu. Status: {qa_status}. Task aprovada (DONE).", request_id)
-                else:
-                    current_fails = qa_fail_count.get(task_id, 0) + 1
-                    qa_fail_count[task_id] = current_fails
-                    if current_fails >= max_qa_rework:
-                        _update_task(project_id, task_id, status="DONE")
-                        tasks_done_after_qa_fail.add(task_id)
-                        _post_step(
-                            f"QA reportou QA_FAIL (reatempto {current_fails}/{max_qa_rework}). "
-                            "Máximo de reworks atingido; tarefa marcada como DONE (não aprovada). DevOps não será acionado.",
-                            request_id,
-                        )
+            # In parallel mode process all waiting_review tasks concurrently; in
+            # sequential mode (default) only the first task is processed per iteration.
+            qa_tasks_batch = waiting_review if monitor_parallel else waiting_review[:1]
+
+            def _run_qa_task(task: dict) -> None:
+                tid = task.get("taskId") or task.get("task_id")
+                task_desc = task.get("title") or task.get("description") or task.get("name") or ""
+                code_refs = [a.get("path") for a in last_dev_artifacts if isinstance(a, dict) and a.get("path")]
+                _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
+                _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
+                try:
+                    qa_response = call_qa(
+                        spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
+                        task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=last_dev_artifacts,
+                    )
+                    _audit_log("qa", request_id, qa_response)
+                    _qa_summary = qa_response.get("summary", "")
+                    qa_status = qa_response.get("status", "?")
+                    _post_dialogue(
+                        "dev", "qa", "qa.review",
+                        _get_summary_human("qa.review", "qa", "monitor", _qa_summary[:200]),
+                        request_id,
+                    )
+                    if project_id and storage and storage.is_enabled():
+                        storage.write_doc(project_id, "qa", f"report-{tid}", _content_for_doc(qa_response), title=f"QA report {tid}")
+                    passed = _is_qa_pass(qa_response)
+                    if passed:
+                        _update_task(project_id, tid, status="QA_PASS")
+                        _update_task_status(project_id, tid, "IN_REVIEW", "DONE")
+                        with (_state_lock or _NullLock()):
+                            qa_fail_count[tid] = 0
+                        if pipeline_ctx and last_dev_artifacts:
+                            for art in last_dev_artifacts:
+                                if isinstance(art, dict) and art.get("path") and art.get("content"):
+                                    path_val = (art.get("path") or "").strip()
+                                    if path_val.startswith("apps/") or path_val.startswith("docs/"):
+                                        pipeline_ctx.register_artifact(path_val, art.get("content", ""), tid)
+                        _post_step(f"QA concluiu. Status: {qa_status}. Task {tid} aprovada (DONE).", request_id)
                     else:
-                        _update_task(project_id, task_id, status="QA_FAIL")
-                        _post_step(
-                            f"QA concluiu. Status: {qa_status}. Task em QA_FAIL (reatempto {current_fails}/{max_qa_rework}); Dev será acionado para rework.",
-                            request_id,
-                        )
-            except Exception as e:
-                logger.exception("[Monitor Loop] QA falhou")
-                _post_error(str(e), request_id, e)
+                        with (_state_lock or _NullLock()):
+                            current_fails = qa_fail_count.get(tid, 0) + 1
+                            qa_fail_count[tid] = current_fails
+                        if current_fails >= max_qa_rework:
+                            _update_task(project_id, tid, status="DONE")
+                            with (_state_lock or _NullLock()):
+                                tasks_done_after_qa_fail.add(tid)
+                            _post_step(
+                                f"QA reportou QA_FAIL (reatempto {current_fails}/{max_qa_rework}). "
+                                f"Task {tid} marcada como DONE (não aprovada).",
+                                request_id,
+                            )
+                            _post_escalation_event(
+                                project_id, tid,
+                                f"QA atingiu máximo de {current_fails} reworks sem aprovação. Revisão humana necessária.",
+                                request_id,
+                            )
+                        else:
+                            _update_task_status(project_id, tid, "IN_REVIEW", "QA_FAIL")
+                            _post_step(
+                                f"QA concluiu. Task {tid} em QA_FAIL (reatempto {current_fails}/{max_qa_rework}).",
+                                request_id,
+                            )
+                except Exception as e:
+                    logger.exception("[Monitor Loop] QA falhou para task %s", tid)
+                    _post_error(str(e), request_id, e)
+
+            if monitor_parallel and len(qa_tasks_batch) > 1:
+                with ThreadPoolExecutor(max_workers=min(len(qa_tasks_batch), 3)) as pool:
+                    futures = [pool.submit(_run_qa_task, t) for t in qa_tasks_batch]
+                    for f in as_completed(futures):
+                        f.result()  # re-raise if any raised
+            else:
+                _run_qa_task(qa_tasks_batch[0])
             time.sleep(2)
             continue
 
@@ -831,7 +899,7 @@ def _run_monitor_loop(
             if dev_task:
                 task_id = dev_task.get("taskId") or dev_task.get("task_id")
                 task_desc = dev_task.get("title") or dev_task.get("description") or dev_task.get("name") or "Implementar tarefa do backlog."
-                _update_task(project_id, task_id, status="IN_PROGRESS")
+                _update_task_status(project_id, task_id, dev_task.get("status", "ASSIGNED"), "IN_PROGRESS")
                 _post_step("O Monitor acionou o Dev para implementar ou rework.", request_id)
                 _post_agent_working("dev", "O Dev está implementando ou corrigindo a tarefa.", request_id)
                 try:
@@ -865,6 +933,11 @@ def _run_monitor_loop(
                         dev_gave_up_tasks.add(task_id)
                         _post_step(
                             "Circuit breaker do Dev aberto. Tarefa marcada como DONE (não aprovada). Intervenção humana necessária.",
+                            request_id,
+                        )
+                        _post_escalation_event(
+                            project_id, task_id,
+                            "Circuit breaker do Dev aberto após falhas consecutivas. Revisão humana necessária.",
                             request_id,
                         )
                         time.sleep(2)
@@ -917,6 +990,11 @@ def _run_monitor_loop(
                                 f"Máximo de tentativas do Dev atingido ({n}x sem artefato em apps/). Tarefa marcada como DONE (não aprovada).",
                                 request_id,
                             )
+                            _post_escalation_event(
+                                project_id, task_id,
+                                f"Dev atingiu máximo de {n} tentativas sem entregar artefato. Revisão humana necessária.",
+                                request_id,
+                            )
                         else:
                             _update_task(project_id, task_id, status="BLOCKED")
                             _post_step(
@@ -926,7 +1004,7 @@ def _run_monitor_loop(
                 except Exception as e:
                     logger.exception("[Monitor Loop] Dev falhou")
                     _post_error(str(e), request_id, e)
-                    _update_task(project_id, task_id, status="ASSIGNED")
+                    _update_task_status(project_id, task_id, "IN_PROGRESS", "BLOCKED")
                 time.sleep(2)
                 continue
 

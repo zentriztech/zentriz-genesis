@@ -353,4 +353,40 @@ export async function projectRoutes(app: FastifyInstance) {
       client.release();
     }
   });
+
+  // POST /api/projects/:id/escalate — registra evento de escalação humana
+  // Called by the runner when circuit-breaker or rework limits are hit.
+  app.post<{ Params: { id: string }; Body: { task_id?: string; reason?: string } }>(
+    "/api/projects/:id/escalate",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const body = request.body ?? {};
+      const client = await pool.connect();
+      try {
+        const hasAccess = await checkProjectAccess(client, id, user);
+        if (!hasAccess) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const reason = typeof body.reason === "string" ? body.reason : "Intervenção humana necessária";
+        const taskId = typeof body.task_id === "string" ? body.task_id : null;
+        // Record as project dialogue so it appears in the portal log
+        await client.query(
+          `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+           VALUES ($1, 'system', 'human', 'escalation', $2)`,
+          [id, taskId ? `[${taskId}] ${reason}` : reason]
+        );
+        // Also create a notification for project members
+        await client.query(
+          `INSERT INTO notifications (project_id, type, title, body)
+           SELECT $1, 'blocked', $2, $3
+           FROM projects WHERE id = $1`,
+          [id, "Intervenção necessária", reason]
+        );
+        return reply.status(201).send({ ok: true, projectId: id, taskId, reason });
+      } finally {
+        client.release();
+      }
+    }
+  );
 }

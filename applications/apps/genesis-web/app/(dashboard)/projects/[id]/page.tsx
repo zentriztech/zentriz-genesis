@@ -125,7 +125,7 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || project?.status !== "running") return;
-    const t = setInterval(() => projectsStore.loadProject(id), 5000);
+    const t = setInterval(() => projectsStore.loadProject(id), 10000);
     return () => clearInterval(t);
   }, [id, project?.status]);
 

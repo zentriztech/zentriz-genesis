@@ -1,7 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { hashPassword, validateEmail, validatePassword } from "../auth.js";
+import type { FastifyRequest } from "fastify";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -12,6 +13,13 @@ type CreateUserBody = {
   name?: string;
   password?: string;
   tenant_id?: string | null;
+  role?: string;
+};
+
+type UpdateUserBody = {
+  email?: string;
+  name?: string;
+  password?: string;
   role?: string;
 };
 
@@ -89,6 +97,147 @@ export async function userRoutes(app: FastifyInstance) {
     } finally {
       client.release();
     }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
+    const caller = getUser(request);
+    const { id } = request.params;
+    const result = await pool.query(
+      `SELECT id, email, name, tenant_id, role, status, created_at FROM users WHERE id = $1`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return reply.status(404).send({ code: "NOT_FOUND", message: "Usuário não encontrado" });
+    }
+    const row = result.rows[0];
+    if (
+      caller.role !== "zentriz_admin" &&
+      caller.tenantId !== row.tenant_id &&
+      caller.id !== id
+    ) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+    return reply.send({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      tenantId: row.tenant_id,
+      role: row.role,
+      status: row.status,
+      createdAt: (row.created_at as Date)?.toISOString(),
+    });
+  });
+
+  app.patch<{ Params: { id: string }; Body: UpdateUserBody }>("/api/users/:id", async (request, reply) => {
+    const caller = getUser(request);
+    const { id } = request.params;
+    const body = request.body ?? {};
+
+    const existing = await pool.query(
+      `SELECT id, tenant_id, role FROM users WHERE id = $1`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return reply.status(404).send({ code: "NOT_FOUND", message: "Usuário não encontrado" });
+    }
+    const target = existing.rows[0];
+
+    const canEdit =
+      caller.role === "zentriz_admin" ||
+      (caller.role === "tenant_admin" && caller.tenantId === target.tenant_id) ||
+      caller.id === id;
+    if (!canEdit) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão para editar este usuário" });
+    }
+    if (caller.role === "tenant_admin" && body.role === "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant admin não pode promover a zentriz_admin" });
+    }
+
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (typeof body.name === "string" && body.name.trim().length >= 2) {
+      updates.push(`name = $${idx++}`);
+      values.push(body.name.trim());
+    }
+    if (typeof body.email === "string") {
+      const email = body.email.trim().toLowerCase();
+      if (!validateEmail(email)) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "E-mail inválido" });
+      }
+      updates.push(`email = $${idx++}`);
+      values.push(email);
+    }
+    if (typeof body.password === "string") {
+      const pwdCheck = validatePassword(body.password);
+      if (!pwdCheck.ok) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: pwdCheck.message });
+      }
+      updates.push(`password_hash = $${idx++}`);
+      values.push(await hashPassword(body.password));
+    }
+    if (typeof body.role === "string" && ROLES.has(body.role)) {
+      updates.push(`role = $${idx++}`);
+      values.push(body.role);
+    }
+
+    if (updates.length === 0) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum campo válido para atualizar" });
+    }
+
+    values.push(id);
+    const result = await pool.query(
+      `UPDATE users SET ${updates.join(", ")} WHERE id = $${idx}
+       RETURNING id, email, name, tenant_id, role, status, created_at`,
+      values
+    );
+    const row = result.rows[0];
+    return reply.send({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      tenantId: row.tenant_id,
+      role: row.role,
+      status: row.status,
+      createdAt: (row.created_at as Date)?.toISOString(),
+    });
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/users/:id", async (request, reply) => {
+    const caller = getUser(request);
+    const { id } = request.params;
+
+    if (caller.id === id) {
+      return reply.status(409).send({ code: "CONFLICT", message: "Não é possível deletar seu próprio usuário" });
+    }
+
+    const existing = await pool.query(
+      `SELECT id, tenant_id FROM users WHERE id = $1`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return reply.status(404).send({ code: "NOT_FOUND", message: "Usuário não encontrado" });
+    }
+    const target = existing.rows[0];
+
+    const canDelete =
+      caller.role === "zentriz_admin" ||
+      (caller.role === "tenant_admin" && caller.tenantId === target.tenant_id);
+    if (!canDelete) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão para remover este usuário" });
+    }
+
+    const activeProjects = await pool.query(
+      `SELECT id FROM projects WHERE user_id = $1 AND status NOT IN ('accepted','stopped') LIMIT 1`,
+      [id]
+    );
+    if (activeProjects.rows.length > 0) {
+      return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui projetos ativos; conclua-os antes de remover" });
+    }
+
+    await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+    return reply.status(204).send();
   });
 
   app.get("/api/users", async (request, reply) => {

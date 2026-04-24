@@ -4,7 +4,9 @@ import { observer } from "mobx-react-lite";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { authStore } from "@/stores/authStore";
+import { notificationsStore } from "@/stores/notificationsStore";
 import { AppLayout } from "@/components/AppLayout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -14,6 +16,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     authStore.hydrate();
     setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (authStore.isAuthenticated) {
+      notificationsStore.startPolling();
+    }
+    return () => notificationsStore.stopPolling();
   }, []);
 
   useEffect(() => {
@@ -27,7 +36,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     return null;
   }
 
-  return <AppLayout>{children}</AppLayout>;
+  return (
+    <ErrorBoundary>
+      <AppLayout>{children}</AppLayout>
+    </ErrorBoundary>
+  );
 }
 
 export default observer(DashboardLayoutInner);
