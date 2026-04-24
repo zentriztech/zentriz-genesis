@@ -84,4 +84,18 @@ Quando a IA falhar em JSON/gates:
 
 ---
 
+## 8. Artefatos Connect gerados pelo sistema
+
+Alguns artefatos do ecossistema não precisam ser devolvidos diretamente por um agente. O runner pode montá-los de forma determinística, a partir do estado real do pipeline e dos artefatos já produzidos.
+
+Nesta categoria entram, por etapa:
+
+- pós-Charter: `SystemPassport`, `OwnershipManifest`
+- pós-backlog aprovado: `ServiceManifest`
+- pós-DevOps: `ObservabilityBaselineManifest`, `RuntimePassport`, `KnownSafeActionsPack`
+
+Esses artefatos devem ser gravados em `project/connect/v<connect_version>/`.
+
+---
+
 *Referência: BLUEPRINT_ZENTRIZ_GENESIS_AGENTS_FUNCTIONAL_PIPELINE_V2_REV2.md — Fase 1.*

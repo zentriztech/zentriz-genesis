@@ -94,6 +94,9 @@ zentriz-genesis/
 - **DoD DevOps**: [contracts/devops_definition_of_done.md](../../applications/contracts/devops_definition_of_done.md)
 - **Checklists**: [contracts/checklists/](../../applications/contracts/checklists/) (React, RN, Backend Node/Python)
 - **Envelopes**: [contracts/message_envelope.json](../../applications/contracts/message_envelope.json), [contracts/response_envelope.json](../../applications/contracts/response_envelope.json)
+- **Connect / Deadpool Ready**: [../docs/CONNECT_DEADPOOL_READY_CHECKLIST.md](../docs/CONNECT_DEADPOOL_READY_CHECKLIST.md)
+
+No contexto da suite federada, Genesis continua autônomo, mas os artefatos compartilháveis do ecossistema devem convergir para o **Zentriz Connect**, a camada contratual comum entre Genesis, Deadpool e integrações externas aderentes. Isso inclui especialmente passports, manifests, ownership, observability baselines e demais contratos usados para Shared System Intelligence e sustainment futuro.
 
 ---
 

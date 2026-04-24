@@ -111,6 +111,15 @@ def get_project_dir(project_id: str) -> Path | None:
     return root / "project"
 
 
+def get_connect_dir(project_id: str, connect_version: str) -> Path | None:
+    """Retorna o diretório project/connect/v<version> do projeto."""
+    project_dir = get_project_dir(project_id)
+    if not project_dir:
+        return None
+    version_dir = f"v{str(connect_version).lstrip('v')}"
+    return project_dir / "connect" / version_dir
+
+
 def get_apps_dir(project_id: str) -> Path | None:
     """Retorna o diretório apps do projeto (project_id/apps) para código da aplicação gerado pelo Dev."""
     root = get_project_root(project_id)
@@ -261,6 +270,15 @@ def write_project_artifact(project_id: str, relative_path: str, content: str | b
         _atomic_write(path, content)
     logger.info("[ProjectStorage] Artefato projeto: %s", path)
     return path
+
+
+def write_connect_artifact(project_id: str, connect_version: str, filename: str, content: str | bytes) -> Path | None:
+    """
+    Grava um artefato contratual do Connect em project/connect/v<version>/filename.
+    """
+    version_dir = f"v{str(connect_version).lstrip('v')}"
+    relative_path = f"connect/{version_dir}/{filename}".lstrip("/")
+    return write_project_artifact(project_id, relative_path, content)
 
 
 def write_apps_artifact(project_id: str, relative_path: str, content: str | bytes) -> Path | None:

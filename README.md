@@ -25,6 +25,16 @@ Permitir que um único documento de especificação ([`PRODUCT_SPEC.md`](project
 - **Cloud-Agnostic / Serverless-First**
 - **Governança e Qualidade por Design**
 
+## Suite e interoperabilidade
+
+O **Zentriz Genesis** continua sendo um produto autônomo da suite, com valor e operação próprios. Dentro do ecossistema federado:
+
+- **Genesis** responde por criação, evolução e governança de build/change;
+- **Deadpool** responde por monitoramento, diagnóstico, remediação e aprendizado operacional;
+- **Zentriz Connect** publica a linguagem contratual comum da suite.
+
+Quando o Genesis produz artefatos como passports, manifests, ownership e observability baselines, eles devem convergir para os contratos versionados do Connect para que Deadpool e demais integrações aderentes falem a mesma língua sem acoplamento de runtime.
+
 ## 🏗️ Atores e Responsabilidades
 
 | Ator | Responsabilidade |
@@ -86,6 +96,7 @@ Essa abordagem permite que **novos chats aproveitem o contexto dos chats anterio
 
 - [PRODUCT_SPEC.md](project/spec/PRODUCT_SPEC.md)
 - **[ACTORS_AND_RESPONSIBILITIES.md](project/docs/ACTORS_AND_RESPONSIBILITIES.md)** — Atores, responsabilidades e hierarquia de comunicação
+- **[CONNECT_DEADPOOL_READY_CHECKLIST.md](project/docs/CONNECT_DEADPOOL_READY_CHECKLIST.md)** — Contratos mínimos do Connect para tornar o Genesis Deadpool Ready
 - [ARCHITECTURE_DIAGRAM.md](ARCHITECTURE_DIAGRAM.md) — Diagramas Mermaid (fluxo, squads, etapas)
 - [PROJECT_CHARTER.md](project/docs/PROJECT_CHARTER.md)
 - [ARCHITECTURE.md](project/docs/ARCHITECTURE.md)

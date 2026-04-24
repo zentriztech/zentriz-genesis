@@ -1,0 +1,12 @@
+{
+  "consumer": "zentriz-genesis",
+  "supported": {
+    "min": "1.0.0",
+    "maxExclusive": "2.0.0"
+  },
+  "validatedAgainst": ["1.0.0"],
+  "notes": [
+    "Genesis emits core Connect artifacts via deterministic assembler.",
+    "Cross-repo smoke and local tests validate the current v1 integration."
+  ]
+}

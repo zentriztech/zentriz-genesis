@@ -21,6 +21,7 @@ class PipelineContext:
 
     def __init__(self, project_id: str):
         self.project_id = project_id
+        self.connect_version = "1.0.0"
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -30,6 +31,7 @@ class PipelineContext:
         self.current_module = "backend"
         self.current_task: dict[str, Any] = {}
         self.artifacts: dict[str, str] = {}  # path -> content
+        self.connect_artifacts: dict[str, str] = {}  # project/connect/... -> content
         self.completed_tasks: list[str] = []
         self.current_step: int = 0  # LEI 11: etapa atual para retomada (0 = início)
 
@@ -199,6 +201,11 @@ class PipelineContext:
         if task_id:
             self.add_completed_task(task_id)
 
+    def register_connect_artifact(self, path: str, content: str) -> None:
+        if path:
+            self.connect_artifacts[path] = content
+            self.add_artifact(path, content)
+
     def save_checkpoint(self, storage_path: str | Path) -> None:
         """
         LEI 11: Persiste o estado atual do contexto para retomada após falha.
@@ -208,6 +215,7 @@ class PipelineContext:
         path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
             "project_id": self.project_id,
+            "connect_version": self.connect_version,
             "spec_raw": self.spec_raw,
             "product_spec": self.product_spec,
             "product_spec_template": self.product_spec_template,
@@ -217,6 +225,7 @@ class PipelineContext:
             "current_module": self.current_module,
             "current_task": self.current_task,
             "artifacts": self.artifacts,
+            "connect_artifacts": self.connect_artifacts,
             "completed_tasks": self.completed_tasks,
             "current_step": self.current_step,
             "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -237,6 +246,7 @@ class PipelineContext:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         ctx = cls(project_id)
+        ctx.connect_version = data.get("connect_version", "1.0.0")
         ctx.spec_raw = data.get("spec_raw", "")
         ctx.product_spec = data.get("product_spec", "")
         ctx.product_spec_template = data.get("product_spec_template", "")
@@ -246,6 +256,7 @@ class PipelineContext:
         ctx.current_module = data.get("current_module", "backend")
         ctx.current_task = data.get("current_task") or {}
         ctx.artifacts = data.get("artifacts") or {}
+        ctx.connect_artifacts = data.get("connect_artifacts") or {}
         ctx.completed_tasks = data.get("completed_tasks") or []
         ctx.current_step = data.get("current_step", 0)
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))

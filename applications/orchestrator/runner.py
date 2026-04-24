@@ -414,6 +414,39 @@ def emit_event(event_type: str, payload: dict, request_id: str) -> None:
     logger.info("Evento emitido: %s", event_type)
 
 
+def _emit_connect_contracts(
+    stage: str,
+    pipeline_ctx: "PipelineContext | None",
+    project_id: str | None,
+    storage,
+    request_id: str,
+) -> list[str]:
+    if not (pipeline_ctx and project_id and storage and storage.is_enabled()):
+        return []
+    from orchestrator.connect_contracts import build_connect_artifacts_for_stage
+
+    emitted_paths: list[str] = []
+    artifacts = build_connect_artifacts_for_stage(pipeline_ctx, stage)
+    for artifact in artifacts:
+        path = storage.write_connect_artifact(project_id, pipeline_ctx.connect_version, artifact.filename, artifact.to_json())
+        if path:
+            pipeline_ctx.register_connect_artifact(artifact.project_relative_path, artifact.to_json())
+            emitted_paths.append(artifact.project_relative_path)
+
+    if emitted_paths:
+        emit_event(
+            "connect.contracts.emitted",
+            {
+                "stage": stage,
+                "connect_version": pipeline_ctx.connect_version,
+                "paths": emitted_paths,
+            },
+            request_id,
+        )
+        logger.info("[Pipeline] Connect artifacts emitidos (%s): %s", stage, emitted_paths)
+    return emitted_paths
+
+
 # ---------------------------------------------------------------------------
 # Diálogo (log de passos e erros no portal)
 # ---------------------------------------------------------------------------
@@ -933,16 +966,31 @@ def _run_monitor_loop(
                             if path_val.startswith("project/"):
                                 try:
                                     storage.write_project_artifact(project_id, path_val[8:].lstrip("/"), content if isinstance(content, str) else str(content))
+                                    if pipeline_ctx:
+                                        pipeline_ctx.register_artifact(path_val, content if isinstance(content, str) else str(content))
                                 except Exception as _e:
                                     logger.warning("[Monitor Loop] Falha ao gravar project artifact: %s", _e)
                             elif path_val.startswith("docs/"):
                                 try:
                                     storage.write_doc_by_path(project_id, "devops", path_val[5:].lstrip("/"), content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                    if pipeline_ctx:
+                                        pipeline_ctx.register_artifact(path_val, content if isinstance(content, str) else str(content))
                                 except Exception as _e:
                                     logger.warning("[Monitor Loop] write_doc_by_path devops falhou, fallback write_doc: %s", _e)
                                     storage.write_doc(project_id, "devops", path_val.replace("/", "_").replace(".", "_")[:60] or f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                    if pipeline_ctx:
+                                        pipeline_ctx.register_artifact(path_val, content if isinstance(content, str) else str(content))
                             elif path_val:
                                 storage.write_doc(project_id, "devops", f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(f"docs/devops/artifact_{i}.md", content if isinstance(content, str) else str(content))
+                    if pipeline_ctx:
+                        emitted = _emit_connect_contracts("devops", pipeline_ctx, project_id, storage, request_id)
+                        if emitted:
+                            _post_step(
+                                "Artefatos operacionais do Connect emitidos após o DevOps: ObservabilityBaselineManifest, RuntimePassport e KnownSafeActionsPack.",
+                                request_id,
+                            )
                     devops_done = True
                     _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
                 except Exception as e:
@@ -1166,6 +1214,12 @@ def main() -> int:
                 logger.info("[Pipeline] Charter persistido: %s", charter_path)
             if pipeline_ctx:
                 pipeline_ctx.set_charter(charter_summary)
+                emitted = _emit_connect_contracts("charter", pipeline_ctx, project_id, storage, request_id)
+                if emitted:
+                    _post_step(
+                        "Artefatos iniciais do Connect emitidos após o Charter: SystemPassport e OwnershipManifest.",
+                        request_id,
+                    )
                 pipeline_ctx.current_step = 2
                 pipeline_ctx.save_checkpoint(STATE_DIR)
 
@@ -1247,6 +1301,12 @@ def main() -> int:
 
             if pipeline_ctx:
                 pipeline_ctx.set_backlog(backlog_summary)
+                emitted = _emit_connect_contracts("backlog", pipeline_ctx, project_id, storage, request_id)
+                if emitted:
+                    _post_step(
+                        "ServiceManifest(s) do Connect emitidos após a aprovação do backlog.",
+                        request_id,
+                    )
                 pipeline_ctx.current_step = 3
                 pipeline_ctx.save_checkpoint(STATE_DIR)
         _post_step(
@@ -1341,10 +1401,22 @@ def main() -> int:
                         if isinstance(art, dict) and art.get("content"):
                             content = art.get("content", "")
                             path_key = art.get("path") or f"artifact_{i}"
-                            if art.get("path"):
-                                storage.write_apps_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                            if path_key.startswith("apps/"):
+                                storage.write_apps_artifact(project_id, path_key[5:].lstrip("/"), content if isinstance(content, str) else str(content))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(path_key, content if isinstance(content, str) else str(content))
+                            elif path_key.startswith("docs/"):
+                                storage.write_doc_by_path(project_id, "dev", path_key[5:].lstrip("/"), content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(path_key, content if isinstance(content, str) else str(content))
+                            elif art.get("path"):
+                                storage.write_doc(project_id, "dev", f"artifact_{i}", content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(f"docs/dev/artifact_{i}.md", content if isinstance(content, str) else str(content))
                             else:
                                 storage.write_doc(project_id, "dev", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(f"docs/dev/artifact_{i}.md", content if isinstance(content, str) else str(content))
             except Exception as e:
                 logger.exception("[Pipeline] Dev falhou")
                 dev_status = "FAIL"
@@ -1441,10 +1513,29 @@ def main() -> int:
                         if isinstance(art, dict):
                             content = art.get("content")
                             path_key = art.get("path") or f"artifact_{i}"
-                            if content and path_key:
+                            if content and path_key.startswith("project/"):
+                                storage.write_project_artifact(project_id, path_key[8:].lstrip("/"), content if isinstance(content, str) else str(content))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(path_key, content if isinstance(content, str) else str(content))
+                            elif content and path_key.startswith("docs/"):
+                                storage.write_doc_by_path(project_id, "devops", path_key[5:].lstrip("/"), content if isinstance(content, str) else str(content), title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(path_key, content if isinstance(content, str) else str(content))
+                            elif content and path_key:
                                 storage.write_project_artifact(project_id, path_key, content if isinstance(content, str) else str(content))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(f"project/{path_key.lstrip('/')}", content if isinstance(content, str) else str(content))
                             elif content:
                                 storage.write_doc(project_id, "devops", f"artifact_{i}", content, title=art.get("purpose", f"Artifact {i}"))
+                                if pipeline_ctx:
+                                    pipeline_ctx.register_artifact(f"docs/devops/artifact_{i}.md", content if isinstance(content, str) else str(content))
+                    if pipeline_ctx:
+                        emitted = _emit_connect_contracts("devops", pipeline_ctx, project_id, storage, request_id)
+                        if emitted:
+                            _post_step(
+                                "Artefatos operacionais do Connect emitidos após o DevOps: ObservabilityBaselineManifest, RuntimePassport e KnownSafeActionsPack.",
+                                request_id,
+                            )
             except Exception as e:
                 logger.exception("[Pipeline] DevOps falhou")
                 devops_status = "FAIL"

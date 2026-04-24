@@ -112,6 +112,7 @@
 |-----------|-----------|
 | [docs/adr/](adr/) | Architecture Decision Records |
 | [docs/rfc/](rfc/) | Request for Comments |
+| [docs/rfc/RFC-0001-GRAPH-VIEW-EXECUTIVE_COMMAND_CENTER.md](rfc/RFC-0001-GRAPH-VIEW-EXECUTIVE_COMMAND_CENTER.md) | Proposta de Graph View executivo para squads, agentes, atividades e fluxos de conversa |
 
 ---
 
