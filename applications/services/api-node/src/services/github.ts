@@ -6,21 +6,6 @@ const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? "";
 const GITHUB_APP_CLIENT_ID = process.env.GITHUB_APP_CLIENT_ID ?? "";
 const GITHUB_APP_CLIENT_SECRET = process.env.GITHUB_APP_CLIENT_SECRET ?? "";
 
-function _loadPrivateKey(): string {
-  // Prefer file path (GITHUB_APP_PRIVATE_KEY_FILE) over inline value
-  const filePath = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
-  if (filePath) {
-    try {
-      return readFileSync(filePath, "utf-8").trim();
-    } catch (err) {
-      throw new Error(`Failed to read GitHub App private key from ${filePath}: ${err}`);
-    }
-  }
-  return process.env.GITHUB_APP_PRIVATE_KEY ?? "";
-}
-
-const GITHUB_APP_PRIVATE_KEY = _loadPrivateKey();
-
 export type GitHubInstallationInfo = {
   installationId: number;
   githubLogin: string;
@@ -29,8 +14,25 @@ export type GitHubInstallationInfo = {
   selectedRepos: string[];
 };
 
+/** Lazy — reads the private key on first use, not at module load time. */
+function _getPrivateKey(): string {
+  const filePath = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  if (filePath) {
+    try {
+      return readFileSync(filePath, "utf-8").trim();
+    } catch (err) {
+      throw new Error(`Cannot read GitHub App private key from ${filePath}: ${err}`);
+    }
+  }
+  return process.env.GITHUB_APP_PRIVATE_KEY ?? "";
+}
+
 function isAppConfigured(): boolean {
-  return Boolean(GITHUB_APP_ID && GITHUB_APP_PRIVATE_KEY);
+  const appId = process.env.GITHUB_APP_ID ?? "";
+  if (!appId) return false;
+  const keyFile = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  const keyInline = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
+  return Boolean(keyFile || keyInline);
 }
 
 /**
@@ -46,7 +48,7 @@ async function getOctokitForInstallation(installationId: number): Promise<Octoki
 
   const auth = createAppAuth({
     appId: GITHUB_APP_ID,
-    privateKey: GITHUB_APP_PRIVATE_KEY,
+    privateKey: _getPrivateKey(),
     clientId: GITHUB_APP_CLIENT_ID,
     clientSecret: GITHUB_APP_CLIENT_SECRET,
   });
@@ -64,7 +66,7 @@ export async function getInstallationInfo(installationId: number): Promise<GitHu
 
   const auth = createAppAuth({
     appId: GITHUB_APP_ID,
-    privateKey: GITHUB_APP_PRIVATE_KEY,
+    privateKey: _getPrivateKey(),
     clientId: GITHUB_APP_CLIENT_ID,
     clientSecret: GITHUB_APP_CLIENT_SECRET,
   });

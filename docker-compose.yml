@@ -22,6 +22,7 @@ services:
       - API_BASE_URL=http://api:3000
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
+      - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
       # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
       - PROJECT_FILES_ROOT=/project-files
       - PGHOST=postgres
@@ -32,6 +33,7 @@ services:
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
+      - ${HOME}/Documents/zentriz/github:/run/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
