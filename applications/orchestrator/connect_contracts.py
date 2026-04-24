@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,10 @@ CONNECT_VERSION_DIR = f"v{CONNECT_SCHEMA_VERSION}"
 CONNECT_PROJECT_DIR = f"connect/{CONNECT_VERSION_DIR}"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONNECT_ROOT = REPO_ROOT.parent / "zentriz-connect"
+# ZENTRIZ_CONNECT_ROOT env var allows overriding the path in Docker/CI
+# (default: sibling directory ../zentriz-connect, works on host but not in container)
+_connect_root_env = os.environ.get("ZENTRIZ_CONNECT_ROOT", "").strip()
+CONNECT_ROOT = Path(_connect_root_env) if _connect_root_env else REPO_ROOT.parent / "zentriz-connect"
 CONNECT_SCHEMA_ROOT = CONNECT_ROOT / "contract-kit" / "schemas"
 
 

@@ -127,10 +127,13 @@ services:
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
       - ${HOME}/.aws:/root/.aws:ro
+      - ${ZENTRIZ_CONNECT_PATH:-../zentriz-connect}:/zentriz-connect:ro
     depends_on:
       - agents
     healthcheck:
