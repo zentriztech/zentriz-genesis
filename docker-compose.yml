@@ -125,10 +125,9 @@ services:
       # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
       - PROJECT_FILES_ROOT=/project-files
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
+      - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    environment:
-      - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
