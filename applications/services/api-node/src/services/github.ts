@@ -1,10 +1,25 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
+import { readFileSync } from "fs";
 
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? "";
-const GITHUB_APP_PRIVATE_KEY = process.env.GITHUB_APP_PRIVATE_KEY ?? "";
 const GITHUB_APP_CLIENT_ID = process.env.GITHUB_APP_CLIENT_ID ?? "";
 const GITHUB_APP_CLIENT_SECRET = process.env.GITHUB_APP_CLIENT_SECRET ?? "";
+
+function _loadPrivateKey(): string {
+  // Prefer file path (GITHUB_APP_PRIVATE_KEY_FILE) over inline value
+  const filePath = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  if (filePath) {
+    try {
+      return readFileSync(filePath, "utf-8").trim();
+    } catch (err) {
+      throw new Error(`Failed to read GitHub App private key from ${filePath}: ${err}`);
+    }
+  }
+  return process.env.GITHUB_APP_PRIVATE_KEY ?? "";
+}
+
+const GITHUB_APP_PRIVATE_KEY = _loadPrivateKey();
 
 export type GitHubInstallationInfo = {
   installationId: number;
