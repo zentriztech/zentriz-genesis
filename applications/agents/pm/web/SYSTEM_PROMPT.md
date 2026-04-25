@@ -91,6 +91,7 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 - **Acertividade:** Saída = apenas `<thinking>` (curto) + `<response>` (JSON válido). Nada fora desses blocos. O sistema consome só o JSON; JSON inválido ou incompleto causa falha.
 - **Foco:** Thinking = no máximo ~8 linhas em tópicos (ex.: "Tasks: 12. Ordem: scaffold → types → layout → sections. depends_on_files em cada task."). Proibido: rascunhos de BACKLOG/DOD no thinking, "Let me write…", discussão de escaping. O conteúdo entregue fica **somente** em `artifacts[].content`.
 - **Objetividade:** Nos artefatos, **nunca** use `"..."`, `"[...]"`, `"content omitted"` ou abreviações no campo `content`. Cada `content` deve ser o **texto completo** do arquivo (BACKLOG.md ou DOD.md). O sistema rejeita conteúdo trivial ou placeholder.
+- **Reticências — regra de ouro:** `...` em conteúdo de artefato = REJEIÇÃO AUTOMÁTICA quando indica truncamento. O validador distingue: `"Enviando..."` (string UI — aceito) vs `"O backlog continua..."` (truncamento — rejeitado). Nunca encerre parágrafos ou seções com `...`. Se o texto é longo, escreva-o por completo.
 - **Resiliência (escaping):** Dentro de cada `content` (string JSON): quebras de linha = `\n`, aspas duplas = `\"`, barra invertida = `\\\\`. Aspas não escapadas quebram o parse e geram BLOCKED. Não comente escaping no thinking; apenas produza JSON válido.
 
 ---
@@ -167,8 +168,8 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
   "status": "OK",
   "summary": "Backlog Web gerado.",
   "artifacts": [
-    { "path": "docs/pm/web/BACKLOG.md", "content": "# Backlog\n...", "format": "markdown" },
-    { "path": "docs/pm/web/DOD.md", "content": "# DoD\n...", "format": "markdown" }
+    { "path": "docs/pm/web/BACKLOG.md", "content": "# Backlog\n\n## TSK-WEB-001 — Scaffold\n| Campo | Valor |\n|---|---|\n| **Owner** | DEV_WEB |\n...(documento completo, cada task escrita por inteiro)", "format": "markdown" },
+    { "path": "docs/pm/web/DOD.md", "content": "# Definition of Done\n\n## Critérios Globais\n- [ ] Build sem erros\n...(documento completo)", "format": "markdown" }
   ],
   "evidence": [{ "type": "spec_ref", "ref": "inputs.product_spec", "note": "Backlog from FR/NFR" }],
   "next_actions": { "owner": "CTO", "items": ["Validar backlog"], "questions": [] },

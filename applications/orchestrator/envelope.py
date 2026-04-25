@@ -132,15 +132,83 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
             _is_config = any(p in path for p in _short_ok_patterns)
             if len(content) < 50 and status == "OK" and not _is_config:
                 errors.append(f"artifact {path!r} muito curto ({len(content)} chars)")
-            # Detect placeholder abbreviations — must be selective to avoid false positives
-            # "[...]" is always a placeholder
-            # In code: "// ..." placeholder comments (not spread operators)
-            # In docs: only flag standalone "..." lines (not inline in text or code blocks)
+            # ── Detecção de truncamento por contexto ────────────────────────────
+            # Objetivo: detectar quando o LLM truncou o conteúdo com reticências,
+            # sem rejeitar usos legítimos de "..." em código e UI strings.
+            #
+            # Regra de ouro:
+            #   TRUNCAMENTO  = "..." ao final de parágrafo/seção indicando que há mais
+            #   USO LEGÍTIMO = "..." como parte semântica da string (Enviando..., spread, etc.)
+            #
+            import re as _re
+
             _is_code = any(path.endswith(ext) for ext in (".ts", ".tsx", ".js", ".jsx", ".py", ".json", ".css", ".sh"))
+            _is_doc  = path.endswith(".md") or path.endswith(".txt")
+
+            _truncation_found = False
+
+            # 1. "[...]" é SEMPRE placeholder — sem exceções
             if "[...]" in content:
-                errors.append(f"artifact {path!r} contém reticências/abreviações")
-            elif _is_code and "// ..." in content:
-                errors.append(f"artifact {path!r} contém reticências/abreviações")
+                _truncation_found = True
+
+            # 2. Marcadores explícitos de truncamento em qualquer tipo de arquivo
+            _explicit_truncation = [
+                "content omitted", "rest of file", "rest of section",
+                "... (continua)", "... (continues)", "... (ver acima)",
+                "... (see above)", "... mais", "... more",
+                "# ...", "## ...", "### ...",   # heading seguido só de ...
+            ]
+            for marker in _explicit_truncation:
+                if marker.lower() in content.lower():
+                    _truncation_found = True
+                    break
+
+            # 3. Em docs (.md): linha terminando com "..." indica parágrafo truncado
+            # Exceto: linhas que são claramente UI strings ou código inline
+            if not _truncation_found and _is_doc:
+                lines = content.split("\n")
+                for line in lines:
+                    stripped = line.strip()
+                    # Linha que termina com "..." e tem conteúdo substantivo antes
+                    # mas NÃO é: bullet de lista com "...", tabela markdown, código inline
+                    if (
+                        stripped.endswith("...")
+                        and len(stripped) > 10          # não só "..."
+                        and not stripped.startswith("|") # não é linha de tabela
+                        and not stripped.startswith("`") # não é código inline
+                        and not stripped.startswith("- `") # não é bullet com código
+                        and "```" not in stripped       # não é fence de código
+                    ):
+                        # Heurística: se a linha termina com palavra+... é truncamento
+                        # Se termina com símbolo UI como "Carregando..." é aceitável
+                        # Distinguir: "Este texto continua..." (truncamento) vs "Enviando..." (UI)
+                        _before_dots = stripped[:-3].rstrip()
+                        _last_word = _before_dots.split()[-1] if _before_dots.split() else ""
+                        # UI strings geralmente têm 1-2 palavras antes dos "..."
+                        # Truncamentos têm frases completas que "continuam"
+                        _word_count = len(_before_dots.split())
+                        if _word_count >= 5:  # 5+ palavras antes de "..." = truncamento
+                            _truncation_found = True
+                            break
+
+            # 4. Em código: "// ..." é comentário placeholder (não é spread operator)
+            if not _truncation_found and _is_code:
+                if "// ..." in content:
+                    _truncation_found = True
+
+            # 5. JSON content fields com valor "..." ou similar
+            if not _truncation_found:
+                if _re.search(r'"content"\s*:\s*"\.\.\.', content):
+                    _truncation_found = True
+                if _re.search(r'"content"\s*:\s*"#[^"]*\\n\.\.\."', content):
+                    _truncation_found = True
+
+            if _truncation_found:
+                errors.append(
+                    f"artifact {path!r} contém truncamento — o LLM usou '...' para indicar "
+                    f"que o conteúdo continua. Escreva o conteúdo COMPLETO sem reticências."
+                )
+
             # // TODO only flagged in code files (not in markdown documentation)
             if "// TODO" in content and _is_code:
                 errors.append(f"artifact {path!r} contém // TODO")

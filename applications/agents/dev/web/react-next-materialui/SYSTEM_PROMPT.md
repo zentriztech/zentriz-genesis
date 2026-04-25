@@ -577,8 +577,8 @@ Estrutura MUI:
 // Sitemap como array de objetos — não hardcoded
 const SITE_MAP = [
   { title: 'Navegação', links: [{ label, href }] },
-  { title: 'Produtos/Serviços', links: [...] },
-  { title: 'Institucional', links: [...] },
+  { title: 'Produtos/Serviços', links: [{ label: 'Ver todos', href: '#produtos' }] },
+  { title: 'Institucional', links: [{ label: 'Sobre', href: '#sobre' }, { label: 'Privacidade', href: '#' }] },
 ]
 // Renderizar com SITE_MAP.map() — genérico para qualquer projeto
 ```

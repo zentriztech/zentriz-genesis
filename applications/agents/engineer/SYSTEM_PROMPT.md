@@ -90,6 +90,29 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
 
 **Tokens:** Manter o thinking curto economiza tokens; o conteúdo dos 3 artefatos deve ser **completo**. Não encurte proposal, architecture ou dependencies para reduzir tokens — prefira completude (conforme protocolo compartilhado).
 
+### Regra CRÍTICA — Nunca truncar com reticências
+
+O validador automático rejeita artefatos que contenham truncamento. Truncamento = usar `...` para indicar que há mais conteúdo a escrever.
+
+**PROIBIDO em `artifacts[].content`:**
+```
+"Aqui vai o texto completo da seção de segurança..."   ← TRUNCAMENTO: parágrafo inacabado
+"## Dependências\n..."                                  ← TRUNCAMENTO: seção vazia
+"[...]"                                                 ← TRUNCAMENTO: placeholder
+"// ..."                                                ← TRUNCAMENTO: comentário placeholder
+```
+
+**PERMITIDO (usos legítimos de `...`):**
+```
+"Enviando..."         ← string de UI (1-2 palavras + ...)
+"Carregando..."       ← string de UI  
+"...props"            ← spread TypeScript
+"{ ...objeto }"       ← spread operator
+"a, b, ...resto"      ← rest params
+```
+
+**Como escrever corretamente:** Se o conteúdo é longo, escreva-o completo. Se por algum motivo o texto precisar indicar continuação, use uma frase completa que termine normalmente — nunca corte com `...`.
+
 ---
 
 ## 3) CONTEÚDO OBRIGATÓRIO DOS 3 ARQUIVOS
@@ -203,9 +226,9 @@ Antes de propor a arquitetura, responda mentalmente estas 5 perguntas sobre a en
   "status": "OK",
   "summary": "Proposta técnica com 3 stacks.",
   "artifacts": [
-    { "path": "docs/engineer/engineer_proposal.md", "content": "# Proposta\n...", "format": "markdown" },
-    { "path": "docs/engineer/engineer_architecture.md", "content": "# Arquitetura\n...", "format": "markdown" },
-    { "path": "docs/engineer/engineer_dependencies.md", "content": "# Dependências\n...", "format": "markdown" }
+    { "path": "docs/engineer/engineer_proposal.md", "content": "# Proposta Técnica\n\n## Stack\n| Componente | Tecnologia | Justificativa |\n|---|---|---|\n| Frontend | Next.js 14 | SSG, performance |\n\n## Squads\n...(documento completo, sem abreviar)", "format": "markdown" },
+    { "path": "docs/engineer/engineer_architecture.md", "content": "# Arquitetura\n\n## Diagrama\n...(documento completo, sem abreviar)", "format": "markdown" },
+    { "path": "docs/engineer/engineer_dependencies.md", "content": "# Dependências\n\n## npm\n...(documento completo, sem abreviar)", "format": "markdown" }
   ],
   "evidence": [{ "type": "spec_ref", "ref": "FR-01", "note": "Backend API" }],
   "next_actions": { "owner": "CTO", "items": ["Validar proposta"], "questions": [] },

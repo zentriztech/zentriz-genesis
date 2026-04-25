@@ -205,7 +205,12 @@ A spec descreve: Landing + Catálogo Digital para loja de veículos; objetivo = 
 - **evidence**: 2–5 entradas type "spec_ref" mapeando trechos da spec para FR/NFR (ex.: "Experiência do Visitante: vitrine" → FR-01; "agendamento direto, data e horário" → FR-04; "LGPD" → NFR-04)
 - **next_actions**: owner "CTO", items ["Enviar PRODUCT_SPEC ao Engineer para proposta técnica"], questions [] (ou perguntas específicas se TBD)
 
-**Não use reticências no content.** O artefato PRODUCT_SPEC.md deve ter texto completo em cada seção, no nível de detalhe acima. Reforço: mesmo que o sistema rejeite por “muito curto” ou “reticências”, a resposta em JSON é gravada em `docs/cto/` para avaliação — mas para aprovação automática, entregue sempre documento completo, sem `...` ou abreviações.
+**Reticências em content — regra de ouro:**
+O validador distingue dois usos de `...`:
+- **Truncamento (REJEITADO):** `...` ao fim de parágrafo/seção indicando que há mais a escrever. Ex: `”O FR-03 descreve o detalhamento do veículo...”` — REJEITADO porque o texto foi cortado.
+- **Uso legítimo (ACEITO):** `...` como parte semântica de uma string curta. Ex: `”Carregando...”`, `”...props”` em código TypeScript — ACEITOS.
+
+**Regra prática:** escreva cada seção até o fim. Se uma seção ficaria longa, inclua todos os sub-itens relevantes. Nunca use `...` como indicador de “aqui teria mais conteúdo”. O sistema rejeita e força retry.
 
 ---
 
