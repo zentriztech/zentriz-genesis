@@ -15,6 +15,14 @@ import Stack from "@mui/material/Stack";
 import Stepper from "@mui/material/Stepper";
 import Step from "@mui/material/Step";
 import StepLabel from "@mui/material/StepLabel";
+import Tab from "@mui/material/Tab";
+import Tabs from "@mui/material/Tabs";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import LinearProgress from "@mui/material/LinearProgress";
 import Typography from "@mui/material/Typography";
 import Schedule from "@mui/icons-material/Schedule";
 import CalendarToday from "@mui/icons-material/CalendarToday";
@@ -101,6 +109,7 @@ function ProjectDetailPageInner() {
   const [workingMessage, setWorkingMessage] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
   const [tasks, setTasks] = useState<TaskItem[] | null>(null);
+  const [activeTab, setActiveTab] = useState(0);
   const project = projectsStore.getById(id);
 
   const handleDialogueEntriesLoaded = useCallback((entries: DialogueEntry[]) => {
@@ -129,15 +138,28 @@ function ProjectDetailPageInner() {
     return () => clearInterval(t);
   }, [id, project?.status]);
 
+  // Artefatos — carrega uma vez e atualiza quando projeto muda de status
   useEffect(() => {
     if (!id) return;
     apiGet<ArtifactsResponse>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => setArtifacts(null));
-  }, [id]);
+  }, [id, project?.status]);
 
+  // Tasks — polling automático a cada 8s enquanto rodando
   useEffect(() => {
     if (!id || !project) return;
-    if (project.status !== "running" && project.status !== "completed" && project.status !== "accepted") return;
-    apiGet<TaskItem[]>(`/api/projects/${id}/tasks`).then((data) => setTasks(Array.isArray(data) ? data : [])).catch(() => setTasks(null));
+    const isActive = project.status === "running" || project.status === "completed" || project.status === "accepted";
+    if (!isActive) return;
+
+    const loadTasks = () =>
+      apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
+        .then((data) => setTasks(Array.isArray(data) ? data : []))
+        .catch(() => {});
+
+    loadTasks(); // imediato
+
+    if (project.status !== "running") return;
+    const interval = setInterval(loadTasks, 8000);
+    return () => clearInterval(interval);
   }, [id, project?.status]);
 
   if (!project) {
@@ -418,76 +440,209 @@ function ProjectDetailPageInner() {
         </MotionCard>
       )}
 
-      <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
-        <Typography variant="h6" gutterBottom fontWeight={600}>
-          Diálogo da equipe
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          O que os agentes estão fazendo (atualização automática).
-        </Typography>
-        <ProjectDialogue
-          projectId={id}
-          pollIntervalMs={project.status === STATUS_RUNNING ? 5000 : 10000}
-          onEntriesLoaded={handleDialogueEntriesLoaded}
-        />
-      </MotionCard>
-
-      {(project.status === "running" || project.status === "completed" || project.status === "accepted") && tasks !== null && tasks.length > 0 && (
-        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
-          <Typography variant="h6" gutterBottom fontWeight={600}>
-            Tarefas
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Tarefas do backlog (Monitor Loop).
-          </Typography>
-          <Stack component="ul" spacing={0.5} sx={{ listStyle: "none", pl: 0, m: 0 }}>
-            {tasks.map((t) => (
-              <Box
-                key={t.id}
-                component="li"
-                sx={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  gap: 1,
-                  py: 0.75,
-                  borderBottom: "1px solid",
-                  borderColor: "divider",
-                }}
-              >
-                <Chip size="small" label={t.status ?? "—"} color={t.status === "DONE" ? "success" : "default"} />
-                <Typography variant="body2">{t.requirements ?? t.taskId ?? t.id}</Typography>
-                {t.module && <Typography variant="caption" color="text.secondary">({t.module})</Typography>}
-              </Box>
-            ))}
-          </Stack>
-        </MotionCard>
-      )}
-
-      {artifacts && (artifacts.docs?.length > 0 || artifacts.projectDocsRoot != null) && (
-        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
-          <Typography variant="h6" gutterBottom fontWeight={600}>
-            Artefatos
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Documentos e artefatos gerados pelo pipeline (docs, apps, project).
-          </Typography>
-          {artifacts.docs?.length > 0 ? (
-            <Stack component="ul" spacing={0.5} sx={{ listStyle: "none", pl: 0, m: 0 }}>
-              {artifacts.docs.map((d, i) => (
-                <Typography key={i} variant="body2" component="li">
-                  {d.title ?? d.filename}
-                  {d.creator && <Typography component="span" variant="caption" color="text.secondary"> — {d.creator}</Typography>}
-                </Typography>
-              ))}
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              Nenhum documento listado no manifest. Os artefatos podem estar em docs/ ou project/ (pasta do projeto).
+      {/* ── Tabs: Diálogo | Tasks | Artefatos ── */}
+      <MotionCard variant="outlined" sx={{ mt: 3 }} {...blockMotion}>
+        {/* Live status do agente ativo */}
+        {project.status === STATUS_RUNNING && workingMessage && (
+          <Box sx={{ px: 2, pt: 1.5, pb: 0, display: "flex", alignItems: "center", gap: 1 }}>
+            <CircularProgress size={14} color="primary" />
+            <Typography variant="body2" color="primary" sx={{ fontWeight: 500 }}>
+              {workingMessage}
             </Typography>
-          )}
-        </MotionCard>
-      )}
+          </Box>
+        )}
+
+        {/* Barra de progresso de tasks */}
+        {tasks && tasks.length > 0 && (
+          <Box sx={{ px: 2, pt: workingMessage ? 0.75 : 1.5, pb: 0 }}>
+            {(() => {
+              const done = tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length;
+              const pct = Math.round((done / tasks.length) * 100);
+              return (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <LinearProgress
+                    variant="determinate"
+                    value={pct}
+                    sx={{ flex: 1, height: 6, borderRadius: 3 }}
+                    color={pct === 100 ? "success" : "primary"}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
+                    {done}/{tasks.length} tasks
+                  </Typography>
+                </Stack>
+              );
+            })()}
+          </Box>
+        )}
+
+        <Tabs
+          value={activeTab}
+          onChange={(_e, v) => setActiveTab(v as number)}
+          sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider" }}
+        >
+          <Tab label="Diálogo da Equipe" />
+          <Tab
+            label={
+              tasks && tasks.length > 0
+                ? `Tasks (${tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length}/${tasks.length})`
+                : "Tasks"
+            }
+          />
+          <Tab
+            label={
+              artifacts?.docs && artifacts.docs.length > 0
+                ? `Artefatos (${artifacts.docs.length})`
+                : "Artefatos"
+            }
+          />
+        </Tabs>
+
+        {/* Aba 0 — Diálogo */}
+        {activeTab === 0 && (
+          <Box sx={{ p: 2 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              O que os agentes estão fazendo (atualização automática).
+            </Typography>
+            <ProjectDialogue
+              projectId={id}
+              pollIntervalMs={project.status === STATUS_RUNNING ? 5000 : 10000}
+              onEntriesLoaded={handleDialogueEntriesLoaded}
+            />
+          </Box>
+        )}
+
+        {/* Aba 1 — Tasks */}
+        {activeTab === 1 && (
+          <Box sx={{ p: 2 }}>
+            {project.status === STATUS_RUNNING && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                Atualização automática a cada 8 segundos.
+              </Typography>
+            )}
+            {!tasks || tasks.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                {project.status === STATUS_RUNNING
+                  ? "Aguardando início do Monitor Loop (CTO → Engineer → PM devem concluir primeiro)..."
+                  : "Nenhuma task encontrada para este projeto."}
+              </Typography>
+            ) : (
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600, width: 120 }}>Task ID</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Descrição</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: 130 }}>Status</TableCell>
+                    <TableCell sx={{ fontWeight: 600, width: 100 }}>Módulo</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {tasks.map((t) => {
+                    const isDone = t.status === "DONE" || t.status === "QA_PASS";
+                    const isActive = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                    const isBlocked = t.status === "BLOCKED" || t.status === "QA_FAIL";
+                    return (
+                      <TableRow
+                        key={t.id}
+                        sx={{
+                          bgcolor: isActive ? "primary.50" : isDone ? "success.50" : "transparent",
+                          "& td": { py: 0.75 },
+                        }}
+                      >
+                        <TableCell>
+                          <Typography variant="caption" fontFamily="monospace">
+                            {t.taskId ?? t.id}
+                          </Typography>
+                        </TableCell>
+                        <TableCell>
+                          <Stack direction="row" spacing={0.75} alignItems="center">
+                            {isActive && <CircularProgress size={12} color="primary" />}
+                            <Typography variant="body2">
+                              {t.requirements ?? "—"}
+                            </Typography>
+                          </Stack>
+                        </TableCell>
+                        <TableCell>
+                          <Chip
+                            size="small"
+                            label={t.status ?? "—"}
+                            color={
+                              isDone ? "success" :
+                              isActive ? "info" :
+                              isBlocked ? "error" : "default"
+                            }
+                            sx={{ fontFamily: "monospace", fontSize: "0.65rem" }}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Typography variant="caption" color="text.secondary">
+                            {t.module ?? t.ownerRole ?? "—"}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </Box>
+        )}
+
+        {/* Aba 2 — Artefatos */}
+        {activeTab === 2 && (
+          <Box sx={{ p: 2 }}>
+            {!artifacts || (!artifacts.docs?.length && !artifacts.projectDocsRoot) ? (
+              <Typography variant="body2" color="text.secondary">
+                Nenhum artefato gerado ainda. Os documentos aparecerão aqui conforme os agentes trabalham.
+              </Typography>
+            ) : (
+              <>
+                {artifacts.projectDocsRoot && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                    Raiz: <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5, fontSize: "0.8em" }}>{artifacts.projectDocsRoot}</Box>
+                  </Typography>
+                )}
+                {artifacts.docs?.length > 0 ? (
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ fontWeight: 600 }}>Arquivo</TableCell>
+                        <TableCell sx={{ fontWeight: 600, width: 110 }}>Criado por</TableCell>
+                        <TableCell sx={{ fontWeight: 600, width: 140 }}>Data</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {artifacts.docs.map((d, i) => (
+                        <TableRow key={i} sx={{ "& td": { py: 0.5 } }}>
+                          <TableCell>
+                            <Typography variant="body2">{d.title ?? d.filename}</Typography>
+                            {d.title && d.filename !== d.title && (
+                              <Typography variant="caption" color="text.secondary" fontFamily="monospace">
+                                {d.filename}
+                              </Typography>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Chip size="small" label={d.creator ?? "—"} variant="outlined" sx={{ fontSize: "0.65rem" }} />
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="caption" color="text.secondary">
+                              {d.created_at ? new Date(d.created_at).toLocaleString("pt-BR") : "—"}
+                            </Typography>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Manifest sem documentos listados. Os artefatos estão sendo gerados.
+                  </Typography>
+                )}
+              </>
+            )}
+          </Box>
+        )}
+      </MotionCard>
 
       <Box sx={{ mt: 3 }}>
         <Button variant="outlined" disabled size="small" sx={{ mr: 1 }}>

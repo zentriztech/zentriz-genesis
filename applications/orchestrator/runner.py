@@ -458,6 +458,16 @@ def persist_state(spec_ref: str, charter: dict, backlog: dict, events: list) -> 
         "events": events,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    # Isolar por project_id — evita conflito entre projetos simultâneos
+    _project_state_dir = STATE_DIR / (spec_ref.split("/")[-1].replace(".md", "") if spec_ref else "default")
+    _pid = os.environ.get("PROJECT_ID")
+    if _pid:
+        _project_state_dir = STATE_DIR / _pid
+    _project_state_dir.mkdir(parents=True, exist_ok=True)
+    (_project_state_dir / "current_project.json").write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    # Manter compatibilidade com path legado (leitura pelo portal)
     (STATE_DIR / "current_project.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -471,7 +481,11 @@ def emit_event(event_type: str, payload: dict, request_id: str) -> None:
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "payload": payload,
     }
-    events_file = STATE_DIR / "events.jsonl"
+    # Isolar events.jsonl por project_id
+    _pid = os.environ.get("PROJECT_ID")
+    _events_dir = STATE_DIR / _pid if _pid else STATE_DIR
+    _events_dir.mkdir(parents=True, exist_ok=True)
+    events_file = _events_dir / "events.jsonl"
     with open(events_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
     logger.info("Evento emitido: %s", event_type)
