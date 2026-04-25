@@ -212,45 +212,105 @@ Casos de uso obrigatórios para este padrão:
 
 ## Professional Form Patterns (aplica a qualquer projeto)
 
-### Regra fundamental: Nunca borda dupla (card + input)
+### Padrão definitivo: WRAPPER-FOCUS (elimina todos os problemas de form)
 
-Quando um formulário está dentro de um card com `border`, os inputs MUI `variant="outlined"` criam BORDA DUPLA (card border + input notchedOutline). Isso gera um visual de "caixa dentro de caixa" muito feio.
+**O problema com MUI TextField `variant="outlined"`:**
+- O input tem sua própria `notchedOutline` (borda)  
+- Quando recebe foco, ganha `box-shadow` que ultrapassa o container pai
+- Resulta em: borda dupla, overflow visual, height incorreto, label floating complexa
 
-**Solução:** O card wrapper do form NÃO deve ter `border` — usar apenas `boxShadow` para delimitar:
+**A solução: Wrapper-Focus Pattern**
+
+O WRAPPER div é quem tem a borda e reage ao foco via `:focus-within`.
+O input nativo dentro é completamente transparente — sem border, sem outline.
 
 ```tsx
-// ✓ CORRETO — card sem border, apenas sombra
-<Box sx={{
-  bgcolor: 'white',
-  borderRadius: '20px',
-  boxShadow: '0 2px 20px rgba(0,0,0,0.07), 0 8px 40px rgba(primaryColor, 0.08)',
-  // Sem border: ... ← NUNCA adicionar border aqui
-  // Padding separado para height:auto funcionar:
-  paddingTop: { xs: '28px', sm: '36px' },
-  paddingBottom: { xs: '28px', sm: '36px' },
-  paddingLeft: { xs: '20px', sm: '36px' },
-  paddingRight: { xs: '20px', sm: '36px' },
-}}>
-  {/* Inputs MUI outlined aqui */}
-</Box>
+// Componente genérico reutilizável para QUALQUER projeto
+interface FieldProps {
+  id: string; label: string; icon: React.ReactNode
+  value: string; onChange: (v: string) => void; onBlur: () => void
+  error?: string | null; success?: boolean; required?: boolean
+  type?: string; multiline?: boolean; rows?: number; maxLength?: number
+  hint?: string
+}
 
-// ✗ ERRADO — card com border + input outlined = BORDA DUPLA
-<Box sx={{ border: '1px solid #ddd', borderRadius: '16px', p: 3 }}>
-  <TextField variant="outlined" /> {/* dupla borda! */}
-</Box>
+function Field({ id, label, icon, value, onChange, onBlur, error, success, required, type = 'text', multiline = false, rows = 1, maxLength, hint }: FieldProps) {
+  const borderColor  = error ? '#D32F2F' : success ? '#2E7D32' : 'rgba(0,0,0,0.15)'
+  const focusColor   = error ? '#D32F2F' : success ? '#2E7D32' : 'var(--brand-primary)'
+  
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+      {/* Label ACIMA do wrapper — não floating, não dentro */}
+      <Box component="label" htmlFor={id} sx={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8125rem', fontWeight: 600, color: error ? '#D32F2F' : success ? '#2E7D32' : 'var(--text-1)', cursor: 'text' }}>
+        <Box component="span" sx={{ color: 'var(--text-3)', display: 'flex' }}>{icon}</Box>
+        {label}
+        {required && <Box component="span" sx={{ color: '#D32F2F' }}>*</Box>}
+      </Box>
+
+      {/* WRAPPER — tem a borda, reage ao foco via :focus-within */}
+      <Box sx={{
+        display: 'flex',
+        alignItems: multiline ? 'flex-start' : 'center',
+        border: `1.5px solid ${borderColor}`,
+        borderRadius: '10px',
+        px: '14px',
+        py: multiline ? '12px' : '0px',
+        bgcolor: 'white',
+        transition: 'border-color 180ms ease, box-shadow 180ms ease',
+        '&:focus-within': {
+          borderColor: focusColor,
+          borderWidth: '2px',
+          boxShadow: `0 0 0 3px ${focusColor}18`,
+          mx: '-0.5px', // compensa 1px extra de borderWidth
+        },
+        '&:hover:not(:focus-within)': { borderColor: 'var(--brand-secondary)' },
+      }}>
+        {/* Input nativo — sem border, sem outline, sem background */}
+        <Box
+          component={multiline ? 'textarea' : 'input'}
+          id={id} type={!multiline ? type : undefined}
+          value={value}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value)}
+          onBlur={onBlur}
+          rows={multiline ? rows : undefined}
+          sx={{
+            width: '100%', border: 'none', outline: 'none', background: 'transparent',
+            fontSize: '0.9375rem', lineHeight: 1.55, fontFamily: 'inherit',
+            py: multiline ? '0px' : '13px',  // padding vertical no input para campo simples
+            resize: multiline ? 'vertical' : 'none',
+            '&::placeholder': { color: 'var(--text-3)' },
+          }}
+        />
+        {/* Ícone de sucesso opcional */}
+        {success && <Box sx={{ color: '#2E7D32', ml: '8px', display: 'flex', flexShrink: 0 }}>✓</Box>}
+      </Box>
+
+      {/* Helper text FORA do wrapper — não afeta a altura do campo */}
+      {(error || hint) && (
+        <Typography component="span" sx={{ fontSize: '0.75rem', color: error ? '#D32F2F' : '#2E7D32', ml: '2px' }}>
+          {error || hint}
+        </Typography>
+      )}
+
+      {/* Contador de chars (opcional) */}
+      {multiline && maxLength && (
+        <Typography component="span" sx={{ fontSize: '0.6875rem', color: value.length > maxLength * 0.9 ? 'var(--brand-primary)' : 'var(--text-3)', textAlign: 'right' }}>
+          {value.length}/{maxLength}
+        </Typography>
+      )}
+    </Box>
+  )
+}
 ```
 
-Também: `bgcolor: 'transparent'` no `MuiOutlinedInput-root` dentro de card já branco — sem fundo duplo:
-```tsx
-sx={{
-  '& .MuiOutlinedInput-root': {
-    bgcolor: 'transparent', // não 'white' quando o card já é branco
-    height: 'auto',         // height:auto — o padding interno define altura
-    '& input': { paddingTop: '13px', paddingBottom: '13px' },
-    '& textarea': { paddingTop: '13px', paddingBottom: '13px' },
-  }
-}}
-```
+**Regras obrigatórias:**
+1. Input nativo: `border: none; outline: none; background: transparent`
+2. Wrapper: `border: 1.5px solid` + `:focus-within` muda cor e box-shadow
+3. Label: ACIMA do wrapper, nunca floating dentro
+4. Helper text: FORA do wrapper, typography separada  
+5. Card que contém o form: SEM border — apenas boxShadow
+6. `mx: '-0.5px'` no :focus-within para compensar borderWidth 1.5 → 2px sem "pulo"
+7. Usar `useId()` para IDs únicos dos campos
 
 ### MUI TextField com validação inline — padrão obrigatório
 Para QUALQUER formulário, usar este padrão completo:
