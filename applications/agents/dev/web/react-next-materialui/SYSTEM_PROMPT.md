@@ -158,7 +158,99 @@ button:not(.btn) { cursor: pointer; border: none; background: transparent; paddi
 ### Princípio de preservação
 Antes de modificar qualquer componente, verificar se está correto. Se o componente já está bom, NÃO modificar. Só corrigir o que está errado.
 
+## Horizontal Distribution Pattern (aplica a qualquer conjunto de 2-5 itens)
+
+Quando um componente exibe uma LISTA PEQUENA de itens relacionados (2-5 itens como: valores da empresa, métricas, features resumidas, etapas), eles DEVEM ser distribuídos HORIZONTALMENTE com espaço igual, NÃO empilhados verticalmente.
+
+**Regra:** Listas de 2-5 itens em contexto de destaque → layout horizontal com `flex: 1` em cada item.
+
+Padrão correto:
+```tsx
+// ✓ CORRETO — distribuição horizontal com divisores
+<Box sx={{
+  display: 'flex',
+  flexDirection: { xs: 'column', sm: 'row' }, // mobile empilhado, desktop horizontal
+  gap: { xs: '16px', sm: 0 },
+}}>
+  {ITEMS.map((item, i) => (
+    <Box key={item.label} sx={{
+      flex: 1,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: { xs: 'flex-start', sm: 'center' },
+      textAlign: { xs: 'left', sm: 'center' },
+      px: { xs: 0, sm: '16px' },
+      /* Divisor vertical entre itens (não no último) */
+      borderRight: i < ITEMS.length - 1 ? { xs: 'none', sm: `1px solid ${dividerColor}` } : 'none',
+    }}>
+      <Typography sx={{ fontWeight: 800, color: primaryColor, mb: '4px' }}>
+        {item.title}
+      </Typography>
+      <Typography sx={{ fontSize: '0.8125rem', color: textSecondary, maxWidth: '120px' }}>
+        {item.subtitle}
+      </Typography>
+    </Box>
+  ))}
+</Box>
+
+// ✗ ERRADO — empilhado verticalmente (parece lista de itens, não destaque)
+<Stack spacing={2}>
+  {ITEMS.map(item => (
+    <Box key={item.label}>
+      <Typography>{item.title}</Typography>
+      <Typography>{item.subtitle}</Typography>
+    </Box>
+  ))}
+</Stack>
+```
+
+Casos de uso obrigatórios para este padrão:
+- Valores/missão da empresa (Qualidade, Cuidado, Confiança)
+- Métricas/stats (1000+ clientes, 5 anos, 98% satisfação)
+- Etapas rápidas (3-4 passos de processo)
+- Features resumidas em linha
+
 ## Professional Form Patterns (aplica a qualquer projeto)
+
+### Regra fundamental: Nunca borda dupla (card + input)
+
+Quando um formulário está dentro de um card com `border`, os inputs MUI `variant="outlined"` criam BORDA DUPLA (card border + input notchedOutline). Isso gera um visual de "caixa dentro de caixa" muito feio.
+
+**Solução:** O card wrapper do form NÃO deve ter `border` — usar apenas `boxShadow` para delimitar:
+
+```tsx
+// ✓ CORRETO — card sem border, apenas sombra
+<Box sx={{
+  bgcolor: 'white',
+  borderRadius: '20px',
+  boxShadow: '0 2px 20px rgba(0,0,0,0.07), 0 8px 40px rgba(primaryColor, 0.08)',
+  // Sem border: ... ← NUNCA adicionar border aqui
+  // Padding separado para height:auto funcionar:
+  paddingTop: { xs: '28px', sm: '36px' },
+  paddingBottom: { xs: '28px', sm: '36px' },
+  paddingLeft: { xs: '20px', sm: '36px' },
+  paddingRight: { xs: '20px', sm: '36px' },
+}}>
+  {/* Inputs MUI outlined aqui */}
+</Box>
+
+// ✗ ERRADO — card com border + input outlined = BORDA DUPLA
+<Box sx={{ border: '1px solid #ddd', borderRadius: '16px', p: 3 }}>
+  <TextField variant="outlined" /> {/* dupla borda! */}
+</Box>
+```
+
+Também: `bgcolor: 'transparent'` no `MuiOutlinedInput-root` dentro de card já branco — sem fundo duplo:
+```tsx
+sx={{
+  '& .MuiOutlinedInput-root': {
+    bgcolor: 'transparent', // não 'white' quando o card já é branco
+    height: 'auto',         // height:auto — o padding interno define altura
+    '& input': { paddingTop: '13px', paddingBottom: '13px' },
+    '& textarea': { paddingTop: '13px', paddingBottom: '13px' },
+  }
+}}
+```
 
 ### MUI TextField com validação inline — padrão obrigatório
 Para QUALQUER formulário, usar este padrão completo:
