@@ -261,22 +261,32 @@ def call_pm(
     return run_agent(system_prompt_path=pm_prompt, message=message, role="PM")
 
 
-def _infer_web_skill_path(context_text: str) -> str:
+def _infer_web_skill_path(context_text: str, project_id: str | None = None) -> str:
     """
-    Infers the correct Dev web skill path from charter/backlog text.
+    Infers the correct Dev web skill path from charter/backlog text or BACKLOG.md on disk.
     Returns the path under applications/agents/dev/web/ to the SYSTEM_PROMPT directory.
     Falls back to react-next-materialui if no variant can be detected.
     """
-    text = (context_text or "").lower()
-    # Tailwind CSS — explicit mention beats everything
-    if "tailwind" in text:
-        tailwind_path = _agents_root() / "dev" / "web" / "react-next-tailwind" / "SYSTEM_PROMPT.md"
+    # Also read BACKLOG.md from disk for more reliable detection
+    disk_text = ""
+    if project_id:
+        try:
+            project_files_root = os.environ.get("PROJECT_FILES_ROOT", "/project-files")
+            backlog_path = Path(project_files_root) / project_id / "docs" / "pm" / "web" / "BACKLOG.md"
+            if backlog_path.exists():
+                disk_text = backlog_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    combined = ((context_text or "") + " " + disk_text).lower()
+    tailwind_path = _agents_root() / "dev" / "web" / "react-next-tailwind" / "SYSTEM_PROMPT.md"
+    if "tailwind" in combined and tailwind_path.exists():
+        return "dev/web/react-next-tailwind"
+    if "material" in combined or "mui" in combined or "material-ui" in combined:
+        return "dev/web/react-next-materialui"
+    # Next.js without explicit UI framework: default to tailwind (more common for static sites)
+    if "next.js" in combined or "nextjs" in combined or "next js" in combined:
         if tailwind_path.exists():
             return "dev/web/react-next-tailwind"
-        # Tailwind variant doesn't exist yet — fall through to materialui which also handles Next.js
-    if "material" in text or "mui" in text or "material-ui" in text:
-        return "dev/web/react-next-materialui"
-    # Default: use materialui variant (handles generic React+Next.js well)
     return "dev/web/react-next-materialui"
 
 
@@ -317,7 +327,8 @@ def call_dev(
     if pipeline_ctx:
         inputs["completed_summary"] = [{"task_id": t, "status": "done"} for t in pipeline_ctx.completed_tasks]
     # Route to correct skill path based on variant and detected stack
-    _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary)
+    _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
+    _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
     _skill_map = {
         "web": _web_skill,
         "backend": "dev/backend/nodejs",

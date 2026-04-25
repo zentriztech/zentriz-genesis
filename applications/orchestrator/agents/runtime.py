@@ -532,6 +532,10 @@ def run_agent(
         if (role or "").upper() == "PM" and (mode or "").strip().lower() == "generate_backlog":
             pm_max = int(os.environ.get("CLAUDE_MAX_TOKENS_PM", "32000"))
             max_tokens = max(max_tokens, min(pm_max, env_max))
+        # Dev (implement_task): código completo de componentes — precisa de espaço generoso
+        if (role or "").upper() == "DEV" and (mode or "").strip().lower() == "implement_task":
+            dev_max = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV", "32000"))
+            max_tokens = max(max_tokens, min(dev_max, env_max))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None

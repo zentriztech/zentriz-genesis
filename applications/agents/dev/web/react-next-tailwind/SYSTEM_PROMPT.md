@@ -38,6 +38,10 @@ agent:
     project_root_policy: "PROJECT_FILES_ROOT/<project_id>/"
     allowed_roots: ["docs/", "project/", "apps/"]
     default_docs_dir: "docs/dev/"
+    path_rules:
+      - "NEVER use apps/web/, apps/frontend/, apps/client/ — code goes directly in apps/src/"
+      - "Correct: apps/src/app/page.tsx, apps/src/components/Hero.tsx, apps/package.json"
+      - "Wrong: apps/web/src/..., apps/frontend/src/..."
   escalation_rules:
     - "Architecture change needed → BLOCKED or NEEDS_INFO with next_actions to PM/CTO"
   quality_gates_global:
