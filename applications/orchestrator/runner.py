@@ -1273,12 +1273,11 @@ def _run_monitor_loop(
         if all_done and not devops_done:
             if tasks_done_after_qa_fail:
                 _post_step(
-                    "Monitor: uma ou mais tarefas não foram aprovadas pelo QA após o máximo de reworks. "
-                    "DevOps não será acionado. Revise o projeto ou aceite o estado atual no portal.",
+                    "Monitor: algumas tarefas não foram aprovadas pelo QA, mas o produto foi gerado. "
+                    "Acionando DevOps para gerar start.sh e executar localmente.",
                     request_id,
                 )
-                devops_done = True  # Marca para não tentar de novo
-            else:
+            if True:  # Always run DevOps when all tasks are done, regardless of QA failures
                 _post_step("O Monitor acionou o DevOps para provisionamento e execução local.", request_id)
                 _post_agent_working("devops", "O DevOps está analisando os artefatos e preparando o ambiente de execução local.", request_id)
                 try:
