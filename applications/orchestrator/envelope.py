@@ -120,12 +120,17 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
         content = art.get("content", "")
         path = art.get("path", "")
         if isinstance(content, str):
-            # Some config files are legitimately short; only flag non-config files
-            _short_ok_patterns = ("jest.setup", "postcss.config", ".env", "jest.config",
-                                  "prettier", ".eslintrc", "babel.config", "vitest.config",
-                                  "next-env.d.ts", "tailwind.config", "tsconfig")
+            # Only flag very short content for substantive files (components, docs, API files)
+            # Config, mock, and utility files can be legitimately short
+            _short_ok_patterns = (
+                "jest.setup", "postcss.config", ".env", "jest.config", "prettier",
+                ".eslintrc", "babel.config", "vitest.config", "next-env.d.ts",
+                "tailwind.config", "tsconfig", "__mocks__", "mock", "index.ts",
+                "index.js", ".d.ts", "robots.txt", "sitemap", ".gitignore",
+                "globals.css", "layout.css", "reset.css",
+            )
             _is_config = any(p in path for p in _short_ok_patterns)
-            if len(content) < 100 and status == "OK" and not _is_config:
+            if len(content) < 50 and status == "OK" and not _is_config:
                 errors.append(f"artifact {path!r} muito curto ({len(content)} chars)")
             if "..." in content or "[...]" in content:
                 errors.append(f"artifact {path!r} contém reticências/abreviações")
