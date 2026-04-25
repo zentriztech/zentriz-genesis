@@ -158,6 +158,91 @@ button:not(.btn) { cursor: pointer; border: none; background: transparent; paddi
 ### Princípio de preservação
 Antes de modificar qualquer componente, verificar se está correto. Se o componente já está bom, NÃO modificar. Só corrigir o que está errado.
 
+## Input Focus Ring — Eliminação Completa (obrigatório)
+
+**Problema:** Mesmo com `outline: none` no sx do input nativo, o browser aplica `:focus-visible` do globals.css nos elementos focáveis. Resultado: borda/outline no input além do :focus-within do wrapper.
+
+**Solução obrigatória no globals.css de TODO projeto:**
+```css
+/* Inputs e textareas NÃO ganham outline do browser */
+/* O wrapper-focus cuida do feedback visual via :focus-within */
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+```
+
+Isso garante que NENHUMA borda extra aparece no input, mesmo com `:focus-visible` global.
+Triple garantia: globals.css + `sx={{ outline: 'none' }}` no input + wrapper :focus-within.
+
+---
+
+## Submit Button — Padrão de Qualidade (obrigatório)
+
+O botão de submit de formulário é um elemento crítico — sempre verificar JUNTO com o form.
+
+**Padrões obrigatórios:**
+- Tamanho: `py: '15px'` (altura generosa, é o CTA principal da seção)
+- Cor brand: usar cor primária do projeto, não genérica
+- 3 estados visuais: idle / sending (animação) / sent (cor verde)
+- Sem `Fade` aninhado duplo — usar renderização condicional direta
+- `hover`: `translateY(-2px)` + sombra mais intensa
+- `active`: `translateY(0)` para dar tato
+- `disabled`: aparência neutra, cursor `not-allowed`
+- Sem `position: 'relative'` que causa sobreposição com elementos absolutos
+
+```tsx
+// ✓ CORRETO — estados com condicional direta, sem Fade duplo
+<MuiButton
+  type="submit" disabled={sending}
+  sx={{
+    mt: '8px',
+    bgcolor: sent ? '#2E7D32' : sending ? `${primaryColor}CC` : primaryColor,
+    color: '#fff',
+    borderRadius: '12px',
+    py: '15px', px: '28px',
+    fontSize: '1rem', fontWeight: 700, textTransform: 'none',
+    boxShadow: `0 4px 16px ${primaryColor}40`,
+    transition: 'background-color 200ms ease, box-shadow 200ms ease, transform 150ms ease',
+    '&:hover:not(:disabled)': { bgcolor: primaryColorDark, transform: 'translateY(-2px)', boxShadow: `0 8px 24px ${primaryColor}50` },
+    '&:active:not(:disabled)': { transform: 'translateY(0)' },
+    '&.Mui-disabled': { bgcolor: 'rgba(0,0,0,0.12)', color: 'rgba(0,0,0,0.38)' },
+  }}
+>
+  {sent ? (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
+      <CheckIcon /><span>Enviado!</span>
+    </Box>
+  ) : sending ? (
+    <span>Enviando...</span>
+  ) : (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'center' }}>
+      <span>💬</span><span>Enviar via WhatsApp</span>
+    </Box>
+  )}
+</MuiButton>
+
+// ✗ ERRADO — Fade duplo com position:absolute causa sobreposição
+<MuiButton sx={{ position: 'relative' }}>
+  <Fade in={sent}><Box sx={{ position: 'absolute' }}>Enviado!</Box></Fade>
+  <Fade in={!sent}><span>Enviar</span></Fade>
+</MuiButton>
+```
+
+**Checklist de contexto** — antes de finalizar um form, verificar SEMPRE:
+1. Input fields — borda correta, sem outline residual
+2. Submit button — tamanho, cor, 3 estados (idle/sending/sent)
+3. Helper text — abaixo do wrapper, fora da área do campo
+4. Card wrapper — sem border, apenas boxShadow
+5. Labels — acima dos campos, visíveis e associadas por htmlFor
+
+---
+
 ## Horizontal Distribution Pattern (aplica a qualquer conjunto de 2-5 itens)
 
 Quando um componente exibe uma LISTA PEQUENA de itens relacionados (2-5 itens como: valores da empresa, métricas, features resumidas, etapas), eles DEVEM ser distribuídos HORIZONTALMENTE com espaço igual, NÃO empilhados verticalmente.
