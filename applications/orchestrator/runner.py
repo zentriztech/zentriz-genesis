@@ -725,9 +725,42 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
         except Exception:
             pass
 
+    # Detect if running inside a Docker container — in that case we cannot run
+    # npm/node commands (no Node.js in the Python runner image). Instead, use the
+    # HOST_PROJECT_FILES_ROOT env var (set in docker-compose) to build the host path
+    # and instruct the user. We still open the browser via `open` which works on macOS host.
+    _in_docker = Path("/.dockerenv").exists() or os.environ.get("container", "") != ""
+    host_root = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
+    if _in_docker and not host_root:
+        # Try to infer host path from PROJECT_FILES_ROOT (might be a bind-mount path)
+        host_root = project_files_root  # best guess
+
+    if _in_docker:
+        # Map container path to host path for the run instruction
+        host_project_dir = Path(host_root) / project_id if host_root else project_dir
+        host_start_sh = host_project_dir / "project" / "start.sh"
+        host_cmd = f"bash '{host_start_sh}'"
+        _post_step(
+            f"Produto pronto. Execute no terminal do host para abrir no browser:\n  {host_cmd}\n"
+            f"  Ou: cd '{host_project_dir}' && bash project/start.sh",
+            request_id,
+        )
+        logger.info("[Local Deploy] Rodando em container — execute no host: %s", host_cmd)
+        # Open browser optimistically (app may already be running or user will start it)
+        if app_url:
+            def _open_later():
+                time.sleep(5)
+                try:
+                    subprocess.Popen(["open", app_url])
+                    logger.info("[Local Deploy] Browser aberto: %s", app_url)
+                except Exception as e:
+                    logger.warning("[Local Deploy] open browser falhou: %s", e)
+            threading.Thread(target=_open_later, daemon=True).start()
+        return
+
     _post_step(f"DevOps iniciando build e execução local: `{run_command}`", request_id)
 
-    def _open_browser_when_ready(url: str, timeout: int = 90) -> None:
+    def _open_browser_when_ready(url: str, timeout: int = 120) -> None:
         """Poll the URL until it responds, then open the browser."""
         import urllib.request as _ur
         deadline = time.time() + timeout
@@ -761,7 +794,6 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
             logger.info("[Local Deploy] Processo iniciado (pid=%s): %s", proc.pid, run_command)
             if app_url:
                 threading.Thread(target=_open_browser_when_ready, args=(app_url,), daemon=True).start()
-            # Stream first 200 lines of output to logs
             lines_read = 0
             for line in proc.stdout:
                 if lines_read < 200:

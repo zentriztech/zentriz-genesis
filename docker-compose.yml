@@ -126,6 +126,8 @@ services:
       - PROJECT_FILES_ROOT=/project-files
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
       - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
+      # Host path dos project files — usado pelo runner para instrução de execução local
+      - HOST_PROJECT_FILES_ROOT=${HOST_PROJECT_FILES_ROOT:-/Users/mac/zentriz-files}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
