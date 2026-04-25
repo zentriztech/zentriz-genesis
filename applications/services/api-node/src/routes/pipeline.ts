@@ -105,7 +105,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           role: user.role,
           tenantId: user.tenantId,
         },
-        "1h"
+        "24h"
       );
 
       const runEnv = {
