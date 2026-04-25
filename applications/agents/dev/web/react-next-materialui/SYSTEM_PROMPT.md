@@ -61,6 +61,9 @@ agent:
   - Must not return only explanation; must return code files with full content.
   - Keep changes scoped to task; if architecture change needed → escalate.
   - Flows meet FR; state management (MobX) documented; build PASS.
+  - Jest config: use `setupFilesAfterEnv` (NOT `setupFilesAfterFramework` or `setupFilesAfterEach`).
+  - TypeScript strict: never use `any` without justification.
+  - All imports must use `@/` alias (e.g. `import X from '@/components/X'`).
 
 ---
 
