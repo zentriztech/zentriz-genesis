@@ -261,6 +261,25 @@ def call_pm(
     return run_agent(system_prompt_path=pm_prompt, message=message, role="PM")
 
 
+def _infer_web_skill_path(context_text: str) -> str:
+    """
+    Infers the correct Dev web skill path from charter/backlog text.
+    Returns the path under applications/agents/dev/web/ to the SYSTEM_PROMPT directory.
+    Falls back to react-next-materialui if no variant can be detected.
+    """
+    text = (context_text or "").lower()
+    # Tailwind CSS — explicit mention beats everything
+    if "tailwind" in text:
+        tailwind_path = _agents_root() / "dev" / "web" / "react-next-tailwind" / "SYSTEM_PROMPT.md"
+        if tailwind_path.exists():
+            return "dev/web/react-next-tailwind"
+        # Tailwind variant doesn't exist yet — fall through to materialui which also handles Next.js
+    if "material" in text or "mui" in text or "material-ui" in text:
+        return "dev/web/react-next-materialui"
+    # Default: use materialui variant (handles generic React+Next.js well)
+    return "dev/web/react-next-materialui"
+
+
 def call_dev(
     spec_ref: str,
     charter_summary: str,
@@ -297,9 +316,10 @@ def call_dev(
         inputs["dependency_code"] = dependency_code
     if pipeline_ctx:
         inputs["completed_summary"] = [{"task_id": t, "status": "done"} for t in pipeline_ctx.completed_tasks]
-    # Route to correct skill path: web → react-next-materialui, backend → nodejs, mobile → react-native
+    # Route to correct skill path based on variant and detected stack
+    _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary)
     _skill_map = {
-        "web": "dev/web/react-next-materialui",
+        "web": _web_skill,
         "backend": "dev/backend/nodejs",
         "mobile": "dev/mobile/react-native",
     }
@@ -317,7 +337,10 @@ def call_dev(
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("dev", message)
     from orchestrator.agents.runtime import run_agent
-    dev_prompt = _agents_root() / "dev" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
+    _skill_path_for_prompt = _skill_map.get(dev_variant, "dev/backend/nodejs")
+    dev_prompt = _agents_root() / Path(*_skill_path_for_prompt.split("/")) / "SYSTEM_PROMPT.md"
+    if not dev_prompt.exists():
+        dev_prompt = _agents_root() / "dev" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
     return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV")
 
 
@@ -379,7 +402,7 @@ def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_
     return run_agent(system_prompt_path=monitor_prompt, message=message, role="MONITOR")
 
 
-def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str) -> dict:
+def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str, dev_artifacts: list | None = None) -> dict:
     inputs = {
         "spec_ref": spec_ref,
         "charter": charter_summary,
@@ -387,10 +410,21 @@ def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, reque
         "backlog_summary": backlog_summary,
         "constraints": ["spec-driven", "paths-resilient"],
     }
+    # Pass dev artifacts so DevOps can detect the real stack (Next.js, Express, Python, etc.)
+    existing = dev_artifacts or []
+    # Trim large content to avoid token overflow — keep path + first 2000 chars of content
+    trimmed_artifacts = []
+    for a in existing:
+        if not isinstance(a, dict):
+            continue
+        entry = {"path": a.get("path", ""), "format": a.get("format", "code")}
+        content = a.get("content", "")
+        entry["content"] = content[:2000] if isinstance(content, str) else str(content)[:2000]
+        trimmed_artifacts.append(entry)
     message = _build_message_envelope(
         request_id, "DevOps", "docker", "provision_artifacts",
-        task_id=None, task="Gerar artefatos de infra (Dockerfile, runbook) em project/ e docs/devops/.",
-        inputs=inputs, existing_artifacts=[], limits={"timeout_sec": 120},
+        task_id=None, task="Analisar artefatos gerados pelo Dev e produzir start.sh + RUNBOOK.md para executar o produto localmente.",
+        inputs=inputs, existing_artifacts=trimmed_artifacts, limits={"timeout_sec": 180},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -644,6 +678,105 @@ def _extract_error_info(exc: BaseException) -> dict:
         return json.loads(msg)
     except (json.JSONDecodeError, TypeError):
         return {"error": msg, "human_message": msg}
+
+
+def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -> None:
+    """
+    Executa o produto localmente após o DevOps gerar os artefatos.
+    Lê meta.run_command e meta.app_url do response do DevOps.
+    Para projetos web: executa o comando e abre o browser quando a porta estiver disponível.
+    Roda em background (não bloqueia o pipeline).
+    """
+    import subprocess
+    import threading
+
+    meta = devops_response.get("meta") or {}
+    run_command = meta.get("run_command", "").strip()
+    app_url = meta.get("app_url", "").strip()
+
+    # Fallback: try to find start.sh in project artifacts
+    if not run_command:
+        artifacts = devops_response.get("artifacts") or []
+        for art in artifacts:
+            if isinstance(art, dict) and (art.get("path") or "").endswith("start.sh"):
+                run_command = "bash project/start.sh"
+                break
+
+    if not run_command:
+        _post_step(
+            "DevOps não forneceu run_command. Execute manualmente conforme docs/devops/RUNBOOK.md.",
+            request_id,
+        )
+        return
+
+    project_files_root = os.environ.get("PROJECT_FILES_ROOT", "/project-files")
+    project_dir = Path(project_files_root) / project_id
+
+    if not project_dir.exists():
+        _post_step(f"Diretório do projeto não encontrado: {project_dir}. Execute manualmente: {run_command}", request_id)
+        return
+
+    # Make start.sh executable if it exists
+    start_sh = project_dir / "project" / "start.sh"
+    if start_sh.exists():
+        try:
+            import stat
+            start_sh.chmod(start_sh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        except Exception:
+            pass
+
+    _post_step(f"DevOps iniciando build e execução local: `{run_command}`", request_id)
+
+    def _open_browser_when_ready(url: str, timeout: int = 90) -> None:
+        """Poll the URL until it responds, then open the browser."""
+        import urllib.request as _ur
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with _ur.urlopen(url, timeout=3) as r:
+                    if r.status < 500:
+                        break
+            except Exception:
+                pass
+            time.sleep(2)
+        try:
+            import subprocess as _sp
+            _sp.Popen(["open", url])
+            logger.info("[Local Deploy] Browser aberto: %s", url)
+            _post_step(f"Aplicação disponível em {url} — browser aberto.", request_id)
+        except Exception as e:
+            logger.warning("[Local Deploy] Não foi possível abrir o browser: %s", e)
+            _post_step(f"Aplicação disponível em {url} — abra no browser manualmente.", request_id)
+
+    def _run() -> None:
+        try:
+            proc = subprocess.Popen(
+                run_command,
+                shell=True,
+                cwd=str(project_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            logger.info("[Local Deploy] Processo iniciado (pid=%s): %s", proc.pid, run_command)
+            if app_url:
+                threading.Thread(target=_open_browser_when_ready, args=(app_url,), daemon=True).start()
+            # Stream first 200 lines of output to logs
+            lines_read = 0
+            for line in proc.stdout:
+                if lines_read < 200:
+                    logger.info("[Local Deploy] %s", line.rstrip())
+                    lines_read += 1
+            proc.wait()
+            if proc.returncode != 0:
+                _post_step(f"Build/run terminou com código {proc.returncode}. Verifique o RUNBOOK.", request_id)
+            else:
+                _post_step("Processo de execução local encerrado normalmente.", request_id)
+        except Exception as e:
+            logger.warning("[Local Deploy] Erro ao executar: %s", e)
+            _post_step(f"Erro ao executar localmente: {e}. Execute manualmente: {run_command}", request_id)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _patch_project(body: dict) -> bool:
@@ -1103,10 +1236,23 @@ def _run_monitor_loop(
                 )
                 devops_done = True  # Marca para não tentar de novo
             else:
-                _post_step("O Monitor acionou o DevOps para provisionamento.", request_id)
-                _post_agent_working("devops", "O DevOps está gerando Dockerfile e artefatos de infraestrutura.", request_id)
+                _post_step("O Monitor acionou o DevOps para provisionamento e execução local.", request_id)
+                _post_agent_working("devops", "O DevOps está analisando os artefatos e preparando o ambiente de execução local.", request_id)
                 try:
-                    devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id)
+                    # Collect all dev artifacts from disk for DevOps stack detection
+                    _all_dev_artifacts: list = []
+                    if project_id:
+                        try:
+                            _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                            if _apps_root.exists():
+                                for _f in sorted(_apps_root.rglob("*")):
+                                    if _f.is_file() and _f.stat().st_size < 30_000 and not any(p in str(_f) for p in ("node_modules", ".next", ".git")):
+                                        _rel = str(_f.relative_to(_apps_root.parent))
+                                        _all_dev_artifacts.append({"path": _rel, "content": _f.read_text(encoding="utf-8", errors="replace")})
+                        except Exception as _de:
+                            logger.warning("[Monitor Loop] Erro ao coletar dev artifacts para DevOps: %s", _de)
+                    _combined_artifacts = _all_dev_artifacts or last_dev_artifacts
+                    devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id, dev_artifacts=_combined_artifacts)
                     _audit_log("devops", request_id, devops_response)
                     devops_summary = devops_response.get("summary", "")
                     _post_dialogue(
@@ -1156,7 +1302,11 @@ def _run_monitor_loop(
                                 request_id,
                             )
                     devops_done = True
-                    _post_step("DevOps concluiu. Aguardando aceite do usuário ou parada.", request_id)
+                    _post_step("DevOps concluiu artefatos. Iniciando execução local do produto.", request_id)
+                    # Run locally: build + serve + open browser
+                    if project_id:
+                        _run_local_deploy(project_id, devops_response, request_id)
+                    _post_step("Produto em execução local. Aguardando aceite do usuário no portal.", request_id)
                 except Exception as e:
                     logger.exception("[Monitor Loop] DevOps falhou")
                     _post_error(str(e), request_id, e)
