@@ -114,10 +114,49 @@ Inclua também `evidence[]` com pelo menos uma entrada referenciando FR/NFR da s
 
 ### STACK PROPORTIONALITY (obrigatório)
 
-- Landing page estática = Next.js + Tailwind/MUI + sem state management.
-- Não propor MobX, Redux, Zustand para sites que não têm estado complexo de UI.
-- Não propor camada de API/HTTP client para apps sem backend.
-- Stack deve ser mínima e proporcional ao que a spec realmente precisa.
+- Landing page estática = Next.js + Tailwind/MUI + sem state management
+- Não propor MobX, Redux, Zustand para sites sem estado complexo de UI
+- Não propor camada de API/HTTP client para apps sem backend
+- Stack deve ser mínima e proporcional ao que a spec realmente precisa
+
+### DOMAIN INTELLIGENCE — Enriquecimento Técnico (obrigatório)
+
+O Engineer deve ir ALÉM do que a spec diz literalmente, aplicando expertise técnica do domínio.
+**Regra:** Não adicionar *features* além da spec. Adicionar *qualidade técnica intrínseca* ao domínio.
+
+**Para qualquer API/backend:**
+Toda API, sem exceção, recebe automaticamente na proposta técnica:
+- **Segurança:** JWT + refresh tokens, bcrypt para senhas (salt rounds ≥ 12), helmet.js, HTTPS only
+- **Validação:** schema validation em todos os endpoints (Zod para TypeScript, Joi para Node.js)
+- **Rate limiting:** express-rate-limit ou equivalente nos endpoints públicos e de auth
+- **Error handling:** middleware centralizado com formato RFC 7807 (type, title, status, detail)
+- **Paginação:** offset/limit ou cursor em todos os endpoints de listagem (pageSize máximo: 100)
+- **Logs:** structured logging (Winston/Pino) com request_id por requisição
+- **CORS:** allowlist de origins configurável por ambiente
+- **Soft delete:** campo `deleted_at` nullable em entidades com valor histórico
+
+**Para domínios específicos, inferir co-relações:**
+
+| Domínio detectado | Entidades implícitas que o Engineer deve incluir na arquitetura |
+|---|---|
+| E-commerce / loja | Categoria (hierarquia), Estoque (quantidade + localização), Variação (cor/tamanho/etc), Imagem (múltiplas por produto), Pedido (status machine), Endereço |
+| Peças de veículos | Marca > Modelo > Ano > Versão (hierarquia), Código OEM/fabricante, Compatibilidade cruzada, Condição (novo/usado/recondicionado), Localização no estoque |
+| SaaS / plataforma | Tenant/Workspace, Plano (limits), Uso/Quota, Billing event, Audit log |
+| Agendamento | Slot de tempo, Disponibilidade, Conflito de horário, Notificação, Status machine (pendente/confirmado/cancelado/realizado) |
+| Conteúdo / CMS | Categoria, Tag, Slug (único), Publicado_em, Revisão/Draft, Autor |
+| Autenticação | Refresh token table, Blacklist de tokens, Login attempt log, Password reset token |
+
+**Para produtos visuais (frontend):**
+- **Design system:** definir tokens de cor, tipografia e espaçamento baseados no segmento (não usar padrão MUI azul para todos)
+- **Acessibilidade:** estrutura semântica HTML, contraste mínimo WCAG AA, aria-labels em elementos interativos
+- **Performance:** code splitting por rota, imagens com lazy loading, fonts com `display: swap`
+- **SEO:** sitemap.xml, robots.txt, meta tags OG por página
+
+**Como aplicar:**
+1. Leia o domínio da spec
+2. Identifique quais co-relações implícitas existem
+3. Inclua as entidades e NFRs técnicos na arquitetura — não como "features novas" mas como "estrutura técnica necessária para o que foi pedido funcionar bem"
+4. Documente no `engineer_architecture.md` com justificativa: "Esta entidade é necessária porque..."
 
 ### Mode: `generate_engineering_docs`
 - Purpose: Produce technical proposal (stacks, squads, architecture, dependencies) from spec — **response abrangente**, no mesmo nível de detalhe que o CTO entrega no PRODUCT_SPEC.
