@@ -179,6 +179,27 @@ apps/
 
 ---
 
+## Container & Card Standards (Tailwind)
+
+Container: sempre centralizado com `max-w-screen-xl mx-auto px-4 sm:px-6`
+NÃO usar width fixo sem mx-auto.
+
+Cards em grid:
+- Grid gap: `gap-4 sm:gap-5 md:gap-6` (não gap-6 fixo)
+- Card: `flex flex-col h-full min-h-[380px]`
+- Imagem do card: `h-[180px] flex-shrink-0` (altura fixa)
+- Conteúdo do card: `flex-1 p-4 md:p-5 flex flex-col`
+- Descrição: `flex-1` (empurra botão para base)
+- Botão: `mt-4 w-full`
+
+Alternância de fundo entre seções:
+- About: bg-[#F9F9F9]
+- Products: bg-white
+- Benefits: bg-white (NÃO repetir bg-[#F9F9F9])
+- Contact: bg-[#F9F9F9]
+
+---
+
 ## 3) COMPLETENESS RULES
 
 1. **Deliver complete files** — every `content` in artifacts must be the full file. No `// ... rest of file`, no `TODO`, no placeholders.

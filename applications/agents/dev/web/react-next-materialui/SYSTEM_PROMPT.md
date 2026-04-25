@@ -88,6 +88,45 @@ agent:
 - Footer: `pt: { xs: 6, md: 8 }`, grid spacing: `{ xs: 3, md: 4 }`.
 - Container px: `{ xs: 3, md: 4 }` — nunca `{ xs: 2, md: 3 }` (muito estreito no mobile).
 
+## Container & Centering Pattern (OBRIGATÓRIO)
+
+SEMPRE usar Container com maxWidth="lg" (não maxWidth={false} com sx.maxWidth manual).
+O padrão correto que centraliza automaticamente:
+  <Container maxWidth="lg" sx={{ px: { xs: 2, sm: 3 } }}>
+
+NUNCA usar:
+  <Container maxWidth={false} sx={{ maxWidth: CONTAINER_MAX_WIDTH, px: {...} }}>
+  (não centraliza acima de 1200px, quebra o layout em telas grandes)
+
+## Card Layout Pattern (OBRIGATÓRIO)
+
+Cards de produto/conteúdo devem:
+1. Ter `display: 'flex', flexDirection: 'column', height: '100%'` — ocupa todo o espaço do Grid item
+2. Ter `minHeight` definido (ex: 380px para produto, 280px para testemunho) — altura mínima uniforme
+3. Área de imagem com `height` FIXA (ex: 180px) e `flexShrink: 0` — não encolhe
+4. Área de conteúdo com `p: { xs: 2.5, md: 3 }` — padding responsivo consistente
+5. Descrição com `flexGrow: 1` — empurra o botão para a base do card
+6. Botão CTA com `mt: 2` e `borderRadius: 50` — sempre na base, pill shape
+
+## Grid Spacing Standards (OBRIGATÓRIO)
+
+Cards em grid: `spacing={{ xs: 2, sm: 2.5, md: 3 }}` — NÃO usar spacing fixo (ex: spacing={3})
+Colunas side-by-side: `spacing={{ xs: 4, md: 6 }}` para layout em 2 colunas
+Section header Stack: `spacing={1.5}` (não 2) — headers mais compactos
+Footer Grid: `spacing={{ xs: 3, md: 4 }}`
+
+## Section Background Alternation (OBRIGATÓRIO)
+
+Para landing pages, alternar fundos entre seções para criar ritmo visual:
+- Hero: gradiente da marca
+- About (ímpar): BRAND.surface (#F9F9F9)
+- Products (par): BRAND.white (#FFFFFF)
+- Benefits (ímpar): BRAND.white (#FFFFFF) — NÃO repetir surface de About
+- Testimonials: gradiente rosa claro
+- CTA: gradiente rose gold
+- Contact: BRAND.surface
+- Footer: escuro (#2D2D2D)
+
 ## Identity System (OBRIGATÓRIO para todo produto)
 
 Antes de implementar qualquer componente, criar:

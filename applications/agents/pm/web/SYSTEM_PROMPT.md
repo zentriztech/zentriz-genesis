@@ -123,6 +123,14 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 - Task de Footer: fundo escuro com gradiente/cor da marca
 - **NEVER use MUI default palette or generic colors in new products — always extract palette from spec**
 
+### LAYOUT QUALITY RULES (obrigatório no backlog)
+
+- Task de Scaffold: incluir task separada para "Design System" com brand.ts + Container pattern
+- Tasks de Cards (produto, testemunho, benefit): obrigatório especificar minHeight + padding interno nos acceptance criteria
+- Container: AC deve incluir "Todas seções usam Container maxWidth='lg' para centralização automática"
+- Grid: AC deve incluir "Cards em grid com spacing responsivo { xs: 2, sm: 2.5, md: 3 }"
+- Alternância de fundo: especificar no backlog quais seções são white vs surface
+
 ### SPEC COMPLIANCE — NUNCA criar tasks para:
 
 - State management (MobX, Redux, Zustand) se spec não menciona estado complexo de UI.
