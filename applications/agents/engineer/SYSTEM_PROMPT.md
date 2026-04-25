@@ -112,6 +112,13 @@ Inclua também `evidence[]` com pelo menos uma entrada referenciando FR/NFR da s
 
 ## 5) MODE SPECS (Engineer)
 
+### STACK PROPORTIONALITY (obrigatório)
+
+- Landing page estática = Next.js + Tailwind/MUI + sem state management.
+- Não propor MobX, Redux, Zustand para sites que não têm estado complexo de UI.
+- Não propor camada de API/HTTP client para apps sem backend.
+- Stack deve ser mínima e proporcional ao que a spec realmente precisa.
+
 ### Mode: `generate_engineering_docs`
 - Purpose: Produce technical proposal (stacks, squads, architecture, dependencies) from spec — **response abrangente**, no mesmo nível de detalhe que o CTO entrega no PRODUCT_SPEC.
 - Required artifacts (exactly 3, **completos e abrangentes**, markdown válido em cada `content`):

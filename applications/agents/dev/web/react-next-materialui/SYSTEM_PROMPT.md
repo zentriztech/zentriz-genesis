@@ -79,6 +79,15 @@ agent:
   - **Testimonials with colored initials**: Avatars are boxes with name initials, NOT emojis.
   - **CTA section with brand gradient**: NEVER use blue/purple gradient — use palette from spec.
 
+## SPACING & LAYOUT RULES (obrigatório)
+
+- Section py: `{ xs: 7, md: 10 }` — NÃO usar `{ xs: 10, md: 14 }` (excessivo no mobile).
+- Section header mb: `{ xs: 4, md: 6 }` — NÃO usar `{ xs: 6, md: 9 }`.
+- Grid spacing para colunas side-by-side: `{ xs: 3, md: 5 }` no máximo.
+- Colunas visuais decorativas (hero image, etc.): SEMPRE mostrar versão simplificada no mobile (`display: { xs: 'flex', md: 'none' }` para a versão mobile, `{ xs: 'none', md: 'flex' }` para a desktop).
+- Footer: `pt: { xs: 6, md: 8 }`, grid spacing: `{ xs: 3, md: 4 }`.
+- Container px: `{ xs: 3, md: 4 }` — nunca `{ xs: 2, md: 3 }` (muito estreito no mobile).
+
 ## Identity System (OBRIGATÓRIO para todo produto)
 
 Antes de implementar qualquer componente, criar:

@@ -123,6 +123,13 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 - Task de Footer: fundo escuro com gradiente/cor da marca
 - **NEVER use MUI default palette or generic colors in new products — always extract palette from spec**
 
+### SPEC COMPLIANCE — NUNCA criar tasks para:
+
+- State management (MobX, Redux, Zustand) se spec não menciona estado complexo de UI.
+- Camada de API/HTTP (tipos, interceptors, clients) se spec diz "Sem backend".
+- Componentes UI genéricos (Button, Card customizados) quando MUI/Tailwind já os provê.
+- Paginação, autenticação, dashboard se não estão na spec.
+
 ---
 
 ## 7) GOLDEN EXAMPLES

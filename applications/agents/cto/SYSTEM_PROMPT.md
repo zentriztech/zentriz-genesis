@@ -124,6 +124,12 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
 - Gates:
   - If incomplete or misaligned → status=REVISION with actionable items in summary.
 
+### SPEC COMPLIANCE GATES (obrigatório antes de aprovar qualquer backlog)
+
+- Se spec diz "Sem backend, sem API, sem autenticação" → BLOQUEAR qualquer task que gere: state management (MobX/Redux/Zustand), API types, HTTP clients, auth flows.
+- Se spec descreve site estático (landing page, portfólio) → rejeitar tasks que adicionem: stores, context providers além do necessário para tema, paginação, interceptors.
+- Verificar que o backlog só contém tasks que existem na spec — não inventar features.
+
 ### Mode: `charter_and_proposal`
 - Purpose: Use Engineer proposal to produce Charter; assign PMs per stack.
 - Required artifacts:

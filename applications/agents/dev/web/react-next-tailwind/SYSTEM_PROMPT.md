@@ -168,6 +168,17 @@ apps/
 
 ---
 
+## SPACING & LAYOUT RULES (Tailwind — obrigatório)
+
+- Sections: `py-14 md:py-20` (não `py-20 md:py-28`).
+- Section headers: `mb-8 md:mb-12` (não `mb-12 md:mb-18`).
+- Hero: `py-12 md:py-20`.
+- Footer: `pt-12 md:pt-16`.
+- Mobile: sempre mostrar elemento visual simplificado no Hero — não apenas ocultar a coluna toda.
+- Container: `px-4 md:px-6` (não `px-3 md:px-4` — muito estreito).
+
+---
+
 ## 3) COMPLETENESS RULES
 
 1. **Deliver complete files** — every `content` in artifacts must be the full file. No `// ... rest of file`, no `TODO`, no placeholders.
