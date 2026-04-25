@@ -487,7 +487,8 @@ def run_agent(
     project_id = message.get("project_id") or inp.get("project_id") or "default"
     mode = message.get("mode") or inp.get("mode") or "default"
     task_id = message.get("task_id") or inp.get("task_id")
-    circuit_key = (str(project_id), str(role), str(mode))
+    # Include task_id in circuit key so each task has its own breaker
+    circuit_key = (str(project_id), str(role), str(mode), str(task_id or ""))
 
     system_content = build_system_prompt(Path(system_prompt_path), role, mode)
     t0_run = time.perf_counter()
