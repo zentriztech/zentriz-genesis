@@ -1,7 +1,17 @@
-# Atividades pendentes (pós serviço agents)
+# Atividades pendentes
 
-> Lista a executar **assim que** estiverem resolvidos: (1) container do serviço `agents` (ex.: zentriz-genesis-agents-1) iniciando corretamente e (2) Engineer disponível no mesmo serviço (já exposto em `POST /invoke/engineer`).  
-> Origem: conclusão do plano Engineer + skills + diálogo ([ENGINEER_AND_TEAM_DYNAMICS_PLAN.md](../plans/ENGINEER_AND_TEAM_DYNAMICS_PLAN.md)).
+> Atualizado em 2026-04-25 — integra atividades históricas + novas descobertas de resiliência e operação autônoma.
+
+---
+
+## ✅ Concluído recentemente (2026-04-25)
+
+- **Isolamento de runner por projeto**: mutex `threading.Lock()` em `runner_server.py`, rejeita segundo `/run` com HTTP 409
+- **PID persistido em disco**: `STATE_DIR/project_id/runner.pid` — sobrevive restart do container
+- **Watchdog de auto-recovery**: `api-node/src/services/watchdog.ts` — relança projetos órfãos automaticamente
+- **Checkpoint isolado por projeto**: `persist_state()` e `events.jsonl` em subpasta do `project_id`
+- **Portal com tabs em tempo real**: Diálogo | Tasks (polling 8s) | Artefatos — com barra de progresso e live status
+- **ADR-006**: documentação completa da arquitetura de resiliência → `project/docs/adr/0006-resiliencia-e-operacao-autonoma.md`
 
 ---
 

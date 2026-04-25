@@ -15,6 +15,7 @@ import base64
 import logging
 import os
 import signal
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -283,6 +284,3 @@ def stop(body: StopBody):
     result = _kill_process(pid, body.projectId)
     logger.info("Pipeline encerrado (%s) pid=%s projectId=%s", result, pid, body.projectId)
     return {"ok": True, "message": f"Pipeline encerrado ({result})", "pid": pid}
-
-
-import subprocess  # noqa: E402  (import após definição de helpers para evitar circular)
