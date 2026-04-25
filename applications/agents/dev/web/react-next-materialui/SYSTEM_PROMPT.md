@@ -68,6 +68,27 @@ agent:
   - Jest config: use `setupFilesAfterEnv` (NOT `setupFilesAfterFramework` or `setupFilesAfterEach`).
   - TypeScript strict: never use `any` without justification.
   - All imports must use `@/` alias (e.g. `import X from '@/components/X'`).
+  - **BRAND palette is law**: NEVER use MUI default palette (#1976d2 blue, #9c27b0 purple). Extract palette from spec and apply in theme.ts BEFORE any component.
+  - **Playfair Display mandatory for feminine/cosmetics products**: if spec mentions typography or product is beauty/cosmetics → use Playfair Display (or equivalent serif) for headings.
+  - **BRAND tokens in separate file**: Create `src/theme/brand.ts` with plain tokens (no createTheme) so it can be imported in Server Components without `createTheme() from server` error.
+  - **Category gradients on product cards**: Never use a generic solid color — each category has a specific gradient derived from the spec palette.
+  - **Alternating section backgrounds**: Even sections in white, odd sections in surface color (#F9F9F9 or equivalent) to create visual rhythm.
+  - **Wave/separator between sections**: Include SVG wave at the bottom of Hero for smooth transition between sections.
+  - **Trust badges in Hero**: Hero MUST include 3 trust badges below CTAs (e.g. "✓ Produto original", "✓ Entrega rápida").
+  - **Dark footer**: Footer with dark background (derived from textPrimary) + color strip at top + "Seguir no Instagram" section.
+  - **Testimonials with colored initials**: Avatars are boxes with name initials, NOT emojis.
+  - **CTA section with brand gradient**: NEVER use blue/purple gradient — use palette from spec.
+
+## Identity System (OBRIGATÓRIO para todo produto)
+
+Antes de implementar qualquer componente, criar:
+1. `src/theme/brand.ts` — tokens plain (sem createTheme), importável em Server Components:
+   - Cores da spec: primary, secondary, background, surface, text, divider
+   - Nunca usar cores padrão MUI (#1976d2, #9c27b0)
+2. `src/theme/theme.ts` — adicionar `'use client'` no topo, importar BRAND de './brand'
+3. `src/app/globals.css` — variáveis CSS com tokens da marca + classe `.section-overline`
+
+Regra: `theme.ts` deve ter `'use client'` no topo (createTheme é client-only no Next.js 14 App Router).
 
 ---
 

@@ -202,6 +202,15 @@ apps/
   - TypeScript strict: never use `any` without justification.
   - All imports must use `@/` alias.
   - Static site: `output: 'export'` in next.config.mjs + `images: { unoptimized: true }`.
+  - **BRAND palette is law**: NEVER use generic colors for brand elements. Extract palette from spec and extend tailwind.config.ts theme with named tokens (e.g. `brand-primary`, `brand-secondary`, `brand-surface`).
+  - **Playfair Display mandatory for feminine/cosmetics products**: if spec mentions typography or product is beauty/cosmetics → import Playfair Display from `next/font/google` and apply to headings.
+  - **Category gradients on product cards**: Never use a generic solid color — each category has a specific gradient derived from the spec palette using Tailwind arbitrary values.
+  - **Alternating section backgrounds**: Even sections in white (`bg-white`), odd sections in surface color (e.g. `bg-[#F9F9F9]`) to create visual rhythm.
+  - **Wave/separator between sections**: Include SVG wave at the bottom of Hero component for smooth section transition.
+  - **Trust badges in Hero**: Hero MUST include 3 trust badges below CTAs (e.g. "✓ Produto original", "✓ Entrega rápida").
+  - **Dark footer**: Footer with dark background (derived from spec's primary dark color) + color strip at top + "Seguir no Instagram" section.
+  - **Testimonials with colored initials**: Avatars are `<div>` boxes with name initials styled with brand colors, NOT emojis.
+  - **CTA section with brand gradient**: NEVER use generic blue/purple gradient — use palette from spec via Tailwind arbitrary values.
 
 ---
 

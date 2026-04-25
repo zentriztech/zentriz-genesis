@@ -113,6 +113,16 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
   - Select DevOps per `constraints.cloud`: [DEVOPS_SELECTION.md](../../../project/docs/DEVOPS_SELECTION.md).
 - **Output:** Only `<thinking>` (brief) + `<response>` with JSON. Both .md contents **only** inside `artifacts[].content`, **each document full** (no abbreviations). Correct JSON escaping (`\n`, `\"`).
 
+### VISUAL QUALITY RULES (obrigatório no backlog)
+
+- Task de "Scaffold" DEVE incluir criação de `src/theme/brand.ts` com tokens plain da spec (para MUI) ou extensão de `tailwind.config.ts` com tokens nomeados da marca (para Tailwind)
+- Task de "Design System" ou primeira task DEVE incluir `globals.css` com CSS variables da marca
+- Tasks de seções DEVEM incluir alternância de fundo (seções pares branco, ímpares surface color)
+- Task do Hero DEVE incluir: trust badges (3 itens abaixo dos CTAs), wave bottom SVG
+- Task de Depoimentos: avatars com iniciais coloridas, não emojis
+- Task de Footer: fundo escuro com gradiente/cor da marca
+- **NEVER use MUI default palette or generic colors in new products — always extract palette from spec**
+
 ---
 
 ## 7) GOLDEN EXAMPLES
