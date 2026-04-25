@@ -158,6 +158,93 @@ button:not(.btn) { cursor: pointer; border: none; background: transparent; paddi
 ### Princípio de preservação
 Antes de modificar qualquer componente, verificar se está correto. Se o componente já está bom, NÃO modificar. Só corrigir o que está errado.
 
+## CSS Reset Seguro — Nunca quebrar componentes de biblioteca (obrigatório)
+
+**Problema crítico:** O reset `button:not(.btn) { background: transparent }` quebra o MUI Button porque `MuiButton` não tem a classe `.btn` — recebe o `background: transparent` que sobrescreve o `bgcolor` do sx.
+
+**Regra:** CSS reset de `button` deve usar `:not([class])` para atingir APENAS botões sem nenhuma classe (botões nus). Qualquer botão com classe de uma biblioteca fica imune.
+
+```css
+/* ✓ CORRETO — só botões completamente sem classe */
+button:not([class]) {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+/* ✗ ERRADO — atinge MuiButton, MuiButtonBase, etc. */
+button:not(.btn) { background: transparent; }
+```
+
+Botões com classe `.btn` recebem apenas `cursor: pointer` — o restante vem das classes `.btn-primary`, `.btn-outline`, etc.
+
+**Verificação obrigatória:** ao criar o globals.css de qualquer projeto, testar que botões MUI renderizam com a cor correta após o reset. Um botão transparente com texto branco = invisível.
+
+---
+
+## Navigation Menu — Expressão Visual (obrigatório para qualquer projeto)
+
+Um menu de navegação com `gap: 4px` entre os itens parece texto corrido, não menu. Padrões obrigatórios:
+
+```tsx
+// Desktop nav — padrão correto
+<Box component="nav" sx={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
+  {NAV_ITEMS.map(item => (
+    <Box component="button" onClick={() => scrollTo(item.href)} sx={{
+      background: 'none',   // explícito — não depende do reset
+      border: 'none',
+      cursor: 'pointer',
+      px: '16px',           // padding horizontal generoso — respiração nos cliques
+      py: '10px',           // padding vertical — área de toque adequada
+      borderRadius: '8px',
+      fontSize: '0.9rem',
+      fontWeight: 500,
+      fontFamily: 'inherit',
+      color: textSecondary,
+      transition: 'all 150ms ease',
+      '&:hover': { color: primaryColor, bgcolor: `${accentColor}18` },
+    }}>
+      {item.label}
+    </Box>
+  ))}
+
+  {/* Divisor visual OBRIGATÓRIO entre links e CTA */}
+  <Box aria-hidden="true" sx={{
+    width: '1px', height: '20px',
+    bgcolor: dividerColor,
+    mx: '12px',             // espaço ao redor do divisor
+    flexShrink: 0,
+  }} />
+
+  {/* CTA — visualmente separado e destacado */}
+  <Box component="a" href={ctaUrl} sx={{
+    display: 'inline-flex', alignItems: 'center', gap: '6px',
+    px: '18px', py: '9px',
+    borderRadius: '100px',  // pill shape — destaca do menu
+    bgcolor: primaryColor,  // sempre cor brand — nunca transparente
+    color: '#fff',
+    fontSize: '0.875rem',
+    fontWeight: 600,
+    textDecoration: 'none',
+    transition: 'all 180ms ease',
+    boxShadow: `0 2px 10px ${primaryColor}40`,
+    '&:hover': { bgcolor: primaryColorDark, transform: 'translateY(-1px)' },
+  }}>
+    {ctaLabel}
+  </Box>
+</Box>
+```
+
+Regras:
+1. `px: '16px', py: '10px'` — mínimo para items de nav (não usar px < 12px)
+2. Divisor visual (`1px × 20px`) obrigatório entre links e CTA
+3. CTA com `bgcolor` explícito (pill shape, nunca transparente)
+4. `background: 'none'` EXPLÍCITO em cada nav button — não confiar no reset
+5. Mobile: `py: '13px'` nos ListItemButton para área de toque mínima de 44px
+
+---
+
 ## Input Focus Ring — Eliminação Completa (obrigatório)
 
 **Problema:** Mesmo com `outline: none` no sx do input nativo, o browser aplica `:focus-visible` do globals.css nos elementos focáveis. Resultado: borda/outline no input além do :focus-within do wrapper.
