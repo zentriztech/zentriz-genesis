@@ -88,6 +88,78 @@ agent:
 - Footer: `pt: { xs: 6, md: 8 }`, grid spacing: `{ xs: 3, md: 4 }`.
 - Container px: `{ xs: 3, md: 4 }` — nunca `{ xs: 2, md: 3 }` (muito estreito no mobile).
 
+## UI Component Quality Rules (OBRIGATÓRIO — aplica a qualquer projeto)
+
+### Rating / Stars
+NUNCA usar MUI Rating com tamanho default. Para estrelas de avaliação, usar SVG próprio:
+```tsx
+function Stars({ n = 5, size = 14 }) {
+  return (
+    <Box sx={{ display: 'flex', gap: '3px' }}>
+      {Array.from({ length: n }).map((_, i) => (
+        <svg key={i} width={size} height={size} viewBox="0 0 14 14" fill="#F5A623">
+          <path d="M7 1l1.545 3.13L12 4.635l-2.5 2.437.59 3.44L7 8.635l-3.09 1.876.59-3.44L2 4.635l3.455-.505L7 1z"/>
+        </svg>
+      ))}
+    </Box>
+  )
+}
+```
+Nunca: `<Rating size="small" />` sem `sx={{ fontSize: '14px' }}`
+
+### Grupos de botões (CTA, Hero, etc.)
+SEMPRE usar Box com gap direto, NUNCA Stack+gap conflitantes:
+```tsx
+// ✓ CORRETO
+<Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: '16px', alignItems: { xs: 'stretch', sm: 'center' } }}>
+  <a className="btn btn-primary btn-lg">CTA Principal</a>
+  <a className="btn btn-outline btn-lg">Secundário</a>
+</Box>
+
+// ✗ ERRADO — Stack spacing={0} conflita com sx.gap
+<Stack direction="row" spacing={0} sx={{ gap: '16px' }}>
+```
+
+### CSS Reset seguro para botões
+No globals.css, SEMPRE usar reset seletivo:
+```css
+/* Não resetar padding de botões com classe .btn */
+button:not(.btn) { cursor: pointer; border: none; background: transparent; padding: 0; }
+```
+
+### Formulários de contato — padrão profissional
+```tsx
+// ✓ CORRETO — OutlinedInput + InputLabel floating
+<FormControl variant="outlined" fullWidth error={!!err}>
+  <InputLabel sx={{ '&.Mui-focused': { color: 'var(--brand-primary)' } }}>
+    Campo *
+  </InputLabel>
+  <OutlinedInput
+    value={val}
+    onChange={(e) => setVal(e.target.value)}
+    label="Campo *"
+    sx={{
+      borderRadius: '10px',
+      '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: 'var(--brand-pink)' },
+      '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: 'var(--brand-primary)', borderWidth: '2px' },
+      '& input': { py: '14px', px: '16px', fontSize: '0.9375rem' },
+    }}
+  />
+  {err && <FormHelperText>{err}</FormHelperText>}
+</FormControl>
+
+// ✓ Submit button — MuiButton (não <button className="btn"> para evitar conflito de reset CSS)
+<MuiButton type="submit" variant="contained" size="large" fullWidth
+  sx={{ borderRadius: '10px', py: '14px', fontWeight: 700, textTransform: 'none' }}>
+  Enviar
+</MuiButton>
+```
+
+### Princípio de preservação
+Antes de modificar qualquer componente, verificar se está correto. Se o componente já está bom, NÃO modificar. Só corrigir o que está errado.
+
+---
+
 ## Container & Centering Pattern (OBRIGATÓRIO)
 
 SEMPRE usar Container com maxWidth="lg" (não maxWidth={false} com sx.maxWidth manual).
