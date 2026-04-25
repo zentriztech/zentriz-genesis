@@ -288,8 +288,8 @@ def call_dev(
     if task_dict:
         inputs["current_task"] = {
             "id": task_dict.get("taskId") or task_dict.get("task_id") or task_id,
-            "title": task_dict.get("title") or task_dict.get("name") or "",
-            "description": task_dict.get("description") or task or "",
+            "title": task_dict.get("requirements") or task_dict.get("title") or task_dict.get("name") or task or "",
+            "description": task_dict.get("requirements") or task_dict.get("description") or task or "",
             "acceptance_criteria": task_dict.get("acceptance_criteria") or task_dict.get("acceptanceCriteria") or [],
             "fr_ref": task_dict.get("fr_ref") or task_dict.get("frRef") or "",
         }
@@ -766,7 +766,7 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
                         "module": _mod,
                         "owner_role": _or,
                         "status": "ASSIGNED",
-                        "title": title,
+                        "requirements": title,  # API uses 'requirements' as the task title/description field
                     })
             i += 1
 
@@ -779,7 +779,7 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
     fallback_id = "TSK-WEB-001" if pm_module == "web" else "TSK-BE-001"
     fallback_role = owner_role_map.get(pm_module, "DEV_WEB")
     logger.warning("[_parse_tasks_from_backlog] No BACKLOG.md found or no tasks parsed — using fallback task %s", fallback_id)
-    return [{"task_id": fallback_id, "module": module, "owner_role": fallback_role, "status": "ASSIGNED"}]
+    return [{"task_id": fallback_id, "module": module, "owner_role": fallback_role, "status": "ASSIGNED", "requirements": "Implementar scaffold do projeto"}]
 
 
 def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
@@ -968,7 +968,7 @@ def _run_monitor_loop(
             )
             if dev_task:
                 task_id = dev_task.get("taskId") or dev_task.get("task_id")
-                task_desc = dev_task.get("title") or dev_task.get("description") or dev_task.get("name") or "Implementar tarefa do backlog."
+                task_desc = dev_task.get("requirements") or dev_task.get("title") or dev_task.get("description") or dev_task.get("name") or "Implementar tarefa do backlog."
                 _update_task_status(project_id, task_id, dev_task.get("status", "ASSIGNED"), "IN_PROGRESS")
                 _post_step("O Monitor acionou o Dev para implementar ou rework.", request_id)
                 _post_agent_working("dev", "O Dev está implementando ou corrigindo a tarefa.", request_id)
