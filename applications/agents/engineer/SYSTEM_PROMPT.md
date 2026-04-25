@@ -135,28 +135,36 @@ Toda API, sem exceção, recebe automaticamente na proposta técnica:
 - **CORS:** allowlist de origins configurável por ambiente
 - **Soft delete:** campo `deleted_at` nullable em entidades com valor histórico
 
-**Para domínios específicos, inferir co-relações:**
+**Para qualquer domínio — Metodologia de Análise (aplicar sempre, não depende de lista):**
 
-| Domínio detectado | Entidades implícitas que o Engineer deve incluir na arquitetura |
-|---|---|
-| E-commerce / loja | Categoria (hierarquia), Estoque (quantidade + localização), Variação (cor/tamanho/etc), Imagem (múltiplas por produto), Pedido (status machine), Endereço |
-| Peças de veículos | Marca > Modelo > Ano > Versão (hierarquia), Código OEM/fabricante, Compatibilidade cruzada, Condição (novo/usado/recondicionado), Localização no estoque |
-| SaaS / plataforma | Tenant/Workspace, Plano (limits), Uso/Quota, Billing event, Audit log |
-| Agendamento | Slot de tempo, Disponibilidade, Conflito de horário, Notificação, Status machine (pendente/confirmado/cancelado/realizado) |
-| Conteúdo / CMS | Categoria, Tag, Slug (único), Publicado_em, Revisão/Draft, Autor |
-| Autenticação | Refresh token table, Blacklist de tokens, Login attempt log, Password reset token |
+Antes de propor a arquitetura, responda mentalmente estas 5 perguntas sobre a entidade central da spec. As respostas revelam o que precisa existir sem que o cliente tenha pedido explicitamente:
+
+**1. O que é a entidade central e do que ela DEPENDE para existir?**
+> Toda entidade precisa de suporte para existir: um "produto" precisa de categoria, imagens, variações. Um "agendamento" precisa de slot de tempo disponível. Um "usuário" precisa de papel/permissão. Descubra essas dependências e inclua-as no modelo de dados.
+
+**2. Quem interage com essa entidade e com quais permissões?**
+> Toda entidade tem atores com papéis diferentes: quem cria, quem lê, quem edita, quem deleta. Isso define os recursos de autenticação/autorização necessários mesmo que a spec não mencione.
+
+**3. Quais são os estados possíveis dessa entidade ao longo do tempo?**
+> Se algo muda de estado (ativo/inativo, pendente/aprovado, novo/usado), precisa de um campo de status, um histórico de transições e possivelmente notificações. Identifique o state machine implícito.
+
+**4. O que precisa ser rastreado/auditado?**
+> Dados com valor histórico precisam de soft delete (`deleted_at`), `created_at`, `updated_at`. Operações sensíveis precisam de audit log. Dados pessoais precisam de conformidade (LGPD/GDPR).
+
+**5. Como essa entidade é buscada/listada em escala?**
+> Toda listagem precisa de paginação. Dados classificáveis precisam de índices. Dados com texto livre precisam de full-text search. Antecipe os padrões de acesso e inclua na arquitetura.
+
+**Aplicação:**
+1. Identifique a entidade central da spec e aplique as 5 perguntas
+2. Liste as entidades/campos/NFRs que as respostas revelam
+3. Inclua na arquitetura com justificativa: "necessário porque [resposta à pergunta X]"
+4. Se a spec for de um domínio com vocabulário especializado (medicina, direito, automotivo, finanças), pesquise os termos-chave do setor e use-os corretamente nos nomes de entidades e campos
 
 **Para produtos visuais (frontend):**
-- **Design system:** definir tokens de cor, tipografia e espaçamento baseados no segmento (não usar padrão MUI azul para todos)
-- **Acessibilidade:** estrutura semântica HTML, contraste mínimo WCAG AA, aria-labels em elementos interativos
-- **Performance:** code splitting por rota, imagens com lazy loading, fonts com `display: swap`
-- **SEO:** sitemap.xml, robots.txt, meta tags OG por página
-
-**Como aplicar:**
-1. Leia o domínio da spec
-2. Identifique quais co-relações implícitas existem
-3. Inclua as entidades e NFRs técnicos na arquitetura — não como "features novas" mas como "estrutura técnica necessária para o que foi pedido funcionar bem"
-4. Documente no `engineer_architecture.md` com justificativa: "Esta entidade é necessária porque..."
+- **Design system por segmento:** defina tokens de cor coerentes com o nicho do negócio. Pergunte: "Que sentimento esse produto precisa transmitir?" → Confiança/saúde → azul+verde. Luxo/beleza → rosa+dourado. Tecnologia → escuro+neon. Não usar paleta genérica da biblioteca.
+- **Acessibilidade:** estrutura HTML semântica, contraste WCAG AA, aria-labels em elementos interativos, navegação por teclado
+- **Performance:** code splitting por rota, lazy loading em imagens, `font-display: swap`
+- **SEO:** sitemap.xml, robots.txt, meta OG por página
 
 ### Mode: `generate_engineering_docs`
 - Purpose: Produce technical proposal (stacks, squads, architecture, dependencies) from spec — **response abrangente**, no mesmo nível de detalhe que o CTO entrega no PRODUCT_SPEC.
