@@ -158,6 +158,107 @@ button:not(.btn) { cursor: pointer; border: none; background: transparent; paddi
 ### Princípio de preservação
 Antes de modificar qualquer componente, verificar se está correto. Se o componente já está bom, NÃO modificar. Só corrigir o que está errado.
 
+## Professional Form Patterns (aplica a qualquer projeto)
+
+### MUI TextField com validação inline — padrão obrigatório
+Para QUALQUER formulário, usar este padrão completo:
+
+1. Estado granular por campo: `errors`, `touched`, `isValid(field)`
+2. Validação no `onBlur` (não só no submit) — feedback imediato
+3. `helperText` dinâmico: erro em vermelho quando touched+invalid, sucesso em verde quando valid
+4. InputAdornment com ícone SVG contextual no lado esquerdo de cada campo
+5. Feedback de sucesso visual no botão (state: idle → loading → success)
+6. Contador de caracteres para campos textarea (`{length}/{MAX}`)
+7. Campo de e-mail sempre opcional em formulários de contato via WhatsApp
+
+Estilo dos campos:
+```tsx
+// Função que retorna sx completo para qualquer campo
+function fieldSx(error: boolean, success: boolean, primaryColor: string, accentColor: string) {
+  return {
+    '& .MuiOutlinedInput-root': {
+      borderRadius: '12px',
+      '& .MuiOutlinedInput-notchedOutline': {
+        borderWidth: '1.5px',
+        borderColor: error ? '#D32F2F' : success ? '#2E7D32' : 'rgba(0,0,0,0.15)',
+        transition: 'border-color 200ms ease',
+      },
+      '&:hover .MuiOutlinedInput-notchedOutline': {
+        borderColor: error ? '#D32F2F' : success ? '#2E7D32' : primaryColor,
+      },
+      '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+        borderColor: error ? '#D32F2F' : success ? '#2E7D32' : accentColor,
+        borderWidth: '2px',
+      },
+      '&.Mui-focused': { boxShadow: `0 0 0 4px ${accentColor}18` },
+    },
+    '& .MuiInputLabel-root.Mui-focused': { color: error ? '#D32F2F' : success ? '#2E7D32' : accentColor },
+  }
+}
+```
+
+Submit button states:
+```tsx
+<MuiButton
+  type="submit"
+  disabled={sending}
+  sx={{
+    bgcolor: sent ? '#2E7D32' : primaryColor,
+    transition: 'all 220ms ease',
+    borderRadius: '12px', py: '14px',
+    fontWeight: 700, textTransform: 'none',
+    '&.Mui-disabled': { bgcolor: '#9E9E9E', color: '#fff' },
+  }}
+>
+  {sent ? '✓ Enviado!' : sending ? 'Enviando...' : 'Enviar'}
+</MuiButton>
+```
+
+### Info card de contato (lateral ao form)
+Para cada canal de contato, usar card com:
+- Ícone em box colorido (bg: `${color}15`, border: `${color}30`)
+- Badge de detalhe (resposta rápida, etc.)
+- Link com cor do canal no hover
+- `transform: 'translateX(3px)'` no hover
+
+Sempre incluir: endereço físico + placeholder de mapa (mesmo fictício).
+
+## Professional Footer Sitemap (aplica a qualquer projeto)
+
+Footer completo tem OBRIGATORIAMENTE:
+
+**Coluna 1 — Marca:**
+- Logo + nome da empresa
+- Descrição curta (2-3 linhas)
+- Endereço físico (mesmo que fictício/placeholder)
+- Horário de atendimento
+- Ícones de redes sociais (4+: WhatsApp, Instagram, Facebook + 1 mais)
+
+**Colunas 2, 3, 4 — Sitemap:**
+- Navegação (links das seções)
+- Categoria do produto/serviço (links filtrados)
+- Institucional (Sobre, Política de troca, Privacidade, Termos)
+
+**Mini CTA (última coluna ou card):**
+- Convite para seguir nas redes sociais
+- Botão pill colorido
+
+**Barra inferior:**
+- Copyright © {year} {nome}
+- Links legais: Privacidade | Termos de uso | Cookies
+- Crédito/tagline
+
+Estrutura MUI:
+```tsx
+// Sitemap como array de objetos — não hardcoded
+const SITE_MAP = [
+  { title: 'Navegação', links: [{ label, href }] },
+  { title: 'Produtos/Serviços', links: [...] },
+  { title: 'Institucional', links: [...] },
+]
+// Renderizar com SITE_MAP.map() — genérico para qualquer projeto
+```
+
 ---
 
 ## Container & Centering Pattern (OBRIGATÓRIO)
