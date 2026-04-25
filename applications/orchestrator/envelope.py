@@ -132,16 +132,16 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
             _is_config = any(p in path for p in _short_ok_patterns)
             if len(content) < 50 and status == "OK" and not _is_config:
                 errors.append(f"artifact {path!r} muito curto ({len(content)} chars)")
-            # Only flag "..." as abbreviation in markdown docs, not in code files
-            # (spread operator ...props, rest params ...args are valid code)
-            _is_doc = path.endswith(".md") or path.endswith(".txt")
+            # Detect placeholder abbreviations — must be selective to avoid false positives
+            # "[...]" is always a placeholder
+            # In code: "// ..." placeholder comments (not spread operators)
+            # In docs: only flag standalone "..." lines (not inline in text or code blocks)
             _is_code = any(path.endswith(ext) for ext in (".ts", ".tsx", ".js", ".jsx", ".py", ".json", ".css", ".sh"))
-            if ("[...]" in content) or (_is_doc and "..." in content):
+            if "[...]" in content:
                 errors.append(f"artifact {path!r} contém reticências/abreviações")
-            elif _is_code and content.count("...") > 3 and "// ..." in content:
-                # Detect placeholder comments like "// ..." but not spread operators
+            elif _is_code and "// ..." in content:
                 errors.append(f"artifact {path!r} contém reticências/abreviações")
-            # // TODO is allowed in markdown docs (as documentation notes)
+            # // TODO only flagged in code files (not in markdown documentation)
             if "// TODO" in content and _is_code:
                 errors.append(f"artifact {path!r} contém // TODO")
 
