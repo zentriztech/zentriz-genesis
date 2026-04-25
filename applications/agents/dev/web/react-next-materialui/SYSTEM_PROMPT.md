@@ -129,12 +129,122 @@ Para landing pages, alternar fundos entre seções para criar ritmo visual:
 
 ## Identity System (OBRIGATÓRIO para todo produto)
 
-Antes de implementar qualquer componente, criar:
-1. `src/theme/brand.ts` — tokens plain (sem createTheme), importável em Server Components:
-   - Cores da spec: primary, secondary, background, surface, text, divider
-   - Nunca usar cores padrão MUI (#1976d2, #9c27b0)
-2. `src/theme/theme.ts` — adicionar `'use client'` no topo, importar BRAND de './brand'
-3. `src/app/globals.css` — variáveis CSS com tokens da marca + classe `.section-overline`
+Criar ANTES de qualquer componente:
+
+### 1. `src/theme/brand.ts` — tokens plain sem createTheme
+Cores da spec como constante objeto. Importável em Server Components.
+
+### 2. `src/theme/theme.ts` — com `'use client'` no topo
+Importa BRAND de './brand', usa nos tokens MUI.
+
+### 3. `src/app/globals.css` — FUNDAÇÃO DO DESIGN SYSTEM
+
+O globals.css DEVE conter:
+a) CSS Custom Properties com a paleta da spec + escala 8-point:
+```css
+:root {
+  /* Paleta da spec */
+  --brand-primary: #...; /* cor primária da spec */
+  --brand-secondary: #...; /* cor secundária */
+  --brand-surface: #F9F9F9;
+  --brand-text-1: #1E1E1E;
+  --brand-text-2: #5A5A5A;
+  --brand-border: #EDE0E4;
+
+  /* 8-point spacing scale */
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+
+  /* Card tokens */
+  --card-p: 24px;
+  --card-p-mobile: 20px;
+  --card-radius: 16px;
+  --card-img-h: 200px;
+
+  /* Sombras */
+  --shadow-card: 0 2px 12px rgba(0,0,0,0.08);
+  --shadow-hover: 0 12px 40px rgba(0,0,0,0.16);
+}
+```
+
+b) Classes CSS utilitárias obrigatórias:
+```css
+/* Section — espaçamento vertical uniforme */
+.section { padding: 64px 0; }
+@media (min-width: 900px) { .section { padding: 96px 0; } }
+
+/* Section header centralizado */
+.section-header { text-align: center; margin-bottom: 32px; }
+@media (min-width: 900px) { .section-header { margin-bottom: 48px; } }
+
+/* Overline pill label */
+.overline {
+  display: inline-block;
+  font-size: 0.6875rem; font-weight: 700; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--brand-primary);
+  background: rgba(0,0,0,0.06); border: 1px solid rgba(0,0,0,0.12);
+  padding: 5px 14px; border-radius: 100px; margin-bottom: 16px;
+}
+
+/* Card base */
+.card {
+  background: white; border-radius: var(--card-radius);
+  border: 1px solid var(--brand-border); box-shadow: var(--shadow-card);
+  overflow: hidden; transition: transform 220ms ease, box-shadow 220ms ease;
+  display: flex; flex-direction: column; height: 100%;
+}
+.card:hover { transform: translateY(-4px); box-shadow: var(--shadow-hover); }
+
+/* Card image area — height fixa */
+.card-img {
+  height: var(--card-img-h); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  position: relative; overflow: hidden;
+}
+
+/* Card body — padding responsivo consistente */
+.card-body {
+  padding: var(--card-p-mobile);
+  display: flex; flex-direction: column; flex: 1; gap: 8px;
+}
+@media (min-width: 600px) { .card-body { padding: var(--card-p); } }
+
+/* Cards CSS Grid — substitui MUI Grid para uniformidade */
+.cards-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+@media (min-width: 600px) { .cards-grid { grid-template-columns: repeat(2, 1fr); gap: 20px; } }
+@media (min-width: 900px) { .cards-grid { grid-template-columns: repeat(3, 1fr); gap: 24px; } }
+
+/* Botão pill */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 11px 28px; border-radius: 100px;
+  font-weight: 600; font-size: 0.9375rem; cursor: pointer;
+  transition: all 200ms ease; text-decoration: none;
+  border: 1.5px solid transparent; line-height: 1.4;
+}
+.btn-primary { background: var(--brand-primary); color: white; }
+.btn-primary:hover { filter: brightness(0.9); transform: translateY(-1px); }
+.btn-outline { background: transparent; color: var(--brand-primary); border-color: var(--brand-primary); }
+.btn-outline:hover { background: rgba(0,0,0,0.04); }
+.btn-sm { padding: 8px 20px; font-size: 0.8125rem; }
+.btn-lg { padding: 14px 36px; font-size: 1rem; }
+```
+
+c) Usar as classes nos componentes:
+- Seções: `className="section"` no Box wrapper
+- Headers de seção: `<div className="section-header"><span className="overline">...</span><h2>...</h2></div>`
+- Cards: `<div className="card"><div className="card-img">...</div><div className="card-body">...</div></div>`
+- Grid de cards: `<div className="cards-grid">`
+- Botões link: `<a className="btn btn-primary" href="...">CTA</a>`
 
 Regra: `theme.ts` deve ter `'use client'` no topo (createTheme é client-only no Next.js 14 App Router).
 

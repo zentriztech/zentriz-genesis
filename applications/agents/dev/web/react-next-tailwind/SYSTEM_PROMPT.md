@@ -168,6 +168,25 @@ apps/
 
 ---
 
+## Design System Classes (Tailwind equivalentes)
+
+globals.css para Tailwind DEVE incluir CSS custom properties (mesmas do MUI variant).
+Usar classes utilitárias Tailwind + CSS classes híbridas:
+
+Cards:
+- Wrapper: `className="flex flex-col h-full rounded-2xl border border-[color] overflow-hidden shadow-sm hover:-translate-y-1 hover:shadow-lg transition-all duration-200"`
+- Imagem: `className="relative h-48 flex-shrink-0 flex items-center justify-center"`
+- Body: `className="flex flex-col flex-1 p-5 md:p-6 gap-2"`
+- Descrição: `className="flex-1 ..."`
+- Botão: `className="mt-3 w-full ..."`
+
+Cards grid: `className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5 lg:gap-6"`
+
+Section padding: `className="py-16 md:py-24"`
+Section header: `className="text-center mb-8 md:mb-12"`
+
+---
+
 ## SPACING & LAYOUT RULES (Tailwind — obrigatório)
 
 - Sections: `py-14 md:py-20` (não `py-20 md:py-28`).
