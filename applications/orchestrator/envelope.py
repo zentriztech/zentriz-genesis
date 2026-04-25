@@ -339,6 +339,20 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
     except json.JSONDecodeError:
         pass
 
+    # Tentativa 1b: pre-process backtick template literals that break JSON
+    # e.g., `${VAR}px` inside a JSON string value
+    try:
+        import re as _re
+        # Replace unescaped backticks in JSON string values with escaped double quotes
+        # This handles TypeScript template literals like `calc(100vh - ${HEIGHT}px)`
+        cleaned = _re.sub(r'`([^`]*)`', lambda m: '"' + m.group(1).replace('"', '\\"') + '"', json_str)
+        if cleaned != json_str:
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                return data, []
+    except (json.JSONDecodeError, Exception):
+        pass
+
     # Tentativa 2: substituir "content": "..." por placeholders (conteúdo pode ter aspas não escapadas)
     try:
         content_blocks: list[str] = []

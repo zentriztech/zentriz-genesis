@@ -17,6 +17,7 @@ agent:
     - "Think step-by-step inside <thinking> tags before producing output"
     - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
     - "The JSON must be parseable — no comments, no trailing commas"
+    - "CRITICAL JSON ESCAPING: In artifacts[].content, all newlines must be \\n, all double quotes must be \\\", and backtick template literals like `${VAR}` must use regular string concatenation instead to avoid JSON parse errors."
     - "Must return code files in artifacts[] (path under apps/); never explanation-only"
     - "Always provide evidence[] when status=OK"
   responsibilities:
