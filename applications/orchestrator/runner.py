@@ -109,6 +109,79 @@ def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _generate_quality_report(
+    project_id: str | None,
+    spec_ref: str,
+    pipeline_ctx: "PipelineContext | None",
+    started_at: str,
+    completed_at: str,
+    tasks_done: int,
+    tasks_total: int,
+    token_data: dict | None = None,
+) -> str:
+    """Generates a markdown quality report and saves it to project files."""
+    lines = [
+        f"# Relatório de Qualidade — Pipeline Genesis",
+        f"",
+        f"**Project ID:** `{project_id or 'N/A'}`  ",
+        f"**Spec:** `{spec_ref}`  ",
+        f"**Gerado em:** {completed_at}",
+        f"",
+        f"---",
+        f"",
+        f"## Resumo de Execução",
+        f"",
+        f"| Item | Valor |",
+        f"|------|-------|",
+        f"| Início | {started_at} |",
+        f"| Conclusão | {completed_at} |",
+        f"| Tasks concluídas | {tasks_done}/{tasks_total} |",
+    ]
+    if token_data:
+        lines.extend([
+            f"| Tokens entrada | {token_data.get('input', 0):,} |",
+            f"| Tokens saída | {token_data.get('output', 0):,} |",
+            f"| Custo estimado | ~${token_data.get('cost_usd', 0):.2f} USD |",
+        ])
+    lines.extend([
+        f"",
+        f"---",
+        f"",
+        f"## Cobertura de Tasks",
+        f"",
+    ])
+    if pipeline_ctx and pipeline_ctx.completed_tasks:
+        for tid in sorted(pipeline_ctx.completed_tasks):
+            lines.append(f"- [x] {tid}")
+    else:
+        lines.append(f"_{tasks_done} tasks concluídas (detalhes em docs/pm/web/BACKLOG.md)_")
+    lines.extend([
+        f"",
+        f"---",
+        f"",
+        f"## Artefatos Gerados",
+        f"",
+        f"- `docs/` — Documentação técnica (spec, charter, backlog, QA reports)",
+        f"- `apps/` — Código-fonte do produto",
+        f"- `project/start.sh` — Script de execução local",
+        f"",
+        f"---",
+        f"",
+        f"_Relatório gerado automaticamente pelo Genesis Pipeline_",
+    ])
+    report = "\n".join(lines)
+
+    if project_id:
+        storage = _project_storage()
+        if storage and storage.is_enabled():
+            try:
+                storage.write_doc(project_id, "reports", "quality_report", report, title="Relatório de Qualidade")
+            except Exception as e:
+                logger.warning("[Quality Report] Falha ao salvar relatório: %s", e)
+
+    return report
+
+
 def _record_agent_metrics(
     project_id: str | None,
     agent: str,
@@ -1586,6 +1659,7 @@ def main() -> int:
         storage.write_spec_doc(project_id, spec_content, spec_ref.replace("/", "_").replace(".", "_")[:80])
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _pipeline_started_at = now_iso
     _patch_project({"started_at": now_iso, "status": "running"})
     _post_step(
         "Pipeline iniciado. A especificação do produto foi recebida e será analisada pelos agentes.",
@@ -2055,6 +2129,23 @@ def main() -> int:
         logger.info("[Pipeline] Estado persistido em orchestrator/state/current_project.json")
 
         completed_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        # Generate quality report before marking completed
+        try:
+            _tasks_done = len(pipeline_ctx.completed_tasks) if pipeline_ctx else 0
+            _tasks_total = len(pipeline_ctx.all_tasks) if (pipeline_ctx and hasattr(pipeline_ctx, "all_tasks")) else _tasks_done
+            _generate_quality_report(
+                project_id=project_id,
+                spec_ref=spec_ref,
+                pipeline_ctx=pipeline_ctx,
+                started_at=_pipeline_started_at,
+                completed_at=completed_at_iso,
+                tasks_done=_tasks_done,
+                tasks_total=_tasks_total,
+            )
+        except Exception as _qr_err:
+            logger.warning("[Quality Report] Erro ao gerar relatório: %s", _qr_err)
+
         _patch_project({
             "status": "completed",
             "completed_at": completed_at_iso,
