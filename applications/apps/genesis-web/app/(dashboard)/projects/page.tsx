@@ -1,101 +1,264 @@
 "use client";
 
 import { observer } from "mobx-react-lite";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
-import Paper from "@mui/material/Paper";
-import Table from "@mui/material/Table";
-import TableBody from "@mui/material/TableBody";
-import TableCell from "@mui/material/TableCell";
-import TableContainer from "@mui/material/TableContainer";
-import TableHead from "@mui/material/TableHead";
-import TableRow from "@mui/material/TableRow";
+import Grid from "@mui/material/Grid";
+import IconButton from "@mui/material/IconButton";
+import LinearProgress from "@mui/material/LinearProgress";
+import Stack from "@mui/material/Stack";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import GridViewIcon from "@mui/icons-material/GridView";
+import ListIcon from "@mui/icons-material/List";
+import SendIcon from "@mui/icons-material/Send";
+import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import { projectsStore } from "@/stores/projectsStore";
+import type { Project } from "@/types";
 
-const rowMotion = {
-  initial: { opacity: 0 },
-  animate: (i: number) => ({ opacity: 1, transition: { delay: i * 0.05 } }),
+const MotionCard = motion(Card);
+const MotionBox  = motion(Box);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const STATUS_LABELS: Record<string, string> = {
+  draft: "Rascunho", spec_submitted: "Spec enviada", pending_conversion: "Convertendo",
+  cto_charter: "Charter CTO", pm_backlog: "Backlog PM", dev_qa: "Dev/QA",
+  devops: "DevOps", running: "Em execução", stopped: "Parado",
+  completed: "Concluído", failed: "Falhou", accepted: "Aceito",
 };
 
-const MotionTableRow = motion(TableRow);
+function statusColor(s: string): "default" | "success" | "error" | "info" | "warning" {
+  if (s === "completed" || s === "accepted") return "success";
+  if (s === "failed" || s === "stopped")     return "error";
+  if (s === "running")                        return "info";
+  if (["spec_submitted","cto_charter","pm_backlog","dev_qa","devops"].includes(s)) return "warning";
+  return "default";
+}
 
+function stepPercent(s: string): number {
+  const map: Record<string, number> = {
+    draft: 0, spec_submitted: 14, pending_conversion: 20, cto_charter: 28,
+    pm_backlog: 42, dev_qa: 65, devops: 85, running: 55,
+    completed: 100, accepted: 100, failed: 0, stopped: 0,
+  };
+  return map[s] ?? 0;
+}
+
+function elapsedLabel(iso?: string): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m}min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}min`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+// ── Project Card (grid view) ──────────────────────────────────────────────────
+function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number }) {
+  const router  = useRouter();
+  const pct     = stepPercent(project.status);
+  const isRun   = project.status === "running";
+  const isDone  = project.status === "completed" || project.status === "accepted";
+  const isFail  = project.status === "failed" || project.status === "stopped";
+  const elapsed = elapsedLabel(project.startedAt);
+
+  const barColor = isDone ? "success" : isFail ? "error" : "primary";
+
+  return (
+    <MotionCard
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0, transition: { delay: delay * 0.06, duration: 0.3 } }}
+      whileHover={{ y: -3, transition: { duration: 0.15 } }}
+      sx={{ cursor: "pointer", height: "100%", display: "flex", flexDirection: "column" }}
+      onClick={() => router.push(`/projects/${project.id}`)}
+    >
+      {/* Progress bar top */}
+      <LinearProgress
+        variant="determinate"
+        value={pct}
+        color={barColor}
+        sx={{ height: 3, borderRadius: "8px 8px 0 0", bgcolor: "divider" }}
+      />
+      <CardContent sx={{ flexGrow: 1, pt: 1.5 }}>
+        {/* Title + Status */}
+        <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} sx={{ mb: 1 }}>
+          <Typography variant="subtitle2" fontWeight={600} sx={{ lineHeight: 1.4 }} noWrap>
+            {project.title ?? "Spec sem título"}
+          </Typography>
+          <Chip
+            label={STATUS_LABELS[project.status] ?? project.status}
+            size="small"
+            color={statusColor(project.status)}
+            sx={{ flexShrink: 0, fontSize: "0.65rem" }}
+          />
+        </Stack>
+
+        {/* Spec ref */}
+        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block", mb: 1.5 }}>
+          {project.specRef}
+        </Typography>
+
+        {/* Running pulse indicator */}
+        {isRun && (
+          <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 1 }}>
+            <Box
+              sx={{
+                width: 6, height: 6, borderRadius: "50%", bgcolor: "info.main",
+                animation: "pulse 1.4s ease-in-out infinite",
+                "@keyframes pulse": { "0%,100%": { opacity: 1 }, "50%": { opacity: 0.3 } },
+              }}
+            />
+            <Typography variant="caption" color="info.main" fontWeight={500}>Pipeline ativo</Typography>
+          </Stack>
+        )}
+
+        {/* Elapsed time */}
+        {elapsed && (
+          <Stack direction="row" spacing={0.5} alignItems="center">
+            <AccessTimeIcon sx={{ fontSize: "0.75rem", color: "text.secondary" }} />
+            <Typography variant="caption" color="text.secondary">{elapsed}</Typography>
+          </Stack>
+        )}
+      </CardContent>
+
+      {/* Footer */}
+      <Box sx={{ px: 2, pb: 1.5 }}>
+        <Typography variant="caption" color="text.secondary">
+          {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "2-digit" })}
+        </Typography>
+      </Box>
+    </MotionCard>
+  );
+}
+
+// ── Project Row (list view) ───────────────────────────────────────────────────
+function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }) {
+  const router  = useRouter();
+  const pct     = stepPercent(project.status);
+  const isDone  = project.status === "completed" || project.status === "accepted";
+  const isFail  = project.status === "failed" || project.status === "stopped";
+  const barColor = isDone ? "success" : isFail ? "error" : "primary";
+
+  return (
+    <MotionBox
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0, transition: { delay: delay * 0.04, duration: 0.25 } }}
+      onClick={() => router.push(`/projects/${project.id}`)}
+      sx={{
+        display: "flex", alignItems: "center", gap: 2, px: 2, py: 1.5,
+        borderBottom: "1px solid", borderColor: "divider",
+        cursor: "pointer", transition: "background 0.15s",
+        "&:hover": { bgcolor: "action.hover" },
+        "&:last-child": { borderBottom: "none" },
+      }}
+    >
+      <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+        <Typography variant="body2" fontWeight={500} noWrap>{project.title ?? "Sem título"}</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.25 }}>
+          <LinearProgress
+            variant="determinate" value={pct} color={barColor}
+            sx={{ width: 80, height: 4, borderRadius: 2, bgcolor: "divider" }}
+          />
+          <Typography variant="caption" color="text.secondary">{pct}%</Typography>
+        </Stack>
+      </Box>
+      <Chip label={STATUS_LABELS[project.status] ?? project.status} size="small" color={statusColor(project.status)} />
+      <Typography variant="caption" color="text.secondary" sx={{ width: 72, textAlign: "right", flexShrink: 0 }}>
+        {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
+      </Typography>
+      <IconButton size="small" onClick={(e) => { e.stopPropagation(); router.push(`/projects/${project.id}`); }}>
+        <ArrowForwardIcon fontSize="small" />
+      </IconButton>
+    </MotionBox>
+  );
+}
+
+// ── Page ─────────────────────────────────────────────────────────────────────
 function ProjectsPageInner() {
-  const router = useRouter();
-  const projects = projectsStore.list;
+  const router   = useRouter();
+  const [view, setView] = useState<"grid" | "list">("grid");
+  const projects  = projectsStore.list;
+  const running   = projects.filter((p) => p.status === "running");
+  const rest      = projects.filter((p) => p.status !== "running");
+  const sorted    = [...running, ...rest];
 
-  useEffect(() => {
-    projectsStore.loadProjects();
-  }, []);
+  useEffect(() => { projectsStore.loadProjects(); }, []);
 
   return (
     <Box>
-      <Typography variant="h4" gutterBottom>
-        Meus projetos
-      </Typography>
-      {projectsStore.loading && <Typography color="text.secondary">Carregando…</Typography>}
-      {projectsStore.error && <Typography color="error">{projectsStore.error}</Typography>}
-      <TableContainer component={Paper} sx={{ mt: 2 }}>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Título</TableCell>
-              <TableCell>Spec</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Atualizado</TableCell>
-              <TableCell align="right">Ações</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {projects.map((p, i) => (
-              <MotionTableRow
-                key={p.id}
-                initial="initial"
-                animate="animate"
-                variants={rowMotion}
-                custom={i}
-                sx={{ "&:hover": { bgcolor: "action.hover" } }}
-              >
-                <TableCell>{p.title ?? "Spec sem título"}</TableCell>
-                <TableCell>{p.specRef}</TableCell>
-                <TableCell>
-                  <Chip
-                  label={
-                    p.status === "running"
-                      ? "Em execução"
-                      : p.status === "stopped"
-                        ? "Parado"
-                        : p.status === "failed"
-                          ? "Falhou"
-                          : p.status
-                  }
-                  size="small"
-                  color={
-                    p.status === "completed"
-                      ? "success"
-                      : p.status === "failed" || p.status === "stopped"
-                        ? "error"
-                        : p.status === "running"
-                          ? "info"
-                          : "default"
-                  }
-                />
-                </TableCell>
-                <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
-                <TableCell align="right">
-                  <Button size="small" onClick={() => router.push(`/projects/${p.id}`)}>
-                    Ver
-                  </Button>
-                </TableCell>
-              </MotionTableRow>
+      {/* ── Header ── */}
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
+        <Box>
+          <Typography variant="h4">Meus projetos</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            {projects.length} projeto{projects.length !== 1 ? "s" : ""} · {running.length} em execução
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <ToggleButtonGroup
+            value={view} exclusive size="small"
+            onChange={(_e, v) => { if (v) setView(v); }}
+          >
+            <ToggleButton value="grid"><Tooltip title="Cards"><GridViewIcon fontSize="small" /></Tooltip></ToggleButton>
+            <ToggleButton value="list"><Tooltip title="Lista"><ListIcon fontSize="small" /></Tooltip></ToggleButton>
+          </ToggleButtonGroup>
+          <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
+            Nova spec
+          </Button>
+        </Stack>
+      </Stack>
+
+      {/* Loading */}
+      {projectsStore.loading && (
+        <LinearProgress sx={{ borderRadius: 1, mb: 2 }} />
+      )}
+
+      {/* Empty */}
+      {!projectsStore.loading && sorted.length === 0 && (
+        <Card sx={{ textAlign: "center", py: 6 }}>
+          <CardContent>
+            <Typography variant="h6" color="text.secondary" gutterBottom>Nenhum projeto ainda</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Envie uma spec para o Genesis criar seu primeiro produto.
+            </Typography>
+            <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
+              Enviar spec
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Grid view */}
+      <AnimatePresence mode="wait">
+        {view === "grid" && sorted.length > 0 && (
+          <Grid key="grid" container spacing={2}>
+            {sorted.map((p, i) => (
+              <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
+                <ProjectCard project={p} delay={i} />
+              </Grid>
             ))}
-          </TableBody>
-        </Table>
-      </TableContainer>
+          </Grid>
+        )}
+
+        {/* List view */}
+        {view === "list" && sorted.length > 0 && (
+          <Card key="list">
+            {sorted.map((p, i) => (
+              <ProjectRow key={p.id} project={p} delay={i} />
+            ))}
+          </Card>
+        )}
+      </AnimatePresence>
     </Box>
   );
 }

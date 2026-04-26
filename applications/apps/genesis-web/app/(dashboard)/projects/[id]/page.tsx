@@ -11,136 +11,185 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
+import Grid from "@mui/material/Grid";
+import IconButton from "@mui/material/IconButton";
+import LinearProgress from "@mui/material/LinearProgress";
+import Snackbar from "@mui/material/Snackbar";
 import Stack from "@mui/material/Stack";
-import Stepper from "@mui/material/Stepper";
-import Step from "@mui/material/Step";
-import StepLabel from "@mui/material/StepLabel";
 import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
-import LinearProgress from "@mui/material/LinearProgress";
-import Typography from "@mui/material/Typography";
-import Schedule from "@mui/icons-material/Schedule";
-import CalendarToday from "@mui/icons-material/CalendarToday";
-import ArrowBack from "@mui/icons-material/ArrowBack";
-import PlayArrow from "@mui/icons-material/PlayArrow";
-import Stop from "@mui/icons-material/Stop";
-import Replay from "@mui/icons-material/Replay";
-import CheckCircle from "@mui/icons-material/CheckCircle";
-import OpenInNew from "@mui/icons-material/OpenInNew";
-import ContentCopy from "@mui/icons-material/ContentCopy";
+import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
-import Snackbar from "@mui/material/Snackbar";
+import Typography from "@mui/material/Typography";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import ReplayIcon from "@mui/icons-material/Replay";
+import StopIcon from "@mui/icons-material/Stop";
+import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import ForumIcon from "@mui/icons-material/Forum";
 import { projectsStore } from "@/stores/projectsStore";
-import { ProjectDialogue, type DialogueEntry } from "@/components/ProjectDialogue";
+import { LiveDialogue } from "@/components/LiveDialogue";
 import { apiGet, apiPost } from "@/lib/api";
+import type { DialogueEntry } from "@/components/LiveDialogue";
+import dynamic from "next/dynamic";
 
-const STEPS = ["Spec enviada", "Engineer (proposta)", "CTO (Charter)", "PM (Backlog)", "Dev/QA/Monitor", "DevOps", "Concluído"];
+// Lazy-load GraphView (uses browser-only APIs)
+const GraphView = dynamic(() => import("@/components/GraphView").then((m) => ({ default: m.GraphView })), {
+  ssr: false,
+  loading: () => (
+    <Box sx={{ height: 480, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, border: "1px solid #30363D" }}>
+      <Typography variant="body2" color="text.secondary">Carregando grafo…</Typography>
+    </Box>
+  ),
+});
 
-const STATUSES_ALLOW_RUN = new Set([
-  "draft",
-  "spec_submitted",
-  "pending_conversion",
-  "cto_charter",
-  "pm_backlog",
-  "stopped",
-  "failed",
+// ── Constants ─────────────────────────────────────────────────────────────────
+const PIPELINE_STEPS = [
+  { label: "Spec",     agent: "system" },
+  { label: "Engineer", agent: "engineer" },
+  { label: "CTO",      agent: "cto" },
+  { label: "PM",       agent: "pm" },
+  { label: "Dev/QA",   agent: "dev" },
+  { label: "DevOps",   agent: "devops" },
+  { label: "Pronto",   agent: "" },
+];
+
+const ALLOW_RUN_STATUS = new Set([
+  "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog", "stopped", "failed",
 ]);
-const STATUS_RUNNING = "running";
 
-type ArtifactsResponse = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null; projectArtifactsRoot: string | null };
-type CodeFilesResponse = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
-type RunInfoResponse = { runCommand: string | null; appUrl: string | null; startShPath: string | null };
-type MetricsResponse = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
-type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
+// ── Types ─────────────────────────────────────────────────────────────────────
+type TaskItem         = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
+type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
+type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
+type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null };
+type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
-/** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
-function agentToStepIndex(fromAgent: string): number {
-  const a = (fromAgent || "").toLowerCase();
-  if (a === "engineer") return 1;
-  if (a === "cto") return 2;
-  if (a === "pm") return 3;
-  if (a === "dev" || a === "qa" || a === "monitor") return 4;
-  if (a === "devops") return 5;
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmtTime(iso: string) {
+  return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function elapsedLabel(start?: string, end?: string): string {
+  if (!start) return "";
+  const ms = (end ? new Date(end) : new Date()).getTime() - new Date(start).getTime();
+  const m  = Math.floor(ms / 60000);
+  if (m < 60) return `${m}min`;
+  const h  = Math.floor(m / 60);
+  return `${h}h${m % 60 > 0 ? ` ${m % 60}min` : ""}`;
+}
+
+function agentToStepIndex(from: string): number {
+  const a = from.toLowerCase();
+  if (a.includes("engineer"))         return 1;
+  if (a === "cto")                    return 2;
+  if (a === "pm" || a.startsWith("pm_")) return 3;
+  if (a === "dev" || a.startsWith("dev_") || a === "qa" || a.startsWith("qa_") || a === "monitor") return 4;
+  if (a === "devops" || a.startsWith("devops_")) return 5;
   return -1;
 }
 
-function formatDateTime(iso: string) {
-  return new Date(iso).toLocaleString("pt-BR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDuration(startIso: string, endIso: string): string {
-  const start = new Date(startIso).getTime();
-  const end = new Date(endIso).getTime();
-  const days = Math.floor((end - start) / 86400000);
-  if (days === 0) {
-    const hours = Math.floor((end - start) / 3600000);
-    if (hours === 0) {
-      const mins = Math.floor((end - start) / 60000);
-      return `${mins} min`;
-    }
-    return `${hours} h`;
-  }
-  return `${days} dia${days !== 1 ? "s" : ""}`;
-}
-
-const blockMotion = {
-  initial: { opacity: 0, y: 16 },
-  animate: { opacity: 1, y: 0 },
-  transition: { duration: 0.3 },
+const TASK_STATUS_COLOR: Record<string, "success" | "info" | "error" | "warning" | "default"> = {
+  DONE: "success", QA_PASS: "success", IN_PROGRESS: "info", WAITING_REVIEW: "info",
+  QA_FAIL: "error", BLOCKED: "error", NEW: "default", ASSIGNED: "warning",
 };
 
-const MotionCard = motion(Card);
+// ── Status chip helper ────────────────────────────────────────────────────────
+function StatusChip({ status }: { status: string }) {
+  const labels: Record<string, string> = {
+    running: "Em execução", accepted: "Aceito", completed: "Concluído",
+    failed: "Falhou", stopped: "Parado", draft: "Rascunho",
+    spec_submitted: "Spec enviada", cto_charter: "Charter", pm_backlog: "Backlog",
+  };
+  const colors: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
+    completed: "success", accepted: "success", failed: "error", stopped: "error",
+    running: "info", cto_charter: "warning", pm_backlog: "warning",
+  };
+  return (
+    <Chip
+      label={labels[status] ?? status}
+      size="small"
+      color={colors[status] ?? "default"}
+      sx={{
+        fontWeight: 600,
+        ...(status === "running" && {
+          "& .MuiChip-label": { pr: 2.5 },
+          "&::after": {
+            content: '""', position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+            width: 6, height: 6, borderRadius: "50%", bgcolor: "info.main",
+            animation: "pulse 1.4s infinite",
+          },
+          position: "relative",
+          "@keyframes pulse": { "0%,100%": { opacity: 1 }, "50%": { opacity: 0.3 } },
+        }),
+      }}
+    />
+  );
+}
 
+// ── Mini stat ─────────────────────────────────────────────────────────────────
+function MiniStat({ label, value, color = "text.primary" }: { label: string; value: string | number; color?: string }) {
+  return (
+    <Box>
+      <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.6rem" }}>{label}</Typography>
+      <Typography variant="body2" fontWeight={700} color={color}>{value}</Typography>
+    </Box>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
 function ProjectDetailPageInner() {
   const params = useParams();
   const router = useRouter();
-  const id = params.id as string;
+  const id     = params.id as string;
+
+  // UI state
   const [triedLoad, setTriedLoad] = useState(false);
-  const [runPipelineLoading, setRunPipelineLoading] = useState(false);
-  const [runPipelineError, setRunPipelineError] = useState<string | null>(null);
-  const [runPipelineSuccess, setRunPipelineSuccess] = useState(false);
+  const [runLoading, setRunLoading] = useState(false);
+  const [runError, setRunError]     = useState<string | null>(null);
   const [acceptLoading, setAcceptLoading] = useState(false);
-  const [acceptError, setAcceptError] = useState<string | null>(null);
+  const [copiedCmd, setCopiedCmd]   = useState(false);
+  const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo
+  const [bottomTab, setBottomTab]   = useState(0); // 0=Tasks, 1=Artefatos, 2=Código
+
+  // Working agent state (from dialogue)
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
-  const [workingMessage, setWorkingMessage] = useState<string | null>(null);
-  const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
-  const [codeFiles, setCodeFiles] = useState<CodeFilesResponse | null>(null);
-  const [runInfo, setRunInfo] = useState<RunInfoResponse | null>(null);
-  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
-  const [copiedCmd, setCopiedCmd] = useState(false);
-  const [tasks, setTasks] = useState<TaskItem[] | null>(null);
-  const [activeTab, setActiveTab] = useState(0);
+  const [workingMessage, setWorkingMessage]       = useState<string | null>(null);
+
+  // Data state
+  const [tasks, setTasks]         = useState<TaskItem[] | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactsResp | null>(null);
+  const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
+  const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
+  const [metrics, setMetrics]     = useState<MetricsResp | null>(null);
+
   const project = projectsStore.getById(id);
 
-  const handleDialogueEntriesLoaded = useCallback((entries: DialogueEntry[]) => {
+  // ── Callbacks ──────────────────────────────────────────────────────────────
+  const handleDialogueLoaded = useCallback((entries: DialogueEntry[]) => {
     const last = entries.length > 0 ? entries[entries.length - 1] : null;
     if (last?.eventType === "agent_working") {
       const step = agentToStepIndex(last.fromAgent);
       setWorkingStepIndex(step >= 0 ? step : null);
-      setWorkingMessage(last.summaryHuman || null);
+      setWorkingMessage(last.summaryHuman ?? null);
     } else {
       setWorkingStepIndex(null);
       setWorkingMessage(null);
     }
   }, []);
 
+  // ── Effects ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!id) return;
     if (project) setTriedLoad(true);
-    else {
-      projectsStore.loadProject(id).then(() => setTriedLoad(true));
-    }
+    else projectsStore.loadProject(id).then(() => setTriedLoad(true));
   }, [id, project]);
 
   useEffect(() => {
@@ -149,559 +198,455 @@ function ProjectDetailPageInner() {
     return () => clearInterval(t);
   }, [id, project?.status]);
 
-  // Artefatos — carrega uma vez e atualiza quando projeto muda de status
+  useEffect(() => {
+    if (!id || !project) return;
+    const isActive = ["running", "completed", "accepted"].includes(project.status);
+    if (!isActive) return;
+    const load = () =>
+      apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
+        .then((d) => setTasks(Array.isArray(d) ? d : []))
+        .catch(() => {});
+    load();
+    if (project.status !== "running") return;
+    const t = setInterval(load, 8000);
+    return () => clearInterval(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, project?.status]);
+
   useEffect(() => {
     if (!id) return;
-    apiGet<ArtifactsResponse>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => setArtifacts(null));
-    apiGet<CodeFilesResponse>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => setCodeFiles(null));
-    if (project?.status === "completed" || project?.status === "accepted") {
-      apiGet<RunInfoResponse>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => setRunInfo(null));
-      apiGet<MetricsResponse>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => setMetrics(null));
+    apiGet<ArtifactsResp>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => null);
+    apiGet<CodeFilesResp>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, project?.status]);
+
+  useEffect(() => {
+    if (!id || !project) return;
+    if (project.status === "completed" || project.status === "accepted") {
+      apiGet<RunInfoResp>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => null);
+      apiGet<MetricsResp>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => null);
     }
   }, [id, project?.status]);
 
-  // Tasks — polling automático a cada 8s enquanto rodando
-  useEffect(() => {
-    if (!id || !project) return;
-    const isActive = project.status === "running" || project.status === "completed" || project.status === "accepted";
-    if (!isActive) return;
+  // ── Actions ────────────────────────────────────────────────────────────────
+  const handleRun = async () => {
+    setRunError(null); setRunLoading(true);
+    try {
+      const d = await apiPost<{ ok: boolean; status?: string }>(`/api/projects/${id}/run`, {});
+      if (d?.status === "running") projectsStore.setProjectStatus(id, "running");
+      await projectsStore.loadProject(id);
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : "Falha ao iniciar");
+    } finally {
+      setRunLoading(false);
+    }
+  };
 
-    const loadTasks = () =>
-      apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
-        .then((data) => setTasks(Array.isArray(data) ? data : []))
-        .catch(() => {});
+  const handleStop = async () => {
+    setRunLoading(true);
+    try {
+      await apiPost(`/api/projects/${id}/stop`, {});
+      await projectsStore.loadProject(id);
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : "Falha ao parar");
+    } finally {
+      setRunLoading(false);
+    }
+  };
 
-    loadTasks(); // imediato
+  const handleAccept = async () => {
+    setAcceptLoading(true);
+    try {
+      await apiPost(`/api/projects/${id}/accept`, {});
+      await projectsStore.loadProject(id);
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : "Falha ao aceitar");
+    } finally {
+      setAcceptLoading(false);
+    }
+  };
 
-    if (project.status !== "running") return;
-    const interval = setInterval(loadTasks, 8000);
-    return () => clearInterval(interval);
-  }, [id, project?.status]);
-
+  // ── Derived ────────────────────────────────────────────────────────────────
   if (!project) {
     return (
-      <Box>
-        {!triedLoad ? (
-          <Typography color="text.secondary">Carregando…</Typography>
-        ) : (
-          <>
-            <Typography>Projeto não encontrado.</Typography>
-            <Button startIcon={<ArrowBack />} onClick={() => router.push("/projects")}>
-              Voltar
-            </Button>
-          </>
-        )}
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 300 }}>
+        {!triedLoad
+          ? <CircularProgress size={24} />
+          : (
+            <Box textAlign="center">
+              <Typography gutterBottom>Projeto não encontrado.</Typography>
+              <Button startIcon={<ArrowBackIcon />} onClick={() => router.push("/projects")}>Voltar</Button>
+            </Box>
+          )}
       </Box>
     );
   }
 
-  const stepIndexFromStatus =
-    project.status === "spec_submitted"
-      ? 1
-      : project.status === "cto_charter"
-        ? 2
-        : project.status === "pm_backlog"
-          ? 3
-          : project.status === "dev_qa"
-            ? 4
-            : project.status === "devops"
-              ? 5
-              : project.status === "completed" || project.status === "accepted"
-                ? 6
-                : 0;
-  const stepIndex =
-    project.status === "running" && workingStepIndex !== null && workingStepIndex >= 0
-      ? workingStepIndex
-      : stepIndexFromStatus;
+  const isRunning   = project.status === "running";
+  const isDone      = project.status === "completed" || project.status === "accepted";
+  const canRun      = ALLOW_RUN_STATUS.has(project.status);
+  const canAccept   = isRunning || project.status === "completed";
+  const elapsed     = elapsedLabel(project.startedAt, project.completedAt);
 
-  const hasProcessDates = project.startedAt || project.completedAt;
-  const duration =
-    project.startedAt && project.completedAt
-      ? formatDuration(project.startedAt, project.completedAt)
-      : null;
+  const stepFromStatus =
+    project.status === "spec_submitted"  ? 1 :
+    project.status === "cto_charter"     ? 2 :
+    project.status === "pm_backlog"      ? 3 :
+    project.status === "dev_qa"          ? 4 :
+    project.status === "devops"          ? 5 :
+    isDone                               ? 6 : 0;
+
+  const activeStep = isRunning && workingStepIndex != null ? workingStepIndex : stepFromStatus;
+
+  const tasksDone  = tasks ? tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length : 0;
+  const tasksPct   = tasks && tasks.length > 0 ? Math.round((tasksDone / tasks.length) * 100) : 0;
 
   return (
-    <Box>
-      <Button
-        startIcon={<ArrowBack />}
-        onClick={() => router.push("/projects")}
-        sx={{ mb: 2 }}
-        variant="outlined"
-      >
-        Voltar
-      </Button>
-
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mb: 2 }}>
-        <Typography variant="h4" fontWeight={600}>
+    <Box sx={{ minHeight: "100%" }}>
+      {/* ── Top header bar ── */}
+      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 2 }}>
+        <IconButton size="small" onClick={() => router.push("/projects")}>
+          <ArrowBackIcon fontSize="small" />
+        </IconButton>
+        <Typography variant="h5" fontWeight={700} noWrap sx={{ flexGrow: 1 }}>
           {project.title ?? "Spec sem título"}
         </Typography>
-        <Chip
-          label={
-            project.status === "running"
-              ? "Em execução"
-              : project.status === "accepted"
-                ? "Aceito"
-                : project.status
-          }
-          color={
-            project.status === "completed" || project.status === "accepted"
-              ? "success"
-              : project.status === "failed" || project.status === "stopped"
-                ? "error"
-                : project.status === "running"
-                  ? "info"
-                  : "default"
-          }
-          sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
-        />
+        <StatusChip status={project.status} />
+
+        {/* Action buttons */}
+        {isRunning && (
+          <Button variant="outlined" color="error" size="small" startIcon={<StopIcon />}
+            disabled={runLoading} onClick={handleStop}>
+            {runLoading ? "Parando…" : "Parar"}
+          </Button>
+        )}
+        {canRun && !isRunning && (
+          <Button variant="contained" size="small"
+            startIcon={project.status === "stopped" || project.status === "failed" ? <ReplayIcon /> : <PlayArrowIcon />}
+            disabled={runLoading} onClick={handleRun}>
+            {runLoading ? "Iniciando…" : project.status === "stopped" || project.status === "failed" ? "Reiniciar" : "Iniciar"}
+          </Button>
+        )}
+        {canAccept && (
+          <Button variant="contained" color="success" size="small" startIcon={<CheckCircleIcon />}
+            disabled={acceptLoading} onClick={handleAccept}>
+            {acceptLoading ? "Aceitando…" : "Aceitar"}
+          </Button>
+        )}
       </Stack>
 
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Spec: {project.specRef} • Criado em {formatDateTime(project.createdAt)}
-      </Typography>
-
-      {runPipelineError && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRunPipelineError(null)}>
-          {runPipelineError}
-        </Alert>
+      {/* Error alert */}
+      {runError && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRunError(null)}>{runError}</Alert>
       )}
 
-      <Box sx={{ mb: 2, display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
-        {project.status === STATUS_RUNNING && (
-          <>
-            <Typography variant="body2" color="text.secondary" sx={{ flexBasis: "100%", mb: 0.5 }}>
-              O pipeline está em execução. Se o log abaixo não atualizar em 1–2 min, verifique os logs do runner:{" "}
-              <Box component="code" sx={{ fontSize: "0.85em", bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>
-                docker compose logs runner --tail=100
-              </Box>
-            </Typography>
-            <Button
-              variant="outlined"
-              color="error"
-              startIcon={<Stop />}
-              disabled={runPipelineLoading}
-              onClick={async () => {
-                setRunPipelineError(null);
-                setRunPipelineLoading(true);
-                try {
-                  await apiPost<{ ok: boolean; message?: string }>(`/api/projects/${id}/stop`, {});
-                  await projectsStore.loadProject(id);
-                } catch (err) {
-                  setRunPipelineError(err instanceof Error ? err.message : "Falha ao parar pipeline");
-                } finally {
-                  setRunPipelineLoading(false);
-                }
-              }}
-            >
-              {runPipelineLoading ? "Parando…" : "Parar pipeline"}
-            </Button>
-            <Typography variant="body2" color="text.secondary">
-              Pipeline em andamento. O log é atualizado abaixo.
-            </Typography>
-          </>
-        )}
-        {STATUSES_ALLOW_RUN.has(project.status) && project.status !== STATUS_RUNNING && (
-          <>
-            <Button
-              variant="contained"
-              color="primary"
-              startIcon={project.status === "stopped" || project.status === "failed" ? <Replay /> : <PlayArrow />}
-              disabled={runPipelineLoading}
-              onClick={async () => {
-                setRunPipelineError(null);
-                setRunPipelineSuccess(false);
-                setRunPipelineLoading(true);
-                try {
-                  const data = await apiPost<{ ok: boolean; message?: string; status?: string }>(`/api/projects/${id}/run`, {});
-                  setRunPipelineSuccess(true);
-                  if (data?.status === "running") projectsStore.setProjectStatus(id, "running");
-                  await projectsStore.loadProject(id);
-                } catch (err) {
-                  setRunPipelineError(err instanceof Error ? err.message : "Falha ao iniciar pipeline");
-                } finally {
-                  setRunPipelineLoading(false);
-                }
-              }}
-            >
-              {runPipelineLoading
-                ? "Iniciando…"
-                : project.status === "stopped" || project.status === "failed"
-                  ? "Reiniciar do início"
-                  : "Iniciar pipeline"}
-            </Button>
-            {(project.status === "stopped" || project.status === "failed") && (
-              <Typography variant="body2" color="text.secondary">
-                Reinicia o fluxo do zero (Spec → CTO → Engineer → PM → Dev/QA/DevOps).
-              </Typography>
-            )}
-          </>
-        )}
-        {(project.status === "completed" || project.status === "running") && (
-            <Button
-              variant="contained"
-              color="success"
-              startIcon={<CheckCircle />}
-              disabled={acceptLoading}
-              onClick={async () => {
-                setAcceptError(null);
-                setAcceptLoading(true);
-                try {
-                  await apiPost<{ ok: boolean; status?: string }>(
-                    `/api/projects/${id}/accept`,
-                    {}
-                  );
-                  await projectsStore.loadProject(id);
-                } catch (err) {
-                  setAcceptError(
-                    err instanceof Error ? err.message : "Falha ao aceitar projeto"
-                  );
-                } finally {
-                  setAcceptLoading(false);
-                }
-              }}
-            >
-              {acceptLoading ? "Aceitando…" : "Aceitar projeto"}
-            </Button>
-          )}
-        {(project.status === "completed" || project.status === "running") && (
-            <Typography variant="body2" color="text.secondary">
-              Ao aceitar, o pipeline será encerrado e o projeto marcado como aceito.
-            </Typography>
-          )}
-        {runPipelineSuccess && project.status !== STATUS_RUNNING && (
-          <Typography variant="body2" color="success.main">
-            Pipeline iniciado. O log será atualizado em breve.
-          </Typography>
-        )}
-        {(runPipelineError || acceptError) && (
-          <Typography variant="body2" color="error.main">
-            {runPipelineError ?? acceptError}
-          </Typography>
-        )}
-      </Box>
-
-      {/* Banner pós-aceite / conclusão */}
-      {(project.status === "accepted" || project.status === "completed") && runInfo?.runCommand && (
+      {/* Post-accept run banner */}
+      {isDone && runInfo?.runCommand && (
         <Alert
-          severity="success"
-          sx={{ mb: 2 }}
-          icon={<CheckCircle />}
-          action={
-            runInfo.appUrl ? (
-              <Button
-                size="small"
-                color="success"
-                endIcon={<OpenInNew />}
-                href={runInfo.appUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                component="a"
-              >
-                Abrir app
-              </Button>
-            ) : undefined
-          }
+          severity="success" sx={{ mb: 2 }} icon={<CheckCircleIcon />}
+          action={runInfo.appUrl ? (
+            <Button size="small" color="success" endIcon={<OpenInNewIcon />}
+              href={runInfo.appUrl} target="_blank" rel="noopener noreferrer" component="a">
+              Abrir app
+            </Button>
+          ) : undefined}
         >
-          <Typography variant="body2" fontWeight={500}>
-            {project.status === "accepted" ? "Projeto aceito — pronto para executar!" : "Pipeline concluído — pronto para executar!"}
-          </Typography>
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.75 }}>
-            <Box
-              component="code"
-              sx={{ bgcolor: "action.hover", px: 1, py: 0.4, borderRadius: 0.5, fontSize: "0.8em", flexGrow: 1, wordBreak: "break-all" }}
-            >
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Typography variant="body2" fontWeight={500}>Pronto para executar:</Typography>
+            <Box component="code" sx={{ bgcolor: "action.hover", px: 1, py: 0.3, borderRadius: 0.5, fontSize: "0.78rem", flexGrow: 1 }}>
               {runInfo.runCommand}
             </Box>
-            <Tooltip title="Copiar comando">
-              <Button
-                size="small"
-                startIcon={<ContentCopy sx={{ fontSize: "0.9rem !important" }} />}
-                onClick={() => {
-                  navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true));
-                }}
-                sx={{ minWidth: "auto", px: 1, flexShrink: 0 }}
-              >
-                Copiar
-              </Button>
+            <Tooltip title="Copiar">
+              <IconButton size="small" onClick={() => navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true))}>
+                <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
+              </IconButton>
             </Tooltip>
           </Stack>
         </Alert>
       )}
+      <Snackbar open={copiedCmd} autoHideDuration={2000} onClose={() => setCopiedCmd(false)}
+        message="Comando copiado!" anchorOrigin={{ vertical: "bottom", horizontal: "center" }} />
 
-      <Snackbar
-        open={copiedCmd}
-        autoHideDuration={2000}
-        onClose={() => setCopiedCmd(false)}
-        message="Comando copiado!"
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      />
-
-      {hasProcessDates && (
-        <MotionCard variant="outlined" sx={{ mb: 3, p: 2 }} {...blockMotion}>
-          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-            Resumo do processo
-          </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} flexWrap="wrap" useFlexGap>
-            {project.startedAt && (
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <Schedule fontSize="small" color="action" />
-                <Typography variant="body2">
-                  Início: {formatDateTime(project.startedAt)}
+      {/* ── Main cockpit layout ── */}
+      <Grid container spacing={2}>
+        {/* ── LEFT COLUMN: Pipeline status + metrics + tasks ── */}
+        <Grid size={{ xs: 12, md: 3.5 }}>
+          <Stack spacing={2}>
+            {/* Pipeline stepper vertical */}
+            <Card>
+              <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1.5 }}>
+                  Pipeline
                 </Typography>
-              </Stack>
-            )}
-            {project.completedAt && (
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <CalendarToday fontSize="small" color="action" />
-                <Typography variant="body2">
-                  Fim: {formatDateTime(project.completedAt)}
-                </Typography>
-              </Stack>
-            )}
-            {duration && (
-              <Typography variant="body2" fontWeight={500}>
-                Duração: {duration}
-              </Typography>
-            )}
-          </Stack>
-        </MotionCard>
-      )}
 
-      <MotionCard variant="outlined" sx={{ p: 2, mb: 3 }} {...blockMotion}>
-        <Stepper activeStep={stepIndex} orientation="horizontal" sx={{ flexWrap: "wrap" }}>
-          {STEPS.map((label, idx) => (
-            <Step key={label}>
-              <StepLabel>
-                <Stack direction="row" alignItems="center" spacing={0.5}>
-                  <span>{label}</span>
-                  {workingStepIndex === idx && (
-                    <CircularProgress size={16} color="primary" sx={{ flexShrink: 0 }} />
-                  )}
-                </Stack>
-              </StepLabel>
-            </Step>
-          ))}
-        </Stepper>
-        {workingMessage && workingStepIndex !== null && (
-          <Typography variant="body2" color="primary" sx={{ mt: 1.5, display: "flex", alignItems: "center", gap: 1 }}>
-            <CircularProgress size={16} color="primary" />
-            {workingMessage}
-          </Typography>
-        )}
-      </MotionCard>
+                {/* Progress bar */}
+                {tasks && tasks.length > 0 && (
+                  <Box sx={{ mb: 1.5 }}>
+                    <LinearProgress
+                      variant="determinate" value={tasksPct}
+                      color={isDone ? "success" : "primary"}
+                      sx={{ height: 5, borderRadius: 3, bgcolor: "divider", mb: 0.5 }}
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      {tasksDone}/{tasks.length} tasks · {tasksPct}%
+                    </Typography>
+                  </Box>
+                )}
 
-      {project.charterSummary && (
-        <MotionCard sx={{ mt: 2 }} {...blockMotion}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom fontWeight={600}>
-              Charter (CTO)
-            </Typography>
-            <Typography variant="body2">{project.charterSummary}</Typography>
-          </CardContent>
-        </MotionCard>
-      )}
-
-      {project.backlogSummary && (
-        <MotionCard sx={{ mt: 2 }} variant="outlined" {...blockMotion}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom fontWeight={600}>
-              Backlog (PM)
-            </Typography>
-            <Typography variant="body2">{project.backlogSummary}</Typography>
-          </CardContent>
-        </MotionCard>
-      )}
-
-      {/* ── Tabs: Diálogo | Tasks | Artefatos ── */}
-      <MotionCard variant="outlined" sx={{ mt: 3 }} {...blockMotion}>
-        {/* Live status do agente ativo */}
-        {project.status === STATUS_RUNNING && workingMessage && (
-          <Box sx={{ px: 2, pt: 1.5, pb: 0, display: "flex", alignItems: "center", gap: 1 }}>
-            <CircularProgress size={14} color="primary" />
-            <Typography variant="body2" color="primary" sx={{ fontWeight: 500 }}>
-              {workingMessage}
-            </Typography>
-          </Box>
-        )}
-
-        {/* Barra de progresso de tasks */}
-        {tasks && tasks.length > 0 && (
-          <Box sx={{ px: 2, pt: workingMessage ? 0.75 : 1.5, pb: 0 }}>
-            {(() => {
-              const done = tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length;
-              const pct = Math.round((done / tasks.length) * 100);
-              return (
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <LinearProgress
-                    variant="determinate"
-                    value={pct}
-                    sx={{ flex: 1, height: 6, borderRadius: 3 }}
-                    color={pct === 100 ? "success" : "primary"}
-                  />
-                  <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
-                    {done}/{tasks.length} tasks
-                  </Typography>
-                </Stack>
-              );
-            })()}
-          </Box>
-        )}
-
-        <Tabs
-          value={activeTab}
-          onChange={(_e, v) => setActiveTab(v as number)}
-          sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider" }}
-        >
-          <Tab label="Diálogo da Equipe" />
-          <Tab
-            label={
-              tasks && tasks.length > 0
-                ? `Tasks (${tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length}/${tasks.length})`
-                : "Tasks"
-            }
-          />
-          <Tab
-            label={
-              artifacts?.docs && artifacts.docs.length > 0
-                ? `Artefatos (${artifacts.docs.length})`
-                : "Artefatos"
-            }
-          />
-          <Tab
-            label={
-              codeFiles && codeFiles.totalFiles > 0
-                ? `Código Gerado (${codeFiles.totalFiles})`
-                : "Código Gerado"
-            }
-          />
-        </Tabs>
-
-        {/* Aba 0 — Diálogo */}
-        {activeTab === 0 && (
-          <Box sx={{ p: 2 }}>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-              O que os agentes estão fazendo (atualização automática).
-            </Typography>
-            <ProjectDialogue
-              projectId={id}
-              pollIntervalMs={project.status === STATUS_RUNNING ? 5000 : 10000}
-              onEntriesLoaded={handleDialogueEntriesLoaded}
-            />
-          </Box>
-        )}
-
-        {/* Aba 1 — Tasks */}
-        {activeTab === 1 && (
-          <Box sx={{ p: 2 }}>
-            {project.status === STATUS_RUNNING && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-                Atualização automática a cada 8 segundos.
-              </Typography>
-            )}
-            {!tasks || tasks.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
-                {project.status === STATUS_RUNNING
-                  ? "Aguardando início do Monitor Loop (CTO → Engineer → PM devem concluir primeiro)..."
-                  : "Nenhuma task encontrada para este projeto."}
-              </Typography>
-            ) : (
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 600, width: 120 }}>Task ID</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Descrição</TableCell>
-                    <TableCell sx={{ fontWeight: 600, width: 130 }}>Status</TableCell>
-                    <TableCell sx={{ fontWeight: 600, width: 100 }}>Módulo</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {tasks.map((t) => {
-                    const isDone = t.status === "DONE" || t.status === "QA_PASS";
-                    const isActive = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
-                    const isBlocked = t.status === "BLOCKED" || t.status === "QA_FAIL";
+                {/* Steps */}
+                <Stack spacing={0}>
+                  {PIPELINE_STEPS.map((step, i) => {
+                    const isDoneStep    = i < activeStep;
+                    const isActiveStep  = i === activeStep;
+                    const isFutureStep  = i > activeStep;
                     return (
-                      <TableRow
-                        key={t.id}
-                        sx={{
-                          bgcolor: isActive ? "primary.50" : isDone ? "success.50" : "transparent",
-                          "& td": { py: 0.75 },
-                        }}
-                      >
-                        <TableCell>
-                          <Typography variant="caption" fontFamily="monospace">
-                            {t.taskId ?? t.id}
+                      <Box key={step.label} sx={{ display: "flex", alignItems: "flex-start", gap: 1, pb: i < PIPELINE_STEPS.length - 1 ? 0.5 : 0 }}>
+                        {/* Dot + line */}
+                        <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", width: 16, pt: 0.25 }}>
+                          <Box sx={{
+                            width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
+                            bgcolor: isDoneStep ? "success.main" : isActiveStep ? "primary.main" : "divider",
+                            border: isActiveStep ? "2px solid" : "1px solid",
+                            borderColor: isActiveStep ? "primary.main" : isDoneStep ? "success.main" : "divider",
+                            ...(isActiveStep && {
+                              boxShadow: "0 0 0 3px #6366F130",
+                              animation: "dot-pulse 1.4s infinite",
+                              "@keyframes dot-pulse": { "0%,100%": { boxShadow: "0 0 0 3px #6366F130" }, "50%": { boxShadow: "0 0 0 6px #6366F115" } },
+                            }),
+                          }} />
+                          {i < PIPELINE_STEPS.length - 1 && (
+                            <Box sx={{ width: 1, flexGrow: 1, minHeight: 12, bgcolor: isDoneStep ? "success.main" : "divider", opacity: 0.4 }} />
+                          )}
+                        </Box>
+                        {/* Label */}
+                        <Box sx={{ pb: 0.75, minWidth: 0 }}>
+                          <Typography
+                            variant="body2"
+                            fontWeight={isActiveStep ? 600 : 400}
+                            color={isDoneStep ? "success.main" : isActiveStep ? "primary.main" : isFutureStep ? "text.disabled" : "text.primary"}
+                            sx={{ lineHeight: 1.5 }}
+                          >
+                            {step.label}
+                            {isActiveStep && isRunning && (
+                              <CircularProgress size={10} color="primary" sx={{ ml: 0.75, verticalAlign: "middle" }} />
+                            )}
                           </Typography>
-                        </TableCell>
-                        <TableCell>
-                          <Stack direction="row" spacing={0.75} alignItems="center">
-                            {isActive && <CircularProgress size={12} color="primary" />}
-                            <Typography variant="body2">
-                              {t.requirements ?? "—"}
+                          {isActiveStep && workingMessage && (
+                            <Typography variant="caption" color="text.secondary"
+                              sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>
+                              {workingMessage.slice(0, 60)}
                             </Typography>
-                          </Stack>
-                        </TableCell>
-                        <TableCell>
-                          <Chip
-                            size="small"
-                            label={t.status ?? "—"}
-                            color={
-                              isDone ? "success" :
-                              isActive ? "info" :
-                              isBlocked ? "error" : "default"
-                            }
-                            sx={{ fontFamily: "monospace", fontSize: "0.65rem" }}
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Typography variant="caption" color="text.secondary">
-                            {t.module ?? t.ownerRole ?? "—"}
-                          </Typography>
-                        </TableCell>
-                      </TableRow>
+                          )}
+                        </Box>
+                      </Box>
                     );
                   })}
-                </TableBody>
-              </Table>
-            )}
-          </Box>
-        )}
+                </Stack>
+              </CardContent>
+            </Card>
 
-        {/* Aba 2 — Artefatos */}
-        {activeTab === 2 && (
-          <Box sx={{ p: 2 }}>
-            {!artifacts || (!artifacts.docs?.length && !artifacts.projectDocsRoot) ? (
-              <Typography variant="body2" color="text.secondary">
-                Nenhum artefato gerado ainda. Os documentos aparecerão aqui conforme os agentes trabalham.
-              </Typography>
-            ) : (
-              <>
-                {artifacts.projectDocsRoot && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-                    Raiz: <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5, fontSize: "0.8em" }}>{artifacts.projectDocsRoot}</Box>
+            {/* Quick metrics */}
+            <Card>
+              <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1.5 }}>
+                  Métricas
+                </Typography>
+                <Stack spacing={1.25}>
+                  {elapsed && <MiniStat label="Tempo" value={elapsed} />}
+                  {project.startedAt && <MiniStat label="Início" value={fmtTime(project.startedAt)} />}
+                  {tasks && tasks.length > 0 && <MiniStat label="Tasks" value={`${tasksDone}/${tasks.length}`} />}
+                  {codeFiles && codeFiles.totalFiles > 0 && <MiniStat label="Arquivos gerados" value={codeFiles.totalFiles} />}
+                  {metrics && metrics.totals.calls > 0 && (
+                    <>
+                      <MiniStat label="Tokens" value={(metrics.totals.input_tokens + metrics.totals.output_tokens).toLocaleString("pt-BR")} />
+                      <MiniStat label="Custo est." value={`~$${metrics.totals.estimated_cost_usd.toFixed(2)}`} color="success.main" />
+                    </>
+                  )}
+                </Stack>
+              </CardContent>
+            </Card>
+
+            {/* Charter summary */}
+            {project.charterSummary && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75 }}>
+                    Charter (CTO)
                   </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.78rem", lineHeight: 1.5 }}>
+                    {project.charterSummary.slice(0, 200)}{project.charterSummary.length > 200 ? "…" : ""}
+                  </Typography>
+                </CardContent>
+              </Card>
+            )}
+          </Stack>
+        </Grid>
+
+        {/* ── RIGHT COLUMN: Dialogue + Graph ── */}
+        <Grid size={{ xs: 12, md: 8.5 }}>
+          <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            {/* Tabs: Diálogo | Grafo */}
+            <Tabs
+              value={rightTab}
+              onChange={(_e, v) => setRightTab(v as number)}
+              sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44 }}
+            >
+              <Tab
+                icon={<ForumIcon sx={{ fontSize: "0.9rem" }} />}
+                iconPosition="start"
+                label="Diálogo ao vivo"
+                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }}
+              />
+              <Tab
+                icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />}
+                iconPosition="start"
+                label="Grafo Obsidian"
+                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }}
+              />
+            </Tabs>
+
+            {/* Tab 0 — Diálogo */}
+            {rightTab === 0 && (
+              <Box sx={{ flexGrow: 1, overflow: "hidden" }}>
+                {isRunning && workingMessage && (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "primary.main" + "12" }}>
+                    <CircularProgress size={12} color="primary" />
+                    <Typography variant="caption" color="primary.main" fontWeight={500} noWrap>
+                      {workingMessage.slice(0, 80)}
+                    </Typography>
+                  </Stack>
                 )}
-                {artifacts.docs?.length > 0 ? (
+                <LiveDialogue
+                  projectId={id}
+                  pollIntervalMs={isRunning ? 4000 : 15000}
+                  onEntriesLoaded={handleDialogueLoaded}
+                  maxHeight={500}
+                />
+              </Box>
+            )}
+
+            {/* Tab 1 — Grafo */}
+            {rightTab === 1 && (
+              <Box sx={{ p: 1.5, flexGrow: 1 }}>
+                <GraphView
+                  projectId={id}
+                  pollIntervalMs={isRunning ? 6000 : 0}
+                  height={500}
+                />
+              </Box>
+            )}
+          </Card>
+        </Grid>
+      </Grid>
+
+      {/* ── Bottom section: Tasks + Artifacts + Code ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0, transition: { delay: 0.2 } }}
+      >
+        <Card sx={{ mt: 2 }}>
+          <Tabs
+            value={bottomTab}
+            onChange={(_e, v) => setBottomTab(v as number)}
+            sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44 }}
+          >
+            <Tab label={tasks && tasks.length > 0 ? `Tasks (${tasksDone}/${tasks.length})` : "Tasks"}
+              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+            <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
+              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+            <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
+              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+          </Tabs>
+
+          {/* Tasks */}
+          {bottomTab === 0 && (
+            <Box sx={{ p: 0 }}>
+              {isRunning && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pt: 1 }}>
+                  Atualização automática a cada 8s
+                </Typography>
+              )}
+              {!tasks || tasks.length === 0 ? (
+                <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
+                  {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
+                </Typography>
+              ) : (
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Task</TableCell>
+                      <TableCell sx={{ minWidth: 200 }}>Descrição</TableCell>
+                      <TableCell sx={{ width: 120 }}>Status</TableCell>
+                      <TableCell sx={{ width: 90 }}>Módulo</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {tasks.map((t) => {
+                      const isDoneT  = t.status === "DONE" || t.status === "QA_PASS";
+                      const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                      return (
+                        <TableRow key={t.id}
+                          sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
+                          <TableCell>
+                            <Typography variant="caption" fontFamily="monospace">{t.taskId}</Typography>
+                          </TableCell>
+                          <TableCell>
+                            <Stack direction="row" spacing={0.75} alignItems="center">
+                              {isActiveT && <CircularProgress size={10} color="primary" />}
+                              <Typography variant="body2" sx={{ fontSize: "0.78rem" }}>{t.requirements ?? "—"}</Typography>
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Chip size="small" label={t.status ?? "—"}
+                              color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
+                              sx={{ fontFamily: "monospace", fontSize: "0.62rem" }} />
+                          </TableCell>
+                          <TableCell>
+                            <Typography variant="caption" color="text.secondary">{t.module ?? t.ownerRole ?? "—"}</Typography>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              )}
+            </Box>
+          )}
+
+          {/* Documents */}
+          {bottomTab === 1 && (
+            <Box sx={{ p: 2 }}>
+              {(!artifacts || !artifacts.docs?.length) ? (
+                <Typography variant="body2" color="text.secondary">Documentos gerados pelos agentes aparecerão aqui.</Typography>
+              ) : (
+                <>
+                  {artifacts.projectDocsRoot && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                      <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{artifacts.projectDocsRoot}</Box>
+                    </Typography>
+                  )}
                   <Table size="small">
                     <TableHead>
                       <TableRow>
-                        <TableCell sx={{ fontWeight: 600 }}>Arquivo</TableCell>
-                        <TableCell sx={{ fontWeight: 600, width: 110 }}>Criado por</TableCell>
-                        <TableCell sx={{ fontWeight: 600, width: 140 }}>Data</TableCell>
+                        <TableCell>Arquivo</TableCell>
+                        <TableCell sx={{ width: 110 }}>Agente</TableCell>
+                        <TableCell sx={{ width: 140 }}>Data</TableCell>
                       </TableRow>
                     </TableHead>
                     <TableBody>
                       {artifacts.docs.map((d, i) => (
-                        <TableRow key={i} sx={{ "& td": { py: 0.5 } }}>
+                        <TableRow key={i}>
                           <TableCell>
                             <Typography variant="body2">{d.title ?? d.filename}</Typography>
                             {d.title && d.filename !== d.title && (
-                              <Typography variant="caption" color="text.secondary" fontFamily="monospace">
-                                {d.filename}
-                              </Typography>
+                              <Typography variant="caption" color="text.secondary" fontFamily="monospace">{d.filename}</Typography>
                             )}
                           </TableCell>
                           <TableCell>
-                            <Chip size="small" label={d.creator ?? "—"} variant="outlined" sx={{ fontSize: "0.65rem" }} />
+                            <Chip size="small" label={d.creator ?? "—"} variant="outlined" sx={{ fontSize: "0.62rem" }} />
                           </TableCell>
                           <TableCell>
                             <Typography variant="caption" color="text.secondary">
@@ -712,135 +657,66 @@ function ProjectDetailPageInner() {
                       ))}
                     </TableBody>
                   </Table>
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    Manifest sem documentos listados. Os artefatos estão sendo gerados.
-                  </Typography>
-                )}
-              </>
-            )}
-          </Box>
-        )}
-        {/* Aba 3 — Código Gerado */}
-        {activeTab === 3 && (
-          <Box sx={{ p: 2 }}>
-            {!codeFiles || codeFiles.totalFiles === 0 ? (
-              <Typography variant="body2" color="text.secondary">
-                Nenhum arquivo de código gerado ainda. Os arquivos aparecerão aqui após o Dev concluir as tasks.
-              </Typography>
-            ) : (
-              <>
-                {codeFiles.appsRoot && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-                    Raiz:{" "}
-                    <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5, fontSize: "0.8em" }}>
-                      {codeFiles.appsRoot}
-                    </Box>
-                  </Typography>
-                )}
-                {(() => {
-                  // Group by extension for summary
-                  const byExt: Record<string, number> = {};
-                  for (const f of codeFiles.files) {
-                    const k = f.ext || "outros";
-                    byExt[k] = (byExt[k] ?? 0) + 1;
-                  }
-                  return (
-                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
-                      {Object.entries(byExt).map(([ext, count]) => (
-                        <Chip key={ext} size="small" label={`.${ext} (${count})`} variant="outlined" />
-                      ))}
-                    </Stack>
-                  );
-                })()}
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Arquivo</TableCell>
-                      <TableCell sx={{ fontWeight: 600, width: 90, textAlign: "right" }}>Tamanho</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {codeFiles.files.map((f, i) => (
-                      <TableRow key={i} sx={{ "& td": { py: 0.4 } }}>
-                        <TableCell>
-                          <Typography variant="body2" fontFamily="monospace" sx={{ fontSize: "0.78rem" }}>
-                            {f.path}
-                          </Typography>
-                        </TableCell>
-                        <TableCell sx={{ textAlign: "right" }}>
-                          <Typography variant="caption" color="text.secondary">
-                            {f.sizeBytes >= 1024 ? `${(f.sizeBytes / 1024).toFixed(1)} KB` : `${f.sizeBytes} B`}
-                          </Typography>
-                        </TableCell>
+                </>
+              )}
+            </Box>
+          )}
+
+          {/* Code files */}
+          {bottomTab === 2 && (
+            <Box sx={{ p: 2 }}>
+              {(!codeFiles || codeFiles.totalFiles === 0) ? (
+                <Typography variant="body2" color="text.secondary">Arquivos de código gerados pelo Dev aparecerão aqui.</Typography>
+              ) : (
+                <>
+                  {codeFiles.appsRoot && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                      <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{codeFiles.appsRoot}</Box>
+                    </Typography>
+                  )}
+                  {/* Extension summary chips */}
+                  {(() => {
+                    const byExt: Record<string, number> = {};
+                    for (const f of codeFiles.files) {
+                      const k = f.ext || "outros";
+                      byExt[k] = (byExt[k] ?? 0) + 1;
+                    }
+                    return (
+                      <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+                        {Object.entries(byExt).map(([ext, cnt]) => (
+                          <Chip key={ext} size="small" label={`.${ext} (${cnt})`} variant="outlined" sx={{ fontSize: "0.65rem" }} />
+                        ))}
+                      </Stack>
+                    );
+                  })()}
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Arquivo</TableCell>
+                        <TableCell align="right" sx={{ width: 90 }}>Tamanho</TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </>
-            )}
-          </Box>
-        )}
-      </MotionCard>
-
-      {/* Métricas do projeto */}
-      {(project.status === "completed" || project.status === "accepted") && (
-        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
-          <Typography variant="subtitle2" color="text.secondary" gutterBottom fontWeight={600}>
-            Métricas do Pipeline
-          </Typography>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={3} flexWrap="wrap" useFlexGap>
-            {tasks && tasks.length > 0 && (
-              <Box>
-                <Typography variant="caption" color="text.secondary">Tasks executadas</Typography>
-                <Typography variant="h6" fontWeight={600}>
-                  {tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length}/{tasks.length}
-                </Typography>
-              </Box>
-            )}
-            {codeFiles && codeFiles.totalFiles > 0 && (
-              <Box>
-                <Typography variant="caption" color="text.secondary">Arquivos gerados</Typography>
-                <Typography variant="h6" fontWeight={600}>{codeFiles.totalFiles}</Typography>
-              </Box>
-            )}
-            {duration && (
-              <Box>
-                <Typography variant="caption" color="text.secondary">Duração total</Typography>
-                <Typography variant="h6" fontWeight={600}>{duration}</Typography>
-              </Box>
-            )}
-            {metrics && metrics.totals.calls > 0 && (
-              <>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Tokens totais</Typography>
-                  <Typography variant="h6" fontWeight={600}>
-                    {(metrics.totals.input_tokens + metrics.totals.output_tokens).toLocaleString("pt-BR")}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {metrics.totals.input_tokens.toLocaleString("pt-BR")} entrada · {metrics.totals.output_tokens.toLocaleString("pt-BR")} saída
-                  </Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Custo estimado</Typography>
-                  <Typography variant="h6" fontWeight={600} color="success.main">
-                    ~${metrics.totals.estimated_cost_usd.toFixed(2)} USD
-                  </Typography>
-                </Box>
-              </>
-            )}
-          </Stack>
-        </MotionCard>
-      )}
-
-      <Box sx={{ mt: 3 }}>
-        <Button variant="outlined" disabled size="small" sx={{ mr: 1 }}>
-          Exportar
-        </Button>
-        <Button variant="outlined" disabled size="small">
-          Compartilhar
-        </Button>
-      </Box>
+                    </TableHead>
+                    <TableBody>
+                      {codeFiles.files.map((f, i) => (
+                        <TableRow key={i}>
+                          <TableCell>
+                            <Typography variant="body2" fontFamily="monospace" sx={{ fontSize: "0.75rem" }}>{f.path}</Typography>
+                          </TableCell>
+                          <TableCell align="right">
+                            <Typography variant="caption" color="text.secondary">
+                              {f.sizeBytes >= 1024 ? `${(f.sizeBytes / 1024).toFixed(1)} KB` : `${f.sizeBytes} B`}
+                            </Typography>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </>
+              )}
+            </Box>
+          )}
+        </Card>
+      </motion.div>
     </Box>
   );
 }
