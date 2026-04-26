@@ -77,14 +77,15 @@ function MarkdownPreview({ content }: { content: string }) {
 // ── Editor + Preview side by side ─────────────────────────────────────────────
 function SpecEditor({
   value, onChange, fullscreen, onToggleFullscreen,
-  onApprove, approving, onRegen, regenDisabled,
+  onSave, onSaveAndStart, approving, onRegen, regenDisabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   fullscreen: boolean;
   onToggleFullscreen: () => void;
-  onApprove: () => void;
-  approving: boolean;
+  onSave: () => void;
+  onSaveAndStart: () => void;
+  approving: "save" | "start" | null;
   onRegen: () => void;
   regenDisabled: boolean;
 }) {
@@ -110,10 +111,20 @@ function SpecEditor({
             </Button>
           </span>
         </Tooltip>
+        <Tooltip title="Guardar a ideia — iniciar quando quiser">
+          <span>
+            <Button size="small" variant="outlined"
+              startIcon={approving === "save" ? <CircularProgress size={12} /> : <span style={{ fontSize: "0.9rem" }}>💾</span>}
+              disabled={approving !== null || !value.trim()} onClick={onSave}
+              sx={{ fontSize: "0.72rem", py: 0.35 }}>
+              {approving === "save" ? "Salvando…" : "Salvar rascunho"}
+            </Button>
+          </span>
+        </Tooltip>
         <Button size="small" variant="contained" color="success"
-          startIcon={approving ? <CircularProgress size={12} /> : <CheckCircleIcon sx={{ fontSize: "0.85rem !important" }} />}
-          disabled={approving || !value.trim()} onClick={onApprove} sx={{ fontSize: "0.75rem", py: 0.4 }}>
-          {approving ? "Iniciando…" : "Aprovar e iniciar pipeline"}
+          startIcon={approving === "start" ? <CircularProgress size={12} /> : <CheckCircleIcon sx={{ fontSize: "0.85rem !important" }} />}
+          disabled={approving !== null || !value.trim()} onClick={onSaveAndStart} sx={{ fontSize: "0.75rem", py: 0.4 }}>
+          {approving === "start" ? "Iniciando…" : "Salvar e iniciar pipeline"}
         </Button>
         <Tooltip title={fullscreen ? "Sair de tela cheia" : "Tela cheia"}>
           <IconButton size="small" onClick={onToggleFullscreen}>
@@ -188,7 +199,7 @@ export default function SpecPage() {
   // Spec editor
   const [specMarkdown, setSpecMarkdown] = useState<string | null>(null);
   const [editorFullscreen, setEditorFullscreen] = useState(false);
-  const [approving, setApproving]       = useState(false);
+  const [approving, setApproving]       = useState<"save" | "start" | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
 
   // Upload flow
@@ -261,10 +272,10 @@ export default function SpecPage() {
   // Cleanup on unmount
   useEffect(() => () => stopPolling(), [stopPolling]);
 
-  // ── Approve: save spec as .md file and submit ───────────────────────────────
-  const handleApprove = useCallback(async () => {
+  // ── Save spec (draft or start) ──────────────────────────────────────────────
+  const handleSaveSpec = useCallback(async (startNow: boolean) => {
     if (!specMarkdown) return;
-    setApproving(true); setApproveError(null);
+    setApproving(startNow ? "start" : "save"); setApproveError(null);
     try {
       const blob = new Blob([specMarkdown], { type: "text/markdown" });
       const filename = `${(projectTitle || "spec").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
@@ -275,11 +286,20 @@ export default function SpecPage() {
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
-      setTimeout(() => router.push(`/projects/${data.projectId}`), 800);
+
+      if (startNow) {
+        // Fire pipeline immediately then navigate
+        try {
+          await apiPost(`/api/projects/${data.projectId}/run`, {});
+        } catch {
+          // If run fails, user can still start manually from the project page
+        }
+      }
+      setTimeout(() => router.push(`/projects/${data.projectId}`), 500);
     } catch (e) {
-      setApproveError(e instanceof Error ? e.message : "Erro ao iniciar pipeline.");
+      setApproveError(e instanceof Error ? e.message : "Erro ao salvar spec.");
     } finally {
-      setApproving(false);
+      setApproving(null);
     }
   }, [specMarkdown, projectTitle, parentProjectId, router]);
 
@@ -289,7 +309,7 @@ export default function SpecPage() {
     e.target.value = "";
   };
   const removeFile = (i: number) => setFiles((p) => p.filter((_, idx) => idx !== i));
-  const handleUploadSubmit = async (e: React.FormEvent) => {
+  const handleUploadSubmit = async (e: React.FormEvent, startNow = false) => {
     e.preventDefault();
     if (!files.length) { setUploadError("Selecione pelo menos um arquivo."); return; }
     setSubmitting(true); setUploadError(null); setResult(null);
@@ -301,7 +321,10 @@ export default function SpecPage() {
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
       projectsStore.loadProjects();
-      if (data.projectId) setTimeout(() => router.push(`/projects/${data.projectId}`), 2000);
+      if (data.projectId && startNow) {
+        try { await apiPost(`/api/projects/${data.projectId}/run`, {}); } catch { /* ok */ }
+      }
+      if (data.projectId) setTimeout(() => router.push(`/projects/${data.projectId}`), 800);
     } catch (err) { setUploadError(err instanceof Error ? err.message : "Falha ao enviar spec."); }
     finally { setSubmitting(false); }
   };
@@ -315,7 +338,7 @@ export default function SpecPage() {
         <SpecEditor
           value={specMarkdown} onChange={setSpecMarkdown}
           fullscreen={true} onToggleFullscreen={() => setEditorFullscreen(false)}
-          onApprove={handleApprove} approving={approving}
+          onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
           onRegen={() => { setEditorFullscreen(false); setSpecMarkdown(null); }}
           regenDisabled={generating}
         />
@@ -449,7 +472,7 @@ export default function SpecPage() {
                       <SpecEditor
                         value={specMarkdown} onChange={setSpecMarkdown}
                         fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                        onApprove={handleApprove} approving={approving}
+                        onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
                         onRegen={() => setSpecMarkdown(null)}
                         regenDisabled={generating}
                       />
@@ -512,11 +535,24 @@ export default function SpecPage() {
                   {uploadError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setUploadError(null)}>{uploadError}</Alert>}
 
                   <Divider sx={{ my: 2 }} />
-                  <Button type="submit" variant="contained" size="large"
-                    startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <SendIcon />}
-                    disabled={submitting || !files.length}>
-                    {submitting ? "Enviando…" : "Enviar spec ao CTO"}
-                  </Button>
+                  <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <Tooltip title="Guardar a ideia — iniciar quando quiser">
+                      <span>
+                        <Button variant="outlined" size="large"
+                          startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : <span style={{ fontSize: "1rem" }}>💾</span>}
+                          disabled={submitting || !files.length}
+                          onClick={(e) => handleUploadSubmit(e as unknown as React.FormEvent, false)}>
+                          {submitting ? "Salvando…" : "Salvar rascunho"}
+                        </Button>
+                      </span>
+                    </Tooltip>
+                    <Button type="submit" variant="contained" size="large"
+                      startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <SendIcon />}
+                      disabled={submitting || !files.length}
+                      onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent, true); }}>
+                      {submitting ? "Enviando…" : "Salvar e iniciar pipeline"}
+                    </Button>
+                  </Stack>
                 </form>
               )}
             </Box>
