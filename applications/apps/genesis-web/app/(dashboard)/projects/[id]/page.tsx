@@ -31,6 +31,10 @@ import PlayArrow from "@mui/icons-material/PlayArrow";
 import Stop from "@mui/icons-material/Stop";
 import Replay from "@mui/icons-material/Replay";
 import CheckCircle from "@mui/icons-material/CheckCircle";
+import OpenInNew from "@mui/icons-material/OpenInNew";
+import ContentCopy from "@mui/icons-material/ContentCopy";
+import Tooltip from "@mui/material/Tooltip";
+import Snackbar from "@mui/material/Snackbar";
 import { projectsStore } from "@/stores/projectsStore";
 import { ProjectDialogue, type DialogueEntry } from "@/components/ProjectDialogue";
 import { apiGet, apiPost } from "@/lib/api";
@@ -50,6 +54,7 @@ const STATUS_RUNNING = "running";
 
 type ArtifactsResponse = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null; projectArtifactsRoot: string | null };
 type CodeFilesResponse = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
+type RunInfoResponse = { runCommand: string | null; appUrl: string | null; startShPath: string | null };
 type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 
 /** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
@@ -110,6 +115,8 @@ function ProjectDetailPageInner() {
   const [workingMessage, setWorkingMessage] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
   const [codeFiles, setCodeFiles] = useState<CodeFilesResponse | null>(null);
+  const [runInfo, setRunInfo] = useState<RunInfoResponse | null>(null);
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const [tasks, setTasks] = useState<TaskItem[] | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const project = projectsStore.getById(id);
@@ -145,6 +152,9 @@ function ProjectDetailPageInner() {
     if (!id) return;
     apiGet<ArtifactsResponse>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => setArtifacts(null));
     apiGet<CodeFilesResponse>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => setCodeFiles(null));
+    if (project?.status === "completed" || project?.status === "accepted") {
+      apiGet<RunInfoResponse>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => setRunInfo(null));
+    }
   }, [id, project?.status]);
 
   // Tasks — polling automático a cada 8s enquanto rodando
@@ -366,6 +376,62 @@ function ProjectDetailPageInner() {
           </Typography>
         )}
       </Box>
+
+      {/* Banner pós-aceite / conclusão */}
+      {(project.status === "accepted" || project.status === "completed") && runInfo?.runCommand && (
+        <Alert
+          severity="success"
+          sx={{ mb: 2 }}
+          icon={<CheckCircle />}
+          action={
+            runInfo.appUrl ? (
+              <Button
+                size="small"
+                color="success"
+                endIcon={<OpenInNew />}
+                href={runInfo.appUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                component="a"
+              >
+                Abrir app
+              </Button>
+            ) : undefined
+          }
+        >
+          <Typography variant="body2" fontWeight={500}>
+            {project.status === "accepted" ? "Projeto aceito — pronto para executar!" : "Pipeline concluído — pronto para executar!"}
+          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.75 }}>
+            <Box
+              component="code"
+              sx={{ bgcolor: "action.hover", px: 1, py: 0.4, borderRadius: 0.5, fontSize: "0.8em", flexGrow: 1, wordBreak: "break-all" }}
+            >
+              {runInfo.runCommand}
+            </Box>
+            <Tooltip title="Copiar comando">
+              <Button
+                size="small"
+                startIcon={<ContentCopy sx={{ fontSize: "0.9rem !important" }} />}
+                onClick={() => {
+                  navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true));
+                }}
+                sx={{ minWidth: "auto", px: 1, flexShrink: 0 }}
+              >
+                Copiar
+              </Button>
+            </Tooltip>
+          </Stack>
+        </Alert>
+      )}
+
+      <Snackbar
+        open={copiedCmd}
+        autoHideDuration={2000}
+        onClose={() => setCopiedCmd(false)}
+        message="Comando copiado!"
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      />
 
       {hasProcessDates && (
         <MotionCard variant="outlined" sx={{ mb: 3, p: 2 }} {...blockMotion}>

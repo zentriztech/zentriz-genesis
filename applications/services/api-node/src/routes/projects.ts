@@ -354,6 +354,52 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/run-info — retorna run_command e app_url do DevOps (para pós-aceite)
+  app.get<{ Params: { id: string } }>("/api/projects/:id/run-info", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const result = await client.query(
+        "SELECT id, tenant_id, created_by FROM projects WHERE id = $1",
+        [id]
+      );
+      const row = result.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      const root = process.env.PROJECT_FILES_ROOT?.trim();
+      const hostRoot = process.env.HOST_PROJECT_FILES_ROOT?.trim() ?? root;
+      if (!root || !hostRoot) return reply.send({ runCommand: null, appUrl: null, startShPath: null });
+
+      const startShPath = path.join(root, id, "project", "start.sh");
+      const hostStartShPath = path.join(hostRoot, id, "project", "start.sh");
+
+      let appUrl: string | null = null;
+      try {
+        const content = await readFile(startShPath, "utf-8");
+        // Extract "http://localhost:PORT" from the script
+        const match = content.match(/https?:\/\/localhost:\d+/);
+        if (match) appUrl = match[0];
+      } catch {
+        // start.sh not generated yet
+      }
+
+      let startShExists = false;
+      try { await stat(startShPath); startShExists = true; } catch { /* */ }
+
+      return reply.send({
+        runCommand: startShExists ? `bash ${hostStartShPath}` : null,
+        appUrl,
+        startShPath: startShExists ? hostStartShPath : null,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/code-files — lista arquivos gerados em apps/ (código do produto)
   app.get<{ Params: { id: string } }>("/api/projects/:id/code-files", async (request, reply) => {
     const user = getUser(request);
