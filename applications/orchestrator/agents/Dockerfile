@@ -22,4 +22,6 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 # 2 workers: allows spec-preview background jobs to run without blocking health/other endpoints
-CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "300"]
+# timeout-keep-alive=600: keeps socket alive during long LLM calls (3-5 min)
+# h11-max-incomplete-event-size: allow large response bodies (spec can be 40KB+)
+CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "600", "--h11-max-incomplete-event-size", "10485760"]

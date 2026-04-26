@@ -102,30 +102,51 @@ function extractSpecMarkdown(data: Record<string, unknown>): string {
  * fetch() connections inside Docker get aborted prematurely even with large timeouts.
  * This function has a plain socket-level timeout (600s) with no AbortController.
  */
-async function httpPost(urlStr: string, body: string, timeoutMs = 600_000): Promise<string> {
+async function httpPost(urlStr: string, body: string, timeoutMs = 720_000): Promise<string> {
   const url = new URL(urlStr);
-  const { request } = url.protocol === "https:"
-    ? await import("https")
-    : await import("http");
+  const httpMod = url.protocol === "https:" ? await import("https") : await import("http");
+
+  // keepAlive agent: prevents OS from closing idle TCP connection during long LLM calls
+  // Without this, the socket is torn down after ~60-120s of no traffic
+  const agent = new httpMod.Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 10 });
+
   return new Promise((resolve, reject) => {
     const options = {
       hostname: url.hostname,
       port: url.port || (url.protocol === "https:" ? 443 : 80),
       path: url.pathname + url.search,
       method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      agent,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "Connection": "keep-alive",
+      },
     };
-    const req = request(options, (res) => {
+
+    const req = httpMod.request(options, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf-8");
         const code = res.statusCode ?? 0;
         if (code >= 200 && code < 300) resolve(text);
-        else reject(new Error(`HTTP ${code}: ${text.slice(0, 200)}`));
+        else reject(new Error(`HTTP ${code}: ${text.slice(0, 300)}`));
       });
+      res.on("error", reject);
     });
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`HTTP request timed out after ${timeoutMs / 1000}s`)); });
+
+    // Socket-level timeout — fires if NO data at all for timeoutMs
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Socket timeout after ${timeoutMs / 1000}s — no response from agents`));
+    });
+
+    req.on("socket", (socket) => {
+      // Enable TCP keep-alive probes every 30s to prevent idle connection teardown
+      socket.setKeepAlive(true, 30_000);
+      // No read timeout on the socket itself — let the request timeout handle it
+    });
+
     req.on("error", reject);
     req.write(body);
     req.end();
