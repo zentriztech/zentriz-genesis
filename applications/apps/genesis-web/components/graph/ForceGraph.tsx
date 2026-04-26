@@ -6,6 +6,7 @@ import Typography from "@mui/material/Typography";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import type { DialogueEntry } from "@/components/LiveDialogue";
+import type { PlanningDoc } from "@/lib/useGraphData";
 import dynamic from "next/dynamic";
 
 // ── react-force-graph-2d é browser-only (usa canvas) ─────────────────────────
@@ -19,7 +20,7 @@ type CodeFilesResponse = { files: CodeFile[]; appsRoot: string | null; totalFile
 interface FGNode {
   id: string;
   label: string;
-  type: "agent" | "task" | "artifact";
+  type: "agent" | "task" | "artifact" | "doc";
   color: string;
   size: number;
   isActive?: boolean;
@@ -41,12 +42,32 @@ const EXT_COLOR: Record<string, string> = {
   css: "#1572B6", json: "#F59E0B", md: "#8B949E", sh: "#10B981", py: "#3776AB",
 };
 
+const PHASE_AGENT_KEY: Record<string, string> = {
+  spec: "system", cto: "cto", engineer: "engineer",
+  pm: "pm", qa: "qa", devops: "devops", other: "system",
+};
+const PHASE_COLOR_FG: Record<string, string> = {
+  spec: "#8B949E", cto: "#1976d2", engineer: "#2e7d32",
+  pm: "#ed6c02", qa: "#43a047", devops: "#0d47a1", other: "#484F58",
+};
+function inferPhaseFG(filename: string, creator?: string): string {
+  const f = filename.toLowerCase(); const c = (creator ?? "").toLowerCase();
+  if (f.includes("spec") || c === "spec") return "spec";
+  if (f.includes("cto") || c === "cto") return "cto";
+  if (f.includes("engineer") || c === "engineer") return "engineer";
+  if (f.includes("pm") || f.includes("backlog") || c === "pm") return "pm";
+  if (f.includes("qa") || c === "qa") return "qa";
+  if (f.includes("devops") || f.includes("runbook") || c === "devops") return "devops";
+  return "other";
+}
+
 // ── Build graph data ──────────────────────────────────────────────────────────
 function buildForceData(
   dialogue: DialogueEntry[],
   tasks: TaskItem[],
   codeFiles: CodeFile[],
   activeAgentId?: string,
+  planningDocs: PlanningDoc[] = [],
 ): GraphData {
   const nodes: FGNode[] = [];
   const links: FGLink[] = [];
@@ -84,6 +105,24 @@ function buildForceData(
   }
 
   // ── 2. Tasks ───────────────────────────────────────────────────────────────
+  // ── 2. Planning doc nodes (spec, charter, backlog, proposals) ───────────────
+  const skipDocs = [".json", "spec__", "raw_response"];
+  const visibleDocs = planningDocs.filter((d) =>
+    !skipDocs.some((p) => d.filename.toLowerCase().includes(p))
+  );
+  for (let i = 0; i < visibleDocs.length; i++) {
+    const doc   = visibleDocs[i];
+    const phase = inferPhaseFG(doc.filename, doc.creator);
+    const color = PHASE_COLOR_FG[phase] ?? "#484F58";
+    const agentKey = PHASE_AGENT_KEY[phase] ?? "system";
+    const shortName = (doc.filename.split("/").pop() ?? doc.filename).replace(/\.md$/i, "");
+    const label = (doc.title ?? shortName).slice(0, 30);
+    const nodeId = `doc-${i}`;
+    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: doc.filename });
+    // Connect agent → doc
+    if (seenAgents.has(agentKey)) addLink(`agent-${agentKey}`, nodeId, color + "70");
+  }
+
   // Map owner roles to the agent key as it appears in dialogue (fromAgent normalized)
   const ownerMap: Record<string, string> = {
     DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev", DEV_BACKEND_NODEJS: "dev",
@@ -146,9 +185,10 @@ interface ForceGraphProps {
   projectId: string;
   pollIntervalMs?: number;
   height?: number;
+  planningDocs?: PlanningDoc[];
 }
 
-export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500 }: ForceGraphProps) {
+export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, planningDocs = [] }: ForceGraphProps) {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string; x: number; y: number } | null>(null);
@@ -171,6 +211,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500 }: F
         Array.isArray(tasks) ? tasks : [],
         (codeFilesData as CodeFilesResponse).files ?? [],
         activeAgentId,
+        planningDocs,
       );
 
       setGraphData(data);

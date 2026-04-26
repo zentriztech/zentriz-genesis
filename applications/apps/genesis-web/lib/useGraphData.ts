@@ -1,10 +1,11 @@
 /**
- * useGraphData — transforma dialogue + tasks + artifacts em nós e arestas para o React Flow.
+ * useGraphData — transforma dialogue + tasks + artifacts + docs em nós e arestas.
  *
  * Grafo:
  *   AgentNode (agente que apareceu no diálogo)
- *     └─→ TaskNode  (tasks do projeto)
- *           └─→ ArtifactNode (arquivos gerados em apps/)
+ *     ├─→ DocNode   (documentos gerados durante planejamento: spec, charter, backlog, proposals)
+ *     ├─→ TaskNode  (tasks do Monitor Loop)
+ *     └─→ ArtifactNode (arquivos gerados em apps/ pelo Dev)
  */
 
 import type { Node, Edge } from "@xyflow/react";
@@ -37,7 +38,16 @@ export interface ArtifactNodeData extends Record<string, unknown> {
   sizeBytes: number;
 }
 
-export type GraphNode = Node<AgentNodeData | TaskNodeData | ArtifactNodeData>;
+export interface DocNodeData extends Record<string, unknown> {
+  nodeType: "doc";
+  filename: string;
+  title: string;
+  creator: string;          // agent id
+  createdAt: string;
+  phase: "spec" | "cto" | "engineer" | "pm" | "qa" | "devops" | "other";
+}
+
+export type GraphNode = Node<AgentNodeData | TaskNodeData | ArtifactNodeData | DocNodeData>;
 export type GraphEdge = Edge;
 
 // ── Pipeline stages (ordem de execução) ──────────────────────────────────────
@@ -50,12 +60,38 @@ function agentX(id: string): number {
 }
 
 // ── Build graph from data ─────────────────────────────────────────────────────
+export interface PlanningDoc {
+  filename: string;
+  title?: string;
+  creator?: string;
+  created_at?: string;
+}
+
 export interface GraphDataInput {
   dialogueEntries: DialogueEntry[];
   tasks: Array<{ id: string; taskId: string; ownerRole?: string; requirements?: string; status?: string }>;
   codeFiles: Array<{ path: string; sizeBytes: number; ext: string }>;
-  activeAgentId?: string;   // agent currently working (from last agent_working event)
+  planningDocs?: PlanningDoc[];  // from /api/projects/:id/artifacts manifest
+  activeAgentId?: string;
 }
+
+// Map filename patterns to phase and creator agent
+function inferDocPhase(filename: string, creator?: string): DocNodeData["phase"] {
+  const f = filename.toLowerCase();
+  const c = (creator ?? "").toLowerCase();
+  if (f.includes("spec") || c === "spec") return "spec";
+  if (f.includes("cto") || c === "cto") return "cto";
+  if (f.includes("engineer") || c === "engineer") return "engineer";
+  if (f.includes("pm") || f.includes("backlog") || c === "pm") return "pm";
+  if (f.includes("qa") || c === "qa") return "qa";
+  if (f.includes("devops") || f.includes("runbook") || c === "devops") return "devops";
+  return "other";
+}
+
+const PHASE_AGENT: Record<DocNodeData["phase"], string> = {
+  spec: "system", cto: "cto", engineer: "engineer",
+  pm: "pm", qa: "qa", devops: "devops", other: "system",
+};
 
 export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const { dialogueEntries, tasks, codeFiles, activeAgentId } = input;
@@ -113,7 +149,47 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     }
   }
 
-  // ── 2. Task nodes (below agents) ─────────────────────────────────────────────
+  // ── 2. Doc nodes (planning phase documents — between agents and tasks) ────────
+  const planningDocs = input.planningDocs ?? [];
+  // Skip raw JSON dumps and spec upload files
+  const skipPatterns = [".json", "spec__", "raw_response"];
+  const visibleDocs = planningDocs.filter((d) =>
+    !skipPatterns.some((p) => d.filename.toLowerCase().includes(p))
+  );
+
+  const DOC_START_X = 900; // to the right of agent chain
+  const DOC_ROW_Y   = 0;
+  const DOC_ROW_H   = 70;
+
+  for (let idx = 0; idx < visibleDocs.length; idx++) {
+    const doc   = visibleDocs[idx];
+    const phase = inferDocPhase(doc.filename, doc.creator);
+    const agentKey = PHASE_AGENT[phase];
+    const nodeId = `doc-${idx}`;
+
+    nodes.push({
+      id: nodeId,
+      type: "docNode",
+      position: { x: DOC_START_X, y: DOC_ROW_Y + idx * DOC_ROW_H },
+      data: {
+        nodeType: "doc",
+        filename: doc.filename,
+        title: doc.title ?? doc.filename,
+        creator: doc.creator ?? agentKey,
+        createdAt: doc.created_at ?? "",
+        phase,
+      } satisfies DocNodeData,
+    });
+
+    // Edge: agent → doc
+    if (seenAgents.has(agentKey)) {
+      addEdge(`agent-${agentKey}`, nodeId, {
+        style: { stroke: "#F59E0B55", strokeWidth: 1, strokeDasharray: "4 3" },
+      });
+    }
+  }
+
+  // ── 4. Task nodes (below agents) ─────────────────────────────────────────────
   const TASK_ROW_Y   = 160;
   const TASK_COLS    = 4;
   const TASK_COL_W   = 180;

@@ -25,8 +25,9 @@ import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import { AgentNode }    from "@/components/graph/AgentNode";
 import { TaskNode }     from "@/components/graph/TaskNode";
 import { ArtifactNode } from "@/components/graph/ArtifactNode";
+import { DocNode }      from "@/components/graph/DocNode";
 import { ForceGraph }   from "@/components/graph/ForceGraph";
-import { buildGraphData, type GraphNode, type GraphEdge } from "@/lib/useGraphData";
+import { buildGraphData, type GraphNode, type GraphEdge, type PlanningDoc } from "@/lib/useGraphData";
 import { apiGet } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 
@@ -35,6 +36,7 @@ const nodeTypes: NodeTypes = {
   agentNode:    AgentNode,
   taskNode:     TaskNode,
   artifactNode: ArtifactNode,
+  docNode:      DocNode,
 };
 
 type TaskItem    = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string };
@@ -46,10 +48,11 @@ interface GraphViewProps {
   projectId: string;
   pollIntervalMs?: number;
   height?: number | string;
+  planningDocs?: PlanningDoc[];
 }
 
 // ── Hierarchy (React Flow) — inner component that can call useReactFlow ─────────
-function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480 }: GraphViewProps) {
+function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, planningDocs }: GraphViewProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<GraphEdge>([]);
   const [loading, setLoading] = useState(true);
@@ -69,6 +72,7 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480 }:
         dialogueEntries: Array.isArray(dialogue) ? dialogue : [],
         tasks: Array.isArray(tasksData) ? tasksData : [],
         codeFiles: (codeFilesData as CodeFilesResponse).files ?? [],
+        planningDocs: planningDocs ?? [],
         activeAgentId: lastWorking?.fromAgent ?? undefined,
       });
       setNodes(newNodes);
@@ -110,15 +114,11 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480 }:
 }
 
 function HierarchyGraph(props: GraphViewProps) {
-  return (
-    <ReactFlowProvider>
-      <HierarchyGraphInner {...props} />
-    </ReactFlowProvider>
-  );
+  return <ReactFlowProvider><HierarchyGraphInner {...props} /></ReactFlowProvider>;
 }
 
 // ── Main GraphView with mode toggle + fullscreen ──────────────────────────────
-function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500 }: GraphViewProps) {
+function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planningDocs }: GraphViewProps) {
   const [mode, setMode]         = useState<GraphMode>("force");
   const [fullscreen, setFullscreen] = useState(false);
   const h = typeof height === "number" ? height : 500;
@@ -127,8 +127,8 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500 }: Grap
     // ForceGraph needs a numeric pixel height; for fullscreen use window height estimate
     const numH = typeof fsHeight === "number" ? fsHeight : (typeof window !== "undefined" ? window.innerHeight - 60 : 700);
     return mode === "force"
-      ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={numH} />
-      : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={fsHeight} />;
+      ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={numH} planningDocs={planningDocs} />
+      : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={fsHeight} planningDocs={planningDocs} />;
   };
 
   return (

@@ -761,6 +761,7 @@ function ProjectDetailPageInner() {
                   projectId={id}
                   pollIntervalMs={isRunning ? 6000 : 0}
                   height={500}
+                  planningDocs={artifacts?.docs ?? []}
                 />
               </Box>
             )}
