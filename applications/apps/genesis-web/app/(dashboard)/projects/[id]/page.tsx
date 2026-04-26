@@ -75,6 +75,8 @@ type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; titl
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
+type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
+type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
 type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string; status: string; expiresAt: string; ttlMinutes: number } | null };
 type EphemeralResult   = { deploymentId: string; provider: string; appUrl: string; expiresAt: string; ttlMinutes: number };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
@@ -178,6 +180,7 @@ function ProjectDetailPageInner() {
   const [metrics, setMetrics]     = useState<MetricsResp | null>(null);
   const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
+  const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | null>(null);
   const [countdown, setCountdown]   = useState<string>("");
@@ -243,6 +246,9 @@ function ProjectDetailPageInner() {
       apiGet<GithubRepoResp>(`/api/projects/${id}/github-repo`)
         .then((d) => setGithubRepo(d.repo))
         .catch(() => setGithubRepo(null));
+      apiGet<VersionsResp>(`/api/projects/${id}/versions`)
+        .then((d) => setVersions(d.versions ?? []))
+        .catch(() => setVersions([]));
       // Load active ephemeral deployment
       apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
         .then((d) => {
@@ -620,6 +626,57 @@ function ProjectDetailPageInner() {
                 </Stack>
               </CardContent>
             </Card>
+
+            {/* Version history */}
+            {versions.length > 1 && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary"
+                      sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
+                      Versões do produto
+                    </Typography>
+                    {isDone && (
+                      <Tooltip title="Nova versão — enviar nova spec">
+                        <Button size="small" startIcon={<PlayArrowIcon sx={{ fontSize: "0.8rem !important" }} />}
+                          onClick={() => router.push(`/spec?parentProjectId=${id}&parentTitle=${encodeURIComponent(project.title ?? "")}`)}
+                          sx={{ fontSize: "0.65rem", py: 0.2, px: 0.75, minWidth: "auto" }}>
+                          v{versions.length + 1}
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </Stack>
+                  <Stack spacing={0.5}>
+                    {versions.map((v) => (
+                      <Box
+                        key={v.id}
+                        onClick={() => v.id !== id && router.push(`/projects/${v.id}`)}
+                        sx={{
+                          display: "flex", alignItems: "center", gap: 1, px: 1, py: 0.5,
+                          borderRadius: 0.75, cursor: v.id !== id ? "pointer" : "default",
+                          bgcolor: v.isCurrent ? "primary.main" + "14" : "transparent",
+                          border: v.isCurrent ? "1px solid" : "1px solid transparent",
+                          borderColor: v.isCurrent ? "primary.main" + "40" : "transparent",
+                          "&:hover": { bgcolor: v.id !== id ? "action.hover" : undefined },
+                        }}
+                      >
+                        <Typography variant="caption" fontWeight={700}
+                          sx={{ color: v.isCurrent ? "primary.main" : "text.secondary", minWidth: 20, fontSize: "0.65rem" }}>
+                          v{v.versionNumber}
+                        </Typography>
+                        <Typography variant="caption" noWrap sx={{ flexGrow: 1, fontSize: "0.7rem",
+                          color: v.isCurrent ? "text.primary" : "text.secondary" }}>
+                          {v.isCurrent ? "atual" : new Date(v.createdAt).toLocaleDateString("pt-BR", { day:"2-digit", month:"short" })}
+                        </Typography>
+                        <Chip size="small" label={v.status}
+                          color={v.status === "accepted" || v.status === "completed" ? "success" : v.status === "running" ? "info" : "default"}
+                          sx={{ fontSize: "0.55rem", height: 14 }} />
+                      </Box>
+                    ))}
+                  </Stack>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Charter summary */}
             {project.charterSummary && (

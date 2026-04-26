@@ -71,6 +71,8 @@ export async function projectRoutes(app: FastifyInstance) {
         updatedAt: (row.updated_at as Date)?.toISOString(),
         startedAt: (row.started_at as Date)?.toISOString() ?? undefined,
         completedAt: (row.completed_at as Date)?.toISOString() ?? undefined,
+        parentProjectId: (row.parent_project_id as string | null) ?? null,
+        versionNumber: (row.version_number as number | null) ?? 1,
       }));
       return reply.send(projects);
     } finally {
@@ -105,6 +107,8 @@ export async function projectRoutes(app: FastifyInstance) {
         updatedAt: (row.updated_at as Date).toISOString(),
         startedAt: (row.started_at as Date)?.toISOString() ?? undefined,
         completedAt: (row.completed_at as Date)?.toISOString() ?? undefined,
+        parentProjectId: (row as Record<string, unknown>).parent_project_id as string | null ?? null,
+        versionNumber: (row as Record<string, unknown>).version_number as number ?? 1,
       });
     } finally {
       client.release();
@@ -357,6 +361,57 @@ export async function projectRoutes(app: FastifyInstance) {
         projectDocsRoot: docsDir,
         projectArtifactsRoot: projectDir,
       });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/versions — retorna toda a linhagem de versões do produto
+  app.get<{ Params: { id: string } }>("/api/projects/:id/versions", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query("SELECT id, tenant_id, created_by, parent_project_id FROM projects WHERE id=$1", [id])).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      // Find root of this lineage
+      let rootId = id;
+      if (row.parent_project_id) {
+        const parentRow = (await client.query("SELECT id, parent_project_id FROM projects WHERE id=$1", [row.parent_project_id])).rows[0];
+        rootId = parentRow?.parent_project_id ? (parentRow.parent_project_id as string) : (row.parent_project_id as string);
+      }
+
+      // Get all versions: root + all descendants
+      const versionsRes = await client.query(
+        `WITH RECURSIVE lineage AS (
+           SELECT id, title, status, version_number, parent_project_id, created_at, updated_at, started_at, completed_at
+           FROM projects WHERE id = $1
+           UNION ALL
+           SELECT p.id, p.title, p.status, p.version_number, p.parent_project_id, p.created_at, p.updated_at, p.started_at, p.completed_at
+           FROM projects p JOIN lineage l ON p.parent_project_id = l.id
+         )
+         SELECT * FROM lineage ORDER BY version_number ASC`,
+        [rootId],
+      );
+
+      const versions = versionsRes.rows.map((v) => ({
+        id: v.id,
+        title: v.title,
+        status: v.status,
+        versionNumber: v.version_number,
+        parentProjectId: v.parent_project_id,
+        createdAt: (v.created_at as Date).toISOString(),
+        updatedAt: (v.updated_at as Date).toISOString(),
+        startedAt: (v.started_at as Date)?.toISOString() ?? null,
+        completedAt: (v.completed_at as Date)?.toISOString() ?? null,
+        isCurrent: v.id === id,
+      }));
+
+      return reply.send({ versions, rootId, currentId: id });
     } finally {
       client.release();
     }

@@ -22,11 +22,40 @@ import ListIcon from "@mui/icons-material/List";
 import SendIcon from "@mui/icons-material/Send";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import { projectsStore } from "@/stores/projectsStore";
 import type { Project } from "@/types";
 
 const MotionCard = motion(Card);
 const MotionBox  = motion(Box);
+
+// ── Build lineage groups ──────────────────────────────────────────────────────
+// Returns: rootProjects (with .children = subsequent versions)
+interface ProjectGroup { root: Project; versions: Project[] }
+
+function buildLineageGroups(projects: Project[]): ProjectGroup[] {
+  const byId = new Map(projects.map((p) => [p.id, p]));
+  const groups: ProjectGroup[] = [];
+  const handled = new Set<string>();
+
+  for (const p of projects) {
+    if (handled.has(p.id)) continue;
+    if (!p.parentProjectId) {
+      // root — find all children
+      const children = projects
+        .filter((c) => c.parentProjectId === p.id || (byId.get(c.parentProjectId ?? "")?.parentProjectId === p.id))
+        .sort((a, b) => (a.versionNumber ?? 1) - (b.versionNumber ?? 1));
+      children.forEach((c) => handled.add(c.id));
+      handled.add(p.id);
+      groups.push({ root: p, versions: [p, ...children] });
+    }
+  }
+  // Orphans (parent deleted etc.)
+  for (const p of projects) {
+    if (!handled.has(p.id)) groups.push({ root: p, versions: [p] });
+  }
+  return groups;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const STATUS_LABELS: Record<string, string> = {
@@ -63,6 +92,33 @@ function elapsedLabel(iso?: string): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+// ── New version button ────────────────────────────────────────────────────────
+function NewVersionButton({ project }: { project: Project }) {
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
+
+  if (project.status !== "accepted" && project.status !== "completed") return null;
+
+  const handleNewVersion = async () => {
+    setLoading(true);
+    try {
+      // Open spec upload page with parentProjectId pre-filled
+      router.push(`/spec?parentProjectId=${project.id}&parentTitle=${encodeURIComponent(project.title ?? "")}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Tooltip title="Criar nova versão deste produto">
+      <IconButton size="small" onClick={handleNewVersion} disabled={loading}
+        sx={{ color: "primary.main", "&:hover": { bgcolor: "primary.main" + "18" } }}>
+        <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />
+      </IconButton>
+    </Tooltip>
+  );
+}
+
 // ── Project Card (grid view) ──────────────────────────────────────────────────
 function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number }) {
   const router  = useRouter();
@@ -90,17 +146,26 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
         sx={{ height: 3, borderRadius: "8px 8px 0 0", bgcolor: "divider" }}
       />
       <CardContent sx={{ flexGrow: 1, pt: 1.5 }}>
-        {/* Title + Status */}
+        {/* Title + Version badge + Status */}
         <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} sx={{ mb: 1 }}>
-          <Typography variant="subtitle2" fontWeight={600} sx={{ lineHeight: 1.4 }} noWrap>
-            {project.title ?? "Spec sem título"}
-          </Typography>
-          <Chip
-            label={STATUS_LABELS[project.status] ?? project.status}
-            size="small"
-            color={statusColor(project.status)}
-            sx={{ flexShrink: 0, fontSize: "0.65rem" }}
-          />
+          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0, flexGrow: 1 }}>
+            {(project.versionNumber ?? 1) > 1 && (
+              <Chip label={`v${project.versionNumber}`} size="small"
+                sx={{ height: 16, fontSize: "0.6rem", bgcolor: "primary.main" + "22", color: "primary.main", flexShrink: 0 }} />
+            )}
+            <Typography variant="subtitle2" fontWeight={600} sx={{ lineHeight: 1.4 }} noWrap>
+              {project.title ?? "Spec sem título"}
+            </Typography>
+          </Stack>
+          <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+            <NewVersionButton project={project} />
+            <Chip
+              label={STATUS_LABELS[project.status] ?? project.status}
+              size="small"
+              color={statusColor(project.status)}
+              sx={{ fontSize: "0.65rem" }}
+            />
+          </Stack>
         </Stack>
 
         {/* Spec ref */}
@@ -191,6 +256,7 @@ function ProjectsPageInner() {
   const running   = projects.filter((p) => p.status === "running");
   const rest      = projects.filter((p) => p.status !== "running");
   const sorted    = [...running, ...rest];
+  const groups    = buildLineageGroups(sorted);
 
   useEffect(() => { projectsStore.loadProjects(); }, []);
 
@@ -238,16 +304,39 @@ function ProjectsPageInner() {
         </Card>
       )}
 
-      {/* Grid view */}
+      {/* Grid view — grouped by lineage */}
       <AnimatePresence mode="wait">
-        {view === "grid" && sorted.length > 0 && (
-          <Grid key="grid" container spacing={2}>
-            {sorted.map((p, i) => (
-              <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
-                <ProjectCard project={p} delay={i} />
-              </Grid>
+        {view === "grid" && groups.length > 0 && (
+          <Box key="grid">
+            {groups.map((group, gi) => (
+              <Box key={group.root.id} sx={{ mb: group.versions.length > 1 ? 3 : 0 }}>
+                {/* Multi-version group: show as timeline */}
+                {group.versions.length > 1 ? (
+                  <Box>
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                      <Typography variant="caption" color="text.secondary"
+                        sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem" }}>
+                        {group.root.title ?? "Produto"} · {group.versions.length} versões
+                      </Typography>
+                    </Stack>
+                    <Grid container spacing={2}>
+                      {group.versions.map((p, i) => (
+                        <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
+                          <ProjectCard project={p} delay={gi * 2 + i} />
+                        </Grid>
+                      ))}
+                    </Grid>
+                  </Box>
+                ) : (
+                  <Grid container spacing={2}>
+                    <Grid size={{ xs: 12, sm: 6, md: 4 }}>
+                      <ProjectCard project={group.root} delay={gi} />
+                    </Grid>
+                  </Grid>
+                )}
+              </Box>
             ))}
-          </Grid>
+          </Box>
         )}
 
         {/* List view */}

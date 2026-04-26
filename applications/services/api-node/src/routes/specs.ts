@@ -26,6 +26,7 @@ export async function specRoutes(app: FastifyInstance) {
     }
 
     let title = "Spec sem título";
+    let parentProjectId: string | null = null;
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -46,6 +47,14 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) title = raw;
+      }
+      if (part.fields?.parentProjectId !== undefined) {
+        const ppField = part.fields.parentProjectId;
+        const v = Array.isArray(ppField) ? ppField[0] : ppField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim()
+          : "";
+        if (raw) parentProjectId = raw;
       }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -72,9 +81,33 @@ export async function specRoutes(app: FastifyInstance) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
       }
 
+      // Compute version_number: find the root project and count existing versions
+      let versionNumber = 1;
+      let rootParentId: string | null = parentProjectId;
+      if (parentProjectId) {
+        // Walk up to root if parent is itself a child
+        const parentRow = await client.query(
+          "SELECT parent_project_id, version_number FROM projects WHERE id = $1",
+          [parentProjectId]
+        );
+        const parent = parentRow.rows[0];
+        if (parent?.parent_project_id) {
+          rootParentId = parent.parent_project_id as string;
+        }
+        // Count existing versions in this lineage (root + all children)
+        const countRes = await client.query(
+          `SELECT COUNT(*) FROM projects
+           WHERE id = $1 OR parent_project_id = $1 OR
+                 parent_project_id IN (SELECT id FROM projects WHERE parent_project_id = $1)`,
+          [rootParentId ?? parentProjectId]
+        );
+        versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
+      }
+
       const projectResult = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [tenantId, user.id, title, files[0].filename, "spec_submitted"]
+        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber]
       );
       projectId = projectResult.rows[0].id;
     } finally {

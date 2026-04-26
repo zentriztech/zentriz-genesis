@@ -339,6 +339,44 @@ export async function ensureThreeBranches(
   await createBranchIfNotExists(installationId, owner, repo, "dev", "staging");
 }
 
+/**
+ * Sets (or updates) a GitHub Actions secret in a repository.
+ * The value is encrypted with the repo's public key using libsodium before sending.
+ *
+ * Requires: tweetsodium (npm install tweetsodium)
+ */
+export async function setRepoSecret(
+  installationId: number,
+  owner: string,
+  repo: string,
+  secretName: string,
+  secretValue: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const sodium = require("tweetsodium") as {
+    seal: (message: Uint8Array, recipientPublicKey: Uint8Array) => Uint8Array;
+  };
+
+  const octokit = await getOctokitForInstallation(installationId);
+
+  // Get repo public key for encrypting the secret
+  const { data: keyData } = await octokit.rest.actions.getRepoPublicKey({ owner, repo });
+
+  // Encrypt secret value with the repo public key
+  const messageBytes  = Buffer.from(secretValue);
+  const keyBytes      = Buffer.from(keyData.key, "base64");
+  const encryptedBytes = sodium.seal(messageBytes, keyBytes);
+  const encryptedValue = Buffer.from(encryptedBytes).toString("base64");
+
+  await octokit.rest.actions.createOrUpdateRepoSecret({
+    owner,
+    repo,
+    secret_name: secretName,
+    encrypted_value: encryptedValue,
+    key_id: keyData.key_id,
+  });
+}
+
 export async function createWorkflow(
   installationId: number,
   opts: {

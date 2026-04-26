@@ -58,6 +58,10 @@ export interface Project {
   startedAt?: string;
   /** Fim do processo (ex.: quando status passou a completed). */
   completedAt?: string;
+  /** ID do projeto pai (null = primeira versão do produto). */
+  parentProjectId?: string | null;
+  /** Número da versão dentro da linhagem (1 = original, 2 = v2, etc.). */
+  versionNumber?: number;
 }
 
 export interface Notification {

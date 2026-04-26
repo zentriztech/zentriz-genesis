@@ -25,7 +25,8 @@
     "bcrypt": "^6.0.0",
     "fastify": "^4.28.1",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.18.0"
+    "pg": "^8.18.0",
+    "tweetsodium": "^0.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",

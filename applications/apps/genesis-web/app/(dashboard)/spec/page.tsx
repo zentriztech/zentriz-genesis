@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useRef, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import TextField from "@mui/material/TextField";
@@ -35,12 +35,22 @@ function getFileExtension(name: string): string {
 
 export default function SpecPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SubmitResponse | null>(null);
+  const [parentProjectId, setParentProjectId] = useState<string | null>(null);
+  const [parentTitle, setParentTitle] = useState<string | null>(null);
+
+  useEffect(() => {
+    const pp = searchParams?.get("parentProjectId");
+    const pt = searchParams?.get("parentTitle");
+    if (pp) setParentProjectId(pp);
+    if (pt) setParentTitle(decodeURIComponent(pt));
+  }, [searchParams]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const chosen = e.target.files;
@@ -67,6 +77,7 @@ export default function SpecPage() {
     try {
       const formData = new FormData();
       formData.append("title", title.trim() || "Spec sem título");
+      if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       files.forEach((file) => formData.append("files", file));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       setResult(data);
@@ -111,6 +122,18 @@ export default function SpecPage() {
       )}
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      {/* New version context banner */}
+      {parentProjectId && parentTitle && (
+        <Alert severity="info" sx={{ mb: 2 }} icon={<span>🔁</span>}>
+          <Typography variant="body2" fontWeight={500}>
+            Nova versão de <strong>{parentTitle}</strong>
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            O novo projeto será vinculado como versão seguinte do produto original.
+          </Typography>
+        </Alert>
+      )}
 
       <form onSubmit={handleSubmit}>
         <TextField
