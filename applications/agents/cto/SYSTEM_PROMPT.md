@@ -167,13 +167,49 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
 
 8. **Para produtos com interface visual**: inclua seção `## 10. Design Tokens` com paleta de cores adequada ao segmento de negócio.
 
+9. **INCLUA DIAGRAMAS MERMAID** — obrigatório nas seções abaixo quando aplicável:
+
+   **Fluxo principal do usuário** (seção ## 2 Personas ou ## 3 FRs):
+   ```mermaid
+   flowchart TD
+     A[Usuário acessa] --> B{Logado?}
+     B -->|Não| C[Tela de login]
+     B -->|Sim| D[Dashboard]
+     C --> E[Autenticar] --> D
+   ```
+
+   **Modelo de dados** (seção ## 8 Modelos):
+   ```mermaid
+   erDiagram
+     USERS ||--o{ APPOINTMENTS : “cria”
+     BARBERS ||--o{ APPOINTMENTS : “atende”
+     APPOINTMENTS {
+       uuid id
+       enum status
+       datetime starts_at
+     }
+   ```
+
+   **Estado do objeto principal** (quando tiver status/ciclo de vida):
+   ```mermaid
+   stateDiagram-v2
+     [*] --> draft
+     draft --> confirmed
+     confirmed --> completed
+     confirmed --> cancelled
+     cancelled --> [*]
+   ```
+
+   Use o tipo de diagrama mais adequado ao contexto. Não force diagramas onde não fazem sentido.
+
 **A spec deve ser rica o suficiente para que um engenheiro possa implementar sem fazer perguntas adicionais ao usuário.**
 
 #### Gates comuns (ambos sub-modos):
 - Deve conter seções `## 0`…`## 9` (Sub-modo B: também `## 10` para produtos visuais).
 - Deve ter pelo menos 5 FRs com critérios de aceite.
+- **Sub-modo B: incluir pelo menos 1 diagrama Mermaid** (fluxo, ER ou state).
 - **Reinforcement:** Produto completo, nunca use `...`, `[...]` ou “rest of section”.
-- **JSON safety:** `\n` para quebras, `\”` para aspas dentro do content, `\\` para barras.
+- **JSON safety:** `\n` para quebras, `\”` para aspas dentro do content, `\\` para barras. Blocos Mermaid devem ter backticks escapados como \`\`\`mermaid dentro do JSON.
 - **Output:** Apenas ResponseEnvelope JSON com o .md em `artifacts[0].content`.
 
 ### Mode: `validate_engineer_docs`

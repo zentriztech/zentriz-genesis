@@ -37,6 +37,27 @@ import { projectsStore } from "@/stores/projectsStore";
 // Lazy-load react-markdown (heavy, browser-only)
 const ReactMarkdown = dynamic(() => import("react-markdown"), { ssr: false });
 
+// ── Mermaid block renderer ────────────────────────────────────────────────────
+function MermaidBlock({ code }: { code: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2, 8)}`);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    import("mermaid").then((m) => {
+      const mermaid = m.default;
+      mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose" });
+      mermaid.render(idRef.current, code).then(({ svg }) => {
+        if (ref.current) ref.current.innerHTML = svg;
+      }).catch(() => {
+        if (ref.current) ref.current.innerHTML = `<pre style="font-size:0.72rem;color:#8B949E">${code}</pre>`;
+      });
+    });
+  }, [code]);
+
+  return <Box ref={ref} sx={{ my: 1.5, "& svg": { maxWidth: "100%", height: "auto" } }} />;
+}
+
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
 type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
@@ -69,7 +90,17 @@ function MarkdownPreview({ content }: { content: string }) {
         "& hr": { borderColor: "divider", my: 2 },
       }}
     >
-      <ReactMarkdown>{content}</ReactMarkdown>
+      <ReactMarkdown
+        components={{
+          // Intercept code blocks: render mermaid as SVG, others as code
+          code({ className, children }) {
+            const lang = (className ?? "").replace("language-", "");
+            const codeStr = String(children).replace(/\n$/, "");
+            if (lang === "mermaid") return <MermaidBlock code={codeStr} />;
+            return <code className={className}>{children}</code>;
+          },
+        }}
+      >{content}</ReactMarkdown>
     </Box>
   );
 }

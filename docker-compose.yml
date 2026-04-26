@@ -34,6 +34,8 @@ services:
       - PGPASSWORD=genesis_dev
       - PGDATABASE=zentriz_genesis
       - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
