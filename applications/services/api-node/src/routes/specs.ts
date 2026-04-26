@@ -178,57 +178,68 @@ async function httpGet(urlStr: string, timeoutMs = 10_000): Promise<string> {
   });
 }
 
-async function runSpecJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): Promise<void> {
+function runSpecJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): void {
   const job = _specJobs.get(jobId);
   if (!job) return;
   job.status = "running";
 
   const base = agentsUrl.replace(/\/$/, "");
+  const startedAt = Date.now();
+  const MAX_MS = 660_000; // 11 min
 
-  try {
-    // Step 1: Start async job on agents server (returns immediately with agentsJobId)
-    // This avoids long-lived HTTP connections that get torn down by TCP idle timeouts
-    const startText = await httpPost(`${base}/invoke/cto/async`, JSON.stringify(message), 30_000);
-    const startData = JSON.parse(startText) as { jobId: string; status: string };
-    const agentsJobId = startData.jobId;
-    if (!agentsJobId) throw new Error("agents /invoke/cto/async did not return a jobId");
+  // Step 1: fire async job — use setImmediate to not block
+  httpPost(`${base}/invoke/cto/async`, JSON.stringify(message), 30_000)
+    .then((startText) => {
+      const startData = JSON.parse(startText) as { jobId: string };
+      const agentsJobId = startData.jobId;
+      if (!agentsJobId) throw new Error("agents /invoke/cto/async did not return a jobId");
 
-    // Step 2: Poll /invoke/cto/status/:jobId every 8s until done or error
-    // Each poll is a short HTTP request (< 1s) — no timeout risk
-    const deadline = Date.now() + 660_000; // 11 min max
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 8_000));
-      try {
-        const pollText = await httpGet(`${base}/invoke/cto/status/${agentsJobId}`, 60_000);
-        const pollData = JSON.parse(pollText) as {
-          status: string; result?: Record<string, unknown>; error?: string; elapsed?: number;
-        };
-        if (pollData.status === "done" && pollData.result) {
-          job.specMarkdown = extractSpecMarkdown(pollData.result);
-          job.summary = (pollData.result.summary as string | undefined) ?? "";
-          job.status = "done";
+      console.log(`[SpecPreview] job=${jobId} agents_job=${agentsJobId} started`);
+
+      // Step 2: poll via setInterval — NOT async/await loop (avoids Promise GC)
+      const timer = setInterval(() => {
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        if (elapsed > MAX_MS / 1000) {
+          clearInterval(timer);
+          const j = _specJobs.get(jobId);
+          if (j) { j.status = "error"; j.error = "Timeout: CTO demorou mais de 11 minutos."; }
           return;
         }
-        if (pollData.status === "error") {
-          job.status = "error";
-          job.error = pollData.error ?? "CTO job failed";
-          return;
-        }
-        // still running — update elapsed for client display
-        const elapsed = pollData.elapsed ?? 0;
-        console.log(`[SpecPreview] job=${jobId} agents_job=${agentsJobId} elapsed=${elapsed}s`);
-      } catch (pollErr) {
-        // transient poll error — keep trying until deadline
-        const errMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
-        console.warn(`[SpecPreview] poll error job=${jobId} agents=${agentsJobId}: ${errMsg}`);
-      }
-    }
-    job.status = "error";
-    job.error = "Timeout: CTO demorou mais de 11 minutos. Tente novamente com uma descrição mais curta.";
-  } catch (err) {
-    job.status = "error";
-    job.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
-  }
+
+        httpGet(`${base}/invoke/cto/status/${agentsJobId}`, 60_000)
+          .then((pollText) => {
+            const pollData = JSON.parse(pollText) as {
+              status: string; result?: Record<string, unknown>; error?: string; elapsed?: number;
+            };
+            console.log(`[SpecPreview] job=${jobId} agents=${agentsJobId} status=${pollData.status} elapsed=${elapsed}s`);
+            const j = _specJobs.get(jobId);
+            if (!j) { clearInterval(timer); return; }
+
+            if (pollData.status === "done" && pollData.result) {
+              clearInterval(timer);
+              j.specMarkdown = extractSpecMarkdown(pollData.result);
+              j.summary = (pollData.result.summary as string | undefined) ?? "";
+              j.status = "done";
+              console.log(`[SpecPreview] ✓ job=${jobId} DONE — ${j.specMarkdown?.length} chars`);
+            } else if (pollData.status === "error") {
+              clearInterval(timer);
+              j.status = "error";
+              j.error = pollData.error ?? "CTO job failed";
+            }
+          })
+          .catch((pollErr) => {
+            const errMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+            console.warn(`[SpecPreview] poll error job=${jobId} agents=${agentsJobId} elapsed=${elapsed}s: ${errMsg}`);
+          });
+      }, 8_000);
+
+      // Keep timer reference in job so it can be cancelled if needed
+      (job as unknown as Record<string, unknown>)._timer = timer;
+    })
+    .catch((err) => {
+      const j = _specJobs.get(jobId);
+      if (j) { j.status = "error"; j.error = err instanceof Error ? err.message.slice(0, 300) : String(err); }
+    });
 }
 
 export async function specRoutes(app: FastifyInstance) {
@@ -255,8 +266,8 @@ export async function specRoutes(app: FastifyInstance) {
 
       const message = buildCTOMessage(freeText, body.title);
 
-      // Fire and forget — do NOT await; return jobId immediately
-      runSpecJob(jobId, message, agentsUrl).catch(console.error);
+      // Fire and forget — setInterval-based, no Promise to await
+      runSpecJob(jobId, message, agentsUrl);
 
       return reply.status(202).send({ jobId, status: "pending" });
     }
