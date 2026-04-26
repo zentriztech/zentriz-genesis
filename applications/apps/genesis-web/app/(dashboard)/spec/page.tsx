@@ -31,7 +31,7 @@ import PreviewIcon from "@mui/icons-material/Preview";
 import SendIcon from "@mui/icons-material/Send";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { apiPost, apiPostMultipart } from "@/lib/api";
+import { apiGet, apiPost, apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 
 // Lazy-load react-markdown (heavy, browser-only)
@@ -39,7 +39,7 @@ const ReactMarkdown = dynamic(() => import("react-markdown"), { ssr: false });
 
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
 type SubmitResponse = { projectId: string; status: string; message: string };
-type SpecPreviewResponse = { specMarkdown: string; summary: string; status: string };
+type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
 
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
@@ -181,6 +181,9 @@ export default function SpecPage() {
   const [projectTitle, setProjectTitle] = useState("");
   const [generating, setGenerating]     = useState(false);
   const [genError, setGenError]         = useState<string | null>(null);
+  const [genElapsed, setGenElapsed]     = useState(0);
+  const [genPhase, setGenPhase]         = useState<"idle" | "queued" | "thinking" | "writing">("idle");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Spec editor
   const [specMarkdown, setSpecMarkdown] = useState<string | null>(null);
@@ -201,25 +204,62 @@ export default function SpecPage() {
     if (pt) setParentTitle(decodeURIComponent(pt));
   }, [searchParams]);
 
-  // ── Generate spec via CTO ───────────────────────────────────────────────────
+  // ── Generate spec via CTO — async job with polling ─────────────────────────
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+
   const handleGenerate = useCallback(async () => {
     if (!freeText.trim() || freeText.trim().length < 20) {
       setGenError("Descreva o produto com pelo menos 20 caracteres.");
       return;
     }
-    setGenerating(true); setGenError(null);
+    setGenerating(true); setGenError(null); setGenElapsed(0); setGenPhase("queued");
+    stopPolling();
+
+    let jobId: string;
     try {
-      const res = await apiPost<SpecPreviewResponse>("/api/spec-preview", {
+      const res = await apiPost<SpecJobResponse>("/api/spec-preview", {
         freeText: freeText.trim(),
         title: projectTitle.trim() || undefined,
       });
-      setSpecMarkdown(res.specMarkdown);
+      jobId = res.jobId;
+      setGenPhase("thinking");
     } catch (e) {
-      setGenError(e instanceof Error ? e.message : "Erro ao gerar spec.");
-    } finally {
-      setGenerating(false);
+      setGenError(e instanceof Error ? e.message : "Erro ao iniciar geração.");
+      setGenerating(false); setGenPhase("idle");
+      return;
     }
-  }, [freeText, projectTitle]);
+
+    // Poll every 3s until done or error
+    const startTs = Date.now();
+    pollRef.current = setInterval(async () => {
+      const elapsed = Math.round((Date.now() - startTs) / 1000);
+      setGenElapsed(elapsed);
+      // Heuristic phases based on elapsed time
+      if (elapsed > 20) setGenPhase("writing");
+      else if (elapsed > 5) setGenPhase("thinking");
+
+      try {
+        const poll = await apiGet<SpecJobResponse>(`/api/spec-preview/${jobId}`);
+        if (poll.status === "done") {
+          stopPolling();
+          setSpecMarkdown(poll.specMarkdown ?? "");
+          setGenerating(false); setGenPhase("idle");
+        } else if (poll.status === "error") {
+          stopPolling();
+          setGenError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
+          setGenerating(false); setGenPhase("idle");
+        }
+        // still pending/running → keep polling
+      } catch {
+        // network error → keep polling silently
+      }
+    }, 3000);
+  }, [freeText, projectTitle, stopPolling]);
+
+  // Cleanup on unmount
+  useEffect(() => () => stopPolling(), [stopPolling]);
 
   // ── Approve: save spec as .md file and submit ───────────────────────────────
   const handleApprove = useCallback(async () => {
@@ -351,13 +391,33 @@ export default function SpecPage() {
                     </Stack>
 
                     {generating && (
-                      <Box sx={{ mt: 3, p: 2, bgcolor: "action.hover", borderRadius: 1, border: "1px solid", borderColor: "divider" }}>
-                        <Stack direction="row" spacing={1.5} alignItems="center">
-                          <CircularProgress size={20} />
-                          <Box>
-                            <Typography variant="body2" fontWeight={500}>CTO está estruturando a spec…</Typography>
+                      <Box sx={{ mt: 3, p: 2.5, bgcolor: "#6366F108", borderRadius: 1.5, border: "1px solid #6366F130" }}>
+                        <Stack direction="row" spacing={2} alignItems="flex-start">
+                          <CircularProgress size={22} sx={{ flexShrink: 0, mt: 0.25 }} />
+                          <Box sx={{ flexGrow: 1 }}>
+                            <Typography variant="body2" fontWeight={600} sx={{ mb: 0.25 }}>
+                              {genPhase === "queued"   && "Conectando ao CTO…"}
+                              {genPhase === "thinking" && "CTO analisando o produto…"}
+                              {genPhase === "writing"  && "CTO escrevendo a spec completa…"}
+                            </Typography>
                             <Typography variant="caption" color="text.secondary">
-                              Identificando requisitos, arquitetura, personas e critérios de aceite.
+                              {genPhase === "queued"   && "Iniciando sessão com o agente CTO."}
+                              {genPhase === "thinking" && "Identificando domínio, personas, requisitos funcionais e NFRs."}
+                              {genPhase === "writing"  && "Estruturando FRs detalhados, modelo de dados, critérios de aceite e tokens visuais."}
+                            </Typography>
+                            {/* Phase progress bar */}
+                            <Box sx={{ mt: 1.5, display: "flex", gap: 0.5 }}>
+                              {(["queued","thinking","writing"] as const).map((p) => (
+                                <Box key={p} sx={{
+                                  height: 3, flex: 1, borderRadius: 2,
+                                  bgcolor: p === genPhase ? "primary.main" :
+                                    ["queued","thinking","writing"].indexOf(p) < ["queued","thinking","writing"].indexOf(genPhase) ? "success.main" : "divider",
+                                  transition: "background-color 0.4s",
+                                }} />
+                              ))}
+                            </Box>
+                            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: "block" }}>
+                              {genElapsed > 0 ? `${genElapsed}s — ` : ""}A spec completa pode levar 1-3 minutos.
                             </Typography>
                           </Box>
                         </Stack>

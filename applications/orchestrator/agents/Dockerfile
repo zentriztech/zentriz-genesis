@@ -21,4 +21,5 @@ RUN pip install --no-cache-dir -r orchestrator/agents/requirements.txt
 ENV PYTHONPATH=/app
 
 EXPOSE 8000
-CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000"]
+# 2 workers: allows spec-preview background jobs to run without blocking health/other endpoints
+CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "300"]

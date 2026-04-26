@@ -66,10 +66,71 @@ Descrição do usuário: "${freeText.replace(/"/g, '\\"')}"
   };
 }
 
+// ── In-memory job store for spec-preview (no DB needed — jobs are transient) ──
+type JobStatus = "pending" | "running" | "done" | "error";
+interface SpecJob {
+  id: string;
+  status: JobStatus;
+  specMarkdown?: string;
+  summary?: string;
+  error?: string;
+  createdAt: number;
+}
+const _specJobs = new Map<string, SpecJob>();
+
+// Clean up jobs older than 30 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [id, job] of _specJobs) {
+    if (job.createdAt < cutoff) _specJobs.delete(id);
+  }
+}, 5 * 60_000);
+
+function extractSpecMarkdown(data: Record<string, unknown>): string {
+  const artifacts = (data.artifacts as Array<Record<string, unknown>>) ?? [];
+  const artifact = artifacts.find((a) =>
+    typeof a.path === "string" && (a.path.endsWith(".md") || a.path.includes("PRODUCT_SPEC") || a.path.includes("spec"))
+  );
+  return (artifact?.content as string | undefined)
+    ?? (data.summary as string | undefined)
+    ?? "# Spec gerada\n\nO CTO não retornou conteúdo válido. Tente novamente.";
+}
+
+async function runSpecJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): Promise<void> {
+  const job = _specJobs.get(jobId);
+  if (!job) return;
+  job.status = "running";
+
+  try {
+    // CTO pode demorar 3-5 min para spec completa — 360s timeout
+    const res = await fetch(`${agentsUrl.replace(/\/$/, "")}/invoke/cto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(message),
+      signal: AbortSignal.timeout(360_000),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      job.status = "error";
+      job.error = `CTO retornou ${res.status}: ${txt.slice(0, 200)}`;
+      return;
+    }
+
+    const data = await res.json() as Record<string, unknown>;
+    job.specMarkdown = extractSpecMarkdown(data);
+    job.summary = (data.summary as string | undefined) ?? "";
+    job.status = "done";
+  } catch (err) {
+    job.status = "error";
+    job.error = err instanceof Error ? err.message.slice(0, 200) : String(err);
+  }
+}
+
 export async function specRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
 
-  // POST /api/spec-preview — CTO generates a standardized spec from free text (no project created)
+  // POST /api/spec-preview — enqueue CTO job, return jobId immediately
   app.post<{ Body: { freeText: string; title?: string } }>(
     "/api/spec-preview",
     async (request, reply) => {
@@ -84,46 +145,42 @@ export async function specRoutes(app: FastifyInstance) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes não configurado" });
       }
 
+      const jobId = `spj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const job: SpecJob = { id: jobId, status: "pending", createdAt: Date.now() };
+      _specJobs.set(jobId, job);
+
       const message = buildCTOMessage(freeText, body.title);
 
-      try {
-        const res = await fetch(`${agentsUrl.replace(/\/$/, "")}/invoke/cto`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(message),
-          signal: AbortSignal.timeout(130_000), // 130s (CTO pode demorar)
-        });
+      // Fire and forget — do NOT await; return jobId immediately
+      runSpecJob(jobId, message, agentsUrl).catch(console.error);
 
-        if (!res.ok) {
-          const txt = await res.text().catch(() => "");
-          return reply.status(502).send({ code: "AGENT_ERROR", message: `Agente CTO retornou ${res.status}: ${txt.slice(0, 200)}` });
-        }
+      return reply.status(202).send({ jobId, status: "pending" });
+    }
+  );
 
-        const data = await res.json() as Record<string, unknown>;
-        const status = data.status as string ?? "?";
-
-        // Extract spec markdown from artifacts
-        const artifacts = (data.artifacts as Array<Record<string, unknown>>) ?? [];
-        const specArtifact = artifacts.find((a) =>
-          typeof a.path === "string" && (a.path.endsWith(".md") || a.path.includes("PRODUCT_SPEC"))
-        );
-        const specMarkdown: string = (specArtifact?.content as string | undefined)
-          ?? (data.summary as string | undefined)
-          ?? "# Spec gerada\n\nO CTO não retornou conteúdo válido. Tente novamente.";
-
-        return reply.send({
-          specMarkdown,
-          summary: data.summary ?? "",
-          status,
-          requestId: data.request_id ?? message.request_id,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("timeout") || msg.includes("abort")) {
-          return reply.status(504).send({ code: "TIMEOUT", message: "O CTO demorou demais para responder. Tente novamente." });
-        }
-        return reply.status(502).send({ code: "AGENT_ERROR", message: msg.slice(0, 300) });
+  // GET /api/spec-preview/:jobId — poll for job result
+  app.get<{ Params: { jobId: string } }>(
+    "/api/spec-preview/:jobId",
+    async (request, reply) => {
+      const { jobId } = request.params;
+      const job = _specJobs.get(jobId);
+      if (!job) {
+        return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
       }
+
+      if (job.status === "done") {
+        return reply.send({
+          jobId, status: "done",
+          specMarkdown: job.specMarkdown,
+          summary: job.summary,
+        });
+      }
+      if (job.status === "error") {
+        return reply.send({ jobId, status: "error", error: job.error });
+      }
+      // still pending or running
+      const elapsed = Math.round((Date.now() - job.createdAt) / 1000);
+      return reply.send({ jobId, status: job.status, elapsed });
     }
   );
 
