@@ -49,6 +49,7 @@ const STATUSES_ALLOW_RUN = new Set([
 const STATUS_RUNNING = "running";
 
 type ArtifactsResponse = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null; projectArtifactsRoot: string | null };
+type CodeFilesResponse = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 
 /** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
@@ -108,6 +109,7 @@ function ProjectDetailPageInner() {
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
   const [workingMessage, setWorkingMessage] = useState<string | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
+  const [codeFiles, setCodeFiles] = useState<CodeFilesResponse | null>(null);
   const [tasks, setTasks] = useState<TaskItem[] | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const project = projectsStore.getById(id);
@@ -142,6 +144,7 @@ function ProjectDetailPageInner() {
   useEffect(() => {
     if (!id) return;
     apiGet<ArtifactsResponse>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => setArtifacts(null));
+    apiGet<CodeFilesResponse>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => setCodeFiles(null));
   }, [id, project?.status]);
 
   // Tasks — polling automático a cada 8s enquanto rodando
@@ -495,6 +498,13 @@ function ProjectDetailPageInner() {
                 : "Artefatos"
             }
           />
+          <Tab
+            label={
+              codeFiles && codeFiles.totalFiles > 0
+                ? `Código Gerado (${codeFiles.totalFiles})`
+                : "Código Gerado"
+            }
+          />
         </Tabs>
 
         {/* Aba 0 — Diálogo */}
@@ -642,7 +652,104 @@ function ProjectDetailPageInner() {
             )}
           </Box>
         )}
+        {/* Aba 3 — Código Gerado */}
+        {activeTab === 3 && (
+          <Box sx={{ p: 2 }}>
+            {!codeFiles || codeFiles.totalFiles === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                Nenhum arquivo de código gerado ainda. Os arquivos aparecerão aqui após o Dev concluir as tasks.
+              </Typography>
+            ) : (
+              <>
+                {codeFiles.appsRoot && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                    Raiz:{" "}
+                    <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5, fontSize: "0.8em" }}>
+                      {codeFiles.appsRoot}
+                    </Box>
+                  </Typography>
+                )}
+                {(() => {
+                  // Group by extension for summary
+                  const byExt: Record<string, number> = {};
+                  for (const f of codeFiles.files) {
+                    const k = f.ext || "outros";
+                    byExt[k] = (byExt[k] ?? 0) + 1;
+                  }
+                  return (
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 2 }}>
+                      {Object.entries(byExt).map(([ext, count]) => (
+                        <Chip key={ext} size="small" label={`.${ext} (${count})`} variant="outlined" />
+                      ))}
+                    </Stack>
+                  );
+                })()}
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 600 }}>Arquivo</TableCell>
+                      <TableCell sx={{ fontWeight: 600, width: 90, textAlign: "right" }}>Tamanho</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {codeFiles.files.map((f, i) => (
+                      <TableRow key={i} sx={{ "& td": { py: 0.4 } }}>
+                        <TableCell>
+                          <Typography variant="body2" fontFamily="monospace" sx={{ fontSize: "0.78rem" }}>
+                            {f.path}
+                          </Typography>
+                        </TableCell>
+                        <TableCell sx={{ textAlign: "right" }}>
+                          <Typography variant="caption" color="text.secondary">
+                            {f.sizeBytes >= 1024 ? `${(f.sizeBytes / 1024).toFixed(1)} KB` : `${f.sizeBytes} B`}
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </>
+            )}
+          </Box>
+        )}
       </MotionCard>
+
+      {/* Métricas do projeto */}
+      {(project.status === "completed" || project.status === "accepted") && (
+        <MotionCard variant="outlined" sx={{ mt: 3, p: 2 }} {...blockMotion}>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom fontWeight={600}>
+            Métricas do Pipeline
+          </Typography>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={3} flexWrap="wrap" useFlexGap>
+            {tasks && tasks.length > 0 && (
+              <Box>
+                <Typography variant="caption" color="text.secondary">Tasks executadas</Typography>
+                <Typography variant="h6" fontWeight={600}>
+                  {tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length}/{tasks.length}
+                </Typography>
+              </Box>
+            )}
+            {codeFiles && codeFiles.totalFiles > 0 && (
+              <Box>
+                <Typography variant="caption" color="text.secondary">Arquivos gerados</Typography>
+                <Typography variant="h6" fontWeight={600}>{codeFiles.totalFiles}</Typography>
+              </Box>
+            )}
+            {duration && (
+              <Box>
+                <Typography variant="caption" color="text.secondary">Duração total</Typography>
+                <Typography variant="h6" fontWeight={600}>{duration}</Typography>
+              </Box>
+            )}
+            <Box>
+              <Typography variant="caption" color="text.secondary">Custo estimado (tokens)</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                Disponível em breve (G23)
+              </Typography>
+            </Box>
+          </Stack>
+        </MotionCard>
+      )}
 
       <Box sx={{ mt: 3 }}>
         <Button variant="outlined" disabled size="small" sx={{ mr: 1 }}>

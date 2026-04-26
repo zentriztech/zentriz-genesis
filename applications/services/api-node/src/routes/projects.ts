@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { readFile } from "fs/promises";
+import { readFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
@@ -348,6 +348,64 @@ export async function projectRoutes(app: FastifyInstance) {
         docs,
         projectDocsRoot: docsDir,
         projectArtifactsRoot: projectDir,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/code-files — lista arquivos gerados em apps/ (código do produto)
+  app.get<{ Params: { id: string } }>("/api/projects/:id/code-files", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const result = await client.query(
+        "SELECT id, tenant_id, created_by FROM projects WHERE id = $1",
+        [id]
+      );
+      const row = result.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      const root = process.env.PROJECT_FILES_ROOT?.trim();
+      if (!root) return reply.send({ files: [], appsRoot: null, totalFiles: 0 });
+
+      const appsDir = path.join(root, id, "apps");
+      const files: Array<{ path: string; sizeBytes: number; ext: string }> = [];
+
+      async function walk(dir: string): Promise<void> {
+        let entries: string[];
+        try {
+          entries = await readdir(dir);
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (entry === "node_modules" || entry === ".next" || entry === "dist" || entry === ".git") continue;
+          const full = path.join(dir, entry);
+          let s: Awaited<ReturnType<typeof stat>>;
+          try { s = await stat(full); } catch { continue; }
+          if (s.isDirectory()) {
+            await walk(full);
+          } else {
+            const rel = path.relative(appsDir, full);
+            files.push({ path: rel, sizeBytes: s.size, ext: path.extname(entry).slice(1) });
+          }
+        }
+      }
+
+      await walk(appsDir).catch(() => {});
+
+      files.sort((a, b) => a.path.localeCompare(b.path));
+
+      const hostRoot = process.env.HOST_PROJECT_FILES_ROOT?.trim() ?? root;
+      return reply.send({
+        files,
+        appsRoot: path.join(hostRoot, id, "apps"),
+        totalFiles: files.length,
       });
     } finally {
       client.release();
