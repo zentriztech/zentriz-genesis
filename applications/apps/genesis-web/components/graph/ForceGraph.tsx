@@ -174,14 +174,18 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500 }: F
 
   // ── Node canvas painter ────────────────────────────────────────────────────
   const paintNode = useCallback((node: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const n = node as FGNode & { x: number; y: number };
+    const n = node as FGNode & { x?: number; y?: number };
+    // Guard: physics hasn't assigned coordinates yet — skip this frame
+    if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
+    const x = n.x as number;
+    const y = n.y as number;
     const r = (n.size ?? 5) * (n.isActive ? 1.4 : 1);
 
     // Glow for active agent
     if (n.isActive) {
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r * 2.2, 0, 2 * Math.PI);
-      const grd = ctx.createRadialGradient(n.x, n.y, r, n.x, n.y, r * 2.2);
+      ctx.arc(x, y, r * 2.2, 0, 2 * Math.PI);
+      const grd = ctx.createRadialGradient(x, y, r, x, y, r * 2.2);
       grd.addColorStop(0, n.color + "60");
       grd.addColorStop(1, n.color + "00");
       ctx.fillStyle = grd;
@@ -190,7 +194,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500 }: F
 
     // Main circle
     ctx.beginPath();
-    ctx.arc(n.x, n.y, r, 0, 2 * Math.PI);
+    ctx.arc(x, y, r, 0, 2 * Math.PI);
     ctx.fillStyle = n.type === "agent" ? n.color : n.color + "CC";
     ctx.fill();
 
@@ -208,7 +212,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500 }: F
       ctx.textAlign    = "center";
       ctx.textBaseline = "middle";
       ctx.fillStyle    = n.type === "agent" ? "#E6EDF3" : n.color;
-      ctx.fillText(n.label, n.x, n.y + r + fontSize * 1.1);
+      ctx.fillText(n.label, x, y + r + fontSize * 1.1);
     }
   }, []);
 
