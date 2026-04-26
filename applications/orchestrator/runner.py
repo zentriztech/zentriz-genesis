@@ -1008,6 +1008,10 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
             logger.warning("[Local Deploy] Não foi possível abrir o browser: %s", e)
             _post_step(f"Aplicação disponível em {url} — abra no browser manualmente.", request_id)
 
+    # MAX_DEPLOY_WAIT_SECS: quanto tempo (em segundos) o runner aguarda o start.sh antes de
+    # encerrar o processo de deploy. O app continua rodando no host; o runner só para de monitorar.
+    MAX_DEPLOY_WAIT_SECS = int(os.environ.get("LOCAL_DEPLOY_MAX_WAIT_SECS", "120"))
+
     def _run() -> None:
         try:
             proc = subprocess.Popen(
@@ -1026,11 +1030,29 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
                 if lines_read < 200:
                     logger.info("[Local Deploy] %s", line.rstrip())
                     lines_read += 1
-            proc.wait()
-            if proc.returncode != 0:
-                _post_step(f"Build/run terminou com código {proc.returncode}. Verifique o RUNBOOK.", request_id)
-            else:
-                _post_step("Processo de execução local encerrado normalmente.", request_id)
+            # Aguardar no máximo MAX_DEPLOY_WAIT_SECS — evita que o runner fique preso
+            # indefinidamente num servidor de desenvolvimento que nunca encerra.
+            try:
+                proc.wait(timeout=MAX_DEPLOY_WAIT_SECS)
+                if proc.returncode != 0:
+                    _post_step(f"Build/run terminou com código {proc.returncode}. Verifique o RUNBOOK.", request_id)
+                else:
+                    _post_step("Processo de execução local encerrado normalmente.", request_id)
+            except subprocess.TimeoutExpired:
+                # App está rodando (timeout é normal para npm run dev / serve).
+                # Terminar o monitoramento — o processo continua no host.
+                logger.info(
+                    "[Local Deploy] Timeout de monitoramento (%ss) atingido — app provavelmente rodando. "
+                    "Execute manualmente: %s", MAX_DEPLOY_WAIT_SECS, run_command,
+                )
+                _post_step(
+                    f"App em execução. Para continuar usando, execute no host: {run_command}",
+                    request_id,
+                )
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("[Local Deploy] Erro ao executar: %s", e)
             _post_step(f"Erro ao executar localmente: {e}. Execute manualmente: {run_command}", request_id)
