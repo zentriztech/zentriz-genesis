@@ -29,6 +29,7 @@ import GitHubIcon from "@mui/icons-material/GitHub";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import CloudIcon from "@mui/icons-material/Cloud";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -51,6 +52,7 @@ const navTenantAdmin = [
   { label: "Projetos",      href: "/tenant/projects", icon: <FolderIcon />,       color: "#F59E0B" },
   { label: "Plano e uso",   href: "/tenant/plan",     icon: <SettingsIcon />,     color: "#64748B" },
   { label: "GitHub",        href: "/settings/github", icon: <GitHubIcon />,       color: "#E2E8F0" },
+  { label: "Cloud Deploy",  href: "/settings/cloud",  icon: <CloudIcon />,        color: "#10B981" },
 ];
 
 const navZentriz = [

@@ -205,6 +205,121 @@ app_url: `http://localhost:8080`
 
 ---
 
+## 8) GITHUB ACTIONS DEPLOY WORKFLOWS
+
+### Quando gerar o workflow
+
+Se `inputs.cloud_provider` estiver presente no charter/inputs (valores: `aws`, `azure`, `gcp`), gerar também:
+- `project/.github/workflows/deploy.yml` — workflow de CI/CD para o provider indicado
+
+O workflow usa **GitHub Secrets** injetados pelo Genesis Cloud Connector — **nunca hardcode credenciais**.
+
+### 8.1 AWS ECS Fargate (cloud_provider = "aws")
+
+```yaml
+name: Deploy to AWS ECS
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build, tag, push image
+        run: |
+          IMAGE_URI=${{ secrets.AWS_ECR_REGISTRY }}/${{ github.event.repository.name }}:${{ github.sha }}
+          docker build -t $IMAGE_URI apps/
+          docker push $IMAGE_URI
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster ${{ secrets.AWS_ECS_CLUSTER }} \
+            --service ${{ github.event.repository.name }} \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
+```
+
+### 8.2 Azure Container Apps (cloud_provider = "azure")
+
+```yaml
+name: Deploy to Azure Container Apps
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Build and push to ACR
+        run: |
+          az acr build \
+            --registry $(az acr list -g ${{ secrets.AZURE_RESOURCE_GROUP }} --query "[0].name" -o tsv) \
+            --image ${{ github.event.repository.name }}:${{ github.sha }} \
+            apps/
+      - name: Update Container App
+        run: |
+          az containerapp update \
+            --name ${{ secrets.AZURE_CONTAINER_APP }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --image $(az acr list -g ${{ secrets.AZURE_RESOURCE_GROUP }} --query "[0].loginServer" -o tsv)/${{ github.event.repository.name }}:${{ github.sha }}
+```
+
+### 8.3 GCP Cloud Run (cloud_provider = "gcp")
+
+```yaml
+name: Deploy to GCP Cloud Run
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build and push to GCR
+        run: |
+          gcloud auth configure-docker gcr.io --quiet
+          docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ github.event.repository.name }}:${{ github.sha }} apps/
+          docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ github.event.repository.name }}:${{ github.sha }}
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ secrets.GCP_SERVICE_NAME || github.event.repository.name }} \
+            --image gcr.io/${{ secrets.GCP_PROJECT_ID }}/${{ github.event.repository.name }}:${{ github.sha }} \
+            --region ${{ secrets.GCP_REGION || 'us-central1' }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+```
+
+### Regras ao gerar o workflow
+
+1. **NUNCA hardcode** credenciais, IDs, tokens ou endpoints — sempre `${{ secrets.NOME }}`
+2. O artifact path deve ser `project/.github/workflows/deploy.yml`
+3. Gerar apenas se `inputs.cloud_provider` estiver presente no charter
+4. Incluir no RUNBOOK.md uma seção "Deploy Automático" explicando que o workflow dispara automaticamente ao fazer push para `main`
+5. Adicionar ao `meta` do response: `"deploy_workflow_generated": true, "cloud_provider": "aws|azure|gcp"`
+
+---
+
 ## Referências
 
 - Competências: [skills.md](skills.md)
