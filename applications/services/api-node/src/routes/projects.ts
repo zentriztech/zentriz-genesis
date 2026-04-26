@@ -372,28 +372,59 @@ export async function projectRoutes(app: FastifyInstance) {
 
       const root = process.env.PROJECT_FILES_ROOT?.trim();
       const hostRoot = process.env.HOST_PROJECT_FILES_ROOT?.trim() ?? root;
-      if (!root || !hostRoot) return reply.send({ runCommand: null, appUrl: null, startShPath: null });
+      if (!root || !hostRoot) return reply.send({ runCommand: null, appUrl: null, startShPath: null, projectType: null });
 
-      const startShPath = path.join(root, id, "project", "start.sh");
+      const startShPath    = path.join(root, id, "project", "start.sh");
       const hostStartShPath = path.join(hostRoot, id, "project", "start.sh");
+      const appsDir        = path.join(root, id, "apps");
+      const hostAppsDir    = path.join(hostRoot, id, "apps");
 
-      let appUrl: string | null = null;
+      // Detect project type: backend if docker-compose.yml exists in apps/
+      let projectType: "backend" | "frontend" | "unknown" = "unknown";
+      let dockerComposeExists = false;
       try {
-        const content = await readFile(startShPath, "utf-8");
-        // Extract "http://localhost:PORT" from the script
-        const match = content.match(/https?:\/\/localhost:\d+/);
-        if (match) appUrl = match[0];
+        await stat(path.join(appsDir, "docker-compose.yml"));
+        dockerComposeExists = true;
+        projectType = "backend";
       } catch {
-        // start.sh not generated yet
+        // Check for next.config to detect frontend
+        try { await stat(path.join(appsDir, "next.config.mjs")); projectType = "frontend"; } catch { /* */ }
+        try { await stat(path.join(appsDir, "next.config.js")); projectType = "frontend"; } catch { /* */ }
       }
 
+      let appUrl: string | null = null;
       let startShExists = false;
-      try { await stat(startShPath); startShExists = true; } catch { /* */ }
+      try {
+        const content = await readFile(startShPath, "utf-8");
+        startShExists = true;
+        const match = content.match(/https?:\/\/localhost:\d+/);
+        if (match) appUrl = match[0];
+      } catch { /* */ }
+
+      // For backends: prefer docker compose command over start.sh
+      let runCommand: string | null = null;
+      let setupSteps: string[] | null = null;
+      if (dockerComposeExists) {
+        runCommand = `cd ${hostAppsDir} && cp .env.example .env && docker compose up -d --build`;
+        appUrl = appUrl ?? "http://localhost:7001/docs";
+        setupSteps = [
+          `cd ${hostAppsDir}`,
+          "cp .env.example .env  # editar DATABASE_URL e segredos",
+          "docker compose up -d --build",
+          "# API: http://localhost:7001",
+          "# Swagger: http://localhost:7001/docs",
+        ];
+      } else if (startShExists) {
+        runCommand = `bash ${hostStartShPath}`;
+      }
 
       return reply.send({
-        runCommand: startShExists ? `bash ${hostStartShPath}` : null,
+        runCommand,
         appUrl,
         startShPath: startShExists ? hostStartShPath : null,
+        projectType,
+        dockerComposeExists,
+        setupSteps,
       });
     } finally {
       client.release();
@@ -555,6 +586,45 @@ export async function projectRoutes(app: FastifyInstance) {
       client.release();
     }
   });
+
+  // GET /api/projects/:id/file-content?path=src/main.ts — conteúdo de um arquivo do projeto
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    "/api/projects/:id/file-content",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const filePath = (request.query as { path?: string }).path?.trim();
+      if (!filePath) return reply.status(400).send({ code: "BAD_REQUEST", message: "path obrigatório" });
+      // Security: prevent path traversal
+      if (filePath.includes("..") || filePath.startsWith("/")) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Path inválido" });
+      }
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const root = process.env.PROJECT_FILES_ROOT?.trim();
+        if (!root) return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "PROJECT_FILES_ROOT não configurado" });
+        const fullPath = path.join(root, id, "apps", filePath);
+        // Ensure the resolved path is still within the project's apps directory
+        const appsBase = path.join(root, id, "apps");
+        if (!fullPath.startsWith(appsBase)) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "Path fora do diretório permitido" });
+        }
+        try {
+          const content = await readFile(fullPath, "utf-8");
+          return reply.send({ content, path: filePath });
+        } catch {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Arquivo não encontrado" });
+        }
+      } finally {
+        client.release();
+      }
+    }
+  );
 
   // POST /api/admin/projects/cleanup — arquiva projetos antigos (TTL configurável via env)
   // Admin only. Marks old draft/failed/stopped projects as 'archived'.

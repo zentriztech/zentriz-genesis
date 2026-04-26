@@ -84,10 +84,24 @@ function buildForceData(
   }
 
   // ── 2. Tasks ───────────────────────────────────────────────────────────────
+  // Map owner roles to the agent key as it appears in dialogue (fromAgent normalized)
   const ownerMap: Record<string, string> = {
-    DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev_backend",
-    QA: "qa", QA_WEB: "qa", QA_BACKEND: "qa_backend",
-    DEVOPS: "devops", PM: "pm", CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
+    DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev", DEV_BACKEND_NODEJS: "dev",
+    QA: "qa", QA_WEB: "qa", QA_BACKEND: "qa", QA_BACKEND_NODEJS: "qa",
+    DEVOPS: "devops", DEVOPS_DOCKER: "devops",
+    PM: "pm", PM_WEB: "pm", PM_BACKEND: "pm", PM_MOBILE: "pm",
+    CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
+  };
+  // Also build reverse map: agentKey → canonical key seen in dialogue
+  const agentKeyInDialogue = (ownerRole: string): string | undefined => {
+    const mapped = ownerMap[(ownerRole ?? "").toUpperCase()];
+    if (!mapped) return undefined;
+    // Check if this key or a prefix-match exists in seenAgents
+    if (seenAgents.has(mapped)) return mapped;
+    for (const k of Array.from(seenAgents.keys())) {
+      if (k.startsWith(mapped) || mapped.startsWith(k.replace(/_.*/, ""))) return k;
+    }
+    return undefined;
   };
 
   for (const t of tasks) {
@@ -96,9 +110,9 @@ function buildForceData(
       id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4,
       detail: t.requirements?.slice(0, 80),
     });
-    const ownerKey = ownerMap[(t.ownerRole ?? "").toUpperCase()];
-    if (ownerKey && seenAgents.has(ownerKey)) {
-      addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "50");
+    const ownerKey = agentKeyInDialogue(t.ownerRole ?? "");
+    if (ownerKey) {
+      addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
     }
   }
 
@@ -108,6 +122,9 @@ function buildForceData(
     .filter((f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock"))
     .slice(0, MAX);
 
+  // Find the dev agent key from seenAgents (could be "dev", "dev_backend", etc.)
+  const devAgentKey = Array.from(seenAgents.keys()).find((k) => k.startsWith("dev")) ?? null;
+
   for (let i = 0; i < showable.length; i++) {
     const f     = showable[i];
     const color = EXT_COLOR[f.ext] ?? "#8B949E";
@@ -116,8 +133,8 @@ function buildForceData(
       id: `artifact-${i}`, label: name, type: "artifact", color, size: 2.5,
       detail: f.path,
     });
-    if (seenAgents.has("dev")) {
-      addLink("agent-dev", `artifact-${i}`, color + "40");
+    if (devAgentKey) {
+      addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
     }
   }
 

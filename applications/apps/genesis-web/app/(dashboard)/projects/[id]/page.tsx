@@ -36,6 +36,8 @@ import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import ForumIcon from "@mui/icons-material/Forum";
 import { projectsStore } from "@/stores/projectsStore";
 import { LiveDialogue } from "@/components/LiveDialogue";
+import { CodeExplorer } from "@/components/CodeExplorer";
+import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
@@ -69,7 +71,7 @@ const ALLOW_RUN_STATUS = new Set([
 type TaskItem         = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
-type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null };
+type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -174,6 +176,9 @@ function ProjectDetailPageInner() {
 
   // ── Callbacks ──────────────────────────────────────────────────────────────
   const handleDialogueLoaded = useCallback((entries: DialogueEntry[]) => {
+    const status = projectsStore.getById(id)?.status ?? "";
+    const finished = status === "completed" || status === "accepted" || status === "failed" || status === "stopped";
+    if (finished) { setWorkingStepIndex(null); setWorkingMessage(null); return; }
     const last = entries.length > 0 ? entries[entries.length - 1] : null;
     if (last?.eventType === "agent_working") {
       const step = agentToStepIndex(last.fromAgent);
@@ -183,7 +188,7 @@ function ProjectDetailPageInner() {
       setWorkingStepIndex(null);
       setWorkingMessage(null);
     }
-  }, []);
+  }, [id]);
 
   // ── Effects ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -218,7 +223,7 @@ function ProjectDetailPageInner() {
     apiGet<ArtifactsResp>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => null);
     apiGet<CodeFilesResp>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, project?.status]);
+  }, [id, project?.status]); // project intentionally excluded — status change is the trigger
 
   useEffect(() => {
     if (!id || !project) return;
@@ -296,7 +301,8 @@ function ProjectDetailPageInner() {
     project.status === "devops"          ? 5 :
     isDone                               ? 6 : 0;
 
-  const activeStep = isRunning && workingStepIndex != null ? workingStepIndex : stepFromStatus;
+  // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
+  const activeStep = (isRunning && workingStepIndex != null) ? workingStepIndex : stepFromStatus;
 
   const tasksDone  = tasks ? tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length : 0;
   const tasksPct   = tasks && tasks.length > 0 ? Math.round((tasksDone / tasks.length) * 100) : 0;
@@ -347,21 +353,29 @@ function ProjectDetailPageInner() {
           action={runInfo.appUrl ? (
             <Button size="small" color="success" endIcon={<OpenInNewIcon />}
               href={runInfo.appUrl} target="_blank" rel="noopener noreferrer" component="a">
-              Abrir app
+              {runInfo.projectType === "backend" ? "Swagger /docs" : "Abrir app"}
             </Button>
           ) : undefined}
         >
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-            <Typography variant="body2" fontWeight={500}>Pronto para executar:</Typography>
-            <Box component="code" sx={{ bgcolor: "action.hover", px: 1, py: 0.3, borderRadius: 0.5, fontSize: "0.78rem", flexGrow: 1 }}>
-              {runInfo.runCommand}
+          <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
+            {runInfo.projectType === "backend" ? "API Backend — executar via Docker:" : "Pronto para executar:"}
+          </Typography>
+          {runInfo.setupSteps ? (
+            <Box component="pre" sx={{ m: 0, p: 0.5, bgcolor: "action.hover", borderRadius: 0.5, fontSize: "0.72rem", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+              {runInfo.setupSteps.join("\n")}
             </Box>
-            <Tooltip title="Copiar">
-              <IconButton size="small" onClick={() => navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true))}>
-                <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
-              </IconButton>
-            </Tooltip>
-          </Stack>
+          ) : (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Box component="code" sx={{ bgcolor: "action.hover", px: 1, py: 0.3, borderRadius: 0.5, fontSize: "0.78rem", flexGrow: 1 }}>
+                {runInfo.runCommand}
+              </Box>
+              <Tooltip title="Copiar">
+                <IconButton size="small" onClick={() => navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true))}>
+                  <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+          )}
         </Alert>
       )}
       <Snackbar open={copiedCmd} autoHideDuration={2000} onClose={() => setCopiedCmd(false)}
@@ -646,7 +660,21 @@ function ProjectDetailPageInner() {
                             )}
                           </TableCell>
                           <TableCell>
-                            <Chip size="small" label={d.creator ?? "—"} variant="outlined" sx={{ fontSize: "0.62rem" }} />
+                            {(() => {
+                              const profile = d.creator ? getAgentProfile(d.creator) : null;
+                              return (
+                                <Chip
+                                  size="small"
+                                  label={profile?.name ?? d.creator ?? "—"}
+                                  sx={{
+                                    fontSize: "0.62rem",
+                                    bgcolor: profile ? `${profile.color}22` : undefined,
+                                    color: profile?.color,
+                                    border: `1px solid ${profile?.color ?? "#30363D"}44`,
+                                  }}
+                                />
+                              );
+                            })()}
                           </TableCell>
                           <TableCell>
                             <Typography variant="caption" color="text.secondary">
@@ -662,56 +690,20 @@ function ProjectDetailPageInner() {
             </Box>
           )}
 
-          {/* Code files */}
+          {/* Code files — VS Code style explorer */}
           {bottomTab === 2 && (
-            <Box sx={{ p: 2 }}>
+            <Box sx={{ p: 0 }}>
               {(!codeFiles || codeFiles.totalFiles === 0) ? (
-                <Typography variant="body2" color="text.secondary">Arquivos de código gerados pelo Dev aparecerão aqui.</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                  Arquivos de código gerados pelo Dev aparecerão aqui.
+                </Typography>
               ) : (
-                <>
-                  {codeFiles.appsRoot && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-                      <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{codeFiles.appsRoot}</Box>
-                    </Typography>
-                  )}
-                  {/* Extension summary chips */}
-                  {(() => {
-                    const byExt: Record<string, number> = {};
-                    for (const f of codeFiles.files) {
-                      const k = f.ext || "outros";
-                      byExt[k] = (byExt[k] ?? 0) + 1;
-                    }
-                    return (
-                      <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
-                        {Object.entries(byExt).map(([ext, cnt]) => (
-                          <Chip key={ext} size="small" label={`.${ext} (${cnt})`} variant="outlined" sx={{ fontSize: "0.65rem" }} />
-                        ))}
-                      </Stack>
-                    );
-                  })()}
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Arquivo</TableCell>
-                        <TableCell align="right" sx={{ width: 90 }}>Tamanho</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {codeFiles.files.map((f, i) => (
-                        <TableRow key={i}>
-                          <TableCell>
-                            <Typography variant="body2" fontFamily="monospace" sx={{ fontSize: "0.75rem" }}>{f.path}</Typography>
-                          </TableCell>
-                          <TableCell align="right">
-                            <Typography variant="caption" color="text.secondary">
-                              {f.sizeBytes >= 1024 ? `${(f.sizeBytes / 1024).toFixed(1)} KB` : `${f.sizeBytes} B`}
-                            </Typography>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </>
+                <CodeExplorer
+                  projectId={id}
+                  files={codeFiles.files}
+                  appsRoot={codeFiles.appsRoot}
+                  height={540}
+                />
               )}
             </Box>
           )}
