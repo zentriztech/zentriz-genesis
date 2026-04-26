@@ -377,6 +377,10 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
             "mysql", "postgresql", "drizzle", "prisma", "jwt", "api key",
             "endpoint", "autenticação", "authentication", "swagger", "openapi",
             "migrations", "orm", "banco de dados", "database", "seed",
+            # Python backend signals
+            "fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel",
+            "pydantic", "alembic", "python", "pip", "pytest", "asyncio",
+            "insomnia", "postman",
         ]
         web_signals = ["landing page", "next.js", "react", "tailwind", "frontend", "estático", "static"]
         backend_count = sum(1 for s in backend_signals if s in text)
@@ -400,7 +404,9 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
     if "backend api" in text and "squad" in text:
         return "backend"
     # Sinais diretos de backend na proposta (sem squad explícita)
-    if ("nestjs" in text or "express" in text or "fastify" in text or "api rest" in text) and "squad" not in text:
+    if ("nestjs" in text or "express" in text or "fastify" in text or "api rest" in text
+            or "fastapi" in text or "flask" in text or "django" in text or "uvicorn" in text
+            or "sqlalchemy" in text or "sqlmodel" in text) and "squad" not in text:
         return "backend"
     # Mobile como squad
     if "squad mobile" in text or "equipe mobile" in text or "mobile squad" in text:
@@ -534,9 +540,17 @@ def call_dev(
     # Route to correct skill path based on variant and detected stack
     _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
+    # Detect if this is a Python backend from charter/backlog
+    _charter_lower = (charter_summary + " " + backlog_summary).lower()
+    _python_signals = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "pydantic", "python", "pytest", "alembic"]
+    _is_python_backend = (dev_variant == "backend") and sum(1 for s in _python_signals if s in _charter_lower) >= 2
+    _python_prompt = "dev/backend/python"
+    _python_prompt_exists = (_agents_root() / "dev" / "backend" / "python" / "SYSTEM_PROMPT.md").exists()
+
     _skill_map = {
         "web": _web_skill,
-        "backend": "dev/backend/nodejs",
+        "backend": (_python_prompt if (_is_python_backend and _python_prompt_exists) else "dev/backend/nodejs"),
+        "backend_python": _python_prompt if _python_prompt_exists else "dev/backend/nodejs",
         "mobile": "dev/mobile/react-native",
     }
     inputs["context"] = inputs.get("context") or {}
@@ -592,7 +606,14 @@ def call_qa(
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
     from orchestrator.agents.runtime import run_agent
-    qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
+    # Use Python QA SYSTEM_PROMPT if Python backend signals detected in charter
+    _qa_ctx = (charter_summary + " " + backlog_summary).lower()
+    _qa_py = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "python", "pydantic"]
+    _python_qa_prompt = _agents_root() / "qa" / "backend" / "python" / "SYSTEM_PROMPT.md"
+    if sum(1 for s in _qa_py if s in _qa_ctx) >= 2 and _python_qa_prompt.exists():
+        qa_prompt = _python_qa_prompt
+    else:
+        qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
     return run_agent(system_prompt_path=qa_prompt, message=message, role="QA")
 
 
@@ -1440,6 +1461,12 @@ def _run_monitor_loop(
                     # Derive variant from owner_role (DEV_WEB → web, DEV_MOBILE → mobile, else backend)
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
+                    # Detect Python backend from charter — override variant so correct SYSTEM_PROMPT is used
+                    _ctx_lower = (charter_summary + " " + backlog_summary).lower()
+                    _py_sigs = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "pydantic", "python"]
+                    if _dev_variant == "backend" and sum(1 for s in _py_sigs if s in _ctx_lower) >= 2:
+                        _dev_variant = "backend_python"
+                        logger.info("[Monitor Loop] Python backend detectado — usando SYSTEM_PROMPT backend/python")
                     # Load existing apps/ artifacts from disk so Dev has full context
                     _disk_artifacts: list = []
                     try:
