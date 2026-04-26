@@ -274,6 +274,62 @@ export async function pipelineRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/admin/failure-stats — failure metrics by agent and status (identifies systemic issues)
+  app.get("/api/admin/failure-stats", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas administradores Zentriz" });
+    }
+    const days = parseInt((request.query as Record<string, string>).days ?? "30", 10);
+    const client = await pool.connect();
+    try {
+      const byAgent = await client.query(
+        `SELECT agent, status, COUNT(*)::int AS calls
+         FROM project_agent_metrics
+         WHERE created_at > now() - ($1 || ' days')::interval
+           AND status IS NOT NULL
+         GROUP BY agent, status
+         ORDER BY agent, status`,
+        [String(days)]
+      );
+
+      const failureRate = await client.query(
+        `SELECT
+           agent,
+           COUNT(*) FILTER (WHERE status NOT IN ('OK', 'QA_PASS'))::float
+             / NULLIF(COUNT(*), 0) AS failure_rate,
+           COUNT(*)::int AS total_calls,
+           COUNT(*) FILTER (WHERE status NOT IN ('OK', 'QA_PASS'))::int AS failed_calls
+         FROM project_agent_metrics
+         WHERE created_at > now() - ($1 || ' days')::interval
+           AND status IS NOT NULL
+         GROUP BY agent
+         ORDER BY failure_rate DESC NULLS LAST`,
+        [String(days)]
+      );
+
+      const dlqByType = await client.query(
+        `SELECT error_type, COUNT(*)::int AS cnt
+         FROM project_errors
+         WHERE created_at > now() - ($1 || ' days')::interval
+         GROUP BY error_type
+         ORDER BY cnt DESC`,
+        [String(days)]
+      ).catch(() => ({ rows: [] }));
+
+      return reply.send({
+        period_days: days,
+        by_agent_status: byAgent.rows,
+        failure_rates: failureRate.rows,
+        dlq_by_type: dlqByType.rows,
+      });
+    } catch {
+      return reply.send({ period_days: days, by_agent_status: [], failure_rates: [], dlq_by_type: [] });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/admin/dlq — dead letter queue entries (projects that failed permanently)
   app.get("/api/admin/dlq", async (request, reply) => {
     const user = getUser(request);
