@@ -332,10 +332,11 @@ export default function SpecPage() {
           setGenerating(false); setGenPhase("idle");
         }
         // still pending/running → keep polling
-      } catch {
-        // network error → keep polling silently
+      } catch (e) {
+        // log to help diagnose silent failures
+        console.warn("[SpecPreview] poll error:", e instanceof Error ? e.message : e);
       }
-    }, 3000);
+    }, 8000); // 8s: gives time for 30k spec JSON to be read completely
   }, [freeText, projectTitle, stopPolling]);
 
   // Cleanup on unmount
