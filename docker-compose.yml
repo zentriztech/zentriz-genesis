@@ -139,6 +139,7 @@ services:
     volumes:
       - zentriz-genesis_uploads:/shared/uploads
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
+      - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}/.runner-state:/orchestrator/state
       - ${HOME}/.aws:/root/.aws:ro
       - ${ZENTRIZ_CONNECT_PATH:-../zentriz-connect}:/zentriz-connect:ro
     depends_on:

@@ -2145,6 +2145,8 @@ def main() -> int:
         # ── Passo 3: PM + loop CTO↔PM (LEI 11: pular se current_step >= 3) ──
         pm_response = None
         pm_status = "?"
+        # Default: se step>=3 (checkpoint restaurado), usar current_module do contexto
+        pm_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "backend"
         if not pipeline_ctx or pipeline_ctx.current_step < 3:
             max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
             cto_pm_questionamentos = None
