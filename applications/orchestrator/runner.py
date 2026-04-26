@@ -353,22 +353,54 @@ def call_cto(
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
-def infer_pm_module_from_engineer_proposal(engineer_proposal: str) -> str:
+def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "") -> str:
     """
     Infere o módulo/squad do PM (web, backend, mobile) a partir da proposta do Engineer.
-    O Engineer define squads no engineer_proposal (ex.: 'Squad: Web (Frontend)', 'Backend Squad: Desnecessário').
+    Se o Engineer falhou (proposta vazia/inválida), usa a spec original como fallback.
     Retorna 'web' | 'backend' | 'mobile'. Default 'web' para landing/estático quando não há backend.
     """
-    if not (engineer_proposal or "").strip():
-        return "web"
     text = (engineer_proposal or "").lower()
+    is_blocked_or_empty = (
+        not text.strip()
+        or "não contém uma especificação" in text
+        or "blocked" in text
+        or "json inválido" in text
+        or "apenas mensagens de erro" in text
+    )
+
+    # Fallback para spec original quando Engineer falhou
+    if is_blocked_or_empty and spec_content:
+        text = spec_content.lower()
+        # Sinais fortes de backend/API na spec
+        backend_signals = [
+            "api rest", "api backend", "nestjs", "express", "fastify", "node.js",
+            "mysql", "postgresql", "drizzle", "prisma", "jwt", "api key",
+            "endpoint", "autenticação", "authentication", "swagger", "openapi",
+            "migrations", "orm", "banco de dados", "database", "seed",
+        ]
+        web_signals = ["landing page", "next.js", "react", "tailwind", "frontend", "estático", "static"]
+        backend_count = sum(1 for s in backend_signals if s in text)
+        web_count = sum(1 for s in web_signals if s in text)
+        if backend_count >= 3 and backend_count > web_count:
+            logger.info("[Pipeline] Módulo inferido da spec (Engineer falhou): backend (%d sinais)", backend_count)
+            return "backend"
+        if web_count > backend_count:
+            return "web"
+        return "backend"  # default para specs complexas sem Engineer válido
+
+    if not text.strip():
+        return "web"
+
     # Backend como squad explícita (equipe/squad de API, servidor)
     if "squad backend" in text or "equipe backend" in text or "backend squad" in text:
-        if "desnecessário" in text or "desnecessario" in text or "não" in text or "nao" in text:
+        if "desnecessário" in text or "desnecessario" in text:
             pass  # "Backend Squad: Desnecessário" → não é backend
         else:
             return "backend"
     if "backend api" in text and "squad" in text:
+        return "backend"
+    # Sinais diretos de backend na proposta (sem squad explícita)
+    if ("nestjs" in text or "express" in text or "fastify" in text or "api rest" in text) and "squad" not in text:
         return "backend"
     # Mobile como squad
     if "squad mobile" in text or "equipe mobile" in text or "mobile squad" in text:
@@ -1842,7 +1874,7 @@ def main() -> int:
                     request_id,
                 )
                 _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-                pm_module = infer_pm_module_from_engineer_proposal(engineer_summary)
+                pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
                 logger.info("[Pipeline] Chamando agente PM (módulo %s inferido da proposta do Engineer, rodada %s)...", pm_module, pm_round)
                 pm_response = call_pm(
                     spec_ref, charter_summary, request_id,

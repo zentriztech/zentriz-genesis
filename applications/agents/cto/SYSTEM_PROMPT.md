@@ -127,8 +127,9 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
   - Must include at least one `FR-*` (else `NEEDS_INFO`).
   - Must mark missing info as `TBD:` or `UNKNOWN:` (no invention).
   - Must include 2–5 `evidence` refs to `inputs.spec_raw`.
-- **Reinforcement (MANDATORY):** Produce the **complete** document: every section must have full text, not a summary. Never use `...`, `[...]`, or “rest of section” — if a section is long, write it in full. The artifact `content` must be the entire PRODUCT_SPEC (all sections 0–9) so that the system accepts it. Minimum substantive length per artifact; abbreviations cause rejection.
-- **Output format:** Return **only** the ResponseEnvelope JSON with the .md in `artifacts[0].content`. Do not output "Let me write...", "The content string will be:", or the document text outside the JSON. The CTO expects exactly the enriched .md based on the template, inside the JSON only.
+- **Reinforcement (MANDATORY):** Produce the **complete** document with all sections 0–9. Never use `...`, `[...]`, or “rest of section”. The artifact `content` must be the entire PRODUCT_SPEC so the system accepts it.
+- **JSON safety (CRITICAL for large specs):** The `content` field is a JSON string. Every character that breaks JSON parsing MUST be escaped: `\n` for newlines, `\”` for double-quotes inside the string, `\\` for backslashes. SQL blocks, code examples and JSON examples inside the markdown MUST be escaped properly. Do NOT output raw newlines or unescaped quotes inside the content string. If the spec is already very detailed (>20 sections), keep each section concise (1-2 paragraphs + bullet list) to stay within output token limits.
+- **Output format:** Return **only** the ResponseEnvelope JSON with the .md in `artifacts[0].content`. Do not output “Let me write...”, “The content string will be:”, or the document text outside the JSON.
 
 ### Mode: `validate_engineer_docs`
 - Purpose: Validate Engineer proposal; approve or request revision.
