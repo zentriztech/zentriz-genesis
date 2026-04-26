@@ -58,7 +58,45 @@ if _dotenv.exists():
     from dotenv import load_dotenv
     load_dotenv(_dotenv)
 
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+class _ProjectFilter(logging.Filter):
+    """Injects project_id into every log record so structured formatters can include it."""
+    _project_id: str | None = None
+
+    @classmethod
+    def set_project_id(cls, pid: str | None) -> None:
+        cls._project_id = pid
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.project_id = self._project_id or "—"  # type: ignore[attr-defined]
+        return True
+
+
+_log_level = os.environ.get("LOG_LEVEL", "INFO")
+_log_format = os.environ.get("LOG_FORMAT", "text")
+if _log_format == "json":
+    import json as _json_mod
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            return _json_mod.dumps({
+                "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+                "level": record.levelname,
+                "project_id": getattr(record, "project_id", "—"),
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }, ensure_ascii=False)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JsonFormatter())
+    logging.basicConfig(level=_log_level, handlers=[_handler])
+else:
+    logging.basicConfig(
+        level=_log_level,
+        format="%(asctime)s %(levelname)s [%(project_id)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+for _h in logging.root.handlers:
+    _h.addFilter(_ProjectFilter())
+
 logger = logging.getLogger(__name__)
 
 STATE_DIR = APPLICATIONS_ROOT / "orchestrator" / "state"
@@ -1421,6 +1459,8 @@ def main() -> int:
 
     request_id = f"runner-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     project_id = _project_id()
+    # Inject project_id into all log records for this process
+    _ProjectFilter.set_project_id(project_id)
     storage = _project_storage()
     if storage and storage.is_enabled():
         if project_id:
