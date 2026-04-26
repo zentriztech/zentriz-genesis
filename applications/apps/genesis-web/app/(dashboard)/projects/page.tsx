@@ -9,7 +9,6 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
-import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import LinearProgress from "@mui/material/LinearProgress";
 import Stack from "@mui/material/Stack";
@@ -111,8 +110,15 @@ function NewVersionButton({ project }: { project: Project }) {
 
   return (
     <Tooltip title="Criar nova versão deste produto">
-      <IconButton size="small" onClick={handleNewVersion} disabled={loading}
-        sx={{ color: "primary.main", "&:hover": { bgcolor: "primary.main" + "18" } }}>
+      <IconButton
+        size="small"
+        disabled={loading}
+        onClick={(e) => {
+          e.stopPropagation(); // prevent card click from firing
+          handleNewVersion();
+        }}
+        sx={{ color: "primary.main", "&:hover": { bgcolor: "primary.main" + "18" } }}
+      >
         <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />
       </IconButton>
     </Tooltip>
@@ -304,29 +310,40 @@ function ProjectsPageInner() {
         </Card>
       )}
 
-      {/* Grid view — todos os projetos num único container, grupos multi-versão têm separador visual */}
+      {/* Grid view — CSS flexbox direto, sem depender do MUI Grid */}
       <AnimatePresence mode="wait">
         {view === "grid" && groups.length > 0 && (
           <Box key="grid">
-            {groups.map((group, gi) => (
-              <Box key={group.root.id} sx={{ mb: group.versions.length > 1 ? 3 : 0 }}>
-                {/* Header só para grupos com múltiplas versões */}
-                {group.versions.length > 1 && (
-                  <Typography variant="caption" color="text.secondary"
-                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem", display: "block", mb: 1 }}>
-                    {group.root.title ?? "Produto"} · {group.versions.length} versões
-                  </Typography>
-                )}
-                {/* Um único Grid container por grupo — cards preenchem a linha horizontalmente */}
-                <Grid container spacing={2}>
+            {/* Grupos multi-versão: cabeçalho + linha própria */}
+            {groups.filter(g => g.versions.length > 1).map((group) => (
+              <Box key={group.root.id} sx={{ mb: 3 }}>
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem", display: "block", mb: 1 }}>
+                  {group.root.title ?? "Produto"} · {group.versions.length} versões
+                </Typography>
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
                   {group.versions.map((p, i) => (
-                    <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
-                      <ProjectCard project={p} delay={gi * 3 + i} />
-                    </Grid>
+                    <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
+                      <ProjectCard project={p} delay={i} />
+                    </Box>
                   ))}
-                </Grid>
+                </Box>
               </Box>
             ))}
+            {/* Projetos individuais (sem versões) — todos juntos num flex wrap */}
+            {(() => {
+              const singles = groups.filter(g => g.versions.length === 1).map(g => g.root);
+              if (singles.length === 0) return null;
+              return (
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                  {singles.map((p, i) => (
+                    <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
+                      <ProjectCard project={p} delay={i} />
+                    </Box>
+                  ))}
+                </Box>
+              );
+            })()}
           </Box>
         )}
 
