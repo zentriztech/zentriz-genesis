@@ -199,6 +199,146 @@ export async function commitAndPush(
  * Creates a GitHub Actions workflow file in the repository.
  * Used by Genesis to set up CI/CD for generated projects.
  */
+/**
+ * Creates a branch if it does not already exist.
+ * sourceBranch is the branch to copy from (defaults to "main").
+ */
+/**
+ * Reads all files under PROJECT_FILES_ROOT/{projectId}/apps/ and pushes them
+ * to the specified branch in batches of 80 (GitHub tree API limit is ~100).
+ *
+ * Files in node_modules/, .next/, dist/, .git/ are skipped.
+ * Binary files are base64-encoded. Text files are UTF-8.
+ *
+ * Returns the SHA of the final commit.
+ */
+export async function pushProjectFiles(
+  installationId: number,
+  owner: string,
+  repo: string,
+  branch: string,
+  projectFilesRoot: string,
+  projectId: string,
+): Promise<{ sha: string; fileCount: number }> {
+  const { readdir, stat, readFile } = await import("fs/promises");
+  const pathMod = await import("path");
+
+  const SKIP_DIRS = new Set(["node_modules", ".next", "dist", ".git", "coverage", ".nyc_output"]);
+  const BATCH_SIZE = 80; // stay well under GitHub's 100-blob limit
+
+  // Collect all file paths
+  const allFiles: Array<{ relativePath: string; absolutePath: string }> = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries: string[];
+    try { entries = await readdir(dir); } catch { return; }
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry)) continue;
+      const full = pathMod.join(dir, entry);
+      let s: Awaited<ReturnType<typeof stat>>;
+      try { s = await stat(full); } catch { continue; }
+      if (s.isDirectory()) {
+        await walk(full);
+      } else if (s.size < 1_500_000) { // skip files > 1.5MB
+        const appsDir = pathMod.join(projectFilesRoot, projectId, "apps");
+        allFiles.push({ relativePath: pathMod.relative(appsDir, full), absolutePath: full });
+      }
+    }
+  }
+
+  const appsDir = pathMod.join(projectFilesRoot, projectId, "apps");
+  await walk(appsDir);
+
+  if (allFiles.length === 0) return { sha: "", fileCount: 0 };
+
+  const octokit = await getOctokitForInstallation(installationId);
+
+  // Get current branch HEAD
+  const { data: refData } = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+  let currentSha = refData.object.sha;
+
+  // Process in batches
+  const batches: typeof allFiles[] = [];
+  for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
+    batches.push(allFiles.slice(i, i + BATCH_SIZE));
+  }
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+
+    // Get base tree from current commit
+    const { data: commitData } = await octokit.git.getCommit({ owner, repo, commit_sha: currentSha });
+    const baseTreeSha = commitData.tree.sha;
+
+    // Create blobs for each file
+    const treeItems = await Promise.all(
+      batch.map(async (f) => {
+        const raw = await readFile(f.absolutePath);
+        const content = raw.toString("base64");
+        const { data: blob } = await octokit.git.createBlob({ owner, repo, content, encoding: "base64" });
+        return { path: f.relativePath, mode: "100644" as const, type: "blob" as const, sha: blob.sha };
+      })
+    );
+
+    const { data: tree } = await octokit.git.createTree({ owner, repo, base_tree: baseTreeSha, tree: treeItems });
+
+    const batchMsg = batches.length > 1
+      ? `feat: Genesis — batch ${batchIdx + 1}/${batches.length} (${batch.length} files)`
+      : `feat: Genesis — push ${allFiles.length} generated files`;
+
+    const { data: newCommit } = await octokit.git.createCommit({
+      owner, repo,
+      message: batchMsg,
+      tree: tree.sha,
+      parents: [currentSha],
+    });
+
+    await octokit.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: newCommit.sha });
+    currentSha = newCommit.sha;
+  }
+
+  return { sha: currentSha, fileCount: allFiles.length };
+}
+
+export async function createBranchIfNotExists(
+  installationId: number,
+  owner: string,
+  repo: string,
+  branch: string,
+  sourceBranch = "main",
+): Promise<void> {
+  const octokit = await getOctokitForInstallation(installationId);
+  // Check if branch already exists
+  try {
+    await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    return; // already exists
+  } catch (err: unknown) {
+    if ((err as { status?: number }).status !== 404) throw err;
+  }
+  // Get SHA of source branch
+  const { data: sourceRef } = await octokit.git.getRef({ owner, repo, ref: `heads/${sourceBranch}` });
+  await octokit.git.createRef({
+    owner, repo,
+    ref: `refs/heads/${branch}`,
+    sha: sourceRef.object.sha,
+  });
+}
+
+/**
+ * Ensures dev, staging, and main branches exist in order:
+ *   main (created by auto_init) → staging ← dev
+ * Safe to call multiple times (idempotent).
+ */
+export async function ensureThreeBranches(
+  installationId: number,
+  owner: string,
+  repo: string,
+): Promise<void> {
+  // staging branches from main, dev branches from staging
+  await createBranchIfNotExists(installationId, owner, repo, "staging", "main");
+  await createBranchIfNotExists(installationId, owner, repo, "dev", "staging");
+}
+
 export async function createWorkflow(
   installationId: number,
   opts: {

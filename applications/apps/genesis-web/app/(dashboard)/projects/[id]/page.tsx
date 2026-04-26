@@ -26,6 +26,8 @@ import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import GitHubIcon from "@mui/icons-material/GitHub";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
@@ -72,6 +74,7 @@ type TaskItem         = { id: string; taskId: string; module?: string; ownerRole
 type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
+type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,6 +174,7 @@ function ProjectDetailPageInner() {
   const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
   const [metrics, setMetrics]     = useState<MetricsResp | null>(null);
+  const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined); // undefined=not loaded
 
   const project = projectsStore.getById(id);
 
@@ -230,6 +234,9 @@ function ProjectDetailPageInner() {
     if (project.status === "completed" || project.status === "accepted") {
       apiGet<RunInfoResp>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => null);
       apiGet<MetricsResp>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => null);
+      apiGet<GithubRepoResp>(`/api/projects/${id}/github-repo`)
+        .then((d) => setGithubRepo(d.repo))
+        .catch(() => setGithubRepo(null));
     }
   }, [id, project?.status]);
 
@@ -380,6 +387,41 @@ function ProjectDetailPageInner() {
       )}
       <Snackbar open={copiedCmd} autoHideDuration={2000} onClose={() => setCopiedCmd(false)}
         message="Comando copiado!" anchorOrigin={{ vertical: "bottom", horizontal: "center" }} />
+
+      {/* GitHub repo banner — shown once repo is created (after accept) */}
+      {isDone && githubRepo && (
+        <Alert
+          severity="info" sx={{ mb: 2 }}
+          icon={<GitHubIcon />}
+          action={
+            <Button size="small" endIcon={<OpenInNewIcon />}
+              href={githubRepo.url} target="_blank" rel="noopener noreferrer" component="a">
+              Ver no GitHub
+            </Button>
+          }
+        >
+          <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
+            🐙 Código publicado em <Box component="code" sx={{ bgcolor: "action.hover", px: 0.75, borderRadius: 0.5, fontSize: "0.78rem" }}>{githubRepo.fullName}</Box>
+          </Typography>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {(["dev","staging","main"] as const).map((b) => (
+              <Button key={b} size="small" variant="outlined" startIcon={<CallSplitIcon sx={{ fontSize: "0.8rem !important" }} />}
+                href={githubRepo.branchUrls[b]} target="_blank" rel="noopener noreferrer" component="a"
+                sx={{ fontSize: "0.7rem", py: 0.3, px: 0.75 }}>
+                {b}
+              </Button>
+            ))}
+          </Stack>
+        </Alert>
+      )}
+      {/* Repo still being created (githubRepo===undefined means not loaded yet, null means no repo) */}
+      {isDone && githubRepo === null && (
+        <Alert severity="info" sx={{ mb: 2 }} icon={<GitHubIcon />}>
+          <Typography variant="body2" color="text.secondary">
+            Repositório GitHub será criado automaticamente se o tenant tiver o GitHub App instalado.
+          </Typography>
+        </Alert>
+      )}
 
       {/* ── Main cockpit layout ── */}
       <Grid container spacing={2}>

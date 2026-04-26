@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, readdir, stat } from "fs/promises";
 import path from "path";
+import { pushProjectToGitHub } from "../services/githubPush.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
@@ -303,10 +304,16 @@ export async function projectRoutes(app: FastifyInstance) {
         [id]
       );
       const u = updated.rows[0] as Record<string, unknown>;
+
+      // Fire-and-forget: push to GitHub if tenant has GitHub App installed
+      // Never awaited — must not delay the accept response
+      setImmediate(() => pushProjectToGitHub(id).catch(console.error));
+
       return reply.send({
         ok: true,
         status: "accepted",
         updatedAt: (u.updated_at as Date)?.toISOString(),
+        githubPushTriggered: true,
       });
     } finally {
       client.release();
@@ -348,6 +355,42 @@ export async function projectRoutes(app: FastifyInstance) {
         docs,
         projectDocsRoot: docsDir,
         projectArtifactsRoot: projectDir,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/github-repo — retorna info do repositório GitHub criado no aceite
+  app.get<{ Params: { id: string } }>("/api/projects/:id/github-repo", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+      const repoRow = (await client.query(
+        "SELECT repo_name, repo_full_name, repo_url, clone_url, pushed_at, sha_dev FROM project_github_repos WHERE project_id = $1",
+        [id],
+      )).rows[0];
+      if (!repoRow) return reply.send({ repo: null });
+      return reply.send({
+        repo: {
+          name: repoRow.repo_name,
+          fullName: repoRow.repo_full_name,
+          url: repoRow.repo_url,
+          cloneUrl: repoRow.clone_url,
+          branchUrls: {
+            dev:     `${repoRow.repo_url}/tree/dev`,
+            staging: `${repoRow.repo_url}/tree/staging`,
+            main:    `${repoRow.repo_url}/tree/main`,
+          },
+          pushedAt: (repoRow.pushed_at as Date)?.toISOString() ?? null,
+          shaDev: repoRow.sha_dev,
+        },
       });
     } finally {
       client.release();
