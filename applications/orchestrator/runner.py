@@ -458,19 +458,14 @@ def persist_state(spec_ref: str, charter: dict, backlog: dict, events: list) -> 
         "events": events,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    # Isolar por project_id — evita conflito entre projetos simultâneos
-    _project_state_dir = STATE_DIR / (spec_ref.split("/")[-1].replace(".md", "") if spec_ref else "default")
+    # Sempre isolado por project_id — sem path global compartilhado entre projetos
     _pid = os.environ.get("PROJECT_ID")
-    if _pid:
-        _project_state_dir = STATE_DIR / _pid
+    _project_state_dir = STATE_DIR / _pid if _pid else STATE_DIR / "default"
     _project_state_dir.mkdir(parents=True, exist_ok=True)
     (_project_state_dir / "current_project.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    # Manter compatibilidade com path legado (leitura pelo portal)
-    (STATE_DIR / "current_project.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    # Path global removido — nenhum serviço externo lê STATE_DIR/current_project.json diretamente
 
 
 def emit_event(event_type: str, payload: dict, request_id: str) -> None:
@@ -1741,7 +1736,7 @@ def main() -> int:
                 "cto_status": cto_status,
                 "pm_status": pm_status,
                 "charter_path": str(charter_path),
-                "state_path": str(STATE_DIR / "current_project.json"),
+                "state_path": str(STATE_DIR / (os.environ.get("PROJECT_ID") or "default") / "current_project.json"),
                 "monitor_loop": True,
             }
             if project_id and storage and storage.is_enabled():
@@ -1972,7 +1967,7 @@ def main() -> int:
             "cto_status": cto_status,
             "pm_status": pm_status,
             "charter_path": str(charter_path),
-            "state_path": str(STATE_DIR / "current_project.json"),
+            "state_path": str(STATE_DIR / (os.environ.get("PROJECT_ID") or "default") / "current_project.json"),
         }
         if run_full_stack:
             out["dev_status"] = dev_status
