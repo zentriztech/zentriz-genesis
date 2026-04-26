@@ -157,6 +157,28 @@ def load_spec(spec_path: Path) -> str:
 
 
 def _agents_root() -> Path:
+    """Returns the agents root directory.
+
+    If SYSTEM_PROMPTS_OVERRIDE_DIR is set and exists, that directory is used instead
+    of the bundled agents/. This allows runtime rollback to a pinned version:
+
+        SYSTEM_PROMPTS_OVERRIDE_DIR=/path/to/agents-v1.2.0
+
+    The override directory must have the same structure as applications/agents/
+    (cto/SYSTEM_PROMPT.md, dev/web/.../SYSTEM_PROMPT.md, etc.).
+
+    Override directories can be created by copying the agents/ folder to a versioned path:
+        cp -r applications/agents/ /pinned-prompts/agents-v1.2.0/
+    """
+    override = os.environ.get("SYSTEM_PROMPTS_OVERRIDE_DIR", "").strip()
+    if override:
+        override_path = Path(override)
+        if override_path.exists() and override_path.is_dir():
+            return override_path
+        else:
+            logger.warning(
+                "[Prompts] SYSTEM_PROMPTS_OVERRIDE_DIR=%s não encontrado ou não é um diretório — usando padrão", override
+            )
     return APPLICATIONS_ROOT / "agents"
 
 
