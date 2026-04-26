@@ -22,6 +22,7 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 # 2 workers: allows spec-preview background jobs to run without blocking health/other endpoints
-# timeout-keep-alive=600: keeps socket alive during long LLM calls (3-5 min)
-# h11-max-incomplete-event-size: allow large response bodies (spec can be 40KB+)
-CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "600", "--h11-max-incomplete-event-size", "10485760"]
+# Single worker: async jobs use threading within one process — multiple workers
+# would split _async_jobs dict across processes, causing "job not found" errors.
+# Background threads handle parallelism; one uvicorn process is sufficient.
+CMD ["uvicorn", "orchestrator.agents.server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "600"]
