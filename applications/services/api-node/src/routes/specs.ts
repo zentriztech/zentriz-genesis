@@ -16,9 +16,33 @@ function isAllowed(filename: string): boolean {
   return ALLOWED_EXT.has(ext);
 }
 
-// ── Message envelope builder for CTO spec_intake_and_normalize ───────────────
+// ── Message envelope builder — spec from free description (leigo → spec completa) ──
 function buildCTOMessage(freeText: string, title?: string): Record<string, unknown> {
   const requestId = `spec-preview-${Date.now()}`;
+
+  // Enriched task instruction: explain that the input is free text from a non-technical user
+  // and the CTO must act as a senior product consultant — inferring, completing, and enriching
+  const taskInstruction = `
+Você está recebendo a DESCRIÇÃO LIVRE de um produto feita por uma pessoa leiga, não-técnica.
+Seu papel neste modo é diferente do spec_intake_and_normalize normal:
+
+OBJETIVO: Gerar uma spec COMPLETA e RICA baseada na intenção do usuário, como um CTO sênior
+e consultor de produto experiente faria após uma conversa de discovery.
+
+REGRAS PARA ESTE MODO:
+1. INFIRA tudo que não foi dito mas é necessário para o produto funcionar.
+   Ex: se pediram "sistema de agendamento", inclua: autenticação, perfis, notificações, conflito de horários.
+2. USE seu conhecimento de domínio para enriquecer — não invente features novas, mas COMPLETE as implícitas.
+3. ESCOLHA a stack tecnológica mais adequada baseada no que foi descrito (mobile? web? backend? ambos?).
+4. ESCREVA cada FR com critérios de aceite detalhados (DADO/QUANDO/ENTÃO).
+5. INCLUA personas reais com jornadas de uso.
+6. DEFINA o modelo de dados com tabelas e campos principais.
+7. SEJA CONCRETO — sem "TBD" ou "UNKNOWN" em itens que você pode inferir do contexto.
+8. A spec deve ser rica o suficiente para que um engenheiro possa implementar sem perguntas adicionais.
+
+Descrição do usuário: "${freeText.replace(/"/g, '\\"')}"
+`.trim();
+
   return {
     project_id: "spec_preview",
     agent: "CTO",
@@ -26,12 +50,16 @@ function buildCTOMessage(freeText: string, title?: string): Record<string, unkno
     mode: "spec_intake_and_normalize",
     request_id: requestId,
     task_id: null,
-    task: "Converter texto livre em PRODUCT_SPEC.md padronizado.",
+    task: taskInstruction,
     inputs: {
       spec_raw: freeText,
       product_spec: freeText,
-      title: title ?? "Spec sem título",
-      constraints: ["spec-driven", "no-invent"],
+      title: title ?? "Produto descrito pelo usuário",
+      // "enrich-from-context" tells CTO to use domain knowledge to fill gaps
+      constraints: ["enrich-from-context", "use-domain-knowledge", "complete-implicit-requirements"],
+      // Extra context: signal that this is a free-text input from a non-technical user
+      input_type: "free_description",
+      user_is_non_technical: true,
     },
     existing_artifacts: [],
     limits: { max_rounds: 1, timeout_sec: 120 },
