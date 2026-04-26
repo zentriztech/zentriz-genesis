@@ -153,20 +153,77 @@ async function httpPost(urlStr: string, body: string, timeoutMs = 720_000): Prom
   });
 }
 
+async function httpGet(urlStr: string, timeoutMs = 10_000): Promise<string> {
+  const url = new URL(urlStr);
+  const httpMod = url.protocol === "https:" ? await import("https") : await import("http");
+  return new Promise((resolve, reject) => {
+    const req = httpMod.get({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: url.pathname + url.search,
+      headers: { "Connection": "keep-alive" },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf-8");
+        const code = res.statusCode ?? 0;
+        if (code >= 200 && code < 300) resolve(text);
+        else reject(new Error(`HTTP ${code}: ${text.slice(0, 200)}`));
+      });
+      res.on("error", reject);
+    });
+    req.setTimeout(timeoutMs, () => { req.destroy(new Error("GET timeout")); });
+    req.on("error", reject);
+  });
+}
+
 async function runSpecJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): Promise<void> {
   const job = _specJobs.get(jobId);
   if (!job) return;
   job.status = "running";
 
+  const base = agentsUrl.replace(/\/$/, "");
+
   try {
-    const url = `${agentsUrl.replace(/\/$/, "")}/invoke/cto`;
-    const body = JSON.stringify(message);
-    // Use native http module — avoids Node 20 AbortController bug with long-lived Docker connections
-    const text = await httpPost(url, body, 600_000); // 10 min hard limit
-    const data = JSON.parse(text) as Record<string, unknown>;
-    job.specMarkdown = extractSpecMarkdown(data);
-    job.summary = (data.summary as string | undefined) ?? "";
-    job.status = "done";
+    // Step 1: Start async job on agents server (returns immediately with agentsJobId)
+    // This avoids long-lived HTTP connections that get torn down by TCP idle timeouts
+    const startText = await httpPost(`${base}/invoke/cto/async`, JSON.stringify(message), 30_000);
+    const startData = JSON.parse(startText) as { jobId: string; status: string };
+    const agentsJobId = startData.jobId;
+    if (!agentsJobId) throw new Error("agents /invoke/cto/async did not return a jobId");
+
+    // Step 2: Poll /invoke/cto/status/:jobId every 8s until done or error
+    // Each poll is a short HTTP request (< 1s) — no timeout risk
+    const deadline = Date.now() + 660_000; // 11 min max
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 8_000));
+      try {
+        const pollText = await httpGet(`${base}/invoke/cto/status/${agentsJobId}`, 10_000);
+        const pollData = JSON.parse(pollText) as {
+          status: string; result?: Record<string, unknown>; error?: string; elapsed?: number;
+        };
+        if (pollData.status === "done" && pollData.result) {
+          job.specMarkdown = extractSpecMarkdown(pollData.result);
+          job.summary = (pollData.result.summary as string | undefined) ?? "";
+          job.status = "done";
+          return;
+        }
+        if (pollData.status === "error") {
+          job.status = "error";
+          job.error = pollData.error ?? "CTO job failed";
+          return;
+        }
+        // still running — update elapsed for client display
+        const elapsed = pollData.elapsed ?? 0;
+        console.log(`[SpecPreview] job=${jobId} agents_job=${agentsJobId} elapsed=${elapsed}s`);
+      } catch (pollErr) {
+        // transient poll error — keep trying until deadline
+        console.warn(`[SpecPreview] poll error (non-fatal): ${pollErr}`);
+      }
+    }
+    job.status = "error";
+    job.error = "Timeout: CTO demorou mais de 11 minutos. Tente novamente com uma descrição mais curta.";
   } catch (err) {
     job.status = "error";
     job.error = err instanceof Error ? err.message.slice(0, 300) : String(err);

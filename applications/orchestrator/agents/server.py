@@ -5,8 +5,12 @@ POST /invoke/{role} com body message_envelope; skill_path opcional em input.cont
 import json
 import os
 import logging
+import threading
+import time
+import uuid
 import traceback as _tb
 from contextlib import asynccontextmanager
+from typing import Dict, Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -424,6 +428,60 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
         detail = _error_response(role, e)
         logger.error("[%s] Erro ao processar: %s", agent_name, detail.get("error", str(e)))
         raise HTTPException(status_code=500, detail=detail)
+
+
+# ── Async job store for spec-preview (eliminates long HTTP connections) ─────────
+_async_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+def _cleanup_old_jobs() -> None:
+    """Remove jobs older than 45 minutes."""
+    cutoff = time.time() - 45 * 60
+    with _jobs_lock:
+        stale = [k for k, v in _async_jobs.items() if v.get("created_at", 0) < cutoff]
+        for k in stale:
+            del _async_jobs[k]
+
+def _run_cto_async(job_id: str, body: dict) -> None:
+    """Run CTO in a background thread and store the result in _async_jobs."""
+    try:
+        result = _invoke_agent(body, CTO_SYSTEM_PROMPT_PATH, "CTO")
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "done"
+                _async_jobs[job_id]["result"] = result
+    except Exception as e:
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "error"
+                _async_jobs[job_id]["error"] = str(e)[:500]
+
+@app.post("/invoke/cto/async")
+def invoke_cto_async(body: dict):
+    """Start CTO processing in a background thread. Returns jobId immediately.
+    Poll GET /invoke/cto/status/{job_id} for the result.
+    Eliminates the long HTTP connection that causes socket timeouts."""
+    _cleanup_old_jobs()
+    job_id = f"cto-{uuid.uuid4().hex[:12]}"
+    with _jobs_lock:
+        _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
+    thread = threading.Thread(target=_run_cto_async, args=(job_id, body), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+@app.get("/invoke/cto/status/{job_id}")
+def get_cto_job_status(job_id: str):
+    """Poll for async CTO job result. Returns {status, result} or {status, error}."""
+    with _jobs_lock:
+        job = _async_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    elapsed = int(time.time() - job.get("created_at", time.time()))
+    if job["status"] == "done":
+        return {"jobId": job_id, "status": "done", "result": job.get("result"), "elapsed": elapsed}
+    if job["status"] == "error":
+        return {"jobId": job_id, "status": "error", "error": job.get("error"), "elapsed": elapsed}
+    return {"jobId": job_id, "status": "running", "elapsed": elapsed}
 
 
 @app.post("/invoke/engineer")
