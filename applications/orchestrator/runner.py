@@ -1688,6 +1688,8 @@ def _run_monitor_loop(
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
                     # Detect backend language — disk-first (cached in pipeline_ctx after first call)
+                    # pm_module is not in scope here; use pipeline_ctx.current_module instead
+                    _current_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "backend"
                     if _dev_variant == "backend":
                         try:
                             _ml_stack = _resolve_backend_stack(
@@ -1695,7 +1697,7 @@ def _run_monitor_loop(
                                 engineer_proposal=getattr(pipeline_ctx, "engineer_proposal", "") if pipeline_ctx else "",
                                 charter_summary=charter_summary,
                                 backlog_summary=backlog_summary,
-                                module=pm_module,
+                                module=_current_module,
                             )
                             _ml_lang = _ml_stack["language"]
                             if _ml_lang != "nodejs":
