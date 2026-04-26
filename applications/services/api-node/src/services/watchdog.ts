@@ -17,6 +17,7 @@ import { signToken } from "../auth.js";
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS ?? "60000", 10);
 const MAX_RESTART_ATTEMPTS  = parseInt(process.env.WATCHDOG_MAX_RESTARTS ?? "5", 10);
 const MAX_RUNTIME_HOURS     = parseFloat(process.env.WATCHDOG_MAX_RUNTIME_HOURS ?? "8");
+const MAX_PARALLEL_RESTARTS = parseInt(process.env.WATCHDOG_MAX_PARALLEL_RESTARTS ?? "1", 10);
 const RUNNER_SERVICE_URL    = (process.env.RUNNER_SERVICE_URL ?? "").trim();
 const API_BASE_URL          = (process.env.API_BASE_URL ?? "http://localhost:3000").trim();
 const UPLOAD_DIR            = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
@@ -284,8 +285,13 @@ async function runWatchdogCycle(): Promise<void> {
 
     console.log(`[Watchdog] ${orphans.length} projeto(s) órfão(s) detectado(s)`);
 
-    // 3. Verificar se o runner está ocupado com outro projeto
-    const runnerHasActiveProject = (runnerStatus?.active_count ?? 0) > 0;
+    // 3. Count how many projects can be relaunched this cycle
+    // WATCHDOG_MAX_PARALLEL_RESTARTS=1 (default) = single project at a time (safe for cost-constrained envs)
+    // Set higher for parallel execution (runner_server supports N concurrent processes)
+    const currentlyActive = runnerStatus?.active_count ?? 0;
+    const availableSlots = Math.max(0, MAX_PARALLEL_RESTARTS - currentlyActive);
+
+    let relaunched = 0;
 
     for (const project of orphans) {
       const runtimeMs = project.started_at
@@ -313,10 +319,10 @@ async function runWatchdogCycle(): Promise<void> {
         continue;
       }
 
-      // Se runner já está ocupado, relançar apenas o mais antigo e aguardar próximo ciclo
-      if (runnerHasActiveProject) {
-        console.log(`[Watchdog] Runner ocupado. Aguardando próximo ciclo para projeto ${project.id}`);
-        break; // projetos restantes serão tentados no próximo ciclo
+      // Verificar slots disponíveis
+      if (relaunched >= availableSlots) {
+        console.log(`[Watchdog] Slots paralelos esgotados (${MAX_PARALLEL_RESTARTS}). Projeto ${project.id} será tentado no próximo ciclo.`);
+        break;
       }
 
       // Tentar relangar
@@ -326,8 +332,7 @@ async function runWatchdogCycle(): Promise<void> {
           restartCount: project.restart_count + 1,
           extra: { last_watchdog_restart: new Date().toISOString() },
         });
-        // Após relangar, runner está ocupado — aguardar próximo ciclo
-        break;
+        relaunched++;
       } else {
         await markProject(project.id, "running", {
           restartCount: project.restart_count + 1,
@@ -358,7 +363,7 @@ export function startWatchdog(): void {
     _watchdogTimer = setInterval(() => {
       runWatchdogCycle().catch(console.error);
     }, WATCHDOG_INTERVAL_MS);
-    console.log(`[Watchdog] Iniciado — ciclo a cada ${WATCHDOG_INTERVAL_MS / 1000}s, max_restarts=${MAX_RESTART_ATTEMPTS}, max_runtime=${MAX_RUNTIME_HOURS}h`);
+    console.log(`[Watchdog] Iniciado — ciclo a cada ${WATCHDOG_INTERVAL_MS / 1000}s, max_restarts=${MAX_RESTART_ATTEMPTS}, max_runtime=${MAX_RUNTIME_HOURS}h, max_parallel_restarts=${MAX_PARALLEL_RESTARTS}`);
   }, 10000);
 }
 
