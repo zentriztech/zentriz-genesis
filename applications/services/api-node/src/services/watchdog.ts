@@ -38,6 +38,7 @@ interface OrphanProject {
   spec_ref: string;
   started_at: string | null;
   restart_count: number; // coluna direta na tabela projects
+  stopped_by: string | null; // 'user' = parado intencionalmente, null = queda/falha
   created_by: string;
   tenant_id: string;
 }
@@ -63,9 +64,11 @@ async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanPr
     const result = await client.query<OrphanProject>(
       `SELECT id, status, spec_ref, started_at,
               COALESCE(restart_count, 0) AS restart_count,
+              stopped_by,
               created_by, tenant_id
        FROM projects
        WHERE status = 'running'
+         AND (stopped_by IS NULL OR stopped_by != 'user')
        ORDER BY started_at ASC NULLS LAST`,
     );
     // Filtra apenas os que não têm processo ativo no runner

@@ -136,7 +136,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
         });
         child.unref();
         await client.query(
-          "UPDATE projects SET status = $1, started_at = now(), updated_at = now() WHERE id = $2",
+          "UPDATE projects SET status = $1, started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $2",
           ["running", projectId]
         );
         return reply.status(202).send({
@@ -171,7 +171,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           });
           if (res.status >= 200 && res.status < 300) {
             await client.query(
-              "UPDATE projects SET status = $1, started_at = now(), updated_at = now() WHERE id = $2",
+              "UPDATE projects SET status = $1, started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $2",
               ["running", projectId]
             );
             request.log.info({ projectId }, "[Pipeline] Runner iniciado com sucesso (202)");
@@ -225,7 +225,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           });
           if (res.status >= 200 && res.status < 300) {
             await client.query(
-              "UPDATE projects SET status = $1, updated_at = now() WHERE id = $2",
+              "UPDATE projects SET status = $1, stopped_by = 'user', updated_at = now() WHERE id = $2",
               ["stopped", projectId]
             );
             return reply.send({ ok: true, message: "Pipeline encerrado" });
@@ -235,7 +235,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
         }
       }
       await client.query(
-        "UPDATE projects SET status = $1, updated_at = now() WHERE id = $2",
+        "UPDATE projects SET status = $1, stopped_by = 'user', updated_at = now() WHERE id = $2",
         ["stopped", projectId]
       );
       return reply.send({ ok: true, message: "Pipeline marcado como encerrado" });
