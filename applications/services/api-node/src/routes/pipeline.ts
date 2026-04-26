@@ -7,6 +7,25 @@ import { signToken } from "../auth.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
+// Simple in-memory sliding-window rate limiter for /run (per tenant or per user)
+// Limit: MAX_RUN_CALLS_PER_WINDOW calls within WINDOW_MS
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RUN_RATE_LIMIT_WINDOW_MS ?? "60000", 10); // 60s
+const RATE_LIMIT_MAX_CALLS = parseInt(process.env.RUN_RATE_LIMIT_MAX_CALLS ?? "5", 10); // 5 calls/min
+const _runCallTimestamps = new Map<string, number[]>(); // key: tenantId or userId → timestamps
+
+function checkRunRateLimit(key: string): { allowed: boolean; retryAfterMs: number } {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const calls = (_runCallTimestamps.get(key) ?? []).filter((t) => t > windowStart);
+  if (calls.length >= RATE_LIMIT_MAX_CALLS) {
+    const oldest = calls[0];
+    return { allowed: false, retryAfterMs: RATE_LIMIT_WINDOW_MS - (now - oldest) };
+  }
+  calls.push(now);
+  _runCallTimestamps.set(key, calls);
+  return { allowed: true, retryAfterMs: 0 };
+}
+
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
 }
@@ -67,6 +86,17 @@ export async function pipelineRoutes(app: FastifyInstance) {
       if (!allowed) {
         request.log.warn({ projectId }, "[Pipeline] Acesso negado (projeto não encontrado ou sem permissão)");
         return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      }
+
+      // Rate limit: 5 /run calls per minute per tenant (or per user if no tenant)
+      const rateLimitKey = user.tenantId ?? user.id;
+      const rl = checkRunRateLimit(rateLimitKey);
+      if (!rl.allowed) {
+        request.log.warn({ projectId, rateLimitKey }, "[Pipeline] Rate limit atingido no /run");
+        return reply.status(429).send({
+          code: "RATE_LIMITED",
+          message: `Muitas tentativas de iniciar pipeline. Aguarde ${Math.ceil(rl.retryAfterMs / 1000)}s antes de tentar novamente.`,
+        });
       }
 
       const projectRow = await client.query(
