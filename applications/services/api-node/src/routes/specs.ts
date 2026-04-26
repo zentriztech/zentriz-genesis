@@ -96,34 +96,56 @@ function extractSpecMarkdown(data: Record<string, unknown>): string {
     ?? "# Spec gerada\n\nO CTO não retornou conteúdo válido. Tente novamente.";
 }
 
+/**
+ * HTTP POST using Node.js built-in http/https modules.
+ * Avoids the AbortController/AbortSignal bug in Node.js 20 where long-lived
+ * fetch() connections inside Docker get aborted prematurely even with large timeouts.
+ * This function has a plain socket-level timeout (600s) with no AbortController.
+ */
+function httpPost(urlStr: string, body: string, timeoutMs = 600_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
+    const mod = url.protocol === "https:" ? require("https") : require("http");
+    const options = {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: url.pathname + url.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    };
+    const req = mod.request(options, (res: { statusCode: number; on: (e: string, cb: (d?: Buffer) => void) => void }) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk?: Buffer) => chunk && chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf-8");
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(text);
+        else reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
+      });
+    });
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`HTTP request timed out after ${timeoutMs / 1000}s`)); });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function runSpecJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): Promise<void> {
   const job = _specJobs.get(jobId);
   if (!job) return;
   job.status = "running";
 
   try {
-    // CTO pode demorar 3-5 min para spec completa — 360s timeout
-    const res = await fetch(`${agentsUrl.replace(/\/$/, "")}/invoke/cto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(message),
-      signal: AbortSignal.timeout(360_000),
-    });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      job.status = "error";
-      job.error = `CTO retornou ${res.status}: ${txt.slice(0, 200)}`;
-      return;
-    }
-
-    const data = await res.json() as Record<string, unknown>;
+    const url = `${agentsUrl.replace(/\/$/, "")}/invoke/cto`;
+    const body = JSON.stringify(message);
+    // Use native http module — avoids Node 20 AbortController bug with long-lived Docker connections
+    const text = await httpPost(url, body, 600_000); // 10 min hard limit
+    const data = JSON.parse(text) as Record<string, unknown>;
     job.specMarkdown = extractSpecMarkdown(data);
     job.summary = (data.summary as string | undefined) ?? "";
     job.status = "done";
   } catch (err) {
     job.status = "error";
-    job.error = err instanceof Error ? err.message.slice(0, 200) : String(err);
+    job.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
   }
 }
 
