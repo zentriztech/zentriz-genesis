@@ -556,6 +556,60 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /api/admin/projects/cleanup — arquiva projetos antigos (TTL configurável via env)
+  // Admin only. Marks old draft/failed/stopped projects as 'archived'.
+  // CLEANUP_TTL_DAYS_DRAFT (default 30): draft projects older than N days
+  // CLEANUP_TTL_DAYS_TERMINAL (default 90): completed/accepted/failed/stopped projects older than N days
+  app.post("/api/admin/projects/cleanup", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas administradores Zentriz" });
+    }
+
+    const draftTtlDays = parseInt(process.env.CLEANUP_TTL_DAYS_DRAFT ?? "30", 10);
+    const terminalTtlDays = parseInt(process.env.CLEANUP_TTL_DAYS_TERMINAL ?? "90", 10);
+    const dryRun = (request.query as Record<string, string>).dry_run === "true";
+
+    const client = await pool.connect();
+    try {
+      // Ensure 'archived' status is accepted by DB constraint — handled via migration 004 if not present
+      const draftResult = await client.query(
+        `SELECT id, title, status, updated_at FROM projects
+         WHERE status IN ('draft')
+           AND updated_at < now() - ($1 || ' days')::interval
+         ORDER BY updated_at ASC LIMIT 100`,
+        [String(draftTtlDays)]
+      );
+      const terminalResult = await client.query(
+        `SELECT id, title, status, updated_at FROM projects
+         WHERE status IN ('completed', 'accepted', 'failed', 'stopped')
+           AND updated_at < now() - ($1 || ' days')::interval
+         ORDER BY updated_at ASC LIMIT 100`,
+        [String(terminalTtlDays)]
+      );
+
+      const candidates = [...draftResult.rows, ...terminalResult.rows] as Array<{ id: string; title: string; status: string; updated_at: string }>;
+
+      if (!dryRun && candidates.length > 0) {
+        const ids = candidates.map((r) => r.id);
+        await client.query(
+          `UPDATE projects SET status = 'archived', updated_at = now()
+           WHERE id = ANY($1::uuid[])`,
+          [ids]
+        );
+      }
+
+      return reply.send({
+        dry_run: dryRun,
+        archived_count: dryRun ? 0 : candidates.length,
+        candidates: candidates.map((r) => ({ id: r.id, title: r.title, status: r.status, updated_at: r.updated_at })),
+        policy: { draft_ttl_days: draftTtlDays, terminal_ttl_days: terminalTtlDays },
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // POST /api/projects/:id/escalate — registra evento de escalação humana
   // Called by the runner when circuit-breaker or rework limits are hit.
   app.post<{ Params: { id: string }; Body: { task_id?: string; reason?: string } }>(
