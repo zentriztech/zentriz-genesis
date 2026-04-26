@@ -197,7 +197,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string; x: number; y: number } | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const containerRef   = useRef<HTMLDivElement>(null);
+  // Track previous graph signature to avoid unnecessary re-renders / physics restarts
+  const prevSignature  = useRef<string>("");
 
   const refresh = useCallback(async () => {
     try {
@@ -219,7 +221,30 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         planningDocs,
       );
 
-      setGraphData(data);
+      // Build a compact signature of node ids + active agent + task statuses + link count
+      // Only update state (which restarts physics) when content actually changed
+      const sig = [
+        data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
+        data.links.length,
+      ].join("§");
+
+      if (sig === prevSignature.current) return; // nothing changed — skip setGraphData
+      prevSignature.current = sig;
+
+      setGraphData(prev => {
+        // Merge: keep existing node positions by reusing prev nodes when ids match
+        // New nodes get no position (physics will place them); removed nodes are dropped
+        const prevNodeMap = new Map(prev.nodes.map(n => [n.id, n]));
+        const mergedNodes = data.nodes.map(n => {
+          const existing = prevNodeMap.get(n.id) as (FGNode & { x?: number; y?: number; vx?: number; vy?: number }) | undefined;
+          if (existing) {
+            // Preserve physics position, only update mutable fields (isActive, detail)
+            return { ...existing, isActive: n.isActive, detail: n.detail, color: n.color };
+          }
+          return n; // new node — no position, physics will place it
+        });
+        return { nodes: mergedNodes, links: data.links };
+      });
     } catch {
       // silent
     } finally {
