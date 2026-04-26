@@ -192,6 +192,7 @@ export async function specRoutes(app: FastifyInstance) {
 
     let title = "Spec sem título";
     let parentProjectId: string | null = null;
+    let freeDescription: string | null = null;
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -220,6 +221,14 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) parentProjectId = raw;
+      }
+      if (part.fields?.freeDescription !== undefined) {
+        const fdField = part.fields.freeDescription;
+        const v = Array.isArray(fdField) ? fdField[0] : fdField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim()
+          : "";
+        if (raw) freeDescription = raw;
       }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -269,10 +278,13 @@ export async function specRoutes(app: FastifyInstance) {
         versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
       }
 
+      const extraJson = JSON.stringify({
+        ...(freeDescription ? { free_description: freeDescription } : {}),
+      });
       const projectResult = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber]
+        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id`,
+        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber, extraJson]
       );
       projectId = projectResult.rows[0].id;
     } finally {

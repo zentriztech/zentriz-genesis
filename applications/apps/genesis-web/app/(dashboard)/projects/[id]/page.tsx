@@ -678,6 +678,22 @@ function ProjectDetailPageInner() {
               </Card>
             )}
 
+            {/* Original idea (free description saved at submission) */}
+            {project.freeDescription && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75, fontSize: "0.6rem" }}>
+                    💡 Ideia original
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary"
+                    sx={{ fontSize: "0.78rem", lineHeight: 1.6, whiteSpace: "pre-wrap", fontStyle: "italic" }}>
+                    &ldquo;{project.freeDescription}&rdquo;
+                  </Typography>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Charter summary */}
             {project.charterSummary && (
               <Card>

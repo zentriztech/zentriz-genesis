@@ -283,6 +283,7 @@ export default function SpecPage() {
       const formData = new FormData();
       formData.append("title", projectTitle.trim() || "Spec sem título");
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
+      if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
@@ -301,7 +302,7 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [specMarkdown, projectTitle, parentProjectId, router]);
+  }, [specMarkdown, projectTitle, parentProjectId, freeText, router]);
 
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {

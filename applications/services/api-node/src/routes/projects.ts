@@ -73,6 +73,7 @@ export async function projectRoutes(app: FastifyInstance) {
         completedAt: (row.completed_at as Date)?.toISOString() ?? undefined,
         parentProjectId: (row.parent_project_id as string | null) ?? null,
         versionNumber: (row.version_number as number | null) ?? 1,
+        freeDescription: ((row.extra as Record<string, unknown> | null)?.free_description as string | undefined) ?? null,
       }));
       return reply.send(projects);
     } finally {
@@ -109,6 +110,7 @@ export async function projectRoutes(app: FastifyInstance) {
         completedAt: (row.completed_at as Date)?.toISOString() ?? undefined,
         parentProjectId: (row as Record<string, unknown>).parent_project_id as string | null ?? null,
         versionNumber: (row as Record<string, unknown>).version_number as number ?? 1,
+        freeDescription: ((row as Record<string, unknown>).extra as Record<string, unknown> | null)?.free_description as string | undefined ?? null,
       });
     } finally {
       client.release();

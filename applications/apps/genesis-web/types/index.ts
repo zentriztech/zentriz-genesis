@@ -62,6 +62,8 @@ export interface Project {
   parentProjectId?: string | null;
   /** Número da versão dentro da linhagem (1 = original, 2 = v2, etc.). */
   versionNumber?: number;
+  /** Texto livre original digitado pelo usuário antes do CTO gerar a spec. */
+  freeDescription?: string | null;
 }
 
 export interface Notification {
