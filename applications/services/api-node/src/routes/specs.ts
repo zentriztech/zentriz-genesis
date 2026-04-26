@@ -102,10 +102,12 @@ function extractSpecMarkdown(data: Record<string, unknown>): string {
  * fetch() connections inside Docker get aborted prematurely even with large timeouts.
  * This function has a plain socket-level timeout (600s) with no AbortController.
  */
-function httpPost(urlStr: string, body: string, timeoutMs = 600_000): Promise<string> {
+async function httpPost(urlStr: string, body: string, timeoutMs = 600_000): Promise<string> {
+  const url = new URL(urlStr);
+  const { request } = url.protocol === "https:"
+    ? await import("https")
+    : await import("http");
   return new Promise((resolve, reject) => {
-    const url = new URL(urlStr);
-    const mod = url.protocol === "https:" ? require("https") : require("http");
     const options = {
       hostname: url.hostname,
       port: url.port || (url.protocol === "https:" ? 443 : 80),
@@ -113,13 +115,14 @@ function httpPost(urlStr: string, body: string, timeoutMs = 600_000): Promise<st
       method: "POST",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
     };
-    const req = mod.request(options, (res: { statusCode: number; on: (e: string, cb: (d?: Buffer) => void) => void }) => {
+    const req = request(options, (res) => {
       const chunks: Buffer[] = [];
-      res.on("data", (chunk?: Buffer) => chunk && chunks.push(chunk));
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf-8");
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(text);
-        else reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 200)}`));
+        const code = res.statusCode ?? 0;
+        if (code >= 200 && code < 300) resolve(text);
+        else reject(new Error(`HTTP ${code}: ${text.slice(0, 200)}`));
       });
     });
     req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error(`HTTP request timed out after ${timeoutMs / 1000}s`)); });
