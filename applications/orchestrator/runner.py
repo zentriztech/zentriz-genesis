@@ -1301,6 +1301,9 @@ def _run_monitor_loop(
     # same type within a single loop iteration. Default false to preserve behavior.
     monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
     _state_lock = threading.Lock() if monitor_parallel else None
+    _api_unreachable_count = 0
+    MAX_API_UNREACHABLE = 5  # encerrar após 5 falhas consecutivas de API quando devops_done
+
     while True:
         if _shutdown_requested:
             _post_step("Monitor Loop encerrado (sinal recebido).", request_id)
@@ -1309,6 +1312,15 @@ def _run_monitor_loop(
         if status in ("accepted", "stopped"):
             _post_step(f"Monitor Loop encerrado: status do projeto é '{status}'.", request_id)
             break
+        if status is None:
+            _api_unreachable_count += 1
+            logger.warning("[Monitor Loop] API inacessível (tentativa %d/%d)", _api_unreachable_count, MAX_API_UNREACHABLE)
+            if devops_done and _api_unreachable_count >= MAX_API_UNREACHABLE:
+                _post_step("Monitor Loop encerrado: API inacessível após DevOps concluído.", request_id)
+                break
+        else:
+            _api_unreachable_count = 0
+
         tasks = _get_tasks(project_id)
         try:
             from orchestrator.pipeline_context import validate_backlog_tasks_max_files
@@ -1323,7 +1335,9 @@ def _run_monitor_loop(
             t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL", "BLOCKED")
             for t in tasks
         )
-        all_done = bool(tasks) and all(t.get("status") == "DONE" for t in tasks)
+        # all_done: all tasks in a terminal state (DONE or QA_PASS; QA_FAIL also counts as done)
+        _terminal = {"DONE", "QA_PASS", "CANCELLED"}
+        all_done = bool(tasks) and all(t.get("status") in _terminal for t in tasks)
 
         if need_qa and waiting_review:
             # In parallel mode process all waiting_review tasks concurrently; in
