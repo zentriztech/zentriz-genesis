@@ -199,7 +199,7 @@ async function runSpecJob(jobId: string, message: Record<string, unknown>, agent
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 8_000));
       try {
-        const pollText = await httpGet(`${base}/invoke/cto/status/${agentsJobId}`, 10_000);
+        const pollText = await httpGet(`${base}/invoke/cto/status/${agentsJobId}`, 60_000);
         const pollData = JSON.parse(pollText) as {
           status: string; result?: Record<string, unknown>; error?: string; elapsed?: number;
         };
