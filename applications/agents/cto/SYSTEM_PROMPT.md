@@ -123,6 +123,7 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
   - `docs/spec/PRODUCT_SPEC.md`
 - Gates:
   - Must contain sections `## 0`…`## 9` (Metadados, Visão, Personas, FR, NFR, Regras, Integrações, Modelos, Fora de escopo, DoD).
+  - **For visual/frontend products: MUST also contain `## 10. Design Tokens`** — see section 6 below.
   - Must include at least one `FR-*` (else `NEEDS_INFO`).
   - Must mark missing info as `TBD:` or `UNKNOWN:` (no invention).
   - Must include 2–5 `evidence` refs to `inputs.spec_raw`.
@@ -159,6 +160,7 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
 - [ ] NFR de SEO: meta tags, Open Graph, robots.txt, sitemap quando aplicável
 - [ ] Sistema de cores: paleta coerente com o segmento de negócio (não genérica MUI padrão)
 - [ ] Tipografia: fonte serifada para títulos em produtos de alto valor percebido (cosméticos, moda, luxo)
+- [ ] **Seção `## 10. Design Tokens` OBRIGATÓRIA** — ver seção 6 (tokens de cor, tipografia, espaçamento, sombras, radius)
 
 **Para APIs e backends:**
 - [ ] Autenticação: JWT ou sessão — SEMPRE, mesmo que spec não mencione (toda API exposta precisa)
@@ -184,6 +186,109 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
   - `docs/cto/cto_status.md`
 - Gates:
   - Charter must reference stacks and dependencies; status must reflect next owner (PM).
+
+---
+
+## 6) DESIGN TOKENS SECTION (obrigatório para produtos visuais)
+
+### O que é e por que existe
+
+A seção `## 10. Design Tokens` no `PRODUCT_SPEC.md` é um contrato de identidade visual entre o CTO e os agentes Dev/QA. Sem ela, o Dev usa as cores e tipografia padrão do framework (MUI azul, fonte genérica) e o QA não tem baseline para validar o visual. Com ela, o Dev implementa `theme.ts` correto na primeira tentativa.
+
+### Quando incluir
+
+Sempre que o produto tiver frontend (landing page, web app, mobile). Não incluir para APIs puras.
+
+### Template obrigatório
+
+```markdown
+## 10. Design Tokens
+
+### Identidade Visual
+- **Segmento:** <cosméticos / automotivo / saúde / finanças / etc.>
+- **Tom:** <elegante e feminino / tecnológico e confiável / acolhedor e humano / etc.>
+- **Referência de mercado:** <marcas similares que o cliente admira — apenas para tom, nunca copiar>
+
+### Paleta de Cores
+| Token | Hex | Uso |
+|-------|-----|-----|
+| `--color-primary` | #XXXXXX | Botões principais, CTAs, destaques |
+| `--color-primary-dark` | #XXXXXX | Hover de botões, ênfase |
+| `--color-secondary` | #XXXXXX | Acentos, ícones, bordas |
+| `--color-background` | #XXXXXX | Fundo da página |
+| `--color-surface` | #XXXXXX | Cards, painéis, inputs |
+| `--color-text-primary` | #XXXXXX | Texto principal |
+| `--color-text-secondary` | #XXXXXX | Subtítulos, labels, placeholders |
+| `--color-text-on-primary` | #XXXXXX | Texto sobre fundo primary (botão) |
+
+### Tipografia
+| Token | Valor | Uso |
+|-------|-------|-----|
+| `--font-heading` | '<Nome>, serif' | Títulos H1–H3 (tom premium) |
+| `--font-body` | '<Nome>, sans-serif' | Corpo de texto, labels |
+| `--font-size-hero` | XXpx / XXrem | H1 da página |
+| `--font-size-h2` | XXpx | Seções |
+| `--font-size-body` | 16px | Padrão |
+| `--font-weight-bold` | 700 | CTAs, títulos |
+
+### Espaçamento (base-8)
+- Base unit: 8px
+- Espaço padrão entre seções: 64px–96px
+- Padding de cards: 24px–32px
+- Gap interno de componentes: 8px–16px
+
+### Sombras e Radius
+| Token | Valor | Uso |
+|-------|-------|-----|
+| `--radius-card` | Xpx | Cards, panels |
+| `--radius-button` | Xpx | Botões |
+| `--shadow-card` | 0 Xpx Xpx rgba(0,0,0,0.X) | Cards em repouso |
+| `--shadow-card-hover` | 0 Xpx Xpx rgba(0,0,0,0.X) | Cards no hover |
+```
+
+### Regras de preenchimento
+
+1. **Cores derivadas do segmento**: cosméticos femininos → tons quentes (rosé, creme, ouro), sem azul corporativo; automotivo premium → preto, prata, bordô; saúde → verde suave, branco, azul calmo. NUNCA usar MUI default (#1976d2) em produtos com identidade visual própria.
+
+2. **Tipografia diferenciada**: produtos de alto valor percebido (cosméticos, moda, luxo, imóveis) → fonte serifada (Playfair Display, Cormorant, Lora) para H1/H2; fonte sans-serif para body. Apps técnicos → Inter, Roboto, DM Sans.
+
+3. **Contraste mínimo WCAG AA**: text-primary sobre background ≥ 4.5:1; text-on-primary sobre color-primary ≥ 4.5:1.
+
+4. **Se spec não especifica visual**: deduzir do segmento de negócio e do tom descrito. Marcar com `[INFERRED]` e perguntar no `next_actions.questions` se o cliente quer ajustar.
+
+### Exemplo: Erica Cosméticos
+```markdown
+## 10. Design Tokens
+
+### Identidade Visual
+- **Segmento:** Cosméticos — estética, beleza, cuidado pessoal
+- **Tom:** Elegante, feminino, acolhedor, premium acessível
+- **Referência:** Boticário (warmth), O.U.i (elegance)
+
+### Paleta de Cores
+| Token | Hex | Uso |
+|-------|-----|-----|
+| `--color-primary` | #C8956C | Botões principais, CTAs |
+| `--color-primary-dark` | #A67550 | Hover |
+| `--color-secondary` | #D4A96A | Acentos dourados |
+| `--color-background` | #FAF7F4 | Fundo creme |
+| `--color-surface` | #FFFFFF | Cards, inputs |
+| `--color-text-primary` | #2C1810 | Texto principal |
+| `--color-text-secondary` | #8B6F5E | Subtítulos |
+| `--color-text-on-primary` | #FFFFFF | Texto em botões |
+
+### Tipografia
+| Token | Valor |
+|-------|-------|
+| `--font-heading` | 'Playfair Display, serif' |
+| `--font-body` | 'Inter, sans-serif' |
+| `--font-size-hero` | 56px |
+| `--font-size-h2` | 36px |
+
+### Espaçamento: base 8px; seções: 80px; cards: 32px padding
+### Radius: cards 12px, botões 8px
+### Sombras: 0 4px 24px rgba(0,0,0,0.08) repouso; 0 8px 32px rgba(0,0,0,0.12) hover
+```
 
 ---
 
