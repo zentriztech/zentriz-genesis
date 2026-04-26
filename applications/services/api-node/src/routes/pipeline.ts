@@ -243,4 +243,71 @@ export async function pipelineRoutes(app: FastifyInstance) {
       client.release();
     }
   });
+
+  // GET /api/watchdog/status — estado atual do Watchdog + projetos órfãos no DB
+  app.get("/api/watchdog/status", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas administradores Zentriz" });
+    }
+
+    const runnerServiceUrl = process.env.RUNNER_SERVICE_URL?.trim();
+    interface RunnerStatusPayload { active_count?: number; projects?: Record<string, number> }
+    let runnerStatus: RunnerStatusPayload | null = null;
+    if (runnerServiceUrl) {
+      try {
+        const res = await fetch(`${runnerServiceUrl.replace(/\/$/, "")}/status`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) runnerStatus = await res.json() as RunnerStatusPayload;
+      } catch {
+        // runner unreachable
+      }
+    }
+
+    const client = await pool.connect();
+    try {
+      const orphans = await client.query(
+        `SELECT id, title, status, started_at, restart_count,
+                COALESCE(restart_count, 0) AS restart_count,
+                stopped_by, created_at
+         FROM projects
+         WHERE status = 'running'
+           AND (stopped_by IS NULL OR stopped_by != 'user')
+         ORDER BY started_at ASC NULLS LAST
+         LIMIT 20`
+      );
+
+      const activeRunnerIds = new Set(Object.keys(runnerStatus?.projects ?? {}));
+      const rows = orphans.rows as Array<{
+        id: string; title: string; status: string;
+        started_at: string | null; restart_count: number; stopped_by: string | null;
+      }>;
+
+      return reply.send({
+        watchdog: {
+          enabled: Boolean(process.env.RUNNER_SERVICE_URL),
+          interval_ms: parseInt(process.env.WATCHDOG_INTERVAL_MS ?? "60000", 10),
+          max_restarts: parseInt(process.env.WATCHDOG_MAX_RESTARTS ?? "5", 10),
+          max_runtime_hours: parseFloat(process.env.WATCHDOG_MAX_RUNTIME_HOURS ?? "8"),
+        },
+        runner: runnerStatus
+          ? { reachable: true, active_count: runnerStatus.active_count ?? 0, active_project_ids: Object.keys(runnerStatus.projects ?? {}) }
+          : { reachable: false },
+        orphan_candidates: rows.map((r) => ({
+          id: r.id,
+          title: r.title,
+          started_at: r.started_at,
+          restart_count: r.restart_count,
+          has_active_process: activeRunnerIds.has(r.id),
+          runtime_hours: r.started_at
+            ? ((Date.now() - new Date(r.started_at).getTime()) / 3600000).toFixed(1)
+            : null,
+        })),
+        checked_at: new Date().toISOString(),
+      });
+    } finally {
+      client.release();
+    }
+  });
 }
