@@ -233,10 +233,18 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id) return;
-    apiGet<ArtifactsResp>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => null);
-    apiGet<CodeFilesResp>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => null);
+    const loadArtifacts = () => {
+      apiGet<ArtifactsResp>(`/api/projects/${id}/artifacts`).then(setArtifacts).catch(() => null);
+      apiGet<CodeFilesResp>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => null);
+    };
+    loadArtifacts(); // immediate load
+    // Poll while running so graph and document list refresh automatically as agents produce files
+    if (project?.status === "running") {
+      const t = setInterval(loadArtifacts, 12000); // every 12s — artifacts change less frequently than tasks
+      return () => clearInterval(t);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, project?.status]); // project intentionally excluded — status change is the trigger
+  }, [id, project?.status]);
 
   useEffect(() => {
     if (!id || !project) return;

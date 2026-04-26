@@ -220,7 +220,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  // planningDocs in deps: when parent refreshes artifacts every 12s, graph rebuilds with new docs
+  }, [projectId, planningDocs]);
 
   useEffect(() => {
     refresh();

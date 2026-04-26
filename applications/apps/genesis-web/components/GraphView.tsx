@@ -79,7 +79,8 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, p
       setEdges(newEdges);
       setTimeout(() => fitView({ padding: 0.2 }), 100);
     } catch { /* silent */ } finally { setLoading(false); }
-  }, [projectId, setNodes, setEdges, fitView]);
+  // planningDocs in deps: when parent refreshes artifacts, graph rebuilds with new docs
+  }, [projectId, planningDocs, setNodes, setEdges, fitView]);
 
   useEffect(() => {
     refresh();
