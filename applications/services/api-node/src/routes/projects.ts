@@ -458,6 +458,104 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /api/projects/:id/agent-metrics — registra métricas de tokens/custo por chamada de agente
+  app.post<{
+    Params: { id: string };
+    Body: { agent: string; taskId?: string; round?: number; inputTokens: number; outputTokens: number; model?: string; durationMs?: number; status?: string };
+  }>("/api/projects/:id/agent-metrics", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const body = request.body ?? {} as Record<string, unknown>;
+    const client = await pool.connect();
+    try {
+      const row = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
+      const proj = row.rows[0];
+      if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      // Accept from runner (via GENESIS_API_TOKEN) or admin/owner
+      if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId && proj.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+      await client.query(
+        `INSERT INTO project_agent_metrics
+           (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          id,
+          String(body.agent ?? "unknown"),
+          body.taskId ? String(body.taskId) : null,
+          Number(body.round ?? 1),
+          Number(body.inputTokens ?? 0),
+          Number(body.outputTokens ?? 0),
+          body.model ? String(body.model) : null,
+          body.durationMs ? Number(body.durationMs) : null,
+          body.status ? String(body.status) : null,
+        ]
+      );
+      return reply.status(201).send({ ok: true });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/metrics — totais de tokens e custo estimado do projeto
+  app.get<{ Params: { id: string } }>("/api/projects/:id/metrics", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const proj = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
+      const row = proj.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      const totals = await client.query(
+        `SELECT
+           agent,
+           COUNT(*)::int AS calls,
+           SUM(input_tokens)::int AS input_tokens,
+           SUM(output_tokens)::int AS output_tokens,
+           SUM(duration_ms)::int AS duration_ms
+         FROM project_agent_metrics
+         WHERE project_id = $1
+         GROUP BY agent
+         ORDER BY agent`,
+        [id]
+      );
+
+      const grand = await client.query(
+        `SELECT
+           SUM(input_tokens)::int AS total_input,
+           SUM(output_tokens)::int AS total_output,
+           COUNT(*)::int AS total_calls
+         FROM project_agent_metrics
+         WHERE project_id = $1`,
+        [id]
+      );
+
+      const g = grand.rows[0] as { total_input: number; total_output: number; total_calls: number } | undefined;
+      const totalInput = g?.total_input ?? 0;
+      const totalOutput = g?.total_output ?? 0;
+
+      // Estimated cost: Claude Sonnet 4 pricing (approximate)
+      const costInput = (totalInput / 1_000_000) * 3;   // $3/MTok input
+      const costOutput = (totalOutput / 1_000_000) * 15; // $15/MTok output
+
+      return reply.send({
+        by_agent: totals.rows,
+        totals: {
+          calls: g?.total_calls ?? 0,
+          input_tokens: totalInput,
+          output_tokens: totalOutput,
+          estimated_cost_usd: parseFloat((costInput + costOutput).toFixed(4)),
+        },
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // POST /api/projects/:id/escalate — registra evento de escalação humana
   // Called by the runner when circuit-breaker or rework limits are hit.
   app.post<{ Params: { id: string }; Body: { task_id?: string; reason?: string } }>(

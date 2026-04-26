@@ -109,6 +109,46 @@ def ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _record_agent_metrics(
+    project_id: str | None,
+    agent: str,
+    response: dict,
+    task_id: str | None = None,
+    round_num: int = 1,
+) -> None:
+    """Fire-and-forget: POST token metrics to the API after each agent call."""
+    if not project_id:
+        return
+    base = os.environ.get("API_BASE_URL", "").strip()
+    token = os.environ.get("GENESIS_API_TOKEN", "").strip()
+    if not base or not token:
+        return
+    input_tokens = response.get("_input_tokens") or 0
+    output_tokens = response.get("_output_tokens") or 0
+    if not input_tokens and not output_tokens:
+        return  # no usage data — skip (e.g. running in no-API mode)
+    try:
+        payload = json.dumps({
+            "agent": agent,
+            "taskId": task_id,
+            "round": round_num,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "model": response.get("_model"),
+            "durationMs": response.get("_duration_ms"),
+            "status": response.get("status"),
+        }).encode()
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api/projects/{project_id}/agent-metrics",
+            data=payload,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        logger.debug("[Metrics] Falha ao registrar métricas do agente %s: %s", agent, e)
+
+
 def load_spec(spec_path: Path) -> str:
     path = spec_path if spec_path.is_absolute() else REPO_ROOT / spec_path
     if not path.exists():
@@ -607,7 +647,13 @@ def _post_step(step_message: str, request_id: str) -> None:
     _post_dialogue("system", "system", "step", step_message, request_id)
 
 
-def _audit_log(agent: str, request_id: str, response: dict) -> None:
+def _audit_log(
+    agent: str,
+    request_id: str,
+    response: dict,
+    task_id: str | None = None,
+    round_num: int = 1,
+) -> None:
     """Audit trail por chamada (Blueprint 6 / Fase 4). Log estruturado para rastreabilidade."""
     status = response.get("status", "?")
     artifacts_count = len(response.get("artifacts") or [])
@@ -618,6 +664,8 @@ def _audit_log(agent: str, request_id: str, response: dict) -> None:
         "[Audit] agent=%s request_id=%s status=%s artifacts_count=%d validator_pass=%s validation_errors=%s artifacts_paths=%s",
         agent, request_id, status, artifacts_count, validator_pass, len(validation_errors), artifacts_paths[:10],
     )
+    # Fire-and-forget token metrics recording
+    _record_agent_metrics(_project_id(), agent, response, task_id=task_id, round_num=round_num)
 
 
 def _post_agent_working(agent_key: str, activity_message: str, request_id: str) -> None:
@@ -1144,7 +1192,7 @@ def _run_monitor_loop(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=last_dev_artifacts,
                     )
-                    _audit_log("qa", request_id, qa_response)
+                    _audit_log("qa", request_id, qa_response, task_id=tid)
                     _qa_summary = qa_response.get("summary", "")
                     qa_status = qa_response.get("status", "?")
                     _post_dialogue(
@@ -1248,7 +1296,7 @@ def _run_monitor_loop(
                         task_dict=dev_task, dependency_code=dep_code, pipeline_ctx=pipeline_ctx,
                         dev_variant=_dev_variant,
                     )
-                    _audit_log("dev", request_id, dev_response)
+                    _audit_log("dev", request_id, dev_response, task_id=task_id)
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
                     last_dev_artifacts = dev_response.get("artifacts", [])

@@ -595,7 +595,14 @@ def run_agent(
                 logger.info("[%s] Thinking: %s...", agent_name, (last_thinking[:200] + "..." if len(last_thinking) > 200 else last_thinking))
         except ImportError:
             last_thinking = ""
-        logger.info("[%s] Resposta recebida (audit: role=%s model=%s request_id=%s).", agent_name, role, model, request_id)
+        # Capture token usage from Anthropic API response
+        _usage = getattr(response, "usage", None)
+        _input_tokens = getattr(_usage, "input_tokens", 0) if _usage else 0
+        _output_tokens = getattr(_usage, "output_tokens", 0) if _usage else 0
+        logger.info(
+            "[%s] Resposta recebida (audit: role=%s model=%s request_id=%s tokens_in=%d tokens_out=%d).",
+            agent_name, role, model, request_id, _input_tokens, _output_tokens,
+        )
 
         try:
             from orchestrator.envelope import (
@@ -651,6 +658,10 @@ def run_agent(
             out["validation_errors"] = []
             out["_thinking"] = bool(last_thinking)
             duration_ms = (time.perf_counter() - t0_run) * 1000
+            out["_input_tokens"] = _input_tokens
+            out["_output_tokens"] = _output_tokens
+            out["_duration_ms"] = int(duration_ms)
+            out["_model"] = model
             log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
             return _normalize_response_envelope(out, request_id, raw_text)
 
@@ -670,6 +681,10 @@ def run_agent(
         out["validator_pass"] = False
         out["validation_errors"] = all_errors
         out["_thinking"] = bool(last_thinking)
+        out["_input_tokens"] = _input_tokens
+        out["_output_tokens"] = _output_tokens
+        out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
+        out["_model"] = model
         duration_ms = (time.perf_counter() - t0_run) * 1000
         log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
         return _normalize_response_envelope(out, request_id, raw_text)

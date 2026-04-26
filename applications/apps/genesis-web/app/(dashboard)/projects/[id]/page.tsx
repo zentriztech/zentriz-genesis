@@ -55,6 +55,7 @@ const STATUS_RUNNING = "running";
 type ArtifactsResponse = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null; projectArtifactsRoot: string | null };
 type CodeFilesResponse = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResponse = { runCommand: string | null; appUrl: string | null; startShPath: string | null };
+type MetricsResponse = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 
 /** Mapeia from_agent do evento agent_working para o índice do passo no Stepper (0=Spec, 1=Engineer, ..., 6=Concluído). */
@@ -116,6 +117,7 @@ function ProjectDetailPageInner() {
   const [artifacts, setArtifacts] = useState<ArtifactsResponse | null>(null);
   const [codeFiles, setCodeFiles] = useState<CodeFilesResponse | null>(null);
   const [runInfo, setRunInfo] = useState<RunInfoResponse | null>(null);
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [tasks, setTasks] = useState<TaskItem[] | null>(null);
   const [activeTab, setActiveTab] = useState(0);
@@ -154,6 +156,7 @@ function ProjectDetailPageInner() {
     apiGet<CodeFilesResponse>(`/api/projects/${id}/code-files`).then(setCodeFiles).catch(() => setCodeFiles(null));
     if (project?.status === "completed" || project?.status === "accepted") {
       apiGet<RunInfoResponse>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => setRunInfo(null));
+      apiGet<MetricsResponse>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => setMetrics(null));
     }
   }, [id, project?.status]);
 
@@ -807,12 +810,25 @@ function ProjectDetailPageInner() {
                 <Typography variant="h6" fontWeight={600}>{duration}</Typography>
               </Box>
             )}
-            <Box>
-              <Typography variant="caption" color="text.secondary">Custo estimado (tokens)</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                Disponível em breve (G23)
-              </Typography>
-            </Box>
+            {metrics && metrics.totals.calls > 0 && (
+              <>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Tokens totais</Typography>
+                  <Typography variant="h6" fontWeight={600}>
+                    {(metrics.totals.input_tokens + metrics.totals.output_tokens).toLocaleString("pt-BR")}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {metrics.totals.input_tokens.toLocaleString("pt-BR")} entrada · {metrics.totals.output_tokens.toLocaleString("pt-BR")} saída
+                  </Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Custo estimado</Typography>
+                  <Typography variant="h6" fontWeight={600} color="success.main">
+                    ~${metrics.totals.estimated_cost_usd.toFixed(2)} USD
+                  </Typography>
+                </Box>
+              </>
+            )}
           </Stack>
         </MotionCard>
       )}
