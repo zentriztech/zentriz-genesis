@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
+import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
@@ -663,6 +664,86 @@ export async function projectRoutes(app: FastifyInstance) {
         } catch {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Arquivo não encontrado" });
         }
+      } finally {
+        client.release();
+      }
+    }
+  );
+
+  // POST /api/projects/:id/deploy/ephemeral — lança ambiente efêmero de 30min
+  app.post<{ Params: { id: string }; Body: { ttlMinutes?: number } }>(
+    "/api/projects/:id/deploy/ephemeral",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const ttlMinutes = Math.min((request.body as { ttlMinutes?: number })?.ttlMinutes ?? 30, 60);
+
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT id, tenant_id, created_by, status FROM projects WHERE id=$1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        if (!["completed", "accepted"].includes(row.status as string)) {
+          return reply.status(409).send({ code: "CONFLICT", message: "Deploy efêmero só disponível para projetos concluídos ou aceitos" });
+        }
+      } finally {
+        client.release();
+      }
+
+      try {
+        const result = await deployEphemeral(id, ttlMinutes);
+        return reply.status(202).send(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.status(500).send({ code: "DEPLOY_ERROR", message: msg });
+      }
+    }
+  );
+
+  // POST /api/projects/:id/deploy/ephemeral/:deploymentId/destroy
+  app.post<{ Params: { id: string; deploymentId: string } }>(
+    "/api/projects/:id/deploy/ephemeral/:deploymentId/destroy",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id, deploymentId } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+      } finally {
+        client.release();
+      }
+      await destroyDeployment(deploymentId);
+      return reply.send({ ok: true });
+    }
+  );
+
+  // GET /api/projects/:id/deploy/ephemeral/active
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/deploy/ephemeral/active",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const dep = (await client.query(
+          `SELECT id, provider, app_url, status, expires_at, ttl_minutes, created_at
+           FROM ephemeral_deployments
+           WHERE project_id=$1 AND status IN ('provisioning','running')
+           ORDER BY created_at DESC LIMIT 1`,
+          [id],
+        )).rows[0];
+        return reply.send({ deployment: dep ?? null });
       } finally {
         client.release();
       }

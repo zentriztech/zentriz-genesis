@@ -75,6 +75,8 @@ type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; titl
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
+type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string; status: string; expiresAt: string; ttlMinutes: number } | null };
+type EphemeralResult   = { deploymentId: string; provider: string; appUrl: string; expiresAt: string; ttlMinutes: number };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -174,7 +176,11 @@ function ProjectDetailPageInner() {
   const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
   const [metrics, setMetrics]     = useState<MetricsResp | null>(null);
-  const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined); // undefined=not loaded
+  const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
+  const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
+  const [deployLoading, setDeployLoading] = useState(false);
+  const [deployError, setDeployError]     = useState<string | null>(null);
+  const [countdown, setCountdown]   = useState<string>("");
 
   const project = projectsStore.getById(id);
 
@@ -237,8 +243,37 @@ function ProjectDetailPageInner() {
       apiGet<GithubRepoResp>(`/api/projects/${id}/github-repo`)
         .then((d) => setGithubRepo(d.repo))
         .catch(() => setGithubRepo(null));
+      // Load active ephemeral deployment
+      apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
+        .then((d) => {
+          if (d.deployment && d.deployment.status === "running") {
+            setEphemeral({
+              deploymentId: d.deployment.id,
+              provider: d.deployment.provider,
+              appUrl: d.deployment.appUrl,
+              expiresAt: d.deployment.expiresAt,
+              ttlMinutes: d.deployment.ttlMinutes,
+            });
+          }
+        })
+        .catch(() => null);
     }
   }, [id, project?.status]);
+
+  // Countdown timer for ephemeral deployment
+  useEffect(() => {
+    if (!ephemeral) return;
+    const tick = () => {
+      const remaining = new Date(ephemeral.expiresAt).getTime() - Date.now();
+      if (remaining <= 0) { setCountdown("Expirado"); setEphemeral(null); return; }
+      const m = Math.floor(remaining / 60000);
+      const s = Math.floor((remaining % 60000) / 1000);
+      setCountdown(`${m}m ${String(s).padStart(2, "0")}s`);
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [ephemeral]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const handleRun = async () => {
@@ -421,6 +456,68 @@ function ProjectDetailPageInner() {
             Repositório GitHub será criado automaticamente se o tenant tiver o GitHub App instalado.
           </Typography>
         </Alert>
+      )}
+
+      {/* Cloud deploy — active deployment banner */}
+      {isDone && ephemeral && (
+        <Alert
+          severity="warning" sx={{ mb: 2 }}
+          icon={<Box sx={{ fontSize: "1.1rem" }}>☁️</Box>}
+          action={
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Button size="small" color="warning" endIcon={<OpenInNewIcon />}
+                href={ephemeral.appUrl} target="_blank" rel="noopener noreferrer" component="a">
+                Abrir app
+              </Button>
+              <Button size="small" color="error" variant="outlined"
+                onClick={async () => {
+                  await apiPost(`/api/projects/${id}/deploy/ephemeral/${ephemeral.deploymentId}/destroy`, {}).catch(() => null);
+                  setEphemeral(null);
+                }}>
+                Destruir
+              </Button>
+            </Stack>
+          }
+        >
+          <Typography variant="body2" fontWeight={500}>
+            ☁️ Ambiente efêmero ativo · expira em{" "}
+            <Box component="span" sx={{ fontFamily: "monospace", color: "warning.main", fontWeight: 700 }}>{countdown}</Box>
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {ephemeral.provider === "fly" ? "Fly.io" : "AWS ECS"} · {ephemeral.appUrl}
+          </Typography>
+        </Alert>
+      )}
+
+      {/* Cloud deploy — launch button */}
+      {isDone && !ephemeral && (
+        <Box sx={{ mb: 2 }}>
+          {deployError && (
+            <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>{deployError}</Alert>
+          )}
+          <Button
+            variant="outlined" size="small"
+            disabled={deployLoading}
+            startIcon={deployLoading ? <CircularProgress size={14} /> : <Box sx={{ fontSize: "0.9rem" }}>☁️</Box>}
+            onClick={async () => {
+              setDeployLoading(true); setDeployError(null);
+              try {
+                const result = await apiPost<EphemeralResult>(`/api/projects/${id}/deploy/ephemeral`, { ttlMinutes: 30 });
+                setEphemeral(result);
+              } catch (e) {
+                setDeployError(e instanceof Error ? e.message : "Falha ao provisionar ambiente cloud");
+              } finally {
+                setDeployLoading(false);
+              }
+            }}
+            sx={{ borderStyle: "dashed" }}
+          >
+            {deployLoading ? "Provisionando ambiente cloud…" : "🚀 Testar em Cloud (30 min)"}
+          </Button>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
+            Ambiente efêmero — dados destruídos automaticamente. Requer FLY_API_TOKEN configurado.
+          </Typography>
+        </Box>
       )}
 
       {/* ── Main cockpit layout ── */}

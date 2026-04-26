@@ -263,6 +263,50 @@ async function relaunchPipeline(project: OrphanProject): Promise<boolean> {
   }
 }
 
+// ── Cleanup de deployments efêmeros expirados ─────────────────────────────────
+
+async function checkExpiredDeployments(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    const expired = await client.query<{
+      id: string; provider: string; machine_id: string | null; app_name: string | null;
+    }>(
+      `SELECT id, provider, machine_id, app_name
+       FROM ephemeral_deployments
+       WHERE status = 'running' AND expires_at < now() AND destroyed_at IS NULL
+       LIMIT 20`,
+    );
+    if (!expired.rows.length) return;
+
+    for (const dep of expired.rows) {
+      try {
+        if (dep.provider === "fly" && dep.machine_id && dep.app_name) {
+          const { destroyMachine: flyDestroy } = await import("./fly.js");
+          await flyDestroy(dep.app_name, dep.machine_id).catch((e: unknown) =>
+            console.warn(`[Watchdog] Fly destroy failed ${dep.id}:`, e),
+          );
+        } else if (dep.provider === "ecs" && dep.machine_id) {
+          const { stopECSTask } = await import("./ecs.js");
+          await stopECSTask(dep.machine_id).catch((e: unknown) =>
+            console.warn(`[Watchdog] ECS stop failed ${dep.id}:`, e),
+          );
+        }
+        await client.query(
+          "UPDATE ephemeral_deployments SET status='destroyed', destroyed_at=now(), updated_at=now() WHERE id=$1",
+          [dep.id],
+        );
+        console.log(`[Watchdog] Ephemeral deployment ${dep.id} destroyed (TTL expired)`);
+      } catch (e) {
+        console.error(`[Watchdog] Failed to destroy ephemeral deployment ${dep.id}:`, e);
+      }
+    }
+  } catch {
+    // Table may not exist yet — ignore
+  } finally {
+    client.release();
+  }
+}
+
 // ── Ciclo principal do Watchdog ────────────────────────────────────────────
 
 async function runWatchdogCycle(): Promise<void> {
@@ -272,8 +316,11 @@ async function runWatchdogCycle(): Promise<void> {
   try {
     if (!RUNNER_SERVICE_URL) return; // runner não configurado
 
-    // 0. Verificar alertas de custo (uma vez por ciclo)
+    // 0a. Verificar alertas de custo (uma vez por ciclo)
     await checkCostAlerts().catch((e) => console.error("[Watchdog] Erro em checkCostAlerts:", e));
+
+    // 0b. Destruir deployments efêmeros expirados
+    await checkExpiredDeployments().catch((e) => console.error("[Watchdog] Erro em checkExpiredDeployments:", e));
 
     // 1. Buscar status do runner
     const runnerStatus = await getRunnerStatus();
