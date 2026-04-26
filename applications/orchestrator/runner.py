@@ -390,49 +390,158 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
         return _heuristic_module_fallback(source_text)
 
 
-def _detect_backend_language(text: str) -> str:
+def _parse_stack_frontmatter(text: str) -> str | None:
     """
-    Detecta a linguagem/runtime do backend descrito no texto usando o LLM.
-    Retorna: 'python' | 'nodejs' | 'java' | 'go' | 'rust' | 'other'
-    Fallback: 'nodejs' (default histórico do Genesis)
+    Extrai runtime do frontmatter YAML do BACKLOG.md — custo zero, sem LLM.
+    Formato esperado: ---\\nstack:\\n  runtime: python\\n---
     """
+    import re as _re
+    m = _re.search(r"---\s*\nstack\s*:\s*\n\s+runtime\s*:\s*(\w+)", text, _re.IGNORECASE)
+    if m:
+        lang = m.group(1).strip().lower()
+        logger.info("[StackDetect] Frontmatter → runtime=%s (zero-cost, no LLM)", lang)
+        return lang
+    return None
+
+
+def _load_file_from_disk(project_id: str | None, relative_path: str) -> str:
+    """Lê um arquivo do PROJECT_FILES_ROOT. Retorna string vazia se não existir."""
+    if not project_id:
+        return ""
     try:
-        import os as _os
-        provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
-        model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-
-        prompt = f"""Analise o texto e responda APENAS com a linguagem/runtime principal do backend:
-python | nodejs | java | go | rust | php | ruby | other
-
-Exemplos: FastAPI/Flask/Django → python, NestJS/Express/Fastify → nodejs, Spring → java, Gin/Echo → go
-
-Responda SOMENTE a palavra, sem explicação.
-
-Texto:
-{text[:2000]}"""
-
-        if provider == "bedrock":
-            import boto3, json as _j  # type: ignore
-            region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
-            client = boto3.client("bedrock-runtime", region_name=region)
-            body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
-                    "messages": [{"role": "user", "content": prompt}]}
-            resp = client.invoke_model(modelId=model, body=_j.dumps(body))
-            answer = _j.loads(resp["body"].read())["content"][0]["text"].strip().lower()
-        else:
-            from anthropic import Anthropic
-            client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
-            resp = client.messages.create(model=model, max_tokens=10,
-                                          messages=[{"role": "user", "content": prompt}])
-            answer = resp.content[0].text.strip().lower()
-
-        valid = {"python", "nodejs", "java", "go", "rust", "php", "ruby", "other"}
-        for v in valid:
-            if v in answer:
-                logger.info("[Pipeline] Backend language detectado pelo LLM: %s", v)
-                return v
+        root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+        path = root / project_id / relative_path
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
-        logger.warning("[Pipeline] LLM language detection failed (%s) — usando 'nodejs'", e)
+        logger.warning("[StackDetect] Falha ao ler %s: %s", relative_path, e)
+    return ""
+
+
+def _ask_llm_for_backend_language(text: str) -> str:
+    """Chama LLM isolado para classificar linguagem. Raises em qualquer falha."""
+    import os as _os, json as _j
+    provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+    model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    prompt = (
+        "Analise o texto e responda APENAS com a linguagem/runtime principal do backend:\n"
+        "python | nodejs | java | go | rust | php | ruby | other\n\n"
+        "Mapas: FastAPI/Flask/Django/SQLAlchemy/Alembic/Pydantic → python; "
+        "Express/NestJS/Fastify/Drizzle/Prisma → nodejs; Spring/Quarkus → java; Gin/Echo → go.\n\n"
+        "Responda SOMENTE a palavra, sem explicação.\n\n"
+        f"Texto:\n{text[:8000]}"
+    )
+    if provider == "bedrock":
+        import boto3  # type: ignore
+        region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
+        client = boto3.client("bedrock-runtime", region_name=region)
+        body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
+                "messages": [{"role": "user", "content": prompt}]}
+        resp = client.invoke_model(modelId=model, body=_j.dumps(body))
+        answer = _j.loads(resp["body"].read())["content"][0]["text"].strip().lower()
+    else:
+        from anthropic import Anthropic
+        client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
+        resp = client.messages.create(model=model, max_tokens=10,
+                                      messages=[{"role": "user", "content": prompt}])
+        answer = resp.content[0].text.strip().lower()
+    for v in ("python", "nodejs", "java", "go", "rust", "php", "ruby", "other"):
+        if v in answer:
+            return v
+    raise ValueError(f"LLM returned unrecognized: {answer!r}")
+
+
+def _detect_backend_stack(
+    *,
+    project_id: str | None,
+    engineer_proposal: str = "",
+    charter_fallback: str = "",
+    backlog_fallback: str = "",
+    module: str = "backend",
+) -> dict:
+    """
+    Detecta linguagem do backend em ordem de precedência (disk-first).
+
+    Fontes em ordem:
+      1. BACKLOG.md do PM em disco  ← texto completo, autoritativo
+      2. PRODUCT_SPEC.md do CTO em disco
+      3. engineer_proposal (texto completo do Engineer)
+      4. charter_fallback + backlog_fallback (summaries curtos — último recurso)
+
+    Retorna: {"language": str, "source": str, "confidence": "high"|"medium"|"low"}
+    NUNCA retorna default silencioso — raises RuntimeError se todas as fontes falharem.
+    """
+    # Priority 0: frontmatter YAML in BACKLOG.md — zero-cost, no LLM needed
+    _backlog_disk = _load_file_from_disk(project_id, f"docs/pm/{module}/BACKLOG.md")
+    if _backlog_disk:
+        _fm_lang = _parse_stack_frontmatter(_backlog_disk)
+        if _fm_lang:
+            return {"language": _fm_lang, "source": "pm_backlog_frontmatter", "confidence": "high"}
+
+    candidates = [
+        ("pm_backlog_disk",   _backlog_disk,                                                     "high"),
+        ("product_spec_disk", _load_file_from_disk(project_id, "docs/spec/PRODUCT_SPEC.md"),    "high"),
+        ("cto_spec_disk",     _load_file_from_disk(project_id, "docs/cto_spec_review.md"),      "high"),
+        ("engineer_proposal", engineer_proposal or "",                                           "medium"),
+        ("charter_summary",   charter_fallback or "",                                            "low"),
+        ("backlog_summary",   backlog_fallback or "",                                            "low"),
+    ]
+
+    for source, text, confidence in candidates:
+        if not text or len(text.strip()) < 50:
+            logger.debug("[StackDetect] Skip source=%s (len=%d)", source, len(text or ""))
+            continue
+        try:
+            lang = _ask_llm_for_backend_language(text)
+            logger.info("[StackDetect] ✓ source=%s → language=%s confidence=%s (input_len=%d)",
+                        source, lang, confidence, len(text))
+            return {"language": lang, "source": source, "confidence": confidence}
+        except Exception as e:
+            logger.error("[StackDetect] source=%s LLM error: %s — tentando próxima fonte", source, e)
+
+    raise RuntimeError(
+        f"[StackDetect] FALHA CRÍTICA: nenhuma fonte produziu classificação válida. "
+        f"project_id={project_id} module={module}"
+    )
+
+
+def _resolve_backend_stack(
+    pipeline_ctx: "PipelineContext | None",
+    project_id: str | None,
+    engineer_proposal: str = "",
+    charter_summary: str = "",
+    backlog_summary: str = "",
+    module: str = "backend",
+) -> dict:
+    """
+    Detecta stack uma vez por projeto e cacheia em pipeline_ctx.
+    Callers subsequentes recebem o resultado cacheado sem nova chamada LLM.
+    """
+    if pipeline_ctx is not None and pipeline_ctx.backend_stack is not None:
+        logger.info("[StackDetect] Cache hit: %s", pipeline_ctx.backend_stack)
+        return pipeline_ctx.backend_stack
+
+    stack = _detect_backend_stack(
+        project_id=project_id,
+        engineer_proposal=engineer_proposal,
+        charter_fallback=charter_summary,
+        backlog_fallback=backlog_summary,
+        module=module,
+    )
+
+    if pipeline_ctx is not None:
+        pipeline_ctx.backend_stack = stack
+
+    return stack
+
+
+# Keep backward compat alias — used in infer_pm_module fallback path (can still call LLM on summaries)
+def _detect_backend_language(text: str) -> str:
+    """DEPRECATED: usa _resolve_backend_stack com project_id para acesso ao disco."""
+    try:
+        return _ask_llm_for_backend_language(text)
+    except Exception as e:
+        logger.warning("[Pipeline] _detect_backend_language fallback failed (%s) — 'nodejs'", e)
     return "nodejs"
 
 
@@ -621,23 +730,38 @@ def call_dev(
     # Route to correct skill path based on variant and detected stack
     _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
-    # Detect backend language/framework from charter to pick the right SYSTEM_PROMPT
-    # Uses the same LLM-based approach as infer_pm_module — no hardcoded signal lists
-    _charter_ctx = (charter_summary + " " + backlog_summary)
-    _backend_lang = _detect_backend_language(_charter_ctx) if dev_variant in ("backend", "backend_python") else None
+    # Detect backend language/framework — disk-first (BACKLOG.md > SPEC > summaries)
+    _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _python_prompt_path = "dev/backend/python"
     _python_prompt_exists = (_agents_root() / "dev" / "backend" / "python" / "SYSTEM_PROMPT.md").exists()
 
+    _detected_lang = "nodejs"  # safe default if detection fails
+    if dev_variant in ("backend", "backend_python"):
+        try:
+            _stack = _resolve_backend_stack(
+                pipeline_ctx, _pid,
+                engineer_proposal=getattr(pipeline_ctx, "engineer_proposal", "") if pipeline_ctx else "",
+                charter_summary=charter_summary,
+                backlog_summary=backlog_summary,
+                module=getattr(pipeline_ctx, "current_module", "backend") if pipeline_ctx else "backend",
+            )
+            _detected_lang = _stack["language"]
+        except RuntimeError as _e:
+            logger.error("[call_dev] Stack detection failed: %s — usando nodejs como fallback", _e)
+
     def _backend_skill() -> str:
-        if _backend_lang == "python" and _python_prompt_exists:
+        if _detected_lang == "python" and _python_prompt_exists:
             return _python_prompt_path
+        skill_map_lang = f"dev/backend/{_detected_lang}"
+        if (_agents_root() / Path(*skill_map_lang.split("/")) / "SYSTEM_PROMPT.md").exists():
+            return skill_map_lang
         return "dev/backend/nodejs"
 
     _skill_map = {
         "web": _web_skill,
         "backend": _backend_skill(),
         "backend_python": _python_prompt_path if _python_prompt_exists else "dev/backend/nodejs",
-        "fullstack": _web_skill,  # fullstack defaults to web Dev; backend handled separately
+        "fullstack": _web_skill,
         "mobile": "dev/mobile/react-native",
     }
     inputs["context"] = inputs.get("context") or {}
@@ -693,8 +817,19 @@ def call_qa(
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
     from orchestrator.agents.runtime import run_agent
-    # Use language-appropriate QA SYSTEM_PROMPT — detected via LLM, not signal list
-    _qa_lang = _detect_backend_language(charter_summary + " " + backlog_summary)
+    # Use language-appropriate QA SYSTEM_PROMPT — disk-first detection
+    _qa_pid = os.environ.get("PROJECT_ID")
+    _qa_lang = "nodejs"
+    try:
+        _qa_stack = _detect_backend_stack(
+            project_id=_qa_pid,
+            engineer_proposal="",
+            charter_fallback=charter_summary,
+            backlog_fallback=backlog_summary,
+        )
+        _qa_lang = _qa_stack["language"]
+    except (RuntimeError, Exception) as _e:
+        logger.warning("[call_qa] Stack detection failed (%s) — usando nodejs QA", _e)
     _python_qa_prompt = _agents_root() / "qa" / "backend" / "python" / "SYSTEM_PROMPT.md"
     if _qa_lang == "python" and _python_qa_prompt.exists():
         qa_prompt = _python_qa_prompt
@@ -1552,13 +1687,23 @@ def _run_monitor_loop(
                     # Derive variant from owner_role (DEV_WEB → web, DEV_MOBILE → mobile, else backend)
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
-                    # Detect backend language via LLM — override variant so correct SYSTEM_PROMPT is used
-                    # This runs once per task but is a tiny LLM call (< 10 tokens out)
+                    # Detect backend language — disk-first (cached in pipeline_ctx after first call)
                     if _dev_variant == "backend":
-                        _lang = _detect_backend_language(charter_summary + " " + backlog_summary)
-                        if _lang == "python":
-                            _dev_variant = "backend_python"
-                            logger.info("[Monitor Loop] Python backend detectado — usando SYSTEM_PROMPT backend/python")
+                        try:
+                            _ml_stack = _resolve_backend_stack(
+                                pipeline_ctx, project_id,
+                                engineer_proposal=getattr(pipeline_ctx, "engineer_proposal", "") if pipeline_ctx else "",
+                                charter_summary=charter_summary,
+                                backlog_summary=backlog_summary,
+                                module=pm_module,
+                            )
+                            _ml_lang = _ml_stack["language"]
+                            if _ml_lang != "nodejs":
+                                _dev_variant = f"backend_{_ml_lang}" if _ml_lang != "other" else "backend"
+                                logger.info("[Monitor Loop] Stack detectado: %s (source=%s, confidence=%s) → variant=%s",
+                                            _ml_lang, _ml_stack["source"], _ml_stack["confidence"], _dev_variant)
+                        except RuntimeError as _ml_e:
+                            logger.error("[Monitor Loop] Stack detection FAILED: %s — usando 'backend' (nodejs)", _ml_e)
                     # Load existing apps/ artifacts from disk so Dev has full context
                     _disk_artifacts: list = []
                     try:

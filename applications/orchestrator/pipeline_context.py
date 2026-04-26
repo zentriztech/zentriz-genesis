@@ -34,6 +34,9 @@ class PipelineContext:
         self.connect_artifacts: dict[str, str] = {}  # project/connect/... -> content
         self.completed_tasks: list[str] = []
         self.current_step: int = 0  # LEI 11: etapa atual para retomada (0 = início)
+        # Detected backend stack — cached to avoid repeated LLM calls per task
+        # {"language": "python"|"nodejs"|..., "source": "pm_backlog_disk"|..., "confidence": "high"|"medium"|"low"}
+        self.backend_stack: dict | None = None
 
     def set_spec_raw(self, value: str) -> None:
         self.spec_raw = (value or "")[:30000]
