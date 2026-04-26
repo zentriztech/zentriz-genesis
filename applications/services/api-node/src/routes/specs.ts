@@ -219,7 +219,8 @@ async function runSpecJob(jobId: string, message: Record<string, unknown>, agent
         console.log(`[SpecPreview] job=${jobId} agents_job=${agentsJobId} elapsed=${elapsed}s`);
       } catch (pollErr) {
         // transient poll error — keep trying until deadline
-        console.warn(`[SpecPreview] poll error (non-fatal): ${pollErr}`);
+        const errMsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+        console.warn(`[SpecPreview] poll error job=${jobId} agents=${agentsJobId}: ${errMsg}`);
       }
     }
     job.status = "error";
