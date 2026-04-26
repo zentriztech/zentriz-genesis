@@ -89,9 +89,14 @@ agent:
 
 **Gates:**
 - `start.sh` must be a valid shell script with shebang and `set -e`
+- **`start.sh` MUST install dependencies BEFORE starting** — never assume node_modules or venv exist:
+  - Node/npm: `npm install --legacy-peer-deps` (or `npm ci` if package-lock.json exists)
+  - Python: `pip install -r requirements.txt -q`
+  - Never symlink or reuse node_modules from another project — always install fresh
 - Port must be deterministic (not random)
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
+- Structure of start.sh MUST follow: (1) cd to apps dir → (2) install deps → (3) build if needed → (4) serve
 
 ---
 

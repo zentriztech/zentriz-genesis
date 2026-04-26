@@ -765,9 +765,11 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
         host_project_dir = Path(host_root) / project_id if host_root else project_dir
         host_start_sh = host_project_dir / "project" / "start.sh"
         host_cmd = f"bash '{host_start_sh}'"
+        # Garantir que start.sh instrui a instalar deps — não assume node_modules existentes
         _post_step(
-            f"Produto pronto. Execute no terminal do host para abrir no browser:\n  {host_cmd}\n"
-            f"  Ou: cd '{host_project_dir}' && bash project/start.sh",
+            f"Produto pronto. Execute no terminal do host para abrir no browser:\n"
+            f"  {host_cmd}\n"
+            f"  (O start.sh instala dependências automaticamente antes de iniciar)",
             request_id,
         )
         logger.info("[Local Deploy] Rodando em container — execute no host: %s", host_cmd)
@@ -782,6 +784,30 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
                     logger.warning("[Local Deploy] open browser falhou: %s", e)
             threading.Thread(target=_open_later, daemon=True).start()
         return
+
+    # Garantia de idempotência: se node_modules não existir, instalar antes de executar
+    apps_dir = project_dir / "apps"
+    if apps_dir.exists() and (apps_dir / "package.json").exists():
+        nm = apps_dir / "node_modules"
+        if not nm.exists() or not nm.is_dir():
+            logger.info("[Local Deploy] node_modules não encontrado — executando npm install antes de iniciar")
+            _post_step("Instalando dependências (npm install)...", request_id)
+            try:
+                install_proc = subprocess.run(
+                    ["npm", "install", "--legacy-peer-deps"],
+                    cwd=str(apps_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if install_proc.returncode == 0:
+                    _post_step("Dependências instaladas com sucesso.", request_id)
+                else:
+                    logger.warning("[Local Deploy] npm install retornou código %s: %s",
+                                   install_proc.returncode, install_proc.stderr[:500])
+                    _post_step("npm install retornou erros — tentando iniciar mesmo assim.", request_id)
+            except Exception as e:
+                logger.warning("[Local Deploy] npm install falhou: %s — continuando", e)
 
     _post_step(f"DevOps iniciando build e execução local: `{run_command}`", request_id)
 
