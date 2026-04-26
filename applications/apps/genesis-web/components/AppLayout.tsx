@@ -18,8 +18,11 @@ import MenuItem from "@mui/material/MenuItem";
 import Toolbar from "@mui/material/Toolbar";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import useMediaQuery from "@mui/material/useMediaQuery";
+import { useTheme } from "@mui/material/styles";
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import FolderIcon from "@mui/icons-material/Folder";
+import MenuIcon from "@mui/icons-material/Menu";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import PeopleIcon from "@mui/icons-material/People";
 import SendIcon from "@mui/icons-material/Send";
@@ -38,7 +41,6 @@ import { themeStore } from "@/stores/themeStore";
 const DRAWER_WIDTH = 240;
 const PRIMARY = "#6366F1";
 
-// ── Cor de destaque por seção ────────────────────────────────────────────────
 const navUser = [
   { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,    color: "#6366F1" },
   { label: "Enviar spec",   href: "/spec",            icon: <SendIcon />,         color: "#10B981" },
@@ -64,11 +66,75 @@ const navZentriz = [
   { label: "GitHub",        href: "/settings/github",   icon: <GitHubIcon />,     color: "#E2E8F0" },
 ];
 
-function AppLayoutInner({ children }: { children: React.ReactNode }) {
-  const pathname  = usePathname();
-  const router    = useRouter();
-  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+// ── Sidebar content (shared between permanent and temporary drawer) ────────────
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const pathname = usePathname();
+  const router   = useRouter();
   const nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* User info */}
+      <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
+        <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {authStore.isZentrizAdmin ? "Zentriz Admin" : authStore.tenant?.name ?? "Workspace"}
+        </Typography>
+        {authStore.tenant && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+            Plano {authStore.tenant.plan.name}
+          </Typography>
+        )}
+      </Box>
+
+      {/* Nav items */}
+      <List sx={{ px: 1, py: 1, flexGrow: 1 }}>
+        {nav.map((item) => {
+          const active = pathname === item.href || pathname.startsWith(item.href + "/");
+          return (
+            <ListItemButton
+              key={item.href}
+              selected={active}
+              onClick={() => { router.push(item.href); onNavigate?.(); }}
+              sx={{ mb: 0.25, px: 1.5, py: 0.75 }}
+            >
+              <ListItemIcon
+                sx={{
+                  minWidth: 32,
+                  "& svg": {
+                    fontSize: "1.1rem",
+                    color: active ? item.color : "text.secondary",
+                    transition: "color 0.15s",
+                  },
+                }}
+              >
+                {item.icon}
+              </ListItemIcon>
+              <ListItemText
+                primary={item.label}
+                primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }}
+              />
+              {active && (
+                <Box sx={{ width: 3, height: 16, borderRadius: 2, background: item.color, ml: 0.5, flexShrink: 0 }} />
+              )}
+            </ListItemButton>
+          );
+        })}
+      </List>
+
+      {/* Footer */}
+      <Box sx={{ px: 2, py: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
+        <Typography variant="caption" color="text.secondary">genesis.zentriz.com.br</Typography>
+      </Box>
+    </Box>
+  );
+}
+
+function AppLayoutInner({ children }: { children: React.ReactNode }) {
+  const router   = useRouter();
+  const theme    = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("md")); // < 900px
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [anchorEl, setAnchorEl]     = useState<null | HTMLElement>(null);
 
   const handleMenu   = (e: React.MouseEvent<HTMLElement>) => setAnchorEl(e.currentTarget);
   const handleClose  = () => setAnchorEl(null);
@@ -76,21 +142,30 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh" }}>
-      {/* ── AppBar ─────────────────────────────────────────────────────────── */}
+      {/* ── AppBar ────────────────────────────────────────────────────────── */}
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar sx={{ gap: 1 }}>
+          {/* Hamburger — mobile only */}
+          {isMobile && (
+            <IconButton
+              size="small" color="inherit" edge="start"
+              onClick={() => setMobileOpen((o) => !o)}
+              sx={{ mr: 0.5 }}
+            >
+              <MenuIcon />
+            </IconButton>
+          )}
+
           {/* Logo */}
           <Box sx={{ display: "flex", alignItems: "center", gap: 1, mr: 2 }}>
-            <Box
-              sx={{
-                width: 28, height: 28, borderRadius: "8px",
-                background: `linear-gradient(135deg, ${PRIMARY} 0%, #4F46E5 100%)`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}
-            >
+            <Box sx={{
+              width: 28, height: 28, borderRadius: "8px",
+              background: `linear-gradient(135deg, ${PRIMARY} 0%, #4F46E5 100%)`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
               <AutoAwesomeIcon sx={{ fontSize: 16, color: "#fff" }} />
             </Box>
-            <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: "-0.02em", flexGrow: 1 }}>
+            <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: "-0.02em" }}>
               Genesis
             </Typography>
           </Box>
@@ -107,11 +182,8 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
           {/* Notifications */}
           <Tooltip title="Notificações">
             <IconButton size="small" color="inherit" onClick={() => router.push("/notifications")}>
-              <Badge
-                badgeContent={notificationsStore.unreadCount}
-                color="error"
-                sx={{ "& .MuiBadge-badge": { fontSize: 9, minWidth: 14, height: 14 } }}
-              >
+              <Badge badgeContent={notificationsStore.unreadCount} color="error"
+                sx={{ "& .MuiBadge-badge": { fontSize: 9, minWidth: 14, height: 14 } }}>
                 <NotificationsIcon fontSize="small" />
               </Badge>
             </IconButton>
@@ -120,20 +192,17 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
           {/* User menu */}
           <Tooltip title={authStore.user?.email ?? "Conta"}>
             <IconButton size="small" onClick={handleMenu} sx={{ p: 0.5 }}>
-              <Avatar
-                sx={{
-                  width: 28, height: 28, fontSize: "0.75rem", fontWeight: 700,
-                  background: `linear-gradient(135deg, ${PRIMARY} 0%, #4F46E5 100%)`,
-                }}
-              >
+              <Avatar sx={{
+                width: 28, height: 28, fontSize: "0.75rem", fontWeight: 700,
+                background: `linear-gradient(135deg, ${PRIMARY} 0%, #4F46E5 100%)`,
+              }}>
                 {(authStore.user?.name?.[0] ?? authStore.user?.email?.[0] ?? "U").toUpperCase()}
               </Avatar>
             </IconButton>
           </Tooltip>
           <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={handleClose}
             anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-            transformOrigin={{ vertical: "top", horizontal: "right" }}
-          >
+            transformOrigin={{ vertical: "top", horizontal: "right" }}>
             <MenuItem disabled sx={{ opacity: "1 !important" }}>
               <Box>
                 <Typography variant="body2" fontWeight={600}>{authStore.user?.name}</Typography>
@@ -146,81 +215,48 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
         </Toolbar>
       </AppBar>
 
-      {/* ── Sidebar ────────────────────────────────────────────────────────── */}
+      {/* ── Sidebar — mobile: temporary (overlay), desktop: permanent ───── */}
+
+      {/* Mobile drawer — slides over content */}
+      <Drawer
+        variant="temporary"
+        open={mobileOpen}
+        onClose={() => setMobileOpen(false)}
+        ModalProps={{ keepMounted: true }} // better mobile performance
+        sx={{
+          display: { xs: "block", md: "none" },
+          "& .MuiDrawer-paper": { width: DRAWER_WIDTH, boxSizing: "border-box", top: 0, pt: "56px" },
+        }}
+      >
+        <SidebarContent onNavigate={() => setMobileOpen(false)} />
+      </Drawer>
+
+      {/* Desktop drawer — always visible, pushes content */}
       <Drawer
         variant="permanent"
         sx={{
+          display: { xs: "none", md: "block" },
           width: DRAWER_WIDTH,
           flexShrink: 0,
           "& .MuiDrawer-paper": { width: DRAWER_WIDTH, boxSizing: "border-box", top: 56 },
         }}
       >
-        {/* User info */}
-        <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
-          <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
-            {authStore.isZentrizAdmin ? "Zentriz Admin" : authStore.tenant?.name ?? "Workspace"}
-          </Typography>
-          {authStore.tenant && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-              Plano {authStore.tenant.plan.name}
-            </Typography>
-          )}
-        </Box>
-
-        {/* Nav items */}
-        <List sx={{ px: 1, py: 1, flexGrow: 1 }}>
-          {nav.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(item.href + "/");
-            return (
-              <ListItemButton
-                key={item.href}
-                selected={active}
-                onClick={() => router.push(item.href)}
-                sx={{ mb: 0.25, px: 1.5, py: 0.75 }}
-              >
-                <ListItemIcon
-                  sx={{
-                    minWidth: 32,
-                    "& svg": {
-                      fontSize: "1.1rem",
-                      color: active ? item.color : "text.secondary",
-                      transition: "color 0.15s",
-                    },
-                  }}
-                >
-                  {item.icon}
-                </ListItemIcon>
-                <ListItemText
-                  primary={item.label}
-                  primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }}
-                />
-                {/* Indicador ativo */}
-                {active && (
-                  <Box
-                    sx={{
-                      width: 3, height: 16, borderRadius: 2,
-                      background: item.color,
-                      ml: 0.5, flexShrink: 0,
-                    }}
-                  />
-                )}
-              </ListItemButton>
-            );
-          })}
-        </List>
-
-        {/* Rodapé */}
-        <Box sx={{ px: 2, py: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
-          <Typography variant="caption" color="text.secondary">
-            genesis.zentriz.com.br
-          </Typography>
-        </Box>
+        <SidebarContent />
       </Drawer>
 
-      {/* ── Main ───────────────────────────────────────────────────────────── */}
+      {/* ── Main ──────────────────────────────────────────────────────────── */}
       <Box
         component="main"
-        sx={{ flexGrow: 1, p: { xs: 2, md: 3 }, mt: "56px", minHeight: "calc(100vh - 56px)", overflow: "auto" }}
+        sx={{
+          flexGrow: 1,
+          p: { xs: 2, md: 3 },
+          mt: "56px",
+          minHeight: "calc(100vh - 56px)",
+          overflow: "auto",
+          // On desktop, sidebar occupies DRAWER_WIDTH — main shifts right naturally.
+          // On mobile, sidebar overlays — main takes full width.
+          ml: { xs: 0, md: 0 }, // MUI permanent drawer already shifts content
+        }}
       >
         {children}
       </Box>
