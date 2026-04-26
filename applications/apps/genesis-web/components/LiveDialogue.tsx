@@ -66,12 +66,53 @@ function ErrorStack({ stack }: { stack: string }) {
 // ── Single entry ──────────────────────────────────────────────────────────────
 function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean }) {
   const from    = getAgentProfile(entry.fromAgent);
-  const isStep  = entry.eventType === "step";
-  const isError = entry.eventType === "error";
-  const isWork  = entry.eventType === "agent_working";
+  const isStep    = entry.eventType === "step";
+  const isError   = entry.eventType === "error";
+  const isWork    = entry.eventType === "agent_working";
+  const isReady   = entry.eventType === "product_ready";
   const { message: errMsg, stack: errStack } = isError ? parseErrorContent(entry.summaryHuman) : { message: "", stack: "" };
 
   const time = new Date(entry.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  if (isReady) {
+    // Product ready — prominent full-width banner
+    const lines = entry.summaryHuman.split("\n").filter(Boolean);
+    const cmd   = lines.find((l) => l.startsWith("bash ") || l.startsWith("  bash")) ?? "";
+    const url   = lines.find((l) => l.startsWith("Acesse:"))?.replace("Acesse:", "").trim();
+    return (
+      <Box
+        sx={{
+          my: 1, p: 2, borderRadius: 1.5,
+          background: "linear-gradient(135deg, #10B98120 0%, #059669 10% 0%, #10B98118 100%)",
+          border: "1px solid #10B98150",
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+          <Box sx={{ fontSize: "1.2rem" }}>🚀</Box>
+          <Typography variant="body2" fontWeight={700} color="success.main">
+            Produto pronto!
+          </Typography>
+        </Box>
+        {cmd && (
+          <Box
+            component="pre"
+            sx={{
+              bgcolor: "#0D1117", border: "1px solid #30363D", borderRadius: 1,
+              px: 1.5, py: 1, fontSize: "0.75rem", fontFamily: "monospace",
+              color: "#E6EDF3", overflowX: "auto", mb: url ? 1 : 0,
+            }}
+          >
+            {cmd.trim()}
+          </Box>
+        )}
+        {url && (
+          <Typography variant="caption" color="success.light">
+            🌐 {url}
+          </Typography>
+        )}
+      </Box>
+    );
+  }
 
   if (isStep) {
     return (

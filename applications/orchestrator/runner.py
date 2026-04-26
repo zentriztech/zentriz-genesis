@@ -355,71 +355,152 @@ def call_cto(
 
 def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "") -> str:
     """
-    Infere o módulo/squad do PM (web, backend, mobile) a partir da proposta do Engineer.
-    Se o Engineer falhou (proposta vazia/inválida), usa a spec original como fallback.
-    Retorna 'web' | 'backend' | 'mobile'. Default 'web' para landing/estático quando não há backend.
+    Infere o módulo/squad do PM a partir da proposta do Engineer (ou da spec como fallback).
+
+    Usa o LLM para classificar o texto em vez de lista hardcoded de signals — isso garante
+    suporte a qualquer linguagem/framework/plataforma sem precisar atualizar código.
+
+    Retorna: 'web' | 'backend' | 'mobile' | 'fullstack'
+    Fallback seguro: 'backend' para texto técnico sem sinais visuais claros.
     """
-    text = (engineer_proposal or "").lower()
+    source_text = (engineer_proposal or "").strip()
     is_blocked_or_empty = (
-        not text.strip()
-        or "não contém uma especificação" in text
-        or "blocked" in text
-        or "json inválido" in text
-        or "apenas mensagens de erro" in text
+        not source_text
+        or "não contém uma especificação" in source_text.lower()
+        or "blocked" in source_text.lower()
+        or "json inválido" in source_text.lower()
+        or "apenas mensagens de erro" in source_text.lower()
     )
 
-    # Fallback para spec original quando Engineer falhou
-    if is_blocked_or_empty and spec_content:
-        text = spec_content.lower()
-        # Sinais fortes de backend/API na spec
-        backend_signals = [
-            "api rest", "api backend", "nestjs", "express", "fastify", "node.js",
-            "mysql", "postgresql", "drizzle", "prisma", "jwt", "api key",
-            "endpoint", "autenticação", "authentication", "swagger", "openapi",
-            "migrations", "orm", "banco de dados", "database", "seed",
-            # Python backend signals
-            "fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel",
-            "pydantic", "alembic", "python", "pip", "pytest", "asyncio",
-            "insomnia", "postman",
-        ]
-        web_signals = ["landing page", "next.js", "react", "tailwind", "frontend", "estático", "static"]
-        backend_count = sum(1 for s in backend_signals if s in text)
-        web_count = sum(1 for s in web_signals if s in text)
-        if backend_count >= 3 and backend_count > web_count:
-            logger.info("[Pipeline] Módulo inferido da spec (Engineer falhou): backend (%d sinais)", backend_count)
-            return "backend"
-        if web_count > backend_count:
-            return "web"
-        return "backend"  # default para specs complexas sem Engineer válido
+    # Se Engineer falhou, usar a spec original como contexto
+    if is_blocked_or_empty:
+        source_text = spec_content or ""
 
-    if not text.strip():
+    if not source_text.strip():
         return "web"
 
-    # Backend como squad explícita (equipe/squad de API, servidor)
-    if "squad backend" in text or "equipe backend" in text or "backend squad" in text:
-        if "desnecessário" in text or "desnecessario" in text:
-            pass  # "Backend Squad: Desnecessário" → não é backend
+    # Perguntar ao LLM qual é o módulo correto
+    # Isso é uma chamada simples (< 300 tokens in/out) — não usa agentes, direto ao SDK
+    try:
+        module = _ask_llm_for_module(source_text[:8000])
+        logger.info("[Pipeline] Módulo inferido pelo LLM: %s", module)
+        return module
+    except Exception as e:
+        logger.warning("[Pipeline] LLM module inference failed (%s) — usando fallback heurístico", e)
+        return _heuristic_module_fallback(source_text)
+
+
+def _detect_backend_language(text: str) -> str:
+    """
+    Detecta a linguagem/runtime do backend descrito no texto usando o LLM.
+    Retorna: 'python' | 'nodejs' | 'java' | 'go' | 'rust' | 'other'
+    Fallback: 'nodejs' (default histórico do Genesis)
+    """
+    try:
+        import os as _os
+        provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+        model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+        prompt = f"""Analise o texto e responda APENAS com a linguagem/runtime principal do backend:
+python | nodejs | java | go | rust | php | ruby | other
+
+Exemplos: FastAPI/Flask/Django → python, NestJS/Express/Fastify → nodejs, Spring → java, Gin/Echo → go
+
+Responda SOMENTE a palavra, sem explicação.
+
+Texto:
+{text[:2000]}"""
+
+        if provider == "bedrock":
+            import boto3, json as _j  # type: ignore
+            region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
+            client = boto3.client("bedrock-runtime", region_name=region)
+            body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
+                    "messages": [{"role": "user", "content": prompt}]}
+            resp = client.invoke_model(modelId=model, body=_j.dumps(body))
+            answer = _j.loads(resp["body"].read())["content"][0]["text"].strip().lower()
         else:
-            return "backend"
-    if "backend api" in text and "squad" in text:
-        return "backend"
-    # Sinais diretos de backend na proposta (sem squad explícita)
-    if ("nestjs" in text or "express" in text or "fastify" in text or "api rest" in text
-            or "fastapi" in text or "flask" in text or "django" in text or "uvicorn" in text
-            or "sqlalchemy" in text or "sqlmodel" in text) and "squad" not in text:
-        return "backend"
-    # Mobile como squad
-    if "squad mobile" in text or "equipe mobile" in text or "mobile squad" in text:
+            from anthropic import Anthropic
+            client = Anthropic(api_key=_os.environ.get("CLAUDE_API_KEY", ""))
+            resp = client.messages.create(model=model, max_tokens=10,
+                                          messages=[{"role": "user", "content": prompt}])
+            answer = resp.content[0].text.strip().lower()
+
+        valid = {"python", "nodejs", "java", "go", "rust", "php", "ruby", "other"}
+        for v in valid:
+            if v in answer:
+                logger.info("[Pipeline] Backend language detectado pelo LLM: %s", v)
+                return v
+    except Exception as e:
+        logger.warning("[Pipeline] LLM language detection failed (%s) — usando 'nodejs'", e)
+    return "nodejs"
+
+
+def _ask_llm_for_module(text: str) -> str:
+    """Chama o LLM para classificar o tipo de produto descrito no texto."""
+    import os as _os
+    provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+    model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+    prompt = f"""Analise o texto técnico abaixo e responda APENAS com uma das palavras:
+web | backend | mobile | fullstack
+
+Critérios:
+- web: frontend, landing page, site estático, Next.js sem API, React sem servidor
+- backend: API, servidor, banco de dados, endpoints HTTP, CLI tools, scripts — independente da linguagem (Node.js, Python, Go, Java, Rust, etc.)
+- mobile: React Native, Flutter, iOS, Android, app móvel
+- fullstack: frontend + backend juntos no mesmo projeto
+
+Responda SOMENTE a palavra correspondente, sem ponto final, sem explicação.
+
+Texto:
+{text[:3000]}"""
+
+    if provider == "bedrock":
+        import boto3  # type: ignore
+        region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
+        client = boto3.client("bedrock-runtime", region_name=region)
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        import json as _json
+        resp = client.invoke_model(modelId=model, body=_json.dumps(body))
+        result = _json.loads(resp["body"].read())
+        answer = result["content"][0]["text"].strip().lower()
+    else:
+        from anthropic import Anthropic
+        api_key = _os.environ.get("CLAUDE_API_KEY", "")
+        client = Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model, max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        answer = resp.content[0].text.strip().lower()
+
+    # Validate answer
+    valid = {"web", "backend", "mobile", "fullstack"}
+    for v in valid:
+        if v in answer:
+            return v
+    return "backend"  # safe default
+
+
+def _heuristic_module_fallback(text: str) -> str:
+    """Fallback heurístico simples quando o LLM não está disponível."""
+    t = text.lower()
+    # Se menciona interface visual explicitamente e NÃO menciona API/backend
+    has_visual = any(w in t for w in ["landing page", "site estático", "página web", "frontend only"])
+    has_backend = any(w in t for w in ["api", "endpoint", "servidor", "server", "backend", "banco de dados", "database"])
+    has_mobile = any(w in t for w in ["mobile", "react native", "flutter", "ios", "android"])
+    if has_mobile:
         return "mobile"
-    # Web/Frontend: único squad, ou squad web, ou next.js/react sem backend
-    if "squad web" in text or "squad: web" in text or "único squad web" in text or "um único squad" in text:
+    if has_backend:
+        return "backend"
+    if has_visual and not has_backend:
         return "web"
-    if "frontend" in text and "backend" not in text:
-        return "web"
-    if "next.js" in text or "nextjs" in text:
-        if "backend" not in text or "desnecessário" in text or "zero backend" in text:
-            return "web"
-    return "web"
+    return "backend"  # default seguro para ambiguidades
 
 
 def call_pm(
@@ -540,17 +621,23 @@ def call_dev(
     # Route to correct skill path based on variant and detected stack
     _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
-    # Detect if this is a Python backend from charter/backlog
-    _charter_lower = (charter_summary + " " + backlog_summary).lower()
-    _python_signals = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "pydantic", "python", "pytest", "alembic"]
-    _is_python_backend = (dev_variant == "backend") and sum(1 for s in _python_signals if s in _charter_lower) >= 2
-    _python_prompt = "dev/backend/python"
+    # Detect backend language/framework from charter to pick the right SYSTEM_PROMPT
+    # Uses the same LLM-based approach as infer_pm_module — no hardcoded signal lists
+    _charter_ctx = (charter_summary + " " + backlog_summary)
+    _backend_lang = _detect_backend_language(_charter_ctx) if dev_variant in ("backend", "backend_python") else None
+    _python_prompt_path = "dev/backend/python"
     _python_prompt_exists = (_agents_root() / "dev" / "backend" / "python" / "SYSTEM_PROMPT.md").exists()
+
+    def _backend_skill() -> str:
+        if _backend_lang == "python" and _python_prompt_exists:
+            return _python_prompt_path
+        return "dev/backend/nodejs"
 
     _skill_map = {
         "web": _web_skill,
-        "backend": (_python_prompt if (_is_python_backend and _python_prompt_exists) else "dev/backend/nodejs"),
-        "backend_python": _python_prompt if _python_prompt_exists else "dev/backend/nodejs",
+        "backend": _backend_skill(),
+        "backend_python": _python_prompt_path if _python_prompt_exists else "dev/backend/nodejs",
+        "fullstack": _web_skill,  # fullstack defaults to web Dev; backend handled separately
         "mobile": "dev/mobile/react-native",
     }
     inputs["context"] = inputs.get("context") or {}
@@ -606,11 +693,10 @@ def call_qa(
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
     from orchestrator.agents.runtime import run_agent
-    # Use Python QA SYSTEM_PROMPT if Python backend signals detected in charter
-    _qa_ctx = (charter_summary + " " + backlog_summary).lower()
-    _qa_py = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "python", "pydantic"]
+    # Use language-appropriate QA SYSTEM_PROMPT — detected via LLM, not signal list
+    _qa_lang = _detect_backend_language(charter_summary + " " + backlog_summary)
     _python_qa_prompt = _agents_root() / "qa" / "backend" / "python" / "SYSTEM_PROMPT.md"
-    if sum(1 for s in _qa_py if s in _qa_ctx) >= 2 and _python_qa_prompt.exists():
+    if _qa_lang == "python" and _python_qa_prompt.exists():
         qa_prompt = _python_qa_prompt
     else:
         qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
@@ -995,12 +1081,17 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
         host_start_sh = host_project_dir / "project" / "start.sh"
         host_cmd = f"bash '{host_start_sh}'"
         # Garantir que start.sh instrui a instalar deps — não assume node_modules existentes
-        _post_step(
-            f"Produto pronto. Execute no terminal do host para abrir no browser:\n"
-            f"  {host_cmd}\n"
-            f"  (O start.sh instala dependências automaticamente antes de iniciar)",
+        # Use special event_type "product_ready" so the portal highlights this message
+        _product_ready_msg = (
+            f"Produto pronto. Execute no terminal do host:\n{host_cmd}"
+            + (f"\nAcesse: {app_url}" if app_url else "")
+        )
+        _post_dialogue(
+            "system", "system", "product_ready",
+            _product_ready_msg,
             request_id,
         )
+        logger.info("[Pipeline] Produto pronto. Comando: %s", host_cmd)
         logger.info("[Local Deploy] Rodando em container — execute no host: %s", host_cmd)
         # Open browser optimistically (app may already be running or user will start it)
         if app_url:
@@ -1461,12 +1552,13 @@ def _run_monitor_loop(
                     # Derive variant from owner_role (DEV_WEB → web, DEV_MOBILE → mobile, else backend)
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
-                    # Detect Python backend from charter — override variant so correct SYSTEM_PROMPT is used
-                    _ctx_lower = (charter_summary + " " + backlog_summary).lower()
-                    _py_sigs = ["fastapi", "flask", "django", "uvicorn", "sqlalchemy", "sqlmodel", "pydantic", "python"]
-                    if _dev_variant == "backend" and sum(1 for s in _py_sigs if s in _ctx_lower) >= 2:
-                        _dev_variant = "backend_python"
-                        logger.info("[Monitor Loop] Python backend detectado — usando SYSTEM_PROMPT backend/python")
+                    # Detect backend language via LLM — override variant so correct SYSTEM_PROMPT is used
+                    # This runs once per task but is a tiny LLM call (< 10 tokens out)
+                    if _dev_variant == "backend":
+                        _lang = _detect_backend_language(charter_summary + " " + backlog_summary)
+                        if _lang == "python":
+                            _dev_variant = "backend_python"
+                            logger.info("[Monitor Loop] Python backend detectado — usando SYSTEM_PROMPT backend/python")
                     # Load existing apps/ artifacts from disk so Dev has full context
                     _disk_artifacts: list = []
                     try:
