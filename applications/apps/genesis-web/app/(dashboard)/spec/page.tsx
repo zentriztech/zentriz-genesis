@@ -34,8 +34,18 @@ import { motion, AnimatePresence } from "framer-motion";
 import { apiGet, apiPost, apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 
-// Lazy-load react-markdown (heavy, browser-only)
-const ReactMarkdown = dynamic(() => import("react-markdown"), { ssr: false });
+// Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
+const ReactMarkdown = dynamic(
+  () => Promise.all([import("react-markdown"), import("remark-gfm")])
+    .then(([md, gfm]) => {
+      const Comp = ({ children, components }: { children: string; components?: Record<string, unknown> }) =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (md.default as any)({ remarkPlugins: [gfm.default], children, components });
+      Comp.displayName = "ReactMarkdownGFM";
+      return { default: Comp };
+    }),
+  { ssr: false }
+);
 
 // ── Mermaid block renderer ────────────────────────────────────────────────────
 function MermaidBlock({ code }: { code: string }) {
@@ -93,7 +103,7 @@ function MarkdownPreview({ content }: { content: string }) {
       <ReactMarkdown
         components={{
           // Intercept code blocks: render mermaid as SVG, others as code
-          code({ className, children }) {
+          code({ className, children }: { className?: string; children?: React.ReactNode }) {
             const lang = (className ?? "").replace("language-", "");
             const codeStr = String(children).replace(/\n$/, "");
             if (lang === "mermaid") return <MermaidBlock code={codeStr} />;
@@ -166,17 +176,45 @@ function SpecEditor({
     </Stack>
   );
 
+  // Highlighted editor: transparent textarea over syntax-highlighted pre
   const editorArea = (h: string) => (
-    <textarea
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      style={{
-        width: "100%", height: h, resize: "none", border: "none", outline: "none",
-        background: "transparent", color: "inherit", fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-        fontSize: "0.78rem", lineHeight: 1.7, padding: "16px", boxSizing: "border-box",
-      }}
-      spellCheck={false}
-    />
+    <Box sx={{ position: "relative", height: h, overflow: "hidden", display: "flex", bgcolor: "#0D0F14" }}>
+      {/* Line numbers */}
+      <Box
+        component="pre"
+        sx={{
+          flexShrink: 0, userSelect: "none", textAlign: "right",
+          px: 1.5, py: 2, m: 0,
+          color: "#484F58", fontSize: "0.73rem", fontFamily: "'JetBrains Mono','Fira Code',monospace",
+          lineHeight: 1.7, borderRight: "1px solid #21262D", bgcolor: "#0D1117",
+          overflow: "hidden", pointerEvents: "none",
+          whiteSpace: "pre",
+        }}
+      >
+        {value.split("\n").map((_, i) => i + 1).join("\n")}
+      </Box>
+      {/* Transparent textarea for input */}
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        style={{
+          position: "absolute", left: 44, top: 0,
+          width: "calc(100% - 44px)", height: "100%",
+          resize: "none", border: "none", outline: "none",
+          background: "transparent",
+          color: "#E6EDF3",
+          fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
+          fontSize: "0.75rem", lineHeight: 1.7,
+          padding: "16px 16px 16px 12px",
+          boxSizing: "border-box",
+          overflowY: "auto",
+          caretColor: "#6366F1",
+          tabSize: 2,
+          zIndex: 2,
+        }}
+      />
+    </Box>
   );
 
   const content = (areaH: string) => {

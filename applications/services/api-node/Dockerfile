@@ -17,6 +17,8 @@ COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
 COPY --from=builder /app/dist ./dist
+# Migrations must be alongside the compiled code so init.ts can find them at dist/db/migrations/
+COPY --from=builder /app/src/db/migrations ./dist/db/migrations
 
 ENV NODE_ENV=production
 ENV PORT=3000
