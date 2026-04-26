@@ -16,8 +16,88 @@ function isAllowed(filename: string): boolean {
   return ALLOWED_EXT.has(ext);
 }
 
+// ── Message envelope builder for CTO spec_intake_and_normalize ───────────────
+function buildCTOMessage(freeText: string, title?: string): Record<string, unknown> {
+  const requestId = `spec-preview-${Date.now()}`;
+  return {
+    project_id: "spec_preview",
+    agent: "CTO",
+    variant: "generic",
+    mode: "spec_intake_and_normalize",
+    request_id: requestId,
+    task_id: null,
+    task: "Converter texto livre em PRODUCT_SPEC.md padronizado.",
+    inputs: {
+      spec_raw: freeText,
+      product_spec: freeText,
+      title: title ?? "Spec sem título",
+      constraints: ["spec-driven", "no-invent"],
+    },
+    existing_artifacts: [],
+    limits: { max_rounds: 1, timeout_sec: 120 },
+  };
+}
+
 export async function specRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
+
+  // POST /api/spec-preview — CTO generates a standardized spec from free text (no project created)
+  app.post<{ Body: { freeText: string; title?: string } }>(
+    "/api/spec-preview",
+    async (request, reply) => {
+      const body = request.body ?? {} as { freeText?: string; title?: string };
+      const freeText = (body.freeText ?? "").trim();
+      if (!freeText || freeText.length < 20) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Descreva o produto com pelo menos 20 caracteres" });
+      }
+
+      const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
+      if (!agentsUrl) {
+        return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes não configurado" });
+      }
+
+      const message = buildCTOMessage(freeText, body.title);
+
+      try {
+        const res = await fetch(`${agentsUrl.replace(/\/$/, "")}/invoke/cto`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message),
+          signal: AbortSignal.timeout(130_000), // 130s (CTO pode demorar)
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          return reply.status(502).send({ code: "AGENT_ERROR", message: `Agente CTO retornou ${res.status}: ${txt.slice(0, 200)}` });
+        }
+
+        const data = await res.json() as Record<string, unknown>;
+        const status = data.status as string ?? "?";
+
+        // Extract spec markdown from artifacts
+        const artifacts = (data.artifacts as Array<Record<string, unknown>>) ?? [];
+        const specArtifact = artifacts.find((a) =>
+          typeof a.path === "string" && (a.path.endsWith(".md") || a.path.includes("PRODUCT_SPEC"))
+        );
+        const specMarkdown: string = (specArtifact?.content as string | undefined)
+          ?? (data.summary as string | undefined)
+          ?? "# Spec gerada\n\nO CTO não retornou conteúdo válido. Tente novamente.";
+
+        return reply.send({
+          specMarkdown,
+          summary: data.summary ?? "",
+          status,
+          requestId: data.request_id ?? message.request_id,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("timeout") || msg.includes("abort")) {
+          return reply.status(504).send({ code: "TIMEOUT", message: "O CTO demorou demais para responder. Tente novamente." });
+        }
+        return reply.status(502).send({ code: "AGENT_ERROR", message: msg.slice(0, 300) });
+      }
+    }
+  );
 
   app.post("/api/specs", async (request, reply) => {
     const user = getUser(request);

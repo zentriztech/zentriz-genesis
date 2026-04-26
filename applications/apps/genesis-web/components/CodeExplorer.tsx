@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import Chip from "@mui/material/Chip";
+import Dialog from "@mui/material/Dialog";
+import DialogContent from "@mui/material/DialogContent";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
@@ -11,6 +13,8 @@ import Typography from "@mui/material/Typography";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import FullscreenIcon from "@mui/icons-material/Fullscreen";
+import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import FolderIcon from "@mui/icons-material/Folder";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
@@ -285,26 +289,15 @@ interface CodeExplorerProps {
 }
 
 export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeExplorerProps) {
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected]     = useState<string | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
   const tree = buildTree(files);
-
   const selectedFile = selected ? files.find((f) => f.path === selected) : null;
 
-  return (
-    <Box
-      sx={{
-        display: "flex", height, border: "1px solid #21262D", borderRadius: 1,
-        overflow: "hidden", bgcolor: "#0D0F14",
-      }}
-    >
+  const explorerContent = (h: number | string) => (
+    <Box sx={{ display: "flex", height: h, overflow: "hidden", bgcolor: "#0D0F14", flex: 1 }}>
       {/* File tree */}
-      <Box
-        sx={{
-          width: 240, flexShrink: 0, overflowY: "auto", overflowX: "hidden",
-          borderRight: "1px solid #21262D", bgcolor: "#0D1117",
-          py: 0.5,
-        }}
-      >
+      <Box sx={{ width: 240, flexShrink: 0, overflowY: "auto", overflowX: "hidden", borderRight: "1px solid #21262D", bgcolor: "#0D1117", py: 0.5 }}>
         {appsRoot && (
           <Typography variant="caption" sx={{ display: "block", px: 1.5, pb: 0.5, color: "#484F58", fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em" }}>
             apps/
@@ -314,7 +307,6 @@ export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeE
           <TreeItem key={node.fullPath} node={node} depth={0} selected={selected} onSelect={setSelected} />
         ))}
       </Box>
-
       {/* Editor */}
       <Box sx={{ flexGrow: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {selected && selectedFile ? (
@@ -328,5 +320,42 @@ export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeE
         )}
       </Box>
     </Box>
+  );
+
+  return (
+    <>
+      {/* Normal view */}
+      <Box sx={{ position: "relative", border: "1px solid #21262D", borderRadius: 1, overflow: "hidden" }}>
+        {/* Fullscreen button */}
+        <Tooltip title="Tela cheia">
+          <IconButton size="small" onClick={() => setFullscreen(true)}
+            sx={{ position: "absolute", top: 6, right: 6, zIndex: 10, bgcolor: "#161B22", border: "1px solid #30363D", borderRadius: 1, p: 0.4, "&:hover": { bgcolor: "#21262D" } }}>
+            <FullscreenIcon sx={{ fontSize: "1rem", color: "#8B949E" }} />
+          </IconButton>
+        </Tooltip>
+        {explorerContent(height)}
+      </Box>
+
+      {/* Fullscreen dialog */}
+      <Dialog open={fullscreen} onClose={() => setFullscreen(false)} fullScreen
+        PaperProps={{ sx: { bgcolor: "#0D0F14", m: 0 } }}>
+        <DialogContent sx={{ p: 0, display: "flex", flexDirection: "column", height: "100vh" }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between"
+            sx={{ px: 2, py: 1, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
+            <Typography variant="body2" fontWeight={600} color="text.primary">
+              Explorador de Código — {files.length} arquivos
+            </Typography>
+            <Tooltip title="Sair de tela cheia">
+              <IconButton onClick={() => setFullscreen(false)} size="small">
+                <FullscreenExitIcon />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+          <Box sx={{ flexGrow: 1, overflow: "hidden" }}>
+            {explorerContent("100%")}
+          </Box>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
