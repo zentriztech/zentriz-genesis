@@ -304,36 +304,27 @@ function ProjectsPageInner() {
         </Card>
       )}
 
-      {/* Grid view — grouped by lineage */}
+      {/* Grid view — todos os projetos num único container, grupos multi-versão têm separador visual */}
       <AnimatePresence mode="wait">
         {view === "grid" && groups.length > 0 && (
           <Box key="grid">
             {groups.map((group, gi) => (
               <Box key={group.root.id} sx={{ mb: group.versions.length > 1 ? 3 : 0 }}>
-                {/* Multi-version group: show as timeline */}
-                {group.versions.length > 1 ? (
-                  <Box>
-                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-                      <Typography variant="caption" color="text.secondary"
-                        sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem" }}>
-                        {group.root.title ?? "Produto"} · {group.versions.length} versões
-                      </Typography>
-                    </Stack>
-                    <Grid container spacing={2}>
-                      {group.versions.map((p, i) => (
-                        <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
-                          <ProjectCard project={p} delay={gi * 2 + i} />
-                        </Grid>
-                      ))}
-                    </Grid>
-                  </Box>
-                ) : (
-                  <Grid container spacing={2}>
-                    <Grid size={{ xs: 12, sm: 6, md: 4 }}>
-                      <ProjectCard project={group.root} delay={gi} />
-                    </Grid>
-                  </Grid>
+                {/* Header só para grupos com múltiplas versões */}
+                {group.versions.length > 1 && (
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem", display: "block", mb: 1 }}>
+                    {group.root.title ?? "Produto"} · {group.versions.length} versões
+                  </Typography>
                 )}
+                {/* Um único Grid container por grupo — cards preenchem a linha horizontalmente */}
+                <Grid container spacing={2}>
+                  {group.versions.map((p, i) => (
+                    <Grid key={p.id} size={{ xs: 12, sm: 6, md: 4 }}>
+                      <ProjectCard project={p} delay={gi * 3 + i} />
+                    </Grid>
+                  ))}
+                </Grid>
               </Box>
             ))}
           </Box>
