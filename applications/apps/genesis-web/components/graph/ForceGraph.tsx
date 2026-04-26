@@ -90,7 +90,8 @@ function buildForceData(
       const node: FGNode = {
         id: `agent-${key}`, label: profile.name, type: "agent",
         color: profile.color, size: isActive ? 10 : 7,
-        isActive, detail: profile.personality,
+        isActive,
+        detail: profile.avatar, // avatar emoji drawn inside the circle
       };
       seenAgents.set(key, node);
       nodes.push(node);
@@ -118,7 +119,7 @@ function buildForceData(
     const shortName = (doc.filename.split("/").pop() ?? doc.filename).replace(/\.md$/i, "");
     const label = (doc.title ?? shortName).slice(0, 30);
     const nodeId = `doc-${i}`;
-    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: doc.filename });
+    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: phase }); // phase used for icon
     // Connect agent → doc
     if (seenAgents.has(agentKey)) addLink(`agent-${agentKey}`, nodeId, color + "70");
   }
@@ -147,7 +148,7 @@ function buildForceData(
     const color = TASK_COLOR[t.status ?? ""] ?? "#4B5563";
     nodes.push({
       id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4,
-      detail: t.requirements?.slice(0, 80),
+      detail: t.status ?? "NEW", // status used for icon inside circle
     });
     const ownerKey = agentKeyInDialogue(t.ownerRole ?? "");
     if (ownerKey) {
@@ -264,7 +265,39 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       ctx.stroke();
     }
 
-    // Label (only when zoomed in enough)
+    // ── Icon inside circle ────────────────────────────────────────────────────
+    if (n.type === "agent") {
+      // Emoji avatar inside the circle (scales with node size)
+      const emojiSize = Math.max(r * 1.1, 6);
+      ctx.font = `${emojiSize}px serif`;
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(n.detail ?? "🤖", x, y); // detail carries avatar emoji
+    } else if (n.type === "task") {
+      // Status icon for tasks
+      const statusIcon = n.detail === "DONE" || n.detail === "QA_PASS" ? "✓"
+        : n.detail === "IN_PROGRESS" || n.detail === "WAITING_REVIEW" ? "⟳"
+        : n.detail === "QA_FAIL" || n.detail === "BLOCKED" ? "✗" : "·";
+      const tSize = Math.max(r * 0.9, 4);
+      ctx.font = `bold ${tSize}px Inter, sans-serif`;
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle    = "#E6EDF3";
+      ctx.fillText(statusIcon, x, y);
+    } else if (n.type === "doc") {
+      // Phase icon: detail = phase string (cto, engineer, pm, qa, devops, spec, other)
+      const phaseIconMap: Record<string, string> = {
+        cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁"
+      };
+      const docIcon = phaseIconMap[n.detail ?? "other"] ?? "📁";
+      const dSize = Math.max(r * 0.9, 4);
+      ctx.font = `${dSize}px serif`;
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(docIcon, x, y);
+    }
+
+    // Label below (only when zoomed in enough or agent)
     const fontSize = Math.max(10 / globalScale, 1.5);
     if (globalScale > 0.6 || n.type === "agent") {
       ctx.font = `${n.type === "agent" ? "bold " : ""}${fontSize}px Inter, sans-serif`;
