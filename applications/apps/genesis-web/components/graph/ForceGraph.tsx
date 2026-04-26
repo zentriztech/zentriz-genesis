@@ -87,8 +87,12 @@ function buildForceData(
       if (seenAgents.has(key)) continue;
       const profile  = getAgentProfile(key);
       const isActive = activeAgentId?.toLowerCase().replace(/[^a-z_]/g, "_") === key;
+      // Label format: "ROLE-IA-NAME" e.g. "CTO-IA-Jean", "DEV-IA-Pedro"
+      const rolePrefix = (profile.role ?? "").toUpperCase().replace(/\s+/g, "-");
+      const humanName  = profile.name.replace(/^IA-/, "");  // strip "IA-" prefix from name
+      const nodeLabel  = rolePrefix ? `${rolePrefix}-IA-${humanName}` : profile.name;
       const node: FGNode = {
-        id: `agent-${key}`, label: profile.name, type: "agent",
+        id: `agent-${key}`, label: nodeLabel, type: "agent",
         color: profile.color, size: isActive ? 10 : 7,
         isActive,
         detail: profile.avatar, // avatar emoji drawn inside the circle
@@ -265,36 +269,39 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       ctx.stroke();
     }
 
-    // ── Icon inside circle ────────────────────────────────────────────────────
-    if (n.type === "agent") {
-      // Emoji avatar inside the circle (scales with node size)
-      const emojiSize = Math.max(r * 1.1, 6);
-      ctx.font = `${emojiSize}px serif`;
+    // ── Icon inside circle — centrado corretamente no canvas ─────────────────
+    // Canvas emoji/text: textBaseline="middle" não centraliza emojis perfeitamente.
+    // Usamos measureText para calcular o offset real e centralizar com precisão.
+    const drawCentered = (text: string, cx: number, cy: number, fontSize: number, font: string) => {
+      ctx.font = font;
       ctx.textAlign    = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(n.detail ?? "🤖", x, y); // detail carries avatar emoji
+      ctx.textBaseline = "alphabetic"; // mais preciso que "middle" para emojis
+      const metrics = ctx.measureText(text);
+      // Offset vertical: centraliza pelo meio real do glyph
+      const ascent  = metrics.actualBoundingBoxAscent  ?? fontSize * 0.7;
+      const descent = metrics.actualBoundingBoxDescent ?? fontSize * 0.2;
+      const yOffset = (ascent - descent) / 2;
+      ctx.fillText(text, cx, cy + yOffset);
+    };
+
+    if (n.type === "agent") {
+      const emojiSize = Math.max(r * 1.05, 6);
+      ctx.fillStyle = "#FFFFFF";
+      drawCentered(n.detail ?? "🤖", x, y, emojiSize, `${emojiSize}px serif`);
     } else if (n.type === "task") {
-      // Status icon for tasks
       const statusIcon = n.detail === "DONE" || n.detail === "QA_PASS" ? "✓"
         : n.detail === "IN_PROGRESS" || n.detail === "WAITING_REVIEW" ? "⟳"
         : n.detail === "QA_FAIL" || n.detail === "BLOCKED" ? "✗" : "·";
-      const tSize = Math.max(r * 0.9, 4);
-      ctx.font = `bold ${tSize}px Inter, sans-serif`;
-      ctx.textAlign    = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle    = "#E6EDF3";
-      ctx.fillText(statusIcon, x, y);
+      const tSize = Math.max(r * 0.85, 4);
+      ctx.fillStyle = "#E6EDF3";
+      drawCentered(statusIcon, x, y, tSize, `bold ${tSize}px Inter, sans-serif`);
     } else if (n.type === "doc") {
-      // Phase icon: detail = phase string (cto, engineer, pm, qa, devops, spec, other)
       const phaseIconMap: Record<string, string> = {
         cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁"
       };
       const docIcon = phaseIconMap[n.detail ?? "other"] ?? "📁";
-      const dSize = Math.max(r * 0.9, 4);
-      ctx.font = `${dSize}px serif`;
-      ctx.textAlign    = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(docIcon, x, y);
+      const dSize = Math.max(r * 0.85, 4);
+      drawCentered(docIcon, x, y, dSize, `${dSize}px serif`);
     }
 
     // Label below (only when zoomed in enough or agent)
