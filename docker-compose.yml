@@ -25,6 +25,10 @@ services:
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
       # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
       - PROJECT_FILES_ROOT=/project-files
+      # api e runner compartilham o mesmo volume /shared/uploads — path-based delivery (sem base64)
+      - RUNNER_UPLOAD_DIR=/shared/uploads
+      # Path do host para project-files — usado pelo watchdog e para exibição ao usuário
+      - HOST_PROJECT_FILES_ROOT=${HOST_PROJECT_FILES_ROOT:-/Users/mac/zentriz-files}
       - PGHOST=postgres
       - PGUSER=genesis
       - PGPASSWORD=genesis_dev
