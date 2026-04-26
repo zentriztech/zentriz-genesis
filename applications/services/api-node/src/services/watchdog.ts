@@ -106,6 +106,71 @@ async function markProject(
   }
 }
 
+async function writeDlqEntry(
+  projectId: string,
+  errorType: "watchdog_gave_up" | "timeout" | "other",
+  reason: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(
+      `INSERT INTO project_errors (project_id, error_type, reason, extra)
+       VALUES ($1, $2, $3, $4::jsonb)
+       ON CONFLICT DO NOTHING`,
+      [projectId, errorType, reason, JSON.stringify(extra ?? {})],
+    );
+  } catch {
+    // DLQ table may not exist yet (migration pending) — ignore silently
+  } finally {
+    client.release();
+  }
+}
+
+async function checkCostAlerts(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    // Find tenants that have spent more than their daily alert threshold today
+    const rows = await client.query<{ tenant_id: string; daily_spend: number; daily_alert_usd: number }>(
+      `SELECT m.tenant_id, SUM(m.input_tokens * 3.0 / 1000000 + m.output_tokens * 15.0 / 1000000)::float AS daily_spend,
+              COALESCE(c.daily_alert_usd, 50.0) AS daily_alert_usd
+       FROM project_agent_metrics m
+       JOIN projects p ON p.id = m.project_id
+       LEFT JOIN cost_alert_config c ON c.tenant_id = p.tenant_id
+       WHERE m.created_at >= date_trunc('day', now())
+         AND p.tenant_id IS NOT NULL
+       GROUP BY m.tenant_id, c.daily_alert_usd
+       HAVING SUM(m.input_tokens * 3.0 / 1000000 + m.output_tokens * 15.0 / 1000000) > COALESCE(c.daily_alert_usd, 50.0)`,
+    );
+    for (const row of rows.rows) {
+      // Check if alert was already sent today for this tenant
+      const existing = await client.query(
+        `SELECT id FROM notifications
+         WHERE tenant_id = $1 AND type = 'alert'
+           AND created_at >= date_trunc('day', now())
+           AND title LIKE 'Alerta de custo%'
+         LIMIT 1`,
+        [row.tenant_id],
+      );
+      if (existing.rows.length > 0) continue;
+      await client.query(
+        `INSERT INTO notifications (tenant_id, type, title, body)
+         VALUES ($1, 'alert', $2, $3)`,
+        [
+          row.tenant_id,
+          "Alerta de custo — limite diário atingido",
+          `Gasto hoje: ~$${row.daily_spend.toFixed(2)} USD (limite: $${row.daily_alert_usd} USD). Revise projetos em execução.`,
+        ],
+      );
+      console.warn(`[Watchdog] Alerta de custo emitido para tenant ${row.tenant_id}: $${row.daily_spend.toFixed(2)} hoje`);
+    }
+  } catch {
+    // project_agent_metrics or cost_alert_config may not exist yet — ignore
+  } finally {
+    client.release();
+  }
+}
+
 async function getSpecFilePath(projectId: string): Promise<string | null> {
   const client = await pool.connect();
   try {
@@ -206,6 +271,9 @@ async function runWatchdogCycle(): Promise<void> {
   try {
     if (!RUNNER_SERVICE_URL) return; // runner não configurado
 
+    // 0. Verificar alertas de custo (uma vez por ciclo)
+    await checkCostAlerts().catch((e) => console.error("[Watchdog] Erro em checkCostAlerts:", e));
+
     // 1. Buscar status do runner
     const runnerStatus = await getRunnerStatus();
     const activeIds = new Set(runnerStatus ? Object.keys(runnerStatus.projects) : []);
@@ -231,6 +299,7 @@ async function runWatchdogCycle(): Promise<void> {
           `[Watchdog] Projeto ${project.id} excedeu ${MAX_RUNTIME_HOURS}h de execução (${runtimeHours.toFixed(1)}h). Marcando como timed_out.`,
         );
         await markProject(project.id, "failed", { extra: { timed_out: true, runtime_hours: runtimeHours.toFixed(1) } });
+        await writeDlqEntry(project.id, "timeout", `Pipeline excedeu ${MAX_RUNTIME_HOURS}h de execução (real: ${runtimeHours.toFixed(1)}h)`);
         continue;
       }
 
@@ -240,6 +309,7 @@ async function runWatchdogCycle(): Promise<void> {
           `[Watchdog] Projeto ${project.id} atingiu limite de ${MAX_RESTART_ATTEMPTS} restarts. Marcando como failed.`,
         );
         await markProject(project.id, "failed", { extra: { watchdog_gave_up: true } });
+        await writeDlqEntry(project.id, "watchdog_gave_up", `Watchdog desistiu após ${MAX_RESTART_ATTEMPTS} restarts`);
         continue;
       }
 

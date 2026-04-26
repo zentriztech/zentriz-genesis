@@ -274,6 +274,29 @@ export async function pipelineRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/admin/dlq — dead letter queue entries (projects that failed permanently)
+  app.get("/api/admin/dlq", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas administradores Zentriz" });
+    }
+    const client = await pool.connect();
+    try {
+      const rows = await client.query(
+        `SELECT e.id, e.project_id, p.title AS project_title, e.error_type, e.agent, e.task_id, e.reason, e.extra, e.created_at
+         FROM project_errors e
+         LEFT JOIN projects p ON p.id = e.project_id
+         ORDER BY e.created_at DESC LIMIT 100`
+      );
+      return reply.send({ entries: rows.rows, total: rows.rowCount });
+    } catch {
+      // Table may not exist yet
+      return reply.send({ entries: [], total: 0 });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/watchdog/status — estado atual do Watchdog + projetos órfãos no DB
   app.get("/api/watchdog/status", async (request, reply) => {
     const user = getUser(request);
