@@ -93,10 +93,20 @@ agent:
   - Node/npm: `npm install --legacy-peer-deps` (or `npm ci` if package-lock.json exists)
   - Python: `pip install -r requirements.txt -q`
   - Never symlink or reuse node_modules from another project — always install fresh
-- Port must be deterministic (not random)
+- Port must be deterministic (not random) — never 3000/3001/3002/3003 (reserved by Genesis portal)
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
 - Structure of start.sh MUST follow: (1) cd to apps dir → (2) install deps → (3) build if needed → (4) serve
+- **`docker-compose.yml` MUST have `name:` at the top and `container_name:` on every service** — without these, all projects share the name "apps" and overwrite each other's containers (BLOCKER):
+  ```yaml
+  name: <project-slug>          # e.g. agendamentos-api, crud-produtos-api
+  services:
+    api:
+      container_name: <project-slug>_api
+    db:
+      container_name: <project-slug>_db
+  ```
+  Derive `<project-slug>` from the project title in the charter (lowercase, hyphens).
 
 ---
 
