@@ -274,10 +274,17 @@ function LiveDialogueInner({ projectId, pollIntervalMs = 10000, onEntriesLoaded 
   return (
     <Box
       sx={{
-        flexGrow: 1, overflowY: "auto",
+        // flexGrow fills available space in a flex parent that has minHeight:0
+        // The explicit maxHeight acts as a hard cap so the page never scrolls
+        flexGrow: 1,
+        minHeight: 0,
+        maxHeight: "100%",
+        overflowY: "auto",
         px: 1.5, py: 1,
         display: "flex", flexDirection: "column", gap: 1,
         scrollbarWidth: "thin",
+        "&::-webkit-scrollbar": { width: 4 },
+        "&::-webkit-scrollbar-thumb": { bgcolor: "#30363D", borderRadius: 2 },
       }}
     >
       <AnimatePresence initial={false}>

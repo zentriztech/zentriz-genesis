@@ -159,51 +159,92 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     }
   }
 
-  // ── 2. Doc nodes (planning phase documents — between agents and tasks) ────────
-  const planningDocs = input.planningDocs ?? [];
-  // Skip raw JSON dumps and spec upload files
-  const skipPatterns = [".json", "spec__", "raw_response"];
-  const visibleDocs = planningDocs.filter((d) =>
-    !skipPatterns.some((p) => d.filename.toLowerCase().includes(p))
-  );
+  // ── Layout constants ──────────────────────────────────────────────────────────
+  // Agents are placed in a horizontal row at Y=0.
+  // Docs belonging to each agent alternate above (Y<0) and below (Y>0) that agent.
+  // Tasks are placed in a grid below the agent row.
+  // Artifact groups are placed to the right of the dev agent, alternating above/below.
 
-  const DOC_START_X = 900; // to the right of agent chain
-  const DOC_ROW_Y   = 0;
-  const DOC_ROW_H   = 70;
+  const AGENT_SPACING_X = 220;  // horizontal gap between agents
+  const AGENT_Y         = 0;
 
-  for (let idx = 0; idx < visibleDocs.length; idx++) {
-    const doc   = visibleDocs[idx];
-    const phase = inferDocPhase(doc.filename, doc.creator);
-    const agentKey = PHASE_AGENT[phase];
-    const nodeId = `doc-${idx}`;
+  // Recompute agent X positions evenly spaced (override the rough AGENT_X map)
+  const agentPositions = new Map<string, number>(); // key → x
+  sortedAgents.forEach((key, i) => {
+    agentPositions.set(key, i * AGENT_SPACING_X);
+  });
 
-    nodes.push({
-      id: nodeId,
-      type: "docNode",
-      position: { x: DOC_START_X, y: DOC_ROW_Y + idx * DOC_ROW_H },
-      data: {
-        nodeType: "doc",
-        filename: doc.filename,
-        title: doc.title ?? doc.filename,
-        creator: doc.creator ?? agentKey,
-        createdAt: doc.created_at ?? "",
-        phase,
-      } satisfies DocNodeData,
-    });
-
-    // Edge: agent → doc
-    if (seenAgents.has(agentKey)) {
-      addEdge(`agent-${agentKey}`, nodeId, {
-        style: { stroke: "#F59E0B55", strokeWidth: 1, strokeDasharray: "4 3" },
-      });
+  // Update already-added agent nodes with new positions
+  for (const node of nodes) {
+    if (node.type === "agentNode") {
+      const key = (node.data as AgentNodeData).agentId;
+      const x   = agentPositions.get(key);
+      if (x !== undefined) node.position = { x, y: AGENT_Y };
     }
   }
 
-  // ── 4. Task nodes (below agents) ─────────────────────────────────────────────
-  const TASK_ROW_Y   = 160;
-  const TASK_COLS    = 4;
-  const TASK_COL_W   = 180;
-  const TASK_ROW_H   = 90;
+  // ── 2. Doc nodes — grouped per agent, alternating above/below ────────────────
+  const planningDocs = input.planningDocs ?? [];
+  const skipPatterns = [".json", "spec__", "raw_response"];
+  const visibleDocs  = planningDocs.filter(
+    (d) => !skipPatterns.some((p) => d.filename.toLowerCase().includes(p))
+  );
+
+  // Bucket docs by their owning agent
+  const docsByAgent = new Map<string, typeof visibleDocs>();
+  for (const doc of visibleDocs) {
+    const phase    = inferDocPhase(doc.filename, doc.creator);
+    const agentKey = PHASE_AGENT[phase];
+    if (!docsByAgent.has(agentKey)) docsByAgent.set(agentKey, []);
+    docsByAgent.get(agentKey)!.push(doc);
+  }
+
+  const DOC_H    = 56;   // approximate height of a docNode
+  const DOC_W    = 170;  // approximate width
+  const DOC_GAP  = 10;
+
+  let globalDocIdx = 0;
+  for (const agentKey of sortedAgents) {
+    const agentX2 = agentPositions.get(agentKey) ?? 0;
+    const agentDocs = docsByAgent.get(agentKey) ?? [];
+
+    agentDocs.forEach((doc, localIdx) => {
+      const nodeId    = `doc-${globalDocIdx++}`;
+      const phase     = inferDocPhase(doc.filename, doc.creator);
+      const isAbove   = localIdx % 2 === 0;           // alternate above/below
+      const stackIdx  = Math.floor(localIdx / 2);     // how many on this side
+      const ySign     = isAbove ? -1 : 1;
+      const yOffset   = 120 + stackIdx * (DOC_H + DOC_GAP);
+      const xOffset   = (localIdx % 2 === 0 ? 0 : DOC_W * 0.15); // slight stagger
+
+      nodes.push({
+        id:   nodeId,
+        type: "docNode",
+        position: {
+          x: agentX2 - DOC_W * 0.3 + xOffset,
+          y: AGENT_Y + ySign * yOffset,
+        },
+        data: {
+          nodeType:  "doc",
+          filename:  doc.filename,
+          title:     doc.title ?? doc.filename,
+          creator:   doc.creator ?? agentKey,
+          createdAt: doc.created_at ?? "",
+          phase,
+        } satisfies DocNodeData,
+      });
+
+      addEdge(`agent-${agentKey}`, nodeId, {
+        style: { stroke: "#F59E0B55", strokeWidth: 1, strokeDasharray: "4 3" },
+      });
+    });
+  }
+
+  // ── 3. Task nodes — grid below agent row ─────────────────────────────────────
+  const TASK_ROW_Y  = 280;   // below the docs-above zone
+  const TASK_COLS   = 4;
+  const TASK_COL_W  = 180;
+  const TASK_ROW_H  = 90;
 
   const ownerAgentMap: Record<string, string> = {
     DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev_backend",
@@ -213,10 +254,10 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
   };
 
   for (let idx = 0; idx < tasks.length; idx++) {
-    const task    = tasks[idx];
-    const col     = idx % TASK_COLS;
-    const row     = Math.floor(idx / TASK_COLS);
-    const nodeId  = `task-${task.taskId}`;
+    const task   = tasks[idx];
+    const col    = idx % TASK_COLS;
+    const row    = Math.floor(idx / TASK_COLS);
+    const nodeId = `task-${task.taskId}`;
 
     nodes.push({
       id:       nodeId,
@@ -231,7 +272,6 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
       } satisfies TaskNodeData,
     });
 
-    // Edge: ownerAgent → task
     const rawOwner = task.ownerRole?.toUpperCase() ?? "";
     const ownerKey = ownerAgentMap[rawOwner];
     if (ownerKey && seenAgents.has(ownerKey)) {
@@ -241,16 +281,11 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     }
   }
 
-  // ── 3. Artifact groups (grouped by top-level dir, collapsible) ───────────────
-  const ART_START_Y = 160;
-  const ART_COL_X   = TASK_COLS * TASK_COL_W + 40;
-  const ART_GAP     = 14;  // gap between group nodes
-
+  // ── 4. Artifact groups — right of dev agent, alternating above/below ─────────
   const showableFiles = codeFiles.filter(
     (f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock")
   );
 
-  // Group by first path segment (top-level dir), or "." for root files
   const groupMap = new Map<string, typeof showableFiles>();
   for (const f of showableFiles) {
     const parts = f.path.split("/");
@@ -259,27 +294,35 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     groupMap.get(dir)!.push(f);
   }
 
-  // Sort groups: dirs first alphabetically, then root files
   const sortedDirs = Array.from(groupMap.keys()).sort((a, b) => {
     if (a === ".") return 1; if (b === ".") return -1;
     return a.localeCompare(b);
   });
 
-  // Determine dev agent key
-  const devKey = Array.from(seenAgents).find(k => k.startsWith("dev")) ?? (seenAgents.has("dev") ? "dev" : null);
+  const devKey    = Array.from(seenAgents).find(k => k.startsWith("dev")) ?? null;
+  const devAgentX = devKey ? (agentPositions.get(devKey) ?? 0) : (sortedAgents.length * AGENT_SPACING_X);
+  const ART_X     = devAgentX + AGENT_SPACING_X * 0.6;
+  const ART_COL_W = 200;
+  const NODE_H_COLLAPSED = 72;
 
-  let currentY = ART_START_Y;
   sortedDirs.forEach((dir, idx) => {
     const files    = groupMap.get(dir)!;
     const nodeId   = `artifactGroup-${idx}`;
     const expanded = expandedGroups?.has(dir) ?? false;
-    // Collapsed height ≈ 72px, expanded ≈ 72 + 28*files
-    const nodeH    = expanded ? 72 + files.length * 28 : 72;
+    const nodeH    = expanded ? NODE_H_COLLAPSED + files.length * 28 : NODE_H_COLLAPSED;
+
+    // Alternate: even indices above agent row, odd below
+    const isAbove  = idx % 2 === 0;
+    const stackIdx = Math.floor(idx / 2);
+    const xPos     = ART_X + stackIdx * (ART_COL_W + 12);
+    const yPos     = isAbove
+      ? AGENT_Y - 120 - (expanded ? nodeH * 0.5 : 0)
+      : AGENT_Y + 120;
 
     nodes.push({
       id:       nodeId,
       type:     "artifactGroupNode",
-      position: { x: ART_COL_X, y: currentY },
+      position: { x: xPos, y: yPos },
       data: {
         nodeType: "artifactGroup",
         dir,
@@ -294,8 +337,6 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
         style: { stroke: "#10B98144", strokeWidth: 1, strokeDasharray: "3 4" },
       });
     }
-
-    currentY += nodeH + ART_GAP;
   });
 
   return { nodes, edges };

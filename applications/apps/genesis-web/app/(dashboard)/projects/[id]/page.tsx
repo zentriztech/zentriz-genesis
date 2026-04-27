@@ -719,7 +719,7 @@ function ProjectDetailPageInner() {
 
         {/* ── RIGHT COLUMN: all tabs ── */}
         <Grid size={{ xs: 12, md: 8.5 }}>
-          <Card sx={{ height: "100%", minHeight: 600, display: "flex", flexDirection: "column" }}>
+          <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
             <Tabs
               value={rightTab}
               onChange={(_e, v) => setRightTab(v as number)}
