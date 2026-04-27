@@ -218,10 +218,10 @@ def _persist_knowledge_entry(project_id: str, entry: dict, api_base_url: str, to
             )
         )
         payload = json.dumps({
-            "fromAgent": "genesis",
-            "toAgent": "human",
-            "eventType": "knowledge.extracted",
-            "summaryHuman": summary,
+            "from_agent": "genesis",
+            "to_agent": "human",
+            "event_type": "knowledge.extracted",
+            "summary_human": summary,
         }).encode()
 
         req = urllib.request.Request(

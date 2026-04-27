@@ -716,25 +716,6 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
-  // POST /api/projects/:id/dialogue — adiciona entrada ao diálogo (usado pelo runner G46)
-  app.post<{ Params: { id: string }; Body: { fromAgent: string; toAgent: string; eventType: string; summaryHuman: string } }>(
-    "/api/projects/:id/dialogue",
-    async (request, reply) => {
-      const { id } = request.params;
-      const { fromAgent, toAgent, eventType, summaryHuman } = request.body as Record<string, string>;
-      if (!fromAgent || !summaryHuman) return reply.status(400).send({ code: "BAD_REQUEST", message: "fromAgent e summaryHuman obrigatórios" });
-      const client = await pool.connect();
-      try {
-        await client.query(
-          `INSERT INTO dialogue_entries (id, project_id, from_agent, to_agent, event_type, summary_human, created_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now())`,
-          [id, fromAgent, toAgent ?? "system", eventType ?? "step", summaryHuman]
-        );
-        return reply.send({ ok: true });
-      } finally { client.release(); }
-    }
-  );
-
   // GET /api/projects/:id/knowledge — lista knowledge entries extraídas pelo G46
   app.get<{ Params: { id: string } }>(
     "/api/projects/:id/knowledge",
