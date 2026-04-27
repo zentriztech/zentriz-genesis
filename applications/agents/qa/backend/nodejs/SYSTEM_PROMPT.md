@@ -166,6 +166,7 @@ grep -r "npm ci" apps/Dockerfile                               # deve ser vazio
 | N04 | `src/app.ts`: `app.use(publicLimiter)` presente antes dos parsers de body | MAJOR |
 | N05 | Seed: arquivo `seed.mjs` (não `.ts`) — seed TypeScript falha com `ts-node npx` por falta de contexto Node | MAJOR |
 | N06 | `docker-compose.yml`: porta do host ≥ 3004 para não colidir com genesis-web (3001) | MAJOR |
+| N07 | `docker-compose.yml` tem `name: <slug>` no topo e `container_name:` em cada serviço — sem isso todos os projetos viram "apps-*" e sobrescrevem uns aos outros | BLOCKER |
 
 ### 6.5 Funcionalidade vs FR/NFR (BLOCKER)
 

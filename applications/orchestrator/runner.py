@@ -2466,6 +2466,26 @@ def main() -> int:
 
         completed_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+        # G46: Self-learning — extrair padrões de QA_FAIL dos reports deste projeto
+        try:
+            from orchestrator.knowledge_extractor import extract_knowledge
+            _api_url = os.environ.get("API_BASE_URL", "")
+            _api_tok  = os.environ.get("GENESIS_API_TOKEN", "")
+            _kresult  = extract_knowledge(project_id or "default", _api_url, _api_tok)
+            if _kresult.get("extracted", 0) > 0:
+                logger.info(
+                    "[G46] Knowledge extraído: %d padrão(ões), %d QA_FAILs, stack=%s",
+                    _kresult["extracted"], _kresult.get("qa_fails", 0), _kresult.get("stack", "?"),
+                )
+                _post_dialogue(
+                    "genesis", "human", "knowledge.extracted",
+                    f"[Aprendizado automático] {_kresult['extracted']} padrão(ões) identificado(s) nos QA reports. "
+                    f"Aguardando revisão humana antes de propor mudanças nos SYSTEM_PROMPTs.",
+                    request_id,
+                )
+        except Exception as _ke:
+            logger.warning("[G46] Extração de knowledge falhou (não crítico): %s", _ke)
+
         # Generate quality report before marking completed
         try:
             _tasks_done = len(pipeline_ctx.completed_tasks) if pipeline_ctx else 0

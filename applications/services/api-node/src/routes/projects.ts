@@ -716,6 +716,55 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /api/projects/:id/dialogue — adiciona entrada ao diálogo (usado pelo runner G46)
+  app.post<{ Params: { id: string }; Body: { fromAgent: string; toAgent: string; eventType: string; summaryHuman: string } }>(
+    "/api/projects/:id/dialogue",
+    async (request, reply) => {
+      const { id } = request.params;
+      const { fromAgent, toAgent, eventType, summaryHuman } = request.body as Record<string, string>;
+      if (!fromAgent || !summaryHuman) return reply.status(400).send({ code: "BAD_REQUEST", message: "fromAgent e summaryHuman obrigatórios" });
+      const client = await pool.connect();
+      try {
+        await client.query(
+          `INSERT INTO dialogue_entries (id, project_id, from_agent, to_agent, event_type, summary_human, created_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now())`,
+          [id, fromAgent, toAgent ?? "system", eventType ?? "step", summaryHuman]
+        );
+        return reply.send({ ok: true });
+      } finally { client.release(); }
+    }
+  );
+
+  // GET /api/projects/:id/knowledge — lista knowledge entries extraídas pelo G46
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/knowledge",
+    async (request, reply) => {
+      const { id } = request.params;
+      const root = process.env.PROJECT_FILES_ROOT?.trim();
+      if (!root) return reply.send({ patterns: [], status: "no_root" });
+      const entryPath = path.join(root, id, "docs", "knowledge_entry.json");
+      try {
+        const content = await readFile(entryPath, "utf-8");
+        return reply.send(JSON.parse(content));
+      } catch {
+        // Also check dialogue entries for knowledge.extracted events
+        const client = await pool.connect();
+        try {
+          const res = await client.query(
+            `SELECT summary_human, created_at FROM dialogue_entries
+             WHERE project_id = $1 AND event_type = 'knowledge.extracted'
+             ORDER BY created_at DESC LIMIT 1`,
+            [id]
+          );
+          if (res.rows.length > 0) {
+            return reply.send({ status: "pending_review", summary: res.rows[0].summary_human, extracted_at: res.rows[0].created_at });
+          }
+          return reply.send({ patterns: [], status: "none" });
+        } finally { client.release(); }
+      }
+    }
+  );
+
   // GET /api/projects/:id/doc-content?path=docs/pm/backend/BACKLOG.md — conteúdo de doc gerado por agente
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
     "/api/projects/:id/doc-content",

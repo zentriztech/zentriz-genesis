@@ -77,8 +77,18 @@ Validar obrigatoriamente — causam falha silenciosa em runtime, não detectáve
 grep -rn "settings\.[A-Z]" apps/           # deve retornar vazio
 grep -rn "backends.legacy" pyproject.toml   # deve retornar vazio
 grep -rn "compare_type" alembic/            # deve retornar vazio
+grep -c "^name:" apps/docker-compose.yml    # deve retornar 1 (G48)
+grep -c "container_name" apps/docker-compose.yml  # deve retornar ≥2
 ```
-Se qualquer grep retornar resultado → **QA_FAIL imediato**.
+Se qualquer grep retornar resultado inesperado → **QA_FAIL imediato**.
+
+### 5.7 docker-compose.yml — name e container_name (G48 — BLOCKER)
+
+| Check | Severidade |
+|-------|------------|
+| `docker-compose.yml` tem `name: <project-slug>` no topo | BLOCKER |
+| Cada serviço tem `container_name: <slug>_api` / `<slug>_db` | BLOCKER |
+| Porta do host ≥ 3004 (nunca 3000–3003, reservados pelo Genesis) | MAJOR |
 
 ### 5.5 Collections e Documentação (quando solicitado)
 | Check | Severidade |
