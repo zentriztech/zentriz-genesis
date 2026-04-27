@@ -326,6 +326,38 @@ async function runWatchdogCycle(): Promise<void> {
     const runnerStatus = await getRunnerStatus();
     const activeIds = new Set(runnerStatus ? Object.keys(runnerStatus.projects) : []);
 
+    // G39: Promover projetos da fila quando há slot disponível
+    try {
+      const { hasConcurrencySlot } = await import("./tenantLlmConfig.js");
+      const queuedProjects = await pool.query<{ id: string; tenant_id: string; spec_ref: string }>(
+        `SELECT id, tenant_id, spec_ref FROM projects
+         WHERE status = 'queued'
+         ORDER BY queued_at ASC
+         LIMIT 10`
+      );
+      for (const qp of queuedProjects.rows) {
+        const hasSlot = await hasConcurrencySlot(qp.tenant_id ?? "");
+        if (!hasSlot) continue;
+        // Promover de queued → running via /run interno
+        try {
+          const { signToken } = await import("../auth.js");
+          const svcToken = signToken({ sub: "watchdog", email: "watchdog@internal", role: "zentriz_admin", tenantId: null }, "1h");
+          const apiBase = process.env.API_BASE_URL ?? "http://localhost:3000";
+          const res = await fetch(`${apiBase}/api/projects/${qp.id}/run`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${svcToken}` },
+          });
+          if (res.ok) {
+            console.log(`[Watchdog][G39] Projeto ${qp.id} promovido da fila → running`);
+          }
+        } catch (e) {
+          console.error(`[Watchdog][G39] Erro ao promover ${qp.id}:`, e);
+        }
+      }
+    } catch (e) {
+      console.error("[Watchdog][G39] Erro na promoção da fila:", e);
+    }
+
     // 2. Buscar projetos running sem processo ativo
     const orphans = await getOrphanProjects(activeIds);
     if (!orphans.length) return;

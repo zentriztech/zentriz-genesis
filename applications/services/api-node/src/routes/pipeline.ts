@@ -4,6 +4,7 @@ import path from "path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signToken } from "../auth.js";
+import { enqueueOrStart, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -126,6 +127,27 @@ export async function pipelineRoutes(app: FastifyInstance) {
         });
       }
       request.log.info({ projectId, specPath: specFilePath.slice(0, 120) }, "[Pipeline] Spec encontrada, disparando runner");
+
+      // G38: Resolve LLM config do tenant (usa conta própria se configurada)
+      const tenantId = user.tenantId ?? "";
+      const llmConfig = tenantId ? await getTenantLlmConfig(tenantId) : null;
+      if (llmConfig && !llmConfig.isDefault) {
+        request.log.info({ projectId, provider: llmConfig.provider, model: llmConfig.modelId },
+          "[G38] Usando LLM config do tenant");
+      }
+
+      // G39: Verifica slot de concorrência — coloca na fila se tenant atingiu máximo
+      if (tenantId) {
+        const queueResult = await enqueueOrStart(projectId, tenantId);
+        if (queueResult === "queued") {
+          request.log.info({ projectId, tenantId }, "[G39] Projeto enfileirado — tenant atingiu máximo de concorrência");
+          return reply.send({
+            ok: true,
+            status: "queued",
+            message: "Pipeline enfileirado. Será iniciado automaticamente quando houver slot disponível.",
+          });
+        }
+      }
 
       const apiBaseUrl = process.env.API_BASE_URL ?? "http://localhost:3000";
       const token = signToken(
