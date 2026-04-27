@@ -316,11 +316,39 @@ export async function projectRoutes(app: FastifyInstance) {
       // Never awaited — must not delay the accept response
       setImmediate(() => pushProjectToGitHub(id).catch(console.error));
 
+      // G44 — Emit project.shipped event for Deadpool handoff
+      // Persisted in DB as a dialogue entry so Deadpool can poll or webhook
+      setImmediate(async () => {
+        try {
+          const projDetails = await pool.query(
+            "SELECT title, tenant_id, created_by FROM projects WHERE id = $1", [id]
+          );
+          const p = projDetails.rows[0] as Record<string, unknown>;
+          await pool.query(
+            `INSERT INTO dialogue_entries (id, project_id, from_agent, to_agent, event_type, summary_human, created_at)
+             VALUES (gen_random_uuid(), $1, 'genesis', 'deadpool', 'project.shipped',
+               $2, now())
+             ON CONFLICT DO NOTHING`,
+            [id, JSON.stringify({
+              event: "project.shipped",
+              project_id: id,
+              title: p?.title,
+              tenant_id: p?.tenant_id,
+              shipped_at: new Date().toISOString(),
+              github_push_triggered: true,
+            })]
+          );
+        } catch (e) {
+          console.error("[G44] project.shipped event failed:", e);
+        }
+      });
+
       return reply.send({
         ok: true,
         status: "accepted",
         updatedAt: (u.updated_at as Date)?.toISOString(),
         githubPushTriggered: true,
+        event: "project.shipped",
       });
     } finally {
       client.release();

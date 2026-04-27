@@ -208,11 +208,25 @@ async def get_current_user(token: str = Depends(security)) -> User:
     ...
 ```
 
-### 3.5 Geração de collections (última task ou DevOps)
-Quando o charter mencionar "Insomnia", "Postman" ou "documentação":
-- Gerar `apps/docs/insomnia_collection.json` com todos os endpoints, exemplos de request/response e autenticação Bearer
-- Gerar `apps/docs/postman_collection.json` no formato Postman v2.1
-- Incluir exemplos de variáveis de ambiente (base_url, token)
+### 3.5 Geração de collections + seed (SEMPRE obrigatório em projetos backend/API)
+
+**Na última task do backlog (ou quando task mencionar scaffold/setup):**
+
+**`apps/seed.py`** — dados fake idempotentes para desenvolvimento (G45):
+- Idempotente: `ON CONFLICT (email/name) DO NOTHING` em todos os inserts
+- Cobrir: 1 admin + 2 clientes + entidades principais do domínio (3–5 por tipo) + relacionamentos
+- Credenciais impressas no stdout ao final
+- Executável: `docker compose exec api python seed.py`
+- Usar `hash_password()` do próprio projeto — nunca hardcodar hash
+
+**`project/insomnia_collection.json`** — formato v4 Insomnia (G40):
+- Campo obrigatório: `"__export_format": 4` na raiz — sem ele Insomnia rejeita
+- Cobrir todos os endpoints com exemplos de body e `Authorization: Bearer {{ token }}`
+- Environment `Local` com `base_url` e `token` vazio
+
+**`project/curl_examples.sh`** — exemplos bash de todos os endpoints (G40):
+- Começar com health check, login (captura token), demais endpoints em ordem lógica
+- Idempotente e executável diretamente
 
 ---
 

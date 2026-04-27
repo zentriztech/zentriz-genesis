@@ -100,6 +100,121 @@ agent:
 
 ---
 
+## 5.1 ENTREGAS OBRIGATÓRIAS — Resiliência e Testabilidade (G41 + G40 + G45)
+
+### G41 — Dockerfile resiliente (BLOCKER para projetos Docker)
+
+Todo `Dockerfile` gerado para Python com extensões C (asyncpg, bcrypt, cryptography, psycopg2) DEVE:
+1. Declarar plataforma explícita: `FROM --platform=linux/amd64 python:3.11-slim AS builder`
+2. Fixar dependências com teto de versão em `pyproject.toml` / `requirements.txt`:
+   - `bcrypt>=3.2.0,<4.0.0` (passlib incompatível com bcrypt>=4)
+   - `setuptools>=68,<70` para build-backend estável
+3. Usar `build-backend = 'setuptools.build_meta'` — nunca `setuptools.backends.legacy:build`
+4. Incluir healthcheck real no `docker-compose.yml` com `start_period` ≥ 60s para APIs com Alembic
+
+**start.sh DEVE incluir smoke test antes de declarar sucesso:**
+```bash
+# Após docker compose up -d, verificar saúde real:
+MAX_WAIT=120; COUNT=0
+until curl -sf "http://localhost:${PORT:-8000}/health" >/dev/null 2>&1; do
+  [ $COUNT -ge $MAX_WAIT ] && echo "[ERRO] Timeout — verifique logs" && exit 1
+  sleep 3; COUNT=$((COUNT+3)); printf "."
+done
+echo "✅ API disponível em http://localhost:${PORT:-8000}"
+```
+
+**Idempotência:** `start.sh` deve funcionar se executado múltiplas vezes (usar `ON CONFLICT DO NOTHING` no seed, `alembic upgrade head` é idempotente por design).
+
+---
+
+### G40 — Collection Insomnia + exemplos curl (OBRIGATÓRIO para projetos backend/API)
+
+Todo projeto com endpoints HTTP DEVE entregar junto com o `RUNBOOK.md`:
+
+**`project/insomnia_collection.json`** — formato v4 Insomnia, campo obrigatório na raiz:
+```json
+{
+  "__export_format": 4,
+  "__export_date": "<ISO date>",
+  "__export_source": "zentriz-genesis",
+  "_type": "export",
+  "resources": [
+    { "_id": "wrk_<id>", "_type": "workspace", "name": "<Project Name>", "scope": "collection" },
+    { "_id": "env_local", "_type": "environment", "parentId": "wrk_<id>", "name": "Local",
+      "data": { "base_url": "http://localhost:<PORT>", "token": "" } },
+    ...requests...
+  ]
+}
+```
+**CRÍTICO:** sem `"__export_format": 4` o Insomnia rejeita o arquivo com "No importers found".
+
+**`project/curl_examples.sh`** — script bash idempotente com todos os endpoints:
+```bash
+#!/bin/bash
+# curl_examples.sh — exemplos de uso da API
+BASE="http://localhost:8000"
+# 1. Health
+curl -s "$BASE/health" | python3 -m json.tool
+# 2. Login (substituir token na variável TOKEN)
+TOKEN=$(curl -s -X POST "$BASE/auth/login" \
+  -d "username=admin@seed.dev&password=Admin@seed123" \
+  -H "Content-Type: application/x-www-form-urlencoded" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+# ... demais endpoints com Bearer $TOKEN
+```
+
+---
+
+### G45 — Script de seed (OBRIGATÓRIO para projetos backend/API)
+
+Todo projeto backend com banco de dados DEVE entregar `apps/seed.py` (Python) ou `apps/seed.ts` (Node):
+
+**Requisitos do seed:**
+- Idempotente: usar `ON CONFLICT DO NOTHING` ou `upsert` — pode rodar N vezes sem duplicar
+- Cobrir: 1 admin, 2–3 usuários comuns, entidades principais do domínio (3–5 por entidade), relacionamentos (5–8 registros)
+- Credenciais claras impressas no stdout ao final
+- Executável via: `docker compose exec api python seed.py` ou `npm run seed`
+
+**Template Python (FastAPI + SQLAlchemy async):**
+```python
+# seed.py — dados fake idempotentes
+import asyncio
+from sqlalchemy import text
+from core.database import AsyncSessionLocal
+from auth.password import hash_password
+
+async def seed():
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            await session.execute(text("""
+                INSERT INTO users (id, email, hashed_password, full_name, role, is_active)
+                VALUES (gen_random_uuid(), 'admin@seed.dev', :pw, 'Admin', 'admin', true)
+                ON CONFLICT (email) DO NOTHING
+            """), {"pw": hash_password("Admin@seed123")})
+    print("✅ Seed concluído | admin@seed.dev / Admin@seed123")
+
+if __name__ == "__main__":
+    asyncio.run(seed())
+```
+
+**Template Node.js (Prisma):**
+```ts
+// seed.ts
+import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcrypt';
+const prisma = new PrismaClient();
+async function main() {
+  await prisma.user.upsert({
+    where: { email: 'admin@seed.dev' },
+    update: {},
+    create: { email: 'admin@seed.dev', password: await bcrypt.hash('Admin@seed123', 10), role: 'admin' },
+  });
+  console.log('✅ Seed concluído | admin@seed.dev / Admin@seed123');
+}
+main().finally(() => prisma.$disconnect());
+```
+
+---
+
 ## 6) STACK-SPECIFIC TEMPLATES
 
 ### 6.1 Next.js static/SSG (Tailwind, no backend)

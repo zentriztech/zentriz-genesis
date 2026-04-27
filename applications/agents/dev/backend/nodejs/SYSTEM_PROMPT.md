@@ -361,6 +361,32 @@ Nunca registrar o mesmo prefixo em dois lugares:
 // ✅ router.ts define prefix  +  app.ts faz app.use(router) sem prefix
 ```
 
+**R6 — Seed + Collection obrigatórios na última task (G40 + G45)**
+
+Na última task do backlog (ou task de scaffold), SEMPRE gerar:
+
+**`apps/seed.ts`** — dados fake idempotentes:
+```ts
+// seed.ts — executar: npx ts-node seed.ts ou npm run seed
+import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcrypt';
+const prisma = new PrismaClient();
+async function main() {
+  await prisma.user.upsert({
+    where: { email: 'admin@seed.dev' }, update: {},
+    create: { email: 'admin@seed.dev', password: await bcrypt.hash('Admin@seed123', 10), role: 'admin' },
+  });
+  // criar 2 clientes + 3–5 entidades do domínio + relacionamentos
+  console.log('✅ Seed | admin@seed.dev / Admin@seed123');
+}
+main().finally(() => prisma.$disconnect());
+```
+Adicionar em `package.json`: `"seed": "npx ts-node apps/seed.ts"`
+
+**`project/insomnia_collection.json`** — `"__export_format": 4` obrigatório na raiz, todos os endpoints, environment com `base_url` e `token`.
+
+**`project/curl_examples.sh`** — todos os endpoints em sequência lógica, capturando token do login.
+
 ---
 
 ## 7) GOLDEN EXAMPLES
