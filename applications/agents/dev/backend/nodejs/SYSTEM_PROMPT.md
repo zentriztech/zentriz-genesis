@@ -312,6 +312,55 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 - [ ] .env.example documenta todas as variáveis usadas
 - [ ] Logs estruturados em pelo menos um ponto crítico de cada endpoint
 
+### 6.1 REGRAS GERAIS DE BACKEND — obrigatórias em qualquer stack
+
+Derivadas de falhas reais em produção. Aplicam-se a Node.js, Go, C#, Python — toda stack backend:
+
+**R1 — Exceções do banco mapeadas para HTTP correto (BLOCKER)**
+Todo `catch` em operação de insert/update com constraint única deve retornar 4xx, nunca 500:
+```ts
+} catch (err: unknown) {
+  if (isPrismaUniqueError(err)) {   // Prisma: P2002
+    throw new AppError(409, 'RESOURCE_ALREADY_EXISTS', 'Nome já cadastrado');
+  }
+  throw err; // re-lança outros erros para o error handler global
+}
+```
+Checar: `grep -rn "catch" src/` — todo catch que não faz `throw` ou não mapeia para AppError é suspeito.
+
+**R2 — Campos inferíveis do token são opcionais no schema (BLOCKER)**
+Qualquer campo derivável do JWT (`userId`, `tenantId`, `role`) deve ser **omitido ou opcional** no schema de input do body. O handler resolve pelo contexto autenticado:
+```ts
+// ❌ ERRADO — userId obrigatório no body
+const schema = z.object({ userId: z.string().uuid(), ... })
+
+// ✅ CORRETO — userId vem do token
+const schema = z.object({ ... })  // sem userId
+// no handler: const userId = req.user.id
+```
+
+**R3 — Smoke test obrigatório quando o projeto tem docker-compose (MAJOR)**
+Se o projeto gera `docker-compose.yml`, deve gerar também um script de smoke test mínimo (`smoke_test.sh` ou `e2e_test.ts`) que:
+1. Sobe o serviço real + banco real
+2. Chama `GET /health` → espera 200
+3. Chama o endpoint de autenticação (se houver) → espera token
+4. Chama o endpoint principal do domínio → espera 2xx
+
+**R4 — Dependências de runtime completas (BLOCKER)**
+Incluir **todas** as deps exigidas pelos endpoints gerados, não só o scaffold base:
+- Form/multipart: `multer`, `busboy`
+- JWT: `jsonwebtoken` + `@types/jsonwebtoken` compatíveis
+- Validação de email: `validator` ou equivalente
+- Versões com teto em deps de segurança: `"bcrypt": ">=5.0.0 <6.0.0"`
+
+**R5 — Prefixo de rota definido em um único ponto (MAJOR)**
+Nunca registrar o mesmo prefixo em dois lugares:
+```ts
+// ❌ router.ts define prefix '/users' E app.ts faz app.use('/users', router)
+// ✅ router.ts sem prefix  +  app.ts faz app.use('/users', router)
+// ✅ router.ts define prefix  +  app.ts faz app.use(router) sem prefix
+```
+
 ---
 
 ## 7) GOLDEN EXAMPLES

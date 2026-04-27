@@ -134,6 +134,25 @@ Você é o agente **QA (Backend Node.js)**. Você:
 | P04 | Logs estruturados em pontos críticos (início de request, erros, operações de negócio importantes) | MINOR |
 | P05 | `global error handler` registrado no `app.ts` como último middleware | MAJOR |
 
+### 6.6 Regras Gerais de Backend — aplicáveis a toda stack (BLOCKER/MAJOR)
+
+Derivadas de falhas reais em produção (validadas em Python/FastAPI, padrão equivalente em Node.js):
+
+| # | Check | Severidade |
+|---|-------|------------|
+| G01 | Todo `catch` em insert/update com constraint única retorna 4xx (ex: Prisma `P2002` → 409) — nunca 500 | BLOCKER |
+| G02 | Campos deriváveis do JWT (`userId`, `tenantId`) são **omitidos ou opcionais** no schema de input do body; o handler resolve via `req.user` | BLOCKER |
+| G03 | Se projeto tem `docker-compose.yml`: existe `smoke_test.sh` ou `e2e_test.ts` que sobe serviço real + chama `/health` + endpoint crítico | MAJOR |
+| G04 | Dependências de runtime **completas** — não só scaffold base; incluir multer, bcrypt, jwt, validator conforme os endpoints gerados | BLOCKER |
+| G05 | Prefixo de rota definido em **um único ponto** (no router OU no `app.use`, nunca nos dois) | BLOCKER |
+| G06 | Deps de segurança (bcrypt, jsonwebtoken) com versão fixada com teto: `">=x.y <x+1"` | MAJOR |
+
+**Varredura rápida obrigatória:**
+```bash
+grep -rn "catch" src/ | grep -v "throw\|AppError\|next(err"  # catch sem tratamento
+grep -rn "req\.body\." src/ | grep -v "schema\|validate\|zod"  # body sem validação
+```
+
 ### 6.5 Funcionalidade vs FR/NFR (BLOCKER)
 
 | # | Check | Severidade |

@@ -45,6 +45,20 @@ agent:
 
 ---
 
+## 4) REGRAS GERAIS DE BACKEND — obrigatórias em qualquer stack
+
+Derivadas de falhas reais em produção. Aplicam-se a Lambdas Node.js, Python, Go:
+
+| # | Check | Severidade |
+|---|-------|------------|
+| G01 | Todo handler com operação de insert/update que tem constraint única trata o erro de DB e retorna 4xx — nunca 500 | BLOCKER |
+| G02 | Campos deriváveis do contexto autenticado (`userId`, `tenantId`) são **omitidos ou opcionais** no body da Lambda; resolvidos via `event.requestContext.authorizer` | BLOCKER |
+| G03 | `handler.ts` / `handler.py` tem bloco `try/catch` global — erro não tratado não pode vazar como 502 sem mensagem | BLOCKER |
+| G04 | Todas as dependências de runtime declaradas no `package.json` ou `requirements.txt` do pacote da Lambda — sem assumir que o layer tem tudo | MAJOR |
+| G05 | Variáveis de ambiente acessadas de forma consistente — verificar `process.env.VAR_NAME` vs `os.environ['VAR_NAME']` conforme a stack | MAJOR |
+
+---
+
 ## 5) MODE SPECS (QA Backend Lambdas)
 
 ### Mode: `validate_task`
