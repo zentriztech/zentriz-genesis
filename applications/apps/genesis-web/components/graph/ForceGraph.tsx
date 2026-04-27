@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Box from "@mui/material/Box";
+import Chip from "@mui/material/Chip";
 import Typography from "@mui/material/Typography";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
@@ -9,7 +10,6 @@ import type { DialogueEntry } from "@/components/LiveDialogue";
 import type { PlanningDoc } from "@/lib/useGraphData";
 import dynamic from "next/dynamic";
 
-// ── react-force-graph-2d é browser-only (usa canvas) ─────────────────────────
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -18,30 +18,35 @@ type CodeFile  = { path: string; sizeBytes: number; ext: string };
 type CodeFilesResponse = { files: CodeFile[]; appsRoot: string | null; totalFiles: number };
 
 interface FGNode {
-  id: string;
-  label: string;
+  id: string; label: string;
   type: "agent" | "task" | "artifact" | "doc";
-  color: string;
-  size: number;
-  isActive?: boolean;
-  detail?: string;
+  color: string; size: number; isActive?: boolean; detail?: string;
 }
-interface FGLink { source: string; target: string; color: string }
+interface FGLink { source: string | FGNode; target: string | FGNode; color: string }
 interface GraphData { nodes: FGNode[]; links: FGLink[] }
+type NodeWithPos = FGNode & { fx?: number; fy?: number; x?: number; y?: number; vx?: number; vy?: number };
 
-// ── Status → color ────────────────────────────────────────────────────────────
+// ── Layout modes ──────────────────────────────────────────────────────────────
+type LayoutMode = "free" | "brain" | "radial" | "pipeline";
+const LAYOUT_CYCLE: LayoutMode[] = ["free", "brain", "radial", "pipeline"];
+const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string }> = {
+  free:     { icon: "🌌", label: "Obsidian",  tip: "Física livre — clique no fundo para mudar" },
+  brain:    { icon: "🧠", label: "Cérebro",   tip: "Agentes no núcleo, conexões bidirecionais" },
+  radial:   { icon: "⭕", label: "Radial",    tip: "CTO no centro, camadas por tipo" },
+  pipeline: { icon: "➡️", label: "Pipeline",  tip: "Esquerda→direita por fase do pipeline" },
+};
+
+// ── Colors ────────────────────────────────────────────────────────────────────
 const TASK_COLOR: Record<string, string> = {
   DONE: "#10B981", QA_PASS: "#10B981",
   IN_PROGRESS: "#6366F1", WAITING_REVIEW: "#6366F1",
   QA_FAIL: "#EF4444", BLOCKED: "#EF4444",
   NEW: "#4B5563", ASSIGNED: "#F59E0B",
 };
-
 const EXT_COLOR: Record<string, string> = {
   tsx: "#61DAFB", ts: "#3178C6", js: "#F7DF1E",
   css: "#1572B6", json: "#F59E0B", md: "#8B949E", sh: "#10B981", py: "#3776AB",
 };
-
 const PHASE_AGENT_KEY: Record<string, string> = {
   spec: "system", cto: "cto", engineer: "engineer",
   pm: "pm", qa: "qa", devops: "devops", other: "system",
@@ -50,6 +55,7 @@ const PHASE_COLOR_FG: Record<string, string> = {
   spec: "#8B949E", cto: "#1976d2", engineer: "#2e7d32",
   pm: "#ed6c02", qa: "#43a047", devops: "#0d47a1", other: "#484F58",
 };
+
 function inferPhaseFG(filename: string, creator?: string): string {
   const f = filename.toLowerCase(); const c = (creator ?? "").toLowerCase();
   if (f.includes("spec") || c === "spec") return "spec";
@@ -61,128 +67,210 @@ function inferPhaseFG(filename: string, creator?: string): string {
   return "other";
 }
 
-// ── Build graph data ──────────────────────────────────────────────────────────
+// ── Build raw graph data ──────────────────────────────────────────────────────
 function buildForceData(
-  dialogue: DialogueEntry[],
-  tasks: TaskItem[],
-  codeFiles: CodeFile[],
-  activeAgentId?: string,
-  planningDocs: PlanningDoc[] = [],
+  dialogue: DialogueEntry[], tasks: TaskItem[], codeFiles: CodeFile[],
+  activeAgentId?: string, planningDocs: PlanningDoc[] = [],
 ): GraphData {
-  const nodes: FGNode[] = [];
-  const links: FGLink[] = [];
-  const seenAgents = new Map<string, FGNode>();
-  const linkSet    = new Set<string>();
+  const nodes: FGNode[] = []; const links: FGLink[] = [];
+  const seenAgents = new Map<string, FGNode>(); const linkSet = new Set<string>();
 
   const addLink = (s: string, t: string, color = "#6366F140") => {
     const key = `${s}|${t}`;
     if (!linkSet.has(key)) { linkSet.add(key); links.push({ source: s, target: t, color }); }
   };
 
-  // ── 1. Agents (from dialogue) ──────────────────────────────────────────────
   for (const e of dialogue) {
     for (const raw of [e.fromAgent, e.toAgent]) {
       if (!raw) continue;
-      const key      = raw.toLowerCase().replace(/[^a-z_]/g, "_");
+      const key = raw.toLowerCase().replace(/[^a-z_]/g, "_");
       if (seenAgents.has(key)) continue;
-      const profile  = getAgentProfile(key);
+      const profile = getAgentProfile(key);
       const isActive = activeAgentId?.toLowerCase().replace(/[^a-z_]/g, "_") === key;
-      // Label format: "ROLE-IA-NAME" e.g. "CTO-IA-Jean", "DEV-IA-Pedro"
       const rolePrefix = (profile.role ?? "").toUpperCase().replace(/\s+/g, "-");
-      const humanName  = profile.name.replace(/^IA-/, "");  // strip "IA-" prefix from name
+      const humanName  = profile.name.replace(/^IA-/, "");
       const nodeLabel  = rolePrefix ? `${rolePrefix}-IA-${humanName}` : profile.name;
       const node: FGNode = {
         id: `agent-${key}`, label: nodeLabel, type: "agent",
-        color: profile.color, size: isActive ? 10 : 7,
-        isActive,
-        detail: profile.avatar, // avatar emoji drawn inside the circle
+        color: profile.color, size: isActive ? 10 : 7, isActive,
+        detail: profile.avatar,
       };
-      seenAgents.set(key, node);
-      nodes.push(node);
+      seenAgents.set(key, node); nodes.push(node);
     }
-    // edge: from → to
     const fk = e.fromAgent.toLowerCase().replace(/[^a-z_]/g, "_");
     const tk = e.toAgent.toLowerCase().replace(/[^a-z_]/g, "_");
     if (fk !== tk && seenAgents.has(fk) && seenAgents.has(tk)) {
-      const fromProfile = getAgentProfile(fk);
-      addLink(`agent-${fk}`, `agent-${tk}`, fromProfile.color + "60");
+      addLink(`agent-${fk}`, `agent-${tk}`, getAgentProfile(fk).color + "60");
     }
   }
 
-  // ── 2. Tasks ───────────────────────────────────────────────────────────────
-  // ── 2. Planning doc nodes (spec, charter, backlog, proposals) ───────────────
   const skipDocs = [".json", "spec__", "raw_response"];
-  const visibleDocs = planningDocs.filter((d) =>
-    !skipDocs.some((p) => d.filename.toLowerCase().includes(p))
-  );
+  const visibleDocs = planningDocs.filter(d => !skipDocs.some(p => d.filename.toLowerCase().includes(p)));
   for (let i = 0; i < visibleDocs.length; i++) {
-    const doc   = visibleDocs[i];
+    const doc = visibleDocs[i];
     const phase = inferPhaseFG(doc.filename, doc.creator);
     const color = PHASE_COLOR_FG[phase] ?? "#484F58";
     const agentKey = PHASE_AGENT_KEY[phase] ?? "system";
     const shortName = (doc.filename.split("/").pop() ?? doc.filename).replace(/\.md$/i, "");
     const label = (doc.title ?? shortName).slice(0, 30);
     const nodeId = `doc-${i}`;
-    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: phase }); // phase used for icon
-    // Connect agent → doc
+    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: phase });
     if (seenAgents.has(agentKey)) addLink(`agent-${agentKey}`, nodeId, color + "70");
   }
 
-  // Map owner roles to the agent key as it appears in dialogue (fromAgent normalized)
   const ownerMap: Record<string, string> = {
     DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev", DEV_BACKEND_NODEJS: "dev",
     QA: "qa", QA_WEB: "qa", QA_BACKEND: "qa", QA_BACKEND_NODEJS: "qa",
-    DEVOPS: "devops", DEVOPS_DOCKER: "devops",
-    PM: "pm", PM_WEB: "pm", PM_BACKEND: "pm", PM_MOBILE: "pm",
-    CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
+    DEVOPS: "devops", DEVOPS_DOCKER: "devops", PM: "pm", PM_WEB: "pm",
+    PM_BACKEND: "pm", PM_MOBILE: "pm", CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
   };
-  // Also build reverse map: agentKey → canonical key seen in dialogue
-  const agentKeyInDialogue = (ownerRole: string): string | undefined => {
+  const agentKeyInDialogue = (ownerRole: string) => {
     const mapped = ownerMap[(ownerRole ?? "").toUpperCase()];
     if (!mapped) return undefined;
-    // Check if this key or a prefix-match exists in seenAgents
     if (seenAgents.has(mapped)) return mapped;
-    for (const k of Array.from(seenAgents.keys())) {
+    for (const k of Array.from(seenAgents.keys()))
       if (k.startsWith(mapped) || mapped.startsWith(k.replace(/_.*/, ""))) return k;
-    }
     return undefined;
   };
 
   for (const t of tasks) {
     const color = TASK_COLOR[t.status ?? ""] ?? "#4B5563";
-    nodes.push({
-      id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4,
-      detail: t.status ?? "NEW", // status used for icon inside circle
-    });
+    nodes.push({ id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4, detail: t.status ?? "NEW" });
     const ownerKey = agentKeyInDialogue(t.ownerRole ?? "");
-    if (ownerKey) {
-      addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
-    }
+    if (ownerKey) addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
   }
 
-  // ── 3. Artifacts (top 20 code files) ──────────────────────────────────────
-  const MAX = 20;
-  const showable = codeFiles
-    .filter((f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock"))
-    .slice(0, MAX);
-
-  // Find the dev agent key from seenAgents (could be "dev", "dev_backend", etc.)
-  const devAgentKey = Array.from(seenAgents.keys()).find((k) => k.startsWith("dev")) ?? null;
-
+  const showable = codeFiles.filter(f => !f.path.includes("node_modules") && !f.path.endsWith(".lock")).slice(0, 20);
+  const devAgentKey = Array.from(seenAgents.keys()).find(k => k.startsWith("dev")) ?? null;
   for (let i = 0; i < showable.length; i++) {
-    const f     = showable[i];
+    const f = showable[i];
     const color = EXT_COLOR[f.ext] ?? "#8B949E";
-    const name  = f.path.split("/").pop() ?? f.path;
-    nodes.push({
-      id: `artifact-${i}`, label: name, type: "artifact", color, size: 2.5,
-      detail: f.path,
-    });
-    if (devAgentKey) {
-      addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
-    }
+    nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
+    if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
   }
 
   return { nodes, links };
+}
+
+// ── Layout position computation ───────────────────────────────────────────────
+function computePositions(
+  nodes: FGNode[], layout: LayoutMode, W: number, H: number,
+): Map<string, { fx: number; fy: number }> | null {
+  if (layout === "free") return null;
+
+  const map = new Map<string, { fx: number; fy: number }>();
+  const cx = 0; const cy = 0;
+  const agents    = nodes.filter(n => n.type === "agent");
+  const tasks     = nodes.filter(n => n.type === "task");
+  const docs      = nodes.filter(n => n.type === "doc");
+  const artifacts = nodes.filter(n => n.type === "artifact");
+  const rScale    = Math.min(W * 0.45, H * 0.85);
+
+  if (layout === "brain") {
+    // Agents: tight inner ellipse (brain core)
+    const aR = Math.max(rScale * 0.13, 40);
+    agents.forEach((n, i) => {
+      const angle = agents.length === 1 ? 0 : (i / agents.length) * 2 * Math.PI;
+      map.set(n.id, { fx: cx + aR * Math.cos(angle) * 1.3, fy: cy + aR * Math.sin(angle) * 0.8 });
+    });
+    // Tasks: first neuron ring
+    const tR = Math.max(rScale * 0.32, 100);
+    tasks.forEach((n, i) => {
+      const angle = (i / Math.max(tasks.length, 1)) * 2 * Math.PI;
+      map.set(n.id, { fx: cx + tR * Math.cos(angle), fy: cy + tR * Math.sin(angle) });
+    });
+    // Docs: second ring
+    const dR = Math.max(rScale * 0.52, 160);
+    docs.forEach((n, i) => {
+      const angle = (i / Math.max(docs.length, 1)) * 2 * Math.PI + Math.PI / 5;
+      map.set(n.id, { fx: cx + dR * Math.cos(angle), fy: cy + dR * Math.sin(angle) });
+    });
+    // Artifacts: outer ring
+    const arR = Math.max(rScale * 0.70, 210);
+    artifacts.forEach((n, i) => {
+      const angle = (i / Math.max(artifacts.length, 1)) * 2 * Math.PI + Math.PI / 8;
+      map.set(n.id, { fx: cx + arR * Math.cos(angle), fy: cy + arR * Math.sin(angle) });
+    });
+
+  } else if (layout === "radial") {
+    const ctoNode = agents.find(n => n.id.includes("cto")) ?? agents[0];
+    const others  = agents.filter(n => n !== ctoNode);
+    if (ctoNode) map.set(ctoNode.id, { fx: cx, fy: cy });
+    const aR = Math.max(rScale * 0.20, 60);
+    others.forEach((n, i) => {
+      const angle = (i / Math.max(others.length, 1)) * 2 * Math.PI;
+      map.set(n.id, { fx: cx + aR * Math.cos(angle), fy: cy + aR * Math.sin(angle) });
+    });
+    const tR = Math.max(rScale * 0.38, 120);
+    tasks.forEach((n, i) => {
+      const angle = (i / Math.max(tasks.length, 1)) * 2 * Math.PI;
+      map.set(n.id, { fx: cx + tR * Math.cos(angle), fy: cy + tR * Math.sin(angle) });
+    });
+    const dR = Math.max(rScale * 0.55, 170);
+    docs.forEach((n, i) => {
+      const angle = (i / Math.max(docs.length, 1)) * 2 * Math.PI + 0.5;
+      map.set(n.id, { fx: cx + dR * Math.cos(angle), fy: cy + dR * Math.sin(angle) });
+    });
+    const arR = Math.max(rScale * 0.70, 220);
+    artifacts.forEach((n, i) => {
+      const angle = (i / Math.max(artifacts.length, 1)) * 2 * Math.PI + 0.2;
+      map.set(n.id, { fx: cx + arR * Math.cos(angle), fy: cy + arR * Math.sin(angle) });
+    });
+
+  } else if (layout === "pipeline") {
+    const phaseX: Record<string, number> = {
+      system: -3.5, spec: -3.5, cto: -2.5, engineer: -1.5, pm: -0.5, monitor: 0.3,
+      dev: 1.5, dev_backend: 1.5, dev_web: 1.5,
+      qa: 2.5, qa_backend: 2.5, qa_web: 2.5, devops: 3.5,
+    };
+    const colW = Math.min(rScale * 0.22, 100);
+
+    const agentCols = new Map<number, FGNode[]>();
+    for (const n of agents) {
+      const key = n.id.replace("agent-", "");
+      let phase = -2.5;
+      for (const [p, x] of Object.entries(phaseX))
+        if (key === p || key.startsWith(p + "_")) { phase = x; break; }
+      const col = Math.round(phase * 10);
+      if (!agentCols.has(col)) agentCols.set(col, []);
+      agentCols.get(col)!.push(n);
+    }
+    for (const [col, nodesInCol] of Array.from(agentCols.entries())) {
+      nodesInCol.forEach((n, i) => {
+        map.set(n.id, {
+          fx: cx + (col / 10) * colW,
+          fy: cy + (i - (nodesInCol.length - 1) / 2) * 45,
+        });
+      });
+    }
+
+    const devColX = cx + 1.5 * colW;
+    const taskSpan = Math.min(H * 0.38, 200);
+    tasks.forEach((n, i) => {
+      map.set(n.id, {
+        fx: devColX + (i % 3 - 1) * 22,
+        fy: cy - taskSpan / 2 + (i / Math.max(tasks.length - 1, 1)) * taskSpan,
+      });
+    });
+
+    const phaseDocX: Record<string, number> = {
+      spec: -3.5, cto: -2.5, engineer: -1.5, pm: -0.5, qa: 2.5, devops: 3.5, other: 0.5,
+    };
+    docs.forEach((n, i) => {
+      const x = phaseDocX[n.detail ?? "other"] ?? 0.5;
+      map.set(n.id, { fx: cx + x * colW + 12, fy: cy + (i % 4 - 1.5) * 28 + 45 });
+    });
+
+    const arColX = cx + 3.8 * colW;
+    artifacts.forEach((n, i) => {
+      map.set(n.id, {
+        fx: arColX + (i % 2) * 22,
+        fy: cy - (artifacts.length / 2) * 16 + i * 16,
+      });
+    });
+  }
+
+  return map;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -196,11 +284,29 @@ interface ForceGraphProps {
 export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, planningDocs = [] }: ForceGraphProps) {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
-  const [tooltip, setTooltip]     = useState<{ label: string; detail?: string; x: number; y: number } | null>(null);
-  const containerRef   = useRef<HTMLDivElement>(null);
-  // Track previous graph signature to avoid unnecessary re-renders / physics restarts
-  const prevSignature  = useRef<string>("");
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
+  const [containerSize, setContainerSize] = useState({ width: 800, height });
+  const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
+  const [justCycled, setJustCycled] = useState(false);
 
+  const containerRef   = useRef<HTMLDivElement>(null);
+  const prevSignature  = useRef<string>("");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fgRef          = useRef<any>(null);
+
+  // ── ResizeObserver — tracks real container size ───────────────────────────
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(entries => {
+      const r = entries[0]?.contentRect;
+      if (r) setContainerSize({ width: Math.floor(r.width), height: Math.floor(r.height) });
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // ── Fetch & build graph ───────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
       const [dialogue, tasks, codeFilesData] = await Promise.all([
@@ -208,141 +314,151 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`).catch(() => [] as TaskItem[]),
         apiGet<CodeFilesResponse>(`/api/projects/${projectId}/code-files`).catch(() => ({ files: [], appsRoot: null, totalFiles: 0 })),
       ]);
-
-      const lastWorking = [...(Array.isArray(dialogue) ? dialogue : [])]
-        .reverse().find((e) => e.eventType === "agent_working");
+      const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
       const activeAgentId = lastWorking?.fromAgent;
-
       const data = buildForceData(
         Array.isArray(dialogue) ? dialogue : [],
         Array.isArray(tasks) ? tasks : [],
         (codeFilesData as CodeFilesResponse).files ?? [],
-        activeAgentId,
-        planningDocs,
+        activeAgentId, planningDocs,
       );
-
-      // Build a compact signature of node ids + active agent + task statuses + link count
-      // Only update state (which restarts physics) when content actually changed
       const sig = [
         data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
         data.links.length,
       ].join("§");
-
-      if (sig === prevSignature.current) return; // nothing changed — skip setGraphData
+      if (sig === prevSignature.current) return;
       prevSignature.current = sig;
 
       setGraphData(prev => {
-        // Merge: keep existing node positions by reusing prev nodes when ids match
-        // New nodes get no position (physics will place them); removed nodes are dropped
         const prevNodeMap = new Map(prev.nodes.map(n => [n.id, n]));
-        const mergedNodes = data.nodes.map(n => {
-          const existing = prevNodeMap.get(n.id) as (FGNode & { x?: number; y?: number; vx?: number; vy?: number }) | undefined;
-          if (existing) {
-            // Preserve physics position, only update mutable fields (isActive, detail)
-            return { ...existing, isActive: n.isActive, detail: n.detail, color: n.color };
-          }
-          return n; // new node — no position, physics will place it
+        const merged = data.nodes.map(n => {
+          const ex = prevNodeMap.get(n.id) as NodeWithPos | undefined;
+          // Preserve physics position (x,y,vx,vy) AND layout pins (fx,fy)
+          if (ex) return { ...ex, isActive: n.isActive, detail: n.detail, color: n.color };
+          return n;
         });
-        return { nodes: mergedNodes, links: data.links };
+        return { nodes: merged, links: data.links };
       });
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  // planningDocs in deps: when parent refreshes artifacts every 12s, graph rebuilds with new docs
+    } catch { /* silent */ } finally { setLoading(false); }
   }, [projectId, planningDocs]);
 
   useEffect(() => {
     refresh();
-    if (pollIntervalMs > 0) {
-      const t = setInterval(refresh, pollIntervalMs);
-      return () => clearInterval(t);
-    }
+    if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
 
-  // ── Node canvas painter ────────────────────────────────────────────────────
+  // ── Apply layout whenever mode or container size changes ──────────────────
+  useEffect(() => {
+    if (graphData.nodes.length === 0) return;
+    const positions = computePositions(graphData.nodes, layoutMode, containerSize.width, containerSize.height);
+
+    setGraphData(prev => ({
+      ...prev,
+      nodes: prev.nodes.map(n => {
+        const nw = n as NodeWithPos;
+        if (!positions) {
+          // Free: strip fx/fy so physics takes over
+          const copy = { ...nw };
+          delete (copy as NodeWithPos).fx;
+          delete (copy as NodeWithPos).fy;
+          return copy as FGNode;
+        }
+        const pos = positions.get(n.id);
+        return pos ? { ...nw, fx: pos.fx, fy: pos.fy } : { ...nw };
+      }),
+    }));
+
+    // Reheat physics so nodes animate to new positions
+    setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutMode, containerSize.width, containerSize.height]);
+
+  // ── Cycle layout on background click ─────────────────────────────────────
+  const handleBackgroundClick = useCallback(() => {
+    setLayoutMode(prev => {
+      const next = LAYOUT_CYCLE[(LAYOUT_CYCLE.indexOf(prev) + 1) % LAYOUT_CYCLE.length];
+      return next;
+    });
+    setJustCycled(true);
+    setTimeout(() => setJustCycled(false), 1200);
+  }, []);
+
+  // ── Add reverse links for brain mode (bidirectional) ─────────────────────
+  const displayLinks = (() => {
+    if (layoutMode !== "brain") return graphData.links;
+    const existing = new Set(graphData.links.map(l => {
+      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source;
+      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target;
+      return `${s}|${t}`;
+    }));
+    const reversed: FGLink[] = [];
+    for (const l of graphData.links) {
+      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
+      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
+      if (s.startsWith("agent-") && t.startsWith("agent-") && !existing.has(`${t}|${s}`))
+        reversed.push({ source: t, target: s, color: l.color });
+    }
+    return [...graphData.links, ...reversed];
+  })();
+
+  // ── Node canvas painter ───────────────────────────────────────────────────
   const paintNode = useCallback((node: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const n = node as FGNode & { x?: number; y?: number };
-    // Guard: physics hasn't assigned coordinates yet — skip this frame
     if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
-    const x = n.x as number;
-    const y = n.y as number;
+    const x = n.x as number; const y = n.y as number;
     const r = (n.size ?? 5) * (n.isActive ? 1.4 : 1);
 
-    // Glow for active agent
     if (n.isActive) {
-      ctx.beginPath();
-      ctx.arc(x, y, r * 2.2, 0, 2 * Math.PI);
+      ctx.beginPath(); ctx.arc(x, y, r * 2.2, 0, 2 * Math.PI);
       const grd = ctx.createRadialGradient(x, y, r, x, y, r * 2.2);
-      grd.addColorStop(0, n.color + "60");
-      grd.addColorStop(1, n.color + "00");
-      ctx.fillStyle = grd;
-      ctx.fill();
+      grd.addColorStop(0, n.color + "60"); grd.addColorStop(1, n.color + "00");
+      ctx.fillStyle = grd; ctx.fill();
     }
 
-    // Main circle
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, 2 * Math.PI);
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
     ctx.fillStyle = n.type === "agent" ? n.color : n.color + "CC";
     ctx.fill();
 
-    // Ring for agents
     if (n.type === "agent") {
-      ctx.strokeStyle = n.color;
-      ctx.lineWidth   = n.isActive ? 1.5 : 0.8;
-      ctx.stroke();
+      ctx.strokeStyle = n.color; ctx.lineWidth = n.isActive ? 1.5 : 0.8; ctx.stroke();
     }
 
-    // ── Icon inside circle — centrado corretamente no canvas ─────────────────
-    // Canvas emoji/text: textBaseline="middle" não centraliza emojis perfeitamente.
-    // Usamos measureText para calcular o offset real e centralizar com precisão.
-    const drawCentered = (text: string, cx: number, cy: number, fontSize: number, font: string) => {
-      ctx.font = font;
-      ctx.textAlign    = "center";
-      ctx.textBaseline = "alphabetic"; // mais preciso que "middle" para emojis
-      const metrics = ctx.measureText(text);
-      // Offset vertical: centraliza pelo meio real do glyph
-      const ascent  = metrics.actualBoundingBoxAscent  ?? fontSize * 0.7;
-      const descent = metrics.actualBoundingBoxDescent ?? fontSize * 0.2;
-      const yOffset = (ascent - descent) / 2;
-      ctx.fillText(text, cx, cy + yOffset);
+    const drawCentered = (text: string, cx2: number, cy2: number, fontSize: number, font: string) => {
+      ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+      const m = ctx.measureText(text);
+      const ascent  = m.actualBoundingBoxAscent  ?? fontSize * 0.7;
+      const descent = m.actualBoundingBoxDescent ?? fontSize * 0.2;
+      ctx.fillText(text, cx2, cy2 + (ascent - descent) / 2);
     };
 
     if (n.type === "agent") {
-      const emojiSize = Math.max(r * 1.05, 6);
+      const es = Math.max(r * 1.05, 6);
       ctx.fillStyle = "#FFFFFF";
-      drawCentered(n.detail ?? "🤖", x, y, emojiSize, `${emojiSize}px serif`);
+      drawCentered(n.detail ?? "🤖", x, y, es, `${es}px serif`);
     } else if (n.type === "task") {
-      const statusIcon = n.detail === "DONE" || n.detail === "QA_PASS" ? "✓"
+      const icon = n.detail === "DONE" || n.detail === "QA_PASS" ? "✓"
         : n.detail === "IN_PROGRESS" || n.detail === "WAITING_REVIEW" ? "⟳"
         : n.detail === "QA_FAIL" || n.detail === "BLOCKED" ? "✗" : "·";
-      const tSize = Math.max(r * 0.85, 4);
-      ctx.fillStyle = "#E6EDF3";
-      drawCentered(statusIcon, x, y, tSize, `bold ${tSize}px Inter, sans-serif`);
+      const ts = Math.max(r * 0.85, 4); ctx.fillStyle = "#E6EDF3";
+      drawCentered(icon, x, y, ts, `bold ${ts}px Inter, sans-serif`);
     } else if (n.type === "doc") {
-      const phaseIconMap: Record<string, string> = {
-        cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁"
-      };
-      const docIcon = phaseIconMap[n.detail ?? "other"] ?? "📁";
-      const dSize = Math.max(r * 0.85, 4);
-      drawCentered(docIcon, x, y, dSize, `${dSize}px serif`);
+      const iconMap: Record<string, string> = { cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁" };
+      const ds = Math.max(r * 0.85, 4);
+      drawCentered(iconMap[n.detail ?? "other"] ?? "📁", x, y, ds, `${ds}px serif`);
     }
 
-    // Label below (only when zoomed in enough or agent)
     const fontSize = Math.max(10 / globalScale, 1.5);
     if (globalScale > 0.6 || n.type === "agent") {
       ctx.font = `${n.type === "agent" ? "bold " : ""}${fontSize}px Inter, sans-serif`;
-      ctx.textAlign    = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle    = n.type === "agent" ? "#E6EDF3" : n.color;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = n.type === "agent" ? "#E6EDF3" : n.color;
       ctx.fillText(n.label, x, y + r + fontSize * 1.1);
     }
   }, []);
 
   if (loading) {
     return (
-      <Box sx={{ height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
+      <Box sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
         <Typography variant="body2" color="text.secondary">Inicializando física…</Typography>
       </Box>
     );
@@ -350,70 +466,87 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   if (graphData.nodes.length === 0) {
     return (
-      <Box sx={{ height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
+      <Box sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
         <Typography variant="body2" color="text.secondary">Sem dados ainda.</Typography>
         <Typography variant="caption" color="text.secondary">O grafo cresce conforme os agentes trabalham.</Typography>
       </Box>
     );
   }
 
-  const containerWidth = containerRef.current?.offsetWidth ?? 800;
+  const meta = LAYOUT_META[layoutMode];
 
   return (
-    <Box ref={containerRef} sx={{ height, bgcolor: "#0D0F14", borderRadius: 1, overflow: "hidden", position: "relative" }}>
+    <Box
+      ref={containerRef}
+      sx={{ height: "100%", minHeight: height, bgcolor: "#0D0F14", borderRadius: 1, overflow: "hidden", position: "relative" }}
+    >
       <ForceGraph2D
-        graphData={graphData as { nodes: object[]; links: object[] }}
-        width={containerWidth}
-        height={height}
+        ref={fgRef}
+        graphData={{ nodes: graphData.nodes as object[], links: displayLinks as object[] }}
+        width={containerSize.width || 800}
+        height={containerSize.height || height}
         backgroundColor="#0D0F14"
         nodeCanvasObject={paintNode}
         nodeCanvasObjectMode={() => "replace"}
         linkColor={(link) => (link as FGLink).color}
-        linkWidth={1}
+        linkWidth={layoutMode === "brain" ? 1.2 : 1}
+        linkCurvature={layoutMode === "brain" ? 0.25 : 0}
         linkDirectionalParticles={2}
         linkDirectionalParticleWidth={1.5}
         linkDirectionalParticleColor={(link) => (link as FGLink).color}
+        linkDirectionalArrowLength={layoutMode === "brain" ? 5 : 0}
+        linkDirectionalArrowRelPos={0.85}
         nodeRelSize={1}
-        d3AlphaDecay={0.02}
-        d3VelocityDecay={0.3}
-        cooldownTicks={120}
+        d3AlphaDecay={layoutMode === "free" ? 0.02 : 0.025}
+        d3VelocityDecay={layoutMode === "free" ? 0.3 : 0.45}
+        cooldownTicks={layoutMode === "free" ? 120 : 100}
+        onBackgroundClick={handleBackgroundClick}
         onNodeHover={(node) => {
           if (!node) { setTooltip(null); return; }
-          const n = node as FGNode & { x: number; y: number };
-          setTooltip({ label: n.label, detail: n.detail, x: 12, y: 12 });
+          const n = node as FGNode;
+          setTooltip({ label: n.label, detail: n.detail });
         }}
         onNodeClick={(node) => {
           const n = node as FGNode;
-          setTooltip({ label: n.label, detail: n.detail, x: 12, y: 12 });
+          setTooltip({ label: n.label, detail: n.detail });
         }}
       />
 
-      {/* Tooltip overlay */}
-      {tooltip && (
-        <Box
+      {/* Layout badge — top right */}
+      <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, pointerEvents: "none" }}>
+        <Chip
+          label={`${meta.icon} ${meta.label}`}
+          size="small"
           sx={{
-            position: "absolute", top: tooltip.y, left: tooltip.x,
-            bgcolor: "#161B22EE", border: "1px solid #30363D",
-            borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none",
+            bgcolor: justCycled ? "#6366F1" : "#161B22EE",
+            color: justCycled ? "#fff" : "#8B949E",
+            border: "1px solid",
+            borderColor: justCycled ? "#6366F1" : "#30363D",
+            fontSize: "0.65rem", height: 22,
+            transition: "all 0.3s ease",
           }}
-        >
+        />
+        <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.58rem", textAlign: "right", maxWidth: 160, lineHeight: 1.3 }}>
+          {justCycled ? meta.tip : "clique no fundo para mudar layout"}
+        </Typography>
+      </Box>
+
+      {/* Tooltip */}
+      {tooltip && (
+        <Box sx={{ position: "absolute", top: 8, left: 8, bgcolor: "#161B22EE", border: "1px solid #30363D", borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none" }}>
           <Typography variant="caption" fontWeight={600} color="text.primary">{tooltip.label}</Typography>
           {tooltip.detail && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
-              {tooltip.detail}
-            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>{tooltip.detail}</Typography>
           )}
         </Box>
       )}
 
       {/* Legend */}
-      <Box sx={{ position: "absolute", bottom: 8, left: 8, display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+      <Box sx={{ position: "absolute", bottom: 8, left: 8, display: "flex", gap: 1.5, flexWrap: "wrap", pointerEvents: "none" }}>
         {[
-          { color: "#6366F1", label: "Agente" },
-          { color: "#10B981", label: "Task OK" },
-          { color: "#EF4444", label: "Task Fail" },
-          { color: "#61DAFB", label: "Artefato" },
-        ].map((item) => (
+          { color: "#6366F1", label: "Agente" }, { color: "#10B981", label: "Task OK" },
+          { color: "#EF4444", label: "Task Fail" }, { color: "#61DAFB", label: "Artefato" },
+        ].map(item => (
           <Box key={item.label} sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
             <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: item.color }} />
             <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.6rem" }}>{item.label}</Typography>
