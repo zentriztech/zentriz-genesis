@@ -744,9 +744,9 @@ function ProjectDetailPageInner() {
 
             {/* Tab 0 — Diálogo */}
             {rightTab === 0 && (
-              <Box sx={{ flexGrow: 1, overflow: "hidden" }}>
+              <Box sx={{ flexGrow: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {isRunning && workingMessage && (
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "primary.main" + "12" }}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "primary.main" + "12", flexShrink: 0 }}>
                     <CircularProgress size={12} color="primary" />
                     <Typography variant="caption" color="primary.main" fontWeight={500} noWrap>
                       {workingMessage.slice(0, 80)}
@@ -757,7 +757,6 @@ function ProjectDetailPageInner() {
                   projectId={id}
                   pollIntervalMs={isRunning ? 4000 : 15000}
                   onEntriesLoaded={handleDialogueLoaded}
-                  maxHeight={500}
                 />
               </Box>
             )}

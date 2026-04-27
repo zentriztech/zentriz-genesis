@@ -29,7 +29,6 @@ interface LiveDialogueProps {
   projectId: string;
   pollIntervalMs?: number;
   onEntriesLoaded?: (entries: DialogueEntry[]) => void;
-  maxHeight?: number | string;
 }
 
 // ── Error block ───────────────────────────────────────────────────────────────
@@ -211,7 +210,7 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-function LiveDialogueInner({ projectId, pollIntervalMs = 10000, onEntriesLoaded, maxHeight = 480 }: LiveDialogueProps) {
+function LiveDialogueInner({ projectId, pollIntervalMs = 10000, onEntriesLoaded }: LiveDialogueProps) {
   const [entries, setEntries] = useState<DialogueEntry[]>([]);
   const [loading, setLoading]  = useState(true);
   const [error, setError]      = useState<string | null>(null);
@@ -275,7 +274,7 @@ function LiveDialogueInner({ projectId, pollIntervalMs = 10000, onEntriesLoaded,
   return (
     <Box
       sx={{
-        overflowY: "auto", maxHeight,
+        flexGrow: 1, overflowY: "auto",
         px: 1.5, py: 1,
         display: "flex", flexDirection: "column", gap: 1,
         scrollbarWidth: "thin",
