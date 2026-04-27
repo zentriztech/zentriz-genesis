@@ -34,6 +34,7 @@ class PipelineContext:
         self.connect_artifacts: dict[str, str] = {}  # project/connect/... -> content
         self.completed_tasks: list[str] = []
         self.current_step: int = 0  # LEI 11: etapa atual para retomada (0 = início)
+        self.project_type: str = ""  # e.g. "backend_api", "frontend_webapp", "landing_page"
         # Detected backend stack — cached to avoid repeated LLM calls per task
         # {"language": "python"|"nodejs"|..., "source": "pm_backlog_disk"|..., "confidence": "high"|"medium"|"low"}
         self.backend_stack: dict | None = None
@@ -77,6 +78,8 @@ class PipelineContext:
             inputs["product_spec"] = self.product_spec or self.spec_raw[:20000]
         if self.product_spec_template:
             inputs["spec_template"] = self.product_spec_template
+        if self.project_type:
+            inputs["project_type"] = self.project_type
         if self.engineer_proposal:
             inputs["engineer_stack_proposal"] = self.engineer_proposal
         if backlog_summary:
@@ -231,6 +234,7 @@ class PipelineContext:
             "connect_artifacts": self.connect_artifacts,
             "completed_tasks": self.completed_tasks,
             "current_step": self.current_step,
+            "project_type": self.project_type,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -262,6 +266,7 @@ class PipelineContext:
         ctx.connect_artifacts = data.get("connect_artifacts") or {}
         ctx.completed_tasks = data.get("completed_tasks") or []
         ctx.current_step = data.get("current_step", 0)
+        ctx.project_type = data.get("project_type", "")
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

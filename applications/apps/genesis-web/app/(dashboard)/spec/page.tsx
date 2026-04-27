@@ -17,6 +17,10 @@ import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import MenuItem from "@mui/material/MenuItem";
+import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
@@ -69,6 +73,36 @@ function MermaidBlock({ code }: { code: string }) {
 }
 
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
+
+const PROJECT_TYPES = [
+  { value: "",                    label: "Não especificado"          },
+  { value: "backend_api",         label: "🔌 Backend / API REST"     },
+  { value: "backend_graphql",     label: "🔗 Backend / GraphQL"      },
+  { value: "fullstack_webapp",    label: "🖥️ Fullstack — Web App"   },
+  { value: "frontend_webapp",     label: "🎨 Frontend — Web App"     },
+  { value: "landing_page",        label: "🏠 Landing Page"           },
+  { value: "ecommerce",           label: "🛒 E-commerce"             },
+  { value: "mobile_app",          label: "📱 App Mobile"             },
+  { value: "saas_platform",       label: "☁️ Plataforma SaaS"       },
+  { value: "dashboard_analytics", label: "📊 Dashboard / Analytics"  },
+  { value: "cli_tool",            label: "⌨️ CLI / Ferramenta"       },
+  { value: "microservice",        label: "🔧 Microsserviço"          },
+  { value: "data_pipeline",       label: "🔄 Pipeline de Dados"      },
+  { value: "other",               label: "📦 Outro"                  },
+];
+
+function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+      <InputLabel>Tipo do projeto (opcional)</InputLabel>
+      <Select value={value} label="Tipo do projeto (opcional)" onChange={(e) => onChange(e.target.value)}>
+        {PROJECT_TYPES.map((t) => (
+          <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  );
+}
 type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
 
@@ -256,6 +290,9 @@ export default function SpecPage() {
   // Tab: 0=texto livre, 1=upload arquivo
   const [tab, setTab] = useState(0);
 
+  // Tipo do projeto
+  const [projectType, setProjectType] = useState("");
+
   // Texto livre flow
   const [freeText, setFreeText]         = useState("");
   const [projectTitle, setProjectTitle] = useState("");
@@ -354,6 +391,7 @@ export default function SpecPage() {
       formData.append("title", projectTitle.trim() || "Spec sem título");
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
+      if (projectType) formData.append("projectType", projectType);
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
@@ -388,6 +426,7 @@ export default function SpecPage() {
       const fd = new FormData();
       fd.append("title", projectTitle.trim() || "Spec sem título");
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
+      if (projectType) fd.append("projectType", projectType);
       files.forEach((f) => fd.append("files", f));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
@@ -458,6 +497,7 @@ export default function SpecPage() {
                       size="small" sx={{ mb: 2 }}
                       placeholder="Ex.: E-commerce de calçados"
                     />
+                    <ProjectTypeSelect value={projectType} onChange={setProjectType} />
                     <TextField
                       fullWidth multiline rows={8}
                       label="Descreva o produto que você quer construir"
@@ -572,6 +612,7 @@ export default function SpecPage() {
                     value={projectTitle} onChange={(e) => setProjectTitle(e.target.value)}
                     size="small" sx={{ mb: 2 }} placeholder="Ex.: Auto Parts API"
                   />
+                  <ProjectTypeSelect value={projectType} onChange={setProjectType} />
 
                   <Box
                     onClick={() => inputRef.current?.click()}

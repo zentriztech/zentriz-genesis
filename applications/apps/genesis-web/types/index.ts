@@ -64,6 +64,8 @@ export interface Project {
   versionNumber?: number;
   /** Texto livre original digitado pelo usuário antes do CTO gerar a spec. */
   freeDescription?: string | null;
+  /** Tipo do projeto selecionado na submissão da spec (e.g. "backend_api", "landing_page"). */
+  projectType?: string | null;
 }
 
 export interface Notification {

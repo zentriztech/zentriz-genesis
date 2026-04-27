@@ -308,6 +308,7 @@ export async function specRoutes(app: FastifyInstance) {
     let title = "Spec sem título";
     let parentProjectId: string | null = null;
     let freeDescription: string | null = null;
+    let projectType: string | null = null;
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -344,6 +345,14 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) freeDescription = raw;
+      }
+      if (part.fields?.projectType !== undefined) {
+        const ptField = part.fields.projectType;
+        const v = Array.isArray(ptField) ? ptField[0] : ptField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim()
+          : "";
+        if (raw) projectType = raw;
       }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -395,6 +404,7 @@ export async function specRoutes(app: FastifyInstance) {
 
       const extraJson = JSON.stringify({
         ...(freeDescription ? { free_description: freeDescription } : {}),
+        ...(projectType    ? { project_type: projectType }           : {}),
       });
       const projectResult = await client.query(
         `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra)

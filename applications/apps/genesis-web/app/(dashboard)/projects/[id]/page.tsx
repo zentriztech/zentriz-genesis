@@ -106,6 +106,16 @@ function agentToStepIndex(from: string): number {
   return -1;
 }
 
+const PROJECT_TYPE_LABELS: Record<string, string> = {
+  backend_api: "🔌 Backend / API REST", backend_graphql: "🔗 Backend / GraphQL",
+  fullstack_webapp: "🖥️ Fullstack — Web App", frontend_webapp: "🎨 Frontend — Web App",
+  landing_page: "🏠 Landing Page", ecommerce: "🛒 E-commerce",
+  mobile_app: "📱 App Mobile", saas_platform: "☁️ Plataforma SaaS",
+  dashboard_analytics: "📊 Dashboard / Analytics", cli_tool: "⌨️ CLI / Ferramenta",
+  microservice: "🔧 Microsserviço", data_pipeline: "🔄 Pipeline de Dados",
+  other: "📦 Outro",
+};
+
 const TASK_STATUS_COLOR: Record<string, "success" | "info" | "error" | "warning" | "default"> = {
   DONE: "success", QA_PASS: "success", IN_PROGRESS: "info", WAITING_REVIEW: "info",
   QA_FAIL: "error", BLOCKED: "error", NEW: "default", ASSIGNED: "warning",
@@ -845,6 +855,21 @@ function ProjectDetailPageInner() {
             )}
 
             {/* Original idea (free description saved at submission) */}
+            {project.projectType && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75, fontSize: "0.6rem" }}>
+                    Tipo do projeto
+                  </Typography>
+                  <Chip size="small"
+                    label={PROJECT_TYPE_LABELS[project.projectType] ?? project.projectType}
+                    sx={{ fontSize: "0.72rem" }}
+                  />
+                </CardContent>
+              </Card>
+            )}
+
             {project.freeDescription && (
               <Card>
                 <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>

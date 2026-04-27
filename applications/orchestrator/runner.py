@@ -1987,6 +1987,17 @@ def main() -> int:
         charter_summary = pipeline_ctx.charter or ""
         engineer_summary = pipeline_ctx.engineer_proposal or ""
         backlog_summary = pipeline_ctx.backlog or ""
+        # Carregar project_type da API (se disponível)
+        if project_id and not pipeline_ctx.project_type:
+            try:
+                _proj_data, _proj_status = _api_get(f"/api/projects/{project_id}")
+                if _proj_data and isinstance(_proj_data, dict):
+                    _pt = _proj_data.get("projectType") or ""
+                    if _pt:
+                        pipeline_ctx.project_type = str(_pt)
+                        logger.info("[Pipeline] project_type=%s", pipeline_ctx.project_type)
+            except Exception as _e:
+                logger.debug("[Pipeline] Não foi possível carregar project_type: %s", _e)
 
     # Persistir spec em project_id/docs quando PROJECT_FILES_ROOT estiver definido
     if project_id and storage and storage.is_enabled():
