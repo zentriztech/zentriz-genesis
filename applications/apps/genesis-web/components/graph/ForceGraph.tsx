@@ -285,7 +285,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
-  const [containerSize, setContainerSize] = useState({ width: 800, height });
+  // Start at 0 — ResizeObserver will set the real size; canvas won't render until measured
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
   const [justCycled, setJustCycled] = useState(false);
 
@@ -456,9 +457,13 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     }
   }, []);
 
+  // Canvas dims: use measured size; fall back to prop only if observer hasn't fired yet
+  const canvasW = containerSize.width  || 800;
+  const canvasH = containerSize.height || height;
+
   if (loading) {
     return (
-      <Box sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
+      <Box ref={containerRef} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
         <Typography variant="body2" color="text.secondary">Inicializando física…</Typography>
       </Box>
     );
@@ -466,7 +471,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   if (graphData.nodes.length === 0) {
     return (
-      <Box sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
+      <Box ref={containerRef} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
         <Typography variant="body2" color="text.secondary">Sem dados ainda.</Typography>
         <Typography variant="caption" color="text.secondary">O grafo cresce conforme os agentes trabalham.</Typography>
       </Box>
@@ -483,8 +488,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       <ForceGraph2D
         ref={fgRef}
         graphData={{ nodes: graphData.nodes as object[], links: displayLinks as object[] }}
-        width={containerSize.width || 800}
-        height={containerSize.height || height}
+        width={canvasW}
+        height={canvasH}
         backgroundColor="#0D0F14"
         nodeCanvasObject={paintNode}
         nodeCanvasObjectMode={() => "replace"}

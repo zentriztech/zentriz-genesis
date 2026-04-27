@@ -125,8 +125,8 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
   const h = typeof height === "number" ? height : 500;
 
   const graphContent = (fsHeight: number | string) => {
-    // ForceGraph needs a numeric pixel height; for fullscreen use window height estimate
-    const numH = typeof fsHeight === "number" ? fsHeight : (typeof window !== "undefined" ? window.innerHeight - 60 : 700);
+    // ForceGraph mede o próprio container via ResizeObserver — height é apenas fallback inicial
+    const numH = typeof fsHeight === "number" ? fsHeight : h;
     return mode === "force"
       ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={numH} planningDocs={planningDocs} />
       : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={fsHeight} planningDocs={planningDocs} />;
@@ -197,7 +197,7 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
               </IconButton>
             </Tooltip>
           </Stack>
-          <Box sx={{ flexGrow: 1, overflow: "hidden" }}>
+          <Box sx={{ flexGrow: 1, overflow: "hidden", height: 0 }}>
             {graphContent("100%")}
           </Box>
         </DialogContent>
