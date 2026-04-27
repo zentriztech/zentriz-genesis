@@ -719,7 +719,7 @@ function ProjectDetailPageInner() {
 
         {/* ── RIGHT COLUMN: all tabs ── */}
         <Grid size={{ xs: 12, md: 8.5 }}>
-          <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+          <Card sx={{ height: "100%", minHeight: 600, display: "flex", flexDirection: "column" }}>
             <Tabs
               value={rightTab}
               onChange={(_e, v) => setRightTab(v as number)}
@@ -741,7 +741,7 @@ function ProjectDetailPageInner() {
 
             {/* Tab 0 — Diálogo */}
             {rightTab === 0 && (
-              <Box sx={{ flexGrow: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+              <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {isRunning && workingMessage && (
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "primary.main" + "12", flexShrink: 0 }}>
                     <CircularProgress size={12} color="primary" />

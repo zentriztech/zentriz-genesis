@@ -24,7 +24,6 @@ import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import { AgentNode }         from "@/components/graph/AgentNode";
 import { TaskNode }          from "@/components/graph/TaskNode";
-import { ArtifactNode }      from "@/components/graph/ArtifactNode";
 import { ArtifactGroupNode } from "@/components/graph/ArtifactGroupNode";
 import { DocNode }           from "@/components/graph/DocNode";
 import { ForceGraph }        from "@/components/graph/ForceGraph";
@@ -36,7 +35,6 @@ import type { DialogueEntry } from "@/components/LiveDialogue";
 const nodeTypes: NodeTypes = {
   agentNode:         AgentNode,
   taskNode:          TaskNode,
-  artifactNode:      ArtifactNode,
   artifactGroupNode: ArtifactGroupNode,
   docNode:           DocNode,
 };
