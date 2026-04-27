@@ -33,6 +33,7 @@ import BusinessIcon from "@mui/icons-material/Business";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
+import PsychologyIcon from "@mui/icons-material/Psychology";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudIcon from "@mui/icons-material/Cloud";
 import { useState } from "react";
@@ -55,9 +56,10 @@ const navTenantAdmin = [
   ...navUser,
   { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,       color: "#8B5CF6" },
   { label: "Projetos",      href: "/tenant/projects", icon: <FolderIcon />,       color: "#F59E0B" },
-  { label: "Plano e uso",   href: "/tenant/plan",     icon: <SettingsIcon />,     color: "#64748B" },
-  { label: "GitHub",        href: "/settings/github", icon: <GitHubIcon />,       color: "#E2E8F0" },
-  { label: "Cloud Deploy",  href: "/settings/cloud",  icon: <CloudIcon />,        color: "#10B981" },
+  { label: "Plano e uso",   href: "/tenant/plan",      icon: <SettingsIcon />,      color: "#64748B" },
+  { label: "LLM / IA",     href: "/settings/llm",     icon: <PsychologyIcon />,    color: "#6366F1" },
+  { label: "GitHub",        href: "/settings/github",  icon: <GitHubIcon />,        color: "#E2E8F0" },
+  { label: "Cloud Deploy",  href: "/settings/cloud",   icon: <CloudIcon />,         color: "#10B981" },
 ];
 
 const navZentriz = [
