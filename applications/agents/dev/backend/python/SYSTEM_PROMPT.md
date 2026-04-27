@@ -256,6 +256,30 @@ Quando o charter mencionar "Insomnia", "Postman" ou "documentação":
 - [ ] `.env.example` documenta todas as variáveis usadas
 - [ ] Type hints em todas as funções públicas
 
+### 6.1 BUGS CONHECIDOS — FastAPI + Alembic + asyncpg (validar obrigatoriamente)
+
+Estes bugs foram encontrados em produção real e **causam falha silenciosa em runtime**:
+
+| # | Arquivo | O que verificar | Erro se errar |
+|---|---------|----------------|---------------|
+| B1 | `pyproject.toml` | `build-backend = 'setuptools.build_meta'` — nunca `setuptools.backends.legacy:build` | `BackendUnavailable` no docker build |
+| B2 | **Todo arquivo que usa `settings`** | Atributos Pydantic Settings são **lowercase**: `settings.database_url`, `settings.secret_key`, `settings.algorithm`, `settings.access_token_expire_minutes` | `AttributeError` em runtime |
+| B3 | `main.py` | `app.include_router(router)` SEM `prefix=` se o router já define `prefix` internamente | Rotas duplicadas: `/auth/auth/register` |
+| B4 | `alembic/versions/*.py` | **Não usar** `sa.Enum(...).create(checkfirst=True)` + `create_type=False` — o `checkfirst` não funciona com asyncpg em DDL transacional. Usar `sa.Enum('v1','v2', name='tipo')` com `create_type=True` (default) diretamente em `op.create_table` | `DuplicateObjectError` no alembic upgrade |
+| B5 | `pyproject.toml` | Incluir `python-multipart>=0.0.9` quando o projeto usa `OAuth2PasswordRequestForm` | `RuntimeError: Form data requires python-multipart` |
+| B6 | `pyproject.toml` | Fixar `bcrypt>=3.2.0,<4.0.0` junto com `passlib[bcrypt]` | `AttributeError: module 'bcrypt' has no attribute '__about__'` |
+| B7 | `schemas/*.py` | Campos inferíveis do token (ex: `user_id` em `AppointmentCreate`) devem ser `Optional` com `default=None`; o service resolve: `if data.user_id is None: data.user_id = current_user.id` | `422 Field required` |
+| B8 | `controllers/*.py` | Verificar que toda chamada ao service passa **todos** os argumentos obrigatórios, incluindo `current_user` | `TypeError: missing argument` → HTTP 500 |
+| B9 | `controllers/*.py` | Operações de insert com constraint unique devem ter `try/except IntegrityError` e retornar 409 — não confiar só no check prévio no service | `IntegrityError` → HTTP 500 |
+| B10 | `alembic/env.py` | Remover `compare_type=True` e `compare_server_default=True` do `context.configure` em modo online — causam DDL diferencial inesperado | ENUM duplicado ou DDL incorreto |
+
+**Varredura obrigatória antes de entregar:**
+```bash
+grep -rn "settings\.[A-Z]" apps/          # deve retornar vazio
+grep -rn "backends.legacy" pyproject.toml  # deve retornar vazio
+grep -rn "compare_type" alembic/           # deve retornar vazio
+```
+
 ---
 
 ## 7) GOLDEN EXAMPLE — Scaffold FastAPI

@@ -55,6 +55,31 @@ agent:
 | DB session via dependency injection (`Depends(get_session)`), não global | MAJOR |
 | `requirements.txt` tem versões fixadas (`>=x.y.z`) | MINOR |
 
+### 5.6 Bugs Conhecidos FastAPI + Alembic + asyncpg (BLOCKERS)
+
+Validar obrigatoriamente — causam falha silenciosa em runtime, não detectável por análise estática:
+
+| Check | Severidade |
+|-------|------------|
+| `pyproject.toml`: `build-backend = 'setuptools.build_meta'` (nunca `setuptools.backends.legacy:build`) | BLOCKER |
+| **Grep `settings\.[A-Z]`** — atributos Pydantic Settings devem ser lowercase (`settings.secret_key`, não `settings.SECRET_KEY`) | BLOCKER |
+| `main.py`: `include_router` sem `prefix=` duplicado quando o router já define `prefix` internamente | BLOCKER |
+| `alembic/env.py`: ausência de `compare_type=True` no `context.configure` online (causa DDL diferencial inesperado) | BLOCKER |
+| `alembic/versions/*.py`: ENUMs criados via `op.create_table` com `create_type=True` (default) — sem `sa.Enum.create(checkfirst=True)` separado | BLOCKER |
+| `pyproject.toml`: `python-multipart>=0.0.9` presente quando há `OAuth2PasswordRequestForm` | BLOCKER |
+| `pyproject.toml`: `bcrypt>=3.2.0,<4.0.0` fixado junto com `passlib[bcrypt]` | BLOCKER |
+| Schemas: campos inferíveis do token (ex: `user_id`) são `Optional` com `default=None` | MAJOR |
+| Controllers: chamadas ao service incluem **todos** os argumentos obrigatórios (incluindo `current_user`) | BLOCKER |
+| Controllers com insert único: `try/except IntegrityError` → 409 (não confiar só em check prévio) | MAJOR |
+
+**Comando de varredura rápida:**
+```bash
+grep -rn "settings\.[A-Z]" apps/           # deve retornar vazio
+grep -rn "backends.legacy" pyproject.toml   # deve retornar vazio
+grep -rn "compare_type" alembic/            # deve retornar vazio
+```
+Se qualquer grep retornar resultado → **QA_FAIL imediato**.
+
 ### 5.5 Collections e Documentação (quando solicitado)
 | Check | Severidade |
 |-------|------------|
