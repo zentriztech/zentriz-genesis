@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import Chip from "@mui/material/Chip";
@@ -76,36 +76,35 @@ function buildTree(files: CodeFile[]): TreeNode[] {
   return root;
 }
 
-// ── Syntax highlight via highlight.js (dynamic import) ───────────────────────
-async function highlightCode(code: string, ext: string): Promise<string> {
-  try {
-    const hljs = (await import("highlight.js/lib/core")).default;
-    const langMap: Record<string, () => Promise<{ default: unknown }>> = {
-      ts:  () => import("highlight.js/lib/languages/typescript"),
-      tsx: () => import("highlight.js/lib/languages/typescript"),
-      js:  () => import("highlight.js/lib/languages/javascript"),
-      jsx: () => import("highlight.js/lib/languages/javascript"),
-      json:() => import("highlight.js/lib/languages/json"),
-      css: () => import("highlight.js/lib/languages/css"),
-      sql: () => import("highlight.js/lib/languages/sql"),
-      sh:  () => import("highlight.js/lib/languages/bash"),
-      bash:() => import("highlight.js/lib/languages/bash"),
-      yml: () => import("highlight.js/lib/languages/yaml"),
-      yaml:() => import("highlight.js/lib/languages/yaml"),
-      py:  () => import("highlight.js/lib/languages/python"),
-      md:  () => import("highlight.js/lib/languages/markdown"),
-    };
-    const loader = langMap[ext] ?? langMap["ts"];
-    if (loader) {
-      const mod = await loader();
-      const lang = (mod as { default: unknown }).default;
-      if (lang && !hljs.getLanguage(ext)) hljs.registerLanguage(ext, lang as Parameters<typeof hljs.registerLanguage>[1]);
+// ── CodeMirror language resolver (dynamic import) ────────────────────────────
+async function getLanguageExtension(ext: string) {
+  switch (ext) {
+    case "ts": case "tsx": case "js": case "jsx": case "mjs": case "cjs": {
+      const { javascript } = await import("@codemirror/lang-javascript");
+      return javascript({ typescript: ext === "ts" || ext === "tsx", jsx: ext === "tsx" || ext === "jsx" });
     }
-    const result = hljs.highlight(code, { language: ext, ignoreIllegals: true });
-    return result.value;
-  } catch {
-    // Fallback: escape HTML
-    return code.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    case "json": {
+      const { json } = await import("@codemirror/lang-json");
+      return json();
+    }
+    case "css": case "scss": {
+      const { css } = await import("@codemirror/lang-css");
+      return css();
+    }
+    case "py": {
+      const { python } = await import("@codemirror/lang-python");
+      return python();
+    }
+    case "sql": {
+      const { sql } = await import("@codemirror/lang-sql");
+      return sql();
+    }
+    case "md": case "mdx": {
+      const { markdown } = await import("@codemirror/lang-markdown");
+      return markdown();
+    }
+    default:
+      return null;
   }
 }
 
@@ -173,29 +172,54 @@ function TreeItem({
   );
 }
 
-// ── Code viewer ───────────────────────────────────────────────────────────────
+// ── Code viewer (CodeMirror) ──────────────────────────────────────────────────
 function CodeViewer({ projectId, filePath, ext }: { projectId: string; filePath: string; ext: string }) {
-  const [html, setHtml]       = useState<string | null>(null);
-  const [raw, setRaw]         = useState<string>("");
+  const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied]   = useState(false);
-  const lineCount = useRef(0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [cmExtensions, setCmExtensions] = useState<any[]>([]);
 
   useEffect(() => {
     setLoading(true);
-    setHtml(null);
-    apiGet<{ content: string; path: string }>(`/api/projects/${projectId}/file-content?path=${encodeURIComponent(filePath)}`)
-      .then(async ({ content }) => {
-        setRaw(content);
-        lineCount.current = content.split("\n").length;
-        const highlighted = await highlightCode(content, ext);
-        setHtml(highlighted);
+    setContent(null);
+    Promise.all([
+      apiGet<{ content: string; path: string }>(`/api/projects/${projectId}/file-content?path=${encodeURIComponent(filePath)}`),
+      getLanguageExtension(ext),
+    ])
+      .then(([{ content: raw }, lang]) => {
+        setContent(raw);
+        setCmExtensions(lang ? [lang] : []);
       })
-      .catch(() => setHtml(null))
+      .catch(() => setContent(null))
       .finally(() => setLoading(false));
   }, [projectId, filePath, ext]);
 
+  // Lazy-load CodeMirror component (heavy — only when a file is selected)
+  const [CodeMirrorComp, setCodeMirrorComp] = useState<React.ComponentType<{
+    value: string;
+    extensions: unknown[];
+    theme: unknown;
+    readOnly: boolean;
+    height: string;
+    style: React.CSSProperties;
+    basicSetup: Record<string, unknown>;
+  }> | null>(null);
+  const [vscodeDark, setVscodeDark] = useState<unknown>(null);
+
+  useEffect(() => {
+    Promise.all([
+      import("@uiw/react-codemirror").then((m) => m.default),
+      import("@uiw/codemirror-theme-vscode").then((m) => m.vscodeDark),
+    ]).then(([cm, theme]) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      setCodeMirrorComp(() => cm as any);
+      setVscodeDark(() => theme);
+    });
+  }, []);
+
   const color = EXT_COLOR[ext] ?? "#8B949E";
+  const lineCount = content ? content.split("\n").length : 0;
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -206,15 +230,15 @@ function CodeViewer({ projectId, filePath, ext }: { projectId: string; filePath:
         <Typography variant="caption" sx={{ color: "#E6EDF3", fontSize: "0.75rem", fontFamily: "monospace", flexGrow: 1 }}>
           {filePath}
         </Typography>
-        {!loading && raw && (
+        {!loading && content && (
           <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.65rem" }}>
-            {lineCount.current} linhas
+            {lineCount} linhas
           </Typography>
         )}
         <Chip label={`.${ext}`} size="small" sx={{ bgcolor: `${color}22`, color, border: `1px solid ${color}40`, fontSize: "0.6rem", height: 18 }} />
-        {raw && (
+        {content && (
           <Tooltip title={copied ? "Copiado!" : "Copiar código"}>
-            <IconButton size="small" onClick={() => navigator.clipboard.writeText(raw).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>
+            <IconButton size="small" onClick={() => navigator.clipboard.writeText(content).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>
               <ContentCopyIcon sx={{ fontSize: "0.8rem", color: copied ? "#10B981" : "#8B949E" }} />
             </IconButton>
           </Tooltip>
@@ -222,58 +246,32 @@ function CodeViewer({ projectId, filePath, ext }: { projectId: string; filePath:
       </Stack>
 
       {/* Code area */}
-      {loading ? (
+      {loading || !CodeMirrorComp || vscodeDark === null ? (
         <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flexGrow: 1, bgcolor: "#0D0F14" }}>
           <CircularProgress size={20} />
         </Box>
-      ) : html == null ? (
+      ) : content == null ? (
         <Box sx={{ p: 2, bgcolor: "#0D0F14", flexGrow: 1 }}>
           <Typography variant="caption" color="error">Não foi possível carregar o arquivo.</Typography>
         </Box>
       ) : (
-        <Box
-          sx={{
-            flexGrow: 1, overflow: "auto", bgcolor: "#0D0F14",
-            "& pre": { m: 0, p: 0 },
-            "& code": { fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace", fontSize: "0.75rem", lineHeight: 1.7 },
-            // highlight.js github-dark tokens
-            "& .hljs-keyword":    { color: "#ff7b72" },
-            "& .hljs-string":     { color: "#a5d6ff" },
-            "& .hljs-number":     { color: "#79c0ff" },
-            "& .hljs-comment":    { color: "#8b949e", fontStyle: "italic" },
-            "& .hljs-type, & .hljs-title": { color: "#ffa657" },
-            "& .hljs-built_in":   { color: "#79c0ff" },
-            "& .hljs-attr, & .hljs-attribute": { color: "#7ee787" },
-            "& .hljs-variable":   { color: "#ffa657" },
-            "& .hljs-meta":       { color: "#d2a8ff" },
-            "& .hljs-function, & .hljs-title.function_": { color: "#d2a8ff" },
-            "& .hljs-params":     { color: "#E6EDF3" },
-            "& .hljs-operator":   { color: "#ff7b72" },
-            "& .hljs-punctuation":{ color: "#8b949e" },
-            "& .hljs-selector-class, & .hljs-selector-id": { color: "#ffa657" },
-          }}
-        >
-          <Box sx={{ display: "flex" }}>
-            {/* Line numbers */}
-            <Box
-              component="pre"
-              sx={{
-                flexShrink: 0, userSelect: "none", textAlign: "right",
-                px: 1.5, py: 1.5,
-                color: "#484F58", fontSize: "0.73rem", fontFamily: "monospace", lineHeight: 1.7,
-                borderRight: "1px solid #21262D", bgcolor: "#0D1117",
-              }}
-            >
-              {Array.from({ length: lineCount.current }, (_, i) => i + 1).join("\n")}
-            </Box>
-            {/* Code */}
-            <Box
-              component="pre"
-              sx={{ flexGrow: 1, px: 1.5, py: 1.5, overflow: "visible", m: 0 }}
-            >
-              <code dangerouslySetInnerHTML={{ __html: html }} />
-            </Box>
-          </Box>
+        <Box sx={{
+          flexGrow: 1, overflow: "auto", bgcolor: "#0D0F14",
+          "& .cm-editor": { height: "100%", fontSize: "0.75rem" },
+          "& .cm-scroller": { fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace", lineHeight: 1.7 },
+          "& .cm-gutters": { bgcolor: "#0D1117", borderRight: "1px solid #21262D", color: "#484F58" },
+          "& .cm-activeLineGutter": { bgcolor: "#161B22" },
+          "& .cm-activeLine": { bgcolor: "#6366F110" },
+        }}>
+          <CodeMirrorComp
+            value={content}
+            extensions={cmExtensions}
+            theme={vscodeDark}
+            readOnly={true}
+            height="100%"
+            style={{ height: "100%" }}
+            basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true, highlightSelectionMatches: false }}
+          />
         </Box>
       )}
     </Box>
