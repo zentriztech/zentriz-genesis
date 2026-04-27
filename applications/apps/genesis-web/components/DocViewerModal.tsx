@@ -96,7 +96,7 @@ export function DocViewerModal({ projectId, filename, title, open, onClose }: Do
     setContent(null);
     // Reuse the file-content endpoint — pass the doc path relative to project
     apiGet<{ content: string; path: string }>(
-      `/api/projects/${projectId}/file-content?path=${encodeURIComponent(filename)}`
+      `/api/projects/${projectId}/doc-content?path=${encodeURIComponent(filename)}`
     )
       .then(({ content: raw }) => setContent(raw))
       .catch(() => setContent("(Não foi possível carregar o conteúdo do arquivo.)"))

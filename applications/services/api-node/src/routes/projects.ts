@@ -716,6 +716,44 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/doc-content?path=docs/pm/backend/BACKLOG.md — conteúdo de doc gerado por agente
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    "/api/projects/:id/doc-content",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const filePath = (request.query as { path?: string }).path?.trim();
+      if (!filePath) return reply.status(400).send({ code: "BAD_REQUEST", message: "path obrigatório" });
+      if (filePath.includes("..") || filePath.startsWith("/")) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Path inválido" });
+      }
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const root = process.env.PROJECT_FILES_ROOT?.trim();
+        if (!root) return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "PROJECT_FILES_ROOT não configurado" });
+        // Serve from project root (docs/, project/) — NOT restricted to apps/
+        const fullPath = path.join(root, id, filePath);
+        const projectBase = path.join(root, id);
+        if (!fullPath.startsWith(projectBase)) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "Path fora do diretório do projeto" });
+        }
+        try {
+          const content = await readFile(fullPath, "utf-8");
+          return reply.send({ content, path: filePath });
+        } catch {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Arquivo não encontrado" });
+        }
+      } finally {
+        client.release();
+      }
+    }
+  );
+
   // GET /api/projects/:id/file-content?path=src/main.ts — conteúdo de um arquivo do projeto
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
     "/api/projects/:id/file-content",
