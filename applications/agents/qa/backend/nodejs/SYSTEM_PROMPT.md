@@ -151,7 +151,21 @@ Derivadas de falhas reais em produção (validadas em Python/FastAPI, padrão eq
 ```bash
 grep -rn "catch" src/ | grep -v "throw\|AppError\|next(err"  # catch sem tratamento
 grep -rn "req\.body\." src/ | grep -v "schema\|validate\|zod"  # body sem validação
+grep -r "mysql" apps/src/ apps/package.json                    # deve ser vazio em projetos PG
+grep -r "cors()" apps/src/app.ts                               # cors sem config → QA_FAIL
+grep -r "npm ci" apps/Dockerfile                               # deve ser vazio
 ```
+
+### 6.7 Bugs Conhecidos Node.js + Drizzle + PostgreSQL (BLOCKERS — validados 2026-04-27)
+
+| # | Check | Severidade |
+|---|-------|------------|
+| N01 | `package.json` + `src/db/`: PostgreSQL usa `postgres` driver + `drizzle-orm/pg-core` — **nunca** `mysql2`/`mysqlTable` | BLOCKER |
+| N02 | `Dockerfile`: usa `npm install --legacy-peer-deps` — **nunca** `npm ci` sem lock file | BLOCKER |
+| N03 | `src/app.ts`: `cors({ origin: [...] })` com lista de origens — **nunca** `cors()` vazio | BLOCKER |
+| N04 | `src/app.ts`: `app.use(publicLimiter)` presente antes dos parsers de body | MAJOR |
+| N05 | Seed: arquivo `seed.mjs` (não `.ts`) — seed TypeScript falha com `ts-node npx` por falta de contexto Node | MAJOR |
+| N06 | `docker-compose.yml`: porta do host ≥ 3004 para não colidir com genesis-web (3001) | MAJOR |
 
 ### 6.5 Funcionalidade vs FR/NFR (BLOCKER)
 

@@ -389,6 +389,28 @@ Adicionar em `package.json`: `"seed": "npx ts-node apps/seed.ts"`
 
 ---
 
+### 6.2 BUGS CONHECIDOS — Node.js + Drizzle + PostgreSQL (validar obrigatoriamente)
+
+Validados em produção real (projeto 31f342e3, 2026-04-27). Causam falha silenciosa em runtime:
+
+| # | Arquivo | O que verificar | Erro se errar |
+|---|---------|----------------|---------------|
+| B1 | `package.json` + `src/db/` | Stack PostgreSQL → imports `drizzle-orm/pg-core` + driver `postgres`; **nunca** `mysql2`/`mysqlTable` mesmo que o charter não diga explicitamente SQL flavor | App sobe mas não conecta ao banco |
+| B2 | `Dockerfile` | `RUN npm install --legacy-peer-deps` — nunca `npm ci` sem `package-lock.json` | Build quebra no primeiro `docker build` |
+| B3 | `src/app.ts` | `cors({ origin: [...] })` com lista de origens — nunca `cors()` vazio | QA_FAIL (CORS sem restrição) |
+| B4 | `src/app.ts` | `app.use(publicLimiter)` **antes** dos parsers de body — rate limiter precisa estar em app.ts, não apenas nas rotas | QA_FAIL (ausência de rate limiting global) |
+| B5 | `seed.ts` | Seed em TypeScript falha com `ts-node npx` por falta de contexto de tipos Node. Criar **`seed.mjs`** (ES module puro) em vez de `seed.ts` | `Cannot find name 'process'` / `console` |
+| B6 | `docker-compose.yml` | Não usar `${PORT:-3001}` se `.env` define `PORT=3001` — isso conflita com genesis-web. Usar porta fixa ≥ 3004 | `port already allocated` |
+
+**Varredura obrigatória:**
+```bash
+grep -r "mysql" apps/src/ apps/package.json    # deve retornar vazio em projetos PostgreSQL
+grep -r "cors()" apps/src/app.ts               # deve retornar vazio (cors deve ter config)
+grep -r "npm ci" apps/Dockerfile               # deve retornar vazio
+```
+
+---
+
 ## 7) GOLDEN EXAMPLES
 
 ### 7.1 Example input (MessageEnvelope)
