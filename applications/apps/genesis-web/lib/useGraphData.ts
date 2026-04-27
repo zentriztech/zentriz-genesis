@@ -38,6 +38,14 @@ export interface ArtifactNodeData extends Record<string, unknown> {
   sizeBytes: number;
 }
 
+export interface ArtifactGroupNodeData extends Record<string, unknown> {
+  nodeType: "artifactGroup";
+  dir: string;
+  files: { path: string; ext: string; sizeBytes: number }[];
+  expanded: boolean;
+  onToggle: () => void;
+}
+
 export interface DocNodeData extends Record<string, unknown> {
   nodeType: "doc";
   filename: string;
@@ -47,7 +55,7 @@ export interface DocNodeData extends Record<string, unknown> {
   phase: "spec" | "cto" | "engineer" | "pm" | "qa" | "devops" | "other";
 }
 
-export type GraphNode = Node<AgentNodeData | TaskNodeData | ArtifactNodeData | DocNodeData>;
+export type GraphNode = Node<AgentNodeData | TaskNodeData | ArtifactNodeData | ArtifactGroupNodeData | DocNodeData>;
 export type GraphEdge = Edge;
 
 // ── Pipeline stages (ordem de execução) ──────────────────────────────────────
@@ -73,6 +81,8 @@ export interface GraphDataInput {
   codeFiles: Array<{ path: string; sizeBytes: number; ext: string }>;
   planningDocs?: PlanningDoc[];  // from /api/projects/:id/artifacts manifest
   activeAgentId?: string;
+  expandedGroups?: Set<string>;          // which artifact group dirs are expanded
+  onToggleGroup?: (dir: string) => void; // callback from parent
 }
 
 // Map filename patterns to phase and creator agent
@@ -94,7 +104,7 @@ const PHASE_AGENT: Record<DocNodeData["phase"], string> = {
 };
 
 export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  const { dialogueEntries, tasks, codeFiles, activeAgentId } = input;
+  const { dialogueEntries, tasks, codeFiles, activeAgentId, expandedGroups, onToggleGroup } = input;
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const seenAgents = new Set<string>();
@@ -231,39 +241,62 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     }
   }
 
-  // ── 3. Artifact nodes (show top N, right side) ───────────────────────────────
-  const ART_START_Y  = 160;
-  const ART_COL_X    = TASK_COLS * TASK_COL_W + 40;
-  const ART_ROW_H    = 50;
-  const MAX_ARTS     = 12;
+  // ── 3. Artifact groups (grouped by top-level dir, collapsible) ───────────────
+  const ART_START_Y = 160;
+  const ART_COL_X   = TASK_COLS * TASK_COL_W + 40;
+  const ART_GAP     = 14;  // gap between group nodes
 
-  // Show only code files (filter out config/lock)
-  const showable = codeFiles
-    .filter((f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock"))
-    .slice(0, MAX_ARTS);
+  const showableFiles = codeFiles.filter(
+    (f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock")
+  );
 
-  for (let idx = 0; idx < showable.length; idx++) {
-    const file   = showable[idx];
-    const nodeId = `artifact-${idx}`;
+  // Group by first path segment (top-level dir), or "." for root files
+  const groupMap = new Map<string, typeof showableFiles>();
+  for (const f of showableFiles) {
+    const parts = f.path.split("/");
+    const dir = parts.length > 1 ? parts[0] : ".";
+    if (!groupMap.has(dir)) groupMap.set(dir, []);
+    groupMap.get(dir)!.push(f);
+  }
+
+  // Sort groups: dirs first alphabetically, then root files
+  const sortedDirs = Array.from(groupMap.keys()).sort((a, b) => {
+    if (a === ".") return 1; if (b === ".") return -1;
+    return a.localeCompare(b);
+  });
+
+  // Determine dev agent key
+  const devKey = Array.from(seenAgents).find(k => k.startsWith("dev")) ?? (seenAgents.has("dev") ? "dev" : null);
+
+  let currentY = ART_START_Y;
+  sortedDirs.forEach((dir, idx) => {
+    const files    = groupMap.get(dir)!;
+    const nodeId   = `artifactGroup-${idx}`;
+    const expanded = expandedGroups?.has(dir) ?? false;
+    // Collapsed height ≈ 72px, expanded ≈ 72 + 28*files
+    const nodeH    = expanded ? 72 + files.length * 28 : 72;
+
     nodes.push({
       id:       nodeId,
-      type:     "artifactNode",
-      position: { x: ART_COL_X, y: ART_START_Y + idx * ART_ROW_H },
+      type:     "artifactGroupNode",
+      position: { x: ART_COL_X, y: currentY },
       data: {
-        nodeType:  "artifact",
-        path:      file.path,
-        ext:       file.ext,
-        sizeBytes: file.sizeBytes,
-      } satisfies ArtifactNodeData,
+        nodeType: "artifactGroup",
+        dir,
+        files,
+        expanded,
+        onToggle: onToggleGroup ? () => onToggleGroup(dir) : () => {},
+      } satisfies ArtifactGroupNodeData,
     });
 
-    // Edge: dev agent → artifact (if visible)
-    if (seenAgents.has("dev")) {
-      addEdge("agent-dev", nodeId, {
+    if (devKey) {
+      addEdge(`agent-${devKey}`, nodeId, {
         style: { stroke: "#10B98144", strokeWidth: 1, strokeDasharray: "3 4" },
       });
     }
-  }
+
+    currentY += nodeH + ART_GAP;
+  });
 
   return { nodes, edges };
 }

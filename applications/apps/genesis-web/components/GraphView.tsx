@@ -22,21 +22,23 @@ import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
-import { AgentNode }    from "@/components/graph/AgentNode";
-import { TaskNode }     from "@/components/graph/TaskNode";
-import { ArtifactNode } from "@/components/graph/ArtifactNode";
-import { DocNode }      from "@/components/graph/DocNode";
-import { ForceGraph }   from "@/components/graph/ForceGraph";
+import { AgentNode }         from "@/components/graph/AgentNode";
+import { TaskNode }          from "@/components/graph/TaskNode";
+import { ArtifactNode }      from "@/components/graph/ArtifactNode";
+import { ArtifactGroupNode } from "@/components/graph/ArtifactGroupNode";
+import { DocNode }           from "@/components/graph/DocNode";
+import { ForceGraph }        from "@/components/graph/ForceGraph";
 import { buildGraphData, type GraphNode, type GraphEdge, type PlanningDoc } from "@/lib/useGraphData";
 import { apiGet } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 
 // ── Node type registry ─────────────────────────────────────────────────────────
 const nodeTypes: NodeTypes = {
-  agentNode:    AgentNode,
-  taskNode:     TaskNode,
-  artifactNode: ArtifactNode,
-  docNode:      DocNode,
+  agentNode:         AgentNode,
+  taskNode:          TaskNode,
+  artifactNode:      ArtifactNode,
+  artifactGroupNode: ArtifactGroupNode,
+  docNode:           DocNode,
 };
 
 type TaskItem    = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string };
@@ -55,10 +57,19 @@ interface GraphViewProps {
 function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, planningDocs }: GraphViewProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<GraphEdge>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]     = useState(true);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const { fitView } = useReactFlow();
 
   const onConnect = useCallback((c: Connection) => setEdges((eds) => addEdge(c, eds)), [setEdges]);
+
+  const onToggleGroup = useCallback((dir: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir); else next.add(dir);
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -74,13 +85,15 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, p
         codeFiles: (codeFilesData as CodeFilesResponse).files ?? [],
         planningDocs: planningDocs ?? [],
         activeAgentId: lastWorking?.fromAgent ?? undefined,
+        expandedGroups,
+        onToggleGroup,
       });
       setNodes(newNodes);
       setEdges(newEdges);
       setTimeout(() => fitView({ padding: 0.2 }), 100);
     } catch { /* silent */ } finally { setLoading(false); }
-  // planningDocs in deps: when parent refreshes artifacts, graph rebuilds with new docs
-  }, [projectId, planningDocs, setNodes, setEdges, fitView]);
+  // expandedGroups in deps: rebuild when a group is toggled
+  }, [projectId, planningDocs, expandedGroups, onToggleGroup, setNodes, setEdges, fitView]);
 
   useEffect(() => {
     refresh();
