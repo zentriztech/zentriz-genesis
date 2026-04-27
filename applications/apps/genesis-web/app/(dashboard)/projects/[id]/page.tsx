@@ -27,6 +27,7 @@ import Typography from "@mui/material/Typography";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import OpenWithIcon from "@mui/icons-material/OpenWith";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -40,6 +41,7 @@ import ForumIcon from "@mui/icons-material/Forum";
 import { projectsStore } from "@/stores/projectsStore";
 import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
+import { DocViewerModal } from "@/components/DocViewerModal";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
@@ -168,6 +170,10 @@ function ProjectDetailPageInner() {
   const [copiedCmd, setCopiedCmd]   = useState(false);
   const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo, 2=Documentos, 3=Código
   const [tasksOpen, setTasksOpen]   = useState(true);
+  // rightPanelContent: null = Tasks (default) | 0..3 = tab index moved from center
+  const [rightPanelContent, setRightPanelContent] = useState<number | null>(null);
+  // Doc viewer modal
+  const [docModal, setDocModal]     = useState<{ filename: string; title: string } | null>(null);
 
   // Working agent state (from dialogue)
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
@@ -723,22 +729,33 @@ function ProjectDetailPageInner() {
         {/* ── CENTER: tabs (Diálogo, Grafo, Documentos, Código) ── */}
         <Grid size={{ xs: 12, md: tasksOpen ? 4.25 : 8.5 }} sx={{ transition: "all 0.25s ease" }}>
           <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
-            <Tabs
-              value={rightTab}
-              onChange={(_e, v) => setRightTab(v as number)}
-              sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44 }}
-            >
-              <Tab icon={<ForumIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
-                label="Diálogo ao vivo"
-                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
-              <Tab icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
-                label="Grafo"
-                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
-              <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
-                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
-              <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
-                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
-            </Tabs>
+            <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid", borderColor: "divider", pr: 1 }}>
+              <Tabs
+                value={rightTab}
+                onChange={(_e, v) => setRightTab(v as number)}
+                sx={{ flex: 1, minHeight: 44, "& .MuiTabs-root": { minHeight: 44 } }}
+              >
+                <Tab icon={<ForumIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
+                  label="Diálogo ao vivo"
+                  sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
+                <Tab icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
+                  label="Grafo"
+                  sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
+                <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
+                  sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+                <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
+                  sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+              </Tabs>
+              {/* Move current tab to right panel */}
+              <Tooltip title={rightPanelContent === rightTab ? "Restaurar Tasks no painel direito" : "Mover aba para o painel direito"}>
+                <IconButton size="small" onClick={() => {
+                  setTasksOpen(true);
+                  setRightPanelContent(prev => prev === rightTab ? null : rightTab);
+                }} sx={{ p: 0.5, color: rightPanelContent === rightTab ? "primary.main" : "text.secondary" }}>
+                  <OpenWithIcon sx={{ fontSize: "0.95rem" }} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
 
             {/* Tab 0 — Diálogo */}
             {rightTab === 0 && (
@@ -793,12 +810,21 @@ function ProjectDetailPageInner() {
                       </TableHead>
                       <TableBody>
                         {artifacts.docs.map((d, i) => (
-                          <TableRow key={i}>
+                          <TableRow key={i}
+                            onClick={() => setDocModal({ filename: d.filename, title: d.title ?? d.filename })}
+                            sx={{ cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}>
                             <TableCell>
-                              <Typography variant="body2">{d.title ?? d.filename}</Typography>
-                              {d.title && d.filename !== d.title && (
-                                <Typography variant="caption" color="text.secondary" fontFamily="monospace">{d.filename}</Typography>
-                              )}
+                              <Stack direction="row" spacing={1} alignItems="center">
+                                <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "#484F58", fontFamily: "monospace", flexShrink: 0 }}>
+                                  {(d.filename.split(".").pop() ?? "").toUpperCase()}
+                                </Typography>
+                                <Box>
+                                  <Typography variant="body2">{d.title ?? d.filename}</Typography>
+                                  {d.title && d.filename !== d.title && (
+                                    <Typography variant="caption" color="text.secondary" fontFamily="monospace" sx={{ fontSize: "0.6rem" }}>{d.filename}</Typography>
+                                  )}
+                                </Box>
+                              </Stack>
                             </TableCell>
                             <TableCell>
                               {(() => {
@@ -850,7 +876,7 @@ function ProjectDetailPageInner() {
           </Card>
         </Grid>
 
-        {/* ── RIGHT PANEL: Tasks (collapsible) ── */}
+        {/* ── RIGHT PANEL: Tasks or moved tab (collapsible) ── */}
         {tasksOpen ? (
           <Grid size={{ xs: 12, md: 4.25 }} sx={{ transition: "all 0.25s ease" }}>
             <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
@@ -859,20 +885,30 @@ function ProjectDetailPageInner() {
                 sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44, flexShrink: 0 }}>
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Typography variant="body2" fontWeight={600}>
-                    Tasks
+                    {rightPanelContent === 0 ? "Diálogo ao vivo"
+                      : rightPanelContent === 1 ? "Grafo"
+                      : rightPanelContent === 2 ? "Documentos"
+                      : rightPanelContent === 3 ? "Código"
+                      : "Tasks"}
                   </Typography>
-                  {tasks && tasks.length > 0 && (
+                  {rightPanelContent === null && tasks && tasks.length > 0 && (
                     <Chip size="small" label={`${tasksDone}/${tasks.length}`}
                       color={tasksDone === tasks.length ? "success" : "default"}
                       sx={{ fontSize: "0.65rem", height: 18 }} />
                   )}
-                  {isRunning && (
+                  {rightPanelContent === null && isRunning && (
                     <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>
                       · auto 8s
                     </Typography>
                   )}
+                  {rightPanelContent !== null && (
+                    <Tooltip title="Restaurar Tasks">
+                      <Chip size="small" label="Restaurar Tasks" onClick={() => setRightPanelContent(null)}
+                        sx={{ fontSize: "0.6rem", height: 18, cursor: "pointer" }} />
+                    </Tooltip>
+                  )}
                 </Stack>
-                <Tooltip title="Recolher painel de Tasks">
+                <Tooltip title="Recolher painel">
                   <IconButton size="small" onClick={() => setTasksOpen(false)}
                     sx={{ p: 0.4, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
                     <ChevronRightIcon sx={{ fontSize: "1rem" }} />
@@ -881,74 +917,113 @@ function ProjectDetailPageInner() {
               </Stack>
 
               {/* Task list */}
-              <Box sx={{ flexGrow: 1, overflow: "auto", p: 0 }}>
-                {!tasks || tasks.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
-                    {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
-                  </Typography>
-                ) : (
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Task</TableCell>
-                        <TableCell>Descrição</TableCell>
-                        <TableCell sx={{ width: 110 }}>Status</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {tasks.map((t) => {
-                        const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
-                        const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
-                        return (
-                          <TableRow key={t.id}
-                            sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
-                            <TableCell>
-                              <Typography variant="caption" fontFamily="monospace" noWrap>{t.taskId}</Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Stack direction="row" spacing={0.75} alignItems="center">
-                                {isActiveT && <CircularProgress size={10} color="primary" />}
-                                <Typography variant="body2" sx={{ fontSize: "0.75rem" }}>{t.requirements ?? "—"}</Typography>
-                              </Stack>
-                            </TableCell>
-                            <TableCell>
-                              <Chip size="small" label={t.status ?? "—"}
-                                color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
-                                sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
-                            </TableCell>
+              {/* Body — Tasks or moved tab */}
+              {rightPanelContent === null ? (
+                <Box sx={{ flexGrow: 1, overflow: "auto", p: 0 }}>
+                  {!tasks || tasks.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
+                      {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
+                    </Typography>
+                  ) : (
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Task</TableCell>
+                          <TableCell>Descrição</TableCell>
+                          <TableCell sx={{ width: 110 }}>Status</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {tasks.map((t) => {
+                          const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
+                          const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                          return (
+                            <TableRow key={t.id}
+                              sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
+                              <TableCell>
+                                <Typography variant="caption" fontFamily="monospace" noWrap>{t.taskId}</Typography>
+                              </TableCell>
+                              <TableCell>
+                                <Stack direction="row" spacing={0.75} alignItems="center">
+                                  {isActiveT && <CircularProgress size={10} color="primary" />}
+                                  <Typography variant="body2" sx={{ fontSize: "0.75rem" }}>{t.requirements ?? "—"}</Typography>
+                                </Stack>
+                              </TableCell>
+                              <TableCell>
+                                <Chip size="small" label={t.status ?? "—"}
+                                  color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
+                                  sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </Box>
+              ) : rightPanelContent === 0 ? (
+                <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                  {isRunning && workingMessage && (
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "primary.main" + "12", flexShrink: 0 }}>
+                      <CircularProgress size={12} color="primary" />
+                      <Typography variant="caption" color="primary.main" fontWeight={500} noWrap>{workingMessage.slice(0, 80)}</Typography>
+                    </Stack>
+                  )}
+                  <LiveDialogue projectId={id} pollIntervalMs={isRunning ? 4000 : 15000} onEntriesLoaded={handleDialogueLoaded} />
+                </Box>
+              ) : rightPanelContent === 1 ? (
+                <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", p: 1 }}>
+                  <GraphView projectId={id} pollIntervalMs={isRunning ? 6000 : 0} height="100%" planningDocs={artifacts?.docs ?? []} />
+                </Box>
+              ) : rightPanelContent === 2 ? (
+                <Box sx={{ flexGrow: 1, overflow: "auto", p: 2 }}>
+                  {(!artifacts || !artifacts.docs?.length) ? (
+                    <Typography variant="body2" color="text.secondary">Documentos aparecerão aqui.</Typography>
+                  ) : (
+                    <Table size="small">
+                      <TableHead><TableRow><TableCell>Arquivo</TableCell><TableCell sx={{ width: 110 }}>Agente</TableCell></TableRow></TableHead>
+                      <TableBody>
+                        {artifacts.docs.map((d, i) => (
+                          <TableRow key={i} onClick={() => setDocModal({ filename: d.filename, title: d.title ?? d.filename })}
+                            sx={{ cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}>
+                            <TableCell><Typography variant="body2" sx={{ fontSize: "0.78rem" }}>{d.title ?? d.filename}</Typography></TableCell>
+                            <TableCell>{(() => { const p = d.creator ? getAgentProfile(d.creator) : null; return <Chip size="small" label={p?.name ?? d.creator ?? "—"} sx={{ fontSize: "0.6rem", bgcolor: p ? `${p.color}22` : undefined, color: p?.color }} />; })()}</TableCell>
                           </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                )}
-              </Box>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </Box>
+              ) : (
+                <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                  {(!codeFiles || codeFiles.totalFiles === 0) ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>Arquivos de código aparecerão aqui.</Typography>
+                  ) : (
+                    <CodeExplorer projectId={id} files={codeFiles.files} appsRoot={codeFiles.appsRoot} height="100%" />
+                  )}
+                </Box>
+              )}
             </Card>
           </Grid>
         ) : (
           /* Collapsed — thin button to reopen */
           <Grid size="auto">
-            <Box sx={{
-              height: "calc(100vh - 180px)", minHeight: 600,
-              display: "flex", alignItems: "center",
-            }}>
-              <Tooltip title="Abrir painel de Tasks" placement="left">
-                <Box
-                  onClick={() => setTasksOpen(true)}
-                  sx={{
-                    cursor: "pointer", display: "flex", flexDirection: "column",
-                    alignItems: "center", justifyContent: "center", gap: 1,
-                    width: 28, height: "100%",
-                    bgcolor: "background.paper",
-                    border: "1px solid", borderColor: "divider", borderRadius: 1,
-                    "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
-                    transition: "all 0.15s",
-                  }}
-                >
+            <Box sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", alignItems: "center" }}>
+              <Tooltip title="Abrir painel direito" placement="left">
+                <Box onClick={() => setTasksOpen(true)} sx={{
+                  cursor: "pointer", display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", gap: 1,
+                  width: 28, height: "100%", bgcolor: "background.paper",
+                  border: "1px solid", borderColor: "divider", borderRadius: 1,
+                  "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
+                  transition: "all 0.15s",
+                }}>
                   <ChevronLeftIcon sx={{ fontSize: "1rem", color: "text.secondary" }} />
                   <Typography variant="caption" color="text.secondary"
                     sx={{ fontSize: "0.6rem", writingMode: "vertical-rl", textOrientation: "mixed", letterSpacing: "0.05em" }}>
-                    Tasks {tasks && tasks.length > 0 ? `${tasksDone}/${tasks.length}` : ""}
+                    {rightPanelContent !== null
+                      ? ["Diálogo","Grafo","Docs","Código"][rightPanelContent]
+                      : `Tasks ${tasks && tasks.length > 0 ? `${tasksDone}/${tasks.length}` : ""}`}
                   </Typography>
                 </Box>
               </Tooltip>
@@ -956,6 +1031,17 @@ function ProjectDetailPageInner() {
           </Grid>
         )}
       </Grid>
+
+      {/* Doc viewer modal */}
+      {docModal && (
+        <DocViewerModal
+          projectId={id}
+          filename={docModal.filename}
+          title={docModal.title}
+          open={!!docModal}
+          onClose={() => setDocModal(null)}
+        />
+      )}
     </Box>
   );
 }
