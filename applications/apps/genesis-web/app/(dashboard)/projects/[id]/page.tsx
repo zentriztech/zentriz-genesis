@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
@@ -10,7 +10,6 @@ import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
-import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import LinearProgress from "@mui/material/LinearProgress";
 import Snackbar from "@mui/material/Snackbar";
@@ -173,7 +172,12 @@ function ProjectDetailPageInner() {
   const [centerTabs, setCenterTabs] = useState<number[]>([0, 1, 2, 3]);
   const [rightTabs, setRightTabs]   = useState<number[]>([]);
   const [centerTab, setCenterTab]   = useState(0);   // active tab index within centerTabs
-  const [rightTab, setRightTab]     = useState(0);   // active tab index within rightTabs
+  // rightActiveTab: -1 = Tasks, 0..N = rightTabs index
+  const [rightActiveTab, setRightActiveTab] = useState<number>(-1);
+  // Column widths (percentages) — draggable
+  const [colWidths, setColWidths]   = useState({ left: 25, center: 42, right: 33 });
+  const dragRef = useRef<{ col: "lc" | "cr"; startX: number; startLeft: number; startCenter: number; startRight: number } | null>(null);
+  const layoutRef = useRef<HTMLDivElement>(null);
   // Doc viewer modal
   const [docModal, setDocModal]     = useState<{ filename: string; title: string } | null>(null);
 
@@ -195,7 +199,7 @@ function ProjectDetailPageInner() {
     setRightTabs(prev => {
       if (prev.includes(tabId)) return prev;
       const next = [...prev, tabId];
-      setRightTab(next.length - 1); // activate newly added tab
+      setRightActiveTab(next.length - 1); // activate newly added tab
       return next;
     });
     setTasksOpen(true);
@@ -204,14 +208,12 @@ function ProjectDetailPageInner() {
   const moveTabToCenter = (tabId: number) => {
     setRightTabs(prev => {
       const next = prev.filter(t => t !== tabId);
-      setRightTab(i => Math.min(i, Math.max(next.length - 1, 0)));
+      setRightActiveTab(next.length === 0 ? -1 : Math.max(0, Math.min(next.length - 1, 0)));
       return next;
     });
     setCenterTabs(prev => {
-      // insert in original order
       const all = [0, 1, 2, 3];
-      const next = all.filter(t => prev.includes(t) || t === tabId);
-      return next;
+      return all.filter(t => prev.includes(t) || t === tabId);
     });
   };
 
@@ -373,6 +375,32 @@ function ProjectDetailPageInner() {
       setAcceptLoading(false);
     }
   };
+
+  // ── Column resize drag handlers (must be before early returns — hooks rule) ──
+  const startDrag = useCallback((col: "lc" | "cr", e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { col, startX: e.clientX, startLeft: colWidths.left, startCenter: colWidths.center, startRight: colWidths.right };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current || !layoutRef.current) return;
+      const totalW = layoutRef.current.offsetWidth;
+      const deltaPct = ((ev.clientX - dragRef.current.startX) / totalW) * 100;
+      const MIN = 15;
+      setColWidths(prev => {
+        if (dragRef.current!.col === "lc") {
+          const newLeft   = Math.max(MIN, Math.min(dragRef.current!.startLeft + deltaPct, 100 - MIN * 2));
+          const newCenter = Math.max(MIN, dragRef.current!.startCenter - (newLeft - dragRef.current!.startLeft));
+          return { ...prev, left: newLeft, center: newCenter };
+        } else {
+          const newCenter = Math.max(MIN, Math.min(dragRef.current!.startCenter + deltaPct, 100 - MIN * 2));
+          const newRight  = Math.max(MIN, dragRef.current!.startRight - (newCenter - dragRef.current!.startCenter));
+          return { ...prev, center: newCenter, right: newRight };
+        }
+      });
+    };
+    const onUp = () => { dragRef.current = null; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [colWidths]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   if (!project) {
@@ -664,10 +692,10 @@ function ProjectDetailPageInner() {
         </Box>
       )}
 
-      {/* ── Main cockpit layout ── */}
-      <Grid container spacing={2}>
-        {/* ── LEFT COLUMN: Pipeline status + metrics + tasks ── */}
-        <Grid size={{ xs: 12, md: 3.5 }}>
+      {/* ── Main cockpit layout — 3 resizable columns ── */}
+      <Box ref={layoutRef} sx={{ display: "flex", gap: 0, alignItems: "flex-start", userSelect: dragRef.current ? "none" : "auto" }}>
+        {/* LEFT COLUMN */}
+        <Box sx={{ width: `${colWidths.left}%`, flexShrink: 0, pr: 1 }}>
           <Stack spacing={2}>
             {/* Pipeline stepper vertical */}
             <Card>
@@ -847,10 +875,16 @@ function ProjectDetailPageInner() {
               </Card>
             )}
           </Stack>
-        </Grid>
+        </Box>
+
+        {/* Drag handle left↔center */}
+        <Box onMouseDown={(e) => startDrag("lc", e)}
+          sx={{ width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
+            bgcolor: "transparent", "&:hover": { bgcolor: "primary.main" + "40" },
+            transition: "background-color 0.15s", borderRadius: 1, mx: 0.25 }} />
 
         {/* ── CENTER PANEL ── */}
-        <Grid size={{ xs: 12, md: tasksOpen ? 4.25 : 8.5 }} sx={{ transition: "all 0.25s ease" }}>
+        <Box sx={{ width: `${colWidths.center}%`, flexShrink: 0, px: 0.5 }}>
           <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
             {centerTabs.length === 0 ? (
               <Box sx={{ flexGrow: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 1 }}>
@@ -886,43 +920,59 @@ function ProjectDetailPageInner() {
               </>
             )}
           </Card>
-        </Grid>
+        </Box>
+
+        {/* Drag handle center↔right — only when right panel open */}
+        {tasksOpen && (
+          <Box onMouseDown={(e) => startDrag("cr", e)}
+            sx={{ width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
+              bgcolor: "transparent", "&:hover": { bgcolor: "primary.main" + "40" },
+              transition: "background-color 0.15s", borderRadius: 1, mx: 0.25 }} />
+        )}
 
         {/* ── RIGHT PANEL: Tasks + moved tabs (collapsible) ── */}
         {tasksOpen ? (
-          <Grid size={{ xs: 12, md: 4.25 }} sx={{ transition: "all 0.25s ease" }}>
+          <Box sx={{ width: `${colWidths.right}%`, flexShrink: 0, pl: 0.5 }}>
             <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
-              {/* Header: Tasks title + moved tab tabs + collapse button */}
+              {/* Header: unified Tabs — Tasks first, then moved tabs */}
               <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid", borderColor: "divider", pr: 0.5, flexShrink: 0 }}>
-                {/* Tasks always shown as first section header */}
-                <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 2, minHeight: 44, flexShrink: 0 }}>
-                  <Typography variant="body2" fontWeight={600}>Tasks</Typography>
-                  {tasks && tasks.length > 0 && (
-                    <Chip size="small" label={`${tasksDone}/${tasks.length}`}
-                      color={tasksDone === tasks.length ? "success" : "default"}
-                      sx={{ fontSize: "0.65rem", height: 18 }} />
-                  )}
-                </Stack>
-                {/* Moved tabs shown as sub-tabs */}
-                {rightTabs.length > 0 && (
-                  <Tabs value={Math.min(rightTab, rightTabs.length - 1)} onChange={(_e, v) => setRightTab(v as number)}
-                    sx={{ flex: 1, minHeight: 44 }}>
-                    {rightTabs.map((tabId, idx) => (
-                      <Tab key={tabId}
-                        icon={TAB_ICONS[tabId] ?? undefined} iconPosition="start"
-                        label={tabId === 2 && artifacts?.docs?.length ? `Docs (${artifacts.docs.length})`
-                          : tabId === 3 && codeFiles?.totalFiles ? `Código (${codeFiles.totalFiles})`
-                          : TAB_LABELS[tabId]}
-                        value={idx}
-                        sx={{ minHeight: 44, textTransform: "none", fontSize: "0.75rem", gap: 0.5 }}
-                      />
-                    ))}
-                  </Tabs>
-                )}
-                {/* Move back button — only shown when rightTabs has something */}
-                {rightTabs.length > 0 && (
+                <Tabs
+                  value={rightActiveTab === -1 ? 0 : rightActiveTab + 1}
+                  onChange={(_e, v) => {
+                    const idx = v as number;
+                    setRightActiveTab(idx === 0 ? -1 : idx - 1);
+                  }}
+                  sx={{ flex: 1, minHeight: 44 }}
+                >
+                  {/* Tasks always first tab */}
+                  <Tab
+                    label={<Stack direction="row" spacing={0.75} alignItems="center">
+                      <span>Tasks</span>
+                      {tasks && tasks.length > 0 && (
+                        <Chip size="small" label={`${tasksDone}/${tasks.length}`}
+                          color={tasksDone === tasks.length ? "success" : "default"}
+                          sx={{ fontSize: "0.6rem", height: 16 }} />
+                      )}
+                    </Stack>}
+                    value={0}
+                    sx={{ minHeight: 44, textTransform: "none", fontSize: "0.78rem" }}
+                  />
+                  {/* Moved tabs */}
+                  {rightTabs.map((tabId, idx) => (
+                    <Tab key={tabId}
+                      icon={TAB_ICONS[tabId] ?? undefined} iconPosition="start"
+                      label={tabId === 2 && artifacts?.docs?.length ? `Docs (${artifacts.docs.length})`
+                        : tabId === 3 && codeFiles?.totalFiles ? `Código (${codeFiles.totalFiles})`
+                        : TAB_LABELS[tabId]}
+                      value={idx + 1}
+                      sx={{ minHeight: 44, textTransform: "none", fontSize: "0.75rem", gap: 0.5 }}
+                    />
+                  ))}
+                </Tabs>
+                {/* Move back — only when a moved tab is active */}
+                {rightActiveTab >= 0 && (
                   <Tooltip title="Mover aba de volta para o centro">
-                    <IconButton size="small" onClick={() => moveTabToCenter(rightTabs[Math.min(rightTab, rightTabs.length - 1)])}
+                    <IconButton size="small" onClick={() => moveTabToCenter(rightTabs[rightActiveTab])}
                       sx={{ p: 0.4, color: "text.secondary", "&:hover": { color: "primary.main" } }}>
                       <ChevronLeftIcon sx={{ fontSize: "1rem" }} />
                     </IconButton>
@@ -935,11 +985,9 @@ function ProjectDetailPageInner() {
                   </IconButton>
                 </Tooltip>
               </Stack>
-
-              {/* Body: show moved tab if one is selected, else Tasks */}
-              {rightTabs.length > 0 ? (
-                renderTabContent(rightTabs[Math.min(rightTab, rightTabs.length - 1)])
-              ) : (
+              {/* Tasks — UNUSED below, keeping for reference only (removed) */}
+              {/* Body: Tasks tab or moved tab content */}
+              {rightActiveTab === -1 ? (
                 <Box sx={{ flexGrow: 1, overflow: "auto", p: 0 }}>
                   {!tasks || tasks.length === 0 ? (
                     <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
@@ -980,32 +1028,32 @@ function ProjectDetailPageInner() {
                     </Table>
                   )}
                 </Box>
+              ) : (
+                renderTabContent(rightTabs[rightActiveTab])
               )}
             </Card>
-          </Grid>
+          </Box>
         ) : (
-          <Grid size="auto">
-            <Box sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", alignItems: "center" }}>
-              <Tooltip title="Abrir painel direito" placement="left">
-                <Box onClick={() => setTasksOpen(true)} sx={{
-                  cursor: "pointer", display: "flex", flexDirection: "column",
-                  alignItems: "center", justifyContent: "center", gap: 1,
-                  width: 28, height: "100%", bgcolor: "background.paper",
-                  border: "1px solid", borderColor: "divider", borderRadius: 1,
-                  "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
-                  transition: "all 0.15s",
-                }}>
-                  <ChevronLeftIcon sx={{ fontSize: "1rem", color: "text.secondary" }} />
-                  <Typography variant="caption" color="text.secondary"
-                    sx={{ fontSize: "0.6rem", writingMode: "vertical-rl", textOrientation: "mixed", letterSpacing: "0.05em" }}>
-                    {rightTabs.length > 0 ? TAB_LABELS[rightTabs[0]] : `Tasks ${tasks?.length ? `${tasksDone}/${tasks.length}` : ""}`}
-                  </Typography>
-                </Box>
-              </Tooltip>
-            </Box>
-          </Grid>
+          <Box sx={{ display: "flex", alignItems: "center", height: "calc(100vh - 180px)", minHeight: 600 }}>
+            <Tooltip title="Abrir painel direito" placement="left">
+              <Box onClick={() => setTasksOpen(true)} sx={{
+                cursor: "pointer", display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center", gap: 1,
+                width: 28, height: "100%", bgcolor: "background.paper",
+                border: "1px solid", borderColor: "divider", borderRadius: 1,
+                "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
+                transition: "all 0.15s",
+              }}>
+                <ChevronLeftIcon sx={{ fontSize: "1rem", color: "text.secondary" }} />
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ fontSize: "0.6rem", writingMode: "vertical-rl", textOrientation: "mixed", letterSpacing: "0.05em" }}>
+                  {rightTabs.length > 0 ? TAB_LABELS[rightTabs[0]] : `Tasks ${tasks?.length ? `${tasksDone}/${tasks.length}` : ""}`}
+                </Typography>
+              </Box>
+            </Tooltip>
+          </Box>
         )}
-      </Grid>
+      </Box>
 
       {/* Doc viewer modal */}
       {docModal && (
