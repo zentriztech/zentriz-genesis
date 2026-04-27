@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { observer } from "mobx-react-lite";
-import { motion } from "framer-motion";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -165,8 +164,7 @@ function ProjectDetailPageInner() {
   const [runError, setRunError]     = useState<string | null>(null);
   const [acceptLoading, setAcceptLoading] = useState(false);
   const [copiedCmd, setCopiedCmd]   = useState(false);
-  const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo
-  const [bottomTab, setBottomTab]   = useState(0); // 0=Tasks, 1=Artefatos, 2=Código
+  const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo, 2=Tasks, 3=Documentos, 4=Código
 
   // Working agent state (from dialogue)
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
@@ -719,27 +717,26 @@ function ProjectDetailPageInner() {
           </Stack>
         </Grid>
 
-        {/* ── RIGHT COLUMN: Dialogue + Graph ── */}
+        {/* ── RIGHT COLUMN: all tabs ── */}
         <Grid size={{ xs: 12, md: 8.5 }}>
           <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-            {/* Tabs: Diálogo | Grafo */}
             <Tabs
               value={rightTab}
               onChange={(_e, v) => setRightTab(v as number)}
               sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44 }}
             >
-              <Tab
-                icon={<ForumIcon sx={{ fontSize: "0.9rem" }} />}
-                iconPosition="start"
+              <Tab icon={<ForumIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
                 label="Diálogo ao vivo"
-                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }}
-              />
-              <Tab
-                icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />}
-                iconPosition="start"
+                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
+              <Tab icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
                 label="Grafo Obsidian"
-                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }}
-              />
+                sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
+              <Tab label={tasks && tasks.length > 0 ? `Tasks (${tasksDone}/${tasks.length})` : "Tasks"}
+                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+              <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
+                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
+              <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
+                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
             </Tabs>
 
             {/* Tab 0 — Diálogo */}
@@ -772,163 +769,141 @@ function ProjectDetailPageInner() {
                 />
               </Box>
             )}
-          </Card>
-        </Grid>
-      </Grid>
 
-      {/* ── Bottom section: Tasks + Artifacts + Code ── */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0, transition: { delay: 0.2 } }}
-      >
-        <Card sx={{ mt: 2 }}>
-          <Tabs
-            value={bottomTab}
-            onChange={(_e, v) => setBottomTab(v as number)}
-            sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44 }}
-          >
-            <Tab label={tasks && tasks.length > 0 ? `Tasks (${tasksDone}/${tasks.length})` : "Tasks"}
-              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
-            <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
-              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
-            <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
-              sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
-          </Tabs>
-
-          {/* Tasks */}
-          {bottomTab === 0 && (
-            <Box sx={{ p: 0 }}>
-              {isRunning && (
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pt: 1 }}>
-                  Atualização automática a cada 8s
-                </Typography>
-              )}
-              {!tasks || tasks.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
-                  {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
-                </Typography>
-              ) : (
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Task</TableCell>
-                      <TableCell sx={{ minWidth: 200 }}>Descrição</TableCell>
-                      <TableCell sx={{ width: 120 }}>Status</TableCell>
-                      <TableCell sx={{ width: 90 }}>Módulo</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {tasks.map((t) => {
-                      const isDoneT  = t.status === "DONE" || t.status === "QA_PASS";
-                      const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
-                      return (
-                        <TableRow key={t.id}
-                          sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
-                          <TableCell>
-                            <Typography variant="caption" fontFamily="monospace">{t.taskId}</Typography>
-                          </TableCell>
-                          <TableCell>
-                            <Stack direction="row" spacing={0.75} alignItems="center">
-                              {isActiveT && <CircularProgress size={10} color="primary" />}
-                              <Typography variant="body2" sx={{ fontSize: "0.78rem" }}>{t.requirements ?? "—"}</Typography>
-                            </Stack>
-                          </TableCell>
-                          <TableCell>
-                            <Chip size="small" label={t.status ?? "—"}
-                              color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
-                              sx={{ fontFamily: "monospace", fontSize: "0.62rem" }} />
-                          </TableCell>
-                          <TableCell>
-                            <Typography variant="caption" color="text.secondary">{t.module ?? t.ownerRole ?? "—"}</Typography>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              )}
-            </Box>
-          )}
-
-          {/* Documents */}
-          {bottomTab === 1 && (
-            <Box sx={{ p: 2 }}>
-              {(!artifacts || !artifacts.docs?.length) ? (
-                <Typography variant="body2" color="text.secondary">Documentos gerados pelos agentes aparecerão aqui.</Typography>
-              ) : (
-                <>
-                  {artifacts.projectDocsRoot && (
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-                      <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{artifacts.projectDocsRoot}</Box>
-                    </Typography>
-                  )}
+            {/* Tab 2 — Tasks */}
+            {rightTab === 2 && (
+              <Box sx={{ p: 0, flexGrow: 1, overflow: "auto" }}>
+                {isRunning && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pt: 1 }}>
+                    Atualização automática a cada 8s
+                  </Typography>
+                )}
+                {!tasks || tasks.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
+                    {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
+                  </Typography>
+                ) : (
                   <Table size="small">
                     <TableHead>
                       <TableRow>
-                        <TableCell>Arquivo</TableCell>
-                        <TableCell sx={{ width: 110 }}>Agente</TableCell>
-                        <TableCell sx={{ width: 140 }}>Data</TableCell>
+                        <TableCell>Task</TableCell>
+                        <TableCell sx={{ minWidth: 200 }}>Descrição</TableCell>
+                        <TableCell sx={{ width: 120 }}>Status</TableCell>
+                        <TableCell sx={{ width: 90 }}>Módulo</TableCell>
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {artifacts.docs.map((d, i) => (
-                        <TableRow key={i}>
-                          <TableCell>
-                            <Typography variant="body2">{d.title ?? d.filename}</Typography>
-                            {d.title && d.filename !== d.title && (
-                              <Typography variant="caption" color="text.secondary" fontFamily="monospace">{d.filename}</Typography>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {(() => {
-                              const profile = d.creator ? getAgentProfile(d.creator) : null;
-                              return (
-                                <Chip
-                                  size="small"
-                                  label={profile?.name ?? d.creator ?? "—"}
-                                  sx={{
-                                    fontSize: "0.62rem",
-                                    bgcolor: profile ? `${profile.color}22` : undefined,
-                                    color: profile?.color,
-                                    border: `1px solid ${profile?.color ?? "#30363D"}44`,
-                                  }}
-                                />
-                              );
-                            })()}
-                          </TableCell>
-                          <TableCell>
-                            <Typography variant="caption" color="text.secondary">
-                              {d.created_at ? new Date(d.created_at).toLocaleString("pt-BR") : "—"}
-                            </Typography>
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {tasks.map((t) => {
+                        const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
+                        const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                        return (
+                          <TableRow key={t.id}
+                            sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
+                            <TableCell>
+                              <Typography variant="caption" fontFamily="monospace">{t.taskId}</Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Stack direction="row" spacing={0.75} alignItems="center">
+                                {isActiveT && <CircularProgress size={10} color="primary" />}
+                                <Typography variant="body2" sx={{ fontSize: "0.78rem" }}>{t.requirements ?? "—"}</Typography>
+                              </Stack>
+                            </TableCell>
+                            <TableCell>
+                              <Chip size="small" label={t.status ?? "—"}
+                                color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
+                                sx={{ fontFamily: "monospace", fontSize: "0.62rem" }} />
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="caption" color="text.secondary">{t.module ?? t.ownerRole ?? "—"}</Typography>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
-                </>
-              )}
-            </Box>
-          )}
+                )}
+              </Box>
+            )}
 
-          {/* Code files — VS Code style explorer */}
-          {bottomTab === 2 && (
-            <Box sx={{ p: 0 }}>
-              {(!codeFiles || codeFiles.totalFiles === 0) ? (
-                <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-                  Arquivos de código gerados pelo Dev aparecerão aqui.
-                </Typography>
-              ) : (
-                <CodeExplorer
-                  projectId={id}
-                  files={codeFiles.files}
-                  appsRoot={codeFiles.appsRoot}
-                  height={540}
-                />
-              )}
-            </Box>
-          )}
-        </Card>
-      </motion.div>
+            {/* Tab 3 — Documentos */}
+            {rightTab === 3 && (
+              <Box sx={{ p: 2, flexGrow: 1, overflow: "auto" }}>
+                {(!artifacts || !artifacts.docs?.length) ? (
+                  <Typography variant="body2" color="text.secondary">Documentos gerados pelos agentes aparecerão aqui.</Typography>
+                ) : (
+                  <>
+                    {artifacts.projectDocsRoot && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+                        <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{artifacts.projectDocsRoot}</Box>
+                      </Typography>
+                    )}
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Arquivo</TableCell>
+                          <TableCell sx={{ width: 110 }}>Agente</TableCell>
+                          <TableCell sx={{ width: 140 }}>Data</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {artifacts.docs.map((d, i) => (
+                          <TableRow key={i}>
+                            <TableCell>
+                              <Typography variant="body2">{d.title ?? d.filename}</Typography>
+                              {d.title && d.filename !== d.title && (
+                                <Typography variant="caption" color="text.secondary" fontFamily="monospace">{d.filename}</Typography>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {(() => {
+                                const profile = d.creator ? getAgentProfile(d.creator) : null;
+                                return (
+                                  <Chip size="small"
+                                    label={profile?.name ?? d.creator ?? "—"}
+                                    sx={{
+                                      fontSize: "0.62rem",
+                                      bgcolor: profile ? `${profile.color}22` : undefined,
+                                      color: profile?.color,
+                                      border: `1px solid ${profile?.color ?? "#30363D"}44`,
+                                    }}
+                                  />
+                                );
+                              })()}
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="caption" color="text.secondary">
+                                {d.created_at ? new Date(d.created_at).toLocaleString("pt-BR") : "—"}
+                              </Typography>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </>
+                )}
+              </Box>
+            )}
+
+            {/* Tab 4 — Código */}
+            {rightTab === 4 && (
+              <Box sx={{ p: 0, flexGrow: 1, overflow: "hidden" }}>
+                {(!codeFiles || codeFiles.totalFiles === 0) ? (
+                  <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                    Arquivos de código gerados pelo Dev aparecerão aqui.
+                  </Typography>
+                ) : (
+                  <CodeExplorer
+                    projectId={id}
+                    files={codeFiles.files}
+                    appsRoot={codeFiles.appsRoot}
+                    height={540}
+                  />
+                )}
+              </Box>
+            )}
+          </Card>
+        </Grid>
+      </Grid>
     </Box>
   );
 }
