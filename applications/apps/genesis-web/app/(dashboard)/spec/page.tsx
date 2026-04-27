@@ -17,10 +17,7 @@ import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
-import FormControl from "@mui/material/FormControl";
-import InputLabel from "@mui/material/InputLabel";
-import MenuItem from "@mui/material/MenuItem";
-import Select from "@mui/material/Select";
+import Autocomplete from "@mui/material/Autocomplete";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
@@ -74,33 +71,104 @@ function MermaidBlock({ code }: { code: string }) {
 
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
 
-const PROJECT_TYPES = [
-  { value: "",                    label: "Não especificado"          },
-  { value: "backend_api",         label: "🔌 Backend / API REST"     },
-  { value: "backend_graphql",     label: "🔗 Backend / GraphQL"      },
-  { value: "fullstack_webapp",    label: "🖥️ Fullstack — Web App"   },
-  { value: "frontend_webapp",     label: "🎨 Frontend — Web App"     },
-  { value: "landing_page",        label: "🏠 Landing Page"           },
-  { value: "ecommerce",           label: "🛒 E-commerce"             },
-  { value: "mobile_app",          label: "📱 App Mobile"             },
-  { value: "saas_platform",       label: "☁️ Plataforma SaaS"       },
-  { value: "dashboard_analytics", label: "📊 Dashboard / Analytics"  },
-  { value: "cli_tool",            label: "⌨️ CLI / Ferramenta"       },
-  { value: "microservice",        label: "🔧 Microsserviço"          },
-  { value: "data_pipeline",       label: "🔄 Pipeline de Dados"      },
-  { value: "other",               label: "📦 Outro"                  },
+interface ProjectTypeOption { value: string; label: string; group: string }
+
+const PROJECT_TYPES: ProjectTypeOption[] = [
+  // ── Backend ────────────────────────────────────────────────────────────────
+  { group: "Backend",   value: "backend_api",           label: "🔌 API REST"                        },
+  { group: "Backend",   value: "backend_graphql",        label: "🔗 API GraphQL"                     },
+  { group: "Backend",   value: "backend_grpc",           label: "⚡ API gRPC"                        },
+  { group: "Backend",   value: "backend_websocket",      label: "🌐 WebSocket / Realtime"            },
+  { group: "Backend",   value: "backend_serverless",     label: "☁️ Serverless (Lambda / Functions)" },
+  { group: "Backend",   value: "backend_microservice",   label: "🔧 Microsserviço"                   },
+  { group: "Backend",   value: "backend_worker",         label: "🤖 Worker / Job agendado (cron/queue)" },
+  { group: "Backend",   value: "backend_data_pipeline",  label: "🔄 Pipeline de Dados / ETL"        },
+  { group: "Backend",   value: "backend_event_driven",   label: "📨 Event-Driven / Message Bus"     },
+  { group: "Backend",   value: "backend_auth_service",   label: "🔐 Serviço de Autenticação / IAM"  },
+  { group: "Backend",   value: "backend_notification",   label: "🔔 Serviço de Notificações"        },
+  { group: "Backend",   value: "backend_file_storage",   label: "📂 Serviço de Armazenamento"       },
+  { group: "Backend",   value: "backend_search",         label: "🔍 Serviço de Busca / Indexação"   },
+  { group: "Backend",   value: "backend_payment",        label: "💳 Serviço de Pagamentos"          },
+  { group: "Backend",   value: "backend_cms_api",        label: "📝 CMS Headless / Content API"     },
+  { group: "Backend",   value: "backend_analytics_api",  label: "📊 API de Analytics / Métricas"    },
+  { group: "Backend",   value: "backend_ai_ml",          label: "🧠 API de IA / ML / LLM"           },
+
+  // ── Frontend ───────────────────────────────────────────────────────────────
+  { group: "Frontend",  value: "frontend_webapp",        label: "🎨 Web App (SPA)"                  },
+  { group: "Frontend",  value: "frontend_pwa",           label: "📱 Progressive Web App (PWA)"      },
+  { group: "Frontend",  value: "frontend_landing",       label: "🏠 Landing Page"                   },
+  { group: "Frontend",  value: "frontend_institutional", label: "🏢 Site Institucional / Portfólio" },
+  { group: "Frontend",  value: "frontend_blog",          label: "📰 Blog / Portal de Conteúdo"      },
+  { group: "Frontend",  value: "frontend_ecommerce",     label: "🛒 E-commerce (Frontend)"          },
+  { group: "Frontend",  value: "frontend_dashboard",     label: "📊 Dashboard / Admin Panel"        },
+  { group: "Frontend",  value: "frontend_design_system", label: "🎨 Design System / Component Lib"  },
+
+  // ── Fullstack ──────────────────────────────────────────────────────────────
+  { group: "Fullstack", value: "fullstack_webapp",       label: "🖥️ Web App Fullstack"             },
+  { group: "Fullstack", value: "fullstack_saas",         label: "☁️ Plataforma SaaS"               },
+  { group: "Fullstack", value: "fullstack_ecommerce",    label: "🛒 E-commerce Completo"            },
+  { group: "Fullstack", value: "fullstack_erp",          label: "🏢 ERP / Sistema Interno"          },
+  { group: "Fullstack", value: "fullstack_marketplace",  label: "🏪 Marketplace"                    },
+  { group: "Fullstack", value: "fullstack_crm",          label: "👥 CRM / Gestão de Clientes"       },
+  { group: "Fullstack", value: "fullstack_lms",          label: "🎓 Plataforma EAD / LMS"           },
+  { group: "Fullstack", value: "fullstack_fintech",      label: "💰 Fintech / Banco Digital"        },
+  { group: "Fullstack", value: "fullstack_healthtech",   label: "🏥 Healthtech / Telemedicina"      },
+  { group: "Fullstack", value: "fullstack_proptech",     label: "🏠 Proptech / Imobiliário"         },
+
+  // ── Mobile ─────────────────────────────────────────────────────────────────
+  { group: "Mobile",    value: "mobile_crossplatform",   label: "📱 App Mobile Multiplataforma (RN/Flutter)" },
+  { group: "Mobile",    value: "mobile_ios",             label: "🍎 App iOS Nativo (Swift)"         },
+  { group: "Mobile",    value: "mobile_android",         label: "🤖 App Android Nativo (Kotlin)"    },
+
+  // ── Infra / DevOps ─────────────────────────────────────────────────────────
+  { group: "Infra / DevOps", value: "infra_iac",         label: "🏗️ IaC / Infraestrutura (Terraform/CDK)" },
+  { group: "Infra / DevOps", value: "infra_cicd",        label: "🔄 Pipeline CI/CD"                 },
+  { group: "Infra / DevOps", value: "infra_monitoring",  label: "📡 Observabilidade / Monitoring"   },
+  { group: "Infra / DevOps", value: "infra_data_lake",   label: "🗄️ Data Lake / Data Warehouse"    },
+
+  // ── Automação / Bots ───────────────────────────────────────────────────────
+  { group: "Automação / Bots", value: "bot_chat",        label: "🤖 Chatbot (Telegram/Discord/WhatsApp)" },
+  { group: "Automação / Bots", value: "bot_scraper",     label: "🕷️ Web Scraper / Crawler"         },
+  { group: "Automação / Bots", value: "bot_automation",  label: "⚙️ Automação / RPA"               },
+  { group: "Automação / Bots", value: "integration",     label: "🔌 Integração / Conector de APIs"  },
+
+  // ── Biblioteca / SDK ───────────────────────────────────────────────────────
+  { group: "Biblioteca / SDK", value: "lib_sdk",         label: "📦 SDK / Biblioteca / Package"     },
+  { group: "Biblioteca / SDK", value: "lib_cli",         label: "⌨️ CLI / Ferramenta de linha de comando" },
+  { group: "Biblioteca / SDK", value: "lib_plugin",      label: "🔧 Plugin / Extensão"              },
+
+  // ── Outro ──────────────────────────────────────────────────────────────────
+  { group: "Outro",     value: "other",                  label: "📦 Outro / Não listado"            },
 ];
 
 function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const selected = PROJECT_TYPES.find(t => t.value === value) ?? null;
   return (
-    <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-      <InputLabel>Tipo do projeto (opcional)</InputLabel>
-      <Select value={value} label="Tipo do projeto (opcional)" onChange={(e) => onChange(e.target.value)}>
-        {PROJECT_TYPES.map((t) => (
-          <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
-        ))}
-      </Select>
-    </FormControl>
+    <Autocomplete
+      size="small"
+      options={PROJECT_TYPES}
+      groupBy={(o) => o.group}
+      getOptionLabel={(o) => o.label}
+      value={selected}
+      onChange={(_e, v) => onChange(v?.value ?? "")}
+      isOptionEqualToValue={(o, v) => o.value === v.value}
+      renderInput={(params) => (
+        <TextField {...params} label="Tipo do projeto (opcional)"
+          placeholder="Digite para filtrar…" sx={{ mb: 2 }} />
+      )}
+      renderGroup={(params) => (
+        <li key={params.key}>
+          <div style={{ padding: "4px 12px 2px", fontSize: "0.65rem", fontWeight: 700,
+            textTransform: "uppercase", letterSpacing: "0.08em", color: "#8B949E" }}>
+            {params.group}
+          </div>
+          <ul style={{ padding: 0 }}>{params.children}</ul>
+        </li>
+      )}
+      slotProps={{ paper: { sx: { maxHeight: 320 } } }}
+      clearOnEscape
+      sx={{ mb: 0 }}
+    />
   );
 }
 type SubmitResponse = { projectId: string; status: string; message: string };

@@ -107,13 +107,31 @@ function agentToStepIndex(from: string): number {
 }
 
 const PROJECT_TYPE_LABELS: Record<string, string> = {
-  backend_api: "🔌 Backend / API REST", backend_graphql: "🔗 Backend / GraphQL",
-  fullstack_webapp: "🖥️ Fullstack — Web App", frontend_webapp: "🎨 Frontend — Web App",
-  landing_page: "🏠 Landing Page", ecommerce: "🛒 E-commerce",
-  mobile_app: "📱 App Mobile", saas_platform: "☁️ Plataforma SaaS",
-  dashboard_analytics: "📊 Dashboard / Analytics", cli_tool: "⌨️ CLI / Ferramenta",
-  microservice: "🔧 Microsserviço", data_pipeline: "🔄 Pipeline de Dados",
-  other: "📦 Outro",
+  backend_api:"🔌 API REST", backend_graphql:"🔗 GraphQL", backend_grpc:"⚡ gRPC",
+  backend_websocket:"🌐 WebSocket / Realtime", backend_serverless:"☁️ Serverless",
+  backend_microservice:"🔧 Microsserviço", backend_worker:"🤖 Worker / Job",
+  backend_data_pipeline:"🔄 Pipeline de Dados", backend_event_driven:"📨 Event-Driven",
+  backend_auth_service:"🔐 Auth / IAM", backend_notification:"🔔 Notificações",
+  backend_file_storage:"📂 Armazenamento", backend_search:"🔍 Busca / Indexação",
+  backend_payment:"💳 Pagamentos", backend_cms_api:"📝 CMS Headless",
+  backend_analytics_api:"📊 Analytics API", backend_ai_ml:"🧠 IA / ML / LLM",
+  frontend_webapp:"🎨 Web App (SPA)", frontend_pwa:"📱 PWA",
+  frontend_landing:"🏠 Landing Page", frontend_institutional:"🏢 Site Institucional",
+  frontend_blog:"📰 Blog / Portal", frontend_ecommerce:"🛒 E-commerce Frontend",
+  frontend_dashboard:"📊 Dashboard / Admin", frontend_design_system:"🎨 Design System",
+  fullstack_webapp:"🖥️ Fullstack Web App", fullstack_saas:"☁️ SaaS",
+  fullstack_ecommerce:"🛒 E-commerce Completo", fullstack_erp:"🏢 ERP",
+  fullstack_marketplace:"🏪 Marketplace", fullstack_crm:"👥 CRM",
+  fullstack_lms:"🎓 EAD / LMS", fullstack_fintech:"💰 Fintech",
+  fullstack_healthtech:"🏥 Healthtech", fullstack_proptech:"🏠 Proptech",
+  mobile_crossplatform:"📱 Mobile Multiplataforma", mobile_ios:"🍎 iOS Nativo",
+  mobile_android:"🤖 Android Nativo",
+  infra_iac:"🏗️ IaC / Infra", infra_cicd:"🔄 CI/CD",
+  infra_monitoring:"📡 Observabilidade", infra_data_lake:"🗄️ Data Lake",
+  bot_chat:"🤖 Chatbot", bot_scraper:"🕷️ Scraper / Crawler",
+  bot_automation:"⚙️ Automação / RPA", integration:"🔌 Integração de APIs",
+  lib_sdk:"📦 SDK / Biblioteca", lib_cli:"⌨️ CLI", lib_plugin:"🔧 Plugin",
+  other:"📦 Outro",
 };
 
 const TASK_STATUS_COLOR: Record<string, "success" | "info" | "error" | "warning" | "default"> = {
