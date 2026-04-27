@@ -761,11 +761,11 @@ function ProjectDetailPageInner() {
 
             {/* Tab 1 — Grafo */}
             {rightTab === 1 && (
-              <Box sx={{ p: 1.5, flexGrow: 1, minHeight: 0 }}>
+              <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", p: 1.5 }}>
                 <GraphView
                   projectId={id}
                   pollIntervalMs={isRunning ? 6000 : 0}
-                  height={500}
+                  height="100%"
                   planningDocs={artifacts?.docs ?? []}
                 />
               </Box>
@@ -832,7 +832,7 @@ function ProjectDetailPageInner() {
 
             {/* Tab 3 — Código */}
             {rightTab === 3 && (
-              <Box sx={{ p: 0, flexGrow: 1, overflow: "hidden" }}>
+              <Box sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {(!codeFiles || codeFiles.totalFiles === 0) ? (
                   <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
                     Arquivos de código gerados pelo Dev aparecerão aqui.
@@ -842,7 +842,7 @@ function ProjectDetailPageInner() {
                     projectId={id}
                     files={codeFiles.files}
                     appsRoot={codeFiles.appsRoot}
-                    height={540}
+                    height="100%"
                   />
                 )}
               </Box>

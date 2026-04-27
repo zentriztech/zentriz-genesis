@@ -133,7 +133,9 @@ function HierarchyGraph(props: GraphViewProps) {
 function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planningDocs }: GraphViewProps) {
   const [mode, setMode]         = useState<GraphMode>("force");
   const [fullscreen, setFullscreen] = useState(false);
-  const h = typeof height === "number" ? height : 500;
+  // When height="100%" the outer Box fills its flex parent; otherwise use numeric px
+  const isFill  = height === "100%";
+  const h       = typeof height === "number" ? height : 500;
 
   const graphContent = (fsHeight: number | string) => {
     // ForceGraph mede o próprio container via ResizeObserver — height é apenas fallback inicial
@@ -145,7 +147,7 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
 
   return (
     <>
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 1, ...(isFill && { height: "100%", minHeight: 0 }) }}>
         {/* Toolbar */}
         <Stack direction="row" alignItems="center" justifyContent="space-between">
           <Typography variant="caption" color="text.secondary"
@@ -179,7 +181,7 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
             </Tooltip>
           </Stack>
         </Stack>
-        {graphContent(h)}
+        {graphContent(isFill ? "100%" : h)}
       </Box>
 
       {/* Fullscreen dialog */}

@@ -283,7 +283,7 @@ interface CodeExplorerProps {
   projectId: string;
   files: CodeFile[];
   appsRoot: string | null;
-  height?: number;
+  height?: number | string;
 }
 
 export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeExplorerProps) {
@@ -323,7 +323,7 @@ export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeE
   return (
     <>
       {/* Normal view */}
-      <Box sx={{ position: "relative", border: "1px solid #21262D", borderRadius: 1, overflow: "hidden" }}>
+      <Box sx={{ position: "relative", border: "1px solid #21262D", borderRadius: 1, overflow: "hidden", height, display: "flex", flexDirection: "column" }}>
         {/* Fullscreen button */}
         <Tooltip title="Tela cheia">
           <IconButton size="small" onClick={() => setFullscreen(true)}
@@ -331,7 +331,7 @@ export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeE
             <FullscreenIcon sx={{ fontSize: "1rem", color: "#8B949E" }} />
           </IconButton>
         </Tooltip>
-        {explorerContent(height)}
+        {explorerContent("100%")}
       </Box>
 
       {/* Fullscreen dialog */}
