@@ -22,6 +22,8 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import FolderIcon from "@mui/icons-material/Folder";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import MenuIcon from "@mui/icons-material/Menu";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import PeopleIcon from "@mui/icons-material/People";
@@ -39,6 +41,7 @@ import { notificationsStore } from "@/stores/notificationsStore";
 import { themeStore } from "@/stores/themeStore";
 
 const DRAWER_WIDTH = 240;
+const DRAWER_COLLAPSED = 56;
 const PRIMARY = "#6366F1";
 
 const navUser = [
@@ -67,64 +70,78 @@ const navZentriz = [
 ];
 
 // ── Sidebar content (shared between permanent and temporary drawer) ────────────
-function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
   const pathname = usePathname();
   const router   = useRouter();
   const nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* User info */}
-      <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
-        <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
-          {authStore.isZentrizAdmin ? "Zentriz Admin" : authStore.tenant?.name ?? "Workspace"}
-        </Typography>
-        {authStore.tenant && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-            Plano {authStore.tenant.plan.name}
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* User info — hidden when collapsed */}
+      {!collapsed && (
+        <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
+          <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+            {authStore.isZentrizAdmin ? "Zentriz Admin" : authStore.tenant?.name ?? "Workspace"}
           </Typography>
-        )}
-      </Box>
+          {authStore.tenant && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+              Plano {authStore.tenant.plan.name}
+            </Typography>
+          )}
+        </Box>
+      )}
 
       {/* Nav items */}
-      <List sx={{ px: 1, py: 1, flexGrow: 1 }}>
+      <List sx={{ px: collapsed ? 0.5 : 1, py: 1, flexGrow: 1 }}>
         {nav.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
-            <ListItemButton
-              key={item.href}
-              selected={active}
-              onClick={() => { router.push(item.href); onNavigate?.(); }}
-              sx={{ mb: 0.25, px: 1.5, py: 0.75 }}
-            >
-              <ListItemIcon
+            <Tooltip key={item.href} title={collapsed ? item.label : ""} placement="right">
+              <ListItemButton
+                selected={active}
+                onClick={() => { router.push(item.href); onNavigate?.(); }}
                 sx={{
-                  minWidth: 32,
-                  "& svg": {
-                    fontSize: "1.1rem",
-                    color: active ? item.color : "text.secondary",
-                    transition: "color 0.15s",
-                  },
+                  mb: 0.25,
+                  px: collapsed ? 1 : 1.5, py: 0.75,
+                  justifyContent: collapsed ? "center" : "flex-start",
+                  minHeight: 40,
                 }}
               >
-                {item.icon}
-              </ListItemIcon>
-              <ListItemText
-                primary={item.label}
-                primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }}
-              />
-              {active && (
-                <Box sx={{ width: 3, height: 16, borderRadius: 2, background: item.color, ml: 0.5, flexShrink: 0 }} />
-              )}
-            </ListItemButton>
+                <ListItemIcon
+                  sx={{
+                    minWidth: collapsed ? "unset" : 32,
+                    "& svg": {
+                      fontSize: "1.1rem",
+                      color: active ? item.color : "text.secondary",
+                      transition: "color 0.15s",
+                    },
+                  }}
+                >
+                  {item.icon}
+                </ListItemIcon>
+                {!collapsed && (
+                  <>
+                    <ListItemText
+                      primary={item.label}
+                      primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }}
+                    />
+                    {active && (
+                      <Box sx={{ width: 3, height: 16, borderRadius: 2, background: item.color, ml: 0.5, flexShrink: 0 }} />
+                    )}
+                  </>
+                )}
+              </ListItemButton>
+            </Tooltip>
           );
         })}
       </List>
 
-      {/* Footer */}
-      <Box sx={{ px: 2, py: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
-        <Typography variant="caption" color="text.secondary">genesis.zentriz.com.br</Typography>
-      </Box>
+      {/* Footer — hidden when collapsed */}
+      {!collapsed && (
+        <Box sx={{ px: 2, py: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
+          <Typography variant="caption" color="text.secondary">genesis.zentriz.com.br</Typography>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -133,8 +150,10 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
   const router   = useRouter();
   const theme    = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down("md")); // < 900px
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [anchorEl, setAnchorEl]     = useState<null | HTMLElement>(null);
+  const [mobileOpen, setMobileOpen]         = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [anchorEl, setAnchorEl]             = useState<null | HTMLElement>(null);
+  const drawerWidth = sidebarCollapsed ? DRAWER_COLLAPSED : DRAWER_WIDTH;
 
   const handleMenu   = (e: React.MouseEvent<HTMLElement>) => setAnchorEl(e.currentTarget);
   const handleClose  = () => setAnchorEl(null);
@@ -145,15 +164,19 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
       {/* ── AppBar ────────────────────────────────────────────────────────── */}
       <AppBar position="fixed" sx={{ zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Toolbar sx={{ gap: 1 }}>
-          {/* Hamburger — mobile only */}
-          {isMobile && (
-            <IconButton
-              size="small" color="inherit" edge="start"
-              onClick={() => setMobileOpen((o) => !o)}
-              sx={{ mr: 0.5 }}
-            >
+          {/* Mobile: hamburger | Desktop: collapse toggle */}
+          {isMobile ? (
+            <IconButton size="small" color="inherit" edge="start"
+              onClick={() => setMobileOpen((o) => !o)} sx={{ mr: 0.5 }}>
               <MenuIcon />
             </IconButton>
+          ) : (
+            <Tooltip title={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}>
+              <IconButton size="small" color="inherit" edge="start"
+                onClick={() => setSidebarCollapsed((c) => !c)} sx={{ mr: 0.5 }}>
+                {sidebarCollapsed ? <ChevronRightIcon fontSize="small" /> : <ChevronLeftIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
           )}
 
           {/* Logo */}
@@ -236,12 +259,19 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
         variant="permanent"
         sx={{
           display: { xs: "none", md: "block" },
-          width: DRAWER_WIDTH,
+          width: drawerWidth,
           flexShrink: 0,
-          "& .MuiDrawer-paper": { width: DRAWER_WIDTH, boxSizing: "border-box", top: 56 },
+          transition: "width 0.2s ease",
+          "& .MuiDrawer-paper": {
+            width: drawerWidth,
+            boxSizing: "border-box",
+            top: 56,
+            overflowX: "hidden",
+            transition: "width 0.2s ease",
+          },
         }}
       >
-        <SidebarContent />
+        <SidebarContent collapsed={sidebarCollapsed} />
       </Drawer>
 
       {/* ── Main ──────────────────────────────────────────────────────────── */}
