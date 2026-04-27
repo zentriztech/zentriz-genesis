@@ -25,6 +25,8 @@ import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -164,7 +166,8 @@ function ProjectDetailPageInner() {
   const [runError, setRunError]     = useState<string | null>(null);
   const [acceptLoading, setAcceptLoading] = useState(false);
   const [copiedCmd, setCopiedCmd]   = useState(false);
-  const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo, 2=Tasks, 3=Documentos, 4=Código
+  const [rightTab, setRightTab]     = useState(0); // 0=Diálogo, 1=Grafo, 2=Documentos, 3=Código
+  const [tasksOpen, setTasksOpen]   = useState(true);
 
   // Working agent state (from dialogue)
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
@@ -717,8 +720,8 @@ function ProjectDetailPageInner() {
           </Stack>
         </Grid>
 
-        {/* ── RIGHT COLUMN: all tabs ── */}
-        <Grid size={{ xs: 12, md: 8.5 }}>
+        {/* ── CENTER: tabs (Diálogo, Grafo, Documentos, Código) ── */}
+        <Grid size={{ xs: 12, md: tasksOpen ? 4.25 : 8.5 }} sx={{ transition: "all 0.25s ease" }}>
           <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
             <Tabs
               value={rightTab}
@@ -729,10 +732,8 @@ function ProjectDetailPageInner() {
                 label="Diálogo ao vivo"
                 sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
               <Tab icon={<AccountTreeIcon sx={{ fontSize: "0.9rem" }} />} iconPosition="start"
-                label="Grafo Obsidian"
+                label="Grafo"
                 sx={{ minHeight: 44, textTransform: "none", fontWeight: 500, fontSize: "0.82rem", gap: 0.75 }} />
-              <Tab label={tasks && tasks.length > 0 ? `Tasks (${tasksDone}/${tasks.length})` : "Tasks"}
-                sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
               <Tab label={artifacts?.docs && artifacts.docs.length > 0 ? `Documentos (${artifacts.docs.length})` : "Documentos"}
                 sx={{ minHeight: 44, textTransform: "none", fontSize: "0.82rem" }} />
               <Tab label={codeFiles && codeFiles.totalFiles > 0 ? `Código (${codeFiles.totalFiles})` : "Código"}
@@ -760,7 +761,7 @@ function ProjectDetailPageInner() {
 
             {/* Tab 1 — Grafo */}
             {rightTab === 1 && (
-              <Box sx={{ p: 1.5, flexGrow: 1 }}>
+              <Box sx={{ p: 1.5, flexGrow: 1, minHeight: 0 }}>
                 <GraphView
                   projectId={id}
                   pollIntervalMs={isRunning ? 6000 : 0}
@@ -770,63 +771,8 @@ function ProjectDetailPageInner() {
               </Box>
             )}
 
-            {/* Tab 2 — Tasks */}
+            {/* Tab 2 — Documentos */}
             {rightTab === 2 && (
-              <Box sx={{ p: 0, flexGrow: 1, overflow: "auto" }}>
-                {isRunning && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pt: 1 }}>
-                    Atualização automática a cada 8s
-                  </Typography>
-                )}
-                {!tasks || tasks.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
-                    {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
-                  </Typography>
-                ) : (
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>Task</TableCell>
-                        <TableCell sx={{ minWidth: 200 }}>Descrição</TableCell>
-                        <TableCell sx={{ width: 120 }}>Status</TableCell>
-                        <TableCell sx={{ width: 90 }}>Módulo</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {tasks.map((t) => {
-                        const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
-                        const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
-                        return (
-                          <TableRow key={t.id}
-                            sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
-                            <TableCell>
-                              <Typography variant="caption" fontFamily="monospace">{t.taskId}</Typography>
-                            </TableCell>
-                            <TableCell>
-                              <Stack direction="row" spacing={0.75} alignItems="center">
-                                {isActiveT && <CircularProgress size={10} color="primary" />}
-                                <Typography variant="body2" sx={{ fontSize: "0.78rem" }}>{t.requirements ?? "—"}</Typography>
-                              </Stack>
-                            </TableCell>
-                            <TableCell>
-                              <Chip size="small" label={t.status ?? "—"}
-                                color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
-                                sx={{ fontFamily: "monospace", fontSize: "0.62rem" }} />
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="caption" color="text.secondary">{t.module ?? t.ownerRole ?? "—"}</Typography>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                )}
-              </Box>
-            )}
-
-            {/* Tab 3 — Documentos */}
-            {rightTab === 3 && (
               <Box sx={{ p: 2, flexGrow: 1, overflow: "auto" }}>
                 {(!artifacts || !artifacts.docs?.length) ? (
                   <Typography variant="body2" color="text.secondary">Documentos gerados pelos agentes aparecerão aqui.</Typography>
@@ -884,8 +830,8 @@ function ProjectDetailPageInner() {
               </Box>
             )}
 
-            {/* Tab 4 — Código */}
-            {rightTab === 4 && (
+            {/* Tab 3 — Código */}
+            {rightTab === 3 && (
               <Box sx={{ p: 0, flexGrow: 1, overflow: "hidden" }}>
                 {(!codeFiles || codeFiles.totalFiles === 0) ? (
                   <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
@@ -903,6 +849,112 @@ function ProjectDetailPageInner() {
             )}
           </Card>
         </Grid>
+
+        {/* ── RIGHT PANEL: Tasks (collapsible) ── */}
+        {tasksOpen ? (
+          <Grid size={{ xs: 12, md: 4.25 }} sx={{ transition: "all 0.25s ease" }}>
+            <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
+              {/* Header */}
+              <Stack direction="row" alignItems="center" justifyContent="space-between"
+                sx={{ px: 2, borderBottom: "1px solid", borderColor: "divider", minHeight: 44, flexShrink: 0 }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="body2" fontWeight={600}>
+                    Tasks
+                  </Typography>
+                  {tasks && tasks.length > 0 && (
+                    <Chip size="small" label={`${tasksDone}/${tasks.length}`}
+                      color={tasksDone === tasks.length ? "success" : "default"}
+                      sx={{ fontSize: "0.65rem", height: 18 }} />
+                  )}
+                  {isRunning && (
+                    <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>
+                      · auto 8s
+                    </Typography>
+                  )}
+                </Stack>
+                <Tooltip title="Recolher painel de Tasks">
+                  <IconButton size="small" onClick={() => setTasksOpen(false)}
+                    sx={{ p: 0.4, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <ChevronRightIcon sx={{ fontSize: "1rem" }} />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+
+              {/* Task list */}
+              <Box sx={{ flexGrow: 1, overflow: "auto", p: 0 }}>
+                {!tasks || tasks.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
+                    {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
+                  </Typography>
+                ) : (
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Task</TableCell>
+                        <TableCell>Descrição</TableCell>
+                        <TableCell sx={{ width: 110 }}>Status</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {tasks.map((t) => {
+                        const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
+                        const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                        return (
+                          <TableRow key={t.id}
+                            sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
+                            <TableCell>
+                              <Typography variant="caption" fontFamily="monospace" noWrap>{t.taskId}</Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Stack direction="row" spacing={0.75} alignItems="center">
+                                {isActiveT && <CircularProgress size={10} color="primary" />}
+                                <Typography variant="body2" sx={{ fontSize: "0.75rem" }}>{t.requirements ?? "—"}</Typography>
+                              </Stack>
+                            </TableCell>
+                            <TableCell>
+                              <Chip size="small" label={t.status ?? "—"}
+                                color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
+                                sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </Box>
+            </Card>
+          </Grid>
+        ) : (
+          /* Collapsed — thin button to reopen */
+          <Grid size="auto">
+            <Box sx={{
+              height: "calc(100vh - 180px)", minHeight: 600,
+              display: "flex", alignItems: "center",
+            }}>
+              <Tooltip title="Abrir painel de Tasks" placement="left">
+                <Box
+                  onClick={() => setTasksOpen(true)}
+                  sx={{
+                    cursor: "pointer", display: "flex", flexDirection: "column",
+                    alignItems: "center", justifyContent: "center", gap: 1,
+                    width: 28, height: "100%",
+                    bgcolor: "background.paper",
+                    border: "1px solid", borderColor: "divider", borderRadius: 1,
+                    "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <ChevronLeftIcon sx={{ fontSize: "1rem", color: "text.secondary" }} />
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ fontSize: "0.6rem", writingMode: "vertical-rl", textOrientation: "mixed", letterSpacing: "0.05em" }}>
+                    Tasks {tasks && tasks.length > 0 ? `${tasksDone}/${tasks.length}` : ""}
+                  </Typography>
+                </Box>
+              </Tooltip>
+            </Box>
+          </Grid>
+        )}
       </Grid>
     </Box>
   );
