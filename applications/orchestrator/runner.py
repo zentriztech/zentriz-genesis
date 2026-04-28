@@ -1139,6 +1139,16 @@ def _is_qa_pass(qa_response: dict) -> bool:
     return False
 
 
+def _qa_has_blocker(qa_response: dict) -> bool:
+    """GAP-P2: detecta BLOCKER no relatório do QA — issues que impedem aprovação mesmo após max_rework."""
+    text = " ".join([
+        qa_response.get("summary") or "",
+        _content_for_doc(qa_response) or "",
+        str(qa_response.get("artifacts") or ""),
+    ]).lower()
+    return "[blocker]" in text or "blocker" in text
+
+
 def _is_timeout_error(exc: BaseException | None, message: str) -> bool:
     """Detecta timeout para exibir mensagem amigável (recorrência: runner→agents HTTP)."""
     if exc is not None:
@@ -1699,20 +1709,26 @@ def _run_monitor_loop(
                             current_fails = qa_fail_count.get(tid, 0) + 1
                             qa_fail_count[tid] = current_fails
                         if current_fails >= max_qa_rework:
-                            _update_task(project_id, tid, status="DONE")
+                            # GAP-P2: se QA reportou BLOCKER, marcar como BLOCKED (não DONE)
+                            # BLOCKED é visível no portal e não alimenta tasks dependentes
+                            _has_blocker = _qa_has_blocker(qa_response)
+                            _final_status = "BLOCKED" if _has_blocker else "DONE"
+                            _update_task(project_id, tid, status=_final_status)
                             if _task_state:
                                 _task_state.mark_qa_fail(tid)
                                 _task_state.save()
                             with (_state_lock or _NullLock()):
                                 tasks_done_after_qa_fail.add(tid)
+                            _label = "BLOCKED (BLOCKER aberto)" if _has_blocker else "DONE (não aprovada)"
                             _post_step(
                                 f"QA reportou QA_FAIL (reatempto {current_fails}/{max_qa_rework}). "
-                                f"Task {tid} marcada como DONE (não aprovada).",
+                                f"Task {tid} marcada como {_label}.",
                                 request_id,
                             )
                             _post_escalation_event(
                                 project_id, tid,
-                                f"QA atingiu máximo de {current_fails} reworks sem aprovação. Revisão humana necessária.",
+                                f"QA atingiu máximo de {current_fails} reworks sem aprovação"
+                                + (" — BLOCKER aberto, revisão humana obrigatória." if _has_blocker else ". Revisão humana necessária."),
                                 request_id,
                             )
                         else:
@@ -1756,6 +1772,23 @@ def _run_monitor_loop(
                     if pipeline_ctx:
                         depends_on = dev_task.get("depends_on_files") or dev_task.get("dependsOnFiles") or []
                         dep_code = pipeline_ctx.get_dependency_code(depends_on)
+                        # GAP-P4: verificar se os arquivos de dependência realmente existem no disco
+                        if depends_on and project_id:
+                            _proj_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id
+                            _missing = [
+                                f for f in depends_on
+                                if f and not (_proj_root / f).exists() and not (_proj_root / "apps" / f).exists()
+                            ]
+                            if _missing:
+                                logger.warning(
+                                    "[GAP-P4] depends_on_files ausentes no disco para task %s: %s",
+                                    dev_task.get("taskId", "?"), _missing[:5],
+                                )
+                                _post_step(
+                                    f"Aviso: task {dev_task.get('taskId','?')} depende de arquivo(s) não encontrado(s) "
+                                    f"no disco: {_missing[:3]}. Dev receberá contexto parcial.",
+                                    request_id,
+                                )
                     # Derive variant from owner_role (DEV_WEB → web, DEV_MOBILE → mobile, else backend)
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
@@ -1900,6 +1933,24 @@ def _run_monitor_loop(
                     request_id,
                 )
             if True:  # Always run DevOps when all tasks are done, regardless of QA failures
+                # GAP-P5: seed TSK-DEVOPS-001 na tabela de tasks para visibilidade no portal
+                if project_id and _api_available():
+                    try:
+                        _devops_seed_path = f"/api/projects/{project_id}/tasks"
+                        _devops_task = [{
+                            "taskId": "TSK-DEVOPS-001",
+                            "module": pm_module or "web",
+                            "ownerRole": "DEVOPS_DOCKER",
+                            "status": "IN_PROGRESS",
+                            "requirements": "Provisionar artefatos de infraestrutura: start.sh, docker-compose.yml, RUNBOOK.md",
+                            "depends_on_files": [],
+                            "target_route": "infra",
+                        }]
+                        _d, _s = _api_post(_devops_seed_path, {"tasks": _devops_task})
+                        if 200 <= _s < 300:
+                            logger.info("[GAP-P5] TSK-DEVOPS-001 criada no portal.")
+                    except Exception as _de:
+                        logger.debug("[GAP-P5] Seed TSK-DEVOPS-001 falhou (não crítico): %s", _de)
                 _post_step("O Monitor acionou o DevOps para provisionamento e execução local.", request_id)
                 _post_agent_working("devops", "O DevOps está analisando os artefatos e preparando o ambiente de execução local.", request_id)
                 try:
@@ -1966,11 +2017,21 @@ def _run_monitor_loop(
                                 request_id,
                             )
                     devops_done = True
+                    # GAP-P5: atualizar TSK-DEVOPS-001 para DONE
+                    if project_id and _api_available():
+                        try:
+                            _update_task(project_id, "TSK-DEVOPS-001", status="DONE")
+                        except Exception:
+                            pass
                     _post_step("DevOps concluiu artefatos. Iniciando execução local do produto.", request_id)
                     # Run locally: build + serve + open browser
                     if project_id:
                         _run_local_deploy(project_id, devops_response, request_id)
-                    _post_step("Produto em execução local. Aguardando aceite do usuário no portal.", request_id)
+                    # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
+                    _post_step(
+                        "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
+                        request_id,
+                    )
                 except Exception as e:
                     logger.exception("[Monitor Loop] DevOps falhou")
                     _post_error(str(e), request_id, e)
@@ -2445,6 +2506,34 @@ def main() -> int:
                     pipeline_ctx=pipeline_ctx,
                 )
                 cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
+                # GAP-P1/Q1: validar LEI 8 antes de aprovar o backlog — se PM gerou tasks com
+                # mais de 3 arquivos estimados, forçar nova rodada com instrução explícita.
+                if cto_backlog_ok and backlog_summary:
+                    try:
+                        from orchestrator.pipeline_context import validate_backlog_tasks_max_files
+                        _lei8_tasks = _get_tasks(project_id) if project_id else []
+                        _lei8_issues = validate_backlog_tasks_max_files(_lei8_tasks) if _lei8_tasks else []
+                        if not _lei8_issues:
+                            # Também verificar no texto do backlog via heurística de arquivos estimados
+                            import re as _re
+                            _estimated = _re.findall(r"estimated_files[^\d]*(\d+)", backlog_summary, _re.IGNORECASE)
+                            _lei8_issues = [f"task com {n} arquivos estimados" for n in _estimated if int(n) > 3]
+                        if _lei8_issues and pm_round < max_cto_pm_rounds:
+                            _post_step(
+                                f"LEI 8 violada: {len(_lei8_issues)} task(s) com mais de 3 arquivos. "
+                                f"PM deve decompor antes de avançar (rodada {pm_round}/{max_cto_pm_rounds}).",
+                                request_id,
+                            )
+                            logger.warning("[GAP-P1] LEI 8: %s — devolvendo ao PM.", _lei8_issues[:3])
+                            cto_backlog_ok = False
+                            cto_pm_questionamentos = (
+                                "BLOCKER LEI 8: as seguintes tasks têm mais de 3 arquivos estimados: "
+                                + str(_lei8_issues[:5])
+                                + ". Decompor cada uma em sub-tasks de no máximo 3 arquivos antes de entregar o backlog."
+                            )
+                            continue
+                    except Exception as _lei8_e:
+                        logger.debug("[GAP-P1] LEI 8 check falhou (não crítico): %s", _lei8_e)
                 if cto_backlog_ok:
                     _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
                     break

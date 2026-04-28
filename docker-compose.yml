@@ -134,6 +134,9 @@ services:
       - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
       # Host path dos project files — usado pelo runner para instrução de execução local
       - HOST_PROJECT_FILES_ROOT=${HOST_PROJECT_FILES_ROOT:-/Users/mac/zentriz-files}
+      # GAP-P6: token para o runner sincronizar métricas (complexity_hint, run_count) com a API
+      - GENESIS_API_TOKEN=${GENESIS_API_TOKEN:-}
+      - GENESIS_API_URL=http://api:3000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
