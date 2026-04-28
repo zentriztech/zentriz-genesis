@@ -1938,10 +1938,12 @@ def _run_monitor_loop(
                     try:
                         _devops_seed_path = f"/api/projects/{project_id}/tasks"
                         _devops_task = [{
-                            "taskId": "TSK-DEVOPS-001",
-                            "module": pm_module or "web",
-                            "ownerRole": "DEVOPS_DOCKER",
-                            "status": "IN_PROGRESS",
+                            "task_id":   "TSK-DEVOPS-001",
+                            "taskId":    "TSK-DEVOPS-001",
+                            "module":    pm_module or "web",
+                            "owner_role": "DEVOPS_DOCKER",
+                            "ownerRole":  "DEVOPS_DOCKER",
+                            "status":    "IN_PROGRESS",
                             "requirements": "Provisionar artefatos de infraestrutura: start.sh, docker-compose.yml, RUNBOOK.md",
                             "depends_on_files": [],
                             "target_route": "infra",
@@ -2406,10 +2408,12 @@ def main() -> int:
             pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
             _owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
             _trivial_task = {
-                "taskId": "TSK-TRIVIAL-001",
-                "module": pm_module,
-                "ownerRole": _owner_role,
-                "status": "ASSIGNED",
+                "task_id":   "TSK-TRIVIAL-001",   # snake_case — padrão esperado pela API
+                "taskId":    "TSK-TRIVIAL-001",   # camelCase — fallback para compatibilidade
+                "module":    pm_module,
+                "owner_role": _owner_role,
+                "ownerRole":  _owner_role,
+                "status":    "ASSIGNED",
                 "requirements": (charter_summary or spec_content)[:800],
                 "depends_on_files": [],
                 "target_route": "/",

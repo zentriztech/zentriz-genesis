@@ -467,7 +467,9 @@ function ProjectDetailPageInner() {
     project.status === "pm_backlog"      ? 3 :
     project.status === "dev_qa"          ? 4 :
     project.status === "devops"          ? 5 :
-    isDone                               ? 6 : 0;
+    isDone                               ? 6 :
+    // stopped/failed: manter no último step ativo inferido pelo diálogo (não regredir para 0/"Spec")
+    project.status === "stopped" || project.status === "failed" ? (workingStepIndex ?? 1) : 0;
 
   // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
   const activeStep = (isRunning && workingStepIndex != null) ? workingStepIndex : stepFromStatus;

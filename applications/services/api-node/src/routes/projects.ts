@@ -248,9 +248,10 @@ export async function projectRoutes(app: FastifyInstance) {
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const created: unknown[] = [];
       for (const t of tasks) {
-        const taskId = t.task_id ?? "";
-        const module = t.module ?? "backend";
-        const ownerRole = t.owner_role ?? "DEV_BACKEND";
+        // Aceita snake_case (task_id, owner_role) e camelCase (taskId, ownerRole) — runner pode enviar qualquer um
+        const taskId = (t as Record<string, unknown>).taskId as string ?? t.task_id ?? "";
+        const module = (t as Record<string, unknown>).module as string ?? "backend";
+        const ownerRole = (t as Record<string, unknown>).ownerRole as string ?? t.owner_role ?? "DEV_BACKEND";
         const requirements = t.requirements ?? null;
         const status = t.status ?? "ASSIGNED";
         await client.query(
@@ -974,8 +975,19 @@ export async function projectRoutes(app: FastifyInstance) {
       }
 
       if (body.action === "stop") {
-        const inputTokens = Number(body.input_tokens ?? 0);
-        const outputTokens = Number(body.output_tokens ?? 0);
+        // Se o runner não enviou tokens, buscar o total acumulado em project_agent_metrics
+        let inputTokens = Number(body.input_tokens ?? 0);
+        let outputTokens = Number(body.output_tokens ?? 0);
+        if (inputTokens === 0 && outputTokens === 0) {
+          const metricsRow = await client.query(
+            `SELECT COALESCE(SUM(input_tokens),0)::int AS total_input,
+                    COALESCE(SUM(output_tokens),0)::int AS total_output
+             FROM project_agent_metrics WHERE project_id = $1`,
+            [id]
+          );
+          inputTokens  = metricsRow.rows[0]?.total_input  ?? 0;
+          outputTokens = metricsRow.rows[0]?.total_output ?? 0;
+        }
         const costUsd = body.estimated_cost_usd != null
           ? Number(body.estimated_cost_usd)
           : parseFloat(((inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15).toFixed(6));
