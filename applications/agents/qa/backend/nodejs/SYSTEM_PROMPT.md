@@ -184,6 +184,9 @@ A varredura `grep mysql` do 6.7a **NÃO se aplica** — MySQL é legítimo. Vali
 | M05 | `docker-compose.yml`: `image: mysql:8.4` com healthcheck `mysqladmin ping` | BLOCKER |
 | M06 | `Dockerfile`: `FROM --platform=linux/amd64` — mysql2 tem binários nativos | MAJOR |
 | M07 | Campos `DECIMAL`: service layer converte `string → number` com `parseFloat()` antes de aritmética | MAJOR |
+| M08 | `src/db/client.ts`: `drizzle(pool, { schema, mode: "default" })` — sem `mode` → crash `DrizzleError: specify mode` | BLOCKER |
+| M09 | `src/routes/auth.ts`: campo de login é `email` OU `username` — deve ser **consistente** em Zod schema, contrato e docs; misturar causa 422 silencioso no frontend | BLOCKER |
+| M10 | `seed.mjs`: usar `bcryptjs` se `package.json` tem `bcryptjs`, não `bcrypt` — são pacotes distintos | MAJOR |
 
 **Varredura MySQL:**
 ```bash

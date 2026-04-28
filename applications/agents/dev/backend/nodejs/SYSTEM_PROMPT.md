@@ -426,6 +426,9 @@ MySQL é um flavor **legítimo** — a varredura `grep mysql` do 6.2a **NÃO se 
 | M8 | `Dockerfile` | `FROM --platform=linux/amd64 node:20-alpine` (mysql2 tem binários nativos) | Build falha no Mac M-series |
 | M9 | Tipos | `DECIMAL` no MySQL retorna **string** via mysql2 — sempre converter: `parseFloat(row.price)` | Aritmética silenciosa errada |
 | M10 | ENUMs | `mysqlEnum('status', ['active','inactive'])` — **não** usar `pgEnum` | Schema incompatível |
+| M11 | `src/db/client.ts` | `drizzle(pool, { schema, mode: "default" })` — **obrigatório** passar `mode: "default"` ao usar schema com mysql2 | `DrizzleError: You need to specify "mode"` crash em runtime |
+| M12 | `src/routes/auth.ts` | Login OAuth2 Password Flow: campo DEVE ser `email` no schema Zod E no contrato `api_contract.md` — ou `username` em ambos. Nunca misturar os dois | Login retorna `email: Required` quando frontend envia `username` |
+| M13 | `seed.mjs` | Verificar qual pacote bcrypt está em `package.json`: `bcrypt` ou `bcryptjs` — são distintos; usar o correto no import dinâmico | `Cannot find package 'bcrypt'` se só existe `bcryptjs` |
 
 **Template `src/db/client.ts` para MySQL:**
 ```ts
