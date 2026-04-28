@@ -72,6 +72,13 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
   - `docs/dev/dev_implementation_<task_id>.md` (summary, how to run/test)
 - Gates:
   - Must not return only explanation; must return code files with full content.
+  - **GAP-Q2 — NUNCA truncar arquivo:** Se um arquivo for grande demais para caber em um único artefato, divida em partes com sufixo numérico e importe uma na outra:
+    ```
+    // Entregue: apps/src/app/produtos/page_part1.tsx  (primeiros componentes)
+    // Entregue: apps/src/app/produtos/page_part2.tsx  (resto do componente)
+    // Em page.tsx: import { ProductGrid } from './page_part1'; import { Filters } from './page_part2'
+    ```
+    **Nunca corte o arquivo no meio e entregue como "completo"** — arquivo truncado gera QA_FAIL em loop infinito. Se não couber: divida, importe, documente no `dev_implementation_*.md`.
   - Keep changes scoped to task; if architecture change needed → escalate.
   - Flows meet FR; state management (MobX) documented; build PASS.
   - Jest config: use `setupFilesAfterEnv` (NOT `setupFilesAfterFramework` or `setupFilesAfterEach`).

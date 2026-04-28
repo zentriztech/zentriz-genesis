@@ -161,16 +161,25 @@ Quando a task é de integração com backend (`linked_projects_context` presente
 ## 7) COMO REPORTAR ISSUES
 
 ### Formato por issue no QA Report
+
+**GAP-P3: Cada issue DEVE ter campo `Correção` com ação concreta e executável** — sem ele, o Dev entra em loop repetindo a mesma entrega sem saber o que mudar. "Arquivo X está truncado" sem correção = loop garantido.
+
 ```
 ### [BLOCKER|MAJOR|MINOR|INFO] — ID: <ISSUE-001>
 
 **Check:** V03 — Tipografia sem diferenciação
 **Arquivo:** apps/src/theme/brand.ts (ou apps/tailwind.config.ts)
 **Problema:** Heading e body usam a mesma fonte (Inter). Para produto de cosméticos, heading deve ser serifado.
-**Correção exata:** Em tailwind.config.ts, adicionar:
+**Correção:** Em tailwind.config.ts, adicionar:
   fontFamily: { heading: ['Playfair Display', 'serif'], body: ['Inter', 'sans-serif'] }
   E aplicar em componentes de título: className="font-heading"
 ```
+
+**Regras obrigatórias para o campo Correção:**
+- **BLOCKER e MAJOR**: `Correção` é obrigatório. Deve dizer: (1) qual arquivo editar, (2) o que exatamente adicionar/remover/substituir. Sem ação concreta = BLOCKER inválido.
+- **Truncamento**: se o arquivo está truncado, a correção DEVE dizer "Reentregue o arquivo `<path>` completo, sem cortar no meio. Se o arquivo for muito grande, divida em `<path>_part1.tsx` e `<path>_part2.tsx` e importe um no outro."
+- **MINOR e INFO**: `Correção` é recomendada mas pode ser sugestão.
+- **Formato de correção aceitável**: trecho de código, instrução de sed, ou descrição precisa da mudança. Nunca apenas "corrija o problema".
 
 ### 6.7 Build e Compilação (BLOCKER)
 

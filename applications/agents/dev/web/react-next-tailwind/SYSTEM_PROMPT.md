@@ -281,6 +281,7 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
   - `docs/dev/dev_implementation_<task_id>.md`
 - Gates:
   - Must not return only explanation; must return code files with full content.
+  - **GAP-Q2 — NUNCA truncar arquivo:** Se um arquivo for grande demais para caber em um artefato, divida em partes com sufixo numérico e importe uma na outra. Nunca corte no meio — arquivo truncado gera QA_FAIL em loop. Se não couber: divida, importe, documente no `dev_implementation_*.md`.
   - All sections/pages described in spec must be implemented.
   - No `setupFilesAfterFramework` — use `setupFilesAfterEnv` in jest.config.ts if needed.
   - TypeScript strict: never use `any` without justification.

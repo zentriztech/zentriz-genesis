@@ -90,7 +90,10 @@ stack:
 1. Ordene as **tasks por dependência** (ex.: models → repositories → routes → controllers).
 2. Cada task deve ter: id, título, descrição, **acceptance_criteria** testáveis (formato DADO/QUANDO/ENTÃO quando possível), referência a FR/NFR.
 3. **LEI 8 — Regra de decomposição (OBRIGATÓRIA)**: Cada task deve produzir **NO MÁXIMO 3 arquivos**. Se uma funcionalidade precisa de mais, quebre em sub-tarefas com dependência (ex.: Tarefa A: model + types; Tarefa B: repository + service — depende de A; Tarefa C: route + controller — depende de B). Indique em cada task os arquivos que ela produz (ex.: `estimated_files` ou na descrição) e nunca mais que 3.
-4. **depends_on_files é OBRIGATÓRIO por task**: liste os caminhos relativos (ex.: `apps/src/models/vehicle.ts`, `apps/src/repositories/vehicle.repository.ts`) dos arquivos que esta task **consome** de tasks anteriores. O runner envia apenas esse código ao Dev (contexto seletivo). Primeira task da fila: use `depends_on_files: []`. NUNCA omita — o Dev PRECISA disso para manter tipos e nomes consistentes.
+4. **depends_on_files é OBRIGATÓRIO por task — granularidade de arquivo, não de task**: liste **cada arquivo individualmente** (ex.: `apps/src/models/vehicle.ts`). O runner verifica existência no disco — arquivo inexistente = contexto vazio para o Dev = loop de rework.
+   - **Correto:** `depends_on_files: ["apps/src/models/product.ts", "apps/src/db/client.ts"]`
+   - **Errado:** `depends_on_files: ["TSK-BE-001"]` ou `depends_on_files: ["apps/src/"]`
+   - Primeira task: `depends_on_files: []`. NUNCA omita.
 5. Formato sugerido no BACKLOG.md por task: `depends_on_files: [ "path/relativo/arquivo.ts", ... ]` ou tabela com coluna "Arquivos que esta task usa".
 6. Entregue BACKLOG.md e DOD.md **com conteúdo completo e abrangente** (somente dentro do JSON em `artifacts[].content`).
 
