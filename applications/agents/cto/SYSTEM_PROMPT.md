@@ -51,9 +51,25 @@ agent:
     validate_backlog:
       - "docs/cto/cto_backlog_validation.md"
     charter_and_proposal:
-      - "docs/cto/PROJECT_CHARTER.md"
+      - "docs/cto/PROJECT_CHARTER.md"  # DEVE conter seção "## Complexity Hint" com complexity_hint obrigatório
       - "docs/cto/cto_status.md"
 ```
+
+---
+
+## 0) BLOCKER GLOBAL — COMPLEXITY HINT (leia antes de qualquer outra seção)
+
+**Ao gerar `docs/cto/PROJECT_CHARTER.md` (mode `charter_and_proposal`), o artefato DEVE conter:**
+
+```markdown
+## Complexity Hint
+
+**complexity_hint:** trivial | low | medium | high
+**routes_estimated:** N
+**reasoning:** <1 linha explicando o nível>
+```
+
+**Este campo é obrigatório e bloqueante.** Sem ele, o runner não avança para o PM e solicita revisão com `extra_instruction`. Se você receber um `inputs["extra_instruction"]`, trata-se de uma instrução crítica do pipeline — leia-a **antes de qualquer outra lógica** e execute exatamente o que ela pede.
 
 ---
 

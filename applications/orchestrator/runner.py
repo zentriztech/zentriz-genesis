@@ -632,6 +632,24 @@ def _extract_complexity_hint(charter_text: str) -> str:
     return ""
 
 
+def _hint_from_response(resp: dict | None, fallback_text: str = "") -> str:
+    """
+    Extrai complexity_hint de uma resposta do CTO (summary + artefatos + fallback).
+    Standalone para reutilização e testabilidade — não depende de escopo local.
+    """
+    if resp:
+        candidate = _extract_complexity_hint(resp.get("summary", ""))
+        if candidate:
+            return candidate
+        for art in resp.get("artifacts", []) or []:
+            if not isinstance(art, dict):
+                continue
+            candidate = _extract_complexity_hint(art.get("content", ""))
+            if candidate:
+                return candidate
+    return _extract_complexity_hint(fallback_text)
+
+
 def call_pm(
     spec_ref: str,
     charter_summary: str,
@@ -2244,21 +2262,9 @@ def main() -> int:
 
         # ── G1/G2: Validação de complexity_hint — BLOCKER antes do PM ──────────────────────────
         # Idempotente: se step>=3 o charter já foi validado em run anterior; não bloquear.
-        # Bug fix: buscar hint no artefato completo quando ausente no summary (Bug 2).
-        def _hint_from_response(resp: dict, fallback_text: str = "") -> str:
-            """Extrai complexity_hint do summary + artefatos da resposta do CTO."""
-            candidate = _extract_complexity_hint(resp.get("summary", "") if resp else "")
-            if candidate:
-                return candidate
-            for art in (resp.get("artifacts", []) if resp else []):
-                candidate = _extract_complexity_hint(art.get("content", ""))
-                if candidate:
-                    return candidate
-            return _extract_complexity_hint(fallback_text)
-
+        # Usa _hint_from_response() standalone (acima de call_pm) — summary + artefatos.
         _complexity_hint_for_patch = _hint_from_response(cto_response, charter_summary)
         if not _complexity_hint_for_patch and (not pipeline_ctx or pipeline_ctx.current_step < 3):
-            # Charter sem o campo obrigatório — tentar reenviar ao CTO para correção
             _hint_retry_rounds = int(os.environ.get("MAX_HINT_RETRY_ROUNDS", "2"))
             for _hint_round in range(1, _hint_retry_rounds + 1):
                 _post_step(
@@ -2270,7 +2276,6 @@ def main() -> int:
                     "[Pipeline] complexity_hint ausente no charter. Solicitando revisão ao CTO (round %d/%d).",
                     _hint_round, _hint_retry_rounds,
                 )
-                # Bug fix: forçar mode=charter_and_proposal com force_mode (Bug 1).
                 _cto_hint_response = call_cto(
                     spec_ref, request_id,
                     engineer_proposal=engineer_summary,
@@ -2289,14 +2294,15 @@ def main() -> int:
                     ),
                 )
                 _audit_log("cto", request_id, _cto_hint_response)
-                # Bug fix: extrair hint de summary + artefatos da revisão (Bug 2).
                 _new_hint = _hint_from_response(_cto_hint_response)
                 if _new_hint:
-                    # Bug fix: atualizar summary E artefatos para manter consistência (Bug 3).
-                    _new_summary = _cto_hint_response.get("summary", "") or charter_summary
-                    charter_summary = _new_summary
+                    charter_summary = _cto_hint_response.get("summary", "") or charter_summary
                     charter_artifacts = _cto_hint_response.get("artifacts", []) or charter_artifacts
                     _complexity_hint_for_patch = _new_hint
+                    # P8: atualizar pipeline_ctx com o charter revisado para checkpoint consistente
+                    if pipeline_ctx:
+                        pipeline_ctx.set_charter(charter_summary)
+                        pipeline_ctx.save_checkpoint(STATE_DIR)
                     logger.info("[Pipeline] complexity_hint obtido na revisão: %s", _new_hint)
                     _post_step(
                         f"CTO incluiu complexity_hint: {_new_hint}. Prosseguindo para o PM.",
