@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -612,6 +613,19 @@ def _heuristic_module_fallback(text: str) -> str:
     return "backend"  # default seguro para ambiguidades
 
 
+def _extract_complexity_hint(charter_text: str) -> str:
+    """
+    Extrai o campo complexity_hint do PROJECT_CHARTER.md gerado pelo CTO.
+    Retorna 'low', 'medium', 'high' ou string vazia se não encontrado.
+    """
+    if not charter_text:
+        return ""
+    match = re.search(r"complexity_hint[*\s]*[:\|][*\s]*(low|medium|high)", charter_text, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+
 def call_pm(
     spec_ref: str,
     charter_summary: str,
@@ -645,6 +659,14 @@ def call_pm(
             inputs["engineer_proposal"] = engineer_proposal
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
+
+    # Extrair complexity_hint do charter e expor como campo de primeiro nível nos inputs.
+    # O PM Web usa esse campo como âncora primária para FAST-TRACK vs FULL.
+    _complexity_hint = _extract_complexity_hint(charter_summary)
+    if _complexity_hint:
+        inputs["complexity_hint"] = _complexity_hint
+        logger.info("[PM] complexity_hint extraído do charter: %s", _complexity_hint)
+
     inputs["context"] = inputs.get("context") or {}
     inputs["context"]["skill_path"] = skill_path
     message = _build_message_envelope(

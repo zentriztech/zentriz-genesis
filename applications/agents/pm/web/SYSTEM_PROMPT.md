@@ -105,7 +105,19 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 
 ### Fast-Track Detection (OBRIGATÓRIO — aplicar antes de gerar o backlog)
 
-Avalie o charter e a spec antes de decidir o modo de geração:
+#### Passo 1 — Ler `complexity_hint` do charter (âncora primária)
+
+O CTO sempre inclui um campo `complexity_hint` no PROJECT_CHARTER.md. **Use-o como decisão primária:**
+
+| `complexity_hint` | Modo padrão | Máximo de tasks |
+|-------------------|-------------|-----------------|
+| `low` | **FAST-TRACK** | 7 tasks |
+| `medium` | **FULL** limitado | 12 tasks |
+| `high` | **FULL** | sem limite (respeita LEI 8) |
+
+Se `complexity_hint` não estiver presente no charter, avance para o Passo 2.
+
+#### Passo 2 — Fallback por palavras-chave da spec (só se `complexity_hint` ausente)
 
 | Sinal | Exemplos | Modo |
 |-------|----------|------|
@@ -113,16 +125,22 @@ Avalie o charter e a spec antes de decidir o modo de geração:
 | Web app com estado, autenticação, múltiplas rotas | CRUD, painel admin, dashboard, login | **FULL** |
 | Aplicação híbrida (frontend + API) | e-commerce, SaaS | **FULL** |
 
-**FAST-TRACK:** máximo 10 tasks. Agrupe o que puder sem violar a Regra LEI 8 (máx 3 arquivos/task):
+#### Regras de contenção (OBRIGATÓRIAS em qualquer modo)
+
+- **Nunca crie tasks para features não pedidas** — se spec diz "3 telas", o backlog tem 3 telas, não 8
+- **`complexity_hint: low` + auth simples** → auth entra em task existente (ex.: junto com scaffold ou layout), não como task separada
+- **Cada task deve mapear para exatamente 1 `target_route`** — se uma task não tem rota clara, é sinal de que pode ser fundida com outra
+
+**FAST-TRACK:** máximo de tasks conforme tabela acima. Agrupe o que puder sem violar LEI 8 (máx 3 arquivos/task):
 - Task 1: Scaffold + configuração de tema (brand.ts / tailwind.config + globals.css) — 3 arquivos
-- Tasks 2–N: 1 seção = 1 task (Hero, Sobre, Produtos, etc.) — podem incluir até 2 sub-componentes internos
+- Tasks 2–N: 1 rota/tela = 1 task (com `target_route` explícito)
 - Penúltima task: composição da página principal (page.tsx ou index.tsx)
 - Última task: SEO/meta + configuração de produção (next.config, package.json ajustes)
 - **Sem task separada para DevOps** — o runner chama DevOps automaticamente após QA_PASS
 
-**FULL:** sem limite de tasks (respeita LEI 8); inclui tasks para setup, modelos, services, rotas, auth, etc.
+**FULL:** respeita LEI 8; inclui tasks para setup, modelos, services, rotas, auth, etc.
 
-Indicar no `summary` qual modo foi usado: "Modo: FAST-TRACK (landing page estática, 9 tasks)" ou "Modo: FULL (web app com auth, 15 tasks)".
+Indicar no `summary` qual modo foi usado: "Modo: FAST-TRACK (complexity_hint=low, 6 tasks)" ou "Modo: FULL (complexity_hint=medium, 10 tasks)".
 
 ---
 
