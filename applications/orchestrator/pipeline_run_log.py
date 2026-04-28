@@ -16,7 +16,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +37,14 @@ class PipelineRunLog:
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self._current_run_id: str | None = None
+        self._current_run_id: Optional[str] = None
 
     @property
     def _log_path(self) -> Path:
         root = os.environ.get("PROJECT_FILES_ROOT", "/project-files")
         return Path(root) / self.project_id / "pipeline_run_log.json"
 
-    def _load(self) -> dict:
+    def _load(self) -> Dict[str, Any]:
         p = self._log_path
         if p.exists():
             try:
@@ -53,7 +53,7 @@ class PipelineRunLog:
                 logger.warning("[RunLog] Falha ao ler log: %s", e)
         return {"project_id": self.project_id, "schema_version": "1.0", "runs": []}
 
-    def _save(self, data: dict) -> None:
+    def _save(self, data: Dict[str, Any]) -> None:
         p = self._log_path
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -64,7 +64,7 @@ class PipelineRunLog:
     def start_run(self, request_id: str, trigger: str = "manual") -> str:
         """Registra início de run; marca runs anteriores sem stop como 'interrupted'."""
         data = self._load()
-        runs: list = data.setdefault("runs", [])
+        runs: List[Dict[str, Any]] = data.setdefault("runs", [])
 
         # Fechar runs sem stop_time (crashes anteriores)
         for run in runs:
@@ -98,12 +98,12 @@ class PipelineRunLog:
     def stop_run(
         self,
         reason: str = "completed",
-        metrics: dict[str, Any] | None = None,
-        run_id: str | None = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         """Registra fim da run atual (ou run_id específico)."""
         data = self._load()
-        runs: list = data.get("runs", [])
+        runs: List[Dict[str, Any]] = data.get("runs", [])
         target_id = run_id or self._current_run_id
 
         run = next((r for r in runs if r.get("run_id") == target_id and not r.get("stop_time")), None)
@@ -135,8 +135,8 @@ class PipelineRunLog:
         )
         self._current_run_id = None
 
-    def get_runs(self) -> list[dict]:
+    def get_runs(self) -> List[Dict[str, Any]]:
         return self._load().get("runs", [])
 
-    def get_current_run_id(self) -> str | None:
+    def get_current_run_id(self) -> Optional[str]:
         return self._current_run_id

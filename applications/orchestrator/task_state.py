@@ -19,7 +19,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class TaskState:
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self._state: dict[str, dict[str, Any]] = {}   # task_id → {status, updated_at, ...}
+        self._state: Dict[str, Dict[str, Any]] = {}   # task_id → {status, updated_at, ...}
         self._dirty = False
 
     # ── Paths ────────────────────────────────────────────────────────────────
@@ -104,13 +104,13 @@ class TaskState:
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
-    def get_status(self, task_id: str) -> str | None:
+    def get_status(self, task_id: str) -> Optional[str]:
         return self._state.get(task_id, {}).get("status")
 
     def is_terminal(self, task_id: str) -> bool:
         return self.get_status(task_id) in TERMINAL_STATUSES
 
-    def terminal_task_ids(self) -> set[str]:
+    def terminal_task_ids(self) -> Set[str]:
         return {tid for tid, t in self._state.items() if t.get("status") in TERMINAL_STATUSES}
 
     def pending_task_ids(self, all_ids: list[str]) -> list[str]:
