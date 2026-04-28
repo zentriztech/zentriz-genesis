@@ -283,23 +283,36 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
 
 Avalie objetivamente o produto a partir da spec e da proposta do Engineer:
 
-| Nível | Critérios | Exemplos |
-|-------|-----------|---------|
-| `low` | 1–3 rotas/telas, sem estado complexo de UI, sem auth própria, ou frontend de demonstração | Landing page, catálogo readonly, app de 2-3 telas |
-| `medium` | 4–8 rotas, auth simples (login/logout), 1–3 entidades de negócio, CRUD básico | Dashboard simples, e-commerce pequeno |
-| `high` | 9+ rotas, auth complexa (roles, permissões), integrações externas, estado global complexo | SaaS, marketplace, app com múltiplos perfis |
+| Nível | Critérios | Exemplos | Agentes no pipeline |
+|-------|-----------|---------|---------------------|
+| `trivial` | Output cabe em 1–3 arquivos, sem backend, sem estado, sem rotas múltiplas, sem auth | HTML/CSS estático, landing page sem JS, página de erro, README visual | CTO → Dev direto (sem Engineer, sem PM) |
+| `low` | 1–3 rotas/telas, sem estado complexo de UI, sem auth própria, ou frontend de demonstração | Catálogo readonly, app de 2-3 telas, landing page com formulário | CTO → PM → Dev (FAST-TRACK, máx 7 tasks) |
+| `medium` | 4–8 rotas, auth simples (login/logout), 1–3 entidades de negócio, CRUD básico | Dashboard simples, e-commerce pequeno | FULL limitado (máx 12 tasks) |
+| `high` | 9+ rotas, auth complexa (roles, permissões), integrações externas, estado global complexo | SaaS, marketplace, app com múltiplos perfis | FULL (sem limite) |
+
+**Critérios de qualidade por nível** — cada nível tem baseline próprio (trivial ≠ zero qualidade):
+
+| Dimensão | `trivial` | `low` | `medium` | `high` |
+|----------|-----------|-------|----------|--------|
+| Segurança | XSS/HTTPS básico | + validação de input | + auth segura | + auditoria/pentest |
+| Performance | best-effort | otimizado | testado | benchmarkado |
+| Escala | N/A (estático) | single-user ok | multi-user | distribuído |
+| Manutenibilidade | código legível | comentado | documentado | arquitetado |
+
+**Reclassificação obrigatória:** se durante a execução o scope crescer além dos critérios do nível atual (ex.: "trivial" ganha backend ou auth), pausar e reclassificar antes de continuar.
 
 Inclua no `PROJECT_CHARTER.md` o campo em uma seção dedicada:
 
 ```markdown
 ## Complexity Hint
 
-**complexity_hint:** low | medium | high
-**routes_estimated:** N  (número de rotas/páginas distintas)
+**complexity_hint:** trivial | low | medium | high
+**routes_estimated:** N  (número de rotas/páginas distintas; use 1 para trivial)
 **reasoning:** <1 linha explicando o nível escolhido>
 ```
 
 **Exemplos:**
+- `complexity_hint: trivial` — "Landing page HTML pura: 1 arquivo, sem JS, sem backend, sem estado"
 - `complexity_hint: low` — "Catálogo de produtos: 3 telas (listagem, detalhe, login simples), sem estado complexo"
 - `complexity_hint: medium` — "Dashboard admin: 6 rotas, auth JWT, CRUD de 2 entidades"
 - `complexity_hint: high` — "SaaS multi-tenant: 12+ rotas, roles, pagamentos, notificações"

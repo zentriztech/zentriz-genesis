@@ -616,11 +616,11 @@ def _heuristic_module_fallback(text: str) -> str:
 def _extract_complexity_hint(charter_text: str) -> str:
     """
     Extrai o campo complexity_hint do PROJECT_CHARTER.md gerado pelo CTO.
-    Retorna 'low', 'medium', 'high' ou string vazia se não encontrado.
+    Retorna 'trivial', 'low', 'medium', 'high' ou string vazia se não encontrado.
     """
     if not charter_text:
         return ""
-    match = re.search(r"complexity_hint[*\s]*[:\|][*\s]*(low|medium|high)", charter_text, re.IGNORECASE)
+    match = re.search(r"complexity_hint[*\s]*[:\|][*\s]*(trivial|low|medium|high)", charter_text, re.IGNORECASE)
     if match:
         return match.group(1).lower()
     return ""
@@ -2248,6 +2248,70 @@ def main() -> int:
         pm_status = "?"
         # Default: se step>=3 (checkpoint restaurado), usar current_module do contexto
         pm_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "backend"
+
+        # ── Trivial fast-path: complexidade trivial → bypass Engineer+PM, 1 task direto ──
+        _complexity_hint_val = _extract_complexity_hint(charter_summary)
+        if _complexity_hint_val == "trivial" and (not pipeline_ctx or pipeline_ctx.current_step < 3):
+            _post_step(
+                "Complexidade trivial detectada. Bypass de Engineer e PM: 1 task gerada diretamente pelo CTO → Dev.",
+                request_id,
+            )
+            pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
+            _owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
+            _trivial_task = {
+                "taskId": "TSK-TRIVIAL-001",
+                "module": pm_module,
+                "ownerRole": _owner_role,
+                "status": "ASSIGNED",
+                "requirements": (charter_summary or spec_content)[:800],
+                "depends_on_files": [],
+                "target_route": "/",
+            }
+            backlog_summary = f"[TRIVIAL] 1 task — {(charter_summary or spec_content)[:300]}"
+            backlog_artifacts = []
+            pm_status = "OK"
+            if project_id and storage and storage.is_enabled():
+                _trivial_backlog_content = (
+                    f"# Backlog — Trivial\n\n"
+                    f"**Modo:** TRIVIAL (complexity_hint=trivial, 1 task)\n\n"
+                    f"## TSK-TRIVIAL-001\n\n"
+                    f"**Título:** Implementação direta (trivial)\n\n"
+                    f"**Requisitos:**\n\n{(charter_summary or spec_content)[:800]}\n\n"
+                    f"**depends_on_files:** []\n\n"
+                    f"**target_route:** /\n"
+                )
+                storage.write_doc(project_id, "pm", "backlog", _trivial_backlog_content, title="Backlog Trivial")
+            if pipeline_ctx:
+                pipeline_ctx.set_backlog(backlog_summary)
+                if hasattr(pipeline_ctx, "current_module"):
+                    pipeline_ctx.current_module = pm_module
+                pipeline_ctx.current_step = 3
+                pipeline_ctx.save_checkpoint(STATE_DIR)
+            # Seed a task trivial diretamente, sem _seed_tasks (que lê BACKLOG.md do disco)
+            if project_id and _api_available():
+                _trivial_seed_path = f"/api/projects/{project_id}/tasks"
+                _trivial_seed_body = {"tasks": [_trivial_task]}
+                _trivial_data, _trivial_status = _api_post(_trivial_seed_path, _trivial_seed_body)
+                if 200 <= _trivial_status < 300:
+                    logger.info("[Trivial] Task TSK-TRIVIAL-001 criada via API.")
+                else:
+                    logger.warning("[Trivial] Falha ao criar task via API (status %s); continuando.", _trivial_status)
+                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
+                if _run_log:
+                    try:
+                        _proj_status = _get_project_status(project_id) or "stopped"
+                        _reason = "accepted" if _proj_status == "accepted" else ("sigterm" if _shutdown_requested else "stopped")
+                        _run_log.stop_run(reason=_reason)
+                    except Exception:
+                        pass
+            persist_state(
+                spec_ref=spec_ref,
+                charter={"summary": charter_summary, "artifacts": charter_artifacts},
+                backlog={"summary": backlog_summary, "artifacts": backlog_artifacts},
+                events=["project.created", "task.assigned", "task.completed", "qa.review"],
+            )
+            return
+
         if not pipeline_ctx or pipeline_ctx.current_step < 3:
             max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
             cto_pm_questionamentos = None

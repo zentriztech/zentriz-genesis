@@ -127,6 +127,25 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 
 ## 5) MODE SPECS (PM Backend)
 
+### Fast-Track Detection (OBRIGATÓRIO — aplicar antes de gerar o backlog)
+
+#### Passo 1 — Ler `complexity_hint` do charter (âncora primária)
+
+O CTO sempre inclui um campo `complexity_hint` no PROJECT_CHARTER.md. **Use-o como decisão primária:**
+
+| `complexity_hint` | Modo padrão | Máximo de tasks |
+|-------------------|-------------|-----------------|
+| `trivial` | **TRIVIAL** — pipeline bypass: o runner NÃO chama o PM; o CTO passa direto ao Dev com 1 task. Se o runner chamar o PM mesmo assim, gere exatamente 1 task e indique `"Modo: TRIVIAL"` no summary. | 1 task |
+| `low` | **FAST-TRACK** | 7 tasks |
+| `medium` | **FULL** limitado | 12 tasks |
+| `high` | **FULL** | sem limite (respeita LEI 8) |
+
+Se `complexity_hint` não estiver presente no charter, infira pelo número de entidades e rotas da spec.
+
+Indicar no `summary` qual modo foi usado: `"Modo: FAST-TRACK (complexity_hint=low, 5 tasks)"` ou `"Modo: FULL (complexity_hint=medium, 10 tasks)"`.
+
+---
+
 ### Mode: `generate_backlog`
 - Purpose: Generate executable backlog for Backend squad (tasks, acceptance criteria, DoD) — **resposta abrangente**, artefatos completos.
 - Required artifacts (exactly 2, **completos e abrangentes**, markdown válido em cada `content`):

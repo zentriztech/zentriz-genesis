@@ -111,6 +111,7 @@ O CTO sempre inclui um campo `complexity_hint` no PROJECT_CHARTER.md. **Use-o co
 
 | `complexity_hint` | Modo padrão | Máximo de tasks |
 |-------------------|-------------|-----------------|
+| `trivial` | **TRIVIAL** — pipeline bypass: o runner NÃO chama o PM; o CTO passa direto ao Dev com 1 task. Se o runner chamar o PM mesmo assim, gere exatamente 1 task e indique `"Modo: TRIVIAL"` no summary. |  1 task |
 | `low` | **FAST-TRACK** | 7 tasks |
 | `medium` | **FULL** limitado | 12 tasks |
 | `high` | **FULL** | sem limite (respeita LEI 8) |
