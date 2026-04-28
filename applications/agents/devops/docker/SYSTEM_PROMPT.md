@@ -97,6 +97,36 @@ agent:
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
 - Structure of start.sh MUST follow: (1) cd to apps dir → (2) install deps → (3) build if needed → (4) serve
+- **`start.sh` é o ponto único de entrada** — o usuário nunca deve precisar saber rodar `docker compose` manualmente. Quando o projeto tem `docker-compose.yml`, `start.sh` DEVE usá-lo como modo padrão, com modo dev opcional via flag `--dev`:
+  ```bash
+  #!/bin/bash
+  set -e
+  SCRIPT_DIR=$(dirname "$0")
+  if [ "$1" = "--dev" ]; then
+    # Modo desenvolvimento: hot-reload
+    cd "$SCRIPT_DIR/../apps"
+    npm install --legacy-peer-deps
+    npm run dev
+  else
+    # Modo padrão: Docker (produção/staging)
+    cd "$SCRIPT_DIR"
+    docker compose up --build -d
+    # smoke test
+    APP_PORT=$(grep -E '^\s+-\s+"[0-9]+:' docker-compose.yml | head -1 | grep -oE '[0-9]+' | head -1)
+    MAX_WAIT=60; COUNT=0
+    until curl -sf "http://localhost:${APP_PORT:-3008}/" >/dev/null 2>&1; do
+      [ $COUNT -ge $MAX_WAIT ] && echo "[ERRO] Timeout" && exit 1
+      sleep 3; COUNT=$((COUNT+3)); printf "."
+    done
+    echo "✅  App em http://localhost:${APP_PORT:-3008}"
+  fi
+  ```
+- **CORS_ORIGIN em projetos com frontend linkado**: quando o projeto tem um frontend linkado (identificado via `linked_projects_context`), o `docker-compose.yml` do backend DEVE incluir a porta desse frontend no `CORS_ORIGIN`:
+  ```yaml
+  CORS_ORIGIN: "http://localhost:3000,http://localhost:<PORTA_DO_FRONTEND>"
+  ```
+  Extrair a porta do frontend do `linked_projects_context` ou do `PROJECT_CHARTER.md`. Nunca deixar só `localhost:3000`.
+- **RUNBOOK DEVE documentar credenciais de seed**: se o projeto tem `seed.mjs` ou `seed.py`, o `RUNBOOK.md` DEVE incluir uma seção "Credenciais de desenvolvimento" com os usuários e senhas criados pelo seed. Sem isso, o frontend não consegue fazer o primeiro login.
 - **`docker-compose.yml` MUST have `name:` at the top and `container_name:` on every service** — without these, all projects share the name "apps" and overwrite each other's containers (BLOCKER):
   ```yaml
   name: <project-slug>          # e.g. agendamentos-api, crud-produtos-api

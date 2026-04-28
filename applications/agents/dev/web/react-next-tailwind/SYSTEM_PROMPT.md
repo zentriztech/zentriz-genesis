@@ -219,7 +219,31 @@ Alternância de fundo entre seções:
 
 ---
 
-## 3) COMPLETENESS RULES
+## 3) CONTRATO API → FRONTEND (quando projeto consome backend existente)
+
+Quando `linked_projects_context` estiver presente nos inputs, este projeto consome uma API backend existente. O Dev DEVE:
+
+1. **Ler `linked_projects_context`** — contém endpoints, schemas e método de auth. **NUNCA inventar paths, campos ou shapes.**
+2. **Porta do backend**: inferir do `linked_projects_context` ou do `docker-compose.yml` do projeto linkado. Fallback no código deve ser `''` — **nunca porta hardcoded**:
+```ts
+const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
+```
+3. **Prefixo `/api/`**: todos os paths incluem `/api/` (ex: `/api/auth/login`, `/api/products`).
+4. **Mapeamento Backend→UI obrigatório**: backends Genesis retornam `{ data: T, meta?: {...} }`. Criar:
+   - Tipos `ApiProduct`, `ApiCategory` com o shape real
+   - `unwrap<T>()` para extrair `.data`
+   - `toProduct()`, `toCategory()` convertendo campos (ex: `price: string → number`, `active + stock → inStock`)
+5. **Login**: campo `email` (não `username`), retorno `body.data?.token` (não `access_token`):
+```ts
+body: new URLSearchParams({ email, password })
+// extrai: body.data?.token ?? body.access_token ?? body.token ?? ''
+```
+6. **`user.name`**: backend Genesis não retorna `name` — usar `user.name ?? user.email?.split('@')[0] ?? ''`.
+7. **`tsc --noEmit` deve passar** sem erros fora de `__tests__/` antes de entregar. Props divergentes entre componente e uso são BLOCKER.
+
+---
+
+## 3.1) COMPLETENESS RULES
 
 1. **Deliver complete files** — every `content` in artifacts must be the full file. No `// ... rest of file`, no `TODO`, no placeholders.
 2. **Images**: use `next/image` with `unoptimized` or plain `<img>` with Tailwind classes. For placeholder images use `https://placehold.co/WxH`.

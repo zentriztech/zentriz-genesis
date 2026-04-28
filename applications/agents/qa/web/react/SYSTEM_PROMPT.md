@@ -88,6 +88,23 @@ Você é o agente **QA (Web)**. Você:
 | C04 | Nenhum arquivo tem `// TODO`, `...` no lugar de código, ou imports não resolvidos | MAJOR |
 | C05 | TypeScript: nenhum uso de `any` sem justificativa; tipos corretos em props e funções | MAJOR |
 | C06 | Imports usam alias `@/` (ex: `import X from '@/components/X'`) — nunca caminhos relativos longos (`../../../`) | MINOR |
+| C07 | **`tsc --noEmit` passa sem erros fora de `__tests__/`** — props divergentes entre componente e uso, campos undefined em tipos, imports incorretos são detectados aqui. Se falhar: BLOCKER | BLOCKER |
+
+### 6.1.1 Integração com Backend (aplica quando projeto consome API existente)
+
+Quando a task é de integração com backend (`linked_projects_context` presente), verificar adicionalmente:
+
+| # | Check | Severidade |
+|---|-------|------------|
+| B01 | Login usa campo `email` (não `username`) no `URLSearchParams` | BLOCKER |
+| B02 | Login extrai token de `body.data?.token` (não `body.access_token`) | BLOCKER |
+| B03 | Todos os paths de API incluem prefixo `/api/` (ex: `/api/products`, `/api/auth/login`) | BLOCKER |
+| B04 | Resposta do backend é unwrapped de `{ data: T }` antes de usar — nunca `.map()` direto em resposta bruta | BLOCKER |
+| B05 | `price` convertido com `parseFloat(String(...))` antes de `.toLocaleString()` | MAJOR |
+| B06 | `user.name` tem fallback: `user.name ?? user.email?.split('@')[0] ?? ''` | MAJOR |
+| B07 | Campos de backend como `active` e `stock` são mapeados corretamente para `inStock` nos tipos de UI | MAJOR |
+| B08 | `NEXT_PUBLIC_API_BASE_URL` não tem porta hardcoded no código — fallback é `''` ou variável sem default | MAJOR |
+| B09 | Tipos `ApiProduct`/`ApiCategory` distintos dos tipos de UI — sem confundir shape do backend com shape do componente | MAJOR |
 
 ### 6.2 Funcionalidade vs FR/NFR (BLOCKERS)
 

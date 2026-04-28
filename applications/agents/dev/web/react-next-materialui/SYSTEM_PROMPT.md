@@ -812,46 +812,50 @@ grep -c "npm ci" apps/Dockerfile        # deve retornar 0
 
 Quando o charter indica que este projeto **consome uma API backend existente**, o Dev DEVE:
 
-1. **Ler o contexto dos projetos linkados** (campo `linked_projects_context` nos inputs) — contém endpoints, schemas e método de autenticação do backend
-2. **Nunca inventar URLs ou schemas** — usar exatamente o que o backend documenta
-3. **Criar `src/lib/api.ts`** centralizando todas as chamadas:
+1. **Ler o contexto dos projetos linkados** (`linked_projects_context` nos inputs) — contém endpoints, schemas e método de autenticação. **NUNCA inventar URLs, campos ou shapes.**
+2. **Inferir a porta do backend** do `linked_projects_context` ou do `docker-compose.yml` do projeto linkado — **nunca hardcodar porta genérica como `3004`**. O fallback no código deve ser `''` (string vazia), não uma porta inventada:
 ```ts
-const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3004';
+const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
+```
+3. **Todos os paths de API incluem o prefixo `/api/`** — backends Genesis registram rotas sob `/api/`. Ex: `/api/auth/login`, `/api/products`, `/api/categories`. Verificar no `linked_projects_context` antes de escrever qualquer path.
+4. **Mapeamento obrigatório Backend→UI** — backends Genesis retornam envelope `{ data: T, meta?: {...} }`. Nunca consumir o shape bruto direto nos componentes. Criar:
+   - Tipos `Api*` refletindo o shape real: `ApiProduct`, `ApiCategory`
+   - Função `unwrap<T>()` para extrair `.data` do envelope
+   - Funções `toProduct()`, `toCategory()` convertendo Api* → tipo de UI
+```ts
+// Envelope padrão de todos os endpoints Genesis
+interface ApiEnvelope<T> { data: T; meta?: { total: number; page: number } }
 
-export async function apiGet<T>(path: string, token?: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+function unwrap<T>(raw: ApiEnvelope<T> | T): T {
+  if (raw !== null && typeof raw === 'object' && 'data' in (raw as object))
+    return (raw as ApiEnvelope<T>).data;
+  return raw as T;
 }
 
-export async function apiPost<T>(path: string, body: unknown, token?: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+// Exemplo: price vem como string "99.90" do MySQL — converter antes de usar
+function toProduct(raw: ApiProduct): Product {
+  return { ...raw, price: parseFloat(String(raw.price)) || 0, inStock: raw.active && raw.stock > 0 };
 }
 ```
-4. **Login (OAuth2 Password Flow)**: o backend usa `Content-Type: application/x-www-form-urlencoded` com campos `username` e `password` — não JSON:
+5. **Login**: o backend Genesis Node.js usa `Content-Type: application/x-www-form-urlencoded` com campo **`email`** (não `username`) e **retorna `{ data: { token: "..." } }`** (não `{ access_token }`):
 ```ts
-export async function apiLogin(email: string, password: string) {
-  const res = await fetch(`${BASE}/auth/login`, {
+export async function apiLogin(email: string, password: string): Promise<string> {
+  const res = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ username: email, password }),
+    body: new URLSearchParams({ email, password }),
   });
   if (!res.ok) throw new Error('Credenciais inválidas');
-  const { access_token } = await res.json();
-  return access_token as string;
+  const body = await res.json();
+  // Backend retorna { data: { token } } — nunca { access_token }
+  return body.data?.token ?? body.access_token ?? body.token ?? '';
 }
 ```
-5. **Armazenar token**: usar `localStorage` para SPA ou `httpOnly cookie` para SSR. Nunca em variável de módulo (perde no reload).
-6. **Tratar 401**: redirecionar para `/login` quando token expirado.
-7. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=http://localhost:3004`
+6. **Verificar `user.name`**: backends Node.js gerados pelo Genesis retornam `{ id, email, role }` — sem campo `name`. Sempre usar fallback: `user.name ?? user.email.split('@')[0]`.
+7. **Armazenar token**: `localStorage` para SPA. Nunca em variável de módulo.
+8. **Tratar 401**: redirecionar para `/login` quando token expirado.
+9. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=` (vazio — porta real deve ser configurada pelo usuário).
+10. **`tsc --noEmit` deve passar sem erros** antes de entregar qualquer artefato. Se houver erros de TypeScript fora de `__tests__/`, são BLOCKERs — não entregar.
 
 ### 6.4 ENTREGÁVEIS OBRIGATÓRIOS para projetos Web App com backend
 
