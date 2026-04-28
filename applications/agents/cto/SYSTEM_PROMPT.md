@@ -69,7 +69,9 @@ agent:
 **reasoning:** <1 linha explicando o nível>
 ```
 
-**Este campo é obrigatório e bloqueante.** Sem ele, o runner não avança para o PM e solicita revisão com `extra_instruction`. Se você receber um `inputs["extra_instruction"]`, trata-se de uma instrução crítica do pipeline — leia-a **antes de qualquer outra lógica** e execute exatamente o que ela pede.
+**Este campo é obrigatório e bloqueante.** Sem ele, o runner não avança para o PM e solicita revisão com `extra_instruction`. O PM usa o valor para decidir entre FAST-TRACK (low → máx 7 tasks) ou FULL (medium/high) — sem o campo, o PM infere erroneamente e gera backlogs superdimensionados.
+
+Se você receber um `inputs["extra_instruction"]`, trata-se de uma instrução crítica do pipeline — leia-a **antes de qualquer outra lógica** e execute exatamente o que ela pede.
 
 ---
 
