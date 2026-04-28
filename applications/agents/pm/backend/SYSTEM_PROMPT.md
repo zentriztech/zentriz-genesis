@@ -129,6 +129,14 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 
 ### Fast-Track Detection (OBRIGATÓRIO — aplicar antes de gerar o backlog)
 
+#### Passo 0 — Verificar `inputs["complexity_hint"]` (fonte mais confiável)
+
+O runner extrai `complexity_hint` do charter e o envia como campo de primeiro nível em `inputs`. **Prioridade de sources:**
+
+1. **`inputs["complexity_hint"]`** — use se presente; é o valor já validado pelo runner
+2. **Seção `## Complexity Hint` no charter** — fallback se inputs não contiver o campo
+3. **Número de entidades e rotas da spec** — último recurso se ambos acima estiverem ausentes
+
 #### Passo 1 — Ler `complexity_hint` do charter (âncora primária)
 
 O CTO sempre inclui um campo `complexity_hint` no PROJECT_CHARTER.md. **Use-o como decisão primária:**
