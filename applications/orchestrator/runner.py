@@ -659,10 +659,12 @@ def call_pm(
     cto_questionamentos: str | None = None,
     pipeline_ctx: "PipelineContext | None" = None,
 ) -> dict:
-    # Garantir que o server carregue o SYSTEM_PROMPT correto (pm/web, pm/backend, pm/mobile)
+    # GAP-A1: PM master tem prioridade — especialização dinâmica pelo charter
+    # Backward compat: se master não existe, usa pm/{module} legado
     if not (module in ("web", "backend", "mobile")):
         module = "web"
-    skill_path = f"pm/{module}"
+    _pm_master = _agents_root() / "pm" / "SYSTEM_PROMPT.md"
+    skill_path = "pm" if _pm_master.exists() else f"pm/{module}"
     if pipeline_ctx:
         pipeline_ctx.current_module = module
         inputs = pipeline_ctx.build_inputs_for_pm(cto_questionamentos)
@@ -710,11 +712,15 @@ def call_pm(
 
 def _infer_web_skill_path(context_text: str, project_id: str | None = None) -> str:
     """
-    Infers the correct Dev web skill path from charter/backlog text or BACKLOG.md on disk.
-    Returns the path under applications/agents/dev/web/ to the SYSTEM_PROMPT directory.
-    Falls back to react-next-materialui if no variant can be detected.
+    GAP-A1: Se o master dev/SYSTEM_PROMPT.md existe, retorna 'dev' para especialização dinâmica.
+    Caso contrário, usa lógica legada de detecção de variant fixa (backward compat).
     """
-    # Also read BACKLOG.md from disk for more reliable detection
+    # GAP-A1: master tem prioridade — especialização dinâmica pelo charter
+    master_path = _agents_root() / "dev" / "SYSTEM_PROMPT.md"
+    if master_path.exists():
+        return "dev"
+
+    # Legado: detecção de variant fixa (mantido para backward compat se master removido)
     disk_text = ""
     if project_id:
         try:
@@ -730,7 +736,6 @@ def _infer_web_skill_path(context_text: str, project_id: str | None = None) -> s
         return "dev/web/react-next-tailwind"
     if "material" in combined or "mui" in combined or "material-ui" in combined:
         return "dev/web/react-next-materialui"
-    # Next.js without explicit UI framework: default to tailwind (more common for static sites)
     if "next.js" in combined or "nextjs" in combined or "next js" in combined:
         if tailwind_path.exists():
             return "dev/web/react-next-tailwind"
@@ -796,6 +801,9 @@ def call_dev(
             logger.error("[call_dev] Stack detection failed: %s — usando nodejs como fallback", _e)
 
     def _backend_skill() -> str:
+        # GAP-A1: master tem prioridade
+        if (_agents_root() / "dev" / "SYSTEM_PROMPT.md").exists():
+            return "dev"
         if _detected_lang == "python" and _python_prompt_exists:
             return _python_prompt_path
         skill_map_lang = f"dev/backend/{_detected_lang}"
@@ -803,12 +811,15 @@ def call_dev(
             return skill_map_lang
         return "dev/backend/nodejs"
 
+    # GAP-A1: master tem prioridade para mobile também
+    _mobile_skill = "dev" if (_agents_root() / "dev" / "SYSTEM_PROMPT.md").exists() else "dev/mobile/react-native"
+
     _skill_map = {
-        "web": _web_skill,
+        "web": _web_skill,         # "dev" se master existe, legado caso contrário
         "backend": _backend_skill(),
-        "backend_python": _python_prompt_path if _python_prompt_exists else "dev/backend/nodejs",
+        "backend_python": _backend_skill(),
         "fullstack": _web_skill,
-        "mobile": "dev/mobile/react-native",
+        "mobile": _mobile_skill,
     }
     inputs["context"] = inputs.get("context") or {}
     inputs["context"]["skill_path"] = _skill_map.get(dev_variant, "dev/backend/nodejs")
@@ -859,11 +870,20 @@ def call_qa(
         existing_artifacts=existing_artifacts or [],
         limits={"timeout_sec": 120},
     )
+    # GAP-A1: QA master tem prioridade — especialização dinâmica pela spec
+    # Quando API_AGENTS_URL está set, o skill_path é resolvido pelo servidor de agentes
+    _qa_master = _agents_root() / "qa" / "SYSTEM_PROMPT.md"
+    if _qa_master.exists() and not os.environ.get("API_AGENTS_URL"):
+        # Modo local: usar master diretamente
+        from orchestrator.agents.runtime import run_agent
+        return run_agent(system_prompt_path=_qa_master, message=message, role="QA")
     if os.environ.get("API_AGENTS_URL"):
+        # Modo HTTP: injetar skill_path=qa para servidor usar master
+        message.setdefault("inputs", {}).setdefault("context", {})["skill_path"] = "qa"
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
     from orchestrator.agents.runtime import run_agent
-    # Use language-appropriate QA SYSTEM_PROMPT — disk-first detection
+    # Fallback legado: detecção de stack para QA variant
     _qa_pid = os.environ.get("PROJECT_ID")
     _qa_lang = "nodejs"
     try:
