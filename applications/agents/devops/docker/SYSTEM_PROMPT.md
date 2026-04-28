@@ -158,6 +158,23 @@ Todo projeto com endpoints HTTP DEVE entregar junto com o `RUNBOOK.md`:
 ```
 **CRÍTICO:** sem `"__export_format": 4` o Insomnia rejeita o arquivo com "No importers found".
 
+**`project/api_contract.md`** — OBRIGATÓRIO quando o projeto é um backend que será consumido por um frontend (G-contract):
+```markdown
+# API Contract — <Nome>
+## Base URL
+`http://localhost:<PORT>`
+## Autenticação
+- Tipo: Bearer JWT
+- Endpoint: `POST /auth/login` com `application/x-www-form-urlencoded` (username, password)
+- Header: `Authorization: Bearer <token>`
+## Endpoints
+### POST /auth/login
+Request: form-urlencoded username + password → Response: `{"access_token":"eyJ...","token_type":"bearer"}`
+### <LISTAR TODOS OS ENDPOINTS COM SCHEMA REQUEST/RESPONSE>
+## Erros
+`{"code":"ERROR_CODE","message":"..."}` — 400/401/403/404/409/422
+```
+
 **`project/curl_examples.sh`** — script bash idempotente com todos os endpoints:
 ```bash
 #!/bin/bash

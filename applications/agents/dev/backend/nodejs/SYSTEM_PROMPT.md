@@ -389,24 +389,68 @@ Adicionar em `package.json`: `"seed": "npx ts-node apps/seed.ts"`
 
 ---
 
-### 6.2 BUGS CONHECIDOS — Node.js + Drizzle + PostgreSQL (validar obrigatoriamente)
+### 6.2 BUGS CONHECIDOS — Node.js + Drizzle (validar obrigatoriamente)
 
-Validados em produção real (projeto 31f342e3, 2026-04-27). Causam falha silenciosa em runtime:
+Validados em produção real. Causam falha silenciosa em runtime:
 
+#### 6.2a Stack PostgreSQL (padrão)
 | # | Arquivo | O que verificar | Erro se errar |
 |---|---------|----------------|---------------|
-| B1 | `package.json` + `src/db/` | Stack PostgreSQL → imports `drizzle-orm/pg-core` + driver `postgres`; **nunca** `mysql2`/`mysqlTable` mesmo que o charter não diga explicitamente SQL flavor | App sobe mas não conecta ao banco |
-| B2 | `Dockerfile` | `RUN npm install --legacy-peer-deps` — nunca `npm ci` sem `package-lock.json` | Build quebra no primeiro `docker build` |
-| B3 | `src/app.ts` | `cors({ origin: [...] })` com lista de origens — nunca `cors()` vazio | QA_FAIL (CORS sem restrição) |
-| B4 | `src/app.ts` | `app.use(publicLimiter)` **antes** dos parsers de body — rate limiter precisa estar em app.ts, não apenas nas rotas | QA_FAIL (ausência de rate limiting global) |
-| B5 | `seed.ts` | Seed em TypeScript falha com `ts-node npx` por falta de contexto de tipos Node. Criar **`seed.mjs`** (ES module puro) em vez de `seed.ts` | `Cannot find name 'process'` / `console` |
-| B6 | `docker-compose.yml` | Não usar `${PORT:-3001}` se `.env` define `PORT=3001` — isso conflita com genesis-web. Usar porta fixa ≥ 3004 | `port already allocated` |
+| B1 | `package.json` + `src/db/` | PostgreSQL → `drizzle-orm/pg-core` + driver `postgres`; **nunca** `mysql2`/`mysqlTable` | App sobe mas não conecta |
+| B2 | `Dockerfile` | `RUN npm install --legacy-peer-deps` — nunca `npm ci` sem lock file | Build quebra |
+| B3 | `src/app.ts` | `cors({ origin: [...] })` com lista — nunca `cors()` vazio | CORS sem restrição |
+| B4 | `src/app.ts` | `app.use(publicLimiter)` antes dos body parsers | Rate limiting ausente |
+| B5 | `seed.ts` | Usar `seed.mjs` (ES module puro) — `seed.ts` falha com ts-node npx | `Cannot find name 'process'` |
+| B6 | `docker-compose.yml` | Porta fixa ≥ 3004; `name: <slug>`; `container_name:` em cada serviço | Conflito de porta / containers sobrescrevem |
 
-**Varredura obrigatória:**
+**Varredura PostgreSQL:**
 ```bash
-grep -r "mysql" apps/src/ apps/package.json    # deve retornar vazio em projetos PostgreSQL
-grep -r "cors()" apps/src/app.ts               # deve retornar vazio (cors deve ter config)
+grep -r "mysql" apps/src/ apps/package.json    # deve retornar vazio
+grep -r "cors()" apps/src/app.ts               # deve retornar vazio
 grep -r "npm ci" apps/Dockerfile               # deve retornar vazio
+```
+
+#### 6.2b Stack MySQL — regras específicas (quando charter diz MySQL/MariaDB)
+
+MySQL é um flavor **legítimo** — a varredura `grep mysql` do 6.2a **NÃO se aplica** quando o charter especifica MySQL. As regras abaixo substituem B1:
+
+| # | Arquivo | O que fazer | Erro se errar |
+|---|---------|------------|---------------|
+| M1 | `package.json` | `"mysql2": "^3.9.0"` como dependência de runtime | App não conecta |
+| M2 | `src/db/client.ts` | `drizzle-orm/mysql2` + `mysql2.createPool({uri})` | Import errado → crash |
+| M3 | `src/db/schema/*.ts` | Imports de `drizzle-orm/mysql-core` (`mysqlTable`, `varchar`, `int`, `decimal`, `datetime`, `mysqlEnum`) | Schema inválido |
+| M4 | `src/db/migrate.ts` | `drizzle-orm/mysql2/migrator` | Migrator errado |
+| M5 | `drizzle.config.ts` | `dialect: 'mysql2'` | Drizzle-kit falha |
+| M6 | `docker-compose.yml` | `image: mysql:8.4`, `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, healthcheck com `mysqladmin ping` | DB não sobe |
+| M7 | `docker-compose.yml` | `DATABASE_URL: "mysql://root:root@db:3306/devdb"` no serviço api | Conexão recusada |
+| M8 | `Dockerfile` | `FROM --platform=linux/amd64 node:20-alpine` (mysql2 tem binários nativos) | Build falha no Mac M-series |
+| M9 | Tipos | `DECIMAL` no MySQL retorna **string** via mysql2 — sempre converter: `parseFloat(row.price)` | Aritmética silenciosa errada |
+| M10 | ENUMs | `mysqlEnum('status', ['active','inactive'])` — **não** usar `pgEnum` | Schema incompatível |
+
+**Template `src/db/client.ts` para MySQL:**
+```ts
+import 'dotenv/config';
+import { drizzle } from 'drizzle-orm/mysql2';
+import mysql from 'mysql2/promise';
+
+const pool = mysql.createPool({
+  uri: process.env.DATABASE_URL!,
+  waitForConnections: true,
+  connectionLimit: Number(process.env.DB_POOL_SIZE ?? 10),
+});
+export const db = drizzle(pool);
+export async function checkDatabaseConnection(): Promise<boolean> {
+  const conn = await pool.getConnection().catch(() => null);
+  if (!conn) return false;
+  conn.release();
+  return true;
+}
+```
+
+**Varredura MySQL (confirmar que NÃO usa pg-core por engano):**
+```bash
+grep -r "pg-core\|postgres-js\|drizzle-orm/postgres" apps/src/  # deve retornar vazio
+grep -r "drizzle-orm/mysql" apps/src/                            # deve retornar resultados
 ```
 
 ---

@@ -747,6 +747,97 @@ Regra: `theme.ts` deve ter `'use client'` no topo (createTheme é client-only no
 
 ---
 
+## 6) CHECKLIST PRÉ-ENTREGA (verificar antes de gerar response)
+
+- [ ] Todos os arquivos têm conteúdo completo (sem `...` ou TODOs)
+- [ ] `package.json` tem scripts `dev`, `build`, `start` e todas as deps de runtime
+- [ ] `next.config.mjs` existe e está correto para o tipo de app (static export ou SSR)
+- [ ] `.env.example` documenta `NEXT_PUBLIC_API_BASE_URL` e demais variáveis
+- [ ] `src/theme/brand.ts` criado antes de qualquer componente
+- [ ] `src/theme/theme.ts` começa com `'use client'`
+- [ ] Nenhuma cor MUI default hardcoded (`#1976d2`, `#9c27b0`) — só variáveis de brand
+- [ ] Formulários: `onSubmit` com `preventDefault`, estado de loading, feedback de erro/sucesso
+- [ ] Todas as chamadas à API usam `NEXT_PUBLIC_API_BASE_URL` do `.env` — nunca URL hardcoded
+
+### 6.1 BUGS CONHECIDOS — Next.js + MUI (validar obrigatoriamente)
+
+Derivados de falhas reais. Causam crash silencioso ou visual quebrado:
+
+| # | Arquivo | O que verificar | Erro se errar |
+|---|---------|----------------|---------------|
+| W1 | `src/theme/theme.ts` | Primeira linha DEVE ser `'use client'` — `createTheme` é client-only no App Router | `Error: createTheme() cannot be called from a Server Component` |
+| W2 | `src/theme/brand.ts` | Exportar tokens como `const` plain (sem `createTheme`) — permite import em Server Components | Erro de hydration ou import circular |
+| W3 | `src/app/globals.css` | Nomes de CSS vars devem ser exatos entre `brand.ts` e `globals.css` — um typo e a cor não aplica | Visual quebrado sem erro visível |
+| W4 | `package.json` | Next.js 14.x + MUI 5.x — versões incompatíveis causam hydration errors | `Hydration failed because the server rendered HTML didn't match` |
+| W5 | `next.config.mjs` | App com rotas dinâmicas / API calls **não pode** usar `output: 'export'` — remover para SSR | Build passa mas página em branco no browser |
+| W6 | `next/image` | Sempre passar `width` e `height` explícitos — sem eles: layout shift + aviso no console | CLS (Cumulative Layout Shift) alto |
+| W7 | `src/app/layout.tsx` | `ThemeRegistry` ou `ThemeProvider` DEVE envolver a árvore — sem isso MUI não aplica tema | Botões azul MUI padrão em produção |
+| W8 | Formulário + MUI TextField | `InputProps` vs `slotProps.input` — depende da versão do MUI; versão errada → prop ignorada silenciosamente | Input sem estilo customizado |
+| W9 | `docker-compose.yml` | `name: <slug>` no topo + `container_name:` em cada serviço + porta ≥ 3004 | Containers sobrescrevem outros projetos |
+| W10 | `.env.example` | `NEXT_PUBLIC_API_BASE_URL` documentado e usado em todas as chamadas — nunca URL hardcoded | Build funciona local mas falha em produção |
+
+**Varredura obrigatória:**
+```bash
+head -1 apps/src/theme/theme.ts         # deve ser 'use client'
+grep -r "#1976d2\|#9c27b0" apps/src/    # deve retornar vazio (sem cores MUI default)
+grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded)
+grep -c "npm ci" apps/Dockerfile        # deve retornar 0
+```
+
+### 6.2 CONTRATO API → FRONTEND (quando projeto é frontend de um backend existente)
+
+Quando o charter indica que este projeto **consome uma API backend existente**, o Dev DEVE:
+
+1. **Ler o contexto dos projetos linkados** (campo `linked_projects_context` nos inputs) — contém endpoints, schemas e método de autenticação do backend
+2. **Nunca inventar URLs ou schemas** — usar exatamente o que o backend documenta
+3. **Criar `src/lib/api.ts`** centralizando todas as chamadas:
+```ts
+const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3004';
+
+export async function apiGet<T>(path: string, token?: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function apiPost<T>(path: string, body: unknown, token?: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+```
+4. **Login (OAuth2 Password Flow)**: o backend usa `Content-Type: application/x-www-form-urlencoded` com campos `username` e `password` — não JSON:
+```ts
+export async function apiLogin(email: string, password: string) {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: email, password }),
+  });
+  if (!res.ok) throw new Error('Credenciais inválidas');
+  const { access_token } = await res.json();
+  return access_token as string;
+}
+```
+5. **Armazenar token**: usar `localStorage` para SPA ou `httpOnly cookie` para SSR. Nunca em variável de módulo (perde no reload).
+6. **Tratar 401**: redirecionar para `/login` quando token expirado.
+7. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=http://localhost:3004`
+
+### 6.3 ENTREGÁVEIS OBRIGATÓRIOS para projetos Web App com backend
+
+Na última task do backlog:
+- `apps/.env.example` com todas as variáveis (`NEXT_PUBLIC_API_BASE_URL`, etc.)
+- `project/insomnia_collection.json` com `"__export_format": 4` — endpoints do frontend (se aplicável)
+- `project/start.sh` ou instruções de como rodar com `npm run dev`
+
+---
+
 ## 7) GOLDEN EXAMPLES
 
 ### 7.1 Example input (MessageEnvelope)

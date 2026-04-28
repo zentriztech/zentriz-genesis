@@ -155,6 +155,35 @@ Você é o agente **QA (Web)**. Você:
   E aplicar em componentes de título: className="font-heading"
 ```
 
+### 6.7 Build e Compilação (BLOCKER)
+
+| # | Check | Severidade |
+|---|-------|------------|
+| B01 | `npm run build` passa sem erros (Next.js build completo) | BLOCKER |
+| B02 | Nenhum uso de `any` sem justificativa explícita em comentário | MAJOR |
+| B03 | Nenhum `console.error` ou `console.warn` em produção visível no browser | MINOR |
+
+### 6.8 Bugs Conhecidos Next.js + MUI (BLOCKERS — validados em produção)
+
+**Varredura rápida obrigatória:**
+```bash
+head -1 apps/src/theme/theme.ts         # deve ser 'use client'
+grep -r "#1976d2\|#9c27b0" apps/src/    # deve retornar vazio
+grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded)
+```
+
+| # | Check | Severidade |
+|---|-------|------------|
+| W1 | `src/theme/theme.ts` começa com `'use client'` | BLOCKER |
+| W2 | Nenhuma cor MUI default hardcoded (`#1976d2`, `#9c27b0`) — grep retorna vazio | BLOCKER |
+| W3 | CSS vars em `globals.css` com nomes exatamente iguais aos de `brand.ts` | MAJOR |
+| W4 | `next/image` tem `width` e `height` explícitos em todas as instâncias | MAJOR |
+| W5 | `ThemeProvider` ou `ThemeRegistry` envolve a árvore em `layout.tsx` | BLOCKER |
+| W6 | `NEXT_PUBLIC_API_BASE_URL` usado em todas as chamadas de API — grep localhost:3 retorna vazio | BLOCKER |
+| W7 | Formulários de login usam `application/x-www-form-urlencoded` (não JSON) quando backend usa OAuth2 Password Flow | BLOCKER |
+| W8 | `docker-compose.yml` tem `name: <slug>` + `container_name:` + porta ≥ 3004 | BLOCKER |
+| W9 | `.env.example` documenta todas as variáveis `NEXT_PUBLIC_*` | MAJOR |
+
 ### Severidade → decisão
 | Severidade | Definição | Impacto na decisão |
 |------------|-----------|-------------------|

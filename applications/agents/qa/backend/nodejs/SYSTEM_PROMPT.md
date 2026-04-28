@@ -156,17 +156,40 @@ grep -r "cors()" apps/src/app.ts                               # cors sem config
 grep -r "npm ci" apps/Dockerfile                               # deve ser vazio
 ```
 
-### 6.7 Bugs Conhecidos Node.js + Drizzle + PostgreSQL (BLOCKERS — validados 2026-04-27)
+### 6.7 Bugs Conhecidos Node.js + Drizzle (BLOCKERS — validados 2026-04-27)
 
+**Primeiro determinar a stack do charter antes de validar:**
+
+#### 6.7a Stack PostgreSQL
 | # | Check | Severidade |
 |---|-------|------------|
-| N01 | `package.json` + `src/db/`: PostgreSQL usa `postgres` driver + `drizzle-orm/pg-core` — **nunca** `mysql2`/`mysqlTable` | BLOCKER |
+| N01 | `package.json` + `src/db/`: usa `postgres` driver + `drizzle-orm/pg-core` — **grep mysql retorna vazio** | BLOCKER |
 | N02 | `Dockerfile`: usa `npm install --legacy-peer-deps` — **nunca** `npm ci` sem lock file | BLOCKER |
 | N03 | `src/app.ts`: `cors({ origin: [...] })` com lista de origens — **nunca** `cors()` vazio | BLOCKER |
 | N04 | `src/app.ts`: `app.use(publicLimiter)` presente antes dos parsers de body | MAJOR |
 | N05 | Seed: arquivo `seed.mjs` (não `.ts`) — seed TypeScript falha com `ts-node npx` por falta de contexto Node | MAJOR |
 | N06 | `docker-compose.yml`: porta do host ≥ 3004 para não colidir com genesis-web (3001) | MAJOR |
 | N07 | `docker-compose.yml` tem `name: <slug>` no topo e `container_name:` em cada serviço — sem isso todos os projetos viram "apps-*" e sobrescrevem uns aos outros | BLOCKER |
+
+#### 6.7b Stack MySQL — quando charter especifica MySQL/MariaDB
+
+A varredura `grep mysql` do 6.7a **NÃO se aplica** — MySQL é legítimo. Validar:
+
+| # | Check | Severidade |
+|---|-------|------------|
+| M01 | `package.json`: `"mysql2": "^3.9.0"` presente; **grep pg-core retorna vazio** | BLOCKER |
+| M02 | `src/db/schema/*.ts`: usa `mysqlTable`, `varchar`, `int`, `decimal`, `mysqlEnum` de `drizzle-orm/mysql-core` | BLOCKER |
+| M03 | `src/db/client.ts`: usa `drizzle-orm/mysql2` + `mysql2.createPool` | BLOCKER |
+| M04 | `drizzle.config.ts`: `dialect: 'mysql2'` | BLOCKER |
+| M05 | `docker-compose.yml`: `image: mysql:8.4` com healthcheck `mysqladmin ping` | BLOCKER |
+| M06 | `Dockerfile`: `FROM --platform=linux/amd64` — mysql2 tem binários nativos | MAJOR |
+| M07 | Campos `DECIMAL`: service layer converte `string → number` com `parseFloat()` antes de aritmética | MAJOR |
+
+**Varredura MySQL:**
+```bash
+grep -r "pg-core\|drizzle-orm/postgres" apps/src/  # deve retornar VAZIO
+grep -r "drizzle-orm/mysql" apps/src/               # deve retornar resultados
+```
 
 ### 6.5 Funcionalidade vs FR/NFR (BLOCKER)
 
