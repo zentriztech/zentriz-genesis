@@ -2188,6 +2188,49 @@ def main() -> int:
         request_id,
     )
 
+    # ── GAP-T1: Pré-classificador trivial — detecta na spec bruta ANTES do CTO ──────────────
+    # Sinais inequívocos de trivial: HTML puro, CSS puro, arquivo único, sem backend, sem JS.
+    # Se detectado E checkpoint não está avançado (step < 1), vai direto ao Dev.
+    # Idempotente: se checkpoint step>=1, o pré-classificador é ignorado (já passou desta fase).
+    _pre_trivial_detected = False
+    if (not pipeline_ctx or pipeline_ctx.current_step < 1) and spec_content:
+        _spec_lower = spec_content.lower()
+        _trivial_signals = [
+            "html" in _spec_lower and "css" in _spec_lower,
+            any(s in _spec_lower for s in ("arquivo único", "single file", "sem javascript", "without javascript", "sem js", "no js", "no javascript")),
+            any(s in _spec_lower for s in ("sem backend", "no backend", "without backend", "sem servidor", "no server")),
+            any(s in _spec_lower for s in ("html puro", "pure html", "html+css", "html + css", "html/css")),
+            any(s in _spec_lower for s in ("sem framework", "no framework", "without framework", "vanilla")),
+        ]
+        _positive_signals = sum(1 for s in _trivial_signals if s)
+        # Remover negações antes de checar sinais de complexidade
+        # "sem backend", "no backend", "without backend" não são requisitos de complexidade
+        import re as _re
+        _spec_without_negations = _re.sub(
+            r'(sem|no|without|não|nunca|never)\s+\w+', '', _spec_lower
+        )
+        # Pelo menos 2 sinais concordantes + sem sinais de complexidade no texto positivo
+        _complexity_signals = any(s in _spec_without_negations for s in (
+            "backend", "database", "autenticação", "authentication", "react", "next.js", "vue", "angular",
+            "api", "rest", "graphql", "typescript", "node.js", "python", "docker",
+        )) if _positive_signals >= 2 else False
+        if _positive_signals >= 2 and not _complexity_signals:
+            _pre_trivial_detected = True
+            logger.info("[GAP-T1] Pré-classificador: spec indica trivial (%d sinais). Bypass CTO+Engineer+PM.", _positive_signals)
+            _post_step(
+                "Spec identificada como trivial pelo pré-classificador. "
+                "Passando diretamente ao Dev sem CTO spec review, Engineer ou PM.",
+                request_id,
+            )
+            _patch_project({"complexity_hint": "trivial"})
+            # GAP-U4: para trivial pré-detectado, spec_understood é a spec bruta (sem processar pelo CTO)
+            # Avançar checkpoint direto para step=2 para evitar regredir em restart
+            if pipeline_ctx:
+                pipeline_ctx.set_product_spec(spec_content)
+                pipeline_ctx.current_step = 2
+                pipeline_ctx.save_checkpoint(STATE_DIR)
+    # ──────────────────────────────────────────────────────────────────────────────────────────
+
     cto_spec_response = {}
     cto_response = None
     engineer_response = None
@@ -2195,8 +2238,8 @@ def main() -> int:
     backlog_artifacts = []
     charter_path = STATE_DIR / "PROJECT_CHARTER.md"
     try:
-        # ── V2: CTO spec review (LEI 11: pular se current_step >= 1) ──
-        if not pipeline_ctx or pipeline_ctx.current_step < 1:
+        # ── V2: CTO spec review (LEI 11: pular se current_step >= 1 OU trivial pré-detectado) ──
+        if not _pre_trivial_detected and (not pipeline_ctx or pipeline_ctx.current_step < 1):
             _post_step(
                 "O CTO está analisando a especificação recebida (conversão para .md e entendimento do projeto).",
                 request_id,
@@ -2231,12 +2274,13 @@ def main() -> int:
             _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)
 
         # ── V2: Loop CTO ↔ Engineer (LEI 11: pular se current_step >= 2) ───────────────────
+        # GAP-T1 + GAP-U4: trivial pré-detectado pula Engineer completamente — sem docs
         max_cto_engineer_rounds = int(os.environ.get("MAX_CTO_ENGINEER_ROUNDS", "3"))
         engineer_summary = engineer_summary or ""
         cto_response = None
         charter_summary = charter_summary or ""
 
-        if not pipeline_ctx or pipeline_ctx.current_step < 2:
+        if not _pre_trivial_detected and (not pipeline_ctx or pipeline_ctx.current_step < 2):
             for round_num in range(1, max_cto_engineer_rounds + 1):
                 _post_step(
                     f"Rodada {round_num}/{max_cto_engineer_rounds}: CTO envia spec ao Engineer para proposta técnica (squads e skills).",
@@ -2324,9 +2368,12 @@ def main() -> int:
         engineer_status = engineer_response.get("status", "?") if engineer_response else "?"
 
         # ── G1/G2: Validação de complexity_hint — BLOCKER antes do PM ──────────────────────────
+        # GAP-T1: se trivial pré-detectado, complexity_hint já está definido — pular BLOCKER
         # Idempotente: se step>=3 o charter já foi validado em run anterior; não bloquear.
-        # Usa _hint_from_response() standalone (acima de call_pm) — summary + artefatos.
-        _complexity_hint_for_patch = _hint_from_response(cto_response, charter_summary)
+        if _pre_trivial_detected:
+            _complexity_hint_for_patch = "trivial"
+        else:
+            _complexity_hint_for_patch = _hint_from_response(cto_response, charter_summary)
         if not _complexity_hint_for_patch and (not pipeline_ctx or pipeline_ctx.current_step < 3):
             _hint_retry_rounds = int(os.environ.get("MAX_HINT_RETRY_ROUNDS", "2"))
             for _hint_round in range(1, _hint_retry_rounds + 1):
@@ -2399,7 +2446,8 @@ def main() -> int:
         pm_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "backend"
 
         # ── Trivial fast-path: complexidade trivial → bypass Engineer+PM, 1 task direto ──
-        _complexity_hint_val = _extract_complexity_hint(charter_summary)
+        # GAP-T1: _pre_trivial_detected bypassa também sem charter_summary
+        _complexity_hint_val = _extract_complexity_hint(charter_summary) or ("trivial" if _pre_trivial_detected else "")
         if _complexity_hint_val == "trivial" and (not pipeline_ctx or pipeline_ctx.current_step < 3):
             _post_step(
                 "Complexidade trivial detectada. Bypass do PM: 1 task gerada diretamente pelo CTO → Dev (sem backlog, sem rodadas).",

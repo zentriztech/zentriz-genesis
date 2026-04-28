@@ -9,13 +9,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "PENDING": ["IN_PROGRESS"],
-    "ASSIGNED": ["IN_PROGRESS"],
-    "IN_PROGRESS": ["IN_REVIEW", "BLOCKED"],
-    "IN_REVIEW": ["DONE", "QA_FAIL"],
-    "QA_FAIL": ["IN_PROGRESS", "BLOCKED"],
-    "DONE": [],
-    "BLOCKED": ["PENDING", "ASSIGNED"],
+    "PENDING":        ["IN_PROGRESS"],
+    "ASSIGNED":       ["IN_PROGRESS"],
+    "IN_PROGRESS":    ["WAITING_REVIEW", "IN_REVIEW", "BLOCKED"],  # GAP-P7: WAITING_REVIEW adicionado
+    "WAITING_REVIEW": ["DONE", "QA_PASS", "QA_FAIL", "IN_PROGRESS"],  # GAP-P7: estado novo
+    "IN_REVIEW":      ["DONE", "QA_PASS", "QA_FAIL"],
+    "QA_PASS":        ["DONE"],
+    "QA_FAIL":        ["IN_PROGRESS", "BLOCKED"],
+    "DONE":           [],
+    "BLOCKED":        ["PENDING", "ASSIGNED"],
 }
 
 MAX_REWORK_BEFORE_BLOCKED = 2
