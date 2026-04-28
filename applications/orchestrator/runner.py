@@ -311,8 +311,11 @@ def call_cto(
     validate_backlog_only: bool = False,
     pipeline_ctx: "PipelineContext | None" = None,
     extra_instruction: str = "",
+    force_mode: str = "",
 ) -> dict:
-    if validate_backlog_only:
+    if force_mode:
+        mode = force_mode
+    elif validate_backlog_only:
         mode = "validate_backlog"
     elif engineer_proposal:
         mode = "validate_engineer_docs" if not backlog_summary else "charter_and_proposal"
@@ -2241,7 +2244,19 @@ def main() -> int:
 
         # ── G1/G2: Validação de complexity_hint — BLOCKER antes do PM ──────────────────────────
         # Idempotente: se step>=3 o charter já foi validado em run anterior; não bloquear.
-        _complexity_hint_for_patch = _extract_complexity_hint(charter_summary)
+        # Bug fix: buscar hint no artefato completo quando ausente no summary (Bug 2).
+        def _hint_from_response(resp: dict, fallback_text: str = "") -> str:
+            """Extrai complexity_hint do summary + artefatos da resposta do CTO."""
+            candidate = _extract_complexity_hint(resp.get("summary", "") if resp else "")
+            if candidate:
+                return candidate
+            for art in (resp.get("artifacts", []) if resp else []):
+                candidate = _extract_complexity_hint(art.get("content", ""))
+                if candidate:
+                    return candidate
+            return _extract_complexity_hint(fallback_text)
+
+        _complexity_hint_for_patch = _hint_from_response(cto_response, charter_summary)
         if not _complexity_hint_for_patch and (not pipeline_ctx or pipeline_ctx.current_step < 3):
             # Charter sem o campo obrigatório — tentar reenviar ao CTO para correção
             _hint_retry_rounds = int(os.environ.get("MAX_HINT_RETRY_ROUNDS", "2"))
@@ -2255,10 +2270,12 @@ def main() -> int:
                     "[Pipeline] complexity_hint ausente no charter. Solicitando revisão ao CTO (round %d/%d).",
                     _hint_round, _hint_retry_rounds,
                 )
+                # Bug fix: forçar mode=charter_and_proposal com force_mode (Bug 1).
                 _cto_hint_response = call_cto(
                     spec_ref, request_id,
                     engineer_proposal=engineer_summary,
                     spec_content=spec_understood,
+                    force_mode="charter_and_proposal",
                     pipeline_ctx=pipeline_ctx,
                     extra_instruction=(
                         "ATENÇÃO: o charter anterior não contém o campo obrigatório `complexity_hint`. "
@@ -2272,10 +2289,13 @@ def main() -> int:
                     ),
                 )
                 _audit_log("cto", request_id, _cto_hint_response)
-                _new_summary = _cto_hint_response.get("summary", "") or charter_summary
-                _new_hint = _extract_complexity_hint(_new_summary)
+                # Bug fix: extrair hint de summary + artefatos da revisão (Bug 2).
+                _new_hint = _hint_from_response(_cto_hint_response)
                 if _new_hint:
+                    # Bug fix: atualizar summary E artefatos para manter consistência (Bug 3).
+                    _new_summary = _cto_hint_response.get("summary", "") or charter_summary
                     charter_summary = _new_summary
+                    charter_artifacts = _cto_hint_response.get("artifacts", []) or charter_artifacts
                     _complexity_hint_for_patch = _new_hint
                     logger.info("[Pipeline] complexity_hint obtido na revisão: %s", _new_hint)
                     _post_step(
