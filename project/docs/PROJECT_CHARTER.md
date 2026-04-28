@@ -25,6 +25,12 @@
 - **Risco**: Dependência de ambiente cloud (AWS) para deploy. **Mitigação**: Spec e backlogs permitem troca de cloud (Azure/GCP) via DevOps; manter IaC parametrizada.
 - **Suposição**: Spec está estável para este ciclo; mudanças de FR/NFR podem exigir atualização de Charter e backlogs.
 
+## Complexity Hint
+
+**complexity_hint:** low
+**routes_estimated:** 4
+**reasoning:** Voucher MVP tem 4 rotas distintas (criar, consultar, resgatar, listar admin), sem auth complexa e sem estado global — encaixa em low/FAST-TRACK.
+
 ## Critérios de aceite
 
 - Baseado no spec: todos os FR-01 a FR-04 implementados e cobertos por testes; NFR-01 a NFR-04 atendidos (performance, segurança, observabilidade, custo).

@@ -119,6 +119,7 @@ class PipelineContext:
         self.engineer_proposal = ""
         self.charter = ""
         self.backlog = ""
+        self.complexity_hint = ""  # preenchido em test_03; usado em test_04
 
 
 @pytest.fixture(scope="module")
@@ -204,7 +205,7 @@ async def test_02_engineer_propose(ctx):
 
 @pytest.mark.asyncio
 async def test_03_cto_charter(ctx):
-    """ETAPA 3: CTO gera Project Charter (necessário para o PM)."""
+    """ETAPA 3: CTO gera Project Charter — inclui complexity_hint obrigatório."""
     assert ctx.product_spec and ctx.engineer_proposal
     inputs = {
         "product_spec": ctx.product_spec,
@@ -227,15 +228,31 @@ async def test_03_cto_charter(ctx):
     assert charter_content
     ctx.charter = charter_content
     assert len(charter_content) >= 300, "Charter muito curto"
+
+    # Validação estrutural (inclui complexity_hint como BLOCKER)
     errors = validate_charter(charter_content)
-    assert not errors, "Charter: " + "; ".join(errors)
-    logger.info("test_03_cto_charter OK")
+    assert not errors, "Charter inválido:\n" + "\n".join(f"  - {e}" for e in errors)
+
+    # Assertion explícita: complexity_hint deve estar presente e ser valor válido
+    import re as _re
+    hint_match = _re.search(
+        r"complexity_hint[*\s]*[:\|][*\s]*(trivial|low|medium|high)",
+        charter_content, _re.IGNORECASE,
+    )
+    assert hint_match, (
+        "BLOCKER: complexity_hint ausente no charter do CTO.\n"
+        "O PM não consegue decidir FAST-TRACK vs FULL sem esse campo.\n"
+        "Esperado: ## Complexity Hint / **complexity_hint:** trivial|low|medium|high"
+    )
+    ctx.complexity_hint = hint_match.group(1).lower()
+    logger.info("test_03_cto_charter OK — complexity_hint=%s", ctx.complexity_hint)
 
 
 @pytest.mark.asyncio
 async def test_04_pm_backlog(ctx):
-    """ETAPA 4: PM gera backlog para squad Web (landing = frontend, sem backend)."""
+    """ETAPA 4: PM gera backlog — modo deve ser compatível com complexity_hint do charter."""
     assert ctx.charter and ctx.product_spec and ctx.engineer_proposal
+    hint = getattr(ctx, "complexity_hint", "")
     inputs = {
         "charter": ctx.charter,
         "engineer_proposal": ctx.engineer_proposal,
@@ -243,6 +260,8 @@ async def test_04_pm_backlog(ctx):
         "module": "web",
         "context": {"skill_path": "pm/web"},
     }
+    if hint:
+        inputs["complexity_hint"] = hint
     body = {
         "project_id": PROJECT_ID,
         "agent": "pm",
@@ -260,8 +279,19 @@ async def test_04_pm_backlog(ctx):
     assert backlog_content
     ctx.backlog = backlog_content
     assert len(backlog_content) >= 500, "Backlog muito curto"
-    errors = validate_backlog(backlog_content)
-    assert not errors, "Backlog: " + "; ".join(errors)
+
+    # Validação estrutural + contagem por complexity_hint
+    errors = validate_backlog(backlog_content, complexity_hint=hint)
+    assert not errors, "Backlog inválido:\n" + "\n".join(f"  - {e}" for e in errors)
+
+    # Verificar que o PM indicou o modo usado no summary
+    import re as _re
+    summary = result.get("summary", "")
+    mode_match = _re.search(r"Modo:\s*(FAST-TRACK|FULL|TRIVIAL)", summary, _re.IGNORECASE)
+    if mode_match:
+        logger.info("test_04_pm_backlog OK — PM modo=%s, complexity_hint=%s", mode_match.group(1), hint)
+    else:
+        logger.warning("test_04_pm_backlog OK — PM não informou modo no summary (complexity_hint=%s)", hint)
     logger.info("test_04_pm_backlog OK — CTO → Engineer → PM concluído")
 
 

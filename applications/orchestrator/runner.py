@@ -310,6 +310,7 @@ def call_cto(
     backlog_summary: str = "",
     validate_backlog_only: bool = False,
     pipeline_ctx: "PipelineContext | None" = None,
+    extra_instruction: str = "",
 ) -> dict:
     if validate_backlog_only:
         mode = "validate_backlog"
@@ -342,6 +343,8 @@ def call_cto(
             inputs["backlog_summary"] = backlog_summary[:15000]
         if validate_backlog_only:
             inputs["validate_backlog_only"] = True
+    if extra_instruction:
+        inputs["extra_instruction"] = extra_instruction
     message = _build_message_envelope(
         request_id, "CTO", "generic", mode, task_id=None, task="",
         inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
@@ -2236,10 +2239,62 @@ def main() -> int:
         cto_status = cto_response.get("status", "?") if cto_response else "?"
         engineer_status = engineer_response.get("status", "?") if engineer_response else "?"
 
-        # Persistir complexity_hint no projeto assim que o charter for definido
+        # ── G1/G2: Validação de complexity_hint — BLOCKER antes do PM ──────────────────────────
+        # Idempotente: se step>=3 o charter já foi validado em run anterior; não bloquear.
         _complexity_hint_for_patch = _extract_complexity_hint(charter_summary)
+        if not _complexity_hint_for_patch and (not pipeline_ctx or pipeline_ctx.current_step < 3):
+            # Charter sem o campo obrigatório — tentar reenviar ao CTO para correção
+            _hint_retry_rounds = int(os.environ.get("MAX_HINT_RETRY_ROUNDS", "2"))
+            for _hint_round in range(1, _hint_retry_rounds + 1):
+                _post_step(
+                    f"Charter sem complexity_hint (BLOCKER). Solicitando revisão ao CTO "
+                    f"(tentativa {_hint_round}/{_hint_retry_rounds}).",
+                    request_id,
+                )
+                logger.warning(
+                    "[Pipeline] complexity_hint ausente no charter. Solicitando revisão ao CTO (round %d/%d).",
+                    _hint_round, _hint_retry_rounds,
+                )
+                _cto_hint_response = call_cto(
+                    spec_ref, request_id,
+                    engineer_proposal=engineer_summary,
+                    spec_content=spec_understood,
+                    pipeline_ctx=pipeline_ctx,
+                    extra_instruction=(
+                        "ATENÇÃO: o charter anterior não contém o campo obrigatório `complexity_hint`. "
+                        "Reescreva o PROJECT_CHARTER.md incluindo a seção:\n\n"
+                        "## Complexity Hint\n\n"
+                        "**complexity_hint:** trivial | low | medium | high\n"
+                        "**routes_estimated:** N\n"
+                        "**reasoning:** <1 linha>\n\n"
+                        "Sem esse campo o PM não consegue decidir FAST-TRACK vs FULL "
+                        "e gera backlogs superdimensionados."
+                    ),
+                )
+                _audit_log("cto", request_id, _cto_hint_response)
+                _new_summary = _cto_hint_response.get("summary", "") or charter_summary
+                _new_hint = _extract_complexity_hint(_new_summary)
+                if _new_hint:
+                    charter_summary = _new_summary
+                    _complexity_hint_for_patch = _new_hint
+                    logger.info("[Pipeline] complexity_hint obtido na revisão: %s", _new_hint)
+                    _post_step(
+                        f"CTO incluiu complexity_hint: {_new_hint}. Prosseguindo para o PM.",
+                        request_id,
+                    )
+                    break
+                if _hint_round == _hint_retry_rounds:
+                    _post_error(
+                        "Charter sem complexity_hint após todas as tentativas de revisão. "
+                        "Pipeline interrompido — verifique o SYSTEM_PROMPT do CTO.",
+                        request_id, None,
+                    )
+                    _patch_project({"status": "failed"})
+                    return
+
         if _complexity_hint_for_patch:
             _patch_project({"complexity_hint": _complexity_hint_for_patch})
+        # ─────────────────────────────────────────────────────────────────────────────────────
 
         emit_event("project.created", {"spec_ref": spec_ref, "constraints": {}, "engineer_summary": engineer_summary[:300]}, request_id)
         _post_dialogue(
