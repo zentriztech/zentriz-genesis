@@ -237,7 +237,12 @@ export async function projectRoutes(app: FastifyInstance) {
              module = EXCLUDED.module,
              owner_role = EXCLUDED.owner_role,
              requirements = COALESCE(EXCLUDED.requirements, project_tasks.requirements),
-             status = EXCLUDED.status,
+             -- IDEMPOTENCY: preserve terminal statuses; reset IN_PROGRESS/WAITING_REVIEW to ASSIGNED on restart
+             status = CASE
+               WHEN project_tasks.status IN ('DONE','QA_PASS','QA_FAIL','BLOCKED') THEN project_tasks.status
+               WHEN project_tasks.status IN ('IN_PROGRESS','WAITING_REVIEW') THEN 'ASSIGNED'
+               ELSE EXCLUDED.status
+             END,
              updated_at = now()`,
           [id, taskId, module, ownerRole, requirements, status]
         );

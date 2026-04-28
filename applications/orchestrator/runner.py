@@ -1477,6 +1477,18 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
 
 def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
     tasks = _parse_tasks_from_backlog(project_id, pm_module)
+
+    # TaskState: preservar status de tasks já terminadas (idempotência entre restarts)
+    try:
+        from orchestrator.task_state import TaskState
+        ts = TaskState(project_id).load()
+        terminal = ts.terminal_task_ids()
+        if terminal:
+            tasks = ts.to_seed_tasks(tasks)
+            logger.info("[TaskState] %d task(s) terminal(is) preservadas no seed.", len(terminal))
+    except Exception as _tse:
+        logger.debug("[TaskState] Não foi possível carregar state (não crítico): %s", _tse)
+
     path = f"/api/projects/{project_id}/tasks"
     body = {"tasks": tasks}
     data, status = _api_post(path, body)
@@ -1539,6 +1551,14 @@ def _run_monitor_loop(
     tasks_done_after_qa_fail: set[str] = set()
     # Tarefas que não devem mais acionar Dev (circuit breaker ou máximo de BLOCKED sem apps/)
     dev_gave_up_tasks: set[str] = set()
+
+    # TaskState: carrega state persistente para preservar progresso entre restarts
+    _task_state = None
+    try:
+        from orchestrator.task_state import TaskState
+        _task_state = TaskState(project_id or "default").load()
+    except Exception as _tse:
+        logger.debug("[TaskState] Monitor Loop: não foi possível carregar (não crítico): %s", _tse)
     consecutive_dev_blocked: dict[str, int] = {}
     max_consecutive_dev_blocked = int(os.environ.get("MAX_CONSECUTIVE_DEV_BLOCKED", "5"))
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
@@ -1616,6 +1636,9 @@ def _run_monitor_loop(
                     if passed:
                         _update_task(project_id, tid, status="QA_PASS")
                         _update_task_status(project_id, tid, "IN_REVIEW", "DONE")
+                        if _task_state:
+                            _task_state.mark_done(tid)
+                            _task_state.save()
                         with (_state_lock or _NullLock()):
                             qa_fail_count[tid] = 0
                         if pipeline_ctx and last_dev_artifacts:
@@ -1631,6 +1654,9 @@ def _run_monitor_loop(
                             qa_fail_count[tid] = current_fails
                         if current_fails >= max_qa_rework:
                             _update_task(project_id, tid, status="DONE")
+                            if _task_state:
+                                _task_state.mark_qa_fail(tid)
+                                _task_state.save()
                             with (_state_lock or _NullLock()):
                                 tasks_done_after_qa_fail.add(tid)
                             _post_step(

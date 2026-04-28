@@ -90,8 +90,16 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    # Timeout alto: Enforcer pode fazer até 3 chamadas LLM (inicial + 2 repairs) por requisição
-    timeout = int(os.environ.get("REQUEST_TIMEOUT", "300"))
+    # Timeout adaptativo: ajusta automaticamente com base no agente e tamanho do payload.
+    # Referência base: REQUEST_TIMEOUT (env). Dev/QA com payload grande recebem mais tempo.
+    _base_timeout = int(os.environ.get("REQUEST_TIMEOUT", "1200"))
+    _payload_kb  = len(data) / 1024
+    if agent_key in ("dev", "qa"):
+        # Cada 50KB de payload adiciona 10 min (tasks grandes de Next.js/full-stack)
+        _extra = int((_payload_kb / 50) * 600)
+        timeout = min(_base_timeout + _extra, int(os.environ.get("REQUEST_TIMEOUT_MAX", "7200")))
+    else:
+        timeout = _base_timeout
     max_attempts = max(1, int(os.environ.get("AGENT_HTTP_RETRY_ON_TIMEOUT", "2")))
 
     logger.info("[%s] Chamando serviço de agentes em %s (timeout=%ss, max_attempts=%s)...", agent_name, url, timeout, max_attempts)
