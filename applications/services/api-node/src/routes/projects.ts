@@ -12,7 +12,7 @@ function getUser(request: FastifyRequest): AuthUser {
 
 const VALID_PROJECT_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog",
-  "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted",
+  "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted", "archived",
 ]);
 
 async function checkProjectAccess(

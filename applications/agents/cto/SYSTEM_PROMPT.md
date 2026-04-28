@@ -278,6 +278,7 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
 - Gates:
   - Charter must reference stacks and dependencies; status must reflect next owner (PM).
   - **`complexity_hint` é OBRIGATÓRIO no charter** — o PM usa esse campo como âncora primária para decidir FAST-TRACK vs FULL. Sem ele, o PM infere erroneamente e gera backlogs superdimensionados.
+  - **BLOCKER:** O artefato `docs/cto/PROJECT_CHARTER.md` DEVE conter a seção `## Complexity Hint` com o campo `complexity_hint: trivial|low|medium|high`. Se ausente → retornar `status: REVISION` e incluir o campo antes de aprovar. Artefatos sem esse campo serão rejeitados pelo runner.
 
 #### Como calcular `complexity_hint`
 

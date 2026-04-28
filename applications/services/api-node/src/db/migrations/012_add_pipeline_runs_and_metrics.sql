@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   trigger          TEXT NOT NULL DEFAULT 'api' CHECK (trigger IN ('api', 'manual', 'retry', 'resume')),
   started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at      TIMESTAMPTZ,
-  duration_sec     INTEGER,                 -- calculado no stop; null se interrompido
+  duration_sec     INTEGER,                 -- calculado no stop (null se interrompido)
   stop_reason      TEXT CHECK (stop_reason IN (
     'completed', 'accepted', 'stopped', 'sigterm', 'timeout', 'error', 'api_unreachable', 'interrupted'
   )),
