@@ -121,12 +121,23 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch<{ Params: { id: string }; Body: { status?: string; started_at?: string; completed_at?: string; charter_summary?: string; backlog_summary?: string } }>(
+  app.patch<{
+    Params: { id: string };
+    Body: {
+      status?: string;
+      started_at?: string;
+      completed_at?: string;
+      finished_at?: string;
+      charter_summary?: string;
+      backlog_summary?: string;
+      complexity_hint?: string;
+    };
+  }>(
     "/api/projects/:id",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
-      const { status, started_at, completed_at, charter_summary, backlog_summary } = request.body ?? {};
+      const { status, started_at, completed_at, finished_at, charter_summary, backlog_summary, complexity_hint } = request.body ?? {};
       const client = await pool.connect();
       try {
         const check = await client.query("SELECT tenant_id, created_by FROM projects WHERE id = $1", [id]);
@@ -154,6 +165,10 @@ export async function projectRoutes(app: FastifyInstance) {
           updates.push(`completed_at = $${i++}`);
           values.push(completed_at);
         }
+        if (finished_at !== undefined) {
+          updates.push(`finished_at = $${i++}`);
+          values.push(finished_at);
+        }
         if (charter_summary !== undefined) {
           updates.push(`charter_summary = $${i++}`);
           values.push(charter_summary);
@@ -161,6 +176,14 @@ export async function projectRoutes(app: FastifyInstance) {
         if (backlog_summary !== undefined) {
           updates.push(`backlog_summary = $${i++}`);
           values.push(backlog_summary);
+        }
+        if (complexity_hint !== undefined) {
+          const validHints = new Set(["trivial", "low", "medium", "high"]);
+          if (!validHints.has(complexity_hint)) {
+            return reply.status(400).send({ code: "BAD_REQUEST", message: `complexity_hint inválido: ${complexity_hint}` });
+          }
+          updates.push(`complexity_hint = $${i++}`);
+          values.push(complexity_hint);
         }
         if (updates.length === 0) return reply.send({ ok: true });
 
@@ -911,6 +934,120 @@ export async function projectRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // POST /api/projects/:id/runs — runner registra início/fim de execução do pipeline
+  app.post<{
+    Params: { id: string };
+    Body: {
+      run_id: string;
+      request_id?: string;
+      trigger?: string;
+      action: "start" | "stop";
+      stop_reason?: string;
+      duration_sec?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+      estimated_cost_usd?: number;
+    };
+  }>("/api/projects/:id/runs", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const body = request.body ?? {} as Record<string, unknown>;
+    const client = await pool.connect();
+    try {
+      const hasAccess = await checkProjectAccess(client, id, user);
+      if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+
+      if (body.action === "start") {
+        await client.query(
+          `INSERT INTO pipeline_runs (project_id, run_id, request_id, trigger, started_at)
+           VALUES ($1, $2, $3, $4, now())
+           ON CONFLICT (project_id, run_id) DO NOTHING`,
+          [id, String(body.run_id), body.request_id ?? null, body.trigger ?? "api"]
+        );
+        // Incrementa run_count no projeto
+        await client.query(
+          `UPDATE projects SET run_count = run_count + 1, updated_at = now() WHERE id = $1`,
+          [id]
+        );
+        return reply.status(201).send({ ok: true, action: "start", run_id: body.run_id });
+      }
+
+      if (body.action === "stop") {
+        const inputTokens = Number(body.input_tokens ?? 0);
+        const outputTokens = Number(body.output_tokens ?? 0);
+        const costUsd = body.estimated_cost_usd != null
+          ? Number(body.estimated_cost_usd)
+          : parseFloat(((inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15).toFixed(6));
+
+        await client.query(
+          `UPDATE pipeline_runs
+           SET finished_at = now(),
+               stop_reason = $1,
+               duration_sec = $2,
+               input_tokens = $3,
+               output_tokens = $4,
+               estimated_cost_usd = $5
+           WHERE project_id = $6 AND run_id = $7`,
+          [body.stop_reason ?? "completed", body.duration_sec ?? null, inputTokens, outputTokens, costUsd, id, String(body.run_id)]
+        );
+        // Acumula duração total e marca finished_at no projeto
+        await client.query(
+          `UPDATE projects
+           SET total_duration_sec = total_duration_sec + COALESCE($1, 0),
+               finished_at = now(),
+               updated_at = now()
+           WHERE id = $2`,
+          [body.duration_sec ?? 0, id]
+        );
+        return reply.send({ ok: true, action: "stop", run_id: body.run_id });
+      }
+
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "action deve ser 'start' ou 'stop'" });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/runs — histórico de execuções do pipeline
+  app.get<{ Params: { id: string } }>("/api/projects/:id/runs", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const hasAccess = await checkProjectAccess(client, id, user);
+      if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+
+      const runs = await client.query(
+        `SELECT run_id, request_id, trigger, started_at, finished_at, duration_sec,
+                stop_reason, input_tokens, output_tokens, estimated_cost_usd, created_at
+         FROM pipeline_runs
+         WHERE project_id = $1
+         ORDER BY started_at ASC`,
+        [id]
+      );
+
+      const proj = await client.query(
+        `SELECT run_count, total_duration_sec, complexity_hint, started_at, finished_at
+         FROM projects WHERE id = $1`,
+        [id]
+      );
+      const p = proj.rows[0] as Record<string, unknown> | undefined;
+
+      return reply.send({
+        runs: runs.rows,
+        summary: {
+          run_count: p?.run_count ?? 0,
+          total_duration_sec: p?.total_duration_sec ?? 0,
+          complexity_hint: p?.complexity_hint ?? null,
+          project_started_at: p?.started_at ?? null,
+          project_finished_at: p?.finished_at ?? null,
+        },
+      });
+    } finally {
+      client.release();
+    }
+  });
 
   // POST /api/admin/projects/cleanup — arquiva projetos antigos (TTL configurável via env)
   // Admin only. Marks old draft/failed/stopped projects as 'archived'.

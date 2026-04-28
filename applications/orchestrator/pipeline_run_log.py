@@ -61,7 +61,35 @@ class PipelineRunLog:
     def _now(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    def start_run(self, request_id: str, trigger: str = "manual") -> str:
+    def _sync_to_api(self, action: str, run_id: str, request_id: str = "", trigger: str = "api",
+                     reason: str = "", duration_sec: Optional[int] = None,
+                     metrics: Optional[Dict[str, Any]] = None) -> None:
+        """Espelha start/stop para POST /api/projects/:id/runs (não-bloqueante)."""
+        import os, urllib.request, urllib.error, json as _json
+        api_base = (os.environ.get("GENESIS_API_URL") or "").rstrip("/")
+        token = os.environ.get("GENESIS_API_TOKEN") or ""
+        if not api_base or not token:
+            return
+        m = metrics or {}
+        payload: Dict[str, Any] = {"run_id": run_id, "action": action, "request_id": request_id, "trigger": trigger}
+        if action == "stop":
+            payload["stop_reason"] = reason
+            payload["duration_sec"] = duration_sec
+            payload["input_tokens"] = m.get("input_tokens", 0)
+            payload["output_tokens"] = m.get("output_tokens", 0)
+        try:
+            req = urllib.request.Request(
+                f"{api_base}/api/projects/{self.project_id}/runs",
+                data=_json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            logger.debug("[RunLog] Sync API falhou (não crítico): %s", e)
+
+    def start_run(self, request_id: str, trigger: str = "api") -> str:
         """Registra início de run; marca runs anteriores sem stop como 'interrupted'."""
         data = self._load()
         runs: List[Dict[str, Any]] = data.setdefault("runs", [])
@@ -93,6 +121,7 @@ class PipelineRunLog:
         data["last_updated"] = now
         self._save(data)
         logger.info("[RunLog] Run iniciada: run_id=%s, trigger=%s", run_id, trigger)
+        self._sync_to_api("start", run_id, request_id=request_id, trigger=trigger)
         return run_id
 
     def stop_run(
@@ -132,6 +161,12 @@ class PipelineRunLog:
         logger.info(
             "[RunLog] Run fechada: run_id=%s, reason=%s, duration=%ss",
             run.get("run_id"), reason, run.get("duration_sec"),
+        )
+        self._sync_to_api(
+            "stop", run.get("run_id", ""),
+            reason=run["stop_reason"],
+            duration_sec=run.get("duration_sec"),
+            metrics=run.get("metrics"),
         )
         self._current_run_id = None
 

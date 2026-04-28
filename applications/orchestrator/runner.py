@@ -2236,6 +2236,11 @@ def main() -> int:
         cto_status = cto_response.get("status", "?") if cto_response else "?"
         engineer_status = engineer_response.get("status", "?") if engineer_response else "?"
 
+        # Persistir complexity_hint no projeto assim que o charter for definido
+        _complexity_hint_for_patch = _extract_complexity_hint(charter_summary)
+        if _complexity_hint_for_patch:
+            _patch_project({"complexity_hint": _complexity_hint_for_patch})
+
         emit_event("project.created", {"spec_ref": spec_ref, "constraints": {}, "engineer_summary": engineer_summary[:300]}, request_id)
         _post_dialogue(
             "cto", "pm", "project.created",
@@ -2678,6 +2683,7 @@ def main() -> int:
         _patch_project({
             "status": "completed",
             "completed_at": completed_at_iso,
+            "finished_at": completed_at_iso,
             "charter_summary": charter_summary,
             "backlog_summary": backlog_summary[:2000] if backlog_summary else None,
         })
