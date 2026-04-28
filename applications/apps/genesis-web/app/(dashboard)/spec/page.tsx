@@ -18,6 +18,10 @@ import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
 import Autocomplete from "@mui/material/Autocomplete";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import MenuItem from "@mui/material/MenuItem";
+import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
@@ -171,6 +175,69 @@ function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: s
     />
   );
 }
+const RELATION_LABELS: Record<string, string> = {
+  uses_backend: "🔌 Consome backend",
+  shares_auth:  "🔐 Compartilha autenticação",
+  shares_db:    "🗄️ Compartilha banco de dados",
+  depends_on:   "➡️ Depende de",
+  related:      "🔗 Relacionado",
+  part_of:      "🧩 Componente de",
+};
+
+interface ProductLinkSectionProps {
+  products: { id: string; name: string }[];
+  productId: string; onProductId: (v: string) => void;
+  allProjects: { id: string; title: string; status: string }[];
+  linkProjectId: string; onLinkProjectId: (v: string) => void;
+  linkRelation: string; onLinkRelation: (v: string) => void;
+}
+function ProductLinkSection({ products, productId, onProductId, allProjects, linkProjectId, onLinkProjectId, linkRelation, onLinkRelation }: ProductLinkSectionProps) {
+  return (
+    <Box sx={{ mt: 0.5, mb: 2, p: 2, border: "1px solid", borderColor: "divider", borderRadius: 1, bgcolor: "action.hover" }}>
+      <Typography variant="caption" color="text.secondary"
+        sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1.5, fontSize: "0.6rem" }}>
+        🧩 Produto &amp; Relações (opcional)
+      </Typography>
+
+      {/* Produto */}
+      <FormControl fullWidth size="small" sx={{ mb: 1.5 }}>
+        <InputLabel>Adicionar a um produto</InputLabel>
+        <Select value={productId} label="Adicionar a um produto" onChange={(e) => onProductId(e.target.value)}>
+          <MenuItem value=""><em>Nenhum / Projeto standalone</em></MenuItem>
+          {products.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+        </Select>
+      </FormControl>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, fontSize: "0.68rem", lineHeight: 1.5 }}>
+        Um produto agrupa projetos relacionados (backend + frontend + mobile do mesmo sistema).
+      </Typography>
+
+      <Divider sx={{ mb: 1.5 }} />
+
+      {/* Link a outro projeto */}
+      <FormControl fullWidth size="small" sx={{ mb: 1 }}>
+        <InputLabel>Linkar a um projeto existente</InputLabel>
+        <Select value={linkProjectId} label="Linkar a um projeto existente" onChange={(e) => onLinkProjectId(e.target.value)}>
+          <MenuItem value=""><em>Nenhum</em></MenuItem>
+          {allProjects.map((p) => <MenuItem key={p.id} value={p.id}>{p.title} <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({p.status})</Typography></MenuItem>)}
+        </Select>
+      </FormControl>
+      {linkProjectId && (
+        <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+          <InputLabel>Tipo de relação</InputLabel>
+          <Select value={linkRelation} label="Tipo de relação" onChange={(e) => onLinkRelation(e.target.value)}>
+            {Object.entries(RELATION_LABELS).map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
+          </Select>
+        </FormControl>
+      )}
+      {linkProjectId && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.68rem", lineHeight: 1.5 }}>
+          O CTO receberá o contexto do projeto linkado ao gerar a spec — garantindo consistência de contratos e schemas.
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
 type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
 
@@ -361,6 +428,13 @@ export default function SpecPage() {
   // Tipo do projeto
   const [projectType, setProjectType] = useState("");
 
+  // Produto e links
+  const [products, setProducts]       = useState<{ id: string; name: string }[]>([]);
+  const [productId, setProductId]     = useState("");
+  const [linkProjectId, setLinkProjectId] = useState("");
+  const [linkRelation, setLinkRelation]   = useState("uses_backend");
+  const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string }[]>([]);
+
   // Texto livre flow
   const [freeText, setFreeText]         = useState("");
   const [projectTitle, setProjectTitle] = useState("");
@@ -388,6 +462,12 @@ export default function SpecPage() {
     if (pp) setParentProjectId(pp);
     if (pt) setParentTitle(decodeURIComponent(pt));
   }, [searchParams]);
+
+  // Load products + projects for linking
+  useEffect(() => {
+    apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {});
+    apiGet<{ id: string; title: string; status: string }[]>("/api/projects").then(setAllProjects).catch(() => {});
+  }, []);
 
   // ── Generate spec via CTO — async job with polling ─────────────────────────
   const stopPolling = useCallback(() => {
@@ -460,17 +540,22 @@ export default function SpecPage() {
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
+      if (productId) formData.append("productId", productId);
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
 
+      // Add to product if selected
+      if (productId && data.projectId) {
+        try { await apiPost(`/api/products/${productId}/projects/${data.projectId}`, {}); } catch { /* non-critical */ }
+      }
+      // Create link to another project if selected
+      if (linkProjectId && data.projectId) {
+        try { await apiPost(`/api/projects/${data.projectId}/links`, { to_project_id: linkProjectId, relation_type: linkRelation }); } catch { /* non-critical */ }
+      }
+
       if (startNow) {
-        // Fire pipeline immediately then navigate
-        try {
-          await apiPost(`/api/projects/${data.projectId}/run`, {});
-        } catch {
-          // If run fails, user can still start manually from the project page
-        }
+        try { await apiPost(`/api/projects/${data.projectId}/run`, {}); } catch { /* ok */ }
       }
       setTimeout(() => router.push(`/projects/${data.projectId}`), 500);
     } catch (e) {
@@ -495,6 +580,7 @@ export default function SpecPage() {
       fd.append("title", projectTitle.trim() || "Spec sem título");
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
+      if (productId) fd.append("productId", productId);
       files.forEach((f) => fd.append("files", f));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
@@ -566,6 +652,11 @@ export default function SpecPage() {
                       placeholder="Ex.: E-commerce de calçados"
                     />
                     <ProjectTypeSelect value={projectType} onChange={setProjectType} />
+                    <ProductLinkSection
+                      products={products} productId={productId} onProductId={setProductId}
+                      allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
+                      linkRelation={linkRelation} onLinkRelation={setLinkRelation}
+                    />
                     <TextField
                       fullWidth multiline rows={8}
                       label="Descreva o produto que você quer construir"
@@ -681,6 +772,11 @@ export default function SpecPage() {
                     size="small" sx={{ mb: 2 }} placeholder="Ex.: Auto Parts API"
                   />
                   <ProjectTypeSelect value={projectType} onChange={setProjectType} />
+                  <ProductLinkSection
+                    products={products} productId={productId} onProductId={setProductId}
+                    allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
+                    linkRelation={linkRelation} onLinkRelation={setLinkRelation}
+                  />
 
                   <Box
                     onClick={() => inputRef.current?.click()}

@@ -258,6 +258,8 @@ function ProjectDetailPageInner() {
   const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
+  const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
+  const [product, setProduct]       = useState<{ id: string; name: string } | null>(null);
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | null>(null);
   const [countdown, setCountdown]   = useState<string>("");
@@ -334,6 +336,13 @@ function ProjectDetailPageInner() {
       apiGet<VersionsResp>(`/api/projects/${id}/versions`)
         .then((d) => setVersions(d.versions ?? []))
         .catch(() => setVersions([]));
+      apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`)
+        .then(setLinks).catch(() => setLinks([]));
+      // Load product info if project belongs to one
+      if (projectsStore.getById(id)?.productId) {
+        apiGet<{ id: string; name: string }>(`/api/products/${projectsStore.getById(id)!.productId}`)
+          .then(setProduct).catch(() => {});
+      }
       // Load active ephemeral deployment
       apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
         .then((d) => {
@@ -884,6 +893,50 @@ function ProjectDetailPageInner() {
                     label={PROJECT_TYPE_LABELS[project.projectType] ?? project.projectType}
                     sx={{ fontSize: "0.72rem" }}
                   />
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Produto */}
+            {product && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75, fontSize: "0.6rem" }}>
+                    🧩 Produto
+                  </Typography>
+                  <Chip size="small" label={product.name}
+                    onClick={() => {}} sx={{ fontSize: "0.72rem", cursor: "default" }} />
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Projetos relacionados */}
+            {links.length > 0 && (
+              <Card>
+                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1, fontSize: "0.6rem" }}>
+                    🔗 Projetos relacionados
+                  </Typography>
+                  <Stack spacing={0.75}>
+                    {links.map((lnk) => {
+                      const isOut = lnk.direction === "outgoing";
+                      const title = isOut ? lnk.to_title : lnk.from_title;
+                      const otherId = isOut ? lnk.to_project_id : lnk.from_project_id;
+                      return (
+                        <Box key={lnk.id} sx={{ display: "flex", alignItems: "flex-start", gap: 0.75, cursor: "pointer" }}
+                          onClick={() => router.push(`/projects/${otherId}`)}>
+                          <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.secondary", mt: 0.1, flexShrink: 0 }}>
+                            {lnk.relation_label}
+                          </Typography>
+                          <Typography variant="caption" fontWeight={500} sx={{ fontSize: "0.72rem", color: "primary.main" }} noWrap>
+                            {title}
+                          </Typography>
+                        </Box>
+                      );
+                    })}
+                  </Stack>
                 </CardContent>
               </Card>
             )}

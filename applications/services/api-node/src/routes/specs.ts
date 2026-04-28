@@ -309,6 +309,7 @@ export async function specRoutes(app: FastifyInstance) {
     let parentProjectId: string | null = null;
     let freeDescription: string | null = null;
     let projectType: string | null = null;
+    let productId: string | null = null;
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -353,6 +354,14 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) projectType = raw;
+      }
+      if (part.fields?.productId !== undefined) {
+        const pidField = part.fields.productId;
+        const v = Array.isArray(pidField) ? pidField[0] : pidField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim()
+          : "";
+        if (raw) productId = raw;
       }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -407,9 +416,9 @@ export async function specRoutes(app: FastifyInstance) {
         ...(projectType    ? { project_type: projectType }           : {}),
       });
       const projectResult = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) RETURNING id`,
-        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber, extraJson]
+        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
+        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber, extraJson, productId]
       );
       projectId = projectResult.rows[0].id;
     } finally {

@@ -35,6 +35,8 @@ class PipelineContext:
         self.completed_tasks: list[str] = []
         self.current_step: int = 0  # LEI 11: etapa atual para retomada (0 = início)
         self.project_type: str = ""  # e.g. "backend_api", "frontend_webapp", "landing_page"
+        self.product_id: str = ""    # ID do produto ao qual este projeto pertence
+        self.linked_projects_context: str = ""  # Contexto dos projetos linkados (para o CTO)
         # Detected backend stack — cached to avoid repeated LLM calls per task
         # {"language": "python"|"nodejs"|..., "source": "pm_backlog_disk"|..., "confidence": "high"|"medium"|"low"}
         self.backend_stack: dict | None = None
@@ -80,6 +82,8 @@ class PipelineContext:
             inputs["spec_template"] = self.product_spec_template
         if self.project_type:
             inputs["project_type"] = self.project_type
+        if self.linked_projects_context:
+            inputs["linked_projects_context"] = self.linked_projects_context
         if self.engineer_proposal:
             inputs["engineer_stack_proposal"] = self.engineer_proposal
         if backlog_summary:

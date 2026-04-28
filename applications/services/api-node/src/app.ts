@@ -15,6 +15,7 @@ import { planRoutes } from "./routes/plans.js";
 import { githubRoutes } from "./routes/github.js";
 import { cloudRoutes } from "./routes/cloud.js";
 import { llmRoutes } from "./routes/llm.js";
+import { productRoutes } from "./routes/products.js";
 
 export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? true });
@@ -62,6 +63,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(githubRoutes);
   await app.register(cloudRoutes);
   await app.register(llmRoutes);
+  await app.register(productRoutes);
 
   return app;
 }

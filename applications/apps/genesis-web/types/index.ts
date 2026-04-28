@@ -66,6 +66,34 @@ export interface Project {
   freeDescription?: string | null;
   /** Tipo do projeto selecionado na submissão da spec (e.g. "backend_api", "landing_page"). */
   projectType?: string | null;
+  /** ID do produto ao qual este projeto pertence (opcional). */
+  productId?: string | null;
+}
+
+export interface Product {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: "active" | "archived";
+  project_count?: number;
+  createdAt?: string;
+  projects?: Project[];
+}
+
+export interface ProjectLink {
+  id: string;
+  from_project_id: string;
+  to_project_id: string;
+  relation_type: string;
+  relation_label: string;
+  direction: "outgoing" | "incoming";
+  from_title?: string;
+  to_title?: string;
+  from_project_type?: string;
+  to_project_type?: string;
+  from_status?: string;
+  to_status?: string;
+  note?: string | null;
 }
 
 export interface Notification {

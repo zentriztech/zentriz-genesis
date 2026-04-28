@@ -1987,17 +1987,48 @@ def main() -> int:
         charter_summary = pipeline_ctx.charter or ""
         engineer_summary = pipeline_ctx.engineer_proposal or ""
         backlog_summary = pipeline_ctx.backlog or ""
-        # Carregar project_type da API (se disponível)
-        if project_id and not pipeline_ctx.project_type:
+        # Carregar project_type e contexto de projetos linkados da API
+        if project_id:
             try:
                 _proj_data, _proj_status = _api_get(f"/api/projects/{project_id}")
                 if _proj_data and isinstance(_proj_data, dict):
                     _pt = _proj_data.get("projectType") or ""
-                    if _pt:
+                    if _pt and not pipeline_ctx.project_type:
                         pipeline_ctx.project_type = str(_pt)
                         logger.info("[Pipeline] project_type=%s", pipeline_ctx.project_type)
+
+                # G-opt3: carregar projetos linkados para contexto do CTO
+                if not pipeline_ctx.linked_projects_context:
+                    _links_data, _links_status = _api_get(f"/api/projects/{project_id}/links")
+                    if _links_data and isinstance(_links_data, list) and len(_links_data) > 0:
+                        _ctx_lines = ["## Projetos relacionados a este projeto\n"]
+                        for _lnk in _links_data[:5]:  # max 5 links
+                            _direction = _lnk.get("direction", "outgoing")
+                            _rel_label = _lnk.get("relation_label", _lnk.get("relation_type", "relacionado"))
+                            if _direction == "outgoing":
+                                _other_title = _lnk.get("to_title", "")
+                                _other_type  = _lnk.get("to_project_type", "")
+                                _other_status = _lnk.get("to_status", "")
+                            else:
+                                _other_title = _lnk.get("from_title", "")
+                                _other_type  = _lnk.get("from_project_type", "")
+                                _other_status = _lnk.get("from_status", "")
+                                _rel_label = f"{_rel_label} (origem)"
+                            _ctx_lines.append(
+                                f"- **{_other_title}** ({_other_type or 'tipo não especificado'}, "
+                                f"status: {_other_status}) — relação: *{_rel_label}*"
+                            )
+                            _note = _lnk.get("note")
+                            if _note:
+                                _ctx_lines.append(f"  Nota: {_note}")
+                        _ctx_lines.append(
+                            "\nUse este contexto para garantir consistência de contratos, "
+                            "schemas, autenticação e nomenclatura entre os projetos relacionados."
+                        )
+                        pipeline_ctx.linked_projects_context = "\n".join(_ctx_lines)
+                        logger.info("[Pipeline] Contexto de %d projeto(s) linkado(s) carregado.", len(_links_data))
             except Exception as _e:
-                logger.debug("[Pipeline] Não foi possível carregar project_type: %s", _e)
+                logger.debug("[Pipeline] Não foi possível carregar project_type/links: %s", _e)
 
     # Persistir spec em project_id/docs quando PROJECT_FILES_ROOT estiver definido
     if project_id and storage and storage.is_enabled():
