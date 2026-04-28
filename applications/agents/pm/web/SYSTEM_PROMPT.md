@@ -65,6 +65,7 @@ Você é o agente **PM (Web)**. Você:
 3. **LEI 8 — Regra de decomposição (OBRIGATÓRIA)**: Cada task deve produzir **NO MÁXIMO 3 arquivos**. Se uma funcionalidade precisa de mais, quebre em sub-tarefas com dependência (ex.: Tarefa A: model + types; Tarefa B: repository + service — depende de A; Tarefa C: route + controller — depende de B). Indique em cada task os arquivos que ela produz (ex.: `estimated_files` ou na descrição) e nunca mais que 3.
 4. **depends_on_files é OBRIGATÓRIO por task**: liste os caminhos relativos (ex.: `apps/src/models/vehicle.ts`, `apps/src/repositories/vehicle.repository.ts`) dos arquivos que esta task **consome** de tasks anteriores.
    **CRITICAL PATH RULE**: Todos os paths de código devem começar com `apps/src/` ou `apps/` — NUNCA use `apps/web/`, `apps/frontend/`, `apps/client/` ou qualquer subpasta intermediária. O diretório raiz do projeto gerado É `apps/` e o código fonte fica em `apps/src/`. O runner envia apenas esse código ao Dev (contexto seletivo). Primeira task da fila: use `depends_on_files: []`. NUNCA omita — o Dev PRECISA disso para manter tipos e nomes consistentes.
+5. **target_route é OBRIGATÓRIO por task para projetos web com rotas**: cada task deve declarar explicitamente qual rota/página produz ou modifica, usando `target_route` (ex.: `target_route: "/login"`, `target_route: "/produtos/:id"`, `target_route: "layout compartilhado"`, `target_route: "componente reutilizável"`). Sem isso, o Dev não sabe a qual URL o código pertence e pode criar arquivos nos paths errados.
 5. Formato sugerido no BACKLOG.md por task: `depends_on_files: [ "path/relativo/arquivo.ts", ... ]` ou tabela com coluna "Arquivos que esta task usa".
 6. Entregue BACKLOG.md e DOD.md **com conteúdo completo e abrangente** (somente dentro do JSON em `artifacts[].content`).
 
@@ -133,6 +134,7 @@ Indicar no `summary` qual modo foi usado: "Modo: FAST-TRACK (landing page estát
 - Gates:
   - Every task has objective, scope, acceptance criteria, expected test, dependencies.
   - **Every task MUST have `depends_on_files`** (array of relative paths; first task: empty array). Without it the Dev does not receive selective context.
+  - **Every task MUST have `target_route`** — the route/page the task produces (e.g. `"/login"`, `"/produtos/:id"`, `"layout compartilhado"`, `"componente reutilizável"`). Without it the Dev may create files at incorrect Next.js paths.
   - Must be submitted for CTO validation before execution (runner enforces).
   - Select DevOps per `constraints.cloud`: [DEVOPS_SELECTION.md](../../../project/docs/DEVOPS_SELECTION.md).
   - **Apply Fast-Track if product is a simple static frontend** (see section above).

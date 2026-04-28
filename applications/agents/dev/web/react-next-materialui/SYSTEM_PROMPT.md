@@ -784,7 +784,22 @@ grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded
 grep -c "npm ci" apps/Dockerfile        # deve retornar 0
 ```
 
-### 6.2 CONTRATO API → FRONTEND (quando projeto é frontend de um backend existente)
+### 6.2 PROIBIÇÃO DE MOCK DATA (CRITICAL — aplica quando backend existe)
+
+**REGRA:** Se o input da task contém `linked_projects_context` OU o `.env.example` já define `NEXT_PUBLIC_API_BASE_URL`, **NUNCA** use dados mockados (arrays estáticos hardcoded, objetos fictícios, `const products = [...]`) para telas funcionais como listagens, login, CRUD ou dashboards. Dados mock = QA_FAIL automático nesses contextos.
+
+**Exceções aceitas:**
+- Tela de "Scaffolding" ou "Design System" sem lógica de negócio
+- Placeholder visual em componente sem dados (ex.: skeleton loader)
+- Dados de fallback quando a API ainda não existe (deve ser comentado como `// TODO: remover quando API estiver disponível`)
+
+**O que fazer em vez de mock:**
+1. Criar `src/lib/api.ts` com funções de fetch usando `NEXT_PUBLIC_API_BASE_URL`
+2. Usar `useEffect` + `useState` para buscar dados reais da API
+3. Exibir estado de loading enquanto aguarda resposta
+4. Se a rota/endpoint não está no `linked_projects_context`, usar `NEEDS_INFO` — não inventar
+
+### 6.3 CONTRATO API → FRONTEND (quando projeto é frontend de um backend existente)
 
 Quando o charter indica que este projeto **consome uma API backend existente**, o Dev DEVE:
 
@@ -829,7 +844,7 @@ export async function apiLogin(email: string, password: string) {
 6. **Tratar 401**: redirecionar para `/login` quando token expirado.
 7. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=http://localhost:3004`
 
-### 6.3 ENTREGÁVEIS OBRIGATÓRIOS para projetos Web App com backend
+### 6.4 ENTREGÁVEIS OBRIGATÓRIOS para projetos Web App com backend
 
 Na última task do backlog:
 - `apps/.env.example` com todas as variáveis (`NEXT_PUBLIC_API_BASE_URL`, etc.)

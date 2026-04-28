@@ -93,7 +93,7 @@ Você é o agente **QA (Web)**. Você:
 
 | # | Check | Severidade |
 |---|-------|------------|
-| F01 | Cada FR listado no acceptance criteria tem um componente ou seção correspondente no código | BLOCKER |
+| F01 | **Quando a task declara acceptance criteria com FRs numerados (ex.: RF-01, FR-1, "DADO/QUANDO/ENTÃO"):** cada FR listado tem um componente ou seção correspondente no código. Se a task não declara FRs explícitos (ex.: task de scaffold, setup, configuração), este check é INFO. | BLOCKER (condicional) |
 | F02 | Seções que devem exibir dados (produtos, depoimentos, contato) têm conteúdo real — não apenas placeholders | MAJOR |
 | F03 | Links de navegação (âncoras, rotas) apontam para IDs/rotas corretos e existentes | MAJOR |
 | F04 | Formulários têm campos corretos conforme spec (nome, email, telefone, mensagem etc.) | MAJOR |

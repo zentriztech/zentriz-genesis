@@ -90,6 +90,16 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
+    # Hot-reload do .env: relê REQUEST_TIMEOUT do arquivo a cada chamada (sem rebuild).
+    try:
+        from pathlib import Path as _Path
+        _dotenv = _Path(__file__).resolve().parents[3] / ".env"
+        if _dotenv.exists():
+            from dotenv import load_dotenv as _lde
+            _lde(_dotenv, override=True)
+    except Exception:
+        pass
+
     # Timeout adaptativo: ajusta automaticamente com base no agente e tamanho do payload.
     # Referência base: REQUEST_TIMEOUT (env). Dev/QA com payload grande recebem mais tempo.
     _base_timeout = int(os.environ.get("REQUEST_TIMEOUT", "1200"))

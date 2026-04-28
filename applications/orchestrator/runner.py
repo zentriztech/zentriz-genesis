@@ -2062,6 +2062,17 @@ def main() -> int:
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     _pipeline_started_at = now_iso
+
+    # Pipeline Run Log — registrar início da execução
+    _run_log = None
+    try:
+        from orchestrator.pipeline_run_log import PipelineRunLog
+        if project_id:
+            _run_log = PipelineRunLog(project_id)
+            _run_log.start_run(request_id, trigger="api")
+    except Exception as _rle:
+        logger.debug("[RunLog] Não foi possível inicializar run log (não crítico): %s", _rle)
+
     _patch_project({"started_at": now_iso, "status": "running"})
     _post_step(
         "Pipeline iniciado. A especificação do produto foi recebida e será analisada pelos agentes.",
@@ -2310,6 +2321,14 @@ def main() -> int:
                 _patch_project({"status": "failed"})
             else:
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
+                # Pipeline Run Log — fechar run após Monitor Loop (stopped/accepted/sigterm)
+                if _run_log:
+                    try:
+                        _proj_status = _get_project_status(project_id) or "stopped"
+                        _reason = "accepted" if _proj_status == "accepted" else ("sigterm" if _shutdown_requested else "stopped")
+                        _run_log.stop_run(reason=_reason)
+                    except Exception:
+                        pass
             persist_state(
                 spec_ref=spec_ref,
                 charter={"summary": charter_summary, "artifacts": charter_artifacts},
@@ -2576,6 +2595,19 @@ def main() -> int:
             "charter_summary": charter_summary,
             "backlog_summary": backlog_summary[:2000] if backlog_summary else None,
         })
+
+        # Pipeline Run Log — registrar fim bem-sucedido
+        if _run_log:
+            try:
+                _tasks_done_log = len(pipeline_ctx.completed_tasks) if pipeline_ctx else 0
+                _tasks_total_log = len(pipeline_ctx.all_tasks) if (pipeline_ctx and hasattr(pipeline_ctx, "all_tasks")) else _tasks_done_log
+                _run_log.stop_run(
+                    reason="completed",
+                    metrics={"tasks_done": _tasks_done_log, "tasks_total": _tasks_total_log},
+                )
+            except Exception as _rle:
+                logger.debug("[RunLog] stop_run falhou (não crítico): %s", _rle)
+
         pipeline_desc = "Engineer → CTO → PM"
         if run_full_stack:
             pipeline_desc += " → Dev → QA → Monitor → DevOps"
@@ -2612,6 +2644,12 @@ def main() -> int:
         _post_error(human_msg, request_id, e)
         completed_at_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         _patch_project({"status": "failed", "completed_at": completed_at_iso})
+        # Pipeline Run Log — registrar falha
+        if _run_log:
+            try:
+                _run_log.stop_run(reason="error", metrics={"error": str(e)[:500]})
+            except Exception:
+                pass
         raise
 
 
