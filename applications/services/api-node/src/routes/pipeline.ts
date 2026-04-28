@@ -263,6 +263,19 @@ export async function pipelineRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const { id: projectId } = request.params;
     const client = await pool.connect();
+
+    const _postStopDialogue = async () => {
+      // Posta mensagem final no diálogo independente do runner — usuário sempre vê "Projeto parado"
+      try {
+        await client.query(
+          `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+           VALUES ($1, 'system', 'system', 'step',
+           '🛑 Projeto parado pelo usuário. Para retomar, clique em Reiniciar.')`,
+          [projectId]
+        );
+      } catch { /* não crítico */ }
+    };
+
     try {
       const allowed = await checkProjectAccess(client, projectId, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
@@ -280,6 +293,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
               "UPDATE projects SET status = $1, stopped_by = 'user', updated_at = now() WHERE id = $2",
               ["stopped", projectId]
             );
+            await _postStopDialogue();
             return reply.send({ ok: true, message: "Pipeline encerrado" });
           }
         } catch (err) {
@@ -290,6 +304,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
         "UPDATE projects SET status = $1, stopped_by = 'user', updated_at = now() WHERE id = $2",
         ["stopped", projectId]
       );
+      await _postStopDialogue();
       return reply.send({ ok: true, message: "Pipeline marcado como encerrado" });
     } finally {
       client.release();
