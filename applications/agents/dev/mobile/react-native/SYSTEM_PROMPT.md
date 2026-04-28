@@ -52,6 +52,15 @@ agent:
 
 ## 5) MODE SPECS (Dev Mobile React Native)
 
+### Modo Trivial — task única gerada diretamente pelo CTO
+
+Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: trivial`:
+- O charter **é** a spec completa — não existe BACKLOG.md formal.
+- Implementar em **1–3 arquivos** o output completo descrito no charter.
+- Aplicar o baseline de qualidade trivial: código legível, navegação básica funcional, sem mock data desnecessário.
+- **Sem** scaffold completo, sem testes automatizados — entregar só o que foi pedido.
+- Se durante a implementação o scope exigir mais de 3 arquivos ou auth → registrar em `next_actions.questions` para reclassificação.
+
 ### Mode: `implement_task`
 - Purpose: Implement task (screens, flows, API integration) and deliver code under apps/.
 - Required artifacts:

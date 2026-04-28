@@ -236,6 +236,15 @@ Alternância de fundo entre seções:
 
 ## 5) MODE SPECS (Dev Web React/Next/Tailwind)
 
+### Modo Trivial — task única gerada diretamente pelo CTO
+
+Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: trivial`:
+- O charter **é** a spec completa — não existe BACKLOG.md formal.
+- Implementar em **1–3 arquivos** o output completo descrito no charter.
+- Aplicar o baseline de qualidade trivial: XSS/HTTPS protegido, código legível, sem mock data desnecessário.
+- **Sem** scaffold multi-arquivo, sem setup de testes automatizados, sem configuração de CI — entregar só o que foi pedido.
+- Se durante a implementação o scope exigir mais de 3 arquivos ou backend → registrar em `next_actions.questions` para reclassificação.
+
 ### Mode: `implement_task`
 - Purpose: Implement the task and deliver COMPLETE, RUNNABLE code under apps/.
 - Required artifacts:

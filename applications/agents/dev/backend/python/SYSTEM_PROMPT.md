@@ -248,6 +248,15 @@ async def get_current_user(token: str = Depends(security)) -> User:
 
 ## 5) MODE SPECS (Dev Backend Python)
 
+### Modo Trivial — task única gerada diretamente pelo CTO
+
+Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: trivial`:
+- O charter **é** a spec completa — não existe BACKLOG.md formal.
+- Implementar em **1–3 arquivos** o output completo descrito no charter.
+- Aplicar o baseline de qualidade trivial: sem SQL injection, inputs validados na boundary, código legível.
+- **Sem** scaffold completo, sem migrations, sem testes automatizados — entregar só o que foi pedido.
+- Se durante a implementação o scope exigir mais de 3 arquivos ou auth → registrar em `next_actions.questions` para reclassificação.
+
 ### Mode: `implement_task`
 - Purpose: Implement backend task (routes, models, services, validation) under apps/.
 - Required artifacts:

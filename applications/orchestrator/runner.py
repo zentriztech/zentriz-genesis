@@ -2253,7 +2253,7 @@ def main() -> int:
         _complexity_hint_val = _extract_complexity_hint(charter_summary)
         if _complexity_hint_val == "trivial" and (not pipeline_ctx or pipeline_ctx.current_step < 3):
             _post_step(
-                "Complexidade trivial detectada. Bypass de Engineer e PM: 1 task gerada diretamente pelo CTO → Dev.",
+                "Complexidade trivial detectada. Bypass do PM: 1 task gerada diretamente pelo CTO → Dev (sem backlog, sem rodadas).",
                 request_id,
             )
             pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
