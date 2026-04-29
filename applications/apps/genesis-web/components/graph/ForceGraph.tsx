@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
 import Typography from "@mui/material/Typography";
@@ -30,11 +30,20 @@ type NodeWithPos = FGNode & { fx?: number; fy?: number; x?: number; y?: number; 
 type LayoutMode = "free" | "brain" | "radial" | "pipeline";
 const LAYOUT_CYCLE: LayoutMode[] = ["free", "brain", "radial", "pipeline"];
 const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string }> = {
-  free:     { icon: "🌌", label: "Obsidian",  tip: "Física livre — clique no fundo para mudar" },
+  free:     { icon: "🌌", label: "Obsidian",  tip: "Física livre — clique no fundo para próximo layout" },
   brain:    { icon: "🧠", label: "Cérebro",   tip: "Agentes no núcleo, conexões bidirecionais" },
   radial:   { icon: "⭕", label: "Radial",    tip: "CTO no centro, camadas por tipo" },
   pipeline: { icon: "➡️", label: "Pipeline",  tip: "Esquerda→direita por fase do pipeline" },
 };
+
+// Pares de agentes que têm relação bidirecional forte (consulta ↔ resposta)
+const BIDIRECTIONAL_PAIRS = new Set([
+  "cto|engineer", "engineer|cto",
+  "cto|pm", "pm|cto",
+  "monitor|dev", "dev|monitor",
+  "monitor|qa", "qa|monitor",
+  "monitor|devops", "devops|monitor",
+]);
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 const TASK_COLOR: Record<string, string> = {
@@ -289,6 +298,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
   const [justCycled, setJustCycled] = useState(false);
+  // Animação de partículas — pulsa quando há agente ativo
+  const [activeAgent, setActiveAgent] = useState<string | null>(null);
 
   const containerRef   = useRef<HTMLDivElement>(null);
   const prevSignature  = useRef<string>("");
@@ -317,6 +328,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       ]);
       const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
       const activeAgentId = lastWorking?.fromAgent;
+      setActiveAgent(activeAgentId ? activeAgentId.toLowerCase().replace(/[^a-z_]/g, "_") : null);
       const data = buildForceData(
         Array.isArray(dialogue) ? dialogue : [],
         Array.isArray(tasks) ? tasks : [],
@@ -377,30 +389,60 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // ── Cycle layout on background click ─────────────────────────────────────
   const handleBackgroundClick = useCallback(() => {
     setLayoutMode(prev => {
-      const next = LAYOUT_CYCLE[(LAYOUT_CYCLE.indexOf(prev) + 1) % LAYOUT_CYCLE.length];
-      return next;
+      const idx = LAYOUT_CYCLE.indexOf(prev);
+      // Último da lista → volta ao primeiro ("free") em vez de wrap implícito
+      return LAYOUT_CYCLE[(idx + 1) % LAYOUT_CYCLE.length];
     });
     setJustCycled(true);
     setTimeout(() => setJustCycled(false), 1200);
   }, []);
 
-  // ── Add reverse links for brain mode (bidirectional) ─────────────────────
-  const displayLinks = (() => {
-    if (layoutMode !== "brain") return graphData.links;
+  // Reset explícito para "free" (clique duplo no badge ou botão)
+  const handleResetLayout = useCallback(() => {
+    setLayoutMode("free");
+    setJustCycled(true);
+    setTimeout(() => setJustCycled(false), 1200);
+    setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
+  }, []);
+
+  // ── Enriquecer links: bidirecional + espessura + partículas por relação ──
+  const displayLinks = useMemo(() => {
     const existing = new Set(graphData.links.map(l => {
-      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source;
-      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target;
+      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
+      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
       return `${s}|${t}`;
     }));
+
+    // Sempre adicionar links reversos para pares bidirecionais (não só no brain)
     const reversed: FGLink[] = [];
     for (const l of graphData.links) {
       const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
       const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
-      if (s.startsWith("agent-") && t.startsWith("agent-") && !existing.has(`${t}|${s}`))
+      const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
+      if (s.startsWith("agent-") && t.startsWith("agent-") &&
+          (BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`) || BIDIRECTIONAL_PAIRS.has(`${tk}|${sk}`)) &&
+          !existing.has(`${t}|${s}`)) {
         reversed.push({ source: t, target: s, color: l.color });
+      }
     }
-    return [...graphData.links, ...reversed];
-  })();
+
+    return [...graphData.links, ...reversed].map(l => {
+      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
+      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
+      const isAgentLink = s.startsWith("agent-") && t.startsWith("agent-");
+      const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
+      const isBidi = BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`);
+      // Link fica mais vivo quando o agente de origem ou destino está ativo
+      const isHot = activeAgent && (sk === activeAgent || tk === activeAgent);
+      return {
+        ...l,
+        _width:     isBidi ? 2.5 : isAgentLink ? 1.5 : 1,
+        _particles: isBidi ? (isHot ? 6 : 3) : isAgentLink ? (isHot ? 4 : 2) : 1,
+        _pWidth:    isBidi ? (isHot ? 3.5 : 2) : 1.5,
+        _color:     isHot ? (l.color.slice(0, 7) + "FF") : l.color,
+      };
+    });
+  }, [graphData.links, activeAgent]);
 
   // ── Node canvas painter ───────────────────────────────────────────────────
   const paintNode = useCallback((node: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -493,13 +535,24 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         backgroundColor="#0D0F14"
         nodeCanvasObject={paintNode}
         nodeCanvasObjectMode={() => "replace"}
-        linkColor={(link) => (link as FGLink).color}
-        linkWidth={layoutMode === "brain" ? 1.2 : 1}
-        linkCurvature={layoutMode === "brain" ? 0.25 : 0}
-        linkDirectionalParticles={2}
-        linkDirectionalParticleWidth={1.5}
-        linkDirectionalParticleColor={(link) => (link as FGLink).color}
-        linkDirectionalArrowLength={layoutMode === "brain" ? 5 : 0}
+        linkColor={(link) => (link as FGLink & { _color?: string })._color ?? (link as FGLink).color}
+        linkWidth={(link) => (link as FGLink & { _width?: number })._width ?? 1}
+        linkCurvature={(link) => {
+          const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
+          const t = typeof (link as FGLink).target === "object" ? ((link as FGLink).target as FGNode).id : (link as FGLink).target as string;
+          const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
+          // Curvar links bidirecionais para evitar sobreposição
+          return BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`) ? 0.2 : 0;
+        }}
+        linkDirectionalParticles={(link) => (link as FGLink & { _particles?: number })._particles ?? 1}
+        linkDirectionalParticleWidth={(link) => (link as FGLink & { _pWidth?: number })._pWidth ?? 1.5}
+        linkDirectionalParticleColor={(link) => (link as FGLink & { _color?: string })._color ?? (link as FGLink).color}
+        linkDirectionalParticleSpeed={0.005}
+        linkDirectionalArrowLength={(link) => {
+          const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
+          const t = typeof (link as FGLink).target === "object" ? ((link as FGLink).target as FGNode).id : (link as FGLink).target as string;
+          return s.startsWith("agent-") && t.startsWith("agent-") ? 5 : 0;
+        }}
         linkDirectionalArrowRelPos={0.85}
         nodeRelSize={1}
         d3AlphaDecay={layoutMode === "free" ? 0.02 : 0.025}
@@ -517,22 +570,40 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
       />
 
-      {/* Layout badge — top right */}
-      <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, pointerEvents: "none" }}>
-        <Chip
-          label={`${meta.icon} ${meta.label}`}
-          size="small"
-          sx={{
-            bgcolor: justCycled ? "#6366F1" : "#161B22EE",
-            color: justCycled ? "#fff" : "#8B949E",
-            border: "1px solid",
-            borderColor: justCycled ? "#6366F1" : "#30363D",
-            fontSize: "0.65rem", height: 22,
-            transition: "all 0.3s ease",
-          }}
-        />
-        <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.58rem", textAlign: "right", maxWidth: 160, lineHeight: 1.3 }}>
-          {justCycled ? meta.tip : "clique no fundo para mudar layout"}
+      {/* Layout badge — top right — clicável para reset */}
+      <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
+        <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+          {/* Botão reset — só aparece quando não está em "free" */}
+          {layoutMode !== "free" && (
+            <Chip
+              label="↩ reset"
+              size="small"
+              onClick={handleResetLayout}
+              sx={{
+                bgcolor: "#161B22EE", color: "#6366F1",
+                border: "1px solid #6366F155", fontSize: "0.6rem", height: 22,
+                cursor: "pointer",
+                "&:hover": { bgcolor: "#6366F122", borderColor: "#6366F1" },
+                transition: "all 0.2s ease",
+              }}
+            />
+          )}
+          <Chip
+            label={`${meta.icon} ${meta.label}`}
+            size="small"
+            sx={{
+              bgcolor: justCycled ? "#6366F1" : "#161B22EE",
+              color: justCycled ? "#fff" : "#8B949E",
+              border: "1px solid",
+              borderColor: justCycled ? "#6366F1" : "#30363D",
+              fontSize: "0.65rem", height: 22,
+              pointerEvents: "none",
+              transition: "all 0.3s ease",
+            }}
+          />
+        </Box>
+        <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.58rem", textAlign: "right", maxWidth: 160, lineHeight: 1.3, pointerEvents: "none" }}>
+          {justCycled ? meta.tip : "clique no fundo para próximo layout"}
         </Typography>
       </Box>
 
