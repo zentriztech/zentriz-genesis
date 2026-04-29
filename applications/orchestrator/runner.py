@@ -2394,8 +2394,22 @@ def main() -> int:
                 )
                 _audit_log("engineer", request_id, engineer_response)
                 engineer_summary = engineer_response.get("summary", "")
+                # GAP-ENG1: enricher — o CTO recebe o conteúdo dos artefatos, não apenas o summary de 1 linha.
+                # Mesmo padrão do bug do QA: summary minimalista causa REVISION em loop.
+                _eng_artifacts = engineer_response.get("artifacts", [])
+                if _eng_artifacts:
+                    _eng_full_content = _content_for_doc(engineer_response) or ""
+                    if _eng_full_content and len(_eng_full_content) > len(engineer_summary):
+                        engineer_summary = _eng_full_content[:15000]
+                    elif not _eng_full_content:
+                        # fallback: concatenar conteúdo dos artefatos
+                        _parts = [engineer_summary]
+                        for _a in _eng_artifacts:
+                            if isinstance(_a, dict) and _a.get("content"):
+                                _parts.append(f"\n\n--- {_a.get('path','artefato')} ---\n{_a['content'][:5000]}")
+                        engineer_summary = "\n".join(_parts)[:15000]
                 engineer_status = engineer_response.get("status", "?")
-                logger.info("[Pipeline] Engineer respondeu (status: %s)", engineer_status)
+                logger.info("[Pipeline] Engineer respondeu (status: %s, summary_len: %d)", engineer_status, len(engineer_summary))
                 _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
                 _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
                 if pipeline_ctx:
