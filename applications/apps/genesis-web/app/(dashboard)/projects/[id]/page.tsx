@@ -414,18 +414,6 @@ function ProjectDetailPageInner() {
     }
   };
 
-  const handleStop = async () => {
-    setRunLoading(true);
-    try {
-      await apiPost(`/api/projects/${id}/stop`, {});
-      await projectsStore.loadProject(id);
-    } catch (e) {
-      setRunError(e instanceof Error ? e.message : "Falha ao parar");
-    } finally {
-      setRunLoading(false);
-    }
-  };
-
   // FT-05: handlers do menu Ações
   const [actionsAnchor, setActionsAnchor] = useState<HTMLElement | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
