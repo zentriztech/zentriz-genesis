@@ -1804,11 +1804,13 @@ def _run_monitor_loop(
             continue
 
         if need_dev:
+            # GAP-NEW-1: BLOCKED é terminal — não redespachar ao Dev automaticamente.
+            # Dev só recebe ASSIGNED/IN_PROGRESS/QA_FAIL; BLOCKED requer intervenção humana.
             dev_task = next(
                 (
                     t
                     for t in tasks
-                    if t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL", "BLOCKED")
+                    if t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL")
                     and (t.get("taskId") or t.get("task_id")) not in dev_gave_up_tasks
                 ),
                 None,
@@ -2326,11 +2328,29 @@ def main() -> int:
             if not _negation_line_pattern.match(line.strip())
         ]
         _spec_without_negations = " ".join(_spec_lines_cleaned)
-        # Pelo menos 2 sinais concordantes + sem sinais de complexidade no texto positivo
-        _complexity_signals = any(s in _spec_without_negations for s in (
-            "backend", "database", "autenticação", "authentication", "react", "next.js", "vue", "angular",
-            "api", "rest", "graphql", "typescript", "node.js", "python", "docker",
+        # GAP-NEW-2: remover linhas de metadados/hospedagem/restrições antes de checar complexidade.
+        # Ex.: "Hospedagem: GitHub Pages, Netlify, S3" ou "Stack: HTML5, CSS3" contêm palavras
+        # como "api" (netlify api), "docker" (contexto de infra), "typescript" (menção de stack)
+        # mas NÃO indicam complexidade real do produto.
+        _meta_line_pattern = _re.compile(
+            r'.*\b(hospedagem|hosting|deploy|cdn|netlify|github pages|s3|cloudflare|'
+            r'restrições|restrictions|metadados|metadata|stack:|versão:|version:|'
+            r'static|estático|estática)\b.*',
+            _re.IGNORECASE
+        )
+        _spec_for_complexity = " ".join(
+            line for line in _spec_without_negations.splitlines()
+            if not _meta_line_pattern.match(line.strip())
+        )
+        # Sinais de complexidade real: frameworks, backend, banco, auth — fora de contexto de negação/infra
+        _complexity_signals = any(s in _spec_for_complexity for s in (
+            "backend", "database", "banco de dados", "autenticação", "authentication",
+            "react", "next.js", "vue", "angular", "svelte",
+            "graphql", "typescript", "node.js", "python", "django", "fastapi", "flask",
+            "docker compose", "kubernetes", "microserviço",
         )) if _positive_signals >= 2 else False
+        # "api" e "rest" e "docker" sozinhos não bastam — podem estar em contexto de hospedagem/CDN
+        # Só contam como sinal de complexidade se combinados com framework/backend explícito
         if _positive_signals >= 2 and not _complexity_signals:
             _pre_trivial_detected = True
             logger.info("[GAP-T1] Pré-classificador: spec indica trivial (%d sinais). Bypass CTO+Engineer+PM.", _positive_signals)
@@ -2771,6 +2791,46 @@ def main() -> int:
                 _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
                 _patch_project({"status": "failed"})
             else:
+                # GAP-NEW-3: PM rodou completo mas complexity_hint=trivial → PM gerou N tasks
+                # quando deveria ter gerado 1. Consolidar em 1 task única antes do Monitor Loop
+                # para evitar 7 tasks para uma landing page estática.
+                _hint_after_pm = _extract_complexity_hint(charter_summary) or ("trivial" if _pre_trivial_detected else "")
+                if _hint_after_pm == "trivial" and project_id and _api_available():
+                    _all_pm_tasks = _get_tasks(project_id)
+                    _active_pm_tasks = [t for t in _all_pm_tasks if t.get("status") not in ("DONE", "QA_PASS", "CANCELLED")]
+                    if len(_active_pm_tasks) > 3:
+                        logger.info(
+                            "[GAP-NEW-3] complexity_hint=trivial mas PM gerou %d tasks. Consolidando em 1 task.",
+                            len(_active_pm_tasks),
+                        )
+                        _post_step(
+                            f"Complexidade trivial com {len(_active_pm_tasks)} tasks do PM — consolidando em 1 task para evitar overhead desnecessário.",
+                            request_id,
+                        )
+                        # Cancelar todas as tasks do PM
+                        for _t in _active_pm_tasks:
+                            _tid = _t.get("taskId") or _t.get("task_id")
+                            if _tid:
+                                _update_task(project_id, _tid, status="CANCELLED")
+                        # Criar 1 task consolidada com todos os requisitos do backlog
+                        _owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
+                        _consolidated_reqs = "\n".join(
+                            f"- {t.get('requirements') or t.get('title') or t.get('taskId','?')}"
+                            for t in _active_pm_tasks
+                        )
+                        _consolidated_task = {
+                            "task_id":   "TSK-TRIVIAL-001",
+                            "taskId":    "TSK-TRIVIAL-001",
+                            "module":    pm_module,
+                            "owner_role": _owner_role,
+                            "ownerRole":  _owner_role,
+                            "status":    "ASSIGNED",
+                            "requirements": f"[TRIVIAL CONSOLIDADO — {len(_active_pm_tasks)} tasks unificadas]\n\n{charter_summary[:600]}\n\nTasks originais:\n{_consolidated_reqs[:600]}",
+                            "depends_on_files": [],
+                            "target_route": "/",
+                        }
+                        _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [_consolidated_task]})
+                        backlog_summary = f"[TRIVIAL CONSOLIDADO] 1 task — {len(_active_pm_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
                 # Pipeline Run Log — fechar run após Monitor Loop (stopped/accepted/sigterm)
                 if _run_log:
