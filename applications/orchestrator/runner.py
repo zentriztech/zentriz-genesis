@@ -2394,21 +2394,28 @@ def main() -> int:
                 )
                 _audit_log("engineer", request_id, engineer_response)
                 engineer_summary = engineer_response.get("summary", "")
-                # GAP-ENG1: enricher — o CTO recebe o conteúdo dos artefatos, não apenas o summary de 1 linha.
-                # Mesmo padrão do bug do QA: summary minimalista causa REVISION em loop.
-                _eng_artifacts = engineer_response.get("artifacts", [])
-                if _eng_artifacts:
-                    _eng_full_content = _content_for_doc(engineer_response) or ""
-                    if _eng_full_content and len(_eng_full_content) > len(engineer_summary):
-                        engineer_summary = _eng_full_content[:15000]
-                    elif not _eng_full_content:
-                        # fallback: concatenar conteúdo dos artefatos
-                        _parts = [engineer_summary]
-                        for _a in _eng_artifacts:
-                            if isinstance(_a, dict) and _a.get("content"):
-                                _parts.append(f"\n\n--- {_a.get('path','artefato')} ---\n{_a['content'][:5000]}")
-                        engineer_summary = "\n".join(_parts)[:15000]
                 engineer_status = engineer_response.get("status", "?")
+                # GAP-ENG1: ler artefatos do Engineer do disco — mesmo padrão do QA.
+                # O summary é 1 linha; o conteúdo real (10-18KB por artefato) fica em docs/engineer/*.md.
+                # O CTO precisa do conteúdo completo para aprovar sem REVISION em loop.
+                if project_id:
+                    try:
+                        _eng_docs_dir = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "docs"
+                        _eng_parts = []
+                        for _ef in sorted(_eng_docs_dir.rglob("engineer_*.md")):
+                            if _ef.is_file() and _ef.stat().st_size > 500:
+                                _ec = _ef.read_text(encoding="utf-8", errors="replace")
+                                # remover cabeçalho "Created by: engineer"
+                                _ec = _ec.replace("<!-- Created by: engineer -->\n\n", "").strip()
+                                _eng_parts.append(f"### {_ef.name}\n{_ec}")
+                        if _eng_parts:
+                            _disk_content = "\n\n".join(_eng_parts)[:15000]
+                            if len(_disk_content) > len(engineer_summary):
+                                engineer_summary = _disk_content
+                                logger.info("[GAP-ENG1] engineer_summary enriquecido do disco: %d chars (%d artefatos)",
+                                            len(engineer_summary), len(_eng_parts))
+                    except Exception as _enge:
+                        logger.debug("[GAP-ENG1] Falha ao ler artefatos do Engineer do disco: %s", _enge)
                 logger.info("[Pipeline] Engineer respondeu (status: %s, summary_len: %d)", engineer_status, len(engineer_summary))
                 _post_dialogue("cto", "engineer", "cto.engineer.request", _get_summary_human("cto.engineer.request", "cto", "engineer", spec_ref[:500]), request_id)
                 _post_dialogue("engineer", "cto", "engineer.cto.response", _get_summary_human("engineer.cto.response", "engineer", "cto", engineer_summary[:500]), request_id)
