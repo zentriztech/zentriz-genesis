@@ -531,19 +531,21 @@ def run_agent(
     request_id = message.get("request_id", "unknown")
     env_max = int(os.environ.get("CLAUDE_MAX_TOKENS", "16000"))
 
-    # GAP-P8: escada de modelo/tokens por rework_attempt do Dev
+    # Escada de modelo/tokens por rework_attempt — Dev e QA
     # rework 0 → modelo padrão + tokens padrão
-    # rework 1 → modelo padrão + tokens aumentados (CLAUDE_MAX_TOKENS_DEV_REWORK)
-    # rework 2+ → modelo mais capaz (CLAUDE_MODEL_REWORK) + tokens máximos
-    if (role or "").upper() == "DEV" and _rework_attempt > 0:
-        if _rework_attempt >= 2:
-            _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-7")
-            if _rework_model != model:
-                model = _rework_model
-                logger.info("[GAP-P8] Dev rework %d → escalando para modelo %s", _rework_attempt, model)
+    # rework 1+ → modelo mais capaz (CLAUDE_MODEL_REWORK, default: Opus 4.7) + tokens máximos
+    # Lógica: 1º QA_FAIL → já usa Opus para maximizar chance de resolver sem BLOCKED.
+    # Se QA aprovar → próxima task volta ao padrão (rework_attempt=0).
+    # Se QA reprovar 3x → BLOCKED (revisão humana). Opus paga para evitar BLOCKED.
+    _is_rework_role = (role or "").upper() in ("DEV", "QA")
+    if _is_rework_role and _rework_attempt >= 1:
+        _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-7")
+        if _rework_model != model:
+            model = _rework_model
+            logger.info("[REWORK-ESCALATE] %s rework %d → escalando para modelo %s", role, _rework_attempt, model)
         _rework_boost = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV_REWORK", "48000"))
         env_max = max(env_max, _rework_boost)
-        logger.info("[GAP-P8] Dev rework %d → tokens aumentados para %d", _rework_attempt, env_max)
+        logger.info("[REWORK-ESCALATE] %s rework %d → tokens aumentados para %d", role, _rework_attempt, env_max)
 
     last_thinking: str = ""
 

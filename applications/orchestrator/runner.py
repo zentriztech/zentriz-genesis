@@ -854,6 +854,7 @@ def call_qa(
     task: str = "",
     code_refs: list | None = None,
     existing_artifacts: list | None = None,
+    rework_attempt: int = 0,
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -861,6 +862,7 @@ def call_qa(
         "backlog_summary": backlog_summary,
         "dev_summary": dev_summary,
         "constraints": ["spec-driven", "paths-resilient"],
+        "rework_attempt": rework_attempt,  # escalada de modelo: rework>=1 → Opus 4.7
     }
     if code_refs:
         inputs["code_refs"] = code_refs
@@ -1726,9 +1728,12 @@ def _run_monitor_loop(
                 _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
                 try:
+                    # QA escalada: rework_attempt>=1 → Opus 4.7 (mesmo modelo que Dev usa no rework)
+                    _qa_rework = qa_fail_count.get(tid, 0)
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
+                        rework_attempt=_qa_rework,
                     )
                     _audit_log("qa", request_id, qa_response, task_id=tid)
                     _qa_summary = qa_response.get("summary", "")
@@ -1877,10 +1882,9 @@ def _run_monitor_loop(
                     except Exception:
                         pass
                     _ea = last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
-                    # GAP-P8: escada de modelo/tokens por número de reworks da task
-                    # rework 0 → modelo padrão + tokens padrão
-                    # rework 1 → modelo padrão + tokens aumentados (MAX_TOKENS_DEV_REWORK)
-                    # rework 2+ → modelo mais capaz (CLAUDE_MODEL_REWORK, ex: Opus 4.7) + tokens máximos
+                    # Escada de modelo por rework: rework 0 → padrão; rework 1+ → Opus 4.7 + tokens máximos.
+                    # 1º QA_FAIL já usa Opus — maximiza resolução antes de BLOCKED (3 QA_FAILs).
+                    # QA usa o mesmo rework_attempt → ambos escalam juntos na mesma rodada.
                     _task_rework_count = qa_fail_count.get(task_id, 0)
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
