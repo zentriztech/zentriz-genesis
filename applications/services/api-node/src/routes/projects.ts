@@ -76,6 +76,7 @@ export async function projectRoutes(app: FastifyInstance) {
         freeDescription: ((row.extra as Record<string, unknown> | null)?.free_description as string | undefined) ?? null,
         projectType:    ((row.extra as Record<string, unknown> | null)?.project_type    as string | undefined) ?? null,
         productId:      (row.product_id as string | null) ?? null,
+        complexityHint: (row.complexity_hint as string | null) ?? null,
       }));
       return reply.send(projects);
     } finally {
@@ -115,6 +116,7 @@ export async function projectRoutes(app: FastifyInstance) {
         freeDescription: ((row as Record<string, unknown>).extra as Record<string, unknown> | null)?.free_description as string | undefined ?? null,
         projectType:    ((row as Record<string, unknown>).extra as Record<string, unknown> | null)?.project_type    as string | undefined ?? null,
         productId:      (row as Record<string, unknown>).product_id as string | null ?? null,
+        complexityHint: (row as Record<string, unknown>).complexity_hint as string | null ?? null,
       });
     } finally {
       client.release();
@@ -193,6 +195,32 @@ export async function projectRoutes(app: FastifyInstance) {
           `UPDATE projects SET ${updates.join(", ")} WHERE id = $${i}`,
           values
         );
+
+        // Disparar gatilhos se status mudou para completed
+        if (status === "completed") {
+          setImmediate(async () => {
+            try {
+              const triggers = await pool.query(
+                `SELECT pt.project_id FROM project_triggers pt
+                 WHERE pt.trigger_project_id = $1 AND pt.trigger_status = 'completed'`,
+                [id]
+              );
+              for (const t of triggers.rows) {
+                const target = await pool.query("SELECT id, status FROM projects WHERE id=$1", [t.project_id]);
+                const tp = target.rows[0] as Record<string, unknown>;
+                if (tp && ["draft","spec_submitted","stopped","failed"].includes(tp.status as string)) {
+                  const { spawn } = await import("child_process");
+                  const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
+                  const python = process.env.PYTHON_BIN ?? "python3";
+                  spawn(python, [runnerPath, String(t.project_id)], { detached: true, stdio: "ignore" }).unref();
+                  await pool.query("UPDATE projects SET status='running', updated_at=NOW() WHERE id=$1", [t.project_id]);
+                  console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho completed ${id}`);
+                }
+              }
+            } catch (e) { console.error("[TRIGGER] Falha ao disparar gatilhos:", e); }
+          });
+        }
+
         return reply.send({ ok: true });
       } finally {
         client.release();
@@ -348,6 +376,31 @@ export async function projectRoutes(app: FastifyInstance) {
       // Fire-and-forget: push to GitHub if tenant has GitHub App installed
       // Never awaited — must not delay the accept response
       setImmediate(() => pushProjectToGitHub(id).catch(console.error));
+
+      // Disparar gatilhos de pipeline: projetos que esperam este projeto aceito
+      setImmediate(async () => {
+        try {
+          const triggers = await pool.query(
+            `SELECT pt.project_id FROM project_triggers pt
+             WHERE pt.trigger_project_id = $1 AND pt.trigger_status = 'accepted'`,
+            [id]
+          );
+          for (const t of triggers.rows) {
+            const target = await pool.query("SELECT id, status FROM projects WHERE id=$1", [t.project_id]);
+            const tp = target.rows[0] as Record<string, unknown>;
+            if (tp && ["draft","spec_submitted","stopped","failed"].includes(tp.status as string)) {
+              const { spawn } = await import("child_process");
+              const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
+              const python = process.env.PYTHON_BIN ?? "python3";
+              spawn(python, [runnerPath, String(t.project_id)], { detached: true, stdio: "ignore" }).unref();
+              await pool.query("UPDATE projects SET status='running', updated_at=NOW() WHERE id=$1", [t.project_id]);
+              console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho do projeto aceito ${id}`);
+            }
+          }
+        } catch (e) {
+          console.error("[TRIGGER] Falha ao disparar gatilhos:", e);
+        }
+      });
 
       // G44 — Emit project.shipped event for Deadpool handoff
       // Persisted in DB as a dialogue entry so Deadpool can poll or webhook

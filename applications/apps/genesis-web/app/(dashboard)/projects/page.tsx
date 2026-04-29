@@ -174,10 +174,20 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
           </Stack>
         </Stack>
 
-        {/* Spec ref */}
-        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block", mb: 1.5 }}>
-          {project.specRef}
-        </Typography>
+        {/* Tipo de projeto + complexidade */}
+        <Stack direction="row" spacing={0.5} flexWrap="wrap" sx={{ mb: 1, gap: 0.4 }}>
+          {project.projectType && (
+            <Chip size="small" label={project.projectType.replace(/_/g, " ")}
+              sx={{ height: 16, fontSize: "0.58rem", bgcolor: "action.hover", textTransform: "capitalize" }} />
+          )}
+          {project.complexityHint && (
+            <Chip size="small" label={project.complexityHint}
+              sx={{ height: 16, fontSize: "0.58rem",
+                bgcolor: { trivial: "#22c55e22", low: "#3b82f622", medium: "#f59e0b22", high: "#ef444422" }[project.complexityHint] ?? "action.hover",
+                color:  { trivial: "#22c55e", low: "#3b82f6", medium: "#f59e0b", high: "#ef4444" }[project.complexityHint] ?? "text.secondary",
+              }} />
+          )}
+        </Stack>
 
         {/* Running pulse indicator */}
         {isRun && (
@@ -203,9 +213,12 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
       </CardContent>
 
       {/* Footer */}
-      <Box sx={{ px: 2, pb: 1.5 }}>
+      <Box sx={{ px: 2, pb: 1.5, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Typography variant="caption" color="text.secondary">
-          {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "2-digit" })}
+          Criado {new Date(project.createdAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "2-digit" })}
+        </Typography>
+        <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.6rem" }}>
+          Atualizado {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
         </Typography>
       </Box>
     </MotionCard>

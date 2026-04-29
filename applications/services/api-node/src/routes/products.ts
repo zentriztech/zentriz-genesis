@@ -1,5 +1,5 @@
 /**
- * products.ts — CRUD de Produtos (grupos de projetos) + links entre projetos.
+ * products.ts — CRUD de Produtos (grupos de projetos) + links entre projetos + gatilhos.
  *
  * GET    /api/products                           — listar produtos do tenant
  * POST   /api/products                           — criar produto
@@ -9,6 +9,12 @@
  *
  * POST   /api/products/:id/projects/:projectId   — adicionar projeto ao produto
  * DELETE /api/products/:id/projects/:projectId   — remover projeto do produto
+ *
+ * PATCH  /api/projects/:id/product               — associar projeto a produto (pós-criação)
+ *
+ * GET    /api/projects/:id/triggers              — listar gatilhos de um projeto
+ * POST   /api/projects/:id/triggers              — criar gatilho (trigger_project_id + trigger_status)
+ * DELETE /api/projects/:id/triggers/:triggerId   — remover gatilho
  *
  * GET    /api/projects/:id/links                 — listar links de um projeto
  * POST   /api/projects/:id/links                 — criar link entre projetos
@@ -87,9 +93,24 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       if (!prod.rows[0]) return reply.status(404).send({ code: "NOT_FOUND" });
 
       const projects = await client.query(
-        `SELECT id, title, status, version_number, extra->>'project_type' AS project_type,
-                started_at, completed_at, updated_at
-         FROM projects WHERE product_id = $1 ORDER BY created_at ASC`,
+        `SELECT p.id, p.title, p.status, p.version_number,
+                p.extra->>'project_type' AS project_type,
+                p.complexity_hint, p.started_at, p.completed_at, p.updated_at, p.created_at,
+                COALESCE(
+                  json_agg(
+                    json_build_object(
+                      'id', pt.id,
+                      'triggerProjectId', pt.trigger_project_id,
+                      'triggerStatus', pt.trigger_status
+                    ) ORDER BY pt.created_at
+                  ) FILTER (WHERE pt.id IS NOT NULL),
+                  '[]'::json
+                ) AS triggers
+         FROM projects p
+         LEFT JOIN project_triggers pt ON pt.project_id = p.id
+         WHERE p.product_id = $1
+         GROUP BY p.id
+         ORDER BY p.created_at ASC`,
         [id]
       );
       return reply.send({ ...prod.rows[0], projects: projects.rows });
@@ -218,6 +239,103 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const client = await pool.connect();
       try {
         await client.query("DELETE FROM project_links WHERE id=$1", [linkId]);
+        return reply.send({ ok: true });
+      } finally { client.release(); }
+    }
+  );
+
+  // ── PATCH /api/projects/:id/product — associar projeto a produto pós-criação ─
+  app.patch<{ Params: { id: string }; Body: { productId: string | null } }>(
+    "/api/projects/:id/product",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const { productId } = request.body ?? {};
+      const client = await pool.connect();
+      try {
+        const proj = (await client.query("SELECT id, tenant_id FROM projects WHERE id=$1", [id])).rows[0];
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
+          return reply.status(403).send({ code: "FORBIDDEN" });
+        }
+        if (productId) {
+          const prod = (await client.query("SELECT id FROM products WHERE id=$1 AND tenant_id=$2", [productId, user.tenantId ?? ""])).rows[0];
+          if (!prod) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+        }
+        await client.query("UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2", [productId ?? null, id]);
+        return reply.send({ ok: true, productId: productId ?? null });
+      } finally { client.release(); }
+    }
+  );
+
+  // ── GET /api/projects/:id/triggers ───────────────────────────────────────────
+  app.get<{ Params: { id: string } }>("/api/projects/:id/triggers", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const proj = (await client.query("SELECT id, tenant_id FROM projects WHERE id=$1", [id])).rows[0];
+      if (!proj) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
+        return reply.status(403).send({ code: "FORBIDDEN" });
+      }
+      const res = await client.query(
+        `SELECT pt.id, pt.trigger_project_id, pt.trigger_status, pt.created_at,
+                p.title AS trigger_project_title, p.status AS trigger_project_status
+         FROM project_triggers pt
+         JOIN projects p ON p.id = pt.trigger_project_id
+         WHERE pt.project_id = $1 ORDER BY pt.created_at`,
+        [id]
+      );
+      return reply.send(res.rows);
+    } finally { client.release(); }
+  });
+
+  // ── POST /api/projects/:id/triggers ──────────────────────────────────────────
+  app.post<{ Params: { id: string }; Body: { triggerProjectId: string; triggerStatus: string } }>(
+    "/api/projects/:id/triggers",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const { triggerProjectId, triggerStatus = "accepted" } = request.body ?? {};
+      if (!triggerProjectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "triggerProjectId obrigatório" });
+      const validStatuses = ["accepted", "completed", "done"];
+      if (!validStatuses.includes(triggerStatus)) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: `triggerStatus deve ser: ${validStatuses.join(", ")}` });
+      }
+      const client = await pool.connect();
+      try {
+        const proj = (await client.query("SELECT id, tenant_id FROM projects WHERE id=$1", [id])).rows[0];
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND" });
+        if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
+          return reply.status(403).send({ code: "FORBIDDEN" });
+        }
+        const trigProj = (await client.query("SELECT id FROM projects WHERE id=$1", [triggerProjectId])).rows[0];
+        if (!trigProj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto gatilho não encontrado" });
+        const res = await client.query(
+          `INSERT INTO project_triggers (project_id, trigger_project_id, trigger_status)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (project_id, trigger_project_id) DO UPDATE SET trigger_status=$3
+           RETURNING *`,
+          [id, triggerProjectId, triggerStatus]
+        );
+        return reply.status(201).send(res.rows[0]);
+      } catch (e) {
+        const msg = (e as Error).message ?? "";
+        if (msg.includes("project_triggers_no_self")) return reply.status(400).send({ code: "BAD_REQUEST", message: "Projeto não pode ter gatilho em si mesmo" });
+        throw e;
+      } finally { client.release(); }
+    }
+  );
+
+  // ── DELETE /api/projects/:id/triggers/:triggerId ──────────────────────────────
+  app.delete<{ Params: { id: string; triggerId: string } }>(
+    "/api/projects/:id/triggers/:triggerId",
+    async (request, reply) => {
+      const { triggerId } = request.params;
+      const client = await pool.connect();
+      try {
+        await client.query("DELETE FROM project_triggers WHERE id=$1", [triggerId]);
         return reply.send({ ok: true });
       } finally { client.release(); }
     }

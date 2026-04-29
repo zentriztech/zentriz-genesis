@@ -29,8 +29,12 @@ import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
+import Select from "@mui/material/Select";
+import TextField from "@mui/material/TextField";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import CancelIcon from "@mui/icons-material/Cancel";
 import DeleteForeverIcon from "@mui/icons-material/DeleteForever";
@@ -50,13 +54,15 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import ReplayIcon from "@mui/icons-material/Replay";
 import StopIcon from "@mui/icons-material/Stop";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
+import AddLinkIcon from "@mui/icons-material/AddLink";
+import BoltIcon from "@mui/icons-material/Bolt";
 import ForumIcon from "@mui/icons-material/Forum";
 import { projectsStore } from "@/stores/projectsStore";
 import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
 import { getAgentProfile } from "@/lib/agentProfiles";
-import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
 
@@ -284,7 +290,16 @@ function ProjectDetailPageInner() {
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
-  const [product, setProduct]       = useState<{ id: string; name: string } | null>(null);
+  const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> } | null>(null);
+  const [triggers, setTriggers]     = useState<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>([]);
+  const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
+  const [triggerProjectId, setTriggerProjectId]   = useState("");
+  const [triggerStatus, setTriggerStatus]         = useState("accepted");
+  const [triggerSaving, setTriggerSaving]         = useState(false);
+  const [productDialogOpen, setProductDialogOpen] = useState(false);
+  const [allProducts, setAllProducts]             = useState<Array<{ id: string; name: string }>>([]);
+  const [linkProductId, setLinkProductId]         = useState("");
+  const [linkProductSaving, setLinkProductSaving] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | null>(null);
   const [countdown, setCountdown]   = useState<string>("");
@@ -363,11 +378,17 @@ function ProjectDetailPageInner() {
         .catch(() => setVersions([]));
       apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`)
         .then(setLinks).catch(() => setLinks([]));
-      // Load product info if project belongs to one
-      if (projectsStore.getById(id)?.productId) {
-        apiGet<{ id: string; name: string }>(`/api/products/${projectsStore.getById(id)!.productId}`)
-          .then(setProduct).catch(() => {});
+      // Load product info (with sibling projects) if project belongs to one
+      const pid = projectsStore.getById(id)?.productId;
+      if (pid) {
+        apiGet<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> }>(
+          `/api/products/${pid}`
+        ).then(setProduct).catch(() => {});
       }
+      // Load triggers for this project
+      apiGet<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>(
+        `/api/projects/${id}/triggers`
+      ).then(setTriggers).catch(() => setTriggers([]));
       // Load active ephemeral deployment
       apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
         .then((d) => {
@@ -1037,19 +1058,213 @@ function ProjectDetailPageInner() {
               </Card>
             )}
 
-            {/* Produto */}
-            {product && (
-              <Card>
-                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+            {/* ── Produto + Projetos do Produto + Gatilhos ── */}
+            <Card>
+              <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
                   <Typography variant="caption" color="text.secondary"
-                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75, fontSize: "0.6rem" }}>
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                     🧩 Produto
                   </Typography>
-                  <Chip size="small" label={product.name}
-                    onClick={() => {}} sx={{ fontSize: "0.72rem", cursor: "default" }} />
-                </CardContent>
-              </Card>
-            )}
+                  {!product && (
+                    <Tooltip title="Associar a um produto">
+                      <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
+                        apiGet<Array<{ id: string; name: string }>>("/api/products").then(setAllProducts).catch(() => {});
+                        setProductDialogOpen(true);
+                      }}>
+                        <AddLinkIcon sx={{ fontSize: "0.85rem" }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </Stack>
+
+                {product ? (
+                  <>
+                    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1 }}>
+                      <Chip size="small" label={product.name}
+                        sx={{ fontSize: "0.72rem", fontWeight: 600, bgcolor: "primary.main" + "22", color: "primary.main" }} />
+                      <Tooltip title="Desvincular do produto">
+                        <IconButton size="small" sx={{ p: 0.1 }} onClick={async () => {
+                          await apiPatch(`/api/projects/${id}/product`, { productId: null });
+                          setProduct(null);
+                          projectsStore.loadProject(id);
+                        }}>
+                          <DeleteOutlineIcon sx={{ fontSize: "0.75rem", color: "text.disabled" }} />
+                        </IconButton>
+                      </Tooltip>
+                    </Stack>
+
+                    {/* Projetos do produto */}
+                    {product.projects && product.projects.length > 0 && (
+                      <Stack spacing={0.5} sx={{ mb: 1 }}>
+                        {product.projects.map((p) => {
+                          const isCurrent = p.id === id;
+                          const stColors: Record<string, string> = {
+                            accepted: "#22c55e", completed: "#22c55e", running: "#3b82f6",
+                            failed: "#ef4444", stopped: "#ef4444",
+                          };
+                          const stColor = stColors[p.status] ?? "#6b7280";
+                          return (
+                            <Box key={p.id}
+                              onClick={() => !isCurrent && router.push(`/projects/${p.id}`)}
+                              sx={{
+                                display: "flex", alignItems: "center", gap: 0.75, px: 1, py: 0.5,
+                                borderRadius: 0.75, cursor: isCurrent ? "default" : "pointer",
+                                bgcolor: isCurrent ? "primary.main" + "14" : "transparent",
+                                border: isCurrent ? "1px solid" : "1px solid transparent",
+                                borderColor: isCurrent ? "primary.main" + "44" : "transparent",
+                                "&:hover": { bgcolor: isCurrent ? undefined : "action.hover" },
+                              }}>
+                              <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: stColor, flexShrink: 0 }} />
+                              <Typography variant="caption" sx={{ fontSize: "0.68rem", flexGrow: 1 }} noWrap>
+                                {p.title ?? "Sem título"}
+                              </Typography>
+                              {isCurrent && <Chip size="small" label="Este" sx={{ height: 14, fontSize: "0.55rem", bgcolor: "primary.main" + "22", color: "primary.main" }} />}
+                            </Box>
+                          );
+                        })}
+                      </Stack>
+                    )}
+                  </>
+                ) : (
+                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.68rem" }}>
+                    Sem produto vinculado
+                  </Typography>
+                )}
+
+                {/* Gatilhos */}
+                <Divider sx={{ my: 1 }} />
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.75 }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
+                    ⚡ Gatilhos
+                  </Typography>
+                  <Tooltip title="Adicionar gatilho">
+                    <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
+                      if (product?.projects) setTriggerDialogOpen(true);
+                      else setTriggerDialogOpen(true);
+                    }}>
+                      <BoltIcon sx={{ fontSize: "0.85rem" }} />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
+                {triggers.length === 0 ? (
+                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.68rem" }}>
+                    Inicia quando o projeto anterior terminar.
+                  </Typography>
+                ) : (
+                  <Stack spacing={0.5}>
+                    {triggers.map((t) => (
+                      <Box key={t.id} sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                        <BoltIcon sx={{ fontSize: "0.75rem", color: "warning.main" }} />
+                        <Typography variant="caption" sx={{ fontSize: "0.68rem", flexGrow: 1 }} noWrap>
+                          {t.trigger_project_title ?? t.trigger_project_id.slice(0, 8)}
+                        </Typography>
+                        <Chip size="small" label={t.trigger_status}
+                          sx={{ height: 14, fontSize: "0.55rem", bgcolor: "warning.main" + "22", color: "warning.main" }} />
+                        <Tooltip title="Remover gatilho">
+                          <IconButton size="small" sx={{ p: 0.1 }} onClick={async () => {
+                            await apiDelete(`/api/projects/${id}/triggers/${t.id}`);
+                            setTriggers((prev) => prev.filter((x) => x.id !== t.id));
+                          }}>
+                            <DeleteOutlineIcon sx={{ fontSize: "0.7rem", color: "text.disabled" }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    ))}
+                  </Stack>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Modal: associar a produto */}
+            <Dialog open={productDialogOpen} onClose={() => setProductDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>Associar a Produto</DialogTitle>
+              <DialogContent>
+                <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+                  <InputLabel>Produto</InputLabel>
+                  <Select label="Produto" value={linkProductId} onChange={(e) => setLinkProductId(e.target.value as string)}>
+                    {allProducts.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+                  </Select>
+                </FormControl>
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setProductDialogOpen(false)}>Cancelar</Button>
+                <Button variant="contained" disabled={!linkProductId || linkProductSaving}
+                  onClick={async () => {
+                    setLinkProductSaving(true);
+                    try {
+                      await apiPatch(`/api/projects/${id}/product`, { productId: linkProductId });
+                      const prod = allProducts.find((p) => p.id === linkProductId);
+                      if (prod) {
+                        const fullProd = await apiGet<typeof product>(`/api/products/${linkProductId}`);
+                        setProduct(fullProd);
+                      }
+                      projectsStore.loadProject(id);
+                      setProductDialogOpen(false);
+                    } finally { setLinkProductSaving(false); }
+                  }}>
+                  {linkProductSaving ? "Salvando…" : "Associar"}
+                </Button>
+              </DialogActions>
+            </Dialog>
+
+            {/* Modal: adicionar gatilho */}
+            <Dialog open={triggerDialogOpen} onClose={() => setTriggerDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>Adicionar Gatilho</DialogTitle>
+              <DialogContent>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Este projeto será iniciado automaticamente quando o projeto selecionado atingir o status escolhido.
+                </Typography>
+                <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                  <InputLabel>Projeto gatilho</InputLabel>
+                  <Select label="Projeto gatilho" value={triggerProjectId}
+                    onChange={(e) => setTriggerProjectId(e.target.value as string)}>
+                    {(product?.projects ?? [])
+                      .filter((p) => p.id !== id)
+                      .map((p) => <MenuItem key={p.id} value={p.id}>{p.title ?? p.id.slice(0, 8)}</MenuItem>)}
+                    {/* Se não há produto, mostrar campo de texto */}
+                  </Select>
+                </FormControl>
+                {!product && (
+                  <TextField fullWidth size="small" label="ID do projeto gatilho" value={triggerProjectId}
+                    onChange={(e) => setTriggerProjectId(e.target.value)} sx={{ mb: 2 }} />
+                )}
+                <FormControl fullWidth size="small">
+                  <InputLabel>Disparar quando</InputLabel>
+                  <Select label="Disparar quando" value={triggerStatus}
+                    onChange={(e) => setTriggerStatus(e.target.value as string)}>
+                    <MenuItem value="accepted">Aceito pelo usuário</MenuItem>
+                    <MenuItem value="completed">Concluído pelo pipeline</MenuItem>
+                  </Select>
+                </FormControl>
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setTriggerDialogOpen(false)}>Cancelar</Button>
+                <Button variant="contained" disabled={!triggerProjectId || triggerSaving}
+                  onClick={async () => {
+                    setTriggerSaving(true);
+                    try {
+                      const res = await apiPost<{ id: string; trigger_project_id: string; trigger_status: string }>(
+                        `/api/projects/${id}/triggers`,
+                        { triggerProjectId, triggerStatus }
+                      );
+                      const proj = product?.projects?.find((p) => p.id === triggerProjectId);
+                      setTriggers((prev) => [...prev, {
+                        id: res.id,
+                        trigger_project_id: triggerProjectId,
+                        trigger_project_title: proj?.title ?? triggerProjectId.slice(0, 8),
+                        trigger_project_status: proj?.status ?? "unknown",
+                        trigger_status: triggerStatus,
+                      }]);
+                      setTriggerDialogOpen(false);
+                      setTriggerProjectId("");
+                    } finally { setTriggerSaving(false); }
+                  }}>
+                  {triggerSaving ? "Salvando…" : "Salvar"}
+                </Button>
+              </DialogActions>
+            </Dialog>
 
             {/* Projetos relacionados */}
             {links.length > 0 && (

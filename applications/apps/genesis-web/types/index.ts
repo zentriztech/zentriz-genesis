@@ -68,6 +68,10 @@ export interface Project {
   projectType?: string | null;
   /** ID do produto ao qual este projeto pertence (opcional). */
   productId?: string | null;
+  /** Complexidade do projeto: trivial / low / medium / high */
+  complexityHint?: string | null;
+  /** Quantidade de tasks (quando disponível no contexto de listagem de produto) */
+  taskCount?: number | null;
 }
 
 export interface Product {
