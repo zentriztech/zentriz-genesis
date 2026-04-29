@@ -1690,13 +1690,33 @@ def _run_monitor_loop(
             def _run_qa_task(task: dict) -> None:
                 tid = task.get("taskId") or task.get("task_id")
                 task_desc = task.get("title") or task.get("description") or task.get("name") or ""
-                code_refs = [a.get("path") for a in last_dev_artifacts if isinstance(a, dict) and a.get("path")]
+                # GAP-T4: QA deve validar o arquivo real do disco, não o JSON da resposta do Dev (que pode estar truncado).
+                # O runner já lê apps/ do disco para o Dev (_disk_artifacts). Fazemos o mesmo para o QA.
+                _qa_disk_artifacts: list = []
+                if project_id:
+                    try:
+                        _qa_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                        if _qa_apps_root.exists():
+                            for _qf in sorted(_qa_apps_root.rglob("*")):
+                                if _qf.is_file() and _qf.stat().st_size < 200_000 and not any(
+                                    p in str(_qf) for p in ("node_modules", ".next", ".git")
+                                ):
+                                    _qrel = str(_qf.relative_to(_qa_apps_root.parent))
+                                    _qa_disk_artifacts.append({
+                                        "path": _qrel,
+                                        "content": _qf.read_text(encoding="utf-8", errors="replace"),
+                                    })
+                    except Exception as _qde:
+                        logger.debug("[QA-Disk] Falha ao ler apps/ do disco: %s", _qde)
+                # Usar artefatos do disco se disponíveis — fallback para JSON do Dev
+                _qa_artifacts = _qa_disk_artifacts if _qa_disk_artifacts else last_dev_artifacts
+                code_refs = [a.get("path") for a in _qa_artifacts if isinstance(a, dict) and a.get("path")]
                 _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
                 try:
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
-                        task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=last_dev_artifacts,
+                        task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
                     )
                     _audit_log("qa", request_id, qa_response, task_id=tid)
                     _qa_summary = qa_response.get("summary", "")

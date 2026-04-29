@@ -233,8 +233,10 @@ def write_doc_by_path(
         file_path.parent.mkdir(parents=True, exist_ok=True)
         header = f"<!-- Created by: {creator} -->\n\n"
         _atomic_write(file_path, header + content)
-        filename = parts[-1]
-        append_manifest(project_id, filename, creator, title=title or filename)
+        # GAP-Portal: salvar path relativo completo (docs/subdir/file.md) para que
+        # a rota doc-content consiga encontrar o arquivo — não apenas o filename final.
+        filename_for_manifest = "/".join(["docs"] + parts) if len(parts) > 1 else parts[-1]
+        append_manifest(project_id, filename_for_manifest, creator, title=title or parts[-1])
     logger.info("[ProjectStorage] Gravado: %s (criador: %s)", file_path, creator)
     return file_path
 
