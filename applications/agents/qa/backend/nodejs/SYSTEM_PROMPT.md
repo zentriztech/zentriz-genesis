@@ -213,11 +213,13 @@ grep -r "drizzle-orm/mysql" apps/src/               # deve retornar resultados
 **Check:** S01 — Input sem validação Zod
 **Arquivo:** apps/src/routes/products.ts, linha ~35
 **Problema:** `req.body` usado diretamente sem schema Zod — injection possível.
-**Correção exata:**
+**Correção:**
   1. Criar apps/src/schemas/product.schema.ts com CreateProductSchema = z.object({...})
   2. Aplicar middleware: router.post('/', validate(CreateProductSchema), createProduct)
   3. O middleware validate() já existe em apps/src/middleware/validate.ts
 ```
+
+**GAP-P3: campo `Correção` é OBRIGATÓRIO em todo BLOCKER e MAJOR.** Deve especificar: (1) qual arquivo editar, (2) o que exatamente adicionar/remover/substituir. Sem ação concreta, o Dev entra em loop repetindo a mesma entrega sem saber o que mudar — loop garantido. `Correção` vago ("corrija o problema") = BLOCKER inválido, rejeitar automaticamente. MINOR e INFO: `Correção` recomendada, pode ser sugestão.
 
 ### Severidade → decisão
 | Severidade | Definição | Impacto |

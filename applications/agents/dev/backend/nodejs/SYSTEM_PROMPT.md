@@ -407,16 +407,40 @@ Validados em produção real. Causam falha silenciosa em runtime:
 |---|---------|----------------|---------------|
 | B1 | `package.json` + `src/db/` | PostgreSQL → `drizzle-orm/pg-core` + driver `postgres`; **nunca** `mysql2`/`mysqlTable` | App sobe mas não conecta |
 | B2 | `Dockerfile` | `RUN npm install --legacy-peer-deps` — nunca `npm ci` sem lock file | Build quebra |
-| B3 | `src/app.ts` | `cors({ origin: [...] })` com lista — nunca `cors()` vazio | CORS sem restrição |
+| B3 | `src/app.ts` | `cors({ origin: [...] })` com lista via split — nunca `cors()` vazio | CORS sem restrição / frontend bloqueado |
 | B4 | `src/app.ts` | `app.use(publicLimiter)` antes dos body parsers | Rate limiting ausente |
 | B5 | `seed.ts` | Usar `seed.mjs` (ES module puro) — `seed.ts` falha com ts-node npx | `Cannot find name 'process'` |
 | B6 | `docker-compose.yml` | Porta fixa ≥ 3004; `name: <slug>`; `container_name:` em cada serviço | Conflito de porta / containers sobrescrevem |
+
+**GAP-I6 — CORS multi-origin (OBRIGATÓRIO):** `CORS_ORIGIN` deve suportar múltiplas origens separadas por vírgula. O frontend gerado pode rodar em porta diferente do padrão — hardcodar uma única origem garante "Failed to fetch" em integração. Padrão obrigatório em `src/app.ts`:
+
+```typescript
+// GAP-I6: suporte a múltiplas origens via split — nunca uma origem hardcoded
+const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origem não permitida: ${origin}`));
+  },
+  credentials: true,
+}));
+```
+
+E no `.env.example`:
+```
+CORS_ORIGIN=http://localhost:3000,http://localhost:3001
+```
 
 **Varredura PostgreSQL:**
 ```bash
 grep -r "mysql" apps/src/ apps/package.json    # deve retornar vazio
 grep -r "cors()" apps/src/app.ts               # deve retornar vazio
 grep -r "npm ci" apps/Dockerfile               # deve retornar vazio
+grep -r "CORS_ORIGIN.*split" apps/src/app.ts   # deve retornar match (GAP-I6)
 ```
 
 #### 6.2b Stack MySQL — regras específicas (quando charter diz MySQL/MariaDB)
@@ -503,7 +527,7 @@ grep -r "drizzle-orm/mysql" apps/src/                            # deve retornar
     },
     {
       "path": "apps/src/app.ts",
-      "content": "import express from 'express';\nimport cors from 'cors';\nimport helmet from 'helmet';\nimport { healthRoutes } from './routes/health';\nimport { errorHandler } from './middleware/errorHandler';\n\nconst app = express();\napp.use(helmet());\napp.use(cors());\napp.use(express.json());\napp.use('/api', healthRoutes);\napp.use(errorHandler);\nexport default app;",
+      "content": "import express from 'express';\nimport cors from 'cors';\nimport helmet from 'helmet';\nimport { healthRoutes } from './routes/health';\nimport { errorHandler } from './middleware/errorHandler';\n\nconst app = express();\napp.use(helmet());\n// GAP-I6: múltiplas origens via split\nconst allowedOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:3000').split(',').map(o => o.trim()).filter(Boolean);\napp.use(cors({ origin: (origin, cb) => { if (!origin || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('CORS: origem não permitida')); }, credentials: true }));\napp.use(express.json());\napp.use('/api', healthRoutes);\napp.use(errorHandler);\nexport default app;",
       "format": "code",
       "purpose": "App instance sem listen — testável com supertest"
     },

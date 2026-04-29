@@ -108,6 +108,8 @@ Se qualquer grep retornar resultado inesperado → **QA_FAIL imediato**.
 **Correção:** SECRET_KEY = os.environ.get("SECRET_KEY") ou usar pydantic-settings BaseSettings
 ```
 
+**GAP-P3: campo `Correção` é OBRIGATÓRIO em todo BLOCKER e MAJOR.** Deve especificar: (1) qual arquivo editar, (2) o que exatamente adicionar/remover/substituir. Sem ação concreta, o Dev entra em loop repetindo a mesma entrega sem saber o que mudar — loop garantido. `Correção` vago ("corrija o problema") = BLOCKER inválido, rejeitar automaticamente. MINOR e INFO: `Correção` recomendada, pode ser sugestão.
+
 ### Severidade → Decisão
 | Severidade | Impacto |
 |------------|---------|
