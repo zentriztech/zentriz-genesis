@@ -140,12 +140,76 @@ Sem isso, `describe`, `expect`, `jest` não são reconhecidos → dezenas de fal
 - `'use client'` em componentes com hooks/estado
 - `brand.ts` com tokens de cores (nunca MUI default `#1976d2`)
 - Imports via alias `@/`
-- `ApiProduct`/`toProduct()`/`unwrap()` ao integrar com backend — backend Genesis retorna `{ data: T }`, nunca o tipo diretamente
 - Campo `email` (não `username`) no login; retorno `body.data?.token` (não `body.access_token`)
 - Paths de API com prefixo `/api/` (ex: `/api/auth/login`, `/api/products`)
 - `user.name` pode ser `null` ou ausente no backend — sempre usar fallback: `user.name ?? user.email?.split('@')[0] ?? ''` (GAP-I9)
 - `product.price` vem como string decimal do MySQL (`"99.90"`) — sempre converter: `parseFloat(String(product.price))` antes de `.toLocaleString()` (GAP-I10)
 - `product.category` ou `categoryId` pode ser `null` — sempre usar guard: `if (!category) return defaultValue` antes de `.toLowerCase()` (GAP-I10)
+
+#### Arquitetura Backend→UI obrigatória (GAP-I11)
+
+Quando o projeto consome um backend externo, **nunca use os tipos do backend diretamente nos componentes**. Sempre crie duas camadas:
+
+```typescript
+// ── Camada 1: shape REAL do backend (copiar do api_contract.md) ──────────────
+// Estes tipos refletem EXATAMENTE o que a API retorna — nunca assuma, leia o contrato.
+interface ApiProduct {
+  id: string;
+  name: string;
+  price: string;          // MySQL/Postgres retornam DECIMAL como string
+  categoryId: string | null;
+  active: boolean;        // o backend pode chamar "active", não "inStock"
+  stock: number;          // pode ser "stock", não "stockCount"
+}
+
+// ── Camada 2: shape do componente (o que o UI precisa) ────────────────────────
+// Estes tipos são convenientes para o frontend — nunca dependem do backend.
+interface Product {
+  id: string;
+  name: string;
+  price: number;          // convertido
+  category: string;       // resolvido com fallback
+  inStock: boolean;       // renomeado para clareza
+  stockCount: number;
+}
+
+// ── Função de transformação: Api* → UI type ───────────────────────────────────
+// Toda conversão e fallback acontece AQUI — componentes nunca fazem parseFloat() inline.
+function toProduct(raw: ApiProduct): Product {
+  return {
+    id: raw.id,
+    name: raw.name,
+    price: parseFloat(String(raw.price)),          // GAP-I10: sempre converter
+    category: raw.categoryId ?? "sem categoria",   // GAP-I10: guard null
+    inStock: raw.active,
+    stockCount: raw.stock,
+  };
+}
+
+// ── Desembrulhar envelope { data: T } ────────────────────────────────────────
+// Todo endpoint Genesis retorna { data: T } ou { data: T[], meta: {...} }.
+// NUNCA faça .map() direto na resposta — sempre unwrap primeiro.
+function unwrap<T>(raw: { data: T } | T): T {
+  return (raw as { data: T }).data ?? (raw as T);
+}
+
+// ── Uso correto ───────────────────────────────────────────────────────────────
+// const raw = await fetch('/api/products').then(r => r.json());
+// const products: Product[] = (unwrap<ApiProduct[]>(raw)).map(toProduct);
+```
+
+**Regra:** componentes React recebem apenas `Product` (UI type), nunca `ApiProduct`. A camada de conversão fica em `apps/src/lib/api.ts` ou `apps/src/types/api.ts`.
+
+#### Porta do backend e BASE_URL (GAP-I3)
+
+Quando `linked_projects_context` estiver presente:
+1. **Ler a Base URL** do `api_contract.md` do projeto linkado — ela contém a porta real (ex: `http://localhost:3008`)
+2. Usar essa URL como valor de `NEXT_PUBLIC_API_BASE_URL` no `.env.example`
+3. **Fallback no código SEMPRE `''`** (string vazia), nunca uma porta inventada:
+   ```typescript
+   const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? ''; // '' força erro visível
+   ```
+4. Se a porta não estiver explícita no contrato, inferir do `docker-compose.yml` do projeto linkado (campo `ports: ["XXXX:3001"]` → porta do host é `XXXX`).
 
 ---
 

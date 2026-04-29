@@ -76,6 +76,18 @@ Cada task produz **NO MÁXIMO 3 arquivos**.
 - ❌ `"TSK-WEB-001"` — task ID não é arquivo
 - ❌ `"apps/src/"` — diretório não é arquivo
 
+## 4.1) PROJETOS LINKADOS — `target_api_url` obrigatório (GAP-I3)
+
+Quando `inputs.linked_projects_context` estiver presente (projeto consome um backend existente):
+
+1. **Extrair a Base URL** do contrato do backend linkado — está em `api_contract.md` como `Base URL: http://localhost:PORT`
+2. **Incluir `target_api_url`** na task de scaffold (primeira task) com a URL completa:
+   ```
+   target_api_url: "http://localhost:3008"   ← porta real do backend
+   ```
+3. Se a porta não estiver no contrato, informar `target_api_url: "VER_DOCKER_COMPOSE_DO_BACKEND"` — o Dev inferirá do `docker-compose.yml`
+4. **NUNCA omitir** `target_api_url` quando há backend linkado — sem ela o Dev usa porta genérica errada e todas as chamadas falham silenciosamente
+
 ---
 
 ## 5) BACKLOG POR STACK
