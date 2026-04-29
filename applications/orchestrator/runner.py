@@ -2935,6 +2935,25 @@ def main() -> int:
                 _post_error(str(e), request_id, e)
 
             # ── Passo 7: DevOps ───────────────────────────────────────────
+            # GAP-P5: seed TSK-DEVOPS-001 no portal antes de chamar o DevOps (fluxo Passo 7)
+            if project_id and _api_available():
+                try:
+                    _d7_seed_path = f"/api/projects/{project_id}/tasks"
+                    _d7_task = [{
+                        "task_id":   "TSK-DEVOPS-001",
+                        "taskId":    "TSK-DEVOPS-001",
+                        "module":    "infra",
+                        "requirements": "Provisionar artefatos de infraestrutura: Dockerfile, docker-compose.yml, start.sh, RUNBOOK.md",
+                        "status":    "IN_PROGRESS",
+                        "ownerRole": "DEVOPS_DOCKER",
+                        "depends_on_files": [],
+                        "target_route": "infra",
+                    }]
+                    _d7, _d7s = _api_post(_d7_seed_path, {"tasks": _d7_task})
+                    if 200 <= _d7s < 300:
+                        logger.info("[GAP-P5/Passo7] TSK-DEVOPS-001 criada no portal.")
+                except Exception as _d7e:
+                    logger.debug("[GAP-P5/Passo7] Seed TSK-DEVOPS-001 falhou (não crítico): %s", _d7e)
             _post_step(
                 "O DevOps está gerando Dockerfile, docker-compose e artefatos de infraestrutura.",
                 request_id,
@@ -2985,6 +3004,12 @@ def main() -> int:
                                 "Artefatos operacionais do Connect emitidos após o DevOps: ObservabilityBaselineManifest, RuntimePassport e KnownSafeActionsPack.",
                                 request_id,
                             )
+                # GAP-P5/Passo7: atualizar TSK-DEVOPS-001 para DONE
+                if project_id and _api_available():
+                    try:
+                        _update_task(project_id, "TSK-DEVOPS-001", status="DONE")
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.exception("[Pipeline] DevOps falhou")
                 devops_status = "FAIL"
