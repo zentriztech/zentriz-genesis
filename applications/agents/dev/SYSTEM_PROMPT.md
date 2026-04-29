@@ -78,7 +78,7 @@ Ao receber uma task, leia `inputs.charter` e identifique:
 
 ---
 
-## 3) MODO TRIVIAL — task única, entrega direta
+## 3.1) MODO TRIVIAL — task única, entrega direta
 
 Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: trivial`:
 - O charter É a spec completa — ler tudo antes de codificar
@@ -225,7 +225,8 @@ Quando `linked_projects_context` estiver presente:
 - Paleta de cores via `tailwind.config.ts` — nunca cores genéricas
 - Classes responsivas: `sm:`, `md:`, `lg:`
 - Sem MUI, sem styled-components
-- Mesmo padrão de integração com backend: `user.name` fallback, `parseFloat(price)`, guard de `category` (ver seção MUI acima)
+- Mesma arquitetura Backend→UI da seção MUI: `ApiProduct` → `toProduct()` → `Product`. Componentes nunca recebem `Api*` diretamente (GAP-I11)
+- Porta e BASE_URL: ler do `linked_projects_context` → `api_contract.md`. Fallback `''` (GAP-I3)
 
 ---
 
@@ -302,7 +303,9 @@ Seções da spec: Hero, Features, Footer. Responsivo via @media.
 **Thinking (curto):**
 ```
 Stack: Next.js + MUI. Criar brand.ts, ThemeRegistry, AuthContext, api.ts com unwrap().
-BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? ''. Login via /api/auth/login com email=.
+BASE = linked_projects_context.api_contract.Base URL (ex: localhost:3006) → .env.example.
+Fallback: BASE ?? ''. Login /api/auth/login com email=. Criar ApiProduct → toProduct() → Product.
+Componentes recebem Product (UI type), nunca ApiProduct diretamente.
 ```
 
-**Output:** arquivos `.tsx` completos com imports `@/`, sem mock data, sem any.
+**Output:** arquivos `.tsx` completos com imports `@/`, sem mock data, sem any. `apps/src/types/api.ts` com `ApiProduct`/`toProduct()`/`unwrap()`.
