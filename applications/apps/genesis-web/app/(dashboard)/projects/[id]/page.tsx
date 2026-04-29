@@ -93,6 +93,7 @@ const ALLOW_RUN_STATUS = new Set([
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type TaskItem         = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
+type TaskMetricItem   = { taskId: string; calls: number; inputTokens: number; outputTokens: number; totalTokens: number; durationMs: number; agents: string[]; models: string[]; estimatedCostUsd: number; lastCallAt?: string };
 type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
@@ -282,6 +283,7 @@ function ProjectDetailPageInner() {
 
   // Data state
   const [tasks, setTasks]         = useState<TaskItem[] | null>(null);
+  const [taskMetrics, setTaskMetrics] = useState<Record<string, TaskMetricItem>>({});
   const [artifacts, setArtifacts] = useState<ArtifactsResp | null>(null);
   const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
@@ -339,10 +341,20 @@ function ProjectDetailPageInner() {
     if (!id || !project) return;
     const isActive = ["running", "completed", "accepted", "stopped", "failed"].includes(project.status);
     if (!isActive) return;
-    const load = () =>
+    const loadMetrics = () =>
+      apiGet<TaskMetricItem[]>(`/api/projects/${id}/task-metrics`)
+        .then((d) => {
+          const map: Record<string, TaskMetricItem> = {};
+          d.forEach((m) => { map[m.taskId] = m; });
+          setTaskMetrics(map);
+        })
+        .catch(() => {});
+    const load = () => {
       apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
         .then((d) => setTasks(Array.isArray(d) ? d : []))
         .catch(() => {});
+      loadMetrics();
+    };
     load();
     if (project.status !== "running") return;
     const t = setInterval(load, 8000);
@@ -1464,12 +1476,14 @@ function ProjectDetailPageInner() {
                           <TableCell>Task</TableCell>
                           <TableCell>Descrição</TableCell>
                           <TableCell sx={{ width: 110 }}>Status</TableCell>
+                          <TableCell sx={{ width: 130, textAlign: "right" }}>Tokens · Custo</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
                         {tasks.map((t) => {
                           const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
                           const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
+                          const m = taskMetrics[t.taskId ?? ""];
                           return (
                             <TableRow key={t.id}
                               sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
@@ -1484,6 +1498,25 @@ function ProjectDetailPageInner() {
                                 <Chip size="small" label={t.status ?? "—"}
                                   color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
                                   sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right" }}>
+                                {m ? (
+                                  <Tooltip title={
+                                    `${m.calls} chamada(s) · ${m.agents.join("+")} · ${Math.round(m.durationMs / 1000)}s\n` +
+                                    `In: ${m.inputTokens.toLocaleString("pt-BR")} · Out: ${m.outputTokens.toLocaleString("pt-BR")}`
+                                  }>
+                                    <Stack alignItems="flex-end" spacing={0.1}>
+                                      <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.secondary", fontFamily: "monospace" }}>
+                                        {m.totalTokens.toLocaleString("pt-BR")} tok
+                                      </Typography>
+                                      <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "success.main", fontFamily: "monospace", fontWeight: 600 }}>
+                                        ~${m.estimatedCostUsd.toFixed(3)}
+                                      </Typography>
+                                    </Stack>
+                                  </Tooltip>
+                                ) : (
+                                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.6rem" }}>—</Typography>
+                                )}
                               </TableCell>
                             </TableRow>
                           );

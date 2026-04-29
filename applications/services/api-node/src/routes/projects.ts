@@ -802,6 +802,59 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/task-metrics — custo, tokens e tempo por task
+  app.get<{ Params: { id: string } }>("/api/projects/:id/task-metrics", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN" });
+      }
+      const res = await client.query(
+        `SELECT
+           COALESCE(task_id, '(planejamento)') AS task_id,
+           COUNT(*)::int                        AS calls,
+           SUM(input_tokens)::int               AS input_tokens,
+           SUM(output_tokens)::int              AS output_tokens,
+           SUM(duration_ms)::int                AS duration_ms,
+           array_agg(DISTINCT agent)            AS agents,
+           array_agg(DISTINCT model)
+             FILTER (WHERE model IS NOT NULL)   AS models,
+           MAX(created_at)                      AS last_call_at
+         FROM project_agent_metrics
+         WHERE project_id = $1
+         GROUP BY COALESCE(task_id, '(planejamento)')
+         ORDER BY MAX(created_at)`,
+        [id]
+      );
+      const PRICE_INPUT  = 3;   // USD per MTok (Sonnet 4.6)
+      const PRICE_OUTPUT = 15;  // USD per MTok
+      const rows = res.rows.map((r) => {
+        const inp = r.input_tokens as number ?? 0;
+        const out = r.output_tokens as number ?? 0;
+        const cost = (inp / 1_000_000) * PRICE_INPUT + (out / 1_000_000) * PRICE_OUTPUT;
+        return {
+          taskId:          r.task_id as string,
+          calls:           r.calls as number,
+          inputTokens:     inp,
+          outputTokens:    out,
+          totalTokens:     inp + out,
+          durationMs:      r.duration_ms as number ?? 0,
+          agents:          r.agents as string[],
+          models:          r.models as string[],
+          estimatedCostUsd: parseFloat(cost.toFixed(4)),
+          lastCallAt:      (r.last_call_at as Date)?.toISOString(),
+        };
+      });
+      return reply.send(rows);
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/knowledge — lista knowledge entries extraídas pelo G46
   app.get<{ Params: { id: string } }>(
     "/api/projects/:id/knowledge",
