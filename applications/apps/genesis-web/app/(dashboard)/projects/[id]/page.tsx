@@ -440,9 +440,24 @@ function ProjectDetailPageInner() {
   }, [ephemeral]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
-  const handleRun = async () => {
+  // Modal de seleção de task para reinício
+  const [restartDialogOpen, setRestartDialogOpen] = useState(false);
+  const [restartFromTask, setRestartFromTask]     = useState<string>("");
+
+  const handleRun = async (fromTaskId?: string) => {
     setRunError(null); setRunLoading(true);
     try {
+      // Se fromTaskId especificado, resetar tasks a partir daquela para ASSIGNED
+      if (fromTaskId && tasks && tasks.length > 0) {
+        const idx = tasks.findIndex(t => (t.taskId || t.id) === fromTaskId);
+        if (idx >= 0) {
+          const toReset = tasks.slice(idx).filter(t => t.status !== "DONE" && t.status !== "QA_PASS");
+          for (const t of toReset) {
+            const tid = t.taskId || t.id;
+            try { await apiPatch(`/api/projects/${id}/tasks/${tid}`, { status: "ASSIGNED" }); } catch { /* non-critical */ }
+          }
+        }
+      }
       const d = await apiPost<{ ok: boolean; status?: string }>(`/api/projects/${id}/run`, {});
       if (d?.status === "running") projectsStore.setProjectStatus(id, "running");
       await projectsStore.loadProject(id);
@@ -450,6 +465,18 @@ function ProjectDetailPageInner() {
       setRunError(e instanceof Error ? e.message : "Falha ao iniciar");
     } finally {
       setRunLoading(false);
+    }
+  };
+
+  const handleRestartClick = () => {
+    // Só mostra o modal se há tasks (projeto com histórico)
+    if (tasks && tasks.length > 0) {
+      // Pré-selecionar: primeira task não DONE, ou BLOCKED
+      const firstPending = tasks.find(t => !["DONE","QA_PASS","CANCELLED"].includes(t.status ?? ""));
+      setRestartFromTask(firstPending?.taskId ?? firstPending?.id ?? tasks[0].taskId ?? tasks[0].id ?? "");
+      setRestartDialogOpen(true);
+    } else {
+      handleRun();
     }
   };
 
@@ -694,7 +721,8 @@ function ProjectDetailPageInner() {
         {canRun && !isRunning && (
           <Button variant="contained" size="small"
             startIcon={project.status === "stopped" || project.status === "failed" ? <ReplayIcon /> : <PlayArrowIcon />}
-            disabled={runLoading} onClick={handleRun}>
+            disabled={runLoading}
+            onClick={project.status === "stopped" || project.status === "failed" ? handleRestartClick : () => handleRun()}>
             {runLoading ? "Iniciando…" : project.status === "stopped" || project.status === "failed" ? "Reiniciar" : "Iniciar"}
           </Button>
         )}
@@ -735,6 +763,69 @@ function ProjectDetailPageInner() {
         </Dialog>
       </Stack>
 
+      {/* Modal: Reiniciar a partir de qual task? */}
+      <Dialog open={restartDialogOpen} onClose={() => setRestartDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <ReplayIcon color="warning" />
+            <Typography variant="h6">Reiniciar pipeline</Typography>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Escolha a partir de qual task o pipeline deve continuar. Tasks anteriores à selecionada permanecem com o status atual.
+          </Typography>
+          {tasks && tasks.length > 0 ? (
+            <FormControl fullWidth size="small">
+              <InputLabel>Retomar a partir de</InputLabel>
+              <Select
+                label="Retomar a partir de"
+                value={restartFromTask}
+                onChange={(e) => setRestartFromTask(e.target.value as string)}
+              >
+                {tasks.map((t) => {
+                  const tid = t.taskId ?? t.id ?? "";
+                  const statusColors: Record<string, string> = {
+                    DONE: "#10B981", QA_PASS: "#10B981", BLOCKED: "#EF4444",
+                    QA_FAIL: "#EF4444", IN_PROGRESS: "#6366F1", ASSIGNED: "#F59E0B",
+                  };
+                  const color = statusColors[t.status ?? ""] ?? "#6B7280";
+                  return (
+                    <MenuItem key={tid} value={tid}>
+                      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ width: "100%" }}>
+                        <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: color, flexShrink: 0 }} />
+                        <Typography variant="body2" fontFamily="monospace" sx={{ minWidth: 120, flexShrink: 0, fontSize: "0.78rem" }}>
+                          {tid}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" noWrap sx={{ flexGrow: 1 }}>
+                          {t.requirements?.slice(0, 50) ?? ""}
+                        </Typography>
+                        <Chip size="small" label={t.status ?? "—"}
+                          sx={{ fontSize: "0.6rem", height: 18, bgcolor: color + "22", color }} />
+                      </Stack>
+                    </MenuItem>
+                  );
+                })}
+              </Select>
+            </FormControl>
+          ) : (
+            <Typography variant="body2" color="text.secondary">Nenhuma task registrada — o pipeline iniciará do começo.</Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRestartDialogOpen(false)}>Cancelar</Button>
+          <Button
+            variant="contained" color="warning" startIcon={<ReplayIcon />}
+            disabled={runLoading}
+            onClick={() => {
+              setRestartDialogOpen(false);
+              handleRun(restartFromTask || undefined);
+            }}>
+            {runLoading ? "Reiniciando…" : "Reiniciar"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Error alert */}
       {runError && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRunError(null)}>{runError}</Alert>
@@ -750,7 +841,7 @@ function ProjectDetailPageInner() {
                 Editar Spec
               </Button>
               <Button size="small" variant="contained" color="info" startIcon={<PlayArrowIcon />}
-                disabled={runLoading} onClick={handleRun}>
+                disabled={runLoading} onClick={() => handleRun()}>
                 Iniciar Agora
               </Button>
             </Stack>
