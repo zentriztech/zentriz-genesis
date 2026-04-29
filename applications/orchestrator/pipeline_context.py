@@ -114,6 +114,9 @@ class PipelineContext:
             inputs["engineer_proposal"] = self.engineer_proposal
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
+        # Contexto de projetos linkados — PM precisa para decomposição correta de tasks de integração
+        if self.linked_projects_context:
+            inputs["linked_projects_context"] = self.linked_projects_context
         return inputs
 
     def build_inputs_for_dev(
@@ -133,6 +136,9 @@ class PipelineContext:
         }
         if code_refs:
             inputs["code_refs"] = code_refs
+        # Contexto de projetos linkados — Dev precisa para saber endpoints, schemas e autenticação do backend
+        if self.linked_projects_context:
+            inputs["linked_projects_context"] = self.linked_projects_context
         return inputs
 
     def get_relevant_artifacts_for_task(self, task_id: str, max_content: int = 8000) -> list[dict]:

@@ -686,6 +686,11 @@ def call_pm(
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
 
+    # Contexto de projetos linkados — PM precisa para criar tasks de integração corretas
+    _pm_linked_ctx = getattr(pipeline_ctx, "linked_projects_context", "") if pipeline_ctx else ""
+    if _pm_linked_ctx and "linked_projects_context" not in inputs:
+        inputs["linked_projects_context"] = _pm_linked_ctx
+
     # Extrair complexity_hint do charter e expor como campo de primeiro nível nos inputs.
     # O PM Web usa esse campo como âncora primária para FAST-TRACK vs FULL.
     _complexity_hint = _extract_complexity_hint(charter_summary)
@@ -780,6 +785,9 @@ def call_dev(
         inputs["dependency_code"] = dependency_code
     if pipeline_ctx:
         inputs["completed_summary"] = [{"task_id": t, "status": "done"} for t in pipeline_ctx.completed_tasks]
+        # Contexto enriquecido de projetos linkados (api_contract.md, curl_examples.sh, RUNBOOK.md)
+        if getattr(pipeline_ctx, "linked_projects_context", ""):
+            inputs["linked_projects_context"] = pipeline_ctx.linked_projects_context
     # Route to correct skill path based on variant and detected stack
     _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
@@ -2248,19 +2256,22 @@ def main() -> int:
                         pipeline_ctx.project_type = str(_pt)
                         logger.info("[Pipeline] project_type=%s", pipeline_ctx.project_type)
 
-                # G-opt3: carregar projetos linkados para contexto do CTO
+                # G-opt3: carregar projetos linkados — contexto rico com artefatos do disco
                 if not pipeline_ctx.linked_projects_context:
                     _links_data, _links_status = _api_get(f"/api/projects/{project_id}/links")
                     if _links_data and isinstance(_links_data, list) and len(_links_data) > 0:
                         _ctx_lines = ["## Projetos relacionados a este projeto\n"]
+                        _files_root = os.environ.get("PROJECT_FILES_ROOT", "/project-files").rstrip("/")
                         for _lnk in _links_data[:5]:  # max 5 links
                             _direction = _lnk.get("direction", "outgoing")
                             _rel_label = _lnk.get("relation_label", _lnk.get("relation_type", "relacionado"))
                             if _direction == "outgoing":
+                                _other_id    = _lnk.get("to_project_id", "")
                                 _other_title = _lnk.get("to_title", "")
                                 _other_type  = _lnk.get("to_project_type", "")
                                 _other_status = _lnk.get("to_status", "")
                             else:
+                                _other_id    = _lnk.get("from_project_id", "")
                                 _other_title = _lnk.get("from_title", "")
                                 _other_type  = _lnk.get("from_project_type", "")
                                 _other_status = _lnk.get("from_status", "")
@@ -2272,6 +2283,54 @@ def main() -> int:
                             _note = _lnk.get("note")
                             if _note:
                                 _ctx_lines.append(f"  Nota: {_note}")
+
+                            # Carregar artefatos de contrato do disco do projeto linkado
+                            # Prioridade: api_contract.md > curl_examples.sh > RUNBOOK.md > docker-compose.yml
+                            if _other_id and _files_root:
+                                _linked_root = Path(_files_root) / _other_id
+                                _contract_candidates = [
+                                    _linked_root / "project" / "api_contract.md",
+                                    _linked_root / "project" / "curl_examples.sh",
+                                    _linked_root / "docs" / "devops" / "RUNBOOK.md",
+                                    _linked_root / "apps" / "docker-compose.yml",
+                                    _linked_root / "apps" / "docker-compose.dev.yml",
+                                ]
+                                _loaded_contracts: list[str] = []
+                                _total_chars = 0
+                                _MAX_CONTRACT_CHARS = 40_000  # ~10K tokens — suficiente para api_contract completo
+
+                                for _cpath in _contract_candidates:
+                                    if _total_chars >= _MAX_CONTRACT_CHARS:
+                                        break
+                                    try:
+                                        _content = _cpath.read_text(encoding="utf-8", errors="replace")
+                                        _available = _MAX_CONTRACT_CHARS - _total_chars
+                                        if len(_content) > _available:
+                                            _content = _content[:_available] + "\n... [truncado por limite de contexto]"
+                                        _rel_cpath = str(_cpath.relative_to(_linked_root))
+                                        _loaded_contracts.append(
+                                            f"\n### `{_rel_cpath}` (projeto: {_other_title})\n\n```\n{_content}\n```"
+                                        )
+                                        _total_chars += len(_content)
+                                        logger.info(
+                                            "[LinkedCtx] Carregado %s de projeto %s (%d chars)",
+                                            _rel_cpath, _other_id[:8], len(_content),
+                                        )
+                                    except (FileNotFoundError, OSError):
+                                        pass
+
+                                if _loaded_contracts:
+                                    _ctx_lines.append(
+                                        f"\n#### Artefatos de contrato do projeto **{_other_title}**\n"
+                                        "Use os arquivos abaixo para garantir que endpoints, schemas, "
+                                        "autenticação, porta e formatos de resposta estão exatamente corretos:"
+                                    )
+                                    _ctx_lines.extend(_loaded_contracts)
+                                    _ctx_lines.append(
+                                        "\n> **REGRA:** Nunca inventar URL, campo ou shape que não esteja "
+                                        "documentado acima. Se um endpoint não constar aqui, use NEEDS_INFO."
+                                    )
+
                         _ctx_lines.append(
                             "\nUse este contexto para garantir consistência de contratos, "
                             "schemas, autenticação e nomenclatura entre os projetos relacionados."
