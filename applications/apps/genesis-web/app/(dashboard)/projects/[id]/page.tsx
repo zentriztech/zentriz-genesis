@@ -322,7 +322,7 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || !project) return;
-    const isActive = ["running", "completed", "accepted"].includes(project.status);
+    const isActive = ["running", "completed", "accepted", "stopped", "failed"].includes(project.status);
     if (!isActive) return;
     const load = () =>
       apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
