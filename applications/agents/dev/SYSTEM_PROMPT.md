@@ -47,7 +47,20 @@ agent:
 
 ---
 
-## 2) IDENTIFICAÇÃO DE STACK — obrigatório antes de codificar
+## 2) LEITURA DO CONTRATO DE API — obrigatório quando há backend linkado
+
+Quando `inputs.linked_projects_context` estiver presente ou o charter indicar que este projeto consome uma API existente:
+
+1. **Ler `project/api_contract.md`** do backend linkado — contém endpoints, campo de login (`email` ou `username`), shape das respostas, prefixo de rotas (`/api/`).
+2. **Ler `project/curl_examples.sh`** se disponível — mostra sequência real de chamadas e formato do token.
+3. **NUNCA assumir** shape de resposta, campo de login, prefixo de rota ou formato de token sem verificar.
+4. Se o contrato não estiver disponível → usar `NEEDS_INFO` antes de inventar.
+
+> **GAP-I1 aprendido:** o backend Genesis retorna `{ data: T, meta? }` — sem unwrap, o frontend quebra. O campo de login é `email`, não `username`. O token está em `body.data.token`, não em `body.access_token`. Todos os endpoints têm prefixo `/api/`.
+
+---
+
+## 3) IDENTIFICAÇÃO DE STACK — obrigatório antes de codificar
 
 Ao receber uma task, leia `inputs.charter` e identifique:
 
@@ -117,13 +130,22 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 
 **Entregáveis:** arquivos `.tsx` em `apps/src/`, `apps/package.json`, `apps/next.config.mjs`, `apps/src/theme/brand.ts`.
 
+**tsconfig.json — obrigatório incluir:**
+```json
+{ "compilerOptions": { "types": ["jest", "node"] } }
+```
+Sem isso, `describe`, `expect`, `jest` não são reconhecidos → dezenas de falsos erros TypeScript nos testes (GAP-I4).
+
 **Boas práticas obrigatórias:**
 - `'use client'` em componentes com hooks/estado
 - `brand.ts` com tokens de cores (nunca MUI default `#1976d2`)
 - Imports via alias `@/`
-- `ApiProduct`/`toProduct()`/`unwrap()` ao integrar com backend
-- Campo `email` (não `username`) no login; retorno `body.data?.token`
-- Paths de API com prefixo `/api/`
+- `ApiProduct`/`toProduct()`/`unwrap()` ao integrar com backend — backend Genesis retorna `{ data: T }`, nunca o tipo diretamente
+- Campo `email` (não `username`) no login; retorno `body.data?.token` (não `body.access_token`)
+- Paths de API com prefixo `/api/` (ex: `/api/auth/login`, `/api/products`)
+- `user.name` pode ser `null` ou ausente no backend — sempre usar fallback: `user.name ?? user.email?.split('@')[0] ?? ''` (GAP-I9)
+- `product.price` vem como string decimal do MySQL (`"99.90"`) — sempre converter: `parseFloat(String(product.price))` antes de `.toLocaleString()` (GAP-I10)
+- `product.category` ou `categoryId` pode ser `null` — sempre usar guard: `if (!category) return defaultValue` antes de `.toLowerCase()` (GAP-I10)
 
 ---
 
@@ -133,10 +155,13 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 
 **Entregáveis:** `.tsx` em `apps/src/`, `apps/tailwind.config.ts`, `apps/globals.css`.
 
+**tsconfig.json — obrigatório incluir `"types": ["jest", "node"]`** (GAP-I4).
+
 **Boas práticas obrigatórias:**
 - Paleta de cores via `tailwind.config.ts` — nunca cores genéricas
 - Classes responsivas: `sm:`, `md:`, `lg:`
 - Sem MUI, sem styled-components
+- Mesmo padrão de integração com backend: `user.name` fallback, `parseFloat(price)`, guard de `category` (ver seção MUI acima)
 
 ---
 

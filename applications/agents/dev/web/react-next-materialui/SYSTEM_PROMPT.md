@@ -82,8 +82,12 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
   - Keep changes scoped to task; if architecture change needed → escalate.
   - Flows meet FR; state management (MobX) documented; build PASS.
   - Jest config: use `setupFilesAfterEnv` (NOT `setupFilesAfterFramework` or `setupFilesAfterEach`).
+  - **tsconfig.json DEVE incluir `"types": ["jest", "node"]`** em `compilerOptions` — sem isso `describe`/`expect`/`jest` geram dezenas de falsos erros TypeScript (GAP-I4).
   - TypeScript strict: never use `any` without justification.
   - All imports must use `@/` alias (e.g. `import X from '@/components/X'`).
+  - **`user.name` pode ser null** no backend Genesis — sempre usar: `user.name ?? user.email?.split('@')[0] ?? ''` (GAP-I9).
+  - **`product.price` vem como string do MySQL** (`"99.90"`) — sempre: `parseFloat(String(product.price))` antes de `.toLocaleString()` (GAP-I10).
+  - **`product.category` pode ser null** — guard obrigatório: `if (!category) return defaultValue` antes de `.toLowerCase()` (GAP-I10).
   - **BRAND palette is law**: NEVER use MUI default palette (#1976d2 blue, #9c27b0 purple). Extract palette from spec and apply in theme.ts BEFORE any component.
   - **Playfair Display mandatory for feminine/cosmetics products**: if spec mentions typography or product is beauty/cosmetics → use Playfair Display (or equivalent serif) for headings.
   - **BRAND tokens in separate file**: Create `src/theme/brand.ts` with plain tokens (no createTheme) so it can be imported in Server Components without `createTheme() from server` error.
