@@ -230,17 +230,43 @@ export const agentProfiles: Record<string, AgentProfile> = {
 };
 
 /** Retorna perfil do agente com nome IA-* ou fallback. */
-export function getAgentProfile(agentId: string): AgentProfile {
+const ALL_NAMES = [
+  "Jean","Érica","Raul","Pedro","Ângelo","André","João","Arthur",
+  "José","Maria","Cean","Kell","Lívia","Aurora","Kaleb","Laura","Halisson",
+];
+
+/** Hash determinístico de uma string → número inteiro */
+function strHash(s: string): number {
+  return s.split("").reduce((acc, c) => (acc * 31 + c.charCodeAt(0)) >>> 0, 0);
+}
+
+/**
+ * Retorna um perfil de agente com nome personalizado por projeto.
+ * Cada project_id gera um "deslocamento" (offset) que rotaciona a lista de nomes —
+ * portanto o mesmo role tem nomes diferentes em projetos diferentes,
+ * mas é sempre consistente dentro do mesmo projeto.
+ */
+export function getAgentProfile(agentId: string, projectId?: string): AgentProfile {
   const normalized = agentId.toLowerCase().replace(/\s+/g, "_");
   const profile = agentProfiles[normalized] ?? agentProfiles[agentId];
-  if (profile) return profile;
 
-  // Fallback genérico: tenta derivar um nome da lista
-  const NAMES = ["Jean","Érica","Raul","Pedro","Ângelo","André","João","Arthur",
-                 "José","Maria","Cean","Kell","Lívia","Aurora","Kaleb","Laura","Halisson"];
-  // Deterministic hash: soma dos char codes do agentId
-  const hash = agentId.split("").reduce((acc, c) => acc + c.charCodeAt(0), 0);
-  const humanName = NAMES[hash % NAMES.length];
+  // Calcular offset por projeto (0 se projectId ausente → comportamento legado)
+  const projectOffset = projectId ? strHash(projectId) % ALL_NAMES.length : 0;
+
+  if (profile) {
+    if (!projectId || projectOffset === 0) return profile;
+    // Rota o nome baseado no projeto mantendo o role fixo
+    const baseRole = normalized.replace(/_.*/, ""); // "dev_backend_nodejs" → "dev"
+    const roleHash = strHash(baseRole);
+    const nameIdx  = (roleHash + projectOffset) % ALL_NAMES.length;
+    const newName  = `IA-${ALL_NAMES[nameIdx]}`;
+    if (newName === profile.name) return profile; // coincidiu com o padrão
+    return { ...profile, name: newName };
+  }
+
+  // Fallback genérico com offset de projeto
+  const hash = strHash(agentId) + projectOffset;
+  const humanName = ALL_NAMES[hash % ALL_NAMES.length];
 
   return {
     id: agentId,

@@ -468,11 +468,16 @@ function ProjectDetailPageInner() {
     project.status === "dev_qa"          ? 4 :
     project.status === "devops"          ? 5 :
     isDone                               ? 6 :
-    // stopped/failed: manter no último step ativo inferido pelo diálogo (não regredir para 0/"Spec")
-    project.status === "stopped" || project.status === "failed" ? (workingStepIndex ?? 1) : 0;
+    // stopped/failed: usar último step do diálogo se disponível, senão o maior step inferido (não "Spec")
+    // workingStepIndex pode ser null após reload — fallback para step 4 (Dev/QA) que é o mais comum
+    project.status === "stopped" || project.status === "failed"
+      ? (workingStepIndex != null ? workingStepIndex : 4) : 0;
+
+  // accepted: sempre mostrar "Pronto" (step 6)
+  const effectiveStep = project.status === "accepted" ? 6 : stepFromStatus;
 
   // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
-  const activeStep = (isRunning && workingStepIndex != null) ? workingStepIndex : stepFromStatus;
+  const activeStep = (isRunning && workingStepIndex != null) ? workingStepIndex : effectiveStep;
 
   const tasksDone  = tasks ? tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length : 0;
   const tasksPct   = tasks && tasks.length > 0 ? Math.round((tasksDone / tasks.length) * 100) : 0;

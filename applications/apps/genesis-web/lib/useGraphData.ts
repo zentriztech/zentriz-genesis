@@ -81,6 +81,7 @@ export interface GraphDataInput {
   codeFiles: Array<{ path: string; sizeBytes: number; ext: string }>;
   planningDocs?: PlanningDoc[];  // from /api/projects/:id/artifacts manifest
   activeAgentId?: string;
+  projectId?: string;            // para nomes de agentes por projeto
   expandedGroups?: Set<string>;          // which artifact group dirs are expanded
   onToggleGroup?: (dir: string) => void; // callback from parent
 }
@@ -104,7 +105,7 @@ const PHASE_AGENT: Record<DocNodeData["phase"], string> = {
 };
 
 export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  const { dialogueEntries, tasks, codeFiles, activeAgentId, expandedGroups, onToggleGroup } = input;
+  const { dialogueEntries, tasks, codeFiles, activeAgentId, projectId, expandedGroups, onToggleGroup } = input;
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const seenAgents = new Set<string>();
@@ -132,7 +133,7 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
 
   for (let i = 0; i < sortedAgents.length; i++) {
     const key     = sortedAgents[i];
-    const profile = getAgentProfile(key);
+    const profile = getAgentProfile(key, projectId);
     const isActive = activeAgentId ? key === activeAgentId.toLowerCase().replace(/[^a-z]/g, "_") : false;
     nodes.push({
       id:       `agent-${key}`,
@@ -155,6 +156,33 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
       addEdge(`agent-${prev}`, `agent-${key}`, {
         animated: isActive,
         style: { stroke: "#6366F1", strokeWidth: isActive ? 2 : 1 },
+      });
+    }
+  }
+
+  // ── Monitor: ligado a todos os agentes com ida e volta ────────────────────────
+  // O Monitor orquestra Dev → QA → DevOps. Se estiver presente no grafo,
+  // conectá-lo a todos os outros agentes (exceto system/error) para mostrar
+  // que ele coordena o pipeline inteiro — causa boa impressão visual.
+  const MONITOR_ORCHESTRATED = ["dev", "dev_backend", "dev_web", "dev_backend_nodejs",
+    "dev_backend_python", "qa", "qa_backend", "qa_web", "devops", "devops_docker"];
+  const monitorKey = sortedAgents.find(k => k.startsWith("monitor"));
+  if (monitorKey) {
+    for (const agentKey of sortedAgents) {
+      if (agentKey === monitorKey) continue;
+      if (agentKey === "system" || agentKey === "error") continue;
+      const base = agentKey.replace(/_.*/, "");
+      if (!MONITOR_ORCHESTRATED.includes(base) && !MONITOR_ORCHESTRATED.includes(agentKey)) continue;
+      const isMonitorActive = activeAgentId?.toLowerCase().includes("monitor");
+      // ida: monitor → agente
+      addEdge(`agent-${monitorKey}`, `agent-${agentKey}`, {
+        animated: !!isMonitorActive,
+        style: { stroke: "#5e35b155", strokeWidth: 1, strokeDasharray: "5 3" },
+      });
+      // volta: agente → monitor
+      addEdge(`agent-${agentKey}`, `agent-${monitorKey}`, {
+        animated: !!isMonitorActive,
+        style: { stroke: "#5e35b133", strokeWidth: 1, strokeDasharray: "3 5" },
       });
     }
   }

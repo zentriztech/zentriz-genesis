@@ -1966,6 +1966,54 @@ def _run_monitor_loop(
                 continue
 
         if all_done and not devops_done:
+            # Para projetos triviais (HTML puro, CSS puro, 1 task), DevOps é desperdício —
+            # o Dev master já entrega os artefatos prontos sem necessidade de docker/npm.
+            # O start.sh trivial é gerado diretamente pelo runner: apenas abrir index.html.
+            _is_trivial_project = any(
+                (t.get("taskId") or t.get("task_id") or "") == "TSK-TRIVIAL-001"
+                for t in tasks
+            )
+            if _is_trivial_project:
+                devops_done = True
+                # Gerar start.sh mínimo para HTML estático
+                if project_id:
+                    try:
+                        _trivial_project_dir = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "project"
+                        _trivial_project_dir.mkdir(parents=True, exist_ok=True)
+                        _trivial_apps_dir = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                        _trivial_start_sh = (
+                            "#!/bin/bash\n"
+                            "# Landing page estática — abrir diretamente no browser\n"
+                            f'SCRIPT_DIR=$(dirname "$0")\n'
+                            f'INDEX="$SCRIPT_DIR/../apps/index.html"\n'
+                            'if [ -f "$INDEX" ]; then\n'
+                            '  if command -v open >/dev/null 2>&1; then open "$INDEX"\n'
+                            '  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$INDEX"\n'
+                            '  else echo "Abra no browser: $INDEX"; fi\n'
+                            '  echo "✅ Landing page: file://$(realpath $INDEX)"\n'
+                            'else\n'
+                            '  echo "[ERRO] index.html não encontrado em $INDEX"; exit 1\n'
+                            'fi\n'
+                        )
+                        (_trivial_project_dir / "start.sh").write_text(_trivial_start_sh, encoding="utf-8")
+                        import stat as _stat
+                        _sh_path = _trivial_project_dir / "start.sh"
+                        _sh_path.chmod(_sh_path.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+                        logger.info("[Trivial] start.sh gerado em %s", _sh_path)
+                    except Exception as _tsh_e:
+                        logger.warning("[Trivial] Falha ao gerar start.sh: %s", _tsh_e)
+                _post_step("Produto HTML estático pronto. Abra apps/index.html no browser ou execute start.sh.", request_id)
+                _post_step(
+                    "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
+                    request_id,
+                )
+                _patch_project({"status": "completed", "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")})
+                if _run_log:
+                    try:
+                        _run_log.stop_run(reason="completed")
+                    except Exception:
+                        pass
+                break
             if tasks_done_after_qa_fail:
                 _post_step(
                     "Monitor: algumas tarefas não foram aprovadas pelo QA, mas o produto foi gerado. "

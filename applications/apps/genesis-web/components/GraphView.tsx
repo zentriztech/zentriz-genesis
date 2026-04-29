@@ -83,6 +83,7 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, p
         codeFiles: (codeFilesData as CodeFilesResponse).files ?? [],
         planningDocs: planningDocs ?? [],
         activeAgentId: lastWorking?.fromAgent ?? undefined,
+        projectId,
         expandedGroups,
         onToggleGroup,
       });
