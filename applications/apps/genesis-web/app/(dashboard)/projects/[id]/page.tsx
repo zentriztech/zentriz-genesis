@@ -56,7 +56,7 @@ import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
 import { getAgentProfile } from "@/lib/agentProfiles";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, apiDelete } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
 
@@ -454,11 +454,11 @@ function ProjectDetailPageInner() {
 
   const handleDeleteKeepFiles = () => openConfirm(
     "Excluir e Manter Arquivos",
-    "O projeto será removido do banco de dados mas os arquivos gerados em disco serão mantidos.",
+    "O projeto será removido do banco de dados mas os arquivos gerados em disco serão mantidos em /zentriz-files.",
     async () => {
-      await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
-      await apiPost(`/api/admin/projects/cleanup`, {}).catch(() => {});
-      await apiPost<unknown>(`/api/projects/${id}`, {}).catch(() => {});
+      // Garantir que está parado antes de excluir
+      if (isRunning) await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
+      await apiDelete(`/api/projects/${id}?keepFiles=true`);
       router.push("/projects");
     },
     true,
@@ -466,9 +466,10 @@ function ProjectDetailPageInner() {
 
   const handleDeleteAll = () => openConfirm(
     "Excluir Completamente",
-    "🔴 AÇÃO IRREVERSÍVEL: O projeto e todos os arquivos gerados serão apagados permanentemente do banco e do disco.",
+    "🔴 AÇÃO IRREVERSÍVEL: O projeto e TODOS os arquivos gerados serão apagados permanentemente do banco e do disco.",
     async () => {
-      await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
+      if (isRunning) await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
+      await apiDelete(`/api/projects/${id}?keepFiles=false`);
       router.push("/projects");
     },
     true,
