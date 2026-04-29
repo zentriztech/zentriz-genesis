@@ -103,11 +103,12 @@ _SPEC_TEMPLATE_PATHS = [
 ]
 
 
-def build_user_message(message: dict) -> str:
+def build_user_message(message: dict, role: str = "") -> str:
     """
     Monta a mensagem do usuário com TODO o contexto necessário (AGENT_LLM_COMMUNICATION_ANALYSIS).
     Evita context window vazio: tarefa, modo, inputs com labels claros, artefatos, limites.
     Para Dev: suporta current_task, dependency_code e previous_attempt (retry com feedback do QA).
+    role: usado para ajustar limites de tamanho de artifacts por agente (QA precisa ver completo).
     """
     envelope = message.get("inputs") or message.get("input") or message
     task = message.get("task") or envelope.get("task") or ""
@@ -166,11 +167,22 @@ def build_user_message(message: dict) -> str:
 
     if message.get("existing_artifacts"):
         parts.append("## Artefatos Existentes")
+        # Limite de tamanho por agente: QA precisa ver artifacts COMPLETOS para validar.
+        # Dev/PM/outros recebem contexto parcial — 8000 chars é suficiente para feedback.
+        _role_upper = (role or "").upper()
+        _artifact_limits = {
+            "QA":       200_000,   # QA valida completude — nunca truncar
+            "DEV":        8_000,   # Dev recebe spec/feedback — resumido OK
+            "PM":        15_000,   # PM recebe spec — pode ser parcial
+            "ENGINEER":  15_000,
+            "MONITOR":    8_000,
+        }
+        _max_artifact = _artifact_limits.get(_role_upper, 8_000)
         for art in message["existing_artifacts"]:
             path = art.get("path", "")
             content = art.get("content", "[não disponível]")
-            if isinstance(content, str) and len(content) > 8000:
-                content = content[:8000] + "\n... [truncado]"
+            if isinstance(content, str) and len(content) > _max_artifact:
+                content = content[:_max_artifact] + "\n... [truncado]"
             parts.append(f"### {path}\n```\n{content}\n```")
 
     # Retry com feedback do QA (Dev rework)
@@ -494,7 +506,7 @@ def run_agent(
     t0_run = time.perf_counter()
     if _circuit_failures.get(circuit_key, 0) >= CIRCUIT_BREAKER_THRESHOLD:
         logger.warning("[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s).", agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD)
-        user_content_cb = build_user_message(message)
+        user_content_cb = build_user_message(message, role=role)
         budget_cb = calculate_token_budget(system_content, user_content_cb, model)
         out = _normalize_response_envelope({
             "request_id": message.get("request_id", "unknown"),
@@ -509,7 +521,7 @@ def run_agent(
         log_agent_call(agent_name, mode, budget_cb, out, (time.perf_counter() - t0_run) * 1000, request_id=message.get("request_id", "unknown"))
         return out
 
-    user_content = build_user_message(message)
+    user_content = build_user_message(message, role=role)
 
     if provider != "bedrock":
         client = Anthropic(api_key=api_key)
@@ -536,6 +548,10 @@ def run_agent(
         if (role or "").upper() == "DEV" and (mode or "").strip().lower() == "implement_task":
             dev_max = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV", "32000"))
             max_tokens = max(max_tokens, min(dev_max, env_max))
+        # QA (validate_task): precisa ver artifacts completos + gerar report detalhado
+        if (role or "").upper() == "QA" and (mode or "").strip().lower() == "validate_task":
+            qa_max = int(os.environ.get("CLAUDE_MAX_TOKENS_QA", "16000"))
+            max_tokens = max(max_tokens, min(qa_max, env_max))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None
