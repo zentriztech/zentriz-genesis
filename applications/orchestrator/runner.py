@@ -2223,12 +2223,23 @@ def main() -> int:
             any(s in _spec_lower for s in ("sem framework", "no framework", "without framework", "vanilla")),
         ]
         _positive_signals = sum(1 for s in _trivial_signals if s)
-        # Remover negações antes de checar sinais de complexidade
-        # "sem backend", "no backend", "without backend" não são requisitos de complexidade
+        # Remover seções de negação antes de checar complexidade.
+        # Estratégia robusta: remover a seção "Não implementar" inteira + linhas de negação.
         import re as _re
-        _spec_without_negations = _re.sub(
-            r'(sem|no|without|não|nunca|never)\s+\w+', '', _spec_lower
+        # 1. Remover seção "Não implementar / Do not implement" até o próximo heading
+        _spec_no_section = _re.sub(
+            r'#+\s*(não implementar|do not implement|not implement)[^\n]*\n(.*?)(?=\n#+|\Z)',
+            '', _spec_lower, flags=_re.IGNORECASE | _re.DOTALL
         )
+        # 2. Remover linhas que contenham palavras de negação explícita
+        _negation_line_pattern = _re.compile(
+            r'.*\b(sem |no |without |não |nunca |never )\b.*', _re.IGNORECASE
+        )
+        _spec_lines_cleaned = [
+            line for line in _spec_no_section.splitlines()
+            if not _negation_line_pattern.match(line.strip())
+        ]
+        _spec_without_negations = " ".join(_spec_lines_cleaned)
         # Pelo menos 2 sinais concordantes + sem sinais de complexidade no texto positivo
         _complexity_signals = any(s in _spec_without_negations for s in (
             "backend", "database", "autenticação", "authentication", "react", "next.js", "vue", "angular",
