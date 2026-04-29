@@ -755,6 +755,7 @@ def call_dev(
     dependency_code: dict | None = None,
     pipeline_ctx: "PipelineContext | None" = None,
     dev_variant: str = "backend",
+    rework_attempt: int = 0,
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -763,6 +764,7 @@ def call_dev(
         "backlog": backlog_summary,
         "backlog_summary": backlog_summary,
         "constraints": ["spec-driven", "paths-resilient", "no-invent"],
+        "rework_attempt": rework_attempt,  # GAP-P8: escada de modelo/tokens
     }
     if code_refs:
         inputs["code_refs"] = code_refs
@@ -1675,12 +1677,22 @@ def _run_monitor_loop(
         waiting_review = [t for t in tasks if t.get("status") == "WAITING_REVIEW"]
         need_qa = len(waiting_review) > 0
         need_dev = any(
-            t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL", "BLOCKED")
+            t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL")
             for t in tasks
         )
-        # all_done: all tasks in a terminal state (DONE or QA_PASS; QA_FAIL also counts as done)
-        _terminal = {"DONE", "QA_PASS", "CANCELLED"}
+        # GAP-P8: BLOCKED é terminal — task escalada para humano, Dev não tenta mais.
+        # Humano intervém via portal (reprocessar task) para devolver a ASSIGNED.
+        _terminal = {"DONE", "QA_PASS", "CANCELLED", "BLOCKED"}
         all_done = bool(tasks) and all(t.get("status") in _terminal for t in tasks)
+        # Notificar tasks BLOCKED para o usuário saber que requer intervenção
+        _blocked_tasks = [t.get("taskId") or t.get("task_id") for t in tasks if t.get("status") == "BLOCKED"]
+        if _blocked_tasks and not getattr(_blocked_tasks, "_notified", False):
+            _post_step(
+                f"⚠️ {len(_blocked_tasks)} task(s) em BLOCKED (requer revisão humana): "
+                f"{', '.join(str(t) for t in _blocked_tasks[:3])}{'...' if len(_blocked_tasks) > 3 else ''}. "
+                f"Acesse o portal para reprocessar.",
+                request_id,
+            )
 
         if need_qa and waiting_review:
             # In parallel mode process all waiting_review tasks concurrently; in
@@ -1863,12 +1875,18 @@ def _run_monitor_loop(
                     except Exception:
                         pass
                     _ea = last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
+                    # GAP-P8: escada de modelo/tokens por número de reworks da task
+                    # rework 0 → modelo padrão + tokens padrão
+                    # rework 1 → modelo padrão + tokens aumentados (MAX_TOKENS_DEV_REWORK)
+                    # rework 2+ → modelo mais capaz (CLAUDE_MODEL_REWORK, ex: Opus 4.7) + tokens máximos
+                    _task_rework_count = qa_fail_count.get(task_id, 0)
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
                         task_id=task_id, task=task_desc, code_refs=[],
                         existing_artifacts=_ea,
                         task_dict=dev_task, dependency_code=dep_code, pipeline_ctx=pipeline_ctx,
                         dev_variant=_dev_variant,
+                        rework_attempt=_task_rework_count,
                     )
                     _audit_log("dev", request_id, dev_response, task_id=task_id)
                     dev_summary = dev_response.get("summary", "")

@@ -499,6 +499,9 @@ def run_agent(
     project_id = message.get("project_id") or inp.get("project_id") or "default"
     mode = message.get("mode") or inp.get("mode") or "default"
     task_id = message.get("task_id") or inp.get("task_id")
+
+    # GAP-P8: ler rework_attempt para escada de modelo/tokens (aplicado abaixo após env_max)
+    _rework_attempt = int(inp.get("rework_attempt", 0))
     # Include task_id in circuit key so each task has its own breaker
     circuit_key = (str(project_id), str(role), str(mode), str(task_id or ""))
 
@@ -527,6 +530,21 @@ def run_agent(
         client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
     env_max = int(os.environ.get("CLAUDE_MAX_TOKENS", "16000"))
+
+    # GAP-P8: escada de modelo/tokens por rework_attempt do Dev
+    # rework 0 → modelo padrão + tokens padrão
+    # rework 1 → modelo padrão + tokens aumentados (CLAUDE_MAX_TOKENS_DEV_REWORK)
+    # rework 2+ → modelo mais capaz (CLAUDE_MODEL_REWORK) + tokens máximos
+    if (role or "").upper() == "DEV" and _rework_attempt > 0:
+        if _rework_attempt >= 2:
+            _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-7")
+            if _rework_model != model:
+                model = _rework_model
+                logger.info("[GAP-P8] Dev rework %d → escalando para modelo %s", _rework_attempt, model)
+        _rework_boost = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV_REWORK", "48000"))
+        env_max = max(env_max, _rework_boost)
+        logger.info("[GAP-P8] Dev rework %d → tokens aumentados para %d", _rework_attempt, env_max)
+
     last_thinking: str = ""
 
     for repair_attempt in range(MAX_REPAIRS + 1):

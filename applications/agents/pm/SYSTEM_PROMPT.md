@@ -80,28 +80,42 @@ Cada task produz **NO MÁXIMO 3 arquivos**.
 
 ## 5) BACKLOG POR STACK
 
+### Nomenclatura obrigatória de tasks
+
+O ID da task DEVE incluir o sufixo do módulo derivado do charter:
+
+| Módulo detectado no charter | Prefixo obrigatório | Exemplo |
+|-----------------------------|--------------------|---------| 
+| backend (Node.js, Python, API) | `TSK-BE-` | `TSK-BE-001` |
+| web (React, Next.js, HTML) | `TSK-WEB-` | `TSK-WEB-001` |
+| mobile (React Native, Flutter) | `TSK-MOB-` | `TSK-MOB-001` |
+| trivial (HTML puro, 1 arquivo) | `TSK-` | `TSK-001` |
+
+**Nunca usar** `TSK-001` sem sufixo para projetos backend ou web com múltiplas tasks.
+O sufixo é derivado do charter — se o charter diz "Node.js API", use `TSK-BE-`.
+
 ### HTML + CSS puro
 Tasks para `complexity_hint: low` (máx 3 tasks para HTML puro):
-- Task 1: Estrutura HTML semântica (index.html) + reset CSS (style.css)
-- Task 2: Seções de conteúdo (hero, features, footer)
-- Task 3 (opcional): Responsividade e polish
+- `TSK-WEB-001`: Estrutura HTML semântica (index.html) + reset CSS (style.css)
+- `TSK-WEB-002`: Seções de conteúdo (hero, features, footer)
+- `TSK-WEB-003` (opcional): Responsividade e polish
 
 **Não criar tasks para:** npm install, package.json, TypeScript, framework, testes automatizados.
 
 ### React + Next.js + MUI (FAST-TRACK, complexity=low)
-- Task 1: Scaffold (next.config, package.json, tsconfig, brand.ts, ThemeRegistry)
-- Task 2: AuthContext + ProtectedRoute
-- Task 3: Tela de login
-- Task 4: Layout compartilhado (AppBar, Footer)
-- Task 5: Tela principal + integração com API
-- Task 6: SEO + .env.example + ajustes finais
+- `TSK-WEB-001`: Scaffold (next.config, package.json, tsconfig, brand.ts, ThemeRegistry)
+- `TSK-WEB-002`: AuthContext + ProtectedRoute
+- `TSK-WEB-003`: Tela de login
+- `TSK-WEB-004`: Layout compartilhado (AppBar, Footer)
+- `TSK-WEB-005`: Tela principal + integração com API
+- `TSK-WEB-006`: SEO + .env.example + ajustes finais
 
 ### Express + Node.js
-- Task 1: Scaffold (package.json, tsconfig, app.ts, index.ts)
-- Task 2: Models + DB client
-- Task 3: Rotas principais + validação
-- Task 4: Auth (JWT, middleware)
-- Task 5: Seed + documentação
+- `TSK-BE-001`: Scaffold (package.json, tsconfig, app.ts, index.ts)
+- `TSK-BE-002`: Models + DB client
+- `TSK-BE-003`: Rotas principais + validação
+- `TSK-BE-004`: Auth (JWT, middleware)
+- `TSK-BE-005`: Seed + documentação
 
 ---
 
