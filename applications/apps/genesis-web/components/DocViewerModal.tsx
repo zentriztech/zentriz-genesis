@@ -92,15 +92,34 @@ export function DocViewerModal({ projectId, filename, title, open, onClose }: Do
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     setLoading(true);
     setContent(null);
-    // Reuse the file-content endpoint — pass the doc path relative to project
-    apiGet<{ content: string; path: string }>(
-      `/api/projects/${projectId}/doc-content?path=${encodeURIComponent(filename)}`
-    )
-      .then(({ content: raw }) => setContent(raw))
-      .catch(() => setContent("(Não foi possível carregar o conteúdo do arquivo.)"))
-      .finally(() => setLoading(false));
+
+    const load = async () => {
+      // Normalizar path: manifests antigos salvam só basename ("cto_charter.md"),
+      // novos salvam path relativo completo ("docs/cto/cto_charter.md").
+      // Estratégia: tentar com prefixo docs/ primeiro, depois sem prefixo.
+      const candidates = filename.includes("/")
+        ? [filename]
+        : [`docs/${filename}`, filename];
+
+      for (const candidate of candidates) {
+        try {
+          const { content: raw } = await apiGet<{ content: string; path: string }>(
+            `/api/projects/${projectId}/doc-content?path=${encodeURIComponent(candidate)}`
+          );
+          if (!cancelled) setContent(raw);
+          return;
+        } catch {
+          // tentar próximo candidato
+        }
+      }
+      if (!cancelled) setContent("(Não foi possível carregar o conteúdo do arquivo.)");
+    };
+
+    load().finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [open, projectId, filename]);
 
   return (

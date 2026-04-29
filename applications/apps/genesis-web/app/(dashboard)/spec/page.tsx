@@ -25,6 +25,7 @@ import Select from "@mui/material/Select";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import AddIcon from "@mui/icons-material/Add";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CloseIcon from "@mui/icons-material/Close";
@@ -187,11 +188,33 @@ const RELATION_LABELS: Record<string, string> = {
 interface ProductLinkSectionProps {
   products: { id: string; name: string }[];
   productId: string; onProductId: (v: string) => void;
+  onProductsReload: () => void;
   allProjects: { id: string; title: string; status: string }[];
   linkProjectId: string; onLinkProjectId: (v: string) => void;
   linkRelation: string; onLinkRelation: (v: string) => void;
 }
-function ProductLinkSection({ products, productId, onProductId, allProjects, linkProjectId, onLinkProjectId, linkRelation, onLinkRelation }: ProductLinkSectionProps) {
+function ProductLinkSection({ products, productId, onProductId, onProductsReload, allProjects, linkProjectId, onLinkProjectId, linkRelation, onLinkRelation }: ProductLinkSectionProps) {
+  const [newProductName, setNewProductName] = useState("");
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  const [showNewProduct, setShowNewProduct] = useState(false);
+
+  const handleCreateProduct = async () => {
+    if (!newProductName.trim()) return;
+    setCreatingProduct(true);
+    try {
+      const { apiPost: post } = await import("@/lib/api");
+      const created = await post<{ id: string; name: string }>("/api/products", { name: newProductName.trim() });
+      onProductId(created.id);
+      onProductsReload();
+      setNewProductName("");
+      setShowNewProduct(false);
+    } catch {
+      // silencioso — produto não criado
+    } finally {
+      setCreatingProduct(false);
+    }
+  };
+
   return (
     <Box sx={{ mt: 0.5, mb: 2, p: 2, border: "1px solid", borderColor: "divider", borderRadius: 1, bgcolor: "action.hover" }}>
       <Typography variant="caption" color="text.secondary"
@@ -199,14 +222,42 @@ function ProductLinkSection({ products, productId, onProductId, allProjects, lin
         🧩 Produto &amp; Relações (opcional)
       </Typography>
 
-      {/* Produto */}
-      <FormControl fullWidth size="small" sx={{ mb: 1.5 }}>
-        <InputLabel>Adicionar a um produto</InputLabel>
-        <Select value={productId} label="Adicionar a um produto" onChange={(e) => onProductId(e.target.value)}>
-          <MenuItem value=""><em>Nenhum / Projeto standalone</em></MenuItem>
-          {products.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
-        </Select>
-      </FormControl>
+      {/* Produto — Select + botão [+] para criar novo */}
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+        <FormControl fullWidth size="small">
+          <InputLabel>Adicionar a um produto</InputLabel>
+          <Select value={productId} label="Adicionar a um produto" onChange={(e) => onProductId(e.target.value)}>
+            <MenuItem value=""><em>Nenhum / Projeto standalone</em></MenuItem>
+            {products.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+          </Select>
+        </FormControl>
+        <Tooltip title="Criar novo produto">
+          <IconButton size="small" onClick={() => setShowNewProduct(v => !v)} color={showNewProduct ? "primary" : "default"}>
+            <AddIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
+      {showNewProduct && (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+          <TextField
+            size="small" fullWidth autoFocus
+            label="Nome do novo produto"
+            value={newProductName}
+            onChange={e => setNewProductName(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleCreateProduct()}
+            placeholder="Ex: E-commerce de Cosméticos"
+          />
+          <Button size="small" variant="contained" disabled={!newProductName.trim() || creatingProduct} onClick={handleCreateProduct}>
+            {creatingProduct ? "…" : "Criar"}
+          </Button>
+          <Button size="small" onClick={() => { setShowNewProduct(false); setNewProductName(""); }}>Cancelar</Button>
+        </Stack>
+      )}
+      {!showNewProduct && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, fontSize: "0.68rem", lineHeight: 1.5 }}>
+          Um produto agrupa projetos relacionados (backend + frontend + mobile do mesmo sistema).
+        </Typography>
+      )}
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, fontSize: "0.68rem", lineHeight: 1.5 }}>
         Um produto agrupa projetos relacionados (backend + frontend + mobile do mesmo sistema).
       </Typography>
@@ -654,6 +705,7 @@ export default function SpecPage() {
                     <ProjectTypeSelect value={projectType} onChange={setProjectType} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
+                      onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
                       allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                       linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                     />
@@ -774,6 +826,7 @@ export default function SpecPage() {
                   <ProjectTypeSelect value={projectType} onChange={setProjectType} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
+                    onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
                     allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                     linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                   />

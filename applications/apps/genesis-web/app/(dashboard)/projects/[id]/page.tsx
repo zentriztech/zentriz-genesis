@@ -23,8 +23,23 @@ import TableRow from "@mui/material/TableRow";
 import Tabs from "@mui/material/Tabs";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import Collapse from "@mui/material/Collapse";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import Divider from "@mui/material/Divider";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import CancelIcon from "@mui/icons-material/Cancel";
+import DeleteForeverIcon from "@mui/icons-material/DeleteForever";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import EditIcon from "@mui/icons-material/Edit";
+import MoreVertIcon from "@mui/icons-material/MoreVert";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
@@ -249,6 +264,16 @@ function ProjectDetailPageInner() {
   const [workingStepIndex, setWorkingStepIndex] = useState<number | null>(null);
   const [workingMessage, setWorkingMessage]       = useState<string | null>(null);
 
+  // FT-06: estado de collapse dos cards — persistido no localStorage por projeto
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => {
+    try { return JSON.parse(localStorage.getItem(`cardCollapse_${id}`) ?? "{}"); } catch { return {}; }
+  });
+  const toggleCollapse = (key: string) => setCollapsed(prev => {
+    const next = { ...prev, [key]: !prev[key] };
+    try { localStorage.setItem(`cardCollapse_${id}`, JSON.stringify(next)); } catch { /* ignore */ }
+    return next;
+  });
+
   // Data state
   const [tasks, setTasks]         = useState<TaskItem[] | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactsResp | null>(null);
@@ -400,6 +425,66 @@ function ProjectDetailPageInner() {
       setRunLoading(false);
     }
   };
+
+  // FT-05: handlers do menu Ações
+  const [actionsAnchor, setActionsAnchor] = useState<HTMLElement | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean; title: string; message: string; critical?: boolean; action: () => Promise<void>;
+  }>({ open: false, title: "", message: "", action: async () => {} });
+
+  const openConfirm = (title: string, message: string, action: () => Promise<void>, critical = false) => {
+    setActionsAnchor(null);
+    setConfirmDialog({ open: true, title, message, critical, action });
+  };
+
+  const execConfirm = async () => {
+    setConfirmDialog(d => ({ ...d, open: false }));
+    setRunLoading(true);
+    try { await confirmDialog.action(); }
+    catch (e) { setRunError(e instanceof Error ? e.message : "Erro"); }
+    finally { setRunLoading(false); }
+  };
+
+  const handleReject = () => openConfirm(
+    "Rejeitar projeto",
+    "O projeto será marcado como parado e poderá ser reiniciado depois.",
+    async () => { await apiPost(`/api/projects/${id}/reject`, {}); await projectsStore.loadProject(id); }
+  );
+
+  const handleStopSafe = () => openConfirm(
+    "Interromper Com Segurança",
+    "⏳ O pipeline aguardará a task atual finalizar antes de parar. Isso pode levar alguns minutos.",
+    async () => { await apiPost(`/api/projects/${id}/stop`, {}); await projectsStore.loadProject(id); }
+  );
+
+  const handleStopNow = () => openConfirm(
+    "Interromper Imediatamente",
+    "⚠️ ATENÇÃO: O pipeline será interrompido agora. A task em execução ficará incompleta e poderá gerar artefatos corrompidos.",
+    async () => { await apiPost(`/api/projects/${id}/stop`, {}); await projectsStore.loadProject(id); },
+    true,
+  );
+
+  const handleDeleteKeepFiles = () => openConfirm(
+    "Excluir e Manter Arquivos",
+    "O projeto será removido do banco de dados mas os arquivos gerados em disco serão mantidos.",
+    async () => {
+      await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
+      await apiPost(`/api/admin/projects/cleanup`, {}).catch(() => {});
+      await apiPost<unknown>(`/api/projects/${id}`, {}).catch(() => {});
+      router.push("/projects");
+    },
+    true,
+  );
+
+  const handleDeleteAll = () => openConfirm(
+    "Excluir Completamente",
+    "🔴 AÇÃO IRREVERSÍVEL: O projeto e todos os arquivos gerados serão apagados permanentemente do banco e do disco.",
+    async () => {
+      await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
+      router.push("/projects");
+    },
+    true,
+  );
 
   const handleAccept = async () => {
     setAcceptLoading(true);
@@ -577,13 +662,7 @@ function ProjectDetailPageInner() {
         </Typography>
         <StatusChip status={project.status} />
 
-        {/* Action buttons */}
-        {isRunning && (
-          <Button variant="outlined" color="error" size="small" startIcon={<StopIcon />}
-            disabled={runLoading} onClick={handleStop}>
-            {runLoading ? "Parando…" : "Parar"}
-          </Button>
-        )}
+        {/* FT-05: Botões de ação + menu Ações */}
         {canRun && !isRunning && (
           <Button variant="contained" size="small"
             startIcon={project.status === "stopped" || project.status === "failed" ? <ReplayIcon /> : <PlayArrowIcon />}
@@ -597,11 +676,62 @@ function ProjectDetailPageInner() {
             {acceptLoading ? "Aceitando…" : "Aceitar"}
           </Button>
         )}
+        {/* Menu Ações */}
+        <Tooltip title="Ações">
+          <IconButton size="small" disabled={runLoading} onClick={e => setActionsAnchor(e.currentTarget)}>
+            <MoreVertIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Menu anchorEl={actionsAnchor} open={!!actionsAnchor} onClose={() => setActionsAnchor(null)}>
+          {isRunning && <MenuItem onClick={handleStopSafe}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Com Segurança</MenuItem>}
+          {isRunning && <MenuItem onClick={handleStopNow} sx={{ color: "warning.main" }}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Imediatamente</MenuItem>}
+          {(isRunning || isDone) && <MenuItem onClick={handleReject}><CancelIcon sx={{ mr: 1, fontSize: "1rem" }} />Rejeitar</MenuItem>}
+          <Divider />
+          <MenuItem onClick={handleDeleteKeepFiles} sx={{ color: "warning.main" }}><DeleteOutlineIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir e Manter Arquivos</MenuItem>
+          <MenuItem onClick={handleDeleteAll} sx={{ color: "error.main" }}><DeleteForeverIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir Completamente</MenuItem>
+        </Menu>
+        {/* Diálogo de confirmação */}
+        <Dialog open={confirmDialog.open} onClose={() => setConfirmDialog(d => ({ ...d, open: false }))} maxWidth="xs" fullWidth>
+          <DialogTitle>{confirmDialog.title}</DialogTitle>
+          <DialogContent>
+            <Alert severity={confirmDialog.critical ? "error" : "warning"} sx={{ mt: 1 }}>
+              {confirmDialog.message}
+            </Alert>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setConfirmDialog(d => ({ ...d, open: false }))}>Cancelar</Button>
+            <Button onClick={execConfirm} variant="contained" color={confirmDialog.critical ? "error" : "warning"} autoFocus>
+              Confirmar
+            </Button>
+          </DialogActions>
+        </Dialog>
       </Stack>
 
       {/* Error alert */}
       {runError && (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setRunError(null)}>{runError}</Alert>
+      )}
+
+      {/* FT-02: Banner para projetos em spec_submitted — revisar spec antes de iniciar */}
+      {project.status === "spec_submitted" && !isRunning && (
+        <Alert severity="info" sx={{ mb: 2 }}
+          action={
+            <Stack direction="row" spacing={1}>
+              <Button size="small" color="info" startIcon={<EditIcon />}
+                onClick={() => router.push(`/spec?parentProjectId=${id}`)}>
+                Editar Spec
+              </Button>
+              <Button size="small" variant="contained" color="info" startIcon={<PlayArrowIcon />}
+                disabled={runLoading} onClick={handleRun}>
+                Iniciar Agora
+              </Button>
+            </Stack>
+          }>
+          <Typography variant="body2" fontWeight={500}>Spec enviada — aguardando início</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Revise a spec antes de iniciar ou clique em Iniciar Agora.
+          </Typography>
+        </Alert>
       )}
 
       {/* Post-accept run banner */}
@@ -744,10 +874,16 @@ function ProjectDetailPageInner() {
             {/* Pipeline stepper vertical */}
             <Card>
               <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
-                <Typography variant="caption" color="text.secondary"
-                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1.5 }}>
-                  Pipeline
-                </Typography>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Pipeline
+                  </Typography>
+                  <IconButton size="small" onClick={() => toggleCollapse("pipeline")} sx={{ p: 0.25, ml: 0.5 }}>
+                    {collapsed.pipeline ? <ExpandMoreIcon sx={{ fontSize: "0.9rem" }} /> : <ExpandLessIcon sx={{ fontSize: "0.9rem" }} />}
+                  </IconButton>
+                </Stack>
+                <Collapse in={!collapsed.pipeline}>
 
                 {/* Progress bar */}
                 {tasks && tasks.length > 0 && (
@@ -812,28 +948,36 @@ function ProjectDetailPageInner() {
                     );
                   })}
                 </Stack>
+                </Collapse>
               </CardContent>
             </Card>
 
             {/* Quick metrics */}
             <Card>
               <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
-                <Typography variant="caption" color="text.secondary"
-                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1.5 }}>
-                  Métricas
-                </Typography>
-                <Stack spacing={1.25}>
-                  {elapsed && <MiniStat label="Tempo" value={elapsed} />}
-                  {project.startedAt && <MiniStat label="Início" value={fmtTime(project.startedAt)} />}
-                  {tasks && tasks.length > 0 && <MiniStat label="Tasks" value={`${tasksDone}/${tasks.length}`} />}
-                  {codeFiles && codeFiles.totalFiles > 0 && <MiniStat label="Arquivos gerados" value={codeFiles.totalFiles} />}
-                  {metrics && metrics.totals.calls > 0 && (
-                    <>
-                      <MiniStat label="Tokens" value={(metrics.totals.input_tokens + metrics.totals.output_tokens).toLocaleString("pt-BR")} />
-                      <MiniStat label="Custo est." value={`~$${metrics.totals.estimated_cost_usd.toFixed(2)}`} color="success.main" />
-                    </>
-                  )}
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Métricas
+                  </Typography>
+                  <IconButton size="small" onClick={() => toggleCollapse("metrics")} sx={{ p: 0.25, ml: 0.5 }}>
+                    {collapsed.metrics ? <ExpandMoreIcon sx={{ fontSize: "0.9rem" }} /> : <ExpandLessIcon sx={{ fontSize: "0.9rem" }} />}
+                  </IconButton>
                 </Stack>
+                <Collapse in={!collapsed.metrics}>
+                  <Stack spacing={1.25}>
+                    {elapsed && <MiniStat label="Tempo" value={elapsed} />}
+                    {project.startedAt && <MiniStat label="Início" value={fmtTime(project.startedAt)} />}
+                    {tasks && tasks.length > 0 && <MiniStat label="Tasks" value={`${tasksDone}/${tasks.length}`} />}
+                    {codeFiles && codeFiles.totalFiles > 0 && <MiniStat label="Arquivos gerados" value={codeFiles.totalFiles} />}
+                    {metrics && metrics.totals.calls > 0 && (
+                      <>
+                        <MiniStat label="Tokens" value={(metrics.totals.input_tokens + metrics.totals.output_tokens).toLocaleString("pt-BR")} />
+                        <MiniStat label="Custo est." value={`~$${metrics.totals.estimated_cost_usd.toFixed(2)}`} color="success.main" />
+                      </>
+                    )}
+                  </Stack>
+                </Collapse>
               </CardContent>
             </Card>
 
@@ -951,14 +1095,21 @@ function ProjectDetailPageInner() {
             {project.freeDescription && (
               <Card>
                 <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
-                  <Typography variant="caption" color="text.secondary"
-                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 0.75, fontSize: "0.6rem" }}>
-                    💡 Ideia original
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary"
-                    sx={{ fontSize: "0.78rem", lineHeight: 1.6, whiteSpace: "pre-wrap", fontStyle: "italic" }}>
-                    &ldquo;{project.freeDescription}&rdquo;
-                  </Typography>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: collapsed.idea ? 0 : 0.75 }}>
+                    <Typography variant="caption" color="text.secondary"
+                      sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
+                      💡 Ideia original
+                    </Typography>
+                    <IconButton size="small" onClick={() => toggleCollapse("idea")} sx={{ p: 0.25, ml: 0.5 }}>
+                      {collapsed.idea ? <ExpandMoreIcon sx={{ fontSize: "0.9rem" }} /> : <ExpandLessIcon sx={{ fontSize: "0.9rem" }} />}
+                    </IconButton>
+                  </Stack>
+                  <Collapse in={!collapsed.idea}>
+                    <Typography variant="body2" color="text.secondary"
+                      sx={{ fontSize: "0.78rem", lineHeight: 1.6, whiteSpace: "pre-wrap", fontStyle: "italic" }}>
+                      &ldquo;{project.freeDescription}&rdquo;
+                    </Typography>
+                  </Collapse>
                 </CardContent>
               </Card>
             )}

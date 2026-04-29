@@ -255,14 +255,57 @@ function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 10;
+
+// FT-04: agrupa grupos por produto (product_id), depois por linhagem dentro de cada produto
+interface ProductSection {
+  productId: string | null;
+  productName: string | null;
+  groups: ProjectGroup[];
+}
+
+function buildProductSections(groups: ProjectGroup[], allProjects: Project[]): ProductSection[] {
+  const productMap = new Map<string, string>(); // productId → name
+  allProjects.forEach(p => {
+    if (p.productId && !productMap.has(p.productId)) {
+      const prod = (p as unknown as Record<string, unknown>).product as { id: string; name: string } | undefined;
+      productMap.set(p.productId, prod?.name ?? `Produto ${p.productId.slice(0, 8)}`);
+    }
+  });
+
+  const sections = new Map<string | null, ProjectGroup[]>();
+  groups.forEach(g => {
+    const key = g.root.productId ?? null;
+    if (!sections.has(key)) sections.set(key, []);
+    sections.get(key)!.push(g);
+  });
+
+  const result: ProductSection[] = [];
+  // Produtos nomeados primeiro
+  sections.forEach((gs, pid) => {
+    if (pid !== null) result.push({ productId: pid, productName: productMap.get(pid) ?? null, groups: gs });
+  });
+  // Projetos standalone por último
+  if (sections.has(null)) result.push({ productId: null, productName: null, groups: sections.get(null)! });
+  return result;
+}
+
 function ProjectsPageInner() {
   const router   = useRouter();
   const [view, setView] = useState<"grid" | "list">("grid");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE); // FT-04: paginação
   const projects  = projectsStore.list;
   const running   = projects.filter((p) => p.status === "running");
   const rest      = projects.filter((p) => p.status !== "running");
   const sorted    = [...running, ...rest];
   const groups    = buildLineageGroups(sorted);
+  // FT-04: todas as linhagens agrupadas por produto
+  const productSections = buildProductSections(groups, sorted);
+  // Paginação: contar linhagens total
+  const totalGroups = groups.length;
+  const visibleGroups = new Set(
+    groups.slice(0, visibleCount).map(g => g.root.id)
+  );
 
   useEffect(() => { projectsStore.loadProjects(); }, []);
 
@@ -314,45 +357,80 @@ function ProjectsPageInner() {
       <AnimatePresence mode="wait">
         {view === "grid" && groups.length > 0 && (
           <Box key="grid">
-            {/* Grupos multi-versão: cabeçalho + linha própria */}
-            {groups.filter(g => g.versions.length > 1).map((group) => (
-              <Box key={group.root.id} sx={{ mb: 3 }}>
-                <Typography variant="caption" color="text.secondary"
-                  sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem", display: "block", mb: 1 }}>
-                  {group.root.title ?? "Produto"} · {group.versions.length} versões
-                </Typography>
-                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-                  {group.versions.map((p, i) => (
-                    <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
-                      <ProjectCard project={p} delay={i} />
-                    </Box>
-                  ))}
-                </Box>
-              </Box>
-            ))}
-            {/* Projetos individuais (sem versões) — todos juntos num flex wrap */}
-            {(() => {
-              const singles = groups.filter(g => g.versions.length === 1).map(g => g.root);
-              if (singles.length === 0) return null;
+            {/* FT-04: renderizar por seção de produto */}
+            {productSections.map((section) => {
+              const sectionGroups = section.groups.filter(g => visibleGroups.has(g.root.id));
+              if (sectionGroups.length === 0) return null;
               return (
-                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-                  {singles.map((p, i) => (
-                    <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
-                      <ProjectCard project={p} delay={i} />
+                <Box key={section.productId ?? "standalone"} sx={{ mb: 3 }}>
+                  {/* Cabeçalho de produto */}
+                  {section.productId && (
+                    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1.5 }}>
+                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: "primary.main" }}>
+                        🧩 {section.productName ?? "Produto"}
+                      </Typography>
+                      <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+                        · {section.groups.reduce((acc, g) => acc + g.versions.length, 0)} projeto(s)
+                      </Typography>
+                    </Stack>
+                  )}
+                  {/* Grupos multi-versão */}
+                  {sectionGroups.filter(g => g.versions.length > 1).map((group) => (
+                    <Box key={group.root.id} sx={{ mb: 2 }}>
+                      <Typography variant="caption" color="text.secondary"
+                        sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem", display: "block", mb: 1 }}>
+                        {group.root.title ?? "Produto"} · {group.versions.length} versões
+                      </Typography>
+                      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                        {group.versions.map((p, i) => (
+                          <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
+                            <ProjectCard project={p} delay={i} />
+                          </Box>
+                        ))}
+                      </Box>
                     </Box>
                   ))}
+                  {/* Projetos individuais dentro do produto */}
+                  {(() => {
+                    const singles = sectionGroups.filter(g => g.versions.length === 1).map(g => g.root);
+                    if (singles.length === 0) return null;
+                    return (
+                      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                        {singles.map((p, i) => (
+                          <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
+                            <ProjectCard project={p} delay={i} />
+                          </Box>
+                        ))}
+                      </Box>
+                    );
+                  })()}
                 </Box>
               );
-            })()}
+            })}
+            {/* FT-04: Carregar Mais */}
+            {visibleCount < totalGroups && (
+              <Box sx={{ textAlign: "center", mt: 3 }}>
+                <Button variant="outlined" onClick={() => setVisibleCount(v => v + PAGE_SIZE)}>
+                  Carregar Mais ({totalGroups - visibleCount} restantes)
+                </Button>
+              </Box>
+            )}
           </Box>
         )}
 
         {/* List view */}
         {view === "list" && sorted.length > 0 && (
           <Card key="list">
-            {sorted.map((p, i) => (
+            {sorted.slice(0, visibleCount).map((p, i) => (
               <ProjectRow key={p.id} project={p} delay={i} />
             ))}
+            {visibleCount < sorted.length && (
+              <Box sx={{ textAlign: "center", p: 2 }}>
+                <Button variant="outlined" size="small" onClick={() => setVisibleCount(v => v + PAGE_SIZE)}>
+                  Carregar Mais
+                </Button>
+              </Box>
+            )}
           </Card>
         )}
       </AnimatePresence>
