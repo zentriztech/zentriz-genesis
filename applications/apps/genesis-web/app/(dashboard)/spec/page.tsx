@@ -34,10 +34,11 @@ import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import PreviewIcon from "@mui/icons-material/Preview";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import SendIcon from "@mui/icons-material/Send";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { apiGet, apiPost, apiPostMultipart } from "@/lib/api";
+import { apiGet, apiPatch, apiPost, apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
@@ -347,7 +348,7 @@ function SpecEditor({
   onSave: () => void;
   onSaveAndStart: () => void;
   approving: "save" | "start" | null;
-  onRegen: () => void;
+  onRegen?: () => void;
   regenDisabled: boolean;
 }) {
   const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split">("split");
@@ -364,14 +365,16 @@ function SpecEditor({
         <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.65rem", height: 18, ml: 1 }} />
       </Stack>
       <Stack direction="row" spacing={0.75} alignItems="center">
-        <Tooltip title="Regenerar spec com IA">
-          <span>
-            <Button size="small" variant="outlined" startIcon={<AutoFixHighIcon sx={{ fontSize: "0.8rem !important" }} />}
-              disabled={regenDisabled} onClick={onRegen} sx={{ fontSize: "0.7rem", py: 0.3 }}>
-              Regenerar
-            </Button>
-          </span>
-        </Tooltip>
+        {onRegen && (
+          <Tooltip title="Regenerar spec com IA">
+            <span>
+              <Button size="small" variant="outlined" startIcon={<AutoFixHighIcon sx={{ fontSize: "0.8rem !important" }} />}
+                disabled={regenDisabled} onClick={onRegen} sx={{ fontSize: "0.7rem", py: 0.3 }}>
+                Regenerar
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         <Tooltip title="Guardar a ideia — iniciar quando quiser">
           <span>
             <Button size="small" variant="outlined"
@@ -472,6 +475,10 @@ export default function SpecPage() {
   // URL params
   const [parentProjectId, setParentProjectId] = useState<string | null>(null);
   const [parentTitle, setParentTitle]         = useState<string | null>(null);
+  // editProjectId: modo edição de spec existente (sem criar novo projeto)
+  const [editProjectId, setEditProjectId]     = useState<string | null>(null);
+  const [editLoading, setEditLoading]         = useState(false);
+  const [editLoadError, setEditLoadError]     = useState<string | null>(null);
 
   // Tab: 0=texto livre, 1=upload arquivo
   const [tab, setTab] = useState(0);
@@ -510,9 +517,25 @@ export default function SpecPage() {
   useEffect(() => {
     const pp = searchParams?.get("parentProjectId");
     const pt = searchParams?.get("parentTitle");
+    const ep = searchParams?.get("editProjectId");
     if (pp) setParentProjectId(pp);
     if (pt) setParentTitle(decodeURIComponent(pt));
+    if (ep) setEditProjectId(ep);
   }, [searchParams]);
+
+  // Quando editProjectId estiver presente, carrega a spec existente do servidor
+  useEffect(() => {
+    if (!editProjectId) return;
+    setEditLoading(true);
+    setEditLoadError(null);
+    apiGet<{ specMarkdown: string; title: string }>(`/api/projects/${editProjectId}/spec-content`)
+      .then((data) => {
+        setSpecMarkdown(data.specMarkdown);
+        if (data.title) setProjectTitle(data.title);
+      })
+      .catch((e) => setEditLoadError(e instanceof Error ? e.message : "Erro ao carregar spec"))
+      .finally(() => setEditLoading(false));
+  }, [editProjectId]);
 
   // Load products + projects for linking
   useEffect(() => {
@@ -583,6 +606,19 @@ export default function SpecPage() {
     if (!specMarkdown) return;
     setApproving(startNow ? "start" : "save"); setApproveError(null);
     try {
+      // Modo edição: PATCH spec existente sem criar novo projeto
+      if (editProjectId) {
+        await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
+          specMarkdown,
+          title: projectTitle.trim() || undefined,
+          startNow,
+        });
+        projectsStore.loadProjects();
+        setTimeout(() => router.push(`/projects/${editProjectId}`), 300);
+        return;
+      }
+
+      // Modo criação: POST nova spec
       const blob = new Blob([specMarkdown], { type: "text/markdown" });
       const filename = `${(projectTitle || "spec").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
       const file = new File([blob], filename, { type: "text/markdown" });
@@ -614,7 +650,7 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [specMarkdown, projectTitle, parentProjectId, freeText, router]);
+  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, router]);
 
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -660,6 +696,83 @@ export default function SpecPage() {
       </DialogContent>
     </Dialog>
   );
+
+  // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
+  if (editProjectId) {
+    return (
+      <Box>
+        <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 3 }}>
+          <EditIcon sx={{ color: "warning.main" }} />
+          <Box sx={{ flexGrow: 1 }}>
+            <Typography variant="h5" fontWeight={700}>Editar Spec</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Edite a spec antes de iniciar o pipeline.
+            </Typography>
+          </Box>
+          <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
+            ← Voltar ao projeto
+          </Button>
+        </Stack>
+
+        {editLoadError && (
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setEditLoadError(null)}>{editLoadError}</Alert>
+        )}
+
+        {editLoading && (
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2, py: 6, justifyContent: "center" }}>
+            <CircularProgress size={24} />
+            <Typography variant="body2" color="text.secondary">Carregando spec…</Typography>
+          </Box>
+        )}
+
+        {!editLoading && specMarkdown !== null && (
+          <Card>
+            <CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
+              {approveError && <Alert severity="error" sx={{ m: 2 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
+              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <CheckCircleIcon sx={{ color: "warning.main", fontSize: "1.1rem" }} />
+                  <TextField
+                    size="small" variant="standard" value={projectTitle}
+                    onChange={(e) => setProjectTitle(e.target.value)}
+                    placeholder="Título do projeto"
+                    InputProps={{ disableUnderline: false, sx: { fontWeight: 600, fontSize: "0.95rem" } }}
+                    sx={{ minWidth: 260 }}
+                  />
+                </Stack>
+                <Stack direction="row" spacing={1}>
+                  <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
+                    Descartar
+                  </Button>
+                  <Button size="small" variant="outlined" disabled={!!approving}
+                    startIcon={approving === "save" ? <CircularProgress size={14} color="inherit" /> : undefined}
+                    onClick={() => handleSaveSpec(false)}>
+                    {approving === "save" ? "Salvando…" : "Salvar"}
+                  </Button>
+                  <Button size="small" variant="contained" disabled={!!approving}
+                    startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon />}
+                    onClick={() => handleSaveSpec(true)}>
+                    {approving === "start" ? "Iniciando…" : "Salvar e Iniciar"}
+                  </Button>
+                </Stack>
+              </Stack>
+              <Box sx={{ height: 600, overflow: "hidden" }}>
+                <SpecEditor
+                  value={specMarkdown} onChange={setSpecMarkdown}
+                  fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
+                  onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+                  onRegen={undefined}
+                  regenDisabled={true}
+                />
+              </Box>
+            </CardContent>
+          </Card>
+        )}
+
+        {editorDialog}
+      </Box>
+    );
+  }
 
   return (
     <Box>

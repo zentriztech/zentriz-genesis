@@ -707,7 +707,7 @@ function ProjectDetailPageInner() {
           action={
             <Stack direction="row" spacing={1}>
               <Button size="small" color="info" startIcon={<EditIcon />}
-                onClick={() => router.push(`/spec?parentProjectId=${id}`)}>
+                onClick={() => router.push(`/spec?editProjectId=${id}`)}>
                 Editar Spec
               </Button>
               <Button size="small" variant="contained" color="info" startIcon={<PlayArrowIcon />}

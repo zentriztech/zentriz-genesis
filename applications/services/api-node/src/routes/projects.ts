@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { readFile, readdir, stat } from "fs/promises";
+import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
 import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
@@ -1198,6 +1198,88 @@ export async function projectRoutes(app: FastifyInstance) {
           [id, "Intervenção necessária", reason]
         );
         return reply.status(201).send({ ok: true, projectId: id, taskId, reason });
+      } finally {
+        client.release();
+      }
+    }
+  );
+
+  // GET /api/projects/:id/spec-content — retorna markdown da spec atual do projeto
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/spec-content",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query(
+          "SELECT p.id, p.tenant_id, p.created_by, p.title FROM projects p WHERE p.id = $1",
+          [id]
+        )).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const specRow = (await client.query(
+          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+          [id]
+        )).rows[0];
+        if (!specRow?.file_path) {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
+        }
+        try {
+          const content = await readFile(specRow.file_path, "utf-8");
+          return reply.send({ specMarkdown: content, filename: specRow.filename, projectId: id, title: row.title });
+        } catch {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Arquivo de spec não encontrado no disco" });
+        }
+      } finally {
+        client.release();
+      }
+    }
+  );
+
+  // PATCH /api/projects/:id/spec-content — atualiza spec existente (sem criar novo projeto)
+  app.patch<{ Params: { id: string }; Body: { specMarkdown: string; title?: string; startNow?: boolean } }>(
+    "/api/projects/:id/spec-content",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const { specMarkdown, title, startNow } = request.body ?? {};
+      if (!specMarkdown || typeof specMarkdown !== "string" || !specMarkdown.trim()) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "specMarkdown obrigatório" });
+      }
+      const client = await pool.connect();
+      try {
+        const row = (await client.query(
+          "SELECT p.id, p.tenant_id, p.created_by, p.status FROM projects p WHERE p.id = $1",
+          [id]
+        )).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const specRow = (await client.query(
+          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+          [id]
+        )).rows[0];
+        if (!specRow?.file_path) {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
+        }
+        await writeFile(specRow.file_path, specMarkdown, "utf-8");
+        if (title?.trim()) {
+          await client.query("UPDATE projects SET title = $1, updated_at = NOW() WHERE id = $2", [title.trim(), id]);
+        }
+        if (startNow) {
+          // Dispara runner via spawn (fire-and-forget) — mesmo padrão do POST /run
+          const { spawn } = await import("child_process");
+          const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
+          const python = process.env.PYTHON_BIN ?? "python3";
+          const child = spawn(python, [runnerPath, id], { detached: true, stdio: "ignore" });
+          child.unref();
+          await client.query("UPDATE projects SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
+        }
+        return reply.send({ ok: true, projectId: id });
       } finally {
         client.release();
       }
