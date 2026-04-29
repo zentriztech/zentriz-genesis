@@ -365,6 +365,23 @@ function ProjectDetailPageInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, project?.status]);
 
+  // Produto e triggers carregam para qualquer status — não dependem do pipeline estar ativo
+  useEffect(() => {
+    if (!id || !project) return;
+    const pid = projectsStore.getById(id)?.productId;
+    if (pid) {
+      apiGet<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> }>(
+        `/api/products/${pid}`
+      ).then(setProduct).catch(() => {});
+    } else {
+      setProduct(null);
+    }
+    apiGet<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>(
+      `/api/projects/${id}/triggers`
+    ).then(setTriggers).catch(() => setTriggers([]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, project?.productId]);
+
   useEffect(() => {
     if (!id || !project) return;
     if (project.status === "completed" || project.status === "accepted") {
@@ -378,17 +395,6 @@ function ProjectDetailPageInner() {
         .catch(() => setVersions([]));
       apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`)
         .then(setLinks).catch(() => setLinks([]));
-      // Load product info (with sibling projects) if project belongs to one
-      const pid = projectsStore.getById(id)?.productId;
-      if (pid) {
-        apiGet<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> }>(
-          `/api/products/${pid}`
-        ).then(setProduct).catch(() => {});
-      }
-      // Load triggers for this project
-      apiGet<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>(
-        `/api/projects/${id}/triggers`
-      ).then(setTriggers).catch(() => setTriggers([]));
       // Load active ephemeral deployment
       apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
         .then((d) => {
