@@ -1619,7 +1619,11 @@ def _run_monitor_loop(
     backlog_summary: str,
     request_id: str,
     pipeline_ctx: "PipelineContext | None" = None,
+    run_log=None,
 ) -> None:
+    # run_log é o PipelineRunLog do caller (main) — passado como parâmetro para evitar
+    # NameError quando _run_monitor_loop é chamado antes de _run_log ser definido em main().
+    _run_log = run_log
     global _shutdown_requested
     signal.signal(signal.SIGTERM, _sigterm_handler)
     storage = _project_storage()
@@ -2657,7 +2661,7 @@ def main() -> int:
                     logger.info("[Trivial] Task TSK-TRIVIAL-001 criada via API.")
                 else:
                     logger.warning("[Trivial] Falha ao criar task via API (status %s); continuando.", _trivial_status)
-                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
+                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
                 if _run_log:
                     try:
                         _proj_status = _get_project_status(project_id) or "stopped"
@@ -2835,7 +2839,7 @@ def main() -> int:
                         }
                         _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [_consolidated_task]})
                         backlog_summary = f"[TRIVIAL CONSOLIDADO] 1 task — {len(_active_pm_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
-                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx)
+                _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
                 # Pipeline Run Log — fechar run após Monitor Loop (stopped/accepted/sigterm)
                 if _run_log:
                     try:
