@@ -319,11 +319,14 @@ function ProjectDetailPageInner() {
     const status = projectsStore.getById(id)?.status ?? "";
     const finished = status === "completed" || status === "accepted" || status === "failed" || status === "stopped";
     if (finished) { setWorkingStepIndex(null); setWorkingMessage(null); return; }
-    const last = entries.length > 0 ? entries[entries.length - 1] : null;
-    if (last?.eventType === "agent_working") {
-      const step = agentToStepIndex(last.fromAgent);
+    // Procurar o último agent_working em vez de apenas o último evento.
+    // Sem isso, eventos como task.completed ou step (que vêm depois) zeram workingStepIndex
+    // e o portal recai no stepFromStatus=0 ("Spec") para status="running".
+    const lastWorking = [...entries].reverse().find(e => e.eventType === "agent_working");
+    if (lastWorking) {
+      const step = agentToStepIndex(lastWorking.fromAgent);
       setWorkingStepIndex(step >= 0 ? step : null);
-      setWorkingMessage(last.summaryHuman ?? null);
+      setWorkingMessage(lastWorking.summaryHuman ?? null);
     } else {
       setWorkingStepIndex(null);
       setWorkingMessage(null);
@@ -622,10 +625,9 @@ function ProjectDetailPageInner() {
     project.status === "dev_qa"          ? 4 :
     project.status === "devops"          ? 5 :
     isDone                               ? 6 :
-    // stopped/failed: usar último step do diálogo se disponível, senão o maior step inferido (não "Spec")
-    // workingStepIndex pode ser null após reload — fallback para step 4 (Dev/QA) que é o mais comum
-    project.status === "stopped" || project.status === "failed"
-      ? (workingStepIndex != null ? workingStepIndex : 4) : 0;
+    // running/stopped/failed: usar workingStepIndex se disponível, senão 4 (Dev/QA)
+    // NUNCA retornar 0 quando o projeto está running — causaria exibir "Spec" como ativo
+    (workingStepIndex != null ? workingStepIndex : 4);
 
   // accepted: sempre mostrar "Pronto" (step 6)
   const effectiveStep = project.status === "accepted" ? 6 : stepFromStatus;
