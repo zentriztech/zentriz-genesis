@@ -288,6 +288,8 @@ function ProjectDetailPageInner() {
   const [taskMetrics, setTaskMetrics] = useState<Record<string, TaskMetricItem>>({});
   const [taskLogs, setTaskLogs]       = useState<TaskLogResp | null>(null);
   const [logsExpanded, setLogsExpanded] = useState<string | null>(null); // taskId expandida
+  // Ticker para tempo real nas métricas (atualiza a cada 30s)
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [artifacts, setArtifacts] = useState<ArtifactsResp | null>(null);
   const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
@@ -337,7 +339,10 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || project?.status !== "running") return;
-    const t = setInterval(() => projectsStore.loadProject(id), 10000);
+    const t = setInterval(() => {
+      projectsStore.loadProject(id);
+      setNowTick(Date.now()); // atualiza ticker para tempo real em Métricas
+    }, 10000);
     return () => clearInterval(t);
   }, [id, project?.status]);
 
@@ -607,7 +612,8 @@ function ProjectDetailPageInner() {
   const isDone      = project.status === "completed" || project.status === "accepted";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
   const canAccept   = isRunning || project.status === "completed";
-  const elapsed     = elapsedLabel(project.startedAt, project.completedAt);
+  const elapsedEnd  = project.completedAt ?? (isRunning ? new Date(nowTick).toISOString() : undefined);
+  const elapsed     = elapsedLabel(project.startedAt, elapsedEnd);
 
   const stepFromStatus =
     project.status === "spec_submitted"  ? 1 :
@@ -1093,8 +1099,11 @@ function ProjectDetailPageInner() {
                 </Stack>
                 <Collapse in={!collapsed.metrics}>
                   <Stack spacing={1.25}>
-                    {elapsed && <MiniStat label="Tempo" value={elapsed} />}
-                    {project.startedAt && <MiniStat label="Início" value={fmtTime(project.startedAt)} />}
+                    {elapsed && <MiniStat label={isRunning ? "⏱ Rodando há" : "Tempo total"} value={elapsed} />}
+                    {project.createdAt && <MiniStat label="Criado em" value={fmtTime(project.createdAt)} />}
+                    {project.startedAt && project.startedAt !== project.createdAt && (
+                      <MiniStat label="Última execução" value={fmtTime(project.startedAt)} />
+                    )}
                     {tasks && tasks.length > 0 && <MiniStat label="Tasks" value={`${tasksDone}/${tasks.length}`} />}
                     {codeFiles && codeFiles.totalFiles > 0 && <MiniStat label="Arquivos gerados" value={codeFiles.totalFiles} />}
                     {metrics && metrics.totals.calls > 0 && (
