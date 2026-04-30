@@ -1750,7 +1750,7 @@ def _run_monitor_loop(
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
                         rework_attempt=_qa_rework,
                     )
-                    _audit_log("qa", request_id, qa_response, task_id=tid)
+                    _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
                     _qa_summary = qa_response.get("summary", "")
                     qa_status = qa_response.get("status", "?")
                     _post_dialogue(
@@ -1943,7 +1943,7 @@ def _run_monitor_loop(
                         dev_variant=_dev_variant,
                         rework_attempt=_task_rework_count,
                     )
-                    _audit_log("dev", request_id, dev_response, task_id=task_id)
+                    _audit_log("dev", request_id, dev_response, task_id=task_id, round_num=_task_rework_count + 1)
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
                     last_dev_artifacts = dev_response.get("artifacts", [])
