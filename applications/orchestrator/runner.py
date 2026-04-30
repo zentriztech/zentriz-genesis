@@ -2213,98 +2213,131 @@ def _run_monitor_loop(
                     if project_id:
                         _run_local_deploy(project_id, devops_response, request_id)
 
-                    # TASK-FULL-TEST: validação end-to-end após DevOps
-                    # Seed task no portal para visibilidade
+                    # ── TASK-FULL-TEST — Claude Code Agent (end-to-end) ───────────────────
+                    # Seed task no portal
                     if project_id and _api_available():
                         try:
-                            _full_test_task = [{
+                            _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [{
                                 "task_id":   "TSK-FULL-TEST",
                                 "taskId":    "TSK-FULL-TEST",
                                 "module":    "test",
                                 "ownerRole": "QA",
                                 "requirements": (
-                                    "Validação end-to-end do produto completo: "
-                                    "verificar compilação TypeScript, endpoints, seed, contratos de interface e funcionamento geral."
+                                    "Validação end-to-end completa pelo Claude Code Agent: "
+                                    "tsc --noEmit, interfaces, use-cases, start.sh, endpoints reais."
                                 ),
-                                "status":    "IN_PROGRESS",
+                                "status":    "ASSIGNED",
                                 "depends_on_files": [],
                                 "target_route": "/",
-                            }]
-                            _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _full_test_task})
-                            logger.info("[TASK-FULL-TEST] Task criada no portal.")
-                        except Exception as _fte:
-                            logger.debug("[TASK-FULL-TEST] Seed falhou (não crítico): %s", _fte)
+                            }]})
+                        except Exception: pass
 
-                    _post_step(
-                        "🔍 TASK-FULL-TEST: validação end-to-end do produto completo iniciada.",
-                        request_id,
+                    # Gerar prompt para Claude Code Agent no disco do projeto (host path)
+                    _host_root = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
+                    _proj_host_dir = Path(_host_root) / project_id if (_host_root and project_id) else None
+                    _proj_container_dir = (Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id) if project_id else None
+
+                    _ft_prompt = f"""# TASK-FULL-TEST — Validação End-to-End do Projeto
+
+Você é o Claude Code Agent executando a validação final do projeto antes do aceite humano.
+
+## Projeto
+- Path: {_proj_host_dir or 'VER PROJECT_FILES_ROOT'}
+- Apps: {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}
+
+## O que fazer
+
+1. **TypeScript** — rode `cd apps && npm install --legacy-peer-deps 2>/dev/null && npx tsc --noEmit` e corrija todos os erros encontrados
+2. **Contratos** — verifique que cada repositório em `infra/repositories/` implementa os métodos da sua interface em `domain/*/`
+3. **Use-cases** — verifique que chamadas de repositório nos `application/*/` batem com os métodos reais
+4. **Infraestrutura** — verifique que `project/start.sh` existe e `docker-compose.yml` está correto
+5. **Seed** — verifique que `seed.mjs` ou `seed.ts` existe e pode ser executado
+6. **Correções** — corrija os problemas encontrados diretamente nos arquivos
+
+## Ao finalizar
+- Grave um relatório em `docs/qa/QA_REPORT_TSK-FULL-TEST.md` com: o que foi encontrado, o que foi corrigido, status final
+- Se tudo OK: indique APROVADO; se há issues irresolvíveis: indique o que precisa de intervenção humana
+
+Execute agora sem pedir confirmação.
+"""
+                    _ft_prompt_path = None
+                    if _proj_container_dir and _proj_container_dir.exists():
+                        try:
+                            _ft_prompt_path = _proj_container_dir / "project" / "full-test-prompt.md"
+                            _ft_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                            _ft_prompt_path.write_text(_ft_prompt, encoding="utf-8")
+                            logger.info("[TASK-FULL-TEST] Prompt gravado em %s", _ft_prompt_path)
+                        except Exception as _ep:
+                            logger.debug("[TASK-FULL-TEST] Falha ao gravar prompt: %s", _ep)
+
+                    # Tentar executar Claude Code Agent automaticamente via subprocess no host
+                    _ft_executed = False
+                    _ft_result_text = ""
+                    _claude_bin = os.environ.get("CLAUDE_BIN", "").strip()
+                    if not _claude_bin:
+                        # Tentar paths comuns
+                        for _cp in ["/Users/mac/.local/bin/claude", "/usr/local/bin/claude", "claude"]:
+                            if Path(_cp).exists() if "/" in _cp else True:
+                                _claude_bin = _cp
+                                break
+
+                    # Chamar o full-test-server.py via HTTP (roda no host, tem acesso ao claude CLI)
+                    _ft_server_url = os.environ.get(
+                        "FULL_TEST_SERVER_URL",
+                        "http://host.docker.internal:7878"
                     )
-                    _post_agent_working("qa", "QA realizando validação end-to-end do produto completo.", request_id)
-
-                    # Executar TASK-FULL-TEST via QA com o projeto inteiro como contexto
-                    _full_test_response = None
-                    try:
-                        if project_id:
-                            _ft_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
-                            _ft_artifacts: list = []
-                            if _ft_apps_root.exists():
-                                for _ff in sorted(_ft_apps_root.rglob("*")):
-                                    if _ff.is_file() and _ff.stat().st_size < 50_000 and not any(
-                                        p in str(_ff) for p in ("node_modules", ".next", ".git", ".DS_Store")
-                                    ):
-                                        _frel = str(_ff.relative_to(_ft_apps_root.parent))
-                                        try:
-                                            _ft_artifacts.append({"path": _frel, "content": _ff.read_text(encoding="utf-8", errors="replace")})
-                                        except Exception:
-                                            pass
-
-                            _full_test_inputs = {
-                                "task_scope_instruction": (
-                                    "TASK-FULL-TEST: valide o PROJETO INTEIRO. "
-                                    "Aqui tsc --noEmit DEVE passar (projeto completo). "
-                                    "Valide: (1) compilação TypeScript sem erros; "
-                                    "(2) todos os repositórios implementam suas interfaces; "
-                                    "(3) use-cases chamam métodos que existem; "
-                                    "(4) start.sh e docker-compose.yml presentes e corretos; "
-                                    "(5) seed e migrations existem. "
-                                    "Esta é a validação final — seja rigoroso e corrija o que encontrar."
-                                ),
-                                "full_test": True,
-                            }
-                            _full_test_response = call_qa(
-                                spec_ref, charter_summary, backlog_summary,
-                                "TASK-FULL-TEST: validação end-to-end do produto completo.",
-                                request_id,
-                                task_id="TSK-FULL-TEST",
-                                task="Validação end-to-end: TypeScript, interfaces, use-cases, seed, start.sh.",
-                                code_refs=[a.get("path") for a in _ft_artifacts if isinstance(a, dict) and a.get("path")],
-                                existing_artifacts=_ft_artifacts,
-                                rework_attempt=0,
-                                task_delivered_files=None,  # Full test — sem restrição de escopo
+                    if _proj_host_dir:
+                        try:
+                            import urllib.request as _ur
+                            import json as _json
+                            _host_prompt_path = str(
+                                Path(_host_root) / project_id / "project" / "full-test-prompt.md"
+                            ) if _host_root else ""
+                            _ft_payload = _json.dumps({
+                                "project_id":   project_id or "",
+                                "project_path": str(_proj_host_dir),
+                                "prompt_path":  _host_prompt_path,
+                            }).encode()
+                            _post_step("🤖 TASK-FULL-TEST: Claude Code Agent iniciado via full-test-server.", request_id)
+                            _update_task(project_id, "TSK-FULL-TEST", status="IN_PROGRESS")
+                            _ft_req = _ur.Request(
+                                f"{_ft_server_url}/run-full-test",
+                                data=_ft_payload,
+                                headers={"Content-Type": "application/json"},
+                                method="POST",
                             )
-                            _audit_log("qa", request_id, _full_test_response, task_id="TSK-FULL-TEST", round_num=1)
-                            _ft_status = _full_test_response.get("status", "?")
-                            _ft_summary = _full_test_response.get("summary", "")
+                            with _ur.urlopen(_ft_req, timeout=660) as _resp:
+                                _ft_resp = _json.loads(_resp.read().decode())
+                            _ft_result_text = _ft_resp.get("output", "")
+                            _ft_executed = True
+                            logger.info("[TASK-FULL-TEST] Server respondeu: status=%s approved=%s",
+                                        _ft_resp.get("status"), _ft_resp.get("approved"))
+                        except Exception as _srv_err:
+                            logger.info("[TASK-FULL-TEST] full-test-server indisponível (%s) — modo manual", _srv_err)
 
-                            if project_id and storage and storage.is_enabled():
-                                storage.write_doc(project_id, "qa", "full-test", _content_for_doc(_full_test_response), title="TASK-FULL-TEST Report")
-
-                            if _ft_status in ("QA_PASS", "OK"):
-                                _update_task(project_id, "TSK-FULL-TEST", status="DONE")
-                                _post_step(f"✅ TASK-FULL-TEST aprovada: {_ft_summary[:200]}", request_id)
-                            else:
-                                _update_task(project_id, "TSK-FULL-TEST", status="QA_FAIL")
-                                _post_step(
-                                    f"⚠️ TASK-FULL-TEST encontrou issues: {_ft_summary[:200]}. "
-                                    f"Verifique o relatório em docs/qa/QA_REPORT_TSK-FULL-TEST.md.",
-                                    request_id,
-                                )
-                    except Exception as _fte2:
-                        logger.exception("[TASK-FULL-TEST] Falhou (não crítico)")
-                        _post_step(f"TASK-FULL-TEST falhou com erro: {str(_fte2)[:100]}", request_id)
-                        if project_id and _api_available():
-                            try: _update_task(project_id, "TSK-FULL-TEST", status="QA_FAIL")
+                    if _ft_executed and _ft_result_text:
+                        # Salvar resultado no disco
+                        if _proj_container_dir:
+                            try:
+                                _ft_report = _proj_container_dir / "docs" / "qa" / "QA_REPORT_TSK-FULL-TEST.md"
+                                _ft_report.parent.mkdir(parents=True, exist_ok=True)
+                                _ft_report.write_text(f"# TASK-FULL-TEST — Relatório Claude Code Agent\n\n{_ft_result_text}", encoding="utf-8")
                             except Exception: pass
+                        _approved = any(w in _ft_result_text.upper() for w in ["APROVADO", "PASSED", "QA_PASS", "ALL CHECKS"])
+                        _update_task(project_id, "TSK-FULL-TEST", status="DONE" if _approved else "QA_FAIL")
+                        _post_step(
+                            f"{'✅' if _approved else '⚠️'} TASK-FULL-TEST (Claude Code): "
+                            f"{'aprovada' if _approved else 'issues encontradas — ver QA_REPORT_TSK-FULL-TEST.md'}",
+                            request_id,
+                        )
+                    else:
+                        # Claude Code não disponível — instruir execução manual
+                        _host_cmd = f"claude --print --dangerously-skip-permissions --cwd '{_proj_host_dir}/apps' \"Execute as instruções em: {Path(_host_root or '') / (project_id or '') / 'project' / 'full-test-prompt.md'}\""
+                        _post_step(
+                            f"🔍 TASK-FULL-TEST: Execute manualmente o Claude Code Agent para validação e2e:\n{_host_cmd}",
+                            request_id,
+                        )
+                        _update_task(project_id, "TSK-FULL-TEST", status="ASSIGNED")
 
                     # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
                     _post_step(

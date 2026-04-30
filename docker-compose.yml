@@ -137,6 +137,8 @@ services:
       # GAP-P6: token para o runner sincronizar métricas (complexity_hint, run_count) com a API
       - GENESIS_API_TOKEN=${GENESIS_API_TOKEN:-}
       - GENESIS_API_URL=http://api:3000
+      # TASK-FULL-TEST: path do Claude Code CLI no host (montado via bind-mount abaixo)
+      - CLAUDE_BIN=${CLAUDE_BIN:-/host-claude/claude}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -145,6 +147,8 @@ services:
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}/.runner-state:/orchestrator/state
       - ${HOME}/.aws:/root/.aws:ro
       - ${ZENTRIZ_CONNECT_PATH:-../zentriz-connect}:/zentriz-connect:ro
+      # TASK-FULL-TEST: URL do full-test-server.py rodando no host
+      - FULL_TEST_SERVER_URL=${FULL_TEST_SERVER_URL:-http://host.docker.internal:7878}
     depends_on:
       - agents
     healthcheck:
