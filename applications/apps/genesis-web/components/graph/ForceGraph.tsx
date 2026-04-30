@@ -27,10 +27,11 @@ interface GraphData { nodes: FGNode[]; links: FGLink[] }
 type NodeWithPos = FGNode & { fx?: number; fy?: number; x?: number; y?: number; vx?: number; vy?: number };
 
 // ── Layout modes ──────────────────────────────────────────────────────────────
-type LayoutMode = "free" | "brain" | "radial" | "pipeline";
-const LAYOUT_CYCLE: LayoutMode[] = ["free", "brain", "radial", "pipeline"];
+type LayoutMode = "free" | "flow" | "brain" | "radial" | "pipeline";
+const LAYOUT_CYCLE: LayoutMode[] = ["free", "flow", "brain", "radial", "pipeline"];
 const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string }> = {
   free:     { icon: "🌌", label: "Obsidian",  tip: "Física livre — clique no fundo para próximo layout" },
+  flow:     { icon: "🌊", label: "Fluxo",     tip: "Pipeline orgânico — esquerda→direita com curvas" },
   brain:    { icon: "🧠", label: "Cérebro",   tip: "Agentes no núcleo, conexões bidirecionais" },
   radial:   { icon: "⭕", label: "Radial",    tip: "CTO no centro, camadas por tipo" },
   pipeline: { icon: "➡️", label: "Pipeline",  tip: "Esquerda→direita por fase do pipeline" },
@@ -38,11 +39,22 @@ const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string
 
 // Pares de agentes que têm relação bidirecional forte (consulta ↔ resposta)
 const BIDIRECTIONAL_PAIRS = new Set([
+  // CTO ↔ Engineer ↔ PM (planejamento)
   "cto|engineer", "engineer|cto",
   "cto|pm", "pm|cto",
-  "monitor|dev", "dev|monitor",
-  "monitor|qa", "qa|monitor",
+  // Monitor/Sistema ↔ todos os agentes de execução
+  "monitor|cto",    "cto|monitor",
+  "monitor|engineer","engineer|monitor",
+  "monitor|pm",     "pm|monitor",
+  "monitor|dev",    "dev|monitor",
+  "monitor|qa",     "qa|monitor",
   "monitor|devops", "devops|monitor",
+  "system|cto",     "cto|system",
+  "system|engineer","engineer|system",
+  "system|pm",      "pm|system",
+  // PM ↔ Dev e PM ↔ QA (backlog/validação)
+  "pm|dev", "dev|pm",
+  "pm|qa",  "qa|pm",
 ]);
 
 // ── Colors ────────────────────────────────────────────────────────────────────
@@ -165,7 +177,7 @@ function buildForceData(
 function computePositions(
   nodes: FGNode[], layout: LayoutMode, W: number, H: number,
 ): Map<string, { fx: number; fy: number }> | null {
-  if (layout === "free") return null;
+  if (layout === "free" || layout === "flow") return null; // physics handles both free modes
 
   const map = new Map<string, { fx: number; fy: number }>();
   const cx = 0; const cy = 0;
@@ -301,6 +313,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // Animação de partículas — pulsa quando há agente ativo
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
 
+  // Pulso animado — valor 0..1 que oscila para o efeito de luz no agente ativo
+  const pulseRef        = useRef<number>(0);
+  const rafRef          = useRef<number>(0);
+
   const containerRef   = useRef<HTMLDivElement>(null);
   const prevSignature  = useRef<string>("");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -359,6 +375,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     refresh();
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
+
+  // ── RAF loop para pulso do agente ativo ───────────────────────────────────
+  useEffect(() => {
+    if (!activeAgent) { pulseRef.current = 0; return; }
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      pulseRef.current = (Math.sin((now - t0) / 400) + 1) / 2; // 0..1, ~2.5Hz
+      fgRef.current?.refresh?.(); // força repaint do canvas sem re-render React
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [activeAgent]);
 
   // ── Apply layout whenever mode or container size changes ──────────────────
   useEffect(() => {
@@ -461,12 +490,39 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
     const x = n.x as number; const y = n.y as number;
     const r = (n.size ?? 5) * (n.isActive ? 1.4 : 1);
+    const pulse = pulseRef.current; // 0..1 oscilando via RAF
 
     if (n.isActive) {
-      ctx.beginPath(); ctx.arc(x, y, r * 2.2, 0, 2 * Math.PI);
-      const grd = ctx.createRadialGradient(x, y, r, x, y, r * 2.2);
-      grd.addColorStop(0, n.color + "60"); grd.addColorStop(1, n.color + "00");
-      ctx.fillStyle = grd; ctx.fill();
+      // Halo pulsante — 3 anéis concêntricos com opacidade variável
+      const haloR1 = r * (2.2 + pulse * 1.0);
+      const haloR2 = r * (3.5 + pulse * 1.5);
+      const haloR3 = r * (5.0 + pulse * 2.0);
+      const alpha1 = Math.round((0.45 + pulse * 0.35) * 255).toString(16).padStart(2, "0");
+      const alpha2 = Math.round((0.25 + pulse * 0.20) * 255).toString(16).padStart(2, "0");
+      const alpha3 = Math.round((0.10 + pulse * 0.10) * 255).toString(16).padStart(2, "0");
+
+      // Anel 1 — mais próximo, mais denso
+      ctx.beginPath(); ctx.arc(x, y, haloR1, 0, 2 * Math.PI);
+      const g1 = ctx.createRadialGradient(x, y, r, x, y, haloR1);
+      g1.addColorStop(0, n.color + alpha1); g1.addColorStop(1, n.color + "00");
+      ctx.fillStyle = g1; ctx.fill();
+
+      // Anel 2 — médio
+      ctx.beginPath(); ctx.arc(x, y, haloR2, 0, 2 * Math.PI);
+      const g2 = ctx.createRadialGradient(x, y, haloR1 * 0.6, x, y, haloR2);
+      g2.addColorStop(0, n.color + alpha2); g2.addColorStop(1, n.color + "00");
+      ctx.fillStyle = g2; ctx.fill();
+
+      // Anel 3 — externo, suave
+      ctx.beginPath(); ctx.arc(x, y, haloR3, 0, 2 * Math.PI);
+      const g3 = ctx.createRadialGradient(x, y, haloR2 * 0.7, x, y, haloR3);
+      g3.addColorStop(0, n.color + alpha3); g3.addColorStop(1, n.color + "00");
+      ctx.fillStyle = g3; ctx.fill();
+
+      // Borda pulsante brilhante
+      ctx.beginPath(); ctx.arc(x, y, r + 1.5 + pulse * 2, 0, 2 * Math.PI);
+      ctx.strokeStyle = n.color + Math.round((0.6 + pulse * 0.4) * 255).toString(16).padStart(2, "0");
+      ctx.lineWidth = 1.5 + pulse * 1.5; ctx.stroke();
     }
 
     ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
@@ -474,7 +530,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     ctx.fill();
 
     if (n.type === "agent") {
-      ctx.strokeStyle = n.color; ctx.lineWidth = n.isActive ? 1.5 : 0.8; ctx.stroke();
+      ctx.strokeStyle = n.color; ctx.lineWidth = n.isActive ? 2 : 0.8; ctx.stroke();
     }
 
     const drawCentered = (text: string, cx2: number, cy2: number, fontSize: number, font: string) => {
@@ -552,8 +608,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
           const t = typeof (link as FGLink).target === "object" ? ((link as FGLink).target as FGNode).id : (link as FGLink).target as string;
           const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
-          // Curvar links bidirecionais para evitar sobreposição
-          return BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`) ? 0.2 : 0;
+          const isBidi = BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`);
+          // flow: curvas orgânicas em todos os links de agente; bidi: mais curvado
+          if (layoutMode === "flow") return isBidi ? 0.4 : 0.15;
+          return isBidi ? 0.2 : 0;
         }}
         linkDirectionalParticles={(link) => (link as FGLink & { _particles?: number })._particles ?? 1}
         linkDirectionalParticleWidth={(link) => (link as FGLink & { _pWidth?: number })._pWidth ?? 1.5}
@@ -566,9 +624,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
         linkDirectionalArrowRelPos={0.85}
         nodeRelSize={1}
-        d3AlphaDecay={layoutMode === "free" ? 0.02 : 0.025}
-        d3VelocityDecay={layoutMode === "free" ? 0.3 : 0.45}
-        cooldownTicks={layoutMode === "free" ? 120 : 100}
+        d3AlphaDecay={layoutMode === "free" || layoutMode === "flow" ? 0.02 : 0.025}
+        d3VelocityDecay={layoutMode === "free" || layoutMode === "flow" ? 0.3 : 0.45}
+        cooldownTicks={layoutMode === "free" || layoutMode === "flow" ? 120 : 100}
         onBackgroundClick={handleBackgroundClick}
         onNodeHover={(node) => {
           if (!node) { setTooltip(null); return; }
