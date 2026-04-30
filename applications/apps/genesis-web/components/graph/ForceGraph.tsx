@@ -365,8 +365,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     if (graphData.nodes.length === 0) return;
     const positions = computePositions(graphData.nodes, layoutMode, containerSize.width, containerSize.height);
 
-    setGraphData(prev => ({
+    setGraphData(prev => {
+      // Ao trocar de layout, resetar links para strings puras (IDs) para forçar
+      // o ForceGraph2D a re-resolver source/target do zero.
+      // Sem isso, links resolvidos para objetos de nós anteriores ficam apontando
+      // para nós com posições erradas após a mutação de fx/fy.
+      const freshLinks = prev.links.map(l => ({
+        ...l,
+        source: typeof l.source === "object" ? (l.source as FGNode).id : l.source as string,
+        target: typeof l.target === "object" ? (l.target as FGNode).id : l.target as string,
+      }));
+      return {
       ...prev,
+      links: freshLinks,
       nodes: prev.nodes.map(n => {
         const nw = n as NodeWithPos;
         if (!positions) {
@@ -379,7 +390,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         const pos = positions.get(n.id);
         return pos ? { ...nw, fx: pos.fx, fy: pos.fy } : { ...nw };
       }),
-    }));
+    }; }); // fechamento do setGraphData
 
     // Reheat physics so nodes animate to new positions
     setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
