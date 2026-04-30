@@ -163,8 +163,31 @@ const TASK_STATUS_COLOR: Record<string, "success" | "info" | "error" | "warning"
   QA_FAIL: "error", BLOCKED: "error", NEW: "default", ASSIGNED: "warning",
 };
 
+// ── LLM model badge ───────────────────────────────────────────────────────────
+function ModelBadge({ model }: { model: string | null | undefined }) {
+  if (!model) return null;
+  const name  = model.toLowerCase();
+  const label = name.includes("opus")   ? "Opus"
+              : name.includes("sonnet") ? "Sonnet"
+              : name.includes("haiku")  ? "Haiku"
+              : model.split("-")[2] ?? model; // fallback: terceiro segmento do model id
+  const color = name.includes("opus")   ? "#f59e0b"
+              : name.includes("sonnet") ? "#6366f1"
+              : "#8B949E";
+  return (
+    <Chip
+      label={label}
+      size="small"
+      sx={{
+        fontSize: "0.6rem", height: 20, fontWeight: 700,
+        bgcolor: `${color}18`, color, border: `1px solid ${color}40`,
+      }}
+    />
+  );
+}
+
 // ── Status chip helper ────────────────────────────────────────────────────────
-function StatusChip({ status }: { status: string }) {
+function StatusChip({ status, model }: { status: string; model?: string | null }) {
   const labels: Record<string, string> = {
     running: "Em execução", accepted: "Aceito", completed: "Concluído",
     failed: "Falhou", stopped: "Parado", draft: "Rascunho",
@@ -175,24 +198,27 @@ function StatusChip({ status }: { status: string }) {
     running: "info", cto_charter: "warning", pm_backlog: "warning",
   };
   return (
-    <Chip
-      label={labels[status] ?? status}
-      size="small"
-      color={colors[status] ?? "default"}
-      sx={{
-        fontWeight: 600,
-        ...(status === "running" && {
-          "& .MuiChip-label": { pr: 2.5 },
-          "&::after": {
-            content: '""', position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
-            width: 6, height: 6, borderRadius: "50%", bgcolor: "info.main",
-            animation: "pulse 1.4s infinite",
-          },
-          position: "relative",
-          "@keyframes pulse": { "0%,100%": { opacity: 1 }, "50%": { opacity: 0.3 } },
-        }),
-      }}
-    />
+    <Stack direction="row" spacing={0.75} alignItems="center">
+      <Chip
+        label={labels[status] ?? status}
+        size="small"
+        color={colors[status] ?? "default"}
+        sx={{
+          fontWeight: 600,
+          ...(status === "running" && {
+            "& .MuiChip-label": { pr: 2.5 },
+            "&::after": {
+              content: '""', position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+              width: 6, height: 6, borderRadius: "50%", bgcolor: "info.main",
+              animation: "pulse 1.4s infinite",
+            },
+            position: "relative",
+            "@keyframes pulse": { "0%,100%": { opacity: 1 }, "50%": { opacity: 0.3 } },
+          }),
+        }}
+      />
+      {status === "running" && <ModelBadge model={model} />}
+    </Stack>
   );
 }
 
@@ -637,6 +663,8 @@ function ProjectDetailPageInner() {
 
   const tasksDone  = tasks ? tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length : 0;
   const tasksPct   = tasks && tasks.length > 0 ? Math.round((tasksDone / tasks.length) * 100) : 0;
+  // Modelo LLM atual — último log com model não-nulo
+  const currentModel = taskLogs?.rows.slice().reverse().find(r => r.model)?.model ?? null;
 
   // Shared tab content renderer — used by both center and right panels
   const renderTabContent = (tabId: number) => {
@@ -731,7 +759,7 @@ function ProjectDetailPageInner() {
         <Typography variant="h5" fontWeight={700} noWrap sx={{ flexGrow: 1 }}>
           {project.title ?? "Spec sem título"}
         </Typography>
-        <StatusChip status={project.status} />
+        <StatusChip status={project.status} model={currentModel} />
 
         {/* FT-05: Botões de ação + menu Ações */}
         {canRun && !isRunning && (
@@ -1631,15 +1659,15 @@ function ProjectDetailPageInner() {
                               </TableCell>
                               <TableCell><Typography variant="caption" fontFamily="monospace" noWrap sx={{ fontSize: "0.7rem" }}>{tid}</Typography></TableCell>
                               <TableCell>
-                                <Stack direction="row" spacing={0.75} alignItems="center">
-                                  {isActiveT && <CircularProgress size={10} color="primary" />}
-                                  <Typography variant="body2" sx={{ fontSize: "0.73rem" }}>{t.requirements ?? "—"}</Typography>
-                                </Stack>
+                                <Typography variant="body2" sx={{ fontSize: "0.73rem" }}>{t.requirements ?? "—"}</Typography>
                               </TableCell>
                               <TableCell>
-                                <Chip size="small" label={t.status ?? "—"}
-                                  color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
-                                  sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
+                                <Stack direction="row" spacing={0.5} alignItems="center">
+                                  <Chip size="small" label={t.status ?? "—"}
+                                    color={TASK_STATUS_COLOR[t.status ?? ""] ?? "default"}
+                                    sx={{ fontFamily: "monospace", fontSize: "0.6rem" }} />
+                                  {isActiveT && <CircularProgress size={10} color="primary" />}
+                                </Stack>
                               </TableCell>
                               <TableCell sx={{ textAlign: "right" }}>
                                 {m ? (
