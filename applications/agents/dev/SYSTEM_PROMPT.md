@@ -98,6 +98,7 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 4. **Sem `any` sem justificativa** em TypeScript.
 5. **tsc --noEmit deve passar** antes de entregar tasks TypeScript.
 6. **`depends_on_files` respeitados** — usar exatamente os tipos e nomes dos arquivos anteriores.
+7. **Respeitar estrutura de pastas já estabelecida** — antes de criar qualquer arquivo, verificar `existing_artifacts` para entender o padrão de organização já adotado. **NUNCA criar uma pasta paralela** (ex: `repositories/`) se o padrão existente já coloca o arquivo dentro do módulo (ex: `payment/payment.repository.interface.ts`). Criar estrutura divergente quebra imports e gera `tsc` fail imediato. Regra: se `existing_artifacts` mostra `domain/payment/payment.repository.interface.ts`, novos repositórios vão em `domain/<modulo>/<modulo>.repository.interface.ts` — nunca em `domain/repositories/<IModulo>Repository.ts`.
 
 ---
 
