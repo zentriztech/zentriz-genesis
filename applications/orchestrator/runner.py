@@ -1656,6 +1656,7 @@ def _run_monitor_loop(
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
     max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
     qa_fail_count: dict[str, int] = {}
+    dev_rework_for_qa: dict[str, int] = {}  # rework_attempt do Dev nesta rodada → QA usa o mesmo
     # MONITOR_PARALLEL=true enables concurrent processing of multiple tasks of the
     # same type within a single loop iteration. Default false to preserve behavior.
     monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
@@ -1740,8 +1741,10 @@ def _run_monitor_loop(
                 _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
                 try:
-                    # QA escalada: rework_attempt>=1 → Opus 4.7 (mesmo modelo que Dev usa no rework)
-                    _qa_rework = qa_fail_count.get(tid, 0)
+                    # Simetria: QA usa o mesmo rework_attempt que o Dev usou nesta rodada.
+                    # dev_rework_for_qa é atualizado pelo Dev loop imediatamente antes de entregar.
+                    # Se Dev usou Opus (rework>=1), QA também usa Opus. Se Dev voltou ao Sonnet, QA também.
+                    _qa_rework = dev_rework_for_qa.get(tid, qa_fail_count.get(tid, 0))
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
@@ -1860,6 +1863,38 @@ def _run_monitor_loop(
                                     f"no disco: {_missing[:3]}. Dev receberá contexto parcial.",
                                     request_id,
                                 )
+                    # Limpar pastas paralelas proibidas antes de despachar Dev (Node.js backend)
+                    # O Dev frequentemente cria src/modules/, src/repositories/, src/database/ por engano.
+                    # Remover antes do despacho garante que o Dev receba existing_artifacts sem lixo.
+                    if project_id:
+                        _apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps" / "src"
+                        _forbidden_dirs = ["modules", "repositories", "database", "controllers", "models", "services", "use-cases", "use_cases"]
+                        _valid_dirs = {"db", "domain", "infra", "http", "application", "shared", "routes",
+                                       "app.ts", "index.ts"}  # index.ts/app.ts são ficheiros, não pastas
+                        if _apps_root.exists():
+                            for _fd in _forbidden_dirs:
+                                _fpath = _apps_root / _fd
+                                if _fpath.exists() and _fpath.is_dir():
+                                    # Só remover se já existe a pasta válida equivalente
+                                    _has_valid_infra = (_apps_root / "infra").exists()
+                                    _has_valid_db = (_apps_root / "db").exists()
+                                    _has_valid_app = (_apps_root / "application").exists()
+                                    _should_remove = (
+                                        (_fd == "repositories" and _has_valid_infra) or
+                                        (_fd == "database" and _has_valid_db) or
+                                        ((_fd in ("use-cases", "use_cases")) and _has_valid_app) or
+                                        _fd in ("modules", "controllers", "models")
+                                    )
+                                    if _should_remove:
+                                        import shutil as _shutil
+                                        _shutil.rmtree(_fpath)
+                                        logger.info("[PreDispatch] Pasta paralela removida: %s", _fpath)
+                                        _post_step(
+                                            f"Limpeza: pasta paralela `src/{_fd}/` removida antes do Dev "
+                                            f"(código correto em src/infra/ ou src/db/).",
+                                            request_id,
+                                        )
+
                     # Derive variant from owner_role (DEV_WEB → web, DEV_MOBILE → mobile, else backend)
                     _owner = (dev_task.get("ownerRole") or dev_task.get("owner_role") or "DEV_BACKEND").upper()
                     _dev_variant = "web" if "WEB" in _owner else ("mobile" if "MOBILE" in _owner else "backend")
@@ -1894,10 +1929,12 @@ def _run_monitor_loop(
                     except Exception:
                         pass
                     _ea = last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
-                    # Escada de modelo por rework: rework 0 → padrão; rework 1+ → Opus 4.7 + tokens máximos.
-                    # 1º QA_FAIL já usa Opus — maximiza resolução antes de BLOCKED (3 QA_FAILs).
-                    # QA usa o mesmo rework_attempt → ambos escalam juntos na mesma rodada.
+                    # Simetria de modelo: Dev e QA usam o mesmo rework_attempt.
+                    # Se Dev escalou para Opus, QA também usa Opus nessa rodada.
+                    # Quando Dev volta ao padrão (nova entrega limpa), QA volta também.
                     _task_rework_count = qa_fail_count.get(task_id, 0)
+                    # Persistir para que o QA leia o mesmo valor após a entrega do Dev
+                    dev_rework_for_qa[task_id] = _task_rework_count
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
                         task_id=task_id, task=task_desc, code_refs=[],
