@@ -26,6 +26,7 @@ export const TaskNode = memo(function TaskNode({ data }: NodeProps) {
 
   return (
     <div
+      onClick={() => d.onClickTask?.(d.taskId)}
       style={{
         background: "#161B22",
         border: `1px solid ${color}50`,
@@ -33,7 +34,7 @@ export const TaskNode = memo(function TaskNode({ data }: NodeProps) {
         borderRadius: 6,
         padding: "6px 10px",
         minWidth: 150, maxWidth: 170,
-        cursor: "default",
+        cursor: d.onClickTask ? "pointer" : "default",
       }}
     >
       {/* Task ID */}

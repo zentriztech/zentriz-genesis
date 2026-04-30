@@ -16,6 +16,7 @@ import ClickAwayListener from "@mui/material/ClickAwayListener";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
 import Divider from "@mui/material/Divider";
+import Drawer from "@mui/material/Drawer";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import FormGroup from "@mui/material/FormGroup";
 import IconButton from "@mui/material/IconButton";
@@ -27,6 +28,7 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
+import CloseIcon from "@mui/icons-material/Close";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import TuneIcon from "@mui/icons-material/Tune";
@@ -38,6 +40,106 @@ import { ForceGraph }        from "@/components/graph/ForceGraph";
 import { buildGraphData, DEFAULT_FILTER, type GraphFilter, type GraphNode, type GraphEdge, type PlanningDoc } from "@/lib/useGraphData";
 import { apiGet } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
+
+// ── Task Detail Drawer (Hierarquia) ───────────────────────────────────────────
+const STATUS_COLOR_GV: Record<string, string> = {
+  DONE: "#10B981", QA_PASS: "#10B981", IN_PROGRESS: "#6366F1",
+  WAITING_REVIEW: "#6366F1", QA_FAIL: "#EF4444", BLOCKED: "#EF4444",
+  NEW: "#8B949E", ASSIGNED: "#F59E0B",
+};
+const STATUS_LABEL_GV: Record<string, string> = {
+  DONE: "✓ Feito", QA_PASS: "✓ QA OK", IN_PROGRESS: "⟳ Em desenvolvimento",
+  WAITING_REVIEW: "⟳ Aguardando Review", QA_FAIL: "✗ QA Falhou",
+  BLOCKED: "⊘ Bloqueada", NEW: "◦ Nova", ASSIGNED: "→ Atribuída",
+};
+
+function TaskDetailDrawerView({ task, onClose }: { task: TaskItem | null; onClose: () => void }) {
+  if (!task) return null;
+  const color = STATUS_COLOR_GV[task.status ?? ""] ?? "#8B949E";
+  const label = STATUS_LABEL_GV[task.status ?? ""] ?? task.status ?? "—";
+  const lines = (task.requirements ?? "").split(/\n/).map(l => l.trim()).filter(Boolean);
+  const isBullet = (l: string) => /^[-*•]/.test(l) || /^\d+[.)]\s/.test(l);
+  const bullets = lines.filter(isBullet).map(l => l.replace(/^[-*•]\s*/, "").replace(/^\d+[.)]\s*/, ""));
+  const prose   = lines.filter(l => !isBullet(l));
+  const fmtDate = (iso?: string) => iso ? new Date(iso).toLocaleString("pt-BR", { day:"2-digit", month:"2-digit", year:"2-digit", hour:"2-digit", minute:"2-digit" }) : null;
+
+  return (
+    <Drawer anchor="right" open={!!task} onClose={onClose}
+      PaperProps={{ sx: { width: 360, bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}>
+      <Stack direction="row" alignItems="center" justifyContent="space-between"
+        sx={{ px: 2, py: 1.5, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
+        <Stack spacing={0.25}>
+          <Typography variant="caption" fontFamily="monospace" color="text.secondary" sx={{ fontSize: "0.65rem" }}>
+            {task.module ? `${task.module} · ` : ""}{task.ownerRole ?? ""}
+          </Typography>
+          <Typography variant="body2" fontWeight={700} color="text.primary" sx={{ fontSize: "0.85rem" }}>{task.taskId}</Typography>
+        </Stack>
+        <IconButton size="small" onClick={onClose} sx={{ color: "text.secondary" }}>
+          <CloseIcon sx={{ fontSize: "1rem" }} />
+        </IconButton>
+      </Stack>
+      <Box sx={{ px: 2, py: 1.5, overflowY: "auto", flexGrow: 1 }}>
+        <Box sx={{ display: "inline-block", mb: 2, px: 1.5, py: 0.4, borderRadius: 10,
+          bgcolor: `${color}18`, border: `1px solid ${color}40`, color, fontSize: "0.7rem", fontWeight: 600 }}>
+          {label}
+        </Box>
+        {bullets.length > 0 && (
+          <>
+            <Typography variant="caption" color="text.disabled"
+              sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem", display: "block", mb: 0.75 }}>
+              Requisitos
+            </Typography>
+            <Stack spacing={0.5} sx={{ mb: 2 }}>
+              {bullets.map((b, i) => (
+                <Stack key={i} direction="row" spacing={1} alignItems="flex-start">
+                  <Box sx={{ width: 4, height: 4, borderRadius: "50%", bgcolor: color, mt: 0.6, flexShrink: 0 }} />
+                  <Typography variant="caption" color="text.primary" sx={{ fontSize: "0.72rem", lineHeight: 1.5 }}>{b}</Typography>
+                </Stack>
+              ))}
+            </Stack>
+          </>
+        )}
+        {prose.length > 0 && (
+          <>
+            {bullets.length > 0 && <Divider sx={{ borderColor: "#30363D", mb: 1.5 }} />}
+            <Typography variant="caption" color="text.disabled"
+              sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem", display: "block", mb: 0.75 }}>
+              {bullets.length === 0 ? "Descrição" : "Detalhes"}
+            </Typography>
+            {prose.map((p, i) => (
+              <Typography key={i} variant="caption" color="text.secondary"
+                sx={{ display: "block", fontSize: "0.72rem", lineHeight: 1.6, mb: 0.5 }}>{p}</Typography>
+            ))}
+          </>
+        )}
+        {bullets.length === 0 && prose.length === 0 && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.7rem" }}>Sem requisitos registrados.</Typography>
+        )}
+        <Divider sx={{ borderColor: "#30363D", mt: 2, mb: 1.5 }} />
+        <Stack spacing={0.75}>
+          {task.ownerRole && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Responsável</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem", fontFamily: "monospace" }}>{task.ownerRole}</Typography>
+            </Stack>
+          )}
+          {fmtDate(task.createdAt) && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Criada em</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>{fmtDate(task.createdAt)}</Typography>
+            </Stack>
+          )}
+          {fmtDate(task.updatedAt) && task.updatedAt !== task.createdAt && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Atualizada</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>{fmtDate(task.updatedAt)}</Typography>
+            </Stack>
+          )}
+        </Stack>
+      </Box>
+    </Drawer>
+  );
+}
 
 // ── Definição dos itens do filtro ──────────────────────────────────────────────
 const FILTER_GROUPS: Array<{
@@ -78,7 +180,7 @@ const nodeTypes: NodeTypes = {
   docNode:           DocNode,
 };
 
-type TaskItem    = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string };
+type TaskItem    = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 type CodeFile    = { path: string; sizeBytes: number; ext: string };
 type CodeFilesResponse = { files: CodeFile[]; appsRoot: string | null; totalFiles: number };
 type GraphMode = "hierarchy" | "force";
@@ -92,7 +194,7 @@ interface GraphViewProps {
 }
 
 // ── Hierarchy (React Flow) — inner component that can call useReactFlow ─────────
-function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, planningDocs, filter }: GraphViewProps) {
+function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, planningDocs, filter, onClickTask }: GraphViewProps & { onClickTask?: (taskId: string) => void }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<GraphNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<GraphEdge>([]);
   const [loading, setLoading]     = useState(true);
@@ -126,6 +228,7 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, p
         projectId,
         expandedGroups,
         onToggleGroup,
+        onClickTask,
         filter,
       });
       setNodes(newNodes);
@@ -167,7 +270,7 @@ function HierarchyGraphInner({ projectId, pollIntervalMs = 8000, height = 480, p
   );
 }
 
-function HierarchyGraph(props: GraphViewProps) {
+function HierarchyGraph(props: GraphViewProps & { onClickTask?: (taskId: string) => void }) {
   return <ReactFlowProvider><HierarchyGraphInner {...props} /></ReactFlowProvider>;
 }
 
@@ -327,6 +430,28 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
   const [mode, setMode]         = useState<GraphMode>("force");
   const [fullscreen, setFullscreen] = useState(false);
   const [filter, setFilter]     = useState<GraphFilter>({ ...DEFAULT_FILTER });
+  // Task detail drawer — compartilhado entre Padrão e Hierarquia
+  const [drawerTask, setDrawerTask] = useState<TaskItem | null>(null);
+  const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
+
+  // Mantém o taskMap atualizado via polling
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const tasks = await apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`);
+        if (active && Array.isArray(tasks)) tasks.forEach(t => taskMapRef.current.set(t.taskId, t));
+      } catch { /* silent */ }
+    };
+    load();
+    const t = pollIntervalMs > 0 ? setInterval(load, pollIntervalMs) : null;
+    return () => { active = false; if (t) clearInterval(t); };
+  }, [projectId, pollIntervalMs]);
+
+  const handleClickTask = useCallback((taskId: string) => {
+    const t = taskMapRef.current.get(taskId);
+    if (t) setDrawerTask(t);
+  }, []);
 
   // When height="100%" the outer Box fills its flex parent; otherwise use numeric px
   const isFill  = height === "100%";
@@ -336,7 +461,7 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
     const numH = typeof fsHeight === "number" ? fsHeight : h;
     return mode === "force"
       ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={numH} planningDocs={planningDocs} filter={filter} />
-      : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={fsHeight} planningDocs={planningDocs} filter={filter} />;
+      : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height={fsHeight} planningDocs={planningDocs} filter={filter} onClickTask={handleClickTask} />;
   };
 
   return (
@@ -367,6 +492,9 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
           </Box>
         </DialogContent>
       </Dialog>
+
+      {/* Task detail drawer — Hierarquia */}
+      <TaskDetailDrawerView task={drawerTask} onClose={() => setDrawerTask(null)} />
     </>
   );
 }

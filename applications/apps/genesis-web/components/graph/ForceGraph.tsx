@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
+import Divider from "@mui/material/Divider";
+import Drawer from "@mui/material/Drawer";
+import IconButton from "@mui/material/IconButton";
+import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
+import CloseIcon from "@mui/icons-material/Close";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import type { DialogueEntry } from "@/components/LiveDialogue";
@@ -13,7 +18,7 @@ import dynamic from "next/dynamic";
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type TaskItem = { id: string; taskId: string; ownerRole?: string; requirements?: string; status?: string };
+type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 type CodeFile  = { path: string; sizeBytes: number; ext: string };
 type CodeFilesResponse = { files: CodeFile[]; appsRoot: string | null; totalFiles: number };
 
@@ -345,6 +350,133 @@ function computePositions(
   return map;
 }
 
+// ── Task status colors (shared) ───────────────────────────────────────────────
+const STATUS_CHIP_COLOR: Record<string, string> = {
+  DONE: "#10B981", QA_PASS: "#10B981", IN_PROGRESS: "#6366F1",
+  WAITING_REVIEW: "#6366F1", QA_FAIL: "#EF4444", BLOCKED: "#EF4444",
+  NEW: "#8B949E", ASSIGNED: "#F59E0B",
+};
+const STATUS_LABEL_FG: Record<string, string> = {
+  DONE: "✓ Feito", QA_PASS: "✓ QA OK", IN_PROGRESS: "⟳ Em desenvolvimento",
+  WAITING_REVIEW: "⟳ Aguardando Review", QA_FAIL: "✗ QA Falhou",
+  BLOCKED: "⊘ Bloqueada", NEW: "◦ Nova", ASSIGNED: "→ Atribuída",
+};
+
+// ── Task Detail Drawer ────────────────────────────────────────────────────────
+function TaskDetailDrawer({ task, onClose }: { task: TaskItem | null; onClose: () => void }) {
+  if (!task) return null;
+  const color  = STATUS_CHIP_COLOR[task.status ?? ""] ?? "#8B949E";
+  const label  = STATUS_LABEL_FG[task.status ?? ""] ?? task.status ?? "—";
+
+  // Divide requirements em tópicos: linhas que começam com -, *, número., ou são linhas com conteúdo
+  const lines = (task.requirements ?? "").split(/\n/).map(l => l.trim()).filter(Boolean);
+  const isBullet = (l: string) => /^[-*•]/.test(l) || /^\d+[.)]\s/.test(l);
+  const bullets = lines.filter(isBullet).map(l => l.replace(/^[-*•]\s*/, "").replace(/^\d+[.)]\s*/, ""));
+  const prose   = lines.filter(l => !isBullet(l));
+
+  const fmtDate = (iso?: string) => iso ? new Date(iso).toLocaleString("pt-BR", { day:"2-digit", month:"2-digit", year:"2-digit", hour:"2-digit", minute:"2-digit" }) : null;
+
+  return (
+    <Drawer
+      anchor="right"
+      open={!!task}
+      onClose={onClose}
+      PaperProps={{ sx: { width: 360, bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}
+    >
+      {/* Header */}
+      <Stack direction="row" alignItems="center" justifyContent="space-between"
+        sx={{ px: 2, py: 1.5, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
+        <Stack spacing={0.25}>
+          <Typography variant="caption" fontFamily="monospace" color="text.secondary" sx={{ fontSize: "0.65rem" }}>
+            {task.module ? `${task.module} · ` : ""}{task.ownerRole ?? ""}
+          </Typography>
+          <Typography variant="body2" fontWeight={700} color="text.primary" sx={{ fontSize: "0.85rem" }}>
+            {task.taskId}
+          </Typography>
+        </Stack>
+        <IconButton size="small" onClick={onClose} sx={{ color: "text.secondary" }}>
+          <CloseIcon sx={{ fontSize: "1rem" }} />
+        </IconButton>
+      </Stack>
+
+      <Box sx={{ px: 2, py: 1.5, overflowY: "auto", flexGrow: 1 }}>
+        {/* Status */}
+        <Box sx={{ display: "inline-block", mb: 2, px: 1.5, py: 0.4, borderRadius: 10,
+          bgcolor: `${color}18`, border: `1px solid ${color}40`, color, fontSize: "0.7rem", fontWeight: 600 }}>
+          {label}
+        </Box>
+
+        {/* Requisitos — tópicos */}
+        {bullets.length > 0 && (
+          <>
+            <Typography variant="caption" color="text.disabled"
+              sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem", display: "block", mb: 0.75 }}>
+              Requisitos
+            </Typography>
+            <Stack spacing={0.5} sx={{ mb: 2 }}>
+              {bullets.map((b, i) => (
+                <Stack key={i} direction="row" spacing={1} alignItems="flex-start">
+                  <Box sx={{ width: 4, height: 4, borderRadius: "50%", bgcolor: color, mt: 0.6, flexShrink: 0 }} />
+                  <Typography variant="caption" color="text.primary" sx={{ fontSize: "0.72rem", lineHeight: 1.5 }}>
+                    {b}
+                  </Typography>
+                </Stack>
+              ))}
+            </Stack>
+          </>
+        )}
+
+        {/* Texto livre (não bullet) */}
+        {prose.length > 0 && (
+          <>
+            {bullets.length > 0 && <Divider sx={{ borderColor: "#30363D", mb: 1.5 }} />}
+            <Typography variant="caption" color="text.disabled"
+              sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem", display: "block", mb: 0.75 }}>
+              {bullets.length === 0 ? "Descrição" : "Detalhes"}
+            </Typography>
+            {prose.map((p, i) => (
+              <Typography key={i} variant="caption" color="text.secondary"
+                sx={{ display: "block", fontSize: "0.72rem", lineHeight: 1.6, mb: 0.5 }}>
+                {p}
+              </Typography>
+            ))}
+          </>
+        )}
+
+        {/* Sem conteúdo */}
+        {bullets.length === 0 && prose.length === 0 && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.7rem" }}>
+            Sem requisitos registrados.
+          </Typography>
+        )}
+
+        {/* Meta */}
+        <Divider sx={{ borderColor: "#30363D", mt: 2, mb: 1.5 }} />
+        <Stack spacing={0.75}>
+          {task.ownerRole && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Responsável</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem", fontFamily: "monospace" }}>{task.ownerRole}</Typography>
+            </Stack>
+          )}
+          {fmtDate(task.createdAt) && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Criada em</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>{fmtDate(task.createdAt)}</Typography>
+            </Stack>
+          )}
+          {fmtDate(task.updatedAt) && task.updatedAt !== task.createdAt && (
+            <Stack direction="row" justifyContent="space-between">
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>Atualizada</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem" }}>{fmtDate(task.updatedAt)}</Typography>
+            </Stack>
+          )}
+        </Stack>
+      </Box>
+    </Drawer>
+  );
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 interface ForceGraphProps {
   projectId: string;
@@ -363,8 +495,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
   const [justCycled, setJustCycled] = useState(false);
-  // Animação de partículas — pulsa quando há agente ativo
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  // Task drawer — abre ao clicar num nó de task
+  const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
+  const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
 
   // Pulso animado — valor 0..1 que oscila para o efeito de luz no agente ativo
   const pulseRef        = useRef<number>(0);
@@ -403,6 +537,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
       const activeAgentId = lastWorking?.fromAgent;
       setActiveAgent(activeAgentId ? activeAgentId.toLowerCase().replace(/[^a-z_]/g, "_") : null);
+      // Atualiza map de tasks para o drawer
+      const taskArr = Array.isArray(tasks) ? tasks : [];
+      taskArr.forEach(t => taskMapRef.current.set(`task-${t.taskId}`, t));
       const currentFilter = filterRef.current;
       const data = buildForceData(
         Array.isArray(dialogue) ? dialogue : [],
@@ -753,6 +890,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
         onNodeClick={(node) => {
           const n = node as FGNode;
+          if (n.type === "task") {
+            const task = taskMapRef.current.get(n.id);
+            if (task) { setTaskDrawer(task); return; }
+          }
           setTooltip({ label: n.label, detail: n.detail });
         }}
       />
@@ -846,6 +987,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           </Box>
         ))}
       </Box>
+
+      {/* Task detail drawer */}
+      <TaskDetailDrawer task={taskDrawer} onClose={() => setTaskDrawer(null)} />
     </Box>
   );
 }

@@ -29,6 +29,10 @@ export interface TaskNodeData extends Record<string, unknown> {
   requirements?: string;
   status: string;
   ownerRole?: string;
+  module?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  onClickTask?: (taskId: string) => void;
 }
 
 export interface ArtifactNodeData extends Record<string, unknown> {
@@ -77,13 +81,14 @@ export interface PlanningDoc {
 
 export interface GraphDataInput {
   dialogueEntries: DialogueEntry[];
-  tasks: Array<{ id: string; taskId: string; ownerRole?: string; requirements?: string; status?: string }>;
+  tasks: Array<{ id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string }>;
   codeFiles: Array<{ path: string; sizeBytes: number; ext: string }>;
   planningDocs?: PlanningDoc[];  // from /api/projects/:id/artifacts manifest
   activeAgentId?: string;
   projectId?: string;            // para nomes de agentes por projeto
   expandedGroups?: Set<string>;          // which artifact group dirs are expanded
   onToggleGroup?: (dir: string) => void; // callback from parent
+  onClickTask?: (taskId: string) => void; // abre detalhe da task
   filter?: GraphFilter;          // filtro de visibilidade
 }
 
@@ -131,7 +136,7 @@ const PHASE_AGENT: Record<DocNodeData["phase"], string> = {
 };
 
 export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  const { dialogueEntries, tasks, codeFiles, activeAgentId, projectId, expandedGroups, onToggleGroup } = input;
+  const { dialogueEntries, tasks, codeFiles, activeAgentId, projectId, expandedGroups, onToggleGroup, onClickTask } = input;
   const f = { ...DEFAULT_FILTER, ...(input.filter ?? {}) };
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
@@ -340,9 +345,13 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
       data: {
         nodeType:     "task",
         taskId:       task.taskId,
-        requirements: task.requirements?.slice(0, 60),
+        requirements: task.requirements,
         status:       task.status ?? "NEW",
         ownerRole:    task.ownerRole,
+        module:       task.module,
+        createdAt:    task.createdAt,
+        updatedAt:    task.updatedAt,
+        onClickTask,
       } satisfies TaskNodeData,
     });
 
