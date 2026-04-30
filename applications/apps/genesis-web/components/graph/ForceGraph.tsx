@@ -93,11 +93,15 @@ function inferPhaseFG(filename: string, creator?: string): string {
   return "other";
 }
 
+// Fases de doc que poluem o grafo — removidas no modo Clean e na Hierarquia
+const NOISY_DOC_PHASES = new Set(["qa", "devops", "other"]);
+
 // ── Build raw graph data ──────────────────────────────────────────────────────
 function buildForceData(
   dialogue: DialogueEntry[], tasks: TaskItem[], codeFiles: CodeFile[],
   activeAgentId?: string, planningDocs: PlanningDoc[] = [],
   compactArtifacts = false,  // true → mostrar só 5 artefatos + nó agregador
+  cleanDocs = false,         // true → ocultar docs QA/DevOps/implantação/Dev Implementation
 ): GraphData {
   const nodes: FGNode[] = []; const links: FGLink[] = [];
   const seenAgents = new Map<string, FGNode>(); const linkSet = new Set<string>();
@@ -132,7 +136,11 @@ function buildForceData(
   }
 
   const skipDocs = [".json", "spec__", "raw_response"];
-  const visibleDocs = planningDocs.filter(d => !skipDocs.some(p => d.filename.toLowerCase().includes(p)));
+  const visibleDocs = planningDocs.filter(d => {
+    if (skipDocs.some(p => d.filename.toLowerCase().includes(p))) return false;
+    if (cleanDocs && NOISY_DOC_PHASES.has(inferPhaseFG(d.filename, d.creator))) return false;
+    return true;
+  });
   for (let i = 0; i < visibleDocs.length; i++) {
     const doc = visibleDocs[i];
     const phase = inferPhaseFG(doc.filename, doc.creator);
@@ -217,10 +225,13 @@ function computePositions(
   const rScale    = Math.min(W * 0.45, H * 0.85);
 
   if (layout === "brain") {
-    // Agents: tight inner ellipse (brain core)
+    // Monitor/Sistema no centro exato, demais agentes em elipse ao redor
+    const hubNode   = agents.find(n => n.id.includes("monitor") || n.id.includes("system"));
+    const otherAgents = agents.filter(n => n !== hubNode);
+    if (hubNode) map.set(hubNode.id, { fx: cx, fy: cy });
     const aR = Math.max(rScale * 0.13, 40);
-    agents.forEach((n, i) => {
-      const angle = agents.length === 1 ? 0 : (i / agents.length) * 2 * Math.PI;
+    otherAgents.forEach((n, i) => {
+      const angle = otherAgents.length === 1 ? 0 : (i / otherAgents.length) * 2 * Math.PI;
       map.set(n.id, { fx: cx + aR * Math.cos(angle) * 1.3, fy: cy + aR * Math.sin(angle) * 0.8 });
     });
     // Tasks: first neuron ring
@@ -243,9 +254,10 @@ function computePositions(
     });
 
   } else if (layout === "radial") {
-    const ctoNode = agents.find(n => n.id.includes("cto")) ?? agents[0];
-    const others  = agents.filter(n => n !== ctoNode);
-    if (ctoNode) map.set(ctoNode.id, { fx: cx, fy: cy });
+    // Monitor/Sistema no centro — fallback para CTO se não existir
+    const centerNode = agents.find(n => n.id.includes("monitor") || n.id.includes("system")) ?? agents.find(n => n.id.includes("cto")) ?? agents[0];
+    const others  = agents.filter(n => n !== centerNode);
+    if (centerNode) map.set(centerNode.id, { fx: cx, fy: cy });
     const aR = Math.max(rScale * 0.20, 60);
     others.forEach((n, i) => {
       const angle = (i / Math.max(others.length, 1)) * 2 * Math.PI;
@@ -335,6 +347,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
+  // Clean mode: só agentes + tasks (sem docs e artefatos)
+  const [cleanMode, setCleanMode] = useState(false);
+  const cleanModeRef = useRef(false);
   // Start at 0 — ResizeObserver will set the real size; canvas won't render until measured
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
@@ -346,6 +361,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const pulseRef        = useRef<number>(0);
   const rafRef          = useRef<number>(0);
   const layoutModeRef   = useRef<LayoutMode>("free"); // acessível em refresh sem closure stale
+  // Sync cleanMode → ref para que refresh() leia sem closure stale
+  useEffect(() => { cleanModeRef.current = cleanMode; }, [cleanMode]);
   // Animação de entrada: nós nascem um a um
   const [revealCount, setRevealCount] = useState<number | null>(null); // null = mostrar todos
 
@@ -377,12 +394,15 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
       const activeAgentId = lastWorking?.fromAgent;
       setActiveAgent(activeAgentId ? activeAgentId.toLowerCase().replace(/[^a-z_]/g, "_") : null);
+      const isClean = cleanModeRef.current;
       const data = buildForceData(
         Array.isArray(dialogue) ? dialogue : [],
         Array.isArray(tasks) ? tasks : [],
         (codeFilesData as CodeFilesResponse).files ?? [],
-        activeAgentId, planningDocs,
+        activeAgentId,
+        planningDocs,
         layoutModeRef.current === "flow",  // compactArtifacts no modo Fluxo
+        isClean,                           // cleanDocs → oculta QA/DevOps/implantação
       );
       const sig = [
         data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
@@ -408,6 +428,13 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     refresh();
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
+
+  // Quando cleanMode muda: invalida cache e força rebuild imediato
+  useEffect(() => {
+    prevSignature.current = "";
+    refresh();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cleanMode]);
 
   // ── RAF loop para pulso do agente ativo ───────────────────────────────────
   useEffect(() => {
@@ -459,14 +486,13 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     const isFlow  = layoutMode === "flow";
     layoutModeRef.current = layoutMode;
     if (wasFlow !== isFlow) {
-      // Compactness mudou — reconstruir nós (refresh vai re-criar o grafo)
       prevSignature.current = ""; // invalidar cache para forçar rebuild
     }
 
     // Reheat physics so nodes animate to new positions
     setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutMode, containerSize.width, containerSize.height]);
+  }, [layoutMode, cleanMode, containerSize.width, containerSize.height]);
 
   // ── Cycle layout on background click ─────────────────────────────────────
   const handleBackgroundClick = useCallback(() => {
@@ -725,6 +751,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       {/* Layout badge — top right — clicável para reset */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+          {/* Botão Clean / Full — alterna entre agentes-only e grafo completo */}
+          <Chip
+            label={cleanMode ? "◉ Agentes" : "◎ Completo"}
+            size="small"
+            onClick={() => setCleanMode(prev => !prev)}
+            sx={{
+              bgcolor: cleanMode ? "#6366F122" : "#161B22EE",
+              color: cleanMode ? "#6366F1" : "#8B949E",
+              border: "1px solid", borderColor: cleanMode ? "#6366F155" : "#30363D",
+              fontSize: "0.6rem", height: 22, cursor: "pointer",
+              transition: "all 0.2s ease",
+            }}
+          />
           {/* Botão Animar — nós nascem um a um em sequência rápida */}
           <Chip
             label={activeAgent ? "⚡ ativo" : revealCount !== null ? "…" : "▶ animar"}

@@ -1057,22 +1057,38 @@ function ProjectDetailPageInner() {
                             <Box sx={{ width: 1, flexGrow: 1, minHeight: 12, bgcolor: isDoneStep ? "success.main" : "divider", opacity: 0.4 }} />
                           )}
                         </Box>
-                        {/* Label */}
+                        {/* Agent icon + Label */}
                         <Box sx={{ pb: 0.75, minWidth: 0 }}>
-                          <Typography
-                            variant="body2"
-                            fontWeight={isActiveStep ? 600 : 400}
-                            color={isDoneStep ? "success.main" : isActiveStep ? "primary.main" : isFutureStep ? "text.disabled" : "text.primary"}
-                            sx={{ lineHeight: 1.5 }}
-                          >
-                            {step.label}
-                            {isActiveStep && isRunning && (
-                              <CircularProgress size={10} color="primary" sx={{ ml: 0.75, verticalAlign: "middle" }} />
+                          <Stack direction="row" alignItems="center" spacing={0.75}>
+                            {step.agent ? (
+                              <Box sx={{
+                                width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+                                bgcolor: `${getAgentProfile(step.agent).color}22`,
+                                border: `1px solid ${isActiveStep ? getAgentProfile(step.agent).color : getAgentProfile(step.agent).color + "50"}`,
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                fontSize: "0.65rem",
+                                ...(isActiveStep && { boxShadow: `0 0 0 2px ${getAgentProfile(step.agent).color}30` }),
+                              }}>
+                                {getAgentProfile(step.agent).avatar}
+                              </Box>
+                            ) : (
+                              <Box sx={{ width: 20, height: 20, flexShrink: 0 }} />
                             )}
-                          </Typography>
+                            <Typography
+                              variant="body2"
+                              fontWeight={isActiveStep ? 600 : 400}
+                              color={isDoneStep ? "success.main" : isActiveStep ? "primary.main" : isFutureStep ? "text.disabled" : "text.primary"}
+                              sx={{ lineHeight: 1.5 }}
+                            >
+                              {step.label}
+                              {isActiveStep && isRunning && (
+                                <CircularProgress size={10} color="primary" sx={{ ml: 0.75, verticalAlign: "middle" }} />
+                              )}
+                            </Typography>
+                          </Stack>
                           {isActiveStep && workingMessage && (
                             <Typography variant="caption" color="text.secondary"
-                              sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>
+                              sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180, ml: 3.5 }}>
                               {workingMessage.slice(0, 60)}
                             </Typography>
                           )}
@@ -1099,7 +1115,7 @@ function ProjectDetailPageInner() {
                 </Stack>
                 <Collapse in={!collapsed.metrics}>
                   <Stack spacing={1.25}>
-                    {elapsed && <MiniStat label={isRunning ? "⏱ Rodando há" : "Tempo total"} value={elapsed} />}
+                    {elapsed && <MiniStat label={isRunning ? "⏱ Esta execução" : "Tempo total"} value={elapsed} />}
                     {project.createdAt && <MiniStat label="Criado em" value={fmtTime(project.createdAt)} />}
                     {project.startedAt && project.startedAt !== project.createdAt && (
                       <MiniStat label="Última execução" value={fmtTime(project.startedAt)} />
@@ -1572,12 +1588,14 @@ function ProjectDetailPageInner() {
               {/* Tasks — UNUSED below, keeping for reference only (removed) */}
               {/* Body: Tasks tab or moved tab content */}
               {rightActiveTab === -1 ? (
-                <Box sx={{ flexGrow: 1, overflow: "auto", p: 0 }}>
+                <Box sx={{ flexGrow: 1, overflow: "hidden", display: "flex", flexDirection: "column", p: 0 }}>
                   {!tasks || tasks.length === 0 ? (
                     <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 3 }}>
                       {isRunning ? "Aguardando CTO → Engineer → PM para gerar tasks…" : "Nenhuma task registrada."}
                     </Typography>
                   ) : (
+                    <>
+                    <Box sx={{ flexGrow: 1, overflow: "auto" }}>
                     <Table size="small">
                       <TableHead>
                         <TableRow sx={{ bgcolor: "action.hover" }}>
@@ -1696,29 +1714,35 @@ function ProjectDetailPageInner() {
                           );
                         })}
                       </TableBody>
-                      {/* Rodapé cumulativo */}
-                      {taskLogs && taskLogs.totals.calls > 0 && (
-                        <TableHead>
-                          <TableRow sx={{ bgcolor: "action.selected", borderTop: "2px solid", borderColor: "divider" }}>
-                            <TableCell colSpan={2} />
-                            <TableCell sx={{ fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
-                              TOTAL ACUMULADO — {taskLogs.totals.calls} chamadas · {Math.round(taskLogs.totals.durationSec / 60)}min
-                            </TableCell>
-                            <TableCell />
-                            <TableCell sx={{ textAlign: "right" }}>
-                              <Stack alignItems="flex-end" spacing={0.1}>
-                                <Typography variant="caption" sx={{ fontSize: "0.63rem", fontFamily: "monospace", fontWeight: 700 }}>
-                                  {taskLogs.totals.tokens.toLocaleString("pt-BR")} tok
-                                </Typography>
-                                <Typography variant="caption" sx={{ fontSize: "0.7rem", color: "success.main", fontFamily: "monospace", fontWeight: 700 }}>
-                                  USD {taskLogs.totals.costUsd.toFixed(2)}
-                                </Typography>
-                              </Stack>
-                            </TableCell>
-                          </TableRow>
-                        </TableHead>
-                      )}
                     </Table>
+                    </Box>
+                    {/* Rodapé cumulativo — fixo fora do scroll */}
+                    {taskLogs && taskLogs.totals.calls > 0 && (
+                      <Box sx={{ flexShrink: 0, borderTop: "2px solid", borderColor: "divider", bgcolor: "action.selected" }}>
+                        <Table size="small">
+                          <TableBody>
+                            <TableRow>
+                              <TableCell sx={{ width: 24, p: 0.5 }} />
+                              <TableCell colSpan={2} sx={{ fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
+                                TOTAL — {taskLogs.totals.calls} chamadas · {Math.round(taskLogs.totals.durationSec / 60)}min
+                              </TableCell>
+                              <TableCell sx={{ width: 100 }} />
+                              <TableCell sx={{ width: 140, textAlign: "right" }}>
+                                <Stack alignItems="flex-end" spacing={0.1}>
+                                  <Typography variant="caption" sx={{ fontSize: "0.63rem", fontFamily: "monospace", fontWeight: 700 }}>
+                                    {taskLogs.totals.tokens.toLocaleString("pt-BR")} tok
+                                  </Typography>
+                                  <Typography variant="caption" sx={{ fontSize: "0.7rem", color: "success.main", fontFamily: "monospace", fontWeight: 700 }}>
+                                    USD {taskLogs.totals.costUsd.toFixed(2)}
+                                  </Typography>
+                                </Stack>
+                              </TableCell>
+                            </TableRow>
+                          </TableBody>
+                        </Table>
+                      </Box>
+                    )}
+                    </>
                   )}
                 </Box>
               ) : (

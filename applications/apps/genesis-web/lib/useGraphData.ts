@@ -86,6 +86,9 @@ export interface GraphDataInput {
   onToggleGroup?: (dir: string) => void; // callback from parent
 }
 
+// Fases que poluem o grafo — nunca exibidas na Hierarquia, ocultas no modo Clean do Force
+const NOISY_DOC_PHASES = new Set<DocNodeData["phase"]>(["qa", "devops", "other"]);
+
 // Map filename patterns to phase and creator agent
 function inferDocPhase(filename: string, creator?: string): DocNodeData["phase"] {
   const f = filename.toLowerCase();
@@ -214,9 +217,12 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
   // ── 2. Doc nodes — grouped per agent, alternating above/below ────────────────
   const planningDocs = input.planningDocs ?? [];
   const skipPatterns = [".json", "spec__", "raw_response"];
-  const visibleDocs  = planningDocs.filter(
-    (d) => !skipPatterns.some((p) => d.filename.toLowerCase().includes(p))
-  );
+  // Hierarquia sempre oculta docs de QA, DevOps e implantação (muito poluído)
+  const visibleDocs  = planningDocs.filter((d) => {
+    if (skipPatterns.some((p) => d.filename.toLowerCase().includes(p))) return false;
+    if (NOISY_DOC_PHASES.has(inferDocPhase(d.filename, d.creator))) return false;
+    return true;
+  });
 
   // Bucket docs by their owning agent
   const docsByAgent = new Map<string, typeof visibleDocs>();
