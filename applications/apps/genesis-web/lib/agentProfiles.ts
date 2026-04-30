@@ -56,7 +56,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("cto"),
     role: "CTO",
     personality: "Foco em produto, priorização e arquitetura de alto nível.",
-    avatar: "🎯",
+    avatar: "◈",   // losango — decisão / arquitetura
     color: "#6366F1",
   },
   engineer: {
@@ -64,7 +64,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("engineer"),
     role: "Engineer",
     personality: "Arquitetura técnica, squads e dependências.",
-    avatar: "⚙️",
+    avatar: "⬡",   // hexágono — estrutura / engenharia
     color: "#2e7d32",
   },
   pm: {
@@ -72,7 +72,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("pm"),
     role: "PM",
     personality: "Backlog executável e critérios de aceite.",
-    avatar: "📋",
+    avatar: "▤",   // grid — backlog / organização
     color: "#ed6c02",
   },
   pm_backend: {
@@ -104,7 +104,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("dev"),
     role: "Dev",
     personality: "Implementação contínua de código.",
-    avatar: "🔧",
+    avatar: "⟨⟩",  // colchetes angulares — código
     color: "#00897b",
   },
   dev_backend: {
@@ -112,7 +112,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("dev_backend"),
     role: "Dev Backend",
     personality: "Implementação de APIs e servidores.",
-    avatar: "🖥️",
+    avatar: "⟨⟩",
     color: "#00897b",
   },
   dev_backend_nodejs: {
@@ -120,7 +120,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("dev_backend_nodejs"),
     role: "Dev Node.js",
     personality: "Implementação Node.js/TypeScript.",
-    avatar: "🟢",
+    avatar: "⟨⟩",
     color: "#00897b",
   },
   dev_backend_python: {
@@ -128,7 +128,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("dev_backend_python"),
     role: "Dev Python",
     personality: "Implementação Python/FastAPI/Django.",
-    avatar: "🐍",
+    avatar: "⟨⟩",
     color: "#3776AB",
   },
   dev_web: {
@@ -136,7 +136,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("dev_web"),
     role: "Dev Web",
     personality: "Implementação frontend React/Next.js.",
-    avatar: "⚛️",
+    avatar: "⟨⟩",
     color: "#61DAFB",
   },
   qa: {
@@ -144,7 +144,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("qa"),
     role: "QA",
     personality: "Testes, validação e qualidade de código.",
-    avatar: "✅",
+    avatar: "◎",   // alvo/scan — validação
     color: "#43a047",
   },
   qa_backend: {
@@ -152,7 +152,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("qa_backend"),
     role: "QA Backend",
     personality: "Testes e validação de APIs.",
-    avatar: "🔍",
+    avatar: "◎",
     color: "#43a047",
   },
   qa_backend_nodejs: {
@@ -160,7 +160,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("qa_backend_nodejs"),
     role: "QA Node.js",
     personality: "Testes e validação Node.js.",
-    avatar: "🔍",
+    avatar: "◎",
     color: "#43a047",
   },
   qa_backend_python: {
@@ -168,7 +168,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("qa_backend_python"),
     role: "QA Python",
     personality: "Testes e validação Python/FastAPI.",
-    avatar: "🐍",
+    avatar: "◎",
     color: "#388e3c",
   },
   qa_web: {
@@ -176,7 +176,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("qa_web"),
     role: "QA Web",
     personality: "Testes visuais e de responsividade.",
-    avatar: "🎨",
+    avatar: "◎",
     color: "#43a047",
   },
   devops: {
@@ -184,7 +184,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("devops"),
     role: "DevOps",
     personality: "Infraestrutura, CI/CD e provisionamento.",
-    avatar: "🐳",
+    avatar: "⬢",   // hexágono sólido — container / infra
     color: "#0d47a1",
   },
   devops_docker: {
@@ -192,7 +192,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("devops_docker"),
     role: "DevOps Docker",
     personality: "Deploy local e containerização.",
-    avatar: "🐳",
+    avatar: "⬢",
     color: "#0d47a1",
   },
   monitor: {
@@ -200,7 +200,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("monitor"),
     role: "Monitor",
     personality: "Coordena Dev/QA e garante progresso do pipeline.",
-    avatar: "👁️",
+    avatar: "⊛",   // estrela cruzada — hub central / orquestrador
     color: "#5e35b1",
   },
   monitor_backend: {
@@ -208,7 +208,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: iaName("monitor_backend"),
     role: "Monitor Backend",
     personality: "Coordena squad backend.",
-    avatar: "👁️",
+    avatar: "⊛",
     color: "#5e35b1",
   },
   system: {
@@ -216,7 +216,7 @@ export const agentProfiles: Record<string, AgentProfile> = {
     name: "IA-Genesis",
     role: "Sistema",
     personality: "Pipeline e log de eventos.",
-    avatar: "✨",
+    avatar: "⬡",   // hexágono vazio — sistema base
     color: "#546e7a",
   },
   error: {

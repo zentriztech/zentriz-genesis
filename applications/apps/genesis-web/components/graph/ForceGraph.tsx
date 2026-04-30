@@ -38,23 +38,28 @@ const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string
 };
 
 // Pares de agentes que têm relação bidirecional forte (consulta ↔ resposta)
+// Sistema/Monitor é o hub central — conecta em duplo sentido com TODOS
 const BIDIRECTIONAL_PAIRS = new Set([
   // CTO ↔ Engineer ↔ PM (planejamento)
   "cto|engineer", "engineer|cto",
-  "cto|pm", "pm|cto",
-  // Monitor/Sistema ↔ todos os agentes de execução
-  "monitor|cto",    "cto|monitor",
+  "cto|pm",       "pm|cto",
+  // Sistema/Monitor ↔ TODOS (hub central)
+  "system|cto",      "cto|system",
+  "system|engineer", "engineer|system",
+  "system|pm",       "pm|system",
+  "system|dev",      "dev|system",
+  "system|qa",       "qa|system",
+  "system|devops",   "devops|system",
+  "monitor|cto",     "cto|monitor",
   "monitor|engineer","engineer|monitor",
-  "monitor|pm",     "pm|monitor",
-  "monitor|dev",    "dev|monitor",
-  "monitor|qa",     "qa|monitor",
-  "monitor|devops", "devops|monitor",
-  "system|cto",     "cto|system",
-  "system|engineer","engineer|system",
-  "system|pm",      "pm|system",
-  // PM ↔ Dev e PM ↔ QA (backlog/validação)
-  "pm|dev", "dev|pm",
-  "pm|qa",  "qa|pm",
+  "monitor|pm",      "pm|monitor",
+  "monitor|dev",     "dev|monitor",
+  "monitor|qa",      "qa|monitor",
+  "monitor|devops",  "devops|monitor",
+  // PM ↔ Dev ↔ QA (ciclo de desenvolvimento)
+  "pm|dev",  "dev|pm",
+  "pm|qa",   "qa|pm",
+  "dev|qa",  "qa|dev",
 ]);
 
 // ── Colors ────────────────────────────────────────────────────────────────────
@@ -92,6 +97,7 @@ function inferPhaseFG(filename: string, creator?: string): string {
 function buildForceData(
   dialogue: DialogueEntry[], tasks: TaskItem[], codeFiles: CodeFile[],
   activeAgentId?: string, planningDocs: PlanningDoc[] = [],
+  compactArtifacts = false,  // true → mostrar só 5 artefatos + nó agregador
 ): GraphData {
   const nodes: FGNode[] = []; const links: FGLink[] = [];
   const seenAgents = new Map<string, FGNode>(); const linkSet = new Set<string>();
@@ -161,13 +167,36 @@ function buildForceData(
     if (ownerKey) addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
   }
 
-  const showable = codeFiles.filter(f => !f.path.includes("node_modules") && !f.path.endsWith(".lock")).slice(0, 20);
+  const allFiles = codeFiles.filter(f => !f.path.includes("node_modules") && !f.path.endsWith(".lock"));
   const devAgentKey = Array.from(seenAgents.keys()).find(k => k.startsWith("dev")) ?? null;
-  for (let i = 0; i < showable.length; i++) {
-    const f = showable[i];
-    const color = EXT_COLOR[f.ext] ?? "#8B949E";
-    nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
-    if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
+
+  if (compactArtifacts && allFiles.length > 0) {
+    // Modo compacto: mostrar 5 artefatos recentes + 1 nó agregador com o restante
+    const MAX_SHOWN = 5;
+    const shown = allFiles.slice(-MAX_SHOWN);
+    const hidden = allFiles.length - shown.length;
+
+    for (let i = 0; i < shown.length; i++) {
+      const f = shown[i];
+      const color = EXT_COLOR[f.ext] ?? "#8B949E";
+      nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
+      if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
+    }
+
+    if (hidden > 0) {
+      const label = hidden >= 500 ? "500+" : hidden >= 100 ? `${Math.floor(hidden / 100) * 100}+` : hidden >= 10 ? `${Math.floor(hidden / 10) * 10}+` : `${hidden}+`;
+      nodes.push({ id: "artifact-group", label: `${label} arquivos`, type: "artifact", color: "#484F58", size: 5.5, detail: `${allFiles.length} arquivos no projeto` });
+      if (devAgentKey) addLink(`agent-${devAgentKey}`, "artifact-group", "#484F5880");
+    }
+  } else {
+    // Modo completo: até 20 artefatos individuais
+    const showable = allFiles.slice(0, 20);
+    for (let i = 0; i < showable.length; i++) {
+      const f = showable[i];
+      const color = EXT_COLOR[f.ext] ?? "#8B949E";
+      nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
+      if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
+    }
   }
 
   return { nodes, links };
@@ -316,6 +345,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // Pulso animado — valor 0..1 que oscila para o efeito de luz no agente ativo
   const pulseRef        = useRef<number>(0);
   const rafRef          = useRef<number>(0);
+  const layoutModeRef   = useRef<LayoutMode>("free"); // acessível em refresh sem closure stale
+  // Animação de entrada: nós nascem um a um
+  const [revealCount, setRevealCount] = useState<number | null>(null); // null = mostrar todos
 
   const containerRef   = useRef<HTMLDivElement>(null);
   const prevSignature  = useRef<string>("");
@@ -350,6 +382,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         Array.isArray(tasks) ? tasks : [],
         (codeFilesData as CodeFilesResponse).files ?? [],
         activeAgentId, planningDocs,
+        layoutModeRef.current === "flow",  // compactArtifacts no modo Fluxo
       );
       const sig = [
         data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
@@ -420,6 +453,15 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         return pos ? { ...nw, fx: pos.fx, fy: pos.fy } : { ...nw };
       }),
     }; }); // fechamento do setGraphData
+
+    // Atualizar ref e forçar re-build do grafo se compactArtifacts mudou
+    const wasFlow = layoutModeRef.current === "flow";
+    const isFlow  = layoutMode === "flow";
+    layoutModeRef.current = layoutMode;
+    if (wasFlow !== isFlow) {
+      // Compactness mudou — reconstruir nós (refresh vai re-criar o grafo)
+      prevSignature.current = ""; // invalidar cache para forçar rebuild
+    }
 
     // Reheat physics so nodes animate to new positions
     setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
@@ -551,6 +593,15 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         : n.detail === "QA_FAIL" || n.detail === "BLOCKED" ? "✗" : "·";
       const ts = Math.max(r * 0.85, 4); ctx.fillStyle = "#E6EDF3";
       drawCentered(icon, x, y, ts, `bold ${ts}px Inter, sans-serif`);
+    } else if (n.id === "artifact-group") {
+      // Nó agregador de artefatos — círculo tracejado com contagem
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = "#6B7280AA"; ctx.lineWidth = 1.2; ctx.stroke();
+      ctx.setLineDash([]);
+      const countStr = n.label.split(" ")[0]; // ex: "99+"
+      const cs = Math.max(r * 0.8, 4); ctx.fillStyle = "#9CA3AF";
+      drawCentered(countStr, x, y, cs, `bold ${cs}px Inter, sans-serif`);
     } else if (n.type === "doc") {
       const iconMap: Record<string, string> = { cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁" };
       const ds = Math.max(r * 0.85, 4);
@@ -562,7 +613,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       ctx.font = `${n.type === "agent" ? "bold " : ""}${fontSize}px Inter, sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillStyle = n.type === "agent" ? "#E6EDF3" : n.color;
-      ctx.fillText(n.label, x, y + r + fontSize * 1.1);
+      ctx.fillText(n.id === "artifact-group" ? n.label : n.label, x, y + r + fontSize * 1.1);
     }
   }, []);
 
@@ -589,6 +640,27 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   const meta = LAYOUT_META[layoutMode];
 
+  // Filtro de reveal: ao animar, mostrar nós progressivamente (agentes primeiro)
+  const visibleNodes = revealCount !== null
+    ? graphData.nodes
+        .slice()
+        .sort((a, b) => {
+          // Ordem: agentes → tasks → docs → artifacts
+          const order = (n: FGNode) => n.type === "agent" ? 0 : n.type === "task" ? 1 : n.type === "doc" ? 2 : 3;
+          return order(a) - order(b);
+        })
+        .slice(0, revealCount)
+    : graphData.nodes;
+
+  const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
+  const visibleLinks = revealCount !== null
+    ? displayLinks.filter(l => {
+        const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
+        const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
+        return visibleNodeIds.has(s) && visibleNodeIds.has(t);
+      })
+    : displayLinks;
+
   return (
     <Box
       ref={containerRef}
@@ -596,7 +668,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     >
       <ForceGraph2D
         ref={fgRef}
-        graphData={{ nodes: graphData.nodes as object[], links: displayLinks as object[] }}
+        graphData={{ nodes: visibleNodes as object[], links: visibleLinks as object[] }}
         width={canvasW}
         height={canvasH}
         backgroundColor="#0D0F14"
@@ -624,9 +696,20 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
         linkDirectionalArrowRelPos={0.85}
         nodeRelSize={1}
-        d3AlphaDecay={layoutMode === "free" || layoutMode === "flow" ? 0.02 : 0.025}
-        d3VelocityDecay={layoutMode === "free" || layoutMode === "flow" ? 0.3 : 0.45}
-        cooldownTicks={layoutMode === "free" || layoutMode === "flow" ? 120 : 100}
+        // Manter agentes mais próximos entre si — força de carga menor para agentes
+        d3AlphaDecay={layoutMode === "free" || layoutMode === "flow" ? 0.015 : 0.025}
+        d3VelocityDecay={layoutMode === "free" || layoutMode === "flow" ? 0.25 : 0.45}
+        cooldownTicks={layoutMode === "free" || layoutMode === "flow" ? 150 : 100}
+        onEngineStop={() => {
+          if ((layoutMode === "free" || layoutMode === "flow") && fgRef.current) {
+            try {
+              fgRef.current.d3Force("charge")?.strength?.((n: FGNode) =>
+                n.type === "agent" ? -120 : n.type === "task" ? -30 : -15
+              );
+              fgRef.current.d3ReheatSimulation?.();
+            } catch { /* silent — força pode não existir */ }
+          }
+        }}
         onBackgroundClick={handleBackgroundClick}
         onNodeHover={(node) => {
           if (!node) { setTooltip(null); return; }
@@ -642,6 +725,36 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       {/* Layout badge — top right — clicável para reset */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+          {/* Botão Animar — nós nascem um a um em sequência rápida */}
+          <Chip
+            label={activeAgent ? "⚡ ativo" : revealCount !== null ? "…" : "▶ animar"}
+            size="small"
+            onClick={() => {
+              if (revealCount !== null) return; // já animando
+              const total = graphData.nodes.length;
+              if (total === 0) return;
+              // Velocidade: ~30ms por nó, mín 15ms, máx 80ms — mais rápido para muitos nós
+              const delay = Math.max(15, Math.min(80, Math.round(2000 / total)));
+              setRevealCount(0);
+              let count = 0;
+              const iv = setInterval(() => {
+                count++;
+                setRevealCount(count);
+                if (count >= total) {
+                  clearInterval(iv);
+                  setTimeout(() => setRevealCount(null), 400);
+                }
+              }, delay);
+              fgRef.current?.d3ReheatSimulation?.();
+            }}
+            sx={{
+              bgcolor: activeAgent ? "#6366F122" : "#161B22EE",
+              color: activeAgent ? "#6366F1" : "#484F58",
+              border: "1px solid", borderColor: activeAgent ? "#6366F155" : "#30363D",
+              fontSize: "0.6rem", height: 22, cursor: "pointer",
+              transition: "all 0.3s ease",
+            }}
+          />
           {/* Botão reset — só aparece quando não está em "free" */}
           {layoutMode !== "free" && (
             <Chip
