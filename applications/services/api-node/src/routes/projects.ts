@@ -855,6 +855,84 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/task-metrics/detail — log completo por chamada (task + round + modelo + tokens + custo)
+  app.get<{ Params: { id: string } }>("/api/projects/:id/task-metrics/detail", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN" });
+      }
+      const res = await client.query(
+        `SELECT
+           id,
+           agent,
+           COALESCE(task_id, '(planejamento)') AS task_id,
+           round,
+           input_tokens,
+           output_tokens,
+           (input_tokens + output_tokens)       AS total_tokens,
+           model,
+           duration_ms,
+           status,
+           created_at
+         FROM project_agent_metrics
+         WHERE project_id = $1
+         ORDER BY created_at`,
+        [id]
+      );
+      const PRICE_INPUT  = 3;   // USD/MTok Sonnet 4.6
+      const PRICE_OUTPUT = 15;  // USD/MTok
+      const PRICE_INPUT_OPUS  = 15;  // USD/MTok Opus 4.7
+      const PRICE_OUTPUT_OPUS = 75;  // USD/MTok
+      const rows = res.rows.map((r) => {
+        const inp = Number(r.input_tokens ?? 0);
+        const out = Number(r.output_tokens ?? 0);
+        const isOpus = String(r.model ?? "").includes("opus");
+        const pi = isOpus ? PRICE_INPUT_OPUS  : PRICE_INPUT;
+        const po = isOpus ? PRICE_OUTPUT_OPUS : PRICE_OUTPUT;
+        const cost = (inp / 1_000_000) * pi + (out / 1_000_000) * po;
+        return {
+          id:               r.id as string,
+          agent:            r.agent as string,
+          taskId:           r.task_id as string,
+          round:            Number(r.round ?? 1),
+          inputTokens:      inp,
+          outputTokens:     out,
+          totalTokens:      inp + out,
+          model:            r.model as string | null,
+          isOpus:           isOpus,
+          durationMs:       Number(r.duration_ms ?? 0),
+          durationSec:      Math.round(Number(r.duration_ms ?? 0) / 1000),
+          status:           r.status as string | null,
+          estimatedCostUsd: parseFloat(cost.toFixed(5)),
+          createdAt:        (r.created_at as Date)?.toISOString(),
+        };
+      });
+      // Totais cumulativos
+      const cumulative = rows.reduce((acc, r) => ({
+        totalCalls:    acc.totalCalls + 1,
+        totalTokens:   acc.totalTokens + r.totalTokens,
+        totalCostUsd:  acc.totalCostUsd + r.estimatedCostUsd,
+        totalDurationMs: acc.totalDurationMs + r.durationMs,
+      }), { totalCalls: 0, totalTokens: 0, totalCostUsd: 0, totalDurationMs: 0 });
+      return reply.send({
+        rows,
+        totals: {
+          calls:       cumulative.totalCalls,
+          tokens:      cumulative.totalTokens,
+          costUsd:     parseFloat(cumulative.totalCostUsd.toFixed(4)),
+          durationSec: Math.round(cumulative.totalDurationMs / 1000),
+        },
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/knowledge — lista knowledge entries extraídas pelo G46
   app.get<{ Params: { id: string } }>(
     "/api/projects/:id/knowledge",

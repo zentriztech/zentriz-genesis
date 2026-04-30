@@ -94,6 +94,8 @@ const ALLOW_RUN_STATUS = new Set([
 // ── Types ─────────────────────────────────────────────────────────────────────
 type TaskItem         = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
 type TaskMetricItem   = { taskId: string; calls: number; inputTokens: number; outputTokens: number; totalTokens: number; durationMs: number; agents: string[]; models: string[]; estimatedCostUsd: number; lastCallAt?: string };
+type TaskLogRow       = { id: string; agent: string; taskId: string; round: number; inputTokens: number; outputTokens: number; totalTokens: number; model: string | null; isOpus: boolean; durationMs: number; durationSec: number; status: string | null; estimatedCostUsd: number; createdAt: string };
+type TaskLogResp      = { rows: TaskLogRow[]; totals: { calls: number; tokens: number; costUsd: number; durationSec: number } };
 type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
@@ -284,6 +286,8 @@ function ProjectDetailPageInner() {
   // Data state
   const [tasks, setTasks]         = useState<TaskItem[] | null>(null);
   const [taskMetrics, setTaskMetrics] = useState<Record<string, TaskMetricItem>>({});
+  const [taskLogs, setTaskLogs]       = useState<TaskLogResp | null>(null);
+  const [logsExpanded, setLogsExpanded] = useState<string | null>(null); // taskId expandida
   const [artifacts, setArtifacts] = useState<ArtifactsResp | null>(null);
   const [codeFiles, setCodeFiles] = useState<CodeFilesResp | null>(null);
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
@@ -349,11 +353,15 @@ function ProjectDetailPageInner() {
           setTaskMetrics(map);
         })
         .catch(() => {});
+    const loadLogs = () =>
+      apiGet<TaskLogResp>(`/api/projects/${id}/task-metrics/detail`)
+        .then(setTaskLogs).catch(() => {});
     const load = () => {
       apiGet<TaskItem[]>(`/api/projects/${id}/tasks`)
         .then((d) => setTasks(Array.isArray(d) ? d : []))
         .catch(() => {});
       loadMetrics();
+      loadLogs();
     };
     load();
     if (project.status !== "running") return;
@@ -1563,11 +1571,12 @@ function ProjectDetailPageInner() {
                   ) : (
                     <Table size="small">
                       <TableHead>
-                        <TableRow>
-                          <TableCell>Task</TableCell>
-                          <TableCell>Descrição</TableCell>
-                          <TableCell sx={{ width: 110 }}>Status</TableCell>
-                          <TableCell sx={{ width: 130, textAlign: "right" }}>Tokens · Custo</TableCell>
+                        <TableRow sx={{ bgcolor: "action.hover" }}>
+                          <TableCell sx={{ width: 24, p: 0.5 }} />
+                          <TableCell sx={{ fontSize: "0.68rem", fontWeight: 700 }}>Task</TableCell>
+                          <TableCell sx={{ fontSize: "0.68rem", fontWeight: 700 }}>Descrição</TableCell>
+                          <TableCell sx={{ width: 100, fontSize: "0.68rem", fontWeight: 700 }}>Status</TableCell>
+                          <TableCell sx={{ width: 140, textAlign: "right", fontSize: "0.68rem", fontWeight: 700 }}>Tokens · Custo</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -1575,14 +1584,27 @@ function ProjectDetailPageInner() {
                           const isDoneT   = t.status === "DONE" || t.status === "QA_PASS";
                           const isActiveT = t.status === "IN_PROGRESS" || t.status === "WAITING_REVIEW";
                           const m = taskMetrics[t.taskId ?? ""];
+                          const tid = t.taskId ?? "";
+                          const logsForTask = taskLogs?.rows.filter(r => r.taskId === tid) ?? [];
+                          const isExpanded = logsExpanded === tid;
                           return (
+                            <>
                             <TableRow key={t.id}
-                              sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent" }}>
-                              <TableCell><Typography variant="caption" fontFamily="monospace" noWrap>{t.taskId}</Typography></TableCell>
+                              sx={{ bgcolor: isActiveT ? "primary.main" + "08" : isDoneT ? "success.main" + "06" : "transparent",
+                                    cursor: logsForTask.length > 0 ? "pointer" : "default" }}
+                              onClick={() => logsForTask.length > 0 && setLogsExpanded(isExpanded ? null : tid)}>
+                              <TableCell sx={{ p: 0.5, textAlign: "center" }}>
+                                {logsForTask.length > 0 && (
+                                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+                                    {isExpanded ? "▲" : "▼"}
+                                  </Typography>
+                                )}
+                              </TableCell>
+                              <TableCell><Typography variant="caption" fontFamily="monospace" noWrap sx={{ fontSize: "0.7rem" }}>{tid}</Typography></TableCell>
                               <TableCell>
                                 <Stack direction="row" spacing={0.75} alignItems="center">
                                   {isActiveT && <CircularProgress size={10} color="primary" />}
-                                  <Typography variant="body2" sx={{ fontSize: "0.75rem" }}>{t.requirements ?? "—"}</Typography>
+                                  <Typography variant="body2" sx={{ fontSize: "0.73rem" }}>{t.requirements ?? "—"}</Typography>
                                 </Stack>
                               </TableCell>
                               <TableCell>
@@ -1592,27 +1614,101 @@ function ProjectDetailPageInner() {
                               </TableCell>
                               <TableCell sx={{ textAlign: "right" }}>
                                 {m ? (
-                                  <Tooltip title={
-                                    `${m.calls} chamada(s) · ${m.agents.join("+")} · ${Math.round(m.durationMs / 1000)}s\n` +
-                                    `In: ${m.inputTokens.toLocaleString("pt-BR")} · Out: ${m.outputTokens.toLocaleString("pt-BR")}`
-                                  }>
-                                    <Stack alignItems="flex-end" spacing={0.1}>
-                                      <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.secondary", fontFamily: "monospace" }}>
-                                        {m.totalTokens.toLocaleString("pt-BR")} tok
-                                      </Typography>
-                                      <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "success.main", fontFamily: "monospace", fontWeight: 600 }}>
-                                        ~${m.estimatedCostUsd.toFixed(3)}
-                                      </Typography>
-                                    </Stack>
-                                  </Tooltip>
+                                  <Stack alignItems="flex-end" spacing={0.1}>
+                                    <Typography variant="caption" sx={{ fontSize: "0.63rem", color: "text.secondary", fontFamily: "monospace" }}>
+                                      {m.totalTokens.toLocaleString("pt-BR")} tok · {m.calls}×
+                                    </Typography>
+                                    <Typography variant="caption" sx={{ fontSize: "0.63rem", color: "success.main", fontFamily: "monospace", fontWeight: 700 }}>
+                                      ~${m.estimatedCostUsd.toFixed(3)}
+                                    </Typography>
+                                  </Stack>
                                 ) : (
                                   <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.6rem" }}>—</Typography>
                                 )}
                               </TableCell>
                             </TableRow>
+                            {/* Log expandido por task */}
+                            {isExpanded && logsForTask.length > 0 && (
+                              <TableRow key={`${t.id}-logs`} sx={{ bgcolor: "#0D0F14" }}>
+                                <TableCell colSpan={5} sx={{ p: 0, pb: 0.5 }}>
+                                  <Table size="small" sx={{ "& td, & th": { fontSize: "0.62rem", py: 0.4, px: 1 } }}>
+                                    <TableHead>
+                                      <TableRow sx={{ bgcolor: "#161B22" }}>
+                                        <TableCell sx={{ color: "#6B7280" }}>Agente</TableCell>
+                                        <TableCell sx={{ color: "#6B7280" }}>Round</TableCell>
+                                        <TableCell sx={{ color: "#6B7280" }}>Modelo</TableCell>
+                                        <TableCell sx={{ color: "#6B7280", textAlign: "right" }}>In tok</TableCell>
+                                        <TableCell sx={{ color: "#6B7280", textAlign: "right" }}>Out tok</TableCell>
+                                        <TableCell sx={{ color: "#6B7280", textAlign: "right" }}>Tempo</TableCell>
+                                        <TableCell sx={{ color: "#6B7280", textAlign: "right" }}>USD</TableCell>
+                                        <TableCell sx={{ color: "#6B7280" }}>Status</TableCell>
+                                      </TableRow>
+                                    </TableHead>
+                                    <TableBody>
+                                      {logsForTask.map((log) => (
+                                        <TableRow key={log.id} sx={{ "&:hover": { bgcolor: "#161B22" } }}>
+                                          <TableCell sx={{ fontFamily: "monospace", color: "#8B949E" }}>{log.agent}</TableCell>
+                                          <TableCell sx={{ fontFamily: "monospace", color: "#6B7280" }}>#{log.round}</TableCell>
+                                          <TableCell>
+                                            <Chip size="small"
+                                              label={log.isOpus ? "Opus" : "Sonnet"}
+                                              sx={{ fontSize: "0.55rem", height: 14,
+                                                bgcolor: log.isOpus ? "#f59e0b22" : "#6366f122",
+                                                color: log.isOpus ? "#f59e0b" : "#6366f1" }} />
+                                          </TableCell>
+                                          <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#8B949E" }}>
+                                            {log.inputTokens.toLocaleString("pt-BR")}
+                                          </TableCell>
+                                          <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#8B949E" }}>
+                                            {log.outputTokens.toLocaleString("pt-BR")}
+                                          </TableCell>
+                                          <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#6B7280" }}>
+                                            {log.durationSec}s
+                                          </TableCell>
+                                          <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#22c55e", fontWeight: 600 }}>
+                                            ${log.estimatedCostUsd.toFixed(4)}
+                                          </TableCell>
+                                          <TableCell>
+                                            <Chip size="small" label={log.status ?? "—"}
+                                              sx={{ fontSize: "0.55rem", height: 14,
+                                                bgcolor: log.status === "QA_PASS" || log.status === "OK" ? "#22c55e22" :
+                                                         log.status === "QA_FAIL" ? "#ef444422" : "#6b728022",
+                                                color: log.status === "QA_PASS" || log.status === "OK" ? "#22c55e" :
+                                                       log.status === "QA_FAIL" ? "#ef4444" : "#6b7280" }} />
+                                          </TableCell>
+                                        </TableRow>
+                                      ))}
+                                    </TableBody>
+                                  </Table>
+                                </TableCell>
+                              </TableRow>
+                            )}
+                            </>
                           );
                         })}
                       </TableBody>
+                      {/* Rodapé cumulativo */}
+                      {taskLogs && taskLogs.totals.calls > 0 && (
+                        <TableHead>
+                          <TableRow sx={{ bgcolor: "action.selected", borderTop: "2px solid", borderColor: "divider" }}>
+                            <TableCell colSpan={2} />
+                            <TableCell sx={{ fontSize: "0.68rem", fontWeight: 700, color: "text.secondary" }}>
+                              TOTAL ACUMULADO — {taskLogs.totals.calls} chamadas · {Math.round(taskLogs.totals.durationSec / 60)}min
+                            </TableCell>
+                            <TableCell />
+                            <TableCell sx={{ textAlign: "right" }}>
+                              <Stack alignItems="flex-end" spacing={0.1}>
+                                <Typography variant="caption" sx={{ fontSize: "0.63rem", fontFamily: "monospace", fontWeight: 700 }}>
+                                  {taskLogs.totals.tokens.toLocaleString("pt-BR")} tok
+                                </Typography>
+                                <Typography variant="caption" sx={{ fontSize: "0.7rem", color: "success.main", fontFamily: "monospace", fontWeight: 700 }}>
+                                  USD {taskLogs.totals.costUsd.toFixed(2)}
+                                </Typography>
+                              </Stack>
+                            </TableCell>
+                          </TableRow>
+                        </TableHead>
+                      )}
                     </Table>
                   )}
                 </Box>
