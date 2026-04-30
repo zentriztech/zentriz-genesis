@@ -348,7 +348,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [loading, setLoading]     = useState(true);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
   // Clean mode: só agentes + tasks (sem docs e artefatos)
-  const [cleanMode, setCleanMode] = useState(false);
+  const [cleanMode, setCleanMode] = useState(true);
   const cleanModeRef = useRef(false);
   // Start at 0 — ResizeObserver will set the real size; canvas won't render until measured
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
