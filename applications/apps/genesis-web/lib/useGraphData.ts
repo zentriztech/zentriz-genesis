@@ -84,10 +84,33 @@ export interface GraphDataInput {
   projectId?: string;            // para nomes de agentes por projeto
   expandedGroups?: Set<string>;          // which artifact group dirs are expanded
   onToggleGroup?: (dir: string) => void; // callback from parent
+  filter?: GraphFilter;          // filtro de visibilidade
 }
 
-// Fases que poluem o grafo — nunca exibidas na Hierarquia, ocultas no modo Clean do Force
-const NOISY_DOC_PHASES = new Set<DocNodeData["phase"]>(["qa", "devops", "other"]);
+// ── Filtro de visibilidade do grafo ──────────────────────────────────────────
+export interface GraphFilter {
+  tasksDone:     boolean;   // DONE, QA_PASS
+  tasksPending:  boolean;   // ASSIGNED, NEW, BLOCKED, QA_FAIL (IN_PROGRESS sempre visível)
+  docsSpec:      boolean;
+  docsCto:       boolean;
+  docsEngineer:  boolean;
+  docsPm:        boolean;
+  docsQa:        boolean;
+  docsDevops:    boolean;
+  artifacts:     boolean;
+}
+
+export const DEFAULT_FILTER: GraphFilter = {
+  tasksDone:    false,
+  tasksPending: false,
+  docsSpec:     true,
+  docsCto:      true,
+  docsEngineer: true,
+  docsPm:       true,
+  docsQa:       false,
+  docsDevops:   false,
+  artifacts:    false,
+};
 
 // Map filename patterns to phase and creator agent
 function inferDocPhase(filename: string, creator?: string): DocNodeData["phase"] {
@@ -109,6 +132,7 @@ const PHASE_AGENT: Record<DocNodeData["phase"], string> = {
 
 export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const { dialogueEntries, tasks, codeFiles, activeAgentId, projectId, expandedGroups, onToggleGroup } = input;
+  const f = { ...DEFAULT_FILTER, ...(input.filter ?? {}) };
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const seenAgents = new Set<string>();
@@ -217,11 +241,18 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
   // ── 2. Doc nodes — grouped per agent, alternating above/below ────────────────
   const planningDocs = input.planningDocs ?? [];
   const skipPatterns = [".json", "spec__", "raw_response"];
-  // Hierarquia sempre oculta docs de QA, DevOps e implantação (muito poluído)
-  const visibleDocs  = planningDocs.filter((d) => {
+  const phaseVisible: Record<DocNodeData["phase"], boolean> = {
+    spec:     f.docsSpec,
+    cto:      f.docsCto,
+    engineer: f.docsEngineer,
+    pm:       f.docsPm,
+    qa:       f.docsQa,
+    devops:   f.docsDevops,
+    other:    false,  // nunca exibir "other" no grafo
+  };
+  const visibleDocs = planningDocs.filter((d) => {
     if (skipPatterns.some((p) => d.filename.toLowerCase().includes(p))) return false;
-    if (NOISY_DOC_PHASES.has(inferDocPhase(d.filename, d.creator))) return false;
-    return true;
+    return phaseVisible[inferDocPhase(d.filename, d.creator)] ?? false;
   });
 
   // Bucket docs by their owning agent
@@ -287,8 +318,17 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
     PM: "pm", PM_WEB: "pm_web", CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
   };
 
-  for (let idx = 0; idx < tasks.length; idx++) {
-    const task   = tasks[idx];
+  const DONE_STATUSES    = new Set(["DONE", "QA_PASS"]);
+  const ACTIVE_STATUSES  = new Set(["IN_PROGRESS", "WAITING_REVIEW"]);
+  const filteredTasks = tasks.filter(t => {
+    const s = t.status ?? "NEW";
+    if (ACTIVE_STATUSES.has(s)) return true;          // IN_PROGRESS sempre visível
+    if (DONE_STATUSES.has(s))   return f.tasksDone;
+    return f.tasksPending;                             // NEW, ASSIGNED, BLOCKED, QA_FAIL
+  });
+
+  for (let idx = 0; idx < filteredTasks.length; idx++) {
+    const task   = filteredTasks[idx];
     const col    = idx % TASK_COLS;
     const row    = Math.floor(idx / TASK_COLS);
     const nodeId = `task-${task.taskId}`;
@@ -316,6 +356,8 @@ export function buildGraphData(input: GraphDataInput): { nodes: GraphNode[]; edg
   }
 
   // ── 4. Artifact groups — right of dev agent, alternating above/below ─────────
+  if (!f.artifacts) return { nodes, edges };  // artefatos desativados pelo filtro
+
   const showableFiles = codeFiles.filter(
     (f) => !f.path.includes("node_modules") && !f.path.endsWith(".lock")
   );

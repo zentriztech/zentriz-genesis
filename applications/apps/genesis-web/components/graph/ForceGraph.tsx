@@ -7,7 +7,7 @@ import Typography from "@mui/material/Typography";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import type { DialogueEntry } from "@/components/LiveDialogue";
-import type { PlanningDoc } from "@/lib/useGraphData";
+import { DEFAULT_FILTER, type PlanningDoc, type GraphFilter } from "@/lib/useGraphData";
 import dynamic from "next/dynamic";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -93,16 +93,14 @@ function inferPhaseFG(filename: string, creator?: string): string {
   return "other";
 }
 
-// Fases de doc que poluem o grafo — removidas no modo Clean e na Hierarquia
-const NOISY_DOC_PHASES = new Set(["qa", "devops", "other"]);
-
 // ── Build raw graph data ──────────────────────────────────────────────────────
 function buildForceData(
   dialogue: DialogueEntry[], tasks: TaskItem[], codeFiles: CodeFile[],
   activeAgentId?: string, planningDocs: PlanningDoc[] = [],
-  compactArtifacts = false,  // true → mostrar só 5 artefatos + nó agregador
-  cleanDocs = false,         // true → ocultar docs QA/DevOps/implantação/Dev Implementation
+  compactArtifacts = false,
+  filter?: GraphFilter,
 ): GraphData {
+  const f: GraphFilter = { ...DEFAULT_FILTER, ...(filter ?? {}) };
   const nodes: FGNode[] = []; const links: FGLink[] = [];
   const seenAgents = new Map<string, FGNode>(); const linkSet = new Set<string>();
 
@@ -135,11 +133,14 @@ function buildForceData(
     }
   }
 
+  const phaseVisible: Record<string, boolean> = {
+    spec: f.docsSpec, cto: f.docsCto, engineer: f.docsEngineer,
+    pm: f.docsPm, qa: f.docsQa, devops: f.docsDevops, other: false,
+  };
   const skipDocs = [".json", "spec__", "raw_response"];
   const visibleDocs = planningDocs.filter(d => {
     if (skipDocs.some(p => d.filename.toLowerCase().includes(p))) return false;
-    if (cleanDocs && NOISY_DOC_PHASES.has(inferPhaseFG(d.filename, d.creator))) return false;
-    return true;
+    return phaseVisible[inferPhaseFG(d.filename, d.creator)] ?? false;
   });
   for (let i = 0; i < visibleDocs.length; i++) {
     const doc = visibleDocs[i];
@@ -153,6 +154,8 @@ function buildForceData(
     if (seenAgents.has(agentKey)) addLink(`agent-${agentKey}`, nodeId, color + "70");
   }
 
+  const DONE_STATUSES   = new Set(["DONE", "QA_PASS"]);
+  const ACTIVE_STATUSES = new Set(["IN_PROGRESS", "WAITING_REVIEW"]);
   const ownerMap: Record<string, string> = {
     DEV: "dev", DEV_WEB: "dev", DEV_BACKEND: "dev", DEV_BACKEND_NODEJS: "dev",
     QA: "qa", QA_WEB: "qa", QA_BACKEND: "qa", QA_BACKEND_NODEJS: "qa",
@@ -169,13 +172,20 @@ function buildForceData(
   };
 
   for (const t of tasks) {
-    const color = TASK_COLOR[t.status ?? ""] ?? "#4B5563";
-    nodes.push({ id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4, detail: t.status ?? "NEW" });
+    const s = t.status ?? "NEW";
+    if (!ACTIVE_STATUSES.has(s)) {
+      if (DONE_STATUSES.has(s)  && !f.tasksDone)    continue;
+      if (!DONE_STATUSES.has(s) && !f.tasksPending)  continue;
+    }
+    const color = TASK_COLOR[s] ?? "#4B5563";
+    nodes.push({ id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4, detail: s });
     const ownerKey = agentKeyInDialogue(t.ownerRole ?? "");
     if (ownerKey) addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
   }
 
-  const allFiles = codeFiles.filter(f => !f.path.includes("node_modules") && !f.path.endsWith(".lock"));
+  if (!f.artifacts) return { nodes, links };
+
+  const allFiles = codeFiles.filter(f2 => !f2.path.includes("node_modules") && !f2.path.endsWith(".lock"));
   const devAgentKey = Array.from(seenAgents.keys()).find(k => k.startsWith("dev")) ?? null;
 
   if (compactArtifacts && allFiles.length > 0) {
@@ -341,15 +351,14 @@ interface ForceGraphProps {
   pollIntervalMs?: number;
   height?: number;
   planningDocs?: PlanningDoc[];
+  filter?: GraphFilter;
 }
 
-export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, planningDocs = [] }: ForceGraphProps) {
+export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, planningDocs = [], filter }: ForceGraphProps) {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
-  // Clean mode: só agentes + tasks (sem docs e artefatos)
-  const [cleanMode, setCleanMode] = useState(true);
-  const cleanModeRef = useRef(false);
+  const filterRef = useRef(filter);
   // Start at 0 — ResizeObserver will set the real size; canvas won't render until measured
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
@@ -361,8 +370,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const pulseRef        = useRef<number>(0);
   const rafRef          = useRef<number>(0);
   const layoutModeRef   = useRef<LayoutMode>("free"); // acessível em refresh sem closure stale
-  // Sync cleanMode → ref para que refresh() leia sem closure stale
-  useEffect(() => { cleanModeRef.current = cleanMode; }, [cleanMode]);
+  // Sync filter → ref para que refresh() leia sem closure stale
+  useEffect(() => { filterRef.current = filter; }, [filter]);
   // Animação de entrada: nós nascem um a um
   const [revealCount, setRevealCount] = useState<number | null>(null); // null = mostrar todos
 
@@ -394,7 +403,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
       const activeAgentId = lastWorking?.fromAgent;
       setActiveAgent(activeAgentId ? activeAgentId.toLowerCase().replace(/[^a-z_]/g, "_") : null);
-      const isClean = cleanModeRef.current;
+      const currentFilter = filterRef.current;
       const data = buildForceData(
         Array.isArray(dialogue) ? dialogue : [],
         Array.isArray(tasks) ? tasks : [],
@@ -402,7 +411,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         activeAgentId,
         planningDocs,
         layoutModeRef.current === "flow",  // compactArtifacts no modo Fluxo
-        isClean,                           // cleanDocs → oculta QA/DevOps/implantação
+        currentFilter,                     // filtro de visibilidade
       );
       const sig = [
         data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
@@ -429,12 +438,12 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
 
-  // Quando cleanMode muda: invalida cache e força rebuild imediato
+  // Quando filter muda: invalida cache e força rebuild imediato
   useEffect(() => {
     prevSignature.current = "";
     refresh();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cleanMode]);
+  }, [filter]);
 
   // ── RAF loop para pulso do agente ativo ───────────────────────────────────
   useEffect(() => {
@@ -492,7 +501,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     // Reheat physics so nodes animate to new positions
     setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutMode, cleanMode, containerSize.width, containerSize.height]);
+  }, [layoutMode, containerSize.width, containerSize.height]);
 
   // ── Cycle layout on background click ─────────────────────────────────────
   const handleBackgroundClick = useCallback(() => {
@@ -751,19 +760,6 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       {/* Layout badge — top right — clicável para reset */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
-          {/* Botão Clean / Full — alterna entre agentes-only e grafo completo */}
-          <Chip
-            label={cleanMode ? "◉ Agentes" : "◎ Completo"}
-            size="small"
-            onClick={() => setCleanMode(prev => !prev)}
-            sx={{
-              bgcolor: cleanMode ? "#6366F122" : "#161B22EE",
-              color: cleanMode ? "#6366F1" : "#8B949E",
-              border: "1px solid", borderColor: cleanMode ? "#6366F155" : "#30363D",
-              fontSize: "0.6rem", height: 22, cursor: "pointer",
-              transition: "all 0.2s ease",
-            }}
-          />
           {/* Botão Animar — nós nascem um a um em sequência rápida */}
           <Chip
             label={activeAgent ? "⚡ ativo" : revealCount !== null ? "…" : "▶ animar"}
