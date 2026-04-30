@@ -1757,9 +1757,13 @@ def _run_monitor_loop(
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
                 try:
                     # Simetria: QA usa o mesmo rework_attempt que o Dev usou nesta rodada.
-                    # dev_rework_for_qa é atualizado pelo Dev loop imediatamente antes de entregar.
-                    # Se Dev usou Opus (rework>=1), QA também usa Opus. Se Dev voltou ao Sonnet, QA também.
-                    _qa_rework = dev_rework_for_qa.get(tid, qa_fail_count.get(tid, 0))
+                    # Buscar com tid normalizado — garante match mesmo com diferença de formato.
+                    _norm_qa_tid = str(tid).strip() if tid else ""
+                    _qa_rework = (
+                        dev_rework_for_qa.get(_norm_qa_tid) or
+                        dev_rework_for_qa.get(tid) or
+                        qa_fail_count.get(tid, 0)
+                    )
                     # task_delivered_files: somente o que o Dev entregou nesta rodada
                     # Extrai do last_dev_artifacts (JSON do Dev) — arquivos novos/modificados
                     _task_files = [
@@ -1953,10 +1957,12 @@ def _run_monitor_loop(
                     _ea = last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
                     # Simetria de modelo: Dev e QA usam o mesmo rework_attempt.
                     # Se Dev escalou para Opus, QA também usa Opus nessa rodada.
-                    # Quando Dev volta ao padrão (nova entrega limpa), QA volta também.
+                    # Normalizar task_id para garantir match com a chave usada pelo QA loop.
                     _task_rework_count = qa_fail_count.get(task_id, 0)
-                    # Persistir para que o QA leia o mesmo valor após a entrega do Dev
-                    dev_rework_for_qa[task_id] = _task_rework_count
+                    # Salvar com task_id normalizado — QA usa o mesmo formato via tid
+                    _norm_tid = str(task_id).strip() if task_id else ""
+                    dev_rework_for_qa[_norm_tid] = _task_rework_count
+                    dev_rework_for_qa[task_id] = _task_rework_count  # fallback duplicado
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
                         task_id=task_id, task=task_desc, code_refs=[],
