@@ -98,7 +98,44 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 4. **Sem `any` sem justificativa** em TypeScript.
 5. **tsc --noEmit deve passar** antes de entregar tasks TypeScript.
 6. **`depends_on_files` respeitados** — usar exatamente os tipos e nomes dos arquivos anteriores.
-7. **Respeitar estrutura de pastas já estabelecida** — antes de criar qualquer arquivo, verificar `existing_artifacts` para entender o padrão de organização já adotado. **NUNCA criar uma pasta paralela** (ex: `repositories/`) se o padrão existente já coloca o arquivo dentro do módulo (ex: `payment/payment.repository.interface.ts`). Criar estrutura divergente quebra imports e gera `tsc` fail imediato. Regra: se `existing_artifacts` mostra `domain/payment/payment.repository.interface.ts`, novos repositórios vão em `domain/<modulo>/<modulo>.repository.interface.ts` — nunca em `domain/repositories/<IModulo>Repository.ts`.
+8. **Assinaturas de método: ler antes de chamar — CRÍTICO** — antes de escrever `this.repo.method()` ou `throw new XError(...)`, ler o arquivo fonte para confirmar a assinatura exata:
+   - `throw new NotFoundError(resource)` — 1 argumento (apenas a string do recurso). NÃO passar objeto de detalhes.
+   - `throw new ConflictError(message, details?)` — 2 argumentos (message obrigatório, details opcional).
+   - Métodos de repositório: verificar no `*.repository.interface.ts` do módulo. Nunca inventar `findByUser()` se a interface define `findByUserId()`, nem `unsetDefaultForUser()` se define `setDefault(id, userId)`.
+   - Nunca criar `declare module '@fastify/jwt'` se já existe em outro arquivo — causa conflito de type augmentation. Buscar com `grep -r "declare module" src/` antes de declarar.
+7. **Respeitar estrutura de pastas já estabelecida — CRÍTICO** — verificar `existing_artifacts` antes de criar qualquer arquivo. Dois anti-patterns que causam BLOCKED garantido:
+
+   **Anti-pattern A — Pasta `repositories/` paralela:** Se `existing_artifacts` mostra `domain/payment/payment.repository.interface.ts`, isso significa que cada módulo tem sua própria interface de repositório DENTRO da sua pasta. **NUNCA criar `domain/repositories/IPaymentRepository.ts`** — essa pasta paralela tem imports para paths que não existem (`../entities/Payment`) e quebra o `tsc` imediatamente. Regra: `domain/<modulo>/<modulo>.repository.interface.ts` — nunca `domain/repositories/<IModulo>Repository.ts`.
+
+   **Anti-pattern B — Interface de repositório dentro do `.entity.ts`:** Um arquivo de entidade (`*.entity.ts`) define APENAS: tipos de entidade, enums, DTOs e constantes. **NUNCA colocar `export interface IPaymentRepository` dentro de `payment.entity.ts`** — isso cria definição duplicada e conflitante com `payment.repository.interface.ts`, causando erro TypeScript de redeclaração. Regra: se já existe `*.repository.interface.ts` para o módulo, a interface de repositório vai SOMENTE lá. Se não existe ainda, e a task pede para criar, criar o arquivo `.repository.interface.ts` separado — nunca embutir na entidade.
+
+   **Anti-pattern C — Qualquer pasta não listada abaixo:** O projeto usa uma estrutura de pastas **fixa e imutável**. Criar qualquer pasta fora dessa lista é um erro garantido de BLOCKED.
+
+   **Pastas VÁLIDAS em `apps/src/` (lista exaustiva):**
+   ```
+   apps/src/
+   ├── db/              ← cliente Drizzle, schema barrel, migrate.ts
+   │   └── schema/      ← *.schema.ts + index.ts
+   ├── domain/          ← entidades, interfaces de repositório, tipos de domínio
+   │   └── <modulo>/    ← ex: payment/, order/, user/
+   ├── infra/           ← implementações concretas
+   │   ├── repositories/← Drizzle*Repository.ts — ÚNICA pasta de repositórios
+   │   └── gateways/    ← MercadoPago, ViaCEP, Nodemailer, etc.
+   ├── http/            ← rotas Fastify, plugins, middlewares, schemas Zod
+   ├── application/     ← use cases
+   └── shared/          ← erros, utils, tipos compartilhados
+   ```
+
+   **Pastas PROIBIDAS** (nunca criar):
+   - `src/database/` — usar `src/db/`
+   - `src/modules/` — não existe módulo por feature nesta arquitetura
+   - `src/repositories/` — usar `src/infra/repositories/`
+   - `src/services/` — usar `src/application/` (use cases) ou `src/infra/gateways/`
+   - `src/controllers/` — usar `src/http/`
+   - `src/models/` — usar `src/domain/<modulo>/`
+   - `src/use-cases/` ou `src/use_cases/` — usar `src/application/`
+
+   **Regra absoluta:** se `existing_artifacts` mostra uma pasta — use ela. Nunca inventar nova estrutura.
 
 ---
 

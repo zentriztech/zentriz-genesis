@@ -863,6 +863,7 @@ def call_qa(
     code_refs: list | None = None,
     existing_artifacts: list | None = None,
     rework_attempt: int = 0,
+    task_delivered_files: list | None = None,  # SOMENTE arquivos entregues por esta task
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -874,6 +875,20 @@ def call_qa(
     }
     if code_refs:
         inputs["code_refs"] = code_refs
+    # Escopo de validação: apenas os arquivos que esta task entregou.
+    # O QA deve validar SOMENTE esses arquivos — não o projeto inteiro.
+    # existing_artifacts serve como contexto de interfaces/tipos existentes.
+    if task_delivered_files:
+        inputs["task_files"] = [
+            {"path": a.get("path", ""), "content": a.get("content", "")[:8000]}
+            for a in task_delivered_files
+            if isinstance(a, dict) and a.get("path") and a.get("content")
+        ]
+        inputs["task_scope_instruction"] = (
+            f"ESCOPO DE VALIDAÇÃO: valide SOMENTE os {len(task_delivered_files)} arquivo(s) listados em "
+            f"'task_files'. NÃO reprove por ausência de arquivos de outras tasks ou EPICs futuros. "
+            f"Use 'existing_artifacts' apenas como contexto de interfaces e tipos — nunca como escopo de reprovação."
+        )
     message = _build_message_envelope(
         request_id, "QA", "backend", "validate_task",
         task_id=task_id,
@@ -1745,10 +1760,17 @@ def _run_monitor_loop(
                     # dev_rework_for_qa é atualizado pelo Dev loop imediatamente antes de entregar.
                     # Se Dev usou Opus (rework>=1), QA também usa Opus. Se Dev voltou ao Sonnet, QA também.
                     _qa_rework = dev_rework_for_qa.get(tid, qa_fail_count.get(tid, 0))
+                    # task_delivered_files: somente o que o Dev entregou nesta rodada
+                    # Extrai do last_dev_artifacts (JSON do Dev) — arquivos novos/modificados
+                    _task_files = [
+                        a for a in (last_dev_artifacts or [])
+                        if isinstance(a, dict) and a.get("path") and a.get("content")
+                    ] or None
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
                         rework_attempt=_qa_rework,
+                        task_delivered_files=_task_files,
                     )
                     _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
                     _qa_summary = qa_response.get("summary", "")
@@ -2190,6 +2212,100 @@ def _run_monitor_loop(
                     # Run locally: build + serve + open browser
                     if project_id:
                         _run_local_deploy(project_id, devops_response, request_id)
+
+                    # TASK-FULL-TEST: validação end-to-end após DevOps
+                    # Seed task no portal para visibilidade
+                    if project_id and _api_available():
+                        try:
+                            _full_test_task = [{
+                                "task_id":   "TSK-FULL-TEST",
+                                "taskId":    "TSK-FULL-TEST",
+                                "module":    "test",
+                                "ownerRole": "QA",
+                                "requirements": (
+                                    "Validação end-to-end do produto completo: "
+                                    "verificar compilação TypeScript, endpoints, seed, contratos de interface e funcionamento geral."
+                                ),
+                                "status":    "IN_PROGRESS",
+                                "depends_on_files": [],
+                                "target_route": "/",
+                            }]
+                            _api_post(f"/api/projects/{project_id}/tasks", {"tasks": _full_test_task})
+                            logger.info("[TASK-FULL-TEST] Task criada no portal.")
+                        except Exception as _fte:
+                            logger.debug("[TASK-FULL-TEST] Seed falhou (não crítico): %s", _fte)
+
+                    _post_step(
+                        "🔍 TASK-FULL-TEST: validação end-to-end do produto completo iniciada.",
+                        request_id,
+                    )
+                    _post_agent_working("qa", "QA realizando validação end-to-end do produto completo.", request_id)
+
+                    # Executar TASK-FULL-TEST via QA com o projeto inteiro como contexto
+                    _full_test_response = None
+                    try:
+                        if project_id:
+                            _ft_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                            _ft_artifacts: list = []
+                            if _ft_apps_root.exists():
+                                for _ff in sorted(_ft_apps_root.rglob("*")):
+                                    if _ff.is_file() and _ff.stat().st_size < 50_000 and not any(
+                                        p in str(_ff) for p in ("node_modules", ".next", ".git", ".DS_Store")
+                                    ):
+                                        _frel = str(_ff.relative_to(_ft_apps_root.parent))
+                                        try:
+                                            _ft_artifacts.append({"path": _frel, "content": _ff.read_text(encoding="utf-8", errors="replace")})
+                                        except Exception:
+                                            pass
+
+                            _full_test_inputs = {
+                                "task_scope_instruction": (
+                                    "TASK-FULL-TEST: valide o PROJETO INTEIRO. "
+                                    "Aqui tsc --noEmit DEVE passar (projeto completo). "
+                                    "Valide: (1) compilação TypeScript sem erros; "
+                                    "(2) todos os repositórios implementam suas interfaces; "
+                                    "(3) use-cases chamam métodos que existem; "
+                                    "(4) start.sh e docker-compose.yml presentes e corretos; "
+                                    "(5) seed e migrations existem. "
+                                    "Esta é a validação final — seja rigoroso e corrija o que encontrar."
+                                ),
+                                "full_test": True,
+                            }
+                            _full_test_response = call_qa(
+                                spec_ref, charter_summary, backlog_summary,
+                                "TASK-FULL-TEST: validação end-to-end do produto completo.",
+                                request_id,
+                                task_id="TSK-FULL-TEST",
+                                task="Validação end-to-end: TypeScript, interfaces, use-cases, seed, start.sh.",
+                                code_refs=[a.get("path") for a in _ft_artifacts if isinstance(a, dict) and a.get("path")],
+                                existing_artifacts=_ft_artifacts,
+                                rework_attempt=0,
+                                task_delivered_files=None,  # Full test — sem restrição de escopo
+                            )
+                            _audit_log("qa", request_id, _full_test_response, task_id="TSK-FULL-TEST", round_num=1)
+                            _ft_status = _full_test_response.get("status", "?")
+                            _ft_summary = _full_test_response.get("summary", "")
+
+                            if project_id and storage and storage.is_enabled():
+                                storage.write_doc(project_id, "qa", "full-test", _content_for_doc(_full_test_response), title="TASK-FULL-TEST Report")
+
+                            if _ft_status in ("QA_PASS", "OK"):
+                                _update_task(project_id, "TSK-FULL-TEST", status="DONE")
+                                _post_step(f"✅ TASK-FULL-TEST aprovada: {_ft_summary[:200]}", request_id)
+                            else:
+                                _update_task(project_id, "TSK-FULL-TEST", status="QA_FAIL")
+                                _post_step(
+                                    f"⚠️ TASK-FULL-TEST encontrou issues: {_ft_summary[:200]}. "
+                                    f"Verifique o relatório em docs/qa/QA_REPORT_TSK-FULL-TEST.md.",
+                                    request_id,
+                                )
+                    except Exception as _fte2:
+                        logger.exception("[TASK-FULL-TEST] Falhou (não crítico)")
+                        _post_step(f"TASK-FULL-TEST falhou com erro: {str(_fte2)[:100]}", request_id)
+                        if project_id and _api_available():
+                            try: _update_task(project_id, "TSK-FULL-TEST", status="QA_FAIL")
+                            except Exception: pass
+
                     # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
                     _post_step(
                         "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
