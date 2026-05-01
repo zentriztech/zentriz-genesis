@@ -238,6 +238,104 @@ Antes de propor a arquitetura, responda mentalmente estas 5 perguntas sobre a en
   - If critical info missing → NEEDS_INFO with questions.
 - **Output:** Only `<thinking>` (brief) + `<response>` with JSON. All three .md contents **only** inside `artifacts[].content`, **each document full and comprehensive** (no abbreviations). Correct JSON escaping (`\n`, `\"`). No draft content in thinking.
 
+### Regra Crítica — Projetos com Backend Linkado (`uses_backend`)
+
+Quando `linked_projects_context` indica que este projeto **consome** um backend existente:
+
+**O backend dita o contrato — o frontend se adapta, nunca o contrário.**
+
+O Engineer **DEVE** extrair do `linked_projects_context` e incluir no `engineer_dependencies.md` uma seção **"## Contrato da API Backend"** com:
+
+#### 1. Metadados de integração
+
+| Item | Valor | Fonte |
+|------|-------|-------|
+| product_slug | `<product-slug>` | Charter |
+| base_port | `<base_port>` | Charter — bloco de 10 portas contíguas |
+| Porta do DB | `base_port + 0` | Charter `port_map` |
+| Porta da API | `base_port + 1` | Charter `port_map` |
+| Porta Frontend 1 | `base_port + 2` | Charter `port_map` |
+| Porta Frontend 2 | `base_port + 3` (se houver) | Charter `port_map` |
+| Base URL local | `http://localhost:<base_port+1>` | derivado de base_port |
+| Content-Type (login/mutations) | `application/json` — REGRA UNIVERSAL | `auth.routes.ts` |
+| Shape do token | `{ data: { accessToken, refreshToken, user } }` | handler de login |
+| Header de autenticação | `Authorization: Bearer <accessToken>` | middleware de auth |
+| Política de CORS | `NODE_ENV=development` = open; prod = `CORS_ORIGIN` | `app.ts` |
+| api_contract.md | gerado pelo backend na última task — lido pelos frontends | `project/api_contract.md` |
+
+**Regra de co-deploy:** todos os projetos do produto sobem no mesmo `docker-compose.yml` com `name: <product-slug>`. O Engineer deve documentar isso no `engineer_dependencies.md` e passar `base_port` + `product_slug` para o PM incluir nas tasks de scaffold.
+
+#### 2. Tabela completa de endpoints
+
+Para **cada** rota exposta pelo backend que este frontend irá consumir:
+
+```markdown
+| Método | Path                        | Auth | Body/Params                  | Resposta                          |
+|--------|-----------------------------|------|------------------------------|-----------------------------------|
+| POST   | /api/auth/login             | Não  | { email, password }          | { data: { accessToken, user } }   |
+| GET    | /api/auth/me                | Sim  | —                            | { data: { id, email, role } }     |
+| GET    | /api/admin/products         | Sim  | ?page&limit&sort&order       | { data: [...], meta: { total } }  |
+| POST   | /api/admin/products         | Sim  | { name, price, stockLevel, status } | { data: Product }          |
+| GET    | /api/admin/products/:id     | Sim  | —                            | { data: Product (com costPrice) } |
+| DELETE | /api/admin/products/:id     | Sim  | —                            | 204                               |
+| ...    | ...                         | ...  | ...                          | ...                               |
+```
+
+**Regras obrigatórias ao extrair a tabela:**
+
+1. **Content-Type universal:** toda stack Genesis usa `application/json` no login — `form-urlencoded` retorna 415 em Fastify e comportamento inesperado nas demais stacks.
+2. **Prefixos assimétricos por operação CRUD:** GET list e GET/:id podem ter prefixos diferentes. Ex: `GET /api/admin/products` (listagem) vs `GET /api/products/:id` (público, com ownership). Verificar **cada método individualmente** no `app.ts`.
+3. **Sub-recursos aninhados provavelmente não existem:** `GET /api/admin/customers/:id/orders` raramente é implementado. Usar filtro na listagem: `GET /api/admin/orders?userId=:id`.
+4. **Operações de escrita exigem verificar o schema de query:** sort/order/filtros variam por endpoint. Backends Fastify rejeitam campos desconhecidos com VALIDATION_ERROR 400. Extrair o schema Zod de cada rota.
+5. **Seed cobre entidades transacionais:** verificar se o seed do backend inclui pedidos/transações além de users/products — sem eles, páginas de listagem transacional ficam vazias.
+
+#### 3. Schema de query params por endpoint (OBRIGATÓRIO para listagens)
+
+Para **cada endpoint de listagem** que o frontend consumir, extrair do arquivo `*.schema.ts` ou diretamente do schema Zod na rota o **valor exato** dos enums aceitos:
+
+```markdown
+| Endpoint                  | Param     | Tipo   | Valores válidos                              | Default     |
+|---------------------------|-----------|--------|----------------------------------------------|-------------|
+| GET /api/products         | limit     | number | 1–100                                        | 20          |
+| GET /api/products         | sort      | enum   | 'name' \| 'price' \| 'createdAt' \| 'stockLevel' | 'createdAt' |
+| GET /api/products         | order     | enum   | 'asc' \| 'desc'                              | 'desc'      |
+| GET /api/products         | inStock   | bool   | true \| false                                | —           |
+| GET /api/admin/orders     | (sem sort)| —      | sort não aceito — omitir                     | —           |
+```
+
+**Regra crítica — validada em produção (2026-05-01):**
+- O frontend usa `perPage` → backend usa `limit` → 500 INTERNAL_ERROR com mensagem Zod
+- O frontend usa `sort='newest'` → backend aceita `'name'|'price'|'createdAt'|'stockLevel'` → 500 INTERNAL_ERROR
+- O frontend usa `sort=-createdAt` (prefixo `-`) → Fastify rejeita com VALIDATION_ERROR 400
+- **Como extrair:** ler `apps/src/http/schemas/<recurso>.schema.ts` do backend — a declaração Zod `.enum([...])` lista todos os valores válidos
+
+#### 4. Inventário de páginas do frontend (OBRIGATÓRIO quando frontend tem nav/sidebar)
+
+Listar **todas** as rotas/páginas que o frontend terá, incluindo as referenciadas no Header e Footer:
+
+```markdown
+| Rota          | Arquivo                        | Task que a cria |
+|---------------|--------------------------------|-----------------|
+| /             | src/app/page.tsx               | TSK-WEB-001     |
+| /produtos     | src/app/produtos/page.tsx      | TSK-WEB-002     |
+| /login        | src/app/login/page.tsx         | TSK-WEB-003     |
+| /categorias   | src/app/categorias/page.tsx    | TSK-WEB-004     |
+| /sobre        | src/app/sobre/page.tsx         | TSK-WEB-XXX     |
+| /contato      | src/app/contato/page.tsx       | TSK-WEB-XXX     |
+| /privacidade  | src/app/privacidade/page.tsx   | TSK-WEB-XXX     |
+| /termos       | src/app/termos/page.tsx        | TSK-WEB-XXX     |
+```
+
+**Regra:** se o Header ou Footer linka para `/sobre`, deve existir uma task que cria `src/app/sobre/page.tsx`. Pages referenciadas no nav e não criadas resultam em 404 em produção. O PM deve incluir uma task para criar cada página — mesmo que seja stub.
+
+**Esta tabela e o schema de query params são entregues ao PM**, que os inclui no backlog como requisito das tasks de scaffold e integração.
+
+Como extrair: ler o cabeçalho de cada `*.routes.ts` do backend — todos têm um comentário com os métodos e paths exatos.
+
+**Se qualquer item não estiver disponível no `linked_projects_context`** → reportar como `NEEDS_INFO` — nunca inventar.
+
+> **Falhas documentadas (2026-05-01):** Dev frontend usou `form-urlencoded` (415), `/api/orders` em vez de `/api/admin/orders` (404), `data.token` em vez de `data.accessToken`, `sort='newest'` quando enum aceita `'createdAt'` (500), `perPage` quando param é `limit` (500), `/api/categories/:id` que não existe (404), `/api/admin/customers/:id/orders` que não existe (404), `PUT /api/products/:id` que não existe (404), sidebar apontando para `/promocoes` sem pasta `app/promocoes/` (404), Footer com 9 hrefs para páginas não criadas (404). Tudo evitável com leitura dos schema.ts e route files antes de escrever os lib files.
+
 ---
 
 ## 7) GOLDEN EXAMPLES

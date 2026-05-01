@@ -107,12 +107,42 @@ Antes de qualquer check, leia o `inputs.charter` e responda:
 
 ### Para projetos com backend linkado (integração)
 
+> Regra fundamental: **o backend dita o contrato**. O frontend se adapta. Nunca o contrário.
+
 | # | Check | Severidade |
 |---|-------|------------|
-| B01 | Login usa campo `email` (não `username`) | BLOCKER |
-| B02 | Token extraído de `body.data?.token` | BLOCKER |
-| B03 | Paths de API com prefixo `/api/` | BLOCKER |
-| B04 | Resposta unwrapped de `{ data: T }` antes de usar | BLOCKER |
+| B01 | Login usa `Content-Type: application/json` + `JSON.stringify({email,password})` — **REGRA UNIVERSAL: toda stack Genesis usa JSON** (Fastify retorna 415 com form-urlencoded; Express e FastAPI também devem usar JSON) | BLOCKER |
+| B02 | Token extraído de `body.data?.accessToken ?? body.data?.token` — backend Fastify retorna `accessToken` | BLOCKER |
+| B03 | Paths de API conferem com o backend REAL — verificar `app.ts` do backend (prefixo pode ser `/api/admin/*` não `/api/*`) | BLOCKER |
+| B04 | Resposta unwrapped de `{ data: T }` antes de usar — nunca `.map()` direto | BLOCKER |
+| B05 | Campos de escrita usam nomes do backend: `stockLevel` (não `stock`), `status:'active'` (não `active:bool`) | BLOCKER |
+| B06 | Customer detail: backend pode retornar `{ user, addresses, stats }` (nested) — normalizar antes de usar | MAJOR |
+| B07 | CORS: backend com `NODE_ENV=development` aceita qualquer origem — se bloqueando, verificar variável de ambiente | MAJOR |
+| B08 | **Prefixos CRUD assimétricos:** GET list, GET/:id, POST, PATCH, DELETE de um mesmo recurso podem ter prefixos diferentes. GET público `/:id` tem ownership check — admin deve usar `/api/admin/:id`. Verificar cada operação individualmente. | BLOCKER |
+| B09 | **Sub-recursos aninhados não inventados:** `GET /api/admin/X/:id/Y` deve existir no backend. Caso contrário, Dev usa filtro na listagem (`?userId=:id`). Verificar no `app.ts`. | BLOCKER |
+| B10 | **Sort sem prefixo `-`:** endpoints com sort usam `sort=campo&order=asc\|desc`. Endpoints sem campo sort no schema rejeitam o param (400). Verificar `src/lib/*.ts`. | BLOCKER |
+| B11 | **Sidebar hrefs mapeiam para `app/` existente:** cada href em Header/Footer/nav deve ter `apps/src/app/<rota>/page.tsx`. Varredura: `grep -rh 'href="/' apps/src/components/layout/` vs `find apps/src/app -name 'page.tsx'`. Href sem page.tsx → BLOCKER. | BLOCKER |
+| B12 | **Seed cobre entidades transacionais:** páginas de pedidos/transações precisam de registros no seed. Verificar `seedOrders()` ou equivalente. | MAJOR |
+| B13 | **Endpoint de update completo existe:** PUT/PATCH de recurso completo pode não existir — só `PATCH .../status`. Verificar antes de usar. | BLOCKER |
+| B14 | **Query params validados contra enum do backend:** para cada endpoint de listagem em `src/lib/*.ts`, o nome e valor dos params devem corresponder ao schema Zod real. `perPage` → deve ser `limit`. `sort='newest'` → verificar enum exato no `*.schema.ts` do backend (ex: `'name'\|'price'\|'createdAt'\|'stockLevel'`). Param com nome ou valor errado → backend retorna 500 ou 400. Varredura: `grep -rn "perPage\|sort='" apps/src/lib/` — qualquer resultado suspeito é BLOCKER. | BLOCKER |
+
+### TSK-FULL-TEST — Validação E2E obrigatória (task final)
+
+Quando `task_id == "TSK-FULL-TEST"`, o QA executa validação completa em 3 fases:
+
+**FASE 1 — Build limpo**
+- `npm run build` deve passar sem erros TypeScript
+- Erros TypeScript são BLOCKERS — corrigir antes de avançar
+
+**FASE 2 — Integração real com backend**
+- Executar `start.sh` e confirmar que servidor sobe
+- Para cada endpoint em `src/lib/*.ts`: `curl` com token real → verificar HTTP 200
+- Testar login, listagens, detalhe, criação, atualização
+- Corrigir imediatamente: 404 (rota errada), 415 (Content-Type), 400 (campo errado), CORS
+
+**FASE 3 — Veredito**
+- APROVADO só se: build limpo + servidor sobe + todos endpoints 200 + writes funcionam
+- ISSUES PENDENTES se qualquer item falhar (com lista exata do que ficou)
 
 ---
 

@@ -1592,11 +1592,30 @@ def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
     except Exception as _tse:
         logger.debug("[TaskState] Não foi possível carregar state (não crítico): %s", _tse)
 
+    # TSK-FULL-TEST sempre no fim — visível no portal desde o início, executada após DevOps.
+    # Status NEW: upsert posterior (quando DevOps termina) promove para ASSIGNED.
+    tasks.append({
+        "task_id":   "TSK-FULL-TEST",
+        "module":    pm_module or "web",
+        "owner_role": "QA",
+        "status":    "NEW",
+        "requirements": (
+            "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
+            "Esta é a ÚLTIMA task. O agente DEVE: "
+            "(1) build sem erros TypeScript; "
+            "(2) executar start.sh e confirmar que o servidor sobe; "
+            "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
+            "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
+            "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
+            "Ver prompt completo em project/full-test-prompt.md"
+        ),
+    })
+
     path = f"/api/projects/{project_id}/tasks"
     body = {"tasks": tasks}
     data, status = _api_post(path, body)
     if 200 <= status < 300:
-        logger.info("[Monitor Loop] %d tarefas criadas para projeto %s (module=%s)", len(tasks), project_id, pm_module)
+        logger.info("[Monitor Loop] %d tarefas criadas para projeto %s (module=%s, inclui TSK-FULL-TEST)", len(tasks), project_id, pm_module)
         return True
     logger.warning("[Monitor Loop] Falha ao criar tarefas: %s %s", status, data)
     return False
@@ -1680,17 +1699,18 @@ def _run_monitor_loop(
                         devops_done = True
                         logger.info("[Monitor Loop] devops_done restaurado: TSK-DEVOPS-001 já está %s no BD.", _bt.get("status"))
                         break
-            # 2. Se devops já concluído, corrigir TSK-DEVOPS-001/TSK-FULL-TEST BLOCKED/ASSIGNED → DONE
-            #    (tarefa de infra não deve bloquear projetos existentes após restart)
+            # 2. Se devops já concluído, corrigir tasks de infra em estados TRAVADOS → DONE.
+            #    Só afeta IN_PROGRESS/WAITING_REVIEW/BLOCKED — não toca NEW/ASSIGNED
+            #    (TSK-FULL-TEST pode estar ASSIGNED aguardando execução legítima).
             if devops_done:
                 for _bt in _all_tasks_boot:
                     _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
                     if _bt_id in ("TSK-DEVOPS-001", "TSK-FULL-TEST"):
                         _bt_status = _bt.get("status", "")
-                        if _bt_status not in ("DONE", "QA_PASS", "QA_FAIL", "CANCELLED"):
+                        if _bt_status in ("IN_PROGRESS", "WAITING_REVIEW", "BLOCKED"):
                             _update_task(project_id, _bt_id, status="DONE")
                             logger.info(
-                                "[Monitor Loop] %s corrigido %s → DONE (devops já concluído — boot fix).",
+                                "[Monitor Loop] %s corrigido %s → DONE (devops já concluído — boot fix, estado travado).",
                                 _bt_id, _bt_status,
                             )
         except Exception as _dbe:
@@ -2365,15 +2385,56 @@ echo "TOKEN: $TOKEN"
 - Se retornar 415 → `Content-Type` errado — corrigir para `application/json`
 - Se TOKEN=FAIL → verificar campo: backend Fastify retorna `accessToken`, não `token`
 
-### 2b. Todos os endpoints que o frontend consome
+### 2b. Varredura de query params (BLOCKER se errado)
+
+Antes de testar os endpoints, varrer os arquivos `src/lib/*.ts` para detectar params inválidos:
+
+```bash
+# Detectar 'perPage' — deve ser 'limit'
+grep -rn "perPage" {apps_dir}/src/lib/ {apps_dir}/src/hooks/ {apps_dir}/src/components/
+
+# Detectar sort com valores inventados — verificar enum real do backend
+grep -rn "sort:.*'\\|sort=.*'" {apps_dir}/src/lib/ {apps_dir}/src/hooks/ {apps_dir}/src/components/
+
+# Detectar sort com prefixo '-' (Fastify rejeita)
+grep -rn "sort.*'-\\|sort.*\"-" {apps_dir}/src/lib/ {apps_dir}/src/hooks/
+```
+
+Se encontrar `perPage`: substituir por `limit` em todos os arquivos.
+Se encontrar `sort='newest'` ou outro valor não-listado no backend: substituir pelos valores válidos do schema Zod.
+Verificar o schema do backend: `grep -n "sort.*enum\\|z\\.enum" <backend_apps>/src/http/schemas/*.schema.ts`
+
+### 2c. Varredura de hrefs vs pages existentes (BLOCKER se faltando)
+
+```bash
+# Listar todos os hrefs que o nav/footer linka
+grep -rh 'href="/' {apps_dir}/src/components/layout/ | grep -oE '"(/[^"?#]+)"' | sort -u
+
+# Listar todas as pages existentes
+find {apps_dir}/src/app -name "page.tsx" | sed 's|{apps_dir}/src/app||' | sed 's|/page.tsx||' | sort
+```
+
+Para cada href que não tiver uma page.tsx correspondente: criar página stub com Header + Footer + título.
+Exemplo de stub:
+```tsx
+import Box from '@mui/material/Box'; import Container from '@mui/material/Container'; import Typography from '@mui/material/Typography';
+import {{{{ Header }}}} from '@/components/layout/Header'; import {{{{ Footer }}}} from '@/components/layout/Footer';
+export default function Route(): JSX.Element {{{{
+  return (<Box sx={{{{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}}}>
+    <Header /><Box component="main" sx={{{{ flex: 1 }}}}><Container sx={{{{ py: 6 }}}}><Typography variant="h4">Título</Typography></Container></Box><Footer />
+  </Box>);
+}}}}
+```
+
+### 2d. Todos os endpoints que o frontend consome
 Para cada rota em `src/lib/*.ts`, executar `curl` com o TOKEN e verificar HTTP 200.
 Erros críticos a corrigir:
 - HTTP 404 → rota errada. Verificar `app.ts` do backend para prefix real (ex: `/api/admin/orders` não `/api/orders`)
 - HTTP 415 → Content-Type errado (deve ser `application/json`)
-- HTTP 400 com `VALIDATION_ERROR` → campo com nome errado (ex: `stock` vs `stockLevel`, `active` vs `status`)
+- HTTP 400/500 com `VALIDATION_ERROR` → param com nome ou valor errado (ex: `perPage` vs `limit`, `sort='newest'` vs enum real)
 - CORS error → adicionar porta do frontend ao `CORS_ORIGIN` no `docker-compose.yml` do backend
 
-### 2c. Operações de escrita
+### 2e. Operações de escrita
 Testar ao menos uma operação POST/PATCH/DELETE em cada domínio com dados reais.
 
 ---
@@ -2382,11 +2443,15 @@ Testar ao menos uma operação POST/PATCH/DELETE em cada domínio com dados reai
 
 Grave `docs/qa/QA_REPORT_TSK-FULL-TEST.md` com:
 - Bugs encontrados e corrigidos (lista com arquivo, problema, fix)
+- Query params verificados (tabela: param enviado → param aceito pelo backend)
+- Hrefs verificados (tabela: href → page.tsx existe?)
 - Endpoints testados e status (tabela)
 - Status final: APROVADO (tudo funciona E2E) ou ISSUES PENDENTES (lista do que ficou)
 
 Só declare APROVADO se:
 - `npm run build` passou sem erros
+- Nenhum `perPage` ou sort inválido em `src/lib/*.ts`
+- Todos os hrefs de nav/footer têm page.tsx correspondente
 - Servidor sobe via `start.sh`
 - Todos os endpoints retornam 200 com dados reais
 - Operações de escrita funcionam

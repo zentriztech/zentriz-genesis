@@ -90,14 +90,34 @@ Você é o agente **QA (Web)**. Você:
 | C06 | Imports usam alias `@/` (ex: `import X from '@/components/X'`) — nunca caminhos relativos longos (`../../../`) | MINOR |
 | C07 | **`tsc --noEmit` passa sem erros fora de `__tests__/`** — props divergentes entre componente e uso, campos undefined em tipos, imports incorretos são detectados aqui. Se falhar: BLOCKER | BLOCKER |
 
+### 6.1.0 PROIBIÇÃO DE ORM PRÓPRIO — quando projeto consome backend via `uses_backend` (BLOCKER IMEDIATO)
+
+> Causa raiz validada em produção (2026-04-30): Frontend Next.js gerou Prisma + PostgreSQL + API Routes próprias ignorando backend linkado.
+
+Se `linked_projects_context` contém `uses_backend` OU o charter diz "consome API backend existente":
+
+| # | Check | Severidade |
+|---|-------|------------|
+| X01 | `apps/package.json` NÃO contém `prisma`, `drizzle-orm`, `typeorm`, `sequelize` — grep deve retornar vazio | BLOCKER |
+| X02 | `apps/` NÃO contém `prisma/schema.prisma`, `drizzle.config.ts`, ou pasta `migrations/` | BLOCKER |
+| X03 | `apps/src/app/api/` NÃO existe ou contém apenas proxies de auth (sem rotas de CRUD de recursos) | BLOCKER |
+| X04 | `.env.example` NÃO define `DATABASE_URL` (projeto frontend puro não tem banco próprio) | BLOCKER |
+
+**Varredura:**
+```bash
+grep -r "prisma\|drizzle\|typeorm" apps/package.json  # deve retornar vazio
+ls apps/src/app/api/ 2>/dev/null                       # deve ser vazio ou só auth proxy
+grep "DATABASE_URL" apps/.env.example 2>/dev/null      # deve retornar vazio
+```
+
 ### 6.1.1 Integração com Backend (aplica quando projeto consome API existente)
 
 Quando a task é de integração com backend (`linked_projects_context` presente), verificar adicionalmente:
 
 | # | Check | Severidade |
 |---|-------|------------|
-| B01 | Login usa campo `email` (não `username`) no `URLSearchParams` | BLOCKER |
-| B02 | Login extrai token de `body.data?.token` (não `body.access_token`) | BLOCKER |
+| B01 | Login usa `Content-Type: application/json` + `JSON.stringify({ email, password })` — **nunca** `application/x-www-form-urlencoded` (Fastify retorna 415) | BLOCKER |
+| B02 | Login extrai token de `body.data?.accessToken ?? body.data?.token` (backend Fastify retorna `accessToken`, não `token` nem `access_token`) | BLOCKER |
 | B03 | Todos os paths de API incluem prefixo `/api/` (ex: `/api/products`, `/api/auth/login`) | BLOCKER |
 | B04 | Resposta do backend é unwrapped de `{ data: T }` antes de usar — nunca `.map()` direto em resposta bruta | BLOCKER |
 | B05 | `price` convertido com `parseFloat(String(...))` antes de `.toLocaleString()` | MAJOR |
@@ -105,6 +125,14 @@ Quando a task é de integração com backend (`linked_projects_context` presente
 | B07 | Campos de backend como `active` e `stock` são mapeados corretamente para `inStock` nos tipos de UI | MAJOR |
 | B08 | `NEXT_PUBLIC_API_BASE_URL` não tem porta hardcoded no código — fallback é `''` ou variável sem default | MAJOR |
 | B09 | Tipos `ApiProduct`/`ApiCategory` distintos dos tipos de UI — sem confundir shape do backend com shape do componente | MAJOR |
+| B10 | **Paths de API conferem com o backend REAL** — backends Genesis frequentemente usam `/api/admin/orders` (não `/api/orders`). **Varredura obrigatória:** para cada path `'/api/X'` nos arquivos `src/lib/*.ts`, confirmar que o backend registra exatamente essa rota. Verificar `app.ts` ou `RUNBOOK.md` do projeto linkado. Se algum path retornaria 404 → BLOCKER. | BLOCKER |
+| B11 | **Prefixos CRUD assimétricos verificados:** GET list, GET/:id, POST, PUT, PATCH, DELETE de cada recurso podem ter prefixos diferentes. Ex: GET `/api/products/:id` (público) ≠ DELETE `/api/admin/products/:id`. Admin DEVE usar `/api/admin/:id` para detalhe — rota pública tem ownership check. | BLOCKER |
+| B12 | **Sub-recursos aninhados não inventados:** `GET /api/admin/X/:id/Y` — verificar se o backend tem esse endpoint antes de chamar. Se não existir, Dev deve usar filtro na listagem (ex: `?userId=:id`). | BLOCKER |
+| B13 | **Sort/order sem prefixo `-`:** endpoints que aceitam sort usam `sort=campo&order=asc\|desc` — nunca `sort=-campo`. Endpoints sem campo sort no schema Zod rejeitam o param com VALIDATION_ERROR 400. Verificar que nenhum `src/lib/*.ts` envia `sort=-X`. | BLOCKER |
+| B14 | **Sidebar hrefs mapeiam para `app/` existente:** cada `href` em Sidebar/nav/Header/Footer deve ter pasta correspondente em `apps/src/app/<rota>/page.tsx`. **Varredura obrigatória:** `grep -rh 'href="/' apps/src/components/layout/ \| grep -oE '"(/[^"]+)"'` — comparar com `find apps/src/app -name 'page.tsx'`. Cada href sem page.tsx é BLOCKER. | BLOCKER |
+| B15 | **Seed cobre entidades transacionais:** se o painel tem página de pedidos/pagamentos/transações, o seed do backend deve criar esses registros. Verificar chamada `seedOrders()` ou equivalente no `seed.mjs`. | MAJOR |
+| B16 | **Endpoint de update verificado:** se o Dev usa PUT/PATCH para atualizar recurso completo, confirmar que esse endpoint existe no backend. Se só existe `PATCH .../status`, os outros campos não podem ser atualizados — UI deve refletir isso. | BLOCKER |
+| B17 | **Query params validados contra o schema Zod do backend:** para cada endpoint de listagem em `src/lib/*.ts`, verificar que os nomes e valores dos params correspondem ao schema real. **Varredura:** `grep -rn "perPage\|sort='\|sort:'" apps/src/lib/` — `perPage` deve ser `limit`; `sort='newest'` deve ser um dos valores do enum Zod (ex: `'name'\|'price'\|'createdAt'\|'stockLevel'`). Valor inválido → backend retorna 500 INTERNAL_ERROR ou 400 VALIDATION_ERROR. Se encontrar params inválidos → BLOCKER. | BLOCKER |
 
 ### 6.2 Funcionalidade vs FR/NFR (BLOCKERS)
 
@@ -196,6 +224,10 @@ Quando a task é de integração com backend (`linked_projects_context` presente
 head -1 apps/src/theme/theme.ts         # deve ser 'use client'
 grep -r "#1976d2\|#9c27b0" apps/src/    # deve retornar vazio
 grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded)
+# W11: Dialog NÃO aceita slotProps.paper — deve usar PaperProps
+grep -rn "slotProps={{" apps/src/ | grep -i "dialog"  # deve retornar vazio
+# W12: useSearchParams precisa de Suspense
+grep -rn "useSearchParams" apps/src/app/  # cada resultado: verificar se há <Suspense> na mesma página
 ```
 
 | # | Check | Severidade |
@@ -206,9 +238,14 @@ grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded
 | W4 | `next/image` tem `width` e `height` explícitos em todas as instâncias | MAJOR |
 | W5 | `ThemeProvider` ou `ThemeRegistry` envolve a árvore em `layout.tsx` | BLOCKER |
 | W6 | `NEXT_PUBLIC_API_BASE_URL` usado em todas as chamadas de API — grep localhost:3 retorna vazio | BLOCKER |
-| W7 | Formulários de login usam `application/x-www-form-urlencoded` (não JSON) quando backend usa OAuth2 Password Flow | BLOCKER |
+| W7 | Formulários de login usam **`application/json`** com `JSON.stringify({ email, password })` — Fastify/Express Genesis **não aceita** `application/x-www-form-urlencoded` (retorna 415) | BLOCKER |
 | W8 | `docker-compose.yml` tem `name: <slug>` + `container_name:` + porta ≥ 3004 | BLOCKER |
 | W9 | `.env.example` documenta todas as variáveis `NEXT_PUBLIC_*` | MAJOR |
+| W11 | **MUI Dialog**: usar `PaperProps={{ sx: {...} }}` — **nunca** `slotProps={{ paper: {...} }}` (MUI v5 `Dialog` não suporta; `Menu`/`Popover` suportam mas `Dialog` não) | BLOCKER |
+| W12 | **`useSearchParams()` sem Suspense**: toda página que chama `useSearchParams()` DEVE envolver o componente com `useSearchParams` em `<Suspense>` — caso contrário Next.js 14 falha no prerender com `useSearchParams() should be wrapped in a suspense boundary` | BLOCKER |
+| W13 | **TypeScript `never` após `axios.isCancel()`**: após `if (axios.isCancel(err)) { return }`, não usar `err` nas branches seguintes — TypeScript estreita para `never`. Cast `const e = err as AxiosError & { code?: string }` deve vir **depois** do bloco isCancel. | BLOCKER |
+| W14 | **Interface extends `AxiosRequestConfig` com prop conflitante**: se a interface customizada redefine `auth` (ou outra prop já existente), adicionar ao `Omit<>` para evitar conflito de tipos. Ex: `Omit<AxiosRequestConfig, 'url' \| 'method' \| 'data' \| 'auth'>` | BLOCKER |
+| W15 | **Assinatura de função TypeScript**: funções que recebem `err: unknown` de handlers `onError` (TanStack Query, try/catch) **não podem** ter parâmetro tipado como tipo específico (ex: `ValidationIssue[]`) — usar `err: unknown` e fazer narrowing interno. | BLOCKER |
 
 ### Severidade → decisão
 | Severidade | Definição | Impacto na decisão |
