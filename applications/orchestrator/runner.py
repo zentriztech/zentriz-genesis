@@ -1666,12 +1666,45 @@ def _run_monitor_loop(
         _task_state = TaskState(project_id or "default").load()
     except Exception as _tse:
         logger.debug("[TaskState] Monitor Loop: não foi possível carregar (não crítico): %s", _tse)
+
+    # Restaurar devops_done a partir do banco — evita re-executar DevOps+TSK-FULL-TEST após restart do Docker.
+    # TSK-DEVOPS-001 DONE no BD significa que o DevOps já rodou neste projeto.
+    if project_id and not devops_done:
+        try:
+            _all_tasks_boot = _get_tasks(project_id)
+            for _bt in _all_tasks_boot:
+                _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
+                if _bt_id == "TSK-DEVOPS-001" and _bt.get("status") in ("DONE", "QA_PASS"):
+                    devops_done = True
+                    logger.info("[Monitor Loop] devops_done restaurado: TSK-DEVOPS-001 já está %s no BD.", _bt.get("status"))
+                    break
+        except Exception as _dbe:
+            logger.debug("[Monitor Loop] Não foi possível restaurar devops_done do BD: %s", _dbe)
     consecutive_dev_blocked: dict[str, int] = {}
     max_consecutive_dev_blocked = int(os.environ.get("MAX_CONSECUTIVE_DEV_BLOCKED", "5"))
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
     max_qa_rework = int(os.environ.get("MAX_QA_REWORK", "3"))
+    # Reconstruir qa_fail_count do BD para sobreviver a restarts do runner.
+    # Conta chamadas QA com status=QA_FAIL por task_id — representa reworks acumulados.
     qa_fail_count: dict[str, int] = {}
+    try:
+        _qfc_base = os.environ.get("API_BASE_URL", "").strip()
+        _qfc_token = os.environ.get("GENESIS_API_TOKEN", "").strip()
+        if _qfc_base and _qfc_token and project_id:
+            import urllib.request as _ur
+            _qfc_req = _ur.Request(
+                f"{_qfc_base.rstrip('/')}/api/projects/{project_id}/agent-metrics/qa-fail-counts",
+                headers={"Authorization": f"Bearer {_qfc_token}"},
+            )
+            with _ur.urlopen(_qfc_req, timeout=5) as _qfc_resp:
+                _qfc_data = json.loads(_qfc_resp.read())
+                qa_fail_count = {k: int(v) for k, v in (_qfc_data or {}).items()}
+                if qa_fail_count:
+                    logger.info("[Monitor Loop] qa_fail_count restaurado do BD: %s", qa_fail_count)
+    except Exception as _qfc_e:
+        logger.debug("[Monitor Loop] Não foi possível restaurar qa_fail_count: %s", _qfc_e)
     dev_rework_for_qa: dict[str, int] = {}  # rework_attempt do Dev nesta rodada → QA usa o mesmo
+    task_artifacts_for_qa: dict[str, list] = {}  # task_id → artifacts entregues pelo Dev (capturados antes do QA)
     # MONITOR_PARALLEL=true enables concurrent processing of multiple tasks of the
     # same type within a single loop iteration. Default false to preserve behavior.
     monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
@@ -1704,18 +1737,25 @@ def _run_monitor_loop(
                 logger.warning("[LEI 8] Tasks com mais de 3 arquivos estimados: %s", lei8_issues[:5])
         except Exception:
             pass
-        waiting_review = [t for t in tasks if t.get("status") == "WAITING_REVIEW"]
+        # TSK-FULL-TEST e TSK-DEVOPS-001 são tasks de infraestrutura/pós-entrega:
+        # não devem acionar Dev/QA após devops_done, nem bloquear all_done.
+        _INFRA_TASKS = {"TSK-FULL-TEST", "TSK-DEVOPS-001"}
+        pipeline_tasks = [
+            t for t in tasks
+            if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS
+        ] if devops_done else tasks
+        waiting_review = [t for t in pipeline_tasks if t.get("status") == "WAITING_REVIEW"]
         need_qa = len(waiting_review) > 0
         need_dev = any(
             t.get("status") in ("ASSIGNED", "IN_PROGRESS", "QA_FAIL")
-            for t in tasks
+            for t in pipeline_tasks
         )
         # GAP-P8: BLOCKED é terminal — task escalada para humano, Dev não tenta mais.
         # Humano intervém via portal (reprocessar task) para devolver a ASSIGNED.
         _terminal = {"DONE", "QA_PASS", "CANCELLED", "BLOCKED"}
-        all_done = bool(tasks) and all(t.get("status") in _terminal for t in tasks)
+        all_done = bool(pipeline_tasks) and all(t.get("status") in _terminal for t in pipeline_tasks)
         # Notificar tasks BLOCKED para o usuário saber que requer intervenção
-        _blocked_tasks = [t.get("taskId") or t.get("task_id") for t in tasks if t.get("status") == "BLOCKED"]
+        _blocked_tasks = [t.get("taskId") or t.get("task_id") for t in pipeline_tasks if t.get("status") == "BLOCKED"]
         if _blocked_tasks and not getattr(_blocked_tasks, "_notified", False):
             _post_step(
                 f"⚠️ {len(_blocked_tasks)} task(s) em BLOCKED (requer revisão humana): "
@@ -1729,29 +1769,32 @@ def _run_monitor_loop(
             # sequential mode (default) only the first task is processed per iteration.
             qa_tasks_batch = waiting_review if monitor_parallel else waiting_review[:1]
 
-            def _run_qa_task(task: dict) -> None:
+            def _run_qa_task(task: dict, _captured_dev_artifacts: list | None = None) -> None:
                 tid = task.get("taskId") or task.get("task_id")
                 task_desc = task.get("title") or task.get("description") or task.get("name") or ""
-                # GAP-T4: QA deve validar o arquivo real do disco, não o JSON da resposta do Dev (que pode estar truncado).
-                # O runner já lê apps/ do disco para o Dev (_disk_artifacts). Fazemos o mesmo para o QA.
-                _qa_disk_artifacts: list = []
-                if project_id:
-                    try:
-                        _qa_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
-                        if _qa_apps_root.exists():
-                            for _qf in sorted(_qa_apps_root.rglob("*")):
-                                if _qf.is_file() and _qf.stat().st_size < 200_000 and not any(
-                                    p in str(_qf) for p in ("node_modules", ".next", ".git")
-                                ):
-                                    _qrel = str(_qf.relative_to(_qa_apps_root.parent))
-                                    _qa_disk_artifacts.append({
-                                        "path": _qrel,
-                                        "content": _qf.read_text(encoding="utf-8", errors="replace"),
-                                    })
-                    except Exception as _qde:
-                        logger.debug("[QA-Disk] Falha ao ler apps/ do disco: %s", _qde)
-                # Usar artefatos do disco se disponíveis — fallback para JSON do Dev
-                _qa_artifacts = _qa_disk_artifacts if _qa_disk_artifacts else last_dev_artifacts
+                # task_delivered_files: somente o que o Dev entregou para ESTA task.
+                # Capturado no momento do dispatch (não via closure para evitar race condition).
+                _task_files = [
+                    a for a in (_captured_dev_artifacts or [])
+                    if isinstance(a, dict) and a.get("path") and a.get("content")
+                ] or None
+                # QA recebe SOMENTE os arquivos entregues pelo Dev desta task.
+                # Ler do disco os mesmos paths para garantir conteúdo não truncado.
+                _qa_artifacts: list = []
+                if _task_files:
+                    _proj_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / (project_id or "")
+                    for _tf in _task_files:
+                        _disk_path = _proj_root / _tf["path"]
+                        if _disk_path.exists() and _disk_path.stat().st_size < 200_000:
+                            _qa_artifacts.append({
+                                "path": _tf["path"],
+                                "content": _disk_path.read_text(encoding="utf-8", errors="replace"),
+                            })
+                        else:
+                            _qa_artifacts.append(_tf)
+                if not _qa_artifacts:
+                    # fallback: apenas os arquivos entregues pelo Dev (sem ler todo o disco)
+                    _qa_artifacts = _task_files or (_captured_dev_artifacts or [])
                 code_refs = [a.get("path") for a in _qa_artifacts if isinstance(a, dict) and a.get("path")]
                 _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
@@ -1764,12 +1807,6 @@ def _run_monitor_loop(
                         dev_rework_for_qa.get(tid) or
                         qa_fail_count.get(tid, 0)
                     )
-                    # task_delivered_files: somente o que o Dev entregou nesta rodada
-                    # Extrai do last_dev_artifacts (JSON do Dev) — arquivos novos/modificados
-                    _task_files = [
-                        a for a in (last_dev_artifacts or [])
-                        if isinstance(a, dict) and a.get("path") and a.get("content")
-                    ] or None
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
@@ -1841,11 +1878,16 @@ def _run_monitor_loop(
 
             if monitor_parallel and len(qa_tasks_batch) > 1:
                 with ThreadPoolExecutor(max_workers=min(len(qa_tasks_batch), 3)) as pool:
-                    futures = [pool.submit(_run_qa_task, t) for t in qa_tasks_batch]
+                    futures = [
+                        pool.submit(_run_qa_task, t, task_artifacts_for_qa.get(str(t.get("taskId") or t.get("task_id") or "").strip()))
+                        for t in qa_tasks_batch
+                    ]
                     for f in as_completed(futures):
                         f.result()  # re-raise if any raised
             else:
-                _run_qa_task(qa_tasks_batch[0])
+                _qt = qa_tasks_batch[0]
+                _qt_id = str(_qt.get("taskId") or _qt.get("task_id") or "").strip()
+                _run_qa_task(_qt, task_artifacts_for_qa.get(_qt_id))
             time.sleep(2)
             continue
 
@@ -1954,7 +1996,11 @@ def _run_monitor_loop(
                                     _disk_artifacts.append({"path": _rel, "content": _f.read_text(encoding="utf-8", errors="replace")})
                     except Exception:
                         pass
-                    _ea = last_dev_artifacts if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
+                    # No rework (QA_FAIL), usar artefatos capturados desta task — evita
+                    # poluição com last_dev_artifacts de outras tasks processadas no meio.
+                    _norm_ea_tid = str(task_id).strip() if task_id else ""
+                    _captured_for_rework = task_artifacts_for_qa.get(_norm_ea_tid)
+                    _ea = (_captured_for_rework or last_dev_artifacts) if dev_task.get("status") == "QA_FAIL" else _disk_artifacts
                     # Simetria de modelo: Dev e QA usam o mesmo rework_attempt.
                     # Se Dev escalou para Opus, QA também usa Opus nessa rodada.
                     # Normalizar task_id para garantir match com a chave usada pelo QA loop.
@@ -1975,6 +2021,9 @@ def _run_monitor_loop(
                     dev_summary = dev_response.get("summary", "")
                     dev_status = dev_response.get("status", "?")
                     last_dev_artifacts = dev_response.get("artifacts", [])
+                    # Capturar artefatos desta task para o QA — evita race condition com last_dev_artifacts
+                    if task_id:
+                        task_artifacts_for_qa[str(task_id).strip()] = list(last_dev_artifacts)
                     _post_dialogue(
                         "pm", "dev", "task.assigned",
                         _get_summary_human("task.assigned", "pm", "dev", backlog_summary[:200]),
@@ -2214,6 +2263,10 @@ def _run_monitor_loop(
                             _update_task(project_id, "TSK-DEVOPS-001", status="DONE")
                         except Exception:
                             pass
+                    # Persistir TSK-DEVOPS-001 no TaskState para sobreviver a restarts do runner
+                    if _task_state:
+                        _task_state.mark_done("TSK-DEVOPS-001")
+                        _task_state.save()
                     _post_step("DevOps concluiu artefatos. Iniciando execução local do produto.", request_id)
                     # Run locally: build + serve + open browser
                     if project_id:
@@ -2229,8 +2282,14 @@ def _run_monitor_loop(
                                 "module":    "test",
                                 "ownerRole": "QA",
                                 "requirements": (
-                                    "Validação end-to-end completa pelo Claude Code Agent: "
-                                    "tsc --noEmit, interfaces, use-cases, start.sh, endpoints reais."
+                                    "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
+                                    "Esta é a ÚLTIMA task. O agente DEVE: "
+                                    "(1) build sem erros TypeScript; "
+                                    "(2) executar start.sh e confirmar que o servidor sobe; "
+                                    "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
+                                    "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
+                                    "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
+                                    "Ver prompt completo em project/full-test-prompt.md"
                                 ),
                                 "status":    "ASSIGNED",
                                 "depends_on_files": [],
@@ -2243,26 +2302,79 @@ def _run_monitor_loop(
                     _proj_host_dir = Path(_host_root) / project_id if (_host_root and project_id) else None
                     _proj_container_dir = (Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id) if project_id else None
 
-                    _ft_prompt = f"""# TASK-FULL-TEST — Validação End-to-End do Projeto
+                    _ft_prompt = f"""# TASK-FULL-TEST — Validação E2E e Correção Final
 
-Você é o Claude Code Agent executando a validação final do projeto antes do aceite humano.
+Você é o Claude Code Agent. Esta é a ÚLTIMA task do pipeline — o produto só vai para aceite humano após você garantir que funciona end-to-end de verdade.
 
 ## Projeto
 - Path: {_proj_host_dir or 'VER PROJECT_FILES_ROOT'}
 - Apps: {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}
 
-## O que fazer
+## REGRA FUNDAMENTAL
+Esta task tem 3 fases obrigatórias em sequência. Não avance para a fase seguinte sem concluir a anterior.
+Se encontrar um bug: CORRIJA IMEDIATAMENTE antes de continuar. Não liste para corrigir depois.
 
-1. **TypeScript** — rode `cd apps && npm install --legacy-peer-deps 2>/dev/null && npx tsc --noEmit` e corrija todos os erros encontrados
-2. **Contratos** — verifique que cada repositório em `infra/repositories/` implementa os métodos da sua interface em `domain/*/`
-3. **Use-cases** — verifique que chamadas de repositório nos `application/*/` batem com os métodos reais
-4. **Infraestrutura** — verifique que `project/start.sh` existe e `docker-compose.yml` está correto
-5. **Seed** — verifique que `seed.mjs` ou `seed.ts` existe e pode ser executado
-6. **Correções** — corrija os problemas encontrados diretamente nos arquivos
+---
 
-## Ao finalizar
-- Grave um relatório em `docs/qa/QA_REPORT_TSK-FULL-TEST.md` com: o que foi encontrado, o que foi corrigido, status final
-- Se tudo OK: indique APROVADO; se há issues irresolvíveis: indique o que precisa de intervenção humana
+## FASE 1 — Build e TypeScript (BLOCKER se falhar)
+
+```bash
+cd {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}
+npm install --legacy-peer-deps --no-audit --no-fund 2>&1 | tail -3
+npm run build 2>&1 | tail -20
+```
+
+- Se houver erros TypeScript: corrija cada um até `npm run build` passar sem erros
+- Erros comuns a corrigir:
+  - `Property 'X' does not exist on type 'Y'` → campo com nome errado
+  - `dialog slotProps.paper` → deve ser `PaperProps` em MUI Dialog
+  - `useSearchParams() should be wrapped in a suspense boundary` → adicionar `<Suspense>`
+  - `axios.isCancel()` narrowing para `never` → mover cast para depois do bloco isCancel
+  - Interface extends AxiosRequestConfig com prop conflitante → adicionar ao Omit<>
+  - Função com `err: ValidationIssue[]` recebendo `unknown` → trocar para `err: unknown`
+
+---
+
+## FASE 2 — Servidor e Integração (BLOCKER se falhar)
+
+Execute `project/start.sh` e confirme que o servidor sobe.
+Se o projeto tem `linked_projects_context` (consome backend externo), faça TODOS estes testes:
+
+### 2a. Login
+```bash
+TOKEN=$(curl -s -X POST <BACKEND_URL>/api/auth/login \\
+  -H "Content-Type: application/json" \\
+  -d '{{"email":"<SEED_EMAIL>","password":"<SEED_PASSWORD>"}}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{{}}).get('accessToken','FAIL'))")
+echo "TOKEN: $TOKEN"
+```
+- Se retornar 415 → `Content-Type` errado — corrigir para `application/json`
+- Se TOKEN=FAIL → verificar campo: backend Fastify retorna `accessToken`, não `token`
+
+### 2b. Todos os endpoints que o frontend consome
+Para cada rota em `src/lib/*.ts`, executar `curl` com o TOKEN e verificar HTTP 200.
+Erros críticos a corrigir:
+- HTTP 404 → rota errada. Verificar `app.ts` do backend para prefix real (ex: `/api/admin/orders` não `/api/orders`)
+- HTTP 415 → Content-Type errado (deve ser `application/json`)
+- HTTP 400 com `VALIDATION_ERROR` → campo com nome errado (ex: `stock` vs `stockLevel`, `active` vs `status`)
+- CORS error → adicionar porta do frontend ao `CORS_ORIGIN` no `docker-compose.yml` do backend
+
+### 2c. Operações de escrita
+Testar ao menos uma operação POST/PATCH/DELETE em cada domínio com dados reais.
+
+---
+
+## FASE 3 — Relatório e Veredito
+
+Grave `docs/qa/QA_REPORT_TSK-FULL-TEST.md` com:
+- Bugs encontrados e corrigidos (lista com arquivo, problema, fix)
+- Endpoints testados e status (tabela)
+- Status final: APROVADO (tudo funciona E2E) ou ISSUES PENDENTES (lista do que ficou)
+
+Só declare APROVADO se:
+- `npm run build` passou sem erros
+- Servidor sobe via `start.sh`
+- Todos os endpoints retornam 200 com dados reais
+- Operações de escrita funcionam
 
 Execute agora sem pedir confirmação.
 """
@@ -2330,7 +2442,12 @@ Execute agora sem pedir confirmação.
                                 _ft_report.write_text(f"# TASK-FULL-TEST — Relatório Claude Code Agent\n\n{_ft_result_text}", encoding="utf-8")
                             except Exception: pass
                         _approved = any(w in _ft_result_text.upper() for w in ["APROVADO", "PASSED", "QA_PASS", "ALL CHECKS"])
-                        _update_task(project_id, "TSK-FULL-TEST", status="DONE" if _approved else "QA_FAIL")
+                        _ft_final_status = "DONE" if _approved else "QA_FAIL"
+                        _update_task(project_id, "TSK-FULL-TEST", status=_ft_final_status)
+                        # Persistir TSK-FULL-TEST no TaskState para sobreviver a restarts do runner
+                        if _task_state:
+                            _task_state.set_status("TSK-FULL-TEST", _ft_final_status)
+                            _task_state.save()
                         _post_step(
                             f"{'✅' if _approved else '⚠️'} TASK-FULL-TEST (Claude Code): "
                             f"{'aprovada' if _approved else 'issues encontradas — ver QA_REPORT_TSK-FULL-TEST.md'}",
@@ -2344,6 +2461,14 @@ Execute agora sem pedir confirmação.
                             request_id,
                         )
                         _update_task(project_id, "TSK-FULL-TEST", status="ASSIGNED")
+
+                    # Mover o stepper do portal para "Pronto" — postar agent_working do devops
+                    # para que o portal não fique preso em "Dev/QA" (último agent_working foi do QA da FULL-TEST)
+                    _post_agent_working(
+                        "devops",
+                        "✅ Projeto entregue. Aguardando aceite do responsável.",
+                        request_id,
+                    )
 
                     # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
                     _post_step(
@@ -3091,11 +3216,25 @@ def main() -> int:
                         _api_post(f"/api/projects/{project_id}/tasks", {"tasks": [_consolidated_task]})
                         backlog_summary = f"[TRIVIAL CONSOLIDADO] 1 task — {len(_active_pm_tasks)} tasks do PM unificadas. {charter_summary[:300]}"
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
+                # Após o Monitor Loop, marcar projeto como completed se todas as tasks estiverem DONE.
+                # Sem isso o portal fica mostrando status=running mesmo com tudo concluído.
+                if project_id:
+                    try:
+                        _post_loop_tasks = _get_tasks(project_id)
+                        _terminal_set = {"DONE", "QA_PASS", "CANCELLED", "BLOCKED"}
+                        _all_terminal = bool(_post_loop_tasks) and all(t.get("status") in _terminal_set for t in _post_loop_tasks)
+                        _current_proj_status = _get_project_status(project_id)
+                        if _all_terminal and _current_proj_status not in ("accepted", "completed", "stopped", "failed"):
+                            _completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                            _patch_project({"status": "completed", "completed_at": _completed_at, "finished_at": _completed_at})
+                            logger.info("[Pipeline] Projeto marcado como completed (todas tasks terminais).")
+                    except Exception as _pls_e:
+                        logger.warning("[Pipeline] Falha ao marcar projeto completed pós-loop: %s", _pls_e)
                 # Pipeline Run Log — fechar run após Monitor Loop (stopped/accepted/sigterm)
                 if _run_log:
                     try:
                         _proj_status = _get_project_status(project_id) or "stopped"
-                        _reason = "accepted" if _proj_status == "accepted" else ("sigterm" if _shutdown_requested else "stopped")
+                        _reason = "accepted" if _proj_status == "accepted" else ("completed" if _proj_status == "completed" else ("sigterm" if _shutdown_requested else "stopped"))
                         _run_log.stop_run(reason=_reason)
                     except Exception:
                         pass
