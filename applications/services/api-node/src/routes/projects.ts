@@ -388,16 +388,59 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE pt.trigger_project_id = $1 AND pt.trigger_status = 'accepted'`,
             [id]
           );
+          const runnerServiceUrl = (process.env.RUNNER_SERVICE_URL ?? "").trim();
+          const apiBaseUrl = (process.env.API_BASE_URL ?? "http://localhost:3000").trim();
           for (const t of triggers.rows) {
-            const target = await pool.query("SELECT id, status FROM projects WHERE id=$1", [t.project_id]);
+            const target = await pool.query("SELECT id, status, created_by, tenant_id FROM projects WHERE id=$1", [t.project_id]);
             const tp = target.rows[0] as Record<string, unknown>;
-            if (tp && ["draft","spec_submitted","stopped","failed"].includes(tp.status as string)) {
-              const { spawn } = await import("child_process");
-              const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
-              const python = process.env.PYTHON_BIN ?? "python3";
-              spawn(python, [runnerPath, String(t.project_id)], { detached: true, stdio: "ignore" }).unref();
-              await pool.query("UPDATE projects SET status='running', updated_at=NOW() WHERE id=$1", [t.project_id]);
-              console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho do projeto aceito ${id}`);
+            if (!tp || !["draft","spec_submitted","stopped","failed"].includes(tp.status as string)) continue;
+            // Chamar runner_server via HTTP — o container api não tem Python
+            if (runnerServiceUrl) {
+              try {
+                const specRes = await pool.query(
+                  `SELECT file_path FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`,
+                  [t.project_id]
+                );
+                const specPath = specRes.rows[0]?.file_path as string | undefined;
+                if (!specPath) {
+                  console.warn(`[TRIGGER] Spec não encontrada para ${t.project_id} — abortando trigger`);
+                  continue;
+                }
+                const { signToken } = await import("../auth.js");
+                const userRes = await pool.query(
+                  `SELECT u.id, u.email, u.role FROM users u WHERE u.id = $1`, [tp.created_by]
+                );
+                const u = userRes.rows[0] as Record<string, unknown> | undefined;
+                if (!u) { console.warn(`[TRIGGER] Usuário não encontrado para ${t.project_id}`); continue; }
+                const token = signToken({ sub: u.id as string, email: u.email as string, role: u.role as string, tenantId: tp.tenant_id as string | null }, "24h");
+                const uploadDir = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
+                const runnerUploadDir = (process.env.RUNNER_UPLOAD_DIR ?? "").trim();
+                let runBody: Record<string, string>;
+                if (runnerUploadDir && (specPath as string).startsWith(uploadDir)) {
+                  const relative = (specPath as string).slice(uploadDir.length);
+                  runBody = { projectId: t.project_id, specPath: `${runnerUploadDir}${relative}`, apiBaseUrl, token };
+                } else {
+                  const { readFileSync } = await import("fs");
+                  const specB64 = readFileSync(specPath as string).toString("base64");
+                  runBody = { projectId: t.project_id, specContent: specB64, apiBaseUrl, token };
+                }
+                const res = await fetch(`${runnerServiceUrl.replace(/\/$/, "")}/run`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(runBody),
+                  signal: AbortSignal.timeout(15000),
+                });
+                if (res.ok || res.status === 409) {
+                  console.info(`[TRIGGER] Projeto ${t.project_id} iniciado via runner_server (status=${res.status}) — gatilho de ${id}`);
+                } else {
+                  const txt = await res.text();
+                  console.error(`[TRIGGER] runner_server retornou ${res.status} para ${t.project_id}: ${txt.slice(0, 200)}`);
+                }
+              } catch (trigErr) {
+                console.error(`[TRIGGER] Erro ao disparar ${t.project_id} via runner_server:`, trigErr);
+              }
+            } else {
+              console.warn(`[TRIGGER] RUNNER_SERVICE_URL não definido — não foi possível disparar ${t.project_id}`);
             }
           }
         } catch (e) {
