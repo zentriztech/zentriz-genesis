@@ -1667,19 +1667,34 @@ def _run_monitor_loop(
     except Exception as _tse:
         logger.debug("[TaskState] Monitor Loop: não foi possível carregar (não crítico): %s", _tse)
 
-    # Restaurar devops_done a partir do banco — evita re-executar DevOps+TSK-FULL-TEST após restart do Docker.
-    # TSK-DEVOPS-001 DONE no BD significa que o DevOps já rodou neste projeto.
-    if project_id and not devops_done:
+    # Restaurar devops_done + corrigir infra tasks não-terminais no boot.
+    # Evita re-executar DevOps+TSK-FULL-TEST após restart do Docker.
+    if project_id:
         try:
             _all_tasks_boot = _get_tasks(project_id)
-            for _bt in _all_tasks_boot:
-                _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
-                if _bt_id == "TSK-DEVOPS-001" and _bt.get("status") in ("DONE", "QA_PASS"):
-                    devops_done = True
-                    logger.info("[Monitor Loop] devops_done restaurado: TSK-DEVOPS-001 já está %s no BD.", _bt.get("status"))
-                    break
+            # 1. Restaurar devops_done se TSK-DEVOPS-001 já está DONE no BD
+            if not devops_done:
+                for _bt in _all_tasks_boot:
+                    _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
+                    if _bt_id == "TSK-DEVOPS-001" and _bt.get("status") in ("DONE", "QA_PASS"):
+                        devops_done = True
+                        logger.info("[Monitor Loop] devops_done restaurado: TSK-DEVOPS-001 já está %s no BD.", _bt.get("status"))
+                        break
+            # 2. Se devops já concluído, corrigir TSK-DEVOPS-001/TSK-FULL-TEST BLOCKED/ASSIGNED → DONE
+            #    (tarefa de infra não deve bloquear projetos existentes após restart)
+            if devops_done:
+                for _bt in _all_tasks_boot:
+                    _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
+                    if _bt_id in ("TSK-DEVOPS-001", "TSK-FULL-TEST"):
+                        _bt_status = _bt.get("status", "")
+                        if _bt_status not in ("DONE", "QA_PASS", "QA_FAIL", "CANCELLED"):
+                            _update_task(project_id, _bt_id, status="DONE")
+                            logger.info(
+                                "[Monitor Loop] %s corrigido %s → DONE (devops já concluído — boot fix).",
+                                _bt_id, _bt_status,
+                            )
         except Exception as _dbe:
-            logger.debug("[Monitor Loop] Não foi possível restaurar devops_done do BD: %s", _dbe)
+            logger.debug("[Monitor Loop] Não foi possível restaurar/corrigir estado no boot: %s", _dbe)
     consecutive_dev_blocked: dict[str, int] = {}
     max_consecutive_dev_blocked = int(os.environ.get("MAX_CONSECUTIVE_DEV_BLOCKED", "5"))
     loop_interval = int(os.environ.get("MONITOR_LOOP_INTERVAL", "20"))
@@ -1717,7 +1732,7 @@ def _run_monitor_loop(
             _post_step("Monitor Loop encerrado (sinal recebido).", request_id)
             break
         status = _get_project_status(project_id)
-        if status in ("accepted", "stopped"):
+        if status in ("accepted", "stopped", "completed"):
             _post_step(f"Monitor Loop encerrado: status do projeto é '{status}'.", request_id)
             break
         if status is None:
@@ -2470,11 +2485,17 @@ Execute agora sem pedir confirmação.
                         request_id,
                     )
 
+                    # Marcar projeto como completed — sai de "Em Execução" para "Pronto"
+                    _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    _patch_project({"status": "completed", "completed_at": _now_iso, "finished_at": _now_iso})
+                    logger.info("[Monitor Loop] Projeto marcado como completed — aguardando aceite do usuário.")
+
                     # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
                     _post_step(
                         "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
                         request_id,
                     )
+                    break
                 except Exception as e:
                     logger.exception("[Monitor Loop] DevOps falhou")
                     _post_error(str(e), request_id, e)
