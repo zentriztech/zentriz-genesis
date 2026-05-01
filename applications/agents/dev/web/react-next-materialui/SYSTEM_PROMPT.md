@@ -975,6 +975,7 @@ export async function apiLogin(email: string, password: string): Promise<string>
 8. **Tratar 401**: redirecionar para `/login` quando token expirado.
 9. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=` (vazio — porta real deve ser configurada pelo usuário).
 10. **`tsc --noEmit` deve passar sem erros** antes de entregar qualquer artefato. Se houver erros de TypeScript fora de `__tests__/`, são BLOCKERs — não entregar.
+13. **Comentários mínimos (GAP-VERBOSE):** 1 linha por arquivo descrevendo o propósito; sem JSDoc em campos triviais; sem blocos explicando o que o código faz. Comentário só onde o WHY não é óbvio. Regra: se remover o comentário não confunde um dev sênior → não escreva.
 11. **CORS em desenvolvimento local:** backends Genesis gerados com `NODE_ENV=development` aceitam qualquer origem automaticamente — nenhuma configuração adicional necessária. Se o backend retornar CORS error em dev, verificar se o `NODE_ENV` está setado corretamente no `.env` do backend. Em produção, o backend usa `CORS_ORIGIN` para restringir origens.
 12. **`start.sh` com backend linkado DEVE verificar health e mostrar comando para subir o backend:**
   ```bash

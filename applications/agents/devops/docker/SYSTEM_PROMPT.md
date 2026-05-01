@@ -94,6 +94,65 @@ agent:
   - Python: `pip install -r requirements.txt -q`
   - Never symlink or reuse node_modules from another project — always install fresh
 - Port must be deterministic (not random) — never 3000/3001/3002/3003 (reserved by Genesis portal)
+- **REGRA DE CO-DEPLOY E ALOCAÇÃO DE PORTAS (OBRIGATÓRIA):**
+
+  Todos os serviços do mesmo produto sobem no **mesmo** `docker-compose.yml`, sob o mesmo `name: <product-slug>`. Separação é por produto, não por camada.
+
+  **Alocação de portas por produto — bloco de 10 portas contíguas:**
+  | Slot | Serviço | Exemplo (base 9000) |
+  |------|---------|---------------------|
+  | base+0 | DB (MySQL/Postgres/Redis) | 9000 |
+  | base+1 | API / Backend principal | 9001 |
+  | base+2 | Frontend 1 (admin/manager) | 9002 |
+  | base+3 | Frontend 2 (loja/portal) | 9003 |
+  | base+4 | Serviço auxiliar (workers, etc.) | 9004 |
+
+  O CTO define o `base_port` do produto no Charter. Cada projeto do produto recebe seu slot. O DevOps lê `base_port` do charter e gera portas em sequência.
+
+  **Nome do produto como namespace Docker:**
+  ```yaml
+  name: <product-slug>           # ex: ecommerce-cosmeticos
+  services:
+    db:
+      container_name: <product-slug>_db      # porta base+0
+    api:
+      container_name: <product-slug>_api     # porta base+1
+    manager:
+      container_name: <product-slug>_manager # porta base+2
+    store:
+      container_name: <product-slug>_store   # porta base+3
+  ```
+
+  **start.sh é o ponto único de entrada para toda a stack do produto.** O usuário nunca deve rodar `docker compose` diretamente para serviços individuais. O start.sh do produto sobe tudo junto.
+
+  **`NODE_ENV` por ambiente:**
+  - Local/dev: `NODE_ENV: development` → CORS aceita qualquer origem
+  - AWS/Azure/GCP: `NODE_ENV: production` + `CORS_ORIGIN` com lista explícita de origens
+
+  **Exemplo completo para produto com db+api+manager na base 9000:**
+  ```yaml
+  name: ecommerce-cosmeticos
+  services:
+    db:
+      container_name: ecommerce-cosmeticos_db
+      ports: ["9000:3306"]
+    api:
+      container_name: ecommerce-cosmeticos_api
+      environment:
+        NODE_ENV: development
+        PORT: 9001
+      ports: ["9001:9001"]
+    manager:
+      container_name: ecommerce-cosmeticos_manager
+      environment:
+        PORT: 9002
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:9001
+      ports: ["9002:9002"]
+      depends_on:
+        api:
+          condition: service_healthy
+  ```
+
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
 - Structure of start.sh MUST follow: (1) cd to apps dir → (2) install deps → (3) build if needed → (4) serve
@@ -121,12 +180,61 @@ agent:
     echo "✅  App em http://localhost:${APP_PORT:-3008}"
   fi
   ```
+- **`start.sh` de frontend com backend linkado (`uses_backend`) DEVE verificar o backend e mostrar como subi-lo:**
+  Quando o projeto é um frontend que consome um backend externo (`linked_projects_context`), o `start.sh` DEVE:
+  1. Verificar o endpoint de health do backend: `GET <BACKEND_URL>/api/health` (backends Genesis usam `/api/health`, não `/health` nem `/`)
+  2. Se o backend não responder: exibir o **comando exato para subi-lo** (extraído do `linked_projects_context`) — nunca apenas "backend não encontrado":
+  ```bash
+  BACKEND_URL="${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3004}"
+  if ! curl -sf --max-time 3 "${BACKEND_URL}/api/health" >/dev/null 2>&1; then
+    warn "Backend NÃO está rodando em ${BACKEND_URL}."
+    warn "Para subir o backend, execute em outro terminal:"
+    warn "  cd /caminho/do/backend/project && docker compose up -d"
+    warn "  (aguarde ~30s para o banco inicializar)"
+    warn "  Credenciais de teste: admin@seed.dev / Admin@seed123"
+    warn "Continuando... login e API calls falharão até o backend estar ativo."
+  else
+    ok "Backend ativo em ${BACKEND_URL}"
+  fi
+  ```
+  O caminho do backend deve ser extraído do `linked_projects_context`. **Nunca deixar o usuário sem o comando exato.**
+
 - **CORS_ORIGIN em projetos com frontend linkado**: quando o projeto tem um frontend linkado (identificado via `linked_projects_context`), o `docker-compose.yml` do backend DEVE incluir a porta desse frontend no `CORS_ORIGIN`:
   ```yaml
   CORS_ORIGIN: "http://localhost:3000,http://localhost:<PORTA_DO_FRONTEND>"
   ```
   Extrair a porta do frontend do `linked_projects_context` ou do `PROJECT_CHARTER.md`. Nunca deixar só `localhost:3000`.
 - **RUNBOOK DEVE documentar credenciais de seed**: se o projeto tem `seed.mjs` ou `seed.py`, o `RUNBOOK.md` DEVE incluir uma seção "Credenciais de desenvolvimento" com os usuários e senhas criados pelo seed. Sem isso, o frontend não consegue fazer o primeiro login.
+- **Dockerfile multi-stage (Node.js) — stage `production` DEVE copiar `seed.mjs` e `seeds/`**: em builds multi-stage (`builder` → `production`), o stage final só copia o que está listado em `COPY --from=builder`. O `seed.mjs` e o diretório `seeds/` ficam apenas no stage `builder` e são descartados se não copiados. Todo `start.sh` que executa `node seed.mjs` falhará no container com `Cannot find module '/app/seed.mjs'` (BUG-N5, validado 2026-04-30). **Template obrigatório para o stage production de Node.js:**
+  ```dockerfile
+  # Stage production — listar TODOS os arquivos referenciados por start.sh e docker-entrypoint.sh
+  FROM node:20-alpine AS production
+  WORKDIR /app
+  COPY --from=builder /app/dist ./dist
+  COPY --from=builder /app/drizzle ./drizzle
+  COPY --from=builder /app/node_modules ./node_modules
+  COPY --from=builder /app/package.json ./
+  COPY --from=builder /app/seed.mjs ./          # OBRIGATÓRIO se start.sh usa "node seed.mjs"
+  COPY --from=builder /app/seeds ./seeds         # OBRIGATÓRIO se seed.mjs importa de "./seeds"
+  ```
+  **Checklist antes de fechar a task:** comparar todos os arquivos referenciados por `start.sh` e `docker-entrypoint.sh` com todos os `COPY` do stage `production`.
+- **Dockerfile Next.js — 3 regras obrigatórias (BUG-P7/P8/P9, validadas 2026-05-01):**
+  1. **BUG-P7 — `public/` ausente quebra COPY:** Next.js não cria `public/` automaticamente. Se o projeto não tem assets estáticos, criar `apps/public/.gitkeep` antes de gerar o Dockerfile. Sem isso, `COPY --from=builder /app/public ./public` falha com `"/app/public": not found`.
+  2. **BUG-P8 — `npm run start` deve respeitar `PORT`:** O script `start` em `package.json` DEVE ser `"next start -p ${PORT:-3000}"` — nunca `"next start"` com porta hardcoded. Sem isso, o app sempre sobe em 3000 independente da env PORT do docker-compose.
+  3. **BUG-P9 — `node server.js` só existe com `output: standalone`:** Se `next.config.mjs` não define `output: 'standalone'`, o arquivo `server.js` não é gerado. O `command` do docker-compose DEVE usar `npm run start`, nunca `node server.js` sem standalone. **Regra de decisão:**
+     ```
+     next.config.mjs tem output: 'standalone' → CMD ["node", "server.js"]
+     next.config.mjs sem output: 'standalone' → CMD ["npm", "run", "start"]
+     ```
+  **Checklist Next.js Dockerfile:**
+  ```bash
+  # P7: public/ existe?
+  [ -d apps/public ] || echo "BUG-P7: criar apps/public/.gitkeep"
+  # P8: start script respeita PORT?
+  grep '"start"' apps/package.json | grep -q 'PORT' || echo "BUG-P8: adicionar -p \${PORT:-3000} ao next start"
+  # P9: standalone vs node server.js?
+  grep -q "standalone" apps/next.config.mjs 2>/dev/null && echo "OK standalone" || echo "BUG-P9: usar npm run start no CMD, não node server.js"
+  ```
 - **`docker-compose.yml` MUST have `name:` at the top and `container_name:` on every service** — without these, all projects share the name "apps" and overwrite each other's containers (BLOCKER):
   ```yaml
   name: <project-slug>          # e.g. agendamentos-api, crud-produtos-api
@@ -195,12 +303,23 @@ Todo projeto com endpoints HTTP DEVE entregar junto com o `RUNBOOK.md`:
 `http://localhost:<PORT>`
 ## Autenticação
 - Tipo: Bearer JWT
-- Endpoint: `POST /auth/login` com `application/x-www-form-urlencoded` (username, password)
-- Header: `Authorization: Bearer <token>`
+- Endpoint: `POST /api/auth/login`
+- Content-Type: **`application/json`** — REGRA UNIVERSAL: toda stack Genesis (Node.js/Fastify, Express, Python/FastAPI) usa JSON no login. `form-urlencoded` é rejeitado com 415 em Fastify e gera comportamento inesperado nas demais stacks.
+- Body: `{ "email": "...", "password": "..." }`
+- Resposta: `{ "data": { "accessToken": "eyJ...", "refreshToken": "...", "user": {...} } }`
+- Header nas demais rotas: `Authorization: Bearer <accessToken>`
 ## Endpoints
-### POST /auth/login
-Request: form-urlencoded username + password → Response: `{"access_token":"eyJ...","token_type":"bearer"}`
-### <LISTAR TODOS OS ENDPOINTS COM SCHEMA REQUEST/RESPONSE>
+### POST /api/auth/login
+Request: `Content-Type: application/json` + `{ "email", "password" }` → Response: `{ "data": { "accessToken": "eyJ..." } }`
+
+**VERIFICAÇÃO OBRIGATÓRIA — prefixos assimétricos por operação CRUD:**
+Para cada recurso, confirmar individualmente no `app.ts` / `routes/*.ts` do backend:
+- Listagem (GET /api/admin/X) pode ter prefixo diferente de detalhe (GET /api/X/:id — público)
+- Sub-recursos aninhados (GET /api/admin/X/:id/Y) frequentemente não existem → usar filtro na listagem (ex: ?userId=:id)
+- Operações de escrita (POST/PUT/PATCH/DELETE) quase sempre em /api/admin/X
+- GET individual público (sem /admin) tem ownership check — admin deve usar /api/admin/X/:id
+
+### <LISTAR TODOS OS ENDPOINTS COM MÉTODO + PATH + SCHEMA REQUEST/RESPONSE>
 ## Erros
 `{"code":"ERROR_CODE","message":"..."}` — 400/401/403/404/409/422
 ```
@@ -209,14 +328,16 @@ Request: form-urlencoded username + password → Response: `{"access_token":"eyJ
 ```bash
 #!/bin/bash
 # curl_examples.sh — exemplos de uso da API
-BASE="http://localhost:8000"
+BASE="http://localhost:3004"
 # 1. Health
-curl -s "$BASE/health" | python3 -m json.tool
-# 2. Login (substituir token na variável TOKEN)
-TOKEN=$(curl -s -X POST "$BASE/auth/login" \
-  -d "username=admin@seed.dev&password=Admin@seed123" \
-  -H "Content-Type: application/x-www-form-urlencoded" | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-# ... demais endpoints com Bearer $TOKEN
+curl -s "$BASE/api/health" | python3 -m json.tool
+# 2. Login — SEMPRE application/json (form-urlencoded retorna 415 em Fastify/Express Genesis)
+TOKEN=$(curl -s -X POST "$BASE/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@seed.dev","password":"Admin@seed123"}' \
+  | python3 -c "import sys,json; b=json.load(sys.stdin); print(b.get('data',{}).get('accessToken') or b.get('access_token',''))")
+echo "Token: $TOKEN"
+# ... demais endpoints com -H "Authorization: Bearer $TOKEN"
 ```
 
 ---

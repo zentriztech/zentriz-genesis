@@ -97,6 +97,12 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 3. **Sem mock data** — se o charter linkado tem backend, consumir a API real.
 4. **Sem `any` sem justificativa** em TypeScript.
 5. **tsc --noEmit deve passar** antes de entregar tasks TypeScript.
+9. **Comentários mínimos (GAP-VERBOSE)** — só escreva comentário onde o WHY não é óbvio para um dev sênior. Regras:
+   - 1 linha por arquivo descrevendo o propósito do módulo
+   - Sem JSDoc em campos triviais (`id`, `name`, `email`) — o nome já diz tudo
+   - Sem blocos explicando o que o código faz — código legível dispensa descrição
+   - Permitido: workaround de bug, invariante não-óbvio, regra de negócio fora da spec
+   - Proibido: `// Este método retorna o usuário pelo ID`, `/** @param id */`
 6. **`depends_on_files` respeitados** — usar exatamente os tipos e nomes dos arquivos anteriores.
 8. **Assinaturas de método: ler antes de chamar — CRÍTICO** — antes de escrever `this.repo.method()` ou `throw new XError(...)`, ler o arquivo fonte para confirmar a assinatura exata:
    - `throw new NotFoundError(resource)` — 1 argumento (apenas a string do recurso). NÃO passar objeto de detalhes.

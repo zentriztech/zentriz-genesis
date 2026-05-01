@@ -270,6 +270,13 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 1. **ANALISE** a tarefa: quais arquivos criar/alterar? Quais dependências (de artefatos em existing_artifacts)? Quais interfaces/contratos já existem?
 2. **PRODUZA** código **COMPLETO e FUNCIONAL**: imports corretos; nunca use `// TODO` ou `...` no lugar de código; tratamento de erro em todos os paths; siga a stack do Charter.
 3. **ESTRUTURE** artefatos: cada arquivo como um item em `artifacts[]` com `path` (ex.: `apps/src/routes/products.ts`), `content` (código completo), `format: "code"`, `purpose` (1 linha).
+4. **COMENTÁRIOS MÍNIMOS (GAP-VERBOSE):** Escreva comentários apenas onde o WHY não é óbvio para um dev sênior. Regras obrigatórias:
+   - **1 linha por arquivo** descrevendo o propósito do módulo (ex: `// Repositório de produtos — acesso ao banco via Drizzle`)
+   - **Sem JSDoc** em campos triviais de interface (`id`, `name`, `email`, `createdAt` — o nome já diz tudo)
+   - **Sem blocos multi-linha** explicando o que o código faz — código legível dispensa comentário
+   - **Permitido:** comentário em algoritmo não-óbvio, workaround de bug conhecido, regra de negócio que não está na spec
+   - **Proibido:** `// Este método retorna o usuário pelo ID`, `// Aqui fazemos o login`, `/** @param id - o ID do produto */`
+   - Regra prática: se remover o comentário não confunde um dev sênior → não escreva
 4. **Por tipo de tarefa**, entregue no mínimo:
    - Endpoint: route file + schema Zod + controller (pode ser inline na route se simples) + types
    - Model/entidade: types file + repository file + migration SQL (se DB)
@@ -370,7 +377,72 @@ Nunca registrar o mesmo prefixo em dois lugares:
 // ✅ router.ts define prefix  +  app.ts faz app.use(router) sem prefix
 ```
 
-**R6 — Seed + Collection obrigatórios na última task (G40 + G45)**
+**R6 — Seed + Collection + API Contract obrigatórios na última task (G40 + G45 + G-contract)**
+
+Na última task do backlog (ou task de scaffold), SEMPRE gerar:
+
+**`project/api_contract.md`** — OBRIGATÓRIO para todo backend que será consumido por um frontend do mesmo produto. Este arquivo é lido pelos projetos frontend via `linked_projects_context` para montar os lib files sem inventar endpoints.
+
+```markdown
+# API Contract — <Nome do Backend>
+
+## Produto
+- **product_slug:** <product-slug>
+- **base_port:** <base_port do charter>
+- **Porta deste serviço:** <base_port + slot>
+
+## Base URL (local)
+`http://localhost:<PORT>`
+
+## Autenticação
+- **Content-Type:** `application/json` (REGRA UNIVERSAL — toda stack Genesis)
+- **Endpoint:** `POST /api/auth/login`
+- **Body:** `{ "email": "...", "password": "..." }`
+- **Resposta:** `{ "data": { "accessToken": "eyJ...", "refreshToken": "...", "user": { id, email, role } } }`
+- **Header:** `Authorization: Bearer <accessToken>`
+
+## Endpoints
+
+### <Módulo: Produtos>
+
+| Método | Path | Auth | Nível | Descrição | Body/Params | Resposta |
+|--------|------|------|-------|-----------|-------------|---------|
+| GET | /api/admin/products | Admin | admin | Lista produtos com paginação e filtros | ?page&pageSize&sort&order&search | `{ data: Product[], meta: { total, page } }` |
+| POST | /api/admin/products | Admin | admin | Cria produto | `{ name, price, stockLevel, status, categoryId }` | `{ data: Product }` |
+| GET | /api/admin/products/:id | Admin | admin | Detalhe do produto (com costPrice) | — | `{ data: Product }` |
+| DELETE | /api/admin/products/:id | Admin | admin | Soft-delete do produto | — | 204 |
+| PATCH | /api/admin/products/:id/status | Admin | admin | Atualiza status do produto | `{ status: 'active'\|'inactive'\|'draft'\|'archived' }` | `{ data: Product }` |
+| GET | /api/products | Público | public | Lista produtos para catálogo | ?page&pageSize&categoryId&search | `{ data: PublicProduct[], meta }` |
+| GET | /api/products/:id | Público | public | Detalhe público (sem costPrice) | — | `{ data: PublicProduct }` |
+
+### <continuar para cada módulo>
+
+## Campos de escrita (nomes exatos do backend)
+Lista os campos que diferem do que a UI poderia assumir:
+- `stockLevel` (não `stock`)
+- `status: 'active'|'inactive'|'draft'|'archived'` (não `active: boolean`)
+
+## Sort/Order por endpoint
+- `/api/admin/products`: aceita `sort=name|price|createdAt|stockLevel` + `order=asc|desc`
+- `/api/admin/orders`: **sem campo sort** — retorna por `createdAt desc` por padrão
+- `/api/admin/customers`: **sem campo sort**
+
+## Sub-recursos existentes (verificados)
+- ✅ `GET /api/categories/tree` — árvore de categorias (sem paginação)
+- ❌ `GET /api/categories/:id` — não existe; filtrar da árvore no frontend
+- ❌ `GET /api/admin/customers/:id/orders` — não existe; usar `GET /api/admin/orders?userId=:id`
+
+## Erros padrão
+`{ "code": "ERROR_CODE", "message": "...", "details"?: [...] }` — 400/401/403/404/409/422/500
+```
+
+**Regras para o `api_contract.md`:**
+1. **Completude:** listar TODOS os endpoints que um frontend do produto precisará consumir, agrupados por módulo.
+2. **Nível de acesso:** coluna `Nível` com `public`, `authenticated` ou `admin` — o frontend usa isso para saber qual header enviar.
+3. **Campos de escrita:** listar explicitamente nomes de campos que diferem do óbvio (`stockLevel` não `stock`).
+4. **Sort/Order por endpoint:** documentar quais endpoints aceitam sort e quais não aceitam — evita VALIDATION_ERROR 400.
+5. **Sub-recursos:** listar o que existe E o que não existe (com o fallback correto).
+6. **Porta:** referenciar `base_port` do charter para que o frontend saiba em qual porta apontar.
 
 Na última task do backlog (ou task de scaffold), SEMPRE gerar:
 
@@ -392,7 +464,23 @@ main().finally(() => prisma.$disconnect());
 ```
 Adicionar em `package.json`: `"seed": "npx ts-node apps/seed.ts"`
 
-**`project/insomnia_collection.json`** — `"__export_format": 4` obrigatório na raiz, todos os endpoints, environment com `base_url` e `token`.
+**`project/insomnia_collection.json`** — template obrigatório (validado 2026-04-30, BUG-009):
+
+```json
+{
+  "__export_format": 4,
+  "__export_date": "2026-01-01T00:00:00.000Z",
+  "__export_source": "insomnia.desktop.app:v9.3.3",
+  "_type": "export",
+  "resources": [...]
+}
+```
+
+**Regras críticas para collections Insomnia:**
+1. **`__export_source` é obrigatório** — sem ele, Insomnia 9+ falha com `No importers found for file`
+2. **Variáveis usam `{{ _.nome }}`** — nunca `{{ nome }}` (sintaxe antiga ≤8.x, descontinuada)
+3. **JSON deve ser válido e completo** — antes de fechar o artefato, verificar mentalmente que todos os `{` têm `}` correspondentes. Arquivo truncado = `JSONDecodeError` no import.
+4. Campos obrigatórios na raiz: `__export_format`, `__export_date`, `__export_source`, `_type`, `resources`
 
 **`project/curl_examples.sh`** — todos os endpoints em sequência lógica, capturando token do login.
 
@@ -412,17 +500,22 @@ Validados em produção real. Causam falha silenciosa em runtime:
 | B5 | `seed.ts` | Usar `seed.mjs` (ES module puro) — `seed.ts` falha com ts-node npx | `Cannot find name 'process'` |
 | B6 | `docker-compose.yml` | Porta fixa ≥ 3004; `name: <slug>`; `container_name:` em cada serviço | Conflito de porta / containers sobrescrevem |
 
-**GAP-I6 — CORS multi-origin (OBRIGATÓRIO):** `CORS_ORIGIN` deve suportar múltiplas origens separadas por vírgula. O frontend gerado pode rodar em porta diferente do padrão — hardcodar uma única origem garante "Failed to fetch" em integração. Padrão obrigatório em `src/app.ts`:
+**GAP-I6 — CORS multi-origin (OBRIGATÓRIO):** Em desenvolvimento local, aceitar **qualquer origem** — o desenvolvedor pode rodar o frontend em qualquer porta. Em produção, restringir via `CORS_ORIGIN`. Padrão obrigatório em `src/app.ts`:
 
 ```typescript
-// GAP-I6: suporte a múltiplas origens via split — nunca uma origem hardcoded
-const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:3000")
-  .split(",")
+// GAP-I6: desenvolvimento = qualquer origem; produção = lista via CORS_ORIGIN
+const isDev = process.env.NODE_ENV !== 'production';
+
+const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
+  .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
 
 app.use(cors({
   origin: (origin, cb) => {
+    // Dev local: aceita qualquer origem (sem restrição de porta)
+    if (isDev) return cb(null, true);
+    // Produção: apenas origens listadas em CORS_ORIGIN
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS: origem não permitida: ${origin}`));
   },
@@ -432,8 +525,12 @@ app.use(cors({
 
 E no `.env.example`:
 ```
-CORS_ORIGIN=http://localhost:3000,http://localhost:3001
+NODE_ENV=development
+# Produção: listar origens permitidas (em dev, qualquer origem é aceita automaticamente)
+CORS_ORIGIN=https://meuapp.com,https://admin.meuapp.com
 ```
+
+> **Erro validado em produção (2026-05-01):** Backend com `CORS_ORIGIN=http://localhost:3000` bloqueou frontend rodando em `localhost:3100`. Causa: porta do frontend variável por projeto. Solução definitiva: `NODE_ENV=development` aceita qualquer origem localmente — sem necessidade de listar portas manualmente.
 
 **Varredura PostgreSQL:**
 ```bash
@@ -462,6 +559,8 @@ MySQL é um flavor **legítimo** — a varredura `grep mysql` do 6.2a **NÃO se 
 | M11 | `src/db/client.ts` | `drizzle(pool, { schema, mode: "default" })` — **obrigatório** passar `mode: "default"` ao usar schema com mysql2 | `DrizzleError: You need to specify "mode"` crash em runtime |
 | M12 | `src/routes/auth.ts` | Login OAuth2 Password Flow: campo DEVE ser `email` no schema Zod E no contrato `api_contract.md` — ou `username` em ambos. Nunca misturar os dois | Login retorna `email: Required` quando frontend envia `username` |
 | M13 | `seed.mjs` | Verificar qual pacote bcrypt está em `package.json`: `bcrypt` ou `bcryptjs` — são distintos; usar o correto no import dinâmico | `Cannot find package 'bcrypt'` se só existe `bcryptjs` |
+| M14 | `seed.mjs` | **Colunas timestamp variam por tabela** — antes de incluir `created_at`/`updated_at` em qualquer INSERT, verificar o schema Drizzle da tabela alvo. Algumas tabelas (ex: `order_items`) não têm essas colunas. Usar `DESCRIBE <table>` ou ler o schema antes de gerar o INSERT. Incluir timestamp em tabela que não tem = `Unknown column` em runtime. | `ER_BAD_FIELD_ERROR: Unknown column 'created_at'` |
+| M15 | `seed.mjs` | **Seed DEVE cobrir entidades transacionais** (pedidos, pagamentos, reservas) além de users/products. Painéis admin com página de pedidos mostram lista vazia se o seed não criar registros de transação. Incluir `seedOrders()` ou equivalente com 3+ registros e seus `order_items`. | Página de pedidos sempre vazia em dev |
 
 **Template `src/db/client.ts` para MySQL:**
 ```ts
@@ -487,6 +586,79 @@ export async function checkDatabaseConnection(): Promise<boolean> {
 ```bash
 grep -r "pg-core\|postgres-js\|drizzle-orm/postgres" apps/src/  # deve retornar vazio
 grep -r "drizzle-orm/mysql" apps/src/                            # deve retornar resultados
+```
+
+#### 6.2c Fastify 4 — regras específicas (quando charter diz Fastify)
+
+Validados em produção real (projeto 75905b77, 2026-04-30). Causam falha no boot ou em runtime:
+
+| # | Arquivo | O que verificar | Erro se errar |
+|---|---------|----------------|---------------|
+| F1 | `src/infra/repositories/` | Toda rota que faz `import { XxxRepository } from '../infra/repositories/xxx.repository'` **DEVE** ter esse arquivo criado na mesma task | `Cannot find module 'xxx.repository'` — boot falha |
+| F2 | `drizzle/migrations/` | Executar `npx drizzle-kit generate:mysql` (ou `generate:pg`) e commitar o SQL resultante — nunca entregar com `_journal.json` vazio | `Can't find meta/_journal.json` — migrate falha em runtime |
+| F3 | Todos os `*.routes.ts` com `errSchema` | `details: { type: 'object' }` — **nunca** `details: {}` (objeto vazio é inválido no `fast-json-stringify`) | `FST_ERR_SCH_SERIALIZATION_BUILD` — boot falha |
+| F4 | Toda rota com `response: { 204: ... }` | `204: { type: 'null', description: '...' }` — nunca `204: { description: '...' }` sem `type` | Mesmo erro F3 — serialization build falha |
+| F5 | `Dockerfile` (stage production) | Copiar `seed.mjs` e `seeds/` do stage builder: `COPY --from=builder /app/seed.mjs ./` + `COPY --from=builder /app/seeds ./seeds` | `Cannot find module '/app/seed.mjs'` no container |
+| F6 | Use cases + repositórios | Se use case declara `repo.findAll(filters, { limit, offset })`, o repositório DEVE implementar `findAll()` com exatamente essa assinatura — nunca apenas `findMany()` | `this.repo.findAll is not a function` — HTTP 500 |
+| F7 | `src/app.ts` (`buildApp()`) | Todo arquivo `*.routes.ts` gerado DEVE ser importado E registrado via `app.register(xxxRoutes, { prefix: '/api' })` no `buildApp()` | Todos os endpoints da rota retornam 404 |
+
+**Template obrigatório de `errSchema` para Fastify 4:**
+```typescript
+const errSchema = {
+  type: 'object',
+  properties: {
+    code:    { type: 'string' },
+    message: { type: 'string' },
+    details: { type: 'object' },  // ✅ nunca {}
+  },
+};
+```
+
+**Template obrigatório para response 204:**
+```typescript
+204: { type: 'null', description: 'Recurso removido com sucesso' }  // ✅ type: 'null' obrigatório
+```
+
+**Template obrigatório Dockerfile multi-stage (Fastify):**
+```dockerfile
+# Stage production — incluir TODOS os arquivos referenciados por start.sh
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/drizzle ./drizzle
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/seed.mjs ./          # ✅ obrigatório se start.sh usa node seed.mjs
+COPY --from=builder /app/seeds ./seeds         # ✅ obrigatório se seed.mjs importa de ./seeds
+COPY --from=builder /app/package.json ./
+```
+
+**Checklist pós-geração Fastify (executar antes de declarar task OK):**
+```bash
+# F1: repositórios ausentes — cada import de repositório deve ter arquivo correspondente
+grep -rh "from '.*repositories/" apps/src/routes/ apps/src/application/ 2>/dev/null \
+  | grep -oE "repositories/[^'\"]*" | sort -u \
+  | while read p; do [ -f "apps/src/$p.ts" ] || echo "FALTANDO: apps/src/$p.ts"; done
+
+# F2: migrations SQL geradas (nunca entregar journal vazio)
+ls apps/drizzle/migrations/*.sql 2>/dev/null && echo "OK" || echo "BUG F2: FALTANDO migration SQL — executar npx drizzle-kit generate"
+
+# F3: details:{} inválido no Fastify schema
+grep -rn "details: {}" apps/src/ && echo "BUG F3: details:{} — substituir por details: { type: 'object' }"
+
+# F4: response 204 sem type:null
+grep -rn "204:" apps/src/routes/ | grep -v "type" && echo "BUG F4: 204 sem type:null — adicionar type: 'null'"
+
+# F5: seed.mjs + seeds/ no Dockerfile
+grep -n "seed" apps/../project/Dockerfile 2>/dev/null || echo "BUG F5: seed.mjs não copiado no Dockerfile"
+
+# F6: findAll vs findMany
+grep -rn "\.findAll\|\.findMany" apps/src/application/ 2>/dev/null | head -5
+
+# F7: rotas registradas no app.ts
+for f in apps/src/routes/*.routes.ts apps/src/http/routes/*.routes.ts 2>/dev/null; do
+  [ -f "$f" ] || continue
+  base=$(basename "$f" .ts)
+  grep -q "$base\|$(echo $base | sed 's/\.routes/Routes/')" apps/src/app.ts 2>/dev/null \
+    || echo "BUG F7: $base não registrado em app.ts"
+done
 ```
 
 ---
@@ -527,7 +699,7 @@ grep -r "drizzle-orm/mysql" apps/src/                            # deve retornar
     },
     {
       "path": "apps/src/app.ts",
-      "content": "import express from 'express';\nimport cors from 'cors';\nimport helmet from 'helmet';\nimport { healthRoutes } from './routes/health';\nimport { errorHandler } from './middleware/errorHandler';\n\nconst app = express();\napp.use(helmet());\n// GAP-I6: múltiplas origens via split\nconst allowedOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:3000').split(',').map(o => o.trim()).filter(Boolean);\napp.use(cors({ origin: (origin, cb) => { if (!origin || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('CORS: origem não permitida')); }, credentials: true }));\napp.use(express.json());\napp.use('/api', healthRoutes);\napp.use(errorHandler);\nexport default app;",
+      "content": "import express from 'express';\nimport cors from 'cors';\nimport helmet from 'helmet';\nimport { healthRoutes } from './routes/health';\nimport { errorHandler } from './middleware/errorHandler';\n\nconst app = express();\napp.use(helmet());\n// GAP-I6: dev=qualquer origem; prod=lista via CORS_ORIGIN\nconst isDev = process.env.NODE_ENV !== 'production';\nconst allowedOrigins = (process.env.CORS_ORIGIN ?? '').split(',').map(o => o.trim()).filter(Boolean);\napp.use(cors({ origin: (origin, cb) => { if (isDev) return cb(null, true); if (!origin || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('CORS: origem não permitida')); }, credentials: true }));\napp.use(express.json());\napp.use('/api', healthRoutes);\napp.use(errorHandler);\nexport default app;",
       "format": "code",
       "purpose": "App instance sem listen — testável com supertest"
     },

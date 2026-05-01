@@ -182,6 +182,22 @@ grep -r "cors()" apps/src/app.ts                               # cors sem config
 grep -r "npm ci" apps/Dockerfile                               # deve ser vazio
 ```
 
+### 6.6a Insomnia Collection — checks obrigatórios (BUG-009, validado 2026-04-30)
+
+| # | Check | Severidade |
+|---|-------|------------|
+| I01 | `project/insomnia_collection.json` é JSON válido e **completo** — não truncado | BLOCKER |
+| I02 | Raiz contém `"__export_format": 4`, `"__export_source": "insomnia.desktop.app:v9.3.3"`, `"_type": "export"` | MAJOR |
+| I03 | Variáveis usam `{{ _.nome_da_variavel }}` — nunca `{{ nome }}` (sintaxe antiga ≤8.x descontinuada) | MAJOR |
+| I04 | `resources` contém pelo menos: 1 workspace, 1 environment, requests para todos os módulos gerados | MAJOR |
+
+**Validação de truncamento:**
+```bash
+python3 -c "import json; json.load(open('project/insomnia_collection.json'))" && echo "✅ JSON válido" || echo "❌ JSON inválido/truncado"
+grep -c '"{{ \.' project/insomnia_collection.json  # deve ser > 0 (variáveis com prefixo _.)
+grep -c '"{{ [^_]' project/insomnia_collection.json  # deve ser 0 (sem variáveis sem prefixo)
+```
+
 ### 6.7 Bugs Conhecidos Node.js + Drizzle (BLOCKERS — validados 2026-04-27)
 
 **Primeiro determinar a stack do charter antes de validar:**
@@ -218,6 +234,26 @@ A varredura `grep mysql` do 6.7a **NÃO se aplica** — MySQL é legítimo. Vali
 ```bash
 grep -r "pg-core\|drizzle-orm/postgres" apps/src/  # deve retornar VAZIO
 grep -r "drizzle-orm/mysql" apps/src/               # deve retornar resultados
+```
+
+#### 6.7c Fastify 4 — quando charter especifica Fastify (BLOCKERS — validados 2026-04-30, projeto 75905b77)
+
+| # | Check | Severidade |
+|---|-------|------------|
+| F01 | Toda rota com `import { XxxRepository } from '../infra/repositories/xxx.repository'` tem esse arquivo em `apps/src/infra/repositories/` — arquivo ausente → boot falha com `Cannot find module` | BLOCKER |
+| F02 | `drizzle/migrations/` contém pelo menos um `.sql` (gerado por `drizzle-kit generate:mysql` ou `generate:pg`) — pasta vazia com só `.gitkeep` causa `Can't find meta/_journal.json` em runtime | BLOCKER |
+| F03 | Nenhum `errSchema` usa `details: {}` — usar `details: { type: 'object' }`. O `fast-json-stringify` (Fastify 4) rejeita `{}` como schema de propriedade → `FST_ERR_SCH_SERIALIZATION_BUILD` no boot | BLOCKER |
+| F04 | Todo response 204 tem `type: 'null'` → `204: { type: 'null', description: '...' }`. Sem `type` → mesmo erro do F03 | BLOCKER |
+| F05 | `Dockerfile` stage `production`: copia `seed.mjs` e `seeds/` do builder. Sem isso, `start.sh` falha com `Cannot find module '/app/seed.mjs'` no container | MAJOR |
+| F06 | Se use case chama `repo.findAll(filters, { limit, offset })`, o repositório implementa `findAll()` com exatamente essa assinatura — misturar com `findMany(filter, page, limit)` causa `this.repo.findAll is not a function` | BLOCKER |
+| F07 | Todo `*.routes.ts` está importado E registrado via `app.register(xxxRoutes, { prefix: '/api' })` em `buildApp()` no `apps/src/app.ts` — rota não registrada = 404 em todos os endpoints | BLOCKER |
+
+**Varredura Fastify:**
+```bash
+grep -rn "details: {}" apps/src/routes/ apps/src/http/ 2>/dev/null && echo "BUG F03: details:{} encontrado" # deve retornar VAZIO
+grep -rn "204:" apps/src/routes/ apps/src/http/ 2>/dev/null | grep -v "type" && echo "BUG F04: 204 sem type"
+ls apps/drizzle/migrations/*.sql 2>/dev/null && echo "OK migrations" || echo "BUG F02: FALTANDO SQL"
+grep -c "register\|app\.use.*Routes" apps/src/app.ts 2>/dev/null || echo "0 rotas registradas"
 ```
 
 ### 6.5 Funcionalidade vs FR/NFR (BLOCKER)
