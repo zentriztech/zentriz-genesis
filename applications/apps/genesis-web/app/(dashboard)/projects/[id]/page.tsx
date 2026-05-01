@@ -337,6 +337,12 @@ function ProjectDetailPageInner() {
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | null>(null);
   const [countdown, setCountdown]   = useState<string>("");
+  const [linkDialogOpen, setLinkDialogOpen]     = useState(false);
+  const [linkableProjects, setLinkableProjects] = useState<Array<{ id: string; title: string; status: string; project_type?: string }>>([]);
+  const [linkTargetId, setLinkTargetId]         = useState("");
+  const [linkRelationType, setLinkRelationType] = useState("uses_backend");
+  const [linkSaving, setLinkSaving]             = useState(false);
+  const [linkError, setLinkError]               = useState<string | null>(null);
 
   const project = projectsStore.getById(id);
 
@@ -345,6 +351,14 @@ function ProjectDetailPageInner() {
     const status = projectsStore.getById(id)?.status ?? "";
     const finished = status === "completed" || status === "accepted" || status === "failed" || status === "stopped";
     if (finished) { setWorkingStepIndex(null); setWorkingMessage(null); return; }
+    // Se há product_ready no diálogo, o pipeline terminou — stepper vai para "Pronto" (step 6)
+    // independente de qualquer agent_working posterior (ex.: FULL-TEST que roda dev/qa após DevOps)
+    const hasProductReady = entries.some(e => e.eventType === "product_ready");
+    if (hasProductReady) {
+      setWorkingStepIndex(6);  // índice de "Pronto"
+      setWorkingMessage("Aguardando aceite");
+      return;
+    }
     // Procurar o último agent_working em vez de apenas o último evento.
     // Sem isso, eventos como task.completed ou step (que vêm depois) zeram workingStepIndex
     // e o portal recai no stepFromStatus=0 ("Spec") para status="running".
@@ -583,8 +597,38 @@ function ProjectDetailPageInner() {
     true,
   );
 
+  const handleOpenLinkDialog = async () => {
+    try {
+      const data = await apiGet<Array<{ id: string; title: string; status: string; project_type?: string }>>("/api/projects");
+      setLinkableProjects((data ?? []).filter(p => p.id !== id));
+    } catch { setLinkableProjects([]); }
+    setLinkTargetId("");
+    setLinkRelationType("uses_backend");
+    setLinkError(null);
+    setLinkDialogOpen(true);
+  };
+
+  const handleCreateLink = async () => {
+    if (!linkTargetId) { setLinkError("Selecione um projeto"); return; }
+    setLinkSaving(true);
+    setLinkError(null);
+    try {
+      await apiPost(`/api/projects/${id}/links`, { to_project_id: linkTargetId, relation_type: linkRelationType });
+      const updated = await apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`);
+      setLinks(updated ?? []);
+      setLinkDialogOpen(false);
+    } catch (e) {
+      setLinkError(e instanceof Error ? e.message : "Falha ao criar vínculo");
+    } finally {
+      setLinkSaving(false);
+    }
+  };
+
   const handleAccept = async () => {
     setAcceptLoading(true);
+    // Mover stepper para "Pronto" imediatamente ao aceitar
+    setWorkingStepIndex(6);
+    setWorkingMessage("Aceito");
     try {
       await apiPost(`/api/projects/${id}/accept`, {});
       await projectsStore.loadProject(id);
@@ -640,7 +684,7 @@ function ProjectDetailPageInner() {
   const isRunning   = project.status === "running";
   const isDone      = project.status === "completed" || project.status === "accepted";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
-  const canAccept   = isRunning || project.status === "completed";
+  const canAccept   = project.status === "completed";
   const elapsedEnd  = project.completedAt ?? (isRunning ? new Date(nowTick).toISOString() : undefined);
   const elapsed     = elapsedLabel(project.startedAt, elapsedEnd);
 
@@ -656,10 +700,12 @@ function ProjectDetailPageInner() {
     (workingStepIndex != null ? workingStepIndex : 4);
 
   // accepted: sempre mostrar "Pronto" (step 6)
-  const effectiveStep = project.status === "accepted" ? 6 : stepFromStatus;
+  // Se todas as tasks estão DONE e projeto ainda running (aguardando aceite): também Pronto
+  const allTasksDone = (tasks ?? []).length > 0 && (tasks ?? []).every(t => t.status === "DONE" || t.status === "CANCELLED");
+  const effectiveStep = (project.status === "accepted" || allTasksDone) ? 6 : stepFromStatus;
 
   // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
-  const activeStep = (isRunning && workingStepIndex != null) ? workingStepIndex : effectiveStep;
+  const activeStep = (isRunning && !allTasksDone && workingStepIndex != null) ? workingStepIndex : effectiveStep;
 
   const tasksDone  = tasks ? tasks.filter((t) => t.status === "DONE" || t.status === "QA_PASS").length : 0;
   const tasksPct   = tasks && tasks.length > 0 ? Math.round((tasksDone / tasks.length) * 100) : 0;
@@ -771,7 +817,7 @@ function ProjectDetailPageInner() {
           </Button>
         )}
         {canAccept && (
-          <Button variant="contained" color="success" size="small" startIcon={<CheckCircleIcon />}
+          <Button variant="contained" color="primary" size="small" startIcon={<CheckCircleIcon />}
             disabled={acceptLoading} onClick={handleAccept}>
             {acceptLoading ? "Aceitando…" : "Aceitar"}
           </Button>
@@ -1438,14 +1484,62 @@ function ProjectDetailPageInner() {
               </DialogActions>
             </Dialog>
 
+            {/* Dialog: Ligar ao projeto */}
+            <Dialog open={linkDialogOpen} onClose={() => setLinkDialogOpen(false)} maxWidth="xs" fullWidth>
+              <DialogTitle>Ligar a outro projeto</DialogTitle>
+              <DialogContent>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Vincule este projeto a um backend, frontend ou serviço relacionado. O Genesis usará esse contexto automaticamente no próximo pipeline.
+                </Typography>
+                <Stack spacing={2}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Tipo de relação</InputLabel>
+                    <Select value={linkRelationType} label="Tipo de relação" onChange={(e) => setLinkRelationType(e.target.value)}>
+                      <MenuItem value="uses_backend">Usa Backend (este frontend consome uma API)</MenuItem>
+                      <MenuItem value="shares_auth">Compartilha Auth</MenuItem>
+                      <MenuItem value="shares_db">Compartilha Banco de Dados</MenuItem>
+                      <MenuItem value="depends_on">Depende de</MenuItem>
+                      <MenuItem value="related">Relacionado</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Projeto destino</InputLabel>
+                    <Select value={linkTargetId} label="Projeto destino" onChange={(e) => setLinkTargetId(e.target.value)}>
+                      {linkableProjects.map((p) => (
+                        <MenuItem key={p.id} value={p.id}>
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Typography variant="body2" noWrap>{p.title}</Typography>
+                            <Chip size="small" label={p.project_type ?? p.status} sx={{ fontSize: "0.6rem", height: 16 }} />
+                          </Stack>
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {linkError && <Typography color="error" variant="caption">{linkError}</Typography>}
+                </Stack>
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setLinkDialogOpen(false)}>Cancelar</Button>
+                <Button variant="contained" disabled={!linkTargetId || linkSaving} onClick={handleCreateLink}>
+                  {linkSaving ? "Salvando…" : "Vincular"}
+                </Button>
+              </DialogActions>
+            </Dialog>
+
             {/* Projetos relacionados */}
-            {links.length > 0 && (
-              <Card>
-                <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+            <Card>
+              <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: links.length > 0 ? 1 : 0 }}>
                   <Typography variant="caption" color="text.secondary"
-                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1, fontSize: "0.6rem" }}>
+                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                     🔗 Projetos relacionados
                   </Typography>
+                  <Button size="small" variant="outlined" onClick={handleOpenLinkDialog}
+                    sx={{ fontSize: "0.6rem", py: 0.25, px: 0.75, minWidth: 0, lineHeight: 1.4, borderRadius: 1 }}>
+                    + Ligar
+                  </Button>
+                </Stack>
+                {links.length > 0 ? (
                   <Stack spacing={0.75}>
                     {links.map((lnk) => {
                       const isOut = lnk.direction === "outgoing";
@@ -1455,7 +1549,7 @@ function ProjectDetailPageInner() {
                         <Box key={lnk.id} sx={{ display: "flex", alignItems: "flex-start", gap: 0.75, cursor: "pointer" }}
                           onClick={() => router.push(`/projects/${otherId}`)}>
                           <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "text.secondary", mt: 0.1, flexShrink: 0 }}>
-                            {lnk.relation_label}
+                            {lnk.relation_label ?? lnk.relation_type}
                           </Typography>
                           <Typography variant="caption" fontWeight={500} sx={{ fontSize: "0.72rem", color: "primary.main" }} noWrap>
                             {title}
@@ -1464,9 +1558,13 @@ function ProjectDetailPageInner() {
                       );
                     })}
                   </Stack>
-                </CardContent>
-              </Card>
-            )}
+                ) : (
+                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+                    Nenhum projeto relacionado
+                  </Typography>
+                )}
+              </CardContent>
+            </Card>
 
             {project.freeDescription && (
               <Card>
