@@ -73,7 +73,30 @@ async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanPr
        ORDER BY started_at ASC NULLS LAST`,
     );
     // Filtra apenas os que não têm processo ativo no runner
-    return result.rows.filter((p) => !runnerActiveIds.has(p.id));
+    const orphans = result.rows.filter((p) => !runnerActiveIds.has(p.id));
+
+    // Antes de relangar, verificar se todas as tasks já estão terminais.
+    // Se sim, o pipeline concluiu normalmente mas o status não foi atualizado
+    // (ex: runner foi derrubado logo após o DevOps). Marcar como completed em vez de relangar.
+    const TERMINAL = new Set(["DONE", "QA_PASS", "QA_FAIL", "BLOCKED", "CANCELLED"]);
+    const safe: OrphanProject[] = [];
+    for (const p of orphans) {
+      const tasks = await client.query<{ status: string }>(
+        `SELECT status FROM project_tasks WHERE project_id = $1`,
+        [p.id],
+      );
+      if (tasks.rows.length > 0 && tasks.rows.every((t) => TERMINAL.has(t.status))) {
+        const now = new Date().toISOString();
+        await client.query(
+          `UPDATE projects SET status = 'completed', completed_at = $1, finished_at = $1, updated_at = now() WHERE id = $2`,
+          [now, p.id],
+        );
+        console.log(`[Watchdog] Projeto ${p.id} marcado como completed (todas as tasks terminais — sem necessidade de relangar).`);
+      } else {
+        safe.push(p);
+      }
+    }
+    return safe;
   } finally {
     client.release();
   }
