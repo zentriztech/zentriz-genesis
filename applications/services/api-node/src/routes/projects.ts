@@ -237,7 +237,10 @@ export async function projectRoutes(app: FastifyInstance) {
       const allowed = await checkProjectAccess(client, id, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const result = await client.query(
-        "SELECT id, project_id, task_id, module, owner_role, requirements, status, artifacts_ref, evidence, created_at, updated_at FROM project_tasks WHERE project_id = $1 ORDER BY task_id",
+        `SELECT id, project_id, task_id, module, owner_role, requirements, status, artifacts_ref, evidence, created_at, updated_at FROM project_tasks WHERE project_id = $1
+         ORDER BY
+           CASE WHEN task_id IN ('TSK-DEVOPS-001','TSK-FULL-TEST') THEN 1 ELSE 0 END ASC,
+           created_at ASC`,
         [id]
       );
       const tasks = result.rows.map((row: Record<string, unknown>) => ({
@@ -743,6 +746,33 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/agent-metrics/qa-fail-counts — conta QA_FAILs por task para restaurar qa_fail_count no runner
+  app.get<{ Params: { id: string } }>("/api/projects/:id/agent-metrics/qa-fail-counts", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const proj = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
+      const row = proj.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN" });
+      }
+      const res = await client.query(
+        `SELECT task_id, COUNT(*)::int AS fail_count
+         FROM project_agent_metrics
+         WHERE project_id = $1 AND agent = 'qa' AND status = 'QA_FAIL' AND task_id IS NOT NULL
+         GROUP BY task_id`,
+        [id]
+      );
+      const result: Record<string, number> = {};
+      for (const r of res.rows) result[r.task_id as string] = r.fail_count as number;
+      return reply.send(result);
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/metrics — totais de tokens e custo estimado do projeto
   app.get<{ Params: { id: string } }>("/api/projects/:id/metrics", async (request, reply) => {
     const user = getUser(request);
@@ -813,42 +843,67 @@ export async function projectRoutes(app: FastifyInstance) {
       if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
         return reply.status(403).send({ code: "FORBIDDEN" });
       }
+      // Buscar linhas individuais para calcular custo por modelo corretamente
       const res = await client.query(
         `SELECT
            COALESCE(task_id, '(planejamento)') AS task_id,
-           COUNT(*)::int                        AS calls,
-           SUM(input_tokens)::int               AS input_tokens,
-           SUM(output_tokens)::int              AS output_tokens,
-           SUM(duration_ms)::int                AS duration_ms,
-           array_agg(DISTINCT agent)            AS agents,
-           array_agg(DISTINCT model)
-             FILTER (WHERE model IS NOT NULL)   AS models,
-           MAX(created_at)                      AS last_call_at
+           input_tokens,
+           output_tokens,
+           model,
+           duration_ms,
+           agent,
+           created_at
          FROM project_agent_metrics
          WHERE project_id = $1
-         GROUP BY COALESCE(task_id, '(planejamento)')
-         ORDER BY MAX(created_at)`,
+         ORDER BY created_at`,
         [id]
       );
-      const PRICE_INPUT  = 3;   // USD per MTok (Sonnet 4.6)
-      const PRICE_OUTPUT = 15;  // USD per MTok
-      const rows = res.rows.map((r) => {
-        const inp = r.input_tokens as number ?? 0;
-        const out = r.output_tokens as number ?? 0;
-        const cost = (inp / 1_000_000) * PRICE_INPUT + (out / 1_000_000) * PRICE_OUTPUT;
-        return {
-          taskId:          r.task_id as string,
-          calls:           r.calls as number,
-          inputTokens:     inp,
-          outputTokens:    out,
-          totalTokens:     inp + out,
-          durationMs:      r.duration_ms as number ?? 0,
-          agents:          r.agents as string[],
-          models:          r.models as string[],
-          estimatedCostUsd: parseFloat(cost.toFixed(4)),
-          lastCallAt:      (r.last_call_at as Date)?.toISOString(),
-        };
-      });
+      const PRICE_INPUT_SONNET  = 3;    // USD/MTok Sonnet 4.6
+      const PRICE_OUTPUT_SONNET = 15;
+      const PRICE_INPUT_OPUS    = 15;   // USD/MTok Opus 4.7
+      const PRICE_OUTPUT_OPUS   = 75;
+      // Agregar por task_id
+      const byTask = new Map<string, { calls: number; inputTokens: number; outputTokens: number; durationMs: number; costUsd: number; agents: Set<string>; models: Set<string>; lastCallAt: Date | null }>();
+      for (const r of res.rows) {
+        const tid = r.task_id as string;
+        const inp = Number(r.input_tokens ?? 0);
+        const out = Number(r.output_tokens ?? 0);
+        const isOpus = String(r.model ?? "").includes("opus");
+        const pi = isOpus ? PRICE_INPUT_OPUS : PRICE_INPUT_SONNET;
+        const po = isOpus ? PRICE_OUTPUT_OPUS : PRICE_OUTPUT_SONNET;
+        const cost = (inp / 1_000_000) * pi + (out / 1_000_000) * po;
+        const existing = byTask.get(tid);
+        if (existing) {
+          existing.calls++;
+          existing.inputTokens += inp;
+          existing.outputTokens += out;
+          existing.durationMs += Number(r.duration_ms ?? 0);
+          existing.costUsd += cost;
+          if (r.agent) existing.agents.add(r.agent as string);
+          if (r.model) existing.models.add(r.model as string);
+          if (r.created_at) existing.lastCallAt = r.created_at as Date;
+        } else {
+          byTask.set(tid, {
+            calls: 1, inputTokens: inp, outputTokens: out,
+            durationMs: Number(r.duration_ms ?? 0), costUsd: cost,
+            agents: new Set(r.agent ? [r.agent as string] : []),
+            models: new Set(r.model ? [r.model as string] : []),
+            lastCallAt: r.created_at as Date | null,
+          });
+        }
+      }
+      const rows = Array.from(byTask.entries()).map(([tid, v]) => ({
+        taskId:           tid,
+        calls:            v.calls,
+        inputTokens:      v.inputTokens,
+        outputTokens:     v.outputTokens,
+        totalTokens:      v.inputTokens + v.outputTokens,
+        durationMs:       v.durationMs,
+        agents:           Array.from(v.agents),
+        models:           Array.from(v.models),
+        estimatedCostUsd: parseFloat(v.costUsd.toFixed(4)),
+        lastCallAt:       v.lastCallAt?.toISOString() ?? null,
+      }));
       return reply.send(rows);
     } finally {
       client.release();
