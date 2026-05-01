@@ -778,6 +778,56 @@ Regra: `theme.ts` deve ter `'use client'` no topo (createTheme é client-only no
 - [ ] Nenhuma cor MUI default hardcoded (`#1976d2`, `#9c27b0`) — só variáveis de brand
 - [ ] Formulários: `onSubmit` com `preventDefault`, estado de loading, feedback de erro/sucesso
 - [ ] Todas as chamadas à API usam `NEXT_PUBLIC_API_BASE_URL` do `.env` — nunca URL hardcoded
+- [ ] **Páginas institucionais têm conteúdo real** — se a task inclui `/sobre`, `/contato`, `/privacidade` etc., cada página deve ter o conteúdo da spec §11, não título genérico (ver regra 6.2 abaixo)
+
+### 6.2 REGRA DE CONTEÚDO REAL — páginas institucionais (BLOCKER se violada)
+
+**Toda página institucional entregue DEVE ter conteúdo real extraído da spec `## 11. Conteúdo de Marca`.**
+
+Conteúdo proibido (gera QA_FAIL imediato):
+- "Saiba mais sobre nossa empresa." — genérico
+- "Conteúdo a definir." — placeholder
+- Página só com `<Typography variant="h4">Sobre nós</Typography>` e mais nada
+- "Lorem ipsum" ou qualquer texto de preenchimento
+
+**Regra de execução:**
+1. Antes de implementar qualquer página institucional, ler a seção `## 11. Conteúdo de Marca` da spec (ou os `requirements` da task que devem conter esse conteúdo)
+2. Usar o texto real da spec para preencher cada página
+3. Se o `requirements` da task não contiver o conteúdo real → retornar `NEEDS_INFO` ao PM/CTO pedindo o conteúdo de marca antes de implementar — **nunca gerar texto genérico**
+
+**Padrão de implementação para páginas institucionais:**
+```tsx
+// /sobre — usa conteúdo real da spec, não placeholder
+export default function SobreRoute() {
+  return (
+    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <Header />
+      <Box component="main" sx={{ flex: 1, bgcolor: BRAND.colors.background }}>
+        <Container maxWidth="lg" sx={{ py: { xs: 6, md: 10 } }}>
+          {/* Nome e tagline da marca */}
+          <Typography variant="h2" sx={{ fontFamily: BRAND.fonts.heading, mb: 2 }}>
+            Érica Cosméticos {/* ← nome real da spec */}
+          </Typography>
+          <Typography variant="h5" color="text.secondary" sx={{ mb: 4 }}>
+            Beleza que celebra quem você é {/* ← tagline real da spec */}
+          </Typography>
+          {/* História — 3-4 parágrafos reais da spec */}
+          <Typography paragraph>
+            A Érica Cosméticos nasceu... {/* ← texto real da spec §11 */}
+          </Typography>
+          {/* Dados de contato reais */}
+          ...
+        </Container>
+      </Box>
+      <Footer />
+    </Box>
+  );
+}
+```
+
+**Páginas legais** (`/privacidade`, `/termos`, `/trocas`, `/cookies`): usar os textos redigidos na spec §11, organizados em seções com `<Typography variant="h5">` para cada bloco. Nunca reduzir a um parágrafo genérico.
+
+**Página de FAQ** (`/faq`): usar as perguntas e respostas da spec §11, implementadas como `Accordion` do MUI para melhor UX.
 
 ### 6.1 BUGS CONHECIDOS — Next.js + MUI (validar obrigatoriamente)
 
@@ -795,6 +845,10 @@ Derivados de falhas reais. Causam crash silencioso ou visual quebrado:
 | W8 | Formulário + MUI TextField | `InputProps` vs `slotProps.input` — depende da versão do MUI; versão errada → prop ignorada silenciosamente | Input sem estilo customizado |
 | W9 | `docker-compose.yml` | `name: <slug>` no topo + `container_name:` em cada serviço + porta ≥ 3004 | Containers sobrescrevem outros projetos |
 | W10 | `.env.example` | `NEXT_PUBLIC_API_BASE_URL` documentado e usado em todas as chamadas — nunca URL hardcoded | Build funciona local mas falha em produção |
+| W11 | MUI `Dialog` | Em MUI v5, `Dialog` **não aceita** `slotProps={{ paper: {...} }}` — use `PaperProps={{ sx: {...} }}`. `slotProps.paper` existe em `Menu` e `Popover`, mas **não em `Dialog`**. | `Type error: 'paper' does not exist in ModalComponentsPropsOverrides` |
+| W12 | `useSearchParams()` no App Router | Qualquer página que usa `useSearchParams()` **DEVE** ser envolvida em `<Suspense>` — caso contrário o prerender falha com `useSearchParams() should be wrapped in a suspense boundary`. Padrão: extrair o componente com `useSearchParams` para `function InnerContent()` e exportar `export default function Page() { return <Suspense><InnerContent /></Suspense>; }` | `Error occurred prerendering page` |
+| W13 | `axios.isCancel()` + narrowing TypeScript | Após `if (axios.isCancel(err)) { return ... }`, o TypeScript estreita `err` para `never` nas branches seguintes. **Solução:** mover o cast `const e = err as AxiosError & { code?: string }` para **depois** do bloco `isCancel`, nunca antes. | `Property 'code' does not exist on type 'never'` |
+| W14 | Interface extends AxiosRequestConfig com propriedade conflitante | Se a interface customizada redefine propriedade já existente em `AxiosRequestConfig` (ex.: `auth?: boolean` conflita com `auth?: AxiosBasicCredentials`), adicionar ao `Omit<>`: `Omit<AxiosRequestConfig, 'url' \| 'method' \| 'data' \| 'auth'>` | `Types of property 'auth' are incompatible` |
 
 **Varredura obrigatória:**
 ```bash
@@ -802,6 +856,32 @@ head -1 apps/src/theme/theme.ts         # deve ser 'use client'
 grep -r "#1976d2\|#9c27b0" apps/src/    # deve retornar vazio (sem cores MUI default)
 grep -r "localhost:3" apps/src/         # deve retornar vazio (sem URL hardcoded)
 grep -c "npm ci" apps/Dockerfile        # deve retornar 0
+# W11: Dialog deve usar PaperProps, não slotProps.paper
+grep -rn "slotProps={{" apps/src/ | grep -i "dialog"  # deve retornar vazio
+# W12: useSearchParams deve ter Suspense na mesma página
+grep -rn "useSearchParams" apps/src/app/ | grep -v "Suspense"  # revisar manualmente
+```
+
+### 6.1b PROIBIÇÃO DE ORM/BANCO PRÓPRIO — quando projeto consome backend existente (BLOCKER)
+
+> Causa raiz validada em produção (2026-04-30): Frontend Next.js gerou Prisma + PostgreSQL ignorando backend existente linkado via `uses_backend`.
+
+**REGRA ABSOLUTA:** Se o charter ou `linked_projects_context` indica que este projeto **consome uma API backend** (`uses_backend`, `shares_db`, ou qualquer menção a "consome", "consome a API de", "frontend de"):
+
+- **NUNCA** instalar ou usar `prisma`, `drizzle-orm`, `typeorm`, `sequelize` ou qualquer ORM
+- **NUNCA** criar `schema.prisma`, `drizzle.config.ts`, migrations, ou tabelas próprias
+- **NUNCA** criar `Next.js API Routes` (`src/app/api/`) além de proxies de autenticação simples
+- **NUNCA** definir `DATABASE_URL` no `.env.example` quando o projeto é frontend puro
+
+**O que fazer:**
+- Criar `src/lib/api.ts` com funções fetch apontando para `NEXT_PUBLIC_API_BASE_URL`
+- Ler o `linked_projects_context` para obter endpoints, schemas e porta do backend
+- Se o backend não está rodando, usar `NEEDS_INFO` — não inventar schema próprio
+
+**Violação desta regra = QA_FAIL automático + BLOCKER.** O QA deve verificar:
+```bash
+grep -r "prisma\|drizzle\|typeorm" apps/package.json  # deve retornar vazio
+ls apps/src/app/api/ 2>/dev/null | wc -l              # deve ser 0 ou apenas auth proxy
 ```
 
 ### 6.2 PROIBIÇÃO DE MOCK DATA (CRITICAL — aplica quando backend existe)
@@ -821,14 +901,41 @@ grep -c "npm ci" apps/Dockerfile        # deve retornar 0
 
 ### 6.3 CONTRATO API → FRONTEND (quando projeto é frontend de um backend existente)
 
+**O backend dita o contrato. O Dev frontend NÃO inventa nenhum detalhe de integração.**
+
+Antes de escrever qualquer arquivo de `src/lib/`, o Dev DEVE localizar e ler o contrato da API nos inputs da task. O contrato deve estar em um dos seguintes locais (em ordem de prioridade):
+
+1. Campo `requirements` da task atual (seção "Contrato da API Backend" — gerada pelo PM)
+2. `linked_projects_context` nos inputs do projeto
+3. `engineer_dependencies.md` nos `existing_artifacts`
+
+**Se nenhum dos 3 existir → retornar `NEEDS_INFO`** com a pergunta: "Contrato da API Backend não encontrado. Necessito: Content-Type aceito no login, prefixos de rota, shape do token retornado, porta do backend."
+
+**NUNCA iniciar implementação de chamadas à API sem ter o contrato.** Inventar endpoints → 404. Inventar Content-Type → 415. Inventar shape do token → login quebrado.
+
 Quando o charter indica que este projeto **consome uma API backend existente**, o Dev DEVE:
 
-1. **Ler o contexto dos projetos linkados** (`linked_projects_context` nos inputs) — contém endpoints, schemas e método de autenticação. **NUNCA inventar URLs, campos ou shapes.**
-2. **Inferir a porta do backend** do `linked_projects_context` ou do `docker-compose.yml` do projeto linkado — **nunca hardcodar porta genérica como `3004`**. O fallback no código deve ser `''` (string vazia), não uma porta inventada:
+1. **Ler o contrato** (acima) antes de criar qualquer `src/lib/*.ts`. O contrato define: porta, Content-Type, prefixos de rota, shape das respostas.
+2. **Inferir a porta do backend** do contrato — **nunca hardcodar porta genérica**. O fallback no código deve ser `''`:
 ```ts
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? '';
 ```
-3. **Todos os paths de API incluem o prefixo `/api/`** — backends Genesis registram rotas sob `/api/`. Ex: `/api/auth/login`, `/api/products`, `/api/categories`. Verificar no `linked_projects_context` antes de escrever qualquer path.
+3. **Consultar o swagger/OpenAPI do backend ANTES de escrever qualquer path de API** — backends Genesis frequentemente usam sub-prefixos como `/api/admin/orders` (não `/api/orders`), `/api/admin/customers`, `/api/admin/dashboard/stats`. **NUNCA assumir** que o path é `/api/<recurso>` sem verificar. Processo obrigatório:
+   - Ler o `linked_projects_context` ou o `RUNBOOK.md` do projeto backend linkado
+   - Verificar o arquivo `app.ts` ou `server.ts` do backend para entender os prefixos registrados (ex.: `{ prefix: '/api' }` + rota interna `/admin/orders` = path real `/api/admin/orders`)
+   - Se o swagger URL está disponível (`/docs`), confirmar todos os endpoints antes de codificar
+   - Se não houver acesso ao backend: usar `NEEDS_INFO` — **nunca inventar paths**
+
+   **Regras adicionais obrigatórias — prefixos e contratos:**
+
+   - **Prefixos CRUD são assimétricos por operação:** GET list e GET/:id podem ter prefixos diferentes. Verificar individualmente: `GET /api/admin/products` (listagem) ≠ `GET /api/products/:id` (público com ownership). Admin SEMPRE usa `/api/admin/:id` para detalhe — a rota pública tem ownership check que rejeita token de admin.
+   - **Sub-recursos aninhados raramente existem:** `GET /api/admin/customers/:id/orders`, `/api/admin/X/:id/Y` — verificar no `app.ts`. Se não existir, usar filtro na listagem: `GET /api/admin/orders?userId=:id`.
+   - **Endpoint de update pode não existir:** verificar se o backend tem PUT/PATCH completo de recurso. Se só existir `PATCH /api/admin/X/:id/status`, o frontend não pode atualizar outros campos — retornar `NEEDS_INFO` ao invés de chamar endpoint inexistente.
+   - **Sort/order: verificar schema por endpoint:** alguns aceitam `sort=campo&order=asc|desc`, outros não aceitam sort algum. Nunca enviar `sort=-campo` (prefixo `-`) — Fastify rejeita com VALIDATION_ERROR 400. Verificar o schema Zod de cada rota antes de construir a query string.
+   - **Sidebar e navegação devem mapear para `app/` existente:** antes de escrever qualquer `href` no sidebar ou menu, confirmar que existe uma pasta correspondente em `apps/src/app/<rota>/`. Inventar href para rota inexistente gera 404 no Next.js.
+   - **Seed deve cobrir entidades transacionais:** se o painel exibe pedidos, pagamentos ou qualquer entidade de transação, verificar se o `seed.mjs` as inclui. Seed sem pedidos = página de pedidos sempre vazia.
+   
+   **Erros documentados (2026-05-01):** GET `/api/categories/:id` (backend só tem `/api/categories/tree`), GET `/api/orders/:id` (ownership check rejeita admin — usar `/api/admin/orders/:id`), GET `/api/admin/customers/:id/orders` (não existe — usar `/api/admin/orders?userId=:id`), `sort=-createdAt` em `/api/admin/orders` (sem campo sort), PUT `/api/products/:id` (não existe — backend só tem `PATCH /api/admin/products/:id/status`), GET/PUT/DELETE `/api/coupons/:id` (prefixo errado — `/api/admin/coupons/:id`), sidebar `/promocoes` sem `app/promocoes/`.
 4. **Mapeamento obrigatório Backend→UI** — backends Genesis retornam envelope `{ data: T, meta?: {...} }`. Nunca consumir o shape bruto direto nos componentes. Criar:
    - Tipos `Api*` refletindo o shape real: `ApiProduct`, `ApiCategory`
    - Função `unwrap<T>()` para extrair `.data` do envelope
@@ -848,32 +955,49 @@ function toProduct(raw: ApiProduct): Product {
   return { ...raw, price: parseFloat(String(raw.price)) || 0, inStock: raw.active && raw.stock > 0 };
 }
 ```
-5. **Login**: o backend Genesis Node.js usa `Content-Type: application/x-www-form-urlencoded` com campo **`email`** (não `username`) e **retorna `{ data: { token: "..." } }`** (não `{ access_token }`):
+5. **Login**: o backend Genesis Node.js (Fastify/Express) usa **`Content-Type: application/json`** — **nunca** `application/x-www-form-urlencoded` (Fastify retorna 415 Unsupported Media Type). Campo: **`email`** (não `username`). Retorna `{ data: { accessToken: "..." } }`:
 ```ts
 export async function apiLogin(email: string, password: string): Promise<string> {
   const res = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ email, password }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
   });
   if (!res.ok) throw new Error('Credenciais inválidas');
   const body = await res.json();
-  // Backend retorna { data: { token } } — nunca { access_token }
-  return body.data?.token ?? body.access_token ?? body.token ?? '';
+  // Backend Fastify retorna { data: { accessToken } }
+  return body.data?.accessToken ?? body.data?.token ?? body.access_token ?? '';
 }
 ```
+> **Erro validado em produção (2026-05-01):** Frontend enviou `application/x-www-form-urlencoded` → Fastify retornou `415 FST_ERR_CTP_INVALID_MEDIA_TYPE`. Fastify **não aceita form-urlencoded por padrão** — sempre usar JSON.
 6. **Verificar `user.name`**: backends Node.js gerados pelo Genesis retornam `{ id, email, role }` — sem campo `name`. Sempre usar fallback: `user.name ?? user.email.split('@')[0]`.
 7. **Armazenar token**: `localStorage` para SPA. Nunca em variável de módulo.
 8. **Tratar 401**: redirecionar para `/login` quando token expirado.
 9. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=` (vazio — porta real deve ser configurada pelo usuário).
 10. **`tsc --noEmit` deve passar sem erros** antes de entregar qualquer artefato. Se houver erros de TypeScript fora de `__tests__/`, são BLOCKERs — não entregar.
+11. **CORS em desenvolvimento local:** backends Genesis gerados com `NODE_ENV=development` aceitam qualquer origem automaticamente — nenhuma configuração adicional necessária. Se o backend retornar CORS error em dev, verificar se o `NODE_ENV` está setado corretamente no `.env` do backend. Em produção, o backend usa `CORS_ORIGIN` para restringir origens.
+12. **`start.sh` com backend linkado DEVE verificar health e mostrar comando para subir o backend:**
+  ```bash
+  BACKEND_URL="${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3004}"
+  # Backends Genesis usam /api/health (não /health nem /)
+  if ! curl -sf --max-time 3 "${BACKEND_URL}/api/health" >/dev/null 2>&1; then
+    warn "Backend NÃO está rodando em ${BACKEND_URL}."
+    warn "Para subir o backend, execute em outro terminal:"
+    warn "  cd <BACKEND_PROJECT_PATH>/project && docker compose up -d"
+    warn "  Aguarde ~30s para o banco inicializar"
+    warn "  Credenciais: admin@seed.dev / Admin@seed123"
+  else
+    ok "Backend ativo em ${BACKEND_URL}"
+  fi
+  ```
+  Substituir `<BACKEND_PROJECT_PATH>` pelo path real do projeto backend extraído do `linked_projects_context`. **Nunca exibir apenas "backend não encontrado" — sempre mostrar o comando exato.**
 
 ### 6.4 ENTREGÁVEIS OBRIGATÓRIOS para projetos Web App com backend
 
 Na última task do backlog:
 - `apps/.env.example` com todas as variáveis (`NEXT_PUBLIC_API_BASE_URL`, etc.)
 - `project/insomnia_collection.json` com `"__export_format": 4` — endpoints do frontend (se aplicável)
-- `project/start.sh` ou instruções de como rodar com `npm run dev`
+- `project/start.sh` com porta documentada e aviso de CORS
 
 ---
 

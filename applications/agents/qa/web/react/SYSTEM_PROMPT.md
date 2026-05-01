@@ -143,6 +143,7 @@ Quando a task é de integração com backend (`linked_projects_context` presente
 | F03 | Links de navegação (âncoras, rotas) apontam para IDs/rotas corretos e existentes | MAJOR |
 | F04 | Formulários têm campos corretos conforme spec (nome, email, telefone, mensagem etc.) | MAJOR |
 | F05 | Textos em português (ou idioma da spec); sem strings em inglês hardcoded visíveis ao usuário | MINOR |
+| F06 | **Páginas institucionais têm conteúdo real da spec §11** — para qualquer página entregue cuja rota seja `/sobre`, `/contato`, `/privacidade`, `/termos`, `/trocas`, `/faq`, `/cookies` ou equivalente: o conteúdo deve refletir os dados reais da marca definidos na spec `## 11. Conteúdo de Marca`. **Varredura obrigatória:** `grep -rn "Saiba mais\|Conteúdo a definir\|Lorem ipsum\|placeholder\|Em breve\|Coming soon" apps/src/app/sobre apps/src/app/contato apps/src/app/privacidade apps/src/app/termos apps/src/app/trocas apps/src/app/faq apps/src/app/cookies` — qualquer resultado é BLOCKER. Página com só um parágrafo genérico de 1 linha = BLOCKER. | BLOCKER |
 
 ### 6.3 Visual e Design System (MAJOR se ausente)
 

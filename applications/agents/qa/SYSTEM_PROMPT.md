@@ -84,6 +84,7 @@ Antes de qualquer check, leia o `inputs.charter` e responda:
 | U03 | Nenhum `// TODO`, `...`, placeholder no lugar de código real | MAJOR |
 | U04 | O que o charter proíbe não aparece nos artefatos | BLOCKER |
 | U05 | Arquivos de `depends_on_files` são referenciados corretamente | MAJOR |
+| U06 | **Páginas institucionais têm conteúdo real** — para rotas como `/sobre`, `/contato`, `/privacidade`, `/termos`, `/trocas`, `/faq`, `/cookies`: o conteúdo deve refletir os dados reais da marca (da spec `## 11` ou dos `requirements` da task). Página com apenas um título e uma linha genérica ("Saiba mais...", "Em breve", "Conteúdo a definir") é BLOCKER — equivale a entregar feature incompleta. Varredura: grep por "Saiba mais\|Conteúdo a definir\|Lorem ipsum\|Em breve" nos arquivos dessas rotas. | BLOCKER |
 
 ### Para projetos HTML + CSS puro
 
