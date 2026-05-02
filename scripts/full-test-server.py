@@ -102,9 +102,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
 
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
+        # Criar script wrapper que muda para apps_path antes de invocar Claude.
+        # O Claude --print não herda o cwd do subprocess — o wrapper garante o diretório correto.
+        wrapper_prompt = f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}"
         try:
             result = subprocess.run(
-                [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", prompt],
+                [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", wrapper_prompt],
                 capture_output=True, text=True, timeout=3600, cwd=str(apps_path),
             )
             output   = (result.stdout or "") + (result.stderr or "")
