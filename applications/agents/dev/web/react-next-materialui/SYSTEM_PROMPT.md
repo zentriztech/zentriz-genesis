@@ -778,6 +778,65 @@ Regra: `theme.ts` deve ter `'use client'` no topo (createTheme é client-only no
 - [ ] Nenhuma cor MUI default hardcoded (`#1976d2`, `#9c27b0`) — só variáveis de brand
 - [ ] Formulários: `onSubmit` com `preventDefault`, estado de loading, feedback de erro/sucesso
 - [ ] Todas as chamadas à API usam `NEXT_PUBLIC_API_BASE_URL` do `.env` — nunca URL hardcoded
+- [ ] **NEXT_PUBLIC embutidas no build** — ver regra 6.3 abaixo (BLOCKER em Docker standalone)
+- [ ] **Todas as páginas têm conteúdo funcional** — nenhuma página entregue pode ser stub de 31 linhas com "em desenvolvimento" (BLOCKER)
+- [ ] **Formulários de emissão/criação implementados** — se a spec pede emissão de documentos ou criação de registros, o formulário é funcional com campos reais, validação Zod, submit que chama a API e feedback de sucesso/erro
+
+### 6.3 NEXT_PUBLIC em Next.js standalone — regra crítica (BLOCKER se violado)
+
+**NEXT_PUBLIC_* são embutidas no bundle durante `next build` — NÃO são injetadas em runtime.**
+
+Isso significa:
+- ❌ ERRADO: passar `NEXT_PUBLIC_API_URL` como `environment:` no docker-compose → valor NUNCA chega ao bundle
+- ✅ CORRETO: embutir no `next.config.mjs` → embute no bundle durante o build Docker
+
+**Padrão obrigatório quando há múltiplas APIs (ex: produto multi-serviço):**
+```js
+// next.config.mjs
+const nextConfig = {
+  output: 'standalone',
+  env: {
+    // Embutidas no bundle — valores reais do ambiente de execução
+    NEXT_PUBLIC_API_URL:       process.env.NEXT_PUBLIC_API_URL       ?? 'http://localhost:9001',
+    NEXT_PUBLIC_API_MANAGER:   process.env.NEXT_PUBLIC_API_MANAGER   ?? 'http://localhost:9001',
+    NEXT_PUBLIC_API_CTe_URL:   process.env.NEXT_PUBLIC_API_CTe_URL   ?? 'http://localhost:7101',
+    NEXT_PUBLIC_API_MDFe_URL:  process.env.NEXT_PUBLIC_API_MDFe_URL  ?? 'http://localhost:7102',
+    // ... demais APIs do produto
+  },
+};
+```
+
+**Regra:** todo `NEXT_PUBLIC_*` que o código usa DEVE estar declarado em `next.config.mjs > env` com o valor padrão correto para o ambiente local do produto. O docker-compose pode sobrescrever via `--build-arg` durante o build, mas o fallback garante que o valor local funcione.
+
+**Varredura obrigatória antes de fechar a task:**
+```bash
+# Extrair todos NEXT_PUBLIC usados no código
+grep -rh "process\.env\.NEXT_PUBLIC_" apps/src/ | grep -oE "NEXT_PUBLIC_[A-Z_]+" | sort -u
+# Para cada um: verificar que está em next.config.mjs > env com valor padrão
+grep "NEXT_PUBLIC_" apps/next.config.mjs
+# Deve ter um match por variável
+```
+
+### 6.4 PÁGINAS STUB SÃO BLOCKER
+
+**Toda página entregue DEVE ser funcional.** Páginas `/novo`, `/[id]`, `/configuracoes`, `/perfil` com apenas título "em desenvolvimento" = BLOCKER.
+
+Regra: se a spec menciona emissão de documento, cadastro de entidade ou configuração → a página DEVE ter:
+1. Formulário com campos reais (React Hook Form + Zod)
+2. Submit que chama a API real (ou demo com feedback visual)
+3. Feedback de sucesso/erro (Snackbar/Alert)
+4. Redirect após sucesso (useRouter().push)
+
+**Proibido entregar:**
+```tsx
+export default function NovoPage() {
+  return (
+    <AppShell>
+      <Typography>Formulario em desenvolvimento.</Typography>  {/* BLOCKER */}
+    </AppShell>
+  );
+}
+```
 - [ ] **Páginas institucionais têm conteúdo real** — se a task inclui `/sobre`, `/contato`, `/privacidade` etc., cada página deve ter o conteúdo da spec §11, não título genérico (ver regra 6.2 abaixo)
 
 ### 6.2 REGRA DE CONTEÚDO REAL — páginas institucionais (BLOCKER se violada)
