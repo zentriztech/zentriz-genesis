@@ -638,6 +638,57 @@ port_map:
 
 ---
 
+## LEI 11 — Auth Service Centralizado (INVIOLÁVEL para produtos multi-serviço)
+
+> **"Em qualquer produto com 2 ou mais backends, a autenticação é um serviço separado. Não é opcional."**
+
+### Regra
+
+Quando um produto Genesis tem **2 ou mais projetos backend**, o CTO DEVE criar um projeto dedicado de autenticação (`auth-service`) **antes** de qualquer outro backend.
+
+**NUNCA:**
+- ❌ Cada backend com sua própria tabela `users` e `POST /auth/login`
+- ❌ JWT_SECRET hardcoded igual em todos os backends como "solução"
+- ❌ Manager/Frontend com autenticação demo/local que não funciona com os backends reais
+- ❌ "Usar a NF-e como auth canônica" como gambiarra de produção
+
+**SEMPRE:**
+```yaml
+product: venuxx-ledger-br
+services:
+  auth:            # projeto 1 — SEMPRE o primeiro
+    port: base+0
+    responsibilities:
+      - POST /api/auth/login    → emite JWT assinado com chave privada RSA
+      - POST /api/auth/refresh  → renova token
+      - GET  /api/auth/me       → perfil do usuário autenticado
+      - POST /api/auth/register → cadastro
+    owns: tabela users, roles, sessions
+    jwt_strategy: RSA asymmetric
+      private_key: somente no auth-service
+      public_key: distribuída para todos os outros serviços do produto
+
+  cte:             # projeto 2
+    port: base+1
+    auth: valida JWT com PUBLIC_KEY do auth-service (nunca autentica por conta própria)
+
+  mdfe:            # projeto 3
+    port: base+2
+    auth: idem cte
+```
+
+**Por que RSA assimétrico (não HMAC):**
+- HMAC: todos os serviços precisam do segredo → se 1 serviço for comprometido, todos são
+- RSA: apenas o auth-service tem a chave privada → outros só validam com chave pública
+
+**Quando o produto tem apenas 1 backend:** auth integrado é aceitável. Com 2+: auth separado é LEI.
+
+**Consequência se violado:** Manager/Frontend faz login em serviço A e recebe token que não funciona no serviço B → 401 em todo request → loop de logout → produto inutilizável.
+
+**Causa raiz validada (Venuxx Ledger BR, 2026-05-02):** 7 backends criados sem auth centralizado → Manager gerou login demo → todos os endpoints retornavam 401 → redirect para login em loop.
+
+---
+
 ## LEI 10 — Product Awareness (Consciência de Produto)
 
 **Todo projeto pertencente a um produto multi-serviço DEVE conhecer sua família.**
