@@ -247,6 +247,8 @@ grep -r "drizzle-orm/mysql" apps/src/               # deve retornar resultados
 | F05 | `Dockerfile` stage `production`: copia `seed.mjs` e `seeds/` do builder. Sem isso, `start.sh` falha com `Cannot find module '/app/seed.mjs'` no container | MAJOR |
 | F06 | Se use case chama `repo.findAll(filters, { limit, offset })`, o repositório implementa `findAll()` com exatamente essa assinatura — misturar com `findMany(filter, page, limit)` causa `this.repo.findAll is not a function` | BLOCKER |
 | F07 | Todo `*.routes.ts` está importado E registrado via `app.register(xxxRoutes, { prefix: '/api' })` em `buildApp()` no `apps/src/app.ts` — rota não registrada = 404 em todos os endpoints | BLOCKER |
+| F08 | **SHARED DB LAW** — Se o charter tem `shared_db: true`: o docker-compose do projeto NÃO deve conter serviço de banco próprio (postgres/mysql/mongo). DATABASE_URL deve apontar para o hostname do container compartilhado (ex: `@postgres:5432`, não `@localhost:5432`). **Varredura:** `grep -n "image.*postgres\|image.*mysql" project/docker-compose.yml` → deve retornar VAZIO. `grep "DATABASE_URL" project/docker-compose.yml` → hostname deve ser container name, não localhost. | BLOCKER |
+| F09 | **CONTRACT LAW** — O projeto gera `project/api_contract.md` com todos os endpoints documentados (seção 4 com tabela completa), tipos TypeScript (seção 5), parâmetros de query (seção 6), sub-recursos existentes/inexistentes (seção 7) e rota de health check. Arquivo ausente ou sem seção 4 → BLOCKER. | BLOCKER |
 
 **Varredura Fastify:**
 ```bash

@@ -197,17 +197,47 @@ agent:
 
 Extrair de: charter > product.slug (ex: `zentriz-ecommerce`, `venuxx-ledger-br`). Se ausente no charter: usar o `title` do projeto em lowercase com hífens.
 
+### SHARED DB LAW — BANCO DE DADOS COMPARTILHADO (INVIOLÁVEL)
+
+> **"Quando o charter define `shared_db: true`, todos os serviços do produto usam UM ÚNICO banco de dados. Esta regra tem a mesma prioridade do CONTRACT LAW. Violá-la significa que os dados ficam fragmentados em múltiplos bancos sem visibilidade cruzada — um defeito de arquitetura irreversível."**
+
 **Se o charter declara `shared_db: true`:**
 - Este projeto NÃO deve gerar serviço de banco próprio no docker-compose
-- O banco já existe no projeto `db_project_id` — referenciar via rede Docker externa:
-  ```yaml
-  # No docker-compose.yml deste serviço:
-  networks:
-    default:
-      external: true           # conecta à rede do ledger-db
-      name: <product_slug>_default
+- O banco compartilhado existe no projeto `db_project_id` com `name: <product_slug>` (mesmo grupo Docker)
+- A `DATABASE_URL` aponta para o container do banco compartilhado via rede interna Docker:
   ```
-- `DATABASE_URL` aponta para `<db_service_name>:5432` (container no mesmo network)
+  DATABASE_URL=postgresql://ledger:ledger_dev@postgres:5432/ledger
+  # OU
+  DATABASE_URL=mysql://root:root@db:3306/appdb
+  ```
+  O hostname é o `container_name` do banco no compose (ex: `postgres`, `db`, `mysql`) — nunca `localhost`
+
+**Checklist obrigatório antes de gerar o docker-compose (shared_db):**
+```bash
+# 1. Verificar se o charter tem shared_db: true e db_project_id
+grep "shared_db\|db_project_id" existing_artifacts/charter.md
+
+# 2. Confirmar que NÃO está gerando imagem/serviço de banco próprio
+# PROIBIDO quando shared_db=true:
+# services:
+#   db:          ← PROIBIDO
+#     image: postgres/mysql  ← PROIBIDO
+
+# 3. DATABASE_URL DEVE usar o hostname do banco compartilhado
+# CORRETO: DATABASE_URL=postgresql://ledger:pass@postgres:5432/ledger
+# ERRADO:  DATABASE_URL=postgresql://localhost:5432/ledger
+# ERRADO:  DATABASE_URL=postgresql://127.0.0.1:5432/ledger
+```
+
+**Verificação pós-geração:**
+```bash
+grep -n "image.*postgres\|image.*mysql\|image.*mongo" docker-compose.yml
+# Deve retornar VAZIO para projetos com shared_db=true
+grep "DATABASE_URL" docker-compose.yml
+# Deve apontar para hostname do container do banco (não localhost)
+```
+
+Se o DevOps detectar que o projeto tem `shared_db: true` mas não há `db_project_id` definido → retornar `NEEDS_INFO`: "shared_db=true mas db_project_id não definido no charter. Qual é o projeto do banco compartilhado?"
 
 **Se este projeto é o `docker_compose_owner` (último/manager):**
 - Incluir TODOS os serviços do produto listados em `product.services` do charter
