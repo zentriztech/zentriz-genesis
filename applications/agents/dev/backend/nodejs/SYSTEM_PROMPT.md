@@ -654,14 +654,25 @@ const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Dev local: aceita qualquer origem (sem restrição de porta)
     if (isDev) return cb(null, true);
-    // Produção: apenas origens listadas em CORS_ORIGIN
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS: origem não permitida: ${origin}`));
   },
   credentials: true,
+  // OBRIGATÓRIO: incluir todos os headers customizados que frontends do produto enviarão
+  // Frontends Venuxx/Zentriz enviam X-Fiscal-Api, X-Idempotency-Key além dos padrões
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Request-Id',
+    'X-Fiscal-Api',        // Identificador da API fiscal no cliente multi-serviço
+    'X-Idempotency-Key',   // Idempotência em mutations
+    'X-Correlation-Id',    // Rastreabilidade cross-service
+  ],
+  exposedHeaders: ['X-Request-Id', 'X-Total-Count'],
 }));
+// ⚠️ REGRA: Se o frontend envia qualquer header customizado (X-Fiscal-Api, X-Api-Version, etc.),
+// ele DEVE estar em allowedHeaders. Ausência gera ERR_UNSAFE_CORS no browser sem mensagem clara.
 ```
 
 E no `.env.example`:
@@ -896,3 +907,74 @@ done
 
 - Competências: [skills.md](skills.md)
 - Contrato global: [AGENT_PROTOCOL.md](../../../../../contracts/AGENT_PROTOCOL.md)
+
+---
+
+## INTER-SERVICE CONTRACT VALIDATION (ISVC) — Lei de compatibilidade entre serviços
+
+> **"Nenhum serviço vai para Docker sem validar que todos os consumidores do produto conseguem chamar seus endpoints."**
+
+Esta lei aplica-se a qualquer projeto que é consumido por outro projeto do mesmo produto.
+
+### Quando o DevOps gera o docker-compose do produto, DEVE executar a ISVC checklist:
+
+**1. Inventariar todos os consumers do serviço**
+```bash
+# Quais projetos do produto consomem este backend?
+grep -r "7101\|7102\|7103\|7104\|7105\|NEXT_PUBLIC_API" \
+  /project-files/*/apps/src/lib/api/ 2>/dev/null | grep "localhost" | head -20
+```
+
+**2. Para cada consumer, validar rotas chamadas vs rotas expostas:**
+```bash
+# Extrair rotas chamadas pelo frontend
+grep -rh "client\.(get\|post\|patch\|delete)\(" /project-files/<frontend>/apps/src/lib/api/ | \
+  grep -oE "'[^']+'" | sort -u
+
+# Comparar com rotas do backend
+find /project-files/<backend>/apps/src/routes -name "*.ts" | \
+  xargs grep -h "app\.get\|app\.post" | grep -oE "'[^']+'" | sort -u
+```
+Qualquer rota chamada pelo frontend que NÃO está no backend = BLOCKER.
+
+**3. Validar CORS allowedHeaders:**
+```bash
+# Quais headers o frontend envia?
+grep -rh "headers\[" /project-files/<frontend>/apps/src/lib/api/client.ts | \
+  grep -oE "'X-[^']+'|\"X-[^\"]+"
+
+# Comparar com allowedHeaders do backend
+grep "allowedHeaders" /project-files/<backend>/apps/src/app.ts
+```
+Header enviado pelo frontend não listado no backend = CORS bloqueado em produção.
+
+**4. Validar compatibilidade de NEXT_PUBLIC com portas reais:**
+```bash
+# Verificar que cada NEXT_PUBLIC_API_*_URL no next.config.mjs aponta para porta correta
+grep "NEXT_PUBLIC_API_" /project-files/<frontend>/apps/next.config.mjs
+# Comparar com portas do docker-compose
+grep "ports:" /project-files/<product>/docker-compose.yml
+```
+
+**5. Smoke test pós-build, pré-run:**
+Antes de marcar o produto como "pronto", executar smoke test mínimo via curl:
+```bash
+# Para cada API do produto:
+TOKEN=$(curl -s -X POST http://localhost:<PORT>/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@seed.dev","password":"Admin@seed123"}' | \
+  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('accessToken',''))")
+
+# Para cada rota listada no api_contract.md:
+curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/api/<rota> \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Fiscal-Api: <api_name>"  # se o frontend envia headers customizados
+# Espera: 200. Se 404 ou 403 → rota errada ou header faltando no allowedHeaders.
+```
+
+### Causa raiz dos bugs desta sessão (Venuxx Ledger BR):
+1. **CORS bloqueou** `X-Fiscal-Api` — header enviado pelo cliente mas não listado em `allowedHeaders`
+2. **Rotas 404** — Manager usava `/ctes` mas backend expõe `/cte`; `/nfse` mas backend tem `/documentos`
+3. **Endpoint inexistente** — `GET /nfe` (listagem) não existia; só `POST /nfe/emit` e `GET /nfe/:id`
+4. Todos evitáveis com ISVC checklist antes do `docker compose build`
+
