@@ -1166,3 +1166,36 @@ Na última task do backlog:
 ## Referências
 
 - Contrato global: [AGENT_PROTOCOL.md](../../../../../contracts/AGENT_PROTOCOL.md)
+
+### 6.5 baseURL do cliente HTTP DEVE incluir o prefixo de rota da API
+
+**Problema:** Axios/fetch com `baseURL: 'http://localhost:7101'` + chamada `client.get('/cte')` resulta em `http://localhost:7101/cte` — mas o backend registra rotas com prefix `/api`, então a rota real é `http://localhost:7101/api/cte` (404 se não incluir `/api`).
+
+**Regra:** O `baseURL` do cliente HTTP DEVE incluir o prefixo comum de todas as rotas.
+
+```typescript
+// ❌ ERRADO — resulta em GET http://host:7101/cte (404)
+const cteClient = axios.create({ baseURL: 'http://localhost:7101' });
+cteClient.get('/cte');
+
+// ✅ CORRETO — resulta em GET http://host:7101/api/cte (200)
+const cteClient = axios.create({ baseURL: 'http://localhost:7101/api' });
+cteClient.get('/cte');
+```
+
+**Como determinar o prefixo:** ler o `api_contract.md` do backend — se todos os endpoints começam com `/api/`, incluir `/api` no baseURL. Se os paths já têm `/api` incluído na lista do contrato, NÃO duplicar.
+
+**Padrão para produto multi-API (Ledger BR):**
+```typescript
+const NFE_BASE  = (process.env.NEXT_PUBLIC_API_NFE_URL  ?? 'http://localhost:7103') + '/api';
+const CTE_BASE  = (process.env.NEXT_PUBLIC_API_CTE_URL  ?? 'http://localhost:7101') + '/api';
+// Chamadas então: client.get('/nfe') → http://host:7103/api/nfe ✅
+```
+
+**Varredura obrigatória antes de fechar task:**
+```bash
+# Extrair todos os paths chamados nas libs
+grep -rh "client\.\(get\|post\|patch\|delete\)(" apps/src/lib/api/ | grep -oE "'[^']+'" | sort -u
+# Para cada path: confirmar que baseURL + path = rota real do backend
+# Testar: curl http://BASE_URL/path → deve retornar 200 ou 401, nunca 404
+```
