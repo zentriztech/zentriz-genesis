@@ -1773,12 +1773,13 @@ def _run_monitor_loop(
         except Exception:
             pass
         # TSK-FULL-TEST e TSK-DEVOPS-001 são tasks de infraestrutura/pós-entrega:
-        # não devem acionar Dev/QA após devops_done, nem bloquear all_done.
+        # SEMPRE excluídas de pipeline_tasks para não bloquear all_done nem acionar Dev/QA.
+        # TSK-FULL-TEST em NEW/ASSIGNED não deve impedir o DevOps de rodar.
         _INFRA_TASKS = {"TSK-FULL-TEST", "TSK-DEVOPS-001"}
         pipeline_tasks = [
             t for t in tasks
             if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS
-        ] if devops_done else tasks
+        ]
         waiting_review = [t for t in pipeline_tasks if t.get("status") == "WAITING_REVIEW"]
         need_qa = len(waiting_review) > 0
         need_dev = any(
@@ -2391,13 +2392,13 @@ Antes de testar os endpoints, varrer os arquivos `src/lib/*.ts` para detectar pa
 
 ```bash
 # Detectar 'perPage' — deve ser 'limit'
-grep -rn "perPage" {apps_dir}/src/lib/ {apps_dir}/src/hooks/ {apps_dir}/src/components/
+grep -rn "perPage" {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/lib/ {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/hooks/ {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/components/ 2>/dev/null
 
 # Detectar sort com valores inventados — verificar enum real do backend
-grep -rn "sort:.*'\\|sort=.*'" {apps_dir}/src/lib/ {apps_dir}/src/hooks/ {apps_dir}/src/components/
+grep -rn "sort" {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/lib/ {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/hooks/ 2>/dev/null | grep "newest\\|popular\\|recent"
 
 # Detectar sort com prefixo '-' (Fastify rejeita)
-grep -rn "sort.*'-\\|sort.*\"-" {apps_dir}/src/lib/ {apps_dir}/src/hooks/
+grep -rn "sort.*'-\\|sort.*\"-" {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/lib/ {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/hooks/ 2>/dev/null
 ```
 
 Se encontrar `perPage`: substituir por `limit` em todos os arquivos.
@@ -2408,10 +2409,10 @@ Verificar o schema do backend: `grep -n "sort.*enum\\|z\\.enum" <backend_apps>/s
 
 ```bash
 # Listar todos os hrefs que o nav/footer linka
-grep -rh 'href="/' {apps_dir}/src/components/layout/ | grep -oE '"(/[^"?#]+)"' | sort -u
+grep -rh 'href="/' {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/components/layout/ 2>/dev/null | grep -oE '"(/[^"?#]+)"' | sort -u
 
 # Listar todas as pages existentes
-find {apps_dir}/src/app -name "page.tsx" | sed 's|{apps_dir}/src/app||' | sed 's|/page.tsx||' | sort
+find {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/app -name "page.tsx" 2>/dev/null | sed 's|.*/src/app||' | sed 's|/page.tsx||' | sort
 ```
 
 Para cada href que não tiver uma page.tsx correspondente: criar página stub com Header + Footer + título.
