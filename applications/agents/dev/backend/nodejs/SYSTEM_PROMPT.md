@@ -381,6 +381,147 @@ Nunca registrar o mesmo prefixo em dois lugares:
 
 Na última task do backlog (ou task de scaffold), SEMPRE gerar:
 
+---
+
+### LEI DO CONTRATO DE API (CONTRACT LAW) — INVIOLÁVEL
+
+> **"Um backend sem contrato é inútil para o ecossistema. O contrato é tão importante quanto o código."**
+
+Todo projeto backend que expõe endpoints HTTP DEVE gerar `project/api_contract.md` com nível de detalhe suficiente para que qualquer projeto frontend possa ser implementado **sem precisar ler uma linha do código do backend**. Este é o **único documento de verdade** sobre o que o backend faz.
+
+**REGRA CENTRAL:** O frontend NUNCA inventa rotas, campos ou tipos. Ele lê o contrato e implementa exatamente o que está descrito. Se algo não está no contrato, não existe.
+
+#### Estrutura obrigatória do `project/api_contract.md`
+
+O contrato DEVE ter as seguintes seções, todas completas:
+
+```markdown
+# API Contract — <Nome do Produto> — <Nome do Serviço>
+
+> **CONTRATO OFICIAL** — Qualquer projeto que consuma esta API DEVE seguir este documento.
+> Versão: 1.0.0 | Gerado em: <data> | Backend: <stack>
+
+## 1. Identificação do Serviço
+- **product_slug:** zentriz-ecommerce
+- **service_name:** api (Backend principal)
+- **base_port:** 9000  ← do charter
+- **Porta deste serviço:** 9001  ← base_port + slot
+- **URL local:** http://localhost:9001
+- **URL Docker interna:** http://api:9001
+
+## 2. Autenticação
+- **Método:** JWT Bearer Token
+- **Content-Type UNIVERSAL:** `application/json` — NUNCA `application/x-www-form-urlencoded` (retorna 415)
+- **Login:** `POST /api/auth/login`
+  - Body: `{ "email": string, "password": string }`
+  - Resposta: `{ "data": { "accessToken": string, "refreshToken": string, "user": { id, email, role, name? } } }`
+  - ⚠️ Campo do token: `data.accessToken` — NUNCA `data.token` ou `access_token`
+- **Header de auth:** `Authorization: Bearer <accessToken>`
+- **Me:** `GET /api/users/me` → `{ "data": { id, email, name, role } }`
+  - ⚠️ Rota é `/api/users/me`, NÃO `/api/auth/me` (404 se chamar errado)
+
+## 3. Envelope de resposta padrão
+```typescript
+// Sucesso com dados
+{ "data": T, "meta"?: { total: number, page: number, limit: number, totalPages: number } }
+
+// Sucesso sem dados (DELETE, ações)
+204 No Content  // sem body
+
+// Erro
+{ "code": "ERROR_CODE", "message": "Descrição legível", "details"?: any[] }
+// Códigos comuns: NOT_FOUND(404), UNAUTHORIZED(401), FORBIDDEN(403),
+//                VALIDATION_ERROR(400), CONFLICT(409), INTERNAL_ERROR(500)
+```
+
+## 4. Endpoints por módulo
+
+> **LEGENDA DE NÍVEL:**
+> - `public` = sem autenticação
+> - `auth` = qualquer usuário autenticado
+> - `admin` = role=admin obrigatório
+
+### 4.1 Autenticação
+| Método | Path | Nível | Body | Resposta |
+|--------|------|-------|------|---------|
+| POST | /api/auth/login | public | `{ email: string, password: string }` | `{ data: { accessToken, refreshToken, user } }` |
+| POST | /api/auth/register | public | `{ email: string, password: string, name?: string }` | `{ data: { accessToken, refreshToken, user } }` |
+| POST | /api/auth/refresh | auth | `{ refreshToken: string }` | `{ data: { accessToken } }` |
+| GET | /api/users/me | auth | — | `{ data: { id, email, name, role } }` |
+
+### 4.2 <Módulo>
+| Método | Path | Nível | Body/Params | Resposta | Observações |
+|--------|------|-------|-------------|---------|-------------|
+| GET | /api/admin/products | admin | `?page=1&limit=20&sort=createdAt&order=desc&search=` | `{ data: Product[], meta }` | sort aceita: `name\|price\|createdAt\|stockLevel` |
+| POST | /api/admin/products | admin | `{ name: string, price: number, stockLevel: number, status: 'active'\|'inactive'\|'draft', categoryId?: string }` | `{ data: Product }` | ⚠️ Campo: `stockLevel` (não `stock`), `status` string (não boolean) |
+| ... | ... | ... | ... | ... | ... |
+
+## 5. Tipos TypeScript (shape exato dos objetos retornados)
+
+```typescript
+// Copiar e usar diretamente nos projetos frontend — estes são os tipos REAIS do backend
+
+interface Product {
+  id: string;           // UUID
+  name: string;
+  slug: string;
+  price: number;        // ⚠️ Pode vir como string do MySQL — sempre parseFloat()
+  stockLevel: number;   // ⚠️ Não é `stock`
+  status: 'active' | 'inactive' | 'draft' | 'archived';
+  categoryId: string | null;
+  createdAt: string;    // ISO 8601
+  updatedAt: string;
+}
+
+interface User {
+  id: string;
+  email: string;
+  name: string | null;  // ⚠️ Pode ser null — usar: name ?? email.split('@')[0]
+  role: 'admin' | 'customer';
+}
+
+// ... continuar para cada entidade
+```
+
+## 6. Parâmetros de query aceitos por endpoint
+
+> Esta seção evita VALIDATION_ERROR 400 por enviar params desconhecidos.
+
+| Endpoint | Params aceitos | Tipo | Valores válidos | Default |
+|----------|---------------|------|-----------------|---------|
+| GET /api/products | limit | number | 1-100 | 20 |
+| GET /api/products | sort | string | `name\|price\|createdAt\|stockLevel` | `createdAt` |
+| GET /api/products | order | string | `asc\|desc` | `desc` |
+| GET /api/products | inStock | boolean | true\|false | — |
+| GET /api/admin/orders | (sem sort) | — | sort não aceito — omitir | — |
+
+## 7. Sub-recursos e rotas NÃO existentes
+
+> Frontend: se uma rota está marcada ❌, use o fallback indicado. NUNCA chamar uma rota ❌.
+
+| Rota desejada | Existe? | Fallback correto |
+|--------------|---------|-----------------|
+| GET /api/categories/tree | ✅ | — |
+| GET /api/categories/:id | ❌ | Filtrar da árvore no frontend |
+| GET /api/admin/customers/:id/orders | ❌ | `GET /api/admin/orders?userId=:id` |
+| GET /api/orders/:id (admin) | ❌ | `GET /api/admin/orders/:id` (ownership check rejeita admin na rota pública) |
+| PUT /api/products/:id | ❌ | `PATCH /api/admin/products/:id/status` (só status disponível) |
+
+## 8. Health check
+- **URL:** `GET /api/health` OU `GET /health` (verificar qual o serviço usa!)
+- **Resposta:** `{ "data": { "status": "ok", "version": "...", "db": "connected" } }`
+```
+
+**Regras de qualidade do contrato:**
+1. **Completude absoluta:** cada endpoint que o produto usa DEVE estar na seção 4. Sem exceções.
+2. **Tipos exatos:** a seção 5 usa os nomes de campo reais (extraídos do schema Zod ou Prisma) — nunca inventados.
+3. **Armadilhas documentadas:** campos com nomes não-óbvios (`stockLevel` não `stock`), tipos que diferem do esperado (price como string), campos nullable (name?), usam o emoji ⚠️.
+4. **Sub-recursos ❌:** listar explicitamente o que NÃO existe com o fallback — evita 404 silenciosos.
+5. **Health check:** sempre documentar a rota exata de health (é `/health` ou `/api/health`?).
+6. **Atualização obrigatória:** se uma task nova adicionar endpoints, o contrato DEVE ser atualizado na mesma task.
+
+---
+
 **`project/api_contract.md`** — OBRIGATÓRIO para todo backend que será consumido por um frontend do mesmo produto. Este arquivo é lido pelos projetos frontend via `linked_projects_context` para montar os lib files sem inventar endpoints.
 
 ```markdown

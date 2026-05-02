@@ -903,15 +903,47 @@ ls apps/src/app/api/ 2>/dev/null | wc -l              # deve ser 0 ou apenas aut
 
 **O backend dita o contrato. O Dev frontend NÃO inventa nenhum detalhe de integração.**
 
-Antes de escrever qualquer arquivo de `src/lib/`, o Dev DEVE localizar e ler o contrato da API nos inputs da task. O contrato deve estar em um dos seguintes locais (em ordem de prioridade):
+### CONTRACT LAW — LEI DO CONTRATO (INVIOLÁVEL)
 
-1. Campo `requirements` da task atual (seção "Contrato da API Backend" — gerada pelo PM)
-2. `linked_projects_context` nos inputs do projeto
-3. `engineer_dependencies.md` nos `existing_artifacts`
+> **"O contrato é a única fonte de verdade. Qualquer endpoint, campo, tipo ou comportamento não documentado no contrato não existe para o frontend."**
 
-**Se nenhum dos 3 existir → retornar `NEEDS_INFO`** com a pergunta: "Contrato da API Backend não encontrado. Necessito: Content-Type aceito no login, prefixos de rota, shape do token retornado, porta do backend."
+**Fonte primária obrigatória: `project/api_contract.md` do backend linkado.**
 
-**NUNCA iniciar implementação de chamadas à API sem ter o contrato.** Inventar endpoints → 404. Inventar Content-Type → 415. Inventar shape do token → login quebrado.
+O `api_contract.md` é um documento estruturado gerado pelo Dev Backend contendo:
+- Todos os endpoints com método, path, nível de acesso, body exato e resposta exata
+- Tipos TypeScript dos objetos retornados (copiáveis diretamente)
+- Parâmetros de query aceitos por endpoint (incluindo quais NÃO aceitam sort)
+- Sub-recursos que ❌ não existem com o fallback correto
+- Rota exata do health check
+
+**Processo obrigatório antes de escrever qualquer `src/lib/*.ts`:**
+
+```
+1. LOCALIZAR o api_contract.md:
+   - Campo `requirements` da task (seção "Contrato da API Backend")
+   - `linked_projects_context` → arquivo `project/api_contract.md` do backend
+   - `existing_artifacts` → `project/api_contract.md`
+
+2. VERIFICAR completude: o contrato cobre TODOS os endpoints que esta task precisa?
+   - Se não cobre → NEEDS_INFO: "api_contract.md não tem o endpoint /api/X. Necessito: método, path, auth level, body, resposta."
+   - Se não existe → NEEDS_INFO: "project/api_contract.md não encontrado no linked_projects_context. Necessito contrato completo antes de implementar chamadas à API."
+
+3. IMPLEMENTAR os lib files usando EXCLUSIVAMENTE o contrato como referência:
+   - Paths: copiar exatamente do contrato (ex: /api/admin/sales, não /api/orders)
+   - Campos: usar os nomes exatos (ex: stockLevel, não stock)
+   - Tipos: copiar da seção 5 do contrato (TypeScript interfaces)
+   - Query params: usar apenas os listados na seção 6 do contrato
+   - Sub-recursos: verificar seção 7 — se marcado ❌, usar fallback indicado
+
+4. VARREDURA final antes de declarar OK:
+   grep -rh "'/api/" apps/src/lib/ | sort -u
+   → Para cada rota: confirmar que está na seção 4 do api_contract.md
+   → Qualquer rota NÃO listada no contrato = BLOCKER
+```
+
+**Se nenhum dos 3 existir → retornar `NEEDS_INFO`** com a pergunta: "Contrato da API Backend não encontrado. Necessito o arquivo `project/api_contract.md` do backend linkado antes de implementar qualquer chamada à API."
+
+**NUNCA iniciar implementação de chamadas à API sem ter o contrato.** Inventar endpoints → 404. Inventar Content-Type → 415. Inventar shape do token → login quebrado. Inventar sort params → 400 VALIDATION_ERROR.
 
 Quando o charter indica que este projeto **consome uma API backend existente**, o Dev DEVE:
 
@@ -976,6 +1008,18 @@ export async function apiLogin(email: string, password: string): Promise<string>
 9. **`.env.example`** com `NEXT_PUBLIC_API_BASE_URL=` (vazio — porta real deve ser configurada pelo usuário).
 10. **`tsc --noEmit` deve passar sem erros** antes de entregar qualquer artefato. Se houver erros de TypeScript fora de `__tests__/`, são BLOCKERs — não entregar.
 13. **Comentários mínimos (GAP-VERBOSE):** 1 linha por arquivo descrevendo o propósito; sem JSDoc em campos triviais; sem blocos explicando o que o código faz. Comentário só onde o WHY não é óbvio. Regra: se remover o comentário não confunde um dev sênior → não escreva.
+14. **Rotas do Manager DEVEM espelhar o api_contract.md do backend linkado (BLOCKER):** Antes de escrever qualquer chamada de API em `src/lib/*.ts`, ler o `api_contract.md` do backend linkado e criar um mapa:
+    - "Quero dados de vendas/pedidos" → verificar se existe `/api/admin/orders` OU `/api/admin/sales` no contrato
+    - "Quero dados do dashboard" → verificar `/api/admin/dashboard/stats` OU `/api/admin/reports/sales/summary`
+    - "Quero categorias" → verificar `/api/categories/tree` OU `/api/admin/categories`
+    Se a rota desejada não existe no contrato: usar a mais próxima disponível OU implementar fallback gracioso (retornar `[]` sem crash).
+    **NUNCA inventar rotas que não existem no contrato** — causa 404 em produção e tela de erro para o usuário.
+    Varredura obrigatória antes de declarar task OK:
+    ```bash
+    grep -rh "'/api/" apps/src/lib/ | sort -u
+    # Para cada rota encontrada: verificar se está no api_contract.md do backend linkado
+    ```
+    Se o `api_contract.md` não está disponível nos `existing_artifacts` → retornar `NEEDS_INFO` com: "api_contract.md do backend linkado ausente. Necessário para mapear rotas antes de implementar chamadas."
 11. **CORS em desenvolvimento local:** backends Genesis gerados com `NODE_ENV=development` aceitam qualquer origem automaticamente — nenhuma configuração adicional necessária. Se o backend retornar CORS error em dev, verificar se o `NODE_ENV` está setado corretamente no `.env` do backend. Em produção, o backend usa `CORS_ORIGIN` para restringir origens.
 12. **`start.sh` com backend linkado DEVE verificar health e mostrar comando para subir o backend:**
   ```bash

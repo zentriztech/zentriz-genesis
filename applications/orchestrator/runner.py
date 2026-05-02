@@ -2723,16 +2723,47 @@ def main() -> int:
                                     except (FileNotFoundError, OSError):
                                         pass
 
-                                if _loaded_contracts:
+                                # CONTRACT LAW: api_contract.md é obrigatório para relações uses_backend
+                                _api_contract_path = _linked_root / "project" / "api_contract.md"
+                                _has_api_contract = _api_contract_path.exists()
+                                _link_type_str = _link_type or ""
+                                if "uses_backend" in _link_type_str and not _has_api_contract:
+                                    # Backend linkado existe mas não tem contrato — avisar fortemente
                                     _ctx_lines.append(
-                                        f"\n#### Artefatos de contrato do projeto **{_other_title}**\n"
-                                        "Use os arquivos abaixo para garantir que endpoints, schemas, "
-                                        "autenticação, porta e formatos de resposta estão exatamente corretos:"
+                                        f"\n⚠️ **CONTRACT LAW VIOLATION:** O projeto backend **{_other_title}** "
+                                        f"NÃO tem `project/api_contract.md`. "
+                                        "Nenhum Dev ou QA pode implementar/validar integração sem o contrato. "
+                                        "O backend DEVE gerar este arquivo. Se você é o primeiro projeto rodando, "
+                                        "ignore este aviso — o backend ainda será gerado. "
+                                        "Se o backend já foi concluído, verificar se o DevOps gerou o api_contract.md."
                                     )
+                                    logger.warning(
+                                        "[CONTRACT LAW] Backend %s não tem api_contract.md — frontend pode inventar rotas",
+                                        _other_id[:8],
+                                    )
+
+                                if _loaded_contracts:
+                                    # Destacar o api_contract.md se presente
+                                    has_contract_md = any("api_contract.md" in c for c in _loaded_contracts)
+                                    if has_contract_md:
+                                        _ctx_lines.append(
+                                            f"\n#### ⚡ CONTRATO OFICIAL DA API — Projeto **{_other_title}**\n"
+                                            "**CONTRACT LAW:** Este é o documento de verdade. "
+                                            "TODA chamada de API neste projeto frontend DEVE usar EXCLUSIVAMENTE "
+                                            "os endpoints, campos e tipos documentados abaixo. "
+                                            "Rota não listada aqui = não existe = NEEDS_INFO, nunca inventar:"
+                                        )
+                                    else:
+                                        _ctx_lines.append(
+                                            f"\n#### Artefatos de contrato do projeto **{_other_title}**\n"
+                                            "Use os arquivos abaixo para garantir que endpoints, schemas, "
+                                            "autenticação, porta e formatos de resposta estão exatamente corretos:"
+                                        )
                                     _ctx_lines.extend(_loaded_contracts)
                                     _ctx_lines.append(
-                                        "\n> **REGRA:** Nunca inventar URL, campo ou shape que não esteja "
-                                        "documentado acima. Se um endpoint não constar aqui, use NEEDS_INFO."
+                                        "\n> **CONTRACT LAW:** Nunca inventar URL, campo, tipo ou shape que não esteja "
+                                        "documentado acima. Se um endpoint não constar aqui → NEEDS_INFO. "
+                                        "A rota existe no contrato ou não existe no sistema."
                                     )
 
                         _ctx_lines.append(

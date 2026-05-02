@@ -94,6 +94,44 @@ agent:
   - Python: `pip install -r requirements.txt -q`
   - Never symlink or reuse node_modules from another project — always install fresh
 - Port must be deterministic (not random) — never 3000/3001/3002/3003 (reserved by Genesis portal)
+- **Healthcheck — rota real (BLOCKER se errado):**
+  Antes de gerar o healthcheck, verificar a rota real de health do serviço:
+  ```bash
+  grep -rn "'/health\|'/api/health\|app\.get.*health" apps/src/routes/ apps/src/ 2>/dev/null | head -5
+  ```
+  Se encontrar `/health` → usar `http://localhost:$PORT/health`.
+  Se encontrar `/api/health` → usar `http://localhost:$PORT/api/health`.
+  Nunca assumir `/api/health` sem verificar — cada serviço define sua própria rota.
+  Padrão de fallback: `/health` (mais comum em Fastify puro sem prefixo de roteador).
+
+- **Variáveis obrigatórias — ler do schema Zod (BLOCKER):**
+  Antes de gerar o docker-compose, verificar o schema de validação de env:
+  ```bash
+  grep -rn "z\.string()\|z\.number()\|z\.enum(" apps/src/config/env.ts apps/src/config/index.ts apps/src/env.ts 2>/dev/null | grep -v "optional\|default"
+  ```
+  Cada campo sem `.optional()` e sem `.default()` é OBRIGATÓRIO no docker-compose.
+  Para campos sensíveis (CERT, KEY, SECRET, API_KEY): gerar valor de desenvolvimento com `node -e "require('crypto').randomBytes(32).toString('hex')"` ou `openssl rand -base64 32`.
+  Documentar no RUNBOOK.md: "Em produção, substituir os valores gerados automaticamente por credenciais reais."
+
+- **Migrations Drizzle — aplicar no boot do container (OBRIGATÓRIO):**
+  O start.sh interno do container (gerado pelo Dev) DEVE incluir migrate step antes de iniciar o servidor:
+  ```sh
+  # Aplicar migrations antes de iniciar o servidor
+  echo "Aplicando migrations..."
+  node -e "
+  const { migrate } = require('drizzle-orm/postgres-js/migrator'); // ou mysql2/migrator
+  const { drizzle } = require('drizzle-orm/postgres-js');          // ou mysql2
+  const driver = require('postgres')(process.env.DATABASE_URL);    // ou mysql2
+  const db = drizzle(driver);
+  migrate(db, { migrationsFolder: './drizzle/migrations' })
+    .then(() => { console.log('Migrations OK'); driver.end(); })
+    .catch(e => { console.error('Migrations ERROR:', e.message); driver.end(); process.exit(1); });
+  " 2>&1
+  ```
+  Após migrations: `exec node dist/server.js` (ou o entry point real do serviço).
+  Se o projeto usa Prisma em vez de Drizzle: `npx prisma migrate deploy` antes do `exec`.
+  **Checklist:** verificar `drizzle/migrations/` ou `prisma/migrations/` existe no stage `production` do Dockerfile — migrations ausentes no container = tabelas não criadas = crash no boot.
+
 - **REGRA DE CO-DEPLOY E ALOCAÇÃO DE PORTAS (OBRIGATÓRIA):**
 
   Todos os serviços do mesmo produto sobem no **mesmo** `docker-compose.yml`, sob o mesmo `name: <product-slug>`. Separação é por produto, não por camada.

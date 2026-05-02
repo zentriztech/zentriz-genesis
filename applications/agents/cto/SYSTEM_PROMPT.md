@@ -580,6 +580,23 @@ sidebar href="/promocoes"                          ← ERRADO se apps/src/app/pr
 - Se `linked_projects_context` menciona `uses_backend` → Charter DEVE incluir contrato completo: Content-Type, prefixos, shape do token, CORS
 - Qualquer item do contrato não disponível no `linked_projects_context` → usar `NEEDS_INFO` antes de inventar
 
+### REVISÃO DE SPEC ANTES DE INICIAR PROJETO FRONTEND LINKADO (OBRIGATÓRIO)
+
+Quando um projeto frontend é iniciado E tem `linked_projects_context` com `uses_backend`:
+
+**O CTO DEVE revisar a spec existente e verificar:**
+1. A spec menciona os endpoints reais do backend? (se o backend já foi gerado, ler o `api_contract.md`)
+2. Os tipos de dados usados na spec correspondem ao `api_contract.md`? (ex: spec fala em `stock` mas backend usa `stockLevel`)
+3. As rotas descritas na spec existem no backend? (ex: spec menciona `/api/dashboard` mas backend só tem `/api/admin/reports/sales/summary`)
+
+**Se o backend já foi gerado (está em `linked_projects_context`):**
+- Ler o `project/api_contract.md` do backend
+- Enriquecer a PRODUCT_SPEC com uma seção `## 12. Contrato de Integração` contendo os endpoints reais
+- **Corrigir qualquer divergência** entre a spec original e o contrato real ANTES de passar ao Engineer/PM
+- Se a spec original pede uma funcionalidade que o backend não suporta: registrar como `NEEDS_INFO` ou `TBD: endpoint não existe no backend — frontend deve implementar graciosamente (retornar vazio)`
+
+**Por que isso é crítico:** Se o PM gerar o backlog com rotas erradas (porque a spec não foi atualizada com o contrato real), o Dev vai implementar chamadas a `/api/dashboard/stats` que retornam 404, gerando retrabalho na TSK-FULL-TEST. Prevenir na spec é infinitamente mais barato que corrigir no E2E.
+
 ---
 
 ## Regra de Co-Deploy e Alocação de Portas (OBRIGATÓRIA no Charter)
@@ -653,6 +670,26 @@ product:
 - O Manager conhece as URLs de TODAS as APIs do produto via `linked_projects_context`
 
 **Sem isso:** cada DevOps inventa um slug, cria banco próprio, gera compose isolado — produto não sobe como unidade.
+
+**Conflito de schema em banco compartilhado (GAP-SEED-SHARED):**
+Quando `shared_db: true`, o CTO DEVE definir no charter:
+- `shared_tables`: tabelas que TODOS os serviços usam (ex: `users`, `tenants`, `audit_log`) — criadas APENAS pelo projeto `db` no schema `shared`
+- `service_tables`: tabelas privadas de cada serviço — cada serviço cria no seu schema próprio (ex: `cte.documentos`, `mdfe.manifestos`, `nfse.notas`)
+- **Regra de conflito:** Nenhum serviço cria tabela `users` no schema `public` — usa `shared.users` ou `{service}_users` no schema do serviço
+- **Regra de seed:** seeds de serviços com `shared_db: true` NÃO inserem dados em `shared.users` diretamente — referenciam o usuário admin criado pelo seed do projeto `db`. Se precisarem de usuários próprios de teste, usar namespace: `cte_admin@seed.dev`, `mdfe_admin@seed.dev`, etc.
+- **Exemplo de declaração no Charter:**
+  ```yaml
+  product:
+    shared_db: true
+    db_project_id: ledger-db
+    shared_tables:
+      - schema: shared
+        tables: [users, tenants, audit_log, refresh_tokens]
+    service_schemas:
+      cte-api:    cte
+      mdfe-api:   mdfe
+      nfse-api:   nfse
+  ```
 
 ---
 
