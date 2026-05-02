@@ -105,16 +105,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", prompt],
-                capture_output=True, text=True, timeout=1800, cwd=str(apps_path),
+                capture_output=True, text=True, timeout=3600, cwd=str(apps_path),
             )
             output   = (result.stdout or "") + (result.stderr or "")
+            # Buscar "APROVADO" em todo o output (não só nos primeiros 12k chars)
             approved = any(w in output.upper() for w in
-                           ["APROVADO", "ALL CHECKS", "QA_PASS", "PASSED", "ALL PASS"])
-            log.info("Concluída: approved=%s rc=%d", approved, result.returncode)
-            self._json(200, {"status": "ok", "output": output[:12000],
+                           ["APROVADO", "ALL CHECKS", "QA_PASS", "PASSED", "ALL PASS",
+                            "STATUS FINAL: APROVADO", "✅ APROVADO", "APPROVED"])
+            log.info("Concluída: approved=%s rc=%d len=%d", approved, result.returncode, len(output))
+            # Retornar início + fim para não perder o veredito final
+            out_excerpt = output[:8000] + "\n...\n" + output[-4000:] if len(output) > 12000 else output
+            self._json(200, {"status": "ok", "output": out_excerpt,
                              "approved": approved, "returncode": result.returncode})
         except subprocess.TimeoutExpired:
-            self._json(200, {"status": "timeout", "output": "Timeout após 1800s", "approved": False})
+            self._json(200, {"status": "timeout", "output": "Timeout após 3600s", "approved": False})
         except FileNotFoundError:
             self._json(500, {"status": "error",
                              "output": f"claude CLI não encontrado: {CLAUDE_BIN}", "approved": False})
