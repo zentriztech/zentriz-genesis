@@ -99,9 +99,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
         try:
             result = subprocess.run(
-                [CLAUDE_BIN, "--print", "--dangerously-skip-permissions",
-                 f"--cwd={apps_path}", prompt],
-                capture_output=True, text=True, timeout=600, cwd=str(apps_path),
+                [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", prompt],
+                capture_output=True, text=True, timeout=1800, cwd=str(apps_path),
             )
             output   = (result.stdout or "") + (result.stderr or "")
             approved = any(w in output.upper() for w in
