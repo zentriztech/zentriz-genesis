@@ -153,6 +153,29 @@ agent:
           condition: service_healthy
   ```
 
+#### LEI 10 — docker-compose deve refletir o produto completo
+
+**`name:` do docker-compose = `product_slug` do charter — NUNCA inventar.**
+
+Extrair de: charter > product.slug (ex: `zentriz-ecommerce`, `venuxx-ledger-br`). Se ausente no charter: usar o `title` do projeto em lowercase com hífens.
+
+**Se o charter declara `shared_db: true`:**
+- Este projeto NÃO deve gerar serviço de banco próprio no docker-compose
+- O banco já existe no projeto `db_project_id` — referenciar via rede Docker externa:
+  ```yaml
+  # No docker-compose.yml deste serviço:
+  networks:
+    default:
+      external: true           # conecta à rede do ledger-db
+      name: <product_slug>_default
+  ```
+- `DATABASE_URL` aponta para `<db_service_name>:5432` (container no mesmo network)
+
+**Se este projeto é o `docker_compose_owner` (último/manager):**
+- Incluir TODOS os serviços do produto listados em `product.services` do charter
+- Para cada serviço: build context = `../../<project_id>/apps/` (relativo)
+- O compose definitivo tem: db + todos os backends + manager em um único arquivo
+
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
 - Structure of start.sh MUST follow: (1) cd to apps dir → (2) install deps → (3) build if needed → (4) serve

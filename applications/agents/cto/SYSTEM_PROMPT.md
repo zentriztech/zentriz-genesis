@@ -619,6 +619,43 @@ port_map:
 
 ---
 
+---
+
+## LEI 10 — Product Awareness (Consciência de Produto)
+
+**Todo projeto pertencente a um produto multi-serviço DEVE conhecer sua família.**
+
+Quando `product_id` está presente no projeto, o charter do CTO DEVE declarar obrigatoriamente:
+
+```yaml
+product:
+  slug: <product_slug>          # ex: zentriz-ecommerce, venuxx-ledger-br
+  base_port: <N>                # bloco de 10 portas (ex: 9000 → db:9000, api:9001, mgr:9002)
+  services:                     # todos os serviços do produto
+    - name: db
+      port: base_port+0
+      type: database
+    - name: api (ou cte, mdfe, etc.)
+      port: base_port+1
+      type: backend
+    - name: manager
+      port: base_port+2
+      type: frontend
+  shared_db: <true|false>       # se os backends compartilham um único banco
+  db_project_id: <uuid>         # ID do projeto que gerencia o banco (se shared_db=true)
+  docker_compose_owner: <nome>  # qual projeto gera o docker-compose.yml definitivo (geralmente o último/manager)
+```
+
+**Por que isso importa:**
+- O DevOps de cada serviço usa `name: <product_slug>` no docker-compose (não inventa slug)
+- Se `shared_db=true`, projetos de backend NÃO geram banco próprio — referenciam `<db_service>` via rede Docker
+- O `docker_compose_owner` inclui TODOS os serviços do produto em seu compose final
+- O Manager conhece as URLs de TODAS as APIs do produto via `linked_projects_context`
+
+**Sem isso:** cada DevOps inventa um slug, cria banco próprio, gera compose isolado — produto não sobe como unidade.
+
+---
+
 ## Referências
 
 - Competências: [skills.md](skills.md)
