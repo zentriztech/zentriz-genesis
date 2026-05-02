@@ -420,6 +420,31 @@ O contrato DEVE ter as seguintes seções, todas completas:
 - **Me:** `GET /api/users/me` → `{ "data": { id, email, name, role } }`
   - ⚠️ Rota é `/api/users/me`, NÃO `/api/auth/me` (404 se chamar errado)
 
+### 2.1 Autenticação compartilhada em produto multi-serviço (OBRIGATÓRIO documentar)
+
+Quando o produto tem múltiplos backends com o **mesmo JWT_SECRET**, o contrato DEVE declarar:
+
+```markdown
+## 2.1 Autenticação compartilhada
+- **JWT_SECRET:** compartilhado entre todos os serviços do produto `<product_slug>`
+- **Serviço de auth canônico:** <nome_do_serviço> (ex: nfe-api em :7103)
+  - Faça login UMA VEZ aqui: `POST http://localhost:7103/api/auth/login`
+  - O `accessToken` retornado é aceito por: cte-api, mdfe-api, nfe-api, nfce-api, nfse-api
+- **Razão:** todos os backends usam `JWT_SECRET=<valor>` — qualquer token assinado com
+  este secret é válido em todos os serviços
+- **Frontend:** chamar auth SOMENTE neste endpoint — não criar login separado por serviço
+```
+
+**Por que isso importa para o Manager/Frontend:**
+- Sem esta declaração, o Dev frontend pode criar autenticação demo/local que não serve para os backends reais
+- Com esta declaração, o Dev sabe exatamente onde fazer login e que o token é universal
+- Ausência desta seção = Manager com token fake = 401 em todos os endpoints = loop de logout
+
+**Causa raiz validada (Venuxx Ledger BR, 2026-05-02):**
+- Manager usava `demo.base64.local` como token → todos os 5 backends rejeitavam com 401
+- Interceptor detectava 401 → `window.localStorage.removeItem('venuxx.auth.token')` → redirect `/login?reason=session_expired`
+- Corrigido adicionando esta seção ao contrato e fazendo login real na NF-e
+
 ## 3. Envelope de resposta padrão
 ```typescript
 // Sucesso com dados
