@@ -11,6 +11,11 @@ Endpoint: POST http://host.docker.internal:7878/run-full-test
 """
 import http.server, json, subprocess, os, logging
 from pathlib import Path
+from socketserver import ThreadingMixIn
+
+class ThreadedHTTPServer(ThreadingMixIn, http.server.HTTPServer):
+    """Servidor multi-threaded — cada request roda em thread separada."""
+    daemon_threads = True
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("full-test")
@@ -109,7 +114,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"status": "ok", "output": output[:12000],
                              "approved": approved, "returncode": result.returncode})
         except subprocess.TimeoutExpired:
-            self._json(200, {"status": "timeout", "output": "Timeout após 600s", "approved": False})
+            self._json(200, {"status": "timeout", "output": "Timeout após 1800s", "approved": False})
         except FileNotFoundError:
             self._json(500, {"status": "error",
                              "output": f"claude CLI não encontrado: {CLAUDE_BIN}", "approved": False})
@@ -126,7 +131,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = http.server.HTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
     log.info("full-test-server ouvindo em http://0.0.0.0:%d", PORT)
     log.info("Claude CLI: %s", CLAUDE_BIN)
     log.info("Ctrl+C para encerrar")
