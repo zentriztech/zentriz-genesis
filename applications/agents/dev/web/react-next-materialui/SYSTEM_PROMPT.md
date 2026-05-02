@@ -808,6 +808,24 @@ const nextConfig = {
 
 **Regra:** todo `NEXT_PUBLIC_*` que o código usa DEVE estar declarado em `next.config.mjs > env` com o valor padrão correto para o ambiente local do produto. O docker-compose pode sobrescrever via `--build-arg` durante o build, mas o fallback garante que o valor local funcione.
 
+**REGRA ADICIONAL — Nunca acesso dinâmico:**
+```typescript
+// ❌ ERRADO — process.env[key] com chave dinâmica sempre retorna undefined no bundle
+const url = process.env[envKey]; // NUNCA FAZER
+
+// ✅ CORRETO — acesso literal + fallback obrigatório
+const url = process.env.NEXT_PUBLIC_API_NFE_URL ?? 'http://localhost:7103';
+
+// ✅ CORRETO — mapa estático para múltiplas APIs
+const API_URLS = {
+  NEXT_PUBLIC_API_NFE_URL:  process.env.NEXT_PUBLIC_API_NFE_URL  ?? 'http://localhost:7103',
+  NEXT_PUBLIC_API_CTE_URL:  process.env.NEXT_PUBLIC_API_CTE_URL  ?? 'http://localhost:7101',
+  // ...
+};
+```
+
+**Fallback `?? 'localhost:PORT'` é OBRIGATÓRIO** em toda leitura de NEXT_PUBLIC — garante que o código funcione em dev local sem `.env` configurado.
+
 **Varredura obrigatória antes de fechar a task:**
 ```bash
 # Extrair todos NEXT_PUBLIC usados no código
