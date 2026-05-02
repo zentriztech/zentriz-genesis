@@ -3258,10 +3258,18 @@ def main() -> int:
                 "Squad criada. Iniciando Monitor Loop: Dev/QA/DevOps serão acionados até você aceitar o projeto ou parar.",
                 request_id,
             )
-            if not _seed_tasks(project_id, pm_module=pm_module):
-                _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
-                _patch_project({"status": "failed"})
-            else:
+            seed_ok = _seed_tasks(project_id, pm_module=pm_module)
+            if not seed_ok:
+                # Verificar se as tasks foram criadas mesmo com erro (upsert parcial)
+                # Isso acontece quando ON CONFLICT DO UPDATE falha em alguma task mas outras são inseridas.
+                _existing_tasks = _get_tasks(project_id)
+                if _existing_tasks:
+                    logger.warning("[Monitor Loop] _seed_tasks retornou False mas %d tasks já existem — continuando.", len(_existing_tasks))
+                    seed_ok = True
+                else:
+                    _post_error("Falha ao criar tarefas iniciais na API.", request_id, None)
+                    _patch_project({"status": "failed"})
+            if seed_ok:
                 # GAP-NEW-3: PM rodou completo mas complexity_hint=trivial → PM gerou N tasks
                 # quando deveria ter gerado 1. Consolidar em 1 task única antes do Monitor Loop
                 # para evitar 7 tasks para uma landing page estática.
