@@ -92,10 +92,38 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!prod.rows[0]) return reply.status(404).send({ code: "NOT_FOUND" });
 
+      // Ordenação topológica: projetos raiz (sem predecessores) primeiro,
+      // depois seus dependentes em ordem de profundidade no grafo de triggers.
+      // Dentro do mesmo nível (depth), ordena por created_at para estabilidade.
       const projects = await client.query(
-        `SELECT p.id, p.title, p.status, p.version_number,
+        `WITH RECURSIVE topo AS (
+           -- Nível 0: projetos sem predecessores dentro do produto
+           SELECT p.id, 0 AS depth
+           FROM projects p
+           WHERE p.product_id = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM project_triggers pt
+               WHERE pt.project_id = p.id
+                 AND pt.trigger_project_id IN (
+                   SELECT id FROM projects WHERE product_id = $1
+                 )
+             )
+           UNION ALL
+           -- Nível N: projetos cujos predecessores já foram visitados
+           SELECT p.id, t.depth + 1
+           FROM projects p
+           JOIN project_triggers pt ON pt.project_id = p.id
+           JOIN topo t ON t.id = pt.trigger_project_id
+           WHERE p.product_id = $1
+         ),
+         depths AS (
+           -- Para projetos com múltiplos predecessores, usar a profundidade máxima
+           SELECT id, MAX(depth) AS depth FROM topo GROUP BY id
+         )
+         SELECT p.id, p.title, p.status, p.version_number,
                 p.extra->>'project_type' AS project_type,
                 p.complexity_hint, p.started_at, p.completed_at, p.updated_at, p.created_at,
+                COALESCE(d.depth, 0) AS execution_order,
                 COALESCE(
                   json_agg(
                     json_build_object(
@@ -107,10 +135,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                   '[]'::json
                 ) AS triggers
          FROM projects p
+         LEFT JOIN depths d ON d.id = p.id
          LEFT JOIN project_triggers pt ON pt.project_id = p.id
          WHERE p.product_id = $1
-         GROUP BY p.id
-         ORDER BY p.created_at ASC`,
+         GROUP BY p.id, d.depth
+         ORDER BY COALESCE(d.depth, 0) ASC, p.created_at ASC`,
         [id]
       );
       return reply.send({ ...prod.rows[0], projects: projects.rows });

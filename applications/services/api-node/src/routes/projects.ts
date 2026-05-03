@@ -36,25 +36,71 @@ export async function projectRoutes(app: FastifyInstance) {
     const user = getUser(request);
     const client = await pool.connect();
     try {
+      // Ordena: projetos agrupados por produto seguem ordem topológica (depth no grafo de triggers).
+      // Projetos sem produto ficam no topo ordenados por updated_at (mais recentes primeiro).
+      const baseSelect = `
+        WITH RECURSIVE topo AS (
+          SELECT p2.id, 0 AS depth
+          FROM projects p2
+          WHERE p2.product_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM project_triggers pt2
+              WHERE pt2.project_id = p2.id
+                AND pt2.trigger_project_id IN (
+                  SELECT id FROM projects WHERE product_id = p2.product_id
+                )
+            )
+          UNION ALL
+          SELECT p2.id, t.depth + 1
+          FROM projects p2
+          JOIN project_triggers pt2 ON pt2.project_id = p2.id
+          JOIN topo t ON t.id = pt2.trigger_project_id
+          WHERE p2.product_id IS NOT NULL
+        ),
+        depths AS (SELECT id, MAX(depth) AS depth FROM topo GROUP BY id)`;
+
       let result;
       if (user.role === "zentriz_admin") {
         result = await client.query(
-          `SELECT p.*, u.email as created_by_email FROM projects p
+          `${baseSelect}
+           SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order
+           FROM projects p
            JOIN users u ON p.created_by = u.id
-           ORDER BY p.updated_at DESC`
+           LEFT JOIN depths d ON d.id = p.id
+           ORDER BY
+             CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
+             p.product_id NULLS FIRST,
+             COALESCE(d.depth, 0) ASC,
+             p.created_at ASC`
         );
       } else if (user.tenantId) {
         result = await client.query(
-          `SELECT p.*, u.email as created_by_email FROM projects p
+          `${baseSelect}
+           SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order
+           FROM projects p
            JOIN users u ON p.created_by = u.id
-           WHERE p.tenant_id = $1 ORDER BY p.updated_at DESC`,
+           LEFT JOIN depths d ON d.id = p.id
+           WHERE p.tenant_id = $1
+           ORDER BY
+             CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
+             p.product_id NULLS FIRST,
+             COALESCE(d.depth, 0) ASC,
+             p.created_at ASC`,
           [user.tenantId]
         );
       } else {
         result = await client.query(
-          `SELECT p.*, u.email as created_by_email FROM projects p
+          `${baseSelect}
+           SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order
+           FROM projects p
            JOIN users u ON p.created_by = u.id
-           WHERE p.created_by = $1 ORDER BY p.updated_at DESC`,
+           LEFT JOIN depths d ON d.id = p.id
+           WHERE p.created_by = $1
+           ORDER BY
+             CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
+             p.product_id NULLS FIRST,
+             COALESCE(d.depth, 0) ASC,
+             p.created_at ASC`,
           [user.id]
         );
       }
@@ -75,8 +121,9 @@ export async function projectRoutes(app: FastifyInstance) {
         versionNumber: (row.version_number as number | null) ?? 1,
         freeDescription: ((row.extra as Record<string, unknown> | null)?.free_description as string | undefined) ?? null,
         projectType:    ((row.extra as Record<string, unknown> | null)?.project_type    as string | undefined) ?? null,
-        productId:      (row.product_id as string | null) ?? null,
-        complexityHint: (row.complexity_hint as string | null) ?? null,
+        productId:       (row.product_id as string | null) ?? null,
+        complexityHint:  (row.complexity_hint as string | null) ?? null,
+        executionOrder:  (row.execution_order as number | null) ?? 0,
       }));
       return reply.send(projects);
     } finally {

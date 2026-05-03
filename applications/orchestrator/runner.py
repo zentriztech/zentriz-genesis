@@ -1012,30 +1012,51 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
         f"Responda APENAS com JSON — sem texto adicional."
     )
 
-    _client = _anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
-    _model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+    _provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
+    _model    = os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
 
     for _attempt in range(2):
         try:
-            _response = _client.messages.create(
-                model=_model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": _monitor_prompt}],
-                timeout=120,
-            )
-            _text = _response.content[0].text if _response.content else ""
-            # Extrair JSON da resposta
+            # Suporta Bedrock (padrão do Genesis) e Anthropic API direta
+            if _provider == "bedrock":
+                import boto3 as _boto3
+                import json as _json
+                _bedrock = _boto3.client(
+                    "bedrock-runtime",
+                    region_name=os.environ.get("GENESIS_AWS_REGION", "us-east-1"),
+                )
+                _body = _json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4096,
+                    "messages": [{"role": "user", "content": _monitor_prompt}],
+                })
+                _resp = _bedrock.invoke_model(modelId=_model, body=_body)
+                _parsed = _json.loads(_resp["body"].read())
+                _text = _parsed.get("content", [{}])[0].get("text", "")
+            else:
+                # Anthropic API direta
+                _client = _anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
+                _response = _client.messages.create(
+                    model=_model,
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": _monitor_prompt}],
+                    timeout=120,
+                )
+                    _text = _response.content[0].text if _response.content else ""
+
+            # Extrair JSON da resposta (comum a todos os providers)
             import json as _json
             _start = _text.find("{")
             _end = _text.rfind("}") + 1
             if _start >= 0 and _end > _start:
                 _result = _json.loads(_text[_start:_end])
                 _outcome = _result.get("outcome", "ESCALATE")
-                logger.info("[FT-11] Monitor Autônomo: task=%s attempt=%d outcome=%s", task_id, _attempt + 1, _outcome)
+                logger.info("[FT-11] Monitor Autônomo: task=%s attempt=%d outcome=%s provider=%s",
+                            task_id, _attempt + 1, _outcome, _provider)
                 if _outcome in ("GENESIS_BUG", "ESCALATE", "FIXED"):
                     return _result
         except Exception as _e:
-            logger.warning("[FT-11] Monitor attempt %d falhou: %s", _attempt + 1, _e)
+            logger.warning("[FT-11] Monitor attempt %d falhou (provider=%s): %s", _attempt + 1, _provider, _e)
             if _attempt == 1:
                 return {"outcome": "ESCALATE", "summary": f"Monitor falhou após 2 tentativas: {_e}"}
 
