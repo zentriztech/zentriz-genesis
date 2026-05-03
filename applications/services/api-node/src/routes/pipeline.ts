@@ -118,6 +118,30 @@ export async function pipelineRoutes(app: FastifyInstance) {
         });
       }
 
+      // ── Validação de dependências (project_triggers) ─────────────────────────
+      // Bloqueia /run se algum predecessor obrigatório ainda não concluiu.
+      // "Concluiu" = status completed ou accepted.
+      const triggersRes = await client.query(
+        `SELECT pt.trigger_project_id, p.title, p.status
+         FROM project_triggers pt
+         JOIN projects p ON p.id = pt.trigger_project_id
+         WHERE pt.project_id = $1`,
+        [projectId]
+      );
+      const blockers = triggersRes.rows.filter(
+        (r) => !["completed", "accepted"].includes(r.status as string)
+      ) as Array<{ trigger_project_id: string; title: string; status: string }>;
+      if (blockers.length > 0) {
+        const list = blockers.map((b) => `"${b.title}" (${b.status})`).join(", ");
+        request.log.warn({ projectId, blockers: blockers.map((b) => b.trigger_project_id) },
+          "[Pipeline] Bloqueado por dependências não concluídas");
+        return reply.status(409).send({
+          code: "DEPENDENCY_NOT_READY",
+          message: `Aguardando conclusão dos projetos predecessores: ${list}. Eles precisam estar completed ou accepted antes de iniciar este projeto.`,
+          blockers: blockers.map((b) => ({ id: b.trigger_project_id, title: b.title, status: b.status })),
+        });
+      }
+
       const specFilePath = await getProjectSpecFilePath(client, projectId);
       if (!specFilePath) {
         request.log.warn({ projectId }, "[Pipeline] Sem arquivo .md no projeto (project_spec_files vazio ou sem .md)");

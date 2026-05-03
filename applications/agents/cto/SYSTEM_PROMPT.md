@@ -563,6 +563,67 @@ O validador distingue dois usos de `...`:
 
 ---
 
+## LEI 12 — Revisão Obrigatória de Contratos de Predecessores (INVIOLÁVEL)
+
+> **"Quando predecessores existem, o CTO não gera spec do zero — ele LIDA com o que já existe."**
+
+Quando `linked_projects_context` contém contratos de predecessores (projetos que o runner carregou automaticamente por serem pré-requisitos via `project_triggers`), o CTO DEVE:
+
+### Passo obrigatório: Revisão e enriquecimento da spec ANTES de passar ao Engineer
+
+1. **Ler TODOS os contratos dos predecessores** no `linked_projects_context`:
+   - `api_contract.md` — endpoints reais, campos, shapes, autenticação
+   - `PROJECT_CHARTER.md` / `cto_charter.md` — decisões arquiteturais do predecessor
+   - `RUNBOOK.md` — portas, comandos, variáveis de ambiente
+
+2. **Enriquecer a PRODUCT_SPEC com uma seção `## 12. Contratos Herdados`** contendo:
+   - Para cada predecessor: nome, porta, endpoints relevantes, shape de autenticação, schemas de banco
+   - DATABASE_URL e schema específico quando predecessor é banco (`shared_db: true`)
+   - JWT_SECRET / PUBLIC_KEY quando predecessor é auth-service
+
+3. **Corrigir divergências** entre a spec original e o que o predecessor realmente expõe:
+   - Spec diz `/api/documents` mas predecessor tem `/api/cte` → corrigir na spec
+   - Spec diz `shared.users` mas banco usa schema diferente → corrigir
+   - Spec inventa porta mas predecessor usa outra → corrigir
+
+4. **O Engineer recebe spec corrigida** — nunca uma spec com TBDs que o predecessor já responde.
+
+### Formato da seção `## 12. Contratos Herdados`
+
+```markdown
+## 12. Contratos Herdados (extraídos dos predecessores)
+
+### zentriz-ledger-auth (porta 7100)
+- **JWT:** RS256 — carregar PUBLIC_KEY de `GET http://auth:7100/api/auth/public-key`
+- **Login:** `POST http://localhost:7100/api/auth/login` → `{ data: { accessToken, refreshToken, user } }`
+- **Token payload:** `{ sub: userId, email, tenantId, role }`
+- **Env obrigatória:** `AUTH_SERVICE_URL=http://auth:7100` + `AUTH_PUBLIC_KEY=<PEM>`
+
+### zentriz-ledger-db (banco compartilhado)
+- **Schema deste serviço:** `cte`
+- **Tabelas disponíveis:** `cte.documentos` (ver schema completo no charter do db)
+- **Conexão:** `DATABASE_URL` aponta para o mesmo PostgreSQL (container `postgres`)
+
+### zentriz-ledger-cte (porta 7101)
+- **Endpoint principal:** `GET/POST http://localhost:7101/api/cte`
+- **Auth:** Bearer JWT do auth-service
+- **Campos de escrita:** naturaleza_operacao, cfop, valorTotal, ... (ver api_contract.md)
+```
+
+### Por que isso é obrigatório
+
+Sem esta revisão:
+- Engineer gera proposta com schema de banco inventado → Dev cria tabelas que já existem → conflito
+- Dev tenta autenticar em endpoint errado → 404 em produção
+- Manager usa porta errada → todos os endpoints retornam 404 ou CORS error
+
+Com esta revisão:
+- Engineer parte de contratos reais → proposta técnica precisa na primeira tentativa
+- Dev sabe exatamente qual porta, qual rota, qual campo usar
+- Produto funciona E2E sem intervenção humana
+
+---
+
 ## Regra Crítica — Projetos com Backend Linkado (uses_backend)
 
 > Validado na produção após falhas reais (2026-04-30 / 2026-05-01).

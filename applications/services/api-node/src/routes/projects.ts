@@ -580,6 +580,47 @@ export async function projectRoutes(app: FastifyInstance) {
   });
 
   // GET /api/projects/:id/github-repo — retorna info do repositório GitHub criado no aceite
+  // GET /api/projects/:id/triggers/predecessors — predecessores deste projeto (pré-requisitos)
+  // Usado pelo runner para carregar contratos dos projetos que já foram concluídos.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/triggers/predecessors", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const hasAccess = await checkProjectAccess(client, id, user);
+      if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN" });
+      const res = await client.query(
+        `SELECT p.id, p.title, p.status, p.project_type AS "projectType", pt.trigger_status AS "triggerStatus"
+         FROM project_triggers pt
+         JOIN projects p ON p.id = pt.trigger_project_id
+         WHERE pt.project_id = $1
+         ORDER BY p.created_at ASC`,
+        [id]
+      );
+      return reply.send(res.rows);
+    } finally { client.release(); }
+  });
+
+  // GET /api/projects/:id/triggers/dependents — projetos que dependem deste
+  app.get<{ Params: { id: string } }>("/api/projects/:id/triggers/dependents", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const hasAccess = await checkProjectAccess(client, id, user);
+      if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN" });
+      const res = await client.query(
+        `SELECT p.id, p.title, p.status, p.project_type AS "projectType", pt.trigger_status AS "triggerStatus"
+         FROM project_triggers pt
+         JOIN projects p ON p.id = pt.project_id
+         WHERE pt.trigger_project_id = $1
+         ORDER BY p.created_at ASC`,
+        [id]
+      );
+      return reply.send(res.rows);
+    } finally { client.release(); }
+  });
+
   app.get<{ Params: { id: string } }>("/api/projects/:id/github-repo", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;

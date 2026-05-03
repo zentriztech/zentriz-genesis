@@ -1699,8 +1699,20 @@ def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
 
     # TSK-FULL-TEST: skip se charter declarar tsk_full_test: false
     # Regra geral de produto: em produto multi-serviço, apenas o projeto "deploy" tem TSK-FULL-TEST.
-    # Projetos individuais (auth, db, cte, mdfe, etc.) declaram tsk_full_test: false no charter.
-    _charter_text = _load_file_from_disk(project_id, "docs/cto/PROJECT_CHARTER.md")
+    # O CTO pode gravar o charter em vários paths — tentar todos em ordem de prioridade.
+    _charter_paths = [
+        "docs/cto/PROJECT_CHARTER.md",   # path formal documentado
+        "docs/cto_charter.md",            # path real gerado pelo CTO (observado em produção)
+        "docs/cto_artifact_0.md",         # path alternativo (primeiro artefato do CTO)
+        "project/PROJECT_CHARTER.md",     # fallback
+    ]
+    _charter_text = ""
+    for _cp in _charter_paths:
+        _ct = _load_file_from_disk(project_id, _cp)
+        if _ct:
+            _charter_text = _ct
+            logger.debug("[_seed_tasks] Charter encontrado em %s", _cp)
+            break
     _skip_full_test = bool(re.search(r"tsk_full_test\s*:\s*false", _charter_text, re.IGNORECASE)) if _charter_text else False
     if _skip_full_test:
         logger.info("[_seed_tasks] tsk_full_test: false no charter — TSK-FULL-TEST omitida para projeto %s", project_id)
@@ -2919,6 +2931,67 @@ def main() -> int:
                         )
                         pipeline_ctx.linked_projects_context = "\n".join(_ctx_lines)
                         logger.info("[Pipeline] Contexto de %d projeto(s) linkado(s) carregado.", len(_links_data))
+
+                # ── Predecessores (project_triggers) ──────────────────────────────────
+                # Carregar contratos dos projetos que são pré-requisito deste via trigger.
+                # Eles já estão completed/accepted (o /run só passou porque passaram na validação).
+                # Isso garante que CTO/Engineer/Dev conhecem os schemas e contratos herdados.
+                _triggers_data, _trig_status = _api_get(f"/api/projects/{project_id}/triggers/predecessors")
+                if not (_triggers_data and isinstance(_triggers_data, list)):
+                    # Fallback: buscar direto na tabela via API de projeto (links approach)
+                    _triggers_data = []
+
+                if _triggers_data:
+                    _files_root = _files_root if '_files_root' in dir() else os.environ.get("PROJECT_FILES_ROOT", "/project-files").rstrip("/")
+                    _pred_lines = ["\n## Projetos predecessores (dependências concluídas)\n",
+                                   "Estes projetos já foram completados e são pré-requisitos deste. "
+                                   "USE seus contratos para derivar schemas, endpoints, autenticação e portas.\n"]
+                    _pred_chars = 0
+                    _MAX_PRED_CHARS = 60_000  # predecessores podem ser vários — limite generoso
+                    for _pred in _triggers_data[:10]:
+                        _pred_id    = _pred.get("id", "")
+                        _pred_title = _pred.get("title", "")
+                        _pred_status = _pred.get("status", "")
+                        if not _pred_id:
+                            continue
+                        _pred_lines.append(f"\n### Predecessor: **{_pred_title}** (status: {_pred_status})\n")
+                        _pred_root = Path(_files_root) / _pred_id
+                        # Para predecessores carregamos mais artefatos: charter, api_contract, schemas
+                        _pred_candidates = [
+                            _pred_root / "project" / "api_contract.md",
+                            _pred_root / "project" / "curl_examples.sh",
+                            _pred_root / "docs" / "cto_artifact_0.md",   # charter real gerado pelo CTO
+                            _pred_root / "docs" / "cto_charter.md",       # path alternativo
+                            _pred_root / "docs" / "cto" / "PROJECT_CHARTER.md",  # path formal
+                            _pred_root / "docs" / "devops" / "RUNBOOK.md",
+                            _pred_root / "project" / "api_contract.md",
+                        ]
+                        for _pcpath in _pred_candidates:
+                            if _pred_chars >= _MAX_PRED_CHARS:
+                                break
+                            try:
+                                _pcontent = _pcpath.read_text(encoding="utf-8", errors="replace")
+                                _avail = _MAX_PRED_CHARS - _pred_chars
+                                if len(_pcontent) > _avail:
+                                    _pcontent = _pcontent[:_avail] + "\n... [truncado por limite de contexto]"
+                                _rel = str(_pcpath.relative_to(_pred_root))
+                                _pred_lines.append(f"\n#### `{_rel}` (de: {_pred_title})\n\n```\n{_pcontent}\n```\n")
+                                _pred_chars += len(_pcontent)
+                                logger.info("[PredCtx] Carregado %s de predecessor %s (%d chars)", _rel, _pred_id[:8], len(_pcontent))
+                            except (FileNotFoundError, OSError):
+                                pass
+
+                    if _pred_chars > 0:
+                        _pred_lines.append(
+                            "\n> **REGRA DE PRODUTO:** Os contratos acima são a fonte de verdade. "
+                            "Se este projeto é backend, derive schemas e auth do DB predecessor. "
+                            "Se este projeto é frontend/manager, derive endpoints de TODOS os backends predecessores. "
+                            "Nunca inventar porta, rota, campo ou tipo que não esteja documentado acima."
+                        )
+                        _existing = pipeline_ctx.linked_projects_context or ""
+                        pipeline_ctx.linked_projects_context = _existing + "\n" + "\n".join(_pred_lines)
+                        logger.info("[Pipeline] Contexto de %d predecessor(es) carregado (%d chars).", len(_triggers_data), _pred_chars)
+
             except Exception as _e:
                 logger.debug("[Pipeline] Não foi possível carregar project_type/links: %s", _e)
 

@@ -334,6 +334,47 @@ Como extrair: ler o cabeçalho de cada `*.routes.ts` do backend — todos têm u
 
 **Se qualquer item não estiver disponível no `linked_projects_context`** → reportar como `NEEDS_INFO` — nunca inventar.
 
+### Projetos predecessores via triggers (produto multi-serviço)
+
+Quando `linked_projects_context` contém uma seção **"## Projetos predecessores"**, esses são projetos que já foram completados e são pré-requisitos deste. O Engineer DEVE:
+
+1. **Extrair e documentar no `engineer_dependencies.md`** todos os contratos herdados dos predecessores:
+   - Banco compartilhado: schema name, tabelas disponíveis, `DATABASE_URL` pattern
+   - Auth-service: porta, endpoint de chave pública, payload do JWT, variáveis de env
+   - Backends fiscais/outros: porta, prefixos de rota, campos, shapes
+
+2. **Adaptar a proposta de arquitetura** para reutilizar o que já existe:
+   - Backend com `shared_db: true` → NÃO propor criação de banco próprio
+   - Backend com auth predecessor → propor validação JWT via PUBLIC_KEY (não criar auth próprio)
+   - Common-pkg predecessor → propor `"file:./common-pkg"` no package.json (não reimplementar)
+
+3. **Para cada predecessor, criar uma subseção no `engineer_dependencies.md`:**
+
+```markdown
+## Contrato Herdado — zentriz-ledger-auth (predecessor)
+- **Porta:** 7100
+- **Public Key endpoint:** `GET http://auth:7100/api/auth/public-key`
+- **JWT payload:** `{ sub: userId, email, tenantId, role }`
+- **Env obrigatória:** `AUTH_SERVICE_URL=http://auth:7100`
+- **Env gerada no boot:** `AUTH_PUBLIC_KEY=<PEM lido do endpoint acima>`
+
+## Contrato Herdado — zentriz-ledger-db (predecessor)
+- **Schema deste serviço:** `cte` (isolado — não conflita com outros)
+- **Tabelas disponíveis:** `cte.documentos`, `shared.tenants`, `shared.users`
+- **DATABASE_URL:** aponta para o mesmo banco (`postgres://...@postgres:5432/ledger`)
+- **NUNCA rodar migrations neste serviço** — só o projeto db roda migrations
+
+## Contrato Herdado — zentriz-ledger-common-pkg (predecessor)
+- **Import:** `"zentriz-ledger-common-pkg": "file:./common-pkg"`
+- **Exporta:** GenericSearchBuilder, tipos fiscais (DocumentoCTe, etc.), validadores CNPJ/CPF
+- **Docker:** build.context deve ser raiz do produto (não pasta do serviço)
+```
+
+**Por que isso é crítico:**
+- Dev que não sabe o schema do banco cria tabelas duplicadas → conflito em produção
+- Dev que não sabe o PUBLIC_KEY endpoint implementa validação JWT errada → 401 em todas as rotas
+- Dev que não sabe o path do common-pkg reinventa GenericSearch → código duplicado, inconsistências
+
 > **Falhas documentadas (2026-05-01):** Dev frontend usou `form-urlencoded` (415), `/api/orders` em vez de `/api/admin/orders` (404), `data.token` em vez de `data.accessToken`, `sort='newest'` quando enum aceita `'createdAt'` (500), `perPage` quando param é `limit` (500), `/api/categories/:id` que não existe (404), `/api/admin/customers/:id/orders` que não existe (404), `PUT /api/products/:id` que não existe (404), sidebar apontando para `/promocoes` sem pasta `app/promocoes/` (404), Footer com 9 hrefs para páginas não criadas (404). Tudo evitável com leitura dos schema.ts e route files antes de escrever os lib files.
 
 ---
