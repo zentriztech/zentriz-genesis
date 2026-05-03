@@ -1042,7 +1042,7 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
                     messages=[{"role": "user", "content": _monitor_prompt}],
                     timeout=120,
                 )
-                    _text = _response.content[0].text if _response.content else ""
+                _text = _response.content[0].text if _response.content else ""
 
             # Extrair JSON da resposta (comum a todos os providers)
             import json as _json
