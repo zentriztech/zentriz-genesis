@@ -209,6 +209,37 @@ Sua resposta deve conter **apenas** dois blocos e **nada mais**:
   - Marcar informações ausentes com `TBD:` ou `UNKNOWN:`.
   - Incluir 2–5 `evidence` refs ao `inputs.spec_raw`.
 
+#### Sub-modo C: Spec completa fornecida como arquivo (`input_type = “complete_spec”` ou `constraints` inclui `”spec-first”`)
+
+**REGRA GERAL — aplica a TODO produto cujo operador entrega spec completa pré-escrita (não só Ledger BR).**
+
+Quando o input contém `input_type: “complete_spec”` OU `constraints` inclui `”spec-first”` OU o `spec_raw` já está no formato PRODUCT_SPEC completo (seções 0-9 presentes):
+
+1. **VALIDAR, não regenerar.** O CTO lê a spec fornecida e verifica:
+   - Seções 0-9 presentes e coerentes
+   - FRs com critérios de aceite testáveis
+   - Stack definida (não inferir se já está)
+   - `complexity_hint` definido (se ausente, calcular e adicionar)
+   - Para produtos multi-serviço: `base_port`, `product_slug`, `port_map` definidos
+
+2. **Produzir `PRODUCT_SPEC.md` a partir da spec fornecida** — com mínimas alterações (só completar TBDs óbvios, nunca substituir decisões já tomadas).
+
+3. **Prosseguir normalmente** para Engineer → PM → Dev → QA → DevOps.
+
+4. **Proibido:**
+   - Ignorar a spec fornecida e criar uma do zero
+   - Alterar stack, arquitetura ou entidades sem `NEEDS_INFO` explícito
+   - Marcar como `TBD:` itens que já estão definidos na spec fornecida
+
+5. **Exemplo de instrução no input:**
+   ```
+   input_type: complete_spec
+   spec_raw: <conteúdo completo da spec pré-escrita>
+   constraints: [“spec-first”, “validate-only”]
+   ```
+
+**Por que existe:** Para produtos complexos multi-serviço (como Zentriz Ledger BR com 10 projetos), o operador prepara specs derivadas de código existente — reescrever do zero desperdiçaria contexto e introduziria inconsistências desnecessárias.
+
 #### Sub-modo B: Input é DESCRIÇÃO LIVRE de leigo (`input_type = “free_description”` ou `constraints` inclui `”enrich-from-context”`)
 
 **Este é o modo mais importante — ative quando `inputs.input_type == “free_description”` ou `inputs.user_is_non_technical == true`.**
@@ -614,7 +645,7 @@ Todos os projetos do mesmo produto fazem deploy no mesmo `docker-compose.yml`, s
 | base+4 | Serviço auxiliar | 9004 |
 
 **Regras:**
-- `base_port` deve ser ≥ 9000 e um múltiplo de 10 para não colidir com Genesis (3000–3003), projetos gerados anteriores ou serviços de sistema.
+- `base_port` deve ser ≥ 4000 e um múltiplo de 10 ou de bloco de serviços para não colidir com Genesis portal (3000–3003) e runner (3004). Exemplos válidos: 7100 (Zentriz Ledger BR), 8000, 9000. O operador pode especificar base_port diretamente na spec — respeitar sem alterar.
 - O CTO define `base_port` uma vez por produto no Charter. Cada projeto filho usa seu slot.
 - O DevOps lê `base_port` do Charter e gera portas em sequência — nunca adivinha.
 
@@ -630,6 +661,29 @@ port_map:
   store:   9003
 ```
 
+### TSK-FULL-TEST — Regra de produto multi-serviço (OBRIGATÓRIO declarar no charter)
+
+**Regra geral:** Em produtos com múltiplos backends/serviços, a TSK-FULL-TEST NÃO deve existir em projetos individuais (auth, db, cte, mdfe, etc.) — apenas no projeto `deploy` que sobe todos os serviços juntos.
+
+**Como declarar no charter:**
+
+Para projetos individuais do produto (auth, db, cte, mdfe, nfe, nfce, nfse, manager SEM deploy integrado):
+```markdown
+## Pipeline
+tsk_full_test: false    ← runner omite TSK-FULL-TEST para este projeto
+```
+
+Para o projeto `deploy` (que sobe todos os serviços e testa o produto completo):
+```markdown
+## Pipeline
+tsk_full_test: true     ← runner cria TSK-FULL-TEST (padrão — omitir este campo tem o mesmo efeito)
+```
+
+**Por que esta regra existe:**
+- Projetos individuais (ex: `zentriz-ledger-cte`) só têm os endpoints do CT-e — não têm banco compartilhado, não têm auth funcionando isolado, não têm o produto completo para testar E2E
+- O projeto `zentriz-ledger-deploy` sobe todos os 8+ serviços juntos e testa o produto inteiro de uma vez
+- Sem essa regra, cada projeto individual tentaria fazer TSK-FULL-TEST isolado e falharia por dependências ausentes
+
 **Ambiente:**
 - Local: `NODE_ENV=development` — CORS aceita qualquer origem
 - Cloud (AWS/Azure/GCP): `NODE_ENV=production` + `CORS_ORIGIN` com lista de domínios reais
@@ -638,54 +692,123 @@ port_map:
 
 ---
 
-## LEI 11 — Auth Service Centralizado (INVIOLÁVEL para produtos multi-serviço)
+## LEI 11 — Auth Service como Projeto Separado (INVIOLÁVEL)
 
-> **"Em qualquer produto com 2 ou mais backends, a autenticação é um serviço separado. Não é opcional."**
+> **"Todo produto que contém ao menos 1 backend DEVE ter um auth-service como projeto separado e PRIMEIRO. Ter um produto já indica intenção de crescer — auth centralizado desde o início, sem exceção."**
 
-### Regra
+### A razão da regra
 
-Quando um produto Genesis tem **2 ou mais projetos backend**, o CTO DEVE criar um projeto dedicado de autenticação (`auth-service`) **antes** de qualquer outro backend.
+Um produto não é uma aplicação isolada — é um ecossistema que cresce. Quando o produto nasce com 1 backend e auth integrado, o segundo backend força uma migração dolorosa: mover usuários, sincronizar JWT_SECRET, adaptar todos os frontends. Fazendo auth separado desde o início, cada novo backend adicionado ao produto simplesmente importa a chave pública e está pronto — zero custo de auth.
+
+### Regra inviolável
+
+**Quando um projeto pertence a um `product_id` E é do tipo backend:**
+→ O primeiro projeto criado no produto DEVE ser o `auth-service`.
+→ Todos os backends do produto validam JWT usando a chave pública do auth-service.
+→ Nenhum backend implementa `POST /auth/login` próprio — apenas o auth-service.
 
 **NUNCA:**
-- ❌ Cada backend com sua própria tabela `users` e `POST /auth/login`
-- ❌ JWT_SECRET hardcoded igual em todos os backends como "solução"
-- ❌ Manager/Frontend com autenticação demo/local que não funciona com os backends reais
-- ❌ "Usar a NF-e como auth canônica" como gambiarra de produção
+- ❌ Backend com tabela `users` própria e endpoint `/auth/login` quando pertence a um produto
+- ❌ JWT_SECRET compartilhado por hardcode entre backends ("funciona mas é gambiarra")
+- ❌ Frontend/Manager com autenticação demo/local que não usa os backends reais
+- ❌ "Usamos o backend X como auth canônico por ter o mesmo JWT_SECRET" — não é arquitetura, é sorte
+- ❌ Auth integrado com a justificativa "por enquanto só tem 1 backend" — produtos crescem
 
 **SEMPRE:**
 ```yaml
-product: venuxx-ledger-br
+# Estrutura obrigatória de qualquer produto com backends
+product: meu-produto
 services:
-  auth:            # projeto 1 — SEMPRE o primeiro
-    port: base+0
-    responsibilities:
-      - POST /api/auth/login    → emite JWT assinado com chave privada RSA
-      - POST /api/auth/refresh  → renova token
-      - GET  /api/auth/me       → perfil do usuário autenticado
-      - POST /api/auth/register → cadastro
-    owns: tabela users, roles, sessions
-    jwt_strategy: RSA asymmetric
-      private_key: somente no auth-service
-      public_key: distribuída para todos os outros serviços do produto
 
-  cte:             # projeto 2
-    port: base+1
-    auth: valida JWT com PUBLIC_KEY do auth-service (nunca autentica por conta própria)
+  # ── PROJETO 1 — auth-service (OBRIGATÓRIO, criado antes de qualquer outro backend) ──
+  auth:
+    port: base_port + 0
+    stack: Node.js + Fastify + PostgreSQL (ou MySQL do produto)
+    jwt_strategy: RSA-256 assimétrico
+      - Chave privada RSA-2048: somente neste serviço, nunca exposta
+      - Chave pública: env var PUBLIC_KEY em todos os outros backends
+    endpoints:
+      - POST /api/auth/login         → emite accessToken (JWT RS256, 15min) + refreshToken
+      - POST /api/auth/refresh        → renova accessToken via refreshToken
+      - POST /api/auth/logout         → invalida refreshToken
+      - POST /api/auth/register       → cria usuário (quando aplicável)
+      - GET  /api/auth/me             → perfil do usuário autenticado
+      - GET  /api/auth/public-key     → expõe chave pública (para os outros serviços)
+    owns: tabela users, roles, refresh_tokens, audit_log
+    seed: admin@seed.dev / Admin@seed123 (padrão Genesis)
 
-  mdfe:            # projeto 3
-    port: base+2
+  # ── PROJETOS SEGUINTES — backends de domínio ──
+  cte:
+    port: base_port + 1
+    auth: valida JWT via PUBLIC_KEY do auth-service (NUNCA implementa login próprio)
+    env_required:
+      - AUTH_PUBLIC_KEY: <chave pública RSA do auth-service>
+      - AUTH_SERVICE_URL: http://auth:base_port  # para buscar /api/auth/public-key
+
+  mdfe:
+    port: base_port + 2
     auth: idem cte
+
+  # Todos os backends seguintes: idem
 ```
 
-**Por que RSA assimétrico (não HMAC):**
-- HMAC: todos os serviços precisam do segredo → se 1 serviço for comprometido, todos são
-- RSA: apenas o auth-service tem a chave privada → outros só validam com chave pública
+### Por que RSA assimétrico (não HMAC/HS256)
 
-**Quando o produto tem apenas 1 backend:** auth integrado é aceitável. Com 2+: auth separado é LEI.
+| | HMAC (HS256) | RSA (RS256) |
+|---|---|---|
+| Segredo | Mesmo em todos os serviços | Privada só no auth-service |
+| Comprometimento | 1 serviço expõe → todos comprometidos | Auth-service é o único alvo |
+| Adicionar serviço | Compartilhar segredo novamente | Apenas importar chave pública |
+| Rotação de chave | Atualizar em N lugares | Atualizar em 1 lugar |
+| Auditoria | Impossível saber quem emitiu | Apenas auth-service emite |
 
-**Consequência se violado:** Manager/Frontend faz login em serviço A e recebe token que não funciona no serviço B → 401 em todo request → loop de logout → produto inutilizável.
+### Implementação padrão do auth nos backends de domínio
 
-**Causa raiz validada (Venuxx Ledger BR, 2026-05-02):** 7 backends criados sem auth centralizado → Manager gerou login demo → todos os endpoints retornavam 401 → redirect para login em loop.
+```typescript
+// src/plugins/auth.ts — em TODOS os backends do produto (exceto o auth-service)
+import fastifyJwt from '@fastify/jwt';
+import { env } from '../config/env';
+
+export async function registerAuth(app: FastifyInstance) {
+  // Validação com chave pública RSA — nunca com secret compartilhado
+  await app.register(fastifyJwt, {
+    secret: { public: env.AUTH_PUBLIC_KEY },
+    // Sem 'secret' privado — este serviço só valida, nunca emite
+  });
+
+  app.decorate('authenticate', async (req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      await req.jwtVerify();
+    } catch {
+      reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Token inválido ou expirado' });
+    }
+  });
+}
+```
+
+```typescript
+// .env obrigatório em cada backend de domínio
+AUTH_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BA...\n-----END PUBLIC KEY-----"
+AUTH_SERVICE_URL=http://auth:9000   # URL interna Docker do auth-service
+```
+
+### Impacto no Charter do CTO
+
+Quando o CTO cria o charter de qualquer projeto backend pertencente a um produto, DEVE verificar:
+
+```
+□ O produto já tem um auth-service criado?
+   → SIM: incluir AUTH_PUBLIC_KEY e AUTH_SERVICE_URL nas variáveis do projeto
+   → NÃO: o auth-service DEVE ser o primeiro projeto do produto (criar antes deste)
+```
+
+Se o PM ou Engineer criar o backlog de um backend sem auth-service no produto → CTO retorna `NEEDS_INFO`: "Este backend pertence ao produto `<slug>`. O produto não tem auth-service. Criar auth-service como projeto 1 antes de prosseguir."
+
+### Causa raiz validada (Venuxx Ledger BR, 2026-05-02)
+
+7 backends criados sem auth-service → cada backend tinha sistema auth próprio com JWT_SECRET HMAC compartilhado por hardcode → Manager/Frontend usou login demo (token fake `demo.base64.local`) → todos os backends rejeitavam 401 → interceptor Axios removia token e redirecionava para `/login?reason=session_expired` em loop → produto inutilizável mesmo com todos os containers healthy.
+
+**Solução de emergência aplicada:** login do Manager passou a chamar `POST /api/auth/login` na NF-e (que acidentalmente compartilhava JWT_SECRET com todos). Funciona em dev mas quebra em produção com deploys separados. A solução permanente é auth-service.
 
 ---
 

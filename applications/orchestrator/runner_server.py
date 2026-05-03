@@ -235,7 +235,35 @@ def run(body: RunBody):
             "PROJECT_ID": body.projectId,
             "GENESIS_API_TOKEN": body.token,
         }
-        if not env.get("CLAUDE_API_KEY"):
+
+        # FT-13: Resolver credenciais LLM pela autoridade do projeto (zentriz_admin vs tenant)
+        try:
+            import urllib.request as _urlreq
+            _llm_url = f"{body.apiBaseUrl.rstrip('/')}/api/internal/project-llm-config/{body.projectId}"
+            _req = _urlreq.Request(_llm_url, headers={"X-Internal-Token": body.token})
+            with _urlreq.urlopen(_req, timeout=5) as _resp:
+                import json as _json
+                _llm_cfg = _json.loads(_resp.read().decode())
+            if _llm_cfg.get("ok"):
+                if _llm_cfg.get("apiKey"):
+                    env["CLAUDE_API_KEY"] = _llm_cfg["apiKey"]
+                if _llm_cfg.get("provider"):
+                    env["GENESIS_LLM_PROVIDER"] = _llm_cfg["provider"]
+                if _llm_cfg.get("modelId"):
+                    env["CLAUDE_MODEL"] = _llm_cfg["modelId"]
+                if _llm_cfg.get("awsRegion"):
+                    env["GENESIS_AWS_REGION"] = _llm_cfg["awsRegion"]
+                if _llm_cfg.get("awsAccessKeyId"):
+                    env["AWS_ACCESS_KEY_ID"] = _llm_cfg["awsAccessKeyId"]
+                if _llm_cfg.get("awsSecretAccessKey"):
+                    env["AWS_SECRET_ACCESS_KEY"] = _llm_cfg["awsSecretAccessKey"]
+                _is_default = _llm_cfg.get("isDefault", True)
+                logger.info("[FT-13] LLM config resolvida: provider=%s model=%s isDefault=%s",
+                            env.get("GENESIS_LLM_PROVIDER"), env.get("CLAUDE_MODEL"), _is_default)
+        except Exception as _llm_err:
+            logger.warning("[FT-13] Não foi possível resolver LLM config via API (%s) — usando env atual", _llm_err)
+
+        if not env.get("CLAUDE_API_KEY") and env.get("GENESIS_LLM_PROVIDER", "bedrock") != "bedrock":
             logger.warning("CLAUDE_API_KEY não definida; o runner pode falhar ao chamar os agentes")
 
         cmd = ["python", "-m", "orchestrator.runner", "--spec-file", spec_path]

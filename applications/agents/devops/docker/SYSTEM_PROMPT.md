@@ -132,6 +132,51 @@ agent:
   Se o projeto usa Prisma em vez de Drizzle: `npx prisma migrate deploy` antes do `exec`.
   **Checklist:** verificar `drizzle/migrations/` ou `prisma/migrations/` existe no stage `production` do Dockerfile — migrations ausentes no container = tabelas não criadas = crash no boot.
 
+- **COMMON-PKG BUILD CONTEXT — REGRA GERAL (BLOCKER para todo produto com pacote local compartilhado):**
+
+  Quando o charter define `common_pkg: true` ou o produto tem um projeto do tipo `common-pkg` / `shared-library` (TypeScript puro, não publicado no npm):
+
+  ```yaml
+  # ERRADO — context é a pasta do serviço
+  services:
+    cte-api:
+      build:
+        context: ./cte/apps  # ← ERRADO: não enxerga common-pkg
+
+  # CORRETO — context é a RAIZ do produto
+  services:
+    cte-api:
+      build:
+        context: .                          # raiz do produto
+        dockerfile: cte/project/Dockerfile  # Dockerfile relativo à raiz
+  ```
+
+  **Dockerfile de cada backend (quando usa common-pkg):**
+  ```dockerfile
+  FROM node:20-alpine AS builder
+  WORKDIR /app
+  # Copiar o pacote compartilhado ANTES do serviço
+  COPY common-pkg/ ./common-pkg/
+  COPY cte/apps/ ./            # ou o serviço correspondente
+  RUN npm install              # resolve "file:./common-pkg" corretamente
+  RUN npm run build
+  ```
+
+  **`package.json` do backend deve referenciar:**
+  ```json
+  { "dependencies": { "zentriz-ledger-common-pkg": "file:./common-pkg" } }
+  ```
+
+  **Regra:** quando produto tem common-pkg, o `docker-compose.yml` do produto completo (gerado pelo projeto `deploy`) DEVE usar `context: .` (raiz do produto) para TODOS os serviços que dependem do pacote compartilhado. O Dockerfile de cada serviço cuida do COPY.
+
+  **Checklist common-pkg:**
+  ```bash
+  # Para cada serviço que usa common-pkg:
+  grep "context:" docker-compose.yml   # deve apontar para raiz, não para subpasta
+  grep "common-pkg" */apps/package.json  # deve ter "file:./common-pkg"
+  grep "COPY common-pkg" */project/Dockerfile  # deve copiar antes do serviço
+  ```
+
 - **REGRA DE CO-DEPLOY E ALOCAÇÃO DE PORTAS (OBRIGATÓRIA):**
 
   Todos os serviços do mesmo produto sobem no **mesmo** `docker-compose.yml`, sob o mesmo `name: <product-slug>`. Separação é por produto, não por camada.

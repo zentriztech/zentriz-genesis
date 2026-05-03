@@ -90,6 +90,101 @@ export async function hasConcurrencySlot(tenantId: string): Promise<boolean> {
 }
 
 /**
+ * FT-13: Resolve LLM config pelo role do created_by do projeto.
+ *  - zentriz_admin  → zentriz_llm_config (global)
+ *  - tenant_admin/user → tenant_llm_configs (do tenant)
+ * Se config não existir para a autoridade → erro explícito (pipeline não inicia sem config).
+ */
+export interface ResolvedLlmConfig {
+  provider:   string;
+  modelId:    string;
+  apiKey:     string;     // CLAUDE_API_KEY ou equivalente
+  awsRegion?: string;     // para Bedrock
+  awsAccessKeyId?: string;
+  awsSecretAccessKey?: string;
+  isDefault:  boolean;
+}
+
+export async function resolveProjectLlmConfig(projectId: string): Promise<ResolvedLlmConfig> {
+  // 1. Buscar o projeto e o role do created_by
+  let createdByRole = "user";
+  let tenantId: string | null = null;
+  try {
+    const projResult = await pool.query(
+      `SELECT p.tenant_id, u.role AS creator_role
+       FROM projects p
+       JOIN users u ON u.id = p.created_by
+       WHERE p.id = $1 LIMIT 1`,
+      [projectId]
+    );
+    if (projResult.rows.length > 0) {
+      createdByRole = String(projResult.rows[0].creator_role ?? "user");
+      tenantId = String(projResult.rows[0].tenant_id ?? "");
+    }
+  } catch {
+    // fall through to env fallback
+  }
+
+  // 2. zentriz_admin → zentriz_llm_config
+  if (createdByRole === "zentriz_admin") {
+    try {
+      const res = await pool.query(
+        `SELECT provider, model_id, credentials FROM zentriz_llm_config WHERE is_active = TRUE LIMIT 1`
+      );
+      if (res.rows.length > 0) {
+        const row = res.rows[0] as Record<string, unknown>;
+        const creds = (row.credentials as Record<string, string>) ?? {};
+        return {
+          provider:            String(row.provider ?? "anthropic"),
+          modelId:             String(row.model_id ?? SYSTEM_DEFAULT.modelId),
+          apiKey:              creds.api_key ?? process.env.CLAUDE_API_KEY ?? "",
+          awsRegion:           creds.aws_region,
+          awsAccessKeyId:      creds.aws_access_key_id,
+          awsSecretAccessKey:  creds.aws_secret_access_key,
+          isDefault:           false,
+        };
+      }
+    } catch {
+      // table may not exist yet — fall through to env
+    }
+    // zentriz_admin sem config configurada → usar env (allows bootstrap)
+    return {
+      provider:   process.env.GENESIS_LLM_PROVIDER ?? "anthropic",
+      modelId:    process.env.CLAUDE_MODEL ?? SYSTEM_DEFAULT.modelId,
+      apiKey:     process.env.CLAUDE_API_KEY ?? "",
+      awsRegion:  process.env.GENESIS_AWS_REGION,
+      isDefault:  true,
+    };
+  }
+
+  // 3. tenant_admin/user → tenant_llm_configs
+  if (tenantId) {
+    const tenantCfg = await getTenantLlmConfig(tenantId);
+    if (!tenantCfg.isDefault) {
+      const creds = tenantCfg.credentials;
+      return {
+        provider:            tenantCfg.provider,
+        modelId:             tenantCfg.modelId,
+        apiKey:              creds.api_key ?? "",
+        awsRegion:           creds.aws_region,
+        awsAccessKeyId:      creds.aws_access_key_id,
+        awsSecretAccessKey:  creds.aws_secret_access_key,
+        isDefault:           false,
+      };
+    }
+  }
+
+  // 4. Fallback absoluto — env vars
+  return {
+    provider:   process.env.GENESIS_LLM_PROVIDER ?? "anthropic",
+    modelId:    process.env.CLAUDE_MODEL ?? SYSTEM_DEFAULT.modelId,
+    apiKey:     process.env.CLAUDE_API_KEY ?? "",
+    awsRegion:  process.env.GENESIS_AWS_REGION,
+    isDefault:  true,
+  };
+}
+
+/**
  * G39: Coloca projeto na fila se não houver slot disponível.
  * Retorna "started" ou "queued".
  */

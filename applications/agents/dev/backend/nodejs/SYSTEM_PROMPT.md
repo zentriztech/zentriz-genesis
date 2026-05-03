@@ -379,6 +379,88 @@ Nunca registrar o mesmo prefixo em dois lugares:
 
 **R6 — Seed + Collection + API Contract obrigatórios na última task (G40 + G45 + G-contract)**
 
+**R-GENERIC-SEARCH — GenericSearchBuilder obrigatório em todo produto com banco de dados (REGRA GERAL)**
+
+Todo backend que toca banco de dados e expõe endpoints de listagem DEVE implementar `GenericSearchBuilder<T extends Table>`. Isso vale para qualquer produto (não só Ledger) — é a interface padrão do ecossistema Genesis para queries dinâmicas.
+
+**Padrão obrigatório:**
+```typescript
+// src/shared/generic-search.ts — copiar este template em todo backend com banco
+
+export type FilterOperator = 'eq' | 'in' | 'like' | 'between' | 'gt' | 'gte' | 'lt' | 'lte' | 'isNull';
+
+export interface FieldWhitelist {
+  filterable: string[];   // campos aceitos em ?filter[campo][op]=valor
+  sortable:   string[];   // campos aceitos em ?sort=campo&order=asc|desc
+  selectable: string[];   // campos aceitos em ?fields=campo1,campo2
+}
+
+export interface GenericSearchParams {
+  filters?:  Record<string, { op: FilterOperator; value: unknown }>;
+  sort?:     string;
+  order?:    'asc' | 'desc';
+  fields?:   string[];
+  limit?:    number;   // default 20, max 100
+  offset?:   number;   // default 0
+}
+
+export interface GenericSearchResult<T> {
+  data:   T[];
+  total:  number;
+  limit:  number;
+  offset: number;
+}
+
+// Implementação — adaptar imports do Drizzle ao banco do projeto (pg-core ou mysql-core)
+export async function executeGenericSearch<T>(
+  db:        ReturnType<typeof drizzle>,
+  table:     Table,
+  whitelist: FieldWhitelist,
+  params:    GenericSearchParams,
+): Promise<GenericSearchResult<T>> {
+  const limit  = Math.min(params.limit  ?? 20, 100);
+  const offset = params.offset ?? 0;
+
+  // Construir WHERE a partir de params.filters (validando contra whitelist.filterable)
+  // Construir ORDER BY (validando sort contra whitelist.sortable)
+  // Construir SELECT (validando fields contra whitelist.selectable)
+  // Executar COUNT(*) + SELECT em paralelo
+  // Retornar { data, total, limit, offset }
+  ...
+}
+```
+
+**Uso em cada rota de listagem:**
+```typescript
+// src/routes/products.ts
+import { executeGenericSearch } from '../shared/generic-search';
+import { productsTable } from '../db/schema';
+
+const PRODUCTS_WHITELIST: FieldWhitelist = {
+  filterable: ['status', 'categoryId', 'price'],
+  sortable:   ['name', 'price', 'createdAt', 'stockLevel'],
+  selectable: ['id', 'name', 'price', 'status', 'categoryId', 'stockLevel', 'createdAt'],
+};
+
+router.get('/api/admin/products', authenticate, async (req, res) => {
+  const result = await executeGenericSearch(db, productsTable, PRODUCTS_WHITELIST, {
+    filters: req.query.filter as any,
+    sort:    req.query.sort as string,
+    order:   req.query.order as 'asc' | 'desc',
+    limit:   Number(req.query.limit) || 20,
+    offset:  Number(req.query.offset) || 0,
+  });
+  res.json({ data: result.data, meta: { total: result.total, limit: result.limit, offset: result.offset } });
+});
+```
+
+**Regras:**
+- **Whitelist é obrigatória** — nunca passar campos raw da query para o banco sem validação
+- **Retorno padrão:** `{ data: T[], total: number, limit: number, offset: number }`
+- **Limit máximo:** 100 — requests acima são capped silenciosamente
+- **Campos fora da whitelist:** ignorados silenciosamente (não retornam erro)
+- **Checklist:** todo endpoint `GET /api/*/[lista]` deve usar `executeGenericSearch` — não implementar paginação/filtro/sort manualmente
+
 Na última task do backlog (ou task de scaffold), SEMPRE gerar:
 
 ---

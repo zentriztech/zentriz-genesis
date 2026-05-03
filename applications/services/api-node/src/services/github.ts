@@ -1,10 +1,32 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { readFileSync } from "fs";
+import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { pool } from "../db/client.js";
 
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? "";
 const GITHUB_APP_CLIENT_ID = process.env.GITHUB_APP_CLIENT_ID ?? "";
 const GITHUB_APP_CLIENT_SECRET = process.env.GITHUB_APP_CLIENT_SECRET ?? "";
+
+// AES-256-CBC key from env — must be 32 bytes (64 hex chars)
+const ENCRYPTION_KEY = Buffer.from((process.env.ENCRYPTION_KEY ?? "").padEnd(64, "0").slice(0, 64), "hex");
+const IV_LENGTH = 16;
+
+export function encryptText(text: string): string {
+  const iv = randomBytes(IV_LENGTH);
+  const cipher = createCipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
+  return `${iv.toString("hex")}:${encrypted.toString("hex")}`;
+}
+
+export function decryptText(encrypted: string): string {
+  const [ivHex, dataHex] = encrypted.split(":");
+  if (!ivHex || !dataHex) throw new Error("Invalid encrypted format");
+  const iv = Buffer.from(ivHex, "hex");
+  const decipher = createDecipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
+  const decrypted = Buffer.concat([decipher.update(Buffer.from(dataHex, "hex")), decipher.final()]);
+  return decrypted.toString("utf8");
+}
 
 export type GitHubInstallationInfo = {
   installationId: number;
@@ -14,8 +36,38 @@ export type GitHubInstallationInfo = {
   selectedRepos: string[];
 };
 
-/** Lazy — reads the private key on first use, not at module load time. */
-function _getPrivateKey(): string {
+// FT-12: tenant-level app config — resolved before env fallback
+interface TenantAppConfig {
+  appId: string;
+  privateKey: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+async function _getTenantAppConfig(installationId: number): Promise<TenantAppConfig | null> {
+  try {
+    const res = await pool.query(
+      `SELECT app_id, private_key_encrypted, app_client_id, app_client_secret
+       FROM tenant_github_installations
+       WHERE installation_id = $1 AND app_id IS NOT NULL AND private_key_encrypted IS NOT NULL
+       LIMIT 1`,
+      [installationId]
+    );
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0] as Record<string, unknown>;
+    return {
+      appId:        String(row.app_id ?? ""),
+      privateKey:   decryptText(String(row.private_key_encrypted ?? "")),
+      clientId:     String(row.app_client_id ?? ""),
+      clientSecret: row.app_client_secret ? decryptText(String(row.app_client_secret)) : "",
+    };
+  } catch {
+    return null; // column may not exist yet (migration pending) — fallback to env
+  }
+}
+
+/** Reads global private key from env (lazy, file or inline). */
+function _getGlobalPrivateKey(): string {
   const filePath = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
   if (filePath) {
     try {
@@ -27,48 +79,71 @@ function _getPrivateKey(): string {
   return process.env.GITHUB_APP_PRIVATE_KEY ?? "";
 }
 
-function isAppConfigured(): boolean {
-  const appId = process.env.GITHUB_APP_ID ?? "";
-  if (!appId) return false;
+function isGlobalAppConfigured(): boolean {
+  if (!GITHUB_APP_ID) return false;
   const keyFile = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
   const keyInline = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
   return Boolean(keyFile || keyInline);
 }
 
 /**
- * Returns an authenticated Octokit client for a given installation.
- * Falls back to GITHUB_TOKEN when App is not configured (dev/local).
+ * FT-12: Returns an authenticated Octokit for an installation.
+ * Priority: (1) tenant app_id + private_key from DB, (2) global env App, (3) PAT fallback.
  */
 async function getOctokitForInstallation(installationId: number): Promise<Octokit> {
-  if (!isAppConfigured()) {
-    const token = process.env.GITHUB_TOKEN;
-    if (!token) throw new Error("No GitHub credentials. Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY, or GITHUB_TOKEN.");
+  // 1. Try tenant-specific GitHub App
+  const tenantCfg = await _getTenantAppConfig(installationId);
+  if (tenantCfg?.appId && tenantCfg?.privateKey) {
+    const auth = createAppAuth({
+      appId:        tenantCfg.appId,
+      privateKey:   tenantCfg.privateKey,
+      clientId:     tenantCfg.clientId || undefined,
+      clientSecret: tenantCfg.clientSecret || undefined,
+    });
+    const { token } = await auth({ type: "installation", installationId });
     return new Octokit({ auth: token });
   }
 
-  const auth = createAppAuth({
-    appId: GITHUB_APP_ID,
-    privateKey: _getPrivateKey(),
-    clientId: GITHUB_APP_CLIENT_ID,
-    clientSecret: GITHUB_APP_CLIENT_SECRET,
-  });
+  // 2. Global App from env
+  if (isGlobalAppConfigured()) {
+    const auth = createAppAuth({
+      appId:        GITHUB_APP_ID,
+      privateKey:   _getGlobalPrivateKey(),
+      clientId:     GITHUB_APP_CLIENT_ID || undefined,
+      clientSecret: GITHUB_APP_CLIENT_SECRET || undefined,
+    });
+    const { token } = await auth({ type: "installation", installationId });
+    return new Octokit({ auth: token });
+  }
 
-  const { token } = await auth({ type: "installation", installationId });
+  // 3. PAT fallback (dev/local without App configured)
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error("No GitHub credentials. Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY, ENCRYPTION_KEY, or GITHUB_TOKEN.");
   return new Octokit({ auth: token });
 }
 
 /**
- * Fetches metadata about an installation directly from GitHub.
- * Used during onboarding to validate and store installation details.
+ * FT-12: Fetches metadata about an installation directly from GitHub.
+ * Accepts optional tenant-level app credentials; falls back to global env App.
  */
-export async function getInstallationInfo(installationId: number): Promise<GitHubInstallationInfo> {
-  if (!isAppConfigured()) throw new Error("GitHub App not configured.");
+export async function getInstallationInfo(
+  installationId: number,
+  tenantAppConfig?: { appId: string; privateKey: string; clientId?: string; clientSecret?: string }
+): Promise<GitHubInstallationInfo> {
+  const cfg = tenantAppConfig ?? (isGlobalAppConfigured() ? {
+    appId: GITHUB_APP_ID,
+    privateKey: _getGlobalPrivateKey(),
+    clientId: GITHUB_APP_CLIENT_ID || undefined,
+    clientSecret: GITHUB_APP_CLIENT_SECRET || undefined,
+  } : null);
+
+  if (!cfg) throw new Error("GitHub App not configured.");
 
   const auth = createAppAuth({
-    appId: GITHUB_APP_ID,
-    privateKey: _getPrivateKey(),
-    clientId: GITHUB_APP_CLIENT_ID,
-    clientSecret: GITHUB_APP_CLIENT_SECRET,
+    appId:        cfg.appId,
+    privateKey:   cfg.privateKey,
+    clientId:     cfg.clientId,
+    clientSecret: cfg.clientSecret,
   });
   const { token } = await auth({ type: "app" });
   const octokit = new Octokit({ auth: `Bearer ${token}` });

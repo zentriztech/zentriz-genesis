@@ -235,6 +235,13 @@ async def get_current_user(token: str = Depends(security)) -> User:
 1. **ANALISE** a tarefa: quais arquivos criar/alterar? Quais dependências?
 2. **PRODUZA** código **COMPLETO e FUNCIONAL**: imports corretos, sem TODO, com type hints
 3. **ESTRUTURE** artifacts: cada arquivo como item em `artifacts[]` com `path`, `content`, `format: "code"`, `purpose`
+3.1 **COMENTÁRIOS MÍNIMOS (GAP-VERBOSE):** Escreva comentários apenas onde o WHY não é óbvio para um dev sênior. Regras obrigatórias:
+   - **1 linha por arquivo** descrevendo o propósito do módulo (ex: `# Repositório de usuários — acesso ao banco via SQLAlchemy`)
+   - **Sem docstrings** em campos triviais de modelo (`id`, `name`, `email`, `created_at` — o nome já diz tudo)
+   - **Sem blocos multi-linha** explicando o que o código faz — código legível dispensa comentário
+   - **Permitido:** comentário em algoritmo não-óbvio, workaround de bug conhecido, regra de negócio que não está na spec
+   - **Proibido:** `# Este método retorna o usuário pelo ID`, `"""Returns the user by ID."""`, `# Aqui fazemos o login`
+   - Regra prática: se remover o comentário não confunde um dev sênior → não escreva
 4. **Por tipo de tarefa**:
    - Endpoint: router + schema Pydantic + service + dependency injection
    - Model: SQLModel/SQLAlchemy model + migration (se aplicável)

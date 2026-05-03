@@ -953,6 +953,111 @@ def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_
     return run_agent(system_prompt_path=monitor_prompt, message=message, role="MONITOR")
 
 
+def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> dict:
+    """FT-11: Monitor Autônomo — tenta resolver task BLOCKED via Anthropic SDK.
+    Retorna dict com outcome: FIXED | GENESIS_BUG | ESCALATE.
+    Timeout: 120s. Máx 2 tentativas de fix.
+    """
+    try:
+        import anthropic as _anthropic
+    except ImportError:
+        logger.warning("[FT-11] anthropic SDK não disponível — pulando Monitor Autônomo")
+        return {"outcome": "ESCALATE", "summary": "SDK anthropic não instalado"}
+
+    task_id = task.get("taskId") or task.get("task_id") or ""
+    task_desc = task.get("requirements") or task.get("title") or task.get("description") or ""
+
+    # Carregar QA history da task
+    _qa_history: list[str] = []
+    try:
+        _tasks_data, _ = _api_get(f"/api/projects/{project_id}/tasks")
+        if isinstance(_tasks_data, list):
+            for _t in _tasks_data:
+                if (_t.get("taskId") or _t.get("task_id")) == task_id:
+                    _qa_report = _t.get("qaReport") or _t.get("qa_report") or ""
+                    if _qa_report:
+                        _qa_history.append(_qa_report)
+                    break
+    except Exception:
+        pass
+
+    # Montar tree de arquivos do projeto
+    _proj_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+    _file_tree = ""
+    try:
+        _tree_lines = []
+        for _p in sorted(_proj_root.rglob("*"))[:60]:
+            if _p.is_file() and "node_modules" not in str(_p) and ".next" not in str(_p):
+                _tree_lines.append(str(_p.relative_to(_proj_root.parent.parent)))
+        _file_tree = "\n".join(_tree_lines)
+    except Exception:
+        pass
+
+    _monitor_prompt = (
+        f"Você é o Monitor Autônomo do Genesis.\n"
+        f"Sua única responsabilidade é desbloquear a task abaixo sem modificar nada fora de apps/.\n\n"
+        f"TASK ID: {task_id}\n"
+        f"TASK DESCRIÇÃO: {task_desc}\n\n"
+        f"QA REPORTS (últimas tentativas):\n{chr(10).join(_qa_history) or 'Sem QA reports disponíveis'}\n\n"
+        f"ARQUIVOS NO DISCO (apps/):\n{_file_tree or 'Não foi possível listar'}\n\n"
+        f"Regras obrigatórias:\n"
+        f"1. Leia TODOS os artefatos relevantes antes de qualquer ação\n"
+        f"2. Escreva APENAS em: {_proj_root}/\n"
+        f"3. Se o problema for bug do Genesis (não do projeto), responda:\n"
+        f'   {{"outcome":"GENESIS_BUG","bug_report":{{"description":"...","evidence":"..."}}}}\n'
+        f"4. Máximo 2 tentativas de fix — se não resolver, responda:\n"
+        f'   {{"outcome":"ESCALATE","summary":"motivo"}}\n'
+        f"5. Ao corrigir com sucesso, responda:\n"
+        f'   {{"outcome":"FIXED","files_changed":["path1","path2"],"summary":"o que foi corrigido"}}\n'
+        f"Responda APENAS com JSON — sem texto adicional."
+    )
+
+    _client = _anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
+    _model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+    for _attempt in range(2):
+        try:
+            _response = _client.messages.create(
+                model=_model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": _monitor_prompt}],
+                timeout=120,
+            )
+            _text = _response.content[0].text if _response.content else ""
+            # Extrair JSON da resposta
+            import json as _json
+            _start = _text.find("{")
+            _end = _text.rfind("}") + 1
+            if _start >= 0 and _end > _start:
+                _result = _json.loads(_text[_start:_end])
+                _outcome = _result.get("outcome", "ESCALATE")
+                logger.info("[FT-11] Monitor Autônomo: task=%s attempt=%d outcome=%s", task_id, _attempt + 1, _outcome)
+                if _outcome in ("GENESIS_BUG", "ESCALATE", "FIXED"):
+                    return _result
+        except Exception as _e:
+            logger.warning("[FT-11] Monitor attempt %d falhou: %s", _attempt + 1, _e)
+            if _attempt == 1:
+                return {"outcome": "ESCALATE", "summary": f"Monitor falhou após 2 tentativas: {_e}"}
+
+    return {"outcome": "ESCALATE", "summary": "Monitor não retornou resultado válido"}
+
+
+def _notify_genesis_bug(project_id: str, task_id: str, bug_report: dict) -> None:
+    """FT-11: Notifica Zentriz API sobre bug interno do Genesis."""
+    try:
+        _payload = {
+            "project_id": project_id,
+            "task_id":    task_id,
+            "description": bug_report.get("description", "Bug detectado pelo Monitor Autônomo"),
+            "evidence":    bug_report.get("evidence", {}),
+            "severity":    "high",
+        }
+        _api_post("/api/internal/genesis-bug-report", _payload)
+        logger.info("[FT-11] Bug report enviado para Zentriz API: task=%s", task_id)
+    except Exception as _e:
+        logger.warning("[FT-11] Falha ao notificar bug Zentriz: %s", _e)
+
+
 def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str, dev_artifacts: list | None = None) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -1592,24 +1697,32 @@ def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
     except Exception as _tse:
         logger.debug("[TaskState] Não foi possível carregar state (não crítico): %s", _tse)
 
-    # TSK-FULL-TEST sempre no fim — visível no portal desde o início, executada após DevOps.
-    # Status NEW: upsert posterior (quando DevOps termina) promove para ASSIGNED.
-    tasks.append({
-        "task_id":   "TSK-FULL-TEST",
-        "module":    pm_module or "web",
-        "owner_role": "QA",
-        "status":    "NEW",
-        "requirements": (
-            "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
-            "Esta é a ÚLTIMA task. O agente DEVE: "
-            "(1) build sem erros TypeScript; "
-            "(2) executar start.sh e confirmar que o servidor sobe; "
-            "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
-            "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
-            "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
-            "Ver prompt completo em project/full-test-prompt.md"
-        ),
-    })
+    # TSK-FULL-TEST: skip se charter declarar tsk_full_test: false
+    # Regra geral de produto: em produto multi-serviço, apenas o projeto "deploy" tem TSK-FULL-TEST.
+    # Projetos individuais (auth, db, cte, mdfe, etc.) declaram tsk_full_test: false no charter.
+    _charter_text = _load_file_from_disk(project_id, "docs/cto/PROJECT_CHARTER.md")
+    _skip_full_test = bool(re.search(r"tsk_full_test\s*:\s*false", _charter_text, re.IGNORECASE)) if _charter_text else False
+    if _skip_full_test:
+        logger.info("[_seed_tasks] tsk_full_test: false no charter — TSK-FULL-TEST omitida para projeto %s", project_id)
+    else:
+        # TSK-FULL-TEST sempre no fim — visível no portal desde o início, executada após DevOps.
+        # Status NEW: upsert posterior (quando DevOps termina) promove para ASSIGNED.
+        tasks.append({
+            "task_id":   "TSK-FULL-TEST",
+            "module":    pm_module or "web",
+            "owner_role": "QA",
+            "status":    "NEW",
+            "requirements": (
+                "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
+                "Esta é a ÚLTIMA task. O agente DEVE: "
+                "(1) build sem erros TypeScript; "
+                "(2) executar start.sh e confirmar que o servidor sobe; "
+                "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
+                "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
+                "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
+                "Ver prompt completo em project/full-test-prompt.md"
+            ),
+        })
 
     path = f"/api/projects/{project_id}/tasks"
     body = {"tasks": tasks}
@@ -1790,9 +1903,41 @@ def _run_monitor_loop(
         # Humano intervém via portal (reprocessar task) para devolver a ASSIGNED.
         _terminal = {"DONE", "QA_PASS", "CANCELLED", "BLOCKED"}
         all_done = bool(pipeline_tasks) and all(t.get("status") in _terminal for t in pipeline_tasks)
-        # Notificar tasks BLOCKED para o usuário saber que requer intervenção
+        # FT-11: Monitor Autônomo — tentar resolver tasks BLOCKED antes de notificar humano
+        _blocked_tasks_raw = [t for t in pipeline_tasks if t.get("status") == "BLOCKED"]
+        for _bt in _blocked_tasks_raw:
+            _bt_id = _bt.get("taskId") or _bt.get("task_id") or ""
+            if _bt.get("monitor_attempted"):
+                continue  # já tentou — não tentar novamente
+            try:
+                _monitor_result = _call_autonomous_monitor(project_id, _bt, request_id)
+                if _monitor_result.get("outcome") == "FIXED":
+                    _update_task(project_id, _bt_id, status="ASSIGNED", monitor_attempted=True)
+                    _post_step(
+                        f"🤖 Monitor Autônomo resolveu {_bt_id}: {_monitor_result.get('summary', '')}",
+                        request_id,
+                    )
+                    tasks = _get_tasks(project_id)  # recarregar após fix
+                    pipeline_tasks = [t for t in tasks if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS]
+                    all_done = bool(pipeline_tasks) and all(t.get("status") in _terminal for t in pipeline_tasks)
+                elif _monitor_result.get("outcome") == "GENESIS_BUG":
+                    _update_task(project_id, _bt_id, monitor_attempted=True)
+                    _notify_genesis_bug(project_id, _bt_id, _monitor_result.get("bug_report", {}))
+                    _post_step(
+                        f"🔴 Bug do Genesis detectado em {_bt_id} — equipe Zentriz notificada.",
+                        request_id,
+                    )
+                else:  # ESCALATE ou falha
+                    _update_task(project_id, _bt_id, monitor_attempted=True)
+            except Exception as _mon_err:
+                logger.warning("[FT-11] Monitor Autônomo falhou para task %s: %s", _bt_id, _mon_err)
+                try:
+                    _update_task(project_id, _bt_id, monitor_attempted=True)
+                except Exception:
+                    pass
+        # Notificar tasks BLOCKED que não foram resolvidas pelo Monitor
         _blocked_tasks = [t.get("taskId") or t.get("task_id") for t in pipeline_tasks if t.get("status") == "BLOCKED"]
-        if _blocked_tasks and not getattr(_blocked_tasks, "_notified", False):
+        if _blocked_tasks:
             _post_step(
                 f"⚠️ {len(_blocked_tasks)} task(s) em BLOCKED (requer revisão humana): "
                 f"{', '.join(str(t) for t in _blocked_tasks[:3])}{'...' if len(_blocked_tasks) > 3 else ''}. "
@@ -2492,10 +2637,12 @@ Execute agora sem pedir confirmação.
                             _host_prompt_path = str(
                                 Path(_host_root) / project_id / "project" / "full-test-prompt.md"
                             ) if _host_root else ""
+                            # FT-13: incluir api_key do projeto para que o full-test-server use a chave correta
                             _ft_payload = _json.dumps({
                                 "project_id":   project_id or "",
                                 "project_path": str(_proj_host_dir),
                                 "prompt_path":  _host_prompt_path,
+                                "api_key":      os.environ.get("CLAUDE_API_KEY", ""),
                             }).encode()
                             _post_step("🤖 TASK-FULL-TEST: Claude Code Agent iniciado via full-test-server.", request_id)
                             _update_task(project_id, "TSK-FULL-TEST", status="IN_PROGRESS")

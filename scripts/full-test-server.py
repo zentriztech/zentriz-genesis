@@ -45,6 +45,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         project_id   = body.get("project_id", "")
         project_path = body.get("project_path", "")
         prompt_path  = body.get("prompt_path", "")
+        # FT-13: api_key opcional — permite que cada projeto use a chave do tenant/zentriz
+        api_key      = body.get("api_key", "")
 
         if not project_path or not Path(project_path).exists():
             self._json(400, {"error": f"project_path not found: {project_path}"}); return
@@ -102,13 +104,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             )
 
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
-        # Criar script wrapper que muda para apps_path antes de invocar Claude.
-        # O Claude --print não herda o cwd do subprocess — o wrapper garante o diretório correto.
         wrapper_prompt = f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}"
+
+        # FT-13: injetar ANTHROPIC_API_KEY se fornecida no payload (credencial do tenant/zentriz)
+        subprocess_env = os.environ.copy()
+        if api_key:
+            subprocess_env["ANTHROPIC_API_KEY"] = api_key
+            subprocess_env["CLAUDE_API_KEY"]     = api_key
+            log.info("[FT-13] api_key injetada no subprocess claude (len=%d)", len(api_key))
+
         try:
             result = subprocess.run(
                 [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", wrapper_prompt],
                 capture_output=True, text=True, timeout=3600, cwd=str(apps_path),
+                env=subprocess_env,
             )
             output   = (result.stdout or "") + (result.stderr or "")
             # Buscar "APROVADO" em todo o output (não só nos primeiros 12k chars)
