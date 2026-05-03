@@ -72,13 +72,21 @@ function statusColor(s: string): "default" | "success" | "error" | "info" | "war
   return "default";
 }
 
-function stepPercent(s: string): number {
-  const map: Record<string, number> = {
-    draft: 0, spec_submitted: 14, pending_conversion: 20, cto_charter: 28,
-    pm_backlog: 42, dev_qa: 65, devops: 85, running: 55,
-    completed: 100, accepted: 100, failed: 0, stopped: 0,
-  };
-  return map[s] ?? 0;
+// Percentual por fase do pipeline (fallback quando não há contagem de tasks)
+const STATUS_PHASE_PCT: Record<string, number> = {
+  draft: 0, spec_submitted: 10, pending_conversion: 18, cto_charter: 25,
+  pm_backlog: 38, dev_qa: 60, devops: 85, running: 50,
+  completed: 100, accepted: 100, failed: 0, stopped: 0,
+};
+
+function stepPercent(status: string, taskTotal?: number | null, taskDone?: number | null): number {
+  // Durante execução real: percentual exato baseado nas tasks concluídas
+  if (status === "running" && taskTotal && taskTotal > 0) {
+    const done = taskDone ?? 0;
+    // Pipeline começa com base 15% (CTO+PM já rodaram), tasks correspondem aos 70% restantes
+    return Math.round(15 + (done / taskTotal) * 70);
+  }
+  return STATUS_PHASE_PCT[status] ?? 0;
 }
 
 function elapsedLabel(iso?: string): string {
@@ -128,7 +136,7 @@ function NewVersionButton({ project }: { project: Project }) {
 // ── Project Card (grid view) ──────────────────────────────────────────────────
 function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number }) {
   const router  = useRouter();
-  const pct     = stepPercent(project.status);
+  const pct     = stepPercent(project.status, project.taskCount, project.taskDoneCount);
   const isRun   = project.status === "running";
   const isDone  = project.status === "completed" || project.status === "accepted";
   const isFail  = project.status === "failed" || project.status === "stopped";
@@ -228,7 +236,7 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
 // ── Project Row (list view) ───────────────────────────────────────────────────
 function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }) {
   const router  = useRouter();
-  const pct     = stepPercent(project.status);
+  const pct     = stepPercent(project.status, project.taskCount, project.taskDoneCount);
   const isDone  = project.status === "completed" || project.status === "accepted";
   const isFail  = project.status === "failed" || project.status === "stopped";
   const barColor = isDone ? "success" : isFail ? "error" : "primary";
@@ -322,8 +330,14 @@ function ProjectsPageInner() {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   // Mapa productId → nome real buscado de GET /api/products
   const [productNameMap, setProductNameMap] = useState<Map<string, string>>(new Map());
+  // null = mostrar todos; string = filtrar pelo produto clicado
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
 
-  const projects  = projectsStore.list;
+  const allProjects = projectsStore.list;
+  // Aplicar filtro de produto se selecionado
+  const projects  = selectedProductId
+    ? allProjects.filter(p => p.productId === selectedProductId || (!selectedProductId && !p.productId))
+    : allProjects;
   const running   = projects.filter((p) => p.status === "running");
   const rest      = projects.filter((p) => p.status !== "running");
   const sorted    = [...running, ...rest];
@@ -354,9 +368,22 @@ function ProjectsPageInner() {
       {/* ── Header ── */}
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
         <Box>
-          <Typography variant="h4">Meus projetos</Typography>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="h4">Meus projetos</Typography>
+            {selectedProductId && (
+              <Chip
+                label={`🧩 ${productNameMap.get(selectedProductId) ?? selectedProductId.slice(0, 8)}`}
+                size="small"
+                color="primary"
+                onDelete={() => setSelectedProductId(null)}
+                sx={{ fontSize: "0.72rem", fontWeight: 600 }}
+              />
+            )}
+          </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {projects.length} projeto{projects.length !== 1 ? "s" : ""} · {running.length} em execução
+            {projects.length} projeto{projects.length !== 1 ? "s" : ""}
+            {selectedProductId ? " neste produto" : ` · ${allProjects.length} total`}
+            {running.length > 0 ? ` · ${running.length} em execução` : ""}
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
@@ -406,7 +433,18 @@ function ProjectsPageInner() {
                   {/* Cabeçalho de produto */}
                   {section.productId && (
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1.5 }}>
-                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: section.hasRunning ? "success.main" : "primary.main" }}>
+                      <Typography
+                        variant="caption"
+                        onClick={() => setSelectedProductId(
+                          selectedProductId === section.productId ? null : section.productId
+                        )}
+                        sx={{
+                          fontWeight: 700, fontSize: "0.72rem", cursor: "pointer",
+                          color: selectedProductId === section.productId ? "primary.dark" : section.hasRunning ? "success.main" : "primary.main",
+                          textDecoration: selectedProductId === section.productId ? "underline" : "none",
+                          "&:hover": { textDecoration: "underline" },
+                        }}
+                      >
                         🧩 {section.productName ?? `Produto ${section.productId.slice(0, 8)}`}
                       </Typography>
                       <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>

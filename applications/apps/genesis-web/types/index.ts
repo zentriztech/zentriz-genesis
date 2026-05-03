@@ -72,6 +72,10 @@ export interface Project {
   complexityHint?: string | null;
   /** Quantidade de tasks (quando disponível no contexto de listagem de produto) */
   taskCount?: number | null;
+  /** Quantidade de tasks concluídas (DONE ou QA_PASS) */
+  taskDoneCount?: number | null;
+  /** Posição na ordem topológica do produto (0 = raiz, 1 = segundo nível, etc.) */
+  executionOrder?: number | null;
 }
 
 export interface Product {

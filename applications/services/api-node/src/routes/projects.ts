@@ -57,16 +57,27 @@ export async function projectRoutes(app: FastifyInstance) {
           JOIN topo t ON t.id = pt2.trigger_project_id
           WHERE p2.product_id IS NOT NULL
         ),
-        depths AS (SELECT id, MAX(depth) AS depth FROM topo GROUP BY id)`;
+        depths AS (SELECT id, MAX(depth) AS depth FROM topo GROUP BY id),
+        task_counts AS (
+          SELECT project_id,
+                 COUNT(*) FILTER (WHERE task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST'))            AS total,
+                 COUNT(*) FILTER (WHERE status IN ('DONE','QA_PASS')
+                                    AND task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST'))             AS done
+          FROM project_tasks GROUP BY project_id
+        )`;
 
       let result;
       if (user.role === "zentriz_admin") {
         result = await client.query(
           `${baseSelect}
-           SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order
+           SELECT p.*, u.email as created_by_email,
+                  COALESCE(d.depth, 0) AS execution_order,
+                  COALESCE(tc.total, 0)::int AS task_count,
+                  COALESCE(tc.done, 0)::int  AS task_done_count
            FROM projects p
            JOIN users u ON p.created_by = u.id
            LEFT JOIN depths d ON d.id = p.id
+           LEFT JOIN task_counts tc ON tc.project_id = p.id
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -124,6 +135,8 @@ export async function projectRoutes(app: FastifyInstance) {
         productId:       (row.product_id as string | null) ?? null,
         complexityHint:  (row.complexity_hint as string | null) ?? null,
         executionOrder:  (row.execution_order as number | null) ?? 0,
+        taskCount:       (row.task_count as number | null) ?? null,
+        taskDoneCount:   (row.task_done_count as number | null) ?? null,
       }));
       return reply.send(projects);
     } finally {
@@ -284,9 +297,17 @@ export async function projectRoutes(app: FastifyInstance) {
       const allowed = await checkProjectAccess(client, id, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const result = await client.query(
-        `SELECT id, project_id, task_id, module, owner_role, requirements, status, artifacts_ref, evidence, created_at, updated_at FROM project_tasks WHERE project_id = $1
+        `SELECT id, project_id, task_id, module, owner_role, requirements, status, artifacts_ref, evidence, created_at, updated_at,
+                monitor_attempted
+         FROM project_tasks WHERE project_id = $1
          ORDER BY
            CASE WHEN task_id IN ('TSK-DEVOPS-001','TSK-FULL-TEST') THEN 1 ELSE 0 END ASC,
+           -- Extrai número do sufixo numérico do task_id (TSK-BE-001 → 1, TSK-WEB-012 → 12)
+           -- Garante ordem 001 < 002 < ... < 012 independente do created_at
+           COALESCE(
+             NULLIF(regexp_replace(task_id, '^.*?-0*([0-9]+)$', '\\1', 'g'), task_id)::int,
+             0
+           ) ASC,
            created_at ASC`,
         [id]
       );
@@ -298,10 +319,11 @@ export async function projectRoutes(app: FastifyInstance) {
         ownerRole: row.owner_role,
         requirements: row.requirements,
         status: row.status,
-        artifactsRef: row.artifacts_ref,
-        evidence: row.evidence,
-        createdAt: (row.created_at as Date)?.toISOString(),
-        updatedAt: (row.updated_at as Date)?.toISOString(),
+        artifactsRef:     row.artifacts_ref,
+        evidence:         row.evidence,
+        monitorAttempted: row.monitor_attempted ?? false,
+        createdAt:  (row.created_at as Date)?.toISOString(),
+        updatedAt:  (row.updated_at as Date)?.toISOString(),
       }));
       return reply.send(tasks);
     } finally {

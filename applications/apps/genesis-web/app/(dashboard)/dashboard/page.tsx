@@ -19,9 +19,24 @@ import ErrorIcon from "@mui/icons-material/Error";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import SendIcon from "@mui/icons-material/Send";
+import LinearProgress from "@mui/material/LinearProgress";
 import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import type { Project } from "@/types";
+
+// Percentual real de progresso — usa task counts quando disponível (projeto em execução)
+function projectPercent(p: Project): number {
+  if (p.status === "completed" || p.status === "accepted") return 100;
+  if (p.status === "failed" || p.status === "stopped") return 0;
+  if (p.status === "running" && p.taskCount && p.taskCount > 0) {
+    return Math.round(15 + ((p.taskDoneCount ?? 0) / p.taskCount) * 70);
+  }
+  const phaseMap: Record<string, number> = {
+    draft: 0, spec_submitted: 10, pending_conversion: 18,
+    cto_charter: 25, pm_backlog: 38, running: 50,
+  };
+  return phaseMap[p.status] ?? 0;
+}
 
 const MotionCard = motion(Card);
 const MotionBox  = motion(Box);
@@ -122,9 +137,26 @@ function RecentRow({ project, onClick }: { project: Project; onClick: () => void
       </Box>
       <Box sx={{ flexGrow: 1, minWidth: 0 }}>
         <Typography variant="body2" fontWeight={500} noWrap>{project.title ?? "Sem título"}</Typography>
-        <Typography variant="caption" color="text.secondary">
-          {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.25 }}>
+          {project.status === "running" ? (
+            <>
+              <LinearProgress
+                variant="determinate"
+                value={projectPercent(project)}
+                sx={{ flexGrow: 1, height: 3, borderRadius: 2, bgcolor: "divider" }}
+              />
+              <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, fontSize: "0.62rem" }}>
+                {project.taskDoneCount != null && project.taskCount
+                  ? `${project.taskDoneCount}/${project.taskCount}`
+                  : `${projectPercent(project)}%`}
+              </Typography>
+            </>
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
+            </Typography>
+          )}
+        </Stack>
       </Box>
       <Chip label={statusLabel(project.status)} size="small" color={statusColor(project.status)} />
     </Box>
