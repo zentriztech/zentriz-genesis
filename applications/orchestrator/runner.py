@@ -2533,11 +2533,22 @@ def _run_monitor_loop(
                         except Exception as _de:
                             logger.warning("[Monitor Loop] Erro ao coletar dev artifacts para DevOps: %s", _de)
                     _combined_artifacts = _all_dev_artifacts or last_dev_artifacts
+                    # I-5: resolver product_id localmente — evita problema de closure com _product_id do main()
+                    _devops_product_id: str | None = None
+                    try:
+                        _devops_product_id = _product_id  # type: ignore[name-defined]
+                    except NameError:
+                        try:
+                            _pd, _ = _api_get(f"/api/projects/{project_id}")
+                            if _pd and isinstance(_pd, dict):
+                                _devops_product_id = _pd.get("productId") or _pd.get("product_id")
+                        except Exception:
+                            pass
                     devops_response = call_devops(
                         spec_ref, charter_summary, backlog_summary, request_id,
                         dev_artifacts=_combined_artifacts,
-                        project_id=project_id,   # I-5: passa project_id para injetar contratos predecessores
-                        product_id=_product_id,  # I-5: passes product_id para resolver paths corretos
+                        project_id=project_id,
+                        product_id=_devops_product_id,
                     )
                     _audit_log("devops", request_id, devops_response)
                     devops_summary = devops_response.get("summary", "")
