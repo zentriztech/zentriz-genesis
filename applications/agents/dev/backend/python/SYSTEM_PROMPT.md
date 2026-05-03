@@ -69,6 +69,23 @@ Você é o agente **Dev (Backend Python)**. Você:
 
 ---
 
+## ⚠️ LEI DA STACK — INVIOLÁVEL (ler ANTES de qualquer código)
+
+> **"A stack definida no charter é uma imposição. Não é democracia. Não há escolha."**
+
+**ANTES DE ESCREVER UMA ÚNICA LINHA**, extraia do charter:
+1. **Framework** — use exatamente esse
+2. **Banco de dados** — use exatamente esse
+3. **ORM** — use exatamente esse
+4. **Porta** — use exatamente a porta do charter
+
+**Se charter diz PostgreSQL e você usar MySQL → BLOCKED imediato com NEEDS_INFO.**
+**Se charter diz porta 7105 e você usar 8000 → BLOCKED imediato.**
+
+Nunca "adaptar", "inferir" ou "equivalente". A stack do charter é a lei.
+
+---
+
 ## 2) STACK — DERIVAR DO CHARTER (OBRIGATÓRIO)
 
 ### Framework choice
@@ -78,12 +95,18 @@ Você é o agente **Dev (Backend Python)**. Você:
 | "Flask" | **Flask** |
 | "Django", "django rest framework" | **Django + DRF** |
 
-### ORM / Database
+### ORM / Database (CRÍTICO — a escolha é do charter, nunca do Dev)
 | Charter diz | ORM |
 |-------------|-----|
 | "SQLModel", "SQLite" simples | **SQLModel** |
-| "SQLAlchemy", "PostgreSQL", "MySQL" | **SQLAlchemy 2.x** + Alembic |
+| "SQLAlchemy", "PostgreSQL" | **SQLAlchemy 2.x** + `psycopg2` |
+| "SQLAlchemy", "MySQL" | **SQLAlchemy 2.x** + `PyMySQL` |
 | "tortoise", "beanie", MongoDB | usar o indicado |
+
+**REGRA ABSOLUTA — VIOLAÇÃO = BLOCKED:**
+- Charter diz PostgreSQL → NUNCA usar `PyMySQL`, `mysqlclient`, `aiomysql`
+- Charter diz MySQL → NUNCA usar `psycopg2`, `asyncpg`
+- Se task diverge do charter → `NEEDS_INFO` antes de qualquer código
 
 ### Required packages (FastAPI stack — padrão)
 ```

@@ -411,12 +411,79 @@ def _parse_stack_frontmatter(text: str) -> str | None:
     return None
 
 
-def _load_file_from_disk(project_id: str | None, relative_path: str) -> str:
-    """Lê um arquivo do PROJECT_FILES_ROOT. Retorna string vazia se não existir."""
+def _project_disk_root(project_id: str, product_id: str | None = None) -> Path:
+    """I-1: Resolve o path de disco do projeto.
+
+    Com product_id: <FILES_ROOT>/<product_id>/<project_id>/
+    Sem product_id: <FILES_ROOT>/<project_id>/   (standalone, backward-compat)
+
+    Prioridade: se o diretório com product_id existir, usa ele.
+    Se não, fallback para standalone (suporte a projetos antigos).
+    """
+    root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+    if product_id:
+        product_path = root / product_id / project_id
+        if product_path.exists():
+            return product_path
+        # Path ainda não existe — retornar o path correto para ser criado
+        return product_path
+    return root / project_id
+
+
+def _product_disk_root(product_id: str) -> Path:
+    """I-1: Resolve o path de disco da pasta do produto.
+
+    <FILES_ROOT>/<product_id>/
+    Contém: docker-compose.yml unificado, .env, contracts/, common-pkg/, e subpastas por projeto.
+    """
+    root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+    return root / product_id
+
+
+def _copy_contract_to_product(project_id: str, product_id: str | None) -> None:
+    """I-2: Ao aceitar projeto, copia api_contract.md para <product_id>/contracts/.
+
+    Chamado quando o projeto é marcado como completed/accepted.
+    Permite que predecessores encontrem contratos em path centralizado.
+    """
+    if not product_id:
+        return
+    try:
+        proj_root = _project_disk_root(project_id, product_id)
+        contract_src = proj_root / "project" / "api_contract.md"
+        if not contract_src.exists():
+            return
+        product_root = _product_disk_root(product_id)
+        contracts_dir = product_root / "contracts"
+        contracts_dir.mkdir(parents=True, exist_ok=True)
+        # Buscar título do projeto para nomear o arquivo
+        charter = ""
+        for cp in ["docs/cto_charter.md", "docs/cto_artifact_0.md", "docs/cto/PROJECT_CHARTER.md"]:
+            ct = (proj_root / cp)
+            if ct.exists():
+                charter = ct.read_text(encoding="utf-8", errors="replace")[:200]
+                break
+        # Usar project_id como nome base
+        dest = contracts_dir / f"{project_id[:8]}.api_contract.md"
+        import shutil
+        shutil.copy2(str(contract_src), str(dest))
+        logger.info("[I-2] api_contract.md copiado para %s", dest)
+    except Exception as _e:
+        logger.debug("[I-2] Falha ao copiar contrato: %s", _e)
+
+
+def _load_file_from_disk(project_id: str | None, relative_path: str, product_id: str | None = None) -> str:
+    """Lê um arquivo do PROJECT_FILES_ROOT. Tenta path com product_id primeiro, depois standalone."""
     if not project_id:
         return ""
     try:
         root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+        # Tentar com product_id primeiro (nova estrutura)
+        if product_id:
+            path = root / product_id / project_id / relative_path
+            if path.exists() and path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")
+        # Fallback: path standalone (backward compat)
         path = root / project_id / relative_path
         if path.exists() and path.is_file():
             return path.read_text(encoding="utf-8", errors="replace")
@@ -1079,7 +1146,9 @@ def _notify_genesis_bug(project_id: str, task_id: str, bug_report: dict) -> None
         logger.warning("[FT-11] Falha ao notificar bug Zentriz: %s", _e)
 
 
-def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str, dev_artifacts: list | None = None) -> dict:
+def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str,
+                dev_artifacts: list | None = None, project_id: str | None = None,
+                product_id: str | None = None) -> dict:
     inputs = {
         "spec_ref": spec_ref,
         "charter": charter_summary,
@@ -1088,13 +1157,56 @@ def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, reque
         "constraints": ["spec-driven", "paths-resilient"],
     }
     # Pass dev artifacts so DevOps can detect the real stack (Next.js, Express, Python, etc.)
-    existing = dev_artifacts or []
+    existing = list(dev_artifacts or [])
+
+    # I-5: Injetar docker-compose.yml e api_contract.md dos predecessores como existing_artifacts.
+    # DevOps verá a rede, banco compartilhado, portas e nomes exatos — não precisa inventar nada.
+    if project_id:
+        try:
+            _triggers_data, _ = _api_get(f"/api/projects/{project_id}/triggers/predecessors")
+            if _triggers_data and isinstance(_triggers_data, list):
+                _files_root = os.environ.get("PROJECT_FILES_ROOT", "/project-files").rstrip("/")
+                for _pred in _triggers_data[:8]:
+                    _pred_id = _pred.get("id", "")
+                    _pred_title = _pred.get("title", "unknown")
+                    if not _pred_id:
+                        continue
+                    # Candidatos: nova estrutura (product/project) e legacy
+                    _pred_candidates: list[Path] = []
+                    if product_id:
+                        _pred_candidates += [
+                            Path(_files_root) / product_id / _pred_id / "project" / "docker-compose.yml",
+                            Path(_files_root) / product_id / _pred_id / "project" / "api_contract.md",
+                            Path(_files_root) / product_id / _pred_id / "docs" / "cto_charter.md",
+                        ]
+                    _pred_candidates += [
+                        Path(_files_root) / _pred_id / "project" / "docker-compose.yml",
+                        Path(_files_root) / _pred_id / "project" / "api_contract.md",
+                        Path(_files_root) / _pred_id / "docs" / "cto_charter.md",
+                    ]
+                    for _pc in _pred_candidates:
+                        try:
+                            if _pc.exists():
+                                _content = _pc.read_text(encoding="utf-8", errors="replace")[:4000]
+                                existing.append({
+                                    "path": f"predecessors/{_pred_title}/{_pc.name}",
+                                    "content": _content,
+                                    "format": "yaml" if _pc.suffix == ".yml" else "markdown",
+                                    "purpose": f"Artefato do predecessor '{_pred_title}' — usar como referência para portas, banco, rede e contratos",
+                                })
+                                logger.info("[I-5] DevOps receberá %s de predecessor %s", _pc.name, _pred_title[:20])
+                        except (FileNotFoundError, OSError):
+                            pass
+        except Exception as _e:
+            logger.debug("[I-5] Falha ao carregar artefatos predecessores para DevOps: %s", _e)
+
     # Trim large content to avoid token overflow — keep path + first 2000 chars of content
     trimmed_artifacts = []
     for a in existing:
         if not isinstance(a, dict):
             continue
-        entry = {"path": a.get("path", ""), "format": a.get("format", "code")}
+        entry = {"path": a.get("path", ""), "format": a.get("format", "code"),
+                 "purpose": a.get("purpose", "")}
         content = a.get("content", "")
         entry["content"] = content[:2000] if isinstance(content, str) else str(content)[:2000]
         trimmed_artifacts.append(entry)
@@ -2421,7 +2533,12 @@ def _run_monitor_loop(
                         except Exception as _de:
                             logger.warning("[Monitor Loop] Erro ao coletar dev artifacts para DevOps: %s", _de)
                     _combined_artifacts = _all_dev_artifacts or last_dev_artifacts
-                    devops_response = call_devops(spec_ref, charter_summary, backlog_summary, request_id, dev_artifacts=_combined_artifacts)
+                    devops_response = call_devops(
+                        spec_ref, charter_summary, backlog_summary, request_id,
+                        dev_artifacts=_combined_artifacts,
+                        project_id=project_id,   # I-5: passa project_id para injetar contratos predecessores
+                        product_id=_product_id,  # I-5: passes product_id para resolver paths corretos
+                    )
                     _audit_log("devops", request_id, devops_response)
                     devops_summary = devops_response.get("summary", "")
                     _post_dialogue(
@@ -2782,16 +2899,31 @@ def main() -> int:
     # Inject project_id into all log records for this process
     _ProjectFilter.set_project_id(project_id)
     storage = _project_storage()
+
+    # I-1: Resolver product_id do projeto para estrutura PRODUCT_ID/PROJECT_ID
+    _product_id: str | None = None
+    if project_id:
+        try:
+            _proj_data, _ps = _api_get(f"/api/projects/{project_id}")
+            if _proj_data and isinstance(_proj_data, dict):
+                _product_id = _proj_data.get("productId") or _proj_data.get("product_id") or None
+                if _product_id:
+                    logger.info("[I-1] Projeto %s pertence ao produto %s — path: %s/%s",
+                                project_id[:8], _product_id[:8], _product_id[:8], project_id[:8])
+        except Exception as _pe:
+            logger.debug("[I-1] Não foi possível resolver product_id: %s", _pe)
+
     if storage and storage.is_enabled():
         if project_id:
             try:
                 from orchestrator.project_storage import ensure_project_dirs
-                if ensure_project_dirs(project_id):
-                    logger.info("[Pipeline] Diretórios garantidos: docs/, project/, apps/ para project_id=%s", project_id)
+                if ensure_project_dirs(project_id, _product_id):
+                    root_desc = f"{_product_id[:8]}/{project_id[:8]}" if _product_id else project_id[:8]
+                    logger.info("[Pipeline] Diretórios garantidos: docs/, project/, apps/ para %s", root_desc)
             except Exception as e:
                 logger.warning("[Pipeline] ensure_project_dirs: %s", e)
         logger.info(
-            "[Pipeline] Armazenamento por projeto ativo: PROJECT_FILES_ROOT=%s (docs, project, apps em <root>/<project_id>/)",
+            "[Pipeline] Armazenamento por projeto ativo: PROJECT_FILES_ROOT=%s",
             os.environ.get("PROJECT_FILES_ROOT", ""),
         )
     else:

@@ -440,10 +440,43 @@ export async function projectRoutes(app: FastifyInstance) {
       }
       await client.query("UPDATE projects SET status = $1, updated_at = now() WHERE id = $2", ["accepted", id]);
       const updated = await client.query(
-        "SELECT id, status, updated_at FROM projects WHERE id = $1",
+        "SELECT id, status, updated_at, product_id, title FROM projects WHERE id = $1",
         [id]
       );
       const u = updated.rows[0] as Record<string, unknown>;
+
+      // I-2: copiar api_contract.md para <product_id>/contracts/ quando projeto é aceito
+      setImmediate(async () => {
+        try {
+          const productId = u.product_id as string | null;
+          const title = u.title as string ?? "";
+          if (productId) {
+            const { readFileSync, existsSync, mkdirSync, copyFileSync } = await import("fs");
+            const { join } = await import("path");
+            const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
+            if (filesRoot) {
+              // Tentar path com product_id (nova estrutura) ou standalone (compat)
+              const contractPaths = [
+                join(filesRoot, productId, id, "project", "api_contract.md"),
+                join(filesRoot, id, "project", "api_contract.md"),
+              ];
+              for (const src of contractPaths) {
+                if (existsSync(src)) {
+                  const contractsDir = join(filesRoot, productId, "contracts");
+                  mkdirSync(contractsDir, { recursive: true });
+                  const slug = title.toLowerCase().replace(/\s+/g, "-").replace(/_/g, "-").slice(0, 40);
+                  const dest = join(contractsDir, `${slug}.api_contract.md`);
+                  copyFileSync(src, dest);
+                  console.info(`[I-2] Contrato copiado: ${dest}`);
+                  break;
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.debug("[I-2] Falha ao copiar contrato:", err);
+        }
+      });
 
       // Fire-and-forget: push to GitHub if tenant has GitHub App installed
       // Never awaited — must not delay the accept response

@@ -160,6 +160,27 @@ Se a task pede "gerar migrations", validar que: (a) `drizzle.config.ts` aponta p
 | P04 | Logs estruturados em pontos críticos (início de request, erros, operações de negócio importantes) | MINOR |
 | P05 | `global error handler` registrado no `app.ts` como último middleware | MAJOR |
 
+### 6.5a LEI DA STACK — Verificação obrigatória ANTES de qualquer outro check
+
+**Esta é a PRIMEIRA coisa a verificar em toda task.** Se a stack do charter foi desrespeitada, o QA REPOVA imediatamente com BLOCKER — sem analisar mais nada.
+
+| Check | Como verificar | Severidade |
+|-------|---------------|------------|
+| **Stack do banco** | Ler charter: qual banco? Se PostgreSQL → `grep -r "mysql2\|mysqlTable\|image.*mysql\|drizzle-orm/mysql" apps/` deve retornar VAZIO | BLOCKER |
+| **Stack do banco** | Se MySQL → `grep -r "postgres\|pgTable\|image.*postgres\|drizzle-orm/pg-core" apps/` deve retornar VAZIO | BLOCKER |
+| **Porta** | Charter diz qual porta? `grep "PORT\|ports:" apps/package.json project/docker-compose.yml` — deve bater com o charter | BLOCKER |
+| **Framework** | Charter diz Fastify? Nunca deve ter `express`, `@nestjs` no `package.json` | BLOCKER |
+
+**Template de reprovação:**
+```
+QA_FAIL — LEI DA STACK VIOLADA
+Charter especifica: PostgreSQL
+Encontrado: mysql2 em package.json, mysqlTable em src/db/schema/
+Fix obrigatório: substituir toda a stack de banco por postgres-js + pgTable.
+```
+
+---
+
 ### 6.6 Regras Gerais de Backend — aplicáveis a toda stack (BLOCKER/MAJOR)
 
 Derivadas de falhas reais em produção (validadas em Python/FastAPI, padrão equivalente em Node.js):

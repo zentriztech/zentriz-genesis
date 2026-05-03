@@ -119,15 +119,19 @@ export async function pipelineRoutes(app: FastifyInstance) {
       }
 
       // ── Validação de dependências (project_triggers) ─────────────────────────
-      // Bloqueia /run se algum predecessor obrigatório ainda não concluiu.
-      // "Concluiu" = status completed ou accepted.
+      // I-4: Bloqueia /run se:
+      //   (a) algum predecessor não está completed/accepted, OU
+      //   (b) predecessor está accepted mas não tem api_contract.md no disco
+      // Garante que CTO/Engineer/Dev recebem contratos reais dos predecessores.
       const triggersRes = await client.query(
-        `SELECT pt.trigger_project_id, p.title, p.status
+        `SELECT pt.trigger_project_id, p.title, p.status, p.product_id
          FROM project_triggers pt
          JOIN projects p ON p.id = pt.trigger_project_id
          WHERE pt.project_id = $1`,
         [projectId]
       );
+
+      // (a) predecessores não concluídos
       const blockers = triggersRes.rows.filter(
         (r) => !["completed", "accepted"].includes(r.status as string)
       ) as Array<{ trigger_project_id: string; title: string; status: string }>;
@@ -140,6 +144,63 @@ export async function pipelineRoutes(app: FastifyInstance) {
           message: `Aguardando conclusão dos projetos predecessores: ${list}. Eles precisam estar completed ou accepted antes de iniciar este projeto.`,
           blockers: blockers.map((b) => ({ id: b.trigger_project_id, title: b.title, status: b.status })),
         });
+      }
+
+      // (b) I-4: predecessores accepted mas sem api_contract.md no disco
+      // Aviso: bloqueia apenas para projetos do mesmo produto (shared_db/auth context)
+      // Projeto DB (só migrations) não gera api_contract.md — verificar apenas se há endpoint HTTP.
+      const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
+      if (filesRoot && triggersRes.rows.length > 0) {
+        const { existsSync } = await import("fs");
+        const { join } = await import("path");
+        // Buscar product_id deste projeto
+        const thisProjectRes = await client.query("SELECT product_id, title FROM projects WHERE id=$1", [projectId]);
+        const thisProductId = thisProjectRes.rows[0]?.product_id as string | null;
+
+        const contractMissing: string[] = [];
+        for (const pred of triggersRes.rows as Array<Record<string, unknown>>) {
+          const predId = pred.trigger_project_id as string;
+          const predTitle = pred.title as string;
+          const predProductId = pred.product_id as string | null;
+
+          // Caminhos onde o contrato pode estar (nova estrutura e legacy)
+          const contractCandidates = [
+            // Nova estrutura: <product>/<project>/project/api_contract.md
+            ...(predProductId ? [join(filesRoot, predProductId, predId, "project", "api_contract.md")] : []),
+            // Centralizado: <product>/contracts/<slug>.api_contract.md
+            ...(predProductId ? [join(filesRoot, predProductId, "contracts")] : []),
+            // Legacy standalone
+            join(filesRoot, predId, "project", "api_contract.md"),
+          ];
+
+          const hasContract = contractCandidates.some((p) => {
+            // Para o diretório de contracts, verificar se tem algum arquivo
+            if (p.endsWith("contracts")) {
+              try {
+                const { readdirSync } = require("fs");
+                return readdirSync(p).some((f: string) => f.includes(predId.slice(0, 8)) || f.includes("api_contract"));
+              } catch { return false; }
+            }
+            return existsSync(p);
+          });
+
+          // Projetos de banco (só migrations) não precisam de api_contract — exceção
+          const isDbOnly = predTitle.toLowerCase().includes("-db") || predTitle.toLowerCase().includes("database");
+          if (!hasContract && !isDbOnly) {
+            contractMissing.push(`"${predTitle}" (aceito mas sem api_contract.md no disco)`);
+            request.log.warn({ projectId, predId, predTitle }, "[I-4] Predecessor sem api_contract.md");
+          }
+        }
+
+        if (contractMissing.length > 0) {
+          const list = contractMissing.join(", ");
+          return reply.status(409).send({
+            code: "CONTRACT_MISSING",
+            message: `Predecessores accepted mas sem contratos de API no disco: ${list}. ` +
+              `Execute 'bash project/start.sh' nos predecessores ou verifique se api_contract.md foi gerado pelo DevOps.`,
+            missingContracts: contractMissing,
+          });
+        }
       }
 
       const specFilePath = await getProjectSpecFilePath(client, projectId);

@@ -624,6 +624,49 @@ Com esta revisão:
 
 ---
 
+## LEI 13 — Porta e Stack são Imposição do Charter (INVIOLÁVEL)
+
+> **"A porta e a stack definidas no charter são leis. Nenhum agente pode alterá-las. Não é democracia."**
+
+Quando o Charter define `port: 7101` e `stack: Fastify + PostgreSQL`:
+- O Dev DEVE usar exatamente PostgreSQL — MySQL é BLOCKER
+- O DevOps DEVE expor exatamente a porta 7101 — porta diferente é BLOCKER
+- O Charter DEVE declarar explicitamente no bloco de stack:
+
+```markdown
+## Stack — Lei (inviolável)
+- **Framework:** Fastify 4 — nunca Express, nunca NestJS
+- **Banco:** PostgreSQL 16 — nunca MySQL, nunca SQLite
+- **ORM:** Drizzle (pg-core) — nunca Prisma, nunca TypeORM
+- **Porta:** 7101 — nunca outra porta
+```
+
+Se o CTO não incluir este bloco quando a spec define stack explícita → a task é inválida. Incluir sempre.
+
+---
+
+## LEI 14 — shared_db inclui DATABASE_URL exata no Charter
+
+Quando o charter declara `shared_db: true`:
+
+O Charter DEVE incluir o bloco de conexão exato para que Dev e DevOps não precisem inferir:
+
+```markdown
+## Banco Compartilhado (shared_db: true)
+- **db_project_id:** <uuid_do_projeto_db>
+- **DATABASE_URL:** `postgresql://postgres:postgres@postgres:5432/zentriz_ledger`
+  - hostname `postgres` = container_name do banco na rede `<product_slug>-net`
+  - schema deste serviço: `<nome_do_schema>` (ex: `cte`, `nfe`, `auth`)
+- **Rede Docker:** `<product_slug>-net` (externa — criada pelo projeto db)
+- **NUNCA criar banco próprio** — sem `image: postgres/mysql` no docker-compose deste projeto
+```
+
+**Se o linked_projects_context contém o docker-compose do projeto DB predecessor:**
+- Extrair `container_name`, credenciais, nome do banco
+- Incluir DATABASE_URL exata derivada do docker-compose real — não inventar
+
+---
+
 ## Regra Crítica — Projetos com Backend Linkado (uses_backend)
 
 > Validado na produção após falhas reais (2026-04-30 / 2026-05-01).

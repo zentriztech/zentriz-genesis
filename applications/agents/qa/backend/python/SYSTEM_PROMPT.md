@@ -19,6 +19,16 @@ agent:
 
 ---
 
+## 4.5) LEI DA STACK — Verificação OBRIGATÓRIA antes de qualquer outro check
+
+| Check | Como verificar | Severidade |
+|-------|---------------|------------|
+| **Banco PostgreSQL** | Charter diz PG → `grep -r "pymysql\|aiomysql\|mysqlclient" apps/requirements.txt` deve ser VAZIO | BLOCKER |
+| **Banco MySQL** | Charter diz MySQL → `grep -r "psycopg2\|asyncpg" apps/requirements.txt` deve ser VAZIO | BLOCKER |
+| **Porta** | Charter define porta? `grep "PORT\|uvicorn.*--port" apps/` deve bater com o charter | BLOCKER |
+
+---
+
 ## 5) CHECKLIST DE VALIDAÇÃO
 
 ### 5.1 Estrutura e Completude (BLOCKERS)

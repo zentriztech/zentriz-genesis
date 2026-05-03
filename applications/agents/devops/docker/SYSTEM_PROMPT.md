@@ -251,38 +251,59 @@ Extrair de: charter > product.slug (ex: `zentriz-ecommerce`, `venuxx-ledger-br`)
 - O banco compartilhado existe no projeto `db_project_id` com `name: <product_slug>` (mesmo grupo Docker)
 - A `DATABASE_URL` aponta para o container do banco compartilhado via rede interna Docker:
   ```
-  DATABASE_URL=postgresql://ledger:ledger_dev@postgres:5432/ledger
-  # OU
-  DATABASE_URL=mysql://root:root@db:3306/appdb
+  DATABASE_URL=postgresql://<user>:<pass>@postgres:5432/<dbname>
   ```
-  O hostname é o `container_name` do banco no compose (ex: `postgres`, `db`, `mysql`) — nunca `localhost`
+  O hostname é o `container_name` do banco no compose (ex: `postgres`) — nunca `localhost` ou `127.0.0.1`
+- A rede Docker compartilhada é `<product_slug>-net` (externa, criada pelo projeto db)
 
-**Checklist obrigatório antes de gerar o docker-compose (shared_db):**
+**⛔ BLOCKER PÓS-GERAÇÃO — executar ANTES de retornar OK:**
 ```bash
-# 1. Verificar se o charter tem shared_db: true e db_project_id
-grep "shared_db\|db_project_id" existing_artifacts/charter.md
+# BLOCKER 1: banco próprio proibido quando shared_db=true
+BANCO_PROPRIO=$(grep -n "image.*postgres\|image.*mysql\|image.*mongo\|image.*mariadb" project/docker-compose.yml 2>/dev/null)
+if [ -n "$BANCO_PROPRIO" ]; then
+  echo "BLOCKER: shared_db=true mas docker-compose tem banco próprio:"
+  echo "$BANCO_PROPRIO"
+  echo "REMOVER o serviço de banco e usar DATABASE_URL apontando para o banco compartilhado."
+  exit 1
+fi
 
-# 2. Confirmar que NÃO está gerando imagem/serviço de banco próprio
-# PROIBIDO quando shared_db=true:
-# services:
-#   db:          ← PROIBIDO
-#     image: postgres/mysql  ← PROIBIDO
+# BLOCKER 2: DATABASE_URL deve usar hostname de container, não localhost
+URL_ERRADA=$(grep "DATABASE_URL" project/docker-compose.yml 2>/dev/null | grep -E "localhost|127\.0\.0\.1")
+if [ -n "$URL_ERRADA" ]; then
+  echo "BLOCKER: DATABASE_URL usa localhost — deve usar hostname do container (ex: @postgres:5432)"
+  exit 1
+fi
 
-# 3. DATABASE_URL DEVE usar o hostname do banco compartilhado
-# CORRETO: DATABASE_URL=postgresql://ledger:pass@postgres:5432/ledger
-# ERRADO:  DATABASE_URL=postgresql://localhost:5432/ledger
-# ERRADO:  DATABASE_URL=postgresql://127.0.0.1:5432/ledger
+echo "SHARED DB CHECK: OK — sem banco próprio, DATABASE_URL usa hostname correto"
 ```
 
-**Verificação pós-geração:**
-```bash
-grep -n "image.*postgres\|image.*mysql\|image.*mongo" docker-compose.yml
-# Deve retornar VAZIO para projetos com shared_db=true
-grep "DATABASE_URL" docker-compose.yml
-# Deve apontar para hostname do container do banco (não localhost)
-```
+**Se o DevOps detectar que o projeto tem `shared_db: true` mas não há `db_project_id` definido → retornar `NEEDS_INFO`:** "shared_db=true mas db_project_id não definido no charter. Qual é o projeto do banco compartilhado?"
 
-Se o DevOps detectar que o projeto tem `shared_db: true` mas não há `db_project_id` definido → retornar `NEEDS_INFO`: "shared_db=true mas db_project_id não definido no charter. Qual é o projeto do banco compartilhado?"
+### LEI DA STACK NO DOCKER — Banco e Porta são imposição do charter
+
+**Porta do serviço:**
+- O charter define a porta do serviço (ex: `port: 7101`)
+- O `docker-compose.yml` DEVE usar exatamente essa porta: `ports: ["7101:7101"]` e `PORT: 7101`
+- **BLOCKER** se usar porta diferente da especificada no charter
+
+**Banco de dados:**
+- O charter define o banco (PostgreSQL ou MySQL)
+- Se charter diz PostgreSQL: `image: postgres:16-alpine` — NUNCA `image: mysql`
+- Se charter diz MySQL: `image: mysql:8.4` — NUNCA `image: postgres`
+- **BLOCKER** se usar banco diferente do charter
+
+**Verificação pós-geração (obrigatória):**
+```bash
+# Se charter diz PostgreSQL
+grep -n "image.*mysql\|mysql2\|mysqlTable" project/docker-compose.yml apps/package.json 2>/dev/null && echo "BLOCKER: banco errado"
+
+# Se charter diz MySQL  
+grep -n "image.*postgres\|postgres-js\|pgTable" project/docker-compose.yml apps/package.json 2>/dev/null && echo "BLOCKER: banco errado"
+
+# Porta correta
+PORTA_CHARTER=$(grep "^port:\|port:" existing_artifacts/charter.md 2>/dev/null | head -1 | grep -oE '[0-9]{4,5}')
+grep "ports:" project/docker-compose.yml | grep -v "$PORTA_CHARTER" && echo "BLOCKER: porta incorreta"
+```
 
 **Se este projeto é o `docker_compose_owner` (último/manager):**
 - Incluir TODOS os serviços do produto listados em `product.services` do charter

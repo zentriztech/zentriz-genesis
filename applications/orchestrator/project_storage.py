@@ -47,35 +47,95 @@ def get_files_root() -> Path:
     return _root()
 
 
-def get_project_root(project_id: str) -> Path | None:
-    """Retorna PROJECT_FILES_ROOT / project_id ou None se project_id vazio."""
+def get_project_root(project_id: str, product_id: str | None = None) -> Path | None:
+    """I-1: Retorna path do projeto.
+
+    Com product_id: <FILES_ROOT>/<product_id>/<project_id>/
+    Sem product_id: <FILES_ROOT>/<project_id>/  (standalone ou backward-compat)
+
+    Prioridade: se diretório com product_id existir, usa; senão cria no path correto.
+    """
     base = _root()
     if not base or not (project_id and str(project_id).strip()):
         return None
-    return base / str(project_id).strip()
+    pid = str(project_id).strip()
+    if product_id and str(product_id).strip():
+        product_path = base / str(product_id).strip() / pid
+        # Se já existe standalone (projeto antigo), mantém standalone
+        standalone = base / pid
+        if standalone.exists() and not product_path.exists():
+            return standalone
+        return product_path
+    return base / pid
 
 
-def _require_project_id(project_id: str) -> Path | None:
+def get_product_root(product_id: str) -> Path | None:
+    """I-1: Retorna <FILES_ROOT>/<product_id>/ — pasta raiz do produto."""
+    base = _root()
+    if not base or not (product_id and str(product_id).strip()):
+        return None
+    return base / str(product_id).strip()
+
+
+def _require_project_id(project_id: str, product_id: str | None = None) -> Path | None:
     """
     Exige project_id não vazio quando storage está ativo (Blueprint 1.1).
-    Retorna get_project_root(project_id) ou None. Loga BLOCKED se project_id vazio e root definido.
+    Retorna get_project_root(project_id, product_id) ou None.
     """
     pid = (project_id or "").strip() if project_id else ""
     if not pid:
         if _root() is not None:
             logger.warning("[ProjectStorage] BLOCKED: project_id vazio com storage ativo.")
         return None
-    return get_project_root(pid)
+    return get_project_root(pid, product_id)
 
 
-def ensure_project_dirs(project_id: str) -> bool:
-    """Garante que docs/, project/ e apps/ existem sob project_id. Retorna False se project_id inválido."""
-    root = _require_project_id(project_id)
+def ensure_project_dirs(project_id: str, product_id: str | None = None) -> bool:
+    """I-1: Garante docs/, project/, apps/ sob o path correto do projeto.
+
+    Se product_id fornecido: cria em <FILES_ROOT>/<product_id>/<project_id>/
+    Também garante que <FILES_ROOT>/<product_id>/contracts/ existe.
+    """
+    root = _require_project_id(project_id, product_id)
     if not root:
         return False
     for sub in ("docs", "project", "apps"):
         (root / sub).mkdir(parents=True, exist_ok=True)
+    # I-2: garantir pasta contracts/ na raiz do produto
+    if product_id:
+        prod_root = get_product_root(product_id)
+        if prod_root:
+            (prod_root / "contracts").mkdir(parents=True, exist_ok=True)
     return True
+
+
+def copy_contract_to_product(project_id: str, product_id: str, project_title: str = "") -> bool:
+    """I-2: Copia api_contract.md do projeto para <product_id>/contracts/<slug>.api_contract.md.
+
+    Chamado quando o projeto é aceito — centraliza contratos para predecessores encontrarem facilmente.
+    """
+    try:
+        proj_root = get_project_root(project_id, product_id)
+        if not proj_root:
+            return False
+        contract_src = proj_root / "project" / "api_contract.md"
+        if not contract_src.exists():
+            logger.debug("[I-2] api_contract.md ausente em %s — nada a copiar", project_id[:8])
+            return False
+        prod_root = get_product_root(product_id)
+        if not prod_root:
+            return False
+        contracts_dir = prod_root / "contracts"
+        contracts_dir.mkdir(parents=True, exist_ok=True)
+        slug = project_title.lower().replace(" ", "-").replace("_", "-") if project_title else project_id[:8]
+        dest = contracts_dir / f"{slug}.api_contract.md"
+        import shutil
+        shutil.copy2(str(contract_src), str(dest))
+        logger.info("[I-2] Contrato copiado: %s → %s", contract_src.name, dest)
+        return True
+    except Exception as _e:
+        logger.debug("[I-2] Falha ao copiar contrato: %s", _e)
+        return False
 
 
 def _atomic_write(path: Path, content: str | bytes) -> None:

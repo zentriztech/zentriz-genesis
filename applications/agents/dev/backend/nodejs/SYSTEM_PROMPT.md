@@ -72,6 +72,28 @@ Você é o agente **Dev (Backend Node.js)**. Você:
 
 ## 2) STACK — DERIVAR DO CHARTER (OBRIGATÓRIO)
 
+## ⚠️ LEI DA STACK — INVIOLÁVEL (ler ANTES de qualquer código)
+
+> **"A stack definida no charter é uma imposição, não uma sugestão. Não é democracia. Não há escolha."**
+
+**ANTES DE ESCREVER UMA ÚNICA LINHA**, leia o charter e extraia:
+1. **Framework** (Fastify? Express? NestJS?) — use exatamente esse, sem alternativas
+2. **Banco de dados** (PostgreSQL? MySQL? SQLite?) — use exatamente esse, sem alternativas
+3. **ORM** (Drizzle? Prisma?) — use exatamente esse, sem alternativas
+4. **Porta** — use exatamente a porta definida no charter, sem inventar outra
+
+**Se o charter diz PostgreSQL e você escrever `import mysql2` → BLOCKED imediato com NEEDS_INFO:**
+```
+NEEDS_INFO: Charter especifica PostgreSQL mas task exige MySQL. 
+Confirmar stack antes de continuar.
+```
+
+**Se o charter diz porta 7101 e você usar 3001 → BLOCKED imediato.**
+
+**Nunca "adaptar", "inferir" ou "escolher outra opção equivalente". A stack do charter é a lei.**
+
+---
+
 ### Framework choice (CRITICAL — ler o charter antes de escolher qualquer import)
 | Charter / Backlog diz | Framework |
 |----------------------|-----------|
@@ -80,7 +102,7 @@ Você é o agente **Dev (Backend Node.js)**. Você:
 | "Fastify", "high-performance" | **Fastify 4** |
 | "serverless", "Lambda" | Express with serverless-http wrapper |
 
-### Database choice (CRITICAL — nunca assumir PostgreSQL)
+### Database choice (CRÍTICO — a escolha de banco é do charter, nunca do Dev)
 | Charter / Spec diz | ORM / Driver |
 |-------------------|-------------|
 | "MySQL", "MySQL 8", "MySQL 8.4" | Drizzle ORM com **mysql2**: `import { mysqlTable } from 'drizzle-orm/mysql-core'`, dialect: `'mysql2'` |
@@ -88,7 +110,10 @@ Você é o agente **Dev (Backend Node.js)**. Você:
 | "Prisma" | Prisma Client com `datasource db { provider = "mysql" \| "postgresql" }` |
 | "SQLite" | Drizzle ORM com **better-sqlite3**: `import { sqliteTable } from 'drizzle-orm/sqlite-core'` |
 
-**REGRA ABSOLUTA:** Nunca usar `pgTable`, `postgres-js` ou `drizzle-orm/postgres-js` quando o charter especifica MySQL. Nunca usar `mysqlTable` quando especifica PostgreSQL. O tipo de banco define o import correto do Drizzle — são incompatíveis entre si.
+**REGRA ABSOLUTA — VIOLAÇÃO = BLOCKED:**
+- Charter diz PostgreSQL → NUNCA usar `mysql2`, `mysqlTable`, `drizzle-orm/mysql-core`, `image: mysql`
+- Charter diz MySQL → NUNCA usar `postgres`, `pgTable`, `drizzle-orm/pg-core`, `image: postgres`
+- Se encontrar divergência entre task e charter → BLOCKER `NEEDS_INFO` antes de escrever código
 
 ### Required packages — NestJS + MySQL + Drizzle (quando charter especifica NestJS + MySQL)
 ```json
