@@ -275,16 +275,17 @@ interface ProductSection {
   productId: string | null;
   productName: string | null;
   groups: ProjectGroup[];
+  hasRunning: boolean; // true se algum projeto do produto está em execução
 }
 
-function buildProductSections(groups: ProjectGroup[], allProjects: Project[]): ProductSection[] {
-  const productMap = new Map<string, string>(); // productId → name
-  allProjects.forEach(p => {
-    if (p.productId && !productMap.has(p.productId)) {
-      const prod = (p as unknown as Record<string, unknown>).product as { id: string; name: string } | undefined;
-      productMap.set(p.productId, prod?.name ?? `Produto ${p.productId.slice(0, 8)}`);
-    }
-  });
+function buildProductSections(
+  groups: ProjectGroup[],
+  allProjects: Project[],
+  productNameMap: Map<string, string>
+): ProductSection[] {
+  // Fallback para IDs curtos quando o nome não veio da API
+  const getProductName = (pid: string) =>
+    productNameMap.get(pid) ?? `Produto ${pid.slice(0, 8)}`;
 
   const sections = new Map<string | null, ProjectGroup[]>();
   groups.forEach(g => {
@@ -294,33 +295,59 @@ function buildProductSections(groups: ProjectGroup[], allProjects: Project[]): P
   });
 
   const result: ProductSection[] = [];
-  // Produtos nomeados primeiro
+
   sections.forEach((gs, pid) => {
-    if (pid !== null) result.push({ productId: pid, productName: productMap.get(pid) ?? null, groups: gs });
+    const hasRunning = gs.some(g => g.versions.some(p => p.status === "running"));
+    if (pid !== null) {
+      result.push({ productId: pid, productName: getProductName(pid), groups: gs, hasRunning });
+    }
   });
-  // Projetos standalone por último
-  if (sections.has(null)) result.push({ productId: null, productName: null, groups: sections.get(null)! });
+
+  // Produtos com projetos em execução SEMPRE primeiro, depois por nome
+  result.sort((a, b) => {
+    if (a.hasRunning !== b.hasRunning) return a.hasRunning ? -1 : 1;
+    return (a.productName ?? "").localeCompare(b.productName ?? "");
+  });
+
+  // Projetos standalone (sem produto) por último
+  if (sections.has(null)) {
+    result.push({ productId: null, productName: null, groups: sections.get(null)!, hasRunning: false });
+  }
   return result;
 }
 
 function ProjectsPageInner() {
   const router   = useRouter();
   const [view, setView] = useState<"grid" | "list">("grid");
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE); // FT-04: paginação
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  // Mapa productId → nome real buscado de GET /api/products
+  const [productNameMap, setProductNameMap] = useState<Map<string, string>>(new Map());
+
   const projects  = projectsStore.list;
   const running   = projects.filter((p) => p.status === "running");
   const rest      = projects.filter((p) => p.status !== "running");
   const sorted    = [...running, ...rest];
   const groups    = buildLineageGroups(sorted);
-  // FT-04: todas as linhagens agrupadas por produto
-  const productSections = buildProductSections(groups, sorted);
-  // Paginação: contar linhagens total
+  // FT-04: todas as linhagens agrupadas por produto, ordenadas com running primeiro
+  const productSections = buildProductSections(groups, sorted, productNameMap);
   const totalGroups = groups.length;
   const visibleGroups = new Set(
     groups.slice(0, visibleCount).map(g => g.root.id)
   );
 
-  useEffect(() => { projectsStore.loadProjects(); }, []);
+  useEffect(() => {
+    projectsStore.loadProjects();
+    // Buscar nomes dos produtos para exibir em vez do ID truncado
+    import("@/lib/api").then(({ apiGet }) => {
+      apiGet<{ id: string; name: string }[]>("/api/products")
+        .then(prods => {
+          const m = new Map<string, string>();
+          prods.forEach(p => m.set(p.id, p.name));
+          setProductNameMap(m);
+        })
+        .catch(() => {/* falha silenciosa — fallback para ID curto */});
+    });
+  }, []);
 
   return (
     <Box>
@@ -379,12 +406,17 @@ function ProjectsPageInner() {
                   {/* Cabeçalho de produto */}
                   {section.productId && (
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1.5 }}>
-                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: "primary.main" }}>
-                        🧩 {section.productName ?? "Produto"}
+                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: section.hasRunning ? "success.main" : "primary.main" }}>
+                        🧩 {section.productName ?? `Produto ${section.productId.slice(0, 8)}`}
                       </Typography>
                       <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
                         · {section.groups.reduce((acc, g) => acc + g.versions.length, 0)} projeto(s)
                       </Typography>
+                      {section.hasRunning && (
+                        <Typography variant="caption" sx={{ fontSize: "0.62rem", color: "success.main", fontWeight: 600 }}>
+                          · em execução
+                        </Typography>
+                      )}
                     </Stack>
                   )}
                   {/* Grupos multi-versão */}
@@ -433,18 +465,43 @@ function ProjectsPageInner() {
 
         {/* List view */}
         {view === "list" && sorted.length > 0 && (
-          <Card key="list">
-            {sorted.slice(0, visibleCount).map((p, i) => (
-              <ProjectRow key={p.id} project={p} delay={i} />
-            ))}
+          <Box key="list">
+            {productSections.map((section) => {
+              const sectionProjects = section.groups.flatMap(g => g.versions);
+              if (sectionProjects.length === 0) return null;
+              return (
+                <Box key={section.productId ?? "standalone"} sx={{ mb: 2 }}>
+                  {section.productId && (
+                    <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.75, mt: 1 }}>
+                      <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: section.hasRunning ? "success.main" : "primary.main" }}>
+                        🧩 {section.productName ?? `Produto ${section.productId.slice(0, 8)}`}
+                      </Typography>
+                      <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+                        · {sectionProjects.length} projeto(s)
+                      </Typography>
+                      {section.hasRunning && (
+                        <Typography variant="caption" sx={{ fontSize: "0.62rem", color: "success.main", fontWeight: 600 }}>
+                          · em execução
+                        </Typography>
+                      )}
+                    </Stack>
+                  )}
+                  <Card>
+                    {sectionProjects.slice(0, visibleCount).map((p, i) => (
+                      <ProjectRow key={p.id} project={p} delay={i} />
+                    ))}
+                  </Card>
+                </Box>
+              );
+            })}
             {visibleCount < sorted.length && (
-              <Box sx={{ textAlign: "center", p: 2 }}>
+              <Box sx={{ textAlign: "center", mt: 2 }}>
                 <Button variant="outlined" size="small" onClick={() => setVisibleCount(v => v + PAGE_SIZE)}>
                   Carregar Mais
                 </Button>
               </Box>
             )}
-          </Card>
+          </Box>
         )}
       </AnimatePresence>
     </Box>
