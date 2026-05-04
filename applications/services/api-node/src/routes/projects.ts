@@ -177,6 +177,7 @@ export async function projectRoutes(app: FastifyInstance) {
         projectType:    ((row as Record<string, unknown>).extra as Record<string, unknown> | null)?.project_type    as string | undefined ?? null,
         productId:      (row as Record<string, unknown>).product_id as string | null ?? null,
         complexityHint: (row as Record<string, unknown>).complexity_hint as string | null ?? null,
+        extra:          (row as Record<string, unknown>).extra as Record<string, unknown> | null ?? null,
       });
     } finally {
       client.release();
@@ -419,10 +420,15 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
-  // POST /api/projects/:id/accept — marca projeto como aceite pelo usuário (Monitor Loop para)
-  app.post<{ Params: { id: string } }>("/api/projects/:id/accept", async (request, reply) => {
+  // POST /api/projects/:id/accept — marca projeto como aceito (usuário humano ou Zentriz Cyborg)
+  // Body opcional: { accepted_by?: "zentriz-cyborg" | string, evidence?: string }
+  app.post<{ Params: { id: string }; Body?: { accepted_by?: string; evidence?: string } }>(
+    "/api/projects/:id/accept",
+    async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
+    const acceptedBy: string = (request.body as Record<string, string> | undefined)?.accepted_by ?? user.id;
+    const evidence:   string = (request.body as Record<string, string> | undefined)?.evidence   ?? "";
     const client = await pool.connect();
     try {
       const allowed = await checkProjectAccess(client, id, user);
@@ -438,7 +444,15 @@ export async function projectRoutes(app: FastifyInstance) {
           message: `Aceite só permitido quando status é running, completed ou stopped. Atual: ${current}`,
         });
       }
-      await client.query("UPDATE projects SET status = $1, updated_at = now() WHERE id = $2", ["accepted", id]);
+      // Gravar accepted_by e evidence no campo extra (jsonb merge)
+      await client.query(
+        `UPDATE projects
+         SET status = $1,
+             extra = COALESCE(extra, '{}') || $2::jsonb,
+             updated_at = now()
+         WHERE id = $3`,
+        ["accepted", JSON.stringify({ accepted_by: acceptedBy, ...(evidence ? { accepted_evidence: evidence } : {}) }), id]
+      );
       const updated = await client.query(
         "SELECT id, status, updated_at, product_id, title FROM projects WHERE id = $1",
         [id]
@@ -577,13 +591,74 @@ export async function projectRoutes(app: FastifyInstance) {
         }
       });
 
+      // Postar no diálogo quem aceitou
+      const isCyborg = acceptedBy === "zentriz-cyborg";
+      setImmediate(async () => {
+        try {
+          await pool.query(
+            `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+             VALUES ($1, 'system', 'system', 'step', $2)`,
+            [id, isCyborg
+              ? `🤖 Zentriz Cyborg validou e aceitou este projeto automaticamente. Evidências: ${evidence || "PLAYBOOK UNIVERSAL — todos os checks passaram."}`
+              : `✅ Projeto aceito pelo usuário.`]
+          );
+        } catch { /* não crítico */ }
+      });
+
       return reply.send({
         ok: true,
         status: "accepted",
+        acceptedBy,
         updatedAt: (u.updated_at as Date)?.toISOString(),
         githubPushTriggered: true,
         event: "project.shipped",
       });
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /api/projects/:id/reject — rejeita projeto (Zentriz Cyborg ou humano)
+  // Body: { rejected_by?: string, reason: string }
+  app.post<{ Params: { id: string }; Body: { rejected_by?: string; reason: string } }>(
+    "/api/projects/:id/reject",
+    async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const rejectedBy: string = request.body?.rejected_by ?? user.id;
+    const reason:     string = request.body?.reason ?? "Rejeitado sem motivo especificado.";
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, id, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const proj = await client.query("SELECT status FROM projects WHERE id = $1", [id]);
+      const row = proj.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const current = row.status as string;
+      if (!["running", "completed", "stopped"].includes(current)) {
+        return reply.status(409).send({
+          code: "CONFLICT",
+          message: `Rejeição só permitida quando status é running, completed ou stopped. Atual: ${current}`,
+        });
+      }
+      await client.query(
+        `UPDATE projects
+         SET status = 'failed',
+             extra  = COALESCE(extra, '{}') || $1::jsonb,
+             updated_at = now()
+         WHERE id = $2`,
+        [JSON.stringify({ rejected_by: rejectedBy, rejected_reason: reason, rejected_at: new Date().toISOString() }), id]
+      );
+      // Registrar no diálogo
+      const isCyborg = rejectedBy === "zentriz-cyborg";
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'system', 'system', 'step', $2)`,
+        [id, isCyborg
+          ? `❌ Zentriz Cyborg rejeitou este projeto após ${2} tentativas de validação. Motivo: ${reason}`
+          : `❌ Projeto rejeitado. Motivo: ${reason}`]
+      );
+      return reply.send({ ok: true, status: "failed", rejectedBy, reason });
     } finally {
       client.release();
     }
@@ -1710,4 +1785,125 @@ export async function projectRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // POST /api/projects/:id/evolve — cria projeto filho de evolução a partir de projeto aceito
+  // Body: { request: string (texto livre) | undefined, workMode: "copy" | "branch" }
+  // O arquivo de spec pode ser enviado separadamente via multipart (projeto filho terá spec_ref próprio)
+  app.post<{
+    Params: { id: string };
+    Body: { request?: string; workMode?: "copy" | "branch" };
+  }>("/api/projects/:id/evolve", async (request, reply) => {
+    const user = getUser(request);
+    const { id: parentId } = request.params;
+    const evolutionRequest = request.body?.request?.trim() ?? "";
+    const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";
+
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, parentId, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+      const parentRow = (await client.query(
+        "SELECT id, title, status, product_id, tenant_id, created_by, version_number, complexity_hint FROM projects WHERE id = $1",
+        [parentId]
+      )).rows[0] as Record<string, unknown> | undefined;
+
+      if (!parentRow) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto pai não encontrado" });
+      if (parentRow.status !== "accepted") {
+        return reply.status(409).send({
+          code: "CONFLICT",
+          message: `Evolução só permitida em projetos aceitos. Status atual: ${parentRow.status}`,
+        });
+      }
+      if (!evolutionRequest) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Campo 'request' é obrigatório (descreva o que evoluir)." });
+      }
+
+      const nextVersion = ((parentRow.version_number as number) ?? 1) + 1;
+      const childTitle  = `${parentRow.title} — Evolução v${nextVersion}`;
+
+      // Criar projeto filho
+      const childRes = await client.query(
+        `INSERT INTO projects
+           (tenant_id, created_by, title, status, product_id, parent_project_id, version_number,
+            extra, complexity_hint, updated_at)
+         VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7::jsonb, $8, now())
+         RETURNING id`,
+        [
+          parentRow.tenant_id,
+          user.id,
+          childTitle,
+          parentRow.product_id ?? null,
+          parentId,
+          nextVersion,
+          JSON.stringify({
+            evolution: true,
+            evolution_request: evolutionRequest,
+            evolution_work_mode: workMode,
+            evolution_parent_id: parentId,
+          }),
+          parentRow.complexity_hint ?? null,
+        ]
+      );
+      const childId = childRes.rows[0]?.id as string;
+
+      // Copiar spec original do pai como ponto de partida do filho
+      const parentSpecRow = (await client.query(
+        "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC LIMIT 1",
+        [parentId]
+      )).rows[0] as Record<string, unknown> | undefined;
+
+      if (parentSpecRow?.file_path) {
+        try {
+          const { readFileSync, existsSync } = await import("fs");
+          const { join, dirname } = await import("path");
+          const { mkdirSync, writeFileSync } = await import("fs");
+          const uploadDir  = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
+          const parentSpec = String(parentSpecRow.file_path);
+          if (existsSync(parentSpec)) {
+            const originalContent = readFileSync(parentSpec, "utf-8");
+            // Prefixar spec com instrução de evolução
+            const evolutionHeader = `# EVOLUTION REQUEST — v${nextVersion}\n\n> ${evolutionRequest}\n\n---\n\n`;
+            const evolvedContent  = evolutionHeader + originalContent;
+            const childSpecDir    = join(uploadDir, childId);
+            mkdirSync(childSpecDir, { recursive: true });
+            const childSpecPath   = join(childSpecDir, `spec-evolution-v${nextVersion}.md`);
+            writeFileSync(childSpecPath, evolvedContent, "utf-8");
+            await client.query(
+              `INSERT INTO project_spec_files (project_id, filename, file_path)
+               VALUES ($1, $2, $3)`,
+              [childId, `spec-evolution-v${nextVersion}.md`, childSpecPath]
+            );
+            await client.query(
+              "UPDATE projects SET status = 'spec_submitted', updated_at = now() WHERE id = $1",
+              [childId]
+            );
+          }
+        } catch (err) {
+          request.log.warn({ err, childId }, "[evolve] Falha ao copiar spec do pai — filho permanece em draft");
+        }
+      }
+
+      // Postar no diálogo do filho
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'system', 'system', 'step', $2)`,
+        [childId, `🔄 Evolução v${nextVersion} criada a partir de "${parentRow.title}". Modo: ${workMode}. Pedido: "${evolutionRequest}"`]
+      );
+
+      request.log.info({ parentId, childId, version: nextVersion, workMode }, "[evolve] Projeto filho criado");
+
+      return reply.status(201).send({
+        ok: true,
+        childProjectId: childId,
+        parentProjectId: parentId,
+        versionNumber: nextVersion,
+        workMode,
+        title: childTitle,
+        message: "Projeto de evolução criado. Envie ao pipeline via POST /run quando estiver pronto.",
+      });
+    } finally {
+      client.release();
+    }
+  });
 }

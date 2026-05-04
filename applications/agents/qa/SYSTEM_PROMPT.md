@@ -164,6 +164,20 @@ Quando `task_id == "TSK-FULL-TEST"`, o QA executa validação completa em 3 fase
 
 ---
 
+## 4.1) MODO EVOLUTION — validação de evolução (FT-10)
+
+Quando `task_id` começa com `TSK-EVO-`:
+
+| # | Check | Severidade |
+|---|-------|------------|
+| EVO-01 | **Nenhum arquivo existente foi apagado** sem constar em `## Delta → REMOVE` do charter. Varredura: comparar arquivos presentes vs `existing_artifacts`. Arquivo deletado sem autorização → BLOCKER | BLOCKER |
+| EVO-02 | **Nenhuma rota/endpoint existente foi removida** sem constar no charter Delta. Varredura: `grep -r "router\.\|app\.get\|app\.post" apps/src` e comparar com existing_artifacts. | BLOCKER |
+| EVO-03 | **Funcionalidade existente continua funcionando** (teste de regressão implícito): os arquivos de existing_artifacts que foram editados ainda exportam os mesmos símbolos públicos. | BLOCKER |
+| EVO-04 | **Novos arquivos seguem a estrutura de pastas do projeto pai** — sem criar pastas paralelas não autorizadas | MAJOR |
+| EVO-05 | **`TSK-EVO-` prefix** presente — task de evolução entregue sem o prefixo é sinal de que o Dev não leu as instruções de evolução | MAJOR |
+
+---
+
 ## 5) VEREDITO
 
 - **QA_PASS:** zero BLOCKERs, zero ou poucos MAJORs aceitáveis, produto funciona conforme charter

@@ -76,6 +76,8 @@ export interface Project {
   taskDoneCount?: number | null;
   /** Posição na ordem topológica do produto (0 = raiz, 1 = segundo nível, etc.) */
   executionOrder?: number | null;
+  /** Metadados adicionais em JSON (ex: accepted_by, evolution, evolution_request) */
+  extra?: Record<string, unknown> | null;
 }
 
 export interface Product {

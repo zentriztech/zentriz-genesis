@@ -3159,6 +3159,114 @@ def main() -> int:
             except Exception as _e:
                 logger.debug("[Pipeline] Não foi possível carregar project_type/links: %s", _e)
 
+    # ── FT-10: Modo EVOLUTION — carrega apps/ do projeto pai como existing_artifacts ───────
+    # Se o projeto foi criado via POST /evolve, extra contém evolution:true.
+    # O runner injeta: (1) codebase do pai como contexto, (2) evolution_request no spec_content.
+    _is_evolution = False
+    _evolution_request = ""
+    _evolution_work_mode = "copy"
+    _parent_project_id_evo: str | None = None
+    if project_id:
+        try:
+            _evo_proj_data, _ = _api_get(f"/api/projects/{project_id}")
+            _extra = (_evo_proj_data or {}).get("extra") or {}
+            if isinstance(_extra, str):
+                import json as _json
+                try: _extra = _json.loads(_extra)
+                except Exception: _extra = {}
+            if _extra.get("evolution") is True:
+                _is_evolution = True
+                _evolution_request   = _extra.get("evolution_request", "")
+                _evolution_work_mode = _extra.get("evolution_work_mode", "copy")
+                _parent_project_id_evo = _extra.get("evolution_parent_id")
+                logger.info("[FT-10] Modo EVOLUTION detectado — request=%s work_mode=%s parent=%s",
+                            _evolution_request[:80], _evolution_work_mode,
+                            (_parent_project_id_evo or "")[:8])
+        except Exception as _evo_e:
+            logger.debug("[FT-10] Falha ao detectar modo evolution: %s", _evo_e)
+
+    if _is_evolution and _parent_project_id_evo and pipeline_ctx:
+        # Carregar apps/ do projeto pai como existing_artifacts no contexto
+        _files_root_evo = os.environ.get("PROJECT_FILES_ROOT", "/project-files").rstrip("/")
+        _parent_apps_dir = Path(_files_root_evo) / _parent_project_id_evo / "apps"
+
+        # Determinar product_id do pai para path novo
+        try:
+            _par_data, _ = _api_get(f"/api/projects/{_parent_project_id_evo}")
+            _par_prod = (_par_data or {}).get("productId")
+            if _par_prod:
+                _parent_apps_dir = Path(_files_root_evo) / _par_prod / _parent_project_id_evo / "apps"
+        except Exception:
+            pass
+
+        _evo_artifacts: list[dict] = []
+        try:
+            _MAX_EVO_CHARS = 80_000
+            _evo_chars = 0
+            # Coletar todos os arquivos de código do pai (excluindo node_modules/.next/dist)
+            _skip_dirs = {"node_modules", ".next", "dist", ".git", "__pycache__", ".venv", "venv"}
+            for _ap in sorted(_parent_apps_dir.rglob("*")):
+                if _evo_chars >= _MAX_EVO_CHARS:
+                    break
+                if not _ap.is_file():
+                    continue
+                if any(s in _ap.parts for s in _skip_dirs):
+                    continue
+                _ext = _ap.suffix.lower()
+                if _ext not in {".ts", ".tsx", ".js", ".jsx", ".py", ".json", ".md", ".toml", ".yaml", ".yml", ".env.example", ".sh", ".sql"}:
+                    continue
+                try:
+                    _content = _ap.read_text(encoding="utf-8", errors="replace")
+                    _avail = _MAX_EVO_CHARS - _evo_chars
+                    if len(_content) > _avail:
+                        _content = _content[:_avail] + "\n...[truncado]"
+                    _rel_path = str(_ap.relative_to(_parent_apps_dir.parent))
+                    _evo_artifacts.append({"path": _rel_path, "content": _content, "format": _ext.lstrip(".")})
+                    _evo_chars += len(_content)
+                except OSError:
+                    pass
+            logger.info("[FT-10] %d artefatos do projeto pai carregados (%d chars)", len(_evo_artifacts), _evo_chars)
+        except Exception as _ea:
+            logger.warning("[FT-10] Falha ao carregar apps/ do pai: %s", _ea)
+
+        # Enriquecer pipeline_ctx com o contexto de evolução
+        _evo_ctx = (
+            f"\n## CONTEXTO DE EVOLUÇÃO — projeto pai: {_parent_project_id_evo[:8]}\n"
+            f"Este projeto É UMA EVOLUÇÃO. O codebase existente está em existing_artifacts.\n"
+            f"PEDIDO DE EVOLUÇÃO: {_evolution_request}\n\n"
+            f"### REGRAS ABSOLUTAS DE EVOLUÇÃO\n"
+            f"1. NUNCA remova recurso existente a menos que a instrução seja EXPLICITAMENTE 'remover X'\n"
+            f"2. Adicione SOMENTE o que o pedido pede — nada além\n"
+            f"3. Edite arquivos existentes com patch cirúrgico — não reescreva do zero\n"
+            f"4. Prefixos de tasks: TSK-EVO- (distingue das tasks originais)\n"
+            f"5. O charter deve ter seção '## Delta' listando o que ADICIONA, MANTÉM e REMOVE\n"
+            f"6. complexity_hint reflete apenas o delta — não o projeto inteiro\n"
+        )
+        _existing_linked = pipeline_ctx.linked_projects_context or ""
+        pipeline_ctx.linked_projects_context = _existing_linked + _evo_ctx
+
+        # Armazenar artefatos no pipeline_ctx para uso pelos agentes
+        if not hasattr(pipeline_ctx, "evolution_artifacts"):
+            pipeline_ctx.evolution_artifacts = _evo_artifacts  # type: ignore[attr-defined]
+
+        # Injetar work_mode no spec_content como instrução adicional
+        if _evolution_work_mode == "branch":
+            # Inicializar git no projeto filho se necessário
+            _child_apps = Path(_files_root_evo) / project_id / "apps"
+            if _child_apps.exists() and not (_child_apps / ".git").exists():
+                try:
+                    import subprocess as _sp
+                    _sp.run(["git", "init"], cwd=str(_child_apps), check=True, capture_output=True)
+                    _sp.run(["git", "checkout", "-b", "main"], cwd=str(_child_apps), capture_output=True)
+                    _sp.run(["git", "checkout", "-b", "staging"], cwd=str(_child_apps), capture_output=True)
+                    _sp.run(["git", "checkout", "-b", "dev"], cwd=str(_child_apps), capture_output=True)
+                    _branch_name = f"evolution/v{(_evo_proj_data or {}).get('versionNumber', 2)}"
+                    _sp.run(["git", "checkout", "-b", _branch_name], cwd=str(_child_apps), capture_output=True)
+                    logger.info("[FT-10] Git inicializado com branches main/staging/dev/%s em %s",
+                                _branch_name, _child_apps)
+                except Exception as _ge:
+                    logger.warning("[FT-10] Falha ao inicializar git: %s", _ge)
+
     # Persistir spec em project_id/docs quando PROJECT_FILES_ROOT estiver definido
     if project_id and storage and storage.is_enabled():
         storage.write_spec_doc(project_id, spec_content, spec_ref.replace("/", "_").replace(".", "_")[:80])

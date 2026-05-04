@@ -243,6 +243,10 @@ function ProjectDetailPageInner() {
   const [runLoading, setRunLoading] = useState(false);
   const [runError, setRunError]     = useState<string | null>(null);
   const [acceptLoading, setAcceptLoading] = useState(false);
+  const [evolveOpen, setEvolveOpen]       = useState(false);
+  const [evolveRequest, setEvolveRequest] = useState("");
+  const [evolveWorkMode, setEvolveWorkMode] = useState<"copy" | "branch">("copy");
+  const [evolveLoading, setEvolveLoading] = useState(false);
   const [copiedCmd, setCopiedCmd]   = useState(false);
   const [tasksOpen, setTasksOpen]   = useState(true);
   // Tab routing: centerTabs = tabs shown in center panel; rightTabs = tabs shown in right panel (alongside Tasks)
@@ -626,7 +630,6 @@ function ProjectDetailPageInner() {
 
   const handleAccept = async () => {
     setAcceptLoading(true);
-    // Mover stepper para "Pronto" imediatamente ao aceitar
     setWorkingStepIndex(6);
     setWorkingMessage("Aceito");
     try {
@@ -636,6 +639,28 @@ function ProjectDetailPageInner() {
       setRunError(e instanceof Error ? e.message : "Falha ao aceitar");
     } finally {
       setAcceptLoading(false);
+    }
+  };
+
+  const handleEvolve = async () => {
+    if (!evolveRequest.trim()) return;
+    setEvolveLoading(true);
+    try {
+      const result = await apiPost(`/api/projects/${id}/evolve`, {
+        request: evolveRequest.trim(),
+        workMode: evolveWorkMode,
+      });
+      setEvolveOpen(false);
+      setEvolveRequest("");
+      // Navegar para o projeto filho
+      const childId = (result as Record<string, unknown>)?.childProjectId;
+      if (childId && typeof childId === "string") {
+        window.location.href = `/projects/${childId}`;
+      }
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : "Falha ao criar evolução");
+    } finally {
+      setEvolveLoading(false);
     }
   };
 
@@ -822,6 +847,14 @@ function ProjectDetailPageInner() {
             {acceptLoading ? "Aceitando…" : "Aceitar"}
           </Button>
         )}
+        {/* FT-10: Botão Evoluir — só aparece em projetos aceitos */}
+        {project.status === "accepted" && (
+          <Button variant="outlined" color="secondary" size="small"
+            startIcon={<span style={{ fontSize: "1rem" }}>🔄</span>}
+            onClick={() => setEvolveOpen(true)}>
+            Evoluir
+          </Button>
+        )}
         {/* Menu Ações */}
         <Tooltip title="Ações">
           <IconButton size="small" disabled={runLoading} onClick={e => setActionsAnchor(e.currentTarget)}>
@@ -942,6 +975,65 @@ function ProjectDetailPageInner() {
           </Typography>
         </Alert>
       )}
+
+      {/* FT-14: Badge Zentriz Cyborg — aparece quando accepted_by = zentriz-cyborg */}
+      {project.status === "accepted" && (project.extra as Record<string,unknown>)?.accepted_by === "zentriz-cyborg" && (
+        <Alert severity="info" icon={<span style={{ fontSize: "1.1rem" }}>🤖</span>} sx={{ mb: 2 }}>
+          <Typography variant="body2" fontWeight={600}>Validado pelo Zentriz Cyborg</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Este projeto foi testado e aceito automaticamente pelo Cyborg após o PLAYBOOK UNIVERSAL. Nenhuma intervenção humana necessária.
+          </Typography>
+        </Alert>
+      )}
+
+      {/* FT-10: Modal de Evolução */}
+      <Dialog open={evolveOpen} onClose={() => setEvolveOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>🔄 Evoluir projeto</DialogTitle>
+        <DialogContent>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Uma evolução cria um projeto filho a partir deste. O CTO analisa o pedido, identifica o delta e gera apenas as tasks necessárias. Nada é removido sem instrução explícita.
+          </Alert>
+          <Typography variant="subtitle2" gutterBottom>O que você quer evoluir?</Typography>
+          <textarea
+            value={evolveRequest}
+            onChange={e => setEvolveRequest(e.target.value)}
+            placeholder="Ex: Adicionar módulo de relatórios em PDF, exportação CSV, ou tela de comparativo mensal..."
+            rows={4}
+            style={{
+              width: "100%", padding: "10px", borderRadius: "6px", resize: "vertical",
+              fontFamily: "inherit", fontSize: "0.875rem",
+              border: "1px solid #ccc", outline: "none", boxSizing: "border-box",
+            }}
+          />
+          <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Modo de trabalho</Typography>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {(["copy", "branch"] as const).map(m => (
+              <Button
+                key={m} size="small"
+                variant={evolveWorkMode === m ? "contained" : "outlined"}
+                onClick={() => setEvolveWorkMode(m)}
+              >
+                {m === "copy" ? "📋 Cópia isolada" : "🌿 Branch git"}
+              </Button>
+            ))}
+          </div>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+            {evolveWorkMode === "copy"
+              ? "Cria uma cópia dos arquivos do projeto atual. Mais simples, sem dependência de git."
+              : "Cria branches main/staging/dev (se necessário) e um branch evolution/vN. Requer git disponível no projeto."}
+          </Typography>
+        </DialogContent>
+        <DialogContent sx={{ pt: 0, display: "flex", justifyContent: "flex-end", gap: 1 }}>
+          <Button onClick={() => setEvolveOpen(false)} disabled={evolveLoading}>Cancelar</Button>
+          <Button
+            variant="contained" color="secondary"
+            disabled={!evolveRequest.trim() || evolveLoading}
+            onClick={handleEvolve}
+          >
+            {evolveLoading ? "Criando…" : "Criar evolução"}
+          </Button>
+        </DialogContent>
+      </Dialog>
 
       {/* Post-accept run banner */}
       {isDone && runInfo?.runCommand && (

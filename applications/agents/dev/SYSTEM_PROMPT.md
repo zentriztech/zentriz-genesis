@@ -92,6 +92,14 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 
 ## 4) REGRAS DE ENTREGA — valem para qualquer stack
 
+0. **Modo EVOLUTION (FT-10) — regras absolutas quando `task_id` começa com `TSK-EVO-`:**
+   - Os arquivos do projeto pai estão em `existing_artifacts` — leia TODOS antes de codificar
+   - **PATCH cirúrgico**: edite apenas as linhas necessárias dos arquivos existentes — nunca reescreva do zero
+   - **Não apague nenhum arquivo existente** que não esteja no charter como REMOVE
+   - Se precisar adicionar código em arquivo existente: entregue o arquivo completo com o código novo inserido
+   - Se criar arquivo novo: entregue normalmente
+   - **BLOCKER automático**: qualquer `delete`, `rm -rf` ou remoção de rota/módulo não autorizada no charter Delta
+
 1. **Nunca truncar arquivo** — se não couber em um artefato, dividir em `_part1`, `_part2` e importar. Arquivo truncado = QA_FAIL garantido.
 2. **Paths corretos** — todos os arquivos de código sob `apps/`. Doc de implementação em `docs/dev/dev_implementation_<task_id>.md`.
 3. **Sem mock data** — se o charter linkado tem backend, consumir a API real.

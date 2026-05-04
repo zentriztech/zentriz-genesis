@@ -624,95 +624,6 @@ Com esta revisão:
 
 ---
 
-## LEI 15 — Contrato de API Completo no Charter (INVIOLÁVEL para produto multi-serviço)
-
-> **"O Charter de um backend que será consumido por frontend/Manager DEVE incluir o contrato completo de API com schema de entrada/saída. Sem isso, o Dev do frontend inventa URLs e tudo quebra em produção."**
-
-**Causa validada em produção (Zentriz Ledger BR):** Manager gerado sem contratos → Dev usou `/api/cte` nas libs mas o `createApiClient` já adiciona `/api/` → resultado: `/api/api/cte` (404). Todos os backends apareciam como "offline". Corrigido manualmente após horas de debug.
-
-### Quando aplicar a LEI 15
-
-Sempre que o charter define `project_type: frontend_web | manager | dashboard` OU quando o projeto tem `uses_backend` no `linked_projects_context`.
-
-### O Charter DEVE incluir:
-
-```markdown
-## Contrato de API — [Nome do Backend] (para uso pelo Manager/Frontend)
-
-### Comportamento do HTTP Client
-
-O frontend usa `createApiClient(BASE_URL)` que **adiciona `/api/` ao baseURL automaticamente**.
-Portanto, as rotas nas libs do frontend DEVEM ser escritas **SEM `/api/` prefix**:
-
-```typescript
-// CORRETO → resulta em BASE/api/cte
-await client.get('/cte', { params })
-
-// ERRADO → resulta em BASE/api/api/cte (404 GARANTIDO)
-await client.get('/api/cte', { params })
-```
-
-### Endpoints (paths SEM /api/ — para uso nas libs do Manager)
-
-| Método | Path na lib | URL real | Auth | Descrição |
-|--------|-------------|----------|------|-----------|
-| GET | /cte | /api/cte | Bearer | Listar CT-e com paginação |
-| GET | /cte/:id | /api/cte/:id | Bearer | Detalhe CT-e |
-| POST | /cte | /api/cte | Bearer | Criar rascunho |
-| PATCH | /cte/:id | /api/cte/:id | Bearer | Atualizar rascunho |
-| POST | /cte/:id/issue | /api/cte/:id/issue | Bearer | Emitir CT-e |
-| POST | /cte/:id/cancel | /api/cte/:id/cancel | Bearer | Cancelar CT-e |
-
-### Tipagem de Request/Response
-
-```typescript
-// GET /cte — query params aceitos
-interface ListParams {
-  page?: number;          // default 1
-  limit?: number;         // default 20, max 100
-  sort?: 'dataEmissao' | 'numero' | 'valorTotal' | 'createdAt';
-  order?: 'asc' | 'desc';
-  dataInicio?: string;    // ISO 8601 — filtro por período
-  dataFim?: string;       // ISO 8601
-  status?: 'authorized' | 'draft' | 'cancelled' | 'rejected';
-}
-
-// Resposta padrão
-interface ListResponse<T> {
-  data: T[];
-  meta: { total: number; limit: number; offset: number; page?: number };
-}
-
-// Entidade principal
-interface Cte {
-  id: string;
-  tenantId: string;
-  chave: string;         // 44 chars
-  numero: number;
-  serie: number;
-  status: 'authorized' | 'draft' | 'cancelled' | 'rejected' | 'pending';
-  valorTotal: number;
-  dataEmissao: string;   // ISO 8601
-  remetenteNome: string;
-  destinatarioNome: string;
-  // ... demais campos do schema real
-}
-```
-
-### Params proibidos (causam 400 VALIDATION_ERROR)
-- `perPage` — usar `limit`
-- `sort=-campo` — usar `sort=campo&order=desc`
-- qualquer campo não listado acima
-```
-
-**Checklist do CTO para produto multi-serviço:**
-- [ ] Charter inclui bloco "## Contrato de API — [Backend]" para CADA backend predecessor
-- [ ] Bloco tem: comportamento do createApiClient, tabela de endpoints, tipagem TypeScript
-- [ ] Params proibidos documentados (para evitar 400)
-- [ ] CTO marca o charter como `NEEDS_INFO` se o api_contract.md do predecessor não existir no disco
-
----
-
 ## LEI 13 — Porta e Stack são Imposição do Charter (INVIOLÁVEL)
 
 > **"A porta e a stack definidas no charter são leis. Nenhum agente pode alterá-las. Não é democracia."**
@@ -744,19 +655,11 @@ O Charter DEVE incluir o bloco de conexão exato para que Dev e DevOps não prec
 ## Banco Compartilhado (shared_db: true)
 - **db_project_id:** <uuid_do_projeto_db>
 - **DATABASE_URL:** `postgresql://postgres:postgres@postgres:5432/zentriz_ledger`
-  - hostname CANÔNICO: `postgres` — SEMPRE este nome, nunca `localhost`, `db`, `zentriz-ledger-db_db`
-  - O projeto Deploy cria a rede com um container chamado `postgres` (container_name)
-  - schema deste serviço: `<nome_do_schema>` (ex: `cte`, `nfe`, `auth`) — NUNCA renomear
-- **Rede Docker:** `<product_slug>-net` (criada pelo Deploy, todos se conectam com o mesmo nome)
-- **JWT config:** todos os backends DEVEM usar:
-  - `JWT_ISSUER=zentriz-ledger-auth` (valor exato do auth-service)
-  - `JWT_AUDIENCE=zentriz-ledger` (global do produto — NUNCA por serviço)
-  - `JWT_PUBLIC_KEY` (PEM inline) OU `JWT_PUBLIC_KEY_PATH` (arquivo) — implementar ambos
+  - hostname `postgres` = container_name do banco na rede `<product_slug>-net`
+  - schema deste serviço: `<nome_do_schema>` (ex: `cte`, `nfe`, `auth`)
+- **Rede Docker:** `<product_slug>-net` (externa — criada pelo projeto db)
 - **NUNCA criar banco próprio** — sem `image: postgres/mysql` no docker-compose deste projeto
 ```
-
-**Por que hostname `postgres` é canônico:**
-Validado em produção: containers usavam `db`, `zentriz-ledger-db_db`, `zentriz-ledger-db_postgres` — cada Dev/DevOps inventou um nome diferente. O Deploy não conseguia orquestrar. Solução definitiva: o hostname interno Docker é SEMPRE `postgres` (container_name canônico definido pelo Deploy).
 
 **Se o linked_projects_context contém o docker-compose do projeto DB predecessor:**
 - Extrair `container_name`, credenciais, nome do banco
@@ -1072,6 +975,68 @@ Quando `shared_db: true`, o CTO DEVE definir no charter:
       mdfe-api:   mdfe
       nfse-api:   nfse
   ```
+
+---
+
+---
+
+## LEI EVO — Modo Evolution Charter (FT-10)
+
+### Quando este modo se aplica
+
+Quando `inputs.linked_projects_context` contém a seção **`## CONTEXTO DE EVOLUÇÃO`** e a spec começa com `# EVOLUTION REQUEST`.
+
+### Comportamento obrigatório
+
+1. **Leia o codebase existente (existing_artifacts) ANTES de qualquer decisão** — o que já existe é a base, não o ponto de partida.
+2. **Analise o pedido de evolução** — o que o usuário quer adicionar, modificar ou (explicitamente) remover.
+3. **NUNCA remova recurso existente** a menos que a instrução seja EXPLICITAMENTE `"remover X"`, `"excluir Y"`, `"substituir Z"`. Ambiguidade → mantém.
+4. **Gere charter com seção `## Delta` obrigatória:**
+
+```markdown
+## Delta — O que este evolution charter muda
+
+### ADICIONA
+- <lista de recursos novos>
+
+### MODIFICA
+- <lista de recursos que mudam comportamento>
+
+### MANTÉM
+- Tudo o que não está listado acima permanece inalterado.
+
+### REMOVE
+- <lista explícita — só se o usuário pediu explicitamente>
+  ou: Nenhuma remoção solicitada.
+```
+
+5. **`complexity_hint` reflete APENAS o delta** — não o projeto inteiro. Uma tela nova em sistema complexo pode ser `low`.
+6. **O charter deve declarar `evolution: true`** na seção de metadados.
+7. **Não reescreva o PROJECT_CHARTER inteiro** — escreva apenas o delta e referencie o charter original como `parent_charter`.
+
+### Exemplo de saída
+
+```markdown
+## EVOLUTION CHARTER — v2
+**parent_charter:** docs/cto/PROJECT_CHARTER.md (projeto pai)
+**evolution:** true
+**complexity_hint:** low
+**reasoning:** Adicionar 1 nova rota de exportação PDF — nenhum novo serviço, nenhuma nova entidade
+
+## Delta — O que este evolution charter muda
+
+### ADICIONA
+- Rota GET /reports/pdf — gera PDF consolidado dos últimos 30 dias
+- Dependência: pdfkit ou puppeteer (a definir pelo Engineer)
+
+### MANTÉM
+- Todas as rotas existentes (/users, /products, /orders, /auth)
+- Banco de dados, schema, seeds
+- Docker compose, Dockerfile
+
+### REMOVE
+- Nenhuma remoção solicitada.
+```
 
 ---
 

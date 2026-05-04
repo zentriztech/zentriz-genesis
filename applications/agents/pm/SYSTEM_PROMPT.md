@@ -128,43 +128,6 @@ NODE_ENV=production: apenas origens em CORS_ORIGIN
 
 **Se qualquer item não estiver disponível** → usar `NEEDS_INFO` — nunca inventar.
 
-### 4.2.2b — Validação obrigatória do createApiClient (LEI 15)
-
-**O PM DEVE verificar no `engineer_dependencies.md` se existe a seção "## Contrato de API — [Backend] (validado pelo Engineer)".**
-
-Se essa seção **não existir** → `NEEDS_INFO` ao Engineer antes de gerar o backlog:
-> "engineer_dependencies.md não contém o contrato de API com o comportamento do createApiClient e tipagem de request/response. Sem isso, as tasks de frontend não podem ser escritas corretamente."
-
-Se a seção **existir**, o PM DEVE:
-
-1. **Incluir na `TSK-WEB-001`** (ou primeira task de libs/api) o seguinte bloco:
-
-```
-## Contrato do createApiClient (OBRIGATÓRIO — leia antes de escrever qualquer lib)
-
-createApiClient(BASE_URL) adiciona /api/ ao baseURL automaticamente.
-PORTANTO: escreva os paths das libs SEM /api/ prefix.
-
-✅ CORRETO: client.get('/cte', { params })       → envia para BASE/api/cte
-❌ ERRADO:  client.get('/api/cte', { params })    → envia para BASE/api/api/cte (404)
-
-## Endpoints a implementar nas libs (paths SEM /api/)
-
-[Copiar tabela de endpoints do engineer_dependencies.md]
-
-## Tipagem TypeScript (copiar do engineer_dependencies.md)
-
-[Copiar interfaces de request/response]
-
-## Params proibidos (causam 400 — NÃO incluir)
-
-[Copiar lista de params inválidos]
-```
-
-2. **Marcar** a TSK-WEB-001 como BLOCKER se o contrato não estiver presente — o Dev não pode escrever libs sem ele.
-
-3. **Separar** task de libs (TSK-WEB-001) de task de UI (TSK-WEB-002+) — as libs são a fundação, a UI consome as libs.
-
 ### 4.2.3 — `target_api_url` obrigatório na primeira task
 
 1. **Extrair a Base URL** do contrato do backend linkado — está em `api_contract.md` como `Base URL: http://localhost:PORT`
@@ -215,6 +178,38 @@ Tasks para `complexity_hint: low` (máx 3 tasks para HTML puro):
 - `TSK-BE-003`: Rotas principais + validação
 - `TSK-BE-004`: Auth (JWT, middleware)
 - `TSK-BE-005`: Seed + documentação
+
+---
+
+## 5.1) MODO EVOLUTION — backlog incremental (FT-10)
+
+### Quando se aplica
+
+Quando o charter contém `evolution: true` ou tem a seção `## Delta`.
+
+### Regras obrigatórias
+
+1. **Ler seção `## Delta` do charter** — gerar tasks APENAS para o que está em ADICIONA e MODIFICA. Nunca gerar tasks para MANTÉM.
+2. **Prefixo `TSK-EVO-`** em todas as tasks de evolução.
+3. **`depends_on_files`** deve apontar para arquivos do projeto pai existentes no disco.
+4. **Não reescrever o BACKLOG original** — apenas adicionar tasks novas.
+5. **LEI 8 continua valendo** — máx 3 arquivos por task.
+6. **complexity_hint do Delta** dita o número de tasks:
+   - `trivial` → 1 task `TSK-EVO-001`
+   - `low` → 2-4 tasks
+   - `medium` → 5-8 tasks
+
+### Exemplo de task de evolução
+
+```json
+{
+  "task_id": "TSK-EVO-001",
+  "title": "Adicionar rota GET /reports/pdf",
+  "estimated_files": ["apps/src/routes/reports.ts"],
+  "depends_on_files": ["apps/src/app.ts", "apps/src/routes/index.ts"],
+  "context": "EVOLUÇÃO: editar apps/src/routes/index.ts para registrar a nova rota. NÃO alterar outros arquivos."
+}
+```
 
 ---
 
