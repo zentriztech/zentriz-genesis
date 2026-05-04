@@ -265,6 +265,47 @@ O Engineer **DEVE** extrair do `linked_projects_context` e incluir no `engineer_
 
 **Regra de co-deploy:** todos os projetos do produto sobem no mesmo `docker-compose.yml` com `name: <product-slug>`. O Engineer deve documentar isso no `engineer_dependencies.md` e passar `base_port` + `product_slug` para o PM incluir nas tasks de scaffold.
 
+#### 2. Validação obrigatória do createApiClient (LEI 15 do CTO)
+
+**O Engineer DEVE verificar no Charter do backend predecessor se existe a seção "## Contrato de API" com o comportamento do `createApiClient`.**
+
+Se o Charter NÃO tiver essa seção → reportar `NEEDS_INFO` ao CTO antes de continuar:
+> "Charter do predecessor [NOME] não documenta o comportamento do createApiClient nem a tipagem de request/response. Sem isso, não é possível definir como as libs do frontend devem ser estruturadas. Solicitar ao CTO que complete o contrato no Charter."
+
+**Se o Charter TEM a seção**, o Engineer DEVE validar e documentar em `engineer_dependencies.md`:
+
+```markdown
+## Contrato de API — [Backend] (validado pelo Engineer)
+
+### ⚠️ Comportamento do HTTP Client (CRÍTICO — impacta todas as libs)
+
+O projeto usa `createApiClient(BASE_URL)` que adiciona `/api/` ao baseURL.
+Resultado: as libs do frontend DEVEM usar caminhos SEM `/api/` prefix.
+
+Exemplo validado do Charter:
+- ✅ `client.get('/cte')` → `http://HOST/api/cte` (CORRETO)
+- ❌ `client.get('/api/cte')` → `http://HOST/api/api/cte` (404)
+
+### Endpoints validados (paths para usar nas libs)
+
+[Copiar tabela do Charter com validação de cada endpoint]
+
+| Path na lib | Método | Request params | Response schema |
+|------------|--------|----------------|-----------------|
+| /cte | GET | page, limit, sort, order, dataInicio, dataFim, status | { data: Cte[], meta: { total, limit, offset } } |
+| /cte/:id | GET | — | { data: Cte } |
+| ... | ... | ... | ... |
+
+### Params proibidos (causam 400 — NÃO incluir nas libs)
+- [listar params que o backend rejeita com VALIDATION_ERROR]
+
+### Interfaces TypeScript (para as libs do frontend)
+
+[Interfaces derivadas do Charter ou do api_contract.md do predecessor]
+```
+
+**Se o Engineer não incluir esta seção e o frontend gerar libs com URLs erradas → BLOCKER no QA do frontend.**
+
 #### 2. Tabela completa de endpoints
 
 Para **cada** rota exposta pelo backend que este frontend irá consumir:

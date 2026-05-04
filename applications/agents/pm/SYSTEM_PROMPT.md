@@ -76,17 +76,104 @@ Cada task produz **NO MÁXIMO 3 arquivos**.
 - ❌ `"TSK-WEB-001"` — task ID não é arquivo
 - ❌ `"apps/src/"` — diretório não é arquivo
 
-## 4.1) PROJETOS LINKADOS — `target_api_url` obrigatório (GAP-I3)
+## 4.1) DEPENDS_ON_FILES PARA TASKS DE CONTINUAÇÃO — obrigatório
+
+Quando a task implementa algo que tem contexto acumulado de tasks anteriores (repositórios, schemas, use cases), o `depends_on_files` DEVE incluir o barrel/index da camada já existente para que o Dev saiba onde colocar o novo código:
+
+- Task de **repositório** (Drizzle*Repository) → incluir `"apps/src/infra/repositories/index.ts"` — assim o Dev sabe que a pasta `src/infra/repositories/` já existe e deve ser usada
+- Task de **schema Drizzle** → incluir `"apps/src/db/schema/index.ts"` — Dev sabe que deve estender este barrel, não criar nova pasta
+- Task de **use case** → incluir `"apps/src/application/index.ts"` se existir
+
+Sem o barrel no `depends_on_files`, o Dev não sabe que a pasta já existe e cria estrutura paralela (`src/modules/`, `src/database/`, etc.) com imports quebrados.
+
+## 4.2) PROJETOS LINKADOS — contrato de API obrigatório antes do desenvolvimento (GAP-I3)
+
+> Falha documentada (2026-05-01): Frontend desenvolvido sem contrato explícito usou Content-Type errado (415), prefixos de rota errados (404) e campo de token errado — tudo corrigível se o contrato tivesse sido entregue antes.
 
 Quando `inputs.linked_projects_context` estiver presente (projeto consome um backend existente):
 
+### 4.2.1 — Regra fundamental: o backend dita o contrato
+
+O backend é a fonte da verdade. O frontend **se adapta** — nunca inventa, nunca assume. O PM é responsável por extrair o contrato do backend e **entregá-lo como artefato** antes do Dev escrever qualquer linha de código de integração.
+
+### 4.2.2 — Task obrigatória: `TSK-WEB-001` deve incluir o contrato completo
+
+A **primeira task de scaffold** do projeto frontend DEVE conter nos `requirements` o contrato completo extraído do `linked_projects_context`. Campos obrigatórios:
+
+```
+## Contrato da API Backend (extraído de linked_projects_context)
+
+Base URL: http://localhost:<PORT>           ← porta real do docker-compose do backend
+Content-Type (mutations/login): application/json   ← Fastify/Express não aceitam form-urlencoded
+Autenticação: Bearer <accessToken>         ← campo exato retornado pelo login
+
+### Endpoints disponíveis
+| Método | Path                          | Auth | Descrição              |
+|--------|-------------------------------|------|------------------------|
+| POST   | /api/auth/login               | Não  | Login; retorna { data: { accessToken, refreshToken, user } } |
+| GET    | /api/auth/me                  | Sim  | Perfil do usuário logado |
+| GET    | /api/admin/products           | Sim  | Listagem de produtos   |
+| ...    | ...                           | ...  | ...                    |
+
+### Shape do token de login
+Resposta: { data: { accessToken: "eyJ...", refreshToken: "...", user: { id, email, role } } }
+Campo usado no header: Authorization: Bearer <accessToken>
+
+### Política de CORS
+NODE_ENV=development: qualquer origem aceita
+NODE_ENV=production: apenas origens em CORS_ORIGIN
+```
+
+**Como extrair:** ler `linked_projects_context.api_contract.md`, `RUNBOOK.md` do backend, e `app.ts`/`server.ts` para prefixos de rota.
+
+**Se qualquer item não estiver disponível** → usar `NEEDS_INFO` — nunca inventar.
+
+### 4.2.2b — Validação obrigatória do createApiClient (LEI 15)
+
+**O PM DEVE verificar no `engineer_dependencies.md` se existe a seção "## Contrato de API — [Backend] (validado pelo Engineer)".**
+
+Se essa seção **não existir** → `NEEDS_INFO` ao Engineer antes de gerar o backlog:
+> "engineer_dependencies.md não contém o contrato de API com o comportamento do createApiClient e tipagem de request/response. Sem isso, as tasks de frontend não podem ser escritas corretamente."
+
+Se a seção **existir**, o PM DEVE:
+
+1. **Incluir na `TSK-WEB-001`** (ou primeira task de libs/api) o seguinte bloco:
+
+```
+## Contrato do createApiClient (OBRIGATÓRIO — leia antes de escrever qualquer lib)
+
+createApiClient(BASE_URL) adiciona /api/ ao baseURL automaticamente.
+PORTANTO: escreva os paths das libs SEM /api/ prefix.
+
+✅ CORRETO: client.get('/cte', { params })       → envia para BASE/api/cte
+❌ ERRADO:  client.get('/api/cte', { params })    → envia para BASE/api/api/cte (404)
+
+## Endpoints a implementar nas libs (paths SEM /api/)
+
+[Copiar tabela de endpoints do engineer_dependencies.md]
+
+## Tipagem TypeScript (copiar do engineer_dependencies.md)
+
+[Copiar interfaces de request/response]
+
+## Params proibidos (causam 400 — NÃO incluir)
+
+[Copiar lista de params inválidos]
+```
+
+2. **Marcar** a TSK-WEB-001 como BLOCKER se o contrato não estiver presente — o Dev não pode escrever libs sem ele.
+
+3. **Separar** task de libs (TSK-WEB-001) de task de UI (TSK-WEB-002+) — as libs são a fundação, a UI consome as libs.
+
+### 4.2.3 — `target_api_url` obrigatório na primeira task
+
 1. **Extrair a Base URL** do contrato do backend linkado — está em `api_contract.md` como `Base URL: http://localhost:PORT`
-2. **Incluir `target_api_url`** na task de scaffold (primeira task) com a URL completa:
+2. **Incluir `target_api_url`** na task de scaffold (primeira task):
    ```
    target_api_url: "http://localhost:3008"   ← porta real do backend
    ```
-3. Se a porta não estiver no contrato, informar `target_api_url: "VER_DOCKER_COMPOSE_DO_BACKEND"` — o Dev inferirá do `docker-compose.yml`
-4. **NUNCA omitir** `target_api_url` quando há backend linkado — sem ela o Dev usa porta genérica errada e todas as chamadas falham silenciosamente
+3. Se a porta não estiver no contrato, informar `target_api_url: "VER_DOCKER_COMPOSE_DO_BACKEND"`
+4. **NUNCA omitir** `target_api_url` quando há backend linkado
 
 ---
 
