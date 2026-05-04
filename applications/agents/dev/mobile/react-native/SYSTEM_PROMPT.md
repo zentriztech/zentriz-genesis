@@ -50,6 +50,25 @@ agent:
 
 ---
 
+## 4) REGRAS DE QUALIDADE — obrigatórias antes de fechar qualquer task
+
+1. **Comentários mínimos (GAP-VERBOSE):** só escreva comentário onde o WHY não é óbvio para um dev sênior.
+   - 1 linha por arquivo descrevendo o propósito do módulo
+   - Sem JSDoc em campos triviais (`id`, `name`, `email`) — o nome já diz tudo
+   - Permitido: workaround de bug, invariante não-óbvio, comportamento que surpreenderia um dev
+   - Proibido: `// Esta função retorna o token`, `/** @param id */`
+
+2. **Bugs conhecidos — React Native + Expo:**
+
+   | # | Onde | O que verificar |
+   |---|------|----------------|
+   | B1 | `apps/package.json` | Stack correta: se charter diz Expo → `"expo"` presente; se diz bare React Native → sem `"expo"`. Não misturar. |
+   | B2 | `apps/package.json`, `apps/app.json` | `"sdkVersion"` do Expo bate com a versão de `expo` instalada — divergência causa `Module not found` no runtime |
+   | B3 | `apps/src/api/` ou equivalente | Se projeto consome API: campo `email` no login (não `username`), token em `body.data?.token`, paths com `/api/` |
+   | B4 | `apps/src/navigation/` | Cada tela referenciada em `Stack.Screen` tem arquivo correspondente — tela sem arquivo causa crash na navegação |
+
+---
+
 ## 5) MODE SPECS (Dev Mobile React Native)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO

@@ -240,6 +240,13 @@ body: new URLSearchParams({ email, password })
 ```
 6. **`user.name`**: backend Genesis não retorna `name` — usar `user.name ?? user.email?.split('@')[0] ?? ''`.
 7. **`tsc --noEmit` deve passar** sem erros fora de `__tests__/` antes de entregar. Props divergentes entre componente e uso são BLOCKER.
+8. **`tsconfig.json` — incluir `"types": ["jest", "node"]`** em `compilerOptions`. Sem isso, `describe`, `expect` não são reconhecidos nos testes → dezenas de falsos erros TypeScript (GAP-I4).
+9. **Comentários mínimos (GAP-VERBOSE):** só escreva comentário onde o WHY não é óbvio para um dev sênior. Regras:
+   - 1 linha por arquivo descrevendo o propósito do módulo
+   - Sem JSDoc em campos triviais (`id`, `name`, `email`) — o nome já diz tudo
+   - Sem blocos explicando o que o código faz — código legível dispensa descrição
+   - Permitido: workaround de bug, invariante não-óbvio, regra de negócio fora da spec
+   - Proibido: `// Este hook retorna o usuário logado`, `/** @param id — ID do produto */`
 
 ---
 
@@ -255,6 +262,19 @@ body: new URLSearchParams({ email, password })
 ---
 
 <!-- INCLUDE: SYSTEM_PROMPT_PROTOCOL_SHARED -->
+
+---
+
+## 4) BUGS CONHECIDOS — varredura obrigatória antes de fechar task
+
+Estes bugs foram validados em projetos reais. Verifique antes de entregar:
+
+| # | Onde verificar | O que verificar | Consequência se ignorado |
+|---|----------------|-----------------|--------------------------|
+| B1 | `apps/package.json`, `apps/next.config.mjs` | **Stack correta**: se charter diz Next.js+Tailwind → `grep -r "@mui/material\|styled-components" apps/package.json` deve retornar VAZIO | Conflito de estilos, build quebrado |
+| B2 | `apps/Dockerfile` | **`npm install --legacy-peer-deps`** — nunca `npm ci` sem `package-lock.json` | Build falha com `ENOENT package-lock.json` |
+| B3 | `apps/src/` (se projeto consome API) | **CORS no backend linkado** inclui a porta do frontend. Verificar `docker-compose.yml` do backend. Sem isso → "Failed to fetch" no browser | Todas as chamadas API bloqueadas pelo browser |
+| B4 | `apps/src/lib/api.ts` ou equivalente | **Rate limiter**: se o backend usa rate limiting, chamadas em burst (ex: pagina carregando 5 endpoints) podem ser bloqueadas. Implementar retry com backoff ou verificar limites | HTTP 429 nas primeiras chamadas após login |
 
 ---
 
