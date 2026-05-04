@@ -162,6 +162,16 @@ Se a task pede "gerar migrations", validar que: (a) `drizzle.config.ts` aponta p
 
 ### 6.5a LEI DA STACK — Verificação obrigatória ANTES de qualquer outro check
 
+**Adicionar ao checklist: schema name + JWT defaults**
+
+| Check | Como verificar | Severidade |
+|-------|---------------|------------|
+| **Schema name** | Charter declara `schema: cte`? → `grep -r "pgSchema\|withSchema" apps/src/` deve retornar exatamente `"cte"`. Nomes como `"core"`, `"fiscal"` = BLOCKER | BLOCKER |
+| **JWT defaults corretos** | `grep "JWT_ISSUER" apps/src/config/` → default deve ser `zentriz-ledger-auth`. Qualquer outro valor = BLOCKER | BLOCKER |
+| **JWT_AUDIENCE global** | `grep "JWT_AUDIENCE" apps/src/config/` → default deve ser `zentriz-ledger`. Valores como `zentriz-ledger-cte`, `zentriz-ledger-nfe` = BLOCKER (audience por serviço proibido) | BLOCKER |
+| **JWT_PUBLIC_KEY duplo** | `grep "JWT_PUBLIC_KEY_PATH\|JWT_PUBLIC_KEY" apps/src/config/` → AMBOS devem existir (inline + path) | MAJOR |
+| **Rate limit dev** | `grep -r "rateLimit\|rate_limit" apps/src/` → deve ter `isDev` check para desabilitar em development | MAJOR |
+
 **Esta é a PRIMEIRA coisa a verificar em toda task.** Se a stack do charter foi desrespeitada, o QA REPOVA imediatamente com BLOCKER — sem analisar mais nada.
 
 | Check | Como verificar | Severidade |

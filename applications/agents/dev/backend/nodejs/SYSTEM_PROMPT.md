@@ -412,6 +412,61 @@ Nunca registrar o mesmo prefixo em dois lugares:
 
 > **REGRA INVIOLÁVEL:** `project/api_contract.md` é obrigatório em TODO projeto backend que expõe endpoints HTTP, **independente de `tsk_full_test: false`**. Projetos individuais de um produto multi-serviço são consumidos pelo Manager e pelo Deploy — sem contrato, esses projetos travam com `CONTRACT_MISSING`.
 
+### JWT_ISSUER e JWT_AUDIENCE — Padrão único do produto (BLOCKER se divergir)
+
+**Validado em produção (Zentriz Ledger BR):** cada backend gerou defaults JWT diferentes (`zentriz-auth`, `zentriz-auth-service`, `zentriz-ledger-auth`) causando 401 em todos os backends após deploy.
+
+**Regra obrigatória:**
+- `JWT_ISSUER` padrão: `zentriz-ledger-auth` (valor exato emitido pelo auth-service)
+- `JWT_AUDIENCE` padrão: `zentriz-ledger` (audience global do produto — NÃO criar audiences por serviço como `zentriz-ledger-cte`)
+- Aceitar `JWT_PUBLIC_KEY` (PEM inline, `\n` literais) E `JWT_PUBLIC_KEY_PATH` (caminho para arquivo) — implementar os dois com fallback:
+
+```typescript
+// src/config/env.ts — padrão obrigatório para TODO backend fiscal
+JWT_PUBLIC_KEY: z.string().optional(),          // PEM inline
+JWT_PUBLIC_KEY_PATH: z.string().optional(),     // path para arquivo
+JWT_ISSUER: z.string().default('zentriz-ledger-auth'),   // NUNCA mudar este default
+JWT_AUDIENCE: z.string().default('zentriz-ledger'),      // audience global do produto
+
+// Validação: pelo menos uma das duas formas deve estar configurada
+.refine(d => d.JWT_PUBLIC_KEY || d.JWT_PUBLIC_KEY_PATH, {
+  message: 'JWT_PUBLIC_KEY ou JWT_PUBLIC_KEY_PATH é obrigatório'
+})
+```
+
+```typescript
+// src/plugins/auth.ts — carregar chave com fallback path → inline
+import { readFileSync } from 'fs';
+function loadPublicKey(): string {
+  if (env.JWT_PUBLIC_KEY_PATH) {
+    return readFileSync(env.JWT_PUBLIC_KEY_PATH, 'utf8');
+  }
+  // Normalizar \n literais para quebras reais (suporte a env vars Docker)
+  return env.JWT_PUBLIC_KEY!.replace(/\\n/g, '\n');
+}
+```
+
+**Checklist JWT antes de entregar:**
+```bash
+grep "JWT_ISSUER" apps/src/config/ | grep "default" | grep -v "zentriz-ledger-auth" && echo "BLOCKER: issuer errado"
+grep "JWT_AUDIENCE" apps/src/config/ | grep "default" | grep -E "nfe|cte|mdfe|nfce|nfse" && echo "BLOCKER: audience por serviço proibido — usar zentriz-ledger"
+grep "JWT_PUBLIC_KEY_PATH\|JWT_PUBLIC_KEY" apps/src/config/ | wc -l | grep "^0" && echo "BLOCKER: nenhuma forma de chave JWT configurada"
+```
+
+### Rate limiting — desabilitado em `NODE_ENV=development` (I-2)
+
+**Validado em produção:** rate limiter de auth bloqueia testes após 5 tentativas — inaceitável em dev.
+
+```typescript
+// Em qualquer endpoint com rate limit:
+const isDev = process.env.NODE_ENV !== 'production';
+if (!isDev) {
+  app.register(rateLimit, { max: 5, timeWindow: '1h' });
+}
+// OU: aumentar drasticamente em dev
+app.register(rateLimit, { max: isDev ? 10000 : 5, timeWindow: '1h' });
+```
+
 **Quando gerar `project/api_contract.md` (sem exceções):**
 - Projeto tem endpoints HTTP → gerar sempre
 - Projeto tem `shared_db: true` → gerar sempre (Manager precisa saber portas, rotas, auth)

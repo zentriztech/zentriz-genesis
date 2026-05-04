@@ -311,10 +311,48 @@ PORTA_CHARTER=$(grep "^port:\|port:" existing_artifacts/charter.md 2>/dev/null |
 grep "ports:" project/docker-compose.yml | grep -v "$PORTA_CHARTER" && echo "BLOCKER: porta incorreta"
 ```
 
-**Se este projeto é o `docker_compose_owner` (último/manager):**
+**Se este projeto é o `docker_compose_owner` (último/manager ou deploy):**
+
+> **OBRIGATÓRIO — validado em produção:** O projeto `*-deploy` DEVE entregar `project/docker-compose.yml` como artefato principal. Sem ele, o produto não sobe. O `start.sh` sozinho não é suficiente.
+
+**`project/docker-compose.yml` — estrutura obrigatória:**
 - Incluir TODOS os serviços do produto listados em `product.services` do charter
-- Para cada serviço: build context = `../../<project_id>/apps/` (relativo)
-- O compose definitivo tem: db + todos os backends + manager em um único arquivo
+- Nome da rede: `<product_slug>-net` com `external: false` (criada aqui, não externa)
+- Container do DB/Postgres: hostname = `postgres` (alias canônico na rede)
+- Todos os backends: `DATABASE_URL: postgres://postgres:postgres@postgres:5432/<dbname>`
+- Todos os backends: env vars JWT padronizadas:
+  ```yaml
+  JWT_PUBLIC_KEY_PATH: /run/secrets/jwt-public.pem  # OU
+  JWT_PUBLIC_KEY: "${JWT_PUBLIC_KEY}"               # PEM inline via .env
+  JWT_ISSUER: zentriz-ledger-auth
+  JWT_AUDIENCE: zentriz-ledger
+  ```
+- Manager/Frontend Next.js: `--build-arg` para URLs de cada backend na hora do build:
+  ```yaml
+  manager:
+    build:
+      context: ../../<manager_project_id>/apps
+      args:
+        NEXT_PUBLIC_AUTH_URL: http://localhost:<auth_port>
+        NEXT_PUBLIC_API_CTE_URL: http://localhost:<cte_port>
+        # ... um por backend
+  ```
+
+**`start.sh` obrigatório — deve:**
+1. Gerar par de chaves RSA se não existir: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`
+2. Exportar `JWT_PUBLIC_KEY` do arquivo gerado
+3. Rodar `docker compose up --build -d` com as chaves no env
+4. Aguardar todos os healthchecks
+5. Executar migrations + seed
+6. Testar login real no auth e listar endpoint de cada backend
+
+**Checklist pós-geração:**
+```bash
+ls project/docker-compose.yml || echo "BLOCKER: docker-compose.yml não gerado"
+grep "image:\|build:" project/docker-compose.yml | wc -l | awk '$1 < 3' && echo "BLOCKER: compose incompleto"
+grep "JWT_ISSUER\|JWT_PUBLIC_KEY" project/docker-compose.yml || echo "BLOCKER: JWT vars ausentes no compose"
+grep "NEXT_PUBLIC_AUTH_URL\|NEXT_PUBLIC_API_" project/docker-compose.yml || echo "BLOCKER: build-args do Manager ausentes"
+```
 
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
@@ -391,8 +429,8 @@ grep "ports:" project/docker-compose.yml | grep -v "$PORTA_CHARTER" && echo "BLO
      ```
   **Checklist Next.js Dockerfile:**
   ```bash
-  # P7: public/ existe?
-  [ -d apps/public ] || echo "BUG-P7: criar apps/public/.gitkeep"
+  # P7: public/ existe? CRIAR ANTES DO BUILD — nunca deixar para o Dev criar
+  [ -d apps/public ] || (mkdir -p apps/public && touch apps/public/.gitkeep && echo "BUG-P7 corrigido: apps/public/.gitkeep criado")
   # P8: start script respeita PORT?
   grep '"start"' apps/package.json | grep -q 'PORT' || echo "BUG-P8: adicionar -p \${PORT:-3000} ao next start"
   # P9: standalone vs node server.js?

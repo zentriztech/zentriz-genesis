@@ -655,11 +655,19 @@ O Charter DEVE incluir o bloco de conexão exato para que Dev e DevOps não prec
 ## Banco Compartilhado (shared_db: true)
 - **db_project_id:** <uuid_do_projeto_db>
 - **DATABASE_URL:** `postgresql://postgres:postgres@postgres:5432/zentriz_ledger`
-  - hostname `postgres` = container_name do banco na rede `<product_slug>-net`
-  - schema deste serviço: `<nome_do_schema>` (ex: `cte`, `nfe`, `auth`)
-- **Rede Docker:** `<product_slug>-net` (externa — criada pelo projeto db)
+  - hostname CANÔNICO: `postgres` — SEMPRE este nome, nunca `localhost`, `db`, `zentriz-ledger-db_db`
+  - O projeto Deploy cria a rede com um container chamado `postgres` (container_name)
+  - schema deste serviço: `<nome_do_schema>` (ex: `cte`, `nfe`, `auth`) — NUNCA renomear
+- **Rede Docker:** `<product_slug>-net` (criada pelo Deploy, todos se conectam com o mesmo nome)
+- **JWT config:** todos os backends DEVEM usar:
+  - `JWT_ISSUER=zentriz-ledger-auth` (valor exato do auth-service)
+  - `JWT_AUDIENCE=zentriz-ledger` (global do produto — NUNCA por serviço)
+  - `JWT_PUBLIC_KEY` (PEM inline) OU `JWT_PUBLIC_KEY_PATH` (arquivo) — implementar ambos
 - **NUNCA criar banco próprio** — sem `image: postgres/mysql` no docker-compose deste projeto
 ```
+
+**Por que hostname `postgres` é canônico:**
+Validado em produção: containers usavam `db`, `zentriz-ledger-db_db`, `zentriz-ledger-db_postgres` — cada Dev/DevOps inventou um nome diferente. O Deploy não conseguia orquestrar. Solução definitiva: o hostname interno Docker é SEMPRE `postgres` (container_name canônico definido pelo Deploy).
 
 **Se o linked_projects_context contém o docker-compose do projeto DB predecessor:**
 - Extrair `container_name`, credenciais, nome do banco
