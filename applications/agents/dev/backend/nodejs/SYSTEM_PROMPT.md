@@ -412,6 +412,64 @@ Nunca registrar o mesmo prefixo em dois lugares:
 
 > **REGRA INVIOLÁVEL:** `project/api_contract.md` é obrigatório em TODO projeto backend que expõe endpoints HTTP, **independente de `tsk_full_test: false`**. Projetos individuais de um produto multi-serviço são consumidos pelo Manager e pelo Deploy — sem contrato, esses projetos travam com `CONTRACT_MISSING`.
 
+### O api_contract.md DEVE incluir: comportamento do createApiClient do Manager
+
+**Causa raiz de bugs em produção (Zentriz Ledger BR):** O Manager usa `createApiClient` que adiciona `/api` ao baseURL automaticamente. Sem documentar isso, o Dev do Manager gera libs inconsistentes (algumas com `/api/cte`, outras com `/cte`) causando 404 em metade das chamadas.
+
+**O `api_contract.md` de todo backend consumido pelo Manager DEVE incluir a seção:**
+
+```markdown
+## Comportamento do Client HTTP (Manager)
+
+O `createApiClient(BASE_URL, fallback)` adiciona `/api` ao baseURL automaticamente.
+Portanto, as libs do Manager DEVEM usar caminhos SEM `/api/` prefix:
+
+```typescript
+// CORRETO — createApiClient(BASE) resulta em BASE/api/cte
+const res = await client.get('/cte', { params });
+
+// ERRADO — resulta em BASE/api/api/cte (404)
+const res = await client.get('/api/cte', { params });
+```
+
+## Endpoints (caminhos SEM /api/ para uso no Manager)
+
+| Método | Path no Manager | URL real no backend | Descrição |
+|--------|----------------|--------------------|-----------| 
+| GET | /cte | BASE/api/cte | Listar CT-e |
+| GET | /cte/:id | BASE/api/cte/:id | Detalhe CT-e |
+| POST | /cte | BASE/api/cte | Criar rascunho |
+...
+
+## Tipagem de request/response
+
+```typescript
+// GET /cte — request params
+interface ListParams {
+  page?: number;        // default 1
+  limit?: number;       // default 20
+  sort?: string;        // 'dataEmissao' | 'numero' | 'valorTotal' | 'createdAt'
+  order?: 'asc' | 'desc';
+  dataInicio?: string;  // ISO 8601
+  dataFim?: string;     // ISO 8601
+  status?: string;      // 'authorized' | 'draft' | 'cancelled'...
+}
+
+// GET /cte — response
+interface ListResponse {
+  data: Cte[];
+  meta: { total: number; limit: number; offset: number; page?: number };
+}
+```
+```
+
+**Checklist antes de fechar task de api_contract.md:**
+- [ ] Seção "Comportamento do Client HTTP" com exemplo correto/errado
+- [ ] Tabela de endpoints com paths SEM /api/ (para usar no Manager)
+- [ ] Tipagem TypeScript de request params e response para cada endpoint
+- [ ] Enum de valores aceitos nos params (sort, status, etc.)
+- [ ] Campos que não existem (para evitar 400 por params desconhecidos)
+
 ### JWT_ISSUER e JWT_AUDIENCE — Padrão único do produto (BLOCKER se divergir)
 
 **Validado em produção (Zentriz Ledger BR):** cada backend gerou defaults JWT diferentes (`zentriz-auth`, `zentriz-auth-service`, `zentriz-ledger-auth`) causando 401 em todos os backends após deploy.
