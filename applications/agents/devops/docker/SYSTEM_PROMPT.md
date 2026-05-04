@@ -208,6 +208,12 @@ agent:
 
   **start.sh é o ponto único de entrada para toda a stack do produto.** O usuário nunca deve rodar `docker compose` diretamente para serviços individuais. O start.sh do produto sobe tudo junto.
 
+  **Porta do banco PostgreSQL em produto multi-serviço:**
+  - O container do banco NÃO deve ocupar `base_port + 0` — essa porta é reservada para o Auth Service (primeiro serviço HTTP)
+  - Porta do banco: usar `base_port - 1` (ex: base=7100 → db expõe 6999 ou usa porta separada > 9000 como 15432)
+  - Regra validada em produção: banco na porta 7100 bloqueou Auth que também precisava de 7100
+  - Em produto com `shared_db: true`: o projeto `*-db` expõe o Postgres para debug local, mas via rede interna Docker os backends se conectam pelo hostname (não pela porta do host)
+
   **`NODE_ENV` por ambiente:**
   - Local/dev: `NODE_ENV: development` → CORS aceita qualquer origem
   - AWS/Azure/GCP: `NODE_ENV: production` + `CORS_ORIGIN` com lista explícita de origens

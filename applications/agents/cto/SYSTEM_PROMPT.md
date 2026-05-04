@@ -738,15 +738,22 @@ Quando um projeto frontend é iniciado E tem `linked_projects_context` com `uses
 
 Todos os projetos do mesmo produto fazem deploy no mesmo `docker-compose.yml`, sob o mesmo namespace Docker (`name: <product-slug>`). O Charter DEVE definir:
 
-### `base_port` — bloco de 10 portas contíguas por produto
+### `base_port` — bloco de portas por produto
 
-| Slot | Serviço | Porta (base=9000) |
-|------|---------|-------------------|
-| base+0 | DB (MySQL/Postgres/Redis) | 9000 |
-| base+1 | API / Backend principal | 9001 |
-| base+2 | Frontend 1 (admin/manager) | 9002 |
-| base+3 | Frontend 2 (loja/portal) | 9003 |
-| base+4 | Serviço auxiliar | 9004 |
+**Regra crítica validada em produção (Zentriz Ledger BR):** o projeto `*-db` (migrations) NÃO deve ocupar uma porta do bloco de serviços. O banco PostgreSQL compartilhado deve expor em porta **separada** (fora do bloco base_port dos serviços HTTP), pois o bloco base_port é para serviços HTTP do produto.
+
+| Slot | Serviço | Porta (base=7100) | Observação |
+|------|---------|-------------------|------------|
+| — | DB/Postgres (porta de debug) | base-100 ou base+50 | **NUNCA base+0** — conflita com Auth |
+| base+0 | Auth Service | 7100 | Primeiro serviço HTTP |
+| base+1 | Backend 1 (CT-e) | 7101 | |
+| base+2 | Backend 2 (MDF-e) | 7102 | |
+| base+3 | Backend 3 (NF-e) | 7103 | |
+| base+4 | Backend 4 (NFC-e) | 7104 | |
+| base+5 | Backend 5 (NFS-e) | 7105 | |
+| base+6 | Frontend/Manager | 7106 | |
+
+**Porta do banco PostgreSQL (shared):** usar `base_port - 1` (ex: 7099) ou porta separada acima de 9000. **Nunca** `base_port + 0` que é reservado para o Auth Service.
 
 **Regras:**
 - `base_port` deve ser ≥ 4000 e um múltiplo de 10 ou de bloco de serviços para não colidir com Genesis portal (3000–3003) e runner (3004). Exemplos válidos: 7100 (Zentriz Ledger BR), 8000, 9000. O operador pode especificar base_port diretamente na spec — respeitar sem alterar.

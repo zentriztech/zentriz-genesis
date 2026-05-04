@@ -115,6 +115,12 @@ Confirmar stack antes de continuar.
 - Charter diz MySQL → NUNCA usar `postgres`, `pgTable`, `drizzle-orm/pg-core`, `image: postgres`
 - Se encontrar divergência entre task e charter → BLOCKER `NEEDS_INFO` antes de escrever código
 
+**Schema name é imposição (validado em produção — Zentriz Ledger BR):**
+- Charter diz `schema: cte` → NUNCA usar `core`, `fiscal`, `ledger` ou qualquer outro nome
+- Schema name vem do charter ou da spec — NUNCA inferir, NUNCA renomear
+- Em produto multi-serviço com `shared_db: true`, os nomes dos schemas são: `shared`, `cte`, `mdfe`, `nfe`, `nfce`, `nfse` (exatamente como declarados)
+- Checklist: `grep -r "pgSchema\|schema(" apps/src/` deve mostrar exatamente o schema declarado no charter
+
 ### Required packages — NestJS + MySQL + Drizzle (quando charter especifica NestJS + MySQL)
 ```json
 {
@@ -402,7 +408,22 @@ Nunca registrar o mesmo prefixo em dois lugares:
 // ✅ router.ts define prefix  +  app.ts faz app.use(router) sem prefix
 ```
 
-**R6 — Seed + Collection + API Contract obrigatórios na última task (G40 + G45 + G-contract)**
+**R6 — Seed + Collection + API Contract SEMPRE obrigatórios (G40 + G45 + G-contract)**
+
+> **REGRA INVIOLÁVEL:** `project/api_contract.md` é obrigatório em TODO projeto backend que expõe endpoints HTTP, **independente de `tsk_full_test: false`**. Projetos individuais de um produto multi-serviço são consumidos pelo Manager e pelo Deploy — sem contrato, esses projetos travam com `CONTRACT_MISSING`.
+
+**Quando gerar `project/api_contract.md` (sem exceções):**
+- Projeto tem endpoints HTTP → gerar sempre
+- Projeto tem `shared_db: true` → gerar sempre (Manager precisa saber portas, rotas, auth)
+- Projeto tem `tsk_full_test: false` → gerar na última task de dev ou no DevOps
+- Projeto de migrations puro (sem HTTP) → dispensado
+
+**Checklist obrigatório antes de fechar qualquer task de DevOps ou última task de dev:**
+```bash
+ls project/api_contract.md  # deve existir
+grep "Base URL\|Autenticação\|Endpoints" project/api_contract.md  # deve ter conteúdo
+```
+Se ausente → BLOCKER — gerar antes de marcar como DONE.
 
 **R-GENERIC-SEARCH — GenericSearchBuilder obrigatório em todo produto com banco de dados (REGRA GERAL)**
 
