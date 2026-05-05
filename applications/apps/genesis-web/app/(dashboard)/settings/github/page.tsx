@@ -37,19 +37,25 @@ type InstallationStatus =
 
 function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose: () => void; onConnected: () => void }) {
   const [installationId, setInstallationId] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [useOwnApp, setUseOwnApp]           = useState(false);
+  const [appId, setAppId]                   = useState("");
+  const [privateKey, setPrivateKey]         = useState("");
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState<string | null>(null);
 
   async function handleConnect() {
     const id = parseInt(installationId, 10);
-    if (!id || isNaN(id)) {
-      setError("Installation ID deve ser um número inteiro.");
-      return;
+    if (!id || isNaN(id)) { setError("Installation ID deve ser um número inteiro."); return; }
+    if (useOwnApp && (!appId.trim() || !privateKey.trim())) {
+      setError("App ID e Chave Privada são obrigatórios quando usar app própria."); return;
     }
     setSaving(true);
     setError(null);
     try {
-      await apiPost("/api/github/installation", { installationId: id });
+      await apiPost("/api/github/installation", {
+        installationId: id,
+        ...(useOwnApp ? { appId: parseInt(appId, 10), privateKey: privateKey.trim() } : {}),
+      });
       onConnected();
       onClose();
     } catch (err) {
@@ -64,12 +70,10 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
       <DialogTitle>Conectar GitHub App</DialogTitle>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
         <Alert severity="info">
-          Instale a <strong>Zentriz Autonomy App</strong> no seu GitHub org ou conta pessoal e cole abaixo o Installation ID gerado pelo GitHub.{" "}
-          <a href="https://github.com/apps/zentriz-autonomy" target="_blank" rel="noreferrer" style={{ color: "inherit" }}>
-            Clique aqui para instalar →
-          </a>
+          Instale a <strong>GitHub App</strong> no seu org ou conta e cole abaixo o Installation ID gerado pelo GitHub.
         </Alert>
         {error && <Alert severity="error">{error}</Alert>}
+
         <TextField
           label="Installation ID"
           type="number"
@@ -79,10 +83,49 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
           fullWidth
         />
         <Typography variant="caption" color="text.secondary">
-          Após instalar, o GitHub redireciona para uma URL como:{" "}
-          <code>github.com/organizations/<strong>seu-org</strong>/settings/installations/<strong>ID</strong></code>.
-          {" "}O número no final é o Installation ID.
+          O Installation ID aparece na URL após instalar:{" "}
+          <code>github.com/organizations/<strong>seu-org</strong>/settings/installations/<strong>ID</strong></code>
         </Typography>
+
+        {/* Toggle: app própria do tenant */}
+        <Box>
+          <Button
+            size="small"
+            variant="text"
+            onClick={() => setUseOwnApp(v => !v)}
+            sx={{ textTransform: "none", p: 0, color: "text.secondary" }}
+          >
+            {useOwnApp ? "▼" : "▶"} Usar GitHub App própria (opcional)
+          </Button>
+          {useOwnApp && (
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mt: 1.5 }}>
+              <Alert severity="info" sx={{ fontSize: "0.78rem" }}>
+                Preencha apenas se você tem uma GitHub App própria instalada no seu org.
+                Caso contrário, a Zentriz usa a App global automaticamente.
+              </Alert>
+              <TextField
+                label="App ID"
+                type="number"
+                value={appId}
+                onChange={(e) => setAppId(e.target.value)}
+                placeholder="Ex: 3609618"
+                fullWidth
+                size="small"
+              />
+              <TextField
+                label="Chave Privada (conteúdo do .pem)"
+                value={privateKey}
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
+                fullWidth
+                multiline
+                rows={4}
+                size="small"
+                inputProps={{ style: { fontFamily: "monospace", fontSize: "0.75rem" } }}
+              />
+            </Box>
+          )}
+        </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={saving}>Cancelar</Button>
