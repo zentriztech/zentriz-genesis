@@ -51,7 +51,13 @@ def _build_cyborg_playbook(project_id: str, project_dir: str, project_type: str,
     base_path    = CYBORG_DIR / "RUNBOOK_BASE.md"
     type_file    = _resolve_runbook_type(project_type)
     type_path    = CYBORG_DIR / type_file
-    project_runbook = Path(project_dir) / "project" / "RUNBOOK.md"
+    # DevOps gera em docs/devops/RUNBOOK.md — também aceita project/RUNBOOK.md como alias
+    _runbook_candidates = [
+        Path(project_dir) / "project" / "RUNBOOK.md",
+        Path(project_dir) / "docs" / "devops" / "RUNBOOK.md",
+        Path(project_dir) / "docs" / "RUNBOOK.md",
+    ]
+    project_runbook = next((p for p in _runbook_candidates if p.exists()), _runbook_candidates[0])
 
     parts = []
 
