@@ -44,7 +44,11 @@ def _schema_for(contract: str) -> dict[str, Any]:
         "KnownSafeActionsPack": "manifests/known-safe-actions-pack.schema.json",
     }
     relative = mapping[contract]
-    return json.loads((CONNECT_SCHEMA_ROOT / relative).read_text(encoding="utf-8"))
+    schema_path = CONNECT_SCHEMA_ROOT / relative
+    if not schema_path.exists():
+        # zentriz-connect não disponível neste ambiente — emitir sem validação de schema
+        return {}
+    return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
 def _validate_type(value: Any, schema_type: str) -> bool:
