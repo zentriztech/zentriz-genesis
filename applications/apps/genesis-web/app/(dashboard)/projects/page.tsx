@@ -62,12 +62,14 @@ const STATUS_LABELS: Record<string, string> = {
   cto_charter: "Charter CTO", pm_backlog: "Backlog PM", dev_qa: "Dev/QA",
   devops: "DevOps", running: "Em execução", stopped: "Parado",
   completed: "Concluído", failed: "Falhou", accepted: "Aceito",
+  pending_cyborg: "Validando (Cyborg)", blocked_cyborg: "Bloqueado (Cyborg)",
 };
 
 function statusColor(s: string): "default" | "success" | "error" | "info" | "warning" {
   if (s === "completed" || s === "accepted") return "success";
-  if (s === "failed" || s === "stopped")     return "error";
+  if (s === "failed" || s === "stopped" || s === "blocked_cyborg") return "error";
   if (s === "running")                        return "info";
+  if (s === "pending_cyborg")                 return "warning";
   if (["spec_submitted","cto_charter","pm_backlog","dev_qa","devops"].includes(s)) return "warning";
   return "default";
 }
@@ -77,6 +79,7 @@ const STATUS_PHASE_PCT: Record<string, number> = {
   draft: 0, spec_submitted: 10, pending_conversion: 18, cto_charter: 25,
   pm_backlog: 38, dev_qa: 60, devops: 85, running: 50,
   completed: 100, accepted: 100, failed: 0, stopped: 0,
+  pending_cyborg: 95, blocked_cyborg: 95,
 };
 
 function stepPercent(status: string, taskTotal?: number | null, taskDone?: number | null): number {

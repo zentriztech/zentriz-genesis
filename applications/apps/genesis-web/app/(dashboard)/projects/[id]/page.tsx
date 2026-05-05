@@ -186,16 +186,79 @@ function ModelBadge({ model }: { model: string | null | undefined }) {
   );
 }
 
+// ── Cyborg Log Card ───────────────────────────────────────────────────────────
+function CyborgLogCard({ projectId, cyborgAttempts }: { projectId: string; cyborgAttempts: number }) {
+  const [logs, setLogs] = useState<{ id: string; attempt: number; message: string; created_at: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    const fetchLogs = async () => {
+      try {
+        const data = await apiGet<{ logs: { id: string; attempt: number; message: string; created_at: string }[] }>(
+          `/api/projects/${projectId}/cyborg-logs`
+        );
+        if (active) setLogs(data.logs ?? []);
+      } catch { /* silencioso */ } finally {
+        if (active) setLoading(false);
+      }
+    };
+    fetchLogs();
+    // Poll a cada 15s enquanto pending_cyborg
+    const interval = setInterval(fetchLogs, 15000);
+    return () => { active = false; clearInterval(interval); };
+  }, [projectId]);
+
+  const attempt = cyborgAttempts + 1;
+
+  return (
+    <Card variant="outlined" sx={{ mb: 2, borderColor: "warning.main", borderWidth: 2 }}>
+      <CardContent sx={{ pb: "12px !important" }}>
+        <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+          <span style={{ fontSize: "1.2rem" }}>🤖</span>
+          <Typography variant="subtitle2" fontWeight={700}>Cyborg — Validação em andamento</Typography>
+          <Chip label={`Tentativa ${attempt}/5`} size="small" color="warning" sx={{ ml: "auto" }} />
+          <CircularProgress size={16} thickness={5} color="warning" />
+        </Stack>
+        <Typography variant="caption" color="text.secondary" display="block" mb={1}>
+          O Cyborg está testando, corrigindo e validando o projeto no host. Aguarde o resultado.
+        </Typography>
+        {loading && <LinearProgress color="warning" sx={{ borderRadius: 1 }} />}
+        {logs.length > 0 && (
+          <Box sx={{
+            maxHeight: 200, overflowY: "auto", mt: 1,
+            bgcolor: "grey.900", borderRadius: 1, p: 1,
+          }}>
+            {logs.map(l => (
+              <Typography key={l.id} variant="caption" display="block" sx={{ color: "grey.300", fontFamily: "monospace", lineHeight: 1.6 }}>
+                <span style={{ color: "#888", marginRight: 8 }}>
+                  {new Date(l.created_at).toLocaleTimeString("pt-BR")}
+                </span>
+                {l.message}
+              </Typography>
+            ))}
+          </Box>
+        )}
+        {!loading && logs.length === 0 && (
+          <Typography variant="caption" color="text.secondary">Aguardando primeiros logs do Cyborg...</Typography>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Status chip helper ────────────────────────────────────────────────────────
 function StatusChip({ status, model }: { status: string; model?: string | null }) {
   const labels: Record<string, string> = {
     running: "Em execução", accepted: "Aceito", completed: "Concluído",
     failed: "Falhou", stopped: "Parado", draft: "Rascunho",
     spec_submitted: "Spec enviada", cto_charter: "Charter", pm_backlog: "Backlog",
+    pending_cyborg: "Validando (Cyborg)", blocked_cyborg: "Bloqueado (Cyborg)",
   };
   const colors: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
     completed: "success", accepted: "success", failed: "error", stopped: "error",
     running: "info", cto_charter: "warning", pm_backlog: "warning",
+    pending_cyborg: "warning", blocked_cyborg: "error",
   };
   return (
     <Stack direction="row" spacing={0.75} alignItems="center">
@@ -353,7 +416,7 @@ function ProjectDetailPageInner() {
   // ── Callbacks ──────────────────────────────────────────────────────────────
   const handleDialogueLoaded = useCallback((entries: DialogueEntry[]) => {
     const status = projectsStore.getById(id)?.status ?? "";
-    const finished = status === "completed" || status === "accepted" || status === "failed" || status === "stopped";
+    const finished = status === "completed" || status === "accepted" || status === "failed" || status === "stopped" || status === "pending_cyborg" || status === "blocked_cyborg";
     if (finished) { setWorkingStepIndex(null); setWorkingMessage(null); return; }
     // Se há product_ready no diálogo, o pipeline terminou — stepper vai para "Pronto" (step 6)
     // independente de qualquer agent_working posterior (ex.: FULL-TEST que roda dev/qa após DevOps)
@@ -707,9 +770,9 @@ function ProjectDetailPageInner() {
   }
 
   const isRunning   = project.status === "running";
-  const isDone      = project.status === "completed" || project.status === "accepted";
+  const isDone      = project.status === "completed" || project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
-  const canAccept   = project.status === "completed";
+  const canAccept   = project.status === "completed" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
   const elapsedEnd  = project.completedAt ?? (isRunning ? new Date(nowTick).toISOString() : undefined);
   const elapsed     = elapsedLabel(project.startedAt, elapsedEnd);
 
@@ -727,7 +790,7 @@ function ProjectDetailPageInner() {
   // accepted: sempre mostrar "Pronto" (step 6)
   // Se todas as tasks estão DONE e projeto ainda running (aguardando aceite): também Pronto
   const allTasksDone = (tasks ?? []).length > 0 && (tasks ?? []).every(t => t.status === "DONE" || t.status === "CANCELLED");
-  const effectiveStep = (project.status === "accepted" || allTasksDone) ? 6 : stepFromStatus;
+  const effectiveStep = (project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg" || allTasksDone) ? 6 : stepFromStatus;
 
   // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
   const activeStep = (isRunning && !allTasksDone && workingStepIndex != null) ? workingStepIndex : effectiveStep;
@@ -976,12 +1039,36 @@ function ProjectDetailPageInner() {
         </Alert>
       )}
 
-      {/* FT-14: Badge Zentriz Cyborg — aparece quando accepted_by = zentriz-cyborg */}
+      {/* Badge: projeto aceito pelo Cyborg */}
       {project.status === "accepted" && (project.extra as Record<string,unknown>)?.accepted_by === "zentriz-cyborg" && (
         <Alert severity="info" icon={<span style={{ fontSize: "1.1rem" }}>🤖</span>} sx={{ mb: 2 }}>
           <Typography variant="body2" fontWeight={600}>Validado pelo Zentriz Cyborg</Typography>
           <Typography variant="caption" color="text.secondary">
-            Este projeto foi testado e aceito automaticamente pelo Cyborg após o PLAYBOOK UNIVERSAL. Nenhuma intervenção humana necessária.
+            Este projeto foi testado e aceito automaticamente pelo Cyborg. Nenhuma intervenção humana necessária.
+          </Typography>
+        </Alert>
+      )}
+
+      {/* Card: Cyborg em validação (pending_cyborg) */}
+      {project.status === "pending_cyborg" && (
+        <CyborgLogCard projectId={id} cyborgAttempts={project.cyborg_attempts ?? 0} />
+      )}
+
+      {/* Banner: Cyborg bloqueado — intervenção humana necessária */}
+      {project.status === "blocked_cyborg" && (
+        <Alert
+          severity="error"
+          icon={<span style={{ fontSize: "1.1rem" }}>🚫</span>}
+          sx={{ mb: 2 }}
+          action={
+            <Button size="small" color="inherit" variant="outlined" onClick={() => handleAccept()}>
+              Aceitar manualmente
+            </Button>
+          }
+        >
+          <Typography variant="body2" fontWeight={600}>Cyborg esgotou 5 tentativas sem validar o projeto</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Verifique os logs do Cyborg abaixo, corrija os problemas identificados e aceite manualmente ou reinicie o pipeline.
           </Typography>
         </Alert>
       )}

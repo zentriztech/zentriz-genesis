@@ -41,7 +41,9 @@ export type ProjectStatus =
   | "accepted"
   | "failed"
   | "running"
-  | "stopped";
+  | "stopped"
+  | "pending_cyborg"
+  | "blocked_cyborg";
 
 export interface Project {
   id: string;
@@ -78,6 +80,8 @@ export interface Project {
   executionOrder?: number | null;
   /** Metadados adicionais em JSON (ex: accepted_by, evolution, evolution_request) */
   extra?: Record<string, unknown> | null;
+  /** Número de tentativas do Cyborg (0 = nunca tentou) */
+  cyborg_attempts?: number;
 }
 
 export interface Product {

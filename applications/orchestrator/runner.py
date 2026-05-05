@@ -2855,20 +2855,65 @@ Execute agora sem pedir confirmação.
                     # para que o portal não fique preso em "Dev/QA" (último agent_working foi do QA da FULL-TEST)
                     _post_agent_working(
                         "devops",
-                        "✅ Projeto entregue. Aguardando aceite do responsável.",
+                        "✅ Pipeline concluído. Cyborg iniciando validação externa...",
                         request_id,
                     )
 
-                    # Marcar projeto como completed — sai de "Em Execução" para "Pronto"
+                    # Marcar projeto como pending_cyborg — Cyborg assume a partir daqui
                     _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    _patch_project({"status": "completed", "completed_at": _now_iso, "finished_at": _now_iso})
-                    logger.info("[Monitor Loop] Projeto marcado como completed — aguardando aceite do usuário.")
+                    _patch_project({"status": "pending_cyborg", "completed_at": _now_iso, "finished_at": _now_iso})
+                    logger.info("[Monitor Loop] Projeto marcado como pending_cyborg — Cyborg assumirá validação.")
 
-                    # GAP-U2: sinalizar explicitamente que o Genesis terminou e aguarda aceite do usuário
                     _post_step(
-                        "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
+                        "🤖 Cyborg iniciando validação externa. Acompanhe o progresso na seção Cyborg abaixo.",
                         request_id,
                     )
+
+                    # Disparar o Cyborg via full-test-server.py no host
+                    _ft_server_url_cyborg = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.internal:7878")
+                    _proj_type_cyborg = ""
+                    try:
+                        import urllib.request as _ur_c
+                        import json as _jc
+                        # Resolver project_type da API
+                        _pt_resp, _pt_status = _api_get(f"/api/projects/{project_id}")
+                        _proj_type_cyborg = (_pt_resp or {}).get("project_type") or (_pt_resp or {}).get("projectType") or "other"
+                        # Resolver product_id para path correto
+                        _product_id_cyborg = (_pt_resp or {}).get("product_id") or (_pt_resp or {}).get("productId") or ""
+                        _host_root_cyborg = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
+                        if _host_root_cyborg and _product_id_cyborg:
+                            _cyborg_dir = str(Path(_host_root_cyborg) / _product_id_cyborg / project_id)
+                        elif _host_root_cyborg:
+                            _cyborg_dir = str(Path(_host_root_cyborg) / project_id)
+                        else:
+                            _cyborg_dir = str(_proj_container_dir) if _proj_container_dir else ""
+                        _cyborg_payload = _jc.dumps({
+                            "project_id":      project_id or "",
+                            "project_dir":     _cyborg_dir,
+                            "project_type":    _proj_type_cyborg,
+                            "genesis_api_url": os.environ.get("API_BASE_URL", "http://localhost:3000"),
+                            "genesis_token":   os.environ.get("GENESIS_API_TOKEN", ""),
+                            "attempt":         1,
+                            "api_key":         os.environ.get("CLAUDE_API_KEY", ""),
+                        }).encode()
+                        _cyborg_req = _ur_c.Request(
+                            f"{_ft_server_url_cyborg}/launch-cyborg",
+                            data=_cyborg_payload,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with _ur_c.urlopen(_cyborg_req, timeout=15) as _cr:
+                            _cyborg_resp = _jc.loads(_cr.read().decode())
+                        logger.info("[CYBORG] Lançado: job_id=%s attempt=1", _cyborg_resp.get("job_id"))
+                        _post_step(f"🤖 Cyborg lançado (job {_cyborg_resp.get('job_id', '?')}) — validando tentativa 1/5.", request_id)
+                    except Exception as _cyborg_err:
+                        logger.warning("[CYBORG] Não foi possível lançar Cyborg: %s", _cyborg_err)
+                        _post_step(
+                            "⚠️ Cyborg indisponível — validação manual necessária. "
+                            "Clique em Aceitar para confirmar a entrega.",
+                            request_id,
+                        )
+                        # Fallback: manter pending_cyborg mas sem disparar — usuário pode aceitar manualmente
                     break
                 except Exception as e:
                     logger.exception("[Monitor Loop] DevOps falhou")

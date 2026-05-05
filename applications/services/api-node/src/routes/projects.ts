@@ -13,6 +13,7 @@ function getUser(request: FastifyRequest): AuthUser {
 const VALID_PROJECT_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog",
   "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted", "archived",
+  "pending_cyborg", "blocked_cyborg",
 ]);
 
 async function checkProjectAccess(
@@ -137,6 +138,7 @@ export async function projectRoutes(app: FastifyInstance) {
         executionOrder:  (row.execution_order as number | null) ?? 0,
         taskCount:       (row.task_count as number | null) ?? null,
         taskDoneCount:   (row.task_done_count as number | null) ?? null,
+        cyborg_attempts: (row.cyborg_attempts as number | null) ?? 0,
       }));
       return reply.send(projects);
     } finally {
@@ -178,6 +180,7 @@ export async function projectRoutes(app: FastifyInstance) {
         productId:      (row as Record<string, unknown>).product_id as string | null ?? null,
         complexityHint: (row as Record<string, unknown>).complexity_hint as string | null ?? null,
         extra:          (row as Record<string, unknown>).extra as Record<string, unknown> | null ?? null,
+        cyborg_attempts: (row as Record<string, unknown>).cyborg_attempts as number ?? 0,
       });
     } finally {
       client.release();
@@ -438,10 +441,10 @@ export async function projectRoutes(app: FastifyInstance) {
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const current = row.status as string;
       if (current === "accepted") return reply.send({ ok: true, status: "accepted", message: "Projeto já aceito" });
-      if (!["running", "completed", "stopped"].includes(current)) {
+      if (!["running", "completed", "stopped", "pending_cyborg"].includes(current)) {
         return reply.status(409).send({
           code: "CONFLICT",
-          message: `Aceite só permitido quando status é running, completed ou stopped. Atual: ${current}`,
+          message: `Aceite só permitido quando status é running, completed, stopped ou pending_cyborg. Atual: ${current}`,
         });
       }
       // Gravar accepted_by e evidence no campo extra (jsonb merge)
@@ -620,6 +623,7 @@ export async function projectRoutes(app: FastifyInstance) {
 
   // POST /api/projects/:id/reject — rejeita projeto (Zentriz Cyborg ou humano)
   // Body: { rejected_by?: string, reason: string }
+  // Cyborg: incrementa cyborg_attempts; se < 5 → relança Cyborg; se >= 5 → blocked_cyborg
   app.post<{ Params: { id: string }; Body: { rejected_by?: string; reason: string } }>(
     "/api/projects/:id/reject",
     async (request, reply) => {
@@ -627,20 +631,104 @@ export async function projectRoutes(app: FastifyInstance) {
     const { id } = request.params;
     const rejectedBy: string = request.body?.rejected_by ?? user.id;
     const reason:     string = request.body?.reason ?? "Rejeitado sem motivo especificado.";
+    const isCyborg = rejectedBy === "zentriz-cyborg";
     const client = await pool.connect();
     try {
       const allowed = await checkProjectAccess(client, id, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      const proj = await client.query("SELECT status FROM projects WHERE id = $1", [id]);
-      const row = proj.rows[0];
+      const proj = await client.query(
+        "SELECT status, cyborg_attempts, project_type, product_id FROM projects WHERE id = $1", [id]
+      );
+      const row = proj.rows[0] as Record<string, unknown> | undefined;
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      const current = row.status as string;
-      if (!["running", "completed", "stopped"].includes(current)) {
+      const current       = row.status as string;
+      const prevAttempts  = (row.cyborg_attempts as number) ?? 0;
+      const projectType   = (row.project_type as string) ?? "other";
+      const productId     = (row.product_id as string) ?? null;
+
+      if (!["running", "completed", "stopped", "pending_cyborg"].includes(current)) {
         return reply.status(409).send({
           code: "CONFLICT",
-          message: `Rejeição só permitida quando status é running, completed ou stopped. Atual: ${current}`,
+          message: `Rejeição só permitida quando status é running, completed, stopped ou pending_cyborg. Atual: ${current}`,
         });
       }
+
+      // Cyborg rejeitando um projeto pending_cyborg: aplicar lógica de retry
+      if (isCyborg && current === "pending_cyborg") {
+        const newAttempts = prevAttempts + 1;
+        const maxAttempts = 5;
+
+        if (newAttempts < maxAttempts) {
+          // Ainda tem tentativas — manter pending_cyborg e incrementar contador
+          await client.query(
+            `UPDATE projects
+             SET cyborg_attempts = $1,
+                 extra = COALESCE(extra, '{}') || $2::jsonb,
+                 updated_at = now()
+             WHERE id = $3`,
+            [newAttempts,
+             JSON.stringify({ [`cyborg_reject_${newAttempts}`]: { reason, at: new Date().toISOString() } }),
+             id]
+          );
+          await client.query(
+            `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+             VALUES ($1, 'cyborg', 'system', 'step', $2)`,
+            [id, `⚠️ Cyborg tentativa ${newAttempts}/${maxAttempts} falhou. Motivo: ${reason}. Relançando...`]
+          );
+
+          // Relançar Cyborg via full-test-server
+          setImmediate(async () => {
+            try {
+              const ftUrl = (process.env.FULL_TEST_SERVER_URL ?? "http://host.docker.internal:7878").trim();
+              const filesRoot = (process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
+              let projectDir = "";
+              if (filesRoot && productId) projectDir = `${filesRoot}/${productId}/${id}`;
+              else if (filesRoot) projectDir = `${filesRoot}/${id}`;
+
+              const payload = JSON.stringify({
+                project_id:      id,
+                project_dir:     projectDir,
+                project_type:    projectType,
+                genesis_api_url: (process.env.API_BASE_URL ?? "http://localhost:3000").trim(),
+                genesis_token:   process.env.GENESIS_API_TOKEN ?? "",
+                attempt:         newAttempts + 1,
+                api_key:         process.env.CLAUDE_API_KEY ?? "",
+              });
+              await fetch(`${ftUrl}/launch-cyborg`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: payload,
+                signal: AbortSignal.timeout(15000),
+              });
+            } catch (e) {
+              console.error("[CYBORG] Falha ao relançar tentativa:", e);
+            }
+          });
+
+          return reply.send({ ok: true, status: "pending_cyborg", cyborgAttempts: newAttempts, retrying: true });
+        }
+
+        // Tentativas esgotadas → blocked_cyborg
+        await client.query(
+          `UPDATE projects
+           SET status = 'blocked_cyborg',
+               cyborg_attempts = $1,
+               extra = COALESCE(extra, '{}') || $2::jsonb,
+               updated_at = now()
+           WHERE id = $3`,
+          [newAttempts,
+           JSON.stringify({ cyborg_blocked: { reason, attempts: newAttempts, at: new Date().toISOString() } }),
+           id]
+        );
+        await client.query(
+          `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+           VALUES ($1, 'cyborg', 'system', 'step', $2)`,
+          [id, `🚫 Cyborg esgotou ${maxAttempts} tentativas sem conseguir validar o projeto. Intervenção humana necessária. Último motivo: ${reason}`]
+        );
+        return reply.send({ ok: true, status: "blocked_cyborg", cyborgAttempts: newAttempts, retrying: false });
+      }
+
+      // Rejeição humana (ou não-Cyborg) — comportamento original: status failed
       await client.query(
         `UPDATE projects
          SET status = 'failed',
@@ -649,14 +737,10 @@ export async function projectRoutes(app: FastifyInstance) {
          WHERE id = $2`,
         [JSON.stringify({ rejected_by: rejectedBy, rejected_reason: reason, rejected_at: new Date().toISOString() }), id]
       );
-      // Registrar no diálogo
-      const isCyborg = rejectedBy === "zentriz-cyborg";
       await client.query(
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
          VALUES ($1, 'system', 'system', 'step', $2)`,
-        [id, isCyborg
-          ? `❌ Zentriz Cyborg rejeitou este projeto após ${2} tentativas de validação. Motivo: ${reason}`
-          : `❌ Projeto rejeitado. Motivo: ${reason}`]
+        [id, `❌ Projeto rejeitado. Motivo: ${reason}`]
       );
       return reply.send({ ok: true, status: "failed", rejectedBy, reason });
     } finally {
@@ -1902,6 +1986,59 @@ export async function projectRoutes(app: FastifyInstance) {
         title: childTitle,
         message: "Projeto de evolução criado. Envie ao pipeline via POST /run quando estiver pronto.",
       });
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /api/projects/:id/cyborg-log — Cyborg posta progresso em tempo não-real
+  // Body: { message: string, attempt?: number }
+  app.post<{ Params: { id: string }; Body: { message: string; attempt?: number } }>(
+    "/api/projects/:id/cyborg-log",
+    async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const { message, attempt = 1 } = request.body ?? {};
+    if (!message?.trim()) return reply.status(400).send({ code: "INVALID", message: "message é obrigatório" });
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, id, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      await client.query(
+        `INSERT INTO cyborg_logs (project_id, attempt, message) VALUES ($1, $2, $3)`,
+        [id, attempt, message.trim()]
+      );
+      // Espelhar no project_dialogue para o portal exibir no feed de atividade
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'cyborg', 'system', 'step', $2)`,
+        [id, `🤖 [Cyborg tentativa ${attempt}] ${message.trim()}`]
+      );
+      return reply.send({ ok: true });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/cyborg-logs — lista logs do Cyborg (portal)
+  app.get<{ Params: { id: string }; Querystring: { attempt?: string } }>(
+    "/api/projects/:id/cyborg-logs",
+    async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const attempt = request.query.attempt ? parseInt(request.query.attempt, 10) : undefined;
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, id, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const rows = await client.query(
+        `SELECT id, attempt, message, created_at
+         FROM cyborg_logs
+         WHERE project_id = $1 ${attempt ? "AND attempt = $2" : ""}
+         ORDER BY created_at ASC`,
+        attempt ? [id, attempt] : [id]
+      );
+      return reply.send({ logs: rows.rows });
     } finally {
       client.release();
     }
