@@ -341,6 +341,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
         hb.start()
 
+        accepted = False
+        rejected = False
+        output   = ""
         try:
             result = subprocess.run(
                 [CLAUDE_BIN, "--print", "--dangerously-skip-permissions", playbook],
@@ -350,42 +353,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             output = (result.stdout or "") + (result.stderr or "")
             log.info("[CYBORG] job=%s rc=%d len=%d", job_id, result.returncode, len(output))
 
-            # Detectar se o Cyborg postou /accept ou /reject no output
-            # (fallback: se não postou, postar resultado com base no output)
             accepted = any(w in output.upper() for w in
                            ["APROVADO", "ACCEPTED", "ACCEPT", "✅", "PASS", "CYBORG_PASS"])
             rejected = any(w in output.upper() for w in
                            ["REJEITADO", "REJECTED", "REJECT", "FAIL", "CYBORG_FAIL", "❌"])
 
-            out_excerpt = output[-3000:] if len(output) > 3000 else output
-            post_log(f"Cyborg concluiu tentativa {attempt}. Resultado: {'PASS' if accepted else 'FAIL'}.\n\n{out_excerpt[:800]}")
-
         except subprocess.TimeoutExpired:
             log.error("[CYBORG] job=%s timeout", job_id)
-            post_log(f"Cyborg timeout após 3600s na tentativa {attempt}.")
-            accepted = False
             rejected = True
             output   = "TIMEOUT"
         except FileNotFoundError:
             log.error("[CYBORG] claude CLI não encontrado: %s", CLAUDE_BIN)
-            post_log(f"Erro crítico: claude CLI não encontrado em {CLAUDE_BIN}.")
-            accepted = False
             rejected = True
             output   = f"CLAUDE_NOT_FOUND: {CLAUDE_BIN}"
         except Exception as e:
             log.error("[CYBORG] job=%s erro: %s", job_id, e)
-            post_log(f"Erro inesperado na tentativa {attempt}: {e}")
-            accepted = False
             rejected = True
             output   = str(e)
         finally:
+            # Para o heartbeat ANTES de postar o log final — evita mensagem
+            # "ainda trabalhando" aparecer depois do veredicto
             stop_heartbeat.set()
 
-        # Se o Cyborg não chamou /accept ou /reject diretamente no playbook,
-        # o runner.py cuida do próximo passo via webhook de status.
-        # Aqui apenas notificamos o resultado via log para rastreabilidade.
-        if not accepted and not rejected:
-            post_log(f"Cyborg tentativa {attempt} inconclusiva — runner decidirá o próximo passo.")
+        # Log final limpo — sem JSON raw, sem output bruto
+        if accepted:
+            post_log(f"✅ Cyborg tentativa {attempt} concluída: PASS — projeto aceito.")
+        elif rejected:
+            # Extrair apenas a última linha significativa do output para o motivo
+            lines = [l.strip() for l in output.splitlines() if l.strip() and not l.strip().startswith("{")]
+            motivo = lines[-1][:200] if lines else output[:200]
+            post_log(f"❌ Cyborg tentativa {attempt} concluída: FAIL — {motivo}")
+        else:
+            post_log(f"⚠️ Cyborg tentativa {attempt} inconclusiva — nenhum veredicto detectado no output.")
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
