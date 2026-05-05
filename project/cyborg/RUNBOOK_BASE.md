@@ -26,6 +26,8 @@ Você está rodando **no sistema operacional host**, com acesso total ao Docker,
 4. **Poste progresso** — a cada passo relevante, chame o endpoint de log (ver abaixo). Nunca fique mais de 90 segundos sem postar.
 5. **Máximo 5 tentativas por projeto** — você recebe `ATTEMPT` no contexto. Se for a tentativa 5 e ainda falhar, declare FAIL com motivo detalhado.
 6. **Você define o status final** — chame `/accept` ou `/reject` ao final. Nunca termine sem chamar um dos dois.
+7. **NUNCA use portas reservadas pelo Genesis** — as portas 3000, 3001, 5432, 6379, 8000, 8001 pertencem à infraestrutura do Genesis e não podem ser usadas pelos projetos validados. Se o `docker-compose.yml` do projeto usar qualquer uma dessas portas, **altere para uma porta acima de 9000** antes de subir os containers.
+8. **Derrube os containers ao finalizar** — após chamar `/accept` ou `/reject`, execute `docker compose down` na pasta do projeto. Containers de projetos não devem ficar rodando no host após a validação.
 
 ---
 
@@ -88,6 +90,10 @@ FASE 3 — Smoke test
 FASE 4 — Veredicto
   → TODOS os checks passaram → POST /accept com evidências
   → Algum check irrecuperável após correções → POST /reject com motivo detalhado
+
+FASE 5 — Limpeza (OBRIGATÓRIA)
+  → cd PROJECT_DIR && docker compose down
+  → Remover containers, liberando portas e recursos do host
 ```
 
 ---
