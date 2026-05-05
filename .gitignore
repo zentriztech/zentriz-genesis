@@ -44,3 +44,11 @@ htmlcov/
 *.pem
 *.key
 secrets/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl

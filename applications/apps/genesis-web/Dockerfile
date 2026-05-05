@@ -8,11 +8,12 @@ RUN npm ci --legacy-peer-deps
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Garante que public existe (Next.js pode não ter a pasta)
 RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
-# Evita falha no patch do lockfile (swc) em ambiente Docker/CI — see Next.js #65182, #36816
 ENV NEXT_IGNORE_INCORRECT_LOCKFILE=1
+# Recebe a URL da API em build time (necessário para NEXT_PUBLIC_* no browser)
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 RUN npm run build
 
 FROM base AS runner

@@ -26,7 +26,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import SaveIcon from "@mui/icons-material/Save";
-import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { apiGet, apiPut, apiDelete } from "@/lib/api";
 
 type Provider = "bedrock" | "openai" | "anthropic" | "azure_openai";
 
@@ -125,7 +125,7 @@ function LlmSettingsInner() {
   const handleSave = async () => {
     setSaving(true); setError(""); setSuccess("");
     try {
-      await apiPost("/api/tenant/llm-config", {
+      await apiPut("/api/tenant/llm-config", {
         provider,
         model_id: modelId || meta.models[0],
         credentials,

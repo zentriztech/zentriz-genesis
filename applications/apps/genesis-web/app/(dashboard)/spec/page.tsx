@@ -281,9 +281,13 @@ function ProductLinkSection({ products, productId, onProductId, onProductsReload
           </Select>
         </FormControl>
       )}
-      {linkProjectId && (
+      {linkProjectId ? (
+        <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 1, fontSize: "0.68rem", lineHeight: 1.5 }}>
+          ✅ O CTO receberá o contexto do projeto linkado (api_contract, endpoints, porta) ao gerar o charter — sem criar banco ou API próprios.
+        </Typography>
+      ) : (
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.68rem", lineHeight: 1.5 }}>
-          O CTO receberá o contexto do projeto linkado ao gerar a spec — garantindo consistência de contratos e schemas.
+          ⚠️ Se este projeto consome um backend existente, linke-o acima — o Genesis usará o contrato da API automaticamente.
         </Typography>
       )}
     </Box>
@@ -491,7 +495,7 @@ export default function SpecPage() {
   const [productId, setProductId]     = useState("");
   const [linkProjectId, setLinkProjectId] = useState("");
   const [linkRelation, setLinkRelation]   = useState("uses_backend");
-  const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string }[]>([]);
+  const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string; project_type?: string }[]>([]);
 
   // Texto livre flow
   const [freeText, setFreeText]         = useState("");
@@ -540,8 +544,26 @@ export default function SpecPage() {
   // Load products + projects for linking
   useEffect(() => {
     apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {});
-    apiGet<{ id: string; title: string; status: string }[]>("/api/projects").then(setAllProjects).catch(() => {});
+    apiGet<{ id: string; title: string; status: string; project_type?: string }[]>("/api/projects").then(setAllProjects).catch(() => {});
   }, []);
+
+  // Auto-sugerir backend quando projectType é frontend E produto selecionado tem backend
+  useEffect(() => {
+    if (!projectType) return;
+    const isFrontend = projectType.startsWith("web_") || projectType.startsWith("mobile_") || projectType === "landing_page";
+    if (!isFrontend) return;
+    if (linkProjectId) return; // usuário já escolheu — não sobrescrever
+    // Buscar projetos do produto selecionado (ou de todos se sem produto) que são backend
+    const backendProjects = allProjects.filter(p =>
+      p.project_type?.startsWith("backend_") &&
+      (p.status === "accepted" || p.status === "completed" || p.status === "running")
+    );
+    if (backendProjects.length === 1) {
+      // Só 1 backend disponível — pré-selecionar automaticamente
+      setLinkProjectId(backendProjects[0].id);
+      setLinkRelation("uses_backend");
+    }
+  }, [projectType, allProjects, linkProjectId]);
 
   // ── Generate spec via CTO — async job with polling ─────────────────────────
   const stopPolling = useCallback(() => {
