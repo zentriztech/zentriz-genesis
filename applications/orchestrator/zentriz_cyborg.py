@@ -30,9 +30,25 @@ import subprocess
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-import requests
+try:
+    import requests as _requests_lib
+    def _http(method, url, headers, body, timeout):
+        r = _requests_lib.request(method, url, headers=headers, json=body, timeout=timeout)
+        return r.status_code, r.text
+except ImportError:
+    import urllib.request, urllib.error
+    def _http(method, url, headers, body, timeout):  # type: ignore[misc]
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+        except Exception as e:
+            return 0, str(e)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,15 +72,15 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {GENESIS_TOKEN}", "Content-Type": "application/json"}
 
 
-def _api(method: str, path: str, body: dict | None = None) -> tuple[Any, int]:
+def _api(method: str, path: str, body: Optional[dict] = None) -> tuple[Any, int]:
     url = f"{API_BASE_URL}{path}"
     try:
-        resp = requests.request(method, url, headers=_headers(), json=body, timeout=30)
+        status, text = _http(method, url, _headers(), body, 30)
         try:
-            data = resp.json()
+            data = json.loads(text)
         except Exception:
-            data = {"raw": resp.text[:500]}
-        return data, resp.status_code
+            data = {"raw": text[:500]}
+        return data, status
     except Exception as e:
         return {"error": str(e)}, 0
 

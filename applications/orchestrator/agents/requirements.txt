@@ -1,5 +1,7 @@
 anthropic>=0.39.0
 python-dotenv>=1.0.0
+# HTTP client para Zentriz Cyborg (FT-14)
+requests>=2.31.0
 # FastAPI (para serviço HTTP)
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
