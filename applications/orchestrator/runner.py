@@ -2484,11 +2484,46 @@ def _run_monitor_loop(
                     except Exception as _tsh_e:
                         logger.warning("[Trivial] Falha ao gerar start.sh: %s", _tsh_e)
                 _post_step("Produto HTML estático pronto. Abra apps/index.html no browser ou execute start.sh.", request_id)
-                _post_step(
-                    "✅ Produto pronto. Aguardando Aceite — clique em Aceitar para confirmar a entrega ou Parar para encerrar.",
-                    request_id,
-                )
-                _patch_project({"status": "completed", "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")})
+                _now_iso_trivial = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                _patch_project({"status": "pending_cyborg", "completed_at": _now_iso_trivial, "finished_at": _now_iso_trivial})
+                _post_step("🤖 Cyborg iniciando validação externa. Acompanhe o progresso na seção Cyborg abaixo.", request_id)
+                # Disparar Cyborg via full-test-server
+                _ft_server_url_trivial = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.internal:7878")
+                try:
+                    import urllib.request as _ur_t
+                    import json as _jt
+                    _pt_resp_t, _ = _api_get(f"/api/projects/{project_id}")
+                    _proj_type_trivial = (_pt_resp_t or {}).get("project_type") or (_pt_resp_t or {}).get("projectType") or "frontend_landing"
+                    _product_id_trivial = (_pt_resp_t or {}).get("product_id") or (_pt_resp_t or {}).get("productId") or ""
+                    _host_root_trivial = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
+                    if _host_root_trivial and _product_id_trivial:
+                        _cyborg_dir_trivial = str(Path(_host_root_trivial) / _product_id_trivial / project_id)
+                    elif _host_root_trivial:
+                        _cyborg_dir_trivial = str(Path(_host_root_trivial) / project_id)
+                    else:
+                        _cyborg_dir_trivial = str(_trivial_project_dir) if _trivial_project_dir else ""
+                    _cyborg_payload_trivial = _jt.dumps({
+                        "project_id":      project_id or "",
+                        "project_dir":     _cyborg_dir_trivial,
+                        "project_type":    _proj_type_trivial,
+                        "genesis_api_url": os.environ.get("API_BASE_URL", "http://localhost:3000"),
+                        "genesis_token":   os.environ.get("GENESIS_API_TOKEN", ""),
+                        "attempt":         1,
+                        "api_key":         os.environ.get("CLAUDE_API_KEY", ""),
+                    }).encode()
+                    _cyborg_req_t = _ur_t.Request(
+                        f"{_ft_server_url_trivial}/launch-cyborg",
+                        data=_cyborg_payload_trivial,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with _ur_t.urlopen(_cyborg_req_t, timeout=15) as _cr_t:
+                        _cyborg_resp_t = _jt.loads(_cr_t.read().decode())
+                    logger.info("[CYBORG-TRIVIAL] Lançado: job_id=%s", _cyborg_resp_t.get("job_id"))
+                    _post_step(f"🤖 Cyborg lançado (job {_cyborg_resp_t.get('job_id', '?')}) — validando tentativa 1/5.", request_id)
+                except Exception as _cyborg_trivial_err:
+                    logger.warning("[CYBORG-TRIVIAL] Não foi possível lançar Cyborg: %s", _cyborg_trivial_err)
+                    _post_step("⚠️ Cyborg indisponível — validação manual necessária. Clique em Aceitar para confirmar.", request_id)
                 if _run_log:
                     try:
                         _run_log.stop_run(reason="completed")
