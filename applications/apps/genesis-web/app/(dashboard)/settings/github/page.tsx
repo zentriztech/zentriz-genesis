@@ -64,7 +64,10 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
       <DialogTitle>Conectar GitHub App</DialogTitle>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 2 }}>
         <Alert severity="info">
-          Instale a GitHub App da Zentriz no seu org ou conta e cole aqui o Installation ID fornecido pelo GitHub.
+          Instale a <strong>Zentriz Autonomy App</strong> no seu GitHub org ou conta pessoal e cole abaixo o Installation ID gerado pelo GitHub.{" "}
+          <a href="https://github.com/apps/zentriz-autonomy" target="_blank" rel="noreferrer" style={{ color: "inherit" }}>
+            Clique aqui para instalar →
+          </a>
         </Alert>
         {error && <Alert severity="error">{error}</Alert>}
         <TextField
@@ -76,7 +79,9 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
           fullWidth
         />
         <Typography variant="caption" color="text.secondary">
-          O Installation ID aparece na URL ao instalar a app: github.com/apps/zentriz/installations/<strong>ID</strong>
+          Após instalar, o GitHub redireciona para uma URL como:{" "}
+          <code>github.com/organizations/<strong>seu-org</strong>/settings/installations/<strong>ID</strong></code>.
+          {" "}O número no final é o Installation ID.
         </Typography>
       </DialogContent>
       <DialogActions>
