@@ -17,6 +17,7 @@ agent:
     - "Think step-by-step inside <thinking> tags before producing output"
     - "After reasoning, output valid JSON ResponseEnvelope inside <response> tags"
     - "The JSON must be parseable — no comments, no trailing commas"
+    - "CRITICAL JSON ESCAPING (BUG-14): In artifacts[].content, ALL newlines MUST be \\n (escaped). NEVER use literal newlines inside JSON strings. Replace every real newline with the two characters backslash-n. Docker variables like ${VAR} MUST be written as ${VAR} (no backticks). Dockerfile and docker-compose.yml are the most common sources of JSON parse failures — double-check before submitting."
     - "Never put secrets/keys in artifacts; use env/secret manager references"
     - "Always provide evidence[] and run_command"
     - "ALWAYS inspect existing_artifacts to determine the real stack before choosing approach"
@@ -311,48 +312,10 @@ PORTA_CHARTER=$(grep "^port:\|port:" existing_artifacts/charter.md 2>/dev/null |
 grep "ports:" project/docker-compose.yml | grep -v "$PORTA_CHARTER" && echo "BLOCKER: porta incorreta"
 ```
 
-**Se este projeto é o `docker_compose_owner` (último/manager ou deploy):**
-
-> **OBRIGATÓRIO — validado em produção:** O projeto `*-deploy` DEVE entregar `project/docker-compose.yml` como artefato principal. Sem ele, o produto não sobe. O `start.sh` sozinho não é suficiente.
-
-**`project/docker-compose.yml` — estrutura obrigatória:**
+**Se este projeto é o `docker_compose_owner` (último/manager):**
 - Incluir TODOS os serviços do produto listados em `product.services` do charter
-- Nome da rede: `<product_slug>-net` com `external: false` (criada aqui, não externa)
-- Container do DB/Postgres: hostname = `postgres` (alias canônico na rede)
-- Todos os backends: `DATABASE_URL: postgres://postgres:postgres@postgres:5432/<dbname>`
-- Todos os backends: env vars JWT padronizadas:
-  ```yaml
-  JWT_PUBLIC_KEY_PATH: /run/secrets/jwt-public.pem  # OU
-  JWT_PUBLIC_KEY: "${JWT_PUBLIC_KEY}"               # PEM inline via .env
-  JWT_ISSUER: zentriz-ledger-auth
-  JWT_AUDIENCE: zentriz-ledger
-  ```
-- Manager/Frontend Next.js: `--build-arg` para URLs de cada backend na hora do build:
-  ```yaml
-  manager:
-    build:
-      context: ../../<manager_project_id>/apps
-      args:
-        NEXT_PUBLIC_AUTH_URL: http://localhost:<auth_port>
-        NEXT_PUBLIC_API_CTE_URL: http://localhost:<cte_port>
-        # ... um por backend
-  ```
-
-**`start.sh` obrigatório — deve:**
-1. Gerar par de chaves RSA se não existir: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`
-2. Exportar `JWT_PUBLIC_KEY` do arquivo gerado
-3. Rodar `docker compose up --build -d` com as chaves no env
-4. Aguardar todos os healthchecks
-5. Executar migrations + seed
-6. Testar login real no auth e listar endpoint de cada backend
-
-**Checklist pós-geração:**
-```bash
-ls project/docker-compose.yml || echo "BLOCKER: docker-compose.yml não gerado"
-grep "image:\|build:" project/docker-compose.yml | wc -l | awk '$1 < 3' && echo "BLOCKER: compose incompleto"
-grep "JWT_ISSUER\|JWT_PUBLIC_KEY" project/docker-compose.yml || echo "BLOCKER: JWT vars ausentes no compose"
-grep "NEXT_PUBLIC_AUTH_URL\|NEXT_PUBLIC_API_" project/docker-compose.yml || echo "BLOCKER: build-args do Manager ausentes"
-```
+- Para cada serviço: build context = `../../<project_id>/apps/` (relativo)
+- O compose definitivo tem: db + todos os backends + manager em um único arquivo
 
 - No hardcoded secrets; env vars via `.env.local` if needed
 - RUNBOOK must include: Prerequisites, Install, Build, Start, Verify in browser
@@ -429,8 +392,8 @@ grep "NEXT_PUBLIC_AUTH_URL\|NEXT_PUBLIC_API_" project/docker-compose.yml || echo
      ```
   **Checklist Next.js Dockerfile:**
   ```bash
-  # P7: public/ existe? CRIAR ANTES DO BUILD — nunca deixar para o Dev criar
-  [ -d apps/public ] || (mkdir -p apps/public && touch apps/public/.gitkeep && echo "BUG-P7 corrigido: apps/public/.gitkeep criado")
+  # P7: public/ existe?
+  [ -d apps/public ] || echo "BUG-P7: criar apps/public/.gitkeep"
   # P8: start script respeita PORT?
   grep '"start"' apps/package.json | grep -q 'PORT' || echo "BUG-P8: adicionar -p \${PORT:-3000} ao next start"
   # P9: standalone vs node server.js?
@@ -811,6 +774,40 @@ jobs:
 3. Gerar apenas se `inputs.cloud_provider` estiver presente no charter
 4. Incluir no RUNBOOK.md uma seção "Deploy Automático" explicando que o workflow dispara automaticamente ao fazer push para `main`
 5. Adicionar ao `meta` do response: `"deploy_workflow_generated": true, "cloud_provider": "aws|azure|gcp"`
+
+---
+
+---
+
+## G46 — Validação JSON obrigatória antes de submeter (BUG-14)
+
+**Problema validado em produção (2026-05-04, projeto zentriz-restaurant):** Dockerfile e docker-compose.yml com conteúdo multi-linha causam JSON parse failure no enforcer. O agente entrega `status: OK` mas nenhum artefato é gravado. O produto não sobe sem intervenção humana.
+
+**Regra absoluta — checar ANTES de fechar o JSON de resposta:**
+
+```
+CHECKLIST PRÉ-SUBMIT (executar mentalmente antes de fechar <response>):
+
+□ Cada artifacts[].content está em UMA LINHA só dentro do JSON?
+  → Se não: substituir cada newline por \\n (barra-n escaped)
+
+□ O conteúdo contém ${VAR} ou ${VAR:-default}?
+  → Verificar que não há backticks envolvendo essas expressões no JSON
+
+□ O conteúdo contém aspas duplas internas?
+  → Cada " dentro de content deve ser \" no JSON
+
+□ Dockerfile tem multi-stage (FROM ... AS builder)?
+  → Cada linha do Dockerfile separada por \\n no JSON
+
+□ docker-compose.yml tem indentação YAML?
+  → Cada linha separada por \\n, cada espaço de indentação preservado
+
+□ TESTE: copiar o JSON da resposta e fazer JSON.parse() mentalmente
+  → Se falhar → corrigir antes de enviar
+```
+
+**Consequência de não seguir:** DevOps marca `status: OK` mas nenhum arquivo é gravado. O produto não sobe. Intervenção humana obrigatória.
 
 ---
 
