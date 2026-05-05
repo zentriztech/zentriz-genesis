@@ -485,17 +485,24 @@ def run_agent(
             or "us-east-1"
         )
         # Passar credenciais explícitas quando disponíveis no env — evita ProfileNotFound
-        # quando ~/.aws/config não existe (ex.: EC2 sem perfil configurado)
+        # quando ~/.aws/config não existe (ex.: EC2 sem perfil configurado).
+        # Também remover AWS_PROFILE do env temporariamente para evitar que boto3
+        # tente carregar um perfil inexistente antes de usar as credenciais explícitas.
         _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
         _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
-        if _ak and _sk:
-            client = AnthropicBedrock(
-                aws_region=aws_region,
-                aws_access_key=_ak,
-                aws_secret_key=_sk,
-            )
-        else:
-            client = AnthropicBedrock(aws_region=aws_region)
+        _profile = os.environ.pop("AWS_PROFILE", None)  # remove para não interferir
+        try:
+            if _ak and _sk:
+                client = AnthropicBedrock(
+                    aws_region=aws_region,
+                    aws_access_key=_ak,
+                    aws_secret_key=_sk,
+                )
+            else:
+                client = AnthropicBedrock(aws_region=aws_region)
+        finally:
+            if _profile:
+                os.environ["AWS_PROFILE"] = _profile  # restaura se existia
         api_key = None  # não utilizado no modo bedrock
     else:
         api_key = os.environ.get("CLAUDE_API_KEY")

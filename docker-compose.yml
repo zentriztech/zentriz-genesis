@@ -97,7 +97,7 @@ services:
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
-      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AWS_PROFILE=${AWS_PROFILE:-}
       - GENESIS_LLM_PROVIDER=${GENESIS_LLM_PROVIDER:-anthropic}
       - GENESIS_AWS_REGION=${GENESIS_AWS_REGION:-us-east-1}
     env_file:
