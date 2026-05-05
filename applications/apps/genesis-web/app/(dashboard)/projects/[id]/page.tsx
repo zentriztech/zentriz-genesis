@@ -458,7 +458,7 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || !project) return;
-    const isActive = ["running", "completed", "accepted", "stopped", "failed"].includes(project.status);
+    const isActive = ["running", "completed", "accepted", "stopped", "failed", "pending_cyborg", "blocked_cyborg"].includes(project.status);
     if (!isActive) return;
     const loadMetrics = () =>
       apiGet<TaskMetricItem[]>(`/api/projects/${id}/task-metrics`)
