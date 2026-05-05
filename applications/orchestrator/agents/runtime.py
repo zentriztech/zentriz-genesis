@@ -484,7 +484,18 @@ def run_agent(
             or os.environ.get("AWS_DEFAULT_REGION")
             or "us-east-1"
         )
-        client = AnthropicBedrock(aws_region=aws_region)
+        # Passar credenciais explícitas quando disponíveis no env — evita ProfileNotFound
+        # quando ~/.aws/config não existe (ex.: EC2 sem perfil configurado)
+        _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+        _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+        if _ak and _sk:
+            client = AnthropicBedrock(
+                aws_region=aws_region,
+                aws_access_key=_ak,
+                aws_secret_key=_sk,
+            )
+        else:
+            client = AnthropicBedrock(aws_region=aws_region)
         api_key = None  # não utilizado no modo bedrock
     else:
         api_key = os.environ.get("CLAUDE_API_KEY")

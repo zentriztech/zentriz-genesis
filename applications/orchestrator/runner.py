@@ -37,6 +37,19 @@ def _sigterm_handler(_signum, _frame):
     logger = logging.getLogger(__name__)
     logger.info("[Pipeline] SIGTERM recebido; encerrando Monitor Loop.")
 
+def _bedrock_client(region: str | None = None):
+    """Cria boto3 bedrock-runtime client com credenciais explícitas quando disponíveis.
+    Evita ProfileNotFound em ambientes sem ~/.aws/config (ex: EC2 com credenciais via env)."""
+    import boto3  # type: ignore
+    r = region or os.environ.get("GENESIS_AWS_REGION", "us-east-1")
+    ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+    sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+    if ak and sk:
+        return boto3.client("bedrock-runtime", region_name=r,
+                            aws_access_key_id=ak, aws_secret_access_key=sk)
+    return boto3.client("bedrock-runtime", region_name=r)
+
+
 def _get_summary_human(*a, **k):
     from orchestrator.dialogue import get_summary_human
     return get_summary_human(*a, **k)
@@ -506,9 +519,7 @@ def _ask_llm_for_backend_language(text: str) -> str:
         f"Texto:\n{text[:8000]}"
     )
     if provider == "bedrock":
-        import boto3  # type: ignore
-        region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
-        client = boto3.client("bedrock-runtime", region_name=region)
+        client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
         body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 10,
                 "messages": [{"role": "user", "content": prompt}]}
         resp = client.invoke_model(modelId=model, body=_j.dumps(body))
@@ -640,15 +651,13 @@ Texto:
 {text[:3000]}"""
 
     if provider == "bedrock":
-        import boto3  # type: ignore
-        region = _os.environ.get("GENESIS_AWS_REGION", "us-east-1")
-        client = boto3.client("bedrock-runtime", region_name=region)
+        import json as _json
+        client = _bedrock_client(_os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 10,
             "messages": [{"role": "user", "content": prompt}],
         }
-        import json as _json
         resp = client.invoke_model(modelId=model, body=_json.dumps(body))
         result = _json.loads(resp["body"].read())
         answer = result["content"][0]["text"].strip().lower()
@@ -1086,12 +1095,8 @@ def _call_autonomous_monitor(project_id: str, task: dict, request_id: str) -> di
         try:
             # Suporta Bedrock (padrão do Genesis) e Anthropic API direta
             if _provider == "bedrock":
-                import boto3 as _boto3
                 import json as _json
-                _bedrock = _boto3.client(
-                    "bedrock-runtime",
-                    region_name=os.environ.get("GENESIS_AWS_REGION", "us-east-1"),
-                )
+                _bedrock = _bedrock_client(os.environ.get("GENESIS_AWS_REGION", "us-east-1"))
                 _body = _json.dumps({
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": 4096,
