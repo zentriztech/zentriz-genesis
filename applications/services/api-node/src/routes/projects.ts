@@ -462,13 +462,13 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const u = updated.rows[0] as Record<string, unknown>;
 
-      // Fechar TSK-FULL-TEST se ainda estiver ASSIGNED/IN_PROGRESS — Cyborg substituiu a execução manual
+      // Fechar TSK-FULL-TEST quando projeto é aceito — inclui QA_FAIL (Cyborg corrigiu e validou)
       await client.query(
         `UPDATE project_tasks
          SET status = 'DONE', updated_at = now()
          WHERE project_id = $1
            AND task_id = 'TSK-FULL-TEST'
-           AND status IN ('ASSIGNED', 'IN_PROGRESS', 'NEW')`,
+           AND status NOT IN ('DONE', 'QA_PASS', 'CANCELLED')`,
         [id]
       );
 
