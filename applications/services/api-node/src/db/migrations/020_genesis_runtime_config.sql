@@ -36,4 +36,4 @@ INSERT INTO genesis_runtime_config (key, value, description) VALUES
 ON CONFLICT (key, tenant_id) DO NOTHING;
 
 COMMENT ON TABLE genesis_runtime_config IS
-  'Configuracao dinamica do runtime Genesis. tenant_id NULL = global; tenant sobrescreve o global.';
+  'Configuracao dinamica do runtime Genesis. tenant_id NULL aplica a todos os tenants sem override.';
