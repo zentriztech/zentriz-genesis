@@ -198,7 +198,8 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [slug, role, category, stack_key, domain || null, title, body_md,
-       hard_rule, source, origin_ref || null, ttl_days || null, status, user.id]
+       hard_rule, source, origin_ref || null, ttl_days || null, status,
+       /^[0-9a-f-]{36}$/.test(user.id) ? user.id : null]
     );
     return reply.status(201).send({ data: result.rows[0] });
   });
