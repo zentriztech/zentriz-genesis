@@ -404,20 +404,22 @@ function CloudSettingsPageInner() {
   return (
     <Box sx={{ maxWidth: 800, mx: "auto", p: { xs: 2, md: 4 } }}>
       {/* Cabeçalho */}
-      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 3 }}>
-        <CloudIcon sx={{ color: "primary.main", fontSize: 28 }} />
-        <Box sx={{ flexGrow: 1 }}>
+      <Stack direction="row" alignItems="flex-start" spacing={1.5} sx={{ mb: 3 }}>
+        <CloudIcon sx={{ color: "primary.main", fontSize: 28, mt: 0.25 }} />
+        <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography variant="h5" fontWeight={700}>Conectar Cloud</Typography>
           <Typography variant="body2" color="text.secondary">
             Ao aceitar um projeto, o Genesis injeta as credenciais como GitHub Secrets e gera o workflow de deploy.
             O primeiro slot é o <strong>Principal</strong> — os demais são fallbacks.
           </Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />}
-          onClick={() => { setEditSlot(null); setModalOpen(true); }}
-          disabled={slots.length >= 4}>
-          Adicionar
-        </Button>
+        <Box sx={{ flexShrink: 0 }}>
+          <Button variant="contained" startIcon={<AddIcon />}
+            onClick={() => { setEditSlot(null); setModalOpen(true); }}
+            disabled={slots.length >= 4}>
+            Adicionar
+          </Button>
+        </Box>
       </Stack>
 
       {globalMsg && (
