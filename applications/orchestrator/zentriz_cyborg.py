@@ -107,7 +107,13 @@ def _reject(project_id: str, reason: str) -> bool:
         "rejected_by": "zentriz-cyborg",
         "reason": reason,
     })
-    return status in (200, 201)
+    if status not in (200, 201):
+        logger.warning("[Cyborg] REJECT FALHOU: endpoint /reject retorna %d — %s", status,
+                       str(data)[:200])
+        # Fallback: marcar como failed via PATCH se /reject não funcionar
+        _api("PATCH", f"/api/projects/{project_id}", {"status": "failed"})
+        return False
+    return True
 
 
 # ─── PLAYBOOK UNIVERSAL ────────────────────────────────────────────────────────
@@ -166,15 +172,80 @@ def _detect_project_type(project_id: str, prod_id: str | None) -> str:
 
 
 def _find_project_dir(project_id: str, prod_id: str | None) -> Path | None:
+    """Localiza o diretório raiz do projeto em PROJECT_FILES_ROOT.
+    Tenta múltiplos paths: com produto, sem produto, e fallback sem exigir /apps.
+    """
     root = Path(PROJECT_FILES)
+
+    candidates: list[Path] = []
     if prod_id:
-        candidate = root / prod_id / project_id / "apps"
-        if candidate.exists():
-            return candidate.parent
-    candidate = root / project_id / "apps"
-    if candidate.exists():
-        return candidate.parent
+        candidates.append(root / prod_id / project_id)
+    candidates.append(root / project_id)
+
+    for base in candidates:
+        if not base.exists():
+            continue
+        # Verificar se tem conteúdo relevante (apps/, project/, docs/)
+        has_content = any((base / d).exists() for d in ("apps", "project", "docs"))
+        if has_content:
+            logger.info("[Cyborg] Diretório do projeto encontrado: %s", base)
+            return base
+        # Mesmo sem subpastas conhecidas, retornar se o diretório existe e tem arquivos
+        try:
+            if any(base.iterdir()):
+                logger.info("[Cyborg] Diretório do projeto encontrado (fallback): %s", base)
+                return base
+        except PermissionError:
+            pass
+
+    logger.warning(
+        "[Cyborg] Diretório não encontrado para project_id=%s prod_id=%s em %s",
+        project_id[:8], prod_id, PROJECT_FILES,
+    )
     return None
+
+
+def _generate_api_contract(runbook: str, project_id: str) -> str:
+    """Extrai informações do RUNBOOK.md para gerar um api_contract.md mínimo.
+    Procura: Base URL / porta, credenciais seed, endpoints listados.
+    Usado pelo Cyborg quando o DevOps não gerou o arquivo.
+    """
+    import re as _re
+
+    # Extrair porta / base URL
+    port_match = _re.search(r"(?:localhost|127\.0\.0\.1):(\d{4,5})", runbook)
+    port = port_match.group(1) if port_match else "3000"
+    base_url = f"http://localhost:{port}"
+
+    # Extrair credenciais seed
+    email_match = _re.search(r"(?:email|e-mail)\s*[:\|]\s*([a-z0-9_.+-]+@[a-z0-9.-]+\.[a-z]{2,})", runbook, _re.I)
+    pass_match  = _re.search(r"(?:password|senha|pwd)\s*[:\|]\s*([^\s\n]{4,40})", runbook, _re.I)
+    email    = email_match.group(1) if email_match else "admin@projeto.dev"
+    password = pass_match.group(1)  if pass_match  else "Admin@123"
+
+    # Extrair endpoints explícitos (linhas com GET/POST/PUT/DELETE /api/...)
+    endpoints = _re.findall(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[\w/:{}-]+)", runbook)
+    endpoints_md = "\n".join(f"  {m} {ep}" for m, ep in endpoints[:40]) if endpoints else \
+        "  GET  /api/health\n  POST /api/auth/login\n  GET  /api/auth/me"
+
+    # Extrair informações de stack
+    stack_match = _re.search(r"(?:Stack|stack|framework|Framework)\s*[:\|]\s*([^\n]{5,80})", runbook)
+    stack = stack_match.group(1).strip() if stack_match else "Node.js / Fastify"
+
+    return f"""# API Contract — Projeto {project_id[:8]}
+# Gerado automaticamente pelo Zentriz Cyborg a partir do RUNBOOK.md
+
+Base URL: {base_url}
+Auth: Bearer JWT via POST /api/auth/login
+Stack: {stack}
+
+## Credenciais seed
+  email: {email}
+  password: {password}
+
+## Endpoints
+{endpoints_md}
+"""
 
 
 def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> PlaybookResult:
@@ -213,11 +284,28 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
 
         try:
             contract = Path(project_dir) / "api_contract.md"
-            if contract.exists():
+            if contract.exists() and contract.stat().st_size > 10:
                 api_contract = contract.read_text(encoding="utf-8", errors="replace")[:8000]
-                result.record("api_contract.md existe", True)
-        except Exception:
-            pass
+                result.record("api_contract.md existe", True, f"{len(api_contract)} chars")
+            else:
+                # Linha de defesa: Cyborg gera api_contract.md a partir do RUNBOOK.md
+                result.record("api_contract.md existe", False, "gerando a partir do RUNBOOK.md")
+                if runbook_content:
+                    api_contract = _generate_api_contract(runbook_content, project_id)
+                    if api_contract:
+                        contract.write_text(api_contract, encoding="utf-8")
+                        # Copiar para contracts/ do produto
+                        if prod_id:
+                            contracts_dir = Path(PROJECT_FILES) / prod_id / "contracts"
+                            contracts_dir.mkdir(parents=True, exist_ok=True)
+                            dest = contracts_dir / f"{project_id[:8]}.api_contract.md"
+                            import shutil as _shutil
+                            _shutil.copy2(str(contract), str(dest))
+                        result.record("api_contract.md gerado pelo Cyborg", True,
+                                      f"{len(api_contract)} chars")
+                        logger.info("[Cyborg] api_contract.md gerado para projeto %s", project_id[:8])
+        except Exception as e:
+            result.record("api_contract.md", False, str(e))
 
     # ── FASE 2: INFRAESTRUTURA ─────────────────────────────────────────────────
     result.log.append("=== FASE 2: INFRAESTRUTURA ===")
@@ -416,14 +504,19 @@ def run_with_autocorrection(project_id: str, prod_id: str | None, cyborg_ctx: di
 
 
 def poll_completed_projects(product_id: str | None) -> list[dict]:
-    """Busca projetos em status 'completed' do produto (ou todos se sem produto)."""
+    """Busca projetos em status 'completed' ou 'pending_cyborg' (retry após falha).
+    Modo produto: filtra pelo produto. Modo solitário: projetos sem produto.
+    """
     data, status = _api("GET", "/api/projects")
     if status != 200 or not isinstance(data, list):
         return []
 
+    # Aceita 'completed' (novo) e 'pending_cyborg' (retry após falha anterior)
+    valid_statuses = {"completed", "pending_cyborg"}
+
     projects = []
     for p in data:
-        if p.get("status") != "completed":
+        if p.get("status") not in valid_statuses:
             continue
         if product_id and p.get("productId") != product_id:
             continue
@@ -454,10 +547,18 @@ def main() -> int:
 
             for proj in projects:
                 proj_id = proj.get("id", "")
-                if not proj_id or proj_id in cyborg_ctx["processed"]:
+                if not proj_id:
                     continue
 
-                logger.info("[Cyborg] Projeto detectado: %s — %s", proj_id[:8], proj.get("title", "")[:60])
+                proj_status = proj.get("status", "")
+
+                # Pular projetos já processados com sucesso nesta sessão.
+                # projetos pending_cyborg podem ser retentados — não bloquear pelo processed set.
+                if proj_id in cyborg_ctx["processed"] and proj_status != "pending_cyborg":
+                    continue
+
+                logger.info("[Cyborg] Projeto detectado: %s (%s) — %s",
+                            proj_id[:8], proj_status, proj.get("title", "")[:60])
                 cyborg_ctx["processed"].add(proj_id)
 
                 try:
@@ -466,9 +567,13 @@ def main() -> int:
                         cyborg_ctx["accepted_count"] += 1
                     else:
                         cyborg_ctx["rejected_count"] += 1
+                        # Remover do processed para permitir retry no próximo poll
+                        # (somente se ainda estiver pending_cyborg — o runner pode ter relançado)
+                        cyborg_ctx["processed"].discard(proj_id)
                 except Exception as e:
                     logger.error("[Cyborg] Erro ao processar %s: %s\n%s", proj_id[:8], e, traceback.format_exc()[:1000])
                     _reject(proj_id, f"Erro interno do Cyborg: {str(e)[:500]}")
+                    cyborg_ctx["processed"].discard(proj_id)
 
                 # Modo solitário: encerrar após processar o único projeto
                 if not PRODUCT_ID:

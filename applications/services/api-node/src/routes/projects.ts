@@ -5,6 +5,7 @@ import { pushProjectToGitHub } from "../services/githubPush.js";
 import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { notifyTelegramTenant } from "./telegram.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -618,6 +619,20 @@ export async function projectRoutes(app: FastifyInstance) {
         } catch { /* não crítico */ }
       });
 
+      // Notificação push Telegram — fire-and-forget
+      setImmediate(async () => {
+        try {
+          const projRow = await pool.query(`SELECT title, tenant_id FROM projects WHERE id = $1`, [id]);
+          if (projRow.rows[0]?.tenant_id) {
+            const label = isCyborg ? "🤖 Cyborg validou e aceitou" : "✅ Projeto aceito";
+            notifyTelegramTenant(
+              projRow.rows[0].tenant_id as string,
+              `${label}: *${projRow.rows[0].title}*`
+            ).catch(() => {});
+          }
+        } catch { /* não crítico */ }
+      });
+
       return reply.send({
         ok: true,
         status: "accepted",
@@ -647,13 +662,13 @@ export async function projectRoutes(app: FastifyInstance) {
       const allowed = await checkProjectAccess(client, id, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const proj = await client.query(
-        "SELECT status, cyborg_attempts, project_type, product_id FROM projects WHERE id = $1", [id]
+        "SELECT status, cyborg_attempts, extra, product_id FROM projects WHERE id = $1", [id]
       );
       const row = proj.rows[0] as Record<string, unknown> | undefined;
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const current       = row.status as string;
       const prevAttempts  = (row.cyborg_attempts as number) ?? 0;
-      const projectType   = (row.project_type as string) ?? "other";
+      const projectType   = ((row.extra as Record<string, unknown> | null)?.project_type as string) ?? "other";
       const productId     = (row.product_id as string) ?? null;
 
       if (!["running", "completed", "stopped", "pending_cyborg"].includes(current)) {
@@ -752,6 +767,20 @@ export async function projectRoutes(app: FastifyInstance) {
          VALUES ($1, 'system', 'system', 'step', $2)`,
         [id, `❌ Projeto rejeitado. Motivo: ${reason}`]
       );
+      // Notificação push Telegram — fire-and-forget
+      setImmediate(async () => {
+        try {
+          const projRow = await pool.query(`SELECT title, tenant_id FROM projects WHERE id = $1`, [id]);
+          if (projRow.rows[0]?.tenant_id) {
+            const label = isCyborg ? "🤖 Cyborg rejeitou" : "❌ Projeto rejeitado";
+            notifyTelegramTenant(
+              projRow.rows[0].tenant_id as string,
+              `${label}: *${projRow.rows[0].title}*\nMotivo: ${reason}`
+            ).catch(() => {});
+          }
+        } catch { /* não crítico */ }
+      });
+
       return reply.send({ ok: true, status: "failed", rejectedBy, reason });
     } finally {
       client.release();

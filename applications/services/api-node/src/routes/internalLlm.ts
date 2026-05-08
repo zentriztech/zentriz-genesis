@@ -9,8 +9,23 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
     "/api/internal/project-llm-config/:projectId",
     async (request, reply) => {
       const internalToken = process.env.GENESIS_API_TOKEN ?? process.env.GENESIS_INTERNAL_TOKEN ?? "";
-      const provided = (request.headers["x-internal-token"] as string) ?? "";
-      if (internalToken && provided !== internalToken) {
+      const provided = (request.headers["x-internal-token"] as string)
+        || (request.headers["authorization"] as string ?? "").replace(/^Bearer\s+/i, "");
+      // Aceita: token estático idêntico OU JWT válido assinado com JWT_SECRET (runner usa fresh JWT)
+      let authorized = !internalToken; // sem token configurado = sem restrição
+      if (!authorized && provided) {
+        if (provided === internalToken) {
+          authorized = true;
+        } else {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const jwt = require("jsonwebtoken") as { verify: (t: string, s: string) => { role?: string } };
+            const decoded = jwt.verify(provided, process.env.JWT_SECRET ?? "genesis_secret");
+            authorized = decoded?.role === "zentriz_admin" || decoded?.role === "tenant_admin";
+          } catch { /* token inválido */ }
+        }
+      }
+      if (!authorized) {
         return reply.status(401).send({ code: "UNAUTHORIZED", message: "Token interno inválido" });
       }
       const { projectId } = request.params;

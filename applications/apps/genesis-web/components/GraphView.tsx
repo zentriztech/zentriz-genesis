@@ -28,6 +28,8 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import BubbleChartIcon from "@mui/icons-material/BubbleChart";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CloseIcon from "@mui/icons-material/Close";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
@@ -425,16 +427,326 @@ function GraphToolbar({
   );
 }
 
+// ── Painel de tasks para tela cheia ───────────────────────────────────────────
+const STATUS_ORDER = ["IN_PROGRESS","WAITING_REVIEW","QA_FAIL","BLOCKED","ASSIGNED","DONE","NEW","CANCELLED"];
+function FullscreenTaskPanel({ projectId, pollIntervalMs, onClickTask }: { projectId: string; pollIntervalMs: number; onClickTask: (t: TaskItem) => void }) {
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const data = await apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`);
+        if (active && Array.isArray(data)) setTasks(data);
+      } catch { /* silent */ }
+    };
+    load();
+    const t = pollIntervalMs > 0 ? setInterval(load, pollIntervalMs) : null;
+    return () => { active = false; if (t) clearInterval(t); };
+  }, [projectId, pollIntervalMs]);
+
+  const sorted = [...tasks].sort((a, b) => {
+    const ai = STATUS_ORDER.indexOf(a.status ?? ""); const bi = STATUS_ORDER.indexOf(b.status ?? "");
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+
+  return (
+    <Box sx={{ height: "100%", overflowY: "auto", px: 1.5, py: 1 }}>
+      <Typography variant="caption" color="text.disabled"
+        sx={{ fontSize: "0.6rem", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1 }}>
+        Tasks ({tasks.length})
+      </Typography>
+      <Stack spacing={0.5}>
+        {sorted.map(t => {
+          const color = STATUS_COLOR_GV[t.status ?? ""] ?? "#8B949E";
+          return (
+            <Box key={t.id} onClick={() => onClickTask(t)}
+              sx={{ px: 1, py: 0.6, borderRadius: 1, bgcolor: "#161B22", border: "1px solid #30363D",
+                cursor: "pointer", "&:hover": { borderColor: "#6366F155", bgcolor: "#1e2430" } }}>
+              <Stack direction="row" alignItems="center" spacing={0.75}>
+                <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: color, flexShrink: 0 }} />
+                <Typography variant="caption" fontFamily="monospace" sx={{ fontSize: "0.65rem", color: "#CDD5DE", flexGrow: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {t.taskId}
+                </Typography>
+              </Stack>
+              {t.ownerRole && (
+                <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.58rem", pl: 1.75 }}>
+                  {t.ownerRole}
+                </Typography>
+              )}
+            </Box>
+          );
+        })}
+        {tasks.length === 0 && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+            Nenhuma task ainda.
+          </Typography>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+// ── Resize handle ──────────────────────────────────────────────────────────────
+function ResizeHandle({ onDrag, cursor = "col-resize" }: { onDrag: (delta: number) => void; cursor?: string }) {
+  const dragging = useRef(false);
+  const last     = useRef(0);
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    dragging.current = true;
+    last.current     = e.clientX;
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      onDrag(e.clientX - last.current);
+      last.current = e.clientX;
+    };
+    const onUp = () => { dragging.current = false; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, [onDrag]);
+
+  return (
+    <Box onMouseDown={onMouseDown} sx={{
+      width: 6, flexShrink: 0, cursor, bgcolor: "transparent",
+      borderLeft: "1px solid #30363D", borderRight: "1px solid #30363D",
+      "&:hover": { bgcolor: "#6366F133" }, transition: "background 0.15s", userSelect: "none",
+    }} />
+  );
+}
+
+// ── Fullscreen 3-panel layout ──────────────────────────────────────────────────
+function FullscreenLayout({
+  projectId, pollIntervalMs, mode, filter,
+  onModeChange, onFilterChange, onClose,
+}: {
+  projectId: string; pollIntervalMs: number;
+  mode: GraphMode; filter: GraphFilter;
+  onModeChange: (m: GraphMode) => void;
+  onFilterChange: (f: GraphFilter) => void;
+  onClose: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  // larguras em % dos 3 painéis
+  const [leftPct,  setLeftPct]  = useState(20);
+  const [rightPct, setRightPct] = useState(20);
+  const [leftCollapsed,  setLeftCollapsed]  = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+
+  // task detail
+  const [drawerTask, setDrawerTask] = useState<TaskItem | null>(null);
+  const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const tasks = await apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`);
+        if (active && Array.isArray(tasks)) tasks.forEach(t => taskMapRef.current.set(t.taskId, t));
+      } catch { /* silent */ }
+    };
+    load();
+    const t = pollIntervalMs > 0 ? setInterval(load, pollIntervalMs) : null;
+    return () => { active = false; if (t) clearInterval(t); };
+  }, [projectId, pollIntervalMs]);
+
+  const handleClickTask = useCallback((task: TaskItem) => setDrawerTask(task), []);
+  const handleClickTaskId = useCallback((taskId: string) => {
+    const t = taskMapRef.current.get(taskId);
+    if (t) setDrawerTask(t);
+  }, []);
+
+  const handleLeftDrag = useCallback((delta: number) => {
+    const w = containerRef.current?.clientWidth ?? window.innerWidth;
+    setLeftPct(prev => Math.max(12, Math.min(40, prev + (delta / w) * 100)));
+  }, []);
+
+  const handleRightDrag = useCallback((delta: number) => {
+    const w = containerRef.current?.clientWidth ?? window.innerWidth;
+    setRightPct(prev => Math.max(12, Math.min(40, prev - (delta / w) * 100)));
+  }, []);
+
+  const effectiveLeft  = leftCollapsed  ? 0 : leftPct;
+  const effectiveRight = rightCollapsed ? 0 : rightPct;
+  const centerPct      = 100 - effectiveLeft - effectiveRight;
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100vh", bgcolor: "#0D0F14" }}>
+      {/* Top bar */}
+      <Stack direction="row" alignItems="center" justifyContent="space-between"
+        sx={{ px: 2, py: 0.75, borderBottom: "1px solid #30363D", flexShrink: 0, minHeight: 44 }}>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <Typography variant="body2" fontWeight={600} color="text.primary">Grafo do Pipeline</Typography>
+          <GraphToolbar mode={mode} onModeChange={onModeChange} filter={filter} onFilterChange={onFilterChange} />
+        </Stack>
+        <Tooltip title="Sair de tela cheia">
+          <IconButton onClick={onClose} size="small"><FullscreenExitIcon /></IconButton>
+        </Tooltip>
+      </Stack>
+
+      {/* 3-column body */}
+      <Box ref={containerRef} sx={{ flexGrow: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+
+        {/* ── Painel Esquerdo — Diálogo ao vivo ── */}
+        {!leftCollapsed && (
+          <Box sx={{ width: `${effectiveLeft}%`, flexShrink: 0, display: "flex", flexDirection: "column",
+            borderRight: "1px solid #30363D", overflow: "hidden" }}>
+            <Stack direction="row" alignItems="center" justifyContent="space-between"
+              sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
+              <Typography variant="caption" color="text.disabled"
+                sx={{ fontSize: "0.6rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                Diálogo ao vivo
+              </Typography>
+              <Tooltip title="Recolher painel">
+                <IconButton size="small" onClick={() => setLeftCollapsed(true)}
+                  sx={{ p: 0.3, color: "text.disabled" }}>
+                  <ChevronLeftIcon sx={{ fontSize: "0.9rem" }} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            <Box sx={{ flexGrow: 1, overflow: "hidden", minHeight: 0 }}>
+              <LiveDialoguePanel projectId={projectId} pollIntervalMs={pollIntervalMs} />
+            </Box>
+          </Box>
+        )}
+
+        {/* Collapse tab — esquerdo */}
+        {leftCollapsed && (
+          <Box onClick={() => setLeftCollapsed(false)} sx={{
+            width: 20, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            bgcolor: "#161B22", borderRight: "1px solid #30363D", "&:hover": { bgcolor: "#1e2430" },
+          }}>
+            <ChevronRightIcon sx={{ fontSize: "0.9rem", color: "#8B949E" }} />
+          </Box>
+        )}
+
+        {/* Resize handle esquerdo */}
+        {!leftCollapsed && <ResizeHandle onDrag={handleLeftDrag} />}
+
+        {/* ── Painel Centro — Grafo ── */}
+        <Box sx={{ flexGrow: 1, width: `${centerPct}%`, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+          <Box sx={{ flexGrow: 1, overflow: "hidden", height: 0 }}>
+            {mode === "force"
+              ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={[]} filter={filter} />
+              : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={[]} filter={filter} onClickTask={handleClickTaskId} />}
+          </Box>
+        </Box>
+
+        {/* Resize handle direito */}
+        {!rightCollapsed && <ResizeHandle onDrag={handleRightDrag} />}
+
+        {/* Collapse tab — direito */}
+        {rightCollapsed && (
+          <Box onClick={() => setRightCollapsed(false)} sx={{
+            width: 20, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            bgcolor: "#161B22", borderLeft: "1px solid #30363D", "&:hover": { bgcolor: "#1e2430" },
+          }}>
+            <ChevronLeftIcon sx={{ fontSize: "0.9rem", color: "#8B949E" }} />
+          </Box>
+        )}
+
+        {/* ── Painel Direito — Tasks ── */}
+        {!rightCollapsed && (
+          <Box sx={{ width: `${effectiveRight}%`, flexShrink: 0, display: "flex", flexDirection: "column",
+            borderLeft: "1px solid #30363D", overflow: "hidden" }}>
+            <Stack direction="row" alignItems="center" justifyContent="space-between"
+              sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
+              <Typography variant="caption" color="text.disabled"
+                sx={{ fontSize: "0.6rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                Tasks
+              </Typography>
+              <Tooltip title="Recolher painel">
+                <IconButton size="small" onClick={() => setRightCollapsed(true)}
+                  sx={{ p: 0.3, color: "text.disabled" }}>
+                  <ChevronRightIcon sx={{ fontSize: "0.9rem" }} />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            <Box sx={{ flexGrow: 1, overflow: "hidden", minHeight: 0 }}>
+              <FullscreenTaskPanel projectId={projectId} pollIntervalMs={pollIntervalMs} onClickTask={handleClickTask} />
+            </Box>
+          </Box>
+        )}
+      </Box>
+
+      {/* Task detail drawer */}
+      <TaskDetailDrawerView task={drawerTask} onClose={() => setDrawerTask(null)} />
+    </Box>
+  );
+}
+
+// ── Painel de diálogo inline (sem scroll externo) ─────────────────────────────
+function LiveDialoguePanel({ projectId, pollIntervalMs }: { projectId: string; pollIntervalMs: number }) {
+  const [entries, setEntries] = useState<import("@/components/LiveDialogue").DialogueEntry[]>([]);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const data = await apiGet<import("@/components/LiveDialogue").DialogueEntry[]>(`/api/projects/${projectId}/dialogue`);
+        if (active && Array.isArray(data)) {
+          setEntries(data);
+          setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        }
+      } catch { /* silent */ }
+    };
+    load();
+    const t = pollIntervalMs > 0 ? setInterval(load, pollIntervalMs) : null;
+    return () => { active = false; if (t) clearInterval(t); };
+  }, [projectId, pollIntervalMs]);
+
+  return (
+    <Box sx={{ height: "100%", overflowY: "auto", px: 1.5, py: 1 }}>
+      <Stack spacing={0.75}>
+        {entries.map((e, i) => {
+          const isLast = i === entries.length - 1;
+          const isWork = e.eventType === "agent_working";
+          const isErr  = e.eventType === "error";
+          const color  = isErr ? "#EF4444" : isWork ? "#6366F1" : "#8B949E";
+          const time   = new Date(e.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+          return (
+            <Box key={e.id ?? i} sx={{
+              px: 1, py: 0.6, borderRadius: 1,
+              bgcolor: isLast ? "#1e2430" : "#161B22",
+              border: `1px solid ${isLast ? color + "44" : "#30363D"}`,
+            }}>
+              <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.3 }}>
+                <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: color, flexShrink: 0 }} />
+                <Typography variant="caption" sx={{ fontSize: "0.6rem", color, fontWeight: 600 }}>
+                  {e.fromAgent ?? "sistema"}
+                </Typography>
+                <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.58rem", ml: "auto" }}>
+                  {time}
+                </Typography>
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.65rem", lineHeight: 1.45, display: "block" }}>
+                {String(e.summaryHuman ?? "").slice(0, 160)}
+              </Typography>
+            </Box>
+          );
+        })}
+        {entries.length === 0 && (
+          <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
+            Aguardando atividade...
+          </Typography>
+        )}
+        <div ref={bottomRef} />
+      </Stack>
+    </Box>
+  );
+}
+
 // ── Main GraphView with mode toggle + fullscreen ──────────────────────────────
 function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planningDocs }: GraphViewProps) {
-  const [mode, setMode]         = useState<GraphMode>("force");
+  const [mode, setMode]             = useState<GraphMode>("force");
   const [fullscreen, setFullscreen] = useState(false);
-  const [filter, setFilter]     = useState<GraphFilter>({ ...DEFAULT_FILTER });
-  // Task detail drawer — compartilhado entre Padrão e Hierarquia
+  const [filter, setFilter]         = useState<GraphFilter>({ ...DEFAULT_FILTER });
   const [drawerTask, setDrawerTask] = useState<TaskItem | null>(null);
   const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
 
-  // Mantém o taskMap atualizado via polling
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -453,9 +765,8 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
     if (t) setDrawerTask(t);
   }, []);
 
-  // When height="100%" the outer Box fills its flex parent; otherwise use numeric px
-  const isFill  = height === "100%";
-  const h       = typeof height === "number" ? height : 500;
+  const isFill = height === "100%";
+  const h      = typeof height === "number" ? height : 500;
 
   const graphContent = (fsHeight: number | string) => {
     const numH = typeof fsHeight === "number" ? fsHeight : h;
@@ -471,29 +782,19 @@ function GraphViewInner({ projectId, pollIntervalMs = 8000, height = 500, planni
         {graphContent(isFill ? "100%" : h)}
       </Box>
 
-      {/* Fullscreen dialog */}
+      {/* Fullscreen dialog — 3 painéis redimensionáveis */}
       <Dialog open={fullscreen} onClose={() => setFullscreen(false)} fullScreen
-        PaperProps={{ sx: { bgcolor: "#0D0F14", m: 0 } }}>
-        <DialogContent sx={{ p: 0, display: "flex", flexDirection: "column", height: "100vh" }}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between"
-            sx={{ px: 2, py: 1, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <Typography variant="body2" fontWeight={600} color="text.primary">Grafo do Pipeline</Typography>
-              <GraphToolbar mode={mode} onModeChange={setMode} filter={filter} onFilterChange={setFilter} />
-            </Stack>
-            <Tooltip title="Sair de tela cheia">
-              <IconButton onClick={() => setFullscreen(false)} size="small">
-                <FullscreenExitIcon />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-          <Box sx={{ flexGrow: 1, overflow: "hidden", height: 0 }}>
-            {graphContent("100%")}
-          </Box>
+        PaperProps={{ sx: { bgcolor: "#0D0F14", m: 0, overflow: "hidden" } }}>
+        <DialogContent sx={{ p: 0, overflow: "hidden" }}>
+          <FullscreenLayout
+            projectId={projectId} pollIntervalMs={pollIntervalMs}
+            mode={mode} filter={filter}
+            onModeChange={setMode} onFilterChange={setFilter}
+            onClose={() => setFullscreen(false)}
+          />
         </DialogContent>
       </Dialog>
 
-      {/* Task detail drawer — Hierarquia */}
       <TaskDetailDrawerView task={drawerTask} onClose={() => setDrawerTask(null)} />
     </>
   );

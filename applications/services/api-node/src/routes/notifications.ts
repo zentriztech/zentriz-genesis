@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { notifyTelegramTenant } from "./telegram.js";
 import type { FastifyRequest } from "fastify";
+
+const TELEGRAM_NOTIFY_TYPES = new Set(["project_finished", "blocked", "alert"]);
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -79,6 +82,18 @@ export async function notificationRoutes(app: FastifyInstance) {
        RETURNING id, tenant_id, user_id, project_id, type, title, body, read, created_at`,
       [tenantId, userId, projectId, body.type, body.title.trim(), body.body ?? ""]
     );
+
+    // Push Telegram para tipos críticos — fire-and-forget
+    if (tenantId && TELEGRAM_NOTIFY_TYPES.has(body.type)) {
+      const emoji: Record<string, string> = {
+        project_finished: "✅",
+        blocked: "⚠️",
+        alert: "🚨",
+      };
+      const icon = emoji[body.type] ?? "📢";
+      notifyTelegramTenant(tenantId, `${icon} *${body.title.trim()}*\n${body.body ?? ""}`).catch(() => {});
+    }
+
     return reply.status(201).send(mapRow(result.rows[0]));
   });
 

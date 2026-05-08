@@ -481,7 +481,7 @@ function TaskDetailDrawer({ task, onClose }: { task: TaskItem | null; onClose: (
 interface ForceGraphProps {
   projectId: string;
   pollIntervalMs?: number;
-  height?: number;
+  height?: number | string;
   planningDocs?: PlanningDoc[];
   filter?: GraphFilter;
 }
@@ -789,9 +789,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     }
   }, []);
 
-  // Canvas dims: use measured size; fall back to prop only if observer hasn't fired yet
+  // Canvas dims: always numbers — use measured container size (ResizeObserver);
+  // fall back to prop if observer hasn't fired yet; treat "100%" as 600 placeholder
   const canvasW = containerSize.width  || 800;
-  const canvasH = containerSize.height || height;
+  const canvasH = containerSize.height || (typeof height === "number" ? height : 600);
 
   if (loading) {
     return (

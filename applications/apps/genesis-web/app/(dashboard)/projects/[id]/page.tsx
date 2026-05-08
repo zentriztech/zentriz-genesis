@@ -166,13 +166,19 @@ const TASK_STATUS_COLOR: Record<string, "success" | "info" | "error" | "warning"
 // ── LLM model badge ───────────────────────────────────────────────────────────
 function ModelBadge({ model }: { model: string | null | undefined }) {
   if (!model) return null;
-  const name  = model.toLowerCase();
-  const label = name.includes("opus")   ? "Opus"
-              : name.includes("sonnet") ? "Sonnet"
-              : name.includes("haiku")  ? "Haiku"
-              : model.split("-")[2] ?? model; // fallback: terceiro segmento do model id
-  const color = name.includes("opus")   ? "#f59e0b"
-              : name.includes("sonnet") ? "#6366f1"
+  const name = model.toLowerCase();
+  const label = name.includes("opus")    ? "Opus"
+              : name.includes("sonnet")  ? "Sonnet"
+              : name.includes("haiku")   ? "Haiku"
+              : name.includes("gpt-4.1") ? "GPT-4.1"
+              : name.includes("gpt-4o")  ? "GPT-4o"
+              : name.includes("gpt-4")   ? "GPT-4"
+              : name.includes("o3")      ? "o3"
+              : name.includes("o1")      ? "o1"
+              : model.split(/[-/]/)[0].toUpperCase(); // fallback: primeiro segmento
+  const color = name.includes("opus")               ? "#f59e0b"
+              : name.includes("sonnet")              ? "#6366f1"
+              : name.includes("gpt") || name.includes("o3") || name.includes("o1") ? "#10b981"
               : "#8B949E";
   return (
     <Chip
@@ -1984,11 +1990,7 @@ function ProjectDetailPageInner() {
                                           <TableCell sx={{ fontFamily: "monospace", color: "#8B949E" }}>{log.agent}</TableCell>
                                           <TableCell sx={{ fontFamily: "monospace", color: "#6B7280" }}>#{log.round}</TableCell>
                                           <TableCell>
-                                            <Chip size="small"
-                                              label={log.isOpus ? "Opus" : "Sonnet"}
-                                              sx={{ fontSize: "0.55rem", height: 14,
-                                                bgcolor: log.isOpus ? "#f59e0b22" : "#6366f122",
-                                                color: log.isOpus ? "#f59e0b" : "#6366f1" }} />
+                                            <ModelBadge model={log.model ?? (log.isOpus ? "opus" : "sonnet")} />
                                           </TableCell>
                                           <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#8B949E" }}>
                                             {log.inputTokens.toLocaleString("pt-BR")}

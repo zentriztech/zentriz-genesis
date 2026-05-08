@@ -370,11 +370,42 @@ def _persist_artifacts_for_role(message: dict, response: dict, role_dir: str) ->
             logger.warning("[%s] Falha ao gravar artifact em disco: %s", role_dir.title(), e)
 
 
+def _resolve_llm_api_key(message: dict) -> dict:
+    """FT-13: se o envelope traz llm_config.provider != bedrock/anthropic, resolve api_key via API interna."""
+    llm_cfg = message.get("llm_config") or {}
+    provider = (llm_cfg.get("provider") or "").strip().lower()
+    if not provider or provider in ("bedrock", "anthropic") or llm_cfg.get("api_key"):
+        return message  # já tem key ou não precisa
+    # Resolver via API interna: GET /api/internal/project-llm-config/:projectId
+    project_id = message.get("project_id") or (message.get("inputs") or {}).get("project_id") or ""
+    api_base = os.environ.get("GENESIS_API_URL", "http://api:3000").rstrip("/")
+    internal_token = os.environ.get("GENESIS_API_TOKEN", "")
+    if not (project_id and internal_token):
+        return message
+    try:
+        import urllib.request as _ur, json as _j
+        req = _ur.Request(
+            f"{api_base}/api/internal/project-llm-config/{project_id}",
+            headers={"X-Internal-Token": internal_token},
+        )
+        with _ur.urlopen(req, timeout=5) as r:
+            cfg = _j.loads(r.read().decode())
+        if cfg.get("ok") and cfg.get("apiKey"):
+            new_msg = dict(message)
+            new_msg["llm_config"] = {**llm_cfg, "api_key": cfg["apiKey"]}
+            logger.info("[FT-13-agents] api_key resolvida para provider=%s project=%s", provider, project_id[:8])
+            return new_msg
+    except Exception as e:
+        logger.warning("[FT-13-agents] Não foi possível resolver api_key: %s", e)
+    return message
+
+
 def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
     """Handler genérico para endpoints com prompt fixo."""
     agent_name = AGENT_LABELS.get(role, role)
     try:
         message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
+        message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         logger.info("[%s] Recebeu solicitação. Processando...", agent_name)
         response = run_agent(system_prompt_path=system_prompt, message=message, role=role)
         logger.info("[%s] Solicitação processada com sucesso.", agent_name)
@@ -403,6 +434,7 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
     agent_name = AGENT_LABELS.get(role, role)
     try:
         message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
+        message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         inp = message.get("input") or {}
         ctx = inp.get("context") or {}
         if not ctx and body.get("context"):

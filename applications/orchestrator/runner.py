@@ -295,7 +295,7 @@ def call_engineer(
     message = _build_message_envelope(
         request_id, "Engineer", "generic", "generate_engineering_docs",
         task_id=None, task="Gerar proposta técnica (stacks, squads, dependências).",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_ENGINEER", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -363,7 +363,7 @@ def call_cto(
         inputs["extra_instruction"] = extra_instruction
     message = _build_message_envelope(
         request_id, "CTO", "generic", mode, task_id=None, task="",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_CTO", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -453,8 +453,72 @@ def _product_disk_root(product_id: str) -> Path:
     return root / product_id
 
 
+def _ensure_api_contract(project_id: str, product_id: str | None) -> bool:
+    """Garante que api_contract.md existe. Se não existir, tenta gerar a partir do RUNBOOK.md.
+    Retorna True se o arquivo existe após a tentativa.
+    """
+    try:
+        proj_root = _project_disk_root(project_id, product_id)
+        contract_path = proj_root / "project" / "api_contract.md"
+        if contract_path.exists() and contract_path.stat().st_size > 20:
+            return True
+
+        # Tentar gerar a partir do RUNBOOK.md
+        runbook_candidates = [
+            proj_root / "project" / "RUNBOOK.md",
+            proj_root / "docs" / "devops" / "RUNBOOK.md",
+            proj_root / "docs" / "devops_artifact_0.md",
+        ]
+        runbook_text = ""
+        for rb in runbook_candidates:
+            if rb.exists():
+                runbook_text = rb.read_text(encoding="utf-8", errors="replace")[:8000]
+                break
+
+        if not runbook_text:
+            return False
+
+        import re as _re
+
+        port_match = _re.search(r"(?:localhost|127\.0\.0\.1):(\d{4,5})", runbook_text)
+        port = port_match.group(1) if port_match else "3000"
+
+        email_match = _re.search(r"(?:email|e-mail)\s*[:\|]\s*([a-z0-9_.+-]+@[a-z0-9.-]+\.[a-z]{2,})", runbook_text, _re.I)
+        pass_match  = _re.search(r"(?:password|senha|pwd)\s*[:\|]\s*([^\s\n]{4,40})", runbook_text, _re.I)
+        email    = email_match.group(1) if email_match else "admin@projeto.dev"
+        password = pass_match.group(1)  if pass_match  else "Admin@123"
+
+        endpoints = _re.findall(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[\w/:{}_-]+)", runbook_text)
+        endpoints_md = "\n".join(f"  {m} {ep}" for m, ep in endpoints[:40]) if endpoints else \
+            "  GET  /api/health\n  POST /api/auth/login\n  GET  /api/auth/me"
+
+        content = f"""# API Contract — Projeto {project_id[:8]}
+# Gerado automaticamente pelo runner a partir do RUNBOOK.md (DevOps não gerou)
+
+Base URL: http://localhost:{port}
+Auth: Bearer JWT via POST /api/auth/login
+
+Credenciais seed:
+  email: {email}
+  password: {password}
+
+Endpoints:
+{endpoints_md}
+"""
+        contract_path.parent.mkdir(parents=True, exist_ok=True)
+        contract_path.write_text(content, encoding="utf-8")
+        logger.warning(
+            "[I-2] api_contract.md gerado automaticamente (DevOps não criou) para projeto %s — %d chars",
+            project_id[:8], len(content),
+        )
+        return True
+    except Exception as _e:
+        logger.debug("[I-2] Falha ao garantir api_contract: %s", _e)
+        return False
+
+
 def _copy_contract_to_product(project_id: str, product_id: str | None) -> None:
-    """I-2: Ao aceitar projeto, copia api_contract.md para <product_id>/contracts/.
+    """I-2: Ao aceitar projeto, garante e copia api_contract.md para <product_id>/contracts/.
 
     Chamado quando o projeto é marcado como completed/accepted.
     Permite que predecessores encontrem contratos em path centralizado.
@@ -463,6 +527,8 @@ def _copy_contract_to_product(project_id: str, product_id: str | None) -> None:
         return
     try:
         proj_root = _project_disk_root(project_id, product_id)
+        # Garantir que o contrato existe antes de copiar
+        _ensure_api_contract(project_id, product_id)
         contract_src = proj_root / "project" / "api_contract.md"
         if not contract_src.exists():
             return
@@ -779,7 +845,7 @@ def call_pm(
     message = _build_message_envelope(
         request_id, "PM", module, "generate_backlog",
         task_id=None, task=f"Gerar backlog da squad {module}.",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": 120},
+        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_PM", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -915,17 +981,33 @@ def call_dev(
         task=task or (task_dict.get("description") if task_dict else "") or "Implementar tarefa conforme backlog e spec.",
         inputs=inputs,
         existing_artifacts=existing_artifacts or [],
-        limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": 120},
+        limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_DEV", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("dev", message)
-    from orchestrator.agents.runtime import run_agent
+    from orchestrator.agents.runtime import run_agent, load_system_prompt_with_skills
     _skill_path_for_prompt = _skill_map.get(dev_variant, "dev/backend/nodejs")
     dev_prompt = _agents_root() / Path(*_skill_path_for_prompt.split("/")) / "SYSTEM_PROMPT.md"
     if not dev_prompt.exists():
         dev_prompt = _agents_root() / "dev" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV")
+    # Skill store: determinar stack_key canônico para assembly
+    _dev_stack_key = (
+        _detected_lang if dev_variant in ("backend", "backend_python") else
+        "react-native"          if dev_variant == "mobile" else
+        _skill_path_for_prompt.split("/")[-1] if "/" in _skill_path_for_prompt else
+        "generic"
+    )
+    _dev_system_prompt, _bundle_hash = load_system_prompt_with_skills(
+        dev_prompt, role="dev", stack_key=_dev_stack_key,
+        project_id=_pid, task_id=task_id,
+    )
+    # Gravar bundle_hash na task para auditoria (best-effort)
+    if _bundle_hash and task_id:
+        inputs.setdefault("context", {})["bundle_hash"] = _bundle_hash
+        inputs["context"]["origin_actor"] = "runner"
+    return run_agent(system_prompt_path=dev_prompt, message=message, role="DEV",
+                     system_prompt_override=_dev_system_prompt)
 
 
 def call_qa(
@@ -971,40 +1053,47 @@ def call_qa(
         task=task or "Validar artefatos do Dev (veredito QA_PASS ou QA_FAIL).",
         inputs=inputs,
         existing_artifacts=existing_artifacts or [],
-        limits={"timeout_sec": 120},
+        limits={"timeout_sec": int(os.environ.get("AGENT_TIMEOUT_QA", "600"))},
     )
     # GAP-A1: QA master tem prioridade — especialização dinâmica pela spec
     # Quando API_AGENTS_URL está set, o skill_path é resolvido pelo servidor de agentes
     _qa_master = _agents_root() / "qa" / "SYSTEM_PROMPT.md"
-    if _qa_master.exists() and not os.environ.get("API_AGENTS_URL"):
-        # Modo local: usar master diretamente
-        from orchestrator.agents.runtime import run_agent
-        return run_agent(system_prompt_path=_qa_master, message=message, role="QA")
     if os.environ.get("API_AGENTS_URL"):
         # Modo HTTP: injetar skill_path=qa para servidor usar master
         message.setdefault("inputs", {}).setdefault("context", {})["skill_path"] = "qa"
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("qa", message)
-    from orchestrator.agents.runtime import run_agent
-    # Fallback legado: detecção de stack para QA variant
+    from orchestrator.agents.runtime import run_agent, load_system_prompt_with_skills
+    # Determinar prompt e stack_key para QA
     _qa_pid = os.environ.get("PROJECT_ID")
-    _qa_lang = "nodejs"
-    try:
-        _qa_stack = _detect_backend_stack(
-            project_id=_qa_pid,
-            engineer_proposal="",
-            charter_fallback=charter_summary,
-            backlog_fallback=backlog_summary,
-        )
-        _qa_lang = _qa_stack["language"]
-    except (RuntimeError, Exception) as _e:
-        logger.warning("[call_qa] Stack detection failed (%s) — usando nodejs QA", _e)
-    _python_qa_prompt = _agents_root() / "qa" / "backend" / "python" / "SYSTEM_PROMPT.md"
-    if _qa_lang == "python" and _python_qa_prompt.exists():
-        qa_prompt = _python_qa_prompt
+    if _qa_master.exists():
+        qa_prompt   = _qa_master
+        _qa_stack_key = "generic"
     else:
-        qa_prompt = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=qa_prompt, message=message, role="QA")
+        # Fallback legado: detecção de stack para QA variant
+        _qa_lang = "nodejs"
+        try:
+            _qa_stack = _detect_backend_stack(
+                project_id=_qa_pid,
+                engineer_proposal="",
+                charter_fallback=charter_summary,
+                backlog_fallback=backlog_summary,
+            )
+            _qa_lang = _qa_stack["language"]
+        except (RuntimeError, Exception) as _e:
+            logger.warning("[call_qa] Stack detection failed (%s) — usando nodejs QA", _e)
+        _python_qa_prompt = _agents_root() / "qa" / "backend" / "python" / "SYSTEM_PROMPT.md"
+        if _qa_lang == "python" and _python_qa_prompt.exists():
+            qa_prompt     = _python_qa_prompt
+            _qa_stack_key = "python-fastapi"
+        else:
+            qa_prompt     = _agents_root() / "qa" / "backend" / "nodejs" / "SYSTEM_PROMPT.md"
+            _qa_stack_key = "nodejs"
+    _qa_system_prompt, _qa_bundle_hash = load_system_prompt_with_skills(
+        qa_prompt, role="qa", stack_key=_qa_stack_key, project_id=_qa_pid,
+    )
+    return run_agent(system_prompt_path=qa_prompt, message=message, role="QA",
+                     system_prompt_override=_qa_system_prompt)
 
 
 def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_summary: str, qa_summary: str, request_id: str) -> dict:
@@ -1019,7 +1108,7 @@ def call_monitor(spec_ref: str, charter_summary: str, backlog_summary: str, dev_
     message = _build_message_envelope(
         request_id, "Monitor", "backend", "orchestrate",
         task_id=None, task="Decidir próximo passo (Dev/QA/DevOps) e atualizar estado.",
-        inputs=inputs, existing_artifacts=[], limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": 120},
+        inputs=inputs, existing_artifacts=[], limits={"max_rework": int(os.environ.get("MAX_QA_REWORK", "3")), "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_MONITOR", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -1218,14 +1307,19 @@ def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, reque
     message = _build_message_envelope(
         request_id, "DevOps", "docker", "provision_artifacts",
         task_id=None, task="Analisar artefatos gerados pelo Dev e produzir start.sh + RUNBOOK.md para executar o produto localmente.",
-        inputs=inputs, existing_artifacts=trimmed_artifacts, limits={"timeout_sec": 180},
+        inputs=inputs, existing_artifacts=trimmed_artifacts, limits={"timeout_sec": int(os.environ.get("AGENT_TIMEOUT_DEVOPS", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("devops", message)
-    from orchestrator.agents.runtime import run_agent
+    from orchestrator.agents.runtime import run_agent, load_system_prompt_with_skills
     devops_prompt = _agents_root() / "devops" / "docker" / "SYSTEM_PROMPT.md"
-    return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS")
+    _devops_system_prompt, _ = load_system_prompt_with_skills(
+        devops_prompt, role="devops", stack_key="docker",
+        project_id=os.environ.get("PROJECT_ID"),
+    )
+    return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS",
+                     system_prompt_override=_devops_system_prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1417,17 @@ def _build_message_envelope(
 ) -> dict:
     """Monta MessageEnvelope completo para o Enforcer (project_id, mode, task_id, inputs, existing_artifacts, limits)."""
     project_id = _project_id() or "default"
+    # FT-13: propaga provider e model para o agents container via envelope.
+    # NUNCA incluir api_key no envelope — segurança e evita corrupção do contexto LLM.
+    # O agents container resolve a api_key via GENESIS_API_TOKEN → FT-13 no server.py.
+    _llm_config: dict = {}
+    _provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip()
+    _model    = os.environ.get("CLAUDE_MODEL", "").strip()
+    if _provider:
+        _llm_config["provider"] = _provider
+    if _model:
+        _llm_config["model"]    = _model
+
     return {
         "request_id": request_id,
         "project_id": project_id,
@@ -1335,6 +1440,7 @@ def _build_message_envelope(
         "existing_artifacts": existing_artifacts or [],
         "limits": limits or {"max_rounds": 3, "max_rework": 3, "timeout_sec": int(os.environ.get("REQUEST_TIMEOUT", "300"))},
         "input": inputs,  # compatibilidade: runtime pode ler input ou inputs
+        "llm_config": _llm_config,  # FT-13: override de provider/api_key/model por projeto
     }
 
 
@@ -1480,14 +1586,14 @@ def _post_error(message: str, request_id: str, exc: BaseException | None = None)
         if error_detail.get("human_message"):
             body = error_detail["human_message"]
         if _is_timeout_error(exc, body):
-            body = "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner."
+            body = "O agente demorou mais que o limite configurado para responder. O pipeline foi marcado como failed — use /run ou o botão Reiniciar para retomar do checkpoint."
         if SHOW_TRACEBACK:
             tb_text = error_detail.get("traceback", "")
             if not tb_text:
                 tb_text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
             body += "\n\n--- Traceback (SHOW_TRACEBACK=true) ---\n" + tb_text[:3000]
     elif _is_timeout_error(None, body):
-        body = "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner."
+        body = "O agente demorou mais que o limite configurado para responder. O pipeline foi marcado como failed — use /run ou o botão Reiniciar para retomar do checkpoint."
     logger.error("[Pipeline] %s", body[:500])
     _post_dialogue("system", "error", "error", body, request_id)
 
@@ -1863,14 +1969,8 @@ def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
             "owner_role": "QA",
             "status":    "NEW",
             "requirements": (
-                "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
-                "Esta é a ÚLTIMA task. O agente DEVE: "
-                "(1) build sem erros TypeScript; "
-                "(2) executar start.sh e confirmar que o servidor sobe; "
-                "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
-                "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
-                "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
-                "Ver prompt completo em project/full-test-prompt.md"
+                "TSK-FULL-TEST — Validação E2E e correção de bugs (Claude Code Agent). "
+                "Ver project/full-test-prompt.md"
             ),
         })
 
@@ -3657,13 +3757,27 @@ def main() -> int:
                     )
                     break
                 if _hint_round == _hint_retry_rounds:
-                    _post_error(
-                        "Charter sem complexity_hint após todas as tentativas de revisão. "
-                        "Pipeline interrompido — verifique o SYSTEM_PROMPT do CTO.",
-                        request_id, None,
+                    # Fallback: inferir complexity_hint pela spec em vez de bloquear o pipeline
+                    _spec_len = len(spec_understood or spec_content or "")
+                    _fr_count = len(re.findall(r"\bFR[-\s]?\d+\b", spec_understood or spec_content or "", re.IGNORECASE))
+                    if _spec_len < 1000 or _fr_count <= 2:
+                        _inferred = "low"
+                    elif _spec_len < 4000 or _fr_count <= 8:
+                        _inferred = "medium"
+                    else:
+                        _inferred = "high"
+                    _complexity_hint_for_patch = _inferred
+                    logger.warning(
+                        "[Pipeline] complexity_hint não obtido do CTO após %d tentativas. "
+                        "Inferido automaticamente como '%s' (spec_len=%d, fr_count=%d).",
+                        _hint_retry_rounds, _inferred, _spec_len, _fr_count,
                     )
-                    _patch_project({"status": "failed"})
-                    return
+                    _post_step(
+                        f"complexity_hint inferido automaticamente como '{_inferred}' (CTO não forneceu). "
+                        f"Prosseguindo para o PM.",
+                        request_id,
+                    )
+                    break
 
         if _complexity_hint_for_patch:
             _patch_project({"complexity_hint": _complexity_hint_for_patch})

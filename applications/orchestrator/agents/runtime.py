@@ -241,6 +241,120 @@ Use <thinking> para planejar antes de <response>.
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Skill Store — assembly dinâmico de SYSTEM_PROMPT
+# ─────────────────────────────────────────────────────────────────────────────
+
+import hashlib as _hashlib
+import urllib.request as _urllib_req
+import urllib.parse as _urllib_parse
+
+# SKILL_STORE_MODE controla o comportamento do assembly dinâmico:
+#   "off"    — usa SYSTEM_PROMPT estático (comportamento legado, padrão)
+#   "shadow" — monta via skill store e compara com estático; usa estático em runtime
+#   "active" — usa o prompt montado pelo skill store; fallback para estático se falhar
+SKILL_STORE_MODE = os.environ.get("SKILL_STORE_MODE", "off").strip().lower()
+
+# URL base da API Genesis (runner_server chama a mesma API)
+_GENESIS_API_URL   = os.environ.get("GENESIS_API_URL", "http://localhost:3333")
+_GENESIS_API_TOKEN = os.environ.get("GENESIS_API_TOKEN", "")
+
+
+def _skill_store_assemble(
+    role: str,
+    stack_key: str,
+    project_id: str | None = None,
+    task_id: str | None = None,
+) -> tuple[str, str] | None:
+    """
+    Chama GET /api/skills/assemble e retorna (assembled_prompt, bundle_hash).
+    Retorna None em caso de falha (timeout, API indisponível, sem cobertura).
+    """
+    if not _GENESIS_API_TOKEN:
+        return None
+    try:
+        params = {"role": role, "stack_key": stack_key}
+        if project_id:
+            params["project_id"] = project_id
+        if task_id:
+            params["task_id"] = task_id
+        qs = _urllib_parse.urlencode(params)
+        url = f"{_GENESIS_API_URL}/api/skills/assemble?{qs}"
+        req = _urllib_req.Request(
+            url,
+            headers={"Authorization": f"Bearer {_GENESIS_API_TOKEN}"},
+        )
+        with _urllib_req.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        d = data.get("data", {})
+        prompt = d.get("assembled_prompt", "")
+        bundle_hash = d.get("bundle_hash", "")
+        if not prompt:
+            return None
+        return prompt, bundle_hash
+    except Exception as _e:
+        logger.debug("[SkillStore] assemble falhou (%s) — usando SYSTEM_PROMPT estático", _e)
+        return None
+
+
+def load_system_prompt_with_skills(
+    system_prompt_path: Path,
+    role: str,
+    stack_key: str,
+    project_id: str | None = None,
+    task_id: str | None = None,
+) -> tuple[str, str | None]:
+    """
+    Versão enriquecida de load_system_prompt() que integra o skill store.
+
+    Comportamento por SKILL_STORE_MODE:
+      "off"    → retorna (load_system_prompt(path), None) — sem skill store
+      "shadow" → monta via skill store em paralelo; usa estático; loga diferença de hash
+      "active" → usa prompt do skill store; fallback para estático se skill store falhar
+
+    Retorna: (system_prompt_text, bundle_hash_or_None)
+    """
+    static_prompt = load_system_prompt(system_prompt_path)
+
+    if SKILL_STORE_MODE == "off":
+        return static_prompt, None
+
+    result = _skill_store_assemble(role, stack_key, project_id, task_id)
+
+    if SKILL_STORE_MODE == "shadow":
+        if result is not None:
+            dynamic_prompt, bundle_hash = result
+            # Comparar hashes para detectar divergência — nunca bloquear execução
+            static_hash  = _hashlib.sha256(static_prompt.encode()).hexdigest()[:12]
+            dynamic_hash = _hashlib.sha256(dynamic_prompt.encode()).hexdigest()[:12]
+            if static_hash != dynamic_hash:
+                logger.info(
+                    "[SkillStore/shadow] role=%s stack=%s — estático:%s dinâmico:%s bundle:%s",
+                    role, stack_key, static_hash, dynamic_hash, bundle_hash
+                )
+            else:
+                logger.debug("[SkillStore/shadow] role=%s stack=%s — hashes idênticos ✓", role, stack_key)
+        # shadow sempre usa o prompt estático em runtime
+        return static_prompt, None
+
+    # SKILL_STORE_MODE == "active"
+    if result is not None:
+        dynamic_prompt, bundle_hash = result
+        logger.debug("[SkillStore/active] role=%s stack=%s bundle=%s", role, stack_key, bundle_hash)
+        # O prompt dinâmico SUBSTITUI o body do static, mas mantém LEI 2 e protocolo shared
+        # Para garantir LEI 2, aplicamos as regras críticas ao prompt dinâmico
+        critical = _load_critical_rules_lei2()
+        if critical:
+            opening = "## INÍCIO — Regras críticas (LEI 2)\n\n" + critical + "\n\n---\n\n"
+            closing = "\n\n---\n\n## LEMBRETES FINAIS (LEI 2 — leia com atenção)\n\n" + critical + "\n"
+            dynamic_prompt = opening + dynamic_prompt.rstrip() + closing
+        return dynamic_prompt, bundle_hash
+
+    # Fallback: skill store indisponível → usar estático
+    logger.warning("[SkillStore/active] role=%s stack=%s — sem cobertura, fallback estático", role, stack_key)
+    return static_prompt, None
+
+
 def _load_product_spec_template() -> str:
     for p in _SPEC_TEMPLATE_PATHS:
         if p.exists():
@@ -459,23 +573,178 @@ def _get_model_for_role(role: str) -> str:
     return os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 
+# OpenAI model limits (context window e max_output)
+_OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
+    "gpt-4o":            {"context": 128_000, "max_output": 16_384},
+    "gpt-4o-mini":       {"context": 128_000, "max_output": 16_384},
+    "gpt-4-turbo":       {"context": 128_000, "max_output": 4_096},
+    "gpt-4":             {"context": 8_192,   "max_output": 4_096},
+    "gpt-4-32k":         {"context": 32_768,  "max_output": 4_096},
+    "gpt-4.1":           {"context": 1_000_000, "max_output": 32_768},
+    "gpt-4.1-mini":      {"context": 1_000_000, "max_output": 32_768},
+    "gpt-4.1-nano":      {"context": 1_000_000, "max_output": 32_768},
+    "o1":                {"context": 200_000, "max_output": 100_000},
+    "o1-mini":           {"context": 128_000, "max_output": 65_536},
+    "o3-mini":           {"context": 200_000, "max_output": 100_000},
+}
+_OPENAI_DEFAULT_LIMITS = {"context": 128_000, "max_output": 16_384}
+
+
+def _run_agent_openai(
+    system_prompt_path: str | Path,
+    message: dict,
+    role: str,
+    api_key: str,
+    model: str,
+    timeout: int,
+    system_prompt_override: str | None = None,
+) -> dict:
+    """Executa agente via OpenAI SDK — interface compatível com run_agent (Anthropic/Bedrock)."""
+    from openai import OpenAI as _OpenAI  # type: ignore
+
+    client    = _OpenAI(api_key=api_key, timeout=timeout)
+    oai_lim   = _OPENAI_MODEL_LIMITS.get(model, _OPENAI_DEFAULT_LIMITS)
+    env_max   = int(os.environ.get("CLAUDE_MAX_TOKENS", "16384"))
+    max_tokens = min(env_max, oai_lim["max_output"])
+
+    mode = message.get("mode") or "default"
+    system_content = system_prompt_override if system_prompt_override else build_system_prompt(Path(system_prompt_path), role, mode)
+    user_content   = build_user_message(message, role=role)
+    request_id     = message.get("request_id", "unknown")
+    agent_name     = _label(role)
+    t0             = time.perf_counter()
+
+    logger.info("[%s][OpenAI] modelo=%s max_tokens=%d timeout=%ds", agent_name, model, max_tokens, timeout)
+
+    raw_text = ""
+    for attempt in range(CLAUDE_RETRY_ATTEMPTS):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user",   "content": user_content},
+                ],
+            )
+            raw_text = resp.choices[0].message.content or ""
+            _in  = resp.usage.prompt_tokens     if resp.usage else 0
+            _out = resp.usage.completion_tokens if resp.usage else 0
+            logger.info("[%s][OpenAI] Resposta recebida tokens_in=%d tokens_out=%d", agent_name, _in, _out)
+            break
+        except Exception as e:
+            err_lower = str(e).lower()
+            is_retryable = (
+                getattr(e, "status_code", None) in (429, 500, 502, 503)
+                or "timeout" in err_lower
+                or "connection" in err_lower
+            )
+            if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
+                time.sleep(2 + attempt * 2)
+                continue
+            raise RuntimeError(
+                json.dumps({"agent": role, "model": model, "error": str(e), "human_message": str(e)}, ensure_ascii=False)
+            ) from e
+
+    _persist_raw_llm_response(role, message, raw_text)
+
+    # Reutilizar o mesmo parser de envelope que Anthropic usa
+    try:
+        from orchestrator.envelope import parse_response_envelope
+        out, _ = parse_response_envelope(raw_text, request_id, require_artifacts=False, require_evidence_when_ok=True)
+    except Exception:
+        # Fallback: extrair JSON do bloco de código
+        text = raw_text
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+        try:
+            out = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            out = {"request_id": request_id, "status": "FAIL", "summary": raw_text[:500], "artifacts": [], "evidence": [], "next_actions": {}}
+
+    out["validator_pass"] = True
+    out["_model"] = model
+    out["_duration_ms"] = int((time.perf_counter() - t0) * 1000)
+    log_agent_call(agent_name, mode, {}, out, out["_duration_ms"], request_id=request_id)
+    return _normalize_response_envelope(out, request_id, raw_text)
+
+
 def run_agent(
     system_prompt_path: str | Path,
     message: dict,
     role: str = "PM",
+    system_prompt_override: str | None = None,
 ) -> dict:
     """
-    Executa o agente: system prompt + message -> Claude -> response_envelope.
-    message deve conter request_id, input (spec_ref, context, task, constraints, artifacts).
-    Retorna dict com status, summary, artifacts, evidence, next_actions (formato response_envelope).
+    Executa o agente: system prompt + message -> LLM -> response_envelope.
+    Suporta Anthropic, AWS Bedrock e OpenAI.
+    Lê llm_config do envelope (FT-13) como override do env do container.
+    system_prompt_override: quando fornecido (skill store ativo), substitui a leitura do arquivo .md.
     """
+    # FT-13: llm_config no envelope — lê sem mutar os.environ (evita contaminação global)
+    _llm_cfg = message.get("llm_config") or {}
+    _provider_override = (_llm_cfg.get("provider") or "").strip().lower()
+    _api_key_override  = (_llm_cfg.get("api_key")  or "").strip()
+    _model_override    = (_llm_cfg.get("model")    or "").strip()
+
+    # Auto-detectar provider pelo nome do modelo quando há conflito
+    # Ex: provider=openai mas model=claude-sonnet-4-5 → usar bedrock/anthropic
+    def _infer_provider_from_model(m: str) -> str:
+        ml = m.lower()
+        if any(x in ml for x in ("claude", "anthropic", "sonnet", "opus", "haiku")):
+            return "bedrock" if ml.startswith("us.anthropic") else "anthropic"
+        if any(x in ml for x in ("gpt", "o1", "o3", "davinci", "composer")):
+            return "openai"
+        return ""
+
+    _raw_provider = _provider_override or os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
+    _model_for_inference = _model_override or _get_model_for_role(role)
+    _inferred = _infer_provider_from_model(_model_for_inference)
+    # Se o provider declarado é openai mas o modelo é Claude → corrigir silenciosamente
+    if _raw_provider == "openai" and _inferred and _inferred != "openai":
+        logger.warning(
+            "[FT-13] provider='openai' mas modelo '%s' é %s — corrigindo provider automaticamente.",
+            _model_for_inference, _inferred,
+        )
+        provider = _inferred
+    else:
+        provider = _raw_provider
+
+    # model e timeout definidos aqui para uso tanto no bloco OpenAI quanto Anthropic/Bedrock
+    model   = _model_override or _get_model_for_role(role)
+    _msg_limits_early = message.get("limits") or {}
+    timeout = int(
+        _msg_limits_early.get("timeout_sec")
+        or os.environ.get("REQUEST_TIMEOUT")
+        or 900
+    )
+
+    # ── OpenAI ────────────────────────────────────────────────────────────────
+    if provider == "openai":
+        try:
+            from openai import OpenAI as _OpenAI  # noqa: F401
+        except ImportError:
+            raise ImportError("Instale openai: pip install openai")
+        _oai_key = _api_key_override or os.environ.get("CLAUDE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        if not _oai_key:
+            raise ValueError("CLAUDE_API_KEY (ou OPENAI_API_KEY) não definida para provider openai.")
+        return _run_agent_openai(
+            system_prompt_path=system_prompt_path,
+            message=message,
+            role=role,
+            api_key=_oai_key,
+            model=model,
+            timeout=timeout,
+            system_prompt_override=system_prompt_override,
+        )
+
     try:
         from anthropic import Anthropic
         from anthropic import AnthropicBedrock
     except ImportError:
         raise ImportError("Instale anthropic: pip install anthropic")
-
-    provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
 
     if provider == "bedrock":
         aws_region = (
@@ -484,33 +753,39 @@ def run_agent(
             or os.environ.get("AWS_DEFAULT_REGION")
             or "us-east-1"
         )
-        # Passar credenciais explícitas quando disponíveis no env — evita ProfileNotFound
-        # quando ~/.aws/config não existe (ex.: EC2 sem perfil configurado).
-        # Também remover AWS_PROFILE do env temporariamente para evitar que boto3
-        # tente carregar um perfil inexistente antes de usar as credenciais explícitas.
+        # Construir cliente Bedrock com credenciais explícitas do env.
+        # NUNCA usar profile — AWS_PROFILE vazio ("") causa ProfileNotFound no botocore
+        # mesmo após pop() porque a Session interna já pode estar cacheada.
+        # Solução: sempre passar aws_access_key + aws_secret_key diretamente.
         _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
         _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
-        _profile = os.environ.pop("AWS_PROFILE", None)  # remove para não interferir
-        try:
-            if _ak and _sk:
-                client = AnthropicBedrock(
-                    aws_region=aws_region,
-                    aws_access_key=_ak,
-                    aws_secret_key=_sk,
-                )
-            else:
-                client = AnthropicBedrock(aws_region=aws_region)
-        finally:
-            if _profile:
-                os.environ["AWS_PROFILE"] = _profile  # restaura se existia
-        api_key = None  # não utilizado no modo bedrock
+        _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+
+        os.environ.pop("AWS_PROFILE", None)
+        os.environ.pop("AWS_DEFAULT_PROFILE", None)
+
+        if not (_ak and _sk):
+            raise ValueError(
+                "AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY são obrigatórios para Bedrock. "
+                "Defina no .env."
+            )
+
+        kwargs: dict = {
+            "aws_region":     aws_region,
+            "aws_access_key": _ak,
+            "aws_secret_key": _sk,
+        }
+        if _token:
+            kwargs["aws_session_token"] = _token
+
+        client = AnthropicBedrock(**kwargs)
+        api_key = None
     else:
         api_key = os.environ.get("CLAUDE_API_KEY")
         if not api_key:
             raise ValueError("CLAUDE_API_KEY não definida. Para Bedrock, use GENESIS_LLM_PROVIDER=bedrock")
 
-    model = _get_model_for_role(role)
-    timeout = int(os.environ.get("REQUEST_TIMEOUT", "180"))
+    # model e timeout já foram definidos acima (antes do bloco OpenAI)
     agent_name = _label(role)
 
     inp = message.get("inputs") or message.get("input") or {}
@@ -523,7 +798,12 @@ def run_agent(
     # Include task_id in circuit key so each task has its own breaker
     circuit_key = (str(project_id), str(role), str(mode), str(task_id or ""))
 
-    system_content = build_system_prompt(Path(system_prompt_path), role, mode)
+    # Skill store: usar override quando disponível (SKILL_STORE_MODE=active)
+    # system_prompt_override já tem LEI 2 aplicada por load_system_prompt_with_skills()
+    if system_prompt_override:
+        system_content = system_prompt_override
+    else:
+        system_content = build_system_prompt(Path(system_prompt_path), role, mode)
     t0_run = time.perf_counter()
     if _circuit_failures.get(circuit_key, 0) >= CIRCUIT_BREAKER_THRESHOLD:
         logger.warning("[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s).", agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD)
@@ -547,7 +827,9 @@ def run_agent(
     if provider != "bedrock":
         client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
-    env_max = int(os.environ.get("CLAUDE_MAX_TOKENS", "16000"))
+    # Bug fix: CLAUDE_MAX_TOKENS é o teto padrão mas roles específicos (Engineer, PM, Dev)
+    # precisam de mais tokens. env_max é elevado por role abaixo — não limitar aqui.
+    env_max = int(os.environ.get("CLAUDE_MAX_TOKENS", "32000"))
 
     # Escada de modelo/tokens por rework_attempt — Dev e QA
     # rework 0 → modelo padrão + tokens padrão
@@ -574,22 +856,23 @@ def run_agent(
         # E2E: cap para spec_intake evita resposta gigante e timeout (E2E_CORRECTION_PLAN)
         if (mode or "").strip().lower() == "spec_intake_and_normalize":
             max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
-        # Engineer (generate_engineering_docs): resposta longa (3 docs completos) — garantir teto alto para raw completo
+        # Bug fix: tokens por role NÃO são limitados por env_max (teto padrão).
+        # Cada role usa seu próprio teto — max() garante o maior entre o calculado e o role-specific.
         if (role or "").upper() == "ENGINEER" and (mode or "").strip().lower() == "generate_engineering_docs":
             engineer_max = int(os.environ.get("CLAUDE_MAX_TOKENS_ENGINEER", "32000"))
-            max_tokens = max(max_tokens, min(engineer_max, env_max))
-        # PM (generate_backlog): BACKLOG.md + DOD.md completos — teto alto para raw completo
+            max_tokens = max(max_tokens, engineer_max)
         if (role or "").upper() == "PM" and (mode or "").strip().lower() == "generate_backlog":
             pm_max = int(os.environ.get("CLAUDE_MAX_TOKENS_PM", "32000"))
-            max_tokens = max(max_tokens, min(pm_max, env_max))
-        # Dev (implement_task): código completo de componentes — precisa de espaço generoso
+            max_tokens = max(max_tokens, pm_max)
         if (role or "").upper() == "DEV" and (mode or "").strip().lower() == "implement_task":
             dev_max = int(os.environ.get("CLAUDE_MAX_TOKENS_DEV", "32000"))
-            max_tokens = max(max_tokens, min(dev_max, env_max))
-        # QA (validate_task): precisa ver artifacts completos + gerar report detalhado
+            max_tokens = max(max_tokens, dev_max)
         if (role or "").upper() == "QA" and (mode or "").strip().lower() == "validate_task":
             qa_max = int(os.environ.get("CLAUDE_MAX_TOKENS_QA", "16000"))
-            max_tokens = max(max_tokens, min(qa_max, env_max))
+            max_tokens = max(max_tokens, qa_max)
+        # Spec intake: manter o cap reduzido (resposta pequena esperada)
+        if (mode or "").strip().lower() == "spec_intake_and_normalize":
+            max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None

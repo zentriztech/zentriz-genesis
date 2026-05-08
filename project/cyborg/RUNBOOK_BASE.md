@@ -122,3 +122,15 @@ As variáveis abaixo são injetadas pelo `full-test-server.py` ao spawnar este p
 ```
 PROJECT_ID, PROJECT_DIR, PROJECT_TYPE, GENESIS_API_URL, GENESIS_TOKEN, ATTEMPT
 ```
+
+
+---
+
+## INSTRUÇÃO FINAL OBRIGATÓRIA
+
+Apos chamar o curl de accept ou reject, imprima obrigatoriamente uma das linhas abaixo:
+
+- Se aceito: escreva exatamente: CYBORG_PASS
+- Se rejeitado: escreva exatamente: CYBORG_FAIL: motivo
+
+Isso e necessario para que o full-test-server registre o veredicto.

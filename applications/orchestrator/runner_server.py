@@ -237,34 +237,126 @@ def run(body: RunBody):
         }
 
         # FT-13: Resolver credenciais LLM pela autoridade do projeto (zentriz_admin vs tenant)
+        # Usa GENESIS_API_TOKEN do env (token interno do runner, aceito pelo endpoint)
         try:
             import urllib.request as _urlreq
+            _internal_token = os.environ.get("GENESIS_API_TOKEN", "").strip() or body.token
             _llm_url = f"{body.apiBaseUrl.rstrip('/')}/api/internal/project-llm-config/{body.projectId}"
-            _req = _urlreq.Request(_llm_url, headers={"X-Internal-Token": body.token})
+            _req = _urlreq.Request(_llm_url, headers={"X-Internal-Token": _internal_token})
             with _urlreq.urlopen(_req, timeout=5) as _resp:
                 import json as _json
                 _llm_cfg = _json.loads(_resp.read().decode())
             if _llm_cfg.get("ok"):
-                if _llm_cfg.get("apiKey"):
-                    env["CLAUDE_API_KEY"] = _llm_cfg["apiKey"]
-                if _llm_cfg.get("provider"):
-                    env["GENESIS_LLM_PROVIDER"] = _llm_cfg["provider"]
-                if _llm_cfg.get("modelId"):
-                    env["CLAUDE_MODEL"] = _llm_cfg["modelId"]
-                if _llm_cfg.get("awsRegion"):
-                    env["GENESIS_AWS_REGION"] = _llm_cfg["awsRegion"]
-                if _llm_cfg.get("awsAccessKeyId"):
-                    env["AWS_ACCESS_KEY_ID"] = _llm_cfg["awsAccessKeyId"]
-                if _llm_cfg.get("awsSecretAccessKey"):
-                    env["AWS_SECRET_ACCESS_KEY"] = _llm_cfg["awsSecretAccessKey"]
+                _raw_provider = (_llm_cfg.get("provider") or "").strip().lower()
+                _model_id     = (_llm_cfg.get("modelId")  or "").strip()
+                _api_key      = (_llm_cfg.get("apiKey")   or "").strip()
+
+                # Validar compatibilidade provider ↔ modelo.
+                # Regra: respeitar o provider do banco. Só corrigir se for impossível
+                # (ex: provider=bedrock com modelo gpt-4o, ou provider=openai com modelo us.anthropic.*).
+                def _is_compatible(prov: str, m: str) -> bool:
+                    ml = m.lower()
+                    if prov == "bedrock"     and ml.startswith("us.anthropic"): return True
+                    if prov == "anthropic"   and any(x in ml for x in ("claude", "sonnet", "opus", "haiku")) and not ml.startswith("us.anthropic"): return True
+                    if prov == "openai"      and any(x in ml for x in ("gpt", "o1", "o3", "o4", "composer", "davinci")): return True
+                    if prov == "azure_openai" and any(x in ml for x in ("gpt", "o1", "o3", "davinci")): return True
+                    # Modelo desconhecido → assumir compatível (não quebrar)
+                    known = any(x in ml for x in ("claude","sonnet","opus","haiku","gpt","o1","o3","o4","composer","davinci","us.anthropic"))
+                    return not known
+
+                if _model_id and not _is_compatible(_raw_provider, _model_id):
+                    # Inferir provider correto para o modelo
+                    ml = _model_id.lower()
+                    if ml.startswith("us.anthropic"):
+                        _corrected = "bedrock"
+                    elif any(x in ml for x in ("claude", "sonnet", "opus", "haiku")):
+                        _corrected = "anthropic"
+                    elif any(x in ml for x in ("gpt", "o1", "o3", "o4", "composer", "davinci")):
+                        _corrected = "openai"
+                    else:
+                        _corrected = _raw_provider
+                    logger.warning(
+                        "[FT-13] provider='%s' incompatível com modelo '%s' — corrigindo para '%s'",
+                        _raw_provider, _model_id, _corrected,
+                    )
+                    _effective_provider = _corrected
+                else:
+                    _effective_provider = _raw_provider
+
+                env["GENESIS_LLM_PROVIDER"] = _effective_provider
+                env["CLAUDE_MODEL"]          = _model_id
+
+                # Credentials por provider
+                if _effective_provider == "openai" and _api_key:
+                    env["CLAUDE_API_KEY"] = _api_key
+                elif _effective_provider == "anthropic" and _api_key:
+                    env["CLAUDE_API_KEY"] = _api_key
+                elif _effective_provider == "bedrock":
+                    # Bedrock usa credenciais AWS do env — não sobrescrever com OpenAI key
+                    if _llm_cfg.get("awsAccessKeyId"):
+                        env["AWS_ACCESS_KEY_ID"]     = _llm_cfg["awsAccessKeyId"]
+                    if _llm_cfg.get("awsSecretAccessKey"):
+                        env["AWS_SECRET_ACCESS_KEY"] = _llm_cfg["awsSecretAccessKey"]
+                    if _llm_cfg.get("awsRegion"):
+                        env["GENESIS_AWS_REGION"]    = _llm_cfg["awsRegion"]
+                    # Limpar qualquer CLAUDE_API_KEY OpenAI que possa ter vazado
+                    env.pop("CLAUDE_API_KEY", None)
+
                 _is_default = _llm_cfg.get("isDefault", True)
                 logger.info("[FT-13] LLM config resolvida: provider=%s model=%s isDefault=%s",
-                            env.get("GENESIS_LLM_PROVIDER"), env.get("CLAUDE_MODEL"), _is_default)
+                            _effective_provider, _model_id, _is_default)
         except Exception as _llm_err:
             logger.warning("[FT-13] Não foi possível resolver LLM config via API (%s) — usando env atual", _llm_err)
 
         if not env.get("CLAUDE_API_KEY") and env.get("GENESIS_LLM_PROVIDER", "bedrock") != "bedrock":
             logger.warning("CLAUDE_API_KEY não definida; o runner pode falhar ao chamar os agentes")
+
+        # Runtime Config: sobrescreve env com valores da tabela genesis_runtime_config
+        # Gera token fresco assinado com JWT_SECRET atual (body.token pode estar desatualizado)
+        try:
+            import urllib.request as _urlreq2
+            import json as _json2
+            import time as _time
+            import hmac as _hmac
+            import hashlib as _hashlib
+            import struct as _struct
+
+            # Gerar JWT HS256 mínimo sem dependência externa
+            def _make_jwt(secret: str) -> str:
+                import base64 as _b64
+                header  = _b64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+                now     = int(_time.time())
+                payload = _b64.urlsafe_b64encode(
+                    _json2.dumps({"sub":"runner","role":"zentriz_admin","tenantId":None,"iat":now,"exp":now+300}).encode()
+                ).rstrip(b"=").decode()
+                sig_input = f"{header}.{payload}".encode()
+                sig = _b64.urlsafe_b64encode(
+                    _hmac.HMAC(secret.encode(), sig_input, _hashlib.sha256).digest()
+                ).rstrip(b"=").decode()
+                return f"{header}.{payload}.{sig}"
+
+            _jwt_secret = os.environ.get("JWT_SECRET", "genesis_secret")
+            _fresh_token = _make_jwt(_jwt_secret)
+            _cfg_url = f"{body.apiBaseUrl.rstrip('/')}/api/admin/runtime-config/resolved"
+            _cfg_req = _urlreq2.Request(_cfg_url, headers={"Authorization": f"Bearer {_fresh_token}"})
+            with _urlreq2.urlopen(_cfg_req, timeout=5) as _cfg_resp:
+                _runtime_cfg = _json2.loads(_cfg_resp.read().decode())
+            _RUNTIME_KEYS = {
+                "AGENT_TIMEOUT_ENGINEER", "AGENT_TIMEOUT_CTO", "AGENT_TIMEOUT_PM",
+                "AGENT_TIMEOUT_DEV", "AGENT_TIMEOUT_QA", "AGENT_TIMEOUT_MONITOR",
+                "AGENT_TIMEOUT_DEVOPS", "REQUEST_TIMEOUT", "MAX_QA_REWORK",
+                "CLAUDE_MAX_TOKENS", "CLAUDE_MAX_TOKENS_DEV", "CLAUDE_MAX_TOKENS_PM",
+                "CLAUDE_MAX_TOKENS_ENGINEER",
+            }
+            applied = []
+            for k, v in _runtime_cfg.items():
+                if k in _RUNTIME_KEYS and v:
+                    env[k] = str(v)
+                    applied.append(f"{k}={v}")
+            if applied:
+                logger.info("[RuntimeConfig] Aplicado: %s", ", ".join(applied))
+        except Exception as _cfg_err:
+            logger.warning("[RuntimeConfig] Não foi possível carregar via API (%s) — usando env atual", _cfg_err)
 
         cmd = ["python", "-m", "orchestrator.runner", "--spec-file", spec_path]
         try:

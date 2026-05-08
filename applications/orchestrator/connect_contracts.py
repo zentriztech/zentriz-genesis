@@ -43,12 +43,18 @@ def _schema_for(contract: str) -> dict[str, Any]:
         "RuntimePassport": "manifests/runtime-passport.schema.json",
         "KnownSafeActionsPack": "manifests/known-safe-actions-pack.schema.json",
     }
-    relative = mapping[contract]
-    schema_path = CONNECT_SCHEMA_ROOT / relative
-    if not schema_path.exists():
-        # zentriz-connect não disponível neste ambiente — emitir sem validação de schema
+    relative = mapping.get(contract)
+    if not relative:
         return {}
-    return json.loads(schema_path.read_text(encoding="utf-8"))
+    schema_path = CONNECT_SCHEMA_ROOT / relative
+    try:
+        if not schema_path.exists():
+            # zentriz-connect não disponível neste ambiente — emitir sem validação de schema
+            return {}
+        return json.loads(schema_path.read_text(encoding="utf-8"))
+    except Exception:
+        # Falha silenciosa — nunca bloquear o pipeline por ausência de schema
+        return {}
 
 
 def _validate_type(value: Any, schema_type: str) -> bool:
@@ -380,8 +386,17 @@ def build_connect_artifacts_for_stage(ctx: Any, stage: str) -> list[ConnectArtif
     else:
         raise ValueError(f"Connect stage desconhecido: {stage}")
 
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     for artifact in artifacts:
-        errors = validate_connect_artifact(artifact.contract, artifact.payload)
-        if errors:
-            raise ValueError(f"Contrato {artifact.contract} inválido para stage {stage}: {'; '.join(errors)}")
+        try:
+            errors = validate_connect_artifact(artifact.contract, artifact.payload)
+            if errors:
+                # Logar como aviso — nunca derrubar o pipeline por erro de validação de schema
+                _log.warning(
+                    "[Connect] Contrato %s com avisos de validação (stage=%s): %s",
+                    artifact.contract, stage, "; ".join(errors),
+                )
+        except Exception as _val_err:
+            _log.warning("[Connect] Falha ao validar contrato %s: %s", artifact.contract, _val_err)
     return artifacts

@@ -17,6 +17,9 @@ import { cloudRoutes } from "./routes/cloud.js";
 import { llmRoutes } from "./routes/llm.js";
 import { productRoutes } from "./routes/products.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
+import { telegramRoutes } from "./routes/telegram.js";
+import { runtimeConfigRoutes } from "./routes/runtimeConfig.js";
+import { skillsRoutes } from "./routes/skills.js";
 
 export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? true });
@@ -66,6 +69,9 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(llmRoutes);
   await app.register(productRoutes);
   await app.register(internalLlmRoutes);
+  await app.register(telegramRoutes);
+  await app.register(runtimeConfigRoutes);
+  await app.register(skillsRoutes);
 
   return app;
 }

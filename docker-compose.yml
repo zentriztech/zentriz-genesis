@@ -29,11 +29,16 @@ services:
       - RUNNER_UPLOAD_DIR=/shared/uploads
       # Path do host para project-files — usado pelo watchdog e para exibição ao usuário
       - HOST_PROJECT_FILES_ROOT=${HOST_PROJECT_FILES_ROOT:-/Users/mac/zentriz-files}
-      - PGHOST=postgres
-      - PGUSER=genesis
-      - PGPASSWORD=genesis_dev
-      - PGDATABASE=zentriz_genesis
-      - JWT_SECRET=${JWT_SECRET:-zentriz-genesis-jwt-secret}
+      - PGHOST=${PGHOST:?PGHOST nao definido no .env}
+      - PGUSER=${PGUSER:?PGUSER nao definido no .env}
+      - PGPASSWORD=${PGPASSWORD:?PGPASSWORD nao definido no .env}
+      - PGDATABASE=${PGDATABASE:?PGDATABASE nao definido no .env}
+      - PGPORT=${PGPORT:-5432}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET nao definido no .env}
+      # Telegram Bot (FT-09) — deixar vazio para desabilitar notificações
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET:-}
+      - TELEGRAM_WEBHOOK_PATH=${TELEGRAM_WEBHOOK_PATH:-wh/change-me}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -93,13 +98,26 @@ services:
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-900}
+      - REQUEST_TIMEOUT_MAX=${REQUEST_TIMEOUT_MAX:-7200}
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - AWS_PROFILE=${AWS_PROFILE:-}
       - GENESIS_LLM_PROVIDER=${GENESIS_LLM_PROVIDER:-anthropic}
       - GENESIS_AWS_REGION=${GENESIS_AWS_REGION:-us-east-1}
+      - CLAUDE_MAX_TOKENS=${CLAUDE_MAX_TOKENS:-32000}
+      - CLAUDE_MAX_TOKENS_ENGINEER=${CLAUDE_MAX_TOKENS_ENGINEER:-32000}
+      - CLAUDE_MAX_TOKENS_PM=${CLAUDE_MAX_TOKENS_PM:-32000}
+      - CLAUDE_MAX_TOKENS_DEV=${CLAUDE_MAX_TOKENS_DEV:-32000}
+      - CLAUDE_MAX_TOKENS_QA=${CLAUDE_MAX_TOKENS_QA:-16000}
+      - CLAUDE_MAX_TOKENS_SPEC_INTAKE=${CLAUDE_MAX_TOKENS_SPEC_INTAKE:-12000}
+      - CLAUDE_MAX_TOKENS_DEV_REWORK=${CLAUDE_MAX_TOKENS_DEV_REWORK:-48000}
+      - CLAUDE_RETRY_ATTEMPTS=${CLAUDE_RETRY_ATTEMPTS:-3}
+      - MAX_REPAIRS=${MAX_REPAIRS:-2}
+      - CIRCUIT_BREAKER_THRESHOLD=${CIRCUIT_BREAKER_THRESHOLD:-3}
+      - GENESIS_API_TOKEN=${GENESIS_API_TOKEN:-}
+      - GENESIS_API_URL=http://api:3000
     env_file:
       - .env
     volumes:
@@ -126,8 +144,24 @@ services:
       # APÓS env_file para sobrescrever localhost do .env
       - API_BASE_URL=http://api:3000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-900}
+      - REQUEST_TIMEOUT_MAX=${REQUEST_TIMEOUT_MAX:-7200}
       - SHOW_TRACEBACK=${SHOW_TRACEBACK:-true}
+      - AGENT_TIMEOUT_ENGINEER=${AGENT_TIMEOUT_ENGINEER:-900}
+      - AGENT_TIMEOUT_CTO=${AGENT_TIMEOUT_CTO:-900}
+      - AGENT_TIMEOUT_PM=${AGENT_TIMEOUT_PM:-900}
+      - AGENT_TIMEOUT_DEV=${AGENT_TIMEOUT_DEV:-900}
+      - AGENT_TIMEOUT_QA=${AGENT_TIMEOUT_QA:-600}
+      - AGENT_TIMEOUT_MONITOR=${AGENT_TIMEOUT_MONITOR:-600}
+      - AGENT_TIMEOUT_DEVOPS=${AGENT_TIMEOUT_DEVOPS:-900}
+      - AGENT_HTTP_RETRY_ON_TIMEOUT=${AGENT_HTTP_RETRY_ON_TIMEOUT:-2}
+      - MAX_QA_REWORK=${MAX_QA_REWORK:-3}
+      - CLAUDE_MAX_TOKENS=${CLAUDE_MAX_TOKENS:-32000}
+      - CLAUDE_MAX_TOKENS_ENGINEER=${CLAUDE_MAX_TOKENS_ENGINEER:-32000}
+      - CLAUDE_MAX_TOKENS_PM=${CLAUDE_MAX_TOKENS_PM:-32000}
+      - CLAUDE_MAX_TOKENS_DEV=${CLAUDE_MAX_TOKENS_DEV:-32000}
+      - CLAUDE_MAX_TOKENS_QA=${CLAUDE_MAX_TOKENS_QA:-16000}
+      - CLAUDE_MAX_TOKENS_DEV_REWORK=${CLAUDE_MAX_TOKENS_DEV_REWORK:-48000}
       # Fixo: dentro do container sempre /project-files; bind mount mapeia para o host
       - PROJECT_FILES_ROOT=/project-files
       - PIPELINE_FULL_STACK=${PIPELINE_FULL_STACK:-true}
@@ -190,11 +224,13 @@ services:
     build:
       context: ./applications/apps/genesis-web
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* são embutidas no bundle em build time — obrigatório definir no .env
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL nao definido no .env}
     ports:
       - "3001:3001"
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3000}
     restart: unless-stopped
 
 volumes:

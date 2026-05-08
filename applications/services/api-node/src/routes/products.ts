@@ -146,6 +146,54 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     } finally { client.release(); }
   });
 
+  // ── DELETE /api/products/:id ─────────────────────────────────────────────────
+  // Remove produto e todos os projetos filhos do banco. Arquivos em disco mantidos.
+  // Bloqueia se algum projeto filho estiver em execução (running).
+  app.delete<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const prod = await client.query(
+        "SELECT id, name, tenant_id FROM products WHERE id = $1",
+        [id]
+      );
+      const row = prod.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+
+      // Bloquear se algum filho estiver rodando
+      const running = await client.query(
+        "SELECT id, title FROM projects WHERE product_id = $1 AND status = 'running'",
+        [id]
+      );
+      if (running.rows.length > 0) {
+        return reply.status(409).send({
+          code: "CONFLICT",
+          message: `Pare o pipeline antes de excluir. Projetos em execução: ${running.rows.map((r) => r.title).join(", ")}`,
+        });
+      }
+
+      // Contar projetos filhos antes de remover
+      const countRes = await client.query("SELECT COUNT(*) AS n FROM projects WHERE product_id = $1", [id]);
+      const projectCount = Number(countRes.rows[0]?.n ?? 0);
+
+      // ON DELETE CASCADE remove projetos e todas as tabelas filhas (tasks, diálogos, etc.)
+      await client.query("DELETE FROM products WHERE id = $1", [id]);
+
+      return reply.send({
+        ok: true,
+        productId: id,
+        projectsDeleted: projectCount,
+        message: `Produto e ${projectCount} projeto(s) removidos do banco. Arquivos em disco mantidos.`,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // ── PATCH /api/products/:id ──────────────────────────────────────────────────
   app.patch<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {
     const user = getUser(request);

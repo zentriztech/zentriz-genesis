@@ -36,6 +36,8 @@ import LightModeIcon from "@mui/icons-material/LightMode";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudIcon from "@mui/icons-material/Cloud";
+import TelegramIcon from "@mui/icons-material/Telegram";
+import TuneIcon from "@mui/icons-material/Tune";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -57,9 +59,12 @@ const navTenantAdmin = [
   { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,       color: "#8B5CF6" },
   { label: "Projetos",      href: "/tenant/projects", icon: <FolderIcon />,       color: "#F59E0B" },
   { label: "Plano e uso",   href: "/tenant/plan",      icon: <SettingsIcon />,      color: "#64748B" },
-  { label: "LLM / IA",     href: "/settings/llm",     icon: <PsychologyIcon />,    color: "#6366F1" },
-  { label: "GitHub",        href: "/settings/github",  icon: <GitHubIcon />,        color: "#E2E8F0" },
-  { label: "Cloud Deploy",  href: "/settings/cloud",   icon: <CloudIcon />,         color: "#10B981" },
+  { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
+  { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,     color: "#E2E8F0" },
+  { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
+  { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
+  { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
+  { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
 
 const navZentriz = [
@@ -68,11 +73,14 @@ const navZentriz = [
   { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,     color: "#8B5CF6" },
   { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
-  { label: "GitHub",        href: "/settings/github",   icon: <GitHubIcon />,     color: "#E2E8F0" },
+  { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
+  { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
+  { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
 
 // ── Sidebar content (shared between permanent and temporary drawer) ────────────
-function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
+// observer obrigatório — lê authStore.isTenantAdmin que muda após hydrate()
+const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
   const pathname = usePathname();
   const router   = useRouter();
   const nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
@@ -146,7 +154,7 @@ function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => 
       )}
     </Box>
   );
-}
+});
 
 function AppLayoutInner({ children }: { children: React.ReactNode }) {
   const router   = useRouter();

@@ -100,10 +100,20 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
     except Exception:
         pass
 
-    # Timeout adaptativo: ajusta automaticamente com base no agente e tamanho do payload.
-    # Referência base: REQUEST_TIMEOUT (env). Dev/QA com payload grande recebem mais tempo.
-    _base_timeout = int(os.environ.get("REQUEST_TIMEOUT", "1200"))
-    _payload_kb  = len(data) / 1024
+    # Timeout HTTP: lido do limits["timeout_sec"] da mensagem (AGENT_TIMEOUT_* por agente)
+    # com fallback para REQUEST_TIMEOUT env. Adiciona 20% de margem sobre o timeout LLM
+    # para garantir que o HTTP não expire antes da resposta do Bedrock/Claude.
+    _msg_timeout_sec = message.get("limits", {}).get("timeout_sec") if isinstance(message, dict) else None
+    _base_timeout_llm = int(
+        _msg_timeout_sec
+        or os.environ.get("REQUEST_TIMEOUT")
+        or 900
+    )
+    # Margem de 20% acima do timeout LLM — HTTP deve expirar DEPOIS do LLM
+    _margin = max(120, int(_base_timeout_llm * 0.20))
+    _base_timeout = _base_timeout_llm + _margin
+
+    _payload_kb = len(data) / 1024
     if agent_key in ("dev", "qa"):
         # Cada 50KB de payload adiciona 10 min (tasks grandes de Next.js/full-stack)
         _extra = int((_payload_kb / 50) * 600)
@@ -149,7 +159,7 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
                         "agent": agent_key,
                         "agent_name": agent_name,
                         "error": "timed out",
-                        "human_message": "O agente demorou mais que o limite (timeout). Tente iniciar o pipeline novamente ou defina REQUEST_TIMEOUT=300 no ambiente do runner.",
+                        "human_message": f"O agente {agent_name} demorou mais que {timeout}s para responder. O pipeline será marcado como failed — reinicie com /run para retomar do checkpoint.",
                         "traceback": "",
                     }, ensure_ascii=False)
                 ) from e
