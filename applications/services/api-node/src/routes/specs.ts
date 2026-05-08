@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "path";
 import fs from "fs/promises";
+import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
-const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
+const ALLOWED_EXT   = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
+const ALLOWED_IN_ZIP = new Set([".md", ".txt", ".pdf"]);
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -13,7 +15,33 @@ function getUser(request: FastifyRequest): AuthUser {
 
 function isAllowed(filename: string): boolean {
   const ext = path.extname(filename).toLowerCase();
-  return ALLOWED_EXT.has(ext);
+  return ALLOWED_EXT.has(ext) || ext === ".zip";
+}
+
+type ExtractedFile = { filename: string; buffer: Buffer; mimeType: string };
+
+function extractZip(zipBuffer: Buffer, originalName: string): ExtractedFile[] {
+  const zip  = new AdmZip(zipBuffer);
+  const out: ExtractedFile[] = [];
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory) continue;
+    const name = path.basename(entry.entryName);
+    const ext  = path.extname(name).toLowerCase();
+    if (!ALLOWED_IN_ZIP.has(ext)) continue;
+    if (name.startsWith(".") || name.startsWith("__MACOSX")) continue;
+    const mime =
+      ext === ".md"  ? "text/markdown" :
+      ext === ".txt" ? "text/plain"    :
+      ext === ".pdf" ? "application/pdf" : "application/octet-stream";
+    out.push({ filename: name, buffer: entry.getData(), mimeType: mime });
+  }
+  if (out.length === 0) {
+    throw new Error(
+      `O ZIP "${originalName}" não contém arquivos válidos (.md, .txt, .pdf). ` +
+      "Verifique o conteúdo e tente novamente."
+    );
+  }
+  return out;
 }
 
 // ── Message envelope builder — spec from free description (leigo → spec completa) ──
@@ -367,11 +395,25 @@ export async function specRoutes(app: FastifyInstance) {
         if (!isAllowed(part.filename)) {
           return reply.status(400).send({
             code: "BAD_REQUEST",
-            message: "Formatos aceitos: .md, .txt, .doc, .docx, .pdf",
+            message: "Formatos aceitos: .md, .txt, .doc, .docx, .pdf, .zip",
           });
         }
         const buffer = await part.toBuffer();
-        files.push({ filename: part.filename, buffer, mimeType: part.mimetype });
+        const ext = path.extname(part.filename).toLowerCase();
+        if (ext === ".zip") {
+          let extracted: ExtractedFile[];
+          try {
+            extracted = extractZip(buffer, part.filename);
+          } catch (e) {
+            return reply.status(400).send({
+              code: "BAD_REQUEST",
+              message: e instanceof Error ? e.message : "Erro ao extrair ZIP.",
+            });
+          }
+          files.push(...extracted);
+        } else {
+          files.push({ filename: part.filename, buffer, mimeType: part.mimetype });
+        }
       }
     }
 

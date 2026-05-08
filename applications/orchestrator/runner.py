@@ -243,6 +243,37 @@ def load_spec(spec_path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def load_spec_all(project_id: str) -> str:
+    """Carrega todos os project_spec_files de um projeto e os concatena.
+
+    Retorna string única com separador entre arquivos. Usado quando o projeto
+    foi criado com múltiplos arquivos ou via ZIP. Se não encontrar nenhum
+    arquivo via API, retorna string vazia (caller faz fallback para load_spec).
+    """
+    try:
+        data, status = _api_get(f"/api/projects/{project_id}/spec-files")
+        if status != 200 or not isinstance(data, list) or len(data) == 0:
+            return ""
+        if len(data) == 1:
+            fpath = Path(data[0].get("filePath") or data[0].get("file_path", ""))
+            if fpath.exists():
+                return fpath.read_text(encoding="utf-8")
+            return ""
+        parts: list[str] = []
+        for entry in data:
+            fpath = Path(entry.get("filePath") or entry.get("file_path", ""))
+            fname = entry.get("filename", fpath.name)
+            if not fpath.exists():
+                logger.warning("[load_spec_all] Arquivo não encontrado: %s", fpath)
+                continue
+            content = fpath.read_text(encoding="utf-8")
+            parts.append(f"---\n# [{fname}]\n\n{content}")
+        return "\n\n".join(parts)
+    except Exception as exc:
+        logger.warning("[load_spec_all] Falha ao carregar spec files: %s", exc)
+        return ""
+
+
 def _agents_root() -> Path:
     """Returns the agents root directory.
 
@@ -3129,7 +3160,15 @@ def main() -> int:
         )
 
     logger.info("[Pipeline] Lendo spec: %s", spec_ref)
-    spec_content = load_spec(spec_path)
+    spec_content = ""
+    if project_id:
+        spec_content = load_spec_all(project_id)
+        if spec_content:
+            logger.info("[Pipeline] Spec carregada via project_spec_files (%d chars, %d arquivo(s))",
+                        len(spec_content),
+                        spec_content.count("\n# [") + (1 if spec_content and "\n# [" not in spec_content else 0))
+    if not spec_content:
+        spec_content = load_spec(spec_path)
 
     spec_template_content = _load_spec_template()
     # LEI 11: tentar restaurar checkpoint; senão criar contexto novo

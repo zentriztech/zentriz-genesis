@@ -75,7 +75,7 @@ function MermaidBlock({ code }: { code: string }) {
   return <Box ref={ref} sx={{ my: 1.5, "& svg": { maxWidth: "100%", height: "auto" } }} />;
 }
 
-const ACCEPT = ".md,.txt,.doc,.docx,.pdf";
+const ACCEPT = ".md,.txt,.doc,.docx,.pdf,.zip";
 
 interface ProjectTypeOption { value: string; label: string; group: string }
 
@@ -977,7 +977,7 @@ export default function SpecPage() {
                   >
                     <UploadFileIcon sx={{ fontSize: "2.5rem", color: "text.secondary", mb: 1 }} />
                     <Typography variant="body2" fontWeight={500}>Clique para selecionar arquivos</Typography>
-                    <Typography variant="caption" color="text.secondary">.md .txt .doc .docx .pdf — máx 10MB</Typography>
+                    <Typography variant="caption" color="text.secondary">.md .txt .doc .docx .pdf .zip — máx 10MB · ZIP com múltiplos arquivos é descompactado automaticamente</Typography>
                     <input ref={inputRef} type="file" accept={ACCEPT} multiple hidden onChange={handleFileChange} />
                   </Box>
 
