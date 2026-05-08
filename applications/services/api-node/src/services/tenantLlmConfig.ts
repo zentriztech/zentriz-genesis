@@ -15,6 +15,7 @@ import { pool } from "../db/client.js";
 export interface TenantLlmConfig {
   provider: string;
   modelId: string;
+  modelIdFallback: string | null;
   credentials: Record<string, string>;
   maxConcurrentProjects: number;
   dailyTokenQuota: number | null;
@@ -26,17 +27,19 @@ export interface TenantLlmConfig {
 export interface ResolvedLlmConfig {
   provider:            string;
   modelId:             string;
+  fallbackModelId?:    string;   // modelo para rework/QA-escalation
   apiKey:              string;
   awsRegion?:          string;
   awsAccessKeyId?:     string;
   awsSecretAccessKey?: string;
   isDefault:           boolean;
-  priority:            number;  // qual config foi usada (0-3)
+  priority:            number;
 }
 
 const SYSTEM_DEFAULT: TenantLlmConfig = {
   provider:              process.env.GENESIS_LLM_PROVIDER ?? "bedrock",
   modelId:               process.env.CLAUDE_MODEL ?? "us.anthropic.claude-sonnet-4-6",
+  modelIdFallback:       null,
   credentials:           {},
   maxConcurrentProjects: 3,
   dailyTokenQuota:       null,
@@ -65,7 +68,7 @@ function hasValidCredentials(provider: string, creds: Record<string, string>): b
 export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmConfig[]> {
   try {
     const result = await pool.query(
-      `SELECT provider, model_id, credentials, max_concurrent_projects,
+      `SELECT provider, model_id, model_id_fallback, credentials, max_concurrent_projects,
               daily_token_quota, deadpool_token_reserve, priority
        FROM tenant_llm_configs
        WHERE tenant_id = $1 AND is_active = TRUE
@@ -75,6 +78,7 @@ export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmCo
     return result.rows.map((row: Record<string, unknown>) => ({
       provider:              String(row.provider ?? "bedrock"),
       modelId:               String(row.model_id ?? SYSTEM_DEFAULT.modelId),
+      modelIdFallback:       row.model_id_fallback ? String(row.model_id_fallback) : null,
       credentials:           (row.credentials as Record<string, string>) ?? {},
       maxConcurrentProjects: Number(row.max_concurrent_projects ?? 3),
       dailyTokenQuota:       row.daily_token_quota != null ? Number(row.daily_token_quota) : null,
@@ -154,6 +158,7 @@ export async function resolveProjectLlmConfig(projectId: string): Promise<Resolv
         return {
           provider:           cfg.provider,
           modelId:            cfg.modelId,
+          fallbackModelId:    cfg.modelIdFallback ?? undefined,
           apiKey:             cfg.credentials.api_key ?? "",
           awsRegion:          cfg.credentials.aws_region,
           awsAccessKeyId:     cfg.credentials.aws_access_key_id,

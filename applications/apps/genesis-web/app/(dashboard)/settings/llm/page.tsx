@@ -47,6 +47,7 @@ interface LlmSlot {
   priority_label: string;
   provider: Provider | null;
   model_id: string | null;
+  model_id_fallback: string | null;
   credentials_masked: Record<string, string>;
   has_credentials: boolean;
   max_concurrent_projects: number;
@@ -146,11 +147,12 @@ interface AddModalProps {
 
 function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimitsChange }: AddModalProps) {
   const initialProvider = (slot?.provider as Provider) ?? "bedrock";
-  const [tab, setTab]     = useState(PROVIDERS.indexOf(initialProvider));
-  const [modelId, setModelId] = useState(slot?.model_id ?? "");
-  const [creds, setCreds] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-  const [err, setErr]     = useState<string | null>(null);
+  const [tab, setTab]           = useState(PROVIDERS.indexOf(initialProvider));
+  const [modelId, setModelId]   = useState(slot?.model_id ?? "");
+  const [fallbackId, setFallbackId] = useState(slot?.model_id_fallback ?? "");
+  const [creds, setCreds]       = useState<Record<string, string>>({});
+  const [saving, setSaving]     = useState(false);
+  const [err, setErr]           = useState<string | null>(null);
   const [showLimits, setShowLimits] = useState(false);
 
   // Sincronizar tab quando o slot muda (edição de slot existente)
@@ -159,6 +161,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
       const p = (slot?.provider as Provider) ?? "bedrock";
       setTab(PROVIDERS.indexOf(p));
       setModelId(slot?.model_id ?? "");
+      setFallbackId(slot?.model_id_fallback ?? "");
       setCreds({});
       setErr(null);
     }
@@ -168,6 +171,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
   useEffect(() => {
     const meta = PROVIDER_META[PROVIDERS[tab]];
     setModelId(meta.models[0] ?? "");
+    setFallbackId("");
     setCreds({});
   }, [tab]);
 
@@ -182,6 +186,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
       await apiPut(`/api/tenant/llm-config/${priority}`, {
         provider:                resolvedProvider,
         model_id:                selected,
+        model_id_fallback:       fallbackId || null,
         credentials:             creds,
         max_concurrent_projects: globalLimits.maxConc,
         daily_token_quota:       globalLimits.quota ? Number(globalLimits.quota) : null,
@@ -254,16 +259,36 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
           ))}
         </Stack>
 
-        {/* Modelo */}
-        <FormControl size="small" fullWidth sx={{ mb: 2 }}>
-          <InputLabel>Modelo</InputLabel>
-          <Select value={modelId || meta.models[0]} label="Modelo"
-            onChange={(e) => setModelId(e.target.value)}>
-            {meta.models.map((m) => (
-              <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
-            ))}
-          </Select>
-        </FormControl>
+        {/* Modelo principal + Fallback */}
+        <Stack direction="row" spacing={1.5} sx={{ mb: 2 }}>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Modelo principal</InputLabel>
+            <Select value={modelId || meta.models[0]} label="Modelo principal"
+              onChange={(e) => setModelId(e.target.value)}>
+              {meta.models.map((m) => (
+                <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Fallback (rework / QA)</InputLabel>
+            <Select value={fallbackId} label="Fallback (rework / QA)"
+              onChange={(e) => setFallbackId(e.target.value)}>
+              <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
+                — Nenhum —
+              </MenuItem>
+              {meta.models.map((m) => (
+                <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Stack>
+        {fallbackId && (
+          <Alert severity="info" icon={false} sx={{ mb: 2, py: 0.5, fontSize: "0.75rem" }}>
+            Dev/QA usam <strong>{modelId || meta.models[0]}</strong> no 1º intento.
+            No rework (QA_FAIL ≥ 1) ou quando Dev escalou, <strong>{fallbackId}</strong> é chamado automaticamente.
+          </Alert>
+        )}
 
         {/* Limites globais — expansível */}
         <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
@@ -356,11 +381,14 @@ function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, d
 
           {/* Info do provider */}
           <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
               <Typography sx={{ fontSize: "1rem" }}>{meta?.icon}</Typography>
               <Typography variant="body2" fontWeight={600} noWrap>{meta?.label}</Typography>
               <Typography variant="caption" color="text.secondary" noWrap sx={{ fontFamily: "monospace" }}>
                 {slot.model_id}
+                {slot.model_id_fallback && (
+                  <> <span style={{ opacity: 0.5 }}>→</span> {slot.model_id_fallback}</>
+                )}
               </Typography>
             </Stack>
             {slot.has_credentials ? (

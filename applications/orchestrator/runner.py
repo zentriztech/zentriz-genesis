@@ -2134,6 +2134,10 @@ def _run_monitor_loop(
         logger.debug("[Monitor Loop] Não foi possível restaurar qa_fail_count: %s", _qfc_e)
     dev_rework_for_qa: dict[str, int] = {}  # rework_attempt do Dev nesta rodada → QA usa o mesmo
     task_artifacts_for_qa: dict[str, list] = {}  # task_id → artifacts entregues pelo Dev (capturados antes do QA)
+    # Piso de modelo inter-agente: se Dev usou fallback (rework>=1 → Opus), QA não pode regredir.
+    # Mapeamento task_id → rework_attempt máximo observado pelo Dev.
+    # QA: _qa_rework_effective = max(_qa_rework, dev_peak_rework[tid])
+    dev_peak_rework: dict[str, int] = {}
     # MONITOR_PARALLEL=true enables concurrent processing of multiple tasks of the
     # same type within a single loop iteration. Default false to preserve behavior.
     monitor_parallel = os.environ.get("MONITOR_PARALLEL", "false").strip().lower() in ("1", "true", "yes")
@@ -2261,14 +2265,20 @@ def _run_monitor_loop(
                 _post_step(f"O Monitor acionou o QA para revisar a tarefa {tid}.", request_id)
                 _post_agent_working("qa", "O QA está revisando os artefatos e executando testes.", request_id)
                 try:
-                    # Simetria: QA usa o mesmo rework_attempt que o Dev usou nesta rodada.
-                    # Buscar com tid normalizado — garante match mesmo com diferença de formato.
+                    # Simetria + piso inter-agente: QA usa o maior entre:
+                    #   1. rework_attempt do Dev nesta rodada (simetria)
+                    #   2. pico histórico do Dev nesta task (piso — nunca regredir de modelo)
+                    #   3. qa_fail_count acumulado da task
+                    # Regra: Dev rodou com Opus (rework>=1) → QA obrigatoriamente usa Opus ou melhor.
                     _norm_qa_tid = str(tid).strip() if tid else ""
-                    _qa_rework = (
-                        dev_rework_for_qa.get(_norm_qa_tid) or
-                        dev_rework_for_qa.get(tid) or
-                        qa_fail_count.get(tid, 0)
+                    _qa_rework = max(
+                        dev_rework_for_qa.get(_norm_qa_tid) or dev_rework_for_qa.get(tid) or 0,
+                        dev_peak_rework.get(_norm_qa_tid) or dev_peak_rework.get(tid) or 0,
+                        qa_fail_count.get(tid, 0),
                     )
+                    if _qa_rework >= 1:
+                        logger.info("[MODEL-FLOOR] QA task=%s usando piso rework=%d (Dev escalou ou QA falhou antes)",
+                                    tid, _qa_rework)
                     qa_response = call_qa(
                         spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
@@ -2471,6 +2481,11 @@ def _run_monitor_loop(
                     _norm_tid = str(task_id).strip() if task_id else ""
                     dev_rework_for_qa[_norm_tid] = _task_rework_count
                     dev_rework_for_qa[task_id] = _task_rework_count  # fallback duplicado
+                    # Piso inter-agente: registrar o rework mais alto que o Dev já usou nesta task.
+                    # QA vai usar max(qa_rework, dev_peak) para nunca regredir de modelo.
+                    _prev_peak = dev_peak_rework.get(_norm_tid, 0)
+                    dev_peak_rework[_norm_tid] = max(_prev_peak, _task_rework_count)
+                    dev_peak_rework[task_id]   = dev_peak_rework[_norm_tid]
                     dev_response = call_dev(
                         spec_ref, charter_summary, backlog_summary, request_id,
                         task_id=task_id, task=task_desc, code_refs=[],

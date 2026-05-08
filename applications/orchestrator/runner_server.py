@@ -302,9 +302,18 @@ def run(body: RunBody):
                     # Limpar qualquer CLAUDE_API_KEY OpenAI que possa ter vazado
                     env.pop("CLAUDE_API_KEY", None)
 
+                # Fallback model: usado em rework (QA_FAIL >= 1) e piso inter-agente Dev→QA
+                _fallback_model = (_llm_cfg.get("fallbackModelId") or "").strip()
+                if _fallback_model:
+                    env["CLAUDE_MODEL_REWORK"] = _fallback_model
+                    logger.info("[FT-13] Fallback model configurado: %s → %s", _model_id, _fallback_model)
+                else:
+                    # Se não há fallback explícito, remover override para usar o default do runner
+                    env.pop("CLAUDE_MODEL_REWORK", None)
+
                 _is_default = _llm_cfg.get("isDefault", True)
-                logger.info("[FT-13] LLM config resolvida: provider=%s model=%s isDefault=%s",
-                            _effective_provider, _model_id, _is_default)
+                logger.info("[FT-13] LLM config resolvida: provider=%s model=%s fallback=%s isDefault=%s",
+                            _effective_provider, _model_id, _fallback_model or "none", _is_default)
         except Exception as _llm_err:
             logger.warning("[FT-13] Não foi possível resolver LLM config via API (%s) — usando env atual", _llm_err)
 

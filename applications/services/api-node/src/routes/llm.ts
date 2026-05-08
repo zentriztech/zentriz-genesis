@@ -78,6 +78,7 @@ function formatSlot(row: Record<string, unknown>) {
     priority_label:          PRIORITY_LABELS[priority] ?? `Prioridade ${priority}`,
     provider,
     model_id:                row.model_id,
+    model_id_fallback:       row.model_id_fallback ?? null,
     credentials_masked:      maskCredentials(creds),
     has_credentials:         hasCredentials(provider, creds),
     max_concurrent_projects: row.max_concurrent_projects,
@@ -92,29 +93,30 @@ async function upsertConfig(
   priority: number,
   body: Record<string, unknown>
 ) {
-  const provider      = String(body.provider ?? "bedrock") as Provider;
-  const credentials   = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
-  const model_id      = String(body.model_id ?? DEFAULT_MODELS[provider]);
-  const max_concurrent = Math.min(Math.max(Number(body.max_concurrent_projects ?? 3), 1), 20);
-  const daily_quota   = body.daily_token_quota ? Number(body.daily_token_quota) : null;
-  const dp_reserve    = Number(body.deadpool_token_reserve ?? 0);
+  const provider         = String(body.provider ?? "bedrock") as Provider;
+  const credentials      = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
+  const model_id         = String(body.model_id ?? DEFAULT_MODELS[provider]);
+  const model_id_fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
+  const max_concurrent   = Math.min(Math.max(Number(body.max_concurrent_projects ?? 3), 1), 20);
+  const daily_quota      = body.daily_token_quota ? Number(body.daily_token_quota) : null;
+  const dp_reserve       = Number(body.deadpool_token_reserve ?? 0);
 
   await pool.query(
     `INSERT INTO tenant_llm_configs
-       (tenant_id, priority, provider, model_id, credentials,
+       (tenant_id, priority, provider, model_id, model_id_fallback, credentials,
         max_concurrent_projects, daily_token_quota, deadpool_token_reserve,
         is_active, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,now())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,now())
      ON CONFLICT (tenant_id, priority) DO UPDATE SET
-       provider=$3, model_id=$4, credentials=$5,
-       max_concurrent_projects=$6, daily_token_quota=$7,
-       deadpool_token_reserve=$8, is_active=true, updated_at=now()`,
-    [tenantId, priority, provider, model_id, JSON.stringify(credentials),
+       provider=$3, model_id=$4, model_id_fallback=$5, credentials=$6,
+       max_concurrent_projects=$7, daily_token_quota=$8,
+       deadpool_token_reserve=$9, is_active=true, updated_at=now()`,
+    [tenantId, priority, provider, model_id, model_id_fallback, JSON.stringify(credentials),
      max_concurrent, daily_quota, dp_reserve]
   );
 
   return { ok: true, priority, priority_label: PRIORITY_LABELS[priority], provider, model_id,
-           has_credentials: hasCredentials(provider, credentials) };
+           model_id_fallback, has_credentials: hasCredentials(provider, credentials) };
 }
 
 export async function llmRoutes(app: FastifyInstance): Promise<void> {
@@ -128,7 +130,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     const client = await pool.connect();
     try {
       const res = await client.query(
-        `SELECT provider, model_id, credentials, max_concurrent_projects,
+        `SELECT provider, model_id, model_id_fallback, credentials, max_concurrent_projects,
                 daily_token_quota, deadpool_token_reserve, is_active, priority
          FROM tenant_llm_configs WHERE tenant_id = $1 ORDER BY priority ASC`,
         [user.tenantId]
