@@ -28,5 +28,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_llm_priority
 UPDATE tenant_llm_configs SET priority = 0 WHERE priority IS NULL OR priority = 0;
 
 COMMENT ON COLUMN tenant_llm_configs.priority IS
-  '0=Padrão, 1=Contingência 1, 2=Contingência 2, 3=Contingência 3. '
-  'O runner tenta na ordem crescente; pula configs sem credenciais válidas.';
+  '0=Padrao, 1=Contingencia 1, 2=Contingencia 2, 3=Contingencia 3. O runner tenta na ordem crescente.';

@@ -77,22 +77,16 @@ CREATE INDEX IF NOT EXISTS idx_skill_ttl_cleanup
   WHERE status = 'trusted' AND ttl_days IS NOT NULL;
 
 COMMENT ON TABLE skill IS
-  'Fragmentos atômicos de conhecimento para montagem dinâmica de SYSTEM_PROMPTs. '
-  'hard_rule=true são imunes a TTL e representam regras imutáveis (bugs conhecidos, '
-  'constraints de produto como "React Native sem Expo").';
+  'Fragmentos atomicos de conhecimento para SYSTEM_PROMPTs dinamicos. hard_rule=true sao imunes a TTL.';
 
 COMMENT ON COLUMN skill.slug IS
-  'Identificador canônico único. Formato recomendado: <role>.<stack>.<categoria>. '
-  'Ex: dev.python-fastapi.asyncpg-enum-native, dev.react-native.no-expo';
+  'Identificador canonico unico. Ex: dev.python-fastapi.asyncpg-enum-native, dev.react-native.no-expo';
 
 COMMENT ON COLUMN skill.body_md IS
-  'Fragmento Markdown que será concatenado ao SYSTEM_PROMPT do agente. '
-  'Deve ser autocontido e não depender de outras skills para fazer sentido.';
+  'Fragmento Markdown concatenado ao SYSTEM_PROMPT. Deve ser autocontido.';
 
 COMMENT ON COLUMN skill.ttl_days IS
-  'Tempo de vida em dias a partir de last_used_at. NULL = sem expiração. '
-  'Valores padrão por categoria: hard_rule=NULL, domain=365, stack=180, '
-  'pattern/antipattern=90, llm_generated=30.';
+  'Dias de vida desde last_used_at. NULL=sem expiracao. hard_rule=NULL, domain=365, stack=180, pattern=90, llm=30.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 2. Tabela: skill_bundle — conjunto montado para uma task específica
@@ -127,9 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_skill_bundle_hash
   ON skill_bundle (bundle_hash);
 
 COMMENT ON TABLE skill_bundle IS
-  'Registro de qual conjunto de skills foi usado para cada task. '
-  'bundle_hash permite reproduzir exatamente o mesmo SYSTEM_PROMPT para debugging. '
-  'result_status é preenchido pelo runner ao fechar a task (DONE/BLOCKED).';
+  'Conjunto de skills usadas por task. bundle_hash reproduz o SYSTEM_PROMPT. result_status=DONE/BLOCKED.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3. Tabela: skill_feedback — telemetria de qualidade para promoção/expiração
@@ -160,9 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_skill_feedback_project
   ON skill_feedback (project_id, created_at DESC);
 
 COMMENT ON TABLE skill_feedback IS
-  'Telemetria de qualidade por skill. Alimenta quality_score e promoção shadow→trusted. '
-  'Um job periódico (ou trigger pós-task) agrega os sinais e atualiza skill.quality_score. '
-  'quality_score < 0.4 por N amostras → status=deprecated + alerta humano.';
+  'Telemetria de qualidade por skill. quality_score < 0.4 por N amostras depreca a skill.';
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4. Seed inicial: skills hard_rule imutáveis

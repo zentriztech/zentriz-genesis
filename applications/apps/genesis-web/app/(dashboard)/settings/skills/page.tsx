@@ -20,9 +20,6 @@ import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
-import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
-import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
@@ -33,7 +30,7 @@ import LockIcon from "@mui/icons-material/Lock";
 import PsychologyAltIcon from "@mui/icons-material/PsychologyAlt";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
-import { apiGet, apiPost, apiPatch } from "@/lib/api";
+import { apiGet, apiPatch } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
 
 interface Skill {
@@ -89,7 +86,7 @@ export default observer(function SkillsPage() {
       const params = new URLSearchParams();
       if (roleFilter !== "all")   params.set("role",   roleFilter);
       if (statusFilter !== "all") params.set("status", statusFilter);
-      const data = await apiGet(`/api/skills?${params}`);
+      const data = await apiGet(`/api/skills?${params}`) as { data: Skill[] };
       setSkills(data.data ?? []);
     } catch {
       setGlobalAlert({ type: "error", msg: "Erro ao carregar skills." });
