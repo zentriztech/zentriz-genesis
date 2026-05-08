@@ -125,7 +125,7 @@ export async function syncSecretsToGitHub(
       `SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag
        FROM tenant_cloud_connections
        WHERE tenant_id = $1 AND status = 'active'
-       ORDER BY created_at DESC LIMIT 1`,
+       ORDER BY slot_index ASC LIMIT 1`,
       [tenantId],
     );
     const row = res.rows[0];
@@ -175,7 +175,7 @@ export async function getCloudConnection(tenantId: string): Promise<CloudConnect
       `SELECT id, tenant_id, provider, region, service_type, github_secrets_synced_at, status, created_at
        FROM tenant_cloud_connections
        WHERE tenant_id = $1 AND status = 'active'
-       ORDER BY created_at DESC LIMIT 1`,
+       ORDER BY slot_index ASC LIMIT 1`,
       [tenantId],
     );
     const row = res.rows[0];
