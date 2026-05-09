@@ -461,10 +461,12 @@ function ProjectDetailPageInner() {
   }, [id, project]);
 
   useEffect(() => {
-    if (!id || project?.status !== "running") return;
+    // Atualizar project do store e ticker para todos os estados ativos
+    const ACTIVE = new Set(["running", "spec_submitted", "pending_conversion"]);
+    if (!id || !project || !ACTIVE.has(project.status)) return;
     const t = setInterval(() => {
       projectsStore.loadProject(id);
-      setNowTick(Date.now()); // atualiza ticker para tempo real em Métricas
+      setNowTick(Date.now());
     }, 10000);
     return () => clearInterval(t);
   }, [id, project?.status]);
@@ -492,7 +494,9 @@ function ProjectDetailPageInner() {
       loadLogs();
     };
     load();
-    if (project.status !== "running") return;
+    // Polling ativo para todos os estados "em execução" — spec_submitted inclui CTO/Engineer/PM
+    const ACTIVE_STATUSES = new Set(["running", "spec_submitted", "pending_conversion"]);
+    if (!ACTIVE_STATUSES.has(project.status)) return;
     const t = setInterval(load, 8000);
     return () => clearInterval(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
