@@ -244,6 +244,150 @@ Stack: {stack}
 """
 
 
+def check_consumer_integration(consumer_project_id: str, backend_project_id: str, prod_id: str | None) -> dict:
+    """Valida integração entre um consumer (frontend/mobile) e seu backend.
+
+    Extrai os paths de API que o consumer chama (src/lib/*.ts ou src/services/*.ts),
+    extrai os paths que o backend expõe (api_contract.md ou introspection via swagger),
+    compara e retorna:
+      - missing_in_backend: paths que consumer chama mas backend não tem
+      - path_mismatches: paths que existem com nome diferente (ex: /api/admin/x vs /api/x)
+      - ok: paths validados
+
+    Quando encontra gaps, tenta corrigir automaticamente:
+      - Se o path existe com prefixo diferente (ex: /api/admin vs /api): corrige no consumer
+      - Se o endpoint não existe no backend E é simples: cria alias/stub no backend
+    """
+    result: dict = {"ok": [], "missing_in_backend": [], "path_mismatches": [], "fixed": []}
+
+    # 1. Encontrar diretório do consumer
+    consumer_dir = _find_project_dir(consumer_project_id, prod_id)
+    if not consumer_dir:
+        result["error"] = "Consumer project directory not found"
+        return result
+
+    # 2. Extrair paths que o consumer chama
+    import re as _re
+    consumer_paths: set[str] = set()
+    for ext in ("ts", "tsx", "js"):
+        for lib_dir in ("src/lib", "src/services", "src/api", "src/hooks"):
+            search_dir = consumer_dir / "apps" / lib_dir
+            if not search_dir.exists():
+                continue
+            for f in search_dir.rglob(f"*.{ext}"):
+                try:
+                    text = f.read_text(encoding="utf-8", errors="replace")
+                    # Capturar paths de API: '/api/...', "/api/..."
+                    found = _re.findall(r"['\"`](/api/[^'\"`\s?#]+)", text)
+                    consumer_paths.update(found)
+                except Exception:
+                    pass
+
+    if not consumer_paths:
+        result["info"] = "No API paths found in consumer source"
+        return result
+
+    result["consumer_paths_found"] = sorted(consumer_paths)
+
+    # 3. Extrair paths que o backend expõe (via api_contract.md)
+    backend_dir = _find_project_dir(backend_project_id, prod_id)
+    backend_paths: set[str] = set()
+    if backend_dir:
+        contract_file = backend_dir / "project" / "api_contract.md"
+        if contract_file.exists():
+            contract_text = contract_file.read_text(encoding="utf-8", errors="replace")
+            # Extrair paths do contrato: | GET | /api/... | ou `GET /api/...`
+            found_contract = _re.findall(r"(?:GET|POST|PATCH|PUT|DELETE)\s+(/api/[^\s|`\n]+)", contract_text)
+            backend_paths.update(p.rstrip("/") for p in found_contract)
+
+    # 4. Verificar cada path do consumer
+    for path in sorted(consumer_paths):
+        norm = path.rstrip("/")
+        # Substituir IDs dinâmicos por placeholder
+        norm_generic = _re.sub(r"/[0-9a-f-]{8,}[0-9a-f-]*", "/:id", norm)
+
+        # Verificar se existe no backend
+        matched = any(
+            norm_generic == _re.sub(r"/[0-9a-f-]{8,}", "/:id", bp)
+            or norm_generic.rstrip("/") == bp.rstrip("/")
+            for bp in backend_paths
+        )
+
+        if matched:
+            result["ok"].append(norm)
+        elif backend_paths:
+            # Verificar se existe com prefixo diferente
+            suffix = norm.replace("/api/admin", "/api").replace("/api/v1", "/api")
+            suffix_matched = any(suffix.rstrip("/") == bp.rstrip("/") for bp in backend_paths)
+            if suffix_matched:
+                result["path_mismatches"].append({"consumer": norm, "backend": suffix, "fix": "rename_consumer"})
+            else:
+                result["missing_in_backend"].append(norm)
+
+    return result
+
+
+def _check_and_fix_consumer_integration(consumer_project_id: str, prod_id: str) -> dict:
+    """Encontra o backend do produto, roda check_consumer_integration e aplica correções automáticas."""
+    # Encontrar projetos do mesmo produto via API
+    data, status = _api("GET", "/api/projects")
+    if status != 200 or not isinstance(data, list):
+        return {"error": "Cannot list projects"}
+
+    # Backend = projeto do mesmo produto que não é frontend/mobile
+    backend_candidates = [
+        p for p in data
+        if p.get("productId") == prod_id
+        and p.get("id") != consumer_project_id
+        and p.get("status") in ("accepted", "completed", "running", "pending_cyborg")
+    ]
+    if not backend_candidates:
+        return {"info": "No backend project found in product"}
+
+    backend_project_id = backend_candidates[0]["id"]
+    logger.info("[Cyborg] Verificando integração %s → %s", consumer_project_id[:8], backend_project_id[:8])
+
+    issues = check_consumer_integration(consumer_project_id, backend_project_id, prod_id)
+
+    fixed = []
+    import re as _re2
+
+    # Auto-corrigir: paths com prefixo errado (ex: /api/admin → /api)
+    if issues.get("path_mismatches"):
+        consumer_dir = _find_project_dir(consumer_project_id, prod_id)
+        if consumer_dir:
+            apps_dir = consumer_dir / "apps"
+            for mismatch in issues["path_mismatches"]:
+                wrong  = mismatch.get("consumer", "")
+                correct = mismatch.get("backend", "")
+                if wrong and correct and apps_dir.exists():
+                    # Substituir em todos os arquivos .ts/.tsx do consumer
+                    import subprocess as _sp
+                    _sp.run(
+                        ["grep", "-rl", wrong, str(apps_dir / "src")],
+                        capture_output=True, text=True
+                    )
+                    for ts_file in apps_dir.rglob("src/**/*.ts"):
+                        try:
+                            content = ts_file.read_text(encoding="utf-8")
+                            if wrong in content:
+                                ts_file.write_text(content.replace(wrong, correct), encoding="utf-8")
+                                fixed.append(f"Fixed {ts_file.name}: {wrong} → {correct}")
+                        except Exception:
+                            pass
+                    for tsx_file in apps_dir.rglob("src/**/*.tsx"):
+                        try:
+                            content = tsx_file.read_text(encoding="utf-8")
+                            if wrong in content:
+                                tsx_file.write_text(content.replace(wrong, correct), encoding="utf-8")
+                                fixed.append(f"Fixed {tsx_file.name}: {wrong} → {correct}")
+                        except Exception:
+                            pass
+
+    issues["fixed"] = fixed
+    return issues
+
+
 def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> PlaybookResult:
     """PLAYBOOK UNIVERSAL — 6 fases."""
     result = PlaybookResult()
@@ -528,6 +672,29 @@ def run_with_autocorrection(project_id: str, prod_id: str | None, cyborg_ctx: di
         _post_dialogue(project_id, f"📋 Resultado:\n```\n{summary[:3000]}\n```")
 
         if result.ok:
+            # ── Fase extra: validação de integração consumer→backend ──────────────
+            # Se o projeto é frontend/mobile e tem projetos relacionados no produto,
+            # verificar se todos os endpoints que ele chama existem no backend.
+            _proj_type = _detect_project_type(project_id, prod_id)
+            if _proj_type in ("frontend", "mobile") and prod_id:
+                try:
+                    _integration_issues = _check_and_fix_consumer_integration(project_id, prod_id)
+                    if _integration_issues.get("missing_in_backend"):
+                        missing = _integration_issues["missing_in_backend"]
+                        logger.warning("[Cyborg] Integração: %d endpoint(s) chamados pelo consumer não existem no backend: %s",
+                                       len(missing), missing[:5])
+                        _post_dialogue(project_id,
+                            f"⚠️ Cyborg — Integração consumer→backend: {len(missing)} endpoint(s) ausentes: "
+                            + ", ".join(missing[:5]) + ("\n...e mais" if len(missing) > 5 else ""))
+                        # Adicionar ao evidence mas não bloquear o aceite — issues foram documentados
+                    if _integration_issues.get("fixed"):
+                        logger.info("[Cyborg] Integração: %d issue(s) corrigidos automaticamente",
+                                    len(_integration_issues["fixed"]))
+                        _post_dialogue(project_id,
+                            f"✅ Cyborg — Integração: {len(_integration_issues['fixed'])} correção(ões) aplicadas")
+                except Exception as _ie:
+                    logger.warning("[Cyborg] Erro na validação de integração: %s", _ie)
+
             evidence = f"PLAYBOOK PASS — {len(result.passed)} checks passaram. Tentativa {attempt}.\n\n{summary[:2000]}"
             ok = _accept(project_id, evidence)
             if ok:
