@@ -289,22 +289,34 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
                 api_contract = contract.read_text(encoding="utf-8", errors="replace")[:8000]
                 result.record("api_contract.md existe", True, f"{len(api_contract)} chars")
             else:
-                # Linha de defesa: Cyborg gera api_contract.md a partir do RUNBOOK.md
-                result.record("api_contract.md existe", False, "gerando a partir do RUNBOOK.md")
-                if runbook_content:
-                    api_contract = _generate_api_contract(runbook_content, project_id)
-                    if api_contract:
-                        contract.write_text(api_contract, encoding="utf-8")
-                        # Copiar para contracts/ do produto
-                        if prod_id:
-                            contracts_dir = Path(PROJECT_FILES) / prod_id / "contracts"
-                            contracts_dir.mkdir(parents=True, exist_ok=True)
-                            dest = contracts_dir / f"{project_id[:8]}.api_contract.md"
-                            import shutil as _shutil
-                            _shutil.copy2(str(contract), str(dest))
-                        result.record("api_contract.md gerado pelo Cyborg", True,
-                                      f"{len(api_contract)} chars")
-                        logger.info("[Cyborg] api_contract.md gerado para projeto %s", project_id[:8])
+                # Frontends não têm api_contract.md próprio — consomem o do backend.
+                # Apenas backends precisam expor o contrato.
+                _detected_type = _detect_project_type(project_id, prod_id)
+                if _detected_type in ("frontend", "mobile"):
+                    result.log.append(f"[INFO] Projeto {_detected_type} — api_contract.md não obrigatório (consome API do backend)")
+                    # Tentar ler o contrato do produto (gerado pelo backend)
+                    if prod_id:
+                        product_contract = Path(PROJECT_FILES) / prod_id / "contracts" / f"*.api_contract.md"
+                        import glob as _glob
+                        candidates = _glob.glob(str(product_contract))
+                        if candidates:
+                            api_contract = Path(candidates[0]).read_text(encoding="utf-8", errors="replace")[:8000]
+                            result.log.append(f"[INFO] api_contract.md do produto carregado: {candidates[0]}")
+                else:
+                    # Backend: tentar gerar a partir do RUNBOOK.md
+                    result.record("api_contract.md existe", False, "gerando a partir do RUNBOOK.md")
+                    if runbook_content:
+                        api_contract = _generate_api_contract(runbook_content, project_id)
+                        if api_contract:
+                            contract.write_text(api_contract, encoding="utf-8")
+                            if prod_id:
+                                contracts_dir = Path(PROJECT_FILES) / prod_id / "contracts"
+                                contracts_dir.mkdir(parents=True, exist_ok=True)
+                                dest = contracts_dir / f"{project_id[:8]}.api_contract.md"
+                                import shutil as _shutil
+                                _shutil.copy2(str(contract), str(dest))
+                            result.record("api_contract.md gerado pelo Cyborg", True, f"{len(api_contract)} chars")
+                            logger.info("[Cyborg] api_contract.md gerado para projeto %s", project_id[:8])
         except Exception as e:
             result.record("api_contract.md", False, str(e))
 
@@ -341,29 +353,60 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
 
     # ── FASE 3: SMOKE TEST ─────────────────────────────────────────────────────
     result.log.append("=== FASE 3: SMOKE TEST ===")
+    _in_docker   = os.path.exists("/.dockerenv")
+    _smoke_host  = "host.docker.internal" if _in_docker else "localhost"
+    import re as _re
+
     if smoke_script:
         rc, out, err = _run_cmd("bash -e smoke_test.sh", cwd=project_dir, timeout=120)
         result.record("smoke_test.sh executado", rc == 0, (out + err)[-500:] if rc != 0 else "OK")
-    elif api_contract:
-        # Extrair porta e testar health endpoint
-        # Dentro de container Docker, usar host.docker.internal em vez de localhost
-        import re as _re
-        _in_docker = os.path.exists("/.dockerenv")
-        _health_host = "host.docker.internal" if _in_docker else "localhost"
-        port_match = _re.search(r"http://localhost:(\d+)", api_contract)
-        if port_match:
-            port = port_match.group(1)
-            rc, out, _ = _run_cmd(
-                f"curl -sf http://{_health_host}:{port}/api/health || "
-                f"curl -sf http://{_health_host}:{port}/health || "
-                f"curl -sf http://{_health_host}:{port}/healthz",
-                timeout=20
-            )
-            result.record(f"Health endpoint :{port}", rc == 0, out[:200] if rc != 0 else "OK")
+    else:
+        # Detectar porta pelo docker-compose ativo
+        _port_from_compose: str | None = None
+        if _compose_dir and (Path(_compose_dir) / "docker-compose.yml").exists():
+            try:
+                _dc_txt = (Path(_compose_dir) / "docker-compose.yml").read_text(encoding="utf-8")
+                _pm = _re.search(r'"(\d{4,5}):\d{4,5}"', _dc_txt) or _re.search(r"(\d{4,5}):\d{4,5}", _dc_txt)
+                if _pm:
+                    _port_from_compose = _pm.group(1)
+            except Exception:
+                pass
+
+        _proj_type = _detect_project_type(project_id, prod_id)
+        _port = _port_from_compose
+
+        if _port:
+            if _proj_type in ("frontend", "mobile"):
+                # Frontend: qualquer resposta HTTP < 500 é OK (pode redirecionar para login)
+                rc, out, _ = _run_cmd(
+                    f"curl -sI http://{_smoke_host}:{_port}/ | head -1",
+                    timeout=20
+                )
+                _ok = rc == 0 and ("HTTP/" in out) and not any(c in out for c in ["5", "000"])
+                result.record(f"Frontend responde :{_port}", _ok, out[:100] if not _ok else "OK")
+            else:
+                # Backend: testar health endpoint
+                rc, out, _ = _run_cmd(
+                    f"curl -sf http://{_smoke_host}:{_port}/api/health || "
+                    f"curl -sf http://{_smoke_host}:{_port}/health || "
+                    f"curl -sf http://{_smoke_host}:{_port}/healthz",
+                    timeout=20
+                )
+                result.record(f"Health endpoint :{_port}", rc == 0, out[:200] if rc != 0 else "OK")
+        elif api_contract:
+            port_match = _re.search(r"http://localhost:(\d+)", api_contract)
+            if port_match:
+                port = port_match.group(1)
+                rc, out, _ = _run_cmd(
+                    f"curl -sf http://{_smoke_host}:{port}/api/health || "
+                    f"curl -sf http://{_smoke_host}:{port}/health",
+                    timeout=20
+                )
+                result.record(f"Health endpoint :{port}", rc == 0, out[:200] if rc != 0 else "OK")
+            else:
+                result.record("Health endpoint", False, "Porta não detectada")
         else:
             result.record("Health endpoint", False, "Porta não detectada no api_contract.md")
-    else:
-        result.record("Smoke test", False, "Sem smoke_test.sh nem api_contract.md para teste automático")
 
     # ── FASE 4: VALIDAÇÃO FUNCIONAL ────────────────────────────────────────────
     result.log.append("=== FASE 4: VALIDAÇÃO FUNCIONAL ===")
