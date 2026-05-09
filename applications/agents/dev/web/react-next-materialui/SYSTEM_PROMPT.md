@@ -1199,3 +1199,130 @@ grep -rh "client\.\(get\|post\|patch\|delete\)(" apps/src/lib/api/ | grep -oE "'
 # Para cada path: confirmar que baseURL + path = rota real do backend
 # Testar: curl http://BASE_URL/path → deve retornar 200 ou 401, nunca 404
 ```
+
+---
+
+### 6.6 BUGS VALIDADOS — Sistema Auto Peças Manager (2026-05-09)
+
+Validados ao testar o produto `sistema-auto-pecas-manager` end-to-end. Aplicam-se a qualquer Manager Next.js + MUI que consome backend Fastify/Express.
+
+#### W1 — `toProduct()` DEVE normalizar ambos os shapes de campo (Postgres + MySQL)
+
+**Causa:** Backend Postgres usa `price`, `stockLevel`, `minStock`, `sku`, `status: 'active'|'inactive'`. Backend MySQL usa `salePrice`, `stockQuantity`, `minStockQuantity`, `code`, `active: boolean`. A `toProduct()` só normalizava o shape MySQL, causando colunas Código/Categoria vazias.
+
+**Regra — `toProduct()` DEVE aceitar ambos os shapes via `??` fallback:**
+```typescript
+export function toProduct(raw: Record<string, unknown>): Product {
+  const r = raw;
+  const price      = parseFloat(String(r.price      ?? r.salePrice      ?? 0)) || 0;
+  const stockLevel = Number(r.stockLevel   ?? r.stockQuantity   ?? 0);
+  const minStock   = Number(r.minStock     ?? r.minStockQuantity ?? 0);
+  const active     = typeof r.active === 'boolean'
+    ? r.active
+    : (r.status === 'active' || r.status === undefined);
+  const sku        = (r.sku ?? r.code ?? null) as string | null;
+  const category   = (r.category ?? null) as { id: string; name: string } | null;
+  return {
+    ...r as Partial<Product>,
+    sku, code: sku, price, salePrice: price, stockLevel, stockQuantity: stockLevel,
+    minStock, minStockQuantity: minStock, active, category,
+    isLowStock:   stockLevel > 0 && minStock > 0 && stockLevel <= minStock,
+    isOutOfStock: stockLevel === 0,
+  } as Product;
+}
+```
+
+#### W2 — `getSale(id)` DEVE normalizar shape flat do `GET /sales/:id`
+
+**Causa:** Backend retorna `{ data: { id, code, status, ..., items: [...], subtotal } }` (flat). Se o Manager espera `{ data: { sale: {...}, items: [...] } }` (aninhado), ocorre erro de runtime silencioso.
+
+**Regra:**
+```typescript
+export async function getSale(id: string): Promise<Sale> {
+  const res = await apiClient.get<SaleDetailEnvelope>('/api/sales/' + id);
+  const data = getApiData(res) as Record<string, unknown>;
+  // Shape flat: sale fields + items[] + subtotal embutidos diretamente em data
+  const items = (data.items as unknown[] | undefined) ?? [];
+  const subtotal = typeof data.subtotal === 'number'
+    ? data.subtotal
+    : items.reduce((s, i) => s + (Number((i as Record<string,unknown>).unitPrice) || 0) * (Number((i as Record<string,unknown>).quantity) || 0), 0);
+  return { ...data, subtotal } as unknown as Sale;
+}
+```
+
+#### W3 — Tipos de movimentação DEVEM usar os valores do enum do backend
+
+**Causa:** `MOVE_TYPES` no estoque usava `'saida'`, `'ajuste_negativo'`, `'devolucao'` — valores que não existem no enum `stock_movement_type`. O backend rejeita com erro de validação.
+
+**Regra — usar SOMENTE os 4 valores do enum:**
+```typescript
+const MOVE_TYPES = [
+  { value: 'in',         label: STOCK_MOVEMENT_TYPE_LABEL.in },
+  { value: 'out',        label: STOCK_MOVEMENT_TYPE_LABEL.out },
+  { value: 'adjustment', label: STOCK_MOVEMENT_TYPE_LABEL.adjustment },
+  { value: 'return',     label: STOCK_MOVEMENT_TYPE_LABEL.return },
+];
+```
+
+**Varredura:** `grep -rn "saida\|ajuste_negativo\|devolucao" apps/src/` deve retornar vazio.
+
+#### W4 — `inventoryApi` DEVE enviar `notes` (não `reason`) para backend Fastify
+
+**Causa:** Form usa `reason` internamente mas o campo do backend é `notes`. Backend rejeitava silenciosamente ou ignorava o campo.
+
+```typescript
+// stockAdjustmentToPayload():
+return { productId, type, quantity, notes: form.reason };  // notas = reason mapeado
+```
+
+#### W5 — Sidebar roles DEVEM usar os valores exatos do authStore
+
+**Causa:** Sidebar tinha `roles: ['admin', 'gerente']` — valor `'gerente'` não existe no tipo `UserRole`. Usuários com role `manager` não viam os itens de gestão.
+
+**Regra:** NUNCA usar nomes em PT-BR nos roles. Usar exatamente os valores do enum: `'admin' | 'manager' | 'employee'`.
+```typescript
+// ❌ ERRADO
+roles: ['admin', 'gerente']
+
+// ✅ CORRETO
+roles: ['admin', 'manager']
+```
+
+#### W6 — AppShell `margin-left` DEVE ser responsivo (xs: 0, md: SIDEBAR_W)
+
+**Causa:** `ml: { md: SIDEBAR_W + 'px' }` no MUI herda de xs o valor 0 e aplica só em md+. Mas na prática, `{ md: value }` pode causar overflow em telas pequenas dependendo da versão do MUI.
+
+**Padrão obrigatório:**
+```typescript
+// AppShell component — área main
+sx={{
+  ml: { xs: 0, md: SIDEBAR_W + 'px' },  // explicit xs:0 evita regressão
+}}
+```
+
+**Varredura:** `grep "ml:.*{" apps/src/components/layout/AppShell.tsx` deve mostrar `xs: 0`.
+
+#### W7 — NUNCA gerar escape sequences `\uXXXX` em strings TypeScript/TSX
+
+**Causa:** 93 ocorrências de `é` (é), `ã` (ã), etc. em arquivos TypeScript. Em runtime, o JavaScript interpreta como caracteres literais (ex: a string `ão` vira `ão` corretamente), mas em JSX dentro de JSON o escape `\\u00e3o` vira a string literal `ão` — caracteres quebrados no browser.
+
+**Regra absoluta:** Usar **sempre** o caractere real UTF-8 em strings TypeScript/TSX. NUNCA usar `\uXXXX` em strings que serão renderizadas na UI.
+
+```typescript
+// ❌ ERRADO
+label: 'Cartão de Crédito'
+// ✅ CORRETO
+label: 'Cartão de Crédito'
+```
+
+**Varredura obrigatória antes de fechar task:**
+```bash
+grep -rn "\\\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]" apps/src/ && echo "BUG W7: escapes unicode literais — substituir pelos caracteres reais"
+```
+
+**Script de correção (se necessário):**
+```python
+import re
+def fix(text):
+    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1),16)), text)
+```

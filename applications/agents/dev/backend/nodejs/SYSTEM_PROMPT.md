@@ -1244,3 +1244,117 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/api/<rota> \
 3. **Endpoint inexistente** — `GET /nfe` (listagem) não existia; só `POST /nfe/emit` e `GET /nfe/:id`
 4. Todos evitáveis com ISVC checklist antes do `docker compose build`
 
+---
+
+### 6.3 BUGS VALIDADOS — Sistema Auto Peças (2026-05-09)
+
+Validados ao testar o produto `sistema-auto-pecas-manager` end-to-end. Aplicam-se a qualquer sistema de vendas com Fastify + Drizzle + PostgreSQL.
+
+#### B-SALES-1 — Schema `sales` DEVE ter `paymentMethod` e `code` desde o início
+
+**Causa:** Backend gerou tabela `sales` sem `payment_method` e `code`. O Manager precisava dessas colunas para PDV e detalhe de venda.
+
+**Regra obrigatória:**
+```typescript
+// db/schema/sales.ts — colunas obrigatórias em qualquer sistema de vendas
+export const sales = pgTable('sales', {
+  // ...
+  paymentMethod: varchar('payment_method', { length: 30 }),
+  code: varchar('code', { length: 20 }),  // ex: #0001, #0002
+});
+```
+
+**Geração automática de code no repositório:**
+```typescript
+// Em createSaleAtomic — contar vendas para gerar code sequencial
+const [{ cnt }] = await tx.select({ cnt: count() }).from(sales);
+const saleCode = '#' + String(Number(cnt) + 1).padStart(4, '0');
+// Inserir com: code: saleCode, paymentMethod: input.paymentMethod ?? null
+```
+
+**Checklist:** `grep "payment_method\|code" apps/src/db/schema/sales.ts` deve retornar as duas colunas.
+
+#### B-SALES-2 — `GET /sales/:id` DEVE retornar shape flat (não `{ sale, items }` aninhado)
+
+**Causa:** Backend retornava `{ data: { sale: {...}, items: [...] } }`. O Manager precisava de `{ data: { id, code, status, ..., items: [...], subtotal } }`.
+
+**Regra:**
+- `GET /sales/:id` → shape flat com `items[]` e `subtotal` embutidos — o frontend usa diretamente como `Sale`
+- `POST /sales` → pode retornar shape aninhado `{ sale, items }` (só para confirmação interna)
+
+```typescript
+// routes/sales.ts — GET /sales/:id
+const { sale, items } = await getSaleById(paramsResult.data.id);
+const saleDto = toSaleDto(sale);
+const subtotal = items.reduce((s, i) => s + parseFloat(i.unitPrice) * i.quantity, 0);
+return reply.send(success({ ...saleDto, subtotal, items: items.map(toSaleItemDto) }));
+```
+
+**Schema de resposta:** usar `additionalProperties: true` para shape flat com campos extras.
+
+#### B-SALES-3 — `GET /products` DEVE fazer leftJoin com `categories`
+
+**Causa:** listagem de produtos retornava `category: null` porque não havia join. O Manager mostrava coluna "Categoria" sempre vazia.
+
+```typescript
+// repositories/product.repository.ts
+const rows = await db.select({
+  // campos do produto...
+  categoryName: categories.name,
+}).from(products)
+  .leftJoin(categories, eq(products.categoryId, categories.id))
+  .where(where)...
+
+return {
+  data: rows.map((r) => ({
+    ...r,
+    category: r.categoryId && r.categoryName ? { id: r.categoryId, name: r.categoryName } : null,
+  })),
+  total: Number(total),
+};
+```
+
+**Schema de resposta:** incluir `category: { type: 'object', nullable: true, additionalProperties: true }`.
+
+#### B-SALES-4 — `GET /categories` DEVE retornar `parent` e `productCount`
+
+**Causa:** listagem de categorias não incluía categoria pai nem contagem de produtos.
+
+**Regra — usar SQL raw para subqueries correlacionadas** (Drizzle parametriza mal referências de coluna):
+```typescript
+// repositories/category.repository.ts
+productCount: sql<number>`(SELECT COUNT(*)::int FROM products p WHERE p.category_id = categories.id)`,
+parentName: sql<string | null>`(SELECT name FROM categories parent WHERE parent.id = categories.parent_id)`,
+```
+
+**Importante:** NUNCA usar `${categories.id}` dentro de subquery SQL raw — isso vira parâmetro e resulta sempre 0. Usar o nome real da coluna (`categories.id`).
+
+#### B-SALES-5 — Aliases de rota DEVEM usar `paginated()` corretamente
+
+**Causa:** alias `/api/stock-movements` retornava raw array em vez de `{ data, meta }`.
+
+```typescript
+// Alias incorreto:
+return reply.send(movements);  // ❌
+
+// Alias correto:
+const { data, total } = await listStockMovements({ page, limit, ... });
+return reply.send(paginated(data.map(toStockMovementDto), total, page, limit));  // ✅
+```
+
+#### B-SALES-6 — `GET /users/me` é a rota correta, não `GET /auth/me`
+
+**Causa:** Manager chamava `/api/auth/me` (404). A rota correta no ecossistema Genesis é `/api/users/me`.
+
+**Documentar no `api_contract.md`:**
+```markdown
+## Autenticação
+- **Me:** `GET /api/users/me` → `{ data: { id, email, name, role } }`
+  - ⚠️ Rota é `/api/users/me` — NUNCA `/api/auth/me` (404 se chamar errado)
+```
+
+**Varredura obrigatória:**
+```bash
+grep -rn "auth/me" apps/src/routes/ && echo "BUG: rota deve ser /users/me, não /auth/me"
+```
+
