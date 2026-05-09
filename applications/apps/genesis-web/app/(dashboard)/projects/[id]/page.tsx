@@ -440,8 +440,8 @@ function ProjectDetailPageInner() {
     // independente de qualquer agent_working posterior (ex.: FULL-TEST que roda dev/qa após DevOps)
     const hasProductReady = entries.some(e => e.eventType === "product_ready");
     if (hasProductReady) {
-      setWorkingStepIndex(6);  // índice de "Pronto"
-      setWorkingMessage("Aguardando aceite");
+      setWorkingStepIndex(6);  // índice de "Aceito" (último step)
+      setWorkingMessage("Aguardando aceite pelo Cyborg");
       return;
     }
     // Procurar o último agent_working em vez de apenas o último evento.
@@ -787,7 +787,11 @@ function ProjectDetailPageInner() {
     );
   }
 
-  const isRunning   = project.status === "running";
+  // "running" é o status após o PM concluir. Durante CTO/Engineer/PM o status pode ser
+  // spec_submitted — o pipeline já está ativo (runner rodando) mas o DB ainda não atualizou.
+  // Incluir spec_submitted e pending_conversion como "em execução" para o stepper reagir
+  // ao workingStepIndex derivado do diálogo em tempo real.
+  const isRunning   = project.status === "running" || project.status === "spec_submitted" || project.status === "pending_conversion";
   const isDone      = project.status === "completed" || project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
   const canAccept   = project.status === "completed" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
