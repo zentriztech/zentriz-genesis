@@ -375,8 +375,9 @@ async function autoRescueFailedProjects(activeIds: Set<string>): Promise<void> {
         continue;
       }
 
-      // Não resgatar se já tem processo ativo (estado inconsistente)
-      if (activeIds.has(project.id)) continue;
+      // Não resgatar se tem processo ativo E o projeto não está failed
+      // (se o projeto está failed mas ainda está na lista ativa = processo morreu mas PID não foi limpo)
+      if (activeIds.has(project.id) && project.status !== "failed") continue;
 
       // Verificar se tem checkpoint salvo (runner.py grava em STATE_DIR)
       // Se não tiver checkpoint, relançar do zero (spec_submitted) — também válido

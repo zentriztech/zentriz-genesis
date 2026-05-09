@@ -124,7 +124,23 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
 
     logger.info("[%s] Chamando serviço de agentes em %s (timeout=%ss, max_attempts=%s)...", agent_name, url, timeout, max_attempts)
 
+    # Fallback de modelo: na tentativa 2+, trocar para CLAUDE_MODEL_REWORK (ex: Opus)
+    # se houver fallback configurado. O runtime.py lê llm_config.model do envelope.
+    _fallback_model = os.environ.get("CLAUDE_MODEL_REWORK", "").strip()
+    _primary_model  = (body.get("llm_config") or {}).get("model", "") if isinstance(body, dict) else ""
+
     for attempt in range(max_attempts):
+        # A partir da tentativa 2, escalar para o modelo fallback
+        if attempt >= 1 and _fallback_model and _fallback_model != _primary_model:
+            import copy as _copy
+            body_escalated = _copy.deepcopy(body)
+            if "llm_config" not in body_escalated or not isinstance(body_escalated.get("llm_config"), dict):
+                body_escalated["llm_config"] = {}
+            body_escalated["llm_config"]["model"] = _fallback_model
+            data = json.dumps(body_escalated, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+            logger.info("[%s] Tentativa %d/%d — escalando para modelo fallback: %s",
+                        agent_name, attempt + 1, max_attempts, _fallback_model)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status != 200:
