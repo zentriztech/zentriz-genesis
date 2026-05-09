@@ -262,34 +262,40 @@ function CyborgLogCard({ projectId, cyborgAttempts }: { projectId: string; cybor
 
 // ── Status chip helper ────────────────────────────────────────────────────────
 function StatusChip({ status, model, activeStep }: { status: string; model?: string | null; activeStep?: number }) {
-  // Durante spec_submitted, o pipeline já está rodando — mostrar fase real pelo activeStep
-  const spec_label = activeStep === 1 ? "CTO + Engineer" :
-                     activeStep === 2 ? "PM — Backlog"   :
+  // Fase atual derivada do activeStep (para spec_submitted e running)
+  const phaseLabel = activeStep === 1 ? "CTO + Engineer" :
+                     activeStep === 2 ? "PM"             :
                      activeStep === 3 ? "Dev + QA"       :
-                     activeStep === 4 ? "DevOps"         : "Iniciando…";
-  const labels: Record<string, string> = {
-    running: "Dev + QA", accepted: "Aceito", completed: "Concluído",
+                     activeStep === 4 ? "DevOps"         : null;
+
+  // Status principal — o que o projeto "é" (em execução, aceito, falhou…)
+  const isActiveExecution = status === "running" || status === "spec_submitted" || status === "pending_conversion";
+  const mainLabel: Record<string, string> = {
+    running: "Em execução", accepted: "Aceito", completed: "Concluído",
     failed: "Falhou", stopped: "Parado", draft: "Rascunho",
-    spec_submitted: spec_label, cto_charter: "CTO + Engineer",
-    pm_backlog: "PM — Backlog", dev_qa: "Dev + QA", devops: "DevOps",
-    pending_cyborg: "Cyborg validando", blocked_cyborg: "Cyborg bloqueado",
-    pending_conversion: "Convertendo spec",
+    spec_submitted: "Em execução", cto_charter: "Em execução",
+    pm_backlog: "Em execução", dev_qa: "Em execução", devops: "Em execução",
+    pending_cyborg: "Validando", blocked_cyborg: "Bloqueado",
+    pending_conversion: "Em execução",
   };
-  const colors: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
+  const mainColor: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
     completed: "success", accepted: "success", failed: "error", stopped: "error",
-    running: "info", spec_submitted: "info", cto_charter: "warning",
-    pm_backlog: "warning", dev_qa: "info", devops: "info",
+    running: "info", spec_submitted: "info", cto_charter: "info",
+    pm_backlog: "info", dev_qa: "info", devops: "info",
     pending_cyborg: "warning", blocked_cyborg: "error",
+    pending_conversion: "info",
   };
+
   return (
     <Stack direction="row" spacing={0.75} alignItems="center">
+      {/* Chip 1 — status principal com ponto pulsante quando em execução */}
       <Chip
-        label={labels[status] ?? status}
+        label={mainLabel[status] ?? status}
         size="small"
-        color={colors[status] ?? "default"}
+        color={mainColor[status] ?? "default"}
         sx={{
           fontWeight: 600,
-          ...(status === "running" && {
+          ...(isActiveExecution && {
             "& .MuiChip-label": { pr: 2.5 },
             "&::after": {
               content: '""', position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
@@ -301,7 +307,17 @@ function StatusChip({ status, model, activeStep }: { status: string; model?: str
           }),
         }}
       />
-      {status === "running" && <ModelBadge model={model} />}
+      {/* Chip 2 — fase atual (só quando em execução e há fase conhecida) */}
+      {isActiveExecution && phaseLabel && (
+        <Chip
+          label={phaseLabel}
+          size="small"
+          variant="outlined"
+          sx={{ fontSize: "0.65rem", fontWeight: 500, height: 20, color: "text.secondary", borderColor: "divider" }}
+        />
+      )}
+      {/* Chip 3 — modelo de IA ativo */}
+      {isActiveExecution && <ModelBadge model={model} />}
     </Stack>
   );
 }
