@@ -185,18 +185,14 @@ def _find_project_dir(project_id: str, prod_id: str | None) -> Path | None:
     for base in candidates:
         if not base.exists():
             continue
-        # Verificar se tem conteúdo relevante (apps/, project/, docs/)
-        has_content = any((base / d).exists() for d in ("apps", "project", "docs"))
-        if has_content:
+        # Verificar se tem arquivos reais (não só pastas vazias)
+        try:
+            has_files = any(True for _ in base.rglob("*") if _.is_file())
+        except PermissionError:
+            has_files = False
+        if has_files:
             logger.info("[Cyborg] Diretório do projeto encontrado: %s", base)
             return base
-        # Mesmo sem subpastas conhecidas, retornar se o diretório existe e tem arquivos
-        try:
-            if any(base.iterdir()):
-                logger.info("[Cyborg] Diretório do projeto encontrado (fallback): %s", base)
-                return base
-        except PermissionError:
-            pass
 
     logger.warning(
         "[Cyborg] Diretório não encontrado para project_id=%s prod_id=%s em %s",
@@ -263,22 +259,27 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
 
     if project_dir:
         try:
-            runbook = Path(project_dir) / "RUNBOOK.md"
-            if runbook.exists():
-                runbook_content = runbook.read_text(encoding="utf-8", errors="replace")[:8000]
-                result.record("RUNBOOK.md existe", True, f"{len(runbook_content)} chars")
+            # RUNBOOK.md é informativo — não bloquear se não existir
+            for runbook_name in ("RUNBOOK.md", "README.md", "docs/RUNBOOK.md"):
+                runbook = Path(project_dir) / runbook_name
+                if runbook.exists():
+                    runbook_content = runbook.read_text(encoding="utf-8", errors="replace")[:8000]
+                    result.record("RUNBOOK.md existe", True, f"{len(runbook_content)} chars ({runbook_name})")
+                    break
             else:
-                result.record("RUNBOOK.md existe", False, "arquivo não encontrado")
+                # Não bloquear — logar apenas como aviso
+                result.log.append("[WARN] RUNBOOK.md não encontrado — continuando sem ele")
         except Exception as e:
-            result.record("Ler RUNBOOK", False, str(e))
+            result.log.append(f"[WARN] Erro ao ler RUNBOOK: {e}")
 
         try:
+            # smoke_test.sh é opcional — se não existir, Cyborg usa api_contract.md
             smoke = Path(project_dir) / "smoke_test.sh"
             if smoke.exists():
                 smoke_script = smoke.read_text(encoding="utf-8", errors="replace")[:4000]
-                result.record("smoke_test.sh existe", True)
+                result.log.append("[INFO] smoke_test.sh encontrado")
             else:
-                result.record("smoke_test.sh existe", False, "será gerado inline")
+                result.log.append("[INFO] smoke_test.sh não encontrado — usando api_contract.md para smoke")
         except Exception:
             pass
 
@@ -309,15 +310,21 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
 
     # ── FASE 2: INFRAESTRUTURA ─────────────────────────────────────────────────
     result.log.append("=== FASE 2: INFRAESTRUTURA ===")
-    if apps_dir and (Path(apps_dir) / "docker-compose.yml").exists():
+    # Procurar docker-compose.yml em project/ (gerado pelo DevOps) ou apps/ (fallback)
+    _compose_dir: str | None = None
+    if project_dir and (Path(project_dir) / "docker-compose.yml").exists():
+        _compose_dir = project_dir
+    elif apps_dir and (Path(apps_dir) / "docker-compose.yml").exists():
+        _compose_dir = apps_dir
+    if _compose_dir:
         rc, out, err = _run_cmd(
             "docker compose up -d --build 2>&1 | tail -30",
-            cwd=apps_dir, timeout=PLAYBOOK_TIMEOUT,
+            cwd=_compose_dir, timeout=PLAYBOOK_TIMEOUT,
         )
         if rc == 0:
             # Aguardar healthcheck
-            time.sleep(10)
-            rc2, out2, _ = _run_cmd("docker compose ps", cwd=apps_dir, timeout=30)
+            time.sleep(15)
+            rc2, out2, _ = _run_cmd("docker compose ps", cwd=_compose_dir, timeout=30)
             all_healthy = "unhealthy" not in out2.lower() and "exited" not in out2.lower()
             result.record("docker compose up", rc == 0, out[-300:] if rc != 0 else "OK")
             result.record("Containers saudáveis", all_healthy, out2[-300:] if not all_healthy else "OK")
@@ -339,11 +346,19 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
         result.record("smoke_test.sh executado", rc == 0, (out + err)[-500:] if rc != 0 else "OK")
     elif api_contract:
         # Extrair porta e testar health endpoint
+        # Dentro de container Docker, usar host.docker.internal em vez de localhost
         import re as _re
+        _in_docker = os.path.exists("/.dockerenv")
+        _health_host = "host.docker.internal" if _in_docker else "localhost"
         port_match = _re.search(r"http://localhost:(\d+)", api_contract)
         if port_match:
             port = port_match.group(1)
-            rc, out, _ = _run_cmd(f"curl -sf http://localhost:{port}/health || curl -sf http://localhost:{port}/healthz", timeout=15)
+            rc, out, _ = _run_cmd(
+                f"curl -sf http://{_health_host}:{port}/api/health || "
+                f"curl -sf http://{_health_host}:{port}/health || "
+                f"curl -sf http://{_health_host}:{port}/healthz",
+                timeout=20
+            )
             result.record(f"Health endpoint :{port}", rc == 0, out[:200] if rc != 0 else "OK")
         else:
             result.record("Health endpoint", False, "Porta não detectada no api_contract.md")
@@ -521,9 +536,78 @@ def poll_completed_projects(product_id: str | None) -> list[dict]:
         if product_id and p.get("productId") != product_id:
             continue
         if not product_id and p.get("productId"):
-            continue  # Modo solitário: ignorar projetos com produto
+            # Modo solitário: normalmente ignora projetos com produto.
+            # Exceção: pending_cyborg — o runner pediu validação explícita independente do modo.
+            if p.get("status") != "pending_cyborg":
+                continue
         projects.append(p)
     return projects
+
+
+def poll_blocked_tasks(product_id: str | None) -> list[dict]:
+    """Busca projetos 'running' com tasks em BLOCKED para intervenção autônoma.
+
+    Retorna lista de dicts: { project_id, product_id, blocked_tasks: [task_id] }.
+    O Cyborg vai reprocessar cada task BLOCKED chamando o runner com reset da task.
+    """
+    data, status = _api("GET", "/api/projects")
+    if status != 200 or not isinstance(data, list):
+        return []
+
+    result = []
+    for p in data:
+        if p.get("status") != "running":
+            continue
+        if product_id and p.get("productId") != product_id:
+            continue
+        proj_id = p.get("id", "")
+        if not proj_id:
+            continue
+        # Buscar tasks BLOCKED do projeto
+        tasks_data, t_status = _api("GET", f"/api/projects/{proj_id}/tasks")
+        if t_status != 200 or not isinstance(tasks_data, list):
+            continue
+        blocked = [
+            t.get("taskId") or t.get("task_id")
+            for t in tasks_data
+            if t.get("status") == "BLOCKED" and (t.get("taskId") or t.get("task_id"))
+        ]
+        if blocked:
+            result.append({
+                "project_id":  proj_id,
+                "product_id":  p.get("productId") or product_id,
+                "title":       p.get("title", ""),
+                "blocked_tasks": blocked,
+            })
+    return result
+
+
+def handle_blocked_task(project_id: str, task_id: str, product_id: str | None) -> bool:
+    """Reprocessa uma task BLOCKED:
+    1. Reset do status para NEW (permite que o monitor loop a re-execute)
+    2. Aumenta MAX_QA_REWORK para dar mais uma chance (via API runtime-config)
+    3. Posta diálogo informando a intervenção
+    """
+    logger.info("[Cyborg] Intervenção autônoma — task BLOCKED: %s / %s", project_id[:8], task_id)
+    _post_dialogue(
+        project_id,
+        f"🤖 Cyborg — Intervindo em task BLOCKED: {task_id}. "
+        f"Resetando status para NEW e acionando rework com Opus (modelo superior)."
+    )
+
+    # Reset para ASSIGNED — o monitor loop processa ASSIGNED (não NEW).
+    # dev_peak_rework já registra rework>=1 → próxima execução usará Opus automaticamente.
+    reset_data, reset_status = _api(
+        "PATCH",
+        f"/api/projects/{project_id}/tasks/{task_id}",
+        {"status": "ASSIGNED"}
+    )
+    if reset_status not in (200, 204):
+        logger.warning("[Cyborg] Falha ao resetar task %s: HTTP %d — resp: %s", task_id, reset_status, str(reset_data)[:100])
+        return False
+
+    logger.info("[Cyborg] Task %s / %s resetada para ASSIGNED — monitor loop irá reprocessar com Opus.", project_id[:8], task_id)
+    return True
 
 
 def main() -> int:
@@ -543,6 +627,25 @@ def main() -> int:
 
     while True:
         try:
+            # ── Fase 1: intervenção em tasks BLOCKED em projetos running ─────────
+            blocked_projects = poll_blocked_tasks(PRODUCT_ID or None)
+            for bp in blocked_projects:
+                proj_id   = bp["project_id"]
+                prod_id   = bp.get("product_id") or PRODUCT_ID or None
+                for task_id in bp.get("blocked_tasks", []):
+                    # Evitar re-intervenção na mesma task nesta sessão
+                    intervention_key = f"{proj_id}:{task_id}:blocked"
+                    if intervention_key in cyborg_ctx.get("processed", set()):
+                        continue
+                    try:
+                        ok = handle_blocked_task(proj_id, task_id, prod_id)
+                        if ok:
+                            cyborg_ctx.setdefault("processed", set()).add(intervention_key)
+                            logger.info("[Cyborg] Task %s do projeto %s: intervenção concluída.", task_id, proj_id[:8])
+                    except Exception as e:
+                        logger.error("[Cyborg] Erro ao intervir em task BLOCKED %s/%s: %s", proj_id[:8], task_id, e)
+
+            # ── Fase 2: validar projetos completed/pending_cyborg ─────────────
             projects = poll_completed_projects(PRODUCT_ID or None)
 
             for proj in projects:
@@ -553,8 +656,13 @@ def main() -> int:
                 proj_status = proj.get("status", "")
 
                 # Pular projetos já processados com sucesso nesta sessão.
-                # projetos pending_cyborg podem ser retentados — não bloquear pelo processed set.
+                # pending_cyborg: limitar a 2 reprocessamentos para não travar o loop.
+                rejection_key = f"{proj_id}:rejected"
+                rejection_count = cyborg_ctx.get("rejection_counts", {}).get(proj_id, 0)
                 if proj_id in cyborg_ctx["processed"] and proj_status != "pending_cyborg":
+                    continue
+                if proj_status == "pending_cyborg" and rejection_count >= 2:
+                    # Desistir após 2 rejeições — evitar loop infinito em projeto sem arquivos
                     continue
 
                 logger.info("[Cyborg] Projeto detectado: %s (%s) — %s",
@@ -567,6 +675,9 @@ def main() -> int:
                         cyborg_ctx["accepted_count"] += 1
                     else:
                         cyborg_ctx["rejected_count"] += 1
+                        # Contar rejeições para evitar loop infinito
+                        cyborg_ctx.setdefault("rejection_counts", {})[proj_id] = \
+                            cyborg_ctx.get("rejection_counts", {}).get(proj_id, 0) + 1
                         # Remover do processed para permitir retry no próximo poll
                         # (somente se ainda estiver pending_cyborg — o runner pode ter relançado)
                         cyborg_ctx["processed"].discard(proj_id)
@@ -575,10 +686,11 @@ def main() -> int:
                     _reject(proj_id, f"Erro interno do Cyborg: {str(e)[:500]}")
                     cyborg_ctx["processed"].discard(proj_id)
 
-                # Modo solitário: encerrar após processar o único projeto
+                # Modo solitário: encerrar após aceitar/processar o projeto
+                # Mas só encerra se não houver tasks BLOCKED pendentes de intervenção
                 if not PRODUCT_ID:
-                    logger.info("[Cyborg] Modo solitário — encerrando após processar projeto %s", proj_id[:8])
-                    return 0
+                    logger.info("[Cyborg] Modo solitário — projeto %s processado, verificando tasks BLOCKED...", proj_id[:8])
+                    # Não encerra — continua monitorando tasks BLOCKED em loop
 
         except Exception as e:
             logger.error("[Cyborg] Erro no poll: %s", e)

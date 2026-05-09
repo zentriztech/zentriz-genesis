@@ -118,10 +118,13 @@ services:
       - CIRCUIT_BREAKER_THRESHOLD=${CIRCUIT_BREAKER_THRESHOLD:-3}
       - GENESIS_API_TOKEN=${GENESIS_API_TOKEN:-}
       - GENESIS_API_URL=http://api:3000
+      - PROJECT_FILES_ROOT=/project-files
+      - HOST_PROJECT_FILES_ROOT=${HOST_PROJECT_FILES_ROOT:-/Users/mac/zentriz-files}
     env_file:
       - .env
     volumes:
       - ${HOME}/.aws:/root/.aws:ro
+      - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
       interval: 10s
@@ -213,6 +216,7 @@ services:
     volumes:
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
       - zentriz-genesis_uploads:/shared/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

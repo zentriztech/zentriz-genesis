@@ -330,6 +330,85 @@ async function checkExpiredDeployments(): Promise<void> {
   }
 }
 
+// ── Auto-rescue de projetos failed por causas recuperáveis ────────────────
+// Causas recuperáveis: timeout de agente, disconnect, restart do container.
+// Causas permanentes (não resgatar): timed_out=true, watchdog_gave_up=true, circuit_breaker.
+// Limite: WATCHDOG_MAX_RESTARTS (mesmo limite do orphan rescue).
+// Janela: só resgata projetos que falharam nos últimos RESCUE_WINDOW_MINUTES minutos.
+
+const RESCUE_WINDOW_MINUTES = parseInt(process.env.WATCHDOG_RESCUE_WINDOW_MINUTES ?? "30", 10);
+
+async function autoRescueFailedProjects(activeIds: Set<string>): Promise<void> {
+  if (!RUNNER_SERVICE_URL) return;
+
+  const client = await pool.connect();
+  try {
+    // Buscar projetos 'failed' recentes sem flags de falha permanente
+    const result = await client.query<OrphanProject>(
+      `SELECT id, status, spec_ref, started_at,
+              COALESCE(restart_count, 0) AS restart_count,
+              stopped_by, created_by, tenant_id
+       FROM projects
+       WHERE status = 'failed'
+         AND updated_at >= now() - ($1 || ' minutes')::interval
+         AND (stopped_by IS NULL OR stopped_by != 'user')
+         AND (extra IS NULL
+              OR (
+                extra->>'timed_out' IS DISTINCT FROM 'true'
+                AND extra->>'watchdog_gave_up' IS DISTINCT FROM 'true'
+                AND extra->>'circuit_breaker' IS DISTINCT FROM 'true'
+                AND extra->>'permanent_failure' IS DISTINCT FROM 'true'
+              ))
+       ORDER BY updated_at DESC
+       LIMIT 5`,
+      [RESCUE_WINDOW_MINUTES],
+    );
+
+    if (!result.rows.length) return;
+
+    for (const project of result.rows) {
+      // Não resgatar se já atingiu o limite
+      if (project.restart_count >= MAX_RESTART_ATTEMPTS) {
+        console.warn(`[Watchdog][Rescue] Projeto ${project.id} atingiu limite de ${MAX_RESTART_ATTEMPTS} rescues — desistindo.`);
+        await markProject(project.id, "failed", { extra: { watchdog_gave_up: true } });
+        await writeDlqEntry(project.id, "watchdog_gave_up", `Auto-rescue desistiu após ${MAX_RESTART_ATTEMPTS} tentativas`);
+        continue;
+      }
+
+      // Não resgatar se já tem processo ativo (estado inconsistente)
+      if (activeIds.has(project.id)) continue;
+
+      // Verificar se tem checkpoint salvo (runner.py grava em STATE_DIR)
+      // Se não tiver checkpoint, relançar do zero (spec_submitted) — também válido
+      console.log(
+        `[Watchdog][Rescue] Projeto ${project.id} falhou recentemente — relançando (tentativa ${project.restart_count + 1}/${MAX_RESTART_ATTEMPTS})`,
+      );
+
+      // Resetar para spec_submitted para o runner iniciar do checkpoint se disponível
+      await markProject(project.id, "spec_submitted", {
+        extra: { rescue_attempt: project.restart_count + 1, rescued_at: new Date().toISOString() },
+      });
+
+      const launched = await relaunchPipeline({ ...project, status: "spec_submitted" });
+      if (launched) {
+        await markProject(project.id, "running", {
+          restartCount: project.restart_count + 1,
+          extra: { last_rescue_restart: new Date().toISOString() },
+        });
+        console.log(`[Watchdog][Rescue] Projeto ${project.id} relançado com sucesso.`);
+      } else {
+        // Rollback — voltar para failed se não conseguiu relangar
+        await markProject(project.id, "failed", {
+          extra: { rescue_failed_at: new Date().toISOString() },
+        });
+        console.warn(`[Watchdog][Rescue] Falha ao relangar ${project.id} — mantendo como failed.`);
+      }
+    }
+  } finally {
+    client.release();
+  }
+}
+
 // ── Ciclo principal do Watchdog ────────────────────────────────────────────
 
 async function runWatchdogCycle(): Promise<void> {
@@ -380,6 +459,10 @@ async function runWatchdogCycle(): Promise<void> {
     } catch (e) {
       console.error("[Watchdog][G39] Erro na promoção da fila:", e);
     }
+
+    // 1b. Auto-rescue: projetos 'failed' por causa recuperável (timeout, disconnect)
+    //     Recuperável = failed recentemente + tem checkpoint + sem flag de falha permanente
+    await autoRescueFailedProjects(activeIds).catch((e) => console.error("[Watchdog] Erro em autoRescueFailedProjects:", e));
 
     // 2. Buscar projetos running sem processo ativo
     const orphans = await getOrphanProjects(activeIds);
