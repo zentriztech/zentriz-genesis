@@ -77,22 +77,20 @@ const GraphView = dynamic(() => import("@/components/GraphView").then((m) => ({ 
 });
 
 // ── Pipeline phases (ordem real de execução) ──────────────────────────────────
-// Fase 0: Spec recebida
-// Fase 1: CTO analisa e itera com Engineer (1-3 rounds) → gera Charter
-// Fase 2: PM quebra charter em tasks (backlog)
-// Fase 3: Monitor Loop — Dev implementa task por task, QA valida cada uma
-// Fase 4: DevOps — Dockerfile, docker-compose, CI/CD
-// Fase 5: Cyborg — validação autônoma E2E
-// Fase 6: Aceito
+// Pipeline principal — 5 fases + estado final
+// Cyborg é um guardião lateral: acende no nível da fase que está ajudando,
+// e sozinho na validação final (pending_cyborg / accepted).
 const PIPELINE_STEPS = [
-  { label: "Spec",          agent: "system",   desc: "Especificação recebida e preparada" },
+  { label: "Spec",           agent: "system",  desc: "Especificação recebida e preparada" },
   { label: "CTO + Engineer", agent: "cto",     desc: "Charter técnico e arquitetura" },
   { label: "PM",             agent: "pm",      desc: "Backlog de tasks" },
   { label: "Dev + QA",       agent: "dev",     desc: "Implementação task a task" },
   { label: "DevOps",         agent: "devops",  desc: "Docker, CI/CD e deploy" },
-  { label: "Cyborg",         agent: "monitor", desc: "Validação autônoma E2E" },
   { label: "Aceito",         agent: "",        desc: "Produto entregue" },
 ];
+
+// Letras do Cyborg — uma por step (alinhamento visual com a coluna lateral)
+const CYBORG_LETTERS = ["C", "Y", "B", "O", "R", "G"];
 
 const ALLOW_RUN_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog", "stopped", "failed",
@@ -129,16 +127,13 @@ function elapsedLabel(start?: string, end?: string): string {
 
 function agentToStepIndex(from: string): number {
   const a = from.toLowerCase();
-  // Fase 1: CTO e Engineer fazem rounds juntos
-  if (a === "cto" || a.includes("engineer")) return 1;
-  // Fase 2: PM gera backlog
-  if (a === "pm" || a.startsWith("pm_"))     return 2;
-  // Fase 3: Dev, QA e Monitor orquestram as tasks
-  if (a === "dev" || a.startsWith("dev_") || a === "qa" || a.startsWith("qa_") || a === "monitor" || a.startsWith("monitor_")) return 3;
-  // Fase 4: DevOps
-  if (a === "devops" || a.startsWith("devops_")) return 4;
-  // Fase 5: Cyborg/Cyborg-like
-  if (a.includes("cyborg")) return 5;
+  if (a === "cto" || a.includes("engineer"))       return 1; // Fase 1: CTO+Engineer
+  if (a === "pm" || a.startsWith("pm_"))           return 2; // Fase 2: PM
+  if (a === "dev" || a.startsWith("dev_") ||
+      a === "qa"  || a.startsWith("qa_")  ||
+      a === "monitor" || a.startsWith("monitor_")) return 3; // Fase 3: Dev+QA
+  if (a === "devops" || a.startsWith("devops_"))   return 4; // Fase 4: DevOps
+  // Cyborg não tem step próprio — fica na coluna lateral
   return -1;
 }
 
@@ -440,7 +435,7 @@ function ProjectDetailPageInner() {
     // independente de qualquer agent_working posterior (ex.: FULL-TEST que roda dev/qa após DevOps)
     const hasProductReady = entries.some(e => e.eventType === "product_ready");
     if (hasProductReady) {
-      setWorkingStepIndex(6);  // índice de "Aceito" (último step)
+      setWorkingStepIndex(5);  // índice de "Aceito" (último step agora é 5)
       setWorkingMessage("Aguardando aceite pelo Cyborg");
       return;
     }
@@ -804,16 +799,16 @@ function ProjectDetailPageInner() {
     project.status === "pm_backlog"      ? 3 :  // Backlog pronto → Dev+QA
     project.status === "dev_qa"          ? 3 :  // Dev+QA em andamento
     project.status === "devops"          ? 4 :  // DevOps
-    project.status === "pending_cyborg"  ? 5 :  // Cyborg validando
-    project.status === "blocked_cyborg"  ? 5 :
-    isDone                               ? 6 :
+    project.status === "pending_cyborg"  ? 4 :  // Cyborg validando (DevOps concluído)
+    project.status === "blocked_cyborg"  ? 4 :
+    isDone                               ? 5 :  // Aceito (índice 5 agora)
     // running/stopped/failed: usar workingStepIndex se disponível, senão fase Dev+QA
     (workingStepIndex != null ? workingStepIndex : 3);
 
   // accepted: sempre mostrar "Pronto" (step 6)
   // Se todas as tasks estão DONE e projeto ainda running (aguardando aceite): também Pronto
   const allTasksDone = (tasks ?? []).length > 0 && (tasks ?? []).every(t => t.status === "DONE" || t.status === "CANCELLED");
-  const effectiveStep = (project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg" || allTasksDone) ? 6 : stepFromStatus;
+  const effectiveStep = (project.status === "accepted" || allTasksDone) ? 5 : stepFromStatus;
 
   // Clear workingStep when done — prevents last agent_working event from keeping stepper spinning
   const activeStep = (isRunning && !allTasksDone && workingStepIndex != null) ? workingStepIndex : effectiveStep;
@@ -1310,135 +1305,200 @@ function ProjectDetailPageInner() {
                   </Box>
                 )}
 
-                {/* Steps */}
-                <Stack spacing={0}>
-                  {PIPELINE_STEPS.map((step, i) => {
-                    const isDoneStep   = i < activeStep;
-                    const isActiveStep = i === activeStep;
-                    const isFutureStep = i > activeStep;
-                    const profile      = step.agent ? getAgentProfile(step.agent) : null;
-                    const dotColor     = isDoneStep ? "#22c55e" : isActiveStep ? (profile?.color ?? "#6366F1") : "#30363D";
+                {/* Layout: Cyborg lateral + Steps */}
+                {(() => {
+                  // Estado do Cyborg:
+                  // - "idle": inativo (projeto não iniciado)
+                  // - "watching": assistindo passivamente (pipeline em progresso sem intervenção)
+                  // - "active-N": intervindo na fase N (blocked task, timeout, etc.)
+                  // - "validating": validação final (pending_cyborg / blocked_cyborg)
+                  // - "done": aceito
+                  const isCyborgValidating = project.status === "pending_cyborg" || project.status === "blocked_cyborg";
+                  const isCyborgDone       = project.status === "accepted";
+                  // Detectar intervenção ativa: se há tasks BLOCKED o Cyborg está atuando na fase Dev+QA (step 3)
+                  const hasBlockedTasks    = (tasks ?? []).some(t => t.status === "BLOCKED");
+                  const cyborgActiveAtStep  = isCyborgValidating ? -1  // todas as letras
+                                           : hasBlockedTasks     ? 3   // acende em Dev+QA
+                                           : -2;                        // sem intervenção
 
-                    // Contexto extra por fase ativa
-                    const phaseDetail = (() => {
-                      if (!isActiveStep) return null;
-                      // Fase 1 — CTO+Engineer: mostrar rounds se disponível no charter_summary
-                      if (i === 1 && isRunning) {
-                        return workingMessage ? workingMessage.slice(0, 70) : "Analisando spec e definindo arquitetura…";
-                      }
-                      // Fase 2 — PM
-                      if (i === 2 && isRunning) return workingMessage ? workingMessage.slice(0, 70) : "Quebrando charter em tasks executáveis…";
-                      // Fase 3 — Dev+QA: mostrar progresso real de tasks
-                      if (i === 3) {
-                        if (tasks && tasks.length > 0) {
-                          const blocked = tasks.filter(t => t.status === "BLOCKED").length;
-                          const inProg  = tasks.filter(t => t.status === "IN_PROGRESS").length;
-                          const detail  = blocked > 0 ? `${blocked} BLOCKED` : inProg > 0 ? "Implementando…" : "Aguardando Dev…";
-                          return `${tasksDone}/${tasks.length} tasks · ${detail}`;
-                        }
-                        return workingMessage ? workingMessage.slice(0, 70) : null;
-                      }
-                      // Fase 4 — DevOps
-                      if (i === 4 && isRunning) return workingMessage ? workingMessage.slice(0, 70) : "Gerando Dockerfile e docker-compose…";
-                      // Fase 5 — Cyborg
-                      if (i === 5) return workingMessage ? workingMessage.slice(0, 70) : "Validando E2E…";
-                      return null;
-                    })();
+                  const CYBORG_COLOR = "#5e35b1"; // roxo do monitor/cyborg
 
-                    return (
-                      <Box key={step.label} sx={{ display: "flex", alignItems: "flex-start", gap: 1.25, pb: i < PIPELINE_STEPS.length - 1 ? 0 : 0 }}>
-                        {/* Linha vertical + dot */}
-                        <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", width: 18, flexShrink: 0 }}>
-                          {/* Dot */}
-                          <Box sx={{
-                            width: isDoneStep ? 12 : isActiveStep ? 13 : 10,
-                            height: isDoneStep ? 12 : isActiveStep ? 13 : 10,
-                            borderRadius: isDoneStep ? "50%" : isActiveStep ? "3px" : "50%",
-                            bgcolor: isDoneStep ? dotColor : isActiveStep ? dotColor : "transparent",
-                            border: `2px solid ${dotColor}`,
-                            flexShrink: 0,
-                            mt: 0.4,
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            fontSize: "0.55rem", color: "#fff", fontWeight: 700,
-                            ...(isActiveStep && isRunning && {
-                              boxShadow: `0 0 0 4px ${dotColor}25`,
-                              animation: "dot-pulse 1.6s ease-in-out infinite",
-                              "@keyframes dot-pulse": {
-                                "0%,100%": { boxShadow: `0 0 0 4px ${dotColor}25` },
-                                "50%":     { boxShadow: `0 0 0 8px ${dotColor}10` },
-                              },
-                            }),
-                          }}>
-                            {isDoneStep && <Box component="span" sx={{ lineHeight: 1, fontSize: "0.6rem" }}>✓</Box>}
-                          </Box>
-                          {/* Linha de conexão */}
-                          {i < PIPELINE_STEPS.length - 1 && (
-                            <Box sx={{
-                              width: "2px", flexGrow: 1, minHeight: isActiveStep ? 28 : 20,
-                              bgcolor: isDoneStep ? "#22c55e" : "divider",
-                              opacity: isDoneStep ? 0.6 : 0.25,
-                              borderRadius: 1,
-                              my: 0.25,
-                            }} />
-                          )}
-                        </Box>
-
-                        {/* Conteúdo da fase */}
-                        <Box sx={{ pb: 0.5, minWidth: 0, flexGrow: 1, pt: 0.25 }}>
-                          <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap">
-                            {/* Avatar do agente */}
-                            {profile && (
-                              <Box sx={{
-                                width: 18, height: 18, borderRadius: "4px", flexShrink: 0,
-                                bgcolor: isDoneStep ? "#22c55e18" : `${profile.color}20`,
-                                border: `1px solid ${isDoneStep ? "#22c55e40" : isActiveStep ? profile.color : profile.color + "40"}`,
-                                display: "flex", alignItems: "center", justifyContent: "center",
-                                fontSize: "0.6rem",
-                              }}>
-                                {profile.avatar}
-                              </Box>
-                            )}
-                            <Typography
-                              variant="body2"
-                              fontWeight={isActiveStep ? 700 : isDoneStep ? 500 : 400}
+                  return (
+                    <Box sx={{ display: "flex", gap: 0.5 }}>
+                      {/* Coluna do Cyborg — letras C Y B O R G alinhadas com os steps */}
+                      <Box sx={{
+                        display: "flex", flexDirection: "column",
+                        width: 14, flexShrink: 0,
+                        // Borda lateral discreta quando validando
+                        borderRight: isCyborgValidating || isCyborgDone
+                          ? `2px solid ${CYBORG_COLOR}60`
+                          : "2px solid transparent",
+                        transition: "border-color 0.4s",
+                        pr: 0.5,
+                      }}>
+                        {CYBORG_LETTERS.map((letter, i) => {
+                          const isAllLit  = isCyborgValidating || isCyborgDone;
+                          const isLit     = isAllLit || cyborgActiveAtStep === i;
+                          const isPulsing = isLit && isRunning && !isCyborgDone;
+                          return (
+                            <Box
+                              key={letter}
+                              title={isAllLit ? "Cyborg validando" : isLit ? "Cyborg intervindo" : ""}
                               sx={{
-                                lineHeight: 1.4,
-                                color: isDoneStep ? "#22c55e" : isActiveStep ? (profile?.color ?? "primary.main") : isFutureStep ? "text.disabled" : "text.primary",
-                                fontSize: "0.78rem",
+                                // Altura alinhada ao step correspondente
+                                flexGrow: 1,
+                                minHeight: i === activeStep ? 36 : 26,
+                                display: "flex", alignItems: "flex-start", justifyContent: "center",
+                                pt: 0.5,
                               }}
                             >
-                              {step.label}
-                            </Typography>
-                            {/* Spinner apenas quando esta fase está ativa e rodando */}
-                            {isActiveStep && isRunning && (
-                              <CircularProgress size={9} sx={{ color: profile?.color ?? "primary.main", flexShrink: 0 }} />
-                            )}
-                            {/* Badge de tasks na fase Dev+QA */}
-                            {i === 3 && tasks && tasks.length > 0 && (
-                              <Typography variant="caption" sx={{ color: isDoneStep ? "#22c55e" : isActiveStep ? "text.secondary" : "text.disabled", fontSize: "0.65rem" }}>
-                                {tasksDone}/{tasks.length}
+                              <Typography
+                                sx={{
+                                  fontSize: "0.6rem",
+                                  fontWeight: 800,
+                                  fontFamily: "monospace",
+                                  lineHeight: 1,
+                                  letterSpacing: "-0.02em",
+                                  color: isLit ? CYBORG_COLOR : "#30363D",
+                                  transition: "color 0.3s, text-shadow 0.3s",
+                                  ...(isLit && {
+                                    textShadow: `0 0 8px ${CYBORG_COLOR}80`,
+                                  }),
+                                  ...(isPulsing && {
+                                    animation: "cyborg-pulse 1.8s ease-in-out infinite",
+                                    "@keyframes cyborg-pulse": {
+                                      "0%,100%": { opacity: 1 },
+                                      "50%":     { opacity: 0.4 },
+                                    },
+                                  }),
+                                }}
+                              >
+                                {letter}
                               </Typography>
-                            )}
-                          </Stack>
-
-                          {/* Descrição da fase — só quando ativa ou completa com contexto */}
-                          {isActiveStep && phaseDetail && (
-                            <Typography variant="caption" color="text.secondary"
-                              sx={{ display: "block", mt: 0.25, ml: profile ? 3.25 : 0, fontSize: "0.67rem", lineHeight: 1.4, maxWidth: 190, wordBreak: "break-word" }}>
-                              {phaseDetail}
-                            </Typography>
-                          )}
-                          {/* Fase futura: mostrar descrição discreta */}
-                          {isFutureStep && (
-                            <Typography variant="caption" sx={{ display: "block", ml: profile ? 3.25 : 0, fontSize: "0.63rem", color: "text.disabled", lineHeight: 1.3 }}>
-                              {step.desc}
-                            </Typography>
-                          )}
-                        </Box>
+                            </Box>
+                          );
+                        })}
                       </Box>
-                    );
-                  })}
-                </Stack>
+
+                      {/* Steps do pipeline */}
+                      <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                        {PIPELINE_STEPS.map((step, i) => {
+                          const isDoneStep   = i < activeStep;
+                          const isActiveStep = i === activeStep;
+                          const isFutureStep = i > activeStep;
+                          const profile      = step.agent ? getAgentProfile(step.agent) : null;
+                          const dotColor     = isDoneStep ? "#22c55e" : isActiveStep ? (profile?.color ?? "#6366F1") : "#30363D";
+
+                          // Contexto por fase
+                          const phaseDetail = (() => {
+                            if (!isActiveStep) return null;
+                            if (i === 1) return workingMessage ? workingMessage.slice(0, 70) : "Analisando spec e definindo arquitetura…";
+                            if (i === 2) return workingMessage ? workingMessage.slice(0, 70) : "Quebrando charter em tasks executáveis…";
+                            if (i === 3) {
+                              if (tasks && tasks.length > 0) {
+                                const blocked = tasks.filter(t => t.status === "BLOCKED").length;
+                                const inProg  = tasks.filter(t => t.status === "IN_PROGRESS").length;
+                                const detail  = blocked > 0 ? `⚠ ${blocked} bloqueada${blocked > 1 ? "s" : ""} — Cyborg intervindo` : inProg > 0 ? "Implementando…" : "Aguardando Dev…";
+                                return `${tasksDone}/${tasks.length} tasks · ${detail}`;
+                              }
+                              return workingMessage ? workingMessage.slice(0, 70) : null;
+                            }
+                            if (i === 4) return workingMessage ? workingMessage.slice(0, 70) : "Gerando Dockerfile e docker-compose…";
+                            if (i === 5 && isCyborgValidating) return "Cyborg validando produto…";
+                            return null;
+                          })();
+
+                          return (
+                            <Box key={step.label} sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+                              {/* Dot + linha */}
+                              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", width: 16, flexShrink: 0 }}>
+                                <Box sx={{
+                                  width: isDoneStep ? 11 : isActiveStep ? 12 : 9,
+                                  height: isDoneStep ? 11 : isActiveStep ? 12 : 9,
+                                  borderRadius: isActiveStep ? "3px" : "50%",
+                                  bgcolor: isDoneStep ? dotColor : isActiveStep ? dotColor : "transparent",
+                                  border: `2px solid ${dotColor}`,
+                                  flexShrink: 0, mt: 0.4,
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                  fontSize: "0.5rem", color: "#fff", fontWeight: 700,
+                                  ...(isActiveStep && isRunning && {
+                                    boxShadow: `0 0 0 3px ${dotColor}22`,
+                                    animation: "dot-pulse 1.6s ease-in-out infinite",
+                                    "@keyframes dot-pulse": {
+                                      "0%,100%": { boxShadow: `0 0 0 3px ${dotColor}22` },
+                                      "50%":     { boxShadow: `0 0 0 7px ${dotColor}0a` },
+                                    },
+                                  }),
+                                }}>
+                                  {isDoneStep && "✓"}
+                                </Box>
+                                {i < PIPELINE_STEPS.length - 1 && (
+                                  <Box sx={{
+                                    width: "2px", flexGrow: 1,
+                                    minHeight: isActiveStep ? 26 : 18,
+                                    bgcolor: isDoneStep ? "#22c55e" : "divider",
+                                    opacity: isDoneStep ? 0.5 : 0.2,
+                                    borderRadius: 1, my: 0.25,
+                                  }} />
+                                )}
+                              </Box>
+
+                              {/* Conteúdo */}
+                              <Box sx={{ pb: 0.25, minWidth: 0, flexGrow: 1, pt: 0.25 }}>
+                                <Stack direction="row" alignItems="center" spacing={0.75}>
+                                  {profile && (
+                                    <Box sx={{
+                                      width: 17, height: 17, borderRadius: "3px", flexShrink: 0,
+                                      bgcolor: isDoneStep ? "#22c55e18" : `${profile.color}20`,
+                                      border: `1px solid ${isDoneStep ? "#22c55e40" : isActiveStep ? profile.color : profile.color + "35"}`,
+                                      display: "flex", alignItems: "center", justifyContent: "center",
+                                      fontSize: "0.58rem",
+                                    }}>
+                                      {profile.avatar}
+                                    </Box>
+                                  )}
+                                  <Typography variant="body2" fontWeight={isActiveStep ? 700 : isDoneStep ? 500 : 400} sx={{
+                                    lineHeight: 1.4, fontSize: "0.77rem",
+                                    color: isDoneStep ? "#22c55e" : isActiveStep ? (profile?.color ?? "primary.main") : "text.disabled",
+                                  }}>
+                                    {step.label}
+                                  </Typography>
+                                  {isActiveStep && isRunning && (
+                                    <CircularProgress size={8} sx={{ color: profile?.color ?? "primary.main", flexShrink: 0 }} />
+                                  )}
+                                  {i === 3 && tasks && tasks.length > 0 && (
+                                    <Typography variant="caption" sx={{
+                                      fontSize: "0.63rem",
+                                      color: isDoneStep ? "#22c55e" : isActiveStep ? "text.secondary" : "text.disabled",
+                                    }}>
+                                      {tasksDone}/{tasks.length}
+                                    </Typography>
+                                  )}
+                                </Stack>
+                                {isActiveStep && phaseDetail && (
+                                  <Typography variant="caption" color="text.secondary" sx={{
+                                    display: "block", mt: 0.2, ml: profile ? 3 : 0,
+                                    fontSize: "0.65rem", lineHeight: 1.35, maxWidth: 175, wordBreak: "break-word",
+                                  }}>
+                                    {phaseDetail}
+                                  </Typography>
+                                )}
+                                {isFutureStep && (
+                                  <Typography variant="caption" sx={{
+                                    display: "block", ml: profile ? 3 : 0,
+                                    fontSize: "0.62rem", color: "text.disabled", lineHeight: 1.3,
+                                  }}>
+                                    {step.desc}
+                                  </Typography>
+                                )}
+                              </Box>
+                            </Box>
+                          );
+                        })}
+                      </Box>
+                    </Box>
+                  );
+                })()}
                 </Collapse>
               </CardContent>
             </Card>
