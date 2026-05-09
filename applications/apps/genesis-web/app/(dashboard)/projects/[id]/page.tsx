@@ -261,16 +261,24 @@ function CyborgLogCard({ projectId, cyborgAttempts }: { projectId: string; cybor
 }
 
 // ── Status chip helper ────────────────────────────────────────────────────────
-function StatusChip({ status, model }: { status: string; model?: string | null }) {
+function StatusChip({ status, model, activeStep }: { status: string; model?: string | null; activeStep?: number }) {
+  // Durante spec_submitted, o pipeline já está rodando — mostrar fase real pelo activeStep
+  const spec_label = activeStep === 1 ? "CTO + Engineer" :
+                     activeStep === 2 ? "PM — Backlog"   :
+                     activeStep === 3 ? "Dev + QA"       :
+                     activeStep === 4 ? "DevOps"         : "Iniciando…";
   const labels: Record<string, string> = {
-    running: "Em execução", accepted: "Aceito", completed: "Concluído",
+    running: "Dev + QA", accepted: "Aceito", completed: "Concluído",
     failed: "Falhou", stopped: "Parado", draft: "Rascunho",
-    spec_submitted: "Spec enviada", cto_charter: "Charter", pm_backlog: "Backlog",
-    pending_cyborg: "Validando (Cyborg)", blocked_cyborg: "Bloqueado (Cyborg)",
+    spec_submitted: spec_label, cto_charter: "CTO + Engineer",
+    pm_backlog: "PM — Backlog", dev_qa: "Dev + QA", devops: "DevOps",
+    pending_cyborg: "Cyborg validando", blocked_cyborg: "Cyborg bloqueado",
+    pending_conversion: "Convertendo spec",
   };
   const colors: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
     completed: "success", accepted: "success", failed: "error", stopped: "error",
-    running: "info", cto_charter: "warning", pm_backlog: "warning",
+    running: "info", spec_submitted: "info", cto_charter: "warning",
+    pm_backlog: "warning", dev_qa: "info", devops: "info",
     pending_cyborg: "warning", blocked_cyborg: "error",
   };
   return (
@@ -473,7 +481,11 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || !project) return;
-    const isActive = ["running", "completed", "accepted", "stopped", "failed", "pending_cyborg", "blocked_cyborg"].includes(project.status);
+    // Carregar tasks para qualquer status que não seja draft puro
+    const isActive = ["running", "spec_submitted", "pending_conversion",
+                      "cto_charter", "pm_backlog", "dev_qa", "devops",
+                      "completed", "accepted", "stopped", "failed",
+                      "pending_cyborg", "blocked_cyborg"].includes(project.status);
     if (!isActive) return;
     const loadMetrics = () =>
       apiGet<TaskMetricItem[]>(`/api/projects/${id}/task-metrics`)
@@ -915,7 +927,7 @@ function ProjectDetailPageInner() {
         <Typography variant="h5" fontWeight={700} noWrap sx={{ flexGrow: 1 }}>
           {project.title ?? "Spec sem título"}
         </Typography>
-        <StatusChip status={project.status} model={currentModel} />
+        <StatusChip status={project.status} model={currentModel} activeStep={activeStep} />
 
         {/* FT-05: Botões de ação + menu Ações */}
         {canRun && !isRunning && (
