@@ -956,6 +956,36 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST /api/projects/:id/push-to-github — re-aciona pushProjectToGitHub manualmente
+  // Usado como contingência quando o push automático falhou no aceite.
+  // Idempotente: se repo já existe, apenas retorna os dados existentes.
+  app.post<{ Params: { id: string } }>("/api/projects/:id/push-to-github", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query(
+        "SELECT id, tenant_id, created_by, status FROM projects WHERE id = $1",
+        [id],
+      )).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+      if (row.status !== "accepted") {
+        return reply.status(409).send({
+          code: "CONFLICT",
+          message: `Push para GitHub só é permitido em projetos aceitos. Status atual: ${row.status}`,
+        });
+      }
+      // Disparar push em background (idempotente — githubPush.ts verifica se já existe)
+      setImmediate(() => pushProjectToGitHub(id).catch(console.error));
+      return reply.send({ ok: true, message: "Push para GitHub iniciado. O repositório será criado em instantes." });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/run-info — retorna run_command e app_url do DevOps (para pós-aceite)
   app.get<{ Params: { id: string } }>("/api/projects/:id/run-info", async (request, reply) => {
     const user = getUser(request);

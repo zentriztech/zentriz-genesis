@@ -6,8 +6,15 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
-const ALLOWED_EXT   = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
-const ALLOWED_IN_ZIP = new Set([".md", ".txt", ".pdf"]);
+const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
+
+// Extensões legíveis extraídas de ZIPs — código é incluído como EXEMPLO DE REFERÊNCIA
+const ZIP_TEXT_EXTS  = new Set([".md", ".txt", ".yaml", ".yml", ".json"]);
+const ZIP_CODE_EXTS  = new Set([".ts", ".js", ".tsx", ".jsx", ".py", ".sql", ".sh"]);
+// Palavras no nome/path do arquivo que indicam "é referência/exemplo, não spec"
+const REFERENCE_HINTS = ["example", "sample", "reference", "schema", "structure", "template", "demo"];
+const ZIP_BINARY_SKIP = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+                                  ".zip", ".tar", ".gz", ".exe", ".bin", ".lock"]);
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -20,28 +27,84 @@ function isAllowed(filename: string): boolean {
 
 type ExtractedFile = { filename: string; buffer: Buffer; mimeType: string };
 
+/**
+ * Extrai um ZIP e produz UM ÚNICO arquivo spec.md concatenando todo o conteúdo.
+ * - Arquivos de spec/docs/contrato (.md, .txt, .yaml, .json): incluídos diretamente.
+ * - Arquivos de código (.ts, .js, .py, .sql, etc.): incluídos com cabeçalho
+ *   "EXEMPLO DE REFERÊNCIA — não copiar literalmente".
+ * - Binários e arquivos ocultos: ignorados.
+ * - Não depende de paths ou estrutura de diretórios do ZIP.
+ */
 function extractZip(zipBuffer: Buffer, originalName: string): ExtractedFile[] {
-  const zip  = new AdmZip(zipBuffer);
-  const out: ExtractedFile[] = [];
-  for (const entry of zip.getEntries()) {
-    if (entry.isDirectory) continue;
-    const name = path.basename(entry.entryName);
-    const ext  = path.extname(name).toLowerCase();
-    if (!ALLOWED_IN_ZIP.has(ext)) continue;
-    if (name.startsWith(".") || name.startsWith("__MACOSX")) continue;
-    const mime =
-      ext === ".md"  ? "text/markdown" :
-      ext === ".txt" ? "text/plain"    :
-      ext === ".pdf" ? "application/pdf" : "application/octet-stream";
-    out.push({ filename: name, buffer: entry.getData(), mimeType: mime });
-  }
-  if (out.length === 0) {
+  const zip     = new AdmZip(zipBuffer);
+  const entries = zip.getEntries().filter((e) => {
+    if (e.isDirectory) return false;
+    const name = e.entryName;
+    // Ignorar ocultos e MACOSX
+    if (path.basename(name).startsWith(".")) return false;
+    if (name.includes("__MACOSX") || name.includes(".DS_Store")) return false;
+    const ext = path.extname(name).toLowerCase();
+    // Ignorar binários explícitos
+    if (ZIP_BINARY_SKIP.has(ext)) return false;
+    // Aceitar texto + código
+    return ZIP_TEXT_EXTS.has(ext) || ZIP_CODE_EXTS.has(ext);
+  });
+
+  if (entries.length === 0) {
     throw new Error(
-      `O ZIP "${originalName}" não contém arquivos válidos (.md, .txt, .pdf). ` +
+      `O ZIP "${originalName}" não contém arquivos de texto legíveis (.md, .yaml, .ts, etc.). ` +
       "Verifique o conteúdo e tente novamente."
     );
   }
-  return out;
+
+  // Ordenar: docs primeiro (md/txt/yaml/json), código depois
+  entries.sort((a, b) => {
+    const extA = path.extname(a.entryName).toLowerCase();
+    const extB = path.extname(b.entryName).toLowerCase();
+    const isCodeA = ZIP_CODE_EXTS.has(extA) ? 1 : 0;
+    const isCodeB = ZIP_CODE_EXTS.has(extB) ? 1 : 0;
+    if (isCodeA !== isCodeB) return isCodeA - isCodeB;
+    return a.entryName.localeCompare(b.entryName);
+  });
+
+  // Concatenar tudo em um único spec.md
+  const sections: string[] = [];
+  for (const entry of entries) {
+    const basename    = path.basename(entry.entryName);
+    const ext         = path.extname(basename).toLowerCase();
+    const entryLower  = entry.entryName.toLowerCase();
+    const isCode      = ZIP_CODE_EXTS.has(ext) ||
+                        REFERENCE_HINTS.some((h) => entryLower.includes(h));
+
+    let text: string;
+    try {
+      text = entry.getData().toString("utf-8").trim();
+    } catch {
+      continue; // pular arquivos que não decodificam como UTF-8
+    }
+    if (!text) continue;
+
+    if (isCode) {
+      // Código/infra é contexto/exemplo — nunca instrução literal
+      const lang = ext.replace(".", "") || "text";
+      sections.push(
+        `---\n## [EXEMPLO DE REFERÊNCIA: ${entry.entryName}]\n` +
+        `> ATENÇÃO: Este arquivo é apenas uma referência de estrutura. ` +
+        `NÃO copiar literalmente. Adaptar à arquitetura definida nas specs deste produto.\n\n` +
+        `\`\`\`${lang}\n${text}\n\`\`\``
+      );
+    } else {
+      sections.push(`---\n## [${entry.entryName}]\n\n${text}`);
+    }
+  }
+
+  const combined = sections.join("\n\n");
+  const zipBase  = path.basename(originalName, ".zip");
+  return [{
+    filename: `${zipBase}-spec.md`,
+    buffer:   Buffer.from(combined, "utf-8"),
+    mimeType: "text/markdown",
+  }];
 }
 
 // ── Message envelope builder — spec from free description (leigo → spec completa) ──

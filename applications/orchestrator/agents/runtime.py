@@ -747,19 +747,21 @@ def run_agent(
         raise ImportError("Instale anthropic: pip install anthropic")
 
     if provider == "bedrock":
+        # Construir cliente Bedrock com credenciais explícitas.
+        # Prioridade: envelope do runner (tenant config) > env do container.
+        # NUNCA usar profile — AWS_PROFILE vazio ("") causa ProfileNotFound no botocore.
+        # Credenciais: envelope (tenant config via runner) > env do container
+        _ak = (_llm_cfg.get("aws_access_key_id") or os.environ.get("AWS_ACCESS_KEY_ID", "")).strip()
+        _sk = (_llm_cfg.get("aws_secret_access_key") or os.environ.get("AWS_SECRET_ACCESS_KEY", "")).strip()
+        _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+        # Região: envelope > env
         aws_region = (
-            os.environ.get("GENESIS_AWS_REGION")
+            _llm_cfg.get("aws_region")
+            or os.environ.get("GENESIS_AWS_REGION")
             or os.environ.get("AWS_REGION")
             or os.environ.get("AWS_DEFAULT_REGION")
             or "us-east-1"
         )
-        # Construir cliente Bedrock com credenciais explícitas do env.
-        # NUNCA usar profile — AWS_PROFILE vazio ("") causa ProfileNotFound no botocore
-        # mesmo após pop() porque a Session interna já pode estar cacheada.
-        # Solução: sempre passar aws_access_key + aws_secret_key diretamente.
-        _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
-        _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
-        _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
 
         os.environ.pop("AWS_PROFILE", None)
         os.environ.pop("AWS_DEFAULT_PROFILE", None)
@@ -767,7 +769,7 @@ def run_agent(
         if not (_ak and _sk):
             raise ValueError(
                 "AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY são obrigatórios para Bedrock. "
-                "Defina no .env."
+                "Defina no .env ou configure o LLM no portal Settings → LLM."
             )
 
         kwargs: dict = {

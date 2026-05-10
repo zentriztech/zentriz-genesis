@@ -425,6 +425,7 @@ function ProjectDetailPageInner() {
   const [runInfo, setRunInfo]     = useState<RunInfoResp | null>(null);
   const [metrics, setMetrics]     = useState<MetricsResp | null>(null);
   const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
+  const [pushingToGitHub, setPushingToGitHub] = useState(false);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
@@ -1233,11 +1234,43 @@ function ProjectDetailPageInner() {
           </Stack>
         </Alert>
       )}
-      {/* Repo still being created (githubRepo===undefined means not loaded yet, null means no repo) */}
+      {/* Repo not created — show manual trigger button as fallback */}
       {isDone && githubRepo === null && (
-        <Alert severity="info" sx={{ mb: 2 }} icon={<GitHubIcon />}>
-          <Typography variant="body2" color="text.secondary">
-            Repositório GitHub será criado automaticamente se o tenant tiver o GitHub App instalado.
+        <Alert
+          severity="warning" sx={{ mb: 2 }} icon={<GitHubIcon />}
+          action={
+            <Button
+              size="small"
+              variant="contained"
+              color="warning"
+              startIcon={pushingToGitHub ? <CircularProgress size={14} color="inherit" /> : <GitHubIcon />}
+              disabled={pushingToGitHub}
+              onClick={async () => {
+                setPushingToGitHub(true);
+                try {
+                  await apiPost(`/api/projects/${id}/push-to-github`, {});
+                  // Poll for repo after push
+                  for (let i = 0; i < 10; i++) {
+                    await new Promise((r) => setTimeout(r, 3000));
+                    const d = await apiGet<GithubRepoResp>(`/api/projects/${id}/github-repo`).catch(() => null);
+                    if (d?.repo) { setGithubRepo(d.repo); break; }
+                  }
+                } catch {
+                  // keep null — user can retry
+                } finally {
+                  setPushingToGitHub(false);
+                }
+              }}
+            >
+              {pushingToGitHub ? "Criando..." : "Criar Repositório"}
+            </Button>
+          }
+        >
+          <Typography variant="body2" fontWeight={500}>
+            Repositório GitHub não foi criado no aceite
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
+            Clique em <strong>Criar Repositório</strong> para publicar o código manualmente.
           </Typography>
         </Alert>
       )}

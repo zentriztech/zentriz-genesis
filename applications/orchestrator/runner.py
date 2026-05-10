@@ -1448,16 +1448,29 @@ def _build_message_envelope(
 ) -> dict:
     """Monta MessageEnvelope completo para o Enforcer (project_id, mode, task_id, inputs, existing_artifacts, limits)."""
     project_id = _project_id() or "default"
-    # FT-13: propaga provider e model para o agents container via envelope.
-    # NUNCA incluir api_key no envelope — segurança e evita corrupção do contexto LLM.
-    # O agents container resolve a api_key via GENESIS_API_TOKEN → FT-13 no server.py.
+    # FT-13: propaga provider, model e credenciais para o agents container via envelope.
+    # Credenciais AWS são seguras neste contexto: chamada interna container-to-container.
+    # api_key OpenAI/Anthropic também incluída para tenants com provider não-Bedrock.
     _llm_config: dict = {}
     _provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip()
     _model    = os.environ.get("CLAUDE_MODEL", "").strip()
     if _provider:
         _llm_config["provider"] = _provider
     if _model:
-        _llm_config["model"]    = _model
+        _llm_config["model"] = _model
+    # Injetar credenciais por provider
+    if _provider == "bedrock" or (not _provider):
+        _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+        _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+        _rg = os.environ.get("GENESIS_AWS_REGION") or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        if _ak and _sk:
+            _llm_config["aws_access_key_id"]     = _ak
+            _llm_config["aws_secret_access_key"] = _sk
+            _llm_config["aws_region"]            = _rg
+    elif _provider in ("anthropic", "openai", "azure_openai"):
+        _api_key = os.environ.get("CLAUDE_API_KEY", "").strip()
+        if _api_key:
+            _llm_config["api_key"] = _api_key
 
     return {
         "request_id": request_id,
