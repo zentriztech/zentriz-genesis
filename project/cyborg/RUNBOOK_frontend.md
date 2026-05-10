@@ -59,6 +59,81 @@ curl -sf http://localhost:$PORT | grep -i "<html\|<!DOCTYPE" | head -3
 - [ ] **B-FE-06**: `unwrap()` ausente ao acessar resposta do backend → toda resposta Genesis é `{ data: T }`
 - [ ] **B-FE-07**: `globals.css` ou arquivo base de estilo faltando → criar com conteúdo mínimo
 
+#### Manager/Dashboard com módulo de produtos, vendas e estoque
+
+- [ ] **B-FE-08**: `toProduct()` não normaliza ambos os shapes (Postgres e MySQL)
+
+  ```bash
+  # Detectar — verificar se a função tem fallback ?? para campos alternativos:
+  grep -n "stockLevel\|salePrice\|stockQuantity" apps/src/types/api.ts apps/src/lib/*.ts 2>/dev/null | head -10
+  # Se só houver um shape (ex: só 'salePrice', sem 'price') → a função quebra com backend Postgres
+  # Fix: usar parseFloat(String(r.price ?? r.salePrice ?? 0))
+  #       Number(r.stockLevel ?? r.stockQuantity ?? 0)
+  #       r.sku ?? r.code ?? null
+  #       typeof r.active === 'boolean' ? r.active : r.status === 'active'
+  ```
+
+- [ ] **B-FE-09**: Lib de detalhe de venda espera shape aninhado `{ sale, items }` mas backend retorna flat
+
+  ```bash
+  # Detectar:
+  grep -n "\.sale\." apps/src/lib/salesApi.ts apps/src/app/**/vendas/**/*.tsx 2>/dev/null | head -5
+  # Se encontrar → lib acessa data.sale.status em vez de data.status
+  # Fix: getSale() deve retornar { ...data, subtotal } sem desempacotar 'sale'
+  ```
+
+- [ ] **B-FE-10**: Valores de select de movimentação de estoque usam strings PT-BR em vez do enum
+
+  ```bash
+  # Detectar:
+  grep -rn "saida\|ajuste_negativo\|devolucao\|entrada" apps/src/ 2>/dev/null | grep -v "label\|Label\|//\|LABEL"
+  # Se encontrar como value de MenuItem → são slugs inválidos; backend rejeita com 400
+  # Fix: values DEVEM ser 'in', 'out', 'adjustment', 'return' — os labels em PT-BR ficam só no campo label
+  ```
+
+- [ ] **B-FE-11**: Campo de form mapeado com nome errado para o payload do backend
+
+  ```bash
+  # Detectar (ex: reason vs notes):
+  grep -n "reason\|motivo\|descricao" apps/src/lib/inventoryApi.ts apps/src/lib/*Api.ts 2>/dev/null | head -10
+  # Verificar se o nome do campo no payload bate com o campo aceito pelo backend
+  # Fix: converter explicitamente no toPayload(): { notes: form.reason }
+  ```
+
+- [ ] **B-FE-12**: Roles em guards de menu escritos em PT-BR
+
+  ```bash
+  # Detectar:
+  grep -rn "gerente\|vendedor\|administrador" apps/src/ 2>/dev/null | grep "roles\|role" | head -10
+  # Se encontrar como valor de role → usuarios autenticados não enxergam os itens
+  # Fix: usar os slugs exatos do authStore: 'admin' | 'manager' | 'employee'
+  ```
+
+- [ ] **B-FE-13**: AppShell sem `xs: 0` no `margin-left`
+
+  ```bash
+  # Detectar:
+  grep -n "ml:" apps/src/components/layout/AppShell.tsx 2>/dev/null | grep -v "xs"
+  # Se encontrar ml sem xs → conteúdo pode vazar para mobile
+  # Fix: ml: { xs: 0, md: SIDEBAR_W + 'px' }
+  ```
+
+- [ ] **B-FE-14**: Escape sequences `\uXXXX` literais em arquivos TypeScript/TSX
+
+  ```bash
+  # Detectar:
+  grep -rl "\\\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]" apps/src/ 2>/dev/null | head -5
+  # Se encontrar → caracteres quebrados na UI do usuário final
+  # Fix automático:
+  python3 -c "
+  import re, os, glob
+  for f in glob.glob('apps/src/**/*.ts*', recursive=True):
+      t = open(f).read()
+      n = re.sub(r'\\\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1),16)), t)
+      if n != t: open(f,'w').write(n); print('fixed:', f)
+  "
+  ```
+
 ### Critério PASS Frontend
 
 - [ ] `tsc --noEmit` sem erros

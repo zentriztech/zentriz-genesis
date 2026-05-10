@@ -81,6 +81,67 @@ curl -sf -H "Authorization: Bearer $TOKEN" \
 - [ ] **B-PY-04**: `asyncpg` com ENUM → usar `str` no Python, cast no SQL
 - [ ] **B-PY-05**: `python-multipart` ausente para form upload → adicionar ao requirements
 
+#### Módulo de vendas (quando projeto tem tabela `sales`)
+
+- [ ] **B-SALES-1**: Tabela `sales` sem `payment_method` ou `code`
+
+  ```bash
+  # Detectar:
+  docker exec <db_container> psql -U postgres <db> -c "\d sales" | grep -E "payment_method|code"
+  # Se vazio → adicionar via ALTER TABLE e corrigir o schema Drizzle:
+  # ALTER TABLE sales ADD COLUMN IF NOT EXISTS payment_method varchar(30);
+  # ALTER TABLE sales ADD COLUMN IF NOT EXISTS code varchar(20);
+  ```
+
+- [ ] **B-SALES-2**: `GET /sales/:id` retorna `{ data: { sale: {}, items: [] } }` aninhado em vez de shape flat
+
+  ```bash
+  # Detectar:
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/sales/<id> \
+    | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print('NESTED' if 'sale' in d else 'FLAT')"
+  # Se NESTED → editar o handler GET /sales/:id para retornar shape flat:
+  # { ...saleDto, subtotal, items: items.map(toSaleItemDto) }
+  ```
+
+- [ ] **B-SALES-3**: `GET /products` retorna `category: null` mesmo com produtos categorizados
+
+  ```bash
+  # Detectar:
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/products?limit=1 \
+    | python3 -c "import sys,json; p=json.load(sys.stdin)['data']; print(p[0].get('category') if p else 'NO_DATA')"
+  # Se None → o repository.findProducts não faz leftJoin com categories
+  # Fix: adicionar .leftJoin(categories, eq(products.categoryId, categories.id)) na query
+  ```
+
+- [ ] **B-SALES-4**: `GET /categories` retorna `productCount: 0` e `parent: null` mesmo com dados
+
+  ```bash
+  # Detectar:
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/categories?limit=3 \
+    | python3 -c "import sys,json; cs=json.load(sys.stdin)['data']; print([(c['name'], c.get('productCount',0)) for c in cs])"
+  # Se todos com 0 → subquery usa ${categories.id} parametrizado em vez de 'categories.id' raw
+  # Fix: usar sql\`(SELECT COUNT(*)::int FROM products p WHERE p.category_id = categories.id)\`
+  ```
+
+- [ ] **B-SALES-5**: Alias de rota retorna array raw sem `meta`
+
+  ```bash
+  # Detectar (ex: /api/stock-movements):
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/stock-movements?limit=5 \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('meta') else 'RAW_ARRAY')"
+  # Se RAW_ARRAY → handler do alias retorna resultado cru do service
+  # Fix: envolver em paginated(data.map(toDto), total, page, limit)
+  ```
+
+- [ ] **B-SALES-6**: Endpoint `/api/auth/me` retorna 404 (rota correta é `/api/users/me`)
+
+  ```bash
+  # Detectar:
+  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/auth/me
+  # Se 404 → rota registrada como /users/me; corrigir nas chamadas do frontend
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:$PORT/api/users/me | python3 -m json.tool | head -5
+  ```
+
 ### Critério PASS Backend
 
 - [ ] Container sobe sem reinicialização
