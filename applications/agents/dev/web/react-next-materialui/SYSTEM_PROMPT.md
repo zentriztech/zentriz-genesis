@@ -1202,13 +1202,13 @@ grep -rh "client\.\(get\|post\|patch\|delete\)(" apps/src/lib/api/ | grep -oE "'
 
 ---
 
-### 6.6 BUGS VALIDADOS — Sistema Auto Peças Manager (2026-05-09)
+### 6.6 BUGS VALIDADOS — Manager Next.js + MUI consumindo backend Genesis
 
-Validados ao testar o produto `sistema-auto-pecas-manager` end-to-end. Aplicam-se a qualquer Manager Next.js + MUI que consome backend Fastify/Express.
+Regras derivadas de falhas recorrentes em projetos Manager que consomem backends Fastify/Express. Aplicam-se a qualquer produto com módulo de produtos, vendas ou estoque.
 
-#### W1 — `toProduct()` DEVE normalizar ambos os shapes de campo (Postgres + MySQL)
+#### W1 — `toProduct()` DEVE normalizar ambos os shapes de campo (Postgres e MySQL)
 
-**Causa:** Backend Postgres usa `price`, `stockLevel`, `minStock`, `sku`, `status: 'active'|'inactive'`. Backend MySQL usa `salePrice`, `stockQuantity`, `minStockQuantity`, `code`, `active: boolean`. A `toProduct()` só normalizava o shape MySQL, causando colunas Código/Categoria vazias.
+**Causa recorrente:** backends Postgres usam `price`/`stockLevel`/`minStock`/`sku`/`status:'active'`, enquanto backends MySQL usam `salePrice`/`stockQuantity`/`minStockQuantity`/`code`/`active:boolean`. Quando `toProduct()` só cobre um shape, colunas como Código e Categoria ficam vazias no grid.
 
 **Regra — `toProduct()` DEVE aceitar ambos os shapes via `??` fallback:**
 ```typescript
@@ -1232,9 +1232,9 @@ export function toProduct(raw: Record<string, unknown>): Product {
 }
 ```
 
-#### W2 — `getSale(id)` DEVE normalizar shape flat do `GET /sales/:id`
+#### W2 — `getSale(id)` DEVE consumir shape flat do `GET /sales/:id`
 
-**Causa:** Backend retorna `{ data: { id, code, status, ..., items: [...], subtotal } }` (flat). Se o Manager espera `{ data: { sale: {...}, items: [...] } }` (aninhado), ocorre erro de runtime silencioso.
+**Causa recorrente:** `GET /resource/:id` retorna shape flat (`data.items[]` embutido). Se o lib file espera shape aninhado (`data.sale.items`), os campos ficam `undefined` sem erro visível — a página de detalhe abre em branco.
 
 **Regra:**
 ```typescript
@@ -1250,9 +1250,9 @@ export async function getSale(id: string): Promise<Sale> {
 }
 ```
 
-#### W3 — Tipos de movimentação DEVEM usar os valores do enum do backend
+#### W3 — Valores de select DEVEM usar os slugs exatos do enum do backend
 
-**Causa:** `MOVE_TYPES` no estoque usava `'saida'`, `'ajuste_negativo'`, `'devolucao'` — valores que não existem no enum `stock_movement_type`. O backend rejeita com erro de validação.
+**Causa recorrente:** selects de formulário são preenchidos com labels em PT-BR (`'saida'`, `'ajuste_negativo'`, `'devolucao'`) em vez dos slugs reais do enum (`'out'`, `'adjustment'`, `'return'`). O backend rejeita com erro de validação 400.
 
 **Regra — usar SOMENTE os 4 valores do enum:**
 ```typescript
@@ -1266,18 +1266,18 @@ const MOVE_TYPES = [
 
 **Varredura:** `grep -rn "saida\|ajuste_negativo\|devolucao" apps/src/` deve retornar vazio.
 
-#### W4 — `inventoryApi` DEVE enviar `notes` (não `reason`) para backend Fastify
+#### W4 — O campo do formulário e o campo do payload DEVEM ser mapeados explicitamente
 
-**Causa:** Form usa `reason` internamente mas o campo do backend é `notes`. Backend rejeitava silenciosamente ou ignorava o campo.
+**Causa recorrente:** form interno usa um nome de campo (`reason`) mas o backend espera outro (`notes`). A lib converte form → payload sem mapear, enviando o campo errado — backend ignora ou rejeita silenciosamente.
 
 ```typescript
 // stockAdjustmentToPayload():
 return { productId, type, quantity, notes: form.reason };  // notas = reason mapeado
 ```
 
-#### W5 — Sidebar roles DEVEM usar os valores exatos do authStore
+#### W5 — Guards e visibilidade de menu DEVEM usar os slugs exatos do `UserRole`
 
-**Causa:** Sidebar tinha `roles: ['admin', 'gerente']` — valor `'gerente'` não existe no tipo `UserRole`. Usuários com role `manager` não viam os itens de gestão.
+**Causa recorrente:** roles em guards de menu escritos em PT-BR (`'gerente'`, `'vendedor'`) em vez dos slugs do tipo (`'manager'`, `'employee'`). Usuários autenticados não enxergam itens que deveriam ver — sem erro visível.
 
 **Regra:** NUNCA usar nomes em PT-BR nos roles. Usar exatamente os valores do enum: `'admin' | 'manager' | 'employee'`.
 ```typescript
@@ -1288,9 +1288,9 @@ roles: ['admin', 'gerente']
 roles: ['admin', 'manager']
 ```
 
-#### W6 — AppShell `margin-left` DEVE ser responsivo (xs: 0, md: SIDEBAR_W)
+#### W6 — AppShell `margin-left` DEVE declarar `xs: 0` explicitamente
 
-**Causa:** `ml: { md: SIDEBAR_W + 'px' }` no MUI herda de xs o valor 0 e aplica só em md+. Mas na prática, `{ md: value }` pode causar overflow em telas pequenas dependendo da versão do MUI.
+**Causa recorrente:** `ml: { md: SIDEBAR_W }` omite `xs`. Em algumas versões do MUI, a ausência de `xs` faz o valor vazar para mobile — o conteúdo é empurrado para direita em telas estreitas onde o sidebar é overlay.
 
 **Padrão obrigatório:**
 ```typescript
@@ -1304,7 +1304,7 @@ sx={{
 
 #### W7 — NUNCA gerar escape sequences `\uXXXX` em strings TypeScript/TSX
 
-**Causa:** 93 ocorrências de `é` (é), `ã` (ã), etc. em arquivos TypeScript. Em runtime, o JavaScript interpreta como caracteres literais (ex: a string `ão` vira `ão` corretamente), mas em JSX dentro de JSON o escape `\\u00e3o` vira a string literal `ão` — caracteres quebrados no browser.
+**Causa recorrente:** LLMs geram `é` (é), `ã` (ã), `ç` (ç) em vez dos caracteres UTF-8 reais. Em JSON de artefatos o escape sobrevive para o arquivo; em runtime o JavaScript lê a string como caractere real — mas ferramentas de diff, grep e o próprio dev leem lixo visual. Em JSX dentro de string JSON serializada, o escape literal `\\u00e3` vira a string `ão` — caracteres quebrados no browser.
 
 **Regra absoluta:** Usar **sempre** o caractere real UTF-8 em strings TypeScript/TSX. NUNCA usar `\uXXXX` em strings que serão renderizadas na UI.
 

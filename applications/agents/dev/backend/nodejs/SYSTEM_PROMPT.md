@@ -1246,13 +1246,13 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/api/<rota> \
 
 ---
 
-### 6.3 BUGS VALIDADOS — Sistema Auto Peças (2026-05-09)
+### 6.3 BUGS VALIDADOS — Sistemas de vendas com Fastify + Drizzle
 
-Validados ao testar o produto `sistema-auto-pecas-manager` end-to-end. Aplicam-se a qualquer sistema de vendas com Fastify + Drizzle + PostgreSQL.
+Regras derivadas de falhas recorrentes em produtos com módulo de vendas. Aplicam-se a qualquer backend com tabela `sales`.
 
-#### B-SALES-1 — Schema `sales` DEVE ter `paymentMethod` e `code` desde o início
+#### B-SALES-1 — Schema `sales` DEVE ter `paymentMethod` e `code` desde o scaffold
 
-**Causa:** Backend gerou tabela `sales` sem `payment_method` e `code`. O Manager precisava dessas colunas para PDV e detalhe de venda.
+**Causa recorrente:** tabela `sales` gerada sem `payment_method` e `code`, forçando migration posterior e dados inconsistentes.
 
 **Regra obrigatória:**
 ```typescript
@@ -1276,7 +1276,7 @@ const saleCode = '#' + String(Number(cnt) + 1).padStart(4, '0');
 
 #### B-SALES-2 — `GET /sales/:id` DEVE retornar shape flat (não `{ sale, items }` aninhado)
 
-**Causa:** Backend retornava `{ data: { sale: {...}, items: [...] } }`. O Manager precisava de `{ data: { id, code, status, ..., items: [...], subtotal } }`.
+**Causa recorrente:** endpoint de detalhe retorna `{ data: { sale: {...}, items: [...] } }` aninhado. O frontend consome `data` diretamente como `Sale` — campos ficam `undefined`.
 
 **Regra:**
 - `GET /sales/:id` → shape flat com `items[]` e `subtotal` embutidos — o frontend usa diretamente como `Sale`
@@ -1294,7 +1294,7 @@ return reply.send(success({ ...saleDto, subtotal, items: items.map(toSaleItemDto
 
 #### B-SALES-3 — `GET /products` DEVE fazer leftJoin com `categories`
 
-**Causa:** listagem de produtos retornava `category: null` porque não havia join. O Manager mostrava coluna "Categoria" sempre vazia.
+**Causa recorrente:** listagem de produtos sem join retorna `category: null` — o frontend mostra a coluna Categoria sempre vazia.
 
 ```typescript
 // repositories/product.repository.ts
@@ -1318,7 +1318,7 @@ return {
 
 #### B-SALES-4 — `GET /categories` DEVE retornar `parent` e `productCount`
 
-**Causa:** listagem de categorias não incluía categoria pai nem contagem de produtos.
+**Causa recorrente:** listagem de categorias sem join retorna `parent: null` e `productCount: 0` — frontend não consegue exibir hierarquia nem quantidade de produtos por categoria.
 
 **Regra — usar SQL raw para subqueries correlacionadas** (Drizzle parametriza mal referências de coluna):
 ```typescript
@@ -1329,9 +1329,9 @@ parentName: sql<string | null>`(SELECT name FROM categories parent WHERE parent.
 
 **Importante:** NUNCA usar `${categories.id}` dentro de subquery SQL raw — isso vira parâmetro e resulta sempre 0. Usar o nome real da coluna (`categories.id`).
 
-#### B-SALES-5 — Aliases de rota DEVEM usar `paginated()` corretamente
+#### B-SALES-5 — Todo alias de rota DEVE usar `paginated()` — nunca retornar array raw
 
-**Causa:** alias `/api/stock-movements` retornava raw array em vez de `{ data, meta }`.
+**Causa recorrente:** alias criado para compatibilidade retorna o resultado bruto do service em vez de envolver em `paginated()`. O frontend recebe array sem `meta` e a paginação quebra.
 
 ```typescript
 // Alias incorreto:
@@ -1342,9 +1342,9 @@ const { data, total } = await listStockMovements({ page, limit, ... });
 return reply.send(paginated(data.map(toStockMovementDto), total, page, limit));  // ✅
 ```
 
-#### B-SALES-6 — `GET /users/me` é a rota correta, não `GET /auth/me`
+#### B-SALES-6 — Rota de perfil autenticado é `/users/me`, nunca `/auth/me`
 
-**Causa:** Manager chamava `/api/auth/me` (404). A rota correta no ecossistema Genesis é `/api/users/me`.
+**Causa recorrente:** frontend gera `GET /api/auth/me` por intuição — essa rota não existe. A convenção Genesis registra o endpoint de perfil sob `/users`, não `/auth`.
 
 **Documentar no `api_contract.md`:**
 ```markdown
