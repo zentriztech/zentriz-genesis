@@ -6,139 +6,277 @@ Complementa o RUNBOOK_BASE para projetos do grupo **Frontend**:
 
 ---
 
-## Checks específicos de Frontend
-
-### FASE 1 — Artefatos obrigatórios
-
-- [ ] `Dockerfile` presente (multi-stage: build + nginx/node serve)
-- [ ] `docker-compose.yml` com porta mapeada
-- [ ] `src/` ou `app/` com entry point (`main.tsx`, `App.tsx`, `page.tsx`)
-- [ ] `tsconfig.json` presente
-- [ ] Arquivo de rotas ou pages definido
-- [ ] `src/lib/` ou `src/api/` com clientes de API tipados
-
-### FASE 1.1 — TypeScript obrigatório
+## FASE 1 — Artefatos obrigatórios
 
 ```bash
-cd $PROJECT_DIR && npx tsc --noEmit 2>&1 | head -40
+ls $PROJECT_DIR/apps/Dockerfile
+ls $PROJECT_DIR/project/docker-compose.yml
+ls $PROJECT_DIR/apps/src/ 2>/dev/null || ls $PROJECT_DIR/apps/app/ 2>/dev/null   # entry point
+ls $PROJECT_DIR/apps/tsconfig.json
+ls $PROJECT_DIR/apps/package.json
+
+# Libs de API (obrigatório se consome backend)
+ls $PROJECT_DIR/apps/src/lib/ 2>/dev/null || ls $PROJECT_DIR/apps/src/api/ 2>/dev/null || \
+  echo "WARN: diretório de libs de API não encontrado"
 ```
 
-Se houver erros de tipo: corrija antes de subir containers. Erros de tipo são BLOCKER.
+---
 
-### FASE 2 — Infraestrutura
+## FASE 2 — Build TypeScript
 
 ```bash
-cd $PROJECT_DIR && docker compose up -d
+cd $PROJECT_DIR/apps
+npm install --legacy-peer-deps --no-audit --no-fund 2>&1 | tail -5
+npx tsc --noEmit 2>&1 | head -60
+```
+
+**ZERO erros de TypeScript são tolerados.** Erros comuns e fix:
+
+- `Property 'X' does not exist on type 'Y'` → campo com nome errado no type (ex: `stockLevel` vs `stock`)
+- `useSearchParams() should be wrapped in a suspense boundary` → adicionar `<Suspense>` ao redor
+- `dialog slotProps.paper` → deve ser `PaperProps` em MUI Dialog
+- `axios.isCancel()` narrowing para `never` → mover cast para depois do bloco isCancel
+- Interface com prop conflitante em AxiosRequestConfig → adicionar ao `Omit<>`
+- `err: ValidationIssue[]` recebendo `unknown` → trocar para `err: unknown`
+
+---
+
+## FASE 3 — Infraestrutura
+
+```bash
+cd $PROJECT_DIR/project
+docker compose up -d
 sleep 15
+docker compose ps
 docker compose logs --tail=50
 ```
 
-Se build falhar: leia o log, identifique o módulo com erro, corrija.
+Se build falhar: ler log → identificar módulo com erro → corrigir → `docker compose build` → `up -d`.
 
-### FASE 3 — Smoke test Frontend
+---
 
-**Página carrega:**
+## FASE 4 — Auto-descoberta do escopo
+
+### 4.1 — Descobrir todas as páginas (rotas de tela)
+
 ```bash
-PORT=$(cat $PROJECT_DIR/project/RUNBOOK.md | grep -i "porta\|port" | grep -oE '[0-9]{4,5}' | head -1)
-curl -sf http://localhost:$PORT | grep -i "<html\|<!DOCTYPE" | head -3
-# Deve retornar HTML — não erro 502 ou página em branco
+# Next.js App Router
+find $PROJECT_DIR/apps/src/app -name "page.tsx" -o -name "page.ts" 2>/dev/null \
+  | sed "s|$PROJECT_DIR/apps/src/app||;s|/page\.tsx\?$||;s|^\.$|/|" \
+  | sort
+
+# Next.js Pages Router
+find $PROJECT_DIR/apps/pages -name "*.tsx" -not -name "_*" 2>/dev/null \
+  | sed "s|$PROJECT_DIR/apps/pages||;s|\.tsx$||" \
+  | sort
+
+# React Router (SPA)
+grep -rh "path=" $PROJECT_DIR/apps/src/ 2>/dev/null \
+  | grep -oE 'path="[^"]+"' | sort -u
 ```
 
-**Login funciona (se app tem auth):**
-- Abrir `http://localhost:$PORT/login`
-- Credenciais do RUNBOOK.md
-- Deve redirecionar para dashboard sem erros no console
+### 4.2 — Descobrir todos os endpoints chamados nas libs
 
-### Bugs críticos para verificar (checklist obrigatório)
+```bash
+# Extrair todos os paths de chamadas HTTP nas libs de API
+grep -rh "\.(get\|post\|patch\|put\|delete)\(" \
+  $PROJECT_DIR/apps/src/lib/ $PROJECT_DIR/apps/src/api/ 2>/dev/null \
+  | grep -oE "('|\")[/a-zA-Z0-9_\-]+('|\")" | sort -u
 
-- [ ] **B-FE-01**: `createApiClient` chamado com paths que já têm `/api/` → paths não devem ter prefixo (o client adiciona)
-- [ ] **B-FE-02**: Login usa campo `username` em vez de `email` → verificar o form e o endpoint
-- [ ] **B-FE-03**: Token lido de `response.token` em vez de `response.data?.token` → todos os endpoints Genesis retornam `{ data: T }`
-- [ ] **B-FE-04**: `user.name` sem fallback → usar `user.name ?? user.email?.split('@')[0] ?? ''`
-- [ ] **B-FE-05**: Rota em `src/lib/*.ts` não existe no `api_contract.md` do backend → CONTRACT LAW — BLOCKER
-- [ ] **B-FE-06**: `unwrap()` ausente ao acessar resposta do backend → toda resposta Genesis é `{ data: T }`
-- [ ] **B-FE-07**: `globals.css` ou arquivo base de estilo faltando → criar com conteúdo mínimo
+# Extrair também de hooks e stores
+grep -rh "apiClient\.\|axios\.\|fetch(" \
+  $PROJECT_DIR/apps/src/ 2>/dev/null \
+  | grep -oE "('|\")[/a-zA-Z0-9_\-]+('|\")" | sort -u
+```
 
-#### Manager/Dashboard com módulo de produtos, vendas e estoque
+### 4.3 — Ler o contrato do backend vinculado
 
-- [ ] **B-FE-08**: `toProduct()` não normaliza ambos os shapes (Postgres e MySQL)
+```bash
+# O contrato do backend vinculado (linked_projects_context) está disponível em:
+ls $PROJECT_DIR/project/connect/*/service-manifest.*.json 2>/dev/null | head -5
 
-  ```bash
-  # Detectar — verificar se a função tem fallback ?? para campos alternativos:
-  grep -n "stockLevel\|salePrice\|stockQuantity" apps/src/types/api.ts apps/src/lib/*.ts 2>/dev/null | head -10
-  # Se só houver um shape (ex: só 'salePrice', sem 'price') → a função quebra com backend Postgres
-  # Fix: usar parseFloat(String(r.price ?? r.salePrice ?? 0))
-  #       Number(r.stockLevel ?? r.stockQuantity ?? 0)
-  #       r.sku ?? r.code ?? null
-  #       typeof r.active === 'boolean' ? r.active : r.status === 'active'
-  ```
+# Ler o api_contract.md do backend vinculado (se disponível no contexto)
+BACKEND_ID=$(cat $PROJECT_DIR/project/connect/*/runtime-passport.json 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    deps=[dep['pathOrTarget'] for dep in d.get('dependencies',{}).get('services',[]) if dep.get('critical')]; \
+    print(deps[0] if deps else '')" 2>/dev/null)
 
-- [ ] **B-FE-09**: Lib de detalhe de venda espera shape aninhado `{ sale, items }` mas backend retorna flat
+echo "Backend vinculado: $BACKEND_ID"
+```
 
-  ```bash
-  # Detectar:
-  grep -n "\.sale\." apps/src/lib/salesApi.ts apps/src/app/**/vendas/**/*.tsx 2>/dev/null | head -5
-  # Se encontrar → lib acessa data.sale.status em vez de data.status
-  # Fix: getSale() deve retornar { ...data, subtotal } sem desempacotar 'sale'
-  ```
+---
 
-- [ ] **B-FE-10**: Valores de select de movimentação de estoque usam strings PT-BR em vez do enum
+## FASE 5 — E2E completo
 
-  ```bash
-  # Detectar:
-  grep -rn "saida\|ajuste_negativo\|devolucao\|entrada" apps/src/ 2>/dev/null | grep -v "label\|Label\|//\|LABEL"
-  # Se encontrar como value de MenuItem → são slugs inválidos; backend rejeita com 400
-  # Fix: values DEVEM ser 'in', 'out', 'adjustment', 'return' — os labels em PT-BR ficam só no campo label
-  ```
+### 5.1 — Cada página retorna HTTP correto
 
-- [ ] **B-FE-11**: Campo de form mapeado com nome errado para o payload do backend
+```bash
+PORT=$(cat $PROJECT_DIR/project/RUNBOOK.md | grep -iE "porta|port" | grep -oE '[0-9]{4,5}' | head -1)
 
-  ```bash
-  # Detectar (ex: reason vs notes):
-  grep -n "reason\|motivo\|descricao" apps/src/lib/inventoryApi.ts apps/src/lib/*Api.ts 2>/dev/null | head -10
-  # Verificar se o nome do campo no payload bate com o campo aceito pelo backend
-  # Fix: converter explicitamente no toPayload(): { notes: form.reason }
-  ```
+# Páginas públicas → devem retornar 200
+for PAGE in /login /; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$PAGE")
+  echo "$PAGE → HTTP $CODE"
+  [ "$CODE" != "200" ] && echo "  FAIL: esperado 200, got $CODE"
+done
 
-- [ ] **B-FE-12**: Roles em guards de menu escritos em PT-BR
+# Páginas protegidas → devem retornar 200 ou 307/302 (redirect para login)
+PAGES=$(find $PROJECT_DIR/apps/src/app -path "*/(protected)*/page.tsx" 2>/dev/null \
+  | sed "s|$PROJECT_DIR/apps/src/app/(protected)||;s|/page\.tsx$||" | sort)
 
-  ```bash
-  # Detectar:
-  grep -rn "gerente\|vendedor\|administrador" apps/src/ 2>/dev/null | grep "roles\|role" | head -10
-  # Se encontrar como valor de role → usuarios autenticados não enxergam os itens
-  # Fix: usar os slugs exatos do authStore: 'admin' | 'manager' | 'employee'
-  ```
+for PAGE in $PAGES; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$PAGE")
+  echo "$PAGE → HTTP $CODE"
+  [ "$CODE" != "200" ] && [ "$CODE" != "307" ] && [ "$CODE" != "302" ] && \
+    echo "  FAIL: esperado 200/307/302, got $CODE"
+done
+```
 
-- [ ] **B-FE-13**: AppShell sem `xs: 0` no `margin-left`
+### 5.2 — Cada endpoint chamado existe no backend
 
-  ```bash
-  # Detectar:
-  grep -n "ml:" apps/src/components/layout/AppShell.tsx 2>/dev/null | grep -v "xs"
-  # Se encontrar ml sem xs → conteúdo pode vazar para mobile
-  # Fix: ml: { xs: 0, md: SIDEBAR_W + 'px' }
-  ```
+Para cada endpoint descoberto na FASE 4.2:
 
-- [ ] **B-FE-14**: Escape sequences `\uXXXX` literais em arquivos TypeScript/TSX
+```bash
+BACKEND_URL=$(cat $PROJECT_DIR/project/RUNBOOK.md | grep -iE "backend.*url|api.*url|NEXT_PUBLIC_API" \
+  | grep -oE 'https?://[^"]+' | head -1)
+[ -z "$BACKEND_URL" ] && BACKEND_URL="http://localhost:$(cat $PROJECT_DIR/project/RUNBOOK.md | grep -iE 'backend.*port|api.*port' | grep -oE '[0-9]{4,5}' | head -1)"
 
-  ```bash
-  # Detectar:
-  grep -rl "\\\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]" apps/src/ 2>/dev/null | head -5
-  # Se encontrar → caracteres quebrados na UI do usuário final
-  # Fix automático:
-  python3 -c "
-  import re, os, glob
-  for f in glob.glob('apps/src/**/*.ts*', recursive=True):
-      t = open(f).read()
-      n = re.sub(r'\\\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1),16)), t)
-      if n != t: open(f,'w').write(n); print('fixed:', f)
-  "
-  ```
+TOKEN=$(curl -s -X POST "$BACKEND_URL/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"$(grep -iE 'email|usuario' $PROJECT_DIR/project/RUNBOOK.md | grep '@' | grep -oE '[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}' | head -1)\",\"password\":\"$(grep -iE 'senha|password' $PROJECT_DIR/project/RUNBOOK.md | grep -oE '[A-Za-z0-9@#$%!_\-\.]{6,}' | head -1)\"}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('accessToken','FAIL'))")
 
-### Critério PASS Frontend
+# Testar cada endpoint
+for ENDPOINT in $ENDPOINTS; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer $TOKEN" \
+    "$BACKEND_URL$ENDPOINT")
+  echo "$ENDPOINT → HTTP $CODE"
+  [ "$CODE" = "404" ] && echo "  BUG: endpoint não existe no backend → corrigir path na lib"
+  [ "$CODE" = "500" ] && echo "  BUG: erro interno no backend ao chamar $ENDPOINT"
+done
+```
+
+### 5.3 — Contratos respeitados: campos do backend batem com os tipos do frontend
+
+```bash
+# Verificar que toProduct() tem fallback para ambos os shapes
+grep -n "price\|salePrice\|stockLevel\|stockQuantity\|minStock" \
+  $PROJECT_DIR/apps/src/lib/*.ts $PROJECT_DIR/apps/src/types/*.ts 2>/dev/null \
+  | grep "toProduct\|normalize\|mapProduct" | head -10
+
+# Se só houver UM nome de campo (sem ??) → normalização incompleta
+grep -c "??\|??" $PROJECT_DIR/apps/src/lib/*.ts 2>/dev/null | grep "0" && \
+  echo "WARN: lib sem fallback ?? — pode quebrar com backends de stack diferente"
+
+# Verificar que roles usam slugs do enum (não PT-BR)
+grep -rn "gerente\|vendedor\|administrador" $PROJECT_DIR/apps/src/ 2>/dev/null \
+  | grep "roles\|role" | head -5 && echo "BUG B-FE-12: roles em PT-BR"
+
+# Verificar AppShell com xs:0
+grep -n "ml:" $PROJECT_DIR/apps/src/components/layout/AppShell.tsx 2>/dev/null \
+  | grep -v "xs" && echo "WARN B-FE-13: margin-left sem xs:0 explícito"
+
+# Verificar escapes unicode literais
+grep -rl "\\\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]" \
+  $PROJECT_DIR/apps/src/ 2>/dev/null | head -5 && echo "BUG B-FE-14: escapes \\uXXXX literais"
+```
+
+### 5.4 — Testar o fluxo E2E completo (integrado)
+
+Se o frontend consome um backend (linked project), testar o fluxo completo:
+
+```bash
+echo "=== FLUXO E2E ==="
+
+# 1. Login via backend
+echo "1. Login..."
+TOKEN=$(curl -s -X POST "$BACKEND_URL/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"<SEED_EMAIL>","password":"<SEED_PASS>"}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('accessToken','FAIL'))")
+[ "$TOKEN" = "FAIL" ] && echo "  FAIL: login" || echo "  PASS: token obtido"
+
+# 2. /users/me
+echo "2. /users/me..."
+ME=$(curl -s -H "Authorization: Bearer $TOKEN" "$BACKEND_URL/api/users/me" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('email','FAIL'))")
+[ "$ME" = "FAIL" ] && echo "  FAIL: /users/me" || echo "  PASS: $ME"
+
+# 3. Listagem principal (primeiro recurso do contrato)
+echo "3. Listagem principal..."
+MAIN_ROUTE=$(grep "^| GET" $PROJECT_DIR/project/api_contract.md 2>/dev/null | head -1 | awk '{print $4}')
+[ -n "$MAIN_ROUTE" ] && \
+  curl -s -H "Authorization: Bearer $TOKEN" "$BACKEND_URL$MAIN_ROUTE?limit=3" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    items=d.get('data',[]); \
+    print('  PASS: ' + str(len(items)) + ' items | meta: ' + str(bool(d.get('meta'))))" \
+  || echo "  SKIP: contrato sem rota GET"
+
+# 4. Página protegida carrega
+echo "4. Página protegida..."
+FIRST_PROTECTED=$(find $PROJECT_DIR/apps/src/app -path "*/(protected)*" -name "page.tsx" 2>/dev/null | head -1 \
+  | sed "s|$PROJECT_DIR/apps/src/app/(protected)||;s|/page\.tsx$||")
+[ -n "$FIRST_PROTECTED" ] && \
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$FIRST_PROTECTED") && \
+  echo "  $FIRST_PROTECTED → HTTP $CODE" || echo "  SKIP: sem páginas protegidas"
+```
+
+---
+
+## FASE 6 — Validação de contratos
+
+```bash
+# Frontend consome backend? Verificar contrato vinculado
+cat $PROJECT_DIR/project/full-test-prompt.md 2>/dev/null | grep -i "contrato\|contract\|linked" | head -5
+
+# Cada endpoint chamado nas libs deve existir no api_contract.md do backend
+for ENDPOINT in $ENDPOINTS; do
+  grep -q "$ENDPOINT" $PROJECT_DIR/project/api_contract.md 2>/dev/null || \
+    echo "CONTRATO VIOLADO: $ENDPOINT não está no api_contract.md do backend"
+done
+```
+
+---
+
+## Checklist obrigatório de bugs Frontend (verificar e corrigir)
+
+| # | Check | Detecção | Fix |
+|---|-------|---------|-----|
+| B-FE-01 | Paths com `/api/` duplicado | `grep "'/api/" apps/src/lib/` | Remover prefixo (client já adiciona) |
+| B-FE-02 | Login com campo `username` | `grep "username" apps/src/` | Trocar por `email` |
+| B-FE-03 | Token lido de `response.token` | `grep "\.token" apps/src/lib/auth` | Usar `response.data.accessToken` |
+| B-FE-04 | `user.name` sem fallback | `grep "user\.name" apps/src/` | `user.name ?? user.email.split('@')[0]` |
+| B-FE-05 | Rota inexistente no contrato | loop sobre endpoints vs contrato | Corrigir path ou adicionar ao backend |
+| B-FE-06 | `.data` não desempacotado | `grep "res\." apps/src/lib/` | `getApiData(res)` em vez de `res.data` |
+| B-FE-07 | `globals.css` faltando | `ls apps/src/app/globals.css` | Criar com conteúdo mínimo |
+| B-FE-08 | `toProduct()` sem fallback `??` | `grep "??" apps/src/lib/*.ts` | Normalizar ambos os shapes |
+| B-FE-09 | `getSale()` espera shape aninhado | `grep "\.sale\." apps/src/lib/` | Consumir shape flat |
+| B-FE-10 | Slugs PT-BR em select values | `grep "saida\|ajuste_negativo" apps/src/` | Usar `in/out/adjustment/return` |
+| B-FE-11 | Campo form ≠ campo payload | `grep "reason\|motivo" apps/src/lib/` | Mapear explicitamente no toPayload |
+| B-FE-12 | Roles em PT-BR | `grep "gerente\|vendedor" apps/src/` | Usar slugs do `UserRole` |
+| B-FE-13 | AppShell sem `xs:0` | `grep "ml:" apps/src/components/layout/` | `ml: { xs: 0, md: SIDEBAR_W }` |
+| B-FE-14 | Escapes `\uXXXX` literais | `grep -rl "\\\\u[0-9a-fA-F]{4}" apps/src/` | Script Python de decode |
+
+**Fix automático para B-FE-14:**
+```python
+import re, glob
+for f in glob.glob('apps/src/**/*.ts*', recursive=True):
+    t = open(f).read()
+    n = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1),16)), t)
+    if n != t: open(f,'w').write(n); print('fixed:', f)
+```
+
+---
+
+## Critério de PASS Frontend
 
 - [ ] `tsc --noEmit` sem erros
 - [ ] Container sobe sem erro de build
-- [ ] Página inicial retorna HTML (200)
-- [ ] Login redireciona para dashboard com token válido (se auth presente)
-- [ ] Sem erro 500 ou tela branca nos logs
-- [ ] Sem card "Offline" ou "Serviço indisponível" na UI
+- [ ] Todas as páginas retornam 200 ou redirect de auth esperado (307/302)
+- [ ] Todos os endpoints chamados nas libs existem no backend e retornam 2xx
+- [ ] Fluxo E2E completo: login → dados reais → página protegida carrega
+- [ ] `toProduct()` e demais normalizers aceitam o shape real do backend
+- [ ] Roles em guards usam slugs exatos do `UserRole`
+- [ ] `grep -rl "\\\\u[0-9a-fA-F]{4}" apps/src/` retorna vazio
+- [ ] Sem card "Offline", "Serviço indisponível" ou tela branca nos checks de página
