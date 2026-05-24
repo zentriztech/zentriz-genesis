@@ -161,13 +161,25 @@ ALL_CHECKLISTS: list[dict[str, Any]] = (
 def _open_pg():
     db_url = os.environ.get("DATABASE_URL", "").strip()
     if not db_url:
-        raise RuntimeError("DATABASE_URL não definido — impossível seed.")
+        # fallback: montar DSN a partir de PG* env vars (padrão do runner Docker)
+        host = os.environ.get("PGHOST", "localhost")
+        port = os.environ.get("PGPORT", "5432")
+        user = os.environ.get("PGUSER", "genesis")
+        password = os.environ.get("PGPASSWORD", "genesis_dev")
+        dbname = os.environ.get("PGDATABASE", "zentriz_genesis")
+        db_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     try:
         import psycopg2  # type: ignore
         return psycopg2.connect(db_url)
     except ImportError:
+        pass
+    try:
         import psycopg  # type: ignore
         return psycopg.connect(db_url)
+    except ImportError:
+        pass
+    # último recurso: urllib-based via requests para API Node (sem driver nativo)
+    raise RuntimeError("psycopg2 ou psycopg não encontrado — instale um deles.")
 
 
 def _build_payload(items: list[dict[str, Any]], stack: str) -> dict[str, Any]:
