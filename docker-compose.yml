@@ -59,7 +59,10 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    # F3: trocado para imagem com pgvector pré-instalado para RAG (lessons_embeddings).
+    # Compatível 100% com postgres:16-alpine (mesma base + extensão "vector").
+    # Migration 026 faz CREATE EXTENSION IF NOT EXISTS vector — torna-se no-op em ambientes sem pgvector somente quando RAG_ENABLED!=live.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: genesis
       POSTGRES_PASSWORD: genesis_dev
