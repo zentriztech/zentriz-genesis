@@ -227,6 +227,26 @@ services:
       - runner
     restart: unless-stopped
 
+  cag-seed:
+    # Serviço one-shot: popula context_cache com bug checklists CAG.
+    # Roda uma vez após a API estar healthy e encerra (restart: no).
+    # Idempotente: ON CONFLICT DO UPDATE — seguro re-executar.
+    image: postgres:16-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - CONNECT_VERSION_PIN=${CONNECT_VERSION_PIN:-1.1.0}
+      - PGPASSWORD=${PGPASSWORD}
+    volumes:
+      - ./scripts/cag_seed.sql:/tmp/cag_seed.sql:ro
+    command: >
+      sh -c "psql -h $${PGHOST} -U $${PGUSER} -d $${PGDATABASE} -f /tmp/cag_seed.sql &&
+             echo '[cag-seed] checklists inseridos com sucesso'"
+    restart: "no"
+
   genesis-web:
     build:
       context: ./applications/apps/genesis-web
