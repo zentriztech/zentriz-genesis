@@ -1,0 +1,30 @@
+{"id":"G001","role":"cto","query":"Como decompor um produto SaaS multi-tenant em squads e contratos?","expected_scope":"contracts","stack_key":"generic","tags":["architecture","multi-tenant"]}
+{"id":"G002","role":"cto","query":"Devo usar PostgreSQL ou MongoDB para um sistema fiscal brasileiro?","expected_scope":"contracts","stack_key":"python-fastapi","tags":["db","fiscal-br"]}
+{"id":"G003","role":"cto","query":"Como avaliar dependências entre projetos no pipeline Genesis (LEI 12)?","expected_scope":"contracts","stack_key":"generic","tags":["pipeline","dependencies"]}
+{"id":"G004","role":"cto","query":"Quando criar squad separado vs reusar squad existente?","expected_scope":"contracts","stack_key":"generic","tags":["squads"]}
+{"id":"G005","role":"cto","query":"Como decidir entre Bedrock e Anthropic API direto para o LLM?","expected_scope":"contracts","stack_key":"generic","tags":["llm","provider"]}
+{"id":"G006","role":"engineer","query":"Como extrair contratos herdados de projetos predecessores?","expected_scope":"contracts","stack_key":"generic","tags":["contracts"]}
+{"id":"G007","role":"engineer","query":"Definir endpoints REST de catálogo de produtos com paginação genérica","expected_scope":"contracts","stack_key":"nodejs-express","tags":["api","catalog"]}
+{"id":"G008","role":"engineer","query":"Como modelar enum de status de pedido em PostgreSQL com Drizzle?","expected_scope":"bugs","stack_key":"nodejs-drizzle","tags":["enum","db"]}
+{"id":"G009","role":"engineer","query":"Spec para serviço fiscal de NF-e — quais contratos com SEFAZ homologação?","expected_scope":"contracts","stack_key":"python-fastapi","tags":["fiscal-br","sefaz"]}
+{"id":"G010","role":"engineer","query":"Como definir error envelope padronizado sem details:{} vazio?","expected_scope":"bugs","stack_key":"nodejs-drizzle","tags":["error-shape"]}
+{"id":"G011","role":"pm","query":"Sequência ideal de tasks para um backend CRUD básico","expected_scope":"contracts","stack_key":"generic","tags":["task-plan"]}
+{"id":"G012","role":"pm","query":"Como dividir tasks de Manager (web admin) em prioridade?","expected_scope":"contracts","stack_key":"react-next-tailwind","tags":["frontend","admin"]}
+{"id":"G013","role":"pm","query":"Quando incluir TSK-FULL-TEST condicional no plano?","expected_scope":"contracts","stack_key":"generic","tags":["qa","full-test"]}
+{"id":"G014","role":"pm","query":"Plano de tasks para integração entre backend e frontend Loja","expected_scope":"contracts","stack_key":"generic","tags":["integration","frontend"]}
+{"id":"G015","role":"dev","query":"FastAPI: ENUM PostgreSQL com asyncpg sem CREATE TYPE duplicado","expected_scope":"bugs","stack_key":"python-fastapi","tags":["enum","asyncpg","fastapi"]}
+{"id":"G016","role":"dev","query":"Drizzle: por que findAll não existe e como migrar para findMany","expected_scope":"bugs","stack_key":"nodejs-drizzle","tags":["drizzle","findMany"]}
+{"id":"G017","role":"dev","query":"Pydantic v2: usar model_config ConfigDict e str_to_lower em vez de uppercase","expected_scope":"bugs","stack_key":"python-fastapi","tags":["pydantic","config"]}
+{"id":"G018","role":"dev","query":"Express com Drizzle: por que migration vazia falha e como gerar SQL","expected_scope":"bugs","stack_key":"nodejs-drizzle","tags":["migration","drizzle-kit"]}
+{"id":"G019","role":"dev","query":"Como usar python-multipart corretamente em FastAPI uploads","expected_scope":"bugs","stack_key":"python-fastapi","tags":["multipart","upload"]}
+{"id":"G020","role":"dev","query":"Por que prefixo de rota duplica em include_router e como corrigir","expected_scope":"bugs","stack_key":"python-fastapi","tags":["fastapi","routes"]}
+{"id":"G021","role":"qa","query":"Como cobrir resposta 204 sem content-type no schema OpenAPI?","expected_scope":"bugs","stack_key":"nodejs-express","tags":["openapi","204"]}
+{"id":"G022","role":"qa","query":"Validar Insomnia format export em vez de Postman collection","expected_scope":"bugs","stack_key":"generic","tags":["insomnia"]}
+{"id":"G023","role":"qa","query":"Como detectar rotas não registradas no app.ts antes do smoke test?","expected_scope":"bugs","stack_key":"nodejs-express","tags":["routes","smoke"]}
+{"id":"G024","role":"qa","query":"Critérios de aceitação para TSK-FULL-TEST no Manager Genesis","expected_scope":"contracts","stack_key":"generic","tags":["qa","manager"]}
+{"id":"G025","role":"devops","query":"docker-compose: por que seed.mjs falha quando está fora do Dockerfile","expected_scope":"bugs","stack_key":"nodejs-drizzle","tags":["docker","seed"]}
+{"id":"G026","role":"devops","query":"Como subir Postgres com pgvector localmente sem mudar imagem em produção","expected_scope":"contracts","stack_key":"generic","tags":["pgvector","docker"]}
+{"id":"G027","role":"devops","query":"setuptools >=80: como evitar pip install -e falhando em camada Docker","expected_scope":"bugs","stack_key":"python-fastapi","tags":["setuptools","docker"]}
+{"id":"G028","role":"devops","query":"NODE_ENV=development em local e production só no deploy cloud — onde aplicar?","expected_scope":"contracts","stack_key":"generic","tags":["env","co-deploy"]}
+{"id":"G029","role":"monitor","query":"Quando reabrir uma task BLOCKED via Monitor Autônomo (FT-11)?","expected_scope":"contracts","stack_key":"generic","tags":["monitor","self-heal"]}
+{"id":"G030","role":"monitor","query":"Sinais de circuit breaker aberto e como diferenciar de DEPENDENCY_NOT_READY","expected_scope":"contracts","stack_key":"generic","tags":["circuit-breaker"]}
