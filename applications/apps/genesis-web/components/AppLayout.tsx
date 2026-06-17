@@ -102,7 +102,7 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
       )}
 
       {/* Nav items */}
-      <List sx={{ px: collapsed ? 0.5 : 1, py: 1, flexGrow: 1 }}>
+      <List sx={{ px: collapsed ? 0.5 : 1, py: 1 }}>
         {nav.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
@@ -146,12 +146,14 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
         })}
       </List>
 
-      {/* Footer — hidden when collapsed */}
-      {!collapsed && (
-        <Box sx={{ px: 2, py: 1.5, borderTop: "1px solid", borderColor: "divider" }}>
-          <Typography variant="caption" color="text.secondary">genesis.zentriz.com.br</Typography>
-        </Box>
-      )}
+      {/* Footer */}
+      <Box sx={{ px: collapsed ? 1 : 2, py: 1.5, borderTop: "1px solid", borderColor: "divider", textAlign: collapsed ? "center" : "left" }}>
+        <Typography variant="caption" color="text.secondary">
+          {collapsed
+            ? `v${process.env.NEXT_PUBLIC_APP_VERSION ?? "?"}`
+            : `Genesis v${process.env.NEXT_PUBLIC_APP_VERSION ?? "?"}`}
+        </Typography>
+      </Box>
     </Box>
   );
 });

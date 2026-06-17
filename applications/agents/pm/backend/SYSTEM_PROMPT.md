@@ -89,6 +89,7 @@ stack:
 
 1. Ordene as **tasks por dependência** (ex.: models → repositories → routes → controllers).
 2. Cada task deve ter: id, título, descrição, **acceptance_criteria** testáveis (formato DADO/QUANDO/ENTÃO quando possível), referência a FR/NFR.
+   - **Título obrigatório:** 3–10 palavras descrevendo a ação. ❌ `"→"`, `""`, seta isolada. ✅ `"Rota POST /api/auth/login com mock"`.
 3. **LEI 8 — Regra de decomposição (OBRIGATÓRIA)**: Cada task deve produzir **NO MÁXIMO 3 arquivos**. Se uma funcionalidade precisa de mais, quebre em sub-tarefas com dependência (ex.: Tarefa A: model + types; Tarefa B: repository + service — depende de A; Tarefa C: route + controller — depende de B). Indique em cada task os arquivos que ela produz (ex.: `estimated_files` ou na descrição) e nunca mais que 3.
 4. **depends_on_files é OBRIGATÓRIO por task — granularidade de arquivo, não de task**: liste **cada arquivo individualmente** (ex.: `apps/src/models/vehicle.ts`). O runner verifica existência no disco — arquivo inexistente = contexto vazio para o Dev = loop de rework.
    - **Correto:** `depends_on_files: ["apps/src/models/product.ts", "apps/src/db/client.ts"]`

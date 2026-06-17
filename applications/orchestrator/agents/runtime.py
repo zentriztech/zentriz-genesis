@@ -818,19 +818,14 @@ def run_agent(
         os.environ.pop("AWS_PROFILE", None)
         os.environ.pop("AWS_DEFAULT_PROFILE", None)
 
-        if not (_ak and _sk):
-            raise ValueError(
-                "AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY são obrigatórios para Bedrock. "
-                "Defina no .env ou configure o LLM no portal Settings → LLM."
-            )
-
-        kwargs: dict = {
-            "aws_region":     aws_region,
-            "aws_access_key": _ak,
-            "aws_secret_key": _sk,
-        }
-        if _token:
-            kwargs["aws_session_token"] = _token
+        kwargs: dict = {"aws_region": aws_region}
+        if _ak and _sk:
+            # Credenciais explícitas (env vars ou tenant config)
+            kwargs["aws_access_key"] = _ak
+            kwargs["aws_secret_key"] = _sk
+            if _token:
+                kwargs["aws_session_token"] = _token
+        # Sem creds explícitas → boto3 usa credential chain (~/.aws, instance profile, etc.)
 
         client = AnthropicBedrock(**kwargs)
         api_key = None

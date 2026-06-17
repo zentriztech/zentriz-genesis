@@ -823,7 +823,11 @@ function ProjectDetailPageInner() {
   const isDone      = project.status === "completed" || project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
   const canAccept   = project.status === "completed" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
-  const elapsedEnd  = project.completedAt ?? (isRunning ? new Date(nowTick).toISOString() : undefined);
+  const activelyRunning = project.status === "running";
+  // Ignorar completedAt quando rodando — pode conter timestamp de execução anterior
+  const elapsedEnd  = activelyRunning
+    ? new Date(nowTick).toISOString()
+    : (project.completedAt ?? undefined);
   const elapsed     = elapsedLabel(project.startedAt, elapsedEnd);
 
   const stepFromStatus =
@@ -1582,7 +1586,7 @@ function ProjectDetailPageInner() {
                 </Stack>
                 <Collapse in={!collapsed.metrics}>
                   <Stack spacing={1.25}>
-                    {elapsed && <MiniStat label={isRunning ? "⏱ Esta execução" : "Tempo total"} value={elapsed} />}
+                    {elapsed && <MiniStat label={activelyRunning ? "⏱ Esta execução" : "Tempo total"} value={elapsed} />}
                     {project.createdAt && <MiniStat label="Criado em" value={fmtTime(project.createdAt)} />}
                     {project.startedAt && project.startedAt !== project.createdAt && (
                       <MiniStat label="Última execução" value={fmtTime(project.startedAt)} />

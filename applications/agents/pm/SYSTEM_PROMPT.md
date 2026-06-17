@@ -71,6 +71,12 @@ Ex: "sem JavaScript" → sem task "Configurar TypeScript", sem task "npm install
 
 Cada task produz **NO MÁXIMO 3 arquivos**.
 
+**Título de task — regra obrigatória:**
+- O campo `title` NUNCA pode ser vazio, `→`, uma seta isolada, ou qualquer símbolo sem texto descritivo.
+- O título deve descrever a ação em 3–10 palavras. Ex: `"Scaffold Express + estrutura de rotas"`, `"Rota POST /api/auth/login com mock"`.
+- ❌ `"→"`, `"→ implementar"`, `""` — inválidos.
+- ✅ `"Configurar projeto Node.js + TypeScript"` — correto.
+
 **`depends_on_files` é granular por arquivo:**
 - ✅ `"apps/src/theme/brand.ts"` — correto
 - ❌ `"TSK-WEB-001"` — task ID não é arquivo
