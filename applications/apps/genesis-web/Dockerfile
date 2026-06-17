@@ -11,9 +11,9 @@ COPY . .
 RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_IGNORE_INCORRECT_LOCKFILE=1
-ARG NEXT_PUBLIC_API_BASE_URL
-# Falha o build se a URL não for fornecida — impede deploy silencioso com localhost
-RUN test -n "$NEXT_PUBLIC_API_BASE_URL" || (echo "ERRO: NEXT_PUBLIC_API_BASE_URL não definido" && exit 1)
+ARG NEXT_PUBLIC_API_BASE_URL=""
+# Vazio = URL relativa (funciona em qualquer deploy via nginx/proxy)
+# Preencher apenas para dev local: NEXT_PUBLIC_API_BASE_URL=http://localhost:3000
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 RUN npm run build
 

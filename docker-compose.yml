@@ -252,8 +252,8 @@ services:
       context: ./applications/apps/genesis-web
       dockerfile: Dockerfile
       args:
-        # NEXT_PUBLIC_* são embutidas no bundle em build time — obrigatório definir no .env
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL nao definido no .env}
+        # Vazio = URL relativa (produção/EC2). Preencher para dev local no .env.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
     ports:
       - "3001:3001"
     environment:
