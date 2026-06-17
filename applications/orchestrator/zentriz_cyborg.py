@@ -631,10 +631,17 @@ def _autocorrect(project_id: str, proj_dir: Path | None, failed_checks: list[str
                     corrected = True
 
         elif "health" in check_lower or "container" in check_lower:
-            # Reiniciar containers
-            if apps_dir.exists() and (apps_dir / "docker-compose.yml").exists():
-                rc, _, _ = _run_cmd("docker compose restart", cwd=str(apps_dir), timeout=60)
-                time.sleep(8)
+            # Reiniciar containers — procurar docker-compose em project/ primeiro, depois apps/
+            _dc_dir = None
+            if proj_dir and (proj_dir / "docker-compose.yml").exists():
+                _dc_dir = proj_dir
+            elif apps_dir.exists() and (apps_dir / "docker-compose.yml").exists():
+                _dc_dir = apps_dir
+            if _dc_dir:
+                _run_cmd("docker compose down", cwd=str(_dc_dir), timeout=30)
+                time.sleep(3)
+                rc, _, _ = _run_cmd("docker compose up -d --build", cwd=str(_dc_dir), timeout=120)
+                time.sleep(20)  # aguardar healthcheck
                 if rc == 0:
                     corrected = True
                     logger.info("[Cyborg] Containers reiniciados para projeto %s", project_id[:8])

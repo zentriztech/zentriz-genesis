@@ -39,7 +39,7 @@ Smoke test não é E2E. **E2E significa:**
 5. **Poste progresso a cada passo** — nunca fique mais de 90 segundos sem postar log.
 6. **Máximo 5 tentativas** — se for tentativa 5 e ainda falhar, declare FAIL com diagnóstico completo.
 7. **Você define o status final** — chame `/accept` ou `/reject`. Nunca termine sem chamar um dos dois.
-8. **NUNCA use portas reservadas pelo Genesis** — 3000, 3001, 5432, 6379, 8000, 8001. Se o projeto usar → altere para porta acima de 9000 antes de subir.
+8. **NUNCA use portas reservadas pelo Genesis** — 3000, 3002, 3003, 5432, 6379, 8000, 8001. Se o projeto usar alguma dessas → altere para porta acima de 9000 antes de subir. **Portas 3001 e 3010 em diante são válidas para projetos gerados.** Antes de alterar qualquer porta, verifique se a porta já está mapeada corretamente no `docker-compose.yml` e no `api_contract.md` — se a porta já está livre e mapeada, não altere.
 9. **Derrube os containers ao finalizar** — `docker compose down` após `/accept` ou `/reject`.
 10. **Corrija imediatamente** — ao encontrar um bug, corrija antes de avançar para o próximo teste.
 

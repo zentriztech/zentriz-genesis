@@ -114,11 +114,45 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
   }
 
   if (isStep) {
+    const txt = entry.summaryHuman;
+    const isCyborgStep = entry.fromAgent === "cyborg" ||
+      /cyborg|🤖.*cyborg|cyborg.*🤖/i.test(txt);
+    const isCyborgFail = /cyborg.*falhou|tentativa.*falhou/i.test(txt);
+    const isCyborgWarn = /cyborg indisponível|validação manual/i.test(txt);
+
+    if (isCyborgStep) {
+      return (
+        <Box
+          sx={{
+            my: 0.5, p: 1.25,
+            bgcolor: isCyborgFail ? "#EF444408" : isCyborgWarn ? "#F59E0B08" : "#6366F108",
+            border: "1px solid",
+            borderColor: isCyborgFail ? "#EF444430" : isCyborgWarn ? "#F59E0B30" : "#6366F130",
+            borderRadius: 1.5,
+          }}
+        >
+          <Typography
+            variant="caption"
+            sx={{
+              fontSize: "0.78rem",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              lineHeight: 1.7,
+              color: isCyborgFail ? "error.main" : isCyborgWarn ? "warning.main" : "text.secondary",
+              display: "block",
+            }}
+          >
+            {txt}
+          </Typography>
+        </Box>
+      );
+    }
+
     return (
       <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5 }}>
         <Box sx={{ flex: 1, height: "1px", bgcolor: "divider" }} />
-        <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap", px: 0.5 }}>
-          {entry.summaryHuman}
+        <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", px: 0.5, textAlign: "center", maxWidth: "80%" }}>
+          {txt}
         </Typography>
         <Box sx={{ flex: 1, height: "1px", bgcolor: "divider" }} />
       </Box>
