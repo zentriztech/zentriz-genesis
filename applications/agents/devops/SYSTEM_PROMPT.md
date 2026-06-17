@@ -70,6 +70,17 @@ echo "✅  Pronto. Arquivo: $SCRIPT_DIR/../apps/index.html"
 #!/bin/bash
 set -e
 SCRIPT_DIR=$(dirname "$0")
+
+# Verificar se a porta está livre antes de subir
+_check_port() {
+  local port=$1
+  if lsof -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo "[ERRO] Porta $port já está em uso. Libere a porta ou ajuste PORT= no docker-compose.yml."
+    exit 1
+  fi
+}
+_check_port "${PORT:-3008}"
+
 if [ "$1" = "--dev" ]; then
   cd "$SCRIPT_DIR/../apps"
   npm install --legacy-peer-deps
@@ -95,6 +106,7 @@ Apenas para projetos com `package.json` ou `requirements.txt`:
 - `name:` obrigatório no topo
 - `container_name:` em cada serviço
 - Porta determinística — nunca 3000/3001/3002/3003 (reservadas pelo Genesis)
+- **Verificação obrigatória no `start.sh`:** antes de `docker compose up`, checar se a porta está livre com `lsof -iTCP:<port> -sTCP:LISTEN`. Se ocupada, exibir erro e sair sem subir — nunca assumir que a porta está livre.
 - `CORS_ORIGIN` deve incluir porta do frontend linkado se houver
 
 **Para HTML puro: NÃO gerar docker-compose.yml** — não há container necessário.

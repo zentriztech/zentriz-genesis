@@ -759,6 +759,7 @@ Todos os projetos do mesmo produto fazem deploy no mesmo `docker-compose.yml`, s
 - `base_port` deve ser ≥ 4000 e um múltiplo de 10 ou de bloco de serviços para não colidir com Genesis portal (3000–3003) e runner (3004). Exemplos válidos: 7100 (Zentriz Ledger BR), 8000, 9000. O operador pode especificar base_port diretamente na spec — respeitar sem alterar.
 - O CTO define `base_port` uma vez por produto no Charter. Cada projeto filho usa seu slot.
 - O DevOps lê `base_port` do Charter e gera portas em sequência — nunca adivinha.
+- **Porta deve ser verificada em runtime:** o `start.sh` OBRIGATORIAMENTE checa se a porta está livre com `lsof` antes de subir os containers. Se ocupada, exibe erro claro e sai sem subir. Nunca assume que a porta está disponível.
 
 **Incluir no `PROJECT_CHARTER.md`:**
 ```
