@@ -22,6 +22,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 
+# T01: sanitiza AWS_PROFILE="" (string vazia) — boto3 procura profile literal ""
+# e falha com ProfileNotFound. `unset` no compose vira "" via ${VAR:-}, então
+# corrigimos em runtime também (defesa em profundidade).
+for _k in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+    if _k in os.environ and not os.environ[_k].strip():
+        os.environ.pop(_k, None)
+
 _shutdown_requested = False
 
 
@@ -404,16 +411,81 @@ def call_cto(
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
 
 
+def _parse_squads_yaml(text: str) -> list[dict]:
+    """T09: parser determinístico do frontmatter YAML `squads:` do Engineer.
+
+    O engineer_proposal.md v2 obrigatoriamente inicia com frontmatter:
+
+        ---
+        squads:
+          - name: web
+            module: web
+            owner_role: DEV_WEB
+            variant: react-next-materialui
+            target_tasks: 4
+        complexity_hint: low
+        scope: code
+        ---
+
+    Retorna a lista `squads` ou [] se ausente/inválido.
+    Custo: zero LLM. Idempotente. Sobrevive a replay.
+    """
+    if not text:
+        return []
+    m = re.search(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.DOTALL | re.MULTILINE)
+    if not m:
+        return []
+    try:
+        import yaml  # PyYAML já em requirements do runner
+        data = yaml.safe_load(m.group(1)) or {}
+        sq = data.get("squads") or []
+        if not isinstance(sq, list):
+            return []
+        # sanitiza: só mantém entradas com module válido
+        valid_modules = {"web", "backend", "mobile", "fullstack"}
+        out = []
+        for s in sq:
+            if not isinstance(s, dict):
+                continue
+            mod = str(s.get("module", "")).lower().strip()
+            if mod in valid_modules:
+                out.append({
+                    "name": str(s.get("name", "") or mod),
+                    "module": mod,
+                    "owner_role": str(s.get("owner_role", "") or f"DEV_{mod.upper()}"),
+                    "variant": str(s.get("variant", "") or ""),
+                    "target_tasks": int(s.get("target_tasks", 0) or 0),
+                    "ceiling_tasks": int(s.get("ceiling_tasks", 0) or 0),
+                })
+        return out
+    except Exception as e:
+        logger.debug("[T09] _parse_squads_yaml falhou: %s", e)
+        return []
+
+
 def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "") -> str:
     """
-    Infere o módulo/squad do PM a partir da proposta do Engineer (ou da spec como fallback).
+    Infere o módulo/squad do PM a partir da proposta do Engineer.
 
-    Usa o LLM para classificar o texto em vez de lista hardcoded de signals — isso garante
-    suporte a qualquer linguagem/framework/plataforma sem precisar atualizar código.
+    Ordem de prioridade (T09):
+      1. YAML frontmatter `squads:` (determinístico, custo zero) — se presente e válido,
+         retorna `squads[0].module` sem chamar LLM.
+      2. LLM classifier (fallback para projetos legacy sem YAML).
+      3. Heurística positiva de sinais web (T07 estendido).
+      4. Default "web" (mais seguro que "backend" — evita repetir bug 54967064).
 
     Retorna: 'web' | 'backend' | 'mobile' | 'fullstack'
-    Fallback seguro: 'backend' para texto técnico sem sinais visuais claros.
     """
+    # T09: YAML frontmatter primeiro (determinístico)
+    squads = _parse_squads_yaml(engineer_proposal or "")
+    if squads:
+        chosen = squads[0]["module"]
+        logger.info(
+            "[Pipeline] Módulo via YAML frontmatter: %s (deterministic, %d squad(s) declarada(s))",
+            chosen, len(squads),
+        )
+        return chosen
+
     source_text = (engineer_proposal or "").strip()
     is_blocked_or_empty = (
         not source_text
@@ -430,14 +502,45 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
     if not source_text.strip():
         return "web"
 
-    # Perguntar ao LLM qual é o módulo correto
-    # Isso é uma chamada simples (< 300 tokens in/out) — não usa agentes, direto ao SDK
+    # T16: registrar métrica de fallback (YAML ausente → estamos degradados).
+    # Log estruturado formato JSON — parseável por CloudWatch/Prometheus.
+    # Após 30 dias de rollout (T08 soft-required), esse WARN não deveria existir
+    # em projetos criados via novo Engineer.
     try:
-        module = _ask_llm_for_module(source_text[:8000])
-        logger.info("[Pipeline] Módulo inferido pelo LLM: %s", module)
+        _metric_payload = {
+            "event": "engineer_yaml_missing",
+            "metric": "genesis_module_inference_fallback_total",
+            "source_len": len(source_text),
+            "first_line": source_text.split("\n")[0][:200] if source_text else "",
+        }
+        logger.warning("[T16-METRIC] %s", json.dumps(_metric_payload))
+    except Exception:
+        logger.warning("[T16] engineer_yaml_missing pm_module_inference=fallback source_len=%d", len(source_text))
+
+    # T14: se o circuit breaker está OPEN, nem tenta o LLM — vai direto para heurística
+    # (que agora é robusta com sinais web positivos após T09/P4).
+    if _cb_is_open():
+        logger.warning("[T14-CB] Circuit breaker OPEN — pulando LLM classifier e indo direto para heurística")
+        return _heuristic_module_fallback(source_text)
+
+    # LLM classifier (fallback)
+    try:
+        # T11: aumentar truncate de 8000 para 15000 (evita cortar seção de squads)
+        module = _ask_llm_for_module(source_text[:15000])
+        logger.info("[Pipeline] Módulo inferido pelo LLM (fallback): %s", module)
+        _cb_report(ok=True)  # T14: sucesso reseta o CB
         return module
     except Exception as e:
-        logger.warning("[Pipeline] LLM module inference failed (%s) — usando fallback heurístico", e)
+        # T13: classifica exceção para telemetria e decide se propagar
+        kind = _classify_llm_error(e)
+        _cb_report(ok=False, kind=kind)  # T14: reporta ao CB
+        if kind in ("config", "auth"):
+            logger.error(
+                "[T13] LLM classifier FATAL error kind=%s err=%s — circuit breaker acionado",
+                kind, e,
+            )
+        else:
+            logger.warning("[T13] LLM classifier failed kind=%s err=%s — heurística", kind, e)
         return _heuristic_module_fallback(source_text)
 
 
@@ -727,8 +830,88 @@ def _detect_backend_language(text: str) -> str:
     return "nodejs"
 
 
+class ClassifierUnavailable(RuntimeError):
+    """T13: exceção estruturada quando o LLM classifier está indisponível de forma
+    determinável (config inválida, credenciais ausentes). Sinaliza erros FATAIS que
+    devem propagar para o health-check (T14), não engolir com heurística.
+    """
+    def __init__(self, reason: str, kind: str = "unknown"):
+        super().__init__(reason)
+        self.kind = kind  # 'config' | 'auth' | 'network' | 'unknown'
+
+
+def _cb_file_path():
+    """T14: mesmo path usado por runner_server para compartilhar estado do CB."""
+    return Path(os.environ.get("LLM_CB_FILE", "/tmp/genesis_llm_cb.json"))
+
+
+def _cb_is_open() -> bool:
+    """T14: consulta o arquivo do circuit breaker. True se aberto (LLM indisponível)."""
+    try:
+        import time as _t
+        p = _cb_file_path()
+        if not p.exists():
+            return False
+        data = json.loads(p.read_text())
+        if data.get("healthy", True):
+            return False
+        elapsed = _t.time() - float(data.get("last_fail", 0))
+        cooldown = int(os.environ.get("LLM_CB_COOLDOWN_S", "60"))
+        return elapsed < cooldown
+    except Exception:
+        return False
+
+
+def _cb_report(ok: bool, kind: str = "") -> None:
+    """T14: reporta ok/fail do LLM no arquivo compartilhado com runner_server."""
+    try:
+        import time as _t
+        p = _cb_file_path()
+        try:
+            data = json.loads(p.read_text()) if p.exists() else {}
+        except Exception:
+            data = {}
+        now = _t.time()
+        data["last_check"] = now
+        if ok:
+            data["healthy"] = True
+            data["consecutive_fails"] = 0
+        else:
+            data["last_fail"] = now
+            data["last_fail_kind"] = kind or "unknown"
+            if kind in ("config", "auth"):
+                data["consecutive_fails"] = int(data.get("consecutive_fails", 0)) + 1
+                threshold = int(os.environ.get("LLM_CB_FAIL_THRESHOLD", "3"))
+                if data["consecutive_fails"] >= threshold:
+                    data["healthy"] = False
+        p.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _classify_llm_error(exc: BaseException) -> str:
+    """T13: classifica exceções do Bedrock/Anthropic em categorias tratáveis."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "profile" in msg or "profilenotfound" in name:
+        return "config"
+    if "credential" in msg or "nocredentials" in name or "expiredtoken" in name:
+        return "auth"
+    if "throttl" in msg or "throttlingexception" in name or "rate" in msg:
+        return "throttle"
+    if "timeout" in msg or "timeout" in name or "timed out" in msg:
+        return "timeout"
+    if "connect" in msg or "endpoint" in msg or "network" in msg or "dns" in msg:
+        return "network"
+    return "unknown"
+
+
 def _ask_llm_for_module(text: str) -> str:
-    """Chama o LLM para classificar o tipo de produto descrito no texto."""
+    """Chama o LLM para classificar o tipo de produto descrito no texto.
+
+    T13: erros de config/auth levantam ClassifierUnavailable (fatal), outros
+    propagam para o caller decidir fallback.
+    """
     import os as _os
     provider = _os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").lower()
     model = _os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
@@ -777,19 +960,54 @@ Texto:
 
 
 def _heuristic_module_fallback(text: str) -> str:
-    """Fallback heurístico simples quando o LLM não está disponível."""
+    """T07-P4: fallback heurístico com sinais positivos web (Refutador refinou).
+
+    Regras:
+      1. Mobile explícito → mobile.
+      2. Fullstack: web+backend juntos → fullstack.
+      3. Sinais positivos web (Next.js, React, MUI, Tailwind, App Router, SPA,
+         client-side, etc.) SEM sinais fortes de backend → web.
+      4. Backend explícito (API routes, endpoint HTTP, banco, servidor) → backend.
+      5. Default: web (mais seguro que backend — evita repetir bug 54967064 onde
+         Next.js foi classificado como backend por default).
+    """
     t = text.lower()
-    # Se menciona interface visual explicitamente e NÃO menciona API/backend
-    has_visual = any(w in t for w in ["landing page", "site estático", "página web", "frontend only"])
-    has_backend = any(w in t for w in ["api", "endpoint", "servidor", "server", "backend", "banco de dados", "database"])
-    has_mobile = any(w in t for w in ["mobile", "react native", "flutter", "ios", "android"])
-    if has_mobile:
+
+    # Mobile
+    if any(w in t for w in ("react native", "flutter", " ios ", "android sdk", "expo cli")):
         return "mobile"
-    if has_backend:
-        return "backend"
-    if has_visual and not has_backend:
+
+    # Sinais positivos web (expandido — T07/P4)
+    web_signals = (
+        "landing page", "site estático", "página web", "frontend only",
+        "next.js", "nextjs", "next 14", "next 13", "app router",
+        "react ", "reactjs", "react 18", "vite", "svelte", "vue ",
+        "material ui", "@mui/material", "@mui/", "mui v", "tailwind",
+        "chakra", "shadcn", "app router", "client component",
+        "client-side", "spa ", "single page application", "single-page",
+    )
+    has_web = any(w in t for w in web_signals)
+
+    # Sinais fortes de backend (não apenas "api" isolada — pode ser CDN, plataforma)
+    backend_signals = (
+        "api routes", "app/api/", "server actions", "endpoint http",
+        "servidor http", "backend api", "rest api", "graphql server",
+        "banco de dados", "database schema", "orm ", "prisma",
+        "fastapi", "flask ", "django ", "express.js", "nestjs",
+        "worker background", "cron job",
+    )
+    has_backend_strong = any(w in t for w in backend_signals)
+
+    if has_web and has_backend_strong:
+        return "fullstack"
+    if has_web:
         return "web"
-    return "backend"  # default seguro para ambiguidades
+    if has_backend_strong:
+        return "backend"
+    # Sinais fracos de backend não bastam — default agora é web (mais seguro
+    # após incidente 54967064). Se realmente for backend, o Engineer YAML
+    # (T08) declara explicitamente.
+    return "web"
 
 
 def _extract_complexity_hint(charter_text: str) -> str:
@@ -1651,7 +1869,69 @@ def _extract_error_info(exc: BaseException) -> dict:
         return {"error": msg, "human_message": msg}
 
 
-def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -> None:
+def _read_charter_scope(project_id: str) -> str:
+    """T05/T07: lê `scope:` do PROJECT_CHARTER.md. Default: 'code'.
+    Valores possíveis: 'code' | 'docs-only' | 'adr-only' | 'mixed'."""
+    root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id
+    candidates = [
+        root / "docs" / "cto" / "PROJECT_CHARTER.md",
+        root / "docs" / "cto_charter.md",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace")
+                m = re.search(r"^\s*(?:-\s*)?\*?\*?scope\*?\*?\s*[:\|]\s*`?(code|docs-only|adr-only|mixed)`?", txt, re.IGNORECASE | re.MULTILINE)
+                if m:
+                    return m.group(1).lower()
+            except Exception:
+                continue
+    return "code"
+
+
+def _structural_gate(project_id: str, pm_module: str) -> tuple[bool, str]:
+    """T05: valida estrutura mínima antes de emitir product_ready.
+
+    Regras (respeitam `charter.scope`):
+    - scope='docs-only' / 'adr-only': valida `docs/` não-vazio; ignora apps/.
+    - scope='code' (default) / 'mixed': valida `apps/` não-vazio, `project/RUNBOOK.md` existe,
+      e (se pm_module in {backend, fullstack}) `Dockerfile` presente.
+
+    Retorna (ok, reason). reason='' quando ok=True.
+    """
+    root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id
+    scope = _read_charter_scope(project_id)
+
+    if scope in ("docs-only", "adr-only"):
+        docs_dir = root / "docs"
+        if not docs_dir.exists() or not any(docs_dir.rglob("*.md")):
+            return False, f"scope={scope}: docs/ vazio ou sem .md"
+        return True, ""
+
+    # scope=code|mixed → precisa de código
+    apps = root / "apps"
+    if not apps.exists():
+        return False, "apps/ ausente (scope=code exige código gerado)"
+    _apps_files = [p for p in apps.rglob("*") if p.is_file() and not p.name.startswith(".")]
+    if not _apps_files:
+        return False, "apps/ vazio (nenhum arquivo executável gerado)"
+
+    runbook = root / "project" / "RUNBOOK.md"
+    if not runbook.exists():
+        # Aceita alternativas comuns
+        alt = root / "docs" / "devops" / "RUNBOOK.md"
+        if not alt.exists():
+            return False, "RUNBOOK.md ausente em project/ e docs/devops/"
+
+    if pm_module in ("backend", "fullstack"):
+        has_dockerfile = any(root.rglob("Dockerfile"))
+        if not has_dockerfile:
+            return False, f"pm_module={pm_module} sem Dockerfile no projeto"
+
+    return True, ""
+
+
+def _run_local_deploy(project_id: str, devops_response: dict, request_id: str, pm_module: str = "web") -> None:
     """
     Executa o produto localmente após o DevOps gerar os artefatos.
     Lê meta.run_command e meta.app_url do response do DevOps.
@@ -1685,6 +1965,24 @@ def _run_local_deploy(project_id: str, devops_response: dict, request_id: str) -
 
     if not project_dir.exists():
         _post_step(f"Diretório do projeto não encontrado: {project_dir}. Execute manualmente: {run_command}", request_id)
+        return
+
+    # T05 (P13): structural gate — não emitir product_ready sobre apps/ vazio.
+    # Respeita charter.scope (docs-only / adr-only são exceção legítima).
+    _struct_ok, _struct_reason = _structural_gate(project_id, pm_module)
+    if not _struct_ok:
+        _reason = f"[T05-STRUCTURAL] gate FAIL: {_struct_reason}"
+        logger.error(_reason)
+        _post_step(
+            f"BLOCKED — validação estrutural: {_struct_reason}. "
+            "Pipeline não emite product_ready sobre projeto vazio. "
+            "Revise se o backlog gerou código ou se o scope do charter é docs-only.",
+            request_id,
+        )
+        try:
+            _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason})
+        except Exception:
+            pass
         return
 
     # Make start.sh executable if it exists
@@ -1870,6 +2168,35 @@ def _api_available() -> bool:
     )
 
 
+def _check_cost_gate(project_id: str) -> tuple[bool, float]:
+    """T18: verifica se o projeto excedeu MAX_USD_PER_PROJECT.
+
+    Retorna (ok, current_usd). ok=False → pipeline deve BLOQUEAR imediatamente.
+    Se MAX_USD_PER_PROJECT não está setado ou é 0, sempre retorna ok=True.
+    Se o endpoint /api/projects/:id/cost não existe, retorna ok=True (não bloqueia
+    para compatibilidade — só ativa quando a API expõe o endpoint).
+    """
+    try:
+        max_usd = float(os.environ.get("MAX_USD_PER_PROJECT", "0") or 0)
+        if max_usd <= 0:
+            return True, 0.0
+        # Consulta simples — se endpoint não existir (404), não bloqueia
+        data, status = _api_get(f"/api/projects/{project_id}/cost")
+        if status != 200 or not isinstance(data, dict):
+            return True, 0.0
+        current = float(data.get("total_usd", 0.0) or 0.0)
+        if current >= max_usd:
+            logger.error(
+                "[T18-COST-GATE] Projeto %s excedeu MAX_USD_PER_PROJECT=%s (atual=%s USD). Bloqueando.",
+                project_id, max_usd, current,
+            )
+            return False, current
+        return True, current
+    except Exception as e:
+        logger.debug("[T18] _check_cost_gate falhou (não crítico): %s", e)
+        return True, 0.0
+
+
 def _api_request(method: str, path: str, body: dict | None = None) -> tuple[dict | list | None, int]:
     base = os.environ.get("API_BASE_URL", "").rstrip("/")
     token = os.environ.get("GENESIS_API_TOKEN")
@@ -1962,13 +2289,26 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
         if tasks:
             logger.info("[_parse_tasks_from_backlog] Parsed %d tasks from %s", len(tasks), backlog_path)
             return tasks
-        break  # found file but no tasks — fall through to default
+        # T15 (N3): não fazer break aqui. Se o BACKLOG.md do módulo inferido tem 0 tasks,
+        # continuar procurando nos outros paths. Pode ser que outro PM (com o módulo certo)
+        # tenha gerado tasks. Ex: pm_module='backend' inferido errado, mas docs/pm/web/BACKLOG.md
+        # existe e tem 4 tasks. Antes do fix, o break saía com [] (o runner cai em fallback fantasma).
+        logger.info(
+            "[T15] BACKLOG.md em %s existe mas tem 0 tasks — tentando próximos paths",
+            backlog_path,
+        )
+        continue
 
-    # Fallback: single task based on module
-    fallback_id = "TSK-WEB-001" if pm_module == "web" else "TSK-BE-001"
-    fallback_role = owner_role_map.get(pm_module, "DEV_WEB")
-    logger.warning("[_parse_tasks_from_backlog] No BACKLOG.md found or no tasks parsed — using fallback task %s", fallback_id)
-    return [{"task_id": fallback_id, "module": module, "owner_role": fallback_role, "status": "ASSIGNED", "requirements": "Implementar scaffold do projeto"}]
+    # T02: fallback fantasma removido — retornar [] sinaliza ao runner que o
+    # backlog está incoerente (nenhum BACKLOG.md encontrado ou 0 tasks). O
+    # gate T06 (backlog vazio com FRs > 0) decide se aborta ou aceita como
+    # docs-only. Nunca inventar tasks placeholder ("Implementar scaffold").
+    logger.error(
+        "[_parse_tasks_from_backlog] BACKLOG.md ausente ou vazio para pm_module=%s — retornando [] "
+        "(sem fallback fantasma). Runner deve avaliar via gate T06.",
+        pm_module,
+    )
+    return []
 
 
 def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
@@ -2810,8 +3150,9 @@ def _run_monitor_loop(
                         _task_state.save()
                     _post_step("DevOps concluiu artefatos. Iniciando execução local do produto.", request_id)
                     # Run locally: build + serve + open browser
+                    # T05: passa pm_module para permitir gate estrutural respeitar módulo.
                     if project_id:
-                        _run_local_deploy(project_id, devops_response, request_id)
+                        _run_local_deploy(project_id, devops_response, request_id, pm_module=pm_module)
 
                     # ── TASK-FULL-TEST — Claude Code Agent (end-to-end) ───────────────────
                     # Seed task no portal
@@ -3938,8 +4279,22 @@ def main() -> int:
                     request_id,
                 )
                 _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-                pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
-                logger.info("[Pipeline] Chamando agente PM (módulo %s inferido da proposta do Engineer, rodada %s)...", pm_module, pm_round)
+                # T10 (N2): cachear pm_module em pipeline_ctx — evita 3× chamadas Bedrock por loop
+                # CTO↔PM (economia de LLM + idempotência entre replays).
+                _cached_module = getattr(pipeline_ctx, "current_module", None) if pipeline_ctx else None
+                if _cached_module and _cached_module in ("web", "backend", "mobile", "fullstack"):
+                    pm_module = _cached_module
+                    logger.info("[Pipeline] pm_module lido do cache (pipeline_ctx.current_module=%s) — sem re-inferir (rodada %s)", pm_module, pm_round)
+                else:
+                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
+                    logger.info("[Pipeline] pm_module inferido da proposta do Engineer: %s (rodada %s, cache miss)", pm_module, pm_round)
+                    # T10: persistir no ctx para próximas rodadas
+                    if pipeline_ctx and hasattr(pipeline_ctx, "current_module"):
+                        pipeline_ctx.current_module = pm_module
+                        try:
+                            pipeline_ctx.save_checkpoint(STATE_DIR)
+                        except Exception as _e_ck:
+                            logger.debug("[T10] save_checkpoint falhou (não crítico): %s", _e_ck)
                 pm_response = call_pm(
                     spec_ref, charter_summary, request_id,
                     module=pm_module, engineer_proposal=engineer_summary,
@@ -3969,11 +4324,23 @@ def main() -> int:
                             storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
                 _post_step("O CTO está validando o backlog do PM.", request_id)
                 _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
+                # T03 (N1): passar engineer_proposal + pm_module_used ao CTO no modo
+                # validate_backlog para que ele possa cruzar a coerência do backlog
+                # com a proposta do Engineer (evita "PM Backend com 0 tasks" ser
+                # aprovado quando Engineer declarou "1 squad Web + 4 tasks").
                 cto_backlog_response = call_cto(
                     spec_ref, request_id,
+                    engineer_proposal=engineer_summary,
                     backlog_summary=backlog_summary,
                     validate_backlog_only=True,
                     pipeline_ctx=pipeline_ctx,
+                    extra_instruction=(
+                        f"[T03/N1] pm_module_used={pm_module}. "
+                        "Cruze coerência com engineer_stack_proposal.squads[]. "
+                        "Se pm_module divergir de squads[*].module OU se backlog tem 0 tasks "
+                        "quando Engineer declarou target_tasks>0, retorne status: REVISION "
+                        "com pergunta explícita ao PM (não aprovar por LEI 2/no-invent)."
+                    ),
                 )
                 cto_backlog_ok = (str(cto_backlog_response.get("status", "")).upper() == "OK")
                 # GAP-P1/Q1: validar LEI 8 antes de aprovar o backlog — se PM gerou tasks com
@@ -4005,6 +4372,38 @@ def main() -> int:
                     except Exception as _lei8_e:
                         logger.debug("[GAP-P1] LEI 8 check falhou (não crítico): %s", _lei8_e)
                 if cto_backlog_ok:
+                    # T06 (P12'): gate — se PM aprovou 0 tasks mas spec/charter têm FRs,
+                    # bloquear pipeline. Sem esse gate, o runner segue com backlog vazio
+                    # e o Dev NO-OP infla os custos em ~US$ 2 antes do Cyborg detectar.
+                    try:
+                        _fr_count_total = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
+                        _tasks_now = _get_tasks(project_id) if project_id else []
+                        _tasks_count = len(_tasks_now) if _tasks_now else 0
+                        # Também detecta backlog textual "0 tasks" mesmo antes de _seed_tasks rodar
+                        _bl_text = (backlog_summary or "").lower()
+                        _bl_declares_zero = any(sig in _bl_text for sig in (
+                            "0 tasks", "trivial (0 tasks)", "nenhuma task", "backlog vazio",
+                            "sem tasks nesta iteração", "modo: trivial (0"
+                        ))
+                        # Considera scope docs-only como exceção legítima
+                        _scope = _read_charter_scope(project_id) if project_id else "code"
+                        if _fr_count_total > 0 and (_tasks_count == 0 or _bl_declares_zero) and _scope in ("code", "mixed"):
+                            _reason_t06 = (
+                                f"[T06-EMPTY-BACKLOG] spec/charter tem {_fr_count_total} FRs mas "
+                                f"backlog aprovado tem 0 tasks (scope={_scope}). "
+                                f"pm_module_used={pm_module}. Provável divergência Engineer↔PM."
+                            )
+                            logger.error(_reason_t06)
+                            _post_step(
+                                f"BLOCKED — backlog vazio com {_fr_count_total} FRs pendentes. "
+                                f"O PM (módulo={pm_module}) não gerou tasks. Verifique se a squad correta foi acionada.",
+                                request_id,
+                            )
+                            _patch_project({"status": "blocked_backlog_empty_with_frs", "blocked_reason": _reason_t06})
+                            return
+                    except Exception as _e_t06:
+                        logger.warning("[T06-EMPTY-BACKLOG] check falhou (não crítico): %s", _e_t06)
+
                     _post_step("O CTO aprovou o backlog. Acionando a squad.", request_id)
                     break
                 if pm_round == max_cto_pm_rounds:

@@ -424,6 +424,67 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // T17: POST /api/projects/:id/rerun-from — força re-execução do pipeline a partir de um estágio
+  // com overrides opcionais. Rescue manual quando pm_module foi inferido errado (incidente 54967064).
+  // Body: { stage: "pm"|"engineer"|"dev", overrides?: { module?: "web"|"backend"|"mobile"|"fullstack", squad?: string } }
+  // Auth: role admin ou operator.
+  app.post<{
+    Params: { id: string };
+    Body: { stage: string; overrides?: { module?: string; squad?: string } };
+  }>("/api/projects/:id/rerun-from", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin" && user.role !== "tenant_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas admin ou operator podem rerodar projetos" });
+    }
+    const { id } = request.params;
+    const body = request.body ?? { stage: "pm", overrides: {} };
+    const stage = (body.stage || "pm").toLowerCase();
+    const overrides = body.overrides ?? {};
+
+    const validStages = new Set(["pm", "engineer", "dev"]);
+    if (!validStages.has(stage)) {
+      return reply.status(400).send({ code: "INVALID_STAGE", message: `stage inválido: ${stage}. Válidos: pm|engineer|dev` });
+    }
+    const validModules = new Set(["web", "backend", "mobile", "fullstack"]);
+    if (overrides.module && !validModules.has(overrides.module)) {
+      return reply.status(400).send({ code: "INVALID_MODULE", message: `module inválido: ${overrides.module}` });
+    }
+
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, id, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+      // Marca override no campo extra (jsonb merge); runner lê no boot.
+      const overridesPayload = {
+        rerun_from_stage: stage,
+        forced_module: overrides.module ?? null,
+        forced_squad: overrides.squad ?? null,
+        rerun_requested_by: user.id,
+        rerun_requested_at: new Date().toISOString(),
+      };
+      await client.query(
+        `UPDATE projects
+         SET status = 'rerun_requested',
+             extra  = COALESCE(extra, '{}') || $2::jsonb,
+             updated_at = now()
+         WHERE id = $1`,
+        [id, JSON.stringify(overridesPayload)]
+      );
+
+      // Audit trail (project_dialogue como fallback pois project_overrides pode não existir)
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'system', 'system', 'step', $2)`,
+        [id, `[T17] Rerun solicitado por ${user.id}: stage=${stage} module=${overrides.module ?? "auto"}`]
+      );
+
+      return reply.status(202).send({ ok: true, stage, overrides: overridesPayload });
+    } finally {
+      client.release();
+    }
+  });
+
   // POST /api/projects/:id/accept — marca projeto como aceito (usuário humano ou Zentriz Cyborg)
   // Body opcional: { accepted_by?: "zentriz-cyborg" | string, evidence?: string }
   app.post<{ Params: { id: string }; Body?: { accepted_by?: string; evidence?: string } }>(

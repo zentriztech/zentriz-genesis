@@ -24,6 +24,11 @@ from typing import Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+# T01: sanitiza AWS_PROFILE="" antes de qualquer import boto3.
+for _k in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+    if _k in os.environ and not os.environ[_k].strip():
+        os.environ.pop(_k, None)
+
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,98 @@ app = FastAPI(title="Genesis Runner Service", version="0.2.0")
 # projectId -> pid  (complementado pelo disco — veja _pid_file())
 _running_pids: Dict[str, int] = {}
 _lock = threading.Lock()  # mutex global para operações em _running_pids
+
+# ── T14: Circuit breaker LLM ──────────────────────────────────────────────
+# Estado do circuit breaker para o classificador LLM. Quando um projeto
+# recente sofreu ClassifierUnavailable (config/auth), novos projetos entram
+# em BLOCKED_LLM_UNAVAILABLE por CB_COOLDOWN_S em vez de crashar.
+_llm_cb_state = {
+    "healthy": True,
+    "last_check": 0.0,
+    "last_fail": 0.0,
+    "last_fail_kind": "",
+    "consecutive_fails": 0,
+}
+_llm_cb_lock = threading.Lock()
+LLM_CB_COOLDOWN_S = int(os.environ.get("LLM_CB_COOLDOWN_S", "60"))
+LLM_CB_FAIL_THRESHOLD = int(os.environ.get("LLM_CB_FAIL_THRESHOLD", "3"))
+LLM_CB_FILE = Path(os.environ.get("LLM_CB_FILE", "/tmp/genesis_llm_cb.json"))
+
+
+def _cb_persist():
+    """T14: persiste CB em arquivo para o runner subprocess ler."""
+    try:
+        import json as _j
+        LLM_CB_FILE.write_text(_j.dumps(_llm_cb_state))
+    except Exception:
+        pass
+
+
+def _cb_load():
+    """T14: carrega CB do arquivo (usado no boot para sobreviver a restart do serviço)."""
+    try:
+        import json as _j
+        if LLM_CB_FILE.exists():
+            data = _j.loads(LLM_CB_FILE.read_text())
+            _llm_cb_state.update({k: data[k] for k in _llm_cb_state.keys() if k in data})
+    except Exception:
+        pass
+
+
+def llm_cb_snapshot() -> dict:
+    """T14: retorna cópia do estado do circuit breaker LLM (sem lock)."""
+    with _llm_cb_lock:
+        return dict(_llm_cb_state)
+
+
+def llm_cb_report(ok: bool, kind: str = "") -> None:
+    """T14: agentes reportam sucesso/falha do LLM aqui.
+    Após LLM_CB_FAIL_THRESHOLD falhas consecutivas de tipos fatais (config/auth),
+    o breaker fica OPEN por LLM_CB_COOLDOWN_S segundos.
+    """
+    import time as _t
+    with _llm_cb_lock:
+        now = _t.time()
+        _llm_cb_state["last_check"] = now
+        if ok:
+            _llm_cb_state["healthy"] = True
+            _llm_cb_state["consecutive_fails"] = 0
+            _cb_persist()
+            return
+        _llm_cb_state["last_fail"] = now
+        _llm_cb_state["last_fail_kind"] = kind or "unknown"
+        # Só conta como "hard fail" categorias fatais
+        if kind in ("config", "auth"):
+            _llm_cb_state["consecutive_fails"] += 1
+            if _llm_cb_state["consecutive_fails"] >= LLM_CB_FAIL_THRESHOLD:
+                _llm_cb_state["healthy"] = False
+                logger.error(
+                    "[T14-CB] Circuit breaker OPEN após %d falhas fatais (kind=%s). "
+                    "Novos runs entrarão em BLOCKED por %ds.",
+                    _llm_cb_state["consecutive_fails"], kind, LLM_CB_COOLDOWN_S,
+                )
+        _cb_persist()
+
+
+# T14: carrega estado do CB no boot (sobrevive a restart do serviço)
+_cb_load()
+
+
+def llm_cb_is_open() -> bool:
+    """T14: True se o CB está OPEN (LLM indisponível) e ainda dentro do cooldown."""
+    import time as _t
+    with _llm_cb_lock:
+        if _llm_cb_state["healthy"]:
+            return False
+        elapsed = _t.time() - _llm_cb_state["last_fail"]
+        if elapsed > LLM_CB_COOLDOWN_S:
+            # Half-open — permite próxima tentativa
+            _llm_cb_state["healthy"] = True
+            _llm_cb_state["consecutive_fails"] = 0
+            logger.info("[T14-CB] Circuit breaker half-open — cooldown expirou (%.1fs)", elapsed)
+            return False
+        return True
+
 
 # ── Diretório de estado ────────────────────────────────────────────────────
 # Compartilhado com orchestrator/runner.py via volume — mesma raiz
@@ -161,6 +258,19 @@ class StopBody(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/llm")
+def health_llm():
+    """T14: expõe estado do circuit breaker LLM. Portal/monitoring podem consultar."""
+    snap = llm_cb_snapshot()
+    return {
+        "healthy": snap["healthy"],
+        "cb_open": llm_cb_is_open(),
+        "last_fail_kind": snap["last_fail_kind"],
+        "consecutive_fails": snap["consecutive_fails"],
+        "cooldown_s": LLM_CB_COOLDOWN_S,
+    }
 
 
 @app.get("/status")
