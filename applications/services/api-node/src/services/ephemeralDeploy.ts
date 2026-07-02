@@ -12,6 +12,7 @@ import { pool } from "../db/client.js";
 import { isFlyConfigured, createMachine, waitForMachineStarted, flyAppUrl, destroyMachine as flyDestroyMachine } from "./fly.js";
 import { buildAndPushImage } from "./dockerBuilder.js";
 import { isECSConfigured, runECSTask, getECSTaskUrl, stopECSTask } from "./ecs.js";
+import { destroyBucket as s3DestroyBucket } from "./s3.js";
 
 const MAX_TTL_MINUTES = 60;
 
@@ -165,7 +166,7 @@ export async function destroyDeployment(deploymentId: string): Promise<void> {
   const client = await pool.connect();
   try {
     const res = await client.query(
-      "SELECT provider, machine_id, app_name FROM ephemeral_deployments WHERE id=$1",
+      "SELECT provider, machine_id, app_name, bucket_name FROM ephemeral_deployments WHERE id=$1",
       [deploymentId],
     );
     const row = res.rows[0];
@@ -175,6 +176,11 @@ export async function destroyDeployment(deploymentId: string): Promise<void> {
       await flyDestroyMachine(row.app_name as string, row.machine_id as string).catch(console.error);
     } else if (row.provider === "ecs" && row.machine_id) {
       await stopECSTask(row.machine_id as string).catch(console.error);
+    } else if (row.provider === "s3-static" && row.bucket_name) {
+      // FT-17: destroy S3 bucket (versioning-safe)
+      await s3DestroyBucket(row.bucket_name as string).catch((err) =>
+        console.error("[destroyDeployment] s3 destroy failed:", err),
+      );
     }
 
     await client.query(

@@ -39,6 +39,8 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET:-}
       - TELEGRAM_WEBHOOK_PATH=${TELEGRAM_WEBHOOK_PATH:-wh/change-me}
+      # FT-17: API precisa chamar full-test-server no host (:7878) para deploy S3
+      - FULL_TEST_SERVER_URL=${FULL_TEST_SERVER_URL:-http://host.docker.internal:7878}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

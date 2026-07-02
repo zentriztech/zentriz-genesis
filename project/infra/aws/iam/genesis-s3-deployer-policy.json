@@ -1,0 +1,68 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateAndConfigureBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketWebsite",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutBucketTagging",
+        "s3:PutBucketCORS",
+        "s3:PutBucketLogging",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketAcl"
+      ],
+      "Resource": "arn:aws:s3:::genesis-*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+      }
+    },
+    {
+      "Sid": "UploadAndManageObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetObjectTagging",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketWebsite",
+        "s3:GetBucketTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::genesis-*",
+        "arn:aws:s3:::genesis-*/*"
+      ]
+    },
+    {
+      "Sid": "DestroyBucketsAfterTTL",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:DeleteBucketWebsite"
+      ],
+      "Resource": "arn:aws:s3:::genesis-*"
+    },
+    {
+      "Sid": "ListForReconciliation",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

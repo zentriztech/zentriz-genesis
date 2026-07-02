@@ -108,7 +108,8 @@ type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; c
 type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
 type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
 type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string; status: string; expiresAt: string; ttlMinutes: number } | null };
-type EphemeralResult   = { deploymentId: string; provider: string; appUrl: string; expiresAt: string; ttlMinutes: number };
+type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string; ttlMinutes?: number; ttlDays?: number; status?: string; bucketName?: string };
+type DeployError       = { code: string; message: string; details?: Record<string, unknown> };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -427,6 +428,7 @@ function ProjectDetailPageInner() {
   const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
   const [pushingToGitHub, setPushingToGitHub] = useState(false);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
+  const [lgpdConsent, setLgpdConsent] = useState<boolean>(false); // FT-17
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
   const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> } | null>(null);
@@ -440,7 +442,7 @@ function ProjectDetailPageInner() {
   const [linkProductId, setLinkProductId]         = useState("");
   const [linkProductSaving, setLinkProductSaving] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
-  const [deployError, setDeployError]     = useState<string | null>(null);
+  const [deployError, setDeployError]     = useState<string | DeployError | null>(null);
   const [countdown, setCountdown]   = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen]     = useState(false);
   const [linkableProjects, setLinkableProjects] = useState<Array<{ id: string; title: string; status: string; project_type?: string }>>([]);
@@ -1279,17 +1281,19 @@ function ProjectDetailPageInner() {
         </Alert>
       )}
 
-      {/* Cloud deploy — active deployment banner */}
+      {/* FT-17: Cloud deploy — active deployment banner */}
       {isDone && ephemeral && (
         <Alert
-          severity="warning" sx={{ mb: 2 }}
-          icon={<Box sx={{ fontSize: "1.1rem" }}>☁️</Box>}
+          severity={ephemeral.status === "provisioning" ? "info" : "warning"} sx={{ mb: 2 }}
+          icon={<Box sx={{ fontSize: "1.1rem" }}>{ephemeral.status === "provisioning" ? "⏳" : "☁️"}</Box>}
           action={
             <Stack direction="row" spacing={1} alignItems="center">
-              <Button size="small" color="warning" endIcon={<OpenInNewIcon />}
-                href={ephemeral.appUrl} target="_blank" rel="noopener noreferrer" component="a">
-                Abrir app
-              </Button>
+              {ephemeral.appUrl && (
+                <Button size="small" color="warning" endIcon={<OpenInNewIcon />}
+                  href={ephemeral.appUrl} target="_blank" rel="noopener noreferrer" component="a">
+                  Abrir app
+                </Button>
+              )}
               <Button size="small" color="error" variant="outlined"
                 onClick={async () => {
                   await apiPost(`/api/projects/${id}/deploy/ephemeral/${ephemeral.deploymentId}/destroy`, {}).catch(() => null);
@@ -1301,42 +1305,85 @@ function ProjectDetailPageInner() {
           }
         >
           <Typography variant="body2" fontWeight={500}>
-            ☁️ Ambiente efêmero ativo · expira em{" "}
-            <Box component="span" sx={{ fontFamily: "monospace", color: "warning.main", fontWeight: 700 }}>{countdown}</Box>
+            {ephemeral.status === "provisioning" ? (
+              <>⏳ Provisionando deploy S3…</>
+            ) : (
+              <>☁️ Deploy S3 ativo · expira em{" "}
+                <Box component="span" sx={{ fontFamily: "monospace", color: "warning.main", fontWeight: 700 }}>{countdown}</Box>
+              </>
+            )}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            {ephemeral.provider === "fly" ? "Fly.io" : "AWS ECS"} · {ephemeral.appUrl}
+            {ephemeral.provider === "s3-static" ? "AWS S3 Static" : ephemeral.provider === "fly" ? "Fly.io" : "AWS ECS"} · {ephemeral.appUrl ?? ephemeral.bucketName ?? "—"}
           </Typography>
         </Alert>
       )}
 
-      {/* Cloud deploy — launch button */}
+      {/* FT-17: Cloud deploy — launch button (com LGPD consent) */}
       {isDone && !ephemeral && (
         <Box sx={{ mb: 2 }}>
           {deployError && (
-            <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>{deployError}</Alert>
+            <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>
+              <Typography variant="body2" fontWeight={600}>
+                {(deployError as unknown as { code?: string })?.code ?? "Erro"}
+              </Typography>
+              <Typography variant="caption">
+                {typeof deployError === "string" ? deployError : (deployError as DeployError).message}
+              </Typography>
+              {typeof deployError !== "string" && (deployError as DeployError).details && (
+                <Box component="pre" sx={{ mt: 1, fontSize: "0.7rem", opacity: 0.7, maxHeight: 120, overflow: "auto" }}>
+                  {JSON.stringify((deployError as DeployError).details, null, 2)}
+                </Box>
+              )}
+            </Alert>
           )}
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+            <input
+              type="checkbox"
+              id="lgpd-consent"
+              checked={lgpdConsent}
+              onChange={(e) => setLgpdConsent(e.target.checked)}
+              style={{ margin: 0 }}
+            />
+            <Typography variant="caption" component="label" htmlFor="lgpd-consent" sx={{ fontSize: "0.7rem", cursor: "pointer" }}>
+              Confirmo que o app <strong>não contém dados pessoais reais nem segredos</strong> (bucket público, indexável).
+            </Typography>
+          </Stack>
           <Button
             variant="outlined" size="small"
-            disabled={deployLoading}
+            disabled={deployLoading || !lgpdConsent}
             startIcon={deployLoading ? <CircularProgress size={14} /> : <Box sx={{ fontSize: "0.9rem" }}>☁️</Box>}
             onClick={async () => {
               setDeployLoading(true); setDeployError(null);
               try {
-                const result = await apiPost<EphemeralResult>(`/api/projects/${id}/deploy/ephemeral`, { ttlMinutes: 30 });
+                const result = await apiPost<EphemeralResult>(`/api/projects/${id}/deploy/ephemeral`, {
+                  ttlDays: 7,
+                  consented: true,
+                });
                 setEphemeral(result);
               } catch (e) {
-                setDeployError(e instanceof Error ? e.message : "Falha ao provisionar ambiente cloud");
+                // Erro do apiPost pode vir com body estruturado
+                const msg = e instanceof Error ? e.message : "Falha ao provisionar deploy";
+                try {
+                  const parsed = JSON.parse(msg) as DeployError;
+                  if (parsed && typeof parsed === "object" && "code" in parsed) {
+                    setDeployError(parsed);
+                  } else {
+                    setDeployError(msg);
+                  }
+                } catch {
+                  setDeployError(msg);
+                }
               } finally {
                 setDeployLoading(false);
               }
             }}
             sx={{ borderStyle: "dashed" }}
           >
-            {deployLoading ? "Provisionando ambiente cloud…" : "🚀 Testar em Cloud (30 min)"}
+            {deployLoading ? "Provisionando…" : "🚀 Publicar no S3 (7 dias)"}
           </Button>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
-            Ambiente efêmero — dados destruídos automaticamente. Requer FLY_API_TOKEN configurado.
+            AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Sem backend real (apenas web estático).
           </Typography>
         </Box>
       )}

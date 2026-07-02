@@ -3,6 +3,8 @@ import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
 import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
+import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
+import { isS3Configured } from "../services/s3.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { notifyTelegramTenant } from "./telegram.js";
@@ -1570,34 +1572,226 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   );
 
-  // POST /api/projects/:id/deploy/ephemeral — lança ambiente efêmero de 30min
-  app.post<{ Params: { id: string }; Body: { ttlMinutes?: number } }>(
+  // POST /api/projects/:id/deploy/ephemeral — FT-17: rota atualizada para S3 static
+  //
+  // Comportamento:
+  //   1. Se S3 configurado → tenta S3 static (99% dos apps web gerados pelo Genesis).
+  //   2. Se S3 rejeita (backend detectado) → 409 estruturado {code, message, details}.
+  //   3. Se S3 não configurado → cai para Fly/ECS legado (que hoje falha).
+  //
+  // Body (FT-17):
+  //   { ttlDays?: number, consented: boolean }
+  //   consented=true é OBRIGATÓRIO (LGPD — projeto pode ter dados sensíveis).
+  app.post<{
+    Params: { id: string };
+    Body: { ttlMinutes?: number; ttlDays?: number; consented?: boolean };
+  }>(
     "/api/projects/:id/deploy/ephemeral",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
-      const ttlMinutes = Math.min((request.body as { ttlMinutes?: number })?.ttlMinutes ?? 30, 60);
+      const body = (request.body ?? {}) as { ttlMinutes?: number; ttlDays?: number; consented?: boolean };
+      const ttlDays = Math.min(body.ttlDays ?? 7, 30);
+      const ttlMinutes = Math.min(body.ttlMinutes ?? 30, 60);
+      const consented = body.consented === true;
 
       const client = await pool.connect();
+      let tenantId: string;
       try {
-        const row = (await client.query("SELECT id, tenant_id, created_by, status FROM projects WHERE id=$1", [id])).rows[0];
+        const row = (await client.query(
+          "SELECT id, tenant_id, created_by, status FROM projects WHERE id=$1",
+          [id]
+        )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
         if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         if (!["completed", "accepted"].includes(row.status as string)) {
-          return reply.status(409).send({ code: "CONFLICT", message: "Deploy efêmero só disponível para projetos concluídos ou aceitos" });
+          return reply.status(409).send({
+            code: "PROJECT_NOT_READY",
+            message: "Deploy só disponível para projetos concluídos ou aceitos.",
+            details: { current_status: row.status },
+          });
         }
+        tenantId = row.tenant_id as string;
       } finally {
         client.release();
       }
 
+      // FT-17: se S3 configurado, é o caminho padrão.
+      if (isS3Configured()) {
+        // LGPD: consentimento obrigatório
+        if (!consented) {
+          return reply.status(400).send({
+            code: "CONSENT_REQUIRED",
+            message: "É obrigatório confirmar que o app não contém dados pessoais/segredos reais.",
+            details: { field: "consented", expected: true },
+          });
+        }
+
+        // Rate limit: max N deploys/hora por projeto
+        const rateLimitPerHour = parseInt(process.env.S3_STATIC_RATE_LIMIT_PER_HOUR ?? "3", 10);
+        const rateClient = await pool.connect();
+        try {
+          const recent = await rateClient.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM ephemeral_deployments
+              WHERE project_id = $1 AND created_at > now() - interval '1 hour'`,
+            [id],
+          );
+          if (parseInt(recent.rows[0].count, 10) >= rateLimitPerHour) {
+            return reply.status(429).send({
+              code: "RATE_LIMITED",
+              message: `Limite de ${rateLimitPerHour} deploys/hora atingido. Aguarde antes de tentar novamente.`,
+              details: { limit_per_hour: rateLimitPerHour },
+            });
+          }
+          // Quota: max ativos por tenant
+          const maxActive = parseInt(process.env.S3_STATIC_MAX_ACTIVE_PER_TENANT ?? "5", 10);
+          const active = await rateClient.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM ephemeral_deployments
+              WHERE tenant_id = $1 AND status IN ('provisioning','running','running_degraded')`,
+            [tenantId],
+          );
+          if (parseInt(active.rows[0].count, 10) >= maxActive) {
+            return reply.status(429).send({
+              code: "TENANT_QUOTA_EXCEEDED",
+              message: `Máximo de ${maxActive} deploys ativos atingido para este tenant.`,
+              details: { max_active: maxActive },
+            });
+          }
+        } finally {
+          rateClient.release();
+        }
+
+        // Dispara S3 static deploy
+        try {
+          const outcome: S3StaticDeployOutcome = await deployS3Static({
+            projectId: id,
+            tenantId,
+            consentedByUserId: user.id,
+            ttlDays,
+          });
+          if (!outcome.ok) {
+            // Status apropriado por código
+            const httpStatus =
+              outcome.code === "DEPLOYMENT_IN_PROGRESS" ? 409 :
+              outcome.code.startsWith("BUILD_INCOMPATIBLE") ? 409 :
+              outcome.code === "S3_NOT_CONFIGURED" ? 503 :
+              outcome.code === "LAUNCH_FAILED" ? 502 :
+              500;
+            return reply.status(httpStatus).send({
+              code: outcome.code,
+              message: outcome.message,
+              details: outcome.details,
+            });
+          }
+          return reply.status(202).send(outcome.result);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return reply.status(500).send({ code: "DEPLOY_ERROR", message: msg });
+        }
+      }
+
+      // Fallback legado (Fly/ECS) — hoje não configurado, retorna 503 imediato via deployEphemeral
       try {
         const result = await deployEphemeral(id, ttlMinutes);
         return reply.status(202).send(result);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return reply.status(500).send({ code: "DEPLOY_ERROR", message: msg });
+      }
+    }
+  );
+
+  // FT-17: POST /api/projects/:id/deploy/ephemeral/:deploymentId/callback
+  // Chamado pelo full-test-server para reportar progresso e resultado final.
+  // Auth: Bearer com GENESIS_API_TOKEN (role zentriz_admin).
+  //
+  // Body:
+  //   Progress: { progress: 'installing'|'building'|'uploading' }
+  //   Success:  { status: 'running'|'running_degraded', app_url, health, build_size_bytes? }
+  //   Failure:  { status: 'failed', error_code, error_msg, error_details? }
+  app.post<{
+    Params: { id: string; deploymentId: string };
+    Body: {
+      progress?: string;
+      status?: "running" | "running_degraded" | "failed";
+      app_url?: string;
+      error_code?: string;
+      error_msg?: string;
+      error_details?: Record<string, unknown>;
+      health?: Record<string, unknown>;
+      build_size_bytes?: number;
+    };
+  }>(
+    "/api/projects/:id/deploy/ephemeral/:deploymentId/callback",
+    async (request, reply) => {
+      // Auth: Bearer com role zentriz_admin (o token do full-test-server)
+      const user = getUser(request);
+      if (user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Só serviço interno pode fazer callback" });
+      }
+      const { id, deploymentId } = request.params;
+      const body = request.body ?? {};
+
+      const client = await pool.connect();
+      try {
+        // Confere que deployment pertence ao projeto
+        const dep = (await client.query(
+          "SELECT id, project_id, status FROM ephemeral_deployments WHERE id=$1 AND project_id=$2",
+          [deploymentId, id],
+        )).rows[0];
+        if (!dep) return reply.status(404).send({ code: "DEPLOYMENT_NOT_FOUND" });
+
+        // Progress-only update (mantém provisioning, atualiza error_msg como texto de fase)
+        if (body.progress && !body.status) {
+          await client.query(
+            `UPDATE ephemeral_deployments SET error_msg=$1, updated_at=now() WHERE id=$2`,
+            [body.progress, deploymentId],
+          );
+          if (body.build_size_bytes) {
+            await client.query(
+              `UPDATE ephemeral_deployments SET build_size_bytes=$1 WHERE id=$2`,
+              [body.build_size_bytes, deploymentId],
+            );
+          }
+          return reply.send({ ok: true, phase: body.progress });
+        }
+
+        // Terminal update
+        if (body.status === "running" || body.status === "running_degraded") {
+          await client.query(
+            `UPDATE ephemeral_deployments
+                SET status=$1, app_url=$2, error_msg=$3, updated_at=now()
+              WHERE id=$4`,
+            [
+              body.status,
+              body.app_url ?? null,
+              body.health ? JSON.stringify(body.health) : null,
+              deploymentId,
+            ],
+          );
+          return reply.send({ ok: true, status: body.status });
+        }
+
+        if (body.status === "failed") {
+          const errText = [
+            body.error_code ? `[${body.error_code}]` : "",
+            body.error_msg ?? "",
+            body.error_details ? JSON.stringify(body.error_details).slice(0, 500) : "",
+          ].filter(Boolean).join(" ");
+          await client.query(
+            `UPDATE ephemeral_deployments
+                SET status='failed', error_msg=$1, updated_at=now()
+              WHERE id=$2`,
+            [errText.slice(0, 2000), deploymentId],
+          );
+          return reply.send({ ok: true, status: "failed" });
+        }
+
+        return reply.status(400).send({ code: "INVALID_BODY", message: "progress ou status obrigatório" });
+      } finally {
+        client.release();
       }
     }
   );

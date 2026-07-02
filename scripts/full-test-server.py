@@ -25,6 +25,30 @@ CLAUDE_BIN   = os.environ.get("CLAUDE_BIN", str(Path.home() / ".local/bin/claude
 PORT         = int(os.environ.get("FULL_TEST_PORT", "7878"))
 CYBORG_DIR   = Path(__file__).parent.parent / "project" / "cyborg"
 
+# T09/FT-17: Semaphore global compartilhado entre Cyborg e S3 static deploy.
+# Limita concorrência total no host (2 vCPU no EC2 t3.large). Sem isso, um Cyborg
+# de 60min + build de Vite paralelos causam OOM kill. Ajustar via env HEAVY_JOBS_MAX.
+HEAVY_JOBS_MAX = int(os.environ.get("HEAVY_JOBS_MAX", "2"))
+HEAVY_SEM = threading.BoundedSemaphore(HEAVY_JOBS_MAX)
+
+
+def acquire_heavy_slot(kind: str, job_id: str) -> None:
+    """Bloqueia até slot livre. Loga espera para debug."""
+    if HEAVY_SEM.acquire(blocking=False):
+        log.info(f"[SEM] acquired kind={kind} job={job_id} (immediate)")
+        return
+    log.warning(f"[SEM] waiting kind={kind} job={job_id} — outros jobs em execução")
+    HEAVY_SEM.acquire(blocking=True)
+    log.info(f"[SEM] acquired kind={kind} job={job_id} (after wait)")
+
+
+def release_heavy_slot(kind: str, job_id: str) -> None:
+    try:
+        HEAVY_SEM.release()
+        log.info(f"[SEM] released kind={kind} job={job_id}")
+    except ValueError:
+        log.error(f"[SEM] release without acquire kind={kind} job={job_id}")
+
 # Mapeamento group → RUNBOOK file (derivado do prefixo do project_type)
 RUNBOOK_MAP = {
     "backend":  "RUNBOOK_backend.md",
@@ -134,8 +158,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_run_full_test()
         elif self.path == "/launch-cyborg":
             self._handle_launch_cyborg()
+        elif self.path == "/launch-s3-deploy":
+            self._handle_launch_s3_deploy()
         else:
             self._json(404, {"error": "not found"})
+
+    # ── /launch-s3-deploy (FT-17) ─────────────────────────────────────────────
+    def _handle_launch_s3_deploy(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        required = ["project_id", "project_dir", "deployment_id", "bucket_name",
+                    "deployment_type", "genesis_api_url", "genesis_token",
+                    "aws_s3_access_key_id", "aws_s3_secret_access_key"]
+        missing = [k for k in required if not payload.get(k)]
+        if missing:
+            self._json(400, {"error": f"missing fields: {missing}"}); return
+
+        deployment_id = payload["deployment_id"]
+        job_id = deployment_id[:8]
+
+        # Roda em thread (com semáforo)
+        def _worker():
+            acquire_heavy_slot("s3-deploy", job_id)
+            try:
+                # Import lazy — evita carregar módulo se rota nunca é chamada
+                from pathlib import Path as _P
+                import sys as _sys
+                _sys.path.insert(0, str(_P(__file__).parent))
+                from s3_deploy_runner import run_s3_deploy
+                run_s3_deploy(payload)
+            except Exception as e:
+                log.exception(f"[s3-deploy] {job_id} crashed: {e}")
+            finally:
+                release_heavy_slot("s3-deploy", job_id)
+
+        t = threading.Thread(target=_worker, name=f"s3-deploy-{job_id}", daemon=True)
+        t.start()
+
+        self._json(202, {"ok": True, "job_id": job_id, "deployment_id": deployment_id})
 
     # ── /run-full-test (pipeline interno) ─────────────────────────────────────
 
