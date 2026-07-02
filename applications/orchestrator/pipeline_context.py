@@ -28,7 +28,12 @@ class PipelineContext:
         self.engineer_proposal = ""
         self.charter = ""
         self.backlog = ""
-        self.current_module = "backend"
+        # T10-fix (2026-07-02): default None em vez de "backend".
+        # Motivo: T10 usa isso como cache. Se boot inicializar como "backend", o cache
+        # ganha antes do YAML do Engineer ser lido → runner sempre roda PM Backend
+        # mesmo em projeto Web puro (bug reproduzido no projeto 1f5feb4f-6ced-4f3d-9d70-767506bcce9c).
+        # None força T10 a chamar infer_pm_module que lê o YAML determinístico.
+        self.current_module: "str | None" = None
         self.current_task: dict[str, Any] = {}
         self.artifacts: dict[str, str] = {}  # path -> content
         self.connect_artifacts: dict[str, str] = {}  # project/connect/... -> content
@@ -270,7 +275,10 @@ class PipelineContext:
         ctx.engineer_proposal = data.get("engineer_proposal", "")
         ctx.charter = data.get("charter", "")
         ctx.backlog = data.get("backlog", "")
-        ctx.current_module = data.get("current_module", "backend")
+        # T10-fix: preservar None quando checkpoint não tem current_module
+        # (checkpoints antigos com "backend" hardcoded serão sobrescritos após 1ª inferência real).
+        _cm = data.get("current_module")
+        ctx.current_module = _cm if _cm in ("web", "backend", "mobile", "fullstack") else None
         ctx.current_task = data.get("current_task") or {}
         ctx.artifacts = data.get("artifacts") or {}
         ctx.connect_artifacts = data.get("connect_artifacts") or {}

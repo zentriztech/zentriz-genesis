@@ -3150,9 +3150,14 @@ def _run_monitor_loop(
                         _task_state.save()
                     _post_step("DevOps concluiu artefatos. Iniciando execução local do produto.", request_id)
                     # Run locally: build + serve + open browser
-                    # T05: passa pm_module para permitir gate estrutural respeitar módulo.
+                    # T05-fix (2026-07-02): ler pm_module do pipeline_ctx (fonte de verdade,
+                    # salva em checkpoint pelo T10 cache). Não usar pm_module (só existe na fase CTO↔PM)
+                    # nem _current_module (só existe em outro branch do Monitor Loop).
                     if project_id:
-                        _run_local_deploy(project_id, devops_response, request_id, pm_module=pm_module)
+                        _pm_module_for_deploy = (
+                            getattr(pipeline_ctx, "current_module", None) if pipeline_ctx else None
+                        ) or "web"
+                        _run_local_deploy(project_id, devops_response, request_id, pm_module=_pm_module_for_deploy)
 
                     # ── TASK-FULL-TEST — Claude Code Agent (end-to-end) ───────────────────
                     # Seed task no portal
@@ -3421,12 +3426,22 @@ Execute agora sem pedir confirmação.
                         # Resolver product_id para path correto
                         _product_id_cyborg = (_pt_resp or {}).get("product_id") or (_pt_resp or {}).get("productId") or ""
                         _host_root_cyborg = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
-                        if _host_root_cyborg and _product_id_cyborg:
+                        # Cyborg-path-fix (2026-07-02): verificar se path com product_id existe.
+                        # Storage grava em <FILES_ROOT>/<project_id>/ (sem product_id) quando o Dev
+                        # gera artefatos via storage.write_doc. Só usar path com product_id se ele
+                        # de fato existir no container (para evitar apontar Cyborg a diretório vazio).
+                        _container_proj_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+                        _has_product_path = (
+                            _product_id_cyborg
+                            and (_container_proj_root / _product_id_cyborg / project_id / "apps").exists()
+                        )
+                        if _host_root_cyborg and _has_product_path:
                             _cyborg_dir = str(Path(_host_root_cyborg) / _product_id_cyborg / project_id)
                         elif _host_root_cyborg:
                             _cyborg_dir = str(Path(_host_root_cyborg) / project_id)
                         else:
                             _cyborg_dir = str(_proj_container_dir) if _proj_container_dir else ""
+                        logger.info("[CYBORG] project_dir=%s (product_path_exists=%s)", _cyborg_dir, _has_product_path)
                         _cyborg_payload = _jc.dumps({
                             "project_id":      project_id or "",
                             "project_dir":     _cyborg_dir,
@@ -4375,11 +4390,13 @@ def main() -> int:
                     # T06 (P12'): gate — se PM aprovou 0 tasks mas spec/charter têm FRs,
                     # bloquear pipeline. Sem esse gate, o runner segue com backlog vazio
                     # e o Dev NO-OP infla os custos em ~US$ 2 antes do Cyborg detectar.
+                    # T06-fix (2026-07-02): usar _parse_tasks_from_backlog (lê BACKLOG.md do disco),
+                    # não _get_tasks (só é populado após _seed_tasks, que roda depois deste gate).
                     try:
                         _fr_count_total = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
-                        _tasks_now = _get_tasks(project_id) if project_id else []
-                        _tasks_count = len(_tasks_now) if _tasks_now else 0
-                        # Também detecta backlog textual "0 tasks" mesmo antes de _seed_tasks rodar
+                        _tasks_parsed = _parse_tasks_from_backlog(project_id, pm_module) if project_id else []
+                        _tasks_count = len(_tasks_parsed)
+                        # Também detecta backlog textual "0 tasks" (fallback para casos raros)
                         _bl_text = (backlog_summary or "").lower()
                         _bl_declares_zero = any(sig in _bl_text for sig in (
                             "0 tasks", "trivial (0 tasks)", "nenhuma task", "backlog vazio",
@@ -4390,7 +4407,7 @@ def main() -> int:
                         if _fr_count_total > 0 and (_tasks_count == 0 or _bl_declares_zero) and _scope in ("code", "mixed"):
                             _reason_t06 = (
                                 f"[T06-EMPTY-BACKLOG] spec/charter tem {_fr_count_total} FRs mas "
-                                f"backlog aprovado tem 0 tasks (scope={_scope}). "
+                                f"backlog aprovado tem {_tasks_count} tasks (scope={_scope}, bl_declares_zero={_bl_declares_zero}). "
                                 f"pm_module_used={pm_module}. Provável divergência Engineer↔PM."
                             )
                             logger.error(_reason_t06)
@@ -4401,6 +4418,7 @@ def main() -> int:
                             )
                             _patch_project({"status": "blocked_backlog_empty_with_frs", "blocked_reason": _reason_t06})
                             return
+                        logger.info("[T06] gate OK: %d tasks parseadas do BACKLOG (module=%s, FRs=%d)", _tasks_count, pm_module, _fr_count_total)
                     except Exception as _e_t06:
                         logger.warning("[T06-EMPTY-BACKLOG] check falhou (não crítico): %s", _e_t06)
 
