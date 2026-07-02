@@ -252,13 +252,15 @@ services:
     build:
       context: ./applications/apps/genesis-web
       dockerfile: Dockerfile
-      args:
-        # Vazio = URL relativa (produção/EC2). Preencher para dev local no .env.
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
     ports:
       - "3001:3001"
     environment:
       - NODE_ENV=production
+      # Server-side proxy: Next.js encaminha /api/* → api:3000 (nome do serviço no Docker network).
+      # Browser sempre usa URL relativa. Bundle NUNCA contém URL absoluta. Ver next.config.mjs.
+      - NEXT_INTERNAL_API_URL=http://api:3000
+    depends_on:
+      - api
     restart: unless-stopped
 
 volumes:

@@ -47,6 +47,29 @@ for ENTRY in "${IMAGES[@]}"; do
     exit 1
   fi
 
+  # GUARD: para genesis-web, verifica label e bundle antes de pushar.
+  # Bug histórico: build local com NEXT_PUBLIC_API_BASE_URL=http://localhost:3000
+  # e push ao ECR = portal EC2 quebra chamando localhost do cliente.
+  if [ "$LOCAL_NAME" = "zentriz-genesis-genesis-web" ]; then
+    LABEL_TARGET=$(docker image inspect "$LOCAL_NAME:latest" --format='{{ index .Config.Labels "com.zentriz.build_target" }}' 2>/dev/null || echo "")
+    if [ "$LABEL_TARGET" = "dev" ]; then
+      echo "  ERRO [GUARD]: imagem tem label com.zentriz.build_target=dev — RECUSANDO push ao ECR." >&2
+      echo "  Solução: rebuild sem docker-compose.override.dev.yml (comando padrão 'docker compose build genesis-web')." >&2
+      exit 2
+    fi
+    # Sanity extra: inspeciona bundle interno da imagem.
+    TMPCID=$(docker create "$LOCAL_NAME:latest")
+    BUNDLE_HAS_LOCAL=$(docker cp "$TMPCID:/app/.next/static" - 2>/dev/null | tar -xO 2>/dev/null | grep -cE 'http://localhost:3000|http://127\.0\.0\.1' || true)
+    docker rm "$TMPCID" >/dev/null 2>&1 || true
+    if [ "${BUNDLE_HAS_LOCAL:-0}" -gt 0 ]; then
+      echo "  ERRO [GUARD]: bundle Next.js contém http://localhost:3000 embutido — RECUSANDO push." >&2
+      echo "  Origem provável: build feito com NEXT_PUBLIC_API_BASE_URL apontando localhost." >&2
+      echo "  Corrija: docker compose build genesis-web (sem override.dev.yml) e rode este script novamente." >&2
+      exit 3
+    fi
+    echo "  OK [GUARD]: imagem genesis-web validada (bundle sem localhost)"
+  fi
+
   docker tag "$LOCAL_NAME:latest" "$ECR_URI"
   docker push "$ECR_URI"
   echo "  OK Push concluido"
