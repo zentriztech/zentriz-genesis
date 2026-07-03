@@ -902,8 +902,12 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const hasAccess = await checkProjectAccess(client, id, user);
       if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN" });
+      // T-05 fix: coluna real é `extra->>'project_type'` (JSONB), não coluna direta.
+      // O SELECT anterior retornava 500 (Postgres: column p.project_type does not exist).
       const res = await client.query(
-        `SELECT p.id, p.title, p.status, p.project_type AS "projectType", pt.trigger_status AS "triggerStatus"
+        `SELECT p.id, p.title, p.status,
+                p.extra->>'project_type' AS "projectType",
+                pt.trigger_status AS "triggerStatus"
          FROM project_triggers pt
          JOIN projects p ON p.id = pt.trigger_project_id
          WHERE pt.project_id = $1
@@ -922,8 +926,11 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const hasAccess = await checkProjectAccess(client, id, user);
       if (!hasAccess) return reply.status(403).send({ code: "FORBIDDEN" });
+      // T-05 fix: mesmo bug 500 do endpoint predecessors — usar extra->>'project_type'
       const res = await client.query(
-        `SELECT p.id, p.title, p.status, p.project_type AS "projectType", pt.trigger_status AS "triggerStatus"
+        `SELECT p.id, p.title, p.status,
+                p.extra->>'project_type' AS "projectType",
+                pt.trigger_status AS "triggerStatus"
          FROM project_triggers pt
          JOIN projects p ON p.id = pt.project_id
          WHERE pt.trigger_project_id = $1

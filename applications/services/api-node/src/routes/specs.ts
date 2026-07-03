@@ -444,7 +444,12 @@ export async function specRoutes(app: FastifyInstance) {
         const raw = v && typeof (v as { value?: string }).value === "string"
           ? (v as { value: string }).value.trim()
           : "";
-        if (raw) projectType = raw;
+        if (raw) {
+          // T-05 fix: normalizar via type_aliases do policies.json antes de persistir
+          // — evita "tipos fantasma" no banco (ex: web_app → frontend_dashboard).
+          const { normalizeProjectType } = await import("../services/typePolicyNormalizer.js");
+          projectType = normalizeProjectType(raw) ?? raw;
+        }
       }
       if (part.fields?.productId !== undefined) {
         const pidField = part.fields.productId;

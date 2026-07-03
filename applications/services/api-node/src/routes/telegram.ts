@@ -990,11 +990,19 @@ async function saveProjectSpec(
   const uploadDir  = process.env.UPLOAD_DIR ?? "/shared/uploads";
   const specRef    = `telegram-${Date.now()}-${Math.random().toString(36).slice(2, 5)}.md`;
 
+  // T-05 fix: gravar project_type normalizado no extra desde a criação via Telegram.
+  // Antes: detectProjectType() só entrava no texto da spec — o CTO tinha que redetectar.
+  // Agora: normalização via policies.json + type_aliases (mobile_app → mobile_crossplatform,
+  // static_site → frontend_landing, frontend_webapp → frontend_dashboard etc.).
+  const rawType = detectProjectType(params.specMd);
+  const { normalizeProjectType } = await import("../services/typePolicyNormalizer.js");
+  const projectType = normalizeProjectType(rawType) ?? rawType;
+
   const projRes = await client.query(
     `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, product_id, extra)
      VALUES ($1, $2, $3, $4, 'spec_submitted', $5, $6::jsonb) RETURNING id`,
     [params.tenantId, params.userId, params.title, specRef, params.productId,
-     JSON.stringify({ created_via: "telegram" })]
+     JSON.stringify({ created_via: "telegram", project_type: projectType, project_type_raw: rawType })]
   );
   const projectId = projRes.rows[0].id as string;
 
