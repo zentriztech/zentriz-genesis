@@ -2375,10 +2375,7 @@ def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
             "module":    pm_module or "web",
             "owner_role": "QA",
             "status":    "NEW",
-            "requirements": (
-                "TSK-FULL-TEST — Validação E2E e correção de bugs (Claude Code Agent). "
-                "Ver project/full-test-prompt.md"
-            ),
+            "requirements": "Validação E2E do produto entregue (Claude Code Agent).",
         })
 
     path = f"/api/projects/{project_id}/tasks"
@@ -3156,16 +3153,7 @@ def _run_monitor_loop(
                                 "taskId":    "TSK-FULL-TEST",
                                 "module":    "test",
                                 "ownerRole": "QA",
-                                "requirements": (
-                                    "TSK-FULL-TEST — Validação E2E completa e CORREÇÃO de bugs pelo Claude Code Agent. "
-                                    "Esta é a ÚLTIMA task. O agente DEVE: "
-                                    "(1) build sem erros TypeScript; "
-                                    "(2) executar start.sh e confirmar que o servidor sobe; "
-                                    "(3) chamar TODOS os endpoints da API com token real e verificar HTTP 200; "
-                                    "(4) corrigir QUALQUER bug encontrado — Content-Type, rotas 404, campos errados, CORS; "
-                                    "(5) só marcar APROVADO quando o produto funciona end-to-end de verdade. "
-                                    "Ver prompt completo em project/full-test-prompt.md"
-                                ),
+                                "requirements": "Validação E2E do produto entregue (Claude Code Agent).",
                                 "status":    "ASSIGNED",
                                 "depends_on_files": [],
                                 "target_route": "/",

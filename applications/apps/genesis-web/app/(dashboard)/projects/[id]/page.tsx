@@ -2291,8 +2291,20 @@ function ProjectDetailPageInner() {
                                 )}
                               </TableCell>
                               <TableCell><Typography variant="caption" fontFamily="monospace" noWrap sx={{ fontSize: "0.7rem" }}>{tid}</Typography></TableCell>
-                              <TableCell>
-                                <Typography variant="body2" sx={{ fontSize: "0.73rem" }}>{t.requirements ?? "—"}</Typography>
+                              <TableCell sx={{ maxWidth: 480 }}>
+                                <Tooltip title={t.requirements ?? ""} placement="top-start" arrow disableHoverListener={!t.requirements || t.requirements.length <= 100}>
+                                  <Typography
+                                    variant="body2"
+                                    sx={{
+                                      fontSize: "0.73rem",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {t.requirements ?? "—"}
+                                  </Typography>
+                                </Tooltip>
                               </TableCell>
                               <TableCell>
                                 <Stack direction="row" spacing={0.5} alignItems="center">
