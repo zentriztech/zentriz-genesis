@@ -81,7 +81,8 @@ interface ProjectTypeOption { value: string; label: string; group: string }
 
 const PROJECT_TYPES: ProjectTypeOption[] = [
   // ── Backend ────────────────────────────────────────────────────────────────
-  { group: "Backend",   value: "backend_api",           label: "🔌 API REST"                        },
+  { group: "Backend",   value: "backend_api",           label: "🔌 API REST (Node)"                 },
+  { group: "Backend",   value: "backend_api_python",     label: "🐍 API REST (Python)"               },
   { group: "Backend",   value: "backend_graphql",        label: "🔗 API GraphQL"                     },
   { group: "Backend",   value: "backend_grpc",           label: "⚡ API gRPC"                        },
   { group: "Backend",   value: "backend_websocket",      label: "🌐 WebSocket / Realtime"            },
