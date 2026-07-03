@@ -1,0 +1,438 @@
+# Zentriz Genesis — Project Types Policy
+#
+# Fonte ÚNICA de política técnica por project_type. Consumido em runtime pelo
+# pipeline_context.py (Python) e em build-time convertido para policies.json
+# usado por Node/TS (Telegram, Portal, api-node).
+#
+# Guardrail: adicionar/alterar tipo ⇒ bump `version` + linha no PR description.
+# Precedência: CONTRACT LAW (Charter/LEI 13) > user Delta (LEI EVO) > type_policy > spec
+#
+# Ver README.md para schema completo e política de linguagem PT-BR/EN.
+
+version: "0.1.0"
+
+# ── type_aliases ─────────────────────────────────────────────────────────────
+# Normaliza saídas de detectProjectType (telegram.ts:955-963) + subtipos do
+# portal que devem cair em tipos canônicos Wave 0. Aplicado ANTES de resolver
+# a policy do tipo.
+#
+# Regra: backend_api_python NÃO tem alias para backend_api — bugs Python 1-9
+# são incompatíveis com bugs Node/Drizzle N1-N8.
+type_aliases:
+  mobile_app:         mobile_crossplatform    # telegram detectProjectType output
+  mobile_ios:         mobile_crossplatform    # portal subtype
+  mobile_android:     mobile_crossplatform    # portal subtype
+  backend_api_node:   backend_api             # variante nomeada
+  static_site:        frontend_landing        # telegram detectProjectType output
+  landing_page:       frontend_landing        # legado spec/page.tsx:553
+  web_app:            frontend_dashboard      # legado spec/page.tsx:558
+  frontend_web:       frontend_dashboard      # legado CTO SYSTEM_PROMPT
+  frontend_webapp:    frontend_dashboard      # telegram detectProjectType output
+
+# ── defaults ─────────────────────────────────────────────────────────────────
+# Herdado por todos os tipos exceto quando sobrescrito.
+defaults:
+  scaffold:
+    - Dockerfile
+    - start.sh                   # feedback_port_check: obrigatório lsof antes de subir
+    - .env.example
+    - README.md
+  required_routes:
+    strict: []                   # BLOCKER se ausente
+    expected: []                 # WARN se ausente
+  required_components: []
+  forbidden_patterns: []
+  smell_signals: []
+  fingerprint:
+    required_tokens: []          # tokens que DEVEM aparecer no código gerado
+    forbidden_tokens: []         # tokens que NÃO PODEM aparecer
+    synonyms_pt_br: {}           # equivalências PT-BR para evitar falso positivo
+  meta:
+    requires_runbook: false
+    warn_on_default: false
+    blocks_generation: false
+
+# ── groups ───────────────────────────────────────────────────────────────────
+# Herança intermediária (universal → group → subtype). Merge é ADITIVO em
+# listas (união em forbidden_patterns, required_routes, required_components).
+groups:
+  backend:
+    scaffold:
+      - docker-compose.yml
+    required_routes:
+      strict:
+        - "GET /health"
+    fingerprint:
+      forbidden_tokens:
+        - "hero-section"
+        - "landing-hero"
+        - "AppShell"             # web pattern não faz sentido em backend
+
+  frontend:
+    scaffold:
+      - next.config.js
+      - docker-compose.yml
+    fingerprint:
+      forbidden_tokens:
+        - "Prisma"               # feedback_nodejs_drizzle: usar Drizzle
+
+  fullstack:
+    scaffold:
+      - docker-compose.yml
+
+  mobile:
+    scaffold:
+      - app.json
+      - App.tsx
+    fingerprint:
+      forbidden_tokens:
+        - "localStorage"         # web-only API
+        - "AppShell"
+
+  bot:
+    scaffold:
+      - Dockerfile
+
+# ── types ────────────────────────────────────────────────────────────────────
+# 5 tipos-piloto Wave 0 + _default estrito + other.
+# Cada tipo herda de defaults → groups[X] → type explicit override.
+types:
+
+  # ── backend_api (Node.js) ──────────────────────────────────────────────────
+  backend_api:
+    inherit_from: backend
+    labels:
+      pt_br: "🔌 API REST (Node)"
+      en: "REST API (Node)"
+    scaffold:
+      - app.ts
+      - drizzle.config.ts
+    required_routes:
+      strict:
+        - "POST /auth/login"
+        - "GET /health"
+      expected:
+        - "GET /api/<recurso>"
+    required_components:
+      - "envelope {data, meta}"
+      - "prefixo /api/"
+      - "JWT middleware"
+      - "error handler com details:{}"
+    forbidden_patterns:
+      # Bugs Node/Drizzle validados (N1-N8, P1-P13, F1-F6)
+      - "Prisma"                              # feedback_nodejs_drizzle: usar Drizzle
+      - "seed.mjs no Dockerfile"              # N5: seed sempre fora
+      - "findAll("                            # N6: usar findMany do Drizzle
+      - "rota sem app.register"               # N7: registrar no app.ts
+      - "204 com type:"                       # N8: 204 sem body
+      - "details omitido no errSchema"        # N3
+      - "migrations vazias"                   # N2
+      - "content-type form-urlencoded no login"  # L1: Fastify não aceita
+      - "campo 'token' em vez de 'access_token'"  # L2
+    fingerprint:
+      required_tokens:
+        strong:
+          - "fastify"
+          - "drizzle"
+          - "/auth/login"
+        soft:
+          - "helmet"
+          - "cors"
+      forbidden_tokens:
+        - "prisma"
+        - "next.config"
+        - "AppShell"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20"
+      - "Fastify"
+      - "Drizzle ORM"
+      - "PostgreSQL 16"
+    smell_signals:
+      - "seed.mjs referenciado no Dockerfile CMD"
+      - "rotas criadas em arquivos mas sem app.register no app.ts"
+      - "prefixo duplicado ex /api/api/orders"
+
+  # ── backend_api_python (FastAPI) ───────────────────────────────────────────
+  backend_api_python:
+    inherit_from: backend
+    labels:
+      pt_br: "🐍 API REST (Python)"
+      en: "REST API (Python)"
+    scaffold:
+      - pyproject.toml           # Python 1: NUNCA setuptools/setup.py
+      - main.py
+      - alembic.ini
+    required_routes:
+      strict:
+        - "POST /auth/login"
+        - "GET /health"
+      expected:
+        - "GET /api/<recurso>"
+    required_components:
+      - "envelope {data, meta}"
+      - "Pydantic field names lowercase"     # Python 2
+      - "python-multipart no pyproject"      # Python 5
+      - "passlib[bcrypt]==1.7.4"             # Python 6
+      - "IntegrityError → 409"               # Python 8
+    forbidden_patterns:
+      # Bugs Python/FastAPI validados (Python 1-9)
+      - "setuptools no pyproject"            # Python 1
+      - "Pydantic field UpperCase"           # Python 2
+      - "prefixo /api/ duplicado no router"  # Python 3
+      - "ENUM asyncpg sem cast explícito"    # Python 4
+      - "python-multipart ausente"           # Python 5: form data quebra
+      - "passlib bcrypt sem pin 1.7.4"       # Python 6
+      - "Insomnia format v4"                 # Python 7: usar v5
+      - "IntegrityError → 500"               # Python 8: deve ser 409
+      - "Pydantic v1 style Config"           # Python 9: usar model_config
+    fingerprint:
+      required_tokens:
+        strong:
+          - "fastapi"
+          - "sqlalchemy"
+          - "alembic"
+        soft:
+          - "pydantic"
+          - "uvicorn"
+      forbidden_tokens:
+        - "setuptools"
+        - "setup.py"
+        - "AppShell"
+        - "next.config"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Python 3.11"
+      - "FastAPI"
+      - "SQLAlchemy 2"
+      - "Alembic"
+      - "PostgreSQL 16"
+    smell_signals:
+      - "arquivo setup.py em vez de pyproject.toml"
+      - "field ClienteId com uppercase (Pydantic quebra em snake_case)"
+      - "form POST sem python-multipart instalado"
+
+  # ── frontend_dashboard (Dashboard / Admin Panel) ──────────────────────────
+  frontend_dashboard:
+    inherit_from: frontend
+    labels:
+      pt_br: "📊 Dashboard / Admin"
+      en: "Dashboard / Admin Panel"
+    scaffold:
+      - AppShell.tsx
+    required_routes:
+      strict:
+        - "/"                    # redirect para /login ou /dashboard
+        - "/login"
+        - "/dashboard"
+      expected:
+        - "/configuracoes"
+    required_components:
+      - "<AppShell> wrapping rotas autenticadas"
+      - "middleware.ts com auth guard"
+      - "KPI cards no dashboard"
+      - "cliente HTTP com envelope {data, meta}"
+      - "token field 'access_token' (não 'token')"   # L2
+    forbidden_patterns:
+      # Regras W1-W15 Dev MUI + L1-L19 Manager Integration
+      - "cores hardcoded fora de brand tokens"        # W1
+      - "hero-section"                                # não é landing
+      - "landing-hero"
+      - "sitemap.xml"                                 # é dashboard, não site público
+      - "Prisma"                                      # é frontend puro
+      - "mock estático em vez de fetch"               # scaffold pattern
+      - "página / renderizando dashboard direto"      # deve redirect
+      - "campo 'token' em fetch de login"             # L2: usar access_token
+      - "content-type form-urlencoded no login"       # L1
+    fingerprint:
+      required_tokens:
+        strong:
+          - "AppShell"
+          - "next"
+          - "/dashboard"
+        soft:
+          - "@mui/material"
+          - "recharts"
+          - "middleware"
+      forbidden_tokens:
+        - "hero-section"
+        - "landing-hero"
+        - "sitemap"
+        - "prisma"
+      synonyms_pt_br:
+        dashboard:
+          - "painel"
+          - "gerenciador"
+        settings:
+          - "configuracoes"
+          - "ajustes"
+        reports:
+          - "relatorios"
+    stack_when_charter_silent:
+      - "Next.js 15 (App Router)"
+      - "MUI (Material UI)"
+      - "Recharts"
+      - "TypeScript"
+    smell_signals:
+      - "rota / renderiza KPIs em vez de redirect"
+      - "AppShell ausente em rotas autenticadas"
+      - "menu com hrefs para rotas inexistentes"
+
+  # ── frontend_landing (Landing Page) ────────────────────────────────────────
+  frontend_landing:
+    inherit_from: frontend
+    labels:
+      pt_br: "🏠 Landing Page"
+      en: "Landing Page"
+    scaffold:
+      - sitemap.xml
+      - robots.txt
+    required_routes:
+      strict:
+        - "/"                    # hero com CTA real
+        - "/sobre"
+        - "/contato"
+      expected:
+        - "/legal"               # LGPD
+        - "/privacidade"
+        - "/termos"
+    required_components:
+      - "hero section com CTA real (não Lorem)"
+      - "seções institucionais com conteúdo real"
+      - "OG meta tags"
+      - "form de contato funcional"
+      - "sitemap.xml no repo"
+    forbidden_patterns:
+      - "<AppShell>"                                  # web app pattern
+      - "KPI cards"                                   # é dashboard, não landing
+      - "dashboard layout"
+      - "mock/scaffold em /"                          # home deve ser real
+      - "conteúdo Lorem em /sobre"
+      - "AppShell wrapping /"
+      - "next-auth"                                   # landing sem login
+    fingerprint:
+      required_tokens:
+        strong:
+          - "hero"
+          - "cta"
+          - "/sobre"
+        soft:
+          - "meta"
+          - "og:"
+          - "sitemap"
+      forbidden_tokens:
+        - "AppShell"
+        - "KPICard"
+        - "dashboard"
+        - "middleware.ts"
+      synonyms_pt_br:
+        cta:
+          - "chamada"
+          - "acao"
+        hero:
+          - "capa"
+          - "destaque"
+    stack_when_charter_silent:
+      - "Next.js 15 (App Router)"
+      - "MUI (Material UI)"
+      - "TypeScript"
+    smell_signals:
+      - "/ renderiza dashboard com KPIs"              # OrienteMe V4/V7 bug
+      - "menu lateral com hrefs de admin"
+      - "middleware.ts com auth guard (landing não tem login)"
+      - "sitemap.xml ausente"
+
+  # ── mobile_crossplatform (STUB Wave 0 — completo na Wave 1) ────────────────
+  # Existe na Wave 0 apenas para os aliases mobile_app/mobile_ios/mobile_android
+  # apontarem para tipo canônico. Policy completa vem em v0.2.0 (T-06 Wave 1).
+  # Enquanto isso: sem forbidden_patterns fortes, sem required_routes strict.
+  # Charter DEVE declarar stack completo (React Native + Expo típico).
+  mobile_crossplatform:
+    inherit_from: mobile
+    labels:
+      pt_br: "📱 Mobile Multiplataforma"
+      en: "Mobile Cross-Platform"
+    scaffold: []                                    # herda mobile group
+    required_routes:
+      strict: []                                    # Wave 1 detalha
+      expected:
+        - "Splash"
+        - "Login"
+        - "Home"
+    required_components:
+      - "React Navigation"
+      - "auth flow"
+      - "cliente HTTP com envelope"
+    forbidden_patterns: []                          # Wave 1 codifica
+    fingerprint:
+      required_tokens:
+        strong:
+          - "react-native"
+        soft:
+          - "expo"
+      forbidden_tokens: []
+    stack_when_charter_silent:
+      - "Expo"
+      - "React Native"
+      - "TypeScript"
+    smell_signals:
+      - "uso de localStorage/document/window (web-only APIs)"
+      - "AppShell.tsx (padrão web)"
+    meta:
+      requires_runbook: false
+      warn_on_default: false
+      blocks_generation: false
+
+  # ── other (tipo declarado mas fora do piloto) ──────────────────────────────
+  # Charter DEVE justificar em "## Motivação" + repo DEVE ter RUNBOOK.md.
+  other:
+    inherit_from: null
+    labels:
+      pt_br: "❓ Outro (declarado)"
+      en: "Other (declared)"
+    scaffold:
+      - RUNBOOK.md               # OBRIGATÓRIO — Charter declara scaffold restante
+      - README.md
+    required_routes:
+      strict: []
+      expected: []
+    required_components: []
+    forbidden_patterns:
+      - "spec sem RUNBOOK.md"                         # BLOCKER
+      - "classificação 'other' sem ## Motivação"     # BLOCKER
+    fingerprint:
+      required_tokens:
+        strong: []
+        soft: []
+      forbidden_tokens: []
+    stack_when_charter_silent: []
+    meta:
+      requires_runbook: true
+      warn_on_default: false
+      blocks_generation: false
+
+  # ── _default (fallback estrito) ────────────────────────────────────────────
+  # Reservado — resolução aqui força REVISION obrigatória do CTO.
+  # NÃO é escape hatch silencioso; usar `other` para tipos declarados fora do piloto.
+  _default:
+    inherit_from: null
+    labels:
+      pt_br: "🚫 Sem tipo canônico"
+      en: "No canonical type"
+    scaffold: []
+    required_routes:
+      strict: []
+      expected: []
+    required_components: []
+    forbidden_patterns:
+      - "*"                                           # BLOCKER: nenhuma geração de código
+    fingerprint:
+      required_tokens:
+        strong: []
+        soft: []
+      forbidden_tokens: []
+    stack_when_charter_silent: []
+    meta:
+      requires_runbook: false
+      warn_on_default: true
+      blocks_generation: true                         # dispara REVISION obrigatória
