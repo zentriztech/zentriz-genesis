@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# zentriz-say <project_id> "<message>"
+# Posta mensagem no chat do projeto (project_dialogue).
+set -euo pipefail
+
+PROJECT_ID="${1:?usage: zentriz-say <project_id> <message>}"
+MESSAGE="${2:?message obrigatório}"
+API_URL="${API_BASE_URL:-http://api:3000}"
+TOKEN="${GENESIS_API_TOKEN:?GENESIS_API_TOKEN env var não definido}"
+
+BODY=$(jq -Rn --arg m "$MESSAGE" '{from_agent: "cyborg", to_agent: "system", event_type: "step", summary_human: $m}')
+
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$BODY" \
+  "$API_URL/api/projects/$PROJECT_ID/dialogue" >/dev/null
+
+echo "ok"

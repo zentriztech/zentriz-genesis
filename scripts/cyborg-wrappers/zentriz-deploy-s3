@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# zentriz-deploy-s3 <project_id>
+# Dispara POST /deploy/ephemeral e faz polling até running ou failed. ~6min timeout.
+# Retorna JSON: {ok, url, deployment_id, status, error}
+set -euo pipefail
+
+PROJECT_ID="${1:?usage: zentriz-deploy-s3 <project_id>}"
+API_URL="${API_BASE_URL:-http://api:3000}"
+TOKEN="${GENESIS_API_TOKEN:?GENESIS_API_TOKEN env var não definido}"
+
+BODY='{"ttlDays": 7, "consented": true}'
+
+# Dispara deploy
+INIT=$(curl -sS -w "\n%{http_code}" -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$BODY" \
+  "$API_URL/api/projects/$PROJECT_ID/deploy/ephemeral")
+
+CODE=$(echo "$INIT" | tail -1)
+INIT_BODY=$(echo "$INIT" | sed '$d')
+
+if [ "$CODE" != "200" ] && [ "$CODE" != "202" ]; then
+  echo "{\"ok\": false, \"error\": \"deploy launch: HTTP $CODE\", \"body\": $(echo "$INIT_BODY" | jq -c '.' 2>/dev/null || echo '""')}"
+  exit 1
+fi
+
+DEPLOYMENT_ID=$(echo "$INIT_BODY" | jq -r '.deploymentId // empty')
+if [ -z "$DEPLOYMENT_ID" ]; then
+  echo "{\"ok\": false, \"error\": \"resposta sem deploymentId\", \"body\": $(echo "$INIT_BODY" | jq -c '.')}"
+  exit 1
+fi
+
+# Polling — 6 min máximo, checa a cada 10s
+for i in $(seq 1 36); do
+  sleep 10
+  R=$(curl -sS -H "Authorization: Bearer $TOKEN" "$API_URL/api/projects/$PROJECT_ID/deploy/ephemeral/active" 2>/dev/null || echo '{}')
+  STATUS=$(echo "$R" | jq -r '.deployment.status // "unknown"')
+  APP_URL=$(echo "$R" | jq -r '.deployment.appUrl // empty')
+  case "$STATUS" in
+    running|running_degraded)
+      echo "{\"ok\": true, \"url\": \"$APP_URL\", \"deployment_id\": \"$DEPLOYMENT_ID\", \"status\": \"$STATUS\"}"
+      exit 0
+      ;;
+    failed)
+      ERROR=$(echo "$R" | jq -r '.deployment.errorMsg // "erro desconhecido"' | head -c 400)
+      echo "{\"ok\": false, \"deployment_id\": \"$DEPLOYMENT_ID\", \"error\": $(echo "$ERROR" | jq -Rs '.')}"
+      exit 1
+      ;;
+  esac
+done
+
+echo "{\"ok\": false, \"deployment_id\": \"$DEPLOYMENT_ID\", \"error\": \"timeout após 6 min\"}"
+exit 1

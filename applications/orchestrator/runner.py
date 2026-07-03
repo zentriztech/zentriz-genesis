@@ -2252,21 +2252,44 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
             continue
         content = backlog_path.read_text(encoding="utf-8", errors="replace")
         tasks: list[dict] = []
-        # Pattern: ## TSK-XX-NNN or | TSK-XX-NNN | or **TSK-XX-NNN**
         task_id_pattern = _re.compile(r'\b(TSK-[A-Z]+-\d+|TSK-\d+)\b')
+        # FT-17 fix (2026-07-02): antes o parser aceitava QUALQUER linha com TSK-XX.
+        # Isso capturava menções em notas/parágrafos (ex: "**Ordem de execução:** TSK-001 → TSK-002 → ...")
+        # ANTES do cabeçalho real "## TSK-001 — Título", marcando o ID como visto
+        # com título fragmentado ("→ → → → →" ou nota de rodapé).
+        # Fix: só aceitar linhas que sejam CABEÇALHO de task:
+        #   - Markdown heading: `## TSK-XXX ...`, `### TSK-XXX ...`, `#### TSK-XXX ...`
+        #   - Linha de tabela: `| TSK-XXX | ...`
+        #   - Bullet list: `- TSK-XXX ...`, `* TSK-XXX ...`
+        # Parágrafo comum ("... TSK-XXX ...") é IGNORADO.
+        task_header_pattern = _re.compile(
+            r'^\s*(?:#{2,4}\s+|\|\s*|\-\s+|\*\s+)(?:\**)?(TSK-[A-Z]+-\d+|TSK-\d+)\b'
+        )
         seen_ids: set = set()
         lines = content.splitlines()
         i = 0
         while i < len(lines):
             line = lines[i]
-            id_match = task_id_pattern.search(line)
-            if id_match:
-                tid = id_match.group(1)
+            header_match = task_header_pattern.search(line)
+            if header_match:
+                tid = header_match.group(1)
                 if tid not in seen_ids:
                     seen_ids.add(tid)
                     # Extract title from same line (after task_id)
                     title_raw = task_id_pattern.sub("", line).strip(" #|*-:").strip()
-                    title = title_raw[:120] if title_raw else f"Implementar {tid}"
+                    # Cortar em em-dash/hyphen se separar título de descrição adicional
+                    title_raw = _re.split(r'\s+—\s+|\s+-\s+', title_raw, maxsplit=1)[0].strip() if title_raw else ""
+                    # FT-17 fix (2026-07-02): título vazio ou só símbolos → BLOCKED com log
+                    # (antes: fallback silencioso para "→ → → →" ou "Implementar TSK-XXX")
+                    clean = _re.sub(r'[^\w\s]', '', title_raw).strip() if title_raw else ""
+                    if not clean or len(clean) < 3:
+                        title = f"Implementar {tid}"
+                        logger.warning(
+                            "[_parse_tasks_from_backlog] %s: cabeçalho sem título legível — usando fallback. Linha: %r",
+                            tid, line[:200],
+                        )
+                    else:
+                        title = title_raw[:120]
                     # Detect owner_role override from line
                     _or = owner_role
                     line_lower = line.lower()
@@ -2986,43 +3009,8 @@ def _run_monitor_loop(
                 _now_iso_trivial = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 _patch_project({"status": "pending_cyborg", "completed_at": _now_iso_trivial, "finished_at": _now_iso_trivial})
                 _post_step("🤖 Cyborg iniciando validação externa. Acompanhe o progresso na seção Cyborg abaixo.", request_id)
-                # Disparar Cyborg via full-test-server
-                _ft_server_url_trivial = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.internal:7878")
-                try:
-                    import urllib.request as _ur_t
-                    import json as _jt
-                    _pt_resp_t, _ = _api_get(f"/api/projects/{project_id}")
-                    _proj_type_trivial = (_pt_resp_t or {}).get("project_type") or (_pt_resp_t or {}).get("projectType") or "frontend_landing"
-                    _product_id_trivial = (_pt_resp_t or {}).get("product_id") or (_pt_resp_t or {}).get("productId") or ""
-                    _host_root_trivial = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
-                    if _host_root_trivial and _product_id_trivial:
-                        _cyborg_dir_trivial = str(Path(_host_root_trivial) / _product_id_trivial / project_id)
-                    elif _host_root_trivial:
-                        _cyborg_dir_trivial = str(Path(_host_root_trivial) / project_id)
-                    else:
-                        _cyborg_dir_trivial = str(_trivial_project_dir) if _trivial_project_dir else ""
-                    _cyborg_payload_trivial = _jt.dumps({
-                        "project_id":      project_id or "",
-                        "project_dir":     _cyborg_dir_trivial,
-                        "project_type":    _proj_type_trivial,
-                        "genesis_api_url": os.environ.get("API_BASE_URL", "http://localhost:3000"),
-                        "genesis_token":   os.environ.get("GENESIS_API_TOKEN", ""),
-                        "attempt":         1,
-                        "api_key":         os.environ.get("CLAUDE_API_KEY", ""),
-                    }).encode()
-                    _cyborg_req_t = _ur_t.Request(
-                        f"{_ft_server_url_trivial}/launch-cyborg",
-                        data=_cyborg_payload_trivial,
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with _ur_t.urlopen(_cyborg_req_t, timeout=15) as _cr_t:
-                        _cyborg_resp_t = _jt.loads(_cr_t.read().decode())
-                    logger.info("[CYBORG-TRIVIAL] Lançado: job_id=%s", _cyborg_resp_t.get("job_id"))
-                    _post_step(f"🤖 Cyborg lançado (job {_cyborg_resp_t.get('job_id', '?')}) — validando tentativa 1/5.", request_id)
-                except Exception as _cyborg_trivial_err:
-                    logger.warning("[CYBORG-TRIVIAL] Não foi possível lançar Cyborg: %s", _cyborg_trivial_err)
-                    _post_step("⚠️ Cyborg indisponível — validação manual necessária. Clique em Aceitar para confirmar.", request_id)
+                # FT-18: Cyborg V3 é acionado pelo watcher zentriz_cyborg.py ao detectar pending_cyborg.
+                # Não disparamos mais /launch-cyborg (V1 legacy) daqui — evita dupla execução e mensagens conflitantes.
                 if _run_log:
                     try:
                         _run_log.stop_run(reason="completed")
@@ -3289,6 +3277,40 @@ Erros críticos a corrigir:
 ### 2e. Operações de escrita
 Testar ao menos uma operação POST/PATCH/DELETE em cada domínio com dados reais.
 
+### 2f. Home semântica (BLOCKER) — placeholder em `apps/src/app/page.tsx`
+
+```bash
+# Se o arquivo contém marcador de placeholder, é BLOCKER — a home saiu como scaffold.
+grep -nE "// Home placeholder|// será substituíd|// scaffold ativo|// TODO substituir na TSK|scaffold ativo" {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/app/page.tsx 2>/dev/null
+```
+
+Se retornar qualquer match → CRIAR uma nova task `TSK-WEB-HOME-FIX` (ou reabrir a task original) para substituir por landing/dashboard real ou redirect para rota principal (`/dashboard`, `/atendimentos`, etc). NÃO aprovar TSK-FULL-TEST enquanto a home for placeholder.
+
+Anti-padrão real (OrienteMe 1f5feb4f — 2026-07-02): home saiu em produção mostrando "Web App / Scaffold ativo" ao invés do dashboard admin. TSK-FULL-TEST aprovou porque só checava existência de `page.tsx`, não conteúdo semântico.
+
+### 2g. NAV_ITEMS não é template residual (BLOCKER)
+
+```bash
+# Extrair itens do NAV_ITEMS do AppShell (ou Sidebar)
+grep -E "href:\s*'/" {_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/components/layout/AppShell.tsx 2>/dev/null | grep -oE "'/[^']*'" | sort -u
+```
+
+Comparar com o domínio da spec. Se o produto é sobre saúde/atendimentos e o NAV_ITEMS tem `/checkout`, `/admin/produtos`, `/admin/categorias`, `/admin/clientes` (léxico e-commerce) → resíduo de template. BLOCKER. Reescrever NAV_ITEMS a partir do inventário de rotas do Engineer.
+
+### 2h. Rotas autenticadas envolvem AppShell (BLOCKER)
+
+```bash
+# Para cada rota autenticada listada no Engineer, verificar wrapper AppShell
+for R in atendimentos conta pedidos profissionais dashboard; do
+  P={_proj_host_dir / 'apps' if _proj_host_dir else 'apps/'}/src/app/$R/page.tsx
+  if [ -f $P ] && ! grep -q "AppShell" $P; then
+    echo "BLOCKER: $R renderiza sem AppShell (sidebar desaparece ao navegar)"
+  fi
+done
+```
+
+Exceções: `/login`, `/tenant/signup`, `/sobre`, `/privacidade`, `/termos` (usam `PublicLayout` ou nada).
+
 ---
 
 ## FASE 3 — Relatório e Veredito
@@ -3298,6 +3320,9 @@ Grave `docs/qa/QA_REPORT_TSK-FULL-TEST.md` com:
 - Query params verificados (tabela: param enviado → param aceito pelo backend)
 - Hrefs verificados (tabela: href → page.tsx existe?)
 - Endpoints testados e status (tabela)
+- **Home semântica:** OK / PLACEHOLDER encontrado (com trecho)
+- **NAV_ITEMS coerentes com domínio:** OK / RESÍDUO DE TEMPLATE (listar itens estranhos)
+- **AppShell wrapper em rotas autenticadas:** OK / MISSING (listar rotas)
 - Status final: APROVADO (tudo funciona E2E) ou ISSUES PENDENTES (lista do que ficou)
 
 Só declare APROVADO se:
@@ -3307,6 +3332,9 @@ Só declare APROVADO se:
 - Servidor sobe via `start.sh`
 - Todos os endpoints retornam 200 com dados reais
 - Operações de escrita funcionam
+- **Fase 2f: `apps/src/app/page.tsx` sem placeholder textual**
+- **Fase 2g: NAV_ITEMS coerente com domínio da spec (sem resíduo de template)**
+- **Fase 2h: todas as rotas autenticadas envolvem conteúdo em `<AppShell>`**
 
 Execute agora sem pedir confirmação.
 """
@@ -3413,62 +3441,8 @@ Execute agora sem pedir confirmação.
                         "🤖 Cyborg iniciando validação externa. Acompanhe o progresso na seção Cyborg abaixo.",
                         request_id,
                     )
-
-                    # Disparar o Cyborg via full-test-server.py no host
-                    _ft_server_url_cyborg = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.internal:7878")
-                    _proj_type_cyborg = ""
-                    try:
-                        import urllib.request as _ur_c
-                        import json as _jc
-                        # Resolver project_type da API
-                        _pt_resp, _pt_status = _api_get(f"/api/projects/{project_id}")
-                        _proj_type_cyborg = (_pt_resp or {}).get("project_type") or (_pt_resp or {}).get("projectType") or "other"
-                        # Resolver product_id para path correto
-                        _product_id_cyborg = (_pt_resp or {}).get("product_id") or (_pt_resp or {}).get("productId") or ""
-                        _host_root_cyborg = os.environ.get("HOST_PROJECT_FILES_ROOT", "").strip()
-                        # Cyborg-path-fix (2026-07-02): verificar se path com product_id existe.
-                        # Storage grava em <FILES_ROOT>/<project_id>/ (sem product_id) quando o Dev
-                        # gera artefatos via storage.write_doc. Só usar path com product_id se ele
-                        # de fato existir no container (para evitar apontar Cyborg a diretório vazio).
-                        _container_proj_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
-                        _has_product_path = (
-                            _product_id_cyborg
-                            and (_container_proj_root / _product_id_cyborg / project_id / "apps").exists()
-                        )
-                        if _host_root_cyborg and _has_product_path:
-                            _cyborg_dir = str(Path(_host_root_cyborg) / _product_id_cyborg / project_id)
-                        elif _host_root_cyborg:
-                            _cyborg_dir = str(Path(_host_root_cyborg) / project_id)
-                        else:
-                            _cyborg_dir = str(_proj_container_dir) if _proj_container_dir else ""
-                        logger.info("[CYBORG] project_dir=%s (product_path_exists=%s)", _cyborg_dir, _has_product_path)
-                        _cyborg_payload = _jc.dumps({
-                            "project_id":      project_id or "",
-                            "project_dir":     _cyborg_dir,
-                            "project_type":    _proj_type_cyborg,
-                            "genesis_api_url": os.environ.get("API_BASE_URL", "http://localhost:3000"),
-                            "genesis_token":   os.environ.get("GENESIS_API_TOKEN", ""),
-                            "attempt":         1,
-                            "api_key":         os.environ.get("CLAUDE_API_KEY", ""),
-                        }).encode()
-                        _cyborg_req = _ur_c.Request(
-                            f"{_ft_server_url_cyborg}/launch-cyborg",
-                            data=_cyborg_payload,
-                            headers={"Content-Type": "application/json"},
-                            method="POST",
-                        )
-                        with _ur_c.urlopen(_cyborg_req, timeout=15) as _cr:
-                            _cyborg_resp = _jc.loads(_cr.read().decode())
-                        logger.info("[CYBORG] Lançado: job_id=%s attempt=1", _cyborg_resp.get("job_id"))
-                        _post_step(f"🤖 Cyborg lançado (job {_cyborg_resp.get('job_id', '?')}) — validando tentativa 1/5.", request_id)
-                    except Exception as _cyborg_err:
-                        logger.warning("[CYBORG] Não foi possível lançar Cyborg: %s", _cyborg_err)
-                        _post_step(
-                            "⚠️ Cyborg indisponível — validação manual necessária. "
-                            "Clique em Aceitar para confirmar a entrega.",
-                            request_id,
-                        )
-                        # Fallback: manter pending_cyborg mas sem disparar — usuário pode aceitar manualmente
+                    # FT-18: Cyborg V3 é acionado pelo watcher zentriz_cyborg.py ao detectar pending_cyborg.
+                    # Não disparamos mais /launch-cyborg (V1 legacy) daqui — evita dupla execução e mensagens conflitantes.
                     break
                 except Exception as e:
                     logger.exception("[Monitor Loop] DevOps falhou")
@@ -4216,8 +4190,12 @@ def main() -> int:
         # ── Passo 3: PM + loop CTO↔PM (LEI 11: pular se current_step >= 3) ──
         pm_response = None
         pm_status = "?"
-        # Default: se step>=3 (checkpoint restaurado), usar current_module do contexto
-        pm_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "backend"
+        # Default: se step>=3 (checkpoint restaurado), usar current_module do contexto.
+        # FT-17 fix (2026-07-02): fallback quando ctx.current_module está None era "backend".
+        # Isso enviesava projetos frontend-only (OrienteMe V2 caiu nisso). Fallback correto
+        # é "web" — mais seguro que "backend" (evita bug 54967064 e OrienteMe V2 1b65e70b).
+        # A inferência real do loop CTO↔PM sobrescreve depois; isso só afeta o cold-start.
+        pm_module = (pipeline_ctx.current_module if pipeline_ctx else None) or "web"
 
         # ── Trivial fast-path: complexidade trivial → bypass Engineer+PM, 1 task direto ──
         # GAP-T1: _pre_trivial_detected bypassa também sem charter_summary
@@ -4288,21 +4266,60 @@ def main() -> int:
         if not pipeline_ctx or pipeline_ctx.current_step < 3:
             max_cto_pm_rounds = int(os.environ.get("MAX_CTO_PM_ROUNDS", "3"))
             cto_pm_questionamentos = None
+            # FT-17 fix (2026-07-02, OrienteMe V2 1b65e70b): invalidador do cache de pm_module.
+            # Bug anterior: se a inferência inicial errava (ex: cachou "backend" para projeto
+            # exclusivamente web), o PM da squad errada retornava BLOCKED com evidência
+            # coherence_check, mas o runner reutilizava o cache nas rodadas 2/3 sem reinferir.
+            # Loop custava 3× chamadas de LLM e sempre falhava. Fix: rastrear módulos
+            # já testados e rejeitados; se BLOCKED com coherence_check, invalidar cache e
+            # tentar próximo candidato (inferir do texto do BLOCKED se possível).
+            _rejected_modules: set[str] = set()
+            _prev_pm_response = None
             for pm_round in range(1, max_cto_pm_rounds + 1):
                 _post_step(
                     f"O PM está gerando o backlog do módulo (rodada {pm_round}/{max_cto_pm_rounds}).",
                     request_id,
                 )
                 _post_agent_working("pm", "O PM está gerando o backlog (tarefas e critérios de aceitação).", request_id)
-                # T10 (N2): cachear pm_module em pipeline_ctx — evita 3× chamadas Bedrock por loop
-                # CTO↔PM (economia de LLM + idempotência entre replays).
+                # T10 (N2): cachear pm_module em pipeline_ctx — evita 3× chamadas Bedrock por loop.
+                # FT-17 fix (2026-07-02): invalidar cache se PM anterior retornou BLOCKED c/ coherence_check.
                 _cached_module = getattr(pipeline_ctx, "current_module", None) if pipeline_ctx else None
-                if _cached_module and _cached_module in ("web", "backend", "mobile", "fullstack"):
+                _cache_invalidated = False
+                if _prev_pm_response and str(_prev_pm_response.get("status", "")).upper() == "BLOCKED":
+                    _prev_evidence = _prev_pm_response.get("evidence", []) or []
+                    _has_coherence = any(
+                        isinstance(ev, dict) and str(ev.get("type", "")).lower() in ("coherence_check", "coherence")
+                        for ev in _prev_evidence
+                    )
+                    if _has_coherence and _cached_module:
+                        _rejected_modules.add(_cached_module)
+                        _cached_module = None
+                        _cache_invalidated = True
+                        logger.warning(
+                            "[Pipeline] pm_module cache invalidado: PM anterior retornou BLOCKED com coherence_check. "
+                            "Módulos já rejeitados: %s. Reinferindo…",
+                            sorted(_rejected_modules),
+                        )
+                if _cached_module and _cached_module in ("web", "backend", "mobile", "fullstack") and _cached_module not in _rejected_modules:
                     pm_module = _cached_module
                     logger.info("[Pipeline] pm_module lido do cache (pipeline_ctx.current_module=%s) — sem re-inferir (rodada %s)", pm_module, pm_round)
                 else:
                     pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
-                    logger.info("[Pipeline] pm_module inferido da proposta do Engineer: %s (rodada %s, cache miss)", pm_module, pm_round)
+                    # Se a inferência devolver um módulo já rejeitado, tentar próximo candidato
+                    if pm_module in _rejected_modules:
+                        # Fallback determinístico: tenta na ordem web→backend→mobile→fullstack os que ainda não foram rejeitados
+                        for _candidate in ("web", "backend", "mobile", "fullstack"):
+                            if _candidate not in _rejected_modules:
+                                pm_module = _candidate
+                                logger.warning(
+                                    "[Pipeline] inferência devolveu %s (rejeitado); usando fallback %s",
+                                    _cached_module or "?", pm_module,
+                                )
+                                break
+                    logger.info(
+                        "[Pipeline] pm_module inferido: %s (rodada %s, cache %s)",
+                        pm_module, pm_round, "invalidado" if _cache_invalidated else "miss",
+                    )
                     # T10: persistir no ctx para próximas rodadas
                     if pipeline_ctx and hasattr(pipeline_ctx, "current_module"):
                         pipeline_ctx.current_module = pm_module
@@ -4317,6 +4334,9 @@ def main() -> int:
                     pipeline_ctx=pipeline_ctx,
                 )
                 _audit_log("pm", request_id, pm_response)
+                # FT-17 fix (2026-07-02): guardar resposta atual para o próximo ciclo detectar
+                # BLOCKED+coherence_check e invalidar o cache de pm_module.
+                _prev_pm_response = pm_response
                 backlog_summary = pm_response.get("summary", "")
                 backlog_artifacts = pm_response.get("artifacts", [])
                 pm_status = pm_response.get("status", "?")
@@ -4396,10 +4416,17 @@ def main() -> int:
                         _fr_count_total = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
                         _tasks_parsed = _parse_tasks_from_backlog(project_id, pm_module) if project_id else []
                         _tasks_count = len(_tasks_parsed)
-                        # Também detecta backlog textual "0 tasks" (fallback para casos raros)
+                        # Também detecta backlog textual "0 tasks" (fallback para casos raros).
+                        # FT-18 fix (2026-07-02, OrienteMe V4): "nenhuma task" sem contexto de negação
+                        # dava falso positivo — o PM Web escreveu "Nenhuma task depende de backend"
+                        # (frase legítima descrevendo independência), o regex marcou como declares_zero=True
+                        # e o pipeline bloqueou COM 12 tasks já parseadas. Fix: heurística textual só
+                        # dispara quando `_tasks_count == 0` (fallback puro), nunca quando o parser
+                        # já encontrou tasks reais no BACKLOG.md.
                         _bl_text = (backlog_summary or "").lower()
-                        _bl_declares_zero = any(sig in _bl_text for sig in (
-                            "0 tasks", "trivial (0 tasks)", "nenhuma task", "backlog vazio",
+                        _bl_declares_zero = _tasks_count == 0 and any(sig in _bl_text for sig in (
+                            "0 tasks", "trivial (0 tasks)", "nenhuma task foi",
+                            "nenhuma task será", "backlog vazio",
                             "sem tasks nesta iteração", "modo: trivial (0"
                         ))
                         # Considera scope docs-only como exceção legítima
@@ -4519,16 +4546,25 @@ def main() -> int:
                 _run_monitor_loop(project_id, spec_ref, charter_summary, backlog_summary, request_id, pipeline_ctx=pipeline_ctx, run_log=_run_log)
                 # Após o Monitor Loop, marcar projeto como completed se todas as tasks estiverem DONE.
                 # Sem isso o portal fica mostrando status=running mesmo com tudo concluído.
+                # FT-18 fix (2026-07-03, V5 race condition): incluir 'pending_cyborg' e 'blocked_cyborg'
+                # na lista de status já-terminais/protegidos. Sem esse fix, o runner sobrescrevia
+                # pending_cyborg → completed no mesmo segundo em que o Monitor Loop lançava o Cyborg,
+                # antes do Cyborg V2 conseguir fazer poll (ciclo 60s). Resultado: Cyborg nunca via
+                # o projeto em pending_cyborg e não rodava. Confirmado no V5 (49b39bf2).
                 if project_id:
                     try:
                         _post_loop_tasks = _get_tasks(project_id)
                         _terminal_set = {"DONE", "QA_PASS", "CANCELLED", "BLOCKED"}
                         _all_terminal = bool(_post_loop_tasks) and all(t.get("status") in _terminal_set for t in _post_loop_tasks)
                         _current_proj_status = _get_project_status(project_id)
-                        if _all_terminal and _current_proj_status not in ("accepted", "completed", "stopped", "failed"):
+                        _protected_statuses = ("accepted", "completed", "stopped", "failed",
+                                                "pending_cyborg", "blocked_cyborg")
+                        if _all_terminal and _current_proj_status not in _protected_statuses:
                             _completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
                             _patch_project({"status": "completed", "completed_at": _completed_at, "finished_at": _completed_at})
                             logger.info("[Pipeline] Projeto marcado como completed (todas tasks terminais).")
+                        elif _current_proj_status == "pending_cyborg":
+                            logger.info("[Pipeline] Projeto está em pending_cyborg — não sobrescrever. Cyborg V2 vai processar.")
                     except Exception as _pls_e:
                         logger.warning("[Pipeline] Falha ao marcar projeto completed pós-loop: %s", _pls_e)
                 # Pipeline Run Log — fechar run após Monitor Loop (stopped/accepted/sigterm)

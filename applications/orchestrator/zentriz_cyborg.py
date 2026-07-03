@@ -887,7 +887,20 @@ def main() -> int:
                 cyborg_ctx["processed"].add(proj_id)
 
                 try:
-                    success = run_with_autocorrection(proj_id, PRODUCT_ID or proj.get("productId"), cyborg_ctx)
+                    # FT-18: Cyborg V3 é o único caminho suportado (engenheiro sênior autônomo, sessão única).
+                    # Se falhar, marcamos blocked_cyborg — sem fallback silencioso para V1/V2.
+                    from orchestrator import cyborg_v3 as _cv3
+                    try:
+                        _run = _cv3.run_cyborg_v3(
+                            proj_id,
+                            proj.get("tenantId") or proj.get("tenant_id"),
+                            PRODUCT_ID or proj.get("productId"),
+                        )
+                        success = (_run.final_status == "delivered")
+                    except Exception as _ev3:
+                        logger.exception("[Cyborg V3] falhou: %s", _ev3)
+                        _reject(proj_id, f"Cyborg V3 crashou: {str(_ev3)[:400]}")
+                        success = False
                     if success:
                         cyborg_ctx["accepted_count"] += 1
                     else:

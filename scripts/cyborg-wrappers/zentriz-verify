@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# zentriz-verify <url>
+# Testa rotas comuns retornando 200. Retorna JSON com detalhes.
+set -euo pipefail
+
+URL="${1:?usage: zentriz-verify <url>}"
+URL="${URL%/}"  # remove trailing slash
+
+# Rotas comuns de app web (testar todas — as inexistentes retornam 404, ok)
+declare -a ROUTES=("/" "/login/" "/dashboard/" "/sobre/" "/privacidade/" "/termos/")
+
+RESULTS='['
+FIRST=1
+OK_COUNT=0
+FAIL_COUNT=0
+
+for route in "${ROUTES[@]}"; do
+  CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$URL$route" || echo "0")
+  if [ "$FIRST" = "1" ]; then FIRST=0; else RESULTS+=","; fi
+  RESULTS+="{\"route\":\"$route\",\"code\":$CODE}"
+  if [ "$CODE" = "200" ] || [ "$CODE" = "301" ] || [ "$CODE" = "302" ]; then
+    OK_COUNT=$((OK_COUNT + 1))
+  else
+    # 404 em rota opcional não é erro fatal
+    if [ "$route" != "/" ] && [ "$route" != "/login/" ]; then
+      : # rota opcional, tolerar
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  fi
+done
+
+RESULTS+=']'
+
+TITLE=$(curl -sS "$URL" 2>/dev/null | grep -oE '<title>[^<]+</title>' | head -1 | sed 's|<title>||; s|</title>||' || echo '')
+
+if [ "$FAIL_COUNT" -eq 0 ]; then
+  echo "{\"ok\": true, \"url\": \"$URL\", \"routes\": $RESULTS, \"title\": $(echo "$TITLE" | jq -Rs '.')}"
+else
+  echo "{\"ok\": false, \"url\": \"$URL\", \"routes\": $RESULTS, \"failed_count\": $FAIL_COUNT}"
+  exit 1
+fi

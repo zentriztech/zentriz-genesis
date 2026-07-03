@@ -8,6 +8,7 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Checkbox from "@mui/material/Checkbox";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import IconButton from "@mui/material/IconButton";
@@ -107,8 +108,8 @@ type RunInfoResp      = { runCommand: string | null; appUrl: string | null; star
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
 type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
 type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
-type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string; status: string; expiresAt: string; ttlMinutes: number } | null };
-type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string; ttlMinutes?: number; ttlDays?: number; status?: string; bucketName?: string };
+type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string | null; bucketName: string | null; status: string; expiresAt: string; ttlMinutes: number; errorMsg?: string | null } | null };
+type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string; ttlMinutes?: number; ttlDays?: number; status?: string; bucketName?: string; errorMsg?: string | null };
 type DeployError       = { code: string; message: string; details?: Record<string, unknown> };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
@@ -488,8 +489,13 @@ function ProjectDetailPageInner() {
   }, [id, project]);
 
   useEffect(() => {
-    // Atualizar project do store e ticker para todos os estados ativos
-    const ACTIVE = new Set(["running", "spec_submitted", "pending_conversion"]);
+    // Atualizar project do store e ticker para todos os estados ativos.
+    // pending_cyborg/blocked_cyborg: Cyborg V3 pode terminar a qualquer momento e mudar o status
+    // para accepted/blocked_cyborg — sem polling, o portal fica travado no card de Cyborg até refresh manual.
+    const ACTIVE = new Set([
+      "running", "spec_submitted", "pending_conversion",
+      "pending_cyborg", "blocked_cyborg",
+    ]);
     if (!id || !project || !ACTIVE.has(project.status)) return;
     const t = setInterval(() => {
       projectsStore.loadProject(id);
@@ -567,43 +573,79 @@ function ProjectDetailPageInner() {
 
   useEffect(() => {
     if (!id || !project) return;
-    if (project.status === "completed" || project.status === "accepted") {
-      apiGet<RunInfoResp>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => null);
-      apiGet<MetricsResp>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => null);
+    const showsPostAccept =
+      project.status === "completed" ||
+      project.status === "accepted" ||
+      project.status === "pending_cyborg" ||   // Cyborg V3 pode ter chamado /accept e criado repo enquanto ainda no fluxo
+      project.status === "blocked_cyborg";
+    if (!showsPostAccept) return;
+
+    const loadRepoAndDeploy = () => {
       apiGet<GithubRepoResp>(`/api/projects/${id}/github-repo`)
         .then((d) => setGithubRepo(d.repo))
         .catch(() => setGithubRepo(null));
+      apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
+        .then((d) => {
+          if (d.deployment) {
+            setEphemeral({
+              deploymentId: d.deployment.id,
+              provider: d.deployment.provider,
+              appUrl: d.deployment.appUrl ?? undefined,
+              bucketName: d.deployment.bucketName ?? undefined,
+              status: d.deployment.status,
+              expiresAt: d.deployment.expiresAt,
+              ttlMinutes: d.deployment.ttlMinutes,
+              errorMsg: d.deployment.errorMsg ?? null,
+            });
+          }
+        })
+        .catch(() => null);
+    };
+    loadRepoAndDeploy();
+
+    // Metadados estáticos: carregar 1x quando entra em completed/accepted
+    if (project.status === "completed" || project.status === "accepted") {
+      apiGet<RunInfoResp>(`/api/projects/${id}/run-info`).then(setRunInfo).catch(() => null);
+      apiGet<MetricsResp>(`/api/projects/${id}/metrics`).then(setMetrics).catch(() => null);
       apiGet<VersionsResp>(`/api/projects/${id}/versions`)
         .then((d) => setVersions(d.versions ?? []))
         .catch(() => setVersions([]));
       apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`)
         .then(setLinks).catch(() => setLinks([]));
-      // Load active ephemeral deployment
-      apiGet<EphemeralDeplResp>(`/api/projects/${id}/deploy/ephemeral/active`)
-        .then((d) => {
-          if (d.deployment && d.deployment.status === "running") {
-            setEphemeral({
-              deploymentId: d.deployment.id,
-              provider: d.deployment.provider,
-              appUrl: d.deployment.appUrl,
-              expiresAt: d.deployment.expiresAt,
-              ttlMinutes: d.deployment.ttlMinutes,
-            });
-          }
-        })
-        .catch(() => null);
     }
-  }, [id, project?.status]);
+
+    // Polling: enquanto o repo não existe OU o deploy está provisionando,
+    // atualizar a cada 5s para refletir criação de repo / start / progress de deploy no portal
+    // sem precisar de refresh manual do usuário.
+    const needsRepoPoll = !githubRepo;
+    const needsDeployPoll = ephemeral?.status === "provisioning";
+    const cyborgActive = project.status === "pending_cyborg";
+    if (needsRepoPoll || needsDeployPoll || cyborgActive) {
+      const t = setInterval(loadRepoAndDeploy, 5000);
+      return () => clearInterval(t);
+    }
+  }, [id, project?.status, githubRepo, ephemeral?.status]);
 
   // Countdown timer for ephemeral deployment
   useEffect(() => {
-    if (!ephemeral) return;
+    if (!ephemeral?.expiresAt) return;
+    const expiresMs = new Date(ephemeral.expiresAt).getTime();
+    if (!Number.isFinite(expiresMs)) { setCountdown("—"); return; }
     const tick = () => {
-      const remaining = new Date(ephemeral.expiresAt).getTime() - Date.now();
+      const remaining = expiresMs - Date.now();
       if (remaining <= 0) { setCountdown("Expirado"); setEphemeral(null); return; }
-      const m = Math.floor(remaining / 60000);
-      const s = Math.floor((remaining % 60000) / 1000);
-      setCountdown(`${m}m ${String(s).padStart(2, "0")}s`);
+      const totalSec = Math.floor(remaining / 1000);
+      const d = Math.floor(totalSec / 86400);
+      const h = Math.floor((totalSec % 86400) / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      setCountdown(
+        d > 0
+          ? `${d}d ${h}h ${m}m`
+          : h > 0
+          ? `${h}h ${m}m ${String(s).padStart(2, "0")}s`
+          : `${m}m ${String(s).padStart(2, "0")}s`,
+      );
     };
     tick();
     const t = setInterval(tick, 1000);
@@ -1179,8 +1221,8 @@ function ProjectDetailPageInner() {
         </DialogContent>
       </Dialog>
 
-      {/* Post-accept run banner */}
-      {isDone && runInfo?.runCommand && (
+      {/* Post-accept run banner (execução LOCAL — só faz sentido no host do Genesis) */}
+      {isDone && runInfo?.runCommand && !ephemeral && (
         <Alert
           severity="success" sx={{ mb: 2 }} icon={<CheckCircleIcon />}
           action={runInfo.appUrl ? (
@@ -1191,7 +1233,7 @@ function ProjectDetailPageInner() {
           ) : undefined}
         >
           <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
-            {runInfo.projectType === "backend" ? "API Backend — executar via Docker:" : "Pronto para executar:"}
+            {runInfo.projectType === "backend" ? "API Backend — executar via Docker (local):" : "Executar localmente:"}
           </Typography>
           {runInfo.setupSteps ? (
             <Box component="pre" sx={{ m: 0, p: 0.5, bgcolor: "action.hover", borderRadius: 0.5, fontSize: "0.72rem", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
@@ -1240,8 +1282,11 @@ function ProjectDetailPageInner() {
           </Stack>
         </Alert>
       )}
-      {/* Repo not created — show manual trigger button as fallback */}
-      {isDone && githubRepo === null && (
+      {/* Repo not created — fallback manual só depois que o Cyborg terminou.
+          Enquanto pending_cyborg o V3 está trabalhando e criará o repo via zentriz-github-push.
+          Em blocked_cyborg o Cyborg desistiu — fallback manual faz sentido.
+          Em accepted sem repo o Cyborg terminou mas o push falhou — fallback manual faz sentido. */}
+      {(project.status === "accepted" || project.status === "blocked_cyborg") && githubRepo === null && (
         <Alert
           severity="warning" sx={{ mb: 2 }} icon={<GitHubIcon />}
           action={
@@ -1273,19 +1318,30 @@ function ProjectDetailPageInner() {
           }
         >
           <Typography variant="body2" fontWeight={500}>
-            Repositório GitHub não foi criado no aceite
+            Repositório GitHub não foi criado automaticamente
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
-            Clique em <strong>Criar Repositório</strong> para publicar o código manualmente.
+            {project.status === "blocked_cyborg"
+              ? "O Cyborg reportou NEEDS_HUMAN antes de fazer o push. Clique em Criar Repositório para publicar manualmente."
+              : "O aceite foi feito mas o push automático não completou. Clique em Criar Repositório para publicar manualmente."}
           </Typography>
         </Alert>
       )}
 
-      {/* FT-17: Cloud deploy — active deployment banner */}
+      {/* FT-17: Cloud deploy — active deployment banner (inclui failed pra dar contexto ao usuário) */}
       {isDone && ephemeral && (
         <Alert
-          severity={ephemeral.status === "provisioning" ? "info" : "warning"} sx={{ mb: 2 }}
-          icon={<Box sx={{ fontSize: "1.1rem" }}>{ephemeral.status === "provisioning" ? "⏳" : "☁️"}</Box>}
+          severity={
+            ephemeral.status === "provisioning" ? "info" :
+            ephemeral.status === "failed" ? "error" :
+            "warning"
+          }
+          sx={{ mb: 2 }}
+          icon={<Box sx={{ fontSize: "1.1rem" }}>{
+            ephemeral.status === "provisioning" ? "⏳" :
+            ephemeral.status === "failed" ? "❌" :
+            "☁️"
+          }</Box>}
           action={
             <Stack direction="row" spacing={1} alignItems="center">
               {ephemeral.appUrl && (
@@ -1294,19 +1350,29 @@ function ProjectDetailPageInner() {
                   Abrir app
                 </Button>
               )}
-              <Button size="small" color="error" variant="outlined"
-                onClick={async () => {
-                  await apiPost(`/api/projects/${id}/deploy/ephemeral/${ephemeral.deploymentId}/destroy`, {}).catch(() => null);
-                  setEphemeral(null);
-                }}>
-                Destruir
-              </Button>
+              {ephemeral.status !== "failed" && (
+                <Button size="small" color="error" variant="outlined"
+                  onClick={async () => {
+                    await apiPost(`/api/projects/${id}/deploy/ephemeral/${ephemeral.deploymentId}/destroy`, {}).catch(() => null);
+                    setEphemeral(null);
+                  }}>
+                  Destruir
+                </Button>
+              )}
+              {ephemeral.status === "failed" && (
+                <Button size="small" color="primary" variant="outlined"
+                  onClick={() => setEphemeral(null)}>
+                  Descartar aviso
+                </Button>
+              )}
             </Stack>
           }
         >
           <Typography variant="body2" fontWeight={500}>
             {ephemeral.status === "provisioning" ? (
               <>⏳ Provisionando deploy S3…</>
+            ) : ephemeral.status === "failed" ? (
+              <>❌ Última tentativa de publicar no S3 falhou</>
             ) : (
               <>☁️ Deploy S3 ativo · expira em{" "}
                 <Box component="span" sx={{ fontFamily: "monospace", color: "warning.main", fontWeight: 700 }}>{countdown}</Box>
@@ -1316,11 +1382,25 @@ function ProjectDetailPageInner() {
           <Typography variant="caption" color="text.secondary">
             {ephemeral.provider === "s3-static" ? "AWS S3 Static" : ephemeral.provider === "fly" ? "Fly.io" : "AWS ECS"} · {ephemeral.appUrl ?? ephemeral.bucketName ?? "—"}
           </Typography>
+          {ephemeral.status === "failed" && ephemeral.errorMsg && (
+            <Box component="pre" sx={{
+              mt: 1, p: 1, fontSize: "0.7rem", fontFamily: "monospace",
+              bgcolor: "error.dark", color: "error.contrastText",
+              borderRadius: 0.5, maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap",
+            }}>
+              {String(ephemeral.errorMsg).slice(0, 2000)}
+            </Box>
+          )}
         </Alert>
       )}
 
-      {/* FT-17: Cloud deploy — launch button (com LGPD consent) */}
-      {isDone && !ephemeral && (
+      {/* FT-17: Cloud deploy — launch button (com LGPD consent)
+          Só aparece quando o projeto TEM repositório GitHub (githubRepo truthy) E o Cyborg já terminou.
+          Enquanto pending_cyborg o V3 ainda está trabalhando e vai disparar o deploy sozinho via zentriz-deploy-s3.
+          Sem repo, o alerta amarelo "Criar Repositório" acima já orienta o usuário.
+          Se `ephemeral.status === "failed"`, o card de "última tentativa" aparece acima E o botão
+          "Publicar no S3" também aparece aqui, pra permitir tentar de novo. */}
+      {(project.status === "accepted" || project.status === "completed") && githubRepo && (!ephemeral || ephemeral.status === "failed") && (
         <Box sx={{ mb: 2 }}>
           {deployError && (
             <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>
@@ -1337,21 +1417,34 @@ function ProjectDetailPageInner() {
               )}
             </Alert>
           )}
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-            <input
-              type="checkbox"
+          <Box
+            component="label"
+            htmlFor="lgpd-consent"
+            sx={{
+              display: "flex", alignItems: "center", gap: 1,
+              mb: 1, p: 1, borderRadius: 1, cursor: "pointer",
+              bgcolor: lgpdConsent ? "success.main" : "warning.light",
+              color: lgpdConsent ? "success.contrastText" : "warning.contrastText",
+              border: (t) => `1px solid ${lgpdConsent ? t.palette.success.dark : t.palette.warning.dark}`,
+              transition: "background-color .15s ease-in-out",
+              "&:hover": { opacity: 0.95 },
+            }}
+          >
+            <Checkbox
               id="lgpd-consent"
               checked={lgpdConsent}
               onChange={(e) => setLgpdConsent(e.target.checked)}
-              style={{ margin: 0 }}
+              sx={{ p: 0.5, color: "inherit", "&.Mui-checked": { color: "inherit" } }}
             />
-            <Typography variant="caption" component="label" htmlFor="lgpd-consent" sx={{ fontSize: "0.7rem", cursor: "pointer" }}>
-              Confirmo que o app <strong>não contém dados pessoais reais nem segredos</strong> (bucket público, indexável).
+            <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
+              {lgpdConsent
+                ? "✓ Consentimento LGPD confirmado — pode publicar."
+                : "⚠️ Marque aqui para autorizar: o app não contém dados pessoais reais nem segredos. O bucket S3 é público e indexável."}
             </Typography>
-          </Stack>
+          </Box>
           <Button
             variant="outlined" size="small"
-            disabled={deployLoading || !lgpdConsent}
+            disabled={deployLoading || !lgpdConsent || !githubRepo}
             startIcon={deployLoading ? <CircularProgress size={14} /> : <Box sx={{ fontSize: "0.9rem" }}>☁️</Box>}
             onClick={async () => {
               setDeployLoading(true); setDeployError(null);
@@ -1383,7 +1476,7 @@ function ProjectDetailPageInner() {
             {deployLoading ? "Provisionando…" : "🚀 Publicar no S3 (7 dias)"}
           </Button>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
-            AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Sem backend real (apenas web estático).
+            AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.
           </Typography>
         </Box>
       )}

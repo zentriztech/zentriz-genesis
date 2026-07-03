@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# zentriz-github-push <project_id>
+# Clona repo dev do projeto, aplica o conteúdo LOCAL de /opt/genesis-files/<pid>/apps/,
+# commita e faz push para dev. Encapsula token GitHub.
+set -euo pipefail
+
+PROJECT_ID="${1:?usage: zentriz-github-push <project_id>}"
+GITHUB_REPO_URL="${2:-}"
+
+# Se repo não fornecido, buscar via API interna
+if [ -z "$GITHUB_REPO_URL" ]; then
+  API_URL="${API_BASE_URL:-http://api:3000}"
+  TOKEN="${GENESIS_API_TOKEN:?GENESIS_API_TOKEN env var não definido}"
+  R=$(curl -sS -H "Authorization: Bearer $TOKEN" "$API_URL/api/projects/$PROJECT_ID/github-repo" 2>/dev/null || echo '{}')
+  GITHUB_REPO_URL=$(echo "$R" | jq -r '.repo.cloneUrl // empty')
+  INSTALLATION_ID=$(echo "$R" | jq -r '.repo.installationId // empty')
+fi
+
+if [ -z "$GITHUB_REPO_URL" ]; then
+  echo "{\"ok\": false, \"error\": \"repositório GitHub não configurado para $PROJECT_ID\"}"
+  exit 1
+fi
+
+# Localizar dir do projeto (com ou sem prod_id)
+CANDIDATES=(
+  "/opt/genesis-files/$PROJECT_ID"
+)
+# Adiciona candidatos com prod_id se descobertos
+for p in /opt/genesis-files/*/$PROJECT_ID; do
+  [ -d "$p/apps" ] && CANDIDATES+=("$p")
+done
+
+PROJ_DIR=""
+for c in "${CANDIDATES[@]}"; do
+  if [ -f "$c/apps/package.json" ]; then
+    PROJ_DIR="$c"
+    break
+  fi
+done
+
+if [ -z "$PROJ_DIR" ]; then
+  echo "{\"ok\": false, \"error\": \"apps/package.json não encontrado em nenhum candidato\"}"
+  exit 1
+fi
+
+# Gerar token GitHub via API interna do agents container ou via subprocess Node
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  # Fallback: chamar container api
+  if [ -n "${INSTALLATION_ID:-}" ]; then
+    GITHUB_TOKEN=$(docker exec zentriz-genesis-api-1 sh -c "cd /app && node -e \"import('./dist/services/github.js').then(m => m.getInstallationTokenForClone($INSTALLATION_ID)).then(t => process.stdout.write(t)).catch(e => { process.stderr.write(e.message); process.exit(1); })\"" 2>/dev/null)
+  fi
+fi
+
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "{\"ok\": false, \"error\": \"não consegui gerar token GitHub\"}"
+  exit 1
+fi
+
+# Clone temporário
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+cd "$TMPDIR"
+git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf x-access-token:$GITHUB_TOKEN | base64)" \
+    clone --branch dev "$GITHUB_REPO_URL" repo 2>&1 | tail -2
+
+cd repo
+
+# Copiar conteúdo local (excluindo node_modules, .next, etc.)
+rsync -a --delete \
+  --exclude='.git' \
+  --exclude='node_modules' \
+  --exclude='.next' \
+  --exclude='pnpm-lock.yaml' \
+  "$PROJ_DIR/apps/" ./
+
+git config user.email "cyborg@zentriz.com.br"
+git config user.name "Zentriz Cyborg V3"
+git add -A
+
+if git diff --cached --quiet; then
+  echo "{\"ok\": true, \"changed\": false, \"message\": \"nenhuma mudança para commitar\"}"
+  exit 0
+fi
+
+FILES_CHANGED=$(git diff --cached --name-only | wc -l | tr -d ' ')
+git commit -m "fix(cyborg-v3): correções autônomas do Cyborg V3
+
+Ajustes cirúrgicos aplicados pelo Cyborg V3 após auditoria E2E.
+Arquivos: $FILES_CHANGED
+
+Co-Authored-By: Zentriz Cyborg V3 <cyborg@zentriz.com.br>" >/dev/null 2>&1
+
+SHA=$(git rev-parse HEAD)
+
+git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf x-access-token:$GITHUB_TOKEN | base64)" \
+    push origin dev 2>&1 | tail -1
+
+echo "{\"ok\": true, \"changed\": true, \"files_changed\": $FILES_CHANGED, \"sha\": \"$SHA\"}"

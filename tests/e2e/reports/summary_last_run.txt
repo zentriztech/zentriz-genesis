@@ -1,6 +1,6 @@
 E2E Pipeline Landing — Última execução
 ========================================
-Data: 2026-04-24T14:10:57.262548
+Data: 2026-05-24T13:30:50.918748
 Exit status: 1
 Total: 7 | Passed: 0 | Failed: 7 | Skipped: 0
 JUnit: /Users/mac/workspace/current/zentriz/zentriz-autonomy-suite/zentriz-genesis/tests/e2e/reports/junit.xml

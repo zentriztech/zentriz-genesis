@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# zentriz-accept <project_id> [evidence_text]
+# Chama POST /api/projects/:id/accept. Retorna JSON no stdout.
+# Usa GENESIS_API_TOKEN do env (JWT de serviço).
+set -euo pipefail
+
+PROJECT_ID="${1:?usage: zentriz-accept <project_id> [evidence]}"
+EVIDENCE="${2:-Cyborg V3 — auditoria E2E aprovada. Produto pronto para deploy S3.}"
+API_URL="${API_BASE_URL:-http://api:3000}"
+TOKEN="${GENESIS_API_TOKEN:?GENESIS_API_TOKEN env var não definido}"
+
+BODY=$(jq -Rn --arg ev "$EVIDENCE" '{acceptedBy: "cyborg-v3", evidence: $ev}')
+
+RESP=$(curl -sS -w "\n%{http_code}" -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "$BODY" \
+  "$API_URL/api/projects/$PROJECT_ID/accept")
+
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+
+if [ "$CODE" = "200" ] || [ "$CODE" = "202" ] || [ "$CODE" = "204" ]; then
+  echo "{\"ok\": true, \"status_code\": $CODE, \"body\": $(echo "$BODY" | jq -c '.' 2>/dev/null || echo '""')}"
+  exit 0
+else
+  echo "{\"ok\": false, \"status_code\": $CODE, \"body\": $(echo "$BODY" | jq -c '.' 2>/dev/null || echo '""')}"
+  exit 1
+fi

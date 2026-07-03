@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# zentriz-audit <project_id>
+# Retorna JSON com o resultado da última auditoria Bedrock (5 análises).
+# Se não houver, retorna vazio (o Cyborg V3 pode operar sem — só é briefing inicial).
+set -euo pipefail
+
+PROJECT_ID="${1:?usage: zentriz-audit <project_id>}"
+
+# Procurar audit result gravado pelo cyborg_v3.py em docs/cyborg/
+CANDIDATES=(
+  "/opt/genesis-files/$PROJECT_ID/docs/cyborg/audit.json"
+)
+for p in /opt/genesis-files/*/$PROJECT_ID/docs/cyborg/audit.json; do
+  [ -f "$p" ] && CANDIDATES+=("$p")
+done
+
+for c in "${CANDIDATES[@]}"; do
+  if [ -f "$c" ]; then
+    cat "$c"
+    exit 0
+  fi
+done
+
+echo "{\"ok\": false, \"error\": \"audit.json não encontrado — Cyborg V3 pode operar sem\"}"

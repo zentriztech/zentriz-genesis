@@ -741,62 +741,11 @@ export async function projectRoutes(app: FastifyInstance) {
         });
       }
 
-      // Cyborg rejeitando um projeto pending_cyborg: aplicar lógica de retry
+      // FT-18: Cyborg V3 tem seu próprio loop de retry (até 8 iterações na sessão longa).
+      // Se o Cyborg V3 reportar NEEDS_HUMAN, ele mesmo escreve blocked_cyborg via zentriz-accept/reject.
+      // Aqui só marcamos blocked_cyborg em uma única passagem — sem relançar /launch-cyborg (V1 legacy).
       if (isCyborg && current === "pending_cyborg") {
         const newAttempts = prevAttempts + 1;
-        const maxAttempts = 5;
-
-        if (newAttempts < maxAttempts) {
-          // Ainda tem tentativas — manter pending_cyborg e incrementar contador
-          await client.query(
-            `UPDATE projects
-             SET cyborg_attempts = $1,
-                 extra = COALESCE(extra, '{}') || $2::jsonb,
-                 updated_at = now()
-             WHERE id = $3`,
-            [newAttempts,
-             JSON.stringify({ [`cyborg_reject_${newAttempts}`]: { reason, at: new Date().toISOString() } }),
-             id]
-          );
-          await client.query(
-            `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
-             VALUES ($1, 'cyborg', 'system', 'step', $2)`,
-            [id, `⚠️ Cyborg tentativa ${newAttempts}/${maxAttempts} falhou. Motivo: ${reason}. Relançando...`]
-          );
-
-          // Relançar Cyborg via full-test-server
-          setImmediate(async () => {
-            try {
-              const ftUrl = (process.env.FULL_TEST_SERVER_URL ?? "http://host.docker.internal:7878").trim();
-              const filesRoot = (process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
-              let projectDir = "";
-              if (filesRoot && productId) projectDir = `${filesRoot}/${productId}/${id}`;
-              else if (filesRoot) projectDir = `${filesRoot}/${id}`;
-
-              const payload = JSON.stringify({
-                project_id:      id,
-                project_dir:     projectDir,
-                project_type:    projectType,
-                genesis_api_url: (process.env.API_BASE_URL ?? "http://localhost:3000").trim(),
-                genesis_token:   process.env.GENESIS_API_TOKEN ?? "",
-                attempt:         newAttempts + 1,
-                api_key:         process.env.CLAUDE_API_KEY ?? "",
-              });
-              await fetch(`${ftUrl}/launch-cyborg`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: payload,
-                signal: AbortSignal.timeout(15000),
-              });
-            } catch (e) {
-              console.error("[CYBORG] Falha ao relançar tentativa:", e);
-            }
-          });
-
-          return reply.send({ ok: true, status: "pending_cyborg", cyborgAttempts: newAttempts, retrying: true });
-        }
-
-        // Tentativas esgotadas → blocked_cyborg
         await client.query(
           `UPDATE projects
            SET status = 'blocked_cyborg',
@@ -811,10 +760,11 @@ export async function projectRoutes(app: FastifyInstance) {
         await client.query(
           `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
            VALUES ($1, 'cyborg', 'system', 'step', $2)`,
-          [id, `🚫 Cyborg esgotou ${maxAttempts} tentativas sem conseguir validar o projeto. Intervenção humana necessária. Último motivo: ${reason}`]
+          [id, `🚫 Cyborg V3 reportou NEEDS_HUMAN. Motivo: ${reason}`]
         );
         return reply.send({ ok: true, status: "blocked_cyborg", cyborgAttempts: newAttempts, retrying: false });
       }
+      void projectType; void productId;
 
       // Rejeição humana (ou não-Cyborg) — comportamento original: status failed
       await client.query(
@@ -1830,14 +1780,43 @@ export async function projectRoutes(app: FastifyInstance) {
         if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
-        const dep = (await client.query(
-          `SELECT id, provider, app_url, status, expires_at, ttl_minutes, created_at
+        // FT-17 fix (2026-07-03): incluir 'failed' recente (últimas 24h) para o usuário ver o motivo.
+        // Antes: filtro só retornava provisioning/running → deploys que falhavam sumiam do UI sem
+        // deixar rastro, dando impressão de "não cliquei" ou "deploy nunca aconteceu".
+        // Prioridade: ativo (provisioning/running) > último failed nas últimas 24h.
+        let dep = (await client.query(
+          `SELECT id, provider, app_url, bucket_name, status, expires_at, ttl_minutes, created_at, error_msg
            FROM ephemeral_deployments
-           WHERE project_id=$1 AND status IN ('provisioning','running')
+           WHERE project_id=$1 AND status IN ('provisioning','running','running_degraded')
            ORDER BY created_at DESC LIMIT 1`,
           [id],
         )).rows[0];
-        return reply.send({ deployment: dep ?? null });
+        if (!dep) {
+          // Fallback: último failed nas últimas 24h — mostra ao usuário que a tentativa aconteceu
+          dep = (await client.query(
+            `SELECT id, provider, app_url, bucket_name, status, expires_at, ttl_minutes, created_at, error_msg
+             FROM ephemeral_deployments
+             WHERE project_id=$1
+               AND status = 'failed'
+               AND created_at > now() - interval '24 hours'
+             ORDER BY created_at DESC LIMIT 1`,
+            [id],
+          )).rows[0];
+        }
+        const deployment = dep
+          ? {
+              id: dep.id,
+              provider: dep.provider,
+              appUrl: dep.app_url,
+              bucketName: dep.bucket_name,
+              status: dep.status,
+              expiresAt: dep.expires_at instanceof Date ? dep.expires_at.toISOString() : dep.expires_at,
+              ttlMinutes: dep.ttl_minutes,
+              createdAt: dep.created_at instanceof Date ? dep.created_at.toISOString() : dep.created_at,
+              errorMsg: dep.error_msg ?? null,
+            }
+          : null;
+        return reply.send({ deployment });
       } finally {
         client.release();
       }

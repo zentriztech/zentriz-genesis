@@ -160,8 +160,431 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_launch_cyborg()
         elif self.path == "/launch-s3-deploy":
             self._handle_launch_s3_deploy()
+        elif self.path == "/cyborg-claude-code":
+            self._handle_cyborg_claude_code()
+        elif self.path == "/cyborg-playwright":
+            self._handle_cyborg_playwright()
+        elif self.path == "/cyborg-build":
+            self._handle_cyborg_build()
+        elif self.path == "/cyborg-engineer":
+            self._handle_cyborg_engineer()
         else:
             self._json(404, {"error": "not found"})
+
+    # ── /cyborg-build — roda pnpm install + build + tsc no cwd do projeto ─────
+    def _handle_cyborg_build(self):
+        """FT-18 F2: executa build real para A3 ter contexto verdadeiro (não alucinado)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        project_id = payload.get("project_id", "")
+        prod_id    = payload.get("prod_id", "")
+        timeout    = int(payload.get("timeout", 300))
+
+        # FT-18 fix (2026-07-03, V5 iter 1): usar canário `apps/package.json` para escolher o path certo,
+        # não só existência da pasta. Ambos os paths podem existir (produto multi-projeto), mas só um tem
+        # os arquivos reais.
+        candidates = []
+        if prod_id:
+            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
+        candidates.append(f"/opt/genesis-files/{project_id}")
+        proj_dir = next(
+            (c for c in candidates if Path(c).exists() and (Path(c) / "apps" / "package.json").exists()),
+            None,
+        )
+        if not proj_dir:
+            # Segundo fallback: qualquer path que exista (mesmo sem apps/package.json)
+            proj_dir = next((c for c in candidates if Path(c).exists()), None)
+        if not proj_dir:
+            self._json(404, {"error": f"projeto não encontrado"}); return
+        apps_dir = Path(proj_dir) / "apps"
+        if not apps_dir.exists() or not (apps_dir / "package.json").exists():
+            self._json(200, {
+                "build_rc": -1, "build_output": f"sem apps/package.json em {proj_dir} — projeto não é web/next",
+                "type_check_rc": -1, "type_check_output": "",
+            })
+            return
+
+        # 1. pnpm install (leve — usa lockfile se existir)
+        log.info(f"[cyborg-build] {project_id[:8]}: pnpm install em {apps_dir}")
+        install_rc = -1; install_out = ""
+        try:
+            r = subprocess.run(
+                "pnpm install --prefer-offline --no-frozen-lockfile 2>&1 | tail -50",
+                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=180,
+            )
+            install_rc = r.returncode
+            install_out = (r.stdout or "")[-1500:]
+        except subprocess.TimeoutExpired:
+            install_out = "TIMEOUT after 180s"
+
+        # 2. pnpm build
+        log.info(f"[cyborg-build] {project_id[:8]}: pnpm build")
+        build_rc = -1; build_out = ""
+        try:
+            r = subprocess.run(
+                "pnpm build 2>&1 | tail -80",
+                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=timeout,
+            )
+            build_rc = r.returncode
+            build_out = (r.stdout or "")[-3500:]
+        except subprocess.TimeoutExpired:
+            build_out = f"TIMEOUT after {timeout}s"
+
+        # 3. tsc --noEmit (rápido, se disponível)
+        tc_rc = -1; tc_out = ""
+        try:
+            r = subprocess.run(
+                "npx --no-install tsc --noEmit 2>&1 | tail -30",
+                cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=60,
+            )
+            tc_rc = r.returncode
+            tc_out = (r.stdout or "")[-2000:]
+        except Exception:
+            pass
+
+        self._json(200, {
+            "build_rc": build_rc,
+            "build_output": build_out,
+            "install_rc": install_rc,
+            "install_output": install_out,
+            "type_check_rc": tc_rc,
+            "type_check_output": tc_out,
+        })
+
+    # ── /cyborg-engineer — spawn ONE longa sessão Claude Code (Cyborg V3) ────────
+    def _handle_cyborg_engineer(self):
+        """FT-18 V3: sessão única longa (30-60min) com toolset completo + wrappers no PATH.
+        Streaming de stdout NÃO ao portal em tempo real (BaseHTTP não suporta bem stream),
+        mas o próprio Claude pode postar via `zentriz-say`. Retorna stdout completo ao final."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        project_id    = payload.get("project_id", "")
+        prod_id       = payload.get("prod_id", "")
+        system_prompt = payload.get("system_prompt", "")
+        user_prompt   = payload.get("user_prompt", "")
+        model_id      = payload.get("model_id", os.environ.get("CLAUDE_MODEL", ""))
+        timeout       = int(payload.get("timeout", 3600))
+        cwd_hint      = payload.get("cwd_hint", "apps")
+
+        if not project_id or not user_prompt:
+            self._json(400, {"error": "project_id + user_prompt obrigatórios"}); return
+
+        # Achar projeto com canário apps/package.json
+        candidates = []
+        if prod_id:
+            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
+        candidates.append(f"/opt/genesis-files/{project_id}")
+        proj_dir = next(
+            (c for c in candidates if Path(c).exists() and (Path(c) / "apps" / "package.json").exists()),
+            None,
+        )
+        if not proj_dir:
+            proj_dir = next((c for c in candidates if Path(c).exists()), None)
+        if not proj_dir:
+            self._json(404, {"error": "projeto não encontrado"}); return
+
+        cwd = f"{proj_dir}/{cwd_hint}" if cwd_hint else proj_dir
+        if not Path(cwd).exists():
+            cwd = proj_dir
+
+        # Localizar Claude CLI
+        _claude_bin = CLAUDE_BIN
+        if not Path(_claude_bin).exists():
+            for candidate in ("/usr/bin/claude", "/usr/local/bin/claude", "/opt/claude/bin/claude"):
+                if Path(candidate).exists():
+                    _claude_bin = candidate
+                    break
+
+        # Preparar env: injetar PATH dos wrappers do Cyborg + tokens/URLs
+        wrapper_dir = "/opt/zentriz-genesis/scripts/cyborg-wrappers"
+        env = os.environ.copy()
+        env["PATH"] = f"{wrapper_dir}:{env.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+        env["PROJECT_ID"] = project_id
+        env["PROD_ID"] = prod_id or ""
+        # API_BASE_URL do FTS aponta pra container api — Cyborg V3 (que roda no HOST) precisa da URL pública
+        env["API_BASE_URL"] = env.get("CYBORG_HOST_API_URL", "http://localhost:3000")
+        # GENESIS_API_TOKEN já deve estar no env do FTS (setado via systemd)
+        if not env.get("GENESIS_API_TOKEN"):
+            # tentar ler do .env
+            try:
+                with open("/opt/zentriz-genesis/.env") as f:
+                    for line in f:
+                        if line.startswith("GENESIS_API_TOKEN="):
+                            env["GENESIS_API_TOKEN"] = line.split("=", 1)[1].strip()
+                            break
+            except Exception:
+                pass
+        if model_id:
+            env["CLAUDE_MODEL"] = model_id
+            env["ANTHROPIC_MODEL"] = model_id
+        # CLAUDE_CODE_USE_BEDROCK já deve estar setado — Cyborg V3 usa Bedrock
+
+        log.info(f"[cyborg-engineer] {project_id[:8]}: sessão longa iniciada. cwd={cwd} model={model_id} timeout={timeout}s")
+
+        # Executar Claude Code com system prompt + user prompt via stdin
+        cmd = [_claude_bin, "--dangerously-skip-permissions", "-p"]
+        if system_prompt:
+            cmd.extend(["--append-system-prompt", system_prompt])
+
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, cwd=cwd, env=env, input=user_prompt,
+                              capture_output=True, text=True, timeout=timeout)
+            claude_stdout = r.stdout or ""
+            claude_stderr = r.stderr or ""
+            claude_rc = r.returncode
+        except subprocess.TimeoutExpired:
+            self._json(408, {"ok": False, "error": f"timeout {timeout}s", "stdout": "", "stderr": ""})
+            return
+        except Exception as e:
+            import traceback
+            log.error(f"[cyborg-engineer] {project_id[:8]}: subprocess exception: {e}\n{traceback.format_exc()}")
+            self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+            return
+
+        duration_s = int(time.time() - t0)
+        log.info(f"[cyborg-engineer] {project_id[:8]}: concluído em {duration_s}s (rc={claude_rc}, stdout={len(claude_stdout)} chars)")
+
+        self._json(200, {
+            "ok": True,
+            "stdout": claude_stdout,
+            "stderr": claude_stderr[-4000:],
+            "rc": claude_rc,
+            "duration_s": duration_s,
+        })
+
+    # ── /cyborg-claude-code — spawn Claude Code CLI para aplicar 1 ação do Cyborg ─
+    def _handle_cyborg_claude_code(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        project_id      = payload.get("project_id", "")
+        prod_id         = payload.get("prod_id", "")
+        action_id       = payload.get("action_id", "unknown")
+        prompt          = payload.get("prompt", "")
+        system_prompt   = payload.get("system_prompt", "")  # FT-18 F1: filosofia anti-refactor
+        model_id        = payload.get("model_id", os.environ.get("CLAUDE_MODEL", ""))
+        timeout         = int(payload.get("timeout", 900))
+        verify_cmd      = payload.get("verify_command", "")
+
+        if not project_id or not prompt:
+            self._json(400, {"error": "project_id + prompt obrigatórios"}); return
+
+        # Localizar cwd (com/sem prod_id)
+        candidates = []
+        if prod_id:
+            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
+        candidates.append(f"/opt/genesis-files/{project_id}")
+        cwd = next((c for c in candidates if Path(c).exists()), None)
+        if not cwd:
+            self._json(404, {"error": f"projeto não encontrado: {candidates}"}); return
+
+        # Escreve prompt em arquivo temporário (evita command line gigante)
+        prompt_file = Path(f"/tmp/cyborg-{project_id[:8]}-{action_id}.md")
+        prompt_file.write_text(prompt, encoding="utf-8")
+
+        # Executa Claude Code CLI com model_id override
+        env = os.environ.copy()
+        if model_id:
+            env["CLAUDE_MODEL"] = model_id
+            env["ANTHROPIC_MODEL"] = model_id
+        # FT-18 fix (2026-07-02): CLAUDE_BIN precisa apontar para binário real.
+        # Default do módulo era ~/.local/bin/claude (root não tem); host usa /usr/bin/claude.
+        _claude_bin = CLAUDE_BIN
+        if not Path(_claude_bin).exists():
+            for candidate in ("/usr/bin/claude", "/usr/local/bin/claude", "/opt/claude/bin/claude"):
+                if Path(candidate).exists():
+                    _claude_bin = candidate
+                    break
+            else:
+                # Não achou nenhum — reporta erro claro pro Cyborg
+                self._json(500, {
+                    "action_id": action_id, "status": "FAILED",
+                    "error": f"Claude CLI não encontrado. Tentado: {CLAUDE_BIN} + /usr/bin/claude + /usr/local/bin/claude. "
+                             "Defina CLAUDE_BIN=<path> no genesis-fts.service.",
+                })
+                return
+
+        # FT-18 F8: snapshot antes das mudanças — usado depois para detectar refator suspeito.
+        # Estratégia sem git: hash + tamanho de cada arquivo dentro de apps/src/. Se após execução
+        # mais de N arquivos mudaram, marca refactor suspect (mesmo que verify_command passe).
+        def _snapshot_apps(d: str) -> dict:
+            snap = {}
+            root = Path(d) / "apps" / "src"
+            if not root.exists():
+                return snap
+            for p in root.rglob("*"):
+                if p.is_file() and p.stat().st_size < 500_000:  # ignora binários grandes
+                    try:
+                        st = p.stat()
+                        snap[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns)
+                    except Exception:
+                        pass
+            return snap
+        snap_before = _snapshot_apps(cwd)
+
+        # Claude Code CLI: passar o prompt inline via stdin (evita bugs de @-file em algumas versões).
+        # -p ativa modo print (headless, one-shot). Lê stdin quando não há argumento.
+        # FT-18 F1: se system_prompt fornecido, passa via --append-system-prompt (filosofia anti-refactor)
+        cmd = [_claude_bin, "--dangerously-skip-permissions", "-p"]
+        if system_prompt:
+            cmd.extend(["--append-system-prompt", system_prompt])
+            log.info(f"[cyborg-cc] {action_id}: system_prompt injetado ({len(system_prompt)} chars)")
+        prompt_text = prompt_file.read_text(encoding="utf-8")
+        log.info(f"[cyborg-cc] {action_id}: cwd={cwd} model={model_id or 'default'} bin={_claude_bin} timeout={timeout}s")
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, cwd=cwd, env=env, input=prompt_text,
+                              capture_output=True, text=True, timeout=timeout)
+            claude_stdout = (r.stdout or "")[-8000:]
+            claude_stderr = (r.stderr or "")[-2000:]
+            claude_rc     = r.returncode
+        except subprocess.TimeoutExpired:
+            self._json(408, {"action_id": action_id, "status": "FAILED", "error": f"timeout {timeout}s"})
+            return
+        except Exception as e:
+            import traceback
+            log.error(f"[cyborg-cc] {action_id}: subprocess exception: {e}\n{traceback.format_exc()}")
+            self._json(500, {"action_id": action_id, "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
+            return
+
+        # Roda verify_command
+        verify_output = ""
+        verify_rc = -1
+        if verify_cmd:
+            try:
+                vr = subprocess.run(verify_cmd, cwd=cwd, shell=True, capture_output=True,
+                                    text=True, timeout=60)
+                verify_output = ((vr.stdout or "") + "\n" + (vr.stderr or ""))[-2000:]
+                verify_rc = vr.returncode
+            except Exception as e:
+                verify_output = f"verify error: {e}"
+
+        # Parse Claude output para achar CYBORG_ACTION_RESULT
+        status = "PARTIAL"
+        for line in claude_stdout.splitlines()[::-1]:
+            if line.startswith("STATUS:"):
+                v = line.split(":", 1)[1].strip()
+                if v in ("SUCCESS", "FAILED", "PARTIAL"):
+                    status = v
+                    break
+
+        # Se verify_command foi executado e falhou → override para FAILED
+        if verify_cmd and verify_rc != 0:
+            status = "FAILED"
+
+        # FT-18 F8: guardrail mecânico anti-refactor.
+        # Se o snapshot mostra que Claude tocou muitos arquivos ou criou novas pastas
+        # (típico de refatoração arquitetural), degradar status para REFACTOR_SUSPECT.
+        # O Cyborg V2 vai interpretar como FAILED e não aplicar mudanças na próxima iter.
+        snap_after = _snapshot_apps(cwd)
+        added = [k for k in snap_after if k not in snap_before]
+        removed = [k for k in snap_before if k not in snap_after]
+        modified = [k for k in snap_after if k in snap_before and snap_after[k] != snap_before[k]]
+        total_changed = len(added) + len(removed) + len(modified)
+        # FT-18 fix (2026-07-03): threshold aumentado. Correções legítimas de conteúdo institucional
+        # (§11 spec em /sobre + /privacidade + /termos) tocam 3-4 arquivos. Só suspeitar >10.
+        # Também: só suspeitar de PASTAS NOVAS (indicativo de reorganização estrutural).
+        REFACTOR_THRESHOLD_FILES = 10   # antes 5 — muito restritivo, falso-positivo em correção de 3 páginas
+        refactor_suspect = False
+        if total_changed > REFACTOR_THRESHOLD_FILES and status == "SUCCESS":
+            refactor_suspect = True
+            status = "FAILED"
+            log.warning(
+                f"[cyborg-cc] {action_id}: REFACTOR_SUSPECT — {total_changed} arquivos mudaram "
+                f"(+{len(added)} novos, -{len(removed)} removidos, ~{len(modified)} modificados). "
+                f"Threshold: {REFACTOR_THRESHOLD_FILES}. Ação: FAILED forçado."
+            )
+        # Pastas criadas novas indicam refactor arquitetural (route groups, novos dirs)
+        new_dirs = set()
+        for a in added:
+            parts = a.split("/")
+            if len(parts) > 1:
+                new_dir = parts[0]
+                # Só é 'novo' se a pasta não existia antes
+                if not any(k.startswith(new_dir + "/") for k in snap_before):
+                    new_dirs.add(new_dir)
+        if new_dirs and status == "SUCCESS":
+            refactor_suspect = True
+            status = "FAILED"
+            log.warning(
+                f"[cyborg-cc] {action_id}: REFACTOR_SUSPECT — pastas novas criadas: {sorted(new_dirs)}. "
+                f"Ações cirúrgicas não criam route groups nem reorganizam estrutura. FAILED forçado."
+            )
+
+        self._json(200, {
+            "action_id": action_id,
+            "status": status,
+            "refactor_suspect": refactor_suspect,
+            "files_changed": total_changed,
+            "files_added": added[:20],
+            "files_removed": removed[:20],
+            "duration_s": int(time.time() - t0),
+            "claude_rc": claude_rc,
+            "claude_stdout_tail": claude_stdout[-2000:],
+            "claude_stderr_tail": claude_stderr,
+            "verify_command": verify_cmd,
+            "verify_rc": verify_rc,
+            "verify_output": verify_output,
+        })
+
+    # ── /cyborg-playwright — screenshot + smoke navegacional ──────────────────
+    def _handle_cyborg_playwright(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        base_url  = payload.get("base_url", "")
+        routes    = payload.get("routes", ["/"])
+        out_dir   = payload.get("out_dir", f"/tmp/cyborg-shots-{int(time.time())}")
+        if not base_url:
+            self._json(400, {"error": "base_url obrigatório"}); return
+
+        try:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            # Delega para script Python que chama playwright headless (se instalado)
+            script = f"""
+import sys, json
+from playwright.sync_api import sync_playwright
+results = []
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=True)
+    ctx = b.new_context(viewport={{"width":1280,"height":800}})
+    page = ctx.new_page()
+    console_errors = []
+    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type=="error" else None)
+    for route in {routes!r}:
+        url = {base_url!r} + route
+        try:
+            resp = page.goto(url, wait_until="networkidle", timeout=15000)
+            title = page.title()
+            shot = "{out_dir}" + "/" + route.replace("/","_or_") + ".png"
+            page.screenshot(path=shot, full_page=True)
+            results.append({{"route": route, "url": url, "status": resp.status if resp else 0, "title": title, "shot": shot}})
+        except Exception as e:
+            results.append({{"route": route, "url": url, "error": str(e)}})
+    b.close()
+print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}}))
+"""
+            r = subprocess.run(["python3", "-c", script], capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                self._json(500, {"error": f"playwright fail: {r.stderr[-1000:]}"}); return
+            self._json(200, json.loads(r.stdout))
+        except Exception as e:
+            self._json(500, {"error": f"cyborg-playwright: {e}"})
 
     # ── /launch-s3-deploy (FT-17) ─────────────────────────────────────────────
     def _handle_launch_s3_deploy(self):
@@ -322,7 +745,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ── /launch-cyborg (validação externa autônoma) ────────────────────────────
 
     def _handle_launch_cyborg(self):
-        try:
+        # FT-18: endpoint legacy (V1). Substituído por Cyborg V3 (watcher zentriz_cyborg.py + /cyborg-engineer).
+        # Devolvemos 410 GONE para qualquer chamador residual — não relançamos o playbook antigo.
+        log.info("[launch-cyborg] chamada legacy ignorada (Cyborg V3 é o único caminho ativo)")
+        self._json(410, {
+            "error": "endpoint deprecated",
+            "message": "Cyborg V1 (/launch-cyborg) foi substituído pelo Cyborg V3 (watcher orchestrator/zentriz_cyborg.py + /cyborg-engineer).",
+            "gone": True,
+        })
+        return
+        # Código legacy abaixo mantido só para referência do playbook — nunca é executado.
+        try:  # noqa: E722
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length).decode())
         except Exception as e:
