@@ -1,0 +1,22 @@
+# Override EXCLUSIVO para dev local — nunca deve ser usado em produção nem pushado ao ECR.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.override.dev.yml build genesis-web
+#   docker compose -f docker-compose.yml -f docker-compose.override.dev.yml up -d
+#
+# Este override embute NEXT_PUBLIC_API_BASE_URL=http://localhost:3000 no bundle Next.js,
+# o que quebra o portal quando pushado ao EC2/ECR (bundle terá URL fixa).
+# Por isso o BUILD_TARGET=dev — o Dockerfile aceita URLs localhost apenas neste alvo.
+#
+# CI/ECR-push valida que a imagem final NÃO foi buildada com este override
+# (rejeita se BUILD_TARGET != prod no image label).
+
+services:
+  genesis-web:
+    build:
+      args:
+        NEXT_PUBLIC_API_BASE_URL: "http://localhost:3000"
+        BUILD_TARGET: "dev"
+    labels:
+      com.zentriz.build_target: "dev"
+      com.zentriz.warning: "IMAGEM DEV — NÃO PUSHAR PARA ECR"

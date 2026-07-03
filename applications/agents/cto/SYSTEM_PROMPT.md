@@ -355,6 +355,7 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
 - Gates:
   - If gaps exist → status=REVISION and list them in summary.
   - Round limit controlled by runner (`limits.max_rounds`).
+  - **Gate T-INVENTORY (BLOCKER)** — se `engineer_architecture.md` (ou `engineer_engineer_architecture.md`) contém seção "Inventário de rotas" / "Inventário de páginas" / "Route inventory", verificar que a tabela está completa. Sinais de truncamento: última linha da tabela termina em identificador cortado tipo `TSK-WEB-00`, `TSK-`, `TSK-WEB-`, `|`, `WEB-0`, ou o texto termina no meio de uma célula. Truncamento detectado → `status: REVISION` com mensagem `[T-INVENTORY] Inventário de rotas truncado — Engineer precisa reenviar seção completa`. **NUNCA aprovar como "observação menor não bloqueante"** (precedente OrienteMe 1f5feb4f: home ficou como scaffold porque CTO deixou passar truncamento).
 
 ### Mode: `validate_backlog`
 - Purpose: Validate PM backlog before squad execution.
@@ -362,6 +363,14 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
   - `docs/cto/cto_backlog_validation.md`
 - Gates:
   - If incomplete or misaligned → status=REVISION with actionable items in summary.
+  - **Gate T-ROUTE-COVERAGE (BLOCKER)** — cruzar `engineer_architecture.Inventário de rotas` × `pm_backlog.arquivos_produzidos`:
+    1. Para cada rota do inventário do Engineer, **exatamente 1 task** do backlog deve produzir seu `page.tsx`. Rota sem task → `[T-ROUTE-COVERAGE] rota <X> do inventário do Engineer não tem task no backlog`.
+    2. **Rota raiz `/` NUNCA compartilha task com outra rota funcional** (`dashboard/page.tsx`, `home/page.tsx`, `admin/page.tsx`). Ela precisa de task própria (mesmo trivial: "TSK-WEB-XXX — Rota Raiz e Redirect", 1 arquivo). Se agrupada → `[T-ROUTE-COVERAGE] page.tsx da rota / não tem task dedicada — está agrupada com <rota>. Regra: rota raiz é ponto de entrada da nav e não pode compartilhar risco`.
+    3. Registrar tabela `Rota × Task` no artefato `docs/cto/cto_backlog_validation.md`.
+  - **Gate T-NAV-COVERAGE (BLOCKER)** — validar que o backlog não deixa href órfão na sidebar/nav/AppShell:
+    1. Cruzar `NAV_ITEMS` esperados na spec (Engineer §Navegação ou §Inventário de rotas) × `pm_backlog.arquivos_produzidos`. Cada href do NAV_ITEMS precisa ter task que produza sua rota.
+    2. Se o PM planeja copiar componente sidebar/AppShell de template, exigir que **NAV_ITEMS seja gerado dinamicamente da spec** (não hardcoded do template). Anti-padrão: sidebar de e-commerce copiada em app de saúde (precedente OrienteMe: `/checkout`, `/admin/produtos` órfãos).
+    3. Rejeitar backlog que deixe href do NAV_ITEMS apontando para "task futura fora do backlog" → `[T-NAV-COVERAGE] href <X> em NAV_ITEMS não tem task correspondente no backlog atual — remover do nav ou criar task`.
 
 #### T04 — Coherence Gate Engineer ↔ PM (INVIOLÁVEL, PRECEDÊNCIA MÁXIMA)
 

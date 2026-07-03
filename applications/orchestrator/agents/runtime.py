@@ -1074,3 +1074,52 @@ def run_agent(
         duration_ms = (time.perf_counter() - t0_run) * 1000
         log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
         return _normalize_response_envelope(out, request_id, raw_text)
+
+
+# FT-18 (Cyborg V2): chamada Bedrock direta sem toda a pipeline de agentes.
+# Usada pelo Cyborg V2 para as 5 análises paralelas e consolidação.
+def call_bedrock_direct(system: str, user: str, model_id: str,
+                        max_tokens: int = 8000, temperature: float = 0.2) -> str:
+    """Chama Bedrock com system + user; retorna string bruta da resposta.
+
+    Reusa o mesmo cliente AnthropicBedrock configurado para o resto do pipeline.
+    Não faz repair, não valida schema, não persiste artefatos — pura chamada.
+    """
+    try:
+        from anthropic import AnthropicBedrock
+    except ImportError:
+        raise ImportError("anthropic sdk não instalado")
+
+    _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+    _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+    _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+    aws_region = (os.environ.get("GENESIS_AWS_REGION")
+                  or os.environ.get("AWS_REGION")
+                  or os.environ.get("AWS_DEFAULT_REGION")
+                  or "us-east-1")
+
+    os.environ.pop("AWS_PROFILE", None)
+    os.environ.pop("AWS_DEFAULT_PROFILE", None)
+
+    kwargs: dict = {"aws_region": aws_region}
+    if _ak and _sk:
+        kwargs["aws_access_key"] = _ak
+        kwargs["aws_secret_key"] = _sk
+        if _token:
+            kwargs["aws_session_token"] = _token
+
+    client = AnthropicBedrock(**kwargs)
+    resp = client.messages.create(
+        model=model_id,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    # AnthropicBedrock retorna Message com .content = [TextBlock, ...]
+    parts: list[str] = []
+    for block in getattr(resp, "content", []) or []:
+        t = getattr(block, "text", None)
+        if t:
+            parts.append(t)
+    return "".join(parts)

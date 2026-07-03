@@ -79,6 +79,8 @@ function formatSlot(row: Record<string, unknown>) {
     provider,
     model_id:                row.model_id,
     model_id_fallback:       row.model_id_fallback ?? null,
+    cyborg_model_id:         row.cyborg_model_id ?? null,
+    cyborg_model_id_fallback: row.cyborg_model_id_fallback ?? null,
     credentials_masked:      maskCredentials(creds),
     has_credentials:         hasCredentials(provider, creds),
     max_concurrent_projects: row.max_concurrent_projects,
@@ -97,6 +99,8 @@ async function upsertConfig(
   const credentials      = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
   const model_id         = String(body.model_id ?? DEFAULT_MODELS[provider]);
   const model_id_fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
+  const cyborg_model_id   = body.cyborg_model_id ? String(body.cyborg_model_id) : null;
+  const cyborg_model_id_fallback = body.cyborg_model_id_fallback ? String(body.cyborg_model_id_fallback) : null;
   const max_concurrent   = Math.min(Math.max(Number(body.max_concurrent_projects ?? 3), 1), 20);
   const daily_quota      = body.daily_token_quota ? Number(body.daily_token_quota) : null;
   const dp_reserve       = Number(body.deadpool_token_reserve ?? 0);
@@ -105,18 +109,23 @@ async function upsertConfig(
     `INSERT INTO tenant_llm_configs
        (tenant_id, priority, provider, model_id, model_id_fallback, credentials,
         max_concurrent_projects, daily_token_quota, deadpool_token_reserve,
+        cyborg_model_id, cyborg_model_id_fallback,
         is_active, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,now())
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true,now())
      ON CONFLICT (tenant_id, priority) DO UPDATE SET
        provider=$3, model_id=$4, model_id_fallback=$5, credentials=$6,
        max_concurrent_projects=$7, daily_token_quota=$8,
-       deadpool_token_reserve=$9, is_active=true, updated_at=now()`,
+       deadpool_token_reserve=$9,
+       cyborg_model_id=$10, cyborg_model_id_fallback=$11,
+       is_active=true, updated_at=now()`,
     [tenantId, priority, provider, model_id, model_id_fallback, JSON.stringify(credentials),
-     max_concurrent, daily_quota, dp_reserve]
+     max_concurrent, daily_quota, dp_reserve,
+     cyborg_model_id, cyborg_model_id_fallback]
   );
 
   return { ok: true, priority, priority_label: PRIORITY_LABELS[priority], provider, model_id,
-           model_id_fallback, has_credentials: hasCredentials(provider, credentials) };
+           model_id_fallback, cyborg_model_id, cyborg_model_id_fallback,
+           has_credentials: hasCredentials(provider, credentials) };
 }
 
 export async function llmRoutes(app: FastifyInstance): Promise<void> {
@@ -130,7 +139,9 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     const client = await pool.connect();
     try {
       const res = await client.query(
-        `SELECT provider, model_id, model_id_fallback, credentials, max_concurrent_projects,
+        `SELECT provider, model_id, model_id_fallback,
+                cyborg_model_id, cyborg_model_id_fallback,
+                credentials, max_concurrent_projects,
                 daily_token_quota, deadpool_token_reserve, is_active, priority
          FROM tenant_llm_configs WHERE tenant_id = $1 ORDER BY priority ASC`,
         [user.tenantId]
@@ -146,11 +157,29 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
         max_concurrent_projects: 3, daily_token_quota: null, deadpool_token_reserve: 0, is_active: false,
       });
 
+      // Cyborg defaults do singleton Zentriz (para exibir "herdado" quando slot não configura)
+      let zentrizDefaults: { cyborg_model_id: string | null; cyborg_model_id_fallback: string | null } = {
+        cyborg_model_id: null, cyborg_model_id_fallback: null,
+      };
+      try {
+        const zdef = await client.query(
+          `SELECT cyborg_model_id, cyborg_model_id_fallback FROM zentriz_llm_config LIMIT 1`
+        );
+        if (zdef.rows.length > 0) {
+          zentrizDefaults = {
+            cyborg_model_id: (zdef.rows[0].cyborg_model_id as string | null) ?? null,
+            cyborg_model_id_fallback: (zdef.rows[0].cyborg_model_id_fallback as string | null) ?? null,
+          };
+        }
+      } catch { /* migration ainda não aplicada — fallback null */ }
+
       return reply.send({
         slots,
         system_default: {
           provider: process.env.GENESIS_LLM_PROVIDER ?? "bedrock",
           model_id: process.env.CLAUDE_MODEL ?? "us.anthropic.claude-sonnet-4-6",
+          cyborg_model_id: zentrizDefaults.cyborg_model_id ?? "us.anthropic.claude-opus-4-7",
+          cyborg_model_id_fallback: zentrizDefaults.cyborg_model_id_fallback ?? "us.anthropic.claude-sonnet-4-6",
         },
       });
     } finally { client.release(); }

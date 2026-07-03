@@ -48,6 +48,8 @@ interface LlmSlot {
   provider: Provider | null;
   model_id: string | null;
   model_id_fallback: string | null;
+  cyborg_model_id?: string | null;
+  cyborg_model_id_fallback?: string | null;
   credentials_masked: Record<string, string>;
   has_credentials: boolean;
   max_concurrent_projects: number;
@@ -58,7 +60,12 @@ interface LlmSlot {
 
 interface LlmConfigResponse {
   slots: LlmSlot[];
-  system_default: { provider: string; model_id: string };
+  system_default: {
+    provider: string;
+    model_id: string;
+    cyborg_model_id?: string | null;
+    cyborg_model_id_fallback?: string | null;
+  };
 }
 
 // ── Meta dos providers ────────────────────────────────────────────────────────
@@ -68,8 +75,11 @@ const PROVIDER_META: Record<Provider, {
   fields: { key: string; label: string; placeholder: string; secret?: boolean }[];
 }> = {
   bedrock: {
+    // Modelos Bedrock validados via /invoke/raw em 2026-07-02 no tenant Zentriz.
+    // Modelos que retornam "model identifier invalid" ou "not authorized" foram removidos.
+    // Se novos modelos forem liberados, adicionar após teste real.
     label: "AWS Bedrock", icon: "☁️",
-    models: ["us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-opus-4-7", "us.anthropic.claude-haiku-4-5-20251001"],
+    models: ["us.anthropic.claude-opus-4-7", "us.anthropic.claude-sonnet-4-6"],
     fields: [
       { key: "aws_access_key_id",     label: "AWS Access Key ID",     placeholder: "AKIA...",     secret: false },
       { key: "aws_secret_access_key", label: "AWS Secret Access Key", placeholder: "wJalrXUt...", secret: true  },
@@ -107,7 +117,6 @@ const PROVIDERS = Object.keys(PROVIDER_META) as Provider[];
 const MODEL_PROVIDER_MAP: Record<string, Provider> = {
   "us.anthropic.claude-sonnet-4-6":           "bedrock",
   "us.anthropic.claude-opus-4-7":             "bedrock",
-  "us.anthropic.claude-haiku-4-5-20251001":   "bedrock",
   "claude-opus-4-7":                          "anthropic",
   "claude-sonnet-4-6":                        "anthropic",
   "claude-haiku-4-5-20251001":                "anthropic",
@@ -150,6 +159,8 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
   const [tab, setTab]           = useState(PROVIDERS.indexOf(initialProvider));
   const [modelId, setModelId]   = useState(slot?.model_id ?? "");
   const [fallbackId, setFallbackId] = useState(slot?.model_id_fallback ?? "");
+  const [cyborgId, setCyborgId] = useState(slot?.cyborg_model_id ?? "");
+  const [cyborgFallbackId, setCyborgFallbackId] = useState(slot?.cyborg_model_id_fallback ?? "");
   const [creds, setCreds]       = useState<Record<string, string>>({});
   const [saving, setSaving]     = useState(false);
   const [err, setErr]           = useState<string | null>(null);
@@ -162,6 +173,8 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
       setTab(PROVIDERS.indexOf(p));
       setModelId(slot?.model_id ?? "");
       setFallbackId(slot?.model_id_fallback ?? "");
+      setCyborgId(slot?.cyborg_model_id ?? "");
+      setCyborgFallbackId(slot?.cyborg_model_id_fallback ?? "");
       setCreds({});
       setErr(null);
     }
@@ -172,6 +185,8 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
     const meta = PROVIDER_META[PROVIDERS[tab]];
     setModelId(meta.models[0] ?? "");
     setFallbackId("");
+    setCyborgId("");
+    setCyborgFallbackId("");
     setCreds({});
   }, [tab]);
 
@@ -187,6 +202,8 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
         provider:                resolvedProvider,
         model_id:                selected,
         model_id_fallback:       fallbackId || null,
+        cyborg_model_id:         cyborgId || null,
+        cyborg_model_id_fallback: cyborgFallbackId || null,
         credentials:             creds,
         max_concurrent_projects: globalLimits.maxConc,
         daily_token_quota:       globalLimits.quota ? Number(globalLimits.quota) : null,
@@ -290,6 +307,43 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
           </Alert>
         )}
 
+        {/* Cyborg — modelo dedicado para lapidação e entrega final */}
+        <Box sx={{ border: "1px solid", borderColor: "warning.main", borderRadius: 1, p: 1.5, mb: 2, bgcolor: "warning.main", color: "warning.contrastText" }}>
+          <Typography variant="caption" sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, display: "block", mb: 1 }}>
+            🤖 Cyborg — Lapidação e Entrega (etapa final crítica)
+          </Typography>
+          <Typography variant="caption" sx={{ display: "block", mb: 1.5, opacity: 0.9 }}>
+            O Cyborg audita o produto entregue pelo squad, corrige gaps residuais e publica no S3.
+            Use o modelo mais capaz disponível — é a etapa mais importante do pipeline.
+          </Typography>
+          <Stack direction="row" spacing={1.5}>
+            <FormControl size="small" fullWidth sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
+              <InputLabel>Cyborg principal</InputLabel>
+              <Select value={cyborgId} label="Cyborg principal"
+                onChange={(e) => setCyborgId(e.target.value)}>
+                <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
+                  — Usar padrão Zentriz —
+                </MenuItem>
+                {meta.models.map((m) => (
+                  <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl size="small" fullWidth sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
+              <InputLabel>Cyborg fallback</InputLabel>
+              <Select value={cyborgFallbackId} label="Cyborg fallback"
+                onChange={(e) => setCyborgFallbackId(e.target.value)}>
+                <MenuItem value="" sx={{ fontSize: "0.8rem", color: "text.disabled" }}>
+                  — Nenhum —
+                </MenuItem>
+                {meta.models.map((m) => (
+                  <MenuItem key={m} value={m} sx={{ fontSize: "0.8rem" }}>{m}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Stack>
+        </Box>
+
         {/* Limites globais — expansível */}
         <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
           <Box
@@ -390,6 +444,14 @@ function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, d
                   <> <span style={{ opacity: 0.5 }}>→</span> {slot.model_id_fallback}</>
                 )}
               </Typography>
+              {slot.cyborg_model_id && (
+                <Typography variant="caption" sx={{ display: "block", fontFamily: "monospace", color: "warning.main", fontSize: "0.68rem" }}>
+                  🤖 Cyborg: {slot.cyborg_model_id}
+                  {slot.cyborg_model_id_fallback && (
+                    <> <span style={{ opacity: 0.5 }}>→</span> {slot.cyborg_model_id_fallback}</>
+                  )}
+                </Typography>
+              )}
             </Stack>
             {slot.has_credentials ? (
               <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.25 }}>

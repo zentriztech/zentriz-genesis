@@ -551,6 +551,56 @@ def invoke_devops(body: dict):
     return _invoke_parametrized(body, devops.get_system_prompt_path, "DEVOPS")
 
 
+# FT-18: /invoke/raw — endpoint usado pelo Cyborg V2 para chamar Bedrock com prompt/user custom.
+# Aceita: {prompt_override, user_message, model_id, model_id_fallback, max_tokens}
+# Retorna: {response: <texto bruto do LLM>}
+@app.post("/invoke/raw")
+def invoke_raw(body: dict):
+    """Chamada Bedrock direta com prompt + user_message customizados (para Cyborg V2).
+
+    NOTA sobre temperature: modelos extended-thinking (Opus 4.7, 4.8, Sonnet 4.5+) exigem
+    temperature=1 (deprecated aceitar outros valores). Modelos anteriores aceitam 0-1.
+    Estratégia: se o modelo é opus-4-7/4-8/sonnet-4-x, força temperature=1. Senão respeita input.
+    """
+    try:
+        from orchestrator.agents.runtime import call_bedrock_direct
+    except ImportError:
+        raise HTTPException(status_code=500, detail="call_bedrock_direct não disponível neste container")
+
+    system_prompt = body.get("prompt_override", "")
+    user_message  = body.get("user_message", "")
+    model_id      = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-opus-4-7")
+    fallback_id   = body.get("model_id_fallback")
+    max_tokens    = int(body.get("max_tokens", 8000))
+    # temperature: modelos extended-thinking exigem 1.0 (deprecated aceitar outros).
+    # Detecta e força 1.0 pra evitar erro Bedrock 400.
+    def _temp_for(model: str) -> float:
+        ml = (model or "").lower()
+        if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")):
+            return 1.0
+        return float(body.get("temperature", 0.2))
+
+    if not system_prompt or not user_message:
+        raise HTTPException(status_code=400, detail="prompt_override + user_message obrigatórios")
+
+    try:
+        resp = call_bedrock_direct(system=system_prompt, user=user_message,
+                                    model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id))
+        return {"response": resp, "model_used": model_id}
+    except Exception as e:
+        logger.warning(f"[/invoke/raw] Principal falhou ({model_id}): {e}")
+        if fallback_id:
+            try:
+                resp = call_bedrock_direct(system=system_prompt, user=user_message,
+                                            model_id=fallback_id, max_tokens=max_tokens,
+                                            temperature=_temp_for(fallback_id))
+                return {"response": resp, "model_used": fallback_id, "fallback": True}
+            except Exception as e2:
+                raise HTTPException(status_code=500,
+                                    detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e} / {e2}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
