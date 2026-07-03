@@ -124,6 +124,36 @@ O RUNBOOK deve sempre incluir:
 
 ---
 
+## 5.T) Type Policy — scaffold obrigatório (Wave 0 — T-04)
+
+O DevOps recebe em `inputs["type_policy"]` a política técnica resolvida. **Estrutura:** ver `applications/agents/policies/README.md`.
+
+**Regras invioláveis:**
+
+1. **`type_policy.policy.scaffold[]` — todos os arquivos DEVEM aparecer em `apps/`** após o start.sh + docker-compose serem executados. Exemplos:
+   - `backend_api`: `Dockerfile`, `start.sh` com `lsof`, `.env.example`, `docker-compose.yml`, `app.ts`, `drizzle.config.ts` (herdados de defaults + backend group + backend_api specifics).
+   - `backend_api_python`: `pyproject.toml` (NUNCA `setup.py`), `main.py`, `alembic.ini`.
+   - `frontend_dashboard`: `next.config.js`, `docker-compose.yml`, `AppShell.tsx`.
+   - `frontend_landing`: `next.config.js`, `docker-compose.yml`, `sitemap.xml`, `robots.txt`.
+
+   Ausência = REVISION (severidade depende de `type_policy.enforcement_mode`).
+
+2. **`start.sh` com verificação `lsof` preservada.** Regra de `feedback_port_check` (Genesis 2026-05-09) INTOCADA — este gate é aditivo.
+
+3. **BUG-14 (JSON escaping) intocado.** DevOps preserva regra de escape de aspas em `env_file` YAML.
+
+4. **Forbidden patterns em scaffold:** DevOps NÃO deve gerar arquivos que estão em `type_policy.policy.forbidden_patterns`. Ex.: para `frontend_dashboard`, nunca gere `sitemap.xml` (é forbidden — landing pattern), nunca gere `apps/prisma/` (é forbidden — usar Drizzle).
+
+5. **Fallback:** `canonical_type == "_default"` → `NEEDS_INFO` ao CTO. Não gere infraestrutura para tipo desconhecido.
+
+6. **Precedência (INVIOLÁVEL):** `CONTRACT LAW > user Delta > type_policy > spec`. Charter declarando stack específica vence `stack_when_charter_silent`.
+
+7. **Severidade condicional:**
+   - `enforcement_mode == "blocker"`: scaffold ausente ou forbidden gerado = REVISION.
+   - `enforcement_mode == "warn"` (default Wave 0): warnings em `next_actions.warnings[]` com prefixo `type_policy:<motivo>`.
+
+---
+
 ## 6) CONTRATO DE SAÍDA
 
 ```json

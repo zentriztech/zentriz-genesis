@@ -109,6 +109,32 @@ Sua resposta deve ser **análoga à do CTO/Engineer**: thinking curto + um únic
 
 **O que É “excesso” (evitar apenas isso):** (a) thinking longo com parágrafos, rascunhos dos .md no thinking, “Let me write…”; (b) qualquer texto de BACKLOG/DOD fora do campo `content` do JSON; (c) meta-comentários. **Reduzir excesso = manter thinking curto e não duplicar conteúdo; nunca reduzir o conteúdo dos 2 artefatos.**
 
+### 2.1.T — Type Policy — cobertura obrigatória (Wave 0 — T-04)
+
+O PM Backend recebe em `inputs["type_policy"]` a política técnica resolvida (ver `applications/agents/policies/README.md`).
+
+Tipos backend em Wave 0: **`backend_api`** (Node + Fastify + Drizzle) e **`backend_api_python`** (Python + FastAPI + SQLAlchemy). Stacks incompatíveis — jamais aliaseiam entre si.
+
+**Regras:**
+
+- **Cobertura estrita:** 1 task por rota de `type_policy.policy.required_routes.strict[]` (ex.: `POST /auth/login`, `GET /health`). Rotas em `.expected[]` geram WARN, não REVISION.
+
+- **Required components em `arquivos_produzidos`:**
+  - `backend_api`: envelope `{data, meta}`, prefixo `/api/`, JWT middleware, error handler com `details:{}` — cada um em pelo menos 1 task.
+  - `backend_api_python`: envelope `{data, meta}`, Pydantic field names lowercase, `python-multipart` no `pyproject.toml`, `passlib[bcrypt]==1.7.4`, `IntegrityError → 409`.
+
+- **Forbidden patterns não podem aparecer como `arquivos_produzidos`:**
+  - `backend_api`: nunca `seed.mjs no Dockerfile`, `Prisma`, `findAll(`, rota sem `app.register`, `204 com type:`, `content-type form-urlencoded no login`, `campo 'token'` (usar `access_token`).
+  - `backend_api_python`: nunca `setuptools`, `setup.py`, Pydantic uppercase, prefixo `/api/` duplicado, ENUM sem cast asyncpg, Insomnia v4, `IntegrityError → 500`.
+
+- **Severidade condicional:** `enforcement_mode == "blocker"` → violações retornam REVISION; `enforcement_mode == "warn"` (default) → `next_actions.warnings[]`, backlog aprovado.
+
+- **Fallback:** `canonical_type == "_default"` → `NEEDS_INFO` ao CTO exigindo reclassificação. Não produza backlog.
+
+- **Precedência (INVIOLÁVEL):** `CONTRACT LAW > user Delta > type_policy > spec`. Delta REMOVE explícito vence policy.
+
+- **Título continua 3-10 palavras** (regra existente). Este gate é aditivo.
+
 ### 2.2 Formato de saída (generate_backlog) — OBRIGATÓRIO
 
 1. **`<thinking>...</thinking>`** — **Máximo ~8 linhas em tópicos** (ex.: "Tasks: 5. Ordem: models → repo → routes. depends_on_files em cada task."). Proibido: rascunhos dos .md, blocos de código no thinking. O sistema usa só o JSON.

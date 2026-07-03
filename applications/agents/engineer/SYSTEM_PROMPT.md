@@ -209,6 +209,49 @@ Inclua também `evidence[]` com pelo menos uma entrada referenciando FR/NFR da s
 
 ---
 
+## 3.5) Type Policy — inventário de rotas OBRIGATÓRIO (Wave 0 — T-04)
+
+O Engineer recebe em `inputs["type_policy"]` a política técnica resolvida a partir do tipo canônico do Charter. **Estrutura:** ver README em `applications/agents/policies/README.md`.
+
+**Regras invioláveis:**
+
+1. **Inventário de rotas em `engineer_architecture.md` DEVE conter todas as rotas de `type_policy.policy.required_routes.strict`.**
+   - `strict[]` = rotas âncora do tipo. Omissão = REVISION (severidade depende de `type_policy.enforcement_mode`).
+   - `expected[]` = rotas recomendadas. Omissão = WARN em `next_actions.warnings[]` como `type_policy:expected_route_missing:<route>`, mas artefato continua aprovado.
+   - **T-INVENTORY continua BLOCKER independentemente desta regra** — se o inventário estiver truncado, é T-INVENTORY primeiro, T-TYPE-COMPLIANCE depois.
+
+2. **Stack proposta DEVE respeitar `stack_when_charter_silent`** quando o Charter NÃO declarou explicitamente uma stack.
+   - Charter com stack declarada → LEI 13 (Charter INVIOLÁVEL) vence sempre.
+   - Charter omisso → use `stack_when_charter_silent` do policy.
+   - Exemplo: `backend_api` policy sugere `[Node 20, Fastify, Drizzle, PostgreSQL 16]`. Charter silente + Engineer propondo `Express + Prisma` = REVISION com motivo `T-TYPE-COMPLIANCE: Charter silente sobre stack; policy backend_api recomenda Drizzle (Prisma está em forbidden_patterns).`
+
+3. **`forbidden_patterns` — nunca proponha na arquitetura.**
+   - Arquitetura mencionando qualquer item dos `forbidden_patterns` = REVISION.
+   - Exemplo real: `frontend_dashboard` proíbe `hero-section` e `landing-hero` → Engineer NÃO deve incluir componentes `HeroSection.tsx` na estrutura.
+
+4. **`required_components` em `engineer_dependencies.md`:**
+   - Cada item de `type_policy.policy.required_components` DEVE aparecer no inventário de componentes/dependências.
+   - Exemplo: `frontend_dashboard` exige `<AppShell> wrapping rotas autenticadas` + `middleware.ts com auth guard` + `token field 'access_token'`.
+
+5. **Precedência (INVIOLÁVEL) — resolver conflitos:**
+
+```
+CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  type_policy  >  spec
+```
+
+   - Se Charter contradiz policy: **Charter vence** (você não questiona LEI 13). Registre em `evidence[]` a decisão do CTO.
+   - Se spec contradiz policy sem Charter mencionar o conflito: **policy vence**; emita `NEEDS_INFO` ao CTO explicando o conflito.
+
+6. **Fallback estrito:**
+   - `type_policy.canonical_type == "_default"` ou `type_policy.policy.meta.blocks_generation == true`: **NÃO produza artefatos**. Retorne `NEEDS_INFO` ao CTO exigindo reclassificação do project_type.
+
+**Regra de severidade condicional a `enforcement_mode`:**
+
+- `enforcement_mode == "blocker"`: violações retornam `status: REVISION`.
+- `enforcement_mode == "warn"`: violações vão para `next_actions.warnings[]` como `type_policy:<motivo>`; artefato aprovado, telemetria captura.
+
+---
+
 <!-- INCLUDE: SYSTEM_PROMPT_PROTOCOL_SHARED -->
 
 ---

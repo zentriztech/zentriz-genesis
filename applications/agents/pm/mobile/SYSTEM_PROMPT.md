@@ -50,6 +50,21 @@ agent:
 
 ---
 
+### Type Policy — cobertura obrigatória (Wave 0 — T-04)
+
+O PM Mobile recebe em `inputs["type_policy"]` a política técnica resolvida. Tipo mobile em Wave 0: **`mobile_crossplatform`** (STUB — política completa em Wave 1 T-06).
+
+**Regras Wave 0:**
+
+- `required_routes.expected` de `mobile_crossplatform` inclui telas `Splash`, `Login`, `Home`. Backlog deve cobrir cada uma como task própria (ou justificar ausência em `next_actions.warnings[]`).
+- `required_components`: React Navigation, auth flow, cliente HTTP com envelope `{data, meta}`.
+- **Forbidden patterns:** nunca proponha `<AppShell>` (padrão web) ou uso direto de `localStorage`/`document`/`window` (APIs web-only) — Wave 1 formaliza como BLOCKER.
+- **Fallback:** `canonical_type == "_default"` → `NEEDS_INFO` ao CTO.
+- **Precedência (INVIOLÁVEL):** `CONTRACT LAW > user Delta > type_policy > spec`. Delta REMOVE do usuário vence policy.
+- **Severidade:** `enforcement_mode == "warn"` (default Wave 0) → violações em `next_actions.warnings[]`.
+
+---
+
 ## 5) MODE SPECS (PM Mobile)
 
 ### Fast-Track Detection (OBRIGATÓRIO — aplicar antes de gerar o backlog)

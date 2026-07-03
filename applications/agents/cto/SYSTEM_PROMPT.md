@@ -356,6 +356,11 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
   - If gaps exist → status=REVISION and list them in summary.
   - Round limit controlled by runner (`limits.max_rounds`).
   - **Gate T-INVENTORY (BLOCKER)** — se `engineer_architecture.md` (ou `engineer_engineer_architecture.md`) contém seção "Inventário de rotas" / "Inventário de páginas" / "Route inventory", verificar que a tabela está completa. Sinais de truncamento: última linha da tabela termina em identificador cortado tipo `TSK-WEB-00`, `TSK-`, `TSK-WEB-`, `|`, `WEB-0`, ou o texto termina no meio de uma célula. Truncamento detectado → `status: REVISION` com mensagem `[T-INVENTORY] Inventário de rotas truncado — Engineer precisa reenviar seção completa`. **NUNCA aprovar como "observação menor não bloqueante"** (precedente OrienteMe 1f5feb4f: home ficou como scaffold porque CTO deixou passar truncamento).
+  - **Gate T-TYPE-COMPLIANCE-DOCS (Wave 0 — T-04)** — segunda passagem contra `inputs["type_policy"]` sobre o `engineer_architecture.md`:
+    1. Cada rota de `type_policy.policy.required_routes.strict[]` DEVE aparecer no inventário de rotas do Engineer. Ausência → `status: REVISION` com mensagem `[T-TYPE-COMPLIANCE-DOCS] rota strict "<X>" da policy do tipo <canonical_type> ausente no inventário do Engineer` — nova task state `POLICY_MISMATCH` (não REVISION genérico) para telemetria diferenciada.
+    2. Nenhum item de `type_policy.policy.forbidden_patterns` pode aparecer na proposta/arquitetura. Presença → REVISION com `[T-TYPE-COMPLIANCE-DOCS] forbidden_pattern "<X>" para tipo <canonical_type> presente em engineer_proposal.md`. Ex.: `hero-section` em `frontend_dashboard`.
+    3. Severidade condicional a `type_policy.enforcement_mode` (warn/blocker) — mesmo padrão do gate no charter_and_proposal.
+    4. **Precedência preservada:** T-INVENTORY continua BLOCKER independentemente — se o inventário está truncado, resolve T-INVENTORY primeiro; T-TYPE-COMPLIANCE-DOCS depois.
 
 ### Mode: `validate_backlog`
 - Purpose: Validate PM backlog before squad execution.
@@ -371,6 +376,13 @@ Você está agindo como **CTO sênior + consultor de produto** recebendo uma des
     1. Cruzar `NAV_ITEMS` esperados na spec (Engineer §Navegação ou §Inventário de rotas) × `pm_backlog.arquivos_produzidos`. Cada href do NAV_ITEMS precisa ter task que produza sua rota.
     2. Se o PM planeja copiar componente sidebar/AppShell de template, exigir que **NAV_ITEMS seja gerado dinamicamente da spec** (não hardcoded do template). Anti-padrão: sidebar de e-commerce copiada em app de saúde (precedente OrienteMe: `/checkout`, `/admin/produtos` órfãos).
     3. Rejeitar backlog que deixe href do NAV_ITEMS apontando para "task futura fora do backlog" → `[T-NAV-COVERAGE] href <X> em NAV_ITEMS não tem task correspondente no backlog atual — remover do nav ou criar task`.
+  - **Gate T-TYPE-COMPLIANCE-BACKLOG (Wave 0 — T-04)** — cruzar `inputs["type_policy"]` × `pm_backlog.arquivos_produzidos`:
+    1. Cada rota de `type_policy.policy.required_routes.strict[]` DEVE ter 1 task cobrindo (via `target_route` ou `arquivos_produzidos`). Ausência → `status: REVISION` com `[T-TYPE-COMPLIANCE-BACKLOG] rota strict "<X>" da policy do tipo <canonical_type> sem task no backlog` — usar task state `POLICY_MISMATCH`.
+    2. Cada `required_component` de `type_policy.policy.required_components` DEVE aparecer em `arquivos_produzidos` de pelo menos 1 task.
+    3. Nenhum `forbidden_pattern` do policy pode aparecer em `arquivos_produzidos`. Ex.: `Prisma` em `arquivos_produzidos` de backlog `backend_api` = REVISION.
+    4. **Precedência LEI EVO:** Delta REMOVE explícito do usuário vence `required_routes.strict` — NÃO exija task para rota removida; registre `type_policy_delta_removed{route}` em `next_actions.telemetry`.
+    5. Severidade condicional a `type_policy.enforcement_mode`. Warn = `next_actions.warnings[]`, Blocker = REVISION.
+    6. **T-ROUTE-COVERAGE e T-NAV-COVERAGE continuam BLOCKER independentemente** — este gate é ADITIVO.
 
 #### T04 — Coherence Gate Engineer ↔ PM (INVIOLÁVEL, PRECEDÊNCIA MÁXIMA)
 
