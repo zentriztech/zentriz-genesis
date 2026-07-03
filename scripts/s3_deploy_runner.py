@@ -89,8 +89,18 @@ def run_s3_deploy(payload: dict) -> dict:
 
     aws_env = _aws_env(aws_key, aws_secret, aws_region)
 
+    # FT-17: fonte do build = repositório GitHub do projeto.
+    git_clone_url = payload.get("git_clone_url", "")
+    git_branch = payload.get("git_branch", "main")
+    git_token = payload.get("git_installation_token", "")
+    git_repo_full_name = payload.get("git_repo_full_name", "")
+    if not git_clone_url or not git_token:
+        raise S3DeployError(
+            "REPO_REQUIRED",
+            "Deploy S3 exige repositório GitHub configurado. Backend deveria ter validado antes.",
+        )
+
     build_dir = Path(tempfile.gettempdir()) / f"build-{deployment_id}"
-    src_apps = Path(project_dir_host) / "apps"
 
     # Estado para restauração no finally
     renamed_middleware: list[tuple[Path, Path]] = []
@@ -98,13 +108,28 @@ def run_s3_deploy(payload: dict) -> dict:
     try:
         _callback(api_url, api_token, project_id, deployment_id, {"progress": "installing"})
 
-        # 1. Cópia descartável
-        log.info(f"[s3-deploy] {deployment_id}: copiando apps → {build_dir}")
+        # 1. Clone do repositório GitHub (fonte de verdade).
+        log.info(f"[s3-deploy] {deployment_id}: clone {git_repo_full_name}@{git_branch}")
         if build_dir.exists():
             shutil.rmtree(build_dir, ignore_errors=True)
         build_dir.mkdir(parents=True, exist_ok=True)
-        build_apps = build_dir / "apps"
-        _copy_tree(src_apps, build_apps)
+        clone_dir = build_dir / "repo"
+        _git_clone(git_clone_url, git_token, git_branch, clone_dir, deployment_id)
+
+        # Detecta onde está o app buildável. Convenção: apps/ (usada pelo Genesis) OU raiz.
+        candidates = [clone_dir / "apps", clone_dir]
+        build_apps = None
+        for c in candidates:
+            if (c / "package.json").exists() or (c / "index.html").exists():
+                build_apps = c
+                break
+        if build_apps is None:
+            raise S3DeployError(
+                "REPO_STRUCTURE_UNKNOWN",
+                "Repositório clonado não contém apps/package.json nem index.html na raiz.",
+                {"repo": git_repo_full_name, "branch": git_branch},
+            )
+        log.info(f"[s3-deploy] {deployment_id}: buildando em {build_apps.relative_to(build_dir)}")
 
         # 2. Sanitize
         for junk in [".env.local", ".env", ".git", ".next", "node_modules", "dist", "build", "out"]:
@@ -255,6 +280,42 @@ def _copy_tree(src: Path, dst: Path) -> None:
     def _ignore(_dir, names):
         return {n for n in names if n in (".git", "node_modules", ".next", "dist", "build", "out", ".turbo")}
     shutil.copytree(src, dst, ignore=_ignore, dirs_exist_ok=True)
+
+
+def _git_clone(clone_url: str, token: str, branch: str, dst: Path, deployment_id: str) -> None:
+    """Clona um repo GitHub com token de instalação via HTTPS.
+
+    Não persiste o token em disco (usa `git -c http.extraheader`).
+    Timeout 120s, depth=1 (só o snapshot da branch).
+    """
+    if not clone_url.startswith("https://github.com/"):
+        raise S3DeployError("CLONE_URL_INVALID", f"clone_url deve ser https://github.com/... : {clone_url}")
+    # `AUTHORIZATION: basic ...` funciona para installation tokens do GitHub App.
+    # Formato aceito pelo GitHub: x-access-token:<TOKEN>@github.com — usamos header para evitar leak no ps aux.
+    auth_header = f"AUTHORIZATION: basic {_b64('x-access-token:' + token)}"
+    cmd = [
+        "git",
+        "-c", f"http.https://github.com/.extraheader={auth_header}",
+        "clone", "--depth", "1", "--branch", branch, clone_url, str(dst),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise S3DeployError("CLONE_TIMEOUT", "git clone excedeu 180s")
+    if r.returncode != 0:
+        # Sanitiza stderr — nunca vaza o token
+        stderr = (r.stderr or "").replace(token, "<REDACTED>")[:400]
+        raise S3DeployError(
+            "CLONE_FAILED",
+            f"git clone falhou (exit {r.returncode}): {stderr.strip()}",
+            {"branch": branch},
+        )
+    log.info(f"[s3-deploy] {deployment_id}: clone concluído em {dst}")
+
+
+def _b64(s: str) -> str:
+    import base64
+    return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
 def _apply_patch(apps_dir: Path, kind: str) -> None:

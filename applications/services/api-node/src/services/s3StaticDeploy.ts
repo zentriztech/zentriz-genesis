@@ -10,6 +10,7 @@
 import { pool } from "../db/client.js";
 import { detectStaticProject, type DetectionResult } from "./staticDetector.js";
 import { generateBucketName, isS3Configured } from "./s3.js";
+import { getInstallationTokenForClone } from "./github.js";
 import { join } from "node:path";
 
 export interface S3StaticDeployResult {
@@ -58,10 +59,47 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     };
   }
 
-  // Detectar tipo do projeto
-  // NOTE: no api container, PROJECT_FILES_ROOT = /project-files (bind mount).
-  //       No host, HOST_PROJECT_FILES_ROOT = /opt/genesis-files.
-  //       O staticDetector roda dentro do container api → usa /project-files.
+  // FT-17: fonte de verdade = repositório GitHub do projeto.
+  // Sem repo → 400. Precisa do clone_url, default_branch e installation_id (tenant).
+  const repoQ = await pool.query<{
+    clone_url: string | null;
+    default_branch: string | null;
+    repo_full_name: string;
+    installation_id: number | null;
+  }>(
+    `SELECT r.clone_url, r.default_branch, r.repo_full_name,
+            gi.installation_id
+       FROM project_github_repos r
+       JOIN projects p ON p.id = r.project_id
+       LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+      WHERE r.project_id = $1
+      LIMIT 1`,
+    [req.projectId],
+  );
+  if (repoQ.rows.length === 0 || !repoQ.rows[0].clone_url) {
+    return {
+      ok: false,
+      code: "REPO_REQUIRED",
+      message:
+        "Este projeto não possui repositório GitHub. Clique em Criar Repositório antes de publicar em cloud.",
+    };
+  }
+  const repoRow = repoQ.rows[0];
+  const cloneUrl = repoRow.clone_url as string;
+  // FT-17: branch de build é a branch de trabalho ativa do Genesis (dev).
+  // main é reservada para releases; dev tem o código atual que o pipeline empurra.
+  const branch = "dev";
+  if (!repoRow.installation_id) {
+    return {
+      ok: false,
+      code: "GITHUB_INSTALLATION_MISSING",
+      message:
+        "Tenant não possui GitHub App instalado — não é possível autenticar o clone. Configure GitHub App do tenant.",
+    };
+  }
+
+  // Detectar tipo do projeto — usa o snapshot local /project-files/<pid>/apps
+  // apenas como HINT. A fonte de verdade para o BUILD é o clone do GitHub.
   const projectDir = join(PROJECT_FILES_ROOT(), req.projectId);
   const appsDir = join(projectDir, "apps");
 
@@ -117,6 +155,14 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     bucketName = generateBucketName(req.projectId);
     const expiresAt = new Date(Date.now() + ttlDays * 86400_000);
 
+    // FT-18 fix (2026-07-03): quando Cyborg V2/V3 chama este endpoint via GENESIS_API_TOKEN
+    // (JWT de serviço), o `user.id` no controller é a string "runner-service" (não UUID).
+    // Postgres rejeita com: `invalid input syntax for type uuid: "runner-service"`.
+    // Fix: validar formato UUID; se não for válido, gravar NULL (coluna aceita) — indica
+    // consentimento vindo de agente autônomo, auditável via `evidence` do /accept.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const consentedByValue = UUID_RE.test(req.consentedByUserId) ? req.consentedByUserId : null;
+
     // INSERT com UNIQUE INDEX parcial protege contra race
     const insertRes = await client.query<{ id: string }>(
       `INSERT INTO ephemeral_deployments
@@ -133,7 +179,7 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
         expiresAt,
         bucketName,
         detection.type,
-        req.consentedByUserId,
+        consentedByValue,
       ],
     );
     deploymentId = insertRes.rows[0].id;
@@ -152,6 +198,22 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     client.release();
   }
 
+  // FT-17: gerar installation token curto (~1h) para o runner clonar via HTTPS.
+  let installationToken: string;
+  try {
+    installationToken = await getInstallationTokenForClone(repoRow.installation_id);
+  } catch (err) {
+    await pool.query(
+      `UPDATE ephemeral_deployments SET status='failed', error_msg=$1, updated_at=now() WHERE id=$2`,
+      [`installation token error: ${err instanceof Error ? err.message : String(err)}`, deploymentId],
+    );
+    return {
+      ok: false,
+      code: "GITHUB_TOKEN_ERROR",
+      message: "Não foi possível gerar token de acesso ao GitHub para clonar o repositório.",
+    };
+  }
+
   // Dispara full-test-server (assíncrono — não bloqueia)
   const hostProjectDir = join(HOST_PROJECT_FILES_ROOT(), req.projectId);
   const payload = {
@@ -163,6 +225,11 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     deployment_type: detection.type,
     ttl_days: ttlDays,
     warnings: detection.warnings,
+    // FT-17: fonte do build = clone do repo GitHub
+    git_clone_url: cloneUrl,
+    git_branch: branch,
+    git_installation_token: installationToken,
+    git_repo_full_name: repoRow.repo_full_name,
     // Callback vem do full-test-server (host, fora do Docker network) — precisa ser URL alcançável do host.
     // Prioridade: GENESIS_PUBLIC_URL (produção HTTPS) > CALLBACK_BASE_URL > host.docker.internal em dev.
     genesis_api_url:

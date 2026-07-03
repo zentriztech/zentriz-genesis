@@ -123,6 +123,39 @@ async function getOctokitForInstallation(installationId: number): Promise<Octoki
 }
 
 /**
+ * FT-17: Returns a short-lived installation token (raw string) usable for
+ * `git clone https://x-access-token:<TOKEN>@github.com/...`.
+ * Priority mirrors getOctokitForInstallation: tenant App → global App → PAT.
+ * Token lifetime ~1h — safe for one clone operation.
+ */
+export async function getInstallationTokenForClone(installationId: number): Promise<string> {
+  const tenantCfg = await _getTenantAppConfig(installationId);
+  if (tenantCfg?.appId && tenantCfg?.privateKey) {
+    const auth = createAppAuth({
+      appId:        tenantCfg.appId,
+      privateKey:   tenantCfg.privateKey,
+      clientId:     tenantCfg.clientId || undefined,
+      clientSecret: tenantCfg.clientSecret || undefined,
+    });
+    const { token } = await auth({ type: "installation", installationId });
+    return token;
+  }
+  if (isGlobalAppConfigured()) {
+    const auth = createAppAuth({
+      appId:        GITHUB_APP_ID,
+      privateKey:   _getGlobalPrivateKey(),
+      clientId:     GITHUB_APP_CLIENT_ID || undefined,
+      clientSecret: GITHUB_APP_CLIENT_SECRET || undefined,
+    });
+    const { token } = await auth({ type: "installation", installationId });
+    return token;
+  }
+  const pat = process.env.GITHUB_TOKEN;
+  if (!pat) throw new Error("No GitHub credentials for clone token.");
+  return pat;
+}
+
+/**
  * FT-12: Fetches metadata about an installation directly from GitHub.
  * Accepts optional tenant-level app credentials; falls back to global env App.
  */
@@ -328,8 +361,24 @@ export async function pushProjectFiles(
 
   const octokit = await getOctokitForInstallation(installationId);
 
-  // Get current branch HEAD
-  const { data: refData } = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+  // Get current branch HEAD — mesmo problema de propagação eventual do GitHub
+  // após createRef: retry com backoff antes de desistir.
+  let refData: Awaited<ReturnType<typeof octokit.git.getRef>>["data"] | null = null;
+  const maxAttempts = 5;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const r = await octokit.git.getRef({ owner, repo, ref: `heads/${branch}` });
+      refData = r.data;
+      break;
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status;
+      if (status !== 404 || attempt === maxAttempts - 1) throw err;
+      const backoffMs = 1000 * Math.pow(2, attempt);
+      console.log(`[GitHub] push: heads/${branch} 404 — retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxAttempts})`);
+      await new Promise(r => setTimeout(r, backoffMs));
+    }
+  }
+  if (!refData) throw new Error(`branch heads/${branch} not found after ${maxAttempts} attempts`);
   let currentSha = refData.object.sha;
 
   // Process in batches
@@ -390,8 +439,24 @@ export async function createBranchIfNotExists(
   } catch (err: unknown) {
     if ((err as { status?: number }).status !== 404) throw err;
   }
-  // Get SHA of source branch
-  const { data: sourceRef } = await octokit.git.getRef({ owner, repo, ref: `heads/${sourceBranch}` });
+  // Get SHA of source branch — pode dar 404 se GitHub ainda não terminou auto_init.
+  // Retry com backoff exponencial: 1s, 2s, 4s, 8s, 16s (total ~30s).
+  let sourceRef: Awaited<ReturnType<typeof octokit.git.getRef>>["data"] | null = null;
+  const maxAttempts = 5;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const r = await octokit.git.getRef({ owner, repo, ref: `heads/${sourceBranch}` });
+      sourceRef = r.data;
+      break;
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status;
+      if (status !== 404 || attempt === maxAttempts - 1) throw err;
+      const backoffMs = 1000 * Math.pow(2, attempt);
+      console.log(`[GitHub] source branch heads/${sourceBranch} 404 — retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxAttempts})`);
+      await new Promise(r => setTimeout(r, backoffMs));
+    }
+  }
+  if (!sourceRef) throw new Error(`source branch heads/${sourceBranch} not found after ${maxAttempts} attempts`);
   await octokit.git.createRef({
     owner, repo,
     ref: `refs/heads/${branch}`,
