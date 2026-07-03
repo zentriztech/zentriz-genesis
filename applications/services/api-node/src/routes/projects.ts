@@ -385,6 +385,36 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // T-18: PATCH /api/projects/:id/extra — merge shallow no campo JSONB `extra` (admin-only).
+  // Uso: backfill de policies (project_type migration), enrichment de tenant/prod, telemetria.
+  // Body: {[key: string]: JSON scalar/object/array} — merge com COALESCE(extra,'{}') || $patch::jsonb
+  app.patch<{
+    Params: { id: string };
+    Body: Record<string, unknown>;
+  }>("/api/projects/:id/extra", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Apenas zentriz_admin" });
+    }
+    const { id } = request.params;
+    const patch = request.body ?? {};
+    if (typeof patch !== "object" || Array.isArray(patch) || Object.keys(patch).length === 0) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "Body deve ser objeto JSON não vazio" });
+    }
+    const client = await pool.connect();
+    try {
+      const check = await client.query("SELECT id FROM projects WHERE id = $1", [id]);
+      if (check.rows.length === 0) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      await client.query(
+        `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb, updated_at = now() WHERE id = $2`,
+        [JSON.stringify(patch), id]
+      );
+      return reply.send({ ok: true, patched_keys: Object.keys(patch) });
+    } finally {
+      client.release();
+    }
+  });
+
   // PATCH /api/projects/:id/tasks/:taskId — atualizar uma task (Monitor Loop após cada agente)
   app.patch<{
     Params: { id: string; taskId: string };
