@@ -569,7 +569,7 @@ def invoke_raw(body: dict):
 
     system_prompt = body.get("prompt_override", "")
     user_message  = body.get("user_message", "")
-    model_id      = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-opus-4-7")
+    model_id      = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-opus-4-8")
     fallback_id   = body.get("model_id_fallback")
     max_tokens    = int(body.get("max_tokens", 8000))
     # temperature: modelos extended-thinking exigem 1.0 (deprecated aceitar outros).

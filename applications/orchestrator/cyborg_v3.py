@@ -45,7 +45,7 @@ FTS_URL           = os.environ.get("FULL_TEST_SERVER_URL", "http://host.docker.i
 API_BASE_URL      = os.environ.get("API_BASE_URL", "http://api:3000").rstrip("/")
 API_TOKEN         = os.environ.get("GENESIS_API_TOKEN", "")
 V3_TIMEOUT        = int(os.environ.get("CYBORG_V3_TIMEOUT_SEC", "3600"))
-V3_MODEL          = os.environ.get("CYBORG_V3_MODEL", "us.anthropic.claude-opus-4-7")
+V3_MODEL          = os.environ.get("CYBORG_V3_MODEL", "us.anthropic.claude-opus-4-8")
 ANALYSIS_TIMEOUT  = int(os.environ.get("CYBORG_ANALYSIS_TIMEOUT_SEC", "180"))
 
 

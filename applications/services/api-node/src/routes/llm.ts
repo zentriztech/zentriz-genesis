@@ -177,9 +177,9 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
         slots,
         system_default: {
           provider: process.env.GENESIS_LLM_PROVIDER ?? "bedrock",
-          model_id: process.env.CLAUDE_MODEL ?? "us.anthropic.claude-sonnet-4-6",
-          cyborg_model_id: zentrizDefaults.cyborg_model_id ?? "us.anthropic.claude-opus-4-7",
-          cyborg_model_id_fallback: zentrizDefaults.cyborg_model_id_fallback ?? "us.anthropic.claude-sonnet-4-6",
+          model_id: process.env.CLAUDE_MODEL ?? "us.anthropic.claude-opus-4-8",
+          cyborg_model_id: zentrizDefaults.cyborg_model_id ?? "us.anthropic.claude-opus-4-8",
+          cyborg_model_id_fallback: zentrizDefaults.cyborg_model_id_fallback ?? "us.anthropic.claude-opus-4-7",
         },
       });
     } finally { client.release(); }

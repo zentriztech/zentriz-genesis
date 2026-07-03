@@ -75,11 +75,15 @@ const PROVIDER_META: Record<Provider, {
   fields: { key: string; label: string; placeholder: string; secret?: boolean }[];
 }> = {
   bedrock: {
-    // Modelos Bedrock validados via /invoke/raw em 2026-07-02 no tenant Zentriz.
-    // Modelos que retornam "model identifier invalid" ou "not authorized" foram removidos.
-    // Se novos modelos forem liberados, adicionar após teste real.
+    // Modelos Bedrock validados via /invoke/raw em 2026-07-02 e opus-4-8 validado em 2026-07-03
+    // no tenant Zentriz. Modelos que retornam "model identifier invalid" ou "not authorized"
+    // foram removidos. Se novos modelos forem liberados, adicionar após teste real.
     label: "AWS Bedrock", icon: "☁️",
-    models: ["us.anthropic.claude-opus-4-7", "us.anthropic.claude-sonnet-4-6"],
+    models: [
+      "us.anthropic.claude-opus-4-8",
+      "us.anthropic.claude-opus-4-7",
+      "us.anthropic.claude-sonnet-4-6",
+    ],
     fields: [
       { key: "aws_access_key_id",     label: "AWS Access Key ID",     placeholder: "AKIA...",     secret: false },
       { key: "aws_secret_access_key", label: "AWS Secret Access Key", placeholder: "wJalrXUt...", secret: true  },
@@ -117,6 +121,7 @@ const PROVIDERS = Object.keys(PROVIDER_META) as Provider[];
 const MODEL_PROVIDER_MAP: Record<string, Provider> = {
   "us.anthropic.claude-sonnet-4-6":           "bedrock",
   "us.anthropic.claude-opus-4-7":             "bedrock",
+  "us.anthropic.claude-opus-4-8":             "bedrock",
   "claude-opus-4-7":                          "anthropic",
   "claude-sonnet-4-6":                        "anthropic",
   "claude-haiku-4-5-20251001":                "anthropic",
