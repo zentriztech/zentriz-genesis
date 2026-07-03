@@ -4,13 +4,114 @@ Garante que cada agente receba os inputs corretos: spec_raw, product_spec,
 engineer_proposal, charter, backlog, artefatos já produzidos.
 LEI 11: save_checkpoint / load_checkpoint para pipeline resumível.
 """
+from __future__ import annotations   # T-02: permite `str | None` mesmo em Python 3.9 (testes locais)
+
+import functools
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ── Type Policy (T-02) ────────────────────────────────────────────────────────
+# Fonte: applications/agents/policies/project_types.yaml
+# Consumidores: build_inputs_for_cto/engineer/pm/dev via inputs["type_policy"].
+# Precedência: CONTRACT LAW > user Delta > type_policy > spec (ver policies/README.md §3).
+
+_POLICY_PATH = Path(__file__).resolve().parent.parent / "agents" / "policies" / "project_types.yaml"
+
+# EMBEDDED_DEFAULT: fallback quando YAML não existe (dev/staging antes de commit).
+# NUNCA usar como política real — dispara REVISION obrigatória (blocks_generation=True).
+_EMBEDDED_DEFAULT_POLICY = {
+    "version": "0.0.0-fallback",
+    "type_aliases": {},
+    "defaults": {},
+    "groups": {},
+    "types": {
+        "_default": {
+            "inherit_from": None,
+            "labels": {"pt_br": "🚫 Fallback embutido", "en": "Embedded fallback"},
+            "scaffold": [],
+            "required_routes": {"strict": [], "expected": []},
+            "required_components": [],
+            "forbidden_patterns": ["*"],
+            "fingerprint": {
+                "required_tokens": {"strong": [], "soft": []},
+                "forbidden_tokens": [],
+                "synonyms_pt_br": {},
+            },
+            "stack_when_charter_silent": [],
+            "smell_signals": [],
+            "meta": {"requires_runbook": False, "warn_on_default": True, "blocks_generation": True},
+        },
+    },
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _load_type_policy() -> dict:
+    """
+    Carrega applications/agents/policies/project_types.yaml uma única vez por processo.
+    YAML ausente → EMBEDDED_DEFAULT + log ERROR (NÃO crasha o pipeline).
+    """
+    try:
+        import yaml  # pyyaml — dep já usada no runner
+    except ImportError:
+        logger.error("[type_policy] pyyaml não instalado; usando EMBEDDED_DEFAULT")
+        return _EMBEDDED_DEFAULT_POLICY
+    if not _POLICY_PATH.exists():
+        logger.error("[type_policy] YAML não encontrado em %s; usando EMBEDDED_DEFAULT", _POLICY_PATH)
+        return _EMBEDDED_DEFAULT_POLICY
+    try:
+        with open(_POLICY_PATH, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        # Sanity mínima
+        if "types" not in data or "_default" not in data.get("types", {}):
+            logger.error("[type_policy] YAML sem 'types._default'; usando EMBEDDED_DEFAULT")
+            return _EMBEDDED_DEFAULT_POLICY
+        return data
+    except Exception as e:  # noqa: BLE001
+        logger.error("[type_policy] falha ao carregar %s: %s; usando EMBEDDED_DEFAULT", _POLICY_PATH, e)
+        return _EMBEDDED_DEFAULT_POLICY
+
+
+def _resolve_type(raw_type: Optional[str]) -> tuple:
+    """
+    Aplica type_aliases e retorna (canonical_type_id, policy_dict).
+    - raw vazio ou desconhecido → ("_default", policy_do__default).
+    - raw em aliases → resolve para canônico.
+    - raw canônico direto → retorna como está.
+    """
+    policy = _load_type_policy()
+    raw = (raw_type or "").strip()
+    if not raw:
+        return "_default", policy["types"]["_default"]
+    canonical = policy.get("type_aliases", {}).get(raw, raw)
+    types = policy.get("types", {})
+    if canonical in types:
+        return canonical, types[canonical]
+    logger.warning("[type_policy] tipo '%s' desconhecido (nem canônico nem alias); resolvido para _default", raw)
+    return "_default", types["_default"]
+
+
+def _build_type_policy_input(raw_type: Optional[str]) -> dict:
+    """
+    Monta o payload injetado como inputs["type_policy"] nos prompts dos agentes.
+    Inclui enforcement_mode (T-02f): 'warn' (default) ou 'blocker'.
+    """
+    canonical, pol = _resolve_type(raw_type)
+    enforcement = "blocker" if os.environ.get("POLICY_ENFORCEMENT_ENABLED", "false").lower() == "true" else "warn"
+    return {
+        "canonical_type": canonical,
+        "resolved_from": raw_type or "",
+        "enforcement_mode": enforcement,
+        "policy_version": _load_type_policy().get("version", "unknown"),
+        "policy": pol,
+    }
 
 
 class PipelineContext:
@@ -87,6 +188,8 @@ class PipelineContext:
             inputs["spec_template"] = self.product_spec_template
         if self.project_type:
             inputs["project_type"] = self.project_type
+        # T-02: injetar policy resolvida (canônico + tipo → política técnica + enforcement_mode)
+        inputs["type_policy"] = _build_type_policy_input(self.project_type)
         if self.linked_projects_context:
             inputs["linked_projects_context"] = self.linked_projects_context
         if self.engineer_proposal:
@@ -103,6 +206,10 @@ class PipelineContext:
             "product_spec": self.product_spec,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        if self.project_type:
+            inputs["project_type"] = self.project_type
+        # T-02: policy é obrigatória — Engineer deriva arquitetura obedecendo required_routes.strict
+        inputs["type_policy"] = _build_type_policy_input(self.project_type)
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
         return inputs
@@ -115,6 +222,10 @@ class PipelineContext:
             "module": self.current_module,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        if self.project_type:
+            inputs["project_type"] = self.project_type
+        # T-02: policy — PM seed backlog cobrindo required_routes.strict + required_components
+        inputs["type_policy"] = _build_type_policy_input(self.project_type)
         if self.engineer_proposal:
             inputs["engineer_proposal"] = self.engineer_proposal
         if cto_questionamentos:
@@ -139,6 +250,11 @@ class PipelineContext:
             "backlog_summary": self.backlog,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        if self.project_type:
+            inputs["project_type"] = self.project_type
+        # T-02: policy — Wave 1 (T-07) codifica precedência nos Dev prompts;
+        # Wave 0 apenas transporta o payload para não retrabalhar depois.
+        inputs["type_policy"] = _build_type_policy_input(self.project_type)
         if code_refs:
             inputs["code_refs"] = code_refs
         # Contexto de projetos linkados — Dev precisa para saber endpoints, schemas e autenticação do backend

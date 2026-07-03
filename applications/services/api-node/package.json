@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "prebuild": "python3 ../../../scripts/generate_policies_json.py --check || python3 ../../../scripts/generate_policies_json.py",
     "build": "tsc && cp src/db/schema.sql dist/db/schema.sql",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",

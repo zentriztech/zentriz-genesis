@@ -1,0 +1,502 @@
+{
+  "defaults": {
+    "fingerprint": {
+      "forbidden_tokens": [],
+      "required_tokens": [],
+      "synonyms_pt_br": {}
+    },
+    "forbidden_patterns": [],
+    "meta": {
+      "blocks_generation": false,
+      "requires_runbook": false,
+      "warn_on_default": false
+    },
+    "required_components": [],
+    "required_routes": {
+      "expected": [],
+      "strict": []
+    },
+    "scaffold": [
+      "Dockerfile",
+      "start.sh",
+      ".env.example",
+      "README.md"
+    ],
+    "smell_signals": []
+  },
+  "groups": {
+    "backend": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "hero-section",
+          "landing-hero",
+          "AppShell"
+        ]
+      },
+      "required_routes": {
+        "strict": [
+          "GET /health"
+        ]
+      },
+      "scaffold": [
+        "docker-compose.yml"
+      ]
+    },
+    "bot": {
+      "scaffold": [
+        "Dockerfile"
+      ]
+    },
+    "frontend": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "Prisma"
+        ]
+      },
+      "scaffold": [
+        "next.config.js",
+        "docker-compose.yml"
+      ]
+    },
+    "fullstack": {
+      "scaffold": [
+        "docker-compose.yml"
+      ]
+    },
+    "mobile": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "localStorage",
+          "AppShell"
+        ]
+      },
+      "scaffold": [
+        "app.json",
+        "App.tsx"
+      ]
+    }
+  },
+  "type_aliases": {
+    "backend_api_node": "backend_api",
+    "frontend_web": "frontend_dashboard",
+    "frontend_webapp": "frontend_dashboard",
+    "landing_page": "frontend_landing",
+    "mobile_android": "mobile_crossplatform",
+    "mobile_app": "mobile_crossplatform",
+    "mobile_ios": "mobile_crossplatform",
+    "static_site": "frontend_landing",
+    "web_app": "frontend_dashboard"
+  },
+  "types": {
+    "_default": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [],
+          "strong": []
+        }
+      },
+      "forbidden_patterns": [
+        "*"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "No canonical type",
+        "pt_br": "🚫 Sem tipo canônico"
+      },
+      "meta": {
+        "blocks_generation": true,
+        "requires_runbook": false,
+        "warn_on_default": true
+      },
+      "required_components": [],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [],
+      "stack_when_charter_silent": []
+    },
+    "backend_api": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "prisma",
+          "next.config",
+          "AppShell"
+        ],
+        "required_tokens": {
+          "soft": [
+            "helmet",
+            "cors"
+          ],
+          "strong": [
+            "fastify",
+            "drizzle",
+            "/auth/login"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "Prisma",
+        "seed.mjs no Dockerfile",
+        "findAll(",
+        "rota sem app.register",
+        "204 com type:",
+        "details omitido no errSchema",
+        "migrations vazias",
+        "content-type form-urlencoded no login",
+        "campo 'token' em vez de 'access_token'"
+      ],
+      "inherit_from": "backend",
+      "labels": {
+        "en": "REST API (Node)",
+        "pt_br": "🔌 API REST (Node)"
+      },
+      "required_components": [
+        "envelope {data, meta}",
+        "prefixo /api/",
+        "JWT middleware",
+        "error handler com details:{}"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /api/<recurso>"
+        ],
+        "strict": [
+          "POST /auth/login",
+          "GET /health"
+        ]
+      },
+      "scaffold": [
+        "app.ts",
+        "drizzle.config.ts"
+      ],
+      "smell_signals": [
+        "seed.mjs referenciado no Dockerfile CMD",
+        "rotas criadas em arquivos mas sem app.register no app.ts",
+        "prefixo duplicado ex /api/api/orders"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20",
+        "Fastify",
+        "Drizzle ORM",
+        "PostgreSQL 16"
+      ]
+    },
+    "backend_api_python": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "setuptools",
+          "setup.py",
+          "AppShell",
+          "next.config"
+        ],
+        "required_tokens": {
+          "soft": [
+            "pydantic",
+            "uvicorn"
+          ],
+          "strong": [
+            "fastapi",
+            "sqlalchemy",
+            "alembic"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "setuptools no pyproject",
+        "Pydantic field UpperCase",
+        "prefixo /api/ duplicado no router",
+        "ENUM asyncpg sem cast explícito",
+        "python-multipart ausente",
+        "passlib bcrypt sem pin 1.7.4",
+        "Insomnia format v4",
+        "IntegrityError → 500",
+        "Pydantic v1 style Config"
+      ],
+      "inherit_from": "backend",
+      "labels": {
+        "en": "REST API (Python)",
+        "pt_br": "🐍 API REST (Python)"
+      },
+      "required_components": [
+        "envelope {data, meta}",
+        "Pydantic field names lowercase",
+        "python-multipart no pyproject",
+        "passlib[bcrypt]==1.7.4",
+        "IntegrityError → 409"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /api/<recurso>"
+        ],
+        "strict": [
+          "POST /auth/login",
+          "GET /health"
+        ]
+      },
+      "scaffold": [
+        "pyproject.toml",
+        "main.py",
+        "alembic.ini"
+      ],
+      "smell_signals": [
+        "arquivo setup.py em vez de pyproject.toml",
+        "field ClienteId com uppercase (Pydantic quebra em snake_case)",
+        "form POST sem python-multipart instalado"
+      ],
+      "stack_when_charter_silent": [
+        "Python 3.11",
+        "FastAPI",
+        "SQLAlchemy 2",
+        "Alembic",
+        "PostgreSQL 16"
+      ]
+    },
+    "frontend_dashboard": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "hero-section",
+          "landing-hero",
+          "sitemap",
+          "prisma"
+        ],
+        "required_tokens": {
+          "soft": [
+            "@mui/material",
+            "recharts",
+            "middleware"
+          ],
+          "strong": [
+            "AppShell",
+            "next",
+            "/dashboard"
+          ]
+        },
+        "synonyms_pt_br": {
+          "dashboard": [
+            "painel",
+            "gerenciador"
+          ],
+          "reports": [
+            "relatorios"
+          ],
+          "settings": [
+            "configuracoes",
+            "ajustes"
+          ]
+        }
+      },
+      "forbidden_patterns": [
+        "cores hardcoded fora de brand tokens",
+        "hero-section",
+        "landing-hero",
+        "sitemap.xml",
+        "Prisma",
+        "mock estático em vez de fetch",
+        "página / renderizando dashboard direto",
+        "campo 'token' em fetch de login",
+        "content-type form-urlencoded no login"
+      ],
+      "inherit_from": "frontend",
+      "labels": {
+        "en": "Dashboard / Admin Panel",
+        "pt_br": "📊 Dashboard / Admin"
+      },
+      "required_components": [
+        "<AppShell> wrapping rotas autenticadas",
+        "middleware.ts com auth guard",
+        "KPI cards no dashboard",
+        "cliente HTTP com envelope {data, meta}",
+        "token field 'access_token' (não 'token')"
+      ],
+      "required_routes": {
+        "expected": [
+          "/configuracoes"
+        ],
+        "strict": [
+          "/",
+          "/login",
+          "/dashboard"
+        ]
+      },
+      "scaffold": [
+        "AppShell.tsx"
+      ],
+      "smell_signals": [
+        "rota / renderiza KPIs em vez de redirect",
+        "AppShell ausente em rotas autenticadas",
+        "menu com hrefs para rotas inexistentes"
+      ],
+      "stack_when_charter_silent": [
+        "Next.js 15 (App Router)",
+        "MUI (Material UI)",
+        "Recharts",
+        "TypeScript"
+      ]
+    },
+    "frontend_landing": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "AppShell",
+          "KPICard",
+          "dashboard",
+          "middleware.ts"
+        ],
+        "required_tokens": {
+          "soft": [
+            "meta",
+            "og:",
+            "sitemap"
+          ],
+          "strong": [
+            "hero",
+            "cta",
+            "/sobre"
+          ]
+        },
+        "synonyms_pt_br": {
+          "cta": [
+            "chamada",
+            "acao"
+          ],
+          "hero": [
+            "capa",
+            "destaque"
+          ]
+        }
+      },
+      "forbidden_patterns": [
+        "<AppShell>",
+        "KPI cards",
+        "dashboard layout",
+        "mock/scaffold em /",
+        "conteúdo Lorem em /sobre",
+        "AppShell wrapping /",
+        "next-auth"
+      ],
+      "inherit_from": "frontend",
+      "labels": {
+        "en": "Landing Page",
+        "pt_br": "🏠 Landing Page"
+      },
+      "required_components": [
+        "hero section com CTA real (não Lorem)",
+        "seções institucionais com conteúdo real",
+        "OG meta tags",
+        "form de contato funcional",
+        "sitemap.xml no repo"
+      ],
+      "required_routes": {
+        "expected": [
+          "/legal",
+          "/privacidade",
+          "/termos"
+        ],
+        "strict": [
+          "/",
+          "/sobre",
+          "/contato"
+        ]
+      },
+      "scaffold": [
+        "sitemap.xml",
+        "robots.txt"
+      ],
+      "smell_signals": [
+        "/ renderiza dashboard com KPIs",
+        "menu lateral com hrefs de admin",
+        "middleware.ts com auth guard (landing não tem login)",
+        "sitemap.xml ausente"
+      ],
+      "stack_when_charter_silent": [
+        "Next.js 15 (App Router)",
+        "MUI (Material UI)",
+        "TypeScript"
+      ]
+    },
+    "mobile_crossplatform": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "expo"
+          ],
+          "strong": [
+            "react-native"
+          ]
+        }
+      },
+      "forbidden_patterns": [],
+      "inherit_from": "mobile",
+      "labels": {
+        "en": "Mobile Cross-Platform",
+        "pt_br": "📱 Mobile Multiplataforma"
+      },
+      "meta": {
+        "blocks_generation": false,
+        "requires_runbook": false,
+        "warn_on_default": false
+      },
+      "required_components": [
+        "React Navigation",
+        "auth flow",
+        "cliente HTTP com envelope"
+      ],
+      "required_routes": {
+        "expected": [
+          "Splash",
+          "Login",
+          "Home"
+        ],
+        "strict": []
+      },
+      "scaffold": [],
+      "smell_signals": [
+        "uso de localStorage/document/window (web-only APIs)",
+        "AppShell.tsx (padrão web)"
+      ],
+      "stack_when_charter_silent": [
+        "Expo",
+        "React Native",
+        "TypeScript"
+      ]
+    },
+    "other": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [],
+          "strong": []
+        }
+      },
+      "forbidden_patterns": [
+        "spec sem RUNBOOK.md",
+        "classificação 'other' sem ## Motivação"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "Other (declared)",
+        "pt_br": "❓ Outro (declarado)"
+      },
+      "meta": {
+        "blocks_generation": false,
+        "requires_runbook": true,
+        "warn_on_default": false
+      },
+      "required_components": [],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [
+        "RUNBOOK.md",
+        "README.md"
+      ],
+      "stack_when_charter_silent": []
+    }
+  },
+  "version": "0.1.0"
+}
