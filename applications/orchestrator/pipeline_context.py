@@ -141,6 +141,9 @@ class PipelineContext:
         self.completed_tasks: list[str] = []
         self.current_step: int = 0  # LEI 11: etapa atual para retomada (0 = início)
         self.project_type: str = ""  # e.g. "backend_api", "frontend_webapp", "landing_page"
+        # T-03f: em Evolution, tipo do Charter pai — usado pelo Gate T-TYPE-COMPLIANCE-EVO do CTO
+        # para detectar transições silenciosas de tipo. Vazio quando não é Evolution.
+        self.previous_project_type: str = ""
         self.product_id: str = ""    # ID do produto ao qual este projeto pertence
         self.linked_projects_context: str = ""  # Contexto dos projetos linkados (para o CTO)
         # Detected backend stack — cached to avoid repeated LLM calls per task
@@ -190,6 +193,9 @@ class PipelineContext:
             inputs["project_type"] = self.project_type
         # T-02: injetar policy resolvida (canônico + tipo → política técnica + enforcement_mode)
         inputs["type_policy"] = _build_type_policy_input(self.project_type)
+        # T-03f: em Evolution, propagar tipo do Charter pai para o Gate T-TYPE-COMPLIANCE-EVO
+        if self.previous_project_type:
+            inputs["previous_project_type"] = self.previous_project_type
         if self.linked_projects_context:
             inputs["linked_projects_context"] = self.linked_projects_context
         if self.engineer_proposal:

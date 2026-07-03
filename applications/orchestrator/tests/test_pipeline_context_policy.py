@@ -179,6 +179,34 @@ def test_build_inputs_with_empty_project_type_falls_back_to_default():
     assert inputs["type_policy"]["policy"]["meta"]["blocks_generation"] is True
 
 
+# ── T-03f: previous_project_type em Evolution ────────────────────────────────
+
+def test_previous_project_type_not_injected_when_absent():
+    """CTO só recebe previous_project_type se houver — sem falso positivo."""
+    from orchestrator.pipeline_context import PipelineContext
+
+    ctx = PipelineContext("proj-fresh")
+    ctx.project_type = "frontend_dashboard"
+    ctx.set_spec_raw("dummy")
+    inputs = ctx.build_inputs_for_cto(mode="charter")
+    assert "previous_project_type" not in inputs
+
+
+def test_previous_project_type_injected_in_evolution():
+    """Em Evolution, runner popula ctx.previous_project_type; CTO deve receber."""
+    from orchestrator.pipeline_context import PipelineContext
+
+    ctx = PipelineContext("proj-evo")
+    ctx.project_type = "frontend_landing"           # tipo novo
+    ctx.previous_project_type = "frontend_dashboard"  # tipo do Charter pai
+    ctx.set_spec_raw("dummy")
+    inputs = ctx.build_inputs_for_cto(mode="charter")
+    assert inputs["previous_project_type"] == "frontend_dashboard"
+    assert inputs["type_policy"]["canonical_type"] == "frontend_landing"
+    # Gate T-TYPE-COMPLIANCE-EVO no CTO usa esses dois valores para BLOCKER se
+    # transição não tiver "## Type Transition" no Charter.
+
+
 # ── policies.json bate byte-a-byte com YAML fresh ─────────────────────────────
 
 def test_policies_json_is_in_sync_with_yaml():

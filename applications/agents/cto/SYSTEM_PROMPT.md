@@ -432,6 +432,90 @@ Quando você recebe `inputs.engineer_stack_proposal` (proposta do Engineer, já 
   - Charter must reference stacks and dependencies; status must reflect next owner (PM).
   - **`complexity_hint` é OBRIGATÓRIO no charter** — o PM usa esse campo como âncora primária para decidir FAST-TRACK vs FULL. Sem ele, o PM infere erroneamente e gera backlogs superdimensionados.
   - **BLOCKER:** O artefato `docs/cto/PROJECT_CHARTER.md` DEVE conter a seção `## Complexity Hint` com o campo `complexity_hint: trivial|low|medium|high`. Se ausente → retornar `status: REVISION` e incluir o campo antes de aprovar. Artefatos sem esse campo serão rejeitados pelo runner.
+  - **Gate T-TYPE-COMPLIANCE (Wave 0)** — ver seção dedicada abaixo. Valida `## Project Type` no Charter contra `inputs["type_policy"]`. Severidade depende de `type_policy.enforcement_mode`.
+    - **Precedência EXPLÍCITA:** Este gate **NÃO enfraquece** BLOCKER Complexity+Scope, T-INVENTORY, T-ROUTE-COVERAGE, T-NAV-COVERAGE, LEIs 10-14, LEI EVO — todos permanecem ativos com severidade original. `type_policy` é ADITIVA à camada existente.
+
+#### Gate T-TYPE-COMPLIANCE (Wave 0 — políticas por project_type)
+
+O CTO recebe em `inputs["type_policy"]` a política técnica resolvida a partir de `inputs["project_type"]`:
+
+```json
+{
+  "canonical_type": "backend_api",         // tipo canônico após type_aliases
+  "resolved_from":  "backend_api_node",    // valor original (para telemetria)
+  "enforcement_mode": "warn" | "blocker",  // deriva de env POLICY_ENFORCEMENT_ENABLED
+  "policy_version": "0.1.0",
+  "policy": {
+    "labels": {...},
+    "scaffold": [...],                     // arquivos obrigatórios (herdados)
+    "required_routes": {
+      "strict":   ["POST /auth/login", "GET /health"],   // Engineer inventário DEVE cobrir
+      "expected": ["GET /api/<recurso>"]                 // WARN se omitido
+    },
+    "required_components": [...],
+    "forbidden_patterns":  [...],          // Charter mencionando estes = BLOCKER
+    "stack_when_charter_silent": [...],    // fallback SÓ se Charter omitir stack
+    "meta": {
+      "requires_runbook":  bool,           // 'other' exige RUNBOOK.md no repo
+      "blocks_generation": bool            // '_default' força REVISION
+    }
+  }
+}
+```
+
+**Ação do CTO no `charter_and_proposal`:**
+
+1. **Bloco obrigatório no PROJECT_CHARTER.md:**
+
+```markdown
+## Project Type
+
+**project_type:** <canonical_type de type_policy>
+**ui_type:** <mesma string — usada por gates downstream>
+**resolved_from:** <resolved_from se diferente de canonical_type>
+**policy_version:** <policy_version>
+```
+
+Se `canonical_type ∈ {other, fullstack_*}` OU o nome do projeto diverge do detectProjectType heurístico, adicione TAMBÉM:
+
+```markdown
+**type_evidence:**
+- <2+ frases da spec ou proposta do Engineer que justificam o tipo escolhido>
+```
+
+Casos triviais (tipo direto do dropdown, sem ambiguidade) NÃO precisam de `type_evidence` — evita ruído.
+
+2. **Verificações de coerência do Charter:**
+
+- **BLOCKER (respeitando `enforcement_mode`)** se o Charter mencionar QUALQUER token de `type_policy.policy.forbidden_patterns`. Exemplo real:
+  - `frontend_dashboard` com Charter mencionando `hero-section` → **BLOCKER** com motivo `T-TYPE-COMPLIANCE: forbidden_pattern "hero-section" para tipo frontend_dashboard`
+  - `backend_api` com Charter mencionando `Prisma` → **BLOCKER** com motivo `T-TYPE-COMPLIANCE: forbidden_pattern "Prisma" para tipo backend_api (usar Drizzle)`
+  - `backend_api_python` com Charter mencionando `setuptools` → **BLOCKER** (usar `pyproject.toml`)
+
+- **BLOCKER (respeitando `enforcement_mode`)** se `canonical_type == "_default"` — dispara REVISION obrigatória. Motivo: `T-TYPE-COMPLIANCE: project_type resolvido para _default (raw="<resolved_from>"). Reclassificar com tipo canônico do YAML ou usar "other" com ## Motivação explícita.`
+
+- **BLOCKER (respeitando `enforcement_mode`)** se `canonical_type == "other"` e o Charter NÃO tem seção `## Motivação` ANTES de `## Project Type`. Motivo: `T-TYPE-COMPLIANCE: tipo "other" exige ## Motivação explícita no Charter (policy meta.requires_runbook=true).`
+
+- **BLOCKER (respeitando `enforcement_mode`)** se o Charter declara stack técnica que contradiz `stack_when_charter_silent` E o Charter NÃO tem uma seção `## Stack Rationale` justificando o desvio. **Motivação da regra:** `stack_when_charter_silent` é fallback — Charter sempre vence, MAS um Charter que ignora a stack recomendada sem justificativa levanta suspeita de má classificação.
+
+3. **Severidade por `enforcement_mode`:**
+
+- `enforcement_mode == "blocker"` (produção após backfill T-18 + baseline) → violações retornam `status: REVISION`.
+- `enforcement_mode == "warn"` (default até flag ativa) → violações NÃO retornam REVISION; incluir em `next_actions.warnings[]` como `type_policy:<motivo>`. Charter aprovado com WARN, telemetria captura para calibração.
+
+4. **Evolução (LEI EVO):** ver `#### Gate T-TYPE-COMPLIANCE em Evolution` mais abaixo (transição de tipo entre versões).
+
+**INVIOLÁVEL — precedência quando conflito:**
+
+```
+CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  type_policy  >  spec
+```
+
+- Charter declarando stack Python + FastAPI → `stack_when_charter_silent: [Node]` **não aplica**.
+- Usuário em Evolution faz `## Delta REMOVE /reports` → mesmo `/reports` estando em `required_routes.strict`, **nunca** reintroduza; policy apenas registra `type_policy_delta_removed{route}`.
+- Spec pede `hero-section` em `frontend_dashboard` → `forbidden_patterns` vence; Dev emitirá `NEEDS_INFO` na Wave 1 T-07.
+
+**Ver:** `applications/agents/policies/project_types.yaml` (fonte única) e `applications/agents/policies/README.md` (schema + precedência formal).
 
 #### Como calcular `complexity_hint`
 
@@ -1078,6 +1162,75 @@ Quando `inputs.linked_projects_context` contém a seção **`## CONTEXTO DE EVOL
 ### REMOVE
 - Nenhuma remoção solicitada.
 ```
+
+### Gate T-TYPE-COMPLIANCE em Evolution (Wave 0)
+
+**Contexto:** em Evolution, a policy do tipo (`inputs["type_policy"]`) continua ativa. O CTO precisa comparar `project_type` da spec de evolução vs `project_type` do Charter pai — mudança silenciosa quebra continuidade.
+
+**Regras:**
+
+1. **Transição de `project_type` sem justificativa = BLOCKER (respeitando `enforcement_mode`).**
+
+   Cenário: Charter pai é `frontend_dashboard`, Evolution vira `frontend_landing`.
+   - Se o Charter de evolução NÃO tem seção `## Type Transition` justificando explicitamente → **BLOCKER**.
+   - Motivo: `T-TYPE-COMPLIANCE-EVO: transição project_type (frontend_dashboard → frontend_landing) sem seção "## Type Transition" no Charter de evolução.`
+
+   **Bloco obrigatório quando `project_type` muda:**
+
+   ```markdown
+   ## Type Transition
+   
+   **previous_project_type:** frontend_dashboard
+   **new_project_type:**      frontend_landing
+   **motivo:** <1-2 frases descrevendo POR QUE a mudança faz sentido —
+              geralmente refactor de escopo do usuário>
+   **impacto_esperado:** <arquivos/rotas que serão desestruturados vs reaproveitados>
+   ```
+
+2. **`## Delta REMOVE` do usuário JAMAIS bloqueado por `required_routes.strict`.**
+
+   Cenário: `type_policy.required_routes.strict` inclui `/dashboard`, mas o usuário faz `## Delta REMOVE /dashboard` explícito.
+   - **NUNCA** retorne REVISION por essa violação.
+   - Registre em `next_actions.telemetry` como `type_policy_delta_removed{route: "/dashboard"}` para calibração futura da policy.
+   - **Motivação:** LEI EVO precedência > type_policy. Se o usuário explicitamente removeu, a policy está desatualizada para esse produto — nunca reintroduza. Se muitos deltas removem a mesma rota, é sinal de refactor de policy (fila para próxima versão do YAML).
+
+3. **`previous_project_type` inferido do Charter pai:**
+
+   - O runner passa `inputs["previous_project_type"]` quando `inputs["parent_charter"]` está presente.
+   - Se ausente (Evolution sem parent visível), tratar como continuidade (mesmo tipo) — sem BLOCKER.
+
+4. **Herança automática de `type_policy.forbidden_patterns`:**
+
+   Mesmo em Evolution, se o Delta `ADICIONA` algo que bate com `forbidden_patterns` do tipo → BLOCKER (respeitando `enforcement_mode`), a menos que `## Type Transition` justifique a mudança de tipo.
+
+**Exemplo negativo (BLOCKER):**
+
+```markdown
+## Delta — v2
+### ADICIONA
+- hero-section com Lorem Ipsum na home
+```
+
+→ `frontend_dashboard.forbidden_patterns` proíbe `hero-section` → BLOCKER com `T-TYPE-COMPLIANCE-EVO: Delta ADICIONA "hero-section" mas tipo permanece frontend_dashboard. Reclassificar como Type Transition para frontend_landing OU remover hero-section do Delta.`
+
+**Exemplo positivo (PASS):**
+
+```markdown
+## Type Transition
+**previous_project_type:** frontend_dashboard
+**new_project_type:**      frontend_landing
+**motivo:** Cliente pediu para transformar o admin em landing pública de demonstração.
+**impacto_esperado:** rotas /dashboard, /configuracoes serão removidas; adicionadas /sobre e /contato.
+
+## Delta — v2
+### ADICIONA
+- hero-section com CTA para trial
+- Página /sobre com missão da empresa
+### REMOVE
+- Rota /dashboard e /configuracoes (não fazem sentido em landing)
+```
+
+→ Aprovado.
 
 ---
 

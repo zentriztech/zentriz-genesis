@@ -3766,6 +3766,11 @@ def main() -> int:
             _par_prod = (_par_data or {}).get("productId")
             if _par_prod:
                 _parent_apps_dir = Path(_files_root_evo) / _par_prod / _parent_project_id_evo / "apps"
+            # T-03f: propagar previous_project_type para Gate T-TYPE-COMPLIANCE-EVO no CTO
+            _par_type = (_par_data or {}).get("projectType") or (_par_data or {}).get("project_type")
+            if _par_type and pipeline_ctx and not getattr(pipeline_ctx, "previous_project_type", ""):
+                pipeline_ctx.previous_project_type = str(_par_type)  # type: ignore[attr-defined]
+                logger.info("[FT-10/T-03f] previous_project_type=%s (Charter pai)", _par_type)
         except Exception:
             pass
 
