@@ -139,6 +139,77 @@ def check_stub_pages(project_root: Path | str) -> dict:
     return {"stubs_found": stubs, "pass": len(stubs) == 0}
 
 
+# Marcadores de responsividade (mobile-first) — MUI. OR: qualquer um satisfaz.
+# Escolhidos com ≥5 chars ou caractere não-alfanumérico ('{ ', ':') para casar
+# como substring (ver _has_any_token). Cobre breakpoint object, hook e theme.
+_RESPONSIVE_MARKERS = [
+    "usemediaquery",      # useMediaQuery hook
+    "theme.breakpoints",  # theme.breakpoints.up/down/between
+    "{ xs:", "{xs:",      # sx={{ xs: ... }} / Grid xs
+    " xs=", " xs:",       # <Grid xs={12}> / props responsivas
+    "gridsize",           # MUI v6 size={{ xs: ... }}
+    "display: {", "flexdirection: {", "flexdirection:{",  # sx responsivo
+]
+
+
+def check_responsive(project_root: Path | str) -> dict:
+    """
+    Mobile-first é LEI do pipeline (não depende da spec pedir): toda app web em
+    browser DEVE ser responsiva. Detecta se o código gerado usa breakpoints MUI.
+
+    Só se aplica a frontends web (existe `apps/src/app` com page.tsx). Para
+    backends/mobile-native/bots retorna pass=True (N/A).
+
+    Retorna {applicable: bool, pages_scanned: int, has_responsive: bool,
+             pages_without_breakpoint: [paths], pass: bool}.
+    Uma entrega web sem NENHUM marcador responsivo em NENHUMA página = FAIL.
+    """
+    root = Path(project_root)
+    apps_dir = root / "apps"
+    scan_root = apps_dir if apps_dir.exists() else root
+    app_dir = scan_root / "src" / "app"
+    if not app_dir.exists():
+        app_dir = scan_root / "app"
+    # Não é frontend web Next → N/A (não penaliza backend/mobile/bot)
+    if not app_dir.exists():
+        return {"applicable": False, "pages_scanned": 0, "has_responsive": True,
+                "pages_without_breakpoint": [], "pass": True}
+
+    pages: list[Path] = []
+    for p in app_dir.rglob("page.tsx"):
+        if any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        pages.append(p)
+    if not pages:
+        return {"applicable": False, "pages_scanned": 0, "has_responsive": True,
+                "pages_without_breakpoint": [], "pass": True}
+
+    # Haystack de TODO o app/ (page.tsx + componentes) — responsividade pode estar
+    # concentrada em AppShell/layout compartilhado, então avaliamos o conjunto.
+    haystack = _read_all_code(scan_root)
+    has_responsive = any(m in haystack for m in _RESPONSIVE_MARKERS)
+
+    # Diagnóstico por página (informativo): páginas sem nenhum marcador local.
+    without: list[str] = []
+    for p in pages:
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+        if not any(m in txt for m in _RESPONSIVE_MARKERS):
+            without.append(str(p.relative_to(root)))
+
+    # FAIL só quando o app inteiro não tem NENHUM sinal de responsividade —
+    # evita falso positivo em página simples que herda layout responsivo do AppShell.
+    return {
+        "applicable": True,
+        "pages_scanned": len(pages),
+        "has_responsive": has_responsive,
+        "pages_without_breakpoint": without,
+        "pass": has_responsive,
+    }
+
+
 def check_fingerprint(project_root: Path | str, policy: dict) -> dict:
     """
     Executa fingerprint check no diretório `project_root/apps/` (default do Genesis).
@@ -197,7 +268,11 @@ def check_fingerprint(project_root: Path | str, policy: dict) -> dict:
     stub_result = check_stub_pages(root)
     stubs_found = stub_result["stubs_found"]
 
-    pass_ = (not missing_strong) and (not forbidden_found) and (not stubs_found)
+    # Mobile-first é LEI do pipeline: app web sem NENHUM breakpoint responsivo = FAIL
+    resp_result = check_responsive(root)
+    responsive_missing = resp_result["applicable"] and not resp_result["has_responsive"]
+
+    pass_ = (not missing_strong) and (not forbidden_found) and (not stubs_found) and (not responsive_missing)
 
     return {
         "pass": pass_,
@@ -205,6 +280,8 @@ def check_fingerprint(project_root: Path | str, policy: dict) -> dict:
         "missing_soft": missing_soft,
         "forbidden_found": forbidden_found,
         "stubs_found": stubs_found,
+        "responsive_missing": responsive_missing,
+        "responsive": resp_result,
         "details": {
             "files_scanned": files_scanned,
             "haystack_chars": len(haystack),
@@ -226,6 +303,8 @@ def summarize_result(result: dict, canonical_type: str = "") -> str:
         parts.append(f"forbidden found: {result['forbidden_found']}")
     if result.get("stubs_found"):
         parts.append(f"STUB pages (FR não implementado): {result['stubs_found']}")
+    if result.get("responsive_missing"):
+        parts.append("MOBILE-FIRST ausente: app web sem breakpoints responsivos (useMediaQuery/theme.breakpoints/sx xs-sm-md) — LEI do pipeline")
     if result.get("missing_soft"):
         parts.append(f"missing soft (WARN): {result['missing_soft']}")
     d = result.get("details", {})

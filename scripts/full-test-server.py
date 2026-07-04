@@ -596,8 +596,12 @@ from playwright.sync_api import sync_playwright
 results = []
 with sync_playwright() as p:
     b = p.chromium.launch(headless=True)
+    # Mobile-first é LEI: capturamos desktop (1280) E mobile (375) por rota,
+    # para o A4 UX avaliar responsividade (menu, overflow, layout em 375px).
     ctx = b.new_context(viewport={{"width":1280,"height":800}})
     page = ctx.new_page()
+    ctx_m = b.new_context(viewport={{"width":375,"height":812}})
+    page_m = ctx_m.new_page()
     console_errors = []
     page.on("console", lambda msg: console_errors.append(msg.text) if msg.type=="error" else None)
     for route in {routes!r}:
@@ -607,7 +611,18 @@ with sync_playwright() as p:
             title = page.title()
             shot = "{out_dir}" + "/" + route.replace("/","_or_") + ".png"
             page.screenshot(path=shot, full_page=True)
-            results.append({{"route": route, "url": url, "status": resp.status if resp else 0, "title": title, "shot": shot}})
+            entry = {{"route": route, "url": url, "status": resp.status if resp else 0, "title": title, "shot": shot}}
+            try:
+                page_m.goto(url, wait_until="networkidle", timeout=15000)
+                shot_m = "{out_dir}" + "/" + route.replace("/","_or_") + "_mobile375.png"
+                page_m.screenshot(path=shot_m, full_page=True)
+                # detecta scroll horizontal (overflow) em mobile — sinal de layout não-responsivo
+                overflow = page_m.evaluate("() => document.documentElement.scrollWidth > window.innerWidth + 1")
+                entry["shot_mobile"] = shot_m
+                entry["mobile_h_overflow"] = bool(overflow)
+            except Exception as em:
+                entry["mobile_error"] = str(em)
+            results.append(entry)
         except Exception as e:
             results.append({{"route": route, "url": url, "error": str(e)}})
     b.close()

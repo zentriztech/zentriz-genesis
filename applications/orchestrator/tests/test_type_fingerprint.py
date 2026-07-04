@@ -233,3 +233,64 @@ def test_real_page_not_stub(tmp_path):
     )
     r = check_stub_pages(tmp_path)
     assert r["pass"] is True
+
+
+def test_responsive_pass_when_breakpoints_present(tmp_path):
+    """Mobile-first LEI: app com breakpoints MUI passa."""
+    from orchestrator.type_fingerprint import check_responsive
+
+    apps = tmp_path / "apps" / "src" / "app" / "dashboard"
+    apps.mkdir(parents=True)
+    (apps / "page.tsx").write_text(
+        "'use client';\nexport default function D(){ return <Grid xs={12} md={6}><Box sx={{ display: { xs: 'block', md: 'flex' } }}/></Grid>; }"
+    )
+    r = check_responsive(tmp_path)
+    assert r["applicable"] is True
+    assert r["pass"] is True
+
+
+def test_responsive_fail_when_no_breakpoints(tmp_path):
+    """Mobile-first LEI: app web sem NENHUM breakpoint = FAIL (BLOCKER)."""
+    from orchestrator.type_fingerprint import check_responsive, check_fingerprint
+
+    apps = tmp_path / "apps" / "src" / "app" / "dashboard"
+    apps.mkdir(parents=True)
+    (apps / "page.tsx").write_text(
+        "'use client';\nexport default function D(){ return <div style={{width:1200}}>fixo</div>; }"
+    )
+    r = check_responsive(tmp_path)
+    assert r["applicable"] is True
+    assert r["pass"] is False
+    # e reprova o fingerprint agregado
+    fp = check_fingerprint(tmp_path, {})
+    assert fp["responsive_missing"] is True
+    assert fp["pass"] is False
+
+
+def test_responsive_na_for_backend(tmp_path):
+    """Backend (sem apps/src/app) não é penalizado — N/A."""
+    from orchestrator.type_fingerprint import check_responsive
+
+    apps = tmp_path / "apps"
+    apps.mkdir(parents=True)
+    (apps / "app.ts").write_text('import fastify from "fastify";')
+    r = check_responsive(tmp_path)
+    assert r["applicable"] is False
+    assert r["pass"] is True
+
+
+def test_responsive_via_appshell_shared_layout(tmp_path):
+    """Responsividade concentrada no AppShell compartilhado conta para o app todo."""
+    from orchestrator.type_fingerprint import check_responsive
+
+    app = tmp_path / "apps" / "src" / "app" / "dashboard"
+    app.mkdir(parents=True)
+    (app / "page.tsx").write_text("'use client';\nexport default function D(){ return <div>KPIs</div>; }")
+    comp = tmp_path / "apps" / "src" / "components"
+    comp.mkdir(parents=True)
+    (comp / "AppShell.tsx").write_text(
+        "import { useMediaQuery } from '@mui/material';\nexport function AppShell(){ const m = useMediaQuery('(max-width:900px)'); return null; }"
+    )
+    r = check_responsive(tmp_path)
+    assert r["applicable"] is True
+    assert r["pass"] is True  # AppShell responsivo cobre o app

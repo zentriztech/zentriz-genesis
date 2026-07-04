@@ -9,7 +9,7 @@
 #
 # Ver README.md para schema completo e política de linguagem PT-BR/EN.
 
-version: "0.3.0"
+version: "0.4.0"
 
 # ── type_aliases ─────────────────────────────────────────────────────────────
 # Normaliza saídas de detectProjectType (telegram.ts:955-963) + subtipos do
@@ -72,7 +72,13 @@ groups:
     scaffold:
       - next.config.js
       - docker-compose.yml
+    required_components:
+      - "responsividade mobile-first (breakpoints MUI xs/sm/md em layout, Grid e AppShell) — LEI do pipeline, independe da spec"
     fingerprint:
+      required_tokens:
+        soft:
+          - "useMediaQuery"      # mobile-first é LEI: reforço diagnóstico do check_responsive
+          - "breakpoints"        # theme.breakpoints — WARN se ausente; BLOCKER vem de check_responsive
       forbidden_tokens:
         - "Prisma"               # feedback_nodejs_drizzle: usar Drizzle
 

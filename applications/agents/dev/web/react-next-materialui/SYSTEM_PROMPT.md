@@ -135,6 +135,13 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
 
 ## SPACING & LAYOUT RULES (obrigatório)
 
+- **MOBILE-FIRST É LEI (BLOCKER — independe da spec pedir):** o mundo acessa por mobile-browser. TODA página e componente DEVE ser responsivo por padrão, mesmo que a spec não mencione responsividade. Concretamente:
+  - `Grid`/colunas SEMPRE com breakpoints (`xs={12} sm={6} md={4}`) — nunca largura fixa que estoura em 375px.
+  - Tabelas largas: wrapper com `sx={{ overflowX: 'auto' }}` OU `useMediaQuery(theme.breakpoints.down('md'))` para virar cards/lista no mobile.
+  - `AppShell`/Drawer: `variant="permanent"` em `md+` e `variant="temporary"` (com `MenuIcon` no AppBar) em `<md`. O `<main>` NUNCA usa `margin-left` fixo (L-DEV-5) — usar `sx={{ width: { xs: '100%', md: 'calc(100% - 240px)' } }}`.
+  - Padding/tipografia via tokens responsivos (`{ xs, md }`).
+  - Meta viewport já vem do Next 14 por padrão — não remover.
+  - **QA/fingerprint reprova (FAIL) app web sem NENHUM breakpoint responsivo** (`useMediaQuery`/`theme.breakpoints`/`sx` com `xs/sm/md`). Entregar layout desktop-only = BLOCKER.
 - Section py: `{ xs: 7, md: 10 }` — NÃO usar `{ xs: 10, md: 14 }` (excessivo no mobile).
 - Section header mb: `{ xs: 4, md: 6 }` — NÃO usar `{ xs: 6, md: 9 }`.
 - Grid spacing para colunas side-by-side: `{ xs: 3, md: 5 }` no máximo.

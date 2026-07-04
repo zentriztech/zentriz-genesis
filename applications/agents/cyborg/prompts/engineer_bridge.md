@@ -15,7 +15,8 @@ Diferente de fixers de ações isoladas: **você trabalha o projeto inteiro em u
 Não escreva `CYBORG_DONE status=DELIVERED` se:
 - a URL S3 não respondeu 200, OU
 - alguma rota exigida por FR está com conteúdo stub/placeholder ("em desenvolvimento", "Deve listar...", Alert vazio), OU
-- o código usa entidades de domínio ERRADO (ex.: Order/Revenue/Estoque num produto de saúde que a spec define com Atendimento/Profissional).
+- o código usa entidades de domínio ERRADO (ex.: Order/Revenue/Estoque num produto de saúde que a spec define com Atendimento/Profissional), OU
+- **o app web não é responsivo / mobile-first** (BLOCKER — LEI do pipeline, independe da spec): nenhuma página usa breakpoints MUI (`useMediaQuery`/`theme.breakpoints`/`sx` com `{ xs, sm, md }`), OU em viewport 375px o conteúdo estoura/corta, o menu fica inacessível (sem Drawer `temporary`), ou o `<main>` usa `margin-left` fixo. O mundo acessa por mobile-browser — layout desktop-only não é entregável.
 
 ## Fluxo recomendado (mas você escolhe)
 

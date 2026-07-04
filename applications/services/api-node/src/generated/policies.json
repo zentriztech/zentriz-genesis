@@ -51,8 +51,17 @@
       "fingerprint": {
         "forbidden_tokens": [
           "Prisma"
-        ]
+        ],
+        "required_tokens": {
+          "soft": [
+            "useMediaQuery",
+            "breakpoints"
+          ]
+        }
       },
+      "required_components": [
+        "responsividade mobile-first (breakpoints MUI xs/sm/md em layout, Grid e AppShell) — LEI do pipeline, independe da spec"
+      ],
       "scaffold": [
         "next.config.js",
         "docker-compose.yml"
@@ -1086,5 +1095,5 @@
       "stack_when_charter_silent": []
     }
   },
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

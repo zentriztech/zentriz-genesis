@@ -219,14 +219,17 @@ Quando a task é de integração com backend (`linked_projects_context` presente
 | I04 | Hover de botão muda visivelmente (cor, sombra ou escala) | MINOR |
 | I05 | Botão com texto/ícone tem padding interno equilibrado (não colapsado) | MINOR |
 
-### 6.5 Responsividade (MAJOR)
+### 6.5 Responsividade — MOBILE-FIRST É LEI (BLOCKER por padrão)
+
+> O mundo acessa por mobile-browser. Responsividade é **default inegociável do pipeline**, independe da spec pedir. O fingerprint (`check_responsive`) já reprova app web sem NENHUM breakpoint; aqui o QA confirma qualidade real por página.
 
 | # | Check | Severidade |
 |---|-------|------------|
-| R01 | Layout usa `Container maxWidth="lg"` ou equivalente Tailwind para centralizar conteúdo | MAJOR |
-| R02 | Grids de cards têm breakpoints responsivos (xs=1 coluna, sm=2, md=3 ou similar) | MAJOR |
-| R03 | Seção Hero não está presa na metade esquerda — conteúdo centralizado ou com container correto | MAJOR |
-| R04 | Texto não transborda nem fica colado nas bordas em telas pequenas (padding lateral presente) | MAJOR |
+| R00 | App usa breakpoints responsivos MUI em algum lugar (`useMediaQuery` / `theme.breakpoints` / `sx` com `{ xs, sm, md }`). **Ausência total = BLOCKER** (bate com o fingerprint). | BLOCKER |
+| R01 | Layout usa `Container maxWidth="lg"` ou equivalente para centralizar conteúdo | MAJOR |
+| R02 | Grids de cards têm breakpoints responsivos (xs=1 coluna, sm=2, md=3 ou similar). **Grid com largura fixa que estoura em 375px = BLOCKER.** | BLOCKER |
+| R03 | AppShell/Drawer: `permanent` em `md+` e `temporary` (MenuIcon no AppBar) em `<md`; `<main>` sem `margin-left` fixo (usar `width: calc(100% - 240px)` só em `md+`) | MAJOR |
+| R04 | Texto/tabela não transborda nem fica colado nas bordas em 375px (padding lateral + tabela larga com `overflowX: auto` ou vira cards no mobile) | MAJOR |
 
 ### 6.6 Acessibilidade e SEO (INFO / MINOR)
 
