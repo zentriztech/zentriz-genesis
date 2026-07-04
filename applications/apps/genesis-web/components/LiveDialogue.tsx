@@ -121,16 +121,33 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
     const isCyborgWarn = /cyborg indisponível|validação manual/i.test(txt);
 
     if (isCyborgStep) {
+      // Cyborg é o agente de entrega final — destaque forte em LARANJA claro.
+      // Fail mantém vermelho; warn mantém âmbar; passo normal do Cyborg = laranja claro visível.
+      const bg     = isCyborgFail ? "#EF444410" : isCyborgWarn ? "#F59E0B14" : "#FFF3E0"; // laranja bem claro (orange-50)
+      const border = isCyborgFail ? "#EF444440" : isCyborgWarn ? "#F59E0B50" : "#FB923C";  // borda laranja (orange-400)
+      const accent = isCyborgFail ? "#EF4444"   : isCyborgWarn ? "#B45309"   : "#C2410C";  // texto/label laranja escuro
       return (
         <Box
           sx={{
-            my: 0.5, p: 1.25,
-            bgcolor: isCyborgFail ? "#EF444408" : isCyborgWarn ? "#F59E0B08" : "#6366F108",
+            my: 0.75, p: 1.25, pl: 1.5,
+            bgcolor: bg,
             border: "1px solid",
-            borderColor: isCyborgFail ? "#EF444430" : isCyborgWarn ? "#F59E0B30" : "#6366F130",
+            borderColor: border,
+            borderLeft: "4px solid",
+            borderLeftColor: border,
             borderRadius: 1.5,
           }}
         >
+          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
+            <Typography component="span" sx={{ fontSize: "0.9rem", lineHeight: 1 }}>🤖</Typography>
+            <Typography
+              variant="caption"
+              sx={{ fontWeight: 700, fontSize: "0.66rem", letterSpacing: "0.06em",
+                    textTransform: "uppercase", color: accent }}
+            >
+              Cyborg — Entrega Final
+            </Typography>
+          </Stack>
           <Typography
             variant="caption"
             sx={{
@@ -138,7 +155,7 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               lineHeight: 1.7,
-              color: isCyborgFail ? "error.main" : isCyborgWarn ? "warning.main" : "text.secondary",
+              color: isCyborgFail ? "error.main" : "#1E293B",
               display: "block",
             }}
           >

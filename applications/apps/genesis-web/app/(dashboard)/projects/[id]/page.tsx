@@ -1847,9 +1847,19 @@ function ProjectDetailPageInner() {
                       </Tooltip>
                     </Stack>
 
-                    {/* Projetos do produto */}
+                    {/* Projetos do produto — scroll quando muitos (evita esticar o card) */}
                     {product.projects && product.projects.length > 0 && (
-                      <Stack spacing={0.5} sx={{ mb: 1 }}>
+                      <Stack
+                        spacing={0.5}
+                        sx={{
+                          mb: 1,
+                          maxHeight: product.projects.length > 6 ? 220 : "none",
+                          overflowY: product.projects.length > 6 ? "auto" : "visible",
+                          pr: product.projects.length > 6 ? 0.5 : 0,
+                          // scrollbar discreta
+                          "&::-webkit-scrollbar": { width: 6 },
+                          "&::-webkit-scrollbar-thumb": { bgcolor: "action.disabled", borderRadius: 3 },
+                        }}>
                         {product.projects.map((p) => {
                           const isCurrent = p.id === id;
                           const stColors: Record<string, string> = {
