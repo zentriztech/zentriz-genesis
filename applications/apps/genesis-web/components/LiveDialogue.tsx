@@ -119,13 +119,15 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
       /cyborg|🤖.*cyborg|cyborg.*🤖/i.test(txt);
     const isCyborgFail = /cyborg.*falhou|tentativa.*falhou/i.test(txt);
     const isCyborgWarn = /cyborg indisponível|validação manual/i.test(txt);
+    const isCyborgDelivered = /entregou o produto|status=delivered|entrega conclu|🎉/i.test(txt);
 
     if (isCyborgStep) {
       // Cyborg é o agente de entrega final — mesmo fundo das outras mensagens (action.hover),
-      // destaque só pela BORDA laranja. Fail mantém vermelho; warn mantém âmbar.
+      // destaque só pela BORDA. Entrega concluída = verde brilhante; fail = vermelho;
+      // warn = âmbar; passo normal = laranja.
       const bg     = isCyborgFail ? "#EF444410" : isCyborgWarn ? "#F59E0B14" : "action.hover"; // igual aos demais agentes
-      const border = isCyborgFail ? "#EF444440" : isCyborgWarn ? "#F59E0B50" : "#FB923C";  // borda laranja (orange-400)
-      const accent = isCyborgFail ? "#EF4444"   : isCyborgWarn ? "#B45309"   : "#C2410C";  // texto/label laranja escuro
+      const border = isCyborgFail ? "#EF444440" : isCyborgWarn ? "#F59E0B50" : isCyborgDelivered ? "#22C55E" : "#FB923C";  // verde brilhante na entrega
+      const accent = isCyborgFail ? "#EF4444"   : isCyborgWarn ? "#B45309"   : isCyborgDelivered ? "#15803D" : "#C2410C";  // label
       return (
         <Box
           sx={{
@@ -136,16 +138,17 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
             borderLeft: "4px solid",
             borderLeftColor: border,
             borderRadius: 1.5,
+            ...(isCyborgDelivered && { boxShadow: "0 0 0 1px #22C55E55, 0 0 12px #22C55E40" }),
           }}
         >
           <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
-            <Typography component="span" sx={{ fontSize: "0.9rem", lineHeight: 1 }}>🤖</Typography>
+            <Typography component="span" sx={{ fontSize: "0.9rem", lineHeight: 1 }}>{isCyborgDelivered ? "🎉" : "🤖"}</Typography>
             <Typography
               variant="caption"
               sx={{ fontWeight: 700, fontSize: "0.66rem", letterSpacing: "0.06em",
                     textTransform: "uppercase", color: accent }}
             >
-              Cyborg — Entrega Final
+              {isCyborgDelivered ? "Cyborg — Produto Entregue" : "Cyborg — Entrega Final"}
             </Typography>
           </Stack>
           <Typography
