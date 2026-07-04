@@ -135,6 +135,44 @@ Tipos backend em Wave 0: **`backend_api`** (Node + Fastify + Drizzle) e **`backe
 
 - **Título continua 3-10 palavras** (regra existente). Este gate é aditivo.
 
+### 2.1.PM — Task state POLICY_MISMATCH (Wave 1 — T-11)
+
+Quando o gate CTO T-TYPE-COMPLIANCE-BACKLOG rejeita o backlog por violação de `type_policy` (rota strict ausente, forbidden_pattern em arquivos_produzidos, required_component omitido), a task associada recebe state **`POLICY_MISMATCH`** — não `REVISION` genérico.
+
+**Por quê essa distinção:**
+- `REVISION` = qualquer motivo (spec ambígua, backlog desbalanceado, erro de escopo)
+- `POLICY_MISMATCH` = motivo específico e mensurável — permite telemetria (endpoint /api/reports/type-compliance, ver T-12)
+
+**Ação do PM ao receber revisão com motivo `POLICY_MISMATCH`:**
+
+1. Ler `next_actions.policy_mismatch_details` do CTO (formato):
+```json
+{
+  "canonical_type":     "backend_api",
+  "missing_strict_routes": ["POST /auth/login"],
+  "missing_components":    ["envelope {data, meta}"],
+  "forbidden_in_arquivos": ["Prisma", "seed.mjs no Dockerfile"]
+}
+```
+
+2. Reescrever tasks:
+   - Cada rota em `missing_strict_routes` → nova task com `target_route: "<rota>"` e `arquivos_produzidos` cobrindo a rota
+   - Cada component em `missing_components` → adicionar a `arquivos_produzidos` de task existente OU criar task nova
+   - Cada item em `forbidden_in_arquivos` → **remover** do backlog (nunca justificar; policy é INVIOLÁVEL para o tipo)
+
+3. Se `type_policy.enforcement_mode == "warn"` (Wave 0 default) e a violação é apenas cosmética (soft) → o próprio CTO já aprovou com aviso; PM registra em `evidence[].note`.
+
+4. **Precedência LEI EVO:** se Delta do usuário REMOVE explicitamente uma rota strict, essa rota **não conta** como missing — CTO deve ter capturado no gate. Se aparecer aqui, é ambiguidade — perguntar ao CTO via `NEEDS_INFO`.
+
+**Preservação intocada:**
+- T-ROUTE-COVERAGE e T-NAV-COVERAGE continuam BLOCKER (rotas do inventário Engineer × arquivos_produzidos)
+- Título 3-10 palavras preservado
+- `feedback_pm_task_title` intocada
+
+---
+
+---
+
 ### 2.2 Formato de saída (generate_backlog) — OBRIGATÓRIO
 
 1. **`<thinking>...</thinking>`** — **Máximo ~8 linhas em tópicos** (ex.: "Tasks: 5. Ordem: models → repo → routes. depends_on_files em cada task."). Proibido: rascunhos dos .md, blocos de código no thinking. O sistema usa só o JSON.
