@@ -36,6 +36,38 @@ function getUser(request: FastifyRequest): AuthUser {
  */
 export async function reportsRoutes(app: FastifyInstance) {
 
+  /**
+   * T-16: GET /api/internal/policies/list
+   * Expõe policies.json ao portal (útil para o hook useProjectTypes).
+   * Endpoint público (auth apenas via origem CORS) — dados não sensíveis.
+   */
+  app.get("/api/internal/policies/list", async (_request, reply) => {
+    try {
+      const { readFileSync } = await import("fs");
+      const { fileURLToPath } = await import("url");
+      const path = await import("path");
+      const dirname = path.dirname(fileURLToPath(import.meta.url));
+      const candidates = [
+        path.join(dirname, "..", "generated", "policies.json"),
+        path.join(dirname, "..", "..", "src", "generated", "policies.json"),
+        path.join(process.cwd(), "src", "generated", "policies.json"),
+      ];
+      for (const c of candidates) {
+        try {
+          const raw = readFileSync(c, "utf-8");
+          return reply
+            .header("Cache-Control", "public, max-age=60")
+            .type("application/json")
+            .send(raw);
+        } catch { /* try next */ }
+      }
+      return reply.status(404).send({ code: "NOT_FOUND", message: "policies.json não gerado" });
+    } catch (err) {
+      return reply.status(500).send({ code: "ERROR", message: String(err) });
+    }
+  });
+
+
   app.get<{
     Querystring: { product_id?: string; tenant_id?: string; limit?: string };
   }>("/api/reports/type-compliance", async (request, reply) => {
