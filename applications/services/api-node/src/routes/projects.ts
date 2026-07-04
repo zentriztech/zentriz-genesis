@@ -1289,23 +1289,30 @@ export async function projectRoutes(app: FastifyInstance) {
         [id]
       );
 
+      // Custo estimado: preço POR MODELO (Opus vs Sonnet). Antes assumia Sonnet
+      // para tudo e subestimava — agora bate com a soma das tasks (task-metrics),
+      // que é mais realista pois o pipeline roda majoritariamente em Opus.
+      // PRICE_INPUT_SONNET=3, OUTPUT=15; PRICE_INPUT_OPUS=15, OUTPUT=75 (USD/MTok).
       const grand = await client.query(
         `SELECT
+           COUNT(*)::int AS total_calls,
            SUM(input_tokens)::int AS total_input,
            SUM(output_tokens)::int AS total_output,
-           COUNT(*)::int AS total_calls
+           SUM(
+             CASE WHEN model ILIKE '%opus%'
+                  THEN (input_tokens / 1000000.0) * 15 + (output_tokens / 1000000.0) * 75
+                  ELSE (input_tokens / 1000000.0) * 3  + (output_tokens / 1000000.0) * 15
+             END
+           ) AS total_cost
          FROM project_agent_metrics
          WHERE project_id = $1`,
         [id]
       );
 
-      const g = grand.rows[0] as { total_input: number; total_output: number; total_calls: number } | undefined;
+      const g = grand.rows[0] as { total_input: number; total_output: number; total_calls: number; total_cost: string | number | null } | undefined;
       const totalInput = g?.total_input ?? 0;
       const totalOutput = g?.total_output ?? 0;
-
-      // Estimated cost: Claude Sonnet 4 pricing (approximate)
-      const costInput = (totalInput / 1_000_000) * 3;   // $3/MTok input
-      const costOutput = (totalOutput / 1_000_000) * 15; // $15/MTok output
+      const totalCost = Number(g?.total_cost ?? 0);
 
       return reply.send({
         by_agent: totals.rows,
@@ -1313,7 +1320,7 @@ export async function projectRoutes(app: FastifyInstance) {
           calls: g?.total_calls ?? 0,
           input_tokens: totalInput,
           output_tokens: totalOutput,
-          estimated_cost_usd: parseFloat((costInput + costOutput).toFixed(4)),
+          estimated_cost_usd: parseFloat(totalCost.toFixed(4)),
         },
       });
     } finally {

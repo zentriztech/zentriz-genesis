@@ -121,9 +121,9 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
     const isCyborgWarn = /cyborg indisponível|validação manual/i.test(txt);
 
     if (isCyborgStep) {
-      // Cyborg é o agente de entrega final — destaque forte em LARANJA claro.
-      // Fail mantém vermelho; warn mantém âmbar; passo normal do Cyborg = laranja claro visível.
-      const bg     = isCyborgFail ? "#EF444410" : isCyborgWarn ? "#F59E0B14" : "#FFF3E0"; // laranja bem claro (orange-50)
+      // Cyborg é o agente de entrega final — mesmo fundo das outras mensagens (action.hover),
+      // destaque só pela BORDA laranja. Fail mantém vermelho; warn mantém âmbar.
+      const bg     = isCyborgFail ? "#EF444410" : isCyborgWarn ? "#F59E0B14" : "action.hover"; // igual aos demais agentes
       const border = isCyborgFail ? "#EF444440" : isCyborgWarn ? "#F59E0B50" : "#FB923C";  // borda laranja (orange-400)
       const accent = isCyborgFail ? "#EF4444"   : isCyborgWarn ? "#B45309"   : "#C2410C";  // texto/label laranja escuro
       return (
@@ -155,7 +155,7 @@ function EntryBubble({ entry, isLast }: { entry: DialogueEntry; isLast: boolean 
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
               lineHeight: 1.7,
-              color: isCyborgFail ? "error.main" : "#1E293B",
+              color: isCyborgFail ? "error.main" : "text.primary",
               display: "block",
             }}
           >
