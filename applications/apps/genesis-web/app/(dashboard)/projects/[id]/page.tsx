@@ -1814,22 +1814,29 @@ function ProjectDetailPageInner() {
             {/* ── Produto + Projetos do Produto + Gatilhos ── */}
             <Card>
               <CardContent sx={{ pt: 1.5, pb: "12px !important" }}>
-                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: collapsed.produto ? 0 : 1 }}>
                   <Typography variant="caption" color="text.secondary"
                     sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                     🧩 Produto
                   </Typography>
-                  {!product && (
-                    <Tooltip title="Associar a um produto">
-                      <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
-                        apiGet<Array<{ id: string; name: string }>>("/api/products").then(setAllProducts).catch(() => {});
-                        setProductDialogOpen(true);
-                      }}>
-                        <AddLinkIcon sx={{ fontSize: "0.85rem" }} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
+                  <Stack direction="row" alignItems="center" spacing={0.25}>
+                    {!product && (
+                      <Tooltip title="Associar a um produto">
+                        <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
+                          apiGet<Array<{ id: string; name: string }>>("/api/products").then(setAllProducts).catch(() => {});
+                          setProductDialogOpen(true);
+                        }}>
+                          <AddLinkIcon sx={{ fontSize: "0.85rem" }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    <IconButton size="small" sx={{ p: 0.25 }} onClick={() => toggleCollapse("produto")}>
+                      {collapsed.produto ? <ExpandMoreIcon sx={{ fontSize: "0.9rem" }} /> : <ExpandLessIcon sx={{ fontSize: "0.9rem" }} />}
+                    </IconButton>
+                  </Stack>
                 </Stack>
+
+                <Collapse in={!collapsed.produto}>
 
                 {product ? (
                   <>
@@ -1937,6 +1944,7 @@ function ProjectDetailPageInner() {
                     ))}
                   </Stack>
                 )}
+                </Collapse>
               </CardContent>
             </Card>
 
