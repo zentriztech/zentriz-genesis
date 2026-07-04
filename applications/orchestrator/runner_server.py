@@ -465,7 +465,8 @@ def run(body: RunBody):
                 "AGENT_TIMEOUT_DEV", "AGENT_TIMEOUT_QA", "AGENT_TIMEOUT_MONITOR",
                 "AGENT_TIMEOUT_DEVOPS", "REQUEST_TIMEOUT", "MAX_QA_REWORK",
                 "CLAUDE_MAX_TOKENS", "CLAUDE_MAX_TOKENS_DEV", "CLAUDE_MAX_TOKENS_PM",
-                "CLAUDE_MAX_TOKENS_ENGINEER",
+                "CLAUDE_MAX_TOKENS_ENGINEER", "CLAUDE_MAX_TOKENS_QA",
+                "CLAUDE_MAX_TOKENS_SPEC_INTAKE",
             }
             applied = []
             for k, v in _runtime_cfg.items():

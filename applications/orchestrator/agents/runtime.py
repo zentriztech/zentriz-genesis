@@ -3,6 +3,8 @@ Runtime reutilizável para agentes que usam LLM (Claude).
 Carrega SYSTEM_PROMPT.md, recebe message_envelope, chama API Anthropic, devolve response_envelope.
 Blueprint V2 REV2: parse/validação via envelope; seleção de modelo por contexto (spec vs code).
 """
+from __future__ import annotations
+
 from pathlib import Path
 import os
 import json
@@ -87,10 +89,17 @@ MODEL_LIMITS: dict[str, dict[str, int]] = {
     "claude-haiku-4-5": {"context": 200_000, "max_output": 8_192},
     "claude-3-5-sonnet": {"context": 200_000, "max_output": 8_192},
     "claude-3-opus": {"context": 200_000, "max_output": 8_192},
+    "claude-opus-4-8": {"context": 200_000, "max_output": 64_000},
+    "claude-opus-4-7": {"context": 200_000, "max_output": 64_000},
     # Bedrock cross-region inference profile IDs
     "us.anthropic.claude-sonnet-4-6": {"context": 200_000, "max_output": 64_000},
     "us.anthropic.claude-sonnet-4-5": {"context": 200_000, "max_output": 64_000},
     "us.anthropic.claude-haiku-4-5": {"context": 200_000, "max_output": 8_192},
+    # Opus 4.8/4.7 — modelos padrão do pipeline (spec/charter/backlog exigem output grande).
+    # Sem estas entradas caíam em _DEFAULT_LIMITS (16k) e truncavam specs grandes no intake.
+    "us.anthropic.claude-opus-4-8": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-opus-4-7": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-opus-4-8[1m]": {"context": 1_000_000, "max_output": 64_000},
 }
 _DEFAULT_LIMITS = {"context": 200_000, "max_output": 16_000}
 
@@ -902,9 +911,14 @@ def run_agent(
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
         budget = calculate_token_budget(system_content, user_content, model)
         max_tokens = min(env_max, budget["safe_max_tokens"])
-        # E2E: cap para spec_intake evita resposta gigante e timeout (E2E_CORRECTION_PLAN)
+        # spec_intake re-emite a PRODUCT_SPEC inteira em artifacts[].content (JSON).
+        # Specs grandes (ex.: OrienteMe v2.2 ~39KB) + thinking do Opus estouram caps
+        # pequenos e truncam o JSON (stop_reason=max_tokens → JSON inválido → BLOCKED).
+        # Default agora = teto do modelo (64000); ajustável via CLAUDE_MAX_TOKENS_SPEC_INTAKE
+        # (portal /settings/runtime-config). safe_max_tokens ainda protege o context window.
+        _spec_intake_cap = int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "64000"))
         if (mode or "").strip().lower() == "spec_intake_and_normalize":
-            max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
+            max_tokens = max(max_tokens, min(_spec_intake_cap, budget["safe_max_tokens"]))
         # Bug fix: tokens por role NÃO são limitados por env_max (teto padrão).
         # Cada role usa seu próprio teto — max() garante o maior entre o calculado e o role-specific.
         if (role or "").upper() == "ENGINEER" and (mode or "").strip().lower() == "generate_engineering_docs":
@@ -919,9 +933,10 @@ def run_agent(
         if (role or "").upper() == "QA" and (mode or "").strip().lower() == "validate_task":
             qa_max = int(os.environ.get("CLAUDE_MAX_TOKENS_QA", "16000"))
             max_tokens = max(max_tokens, qa_max)
-        # Spec intake: manter o cap reduzido (resposta pequena esperada)
+        # Spec intake: garantir o piso do cap (spec grande precisa caber inteira no output).
+        # Nunca abaixo do cap configurado; sempre limitado por safe_max_tokens (context window).
         if (mode or "").strip().lower() == "spec_intake_and_normalize":
-            max_tokens = min(max_tokens, int(os.environ.get("CLAUDE_MAX_TOKENS_SPEC_INTAKE", "12000")))
+            max_tokens = max(max_tokens, min(_spec_intake_cap, budget["safe_max_tokens"]))
         logger.info("[%s] Enviando solicitação à Claude (modelo: %s, repair=%d/%d, max_tokens=%s, utilization=%.1f%%)...",
                     agent_name, model, repair_attempt, MAX_REPAIRS, max_tokens, budget["utilization_pct"])
         last_error = None

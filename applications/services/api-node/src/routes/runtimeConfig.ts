@@ -32,7 +32,11 @@ const CONFIG_KEYS: Record<string, { label: string; group: string; unit: string; 
   CLAUDE_MAX_TOKENS:      { label: "Max tokens (padrão)",   group: "tokens", unit: "tk", min: 1000, max: 64000 },
   CLAUDE_MAX_TOKENS_DEV:  { label: "Max tokens Dev",        group: "tokens", unit: "tk", min: 1000, max: 64000 },
   CLAUDE_MAX_TOKENS_PM:   { label: "Max tokens PM",         group: "tokens", unit: "tk", min: 1000, max: 64000 },
-  CLAUDE_MAX_TOKENS_ENGINEER: { label: "Max tokens Engineer", group: "tokens", unit: "tk", min: 1000, max: 64000 },
+  CLAUDE_MAX_TOKENS_ENGINEER:   { label: "Max tokens Engineer",   group: "tokens", unit: "tk", min: 1000, max: 64000 },
+  CLAUDE_MAX_TOKENS_QA:         { label: "Max tokens QA",         group: "tokens", unit: "tk", min: 1000, max: 64000 },
+  // spec_intake re-emite a PRODUCT_SPEC inteira no output — specs grandes exigem teto alto.
+  // Cap baixo trunca o JSON (BLOCKED). Default 64000 (teto do modelo).
+  CLAUDE_MAX_TOKENS_SPEC_INTAKE: { label: "Max tokens Spec Intake (CTO)", group: "tokens", unit: "tk", min: 1000, max: 64000 },
 };
 
 export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
