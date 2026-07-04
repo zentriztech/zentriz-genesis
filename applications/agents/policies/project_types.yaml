@@ -9,7 +9,7 @@
 #
 # Ver README.md para schema completo e política de linguagem PT-BR/EN.
 
-version: "0.1.0"
+version: "0.2.0"
 
 # ── type_aliases ─────────────────────────────────────────────────────────────
 # Normaliza saídas de detectProjectType (telegram.ts:955-963) + subtipos do
@@ -342,46 +342,202 @@ types:
       - "middleware.ts com auth guard (landing não tem login)"
       - "sitemap.xml ausente"
 
-  # ── mobile_crossplatform (STUB Wave 0 — completo na Wave 1) ────────────────
-  # Existe na Wave 0 apenas para os aliases mobile_app/mobile_ios/mobile_android
-  # apontarem para tipo canônico. Policy completa vem em v0.2.0 (T-06 Wave 1).
-  # Enquanto isso: sem forbidden_patterns fortes, sem required_routes strict.
-  # Charter DEVE declarar stack completo (React Native + Expo típico).
+  # ── mobile_crossplatform (Wave 1 — política completa v0.2.0) ─────────────
   mobile_crossplatform:
     inherit_from: mobile
     labels:
       pt_br: "📱 Mobile Multiplataforma"
       en: "Mobile Cross-Platform"
-    scaffold: []                                    # herda mobile group
+    scaffold:
+      - eas.json                                      # Expo Application Services
+      - app.config.ts
     required_routes:
-      strict: []                                    # Wave 1 detalha
+      strict:
+        - "Splash"                                    # tela inicial obrigatória
+        - "Login"                                     # auth flow inicial
+        - "Home"                                      # rota autenticada raiz
       expected:
-        - "Splash"
-        - "Login"
-        - "Home"
+        - "Settings"
     required_components:
-      - "React Navigation"
-      - "auth flow"
-      - "cliente HTTP com envelope"
-    forbidden_patterns: []                          # Wave 1 codifica
+      - "@react-navigation/native + stack ou tabs"
+      - "AuthContext ou similar (Context API)"
+      - "cliente HTTP com envelope {data, meta}"      # padrão Genesis
+      - "AsyncStorage para token (nunca localStorage)"
+      - "SplashScreen com Expo"
+    forbidden_patterns:
+      - "localStorage"                                # web-only API
+      - "document."                                   # web-only
+      - "window."                                     # web-only
+      - "AppShell.tsx"                                # padrão web dashboard
+      - "next/*"                                      # nunca importar Next.js
+      - "sitemap.xml"                                 # é mobile, não site
+      - "hero-section"                                # padrão web landing
+      - "middleware.ts"                               # Next-specific
     fingerprint:
       required_tokens:
         strong:
           - "react-native"
+          - "@react-navigation"
+          - "AsyncStorage"
         soft:
           - "expo"
-      forbidden_tokens: []
+          - "SplashScreen"
+          - "SafeAreaView"
+      forbidden_tokens:
+        - "localStorage"
+        - "AppShell"
+        - "sitemap"
+        - "next.config"
+      synonyms_pt_br: {}
     stack_when_charter_silent:
-      - "Expo"
-      - "React Native"
+      - "Expo SDK 51+"
+      - "React Native 0.74+"
       - "TypeScript"
+      - "@react-navigation/native"
+      - "react-native-async-storage"
     smell_signals:
       - "uso de localStorage/document/window (web-only APIs)"
-      - "AppShell.tsx (padrão web)"
-    meta:
-      requires_runbook: false
-      warn_on_default: false
-      blocks_generation: false
+      - "AppShell.tsx (padrão web dashboard)"
+      - "import next/* ou react-router-dom (não é web)"
+      - "fetch sem headers Content-Type application/json"
+
+  # ── fullstack_saas (Wave 1 — união backend_api + frontend_dashboard + auth) ───
+  # SaaS multi-tenant típico: API + dashboard admin + auth-service separado (LEI 11).
+  fullstack_saas:
+    inherit_from: fullstack
+    labels:
+      pt_br: "☁️ SaaS (Fullstack)"
+      en: "SaaS (Fullstack)"
+    scaffold:
+      - Dockerfile                                    # herdado defaults
+      - start.sh
+      - .env.example
+      - README.md
+      - docker-compose.yml                            # orquestra api + web + auth-service
+      # union backend_api + frontend_dashboard scaffolds ficam em subpastas
+      # apps/api/Dockerfile, apps/api/app.ts, apps/api/drizzle.config.ts
+      # apps/web/next.config.js, apps/web/AppShell.tsx
+      # apps/auth/... (LEI 11 — serviço separado)
+    required_routes:
+      strict:
+        # API side
+        - "POST /api/auth/login"
+        - "GET /api/health"
+        - "GET /api/<recurso>"
+        # Frontend side
+        - "/"                                         # redirect para /login ou /dashboard
+        - "/login"
+        - "/dashboard"
+      expected:
+        - "/configuracoes"
+        - "GET /api/tenant"                           # multi-tenancy típico
+    required_components:
+      # API
+      - "envelope {data, meta}"
+      - "prefixo /api/"
+      - "JWT middleware (backend)"
+      - "error handler com details:{}"
+      # Frontend
+      - "<AppShell> wrapping rotas autenticadas"
+      - "middleware.ts com auth guard"
+      - "cliente HTTP com envelope"
+      - "token field 'access_token'"
+      # Auth
+      - "auth-service em serviço/container separado (LEI 11)"
+    forbidden_patterns:
+      # Herda defaults + tabus específicos de SaaS
+      - "Prisma"                                       # usar Drizzle no backend
+      - "monolito único (backend + frontend no mesmo container)"
+      - "seed.mjs no Dockerfile"                       # bug Node N5
+      - "findAll("                                     # bug Node N6 — usar findMany
+      - "rota sem app.register"                        # bug Node N7
+      - "content-type form-urlencoded no login"        # Fastify não aceita
+      - "campo 'token' em vez de 'access_token'"       # L2
+      - "hero-section"                                 # é dashboard, não landing
+      - "página / renderizando dashboard direto"       # deve redirect
+      - "auth embutido no api-node principal"          # LEI 11 — separar
+    fingerprint:
+      required_tokens:
+        strong:
+          - "fastify"
+          - "drizzle"
+          - "AppShell"
+          - "/api/auth/login"
+          - "/dashboard"
+        soft:
+          - "@mui/material"
+          - "helmet"
+          - "middleware"
+      forbidden_tokens:
+        - "prisma"
+        - "hero-section"
+        - "landing-hero"
+      synonyms_pt_br:
+        dashboard:
+          - "painel"
+          - "gerenciador"
+        settings:
+          - "configuracoes"
+          - "ajustes"
+    stack_when_charter_silent:
+      - "Node 20 + Fastify + Drizzle + PostgreSQL 16 (backend)"
+      - "Next.js 15 + MUI + TypeScript (frontend)"
+      - "auth-service separado (LEI 11)"
+    smell_signals:
+      - "backend e frontend no mesmo Dockerfile/container"
+      - "auth embutido no api-node principal (não em auth-service)"
+      - "página / renderiza dashboard direto sem redirect"
+      - "docker-compose sem service auth-service"
+
+  # ── bot_chat (Wave 1 — bot conversacional: Telegram, Discord, WhatsApp) ──
+  bot_chat:
+    inherit_from: bot
+    labels:
+      pt_br: "💬 Bot Conversacional"
+      en: "Chat Bot"
+    scaffold:
+      - Dockerfile
+      - start.sh
+      - .env.example
+      # handler principal — nome varia por stack (bot.ts, bot.py, main.py)
+    required_routes:
+      strict:
+        - "/start"                                     # comando universal em bots
+        - "/help"
+      expected:
+        - "1 comando de domínio (varia por produto)"
+    required_components:
+      - "handler de webhook OU polling loop"
+      - "token do bot em .env (nunca hardcoded)"
+      - "error boundary por comando"
+      - "logs estruturados (comando + user_id + resultado)"
+    forbidden_patterns:
+      - "token hardcoded no código"
+      - "server HTTP paralelo sem justificativa"
+      - "banco de dados sem justificativa"           # bot simples não precisa
+      - "AppShell"                                   # padrão web
+      - "next/*"
+      - "hero-section"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "bot"
+        soft:
+          - "webhook"
+          - "polling"
+          - ".env"
+      forbidden_tokens:
+        - "AppShell"
+        - "next.config"
+        - "hardcoded_token"                          # meta-token
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + Fastify (webhook) OU python-telegram-bot / discord.py (polling)"
+      - "TypeScript ou Python 3.11"
+    smell_signals:
+      - "token do bot em código-fonte (não .env)"
+      - "servidor Fastify paralelo ao webhook sem justificativa"
+      - "sem error handler — bot crasha em qualquer input inválido"
 
   # ── other (tipo declarado mas fora do piloto) ──────────────────────────────
   # Charter DEVE justificar em "## Motivação" + repo DEVE ter RUNBOOK.md.

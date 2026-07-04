@@ -255,6 +255,68 @@
         "PostgreSQL 16"
       ]
     },
+    "bot_chat": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "AppShell",
+          "next.config",
+          "hardcoded_token"
+        ],
+        "required_tokens": {
+          "soft": [
+            "webhook",
+            "polling",
+            ".env"
+          ],
+          "strong": [
+            "bot"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "token hardcoded no código",
+        "server HTTP paralelo sem justificativa",
+        "banco de dados sem justificativa",
+        "AppShell",
+        "next/*",
+        "hero-section"
+      ],
+      "inherit_from": "bot",
+      "labels": {
+        "en": "Chat Bot",
+        "pt_br": "💬 Bot Conversacional"
+      },
+      "required_components": [
+        "handler de webhook OU polling loop",
+        "token do bot em .env (nunca hardcoded)",
+        "error boundary por comando",
+        "logs estruturados (comando + user_id + resultado)"
+      ],
+      "required_routes": {
+        "expected": [
+          "1 comando de domínio (varia por produto)"
+        ],
+        "strict": [
+          "/start",
+          "/help"
+        ]
+      },
+      "scaffold": [
+        "Dockerfile",
+        "start.sh",
+        ".env.example"
+      ],
+      "smell_signals": [
+        "token do bot em código-fonte (não .env)",
+        "servidor Fastify paralelo ao webhook sem justificativa",
+        "sem error handler — bot crasha em qualquer input inválido"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Fastify (webhook) OU python-telegram-bot / discord.py (polling)",
+        "TypeScript ou Python 3.11"
+      ]
+    },
     "frontend_dashboard": {
       "fingerprint": {
         "forbidden_tokens": [
@@ -417,51 +479,169 @@
         "TypeScript"
       ]
     },
-    "mobile_crossplatform": {
+    "fullstack_saas": {
       "fingerprint": {
-        "forbidden_tokens": [],
+        "forbidden_tokens": [
+          "prisma",
+          "hero-section",
+          "landing-hero"
+        ],
         "required_tokens": {
           "soft": [
-            "expo"
+            "@mui/material",
+            "helmet",
+            "middleware"
           ],
           "strong": [
-            "react-native"
+            "fastify",
+            "drizzle",
+            "AppShell",
+            "/api/auth/login",
+            "/dashboard"
+          ]
+        },
+        "synonyms_pt_br": {
+          "dashboard": [
+            "painel",
+            "gerenciador"
+          ],
+          "settings": [
+            "configuracoes",
+            "ajustes"
           ]
         }
       },
-      "forbidden_patterns": [],
+      "forbidden_patterns": [
+        "Prisma",
+        "monolito único (backend + frontend no mesmo container)",
+        "seed.mjs no Dockerfile",
+        "findAll(",
+        "rota sem app.register",
+        "content-type form-urlencoded no login",
+        "campo 'token' em vez de 'access_token'",
+        "hero-section",
+        "página / renderizando dashboard direto",
+        "auth embutido no api-node principal"
+      ],
+      "inherit_from": "fullstack",
+      "labels": {
+        "en": "SaaS (Fullstack)",
+        "pt_br": "☁️ SaaS (Fullstack)"
+      },
+      "required_components": [
+        "envelope {data, meta}",
+        "prefixo /api/",
+        "JWT middleware (backend)",
+        "error handler com details:{}",
+        "<AppShell> wrapping rotas autenticadas",
+        "middleware.ts com auth guard",
+        "cliente HTTP com envelope",
+        "token field 'access_token'",
+        "auth-service em serviço/container separado (LEI 11)"
+      ],
+      "required_routes": {
+        "expected": [
+          "/configuracoes",
+          "GET /api/tenant"
+        ],
+        "strict": [
+          "POST /api/auth/login",
+          "GET /api/health",
+          "GET /api/<recurso>",
+          "/",
+          "/login",
+          "/dashboard"
+        ]
+      },
+      "scaffold": [
+        "Dockerfile",
+        "start.sh",
+        ".env.example",
+        "README.md",
+        "docker-compose.yml"
+      ],
+      "smell_signals": [
+        "backend e frontend no mesmo Dockerfile/container",
+        "auth embutido no api-node principal (não em auth-service)",
+        "página / renderiza dashboard direto sem redirect",
+        "docker-compose sem service auth-service"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Fastify + Drizzle + PostgreSQL 16 (backend)",
+        "Next.js 15 + MUI + TypeScript (frontend)",
+        "auth-service separado (LEI 11)"
+      ]
+    },
+    "mobile_crossplatform": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "localStorage",
+          "AppShell",
+          "sitemap",
+          "next.config"
+        ],
+        "required_tokens": {
+          "soft": [
+            "expo",
+            "SplashScreen",
+            "SafeAreaView"
+          ],
+          "strong": [
+            "react-native",
+            "@react-navigation",
+            "AsyncStorage"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "localStorage",
+        "document.",
+        "window.",
+        "AppShell.tsx",
+        "next/*",
+        "sitemap.xml",
+        "hero-section",
+        "middleware.ts"
+      ],
       "inherit_from": "mobile",
       "labels": {
         "en": "Mobile Cross-Platform",
         "pt_br": "📱 Mobile Multiplataforma"
       },
-      "meta": {
-        "blocks_generation": false,
-        "requires_runbook": false,
-        "warn_on_default": false
-      },
       "required_components": [
-        "React Navigation",
-        "auth flow",
-        "cliente HTTP com envelope"
+        "@react-navigation/native + stack ou tabs",
+        "AuthContext ou similar (Context API)",
+        "cliente HTTP com envelope {data, meta}",
+        "AsyncStorage para token (nunca localStorage)",
+        "SplashScreen com Expo"
       ],
       "required_routes": {
         "expected": [
+          "Settings"
+        ],
+        "strict": [
           "Splash",
           "Login",
           "Home"
-        ],
-        "strict": []
+        ]
       },
-      "scaffold": [],
+      "scaffold": [
+        "eas.json",
+        "app.config.ts"
+      ],
       "smell_signals": [
         "uso de localStorage/document/window (web-only APIs)",
-        "AppShell.tsx (padrão web)"
+        "AppShell.tsx (padrão web dashboard)",
+        "import next/* ou react-router-dom (não é web)",
+        "fetch sem headers Content-Type application/json"
       ],
       "stack_when_charter_silent": [
-        "Expo",
-        "React Native",
-        "TypeScript"
+        "Expo SDK 51+",
+        "React Native 0.74+",
+        "TypeScript",
+        "@react-navigation/native",
+        "react-native-async-storage"
       ]
     },
     "other": {
@@ -498,5 +678,5 @@
       "stack_when_charter_silent": []
     }
   },
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
