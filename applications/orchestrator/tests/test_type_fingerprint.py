@@ -193,3 +193,43 @@ def test_summarize_result_fail_lists_missing(tmp_path):
     s = summarize_result(r, "backend_api")
     assert "FAIL" in s
     assert "fastify" in s
+
+
+def test_stub_page_detected_as_fail(tmp_path):
+    """L-DEV-2/4: página 'em desenvolvimento' numa rota admin = FAIL."""
+    from orchestrator.type_fingerprint import check_stub_pages
+
+    apps = tmp_path / "apps" / "src" / "app" / "atendimentos"
+    apps.mkdir(parents=True)
+    (apps / "page.tsx").write_text(
+        "'use client';\nexport default function P(){ return <Alert>Página em desenvolvimento. Deve listar atendimentos.</Alert>; }"
+    )
+    r = check_stub_pages(tmp_path)
+    assert r["pass"] is False
+    assert any("atendimentos" in s for s in r["stubs_found"])
+
+
+def test_institutional_short_page_not_stub(tmp_path):
+    """Página /sobre curta NÃO é stub (é simples por design)."""
+    from orchestrator.type_fingerprint import check_stub_pages
+
+    apps = tmp_path / "apps" / "src" / "app" / "sobre"
+    apps.mkdir(parents=True)
+    (apps / "page.tsx").write_text(
+        "'use client';\nexport default function Sobre(){ return <Container>Fundada em 2017...</Container>; }"
+    )
+    r = check_stub_pages(tmp_path)
+    assert r["pass"] is True
+
+
+def test_real_page_not_stub(tmp_path):
+    """Página com implementação real (sem markers) não é stub."""
+    from orchestrator.type_fingerprint import check_stub_pages
+
+    apps = tmp_path / "apps" / "src" / "app" / "dashboard"
+    apps.mkdir(parents=True)
+    (apps / "page.tsx").write_text(
+        "'use client';\nimport KpiCard from '@/components/KpiCard';\nexport default function D(){ return <KpiCard/>; }"
+    )
+    r = check_stub_pages(tmp_path)
+    assert r["pass"] is True

@@ -100,6 +100,45 @@ def _has_any_token(haystack: str, variants: list[str]) -> bool:
     return False
 
 
+def check_stub_pages(project_root: Path | str) -> dict:
+    """
+    L-DEV-2/4 (V12 OrienteMe): detecta páginas entregues como stub
+    "em desenvolvimento" em vez de implementação real de um FR.
+
+    Retorna {stubs_found: [paths], pass: bool}. Uma página é stub se:
+    - contém Alert com "em desenvolvimento" / "Deve listar" / "Deve exibir" / "será implementad"
+    - tem menos de ~40 linhas E só renderiza Alert/Typography sem lógica
+
+    Rotas admin (dashboard/atendimentos/profissionais/etc.) NÃO podem ser stub.
+    """
+    root = Path(project_root)
+    apps_dir = root / "apps"
+    scan_root = apps_dir if apps_dir.exists() else root
+
+    STUB_MARKERS = [
+        "em desenvolvimento", "página em desenvolvimento", "pagina em desenvolvimento",
+        "deve listar", "deve exibir", "deve conter", "será implementad", "sera implementad",
+        "placeholder", "todo: implementar", "conteúdo a definir", "conteudo a definir",
+        "em breve", "coming soon",
+    ]
+    stubs: list[str] = []
+    if scan_root.exists():
+        for p in scan_root.rglob("page.tsx"):
+            if any(part in _SKIP_DIRS for part in p.parts):
+                continue
+            try:
+                txt = p.read_text(encoding="utf-8", errors="replace").lower()
+            except OSError:
+                continue
+            # Não flaga páginas institucionais curtas (sobre/privacidade/termos são simples por design)
+            rel = str(p.relative_to(scan_root)).lower()
+            is_institutional = any(x in rel for x in ("sobre", "privacidade", "termos", "login"))
+            hit = any(m in txt for m in STUB_MARKERS)
+            if hit and not is_institutional:
+                stubs.append(str(p.relative_to(root)))
+    return {"stubs_found": stubs, "pass": len(stubs) == 0}
+
+
 def check_fingerprint(project_root: Path | str, policy: dict) -> dict:
     """
     Executa fingerprint check no diretório `project_root/apps/` (default do Genesis).
@@ -154,13 +193,18 @@ def check_fingerprint(project_root: Path | str, policy: dict) -> dict:
         if _has_any_token(haystack, [token]):
             forbidden_found.append(token)
 
-    pass_ = (not missing_strong) and (not forbidden_found)
+    # L-DEV-2/4: páginas stub ("em desenvolvimento") são FAIL — rota existir != FR implementado
+    stub_result = check_stub_pages(root)
+    stubs_found = stub_result["stubs_found"]
+
+    pass_ = (not missing_strong) and (not forbidden_found) and (not stubs_found)
 
     return {
         "pass": pass_,
         "missing_strong": missing_strong,
         "missing_soft": missing_soft,
         "forbidden_found": forbidden_found,
+        "stubs_found": stubs_found,
         "details": {
             "files_scanned": files_scanned,
             "haystack_chars": len(haystack),
@@ -180,6 +224,8 @@ def summarize_result(result: dict, canonical_type: str = "") -> str:
         parts.append(f"missing strong: {result['missing_strong']}")
     if result.get("forbidden_found"):
         parts.append(f"forbidden found: {result['forbidden_found']}")
+    if result.get("stubs_found"):
+        parts.append(f"STUB pages (FR não implementado): {result['stubs_found']}")
     if result.get("missing_soft"):
         parts.append(f"missing soft (WARN): {result['missing_soft']}")
     d = result.get("details", {})
