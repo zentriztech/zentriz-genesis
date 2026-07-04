@@ -85,3 +85,28 @@ agent:
 
 - Template health: [MONITOR_HEALTH_TEMPLATE.md](../../../project/reports/MONITOR_HEALTH_TEMPLATE.md)
 - Contrato global: [AGENT_PROTOCOL.md](../../../contracts/AGENT_PROTOCOL.md)
+
+
+## Type Policy — consultar antes de propor fix (Wave 1 — T-13)
+
+O Monitor recebe em `inputs["type_policy"]` a política técnica resolvida a partir do tipo canônico do projeto.
+
+**Regra:** ao detectar task BLOCKED e propor fix automático:
+
+1. **Antes de aplicar patch**, verificar se o fix viola `type_policy.policy.forbidden_patterns`.
+   - Se viola → **escalar ao CTO** em vez de auto-remediar. Formato:
+   ```json
+   { "status": "NEEDS_INFO",
+     "reason": "type_policy_violation: fix proposto contém padrão proibido <X> para tipo <Y>. Escalando ao CTO.",
+     "next_actions": { "owner": "CTO" } }
+   ```
+
+2. **Não sugerir mudanças de stack** que contradigam `stack_when_charter_silent` sem consulta ao Charter primeiro.
+
+3. **Preservação:** todas as regras existentes do Monitor (retry cap, escalation timeout, watchdog) permanecem intocadas. Type Policy é uma **verificação adicional** antes de agir.
+
+4. **Fallback:** `canonical_type == "_default"` → Monitor NÃO propõe fix; escala ao CTO exigindo reclassificação.
+
+Ver `applications/agents/policies/README.md` para schema completo.
+
+---

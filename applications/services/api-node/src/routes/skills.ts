@@ -106,8 +106,32 @@ export async function skillsRoutes(app: FastifyInstance): Promise<void> {
 
     const allSkills = [...hardRulesResult.rows, ...stackSkills];
     const skillIds = allSkills.map((s) => s.id);
+
+    // T-13: incluir hash do policies.json (project_types.yaml) no bundle_hash.
+    // Quando o YAML muda, o hash muda, o bundle é invalidado — força re-assemble
+    // no próximo pedido. Sem isso, mudança de policy não invalida cache existente.
+    let policiesHash = "";
+    try {
+      const { readFileSync } = await import("fs");
+      const { fileURLToPath } = await import("url");
+      const pathMod = await import("path");
+      const dirname = pathMod.dirname(fileURLToPath(import.meta.url));
+      const candidates = [
+        pathMod.join(dirname, "..", "generated", "policies.json"),
+        pathMod.join(dirname, "..", "..", "src", "generated", "policies.json"),
+        pathMod.join(process.cwd(), "src", "generated", "policies.json"),
+      ];
+      for (const c of candidates) {
+        try {
+          const raw = readFileSync(c, "utf-8");
+          policiesHash = createHash("sha256").update(raw).digest("hex").slice(0, 8);
+          break;
+        } catch { /* try next */ }
+      }
+    } catch { /* keep empty */ }
+
     const bundleHash = createHash("sha256")
-      .update(skillIds.sort().join(","))
+      .update(skillIds.sort().join(",") + "|policies:" + policiesHash)
       .digest("hex")
       .slice(0, 16);
 
