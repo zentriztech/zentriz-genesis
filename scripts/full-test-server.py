@@ -246,6 +246,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             pass
 
+        # T-09 sub-fase 2f: fingerprint check (grep semântico contra type_policy)
+        # Só roda se payload trouxer project_type e o módulo type_fingerprint estiver disponível.
+        fingerprint_result = None
+        try:
+            project_type_hint = (payload.get("project_type") or "").strip()
+            if project_type_hint:
+                # Importa on-demand (evita crash se módulo não estiver instalado)
+                import sys as _sys
+                _repo_root = Path(__file__).resolve().parent.parent
+                if str(_repo_root / "applications") not in _sys.path:
+                    _sys.path.insert(0, str(_repo_root / "applications"))
+                try:
+                    from orchestrator.type_fingerprint import check_fingerprint, summarize_result
+                    from orchestrator.pipeline_context import _build_type_policy_input
+                    _tp = _build_type_policy_input(project_type_hint)
+                    _fp = check_fingerprint(Path(proj_dir), _tp.get("policy", {}) or {})
+                    fingerprint_result = {
+                        "canonical_type":   _tp.get("canonical_type"),
+                        "resolved_from":    _tp.get("resolved_from"),
+                        "enforcement_mode": _tp.get("enforcement_mode"),
+                        "pass":             _fp.get("pass"),
+                        "missing_strong":   _fp.get("missing_strong", []),
+                        "missing_soft":     _fp.get("missing_soft", []),
+                        "forbidden_found":  _fp.get("forbidden_found", []),
+                        "summary":          summarize_result(_fp, _tp.get("canonical_type", "?")),
+                    }
+                    log.info(f"[cyborg-build/T-09] {project_id[:8]}: {fingerprint_result['summary']}")
+                except ImportError:
+                    log.warning("[cyborg-build/T-09] type_fingerprint indisponível — skipping")
+        except Exception as _fp_err:
+            log.warning(f"[cyborg-build/T-09] falha fingerprint: {_fp_err}")
+
         self._json(200, {
             "build_rc": build_rc,
             "build_output": build_out,
@@ -253,6 +285,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "install_output": install_out,
             "type_check_rc": tc_rc,
             "type_check_output": tc_out,
+            # T-09: sub-fase 2f (Type Compliance) — pode ser None se policy indisponível
+            "type_compliance": fingerprint_result,
         })
 
     # ── /cyborg-engineer — spawn ONE longa sessão Claude Code (Cyborg V3) ────────
