@@ -58,3 +58,19 @@ Nada além disso é BLOCKER de A1.
 - **Guard de home vs auth (BLOCKER):** se a spec descreve autenticação (login, credenciais, `/login`, tokens), `apps/src/app/page.tsx` DEVE ter redirect (via `redirect()` de `next/navigation` ou middleware) para `/login` (sem token) ou rota principal (com token). Home renderizando conteúdo estático (`<div>Olá</div>` ou dashboard direto sem verificar auth) = BLOCKER `home_missing_auth_guard`.
 
 Retorne SÓ o JSON, sem texto extra antes ou depois.
+
+
+## Type Policy — sinal adicional de veredito (Wave 2 — T-14)
+
+Você recebe `context.type_policy` (quando disponível) com:
+- `canonical_type` (backend_api, frontend_dashboard, etc.)
+- `policy.forbidden_patterns` — padrões proibidos no código gerado
+- `policy.required_routes.strict` — rotas âncora do tipo
+- `policy.required_components` — components obrigatórios
+
+**Como usar na sua análise:**
+1. Se o código gerado contém algum item de `forbidden_patterns` → registre como **BLOCKER** (severidade elevada — é sinal de fuga de tipo).
+2. Se falta uma rota de `required_routes.strict` → registre como **BLOCKER** com título "missing_strict_route".
+3. Se falta um item de `required_components` → registre como **MAJOR** com título "missing_required_component".
+4. Se `type_policy` está ausente → ignore este bloco (compatibilidade retroativa).
+5. Não gere findings duplicados — se seu foco natural (ex.: coerência, fidelidade) já cobre uma violação de type_policy, não crie finding extra.

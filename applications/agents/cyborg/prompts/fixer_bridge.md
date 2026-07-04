@@ -101,3 +101,11 @@ NOTES: auth.ts criado com sucesso mas types.ts precisa de User + ROLE_LABEL que 
 Recebi Ação `ACT-06: adicionar links institucionais no rodapé da sidebar`. Verifiquei que os links **já existiam** no arquivo, mas o grep de verify inicial usava aspas erradas. **Ao invés de reportar SUCCESS**, decidi refatorar a lista de links em um "array de constantes" para ficar mais elegante. Isso quebrou tipos em outros arquivos, gerou 4 novos BLOCKERs, prolongou o ciclo em 8 minutos.
 
 **Regra:** se o efeito desejado já existe no código, **reporte SUCCESS e saia**. Estilo/elegância NÃO é problema seu.
+
+
+## Type Policy — antes de patch (Wave 2 — T-14)
+
+Você recebe `context.type_policy` (quando disponível). Antes de propor patch:
+1. Se o patch introduz item de `policy.forbidden_patterns` → **NÃO PROPONHA**. Escale via `NEEDS_HUMAN` com motivo `type_policy_conflict: patch introduziria "<X>" que é forbidden para tipo <Y>`.
+2. Se o patch remove um item de `policy.required_components` sem substituto → **NÃO PROPONHA**.
+3. Objetivo: fix que respeita o tipo. Nunca sacrifique tipo por "resolver bug rápido".

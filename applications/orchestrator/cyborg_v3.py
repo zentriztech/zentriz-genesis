@@ -146,6 +146,34 @@ def _resolve_proj_dir(project_id: str, prod_id: str | None) -> Path:
     return candidates[-1]
 
 
+def _fetch_type_policy_for_project(project_id: str) -> dict | None:
+    """
+    T-14: consulta project_type do projeto via API e monta type_policy.
+    Retorna None se não conseguir resolver — análises continuam sem type_policy
+    (compatibilidade retroativa com projetos antigos).
+    """
+    try:
+        # Tentar via API HTTP (mesma que o runner usa)
+        api_url = os.environ.get("API_BASE_URL", "http://api:3000").rstrip("/")
+        token = os.environ.get("GENESIS_API_TOKEN", "")
+        if not token:
+            return None
+        import urllib.request as _ur
+        req = _ur.Request(f"{api_url}/api/projects/{project_id}", method="GET")
+        req.add_header("Authorization", f"Bearer {token}")
+        with _ur.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        raw_type = (data or {}).get("projectType") or (data or {}).get("project_type") or ""
+        if not raw_type:
+            return None
+        # Usa loader do pipeline_context
+        from orchestrator.pipeline_context import _build_type_policy_input
+        return _build_type_policy_input(raw_type)
+    except Exception as e:
+        logger.debug(f"[Cyborg V3/T-14] type_policy indisponível: {e}")
+        return None
+
+
 def _collect_context(project_id: str, prod_id: str | None) -> dict:
     """Coleta artefatos + build output para as análises."""
     proj_dir = _resolve_proj_dir(project_id, prod_id)
@@ -204,6 +232,14 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
         logger.warning(f"[Cyborg V3] Build check falhou: {e}")
 
     ctx["_proj_dir"] = str(proj_dir)
+
+    # T-14: injetar type_policy resolvida no contexto compartilhado.
+    # As 5 análises (A1-A5) e os bridges (engineer/fixer/consolidator) leem daí.
+    _tp = _fetch_type_policy_for_project(project_id)
+    if _tp:
+        ctx["type_policy"] = _tp
+        logger.info(f"[Cyborg V3/T-14] type_policy={_tp.get('canonical_type')} injetada no contexto")
+
     return ctx
 
 
@@ -336,6 +372,25 @@ def spawn_engineer(project_id: str, tenant_id: str | None, prod_id: str | None,
     """Chama full-test-server /cyborg-engineer para spawnar sessão longa."""
     engineer_prompt = _load_prompt("engineer_bridge")
 
+    # T-14: type_policy no briefing do engineer bridge (também disponível ao Cyborg via zentriz-audit).
+    _tp = _fetch_type_policy_for_project(project_id)
+    _tp_section = ""
+    if _tp:
+        pol = _tp.get("policy", {}) or {}
+        _tp_section = f"""
+
+## Type Policy (aplicável a este projeto)
+
+- **Tipo canônico:** `{_tp.get('canonical_type')}` (resolvido de `{_tp.get('resolved_from')}`)
+- **Enforcement mode:** `{_tp.get('enforcement_mode')}` (warn = aviso, blocker = REVISION)
+- **Versão da policy:** {_tp.get('policy_version')}
+- **Rotas strict obrigatórias:** {pol.get('required_routes', {}).get('strict', [])}
+- **Components obrigatórios:** {pol.get('required_components', [])[:5]}
+- **Patterns proibidos (não introduza estes):** {pol.get('forbidden_patterns', [])[:8]}
+
+**Regra:** ao corrigir bugs, respeite `forbidden_patterns` (nunca introduza `Prisma` em `backend_api`, `hero-section` em `frontend_dashboard`, etc.). Se o audit sugere um fix que viola a policy, **prefira alternativa que respeite o tipo** ou emita `NEEDS_HUMAN` com motivo.
+"""
+
     # Briefing curto — Claude vai investigar o resto sozinho
     user_briefing = f"""# Missão
 
@@ -345,7 +400,7 @@ O pipeline Genesis já entregou o produto. Sua função: **auditar, corrigir cir
 
 ## Briefing (auditoria prévia Bedrock)
 
-{audit_summary}
+{audit_summary}{_tp_section}
 
 ## Escopo
 

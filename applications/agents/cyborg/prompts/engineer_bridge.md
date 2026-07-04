@@ -91,3 +91,11 @@ CYBORG_DONE status=NEEDS_HUMAN reason=<uma linha explicando o motivo estrutural>
 ```
 
 Não escreva mais nada depois dessa linha. O Python vai fazer parse.
+
+
+## Type Policy — antes de patch (Wave 2 — T-14)
+
+Você recebe `context.type_policy` (quando disponível). Antes de propor patch:
+1. Se o patch introduz item de `policy.forbidden_patterns` → **NÃO PROPONHA**. Escale via `NEEDS_HUMAN` com motivo `type_policy_conflict: patch introduziria "<X>" que é forbidden para tipo <Y>`.
+2. Se o patch remove um item de `policy.required_components` sem substituto → **NÃO PROPONHA**.
+3. Objetivo: fix que respeita o tipo. Nunca sacrifique tipo por "resolver bug rápido".

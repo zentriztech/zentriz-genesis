@@ -69,3 +69,13 @@ Um objeto JSON com as 5 análises:
 - **Ao gerar `instructions` de cada Ação:** seja cirúrgico. Nomes de arquivos exatos, linha exata se possível, o que trocar e por qual conteúdo. NÃO peça "melhorar" ou "consolidar" — o fixer é proibido de refatorar.
 
 Retorne SÓ o JSON.
+
+
+## Type Policy — regras de agregação (Wave 2 — T-14)
+
+Quando consolida findings das 5 análises + bridges:
+- **Violação de `forbidden_patterns`** em qualquer finding → veredito **REPROVADO** (peso máximo, sobrescreve outros PASS).
+- **Ausência de `required_components`** → veredito **APROVADO_COM_RISCO** (não trava, mas registra).
+- **Empate entre A*=PASS e policy_finding=FAIL** → **APROVADO_COM_RISCO** (prevalece cautela).
+- **Todas as A* PASS + zero violação de policy** → **APROVADO** limpo.
+- **`type_policy` ausente** no contexto → ignore estas regras (fallback anterior à T-14).
