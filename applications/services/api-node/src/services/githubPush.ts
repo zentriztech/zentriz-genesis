@@ -19,6 +19,7 @@ import {
   ensureThreeBranches,
   pushProjectFiles,
 } from "./github.js";
+import { notifyTelegramTenant } from "../routes/telegram.js";
 
 const PROJECT_FILES_ROOT = (process.env.PROJECT_FILES_ROOT ?? "/shared/uploads").trim();
 
@@ -134,6 +135,14 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     );
 
     console.log(`[GitHubPush] ✓ ${fullName} — ${fileCount} files pushed to dev (${shaDevResult.slice(0, 8)})${deployMsg}`);
+
+    // ── 9. Telegram (best-effort, nunca bloqueia) ─────────────────────────────
+    if (row.tenant_id) {
+      notifyTelegramTenant(
+        row.tenant_id,
+        `🐙 Repositório GitHub criado para *${row.title}*\nhttps://github.com/${fullName}`,
+      ).catch(() => {});
+    }
   } catch (err) {
     console.error(`[GitHubPush] Failed for project ${projectId}:`, err);
     // Fire-and-forget: never throw — must not fail the accept request

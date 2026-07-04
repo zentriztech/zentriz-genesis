@@ -1632,19 +1632,35 @@ export async function projectRoutes(app: FastifyInstance) {
               details: { limit_per_hour: rateLimitPerHour },
             });
           }
-          // Quota: max ativos por tenant
-          const maxActive = parseInt(process.env.S3_STATIC_MAX_ACTIVE_PER_TENANT ?? "5", 10);
+          // Quota: max ativos por tenant. Em vez de rejeitar (TENANT_QUOTA_EXCEEDED),
+          // fazemos EVICTION do(s) deploy(s) mais antigo(s) — um projeto entregue não deve
+          // segurar slot indefinidamente. O destroy agora funciona in-container (SDK).
+          const maxActive = parseInt(process.env.S3_STATIC_MAX_ACTIVE_PER_TENANT ?? "20", 10);
           const active = await rateClient.query<{ count: string }>(
             `SELECT COUNT(*)::text AS count FROM ephemeral_deployments
               WHERE tenant_id = $1 AND status IN ('provisioning','running','running_degraded')`,
             [tenantId],
           );
-          if (parseInt(active.rows[0].count, 10) >= maxActive) {
-            return reply.status(429).send({
-              code: "TENANT_QUOTA_EXCEEDED",
-              message: `Máximo de ${maxActive} deploys ativos atingido para este tenant.`,
-              details: { max_active: maxActive },
-            });
+          const activeCount = parseInt(active.rows[0].count, 10);
+          if (activeCount >= maxActive) {
+            // Libera espaço para 1 novo deploy: destrói os mais antigos ativos do tenant.
+            const evictCount = activeCount - maxActive + 1;
+            const oldest = await rateClient.query<{ id: string }>(
+              `SELECT id FROM ephemeral_deployments
+                WHERE tenant_id = $1 AND status IN ('provisioning','running','running_degraded')
+                ORDER BY created_at ASC
+                LIMIT $2`,
+              [tenantId, evictCount],
+            );
+            for (const row of oldest.rows) {
+              try {
+                await destroyDeployment(row.id);
+                request.log.info({ deploymentId: row.id, tenantId }, "[quota-evict] deploy antigo destruído para liberar slot");
+              } catch (err) {
+                // Não bloqueia o novo deploy — TTL/reconciliação limpam depois.
+                request.log.warn({ deploymentId: row.id, err: String(err) }, "[quota-evict] falha ao destruir deploy antigo");
+              }
+            }
           }
         } finally {
           rateClient.release();
@@ -1758,6 +1774,24 @@ export async function projectRoutes(app: FastifyInstance) {
               deploymentId,
             ],
           );
+          // Telegram: notifica só na PRIMEIRA transição para running (evita spam em re-report de health)
+          const wasRunning = dep.status === "running" || dep.status === "running_degraded";
+          if (!wasRunning && body.app_url) {
+            setImmediate(async () => {
+              try {
+                const p = await pool.query<{ title: string; tenant_id: string | null }>(
+                  "SELECT title, tenant_id FROM projects WHERE id=$1", [id],
+                );
+                const proj = p.rows[0];
+                if (proj?.tenant_id) {
+                  notifyTelegramTenant(
+                    proj.tenant_id,
+                    `🚀 Deploy publicado: *${proj.title}*\n${body.app_url}`,
+                  ).catch(() => {});
+                }
+              } catch { /* notify best-effort */ }
+            });
+          }
           return reply.send({ ok: true, status: body.status });
         }
 

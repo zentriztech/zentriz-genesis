@@ -30,6 +30,7 @@ import PeopleIcon from "@mui/icons-material/People";
 import SendIcon from "@mui/icons-material/Send";
 import SettingsIcon from "@mui/icons-material/Settings";
 import BusinessIcon from "@mui/icons-material/Business";
+import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import LightModeIcon from "@mui/icons-material/LightMode";
@@ -62,6 +63,7 @@ const navTenantAdmin = [
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,     color: "#E2E8F0" },
   { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
+  { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
   { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
   { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
@@ -74,6 +76,7 @@ const navZentriz = [
   { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
+  { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
   { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
