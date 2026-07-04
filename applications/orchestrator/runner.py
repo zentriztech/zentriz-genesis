@@ -2661,6 +2661,58 @@ def _run_monitor_loop(
                     _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
                     _qa_summary = qa_response.get("summary", "")
                     qa_status = qa_response.get("status", "?")
+
+                    # T-08: fingerprint check contra type_policy (ADITIVO ao QA).
+                    # Só roda se pipeline_ctx tem type_policy resolvido (Wave 1+).
+                    try:
+                        if pipeline_ctx and pipeline_ctx.project_type and project_id:
+                            from orchestrator.pipeline_context import _build_type_policy_input
+                            from orchestrator import type_fingerprint as _tfp
+                            _type_input = _build_type_policy_input(pipeline_ctx.project_type)
+                            _enforcement = _type_input.get("enforcement_mode", "warn")
+                            _canon = _type_input.get("canonical_type", "_default")
+                            _policy = _type_input.get("policy", {}) or {}
+                            _files_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+                            _proj_root = _files_root / project_id
+                            _fp = _tfp.check_fingerprint(_proj_root, _policy)
+                            _fp_summary = _tfp.summarize_result(_fp, _canon)
+                            logger.info("[T-08 fingerprint] task=%s %s", tid, _fp_summary)
+                            # Se enforcement=blocker E fingerprint falha, força QA_FAIL
+                            if _enforcement == "blocker" and not _fp.get("pass"):
+                                _reasons = []
+                                if _fp.get("missing_strong"):
+                                    _reasons.append(f"missing strong tokens {_fp['missing_strong']}")
+                                if _fp.get("forbidden_found"):
+                                    _reasons.append(f"forbidden tokens found {_fp['forbidden_found']}")
+                                qa_response["status"] = "QA_FAIL"
+                                qa_response["summary"] = (
+                                    f"[type_policy_fingerprint_fail: {_canon}] "
+                                    + "; ".join(_reasons)
+                                    + " | "
+                                    + (qa_response.get("summary") or "")
+                                )
+                                qa_status = "QA_FAIL"
+                                _qa_summary = qa_response["summary"]
+                            elif not _fp.get("pass"):
+                                # warn mode — anexa aviso no summary sem bloquear
+                                _warn_parts = []
+                                if _fp.get("missing_strong"):
+                                    _warn_parts.append(f"missing strong {_fp['missing_strong']}")
+                                if _fp.get("forbidden_found"):
+                                    _warn_parts.append(f"forbidden {_fp['forbidden_found']}")
+                                if _fp.get("missing_soft"):
+                                    _warn_parts.append(f"soft {_fp['missing_soft']}")
+                                if _warn_parts:
+                                    _qa_summary = (
+                                        f"[type_policy_warn: {_canon}] "
+                                        + "; ".join(_warn_parts)
+                                        + " | "
+                                        + (_qa_summary or "")
+                                    )
+                                    qa_response["summary"] = _qa_summary
+                    except Exception as _fp_err:
+                        logger.warning("[T-08 fingerprint] falha ao rodar: %s", _fp_err)
+
                     _post_dialogue(
                         "dev", "qa", "qa.review",
                         _get_summary_human("qa.review", "qa", "monitor", _qa_summary[:200]),

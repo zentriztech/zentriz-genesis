@@ -62,6 +62,53 @@ Você é o agente **QA (Web)**. Você:
 
 ---
 
+## Type Policy Fingerprint — grep semântico obrigatório (Wave 1 — T-08)
+
+O QA recebe em `inputs["type_policy"]` a política do tipo canônico. Além dos checks tradicionais (H01-H07, T01-T03, B01-B19), rodar **fingerprint check** contra o código gerado em `apps/`:
+
+### Como avaliar
+
+O runner chama `orchestrator.type_fingerprint.check_fingerprint(project_root, policy)` que retorna:
+```json
+{
+  "pass": bool,
+  "missing_strong":  [...],   // FAIL BLOCKER — tokens strong ausentes
+  "missing_soft":    [...],   // WARN — tokens soft ausentes
+  "forbidden_found": [...],   // FAIL BLOCKER — tokens proibidos encontrados
+  "details": { "files_scanned": N, "haystack_chars": N }
+}
+```
+
+### Regra de veredito
+
+- `pass == true` → **fingerprint OK**, seguir com outros checks.
+- `missing_strong` **não vazio** → `QA_FAIL` com motivo `type_policy_fingerprint: missing strong tokens <lista>` (revisitável — Dev pode entregar os componentes esperados na próxima iteração).
+- `forbidden_found` **não vazio** → `QA_FAIL` BLOCKER com motivo `type_policy_fingerprint: forbidden token "<X>" encontrado em código gerado (proibido pelo tipo <Y>)`.
+- `missing_soft` **não vazio** → WARN em `next_actions.warnings[]` como `type_policy:soft_token_missing:<lista>` — não bloqueia, mas registra.
+
+### Precedência e severidade
+
+- `enforcement_mode == "blocker"`: violações retornam `QA_FAIL`.
+- `enforcement_mode == "warn"` (default): violações vão para `next_actions.warnings[]`; QA aprova com aviso.
+
+### Anti-falso-positivo (PT-BR)
+
+O grep usa `synonyms_pt_br` do policy: se token strong é `dashboard` e o produto usa `painel`, o synonym `dashboard: [painel, gerenciador]` faz PASS. **Não marcar FAIL** por diferença de idioma quando o synonym cobre.
+
+### Preservação intocada
+
+Checks tradicionais permanecem invioláveis:
+- H01-H07 (headers de arquivo, cabeçalho de módulo, imports canônicos)
+- T01-T03 (tipos, tsc --noEmit, no-any)
+- B01-B19 (bugs conhecidos por stack)
+- feedback_pm_task_title (título 3-10 palavras) — não é QA gate mas coerente
+
+Fingerprint é ADITIVO.
+
+---
+
+---
+
 ## 5) MODE SPECS (QA Web React)
 
 ### Mode: `validate_task`

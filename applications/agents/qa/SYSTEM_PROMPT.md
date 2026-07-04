@@ -189,6 +189,47 @@ Quando `task_id` começa com `TSK-EVO-`:
 
 ---
 
+## Type Policy Fingerprint — grep semântico obrigatório (Wave 1 — T-08)
+
+O QA recebe em `inputs["type_policy"]` a política do tipo canônico. Além dos checks tradicionais, rodar **fingerprint check** contra o código gerado em `apps/`:
+
+### Como avaliar
+
+O runner chama `orchestrator.type_fingerprint.check_fingerprint(project_root, policy)` que retorna:
+```json
+{
+  "pass": bool,
+  "missing_strong":  [...],   // FAIL BLOCKER
+  "missing_soft":    [...],   // WARN
+  "forbidden_found": [...],   // FAIL BLOCKER
+  "details": { "files_scanned": N, "haystack_chars": N }
+}
+```
+
+### Regra de veredito
+
+- `pass == true` → seguir com outros checks.
+- `missing_strong` → `QA_FAIL` com motivo `type_policy_fingerprint: missing strong <lista>`.
+- `forbidden_found` → `QA_FAIL` BLOCKER com `forbidden "<X>" encontrado`.
+- `missing_soft` → WARN em `next_actions.warnings[]`, sem bloquear.
+
+### Precedência e severidade
+
+- `enforcement_mode == "blocker"` (produção): FAIL.
+- `enforcement_mode == "warn"` (default): warnings + aprova com aviso.
+
+### Anti-falso-positivo (PT-BR)
+
+O grep usa `synonyms_pt_br`. Ex.: strong `dashboard` + synonym `[painel, gerenciador]` → produto PT-BR com `/painel` passa. **Não marcar FAIL** por diferença de idioma quando synonym cobre.
+
+### Preservação intocada
+
+Todos os checks tradicionais permanecem invioláveis. Fingerprint é ADITIVO.
+
+---
+
+---
+
 ## 5) VEREDITO
 
 - **QA_PASS:** zero BLOCKERs, zero ou poucos MAJORs aceitáveis, produto funciona conforme charter
