@@ -24,6 +24,7 @@ import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import { projectsStore } from "@/stores/projectsStore";
 import type { Project } from "@/types";
+import { ResourceBadges } from "@/components/ResourceBadges";
 
 const MotionCard = motion(Card);
 const MotionBox  = motion(Box);
@@ -228,9 +229,10 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
         <Typography variant="caption" color="text.secondary">
           Criado {new Date(project.createdAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "2-digit" })}
         </Typography>
-        <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.6rem" }}>
-          Atualizado {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
-        </Typography>
+        <ResourceBadges
+          repoUrl={project.repoUrl} repoFullName={project.repoFullName}
+          deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+        />
       </Box>
     </MotionCard>
   );
@@ -271,6 +273,10 @@ function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }
       <Typography variant="caption" color="text.secondary" sx={{ width: 72, textAlign: "right", flexShrink: 0 }}>
         {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
       </Typography>
+      <ResourceBadges
+        repoUrl={project.repoUrl} repoFullName={project.repoFullName}
+        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+      />
       <IconButton size="small" onClick={(e) => { e.stopPropagation(); router.push(`/projects/${project.id}`); }}>
         <ArrowForwardIcon fontSize="small" />
       </IconButton>

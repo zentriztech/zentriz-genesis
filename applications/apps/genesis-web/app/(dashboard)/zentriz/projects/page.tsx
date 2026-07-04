@@ -14,6 +14,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
 import { projectsStore } from "@/stores/projectsStore";
+import { ResourceBadges } from "@/components/ResourceBadges";
 
 function ZentrizProjectsPageInner() {
   const router = useRouter();
@@ -29,6 +30,7 @@ function ZentrizProjectsPageInner() {
               <TableCell>Título</TableCell>
               <TableCell>Tenant</TableCell>
               <TableCell>Status</TableCell>
+              <TableCell>Recursos</TableCell>
               <TableCell>Atualizado</TableCell>
               <TableCell align="right">Ações</TableCell>
             </TableRow>
@@ -39,6 +41,7 @@ function ZentrizProjectsPageInner() {
                 <TableCell>{p.title}</TableCell>
                 <TableCell>Tenant Demo</TableCell>
                 <TableCell><Chip label={p.status} size="small" /></TableCell>
+                <TableCell><ResourceBadges repoUrl={p.repoUrl} repoFullName={p.repoFullName} deployUrl={p.deployUrl} deployStatus={p.deployStatus} /></TableCell>
                 <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
                 <TableCell align="right"><Button size="small" onClick={() => router.push(`/projects/${p.id}`)}>Ver</Button></TableCell>
               </TableRow>

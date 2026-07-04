@@ -59,6 +59,7 @@ import AddLinkIcon from "@mui/icons-material/AddLink";
 import BoltIcon from "@mui/icons-material/Bolt";
 import ForumIcon from "@mui/icons-material/Forum";
 import { projectsStore } from "@/stores/projectsStore";
+import { ResourceBadges } from "@/components/ResourceBadges";
 import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
@@ -432,7 +433,7 @@ function ProjectDetailPageInner() {
   const [lgpdConsent, setLgpdConsent] = useState<boolean>(false); // FT-17
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
-  const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> } | null>(null);
+  const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null }> } | null>(null);
   const [triggers, setTriggers]     = useState<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>([]);
   const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
   const [triggerProjectId, setTriggerProjectId]   = useState("");
@@ -1889,6 +1890,7 @@ function ProjectDetailPageInner() {
                               <Typography variant="caption" sx={{ fontSize: "0.68rem", flexGrow: 1 }} noWrap>
                                 {p.title ?? "Sem título"}
                               </Typography>
+                              <ResourceBadges repoUrl={p.repo_url} repoFullName={p.repo_full_name} deployUrl={p.deploy_url} deployStatus={p.deploy_status} />
                               {isCurrent && <Chip size="small" label="Este" sx={{ height: 14, fontSize: "0.55rem", bgcolor: "primary.main" + "22", color: "primary.main" }} />}
                             </Box>
                           );

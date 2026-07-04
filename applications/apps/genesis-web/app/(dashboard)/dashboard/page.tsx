@@ -25,6 +25,7 @@ import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import { apiGet } from "@/lib/api";
 import type { Project, Product } from "@/types";
+import { ResourceBadges } from "@/components/ResourceBadges";
 
 const MotionCard = motion(Card);
 const MotionBox  = motion(Box);
@@ -116,6 +117,10 @@ function ProductProjectRow({ project, onClick }: { project: Project; onClick: ()
           {isDone ? "100%" : isPending ? "—" : `${pct}%`}
         </Typography>
       )}
+      <ResourceBadges
+        repoUrl={project.repoUrl} repoFullName={project.repoFullName}
+        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+      />
     </Box>
   );
 }
@@ -237,6 +242,10 @@ function StandaloneRow({ project, onClick }: { project: Project; onClick: () => 
           )}
         </Stack>
       </Box>
+      <ResourceBadges
+        repoUrl={project.repoUrl} repoFullName={project.repoFullName}
+        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+      />
       <Chip label={statusLabel(project.status)} size="small" color={statusColor(project.status)} />
     </Box>
   );

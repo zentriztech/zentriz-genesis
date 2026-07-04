@@ -14,6 +14,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
 import { projectsStore } from "@/stores/projectsStore";
+import { ResourceBadges } from "@/components/ResourceBadges";
 
 function TenantProjectsPageInner() {
   const router = useRouter();
@@ -24,12 +25,13 @@ function TenantProjectsPageInner() {
       <Typography variant="h4" gutterBottom>Projetos do tenant</Typography>
       <TableContainer component={Paper} sx={{ mt: 2 }}>
         <Table>
-          <TableHead><TableRow><TableCell>Título</TableCell><TableCell>Status</TableCell><TableCell>Atualizado</TableCell><TableCell align="right">Ações</TableCell></TableRow></TableHead>
+          <TableHead><TableRow><TableCell>Título</TableCell><TableCell>Status</TableCell><TableCell>Recursos</TableCell><TableCell>Atualizado</TableCell><TableCell align="right">Ações</TableCell></TableRow></TableHead>
           <TableBody>
             {projects.map((p) => (
               <TableRow key={p.id}>
                 <TableCell>{p.title}</TableCell>
                 <TableCell><Chip label={p.status} size="small" /></TableCell>
+                <TableCell><ResourceBadges repoUrl={p.repoUrl} repoFullName={p.repoFullName} deployUrl={p.deployUrl} deployStatus={p.deployStatus} /></TableCell>
                 <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
                 <TableCell align="right"><Button size="small" onClick={() => router.push(`/projects/${p.id}`)}>Ver</Button></TableCell>
               </TableRow>

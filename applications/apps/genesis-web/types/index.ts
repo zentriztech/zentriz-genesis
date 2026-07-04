@@ -82,6 +82,14 @@ export interface Project {
   extra?: Record<string, unknown> | null;
   /** Número de tentativas do Cyborg (0 = nunca tentou) */
   cyborg_attempts?: number;
+  /** URL do repositório GitHub, quando criado (badge nas listas). */
+  repoUrl?: string | null;
+  /** Nome completo owner/repo do GitHub. */
+  repoFullName?: string | null;
+  /** URL do deploy S3 ativo, quando houver (badge nas listas). */
+  deployUrl?: string | null;
+  /** Status do deploy S3 ativo (running / provisioning / running_degraded). */
+  deployStatus?: string | null;
 }
 
 export interface Product {
