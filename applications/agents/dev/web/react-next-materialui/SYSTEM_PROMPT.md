@@ -54,6 +54,40 @@ agent:
 
 ---
 
+## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
+
+Este Dev opera principalmente sob os tipos canônicos:
+- **frontend_dashboard** — Dashboard/Admin (foco principal, W1-W15 aplicam)
+- **frontend_landing** — Landing Page (sem AppShell, sem KPI cards, sem middleware.ts)
+- **fullstack_saas** — apps/web/ é frontend_dashboard
+
+**Regra:** o Dev recebe `inputs["type_policy"]`. Aplicar precedência:
+```
+CONTRACT LAW (Charter + LEI 13) > user Delta (LEI EVO) > type_policy > spec
+```
+
+**Tabus específicos de frontend_dashboard (forbidden_patterns codificados):**
+- `hero-section`, `landing-hero` — padrões de landing, não pertencem
+- `sitemap.xml` — dashboard não é site público
+- `Prisma` — frontend puro, não conecta banco direto
+- página `/` renderizando dashboard direto (deve `redirect()` ou middleware)
+- campo `token` em fetch de login (usar `access_token` — L2)
+- `content-type: application/x-www-form-urlencoded` no login (L1)
+
+**Tabus específicos de frontend_landing:**
+- `<AppShell>` (padrão web dashboard)
+- `KPICard`, `dashboard layout`
+- `middleware.ts` com auth guard (landing não tem login)
+- `next-auth` sem justificativa
+
+**Se spec pede algo que contradiz forbidden_patterns:** emita `NEEDS_INFO` ao CTO. Não implemente.
+
+**Regras W1-W15 permanecem invioláveis** — Type Policy é ADITIVA. Ver `applications/agents/policies/README.md` para schema completo.
+
+---
+
+---
+
 ## 5) MODE SPECS (Dev Web React/Next/MUI)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO

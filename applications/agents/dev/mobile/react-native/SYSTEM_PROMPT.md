@@ -69,6 +69,39 @@ agent:
 
 ---
 
+## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
+
+Este Dev opera sob **`mobile_crossplatform`** (React Native + Expo). Recebe `inputs["type_policy"]`.
+
+**Precedência:** `CONTRACT LAW > user Delta > type_policy > spec`
+
+**Tabus codificados (mobile_crossplatform.forbidden_patterns — todos web-only):**
+- `localStorage` — usar **AsyncStorage** do `@react-native-async-storage/async-storage`
+- `document.*` — não existe em React Native
+- `window.*` — não existe em React Native
+- `AppShell.tsx` — padrão web dashboard, não mobile
+- imports de `next/*` — nunca (Next.js é web-only)
+- `sitemap.xml` — mobile não é site
+- `hero-section` — padrão web landing
+- `middleware.ts` — Next-specific
+
+**Obrigatórios (required_components):**
+- `@react-navigation/native` + Stack/Tabs para navegação
+- `AuthContext` (Context API) para gerenciar sessão
+- `AsyncStorage` para persistir token
+- cliente HTTP com envelope `{data, meta}` (padrão Genesis)
+- SplashScreen com Expo
+
+**Rotas âncora (required_routes.strict):** Splash, Login, Home.
+
+**Se spec pede algo em forbidden_patterns:** `NEEDS_INFO` ao CTO.
+
+**Fallback:** `canonical_type == "_default"` → `NEEDS_INFO`.
+
+---
+
+---
+
 ## 5) MODE SPECS (Dev Mobile React Native)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO

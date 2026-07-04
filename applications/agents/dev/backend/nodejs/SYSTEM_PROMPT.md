@@ -323,6 +323,36 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
 ---
 
+## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
+
+Este Dev opera sob **`backend_api`** (Node + Fastify + Drizzle + PostgreSQL). Recebe `inputs["type_policy"]`.
+
+**Precedência:** `CONTRACT LAW > user Delta > type_policy > spec`
+
+**Tabus codificados (backend_api.forbidden_patterns):**
+- `Prisma` — usar **Drizzle** (feedback_nodejs_drizzle_bugs)
+- `seed.mjs no Dockerfile` (N5)
+- `findAll(` — usar `findMany` do Drizzle (N6)
+- rota criada mas sem `app.register` no app.ts (N7)
+- resposta `204` com `type:` no schema (N8)
+- `errSchema` sem `details:{}` (N3)
+- `content-type: form-urlencoded` no login — Fastify **não aceita** (L1)
+- resposta com campo `token` em vez de `access_token` (L2)
+
+**Obrigatórios (required_components):**
+- envelope `{data, meta}` em todas as respostas
+- prefixo `/api/` (sem duplicação)
+- JWT middleware
+- Error handler com `details:{}` no errSchema
+
+**Bugs Python NUNCA aplicam aqui** — `backend_api_python` é tipo diferente, stack incompatível.
+
+**Se spec pede algo em forbidden_patterns:** `NEEDS_INFO` ao CTO.
+
+---
+
+---
+
 ## 5) MODE SPECS (Dev Backend Node.js)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO

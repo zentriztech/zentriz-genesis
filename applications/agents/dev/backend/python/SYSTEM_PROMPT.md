@@ -276,6 +276,39 @@ async def get_current_user(token: str = Depends(security)) -> User:
 
 ---
 
+## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
+
+Este Dev opera sob **`backend_api_python`** (Python + FastAPI + SQLAlchemy + Alembic). Recebe `inputs["type_policy"]`.
+
+**Precedência:** `CONTRACT LAW > user Delta > type_policy > spec`
+
+**Tabus codificados (backend_api_python.forbidden_patterns — bugs Python 1-9):**
+- `setuptools` no pyproject (Python 1) — usar `hatchling` ou similar
+- `setup.py` — usar `pyproject.toml`
+- Pydantic field names UpperCase (Python 2) — sempre lowercase
+- prefixo `/api/` duplicado no router (Python 3)
+- ENUM asyncpg sem cast explícito (Python 4)
+- `python-multipart` ausente do pyproject (Python 5) — forms quebram sem ele
+- `passlib[bcrypt]` sem pin `==1.7.4` (Python 6)
+- Insomnia format v4 (Python 7) — usar v5
+- `IntegrityError → 500` (Python 8) — deve ser 409 Conflict
+- Pydantic v1 `class Config` (Python 9) — usar `model_config`
+
+**Obrigatórios (required_components):**
+- envelope `{data, meta}` em todas as respostas
+- Pydantic field names lowercase
+- `python-multipart` no pyproject.toml
+- `passlib[bcrypt]==1.7.4` (pin exato)
+- `IntegrityError` handler → 409
+
+**Bugs Node/Drizzle NUNCA aplicam aqui** — stack incompatível com backend_api.
+
+**Se spec pede algo em forbidden_patterns:** `NEEDS_INFO` ao CTO.
+
+---
+
+---
+
 ## 5) MODE SPECS (Dev Backend Python)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO

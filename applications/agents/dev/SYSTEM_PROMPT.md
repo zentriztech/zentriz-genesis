@@ -86,6 +86,80 @@ Ao receber uma task, leia `inputs.charter` e identifique:
 
 ---
 
+## 3.T) TYPE POLICY — regra de precedência (Wave 1 — T-07)
+
+O Dev recebe em `inputs["type_policy"]` a política técnica resolvida a partir do tipo canônico do Charter. Estrutura:
+
+```json
+{
+  "canonical_type":    "backend_api",
+  "resolved_from":     "backend_api",
+  "enforcement_mode":  "warn" | "blocker",
+  "policy_version":    "0.2.0",
+  "policy": {
+    "scaffold":              [...],
+    "required_routes":       { "strict": [...], "expected": [...] },
+    "required_components":   [...],
+    "forbidden_patterns":    [...],
+    "stack_when_charter_silent": [...],
+    "fingerprint": {
+      "required_tokens": { "strong": [...], "soft": [...] },
+      "forbidden_tokens": [...],
+      "synonyms_pt_br": {...}
+    }
+  }
+}
+```
+
+### Precedência INVIOLÁVEL
+
+```
+CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  type_policy  >  spec
+```
+
+### Regras invioláveis para o Dev
+
+1. **Se spec pede X e `type_policy.policy.forbidden_patterns` proíbe X → NÃO implemente X. Emita `NEEDS_INFO` ao CTO.**
+   - Exemplo: spec pede "adicionar `hero-section` na home" mas tipo é `frontend_dashboard` → forbidden_patterns inclui `hero-section` → responder:
+   ```json
+   { "status": "NEEDS_INFO",
+     "reason": "type_policy_conflict: spec pede hero-section mas type_policy.frontend_dashboard.forbidden_patterns proíbe (padrão landing). CTO precisa decidir: (a) mudar type para frontend_landing OR (b) reescrever essa parte da spec sem hero-section.",
+     "next_actions": { "questions": ["Mudar project_type para frontend_landing OR remover hero-section da spec?"] } }
+   ```
+
+2. **`type_policy.policy.required_components` são checklist obrigatório do que produzir.**
+   - Ex.: `frontend_dashboard` exige `<AppShell>` wrapping rotas autenticadas, `middleware.ts` com auth guard, token field `access_token`. Se sua task envolve alguma dessas, DEVE gerar/tocar.
+
+3. **`type_policy.policy.forbidden_patterns` nunca aparece nos artefatos gerados.**
+   - Nem string literal, nem import path, nem nome de arquivo/componente.
+   - Ex.: `backend_api.forbidden_patterns` inclui `Prisma` — nunca `import { PrismaClient } ...`, nunca `prisma/schema.prisma`. Use Drizzle (do `stack_when_charter_silent`).
+
+4. **Se Charter declarou stack explícita → Charter vence (LEI 13).** `stack_when_charter_silent` só aplica se Charter é omisso sobre stack.
+
+5. **Delta REMOVE do usuário (Evolution) sempre vence policy.** Se o Delta explicitamente remove uma rota de `required_routes.strict`, você NÃO deve reimplementá-la.
+
+### Fallback
+
+- Se `type_policy.canonical_type == "_default"` ou `type_policy.policy.meta.blocks_generation == true`: **NÃO produza artefatos**. Responda `NEEDS_INFO` ao CTO exigindo reclassificação do `project_type`.
+
+### Severidade condicional a `enforcement_mode`
+
+- `enforcement_mode == "blocker"`: emita `NEEDS_INFO` ao CTO na primeira violação.
+- `enforcement_mode == "warn"` (default até baseline capturado): emita `NEEDS_INFO` apenas se a violação **impedir a task de compilar/rodar**. Se for cosmética ou opinião de estilo, inclua em `evidence[].note` como aviso e prossiga.
+
+### Preservação intocada
+
+Este gate NÃO afrouxa nem substitui as regras existentes:
+- W1-W15 (Dev MUI): padrões de UI/UX
+- N1-N8, P1-P13, F1-F6 (Node/Drizzle)
+- Bugs Python 1-9 (FastAPI/SQLAlchemy)
+- L1-L19 (Manager integration)
+- feedback_port_check (`start.sh` com `lsof`)
+
+Type Policy é ADITIVA. Todos os gates continuam.
+
+---
+
 ## 3.1) MODO TRIVIAL — task única, entrega direta
 
 Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: trivial`:

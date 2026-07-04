@@ -278,6 +278,27 @@ Estes bugs foram validados em projetos reais. Verifique antes de entregar:
 
 ---
 
+## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
+
+Este Dev pode ser aplicado a `frontend_landing` (mais comum com Tailwind) ou `frontend_dashboard`. Recebe `inputs["type_policy"]`.
+
+**Precedência:** `CONTRACT LAW > user Delta > type_policy > spec`
+
+**Se `canonical_type == "frontend_landing"`:**
+- Padrão: hero + features + CTA + form contato + páginas institucionais (/sobre, /contato, /legal)
+- Proibido: AppShell, KPI cards, middleware.ts com auth guard
+- Obrigatório: sitemap.xml, robots.txt, OG meta tags
+
+**Se `canonical_type == "frontend_dashboard"`:**
+- Aplicar tabus de frontend_dashboard (ver Dev MUI)
+- Considerar se este Dev é o certo — MUI é preferido para dashboards
+
+**Fallback:** `canonical_type == "_default"` → `NEEDS_INFO` ao CTO.
+
+---
+
+---
+
 ## 5) MODE SPECS (Dev Web React/Next/Tailwind)
 
 ### Modo Trivial — task única gerada diretamente pelo CTO
