@@ -102,14 +102,36 @@ def _build_type_policy_input(raw_type: Optional[str]) -> dict:
     """
     Monta o payload injetado como inputs["type_policy"] nos prompts dos agentes.
     Inclui enforcement_mode (T-02f): 'warn' (default) ou 'blocker'.
+
+    T-12 observabilidade: emite log estruturado type_policy_resolved a cada chamada.
+    Ferramenta downstream (endpoint /api/reports/type-compliance) parseia esse log.
     """
     canonical, pol = _resolve_type(raw_type)
     enforcement = "blocker" if os.environ.get("POLICY_ENFORCEMENT_ENABLED", "false").lower() == "true" else "warn"
+    version = _load_type_policy().get("version", "unknown")
+
+    # T-12: log estruturado — formato JSON single-line para parsing fácil
+    try:
+        logger.info(
+            "type_policy_resolved %s",
+            json.dumps({
+                "event": "type_policy_resolved",
+                "resolved_from": raw_type or "",
+                "canonical_type": canonical,
+                "enforcement_mode": enforcement,
+                "policy_version": version,
+                "fallback_default": canonical == "_default",
+                "blocks_generation": bool(pol.get("meta", {}).get("blocks_generation", False)),
+            }),
+        )
+    except Exception:
+        pass  # log é aditivo — nunca bloqueia execução
+
     return {
         "canonical_type": canonical,
         "resolved_from": raw_type or "",
         "enforcement_mode": enforcement,
-        "policy_version": _load_type_policy().get("version", "unknown"),
+        "policy_version": version,
         "policy": pol,
     }
 
