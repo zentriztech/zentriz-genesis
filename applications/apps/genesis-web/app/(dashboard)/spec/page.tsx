@@ -549,10 +549,14 @@ export default function SpecPage() {
   }, []);
 
   // Auto-sugerir backend quando projectType é frontend E produto selecionado tem backend
+  // T-15: legado `landing_page` e `web_*` removido; usar frontend_/mobile_/fullstack_ canônicos.
   useEffect(() => {
     if (!projectType) return;
-    const isFrontend = projectType.startsWith("web_") || projectType.startsWith("mobile_") || projectType === "landing_page";
-    if (!isFrontend) return;
+    const isFrontendOrMobile =
+      projectType.startsWith("frontend_") ||
+      projectType.startsWith("mobile_") ||
+      projectType.startsWith("fullstack_");
+    if (!isFrontendOrMobile) return;
     if (linkProjectId) return; // usuário já escolheu — não sobrescrever
     // Buscar projetos do produto selecionado (ou de todos se sem produto) que são backend
     const backendProjects = allProjects.filter(p =>

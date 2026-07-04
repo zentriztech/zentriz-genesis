@@ -255,6 +255,105 @@
         "PostgreSQL 16"
       ]
     },
+    "backend_graphql": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "dataloader",
+            "apollo",
+            "graphql-yoga"
+          ],
+          "strong": [
+            "graphql",
+            "resolver"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "REST /api/*",
+        "SQL cru em resolvers"
+      ],
+      "inherit_from": "backend",
+      "labels": {
+        "en": "GraphQL API",
+        "pt_br": "🔗 GraphQL API"
+      },
+      "required_components": [
+        "resolvers em módulos separados",
+        "schema SDL versionado",
+        "context com auth + dataloader"
+      ],
+      "required_routes": {
+        "strict": [
+          "POST /graphql",
+          "GET /health"
+        ]
+      },
+      "scaffold": [
+        "schema.graphql",
+        "app.ts"
+      ],
+      "smell_signals": [
+        "endpoints REST paralelos sem justificativa"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Apollo Server ou GraphQL Yoga",
+        "TypeScript",
+        "PostgreSQL 16 via Drizzle"
+      ]
+    },
+    "backend_worker": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "fastify.listen"
+        ],
+        "required_tokens": {
+          "soft": [
+            "bullmq",
+            "redis",
+            "cron"
+          ],
+          "strong": [
+            "worker"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "Fastify server como principal",
+        "cron sem retry"
+      ],
+      "inherit_from": "backend",
+      "labels": {
+        "en": "Worker / Job",
+        "pt_br": "🤖 Worker / Job"
+      },
+      "required_components": [
+        "connection ao broker (Redis/BullMQ/RabbitMQ) ou cron scheduler",
+        "graceful shutdown (SIGTERM handler)",
+        "logs estruturados por job",
+        "retry policy explícita"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /health"
+        ],
+        "strict": []
+      },
+      "scaffold": [
+        "worker.ts"
+      ],
+      "smell_signals": [
+        "worker que abre porta HTTP como principal",
+        "sem graceful shutdown"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + BullMQ + Redis (queue)",
+        "OR node-cron (agendamento)"
+      ]
+    },
     "bot_chat": {
       "fingerprint": {
         "forbidden_tokens": [
@@ -315,6 +414,50 @@
       "stack_when_charter_silent": [
         "Node 20 + Fastify (webhook) OU python-telegram-bot / discord.py (polling)",
         "TypeScript ou Python 3.11"
+      ]
+    },
+    "bot_scraper": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "cheerio",
+            "playwright",
+            "beautifulsoup"
+          ],
+          "strong": [
+            "scraper"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "bypass de robots.txt",
+        "sem rate limit entre requests",
+        "hardcoded target URL sem env var"
+      ],
+      "inherit_from": "bot",
+      "labels": {
+        "en": "Scraper / Crawler",
+        "pt_br": "🕷️ Scraper / Crawler"
+      },
+      "required_components": [
+        "cliente HTTP com retry + rate limit",
+        "parser (Cheerio/Playwright/BeautifulSoup)",
+        "storage do resultado (DB, S3, file)",
+        "respeita robots.txt e delay entre requests"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /health"
+        ],
+        "strict": []
+      },
+      "scaffold": [
+        "scraper.ts"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Playwright OR Python 3.11 + BeautifulSoup"
       ]
     },
     "frontend_dashboard": {
@@ -399,6 +542,73 @@
         "TypeScript"
       ]
     },
+    "frontend_ecommerce": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "checkout",
+            "@mui/material"
+          ],
+          "strong": [
+            "produto",
+            "carrinho"
+          ]
+        },
+        "synonyms_pt_br": {
+          "cart": [
+            "carrinho"
+          ],
+          "checkout": [
+            "finalizar"
+          ],
+          "product": [
+            "produto",
+            "item"
+          ]
+        }
+      },
+      "forbidden_patterns": [
+        "hero-section sem CTA para produtos",
+        "dashboard KPI cards em / ",
+        "AppShell wrapping / sem grid de produtos"
+      ],
+      "inherit_from": "frontend",
+      "labels": {
+        "en": "E-commerce (Frontend)",
+        "pt_br": "🛒 E-commerce (Frontend)"
+      },
+      "required_components": [
+        "carrinho persistente (Context ou Zustand)",
+        "checkout com 3+ steps (endereço, pagamento, revisão)",
+        "listagem paginada com filtros",
+        "cliente HTTP com envelope {data, meta}"
+      ],
+      "required_routes": {
+        "expected": [
+          "/login",
+          "/pedidos",
+          "/sobre"
+        ],
+        "strict": [
+          "/",
+          "/produtos",
+          "/produto/[id]",
+          "/carrinho",
+          "/checkout"
+        ]
+      },
+      "scaffold": [
+        "AppShell.tsx"
+      ],
+      "smell_signals": [
+        "página / sem vitrine de produtos",
+        "checkout em rota única (deveria ter steps)"
+      ],
+      "stack_when_charter_silent": [
+        "Next.js 15 + MUI + TypeScript"
+      ]
+    },
     "frontend_landing": {
       "fingerprint": {
         "forbidden_tokens": [
@@ -477,6 +687,73 @@
         "Next.js 15 (App Router)",
         "MUI (Material UI)",
         "TypeScript"
+      ]
+    },
+    "fullstack_ecommerce": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "prisma"
+        ],
+        "required_tokens": {
+          "soft": [
+            "@mui/material",
+            "drizzle"
+          ],
+          "strong": [
+            "fastify",
+            "carrinho",
+            "checkout"
+          ]
+        },
+        "synonyms_pt_br": {
+          "cart": [
+            "carrinho"
+          ],
+          "product": [
+            "produto"
+          ]
+        }
+      },
+      "forbidden_patterns": [
+        "Prisma",
+        "monolito único (backend + frontend no mesmo container)",
+        "hero-section sem CTA para produtos"
+      ],
+      "inherit_from": "fullstack",
+      "labels": {
+        "en": "E-commerce (Fullstack)",
+        "pt_br": "🛒 E-commerce (Fullstack)"
+      },
+      "required_components": [
+        "envelope {data, meta}",
+        "prefixo /api/",
+        "carrinho persistente",
+        "checkout multi-step"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /api/pedidos",
+          "/pedidos"
+        ],
+        "strict": [
+          "POST /api/auth/login",
+          "GET /api/health",
+          "GET /api/produtos",
+          "POST /api/carrinho",
+          "POST /api/pedidos",
+          "/",
+          "/produtos",
+          "/produto/[id]",
+          "/carrinho",
+          "/checkout"
+        ]
+      },
+      "scaffold": [
+        "docker-compose.yml"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Fastify + Drizzle (backend)",
+        "Next.js 15 + MUI (frontend)"
       ]
     },
     "fullstack_saas": {
@@ -570,6 +847,137 @@
         "Node 20 + Fastify + Drizzle + PostgreSQL 16 (backend)",
         "Next.js 15 + MUI + TypeScript (frontend)",
         "auth-service separado (LEI 11)"
+      ]
+    },
+    "infra_cicd": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "jobs",
+            "actions"
+          ],
+          "strong": [
+            "workflow"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "secret em plaintext no workflow",
+        "sem matriz de status (build sempre passa)",
+        "deploy sem approval em produção"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "CI/CD Pipeline",
+        "pt_br": "⚙️ Pipeline CI/CD"
+      },
+      "required_components": [
+        "job de build documentado",
+        "job de test documentado",
+        "job de deploy com env condicional",
+        "secrets referenciados sem hardcoding",
+        "rollback documentado"
+      ],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [
+        ".github/workflows/deploy.yml",
+        "README.md"
+      ],
+      "stack_when_charter_silent": [
+        "GitHub Actions (YAML)",
+        "OR GitLab CI (YAML)",
+        "OR Terraform + Terragrunt"
+      ]
+    },
+    "lib_cli": {
+      "fingerprint": {
+        "forbidden_tokens": [],
+        "required_tokens": {
+          "soft": [
+            "chalk",
+            "yargs"
+          ],
+          "strong": [
+            "commander"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "console.log de erros (deve ser stderr)",
+        "process.exit(0) em erro"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "CLI (Executable Library)",
+        "pt_br": "🖥️ CLI (Biblioteca executável)"
+      },
+      "required_components": [
+        "argparse/commander/click para parsing",
+        "--help com uso completo",
+        "exit codes documentados (0=OK, 1=erro, 2=uso incorreto)",
+        "logs em stderr, dados em stdout (Unix convention)"
+      ],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [
+        "bin/index.ts",
+        "package.json",
+        "README.md"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + Commander OR Python 3.11 + Click"
+      ]
+    },
+    "lib_plugin": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "process.exit"
+        ],
+        "required_tokens": {
+          "soft": [
+            "vscode"
+          ],
+          "strong": [
+            "manifest",
+            "activate"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "manifest sem activationEvents",
+        "process.exit"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "Plugin / Extension",
+        "pt_br": "🧩 Plugin / Extensão"
+      },
+      "required_components": [
+        "activation events / permissões declaradas no manifest",
+        "handler para lifecycle (activate/deactivate)",
+        "settings/config expostos",
+        "empty state e erro amigáveis"
+      ],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [
+        "package.json",
+        "manifest.json",
+        "README.md"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + TypeScript + Extension API (VS Code / Chrome)"
       ]
     },
     "mobile_crossplatform": {
@@ -678,5 +1086,5 @@
       "stack_when_charter_silent": []
     }
   },
-  "version": "0.2.0"
+  "version": "0.3.0"
 }

@@ -9,7 +9,7 @@
 #
 # Ver README.md para schema completo e política de linguagem PT-BR/EN.
 
-version: "0.2.0"
+version: "0.3.0"
 
 # ── type_aliases ─────────────────────────────────────────────────────────────
 # Normaliza saídas de detectProjectType (telegram.ts:955-963) + subtipos do
@@ -538,6 +538,334 @@ types:
       - "token do bot em código-fonte (não .env)"
       - "servidor Fastify paralelo ao webhook sem justificativa"
       - "sem error handler — bot crasha em qualquer input inválido"
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # WAVE 2 — Subtipos com override (v0.3.0)
+  # ═════════════════════════════════════════════════════════════════════════
+
+  # ── frontend_ecommerce ─────────────────────────────────────────────────────
+  # Loja online orientada a produto — vitrine + carrinho + checkout.
+  # Herda frontend base + adiciona rotas de venda.
+  frontend_ecommerce:
+    inherit_from: frontend
+    labels:
+      pt_br: "🛒 E-commerce (Frontend)"
+      en: "E-commerce (Frontend)"
+    scaffold:
+      - AppShell.tsx
+    required_routes:
+      strict:
+        - "/"
+        - "/produtos"
+        - "/produto/[id]"                        # detalhe
+        - "/carrinho"
+        - "/checkout"
+      expected:
+        - "/login"
+        - "/pedidos"                             # área cliente
+        - "/sobre"
+    required_components:
+      - "carrinho persistente (Context ou Zustand)"
+      - "checkout com 3+ steps (endereço, pagamento, revisão)"
+      - "listagem paginada com filtros"
+      - "cliente HTTP com envelope {data, meta}"
+    forbidden_patterns:
+      - "hero-section sem CTA para produtos"     # landing sem loja
+      - "dashboard KPI cards em / "              # é loja, não admin
+      - "AppShell wrapping / sem grid de produtos"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "produto"
+          - "carrinho"
+        soft:
+          - "checkout"
+          - "@mui/material"
+      forbidden_tokens: []
+      synonyms_pt_br:
+        cart:
+          - "carrinho"
+        product:
+          - "produto"
+          - "item"
+        checkout:
+          - "finalizar"
+    stack_when_charter_silent:
+      - "Next.js 15 + MUI + TypeScript"
+    smell_signals:
+      - "página / sem vitrine de produtos"
+      - "checkout em rota única (deveria ter steps)"
+
+  # ── backend_graphql ────────────────────────────────────────────────────────
+  backend_graphql:
+    inherit_from: backend
+    labels:
+      pt_br: "🔗 GraphQL API"
+      en: "GraphQL API"
+    scaffold:
+      - "schema.graphql"                         # SDL
+      - "app.ts"
+    required_routes:
+      strict:
+        - "POST /graphql"                        # endpoint principal
+        - "GET /health"
+    required_components:
+      - "resolvers em módulos separados"
+      - "schema SDL versionado"
+      - "context com auth + dataloader"
+    forbidden_patterns:
+      - "REST /api/*"                            # é GraphQL, não híbrido sem justificativa
+      - "SQL cru em resolvers"                   # deve usar repository/ORM
+    fingerprint:
+      required_tokens:
+        strong:
+          - "graphql"
+          - "resolver"
+        soft:
+          - "dataloader"
+          - "apollo"
+          - "graphql-yoga"
+      forbidden_tokens: []
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + Apollo Server ou GraphQL Yoga"
+      - "TypeScript"
+      - "PostgreSQL 16 via Drizzle"
+    smell_signals:
+      - "endpoints REST paralelos sem justificativa"
+
+  # ── backend_worker ─────────────────────────────────────────────────────────
+  # Job runner / cron / queue consumer — sem HTTP público.
+  backend_worker:
+    inherit_from: backend
+    labels:
+      pt_br: "🤖 Worker / Job"
+      en: "Worker / Job"
+    scaffold:
+      - "worker.ts"                              # entrypoint
+    required_routes:
+      strict: []                                 # sem HTTP público
+      expected:
+        - "GET /health"                          # opcional para orquestrador
+    required_components:
+      - "connection ao broker (Redis/BullMQ/RabbitMQ) ou cron scheduler"
+      - "graceful shutdown (SIGTERM handler)"
+      - "logs estruturados por job"
+      - "retry policy explícita"
+    forbidden_patterns:
+      - "Fastify server como principal"          # é worker, não API
+      - "cron sem retry"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "worker"
+        soft:
+          - "bullmq"
+          - "redis"
+          - "cron"
+      forbidden_tokens:
+        - "fastify.listen"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + BullMQ + Redis (queue)"
+      - "OR node-cron (agendamento)"
+    smell_signals:
+      - "worker que abre porta HTTP como principal"
+      - "sem graceful shutdown"
+
+  # ── fullstack_ecommerce ────────────────────────────────────────────────────
+  # E-commerce completo: união backend_api + frontend_ecommerce.
+  fullstack_ecommerce:
+    inherit_from: fullstack
+    labels:
+      pt_br: "🛒 E-commerce (Fullstack)"
+      en: "E-commerce (Fullstack)"
+    scaffold:
+      - "docker-compose.yml"
+    required_routes:
+      strict:
+        - "POST /api/auth/login"
+        - "GET /api/health"
+        - "GET /api/produtos"
+        - "POST /api/carrinho"
+        - "POST /api/pedidos"
+        - "/"
+        - "/produtos"
+        - "/produto/[id]"
+        - "/carrinho"
+        - "/checkout"
+      expected:
+        - "GET /api/pedidos"
+        - "/pedidos"
+    required_components:
+      - "envelope {data, meta}"
+      - "prefixo /api/"
+      - "carrinho persistente"
+      - "checkout multi-step"
+    forbidden_patterns:
+      - "Prisma"
+      - "monolito único (backend + frontend no mesmo container)"
+      - "hero-section sem CTA para produtos"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "fastify"
+          - "carrinho"
+          - "checkout"
+        soft:
+          - "@mui/material"
+          - "drizzle"
+      forbidden_tokens:
+        - "prisma"
+      synonyms_pt_br:
+        cart:
+          - "carrinho"
+        product:
+          - "produto"
+    stack_when_charter_silent:
+      - "Node 20 + Fastify + Drizzle (backend)"
+      - "Next.js 15 + MUI (frontend)"
+
+  # ── bot_scraper ────────────────────────────────────────────────────────────
+  # Scraping / crawling / data extraction — não conversacional.
+  bot_scraper:
+    inherit_from: bot
+    labels:
+      pt_br: "🕷️ Scraper / Crawler"
+      en: "Scraper / Crawler"
+    scaffold:
+      - "scraper.ts"
+    required_routes:
+      strict: []                                 # sem HTTP
+      expected:
+        - "GET /health"
+    required_components:
+      - "cliente HTTP com retry + rate limit"
+      - "parser (Cheerio/Playwright/BeautifulSoup)"
+      - "storage do resultado (DB, S3, file)"
+      - "respeita robots.txt e delay entre requests"
+    forbidden_patterns:
+      - "bypass de robots.txt"                   # ético + legal
+      - "sem rate limit entre requests"
+      - "hardcoded target URL sem env var"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "scraper"
+        soft:
+          - "cheerio"
+          - "playwright"
+          - "beautifulsoup"
+      forbidden_tokens: []
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + Playwright OR Python 3.11 + BeautifulSoup"
+
+  # ── lib_cli ────────────────────────────────────────────────────────────────
+  # CLI publicável (npm/pypi) — sem servidor, sem UI.
+  lib_cli:
+    inherit_from: null                           # não é backend/frontend/mobile/bot
+    labels:
+      pt_br: "🖥️ CLI (Biblioteca executável)"
+      en: "CLI (Executable Library)"
+    scaffold:
+      - "bin/index.ts"                           # OU bin/main.py
+      - "package.json"                           # OU pyproject.toml
+      - "README.md"
+    required_routes:
+      strict: []
+      expected: []
+    required_components:
+      - "argparse/commander/click para parsing"
+      - "--help com uso completo"
+      - "exit codes documentados (0=OK, 1=erro, 2=uso incorreto)"
+      - "logs em stderr, dados em stdout (Unix convention)"
+    forbidden_patterns:
+      - "console.log de erros (deve ser stderr)"
+      - "process.exit(0) em erro"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "commander"                           # OR click, argparse
+        soft:
+          - "chalk"
+          - "yargs"
+      forbidden_tokens: []
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + Commander OR Python 3.11 + Click"
+
+  # ── lib_plugin ─────────────────────────────────────────────────────────────
+  # Plugin para VS Code / Figma / Cursor / navegador — não roda standalone.
+  lib_plugin:
+    inherit_from: null
+    labels:
+      pt_br: "🧩 Plugin / Extensão"
+      en: "Plugin / Extension"
+    scaffold:
+      - "package.json"
+      - "manifest.json"                          # VS Code / navegador
+      - "README.md"
+    required_routes:
+      strict: []
+      expected: []
+    required_components:
+      - "activation events / permissões declaradas no manifest"
+      - "handler para lifecycle (activate/deactivate)"
+      - "settings/config expostos"
+      - "empty state e erro amigáveis"
+    forbidden_patterns:
+      - "manifest sem activationEvents"          # plugin nunca inicia
+      - "process.exit"                           # crasha o host
+    fingerprint:
+      required_tokens:
+        strong:
+          - "manifest"
+          - "activate"
+        soft:
+          - "vscode"
+      forbidden_tokens:
+        - "process.exit"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + TypeScript + Extension API (VS Code / Chrome)"
+
+  # ── infra_cicd ─────────────────────────────────────────────────────────────
+  # Pipeline CI/CD como produto — GitHub Actions / GitLab CI / Terraform.
+  infra_cicd:
+    inherit_from: null
+    labels:
+      pt_br: "⚙️ Pipeline CI/CD"
+      en: "CI/CD Pipeline"
+    scaffold:
+      - ".github/workflows/deploy.yml"           # OR .gitlab-ci.yml
+      - "README.md"
+    required_routes:
+      strict: []
+      expected: []
+    required_components:
+      - "job de build documentado"
+      - "job de test documentado"
+      - "job de deploy com env condicional"
+      - "secrets referenciados sem hardcoding"
+      - "rollback documentado"
+    forbidden_patterns:
+      - "secret em plaintext no workflow"
+      - "sem matriz de status (build sempre passa)"
+      - "deploy sem approval em produção"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "workflow"                            # workflows/*
+        soft:
+          - "jobs"
+          - "actions"
+      forbidden_tokens: []
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "GitHub Actions (YAML)"
+      - "OR GitLab CI (YAML)"
+      - "OR Terraform + Terragrunt"
 
   # ── other (tipo declarado mas fora do piloto) ──────────────────────────────
   # Charter DEVE justificar em "## Motivação" + repo DEVE ter RUNBOOK.md.
