@@ -23,6 +23,14 @@ if (process.env.NODE_ENV === "production") {
     console.error("[boot] FATAL: NODE_ENV=production sem JWT_SECRET — verifyToken usaria o default de dev. Abortando.");
     process.exit(1);
   }
+  // G1-T3: cifra de credenciais de cloud exige chave 64-hex real em produção.
+  try {
+    const { assertCryptoReady } = await import("./services/crypto.js");
+    assertCryptoReady();
+  } catch (e) {
+    console.error("[boot] FATAL:", e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  }
 }
 
 try {
