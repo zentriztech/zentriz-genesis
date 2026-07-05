@@ -10,6 +10,21 @@ const app = await buildApp();
 const port = parseInt(process.env.PORT ?? "3000", 10);
 const host = process.env.HOST ?? "0.0.0.0";
 
+// G1-T2: fail-closed em produção — endpoints internos (ex.: project-llm-config
+// devolve a api_key de LLM do tenant) exigem token interno E JWT_SECRET reais.
+// Sem eles, a autenticação ficaria fail-open / usaria secret de dev. Abortar.
+if (process.env.NODE_ENV === "production") {
+  const hasInternalToken = !!(process.env.GENESIS_API_TOKEN ?? process.env.GENESIS_INTERNAL_TOKEN ?? "").trim();
+  if (!hasInternalToken) {
+    console.error("[boot] FATAL: NODE_ENV=production sem GENESIS_API_TOKEN/GENESIS_INTERNAL_TOKEN — endpoints internos ficariam fail-open. Abortando.");
+    process.exit(1);
+  }
+  if (!process.env.JWT_SECRET) {
+    console.error("[boot] FATAL: NODE_ENV=production sem JWT_SECRET — verifyToken usaria o default de dev. Abortando.");
+    process.exit(1);
+  }
+}
+
 try {
   await initDb();
   await seedIfEmpty();
