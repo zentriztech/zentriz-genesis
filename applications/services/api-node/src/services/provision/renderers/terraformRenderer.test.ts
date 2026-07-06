@@ -52,6 +52,34 @@ describe("terraformRenderer — single-service produção", () => {
   });
 });
 
+describe("terraformRenderer — HCL válido (sem blocos single-line multi-arg)", () => {
+  // terraform validate rejeita blocos como `ingress { a=1 b=2 }` ou `redirect { a, b }`.
+  // Este guard trava a regressão sem precisar do binário terraform no CI.
+  const BLOCK_KEYWORDS = ["ingress", "egress", "redirect", "condition", "path_pattern",
+    "action", "default_action", "health_check", "runtime_platform", "network_configuration"];
+  const cases: Array<{ name: string; topo: Topology; db: Record<string, string> }> = [
+    { name: "single", topo: single, db: { app: "appdb" } },
+    { name: "multi", topo: multi, db: { api: "app_api", auth: "app_auth" } },
+  ];
+  for (const scenario of cases) {
+    it(`${scenario.name}: nenhum bloco de recurso na mesma linha que abre e fecha com args`, () => {
+      const tf = renderTerraformBundle(buildProvisionPlan({ ...base, topology: scenario.topo, serviceDatabases: scenario.db }))
+        .find((f) => f.path === "terraform/main.tf")!.content;
+      for (const line of tf.split("\n")) {
+        for (const kw of BLOCK_KEYWORDS) {
+          // bloco na mesma linha (abre { e fecha } com conteúdo) → inválido em HCL.
+          const re = new RegExp(`\\b${kw}\\s*\\{.+\\}`);
+          expect(re.test(line), `HCL inválido: '${line.trim()}'`).toBe(false);
+        }
+      }
+      // variáveis também não podem ter args separados por vírgula na mesma linha.
+      const vars = renderTerraformBundle(buildProvisionPlan({ ...base, topology: scenario.topo, serviceDatabases: scenario.db }))
+        .find((f) => f.path === "terraform/variables.tf")!.content;
+      expect(/variable\s+"[^"]+"\s*\{[^}]*,[^}]*\}/.test(vars)).toBe(false);
+    });
+  }
+});
+
 describe("terraformRenderer — multi-serviço", () => {
   const plan = buildProvisionPlan({ ...base, topology: multi, serviceDatabases: { api: "app_api", auth: "app_auth" } });
   const all = bundleText(plan);
