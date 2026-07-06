@@ -129,9 +129,9 @@ beforeEach(() => {
 });
 
 describe("MVP e2e — cadeia completa (grafo determinístico)", () => {
-  it("todos os 9 drivers estão registrados na ordem canônica", () => {
+  it("todos os drivers estão registrados na ordem canônica (ecs antes de alb, ecs_service depois)", () => {
     const keys = orderedDrivers().map((d) => d.key);
-    expect(keys).toEqual(["iam", "networking", "rds", "secrets", "migrating", "ecs", "acm", "alb", "route53"]);
+    expect(keys).toEqual(["iam", "networking", "rds", "secrets", "migrating", "ecs", "acm", "alb", "ecs_service", "route53"]);
   });
 
   it("roda a cadeia inteira e termina em running com app_url", async () => {

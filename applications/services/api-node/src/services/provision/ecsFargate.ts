@@ -1,16 +1,21 @@
 /**
- * ecsFargate.ts — G1-T17 (Fase C). Driver do service Fargate single-service.
+ * ecsFargate.ts — G1-T17 (Fase C). Drivers do Fargate single-service, SPLIT em dois passos.
  *
- * Registra a task-def do SERVICE (mesma base do migrate, mas com portMappings e sem
- * command override), cria o TARGET GROUP (type=ip, exigido por awsvpc/Fargate) com
- * health-check no healthPath, e cria/atualiza o ECS Service:
- *   • CreateService com deploymentCircuitBreaker {enable, rollback} → deploy ruim
- *     reverte sozinho (não deixa o service num estado quebrado).
- *   • se service_arn já existe → UpdateService --force-new-deployment (2º deploy não
- *     duplica; puxa a nova imagem).
+ * BUG DE ORDENAÇÃO CORRIGIDO (2026-07-06, 1º run vivo): a AWS rejeita CreateService com
+ * loadBalancers se o target group ainda não estiver associado a um listener/ALB
+ * ("The target group ... does not have an associated load balancer"). Mas o driver alb
+ * precisa do targetGroupArn (criado aqui). Dependência circular na granularidade única →
+ * dividimos em DOIS drivers:
  *
- * O listener/ALB que aponta para este target group é criado pelo driver alb (T18).
- * Aqui persistimos target_group_arn/cluster_arn/task_def_arn/service_arn (write-ahead).
+ *   • "ecs"          (passo A, ANTES do alb): registra task-def + cria target group.
+ *                     Grava ctx.scratch.{targetGroupArn, taskDefArn}. teardown = DeleteTargetGroup.
+ *   • "ecs_service"  (passo B, DEPOIS do alb): cria/atualiza o ECS Service com loadBalancers
+ *                     (o listener do alb já associou o TG). teardown = DeleteService.
+ *
+ * CHAIN_ORDER: iam → networking → rds → secrets → migrating → ecs → acm → alb → ecs_service → route53.
+ * Saga reversa (ordem inversa): route53 → ecs_service(DeleteService) → alb(remove listener) →
+ * acm → ecs(DeleteTargetGroup, já sem listener). O DeleteTargetGroup fica no driver "ecs"
+ * de propósito: na ordem reversa ele roda DEPOIS de alb.teardown, quando o TG já não tem listener.
  */
 
 import {
@@ -78,6 +83,8 @@ async function findService(ecs: ECSClient, cluster: string, name: string): Promi
   return { arn: svc.serviceArn, status: svc.status ?? "unknown" };
 }
 
+// PASSO A — driver "ecs": task-def + target group. Roda ANTES do alb (que precisa do
+// targetGroupArn). NÃO cria o service (isso exige o listener, criado pelo alb).
 export const ecsFargateDriver: ProvisionDriver = {
   key: "ecs",
   status: "creating_service",
@@ -85,8 +92,6 @@ export const ecsFargateDriver: ProvisionDriver = {
   async provision(ctx: ProvisionContext): Promise<void> {
     const ecs = ecsClient(ctx.creds);
     const elb = elbv2Client(ctx.creds);
-    const cluster = (ctx.scratch.clusterName as string | undefined) ?? "genesis";
-    const name = serviceName(ctx);
 
     // Task-def do service (com portMappings; sem command override).
     // DM-T9 (demo): anexa postgres sidecar na MESMA task (efêmero, sem RDS).
@@ -94,8 +99,46 @@ export const ecsFargateDriver: ProvisionDriver = {
       ? { withDbSidecar: { version: String(ctx.scratch.dbVersion ?? "16"), database: String(ctx.scratch.demoDbName ?? "appdb") } }
       : {};
     const taskDefArn = await registerTaskDef(ecs, ctx, { family: serviceFamily(ctx), ...demoSidecar });
+    // Persistir no scratch: o driver ecs_service (passo B) lê daqui (era var local antes).
+    ctx.scratch.taskDefArn = taskDefArn;
+
     const targetGroupArn = await ensureTargetGroup(elb, ctx);
     ctx.scratch.targetGroupArn = targetGroupArn;
+
+    // Write-ahead do que já temos (service_arn vem no passo B).
+    const cluster = (ctx.scratch.clusterName as string | undefined) ?? "genesis";
+    await patchDeployment(ctx.deploymentId, {
+      cluster_arn: cluster, task_def_arn: taskDefArn, target_group_arn: targetGroupArn,
+    });
+  },
+
+  async teardown(ctx: ProvisionContext): Promise<void> {
+    const elb = elbv2Client(ctx.creds);
+    // Só o target group. Na ordem reversa este teardown roda DEPOIS de alb.teardown
+    // (que removeu o listener), então o TG já não está associado e pode ser deletado.
+    const tg = await findCreatedResource(ctx.deploymentId, "target_group");
+    if (tg?.arn) {
+      await elb.send(new DeleteTargetGroupCommand({ TargetGroupArn: tg.arn })).catch(() => { /* T21 reconcilia */ });
+    }
+  },
+};
+
+// PASSO B — driver "ecs_service": cria/atualiza o ECS Service com loadBalancers.
+// Roda DEPOIS do alb (o listener já associou o target group ao LB). Lê taskDefArn/
+// targetGroupArn do scratch (populados pelo passo A na mesma execução).
+export const ecsServiceDriver: ProvisionDriver = {
+  key: "ecs_service",
+  status: "creating_service",
+
+  async provision(ctx: ProvisionContext): Promise<void> {
+    const ecs = ecsClient(ctx.creds);
+    const cluster = (ctx.scratch.clusterName as string | undefined) ?? "genesis";
+    const name = serviceName(ctx);
+
+    const taskDefArn = ctx.scratch.taskDefArn as string | undefined;
+    const targetGroupArn = ctx.scratch.targetGroupArn as string | undefined;
+    if (!taskDefArn) throw new Error("ECS_SERVICE_NO_TASKDEF: driver ecs não populou taskDefArn no scratch");
+    if (!targetGroupArn) throw new Error("ECS_SERVICE_NO_TARGET_GROUP: driver ecs não populou targetGroupArn no scratch");
 
     const subnets = (ctx.scratch.subnetIds as string[]) ?? [];
     const taskSg = ctx.scratch.taskSecurityGroupId as string;
@@ -116,9 +159,7 @@ export const ecsFargateDriver: ProvisionDriver = {
       await ecs.send(new UpdateServiceCommand({
         cluster, service: name, taskDefinition: taskDefArn, forceNewDeployment: true,
       }));
-      await patchDeployment(ctx.deploymentId, {
-        cluster_arn: cluster, task_def_arn: taskDefArn, service_arn: existing.arn, target_group_arn: targetGroupArn,
-      });
+      await patchDeployment(ctx.deploymentId, { service_arn: existing.arn });
       ctx.scratch.serviceArn = existing.arn;
       return;
     }
@@ -141,24 +182,18 @@ export const ecsFargateDriver: ProvisionDriver = {
     }));
     const arn = out.service!.serviceArn!;
     await markResourceCreated(ledgerId, arn, { name });
-    await patchDeployment(ctx.deploymentId, {
-      cluster_arn: cluster, task_def_arn: taskDefArn, service_arn: arn, target_group_arn: targetGroupArn,
-    });
+    await patchDeployment(ctx.deploymentId, { service_arn: arn });
     ctx.scratch.serviceArn = arn;
   },
 
   async teardown(ctx: ProvisionContext): Promise<void> {
     const ecs = ecsClient(ctx.creds);
-    const elb = elbv2Client(ctx.creds);
     const cluster = (ctx.scratch.clusterName as string | undefined) ?? "genesis";
     const name = serviceName(ctx);
-    // Service primeiro (force=true derruba tasks), depois target group.
+    // Só o service (force=true derruba tasks). O target group é do driver "ecs".
     await ecs.send(new DeleteServiceCommand({ cluster, service: name, force: true })).catch(() => {});
-    const tg = await findCreatedResource(ctx.deploymentId, "target_group");
-    if (tg?.arn) {
-      await elb.send(new DeleteTargetGroupCommand({ TargetGroupArn: tg.arn })).catch(() => { /* T21 reconcilia */ });
-    }
   },
 };
 
 registerDriver(ecsFargateDriver);
+registerDriver(ecsServiceDriver);

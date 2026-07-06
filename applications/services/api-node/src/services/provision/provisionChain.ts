@@ -47,9 +47,12 @@ export interface ProvisionDriver {
 
 /** Ordem canônica da cadeia (T13-T20 preenchem os drivers).
  * acm ANTES de alb: o listener HTTPS do ALB precisa do cert ARN emitido pelo ACM.
+ * "ecs" (task-def + target group) ANTES de alb: o alb associa o TG a um listener.
+ * "ecs_service" (CreateService com loadBalancers) DEPOIS de alb: a AWS exige que o TG
+ *   já esteja associado a um LB — split do driver ecs corrige o bug de ordenação (2026-07-06).
  * route53 por último: o record ALIAS aponta para o DNS name do ALB já criado. */
 export const CHAIN_ORDER = [
-  "iam", "networking", "rds", "secrets", "migrating", "ecs", "acm", "alb", "route53",
+  "iam", "networking", "rds", "secrets", "migrating", "ecs", "acm", "alb", "ecs_service", "route53",
 ] as const;
 
 const REGISTRY = new Map<string, ProvisionDriver>();

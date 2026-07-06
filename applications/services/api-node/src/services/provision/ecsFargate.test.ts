@@ -48,7 +48,7 @@ vi.mock("./backendState.js", () => ({
 }));
 vi.mock("./provisionChain.js", () => ({ registerDriver: () => {} }));
 
-import { ecsFargateDriver } from "./ecsFargate.js";
+import { ecsFargateDriver, ecsServiceDriver } from "./ecsFargate.js";
 import type { ProvisionContext } from "./provisionChain.js";
 
 function ctx(): ProvisionContext {
@@ -79,9 +79,11 @@ describe("ecsFargateDriver.provision", () => {
     expect(tg.input.HealthCheckPath).toBe("/health");
   });
 
-  it("CreateService com circuit breaker + rollback quando não existe", async () => {
+  it("CreateService com circuit breaker + rollback quando não existe (ecs_service, após alb)", async () => {
     const c = ctx();
-    await ecsFargateDriver.provision(c);
+    // passo A (ecs) já rodou: task-def + TG no scratch. passo B (ecs_service) cria o service.
+    c.scratch.taskDefArn = "arn:td:svc:1"; c.scratch.targetGroupArn = "arn:tg:new";
+    await ecsServiceDriver.provision(c);
     const create = ecsSent.find((s) => s.name === "CreateServiceCommand")!;
     const cb = (create.input.deploymentConfiguration as { deploymentCircuitBreaker: { enable: boolean; rollback: boolean } }).deploymentCircuitBreaker;
     expect(cb).toEqual({ enable: true, rollback: true });
@@ -99,16 +101,31 @@ describe("ecsFargateDriver.provision", () => {
 
   it("2º deploy: service existente → UpdateService --force-new-deployment (não duplica)", async () => {
     serviceExists = true;
-    await ecsFargateDriver.provision(ctx());
+    const c = ctx();
+    c.scratch.taskDefArn = "arn:td:svc:1"; c.scratch.targetGroupArn = "arn:tg:1";
+    await ecsServiceDriver.provision(c);
     expect(ecsSent.some((s) => s.name === "CreateServiceCommand")).toBe(false);
     const upd = ecsSent.find((s) => s.name === "UpdateServiceCommand")!;
     expect(upd.input.forceNewDeployment).toBe(true);
   });
 
-  it("persiste service_arn/task_def_arn/target_group_arn no deployment", async () => {
-    await ecsFargateDriver.provision(ctx());
+  it("ecs (passo A) persiste task_def_arn/target_group_arn/cluster_arn; ecs_service persiste service_arn", async () => {
+    // passo A: task-def + TG
+    const cA = ctx();
+    await ecsFargateDriver.provision(cA);
     expect(patchDeployment).toHaveBeenCalledWith("dep-abcdef123456",
-      expect.objectContaining({ service_arn: "arn:svc:new", target_group_arn: "arn:tg:new", cluster_arn: "genesis" }));
+      expect.objectContaining({ task_def_arn: "arn:td:svc:1", target_group_arn: "arn:tg:new", cluster_arn: "genesis" }));
+    expect(cA.scratch.taskDefArn).toBe("arn:td:svc:1");
+    expect(cA.scratch.targetGroupArn).toBe("arn:tg:new");
+    // passo B: service (lê do scratch populado por A)
+    patchDeployment.mockClear();
+    await ecsServiceDriver.provision(cA);
+    expect(patchDeployment).toHaveBeenCalledWith("dep-abcdef123456",
+      expect.objectContaining({ service_arn: "arn:svc:new" }));
+  });
+
+  it("ecs_service aborta se taskDefArn/targetGroupArn ausentes no scratch", async () => {
+    await expect(ecsServiceDriver.provision(ctx())).rejects.toThrow(/ECS_SERVICE_NO_TASKDEF|ECS_SERVICE_NO_TARGET_GROUP/);
   });
 
   it("idempotência do TG: já no ledger → não recria", async () => {
