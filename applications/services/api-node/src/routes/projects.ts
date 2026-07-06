@@ -5,7 +5,7 @@ import { pushProjectToGitHub } from "../services/githubPush.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
-import { resolveRuntimeTarget } from "../services/provision/backendDeployDetector.js";
+import { validateDeployMatrix } from "../services/provision/deployMatrix.js";
 import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
@@ -1621,6 +1621,7 @@ export async function projectRoutes(app: FastifyInstance) {
       let tenantId: string;
       let projectType: string | null = null;
       let extraTarget: string | null = null;
+      let extraMode: string | null = null;
       try {
         const row = (await client.query(
           "SELECT id, tenant_id, created_by, status, extra FROM projects WHERE id=$1",
@@ -1641,6 +1642,7 @@ export async function projectRoutes(app: FastifyInstance) {
         const extra = (row.extra as Record<string, unknown> | null) ?? {};
         projectType = (extra.project_type as string | undefined) ?? null;
         extraTarget = (extra.runtime_target as string | undefined) ?? null;
+        extraMode = (extra.delivery_mode as string | undefined) ?? null;
       } finally {
         client.release();
       }
@@ -1649,10 +1651,19 @@ export async function projectRoutes(app: FastifyInstance) {
       // container ANTES do caminho S3. Web/estático NÃO é afetado (segue idêntico).
       // Regra inviolável: só desvia quando o tipo/target resolve para backend.
       {
-        const { runtimeTarget, isBackend, error } = resolveRuntimeTarget(projectType, extraTarget);
+        const { runtimeTarget, isBackend, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
         if (error) {
           return reply.status(400).send({ code: "INVALID_RUNTIME_TARGET", message: error,
-            details: { project_type: projectType, runtime_target: extraTarget } });
+            details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
+        }
+        // DM-T1: source_only não provisiona nada — entrega repo + kit IaC (compose/tf/k8s/CI).
+        // O renderer do bundle chega na Fase A (DM-T8). Até lá, resposta explícita (não cai no S3).
+        if (isBackend && deliveryMode === "source_only") {
+          return reply.status(501).send({
+            code: "SOURCE_ONLY_KIT_PENDING",
+            message: "Modo 'só código' selecionado. A geração do kit de provisionamento (Docker/Terraform/k8s/CI) está sendo habilitada.",
+            details: { delivery_mode: "source_only", project_type: projectType },
+          });
         }
         if (isBackend && runtimeTarget !== "s3") {
           // G1-T12: provisionamento backend (conta Zentriz). Cria row write-ahead,

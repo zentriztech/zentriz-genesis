@@ -2,7 +2,7 @@
  * G1-T23: validação de matriz + allowlist de dispatch.
  */
 import { describe, it, expect } from "vitest";
-import { validateDeployMatrix, BACKEND_ALLOWLIST } from "./deployMatrix.js";
+import { validateDeployMatrix, BACKEND_ALLOWLIST, resolveDeliveryMode, DEFAULT_BACKEND_DELIVERY_MODE } from "./deployMatrix.js";
 
 describe("validateDeployMatrix", () => {
   it("frontend → s3, sem erro, não backend", () => {
@@ -61,5 +61,41 @@ describe("validateDeployMatrix", () => {
   it("tipo nulo/vazio → s3 não-backend (não desvia)", () => {
     expect(validateDeployMatrix(null, null)).toMatchObject({ runtimeTarget: "s3", isBackend: false });
     expect(validateDeployMatrix(null, null).error).toBeUndefined();
+  });
+});
+
+describe("DM-T1: delivery_mode", () => {
+  it("default do backend = source_only (sem escolha explícita)", () => {
+    expect(DEFAULT_BACKEND_DELIVERY_MODE).toBe("source_only");
+    expect(validateDeployMatrix("backend_api", null).deliveryMode).toBe("source_only");
+    expect(validateDeployMatrix("fullstack_saas", null).deliveryMode).toBe("source_only");
+  });
+
+  it("modo explícito production/demo é respeitado", () => {
+    expect(validateDeployMatrix("backend_api", null, "production").deliveryMode).toBe("production");
+    expect(validateDeployMatrix("backend_api", null, "demo").deliveryMode).toBe("demo");
+  });
+
+  it("modo inválido → erro", () => {
+    const d = validateDeployMatrix("backend_api", null, "staging_typo");
+    expect(d.error).toMatch(/delivery_mode.*inválido/i);
+  });
+
+  it("web/estático → deliveryMode neutro (production), sem erro", () => {
+    expect(validateDeployMatrix("frontend_dashboard", null).deliveryMode).toBe("production");
+    expect(validateDeployMatrix("frontend_dashboard", null).error).toBeUndefined();
+  });
+
+  it("resolveDeliveryMode: backend sem modo → source_only; com modo → o modo", () => {
+    expect(resolveDeliveryMode(true, null).deliveryMode).toBe("source_only");
+    expect(resolveDeliveryMode(true, "production").deliveryMode).toBe("production");
+    expect(resolveDeliveryMode(false, null).deliveryMode).toBe("production"); // web neutro
+    expect(resolveDeliveryMode(true, "xpto").error).toBeTruthy();
+  });
+
+  it("combinação válida com modo: fullstack_saas + production + ecs_fargate", () => {
+    const d = validateDeployMatrix("fullstack_saas", "ecs_fargate", "production");
+    expect(d.error).toBeUndefined();
+    expect(d).toMatchObject({ runtimeTarget: "ecs_fargate", isFullstack: true, deliveryMode: "production" });
   });
 });
