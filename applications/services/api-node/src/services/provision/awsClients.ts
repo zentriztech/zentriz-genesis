@@ -8,6 +8,7 @@
 
 import { IAMClient } from "@aws-sdk/client-iam";
 import { STSClient } from "@aws-sdk/client-sts";
+import { EC2Client } from "@aws-sdk/client-ec2";
 import type { ResolvedAwsCredentials } from "./awsCredentials.js";
 
 type CredsInput = {
@@ -27,6 +28,10 @@ export function iamClient(creds: ResolvedAwsCredentials): IAMClient {
 
 export function stsClient(creds: ResolvedAwsCredentials): STSClient {
   return new STSClient(base(creds));
+}
+
+export function ec2Client(creds: ResolvedAwsCredentials): EC2Client {
+  return new EC2Client(base(creds));
 }
 
 /** Retry com backoff exponencial (1s,2s,4s...) — cobre eventual-consistency de IAM. */
