@@ -26,7 +26,12 @@ vi.mock("./backendState.js", () => ({
 }));
 
 const runProvisionChain = vi.fn((..._a: unknown[]) => Promise.resolve());
-vi.mock("./provisionChain.js", () => ({ runProvisionChain: (...a: unknown[]) => runProvisionChain(...a) }));
+vi.mock("./provisionChain.js", () => ({
+  runProvisionChain: (...a: unknown[]) => runProvisionChain(...a),
+  registerDriver: () => {}, // drivers.js (side-effect import) chama isto
+}));
+// Neutraliza o barrel de drivers (side-effect) no teste de callback.
+vi.mock("./drivers.js", () => ({}));
 
 import { handleBackendCallback } from "./backendCallback.js";
 

@@ -16,6 +16,7 @@
 
 import { listResumableDeployments } from "./backendState.js";
 import { runProvisionChain, orderedDrivers } from "./provisionChain.js";
+import "./drivers.js"; // registra os drivers da cadeia (side-effect)
 
 let _timer: ReturnType<typeof setTimeout> | null = null;
 

@@ -16,6 +16,7 @@
 import { pool } from "../../db/client.js";
 import { setStatus, patchDeployment, type BackendStatus } from "./backendState.js";
 import { runProvisionChain } from "./provisionChain.js";
+import "./drivers.js"; // registra os drivers da cadeia (side-effect)
 
 export interface BackendCallbackBody {
   progress?: "installing" | "building" | "pushing" | "pushed";
