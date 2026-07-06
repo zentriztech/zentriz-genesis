@@ -30,7 +30,9 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 EXPOSE 3000
-CMD ["node", "dist/main"]
+# G-1: migra+seed (idempotente, tolerante) antes de subir — necessário p/ demo (DB fresco)
+# e robusto p/ produção. Não falha o boot se não houver script de migrate.
+CMD ["sh", "-c", "npm run migrate 2>/dev/null || npx drizzle-kit migrate 2>/dev/null || true; npm run seed 2>/dev/null || true; node dist/main"]
 `;
 
 const DOCKERFILE_NODE_API = `FROM node:20-alpine AS builder
@@ -46,7 +48,8 @@ ENV NODE_ENV=production
 COPY --from=builder /app ./
 RUN npm prune --production 2>/dev/null || true
 EXPOSE 3000
-CMD ["npm", "start"]
+# G-1: migra+seed (idempotente, tolerante) antes do start — demo (DB fresco) + robustez.
+CMD ["sh", "-c", "npm run migrate 2>/dev/null || npm run db:migrate 2>/dev/null || npx drizzle-kit migrate 2>/dev/null || true; npm run seed 2>/dev/null || npm run db:seed 2>/dev/null || true; npm start"]
 `;
 
 // ── Python (FastAPI / uvicorn) ─────────────────────────────────────────────────
@@ -63,7 +66,8 @@ RUN pip install --no-cache-dir --upgrade pip \\
       || pip install --no-cache-dir fastapi "uvicorn[standard]" )
 COPY . .
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port \${PORT:-8000}"]
+# G-1: migra (alembic/genérico, tolerante) antes do uvicorn — demo (DB fresco) + robustez.
+CMD ["sh", "-c", "alembic upgrade head 2>/dev/null || python -m app.migrate 2>/dev/null || true; uvicorn main:app --host 0.0.0.0 --port \${PORT:-8000}"]
 `;
 
 /** Fallback genérico Node (mesmo do Node API) — usado p/ runtime desconhecido. */
