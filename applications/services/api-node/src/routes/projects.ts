@@ -6,6 +6,8 @@ import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
 import { validateDeployMatrix } from "../services/provision/deployMatrix.js";
+import { buildPlanForProject } from "../services/provision/buildPlanForProject.js";
+import { renderSourceOnlyBundle, bundleManifest } from "../services/provision/renderers/bundle.js";
 import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
@@ -1656,13 +1658,21 @@ export async function projectRoutes(app: FastifyInstance) {
           return reply.status(400).send({ code: "INVALID_RUNTIME_TARGET", message: error,
             details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
         }
-        // DM-T1: source_only não provisiona nada — entrega repo + kit IaC (compose/tf/k8s/CI).
-        // O renderer do bundle chega na Fase A (DM-T8). Até lá, resposta explícita (não cai no S3).
+        // DM-T1/DM-T8b: source_only não provisiona infra — entrega o kit IaC
+        // (compose/tf/k8s/CI). Não cai no S3; aponta o cliente para o download do kit.
         if (isBackend && deliveryMode === "source_only") {
-          return reply.status(501).send({
-            code: "SOURCE_ONLY_KIT_PENDING",
-            message: "Modo 'só código' selecionado. A geração do kit de provisionamento (Docker/Terraform/k8s/CI) está sendo habilitada.",
-            details: { delivery_mode: "source_only", project_type: projectType },
+          const built = await buildPlanForProject(id);
+          if (!built.ok) {
+            return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
+              code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
+            });
+          }
+          return reply.status(200).send({
+            code: "SOURCE_ONLY_KIT_READY",
+            message: "Modo 'só código': baixe o kit de provisionamento (Docker/Terraform/k8s/CI).",
+            delivery_mode: "source_only",
+            kit_download_url: `/api/projects/${id}/deploy/source-kit`,
+            manifest: bundleManifest(renderSourceOnlyBundle(built.plan!)),
           });
         }
         if (isBackend && runtimeTarget !== "s3") {
@@ -1926,6 +1936,39 @@ export async function projectRoutes(app: FastifyInstance) {
       }
       const result = await handleBackendCallback(id, deploymentId, request.body ?? {});
       return reply.status(result.http).send(result.body);
+    }
+  );
+
+  // DM-T8b: GET /api/projects/:id/deploy/source-kit
+  // Gera e devolve o kit de provisionamento (source_only) como .zip. Sem AWS.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/deploy/source-kit",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        if (!(await checkProjectAccess(client, id, user))) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+      } finally {
+        client.release();
+      }
+      const built = await buildPlanForProject(id);
+      if (!built.ok) {
+        return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
+          code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
+        });
+      }
+      const files = renderSourceOnlyBundle(built.plan!);
+      const { default: AdmZip } = await import("adm-zip");
+      const zip = new AdmZip();
+      for (const f of files) zip.addFile(f.path, Buffer.from(f.content, "utf-8"));
+      const buf = zip.toBuffer();
+      return reply
+        .header("Content-Type", "application/zip")
+        .header("Content-Disposition", `attachment; filename="genesis-deploy-kit-${id.slice(0, 8)}.zip"`)
+        .send(buf);
     }
   );
 
