@@ -68,9 +68,29 @@ export class AmbientCredentialProvider implements AwsCredentialProvider {
   readonly kind = "ambient";
 
   async resolve(ctx?: CredentialContext): Promise<ResolvedAwsCredentials> {
+    // GENESIS_PROVISION_* tem PRECEDÊNCIA (chave DEDICADA de provisão, conta Zentriz).
+    // Sem isso, a cadeia default do SDK pegaria AWS_ACCESS_KEY_ID do ambiente — que pode
+    // ser de OUTRA conta (ex.: a chave do Bedrock/dev.venuxx), provisionando na conta errada.
+    // (Bug real 2026-07-06: recursos tentados na conta 896328489567 em vez da Zentriz.)
+    const k = process.env.GENESIS_PROVISION_ACCESS_KEY_ID?.trim();
+    const s = process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY?.trim();
+    if (k && s) {
+      return {
+        region: (ctx?.region ?? defaultRegion()).trim(),
+        credentials: {
+          accessKeyId: k,
+          secretAccessKey: s,
+          ...(process.env.GENESIS_PROVISION_SESSION_TOKEN
+            ? { sessionToken: process.env.GENESIS_PROVISION_SESSION_TOKEN.trim() }
+            : {}),
+        },
+      };
+    }
     return {
       region: (ctx?.region ?? defaultRegion()).trim(),
-      // credentials: undefined → cadeia default do SDK (conta Zentriz).
+      // credentials: undefined → cadeia default do SDK (env / instance role / SSO).
+      // No EC2 Zentriz o instance role (zentriz-genesis-instance-profile) é a conta certa,
+      // MAS só é alcançado se AWS_ACCESS_KEY_ID não estiver setado no env do container.
       credentials: undefined,
     };
   }
