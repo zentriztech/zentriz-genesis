@@ -63,19 +63,25 @@ export const migratingDriver: ProvisionDriver = {
   status: "migrating",
 
   async provision(ctx: ProvisionContext): Promise<void> {
-    // Guarda "já rodou": ledger migrate_run created → não re-migra (idempotência de resume).
-    const prior = await findCreatedResource(ctx.deploymentId, "migrate_run");
-    if (prior) return;
-
     const ecs = ecsClient(ctx.creds);
     // Cluster compartilhado (shared) — 1 por conta Zentriz. Idempotente: CreateCluster
     // de cluster existente é no-op. O driver ecs (T17) reusa este mesmo cluster.
+    // (Criado mesmo em demo — o service ainda precisa do cluster.)
     const cluster = (process.env.GENESIS_ECS_CLUSTER ?? "genesis").trim();
     await ecs.send(new CreateClusterCommand({
       clusterName: cluster,
       tags: [{ key: "zentriz:product", value: "genesis" }],
     })).catch(() => { /* já existe = ok */ });
     ctx.scratch.clusterName = cluster;
+
+    // DM-T9: demo usa DB sidecar EFÊMERO (fresco a cada boot da task). Não há RunTask de
+    // migrate separada — o container do app roda migrate+seed no seu próprio start contra
+    // o localhost:5432. Pular aqui evita uma RunTask contra um DB que ainda nem existe.
+    if (ctx.klass === "demo") return;
+
+    // Guarda "já rodou": ledger migrate_run created → não re-migra (idempotência de resume).
+    const prior = await findCreatedResource(ctx.deploymentId, "migrate_run");
+    if (prior) return;
 
     // Task-def dedicada com o comando de migrate (mesma imagem/roles/secrets do service).
     const taskDefArn = await registerTaskDef(ecs, ctx, {

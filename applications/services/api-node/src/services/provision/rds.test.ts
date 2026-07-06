@@ -93,12 +93,13 @@ describe("rdsDriver.provision", () => {
     expect(create.input.BackupRetentionPeriod).toBe(7);
   });
 
-  it("demo: DeletionProtection OFF + backup 0", async () => {
+  it("demo (DM-T9): NÃO cria RDS — DB é sidecar na task; seta DATABASE_URL localhost", async () => {
     const c = ctx(); c.klass = "demo";
     await rdsDriver.provision(c);
-    const create = rdsSent.find((s) => s.name === "CreateDBInstanceCommand")!;
-    expect(create.input.DeletionProtection).toBe(false);
-    expect(create.input.BackupRetentionPeriod).toBe(0);
+    // demo não provisiona RDS gerenciado (barato + descartável via sidecar no ecsFargate).
+    expect(rdsSent.some((s) => s.name === "CreateDBInstanceCommand")).toBe(false);
+    expect(c.scratch.databaseUrl).toBe("postgresql://genesis:demo@localhost:5432/appdb");
+    expect(c.scratch.demoDbName).toBe("appdb");
   });
 
   it("idempotência: instância já existente NÃO é recriada", async () => {

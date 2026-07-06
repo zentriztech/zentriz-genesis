@@ -131,10 +131,19 @@ export const rdsDriver: ProvisionDriver = {
   status: "provisioning",
 
   async provision(ctx: ProvisionContext): Promise<void> {
+    const isDemo = ctx.klass === "demo";
+    // DM-T9: demo NÃO cria RDS — o postgres é sidecar na task (ecsFargate). Marca o
+    // nome do db p/ o sidecar e a DATABASE_URL (localhost) e sai. Barato + descartável.
+    if (isDemo) {
+      ctx.scratch.demoDbName = "appdb";
+      ctx.scratch.dbVersion = ENGINE_VERSION;
+      ctx.scratch.databaseUrl = `postgresql://genesis:demo@localhost:5432/appdb`;
+      return;
+    }
+
     const client = rdsClient(ctx.creds);
     const sm = secretsClient(ctx.creds);
     const identifier = dbIdentifier(ctx.deploymentId);
-    const isDemo = ctx.klass === "demo";
 
     const password = await ensureMasterPassword(sm, ctx);
     const subnetGroup = await ensureSubnetGroup(client, ctx);

@@ -35,7 +35,11 @@ export interface RegisterTaskDefOpts {
   command?: string[];
   cpu?: string;      // default 256
   memory?: string;   // default 512
+  /** DM-T9 (demo): anexa um postgres sidecar na MESMA task (efêmero, sem RDS). */
+  withDbSidecar?: { version: string; database: string };
 }
+
+const DB_SIDECAR_NAME = "db";
 
 /**
  * Registra uma task-def e devolve o taskDefinitionArn.
@@ -51,6 +55,51 @@ export async function registerTaskDef(
   const port = Number(ctx.scratch.containerPort) || 3004;
   const region = ctx.creds.region;
 
+  const logOpts = (prefix: string) => ({
+    logDriver: "awslogs",
+    options: {
+      "awslogs-group": logGroupName(ctx),
+      "awslogs-region": region,
+      "awslogs-stream-prefix": prefix,
+      "awslogs-create-group": "true",
+    },
+  });
+
+  const appContainer = {
+    name: containerName(ctx),
+    image,
+    essential: true,
+    command: opts.command,
+    portMappings: opts.command ? undefined : [{ containerPort: port, protocol: "tcp" }],
+    secrets: secretRefs(ctx),
+    // DM-T9: em demo (sidecar), o app fala com o DB em localhost:5432 na mesma task.
+    environment: opts.withDbSidecar
+      ? [{ name: "DATABASE_URL", value: `postgresql://genesis:demo@localhost:5432/${opts.withDbSidecar.database}` }]
+      : undefined,
+    ...(opts.withDbSidecar ? { dependsOn: [{ containerName: DB_SIDECAR_NAME, condition: "HEALTHY" }] } : {}),
+    logConfiguration: logOpts(opts.command ? "migrate" : "app"),
+  };
+
+  const containerDefinitions: unknown[] = [appContainer];
+  if (opts.withDbSidecar) {
+    // Postgres efêmero na mesma task — some quando a task morre (demo descartável).
+    containerDefinitions.push({
+      name: DB_SIDECAR_NAME,
+      image: `postgres:${opts.withDbSidecar.version}-alpine`,
+      essential: true,
+      environment: [
+        { name: "POSTGRES_USER", value: "genesis" },
+        { name: "POSTGRES_PASSWORD", value: "demo" },
+        { name: "POSTGRES_DB", value: opts.withDbSidecar.database },
+      ],
+      healthCheck: {
+        command: ["CMD-SHELL", "pg_isready -U genesis"],
+        interval: 10, timeout: 5, retries: 5, startPeriod: 10,
+      },
+      logConfiguration: logOpts("db"),
+    });
+  }
+
   const out = await ecs.send(new RegisterTaskDefinitionCommand({
     family: opts.family,
     requiresCompatibilities: ["FARGATE"],
@@ -60,23 +109,8 @@ export async function registerTaskDef(
     executionRoleArn: execRoleArn,
     taskRoleArn: taskRoleArn,
     runtimePlatform: { cpuArchitecture: "X86_64", operatingSystemFamily: "LINUX" },
-    containerDefinitions: [{
-      name: containerName(ctx),
-      image,
-      essential: true,
-      command: opts.command,
-      portMappings: opts.command ? undefined : [{ containerPort: port, protocol: "tcp" }],
-      secrets: secretRefs(ctx),
-      logConfiguration: {
-        logDriver: "awslogs",
-        options: {
-          "awslogs-group": logGroupName(ctx),
-          "awslogs-region": region,
-          "awslogs-stream-prefix": opts.command ? "migrate" : "app",
-          "awslogs-create-group": "true",
-        },
-      },
-    }],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    containerDefinitions: containerDefinitions as any,
     tags: [
       { key: "zentriz:product", value: "genesis" },
       { key: "zentriz:deployment_id", value: ctx.deploymentId },

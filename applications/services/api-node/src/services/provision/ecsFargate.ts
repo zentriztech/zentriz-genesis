@@ -89,7 +89,11 @@ export const ecsFargateDriver: ProvisionDriver = {
     const name = serviceName(ctx);
 
     // Task-def do service (com portMappings; sem command override).
-    const taskDefArn = await registerTaskDef(ecs, ctx, { family: serviceFamily(ctx) });
+    // DM-T9 (demo): anexa postgres sidecar na MESMA task (efêmero, sem RDS).
+    const demoSidecar = ctx.klass === "demo"
+      ? { withDbSidecar: { version: String(ctx.scratch.dbVersion ?? "16"), database: String(ctx.scratch.demoDbName ?? "appdb") } }
+      : {};
+    const taskDefArn = await registerTaskDef(ecs, ctx, { family: serviceFamily(ctx), ...demoSidecar });
     const targetGroupArn = await ensureTargetGroup(elb, ctx);
     ctx.scratch.targetGroupArn = targetGroupArn;
 
