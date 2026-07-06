@@ -48,9 +48,10 @@ def run_backend_deploy(payload: dict) -> dict:
     tenant_id = payload.get("tenant_id", "")
     api_url = payload["genesis_api_url"]
     api_token = payload["genesis_token"]
-    aws_key = payload["aws_access_key_id"]
-    aws_secret = payload["aws_secret_access_key"]
+    aws_key = payload.get("aws_access_key_id", "")
+    aws_secret = payload.get("aws_secret_access_key", "")
     aws_region = payload.get("aws_region", "us-east-1")
+    aws_profile = payload.get("aws_profile", "")
 
     # ECR: nome do repo determinístico + tag da imagem (deployment_id[:8] por default).
     ecr_repo_name = payload["ecr_repo_name"]
@@ -67,7 +68,7 @@ def run_backend_deploy(payload: dict) -> dict:
             "Deploy backend exige repositório GitHub configurado. Backend deveria ter validado antes.",
         )
 
-    aws_env = _aws_env(aws_key, aws_secret, aws_region)
+    aws_env = _aws_env(aws_key, aws_secret, aws_region, aws_profile)
     build_dir = Path(tempfile.gettempdir()) / f"backend-build-{deployment_id}"
 
     try:
@@ -149,13 +150,27 @@ def run_backend_deploy(payload: dict) -> dict:
 
 # ── AWS / ECR helpers ────────────────────────────────────────────────────────
 
-def _aws_env(key: str, secret: str, region: str) -> dict:
+def _aws_env(key: str, secret: str, region: str, profile: str = "") -> dict:
+    """Monta o env AWS p/ os subprocessos (aws-cli/docker) usando as credenciais da Zentriz.
+
+    Ordem: (1) se houver chave/secret explícitas → usa-as e limpa AWS_PROFILE; (2) senão,
+    se houver profile → usa AWS_PROFILE (cadeia default via ~/.aws); (3) senão, deixa o
+    ambiente do host intacto → a cadeia default do SDK resolve (instance role/SSO/env já
+    presente). "Usar as AWS Secrets da Zentriz" = não forçar chaves vazias sobre o host.
+    """
     e = dict(os.environ)
-    e["AWS_ACCESS_KEY_ID"] = key
-    e["AWS_SECRET_ACCESS_KEY"] = secret
     e["AWS_DEFAULT_REGION"] = region
-    e.pop("AWS_PROFILE", None)
-    e.pop("AWS_DEFAULT_PROFILE", None)
+    if key and secret:
+        e["AWS_ACCESS_KEY_ID"] = key
+        e["AWS_SECRET_ACCESS_KEY"] = secret
+        e.pop("AWS_PROFILE", None)
+        e.pop("AWS_DEFAULT_PROFILE", None)
+    elif profile:
+        e["AWS_PROFILE"] = profile
+        # não seta chaves vazias (quebraria o profile)
+        e.pop("AWS_ACCESS_KEY_ID", None)
+        e.pop("AWS_SECRET_ACCESS_KEY", None)
+    # else: mantém o env do host como está (instance role / SSO / env herdado).
     return e
 
 

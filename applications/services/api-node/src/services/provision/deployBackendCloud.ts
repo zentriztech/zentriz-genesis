@@ -127,11 +127,23 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
     // G1-T19: token ESCOPADO ao deployment (não o GENESIS_API_TOKEN admin). Se vazar,
     // só permite reportar progresso deste deployment. 2h cobre build+push longo.
     genesis_token: signDeployCallbackToken(row.id, req.projectId, "2h"),
-    // GATE 1: credenciais da conta Zentriz. Preferimos as dedicadas de provisão; caem
-    // no par S3 como último recurso (mesma conta). Região do seam de credencial.
-    aws_access_key_id: process.env.GENESIS_PROVISION_ACCESS_KEY_ID ?? process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
-    aws_secret_access_key: process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ?? process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
+    // Credenciais AWS da conta Zentriz para o runner do host. Ordem de preferência:
+    //   1. GENESIS_PROVISION_* (dedicadas de provisão, se definidas)
+    //   2. AWS_ACCESS_KEY_ID/SECRET (identidade AWS principal da Zentriz — a mesma do Bedrock)
+    //   3. AWS_S3_DEPLOY_* (último recurso; normalmente só permite S3)
+    // Se NENHUMA chave explícita existir, enviamos vazio: o runner então usa a CADEIA
+    // DEFAULT do host (AWS_PROFILE / ~/.aws / instance role) — "as AWS Secrets da Zentriz".
+    aws_access_key_id:
+      process.env.GENESIS_PROVISION_ACCESS_KEY_ID ??
+      process.env.AWS_ACCESS_KEY_ID ??
+      process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
+    aws_secret_access_key:
+      process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ??
+      process.env.AWS_SECRET_ACCESS_KEY ??
+      process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
     aws_region: creds.region,
+    // Repassa o profile p/ o runner usar a cadeia default quando não há chave explícita.
+    aws_profile: process.env.GENESIS_PROVISION_PROFILE ?? process.env.AWS_PROFILE ?? "",
   };
 
   try {

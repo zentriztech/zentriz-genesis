@@ -708,9 +708,10 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         except Exception as e:
             self._json(400, {"error": f"bad request: {e}"}); return
 
+        # aws_access_key_id/secret NÃO são obrigatórios: quando vazios, o runner usa a
+        # cadeia default do host (AWS_PROFILE / ~/.aws / instance role) — credenciais da Zentriz.
         required = ["project_id", "deployment_id", "ecr_repo_name",
                     "genesis_api_url", "genesis_token",
-                    "aws_access_key_id", "aws_secret_access_key",
                     "git_clone_url", "git_installation_token"]
         missing = [k for k in required if not payload.get(k)]
         if missing:
