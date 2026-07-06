@@ -178,6 +178,79 @@ function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: s
     />
   );
 }
+// DM-T2: pergunta de topo (o que quer receber?) + avançado recolhido. Só p/ backend/fullstack.
+const DELIVERY_MODES = [
+  { value: "source_only", icon: "📦", label: "Só o código", desc: "Repo testado + kit de deploy (Docker/Terraform/k8s). Você provisiona." },
+  { value: "demo",        icon: "🧪", label: "Demo",         desc: "Link pra testar, descartável, sem custo de infra." },
+  { value: "production",  icon: "🚀", label: "Produção",     desc: "Sistema pra valer: dados persistentes, HTTPS, banco gerenciado." },
+];
+interface DeliverySectionProps {
+  visible: boolean;
+  mode: string; onMode: (v: string) => void;
+  advancedOpen: boolean; onAdvancedOpen: (v: boolean) => void;
+  dbMode: string; onDbMode: (v: string) => void;
+  runtimeTarget: string; onRuntimeTarget: (v: string) => void;
+  domainMode: string; onDomainMode: (v: string) => void;
+}
+function DeliverySection(p: DeliverySectionProps) {
+  if (!p.visible) return null;
+  return (
+    <Box sx={{ mb: 2 }}>
+      <Typography sx={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase",
+        letterSpacing: "0.06em", color: "#8B949E", mb: 1 }}>
+        O que você quer receber?
+      </Typography>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
+        {DELIVERY_MODES.map((m) => {
+          const active = p.mode === m.value;
+          return (
+            <Card key={m.value} onClick={() => p.onMode(m.value)}
+              sx={{ flex: 1, cursor: "pointer", p: 1.2, border: "2px solid",
+                borderColor: active ? "primary.main" : "divider",
+                bgcolor: active ? "action.selected" : "background.paper",
+                transition: "border-color .15s" }}>
+              <div style={{ fontSize: "1.1rem" }}>{m.icon} <strong style={{ fontSize: "0.85rem" }}>{m.label}</strong></div>
+              <div style={{ fontSize: "0.72rem", color: "#8B949E", marginTop: 2 }}>{m.desc}</div>
+            </Card>
+          );
+        })}
+      </Stack>
+      <Button size="small" variant="text" onClick={() => p.onAdvancedOpen(!p.advancedOpen)}
+        sx={{ fontSize: "0.72rem", textTransform: "none", color: "text.secondary" }}>
+        {p.advancedOpen ? "▲ Ocultar avançado" : "▼ Avançado (opcional)"}
+      </Button>
+      {p.advancedOpen && (
+        <Stack spacing={1.5} sx={{ mt: 1, pl: 0.5 }}>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Banco de dados</InputLabel>
+            <Select value={p.dbMode} label="Banco de dados" onChange={(e) => p.onDbMode(e.target.value)}>
+              <MenuItem value="">Automático (recomendado)</MenuItem>
+              <MenuItem value="rds">RDS gerenciado</MenuItem>
+              <MenuItem value="sidecar">Junto com o backend (sidecar)</MenuItem>
+              <MenuItem value="none">Sem banco</MenuItem>
+              <MenuItem value="external">Banco externo (informo DATABASE_URL)</MenuItem>
+            </Select>
+          </FormControl>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Compute</InputLabel>
+            <Select value={p.runtimeTarget} label="Compute" onChange={(e) => p.onRuntimeTarget(e.target.value)}>
+              <MenuItem value="">Fargate (padrão)</MenuItem>
+              <MenuItem value="app_runner">App Runner</MenuItem>
+              <MenuItem value="ec2">EC2</MenuItem>
+            </Select>
+          </FormControl>
+          <FormControl size="small" fullWidth>
+            <InputLabel>Domínio</InputLabel>
+            <Select value={p.domainMode} label="Domínio" onChange={(e) => p.onDomainMode(e.target.value)}>
+              <MenuItem value="">Subdomínio Zentriz automático</MenuItem>
+              <MenuItem value="custom">Meu domínio (configuro CNAME)</MenuItem>
+            </Select>
+          </FormControl>
+        </Stack>
+      )}
+    </Box>
+  );
+}
 const RELATION_LABELS: Record<string, string> = {
   uses_backend: "🔌 Consome backend",
   shares_auth:  "🔐 Compartilha autenticação",
@@ -491,6 +564,14 @@ export default function SpecPage() {
   // Tipo do projeto
   const [projectType, setProjectType] = useState("");
 
+  // DM-T2: modo de entrega + avançado (só relevante p/ backend/fullstack).
+  const [deliveryMode, setDeliveryMode] = useState("source_only");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [dbMode, setDbMode] = useState("");        // "" = automático
+  const [runtimeTarget, setRuntimeTarget] = useState(""); // "" = padrão (ecs_fargate)
+  const [domainMode, setDomainMode] = useState("");       // "" = subdomínio Zentriz
+  const isBackendType = /^(backend|fullstack)/.test(projectType);
+
   // Produto e links
   const [products, setProducts]       = useState<{ id: string; name: string }[]>([]);
   const [productId, setProductId]     = useState("");
@@ -655,6 +736,12 @@ export default function SpecPage() {
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
       if (productId) formData.append("productId", productId);
+      if (isBackendType) {
+        formData.append("deliveryMode", deliveryMode);
+        if (runtimeTarget) formData.append("runtimeTarget", runtimeTarget);
+        if (dbMode) formData.append("dbMode", dbMode);
+        if (domainMode) formData.append("domainMode", domainMode);
+      }
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
@@ -695,6 +782,12 @@ export default function SpecPage() {
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
       if (productId) fd.append("productId", productId);
+      if (isBackendType) {
+        fd.append("deliveryMode", deliveryMode);
+        if (runtimeTarget) fd.append("runtimeTarget", runtimeTarget);
+        if (dbMode) fd.append("dbMode", dbMode);
+        if (domainMode) fd.append("domainMode", domainMode);
+      }
       files.forEach((f) => fd.append("files", f));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
@@ -843,6 +936,11 @@ export default function SpecPage() {
                       placeholder="Ex.: E-commerce de calçados"
                     />
                     <ProjectTypeSelect value={projectType} onChange={setProjectType} />
+                    <DeliverySection visible={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
+                      advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
+                      dbMode={dbMode} onDbMode={setDbMode}
+                      runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
+                      domainMode={domainMode} onDomainMode={setDomainMode} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
                       onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
@@ -964,6 +1062,11 @@ export default function SpecPage() {
                     size="small" sx={{ mb: 2 }} placeholder="Ex.: Auto Parts API"
                   />
                   <ProjectTypeSelect value={projectType} onChange={setProjectType} />
+                  <DeliverySection visible={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
+                    advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
+                    dbMode={dbMode} onDbMode={setDbMode}
+                    runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
+                    domainMode={domainMode} onDomainMode={setDomainMode} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
                     onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}

@@ -401,6 +401,8 @@ export async function specRoutes(app: FastifyInstance) {
     let freeDescription: string | null = null;
     let projectType: string | null = null;
     let productId: string | null = null;
+    // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
+    const deliveryFields: Record<string, string> = {};
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -458,6 +460,16 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim()
           : "";
         if (raw) productId = raw;
+      }
+      // DM-T2: campos de entrega opcionais (delivery_mode/runtime_target/db_mode/host_target/domain_mode).
+      for (const key of ["deliveryMode", "runtimeTarget", "dbMode", "hostTarget", "domainMode"] as const) {
+        if (part.fields?.[key] !== undefined) {
+          const f = part.fields[key];
+          const v = Array.isArray(f) ? f[0] : f;
+          const raw = v && typeof (v as { value?: string }).value === "string"
+            ? (v as { value: string }).value.trim() : "";
+          if (raw) deliveryFields[key] = raw;
+        }
       }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
@@ -524,6 +536,12 @@ export async function specRoutes(app: FastifyInstance) {
       const extraJson = JSON.stringify({
         ...(freeDescription ? { free_description: freeDescription } : {}),
         ...(projectType    ? { project_type: projectType }           : {}),
+        // DM-T2: entrega (só grava o que veio; ausência = defaults do deployMatrix no deploy).
+        ...(deliveryFields.deliveryMode ? { delivery_mode: deliveryFields.deliveryMode } : {}),
+        ...(deliveryFields.runtimeTarget ? { runtime_target: deliveryFields.runtimeTarget } : {}),
+        ...(deliveryFields.dbMode ? { db_mode: deliveryFields.dbMode } : {}),
+        ...(deliveryFields.hostTarget ? { host_target: deliveryFields.hostTarget } : {}),
+        ...(deliveryFields.domainMode ? { domain_mode: deliveryFields.domainMode } : {}),
       });
       const projectResult = await client.query(
         `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)
