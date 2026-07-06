@@ -15,7 +15,7 @@
 
 import {
   CreateDBInstanceCommand, DescribeDBInstancesCommand, DeleteDBInstanceCommand,
-  CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand,
+  CreateDBSubnetGroupCommand, DescribeDBSubnetGroupsCommand, ModifyDBInstanceCommand,
   type RDSClient,
 } from "@aws-sdk/client-rds";
 import {
@@ -194,17 +194,24 @@ export const rdsDriver: ProvisionDriver = {
     const client = rdsClient(ctx.creds);
     const identifier = dbIdentifier(ctx.deploymentId);
     const isDemo = ctx.klass === "demo";
+    // Durable tem DeletionProtection ON → precisa desativar ANTES do delete (senão falha).
+    if (!isDemo) {
+      await client.send(new ModifyDBInstanceCommand({
+        DBInstanceIdentifier: identifier, DeletionProtection: false, ApplyImmediately: true,
+      })).catch(() => { /* not found ou já off — segue */ });
+    }
     try {
       await client.send(new DeleteDBInstanceCommand({
         DBInstanceIdentifier: identifier,
-        SkipFinalSnapshot: isDemo,
+        SkipFinalSnapshot: isDemo,                                    // durable gera snapshot; demo não
         FinalDBSnapshotIdentifier: isDemo ? undefined : `${identifier}-final`,
         DeleteAutomatedBackups: isDemo,
       }));
     } catch (err) {
-      // Not found = já removida; DeletionProtection impede delete de durable (esperado — T21 desativa antes).
-      if ((err as { name?: string })?.name !== "DBInstanceNotFoundFault") { /* T21 reconcilia */ }
+      // Not found = já removida (idempotente).
+      if ((err as { name?: string })?.name !== "DBInstanceNotFoundFault") { /* T22 reconcilia */ }
     }
+    // Subnet group só some depois da instância; a reconciliação remove no ciclo seguinte.
   },
 };
 

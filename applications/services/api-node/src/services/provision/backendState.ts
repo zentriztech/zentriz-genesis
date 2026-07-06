@@ -273,3 +273,48 @@ export async function listResumableDeployments(): Promise<BackendDeploymentRow[]
   );
   return r.rows;
 }
+
+/** Row completo com todos os ARNs/ids de infra — usado pelo teardown p/ reconstruir o contexto. */
+export interface FullDeploymentRow extends BackendDeploymentRow {
+  cluster_arn: string | null;
+  service_arn: string | null;
+  target_group_arn: string | null;
+  alb_arn: string | null;
+  vpc_id: string | null;
+  subnet_ids: string[] | null;
+  security_group_ids: string[] | null;
+  rds_arn: string | null;
+  secret_arn: string | null;
+  acm_cert_arn: string | null;
+  route53_record: string | null;
+  iam_role_path: string | null;
+}
+
+export async function getFullDeployment(deploymentId: string): Promise<FullDeploymentRow | null> {
+  const r = await pool.query<FullDeploymentRow>(
+    `SELECT id, project_id, tenant_id, provider, runtime_target, class,
+            ecr_repo_uri, image_tag, app_url, health_url, status, error_msg,
+            cluster_arn, service_arn, target_group_arn, alb_arn, vpc_id,
+            subnet_ids, security_group_ids, rds_arn, secret_arn, acm_cert_arn,
+            route53_record, iam_role_path
+       FROM backend_deployments WHERE id = $1`,
+    [deploymentId],
+  );
+  return r.rows[0] ?? null;
+}
+
+/** Deployments marcados p/ destruição (worker de cleanup / resume-no-boot). */
+export async function listDeploymentsForTeardown(): Promise<BackendDeploymentRow[]> {
+  const r = await pool.query<BackendDeploymentRow>(
+    `SELECT id, project_id, tenant_id, provider, runtime_target, class,
+            ecr_repo_uri, image_tag, app_url, health_url, status, error_msg
+       FROM backend_deployments
+      WHERE status IN ('destroying','failed')
+        AND EXISTS (
+          SELECT 1 FROM backend_deployment_resources r
+           WHERE r.deployment_id = backend_deployments.id
+             AND r.status IN ('pending','created','delete-requested','failed')
+        )`,
+  );
+  return r.rows;
+}
