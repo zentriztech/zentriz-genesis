@@ -5,6 +5,7 @@ import { startWatchdog, stopWatchdog } from "./services/watchdog.js";
 import { startS3CleanupWorker, stopS3CleanupWorker } from "./services/s3CleanupWorker.js";
 import { startS3ReconciliationWorker, stopS3ReconciliationWorker } from "./services/s3ReconciliationWorker.js";
 import { startBackendResumeWorker, stopBackendResumeWorker } from "./services/provision/backendResumeWorker.js";
+import { startBackendCleanupWorker, stopBackendCleanupWorker } from "./services/provision/backendCleanupWorker.js";
 
 const app = await buildApp();
 
@@ -47,11 +48,13 @@ try {
   startS3ReconciliationWorker();
   // G1-T12: re-anexa deployments backend em fases não-terminais da cadeia SDK.
   startBackendResumeWorker();
+  // G1-T22: watchdog por fase + sweep de teardown (separado do s3CleanupWorker).
+  startBackendCleanupWorker();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); process.exit(0); });

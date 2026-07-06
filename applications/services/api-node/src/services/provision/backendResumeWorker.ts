@@ -16,6 +16,7 @@
 
 import { listResumableDeployments } from "./backendState.js";
 import { runProvisionChain, orderedDrivers } from "./provisionChain.js";
+import { teardownDeployment } from "./teardown.js";
 import "./drivers.js"; // registra os drivers da cadeia (side-effect)
 
 let _timer: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +38,11 @@ async function resumeOnce(): Promise<void> {
   let rows;
   try { rows = await listResumableDeployments(); } catch { return; }
   for (const dep of rows) {
+    // G1-T22: deploy interrompido em DESTROYING → retoma o teardown (não a provisão).
+    if (dep.status === "destroying") {
+      void teardownDeployment(dep.id).catch(() => { /* backendCleanupWorker repete */ });
+      continue;
+    }
     // Re-anexa apenas quem já tem artefato E está numa fase da cadeia SDK.
     const inSdkChain = SDK_PHASES.has(dep.status);
     const hasArtifact = !!dep.ecr_repo_uri;
