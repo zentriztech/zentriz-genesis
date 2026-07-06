@@ -1450,11 +1450,28 @@ function ProjectDetailPageInner() {
             onClick={async () => {
               setDeployLoading(true); setDeployError(null);
               try {
-                const result = await apiPost<EphemeralResult>(`/api/projects/${id}/deploy/ephemeral`, {
-                  ttlDays: 7,
-                  consented: true,
-                });
-                setEphemeral(result);
+                const result = await apiPost<EphemeralResult & { code?: string; kit_download_url?: string }>(
+                  `/api/projects/${id}/deploy/ephemeral`, { ttlDays: 7, consented: true },
+                );
+                // DM-T8b: modo 'só código' → baixa o kit de provisionamento (zip), não é deploy.
+                // Fetch autenticado (Bearer no header) + download via blob — window.open não
+                // levaria o token e daria 403.
+                if (result && (result as { code?: string }).code === "SOURCE_ONLY_KIT_READY") {
+                  const token = localStorage.getItem("genesis_token");
+                  const resp = await fetch(`/api/projects/${id}/deploy/source-kit`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    credentials: "include",
+                  });
+                  if (!resp.ok) throw new Error(`Falha ao gerar o kit (${resp.status})`);
+                  const blob = await resp.blob();
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `genesis-deploy-kit-${id.slice(0, 8)}.zip`;
+                  document.body.appendChild(a); a.click(); a.remove();
+                  URL.revokeObjectURL(url);
+                } else {
+                  setEphemeral(result);
+                }
               } catch (e) {
                 // Erro do apiPost pode vir com body estruturado
                 const msg = e instanceof Error ? e.message : "Falha ao provisionar deploy";

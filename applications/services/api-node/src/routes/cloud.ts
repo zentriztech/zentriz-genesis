@@ -23,7 +23,10 @@ function getUser(req: FastifyRequest): AuthUser {
 type CloudProvider = "aws" | "azure" | "gcp";
 
 const ALLOWED_KEYS: Record<CloudProvider, string[]> = {
-  aws:   ["accessKeyId", "secretAccessKey", "region", "ecrRegistry", "ecsCluster"],
+  // G1-T6 (seam GATE 2): roleArn + externalId habilitam o AssumeRoleCredentialProvider
+  // do GATE 2. No GATE 1 a provisão usa a conta ambiente (AmbientCredentialProvider),
+  // então estes campos são opcionais e o path S3 legado (accessKeyId estático) segue igual.
+  aws:   ["accessKeyId", "secretAccessKey", "region", "ecrRegistry", "ecsCluster", "roleArn", "externalId"],
   azure: ["clientId", "clientSecret", "subscriptionId", "tenantId", "resourceGroup", "containerAppName"],
   gcp:   ["serviceAccountKey", "projectId", "region", "serviceName"],
 };

@@ -50,6 +50,67 @@ export function verifyToken(token: string): TokenPayload | null {
   }
 }
 
+/**
+ * G1-T19: token de callback escopado por deployment.
+ *
+ * O callback do backend_deploy_runner (host) NÃO deve usar a role admin genérica
+ * (GENESIS_API_TOKEN). Em vez disso, o orquestrador assina um token de escopo restrito,
+ * válido só para UM deployment e por tempo curto. Se vazar, só permite reportar
+ * progresso daquele deployment — não dá acesso admin a nada.
+ *
+ * Payload DEDICADO (não estende TokenPayload, que é fixo e usado em todo lugar).
+ */
+export type DeployCallbackPayload = {
+  scope: "deploy-callback";
+  deploymentId: string;
+  projectId: string;
+};
+
+/** Assina um token de callback escopado a um deployment (default 2h — cobre build+push longo). */
+export function signDeployCallbackToken(
+  deploymentId: string,
+  projectId: string,
+  expiresIn: string = "2h",
+): string {
+  const payload: DeployCallbackPayload = { scope: "deploy-callback", deploymentId, projectId };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn } as jwt.SignOptions);
+}
+
+/**
+ * Decodifica um token e devolve o payload SÓ se o claim `scope` for 'deploy-callback'
+ * (sem checar deploymentId). Usado pelo middleware para reconhecer o token; a checagem
+ * de binding (deploymentId/projectId) é feita na rota via verifyDeployCallbackToken.
+ */
+export function decodeDeployCallbackToken(token: string): DeployCallbackPayload | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as Partial<DeployCallbackPayload>;
+    if (decoded?.scope !== "deploy-callback" || !decoded.deploymentId || !decoded.projectId) return null;
+    return decoded as DeployCallbackPayload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verifica um token de callback e devolve o payload SÓ se o claim `scope` for
+ * 'deploy-callback' e o `deploymentId`/`projectId` casarem com os esperados.
+ * Token de outro deployment (ou admin genérico) → null.
+ */
+export function verifyDeployCallbackToken(
+  token: string,
+  expected: { deploymentId: string; projectId: string },
+): DeployCallbackPayload | null {
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as Partial<DeployCallbackPayload>;
+    if (decoded?.scope !== "deploy-callback") return null;
+    if (decoded.deploymentId !== expected.deploymentId) return null;
+    if (decoded.projectId !== expected.projectId) return null;
+    return decoded as DeployCallbackPayload;
+  } catch {
+    return null;
+  }
+}
+
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, SALT_ROUNDS);
 }

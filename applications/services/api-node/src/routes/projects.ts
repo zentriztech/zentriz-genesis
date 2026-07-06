@@ -2,9 +2,14 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
-import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
+import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
+import { validateDeployMatrix } from "../services/provision/deployMatrix.js";
+import { buildPlanForProject } from "../services/provision/buildPlanForProject.js";
+import { renderSourceOnlyBundle, bundleManifest } from "../services/provision/renderers/bundle.js";
+import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
+import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { notifyTelegramTenant } from "./telegram.js";
@@ -1616,9 +1621,12 @@ export async function projectRoutes(app: FastifyInstance) {
 
       const client = await pool.connect();
       let tenantId: string;
+      let projectType: string | null = null;
+      let extraTarget: string | null = null;
+      let extraMode: string | null = null;
       try {
         const row = (await client.query(
-          "SELECT id, tenant_id, created_by, status FROM projects WHERE id=$1",
+          "SELECT id, tenant_id, created_by, status, extra FROM projects WHERE id=$1",
           [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
@@ -1633,8 +1641,67 @@ export async function projectRoutes(app: FastifyInstance) {
           });
         }
         tenantId = row.tenant_id as string;
+        const extra = (row.extra as Record<string, unknown> | null) ?? {};
+        projectType = (extra.project_type as string | undefined) ?? null;
+        extraTarget = (extra.runtime_target as string | undefined) ?? null;
+        extraMode = (extra.delivery_mode as string | undefined) ?? null;
       } finally {
         client.release();
+      }
+
+      // G1-T9: DISPATCH POR TIPO — backend/fullstack vão para o provisionador de
+      // container ANTES do caminho S3. Web/estático NÃO é afetado (segue idêntico).
+      // Regra inviolável: só desvia quando o tipo/target resolve para backend.
+      {
+        const { runtimeTarget, isBackend, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
+        if (error) {
+          return reply.status(400).send({ code: "INVALID_RUNTIME_TARGET", message: error,
+            details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
+        }
+        // DM-T1/DM-T8b: source_only não provisiona infra — entrega o kit IaC
+        // (compose/tf/k8s/CI). Não cai no S3; aponta o cliente para o download do kit.
+        if (isBackend && deliveryMode === "source_only") {
+          const built = await buildPlanForProject(id);
+          if (!built.ok) {
+            return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
+              code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
+            });
+          }
+          return reply.status(200).send({
+            code: "SOURCE_ONLY_KIT_READY",
+            message: "Modo 'só código': baixe o kit de provisionamento (Docker/Terraform/k8s/CI).",
+            delivery_mode: "source_only",
+            kit_download_url: `/api/projects/${id}/deploy/source-kit`,
+            manifest: bundleManifest(renderSourceOnlyBundle(built.plan!)),
+          });
+        }
+        if (isBackend && runtimeTarget !== "s3") {
+          // G1-T12: provisionamento backend (conta Zentriz). Cria row write-ahead,
+          // dispara build+push ECR no host e responde 202. A cadeia SDK (iam→…→ecs)
+          // roda no callback 'pushed'. NUNCA cai no ramo S3.
+          try {
+            const outcome = await deployBackendCloud({
+              projectId: id, tenantId, projectType, extraTarget, extraMode,
+            });
+            if (!outcome.ok) {
+              const httpStatus =
+                outcome.code === "REPO_REQUIRED" ? 400 :
+                outcome.code === "GITHUB_INSTALLATION_MISSING" ? 400 :
+                outcome.code === "INVALID_RUNTIME_TARGET" ? 400 :
+                outcome.code === "GITHUB_TOKEN_ERROR" ? 502 :
+                outcome.code === "LAUNCH_FAILED" ? 502 :
+                500;
+              return reply.status(httpStatus).send({
+                code: outcome.code, message: outcome.message, details: outcome.details,
+              });
+            }
+            return reply.status(202).send(outcome.result);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return reply.status(500).send({ code: "BACKEND_DEPLOY_ERROR", message: msg });
+          }
+        }
+        // não-backend (frontend/estático) → continua no fluxo S3 abaixo, inalterado.
       }
 
       // FT-17: se S3 configurado, é o caminho padrão.
@@ -1727,14 +1794,13 @@ export async function projectRoutes(app: FastifyInstance) {
         }
       }
 
-      // Fallback legado (Fly/ECS) — hoje não configurado, retorna 503 imediato via deployEphemeral
-      try {
-        const result = await deployEphemeral(id, ttlMinutes);
-        return reply.status(202).send(result);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return reply.status(500).send({ code: "DEPLOY_ERROR", message: msg });
-      }
+      // G1-T17: fallback legado Fly/ECS aposentado. O provisionamento backend agora é o
+      // driver ECS Fargate (deployBackendCloud, ramo acima); o path web é S3. Se chegou
+      // aqui, é web sem S3 configurado — 503 explícito (nada de stub morto).
+      return reply.status(503).send({
+        code: "DEPLOY_NOT_CONFIGURED",
+        message: "Deploy não configurado: projeto web exige S3 (AWS_S3_DEPLOY_*) e backend usa provisionamento ECS.",
+      });
     }
   );
 
@@ -1846,6 +1912,63 @@ export async function projectRoutes(app: FastifyInstance) {
       } finally {
         client.release();
       }
+    }
+  );
+
+  // G1-T12/T19: POST /api/projects/:id/deploy/backend/:deploymentId/callback
+  // Callback do backend_deploy_runner (host). Auth = token de callback ESCOPADO por
+  // deployment (não role admin genérica): o claim scope='deploy-callback' precisa casar
+  // com params.deploymentId + params.id. Token de outro deployment → 403.
+  // installing/building/pushing → avança status; pushed → dispara a cadeia SDK; failed → falha.
+  app.post<{
+    Params: { id: string; deploymentId: string };
+    Body: import("../services/provision/backendCallback.js").BackendCallbackBody;
+  }>(
+    "/api/projects/:id/deploy/backend/:deploymentId/callback",
+    async (request, reply) => {
+      const { id, deploymentId } = request.params;
+      const cb = (request as unknown as { deployCallback?: { scope: string; deploymentId: string; projectId: string } }).deployCallback;
+      const user = getUser(request);
+      // Aceita: token escopado casando com o deployment/projeto, OU zentriz_admin (fallback interno).
+      const scopedOk = cb && cb.scope === "deploy-callback" && cb.deploymentId === deploymentId && cb.projectId === id;
+      if (!scopedOk && user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Token de callback inválido para este deployment" });
+      }
+      const result = await handleBackendCallback(id, deploymentId, request.body ?? {});
+      return reply.status(result.http).send(result.body);
+    }
+  );
+
+  // DM-T8b: GET /api/projects/:id/deploy/source-kit
+  // Gera e devolve o kit de provisionamento (source_only) como .zip. Sem AWS.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/deploy/source-kit",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        if (!(await checkProjectAccess(client, id, user))) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+      } finally {
+        client.release();
+      }
+      const built = await buildPlanForProject(id);
+      if (!built.ok) {
+        return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
+          code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
+        });
+      }
+      const files = renderSourceOnlyBundle(built.plan!);
+      const { default: AdmZip } = await import("adm-zip");
+      const zip = new AdmZip();
+      for (const f of files) zip.addFile(f.path, Buffer.from(f.content, "utf-8"));
+      const buf = zip.toBuffer();
+      return reply
+        .header("Content-Type", "application/zip")
+        .header("Content-Disposition", `attachment; filename="genesis-deploy-kit-${id.slice(0, 8)}.zip"`)
+        .send(buf);
     }
   );
 

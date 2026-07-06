@@ -34,6 +34,12 @@ export interface AWSCredentials {
   region: string;
   ecrRegistry?: string;
   ecsCluster?: string;
+  // G1-T6 (seam GATE 2): grant cross-account via sts:AssumeRole + externalId.
+  // No GATE 1 (conta Zentriz) não são usados; no GATE 2 alimentam o
+  // AssumeRoleCredentialProvider. accessKeyId/secretAccessKey ficam opcionais
+  // quando roleArn está presente (modelo de role tem precedência).
+  roleArn?: string;
+  externalId?: string;
 }
 
 export interface AzureCredentials {
