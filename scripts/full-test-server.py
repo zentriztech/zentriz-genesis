@@ -31,6 +31,13 @@ CYBORG_DIR   = Path(__file__).parent.parent / "project" / "cyborg"
 HEAVY_JOBS_MAX = int(os.environ.get("HEAVY_JOBS_MAX", "2"))
 HEAVY_SEM = threading.BoundedSemaphore(HEAVY_JOBS_MAX)
 
+# G1-T11: semáforo SEPARADO para o build backend (clone+docker build+push ECR).
+# Fica FORA do HEAVY_SEM de propósito: um build de imagem grande não pode serializar
+# com Cyborg/S3 (e vice-versa). Limita só a concorrência de builds backend entre si
+# (docker build é I/O+CPU pesado). Ajustar via env BACKEND_BUILD_MAX.
+BACKEND_BUILD_MAX = int(os.environ.get("BACKEND_BUILD_MAX", "2"))
+BACKEND_SEM = threading.BoundedSemaphore(BACKEND_BUILD_MAX)
+
 
 def acquire_heavy_slot(kind: str, job_id: str) -> None:
     """Bloqueia até slot livre. Loga espera para debug."""
@@ -40,6 +47,24 @@ def acquire_heavy_slot(kind: str, job_id: str) -> None:
     log.warning(f"[SEM] waiting kind={kind} job={job_id} — outros jobs em execução")
     HEAVY_SEM.acquire(blocking=True)
     log.info(f"[SEM] acquired kind={kind} job={job_id} (after wait)")
+
+
+def acquire_backend_slot(job_id: str) -> None:
+    """Slot do build backend (semáforo próprio, independente do HEAVY_SEM)."""
+    if BACKEND_SEM.acquire(blocking=False):
+        log.info(f"[BSEM] acquired backend job={job_id} (immediate)")
+        return
+    log.warning(f"[BSEM] waiting backend job={job_id} — outros builds backend em execução")
+    BACKEND_SEM.acquire(blocking=True)
+    log.info(f"[BSEM] acquired backend job={job_id} (after wait)")
+
+
+def release_backend_slot(job_id: str) -> None:
+    try:
+        BACKEND_SEM.release()
+        log.info(f"[BSEM] released backend job={job_id}")
+    except ValueError:
+        pass
 
 
 def release_heavy_slot(kind: str, job_id: str) -> None:
@@ -160,6 +185,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_launch_cyborg()
         elif self.path == "/launch-s3-deploy":
             self._handle_launch_s3_deploy()
+        elif self.path == "/launch-backend-deploy":
+            self._handle_launch_backend_deploy()
         elif self.path == "/cyborg-claude-code":
             self._handle_cyborg_claude_code()
         elif self.path == "/cyborg-playwright":
@@ -669,6 +696,44 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
                 release_heavy_slot("s3-deploy", job_id)
 
         t = threading.Thread(target=_worker, name=f"s3-deploy-{job_id}", daemon=True)
+        t.start()
+
+        self._json(202, {"ok": True, "job_id": job_id, "deployment_id": deployment_id})
+
+    # ── /launch-backend-deploy (G1-T11) ───────────────────────────────────────
+    def _handle_launch_backend_deploy(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        required = ["project_id", "deployment_id", "ecr_repo_name",
+                    "genesis_api_url", "genesis_token",
+                    "aws_access_key_id", "aws_secret_access_key",
+                    "git_clone_url", "git_installation_token"]
+        missing = [k for k in required if not payload.get(k)]
+        if missing:
+            self._json(400, {"error": f"missing fields: {missing}"}); return
+
+        deployment_id = payload["deployment_id"]
+        job_id = deployment_id[:8]
+
+        # Thread com semáforo PRÓPRIO (BACKEND_SEM) — não serializa com Cyborg/S3.
+        def _worker():
+            acquire_backend_slot(job_id)
+            try:
+                from pathlib import Path as _P
+                import sys as _sys
+                _sys.path.insert(0, str(_P(__file__).parent))
+                from backend_deploy_runner import run_backend_deploy
+                run_backend_deploy(payload)
+            except Exception as e:
+                log.exception(f"[backend-deploy] {job_id} crashed: {e}")
+            finally:
+                release_backend_slot(job_id)
+
+        t = threading.Thread(target=_worker, name=f"backend-deploy-{job_id}", daemon=True)
         t.start()
 
         self._json(202, {"ok": True, "job_id": job_id, "deployment_id": deployment_id})
