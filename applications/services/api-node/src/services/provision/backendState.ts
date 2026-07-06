@@ -94,18 +94,24 @@ export async function createOrGetActiveDeployment(
 
   const client = await pool.connect();
   try {
+    // DM-T10: demo recebe TTL (expira sozinha, reapada pelo cleanup worker); durable = NULL.
+    const klass = input.klass ?? "durable";
+    const demoTtlHours = parseInt(process.env.GENESIS_DEMO_TTL_HOURS ?? "72", 10);
+    const expiresExpr = klass === "demo" ? `now() + ($8 || ' hours')::interval` : "NULL";
+    const params: unknown[] = [
+      input.projectId, input.tenantId, input.provider ?? "aws",
+      input.runtimeTarget, klass,
+      input.ecrRepoUri ?? null, input.imageTag ?? null,
+    ];
+    if (klass === "demo") params.push(demoTtlHours);
     const ins = await client.query<BackendDeploymentRow>(
       `INSERT INTO backend_deployments
          (project_id, tenant_id, provider, runtime_target, class, status,
           ecr_repo_uri, image_tag, expires_at)
-       VALUES ($1, $2, $3, $4, $5, 'provisioning', $6, $7, NULL)
+       VALUES ($1, $2, $3, $4, $5, 'provisioning', $6, $7, ${expiresExpr})
        RETURNING id, project_id, tenant_id, provider, runtime_target, class,
                  ecr_repo_uri, image_tag, app_url, health_url, status, error_msg`,
-      [
-        input.projectId, input.tenantId, input.provider ?? "aws",
-        input.runtimeTarget, input.klass ?? "durable",
-        input.ecrRepoUri ?? null, input.imageTag ?? null,
-      ],
+      params,
     );
     return { row: ins.rows[0], reused: false };
   } catch (err) {
@@ -301,6 +307,23 @@ export async function getFullDeployment(deploymentId: string): Promise<FullDeplo
     [deploymentId],
   );
   return r.rows[0] ?? null;
+}
+
+/**
+ * DM-T10: marca como 'destroying' os deployments demo cujo TTL (expires_at) já passou e
+ * ainda estão ativos. O sweep do cleanup worker então roda o teardown. Só demo tem
+ * expires_at não-nulo (durable é NULL → nunca expira por idade). Retorna quantos marcou.
+ */
+export async function reapExpiredDemos(): Promise<number> {
+  const r = await pool.query(
+    `UPDATE backend_deployments
+        SET status = 'destroying', updated_at = now()
+      WHERE class = 'demo'
+        AND expires_at IS NOT NULL
+        AND expires_at < now()
+        AND status IN ('running','running_degraded')`,
+  );
+  return r.rowCount ?? 0;
 }
 
 /** Deployments marcados p/ destruição (worker de cleanup / resume-no-boot). */

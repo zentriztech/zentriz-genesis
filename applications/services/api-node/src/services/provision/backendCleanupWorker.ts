@@ -16,7 +16,7 @@
  */
 
 import { pool } from "../../db/client.js";
-import { listDeploymentsForTeardown } from "./backendState.js";
+import { listDeploymentsForTeardown, reapExpiredDemos } from "./backendState.js";
 import { teardownDeployment } from "./teardown.js";
 
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -54,9 +54,14 @@ export async function runBackendWatchdogOnce(): Promise<{ marked_failed: number 
 /**
  * Sweep: deploys failed/destroying com recursos vivos → teardown (libera custo).
  */
-export async function runBackendCleanupOnce(): Promise<{ swept: number; errors: number }> {
+export async function runBackendCleanupOnce(): Promise<{ swept: number; errors: number; reaped: number }> {
+  // DM-T10: primeiro marca demos expiradas (TTL) como 'destroying' — o sweep as tear-downa.
+  let reaped = 0;
+  try { reaped = await reapExpiredDemos(); } catch { /* segue */ }
+  if (reaped) console.info(`[backend-cleanup] ${reaped} demo(s) expirada(s) marcada(s) p/ destruição`);
+
   let rows;
-  try { rows = await listDeploymentsForTeardown(); } catch { return { swept: 0, errors: 0 }; }
+  try { rows = await listDeploymentsForTeardown(); } catch { return { swept: 0, errors: 0, reaped }; }
   let swept = 0, errors = 0;
   for (const dep of rows.slice(0, 20)) {
     try {
@@ -68,7 +73,7 @@ export async function runBackendCleanupOnce(): Promise<{ swept: number; errors: 
     }
   }
   if (swept || errors) console.info(`[backend-cleanup] round: swept=${swept} errors=${errors}`);
-  return { swept, errors };
+  return { swept, errors, reaped };
 }
 
 export function startBackendCleanupWorker(): void {

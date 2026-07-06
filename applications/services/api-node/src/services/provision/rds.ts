@@ -200,11 +200,15 @@ export const rdsDriver: ProvisionDriver = {
   },
 
   async teardown(ctx: ProvisionContext): Promise<void> {
+    const isDemo = ctx.klass === "demo";
+    // DM-T9/T10: demo não tem RDS (é sidecar na task) — nada a destruir aqui.
+    // O DB some junto com a task quando o ecsFargate.teardown a derruba.
+    if (isDemo) return;
+
     const client = rdsClient(ctx.creds);
     const identifier = dbIdentifier(ctx.deploymentId);
-    const isDemo = ctx.klass === "demo";
     // Durable tem DeletionProtection ON → precisa desativar ANTES do delete (senão falha).
-    if (!isDemo) {
+    {
       await client.send(new ModifyDBInstanceCommand({
         DBInstanceIdentifier: identifier, DeletionProtection: false, ApplyImmediately: true,
       })).catch(() => { /* not found ou já off — segue */ });
