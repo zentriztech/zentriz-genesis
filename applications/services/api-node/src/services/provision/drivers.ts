@@ -10,7 +10,7 @@
 
 import "./iam.js";        // G1-T13
 import "./networking.js"; // G1-T14
-// import "./rds.js";        // G1-T15
-// import "./secrets.js";    // G1-T15
+import "./rds.js";        // G1-T15
+import "./secrets.js";    // G1-T15
 // import "./ecs.js";        // G1-T17
 // import "./alb.js";        // G1-T18
