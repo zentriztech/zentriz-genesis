@@ -3922,7 +3922,17 @@ def main() -> int:
     # Se detectado E checkpoint não está avançado (step < 1), vai direto ao Dev.
     # Idempotente: se checkpoint step>=1, o pré-classificador é ignorado (já passou desta fase).
     _pre_trivial_detected = False
-    if (not pipeline_ctx or pipeline_ctx.current_step < 1) and spec_content:
+    # GAP-T1-FIX: só tipos ESTÁTICOS de arquivo único podem ser trivial. Um backend_api,
+    # fullstack_*, mobile_* etc. NUNCA é trivial — mesmo que a heurística de texto ache
+    # "sinais" (ex.: frases de negação "sem backend externo", "no server" descrevendo o que
+    # a API não usa). O runner já conhece project_type aqui (setado ~L3605). Sem esta guarda,
+    # uma spec Fastify+Postgres cai no caminho HTML estático (index.html + start.sh) e trava.
+    _TRIVIAL_ELIGIBLE_TYPES = {"landing_page", "static_site", "frontend_static"}
+    _pt_pre = (getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else "").strip().lower()
+    _type_allows_trivial = (not _pt_pre) or (_pt_pre in _TRIVIAL_ELIGIBLE_TYPES)
+    if _pt_pre and not _type_allows_trivial:
+        logger.info("[GAP-T1-FIX] project_type=%s não é estático → pré-classificador trivial VETADO (segue CTO/Engineer/PM).", _pt_pre)
+    if _type_allows_trivial and (not pipeline_ctx or pipeline_ctx.current_step < 1) and spec_content:
         _spec_lower = spec_content.lower()
         _trivial_signals = [
             "html" in _spec_lower and "css" in _spec_lower,
