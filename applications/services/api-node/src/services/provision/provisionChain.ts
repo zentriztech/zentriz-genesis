@@ -45,9 +45,11 @@ export interface ProvisionDriver {
   teardown?(ctx: ProvisionContext): Promise<void>;
 }
 
-/** Ordem canônica da cadeia (T13-T20 preenchem os drivers). */
+/** Ordem canônica da cadeia (T13-T20 preenchem os drivers).
+ * acm ANTES de alb: o listener HTTPS do ALB precisa do cert ARN emitido pelo ACM.
+ * route53 por último: o record ALIAS aponta para o DNS name do ALB já criado. */
 export const CHAIN_ORDER = [
-  "iam", "networking", "rds", "secrets", "migrating", "ecs", "alb", "acm", "route53",
+  "iam", "networking", "rds", "secrets", "migrating", "ecs", "acm", "alb", "route53",
 ] as const;
 
 const REGISTRY = new Map<string, ProvisionDriver>();

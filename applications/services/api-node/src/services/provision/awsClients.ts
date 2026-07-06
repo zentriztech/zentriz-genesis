@@ -13,6 +13,8 @@ import { RDSClient } from "@aws-sdk/client-rds";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ECSClient } from "@aws-sdk/client-ecs";
 import { ElasticLoadBalancingV2Client } from "@aws-sdk/client-elastic-load-balancing-v2";
+import { ACMClient } from "@aws-sdk/client-acm";
+import { Route53Client } from "@aws-sdk/client-route-53";
 import type { ResolvedAwsCredentials } from "./awsCredentials.js";
 
 type CredsInput = {
@@ -52,6 +54,15 @@ export function ecsClient(creds: ResolvedAwsCredentials): ECSClient {
 
 export function elbv2Client(creds: ResolvedAwsCredentials): ElasticLoadBalancingV2Client {
   return new ElasticLoadBalancingV2Client(base(creds));
+}
+
+export function acmClient(creds: ResolvedAwsCredentials): ACMClient {
+  return new ACMClient(base(creds));
+}
+
+export function route53Client(creds: ResolvedAwsCredentials): Route53Client {
+  // Route53 é global; a região não afeta mas o SDK exige uma.
+  return new Route53Client(base(creds));
 }
 
 /** Retry com backoff exponencial (1s,2s,4s...) — cobre eventual-consistency de IAM. */

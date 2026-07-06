@@ -14,4 +14,6 @@ import "./rds.js";        // G1-T15
 import "./secrets.js";    // G1-T15
 import "./migrating.js";  // G1-T16
 import "./ecsFargate.js"; // G1-T17
-// import "./alb.js";        // G1-T18
+import "./acm.js";        // G1-T18
+import "./alb.js";        // G1-T18
+import "./route53.js";    // G1-T18
