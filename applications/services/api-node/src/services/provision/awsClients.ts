@@ -11,6 +11,7 @@ import { STSClient } from "@aws-sdk/client-sts";
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { RDSClient } from "@aws-sdk/client-rds";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { ECSClient } from "@aws-sdk/client-ecs";
 import type { ResolvedAwsCredentials } from "./awsCredentials.js";
 
 type CredsInput = {
@@ -42,6 +43,10 @@ export function rdsClient(creds: ResolvedAwsCredentials): RDSClient {
 
 export function secretsClient(creds: ResolvedAwsCredentials): SecretsManagerClient {
   return new SecretsManagerClient(base(creds));
+}
+
+export function ecsClient(creds: ResolvedAwsCredentials): ECSClient {
+  return new ECSClient(base(creds));
 }
 
 /** Retry com backoff exponencial (1s,2s,4s...) — cobre eventual-consistency de IAM. */
