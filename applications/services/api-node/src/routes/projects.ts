@@ -6,6 +6,8 @@ import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
 import { resolveRuntimeTarget } from "../services/provision/backendDeployDetector.js";
+import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
+import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { notifyTelegramTenant } from "./telegram.js";
@@ -1653,13 +1655,30 @@ export async function projectRoutes(app: FastifyInstance) {
             details: { project_type: projectType, runtime_target: extraTarget } });
         }
         if (isBackend && runtimeTarget !== "s3") {
-          // O provisionador SDK (deployBackendCloud) é entregue na G1-T12. Até lá,
-          // resposta explícita — NUNCA cai no ramo S3 (que rejeitaria com BUILD_INCOMPATIBLE).
-          return reply.status(501).send({
-            code: "BACKEND_PROVISION_PENDING",
-            message: "Provisionamento de backend em container está sendo habilitado (GATE 1). Disponível em breve.",
-            details: { runtime_target: runtimeTarget, project_type: projectType },
-          });
+          // G1-T12: provisionamento backend (conta Zentriz). Cria row write-ahead,
+          // dispara build+push ECR no host e responde 202. A cadeia SDK (iam→…→ecs)
+          // roda no callback 'pushed'. NUNCA cai no ramo S3.
+          try {
+            const outcome = await deployBackendCloud({
+              projectId: id, tenantId, projectType, extraTarget,
+            });
+            if (!outcome.ok) {
+              const httpStatus =
+                outcome.code === "REPO_REQUIRED" ? 400 :
+                outcome.code === "GITHUB_INSTALLATION_MISSING" ? 400 :
+                outcome.code === "INVALID_RUNTIME_TARGET" ? 400 :
+                outcome.code === "GITHUB_TOKEN_ERROR" ? 502 :
+                outcome.code === "LAUNCH_FAILED" ? 502 :
+                500;
+              return reply.status(httpStatus).send({
+                code: outcome.code, message: outcome.message, details: outcome.details,
+              });
+            }
+            return reply.status(202).send(outcome.result);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return reply.status(500).send({ code: "BACKEND_DEPLOY_ERROR", message: msg });
+          }
         }
         // não-backend (frontend/estático) → continua no fluxo S3 abaixo, inalterado.
       }
@@ -1873,6 +1892,25 @@ export async function projectRoutes(app: FastifyInstance) {
       } finally {
         client.release();
       }
+    }
+  );
+
+  // G1-T12: POST /api/projects/:id/deploy/backend/:deploymentId/callback
+  // Callback do backend_deploy_runner (host). Auth idêntica ao callback S3 (zentriz_admin).
+  // installing/building/pushing → avança status; pushed → dispara a cadeia SDK; failed → falha.
+  app.post<{
+    Params: { id: string; deploymentId: string };
+    Body: import("../services/provision/backendCallback.js").BackendCallbackBody;
+  }>(
+    "/api/projects/:id/deploy/backend/:deploymentId/callback",
+    async (request, reply) => {
+      const user = getUser(request);
+      if (user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Só serviço interno pode fazer callback" });
+      }
+      const { id, deploymentId } = request.params;
+      const result = await handleBackendCallback(id, deploymentId, request.body ?? {});
+      return reply.status(result.http).send(result.body);
     }
   );
 
