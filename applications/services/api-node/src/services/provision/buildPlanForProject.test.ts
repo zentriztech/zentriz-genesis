@@ -46,11 +46,13 @@ describe("buildPlanForProject", () => {
     expect(r.code).toBe("NOT_FOUND");
   });
 
-  it("não-backend (frontend) → NOT_BACKEND", async () => {
-    extraRow = { project_type: "frontend_dashboard" };
+  it("frontend source_only → gera kit (web também recebe só-código, sem DB)", async () => {
+    extraRow = { project_type: "frontend_dashboard", delivery_mode: "source_only" };
+    await makeApps("p1", { _root: { dependencies: { next: "^14" } } });
     const r = await buildPlanForProject("p1");
-    expect(r.ok).toBe(false);
-    expect(r.code).toBe("NOT_BACKEND");
+    expect(r.ok).toBe(true);
+    expect(r.plan!.deliveryMode).toBe("source_only");
+    expect(r.plan!.db.kind).toBe("none"); // web não tem banco
   });
 
   it("backend source_only single-service → IR com 1 serviço + db", async () => {

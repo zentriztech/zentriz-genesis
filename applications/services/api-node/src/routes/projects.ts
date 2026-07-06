@@ -1659,8 +1659,9 @@ export async function projectRoutes(app: FastifyInstance) {
             details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
         }
         // DM-T1/DM-T8b: source_only não provisiona infra — entrega o kit IaC
-        // (compose/tf/k8s/CI). Não cai no S3; aponta o cliente para o download do kit.
-        if (isBackend && deliveryMode === "source_only") {
+        // (compose/tf/k8s/CI). Vale p/ QUALQUER tipo (backend ou web): um frontend pode
+        // querer só o código sem publicar no S3. Não cai no S3; aponta p/ o download do kit.
+        if (deliveryMode === "source_only") {
           const built = await buildPlanForProject(id);
           if (!built.ok) {
             return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({

@@ -62,11 +62,16 @@ export function resolveDeliveryMode(
   isBackend: boolean, extraMode: string | null | undefined,
 ): { deliveryMode: DeliveryMode; error?: string } {
   const raw = (extraMode ?? "").toLowerCase().trim();
+  // "publish" é o modo web de publicar no S3 — não é um DeliveryMode de container;
+  // mapeia p/ 'production' (neutro/segue S3). Aceito só p/ não-backend.
+  if (raw === "publish") return { deliveryMode: "production" };
   if (raw && !(VALID_DELIVERY_MODES as string[]).includes(raw)) {
     return { deliveryMode: DEFAULT_BACKEND_DELIVERY_MODE,
-      error: `delivery_mode '${extraMode}' inválido. Aceitos: ${VALID_DELIVERY_MODES.join(", ")}.` };
+      error: `delivery_mode '${extraMode}' inválido. Aceitos: ${VALID_DELIVERY_MODES.join(", ")}, publish.` };
   }
-  if (!isBackend) return { deliveryMode: "production" }; // web/S3 não usa o eixo; neutro
+  // source_only é honrado p/ QUALQUER tipo (web também pode querer só o código).
+  if (raw === "source_only") return { deliveryMode: "source_only" };
+  if (!isBackend) return { deliveryMode: "production" }; // web sem escolha → segue S3 (neutro)
   return { deliveryMode: (raw as DeliveryMode) || DEFAULT_BACKEND_DELIVERY_MODE };
 }
 

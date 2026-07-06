@@ -50,9 +50,10 @@ export async function buildPlanForProject(projectId: string): Promise<BuildPlanF
   const customHostname = extra.custom_hostname as string | undefined;
 
   const decision = validateDeployMatrix(projectType, extraTarget, extraMode);
-  if (decision.error) return { ok: false, code: "INVALID_MATRIX", message: decision.error };
-  if (!decision.isBackend) {
-    return { ok: false, code: "NOT_BACKEND", message: "Kit de provisionamento é para projetos backend/fullstack." };
+  // Nota: para source_only aceitamos QUALQUER tipo (web também gera kit — compose do
+  // estático/SSR, sem DB). Só rejeitamos se a matriz apontar erro estrutural.
+  if (decision.error && decision.deliveryMode !== "source_only") {
+    return { ok: false, code: "INVALID_MATRIX", message: decision.error };
   }
 
   // Topologia a partir do snapshot local apps/.

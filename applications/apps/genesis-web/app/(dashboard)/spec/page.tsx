@@ -178,14 +178,21 @@ function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: s
     />
   );
 }
-// DM-T2: pergunta de topo (o que quer receber?) + avançado recolhido. Só p/ backend/fullstack.
-const DELIVERY_MODES = [
+// DM-T2/UX: pergunta de topo (o que quer receber?) + avançado. Para TODOS os tipos,
+// respeitando o tipo: backend/fullstack → source_only/demo/production; web/frontend →
+// source_only/publish (S3). "publish" preserva o comportamento antigo do S3.
+const DELIVERY_MODES_BACKEND = [
   { value: "source_only", icon: "📦", label: "Só o código", desc: "Repo testado + kit de deploy (Docker/Terraform/k8s). Você provisiona." },
   { value: "demo",        icon: "🧪", label: "Demo",         desc: "Link pra testar, descartável, sem custo de infra." },
   { value: "production",  icon: "🚀", label: "Produção",     desc: "Sistema pra valer: dados persistentes, HTTPS, banco gerenciado." },
 ];
+const DELIVERY_MODES_WEB = [
+  { value: "source_only", icon: "📦", label: "Só o código", desc: "Repo testado + kit de deploy (Docker/estático). Você publica onde quiser." },
+  { value: "publish",     icon: "🌐", label: "Publicar (S3)", desc: "Site publicado com URL pública (hospedagem estática S3)." },
+];
 interface DeliverySectionProps {
   visible: boolean;
+  isBackend: boolean;
   mode: string; onMode: (v: string) => void;
   advancedOpen: boolean; onAdvancedOpen: (v: boolean) => void;
   dbMode: string; onDbMode: (v: string) => void;
@@ -194,6 +201,7 @@ interface DeliverySectionProps {
 }
 function DeliverySection(p: DeliverySectionProps) {
   if (!p.visible) return null;
+  const modes = p.isBackend ? DELIVERY_MODES_BACKEND : DELIVERY_MODES_WEB;
   return (
     <Box sx={{ mb: 2 }}>
       <Typography sx={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase",
@@ -201,7 +209,7 @@ function DeliverySection(p: DeliverySectionProps) {
         O que você quer receber?
       </Typography>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
-        {DELIVERY_MODES.map((m) => {
+        {modes.map((m) => {
           const active = p.mode === m.value;
           return (
             <Card key={m.value} onClick={() => p.onMode(m.value)}
@@ -215,11 +223,13 @@ function DeliverySection(p: DeliverySectionProps) {
           );
         })}
       </Stack>
+      {p.isBackend && (
       <Button size="small" variant="text" onClick={() => p.onAdvancedOpen(!p.advancedOpen)}
         sx={{ fontSize: "0.72rem", textTransform: "none", color: "text.secondary" }}>
         {p.advancedOpen ? "▲ Ocultar avançado" : "▼ Avançado (opcional)"}
       </Button>
-      {p.advancedOpen && (
+      )}
+      {p.isBackend && p.advancedOpen && (
         <Stack spacing={1.5} sx={{ mt: 1, pl: 0.5 }}>
           <FormControl size="small" fullWidth>
             <InputLabel>Banco de dados</InputLabel>
@@ -736,11 +746,13 @@ export default function SpecPage() {
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
       if (productId) formData.append("productId", productId);
-      if (isBackendType) {
+      if (projectType) {
         formData.append("deliveryMode", deliveryMode);
-        if (runtimeTarget) formData.append("runtimeTarget", runtimeTarget);
-        if (dbMode) formData.append("dbMode", dbMode);
-        if (domainMode) formData.append("domainMode", domainMode);
+        if (isBackendType) {
+          if (runtimeTarget) formData.append("runtimeTarget", runtimeTarget);
+          if (dbMode) formData.append("dbMode", dbMode);
+          if (domainMode) formData.append("domainMode", domainMode);
+        }
       }
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
@@ -782,11 +794,13 @@ export default function SpecPage() {
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
       if (productId) fd.append("productId", productId);
-      if (isBackendType) {
+      if (projectType) {
         fd.append("deliveryMode", deliveryMode);
-        if (runtimeTarget) fd.append("runtimeTarget", runtimeTarget);
-        if (dbMode) fd.append("dbMode", dbMode);
-        if (domainMode) fd.append("domainMode", domainMode);
+        if (isBackendType) {
+          if (runtimeTarget) fd.append("runtimeTarget", runtimeTarget);
+          if (dbMode) fd.append("dbMode", dbMode);
+          if (domainMode) fd.append("domainMode", domainMode);
+        }
       }
       files.forEach((f) => fd.append("files", f));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
@@ -936,7 +950,7 @@ export default function SpecPage() {
                       placeholder="Ex.: E-commerce de calçados"
                     />
                     <ProjectTypeSelect value={projectType} onChange={setProjectType} />
-                    <DeliverySection visible={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
+                    <DeliverySection visible={!!projectType} isBackend={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
                       advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
                       dbMode={dbMode} onDbMode={setDbMode}
                       runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
@@ -1062,7 +1076,7 @@ export default function SpecPage() {
                     size="small" sx={{ mb: 2 }} placeholder="Ex.: Auto Parts API"
                   />
                   <ProjectTypeSelect value={projectType} onChange={setProjectType} />
-                  <DeliverySection visible={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
+                  <DeliverySection visible={!!projectType} isBackend={isBackendType} mode={deliveryMode} onMode={setDeliveryMode}
                     advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
                     dbMode={dbMode} onDbMode={setDbMode}
                     runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
