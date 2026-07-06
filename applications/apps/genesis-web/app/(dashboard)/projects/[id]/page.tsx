@@ -1395,13 +1395,47 @@ function ProjectDetailPageInner() {
         </Alert>
       )}
 
-      {/* FT-17: Cloud deploy — launch button (com LGPD consent)
+      {/* FT-17 / DM-T2: Cloud deploy — launch button (com LGPD consent)
           Só aparece quando o projeto TEM repositório GitHub (githubRepo truthy) E o Cyborg já terminou.
-          Enquanto pending_cyborg o V3 ainda está trabalhando e vai disparar o deploy sozinho via zentriz-deploy-s3.
-          Sem repo, o alerta amarelo "Criar Repositório" acima já orienta o usuário.
-          Se `ephemeral.status === "failed"`, o card de "última tentativa" aparece acima E o botão
-          "Publicar no S3" também aparece aqui, pra permitir tentar de novo. */}
-      {(project.status === "accepted" || project.status === "completed") && githubRepo && (!ephemeral || ephemeral.status === "failed") && (
+          O TEXTO e a AÇÃO se adaptam ao delivery_mode do projeto (o backend /deploy/ephemeral
+          já roteia certo — aqui só corrigimos o rótulo/aviso para não mostrar "S3 público" a um backend):
+            - backend/fullstack demo|production → provisiona ECS Fargate (+ Postgres), NÃO S3.
+            - web + source_only → baixa o kit IaC (.zip), não publica nada.
+            - web + publish/default → S3 static hosting (comportamento FT-17 original). */}
+      {(() => {
+        const _pt = (project.projectType ?? "").toLowerCase();
+        const _isBackendDeploy = _pt.startsWith("backend") || _pt.startsWith("fullstack");
+        const _dmode = ((project.extra as Record<string, unknown> | null)?.delivery_mode as string | undefined ?? "").toLowerCase();
+        const _isSourceOnly = _dmode === "source_only";
+        const _isProduction = _dmode === "production";
+        // Rótulos por modo
+        const _deployKind = _isSourceOnly ? "source_only" : _isBackendDeploy ? "backend" : "s3";
+        const _consentText = _deployKind === "source_only"
+          ? "✓ Modo 'só código': o kit não provisiona nada — você recebe o repositório + arquivos de deploy (Docker/Terraform/k8s)."
+          : _deployKind === "backend"
+          ? (_isProduction
+              ? "⚠️ Marque para autorizar o provisionamento em PRODUÇÃO na conta AWS Zentriz (ECS Fargate + RDS gerenciado + HTTPS). Gera custo real."
+              : "⚠️ Marque para autorizar a Demo: ECS Fargate + Postgres na mesma task (efêmero, TTL 72h, sem RDS). Sem dados pessoais/segredos reais.")
+          : "⚠️ Marque aqui para autorizar: o app não contém dados pessoais reais nem segredos. O bucket S3 é público e indexável.";
+        const _consentDone = _deployKind === "source_only"
+          ? "✓ Kit pronto para baixar."
+          : _deployKind === "backend"
+          ? "✓ Autorizado — pode provisionar."
+          : "✓ Consentimento LGPD confirmado — pode publicar.";
+        const _btnLabel = _deployKind === "source_only"
+          ? "📦 Baixar kit de código"
+          : _deployKind === "backend"
+          ? (_isProduction ? "🚀 Provisionar Produção (RDS+Fargate)" : "🚀 Provisionar Demo (Fargate, 72h)")
+          : "🚀 Publicar no S3 (7 dias)";
+        const _footNote = _deployKind === "source_only"
+          ? "Kit source_only · Docker Compose + Terraform + Kubernetes + GitHub Actions · roda local ou na sua nuvem."
+          : _deployKind === "backend"
+          ? (_isProduction
+              ? "AWS ECS Fargate + RDS PostgreSQL · HTTPS em subdomínio Zentriz · Build a partir de dev do repo GitHub."
+              : "AWS ECS Fargate + Postgres sidecar · efêmero (TTL 72h, sem RDS) · Build a partir de dev do repo GitHub.")
+          : "AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.";
+        return (
+      (project.status === "accepted" || project.status === "completed") && githubRepo && (!ephemeral || ephemeral.status === "failed") && (
         <Box sx={{ mb: 2 }}>
           {deployError && (
             <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>
@@ -1438,9 +1472,7 @@ function ProjectDetailPageInner() {
               sx={{ p: 0.5, color: "inherit", "&.Mui-checked": { color: "inherit" } }}
             />
             <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
-              {lgpdConsent
-                ? "✓ Consentimento LGPD confirmado — pode publicar."
-                : "⚠️ Marque aqui para autorizar: o app não contém dados pessoais reais nem segredos. O bucket S3 é público e indexável."}
+              {lgpdConsent ? _consentDone : _consentText}
             </Typography>
           </Box>
           <Button
@@ -1491,13 +1523,15 @@ function ProjectDetailPageInner() {
             }}
             sx={{ borderStyle: "dashed" }}
           >
-            {deployLoading ? "Provisionando…" : "🚀 Publicar no S3 (7 dias)"}
+            {deployLoading ? "Provisionando…" : _btnLabel}
           </Button>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
-            AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.
+            {_footNote}
           </Typography>
         </Box>
-      )}
+      )
+        );
+      })()}
 
       {/* ── Main cockpit layout — 3 resizable columns ── */}
       <Box ref={layoutRef} sx={{ display: "flex", gap: 0, alignItems: "flex-start", userSelect: dragRef.current ? "none" : "auto" }}>
