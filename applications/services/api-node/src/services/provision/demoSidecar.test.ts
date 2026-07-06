@@ -88,6 +88,20 @@ describe("registerTaskDef — withDbSidecar (demo)", () => {
     expect(app.environment?.find((e) => e.name === "DATABASE_URL")?.value).toContain("@localhost:5432/appdb");
   });
 
+  it("G-A: DATABASE_URL NÃO aparece em secrets quando há sidecar (evita ECS 'specified twice')", async () => {
+    const { ECSClient } = await import("@aws-sdk/client-ecs");
+    const ecs = new ECSClient({});
+    await registerTaskDef(ecs, ctx("demo"), { family: "genesis-svc", withDbSidecar: { version: "16", database: "appdb" } });
+    const reg = ecsSent.find((s) => s.name === "RegisterTaskDefinitionCommand")!;
+    const cdefs = reg.input.containerDefinitions as Array<{ name: string; secrets?: Array<{ name: string }>; environment?: Array<{ name: string }> }>;
+    const app = cdefs.find((c) => c.name !== "db")!;
+    const secretNames = (app.secrets ?? []).map((s) => s.name);
+    const envNames = (app.environment ?? []).map((e) => e.name);
+    // DATABASE_URL só no environment (sidecar), nunca nos secrets → sem colisão.
+    expect(secretNames).not.toContain("DATABASE_URL");
+    expect(envNames).toContain("DATABASE_URL");
+  });
+
   it("produção (sem sidecar) → 1 container só (app)", async () => {
     const { ECSClient } = await import("@aws-sdk/client-ecs");
     const ecs = new ECSClient({});

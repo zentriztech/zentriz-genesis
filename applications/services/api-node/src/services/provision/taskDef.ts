@@ -13,12 +13,14 @@ import {
 } from "@aws-sdk/client-ecs";
 import type { ProvisionContext } from "./provisionChain.js";
 
-/** Chaves do app secret que viram `secrets` (valueFrom = <arn>:<key>::) na task-def. */
-function secretRefs(ctx: ProvisionContext): Array<{ name: string; valueFrom: string }> {
+/** Chaves do app secret que viram `secrets` (valueFrom = <arn>:<key>::) na task-def.
+ * `exclude` remove chaves que serão passadas como environment plano (evita ECS "specified
+ * twice"): em demo, DATABASE_URL vem do sidecar (localhost) no environment, não do secret. */
+function secretRefs(ctx: ProvisionContext, exclude: Set<string> = new Set()): Array<{ name: string; valueFrom: string }> {
   const arn = ctx.scratch.appSecretArn as string | undefined;
   const keys = (ctx.scratch.appSecretKeys as string[] | undefined) ?? [];
   if (!arn) return [];
-  return keys.map((k) => ({ name: k, valueFrom: `${arn}:${k}::` }));
+  return keys.filter((k) => !exclude.has(k)).map((k) => ({ name: k, valueFrom: `${arn}:${k}::` }));
 }
 
 export function containerName(ctx: ProvisionContext): string {
@@ -65,13 +67,16 @@ export async function registerTaskDef(
     },
   });
 
+  // Em demo (sidecar), DATABASE_URL vem do environment (localhost) — então é EXCLUÍDO dos
+  // secrets p/ não colidir (ECS rejeita a mesma chave em secrets+environment).
+  const secretExclude = opts.withDbSidecar ? new Set(["DATABASE_URL"]) : new Set<string>();
   const appContainer = {
     name: containerName(ctx),
     image,
     essential: true,
     command: opts.command,
     portMappings: opts.command ? undefined : [{ containerPort: port, protocol: "tcp" }],
-    secrets: secretRefs(ctx),
+    secrets: secretRefs(ctx, secretExclude),
     // DM-T9: em demo (sidecar), o app fala com o DB em localhost:5432 na mesma task.
     environment: opts.withDbSidecar
       ? [{ name: "DATABASE_URL", value: `postgresql://genesis:demo@localhost:5432/${opts.withDbSidecar.database}` }]
