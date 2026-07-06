@@ -111,6 +111,9 @@ type VersionEntry     = { id: string; title: string; status: string; versionNumb
 type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
 type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string | null; bucketName: string | null; status: string; expiresAt: string; ttlMinutes: number; errorMsg?: string | null } | null };
 type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string; ttlMinutes?: number; ttlDays?: number; status?: string; bucketName?: string; errorMsg?: string | null };
+// GATE 1: status do provisionamento backend (ECS Fargate/RDS). Distinto do ephemeral (S3).
+type BackendDep        = { id: string; provider: string; runtimeTarget: string; klass: string; status: string; appUrl: string | null; errorMsg: string | null; createdAt: string; expiresAt: string | null };
+type BackendDeplResp   = { deployment: BackendDep | null };
 type DeployError       = { code: string; message: string; details?: Record<string, unknown> };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
@@ -430,6 +433,7 @@ function ProjectDetailPageInner() {
   const [githubRepo, setGithubRepo] = useState<GithubRepoResp["repo"] | null | undefined>(undefined);
   const [pushingToGitHub, setPushingToGitHub] = useState(false);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
+  const [backendDep, setBackendDep] = useState<BackendDep | null>(null);
   const [lgpdConsent, setLgpdConsent] = useState<boolean>(false); // FT-17
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
@@ -601,6 +605,10 @@ function ProjectDetailPageInner() {
           }
         })
         .catch(() => null);
+      // GATE 1: status do provisionamento backend (Fargate/RDS) — para o card de progresso.
+      apiGet<BackendDeplResp>(`/api/projects/${id}/deploy/backend/active`)
+        .then((d) => setBackendDep(d.deployment))
+        .catch(() => null);
     };
     loadRepoAndDeploy();
 
@@ -620,12 +628,14 @@ function ProjectDetailPageInner() {
     // sem precisar de refresh manual do usuário.
     const needsRepoPoll = !githubRepo;
     const needsDeployPoll = ephemeral?.status === "provisioning";
+    // Backend em qualquer fase intermediária (não terminal running/failed) → continuar pollando.
+    const backendActive = !!backendDep && !["running", "running_degraded", "failed", "destroyed"].includes(backendDep.status);
     const cyborgActive = project.status === "pending_cyborg";
-    if (needsRepoPoll || needsDeployPoll || cyborgActive) {
+    if (needsRepoPoll || needsDeployPoll || backendActive || cyborgActive) {
       const t = setInterval(loadRepoAndDeploy, 5000);
       return () => clearInterval(t);
     }
-  }, [id, project?.status, githubRepo, ephemeral?.status]);
+  }, [id, project?.status, githubRepo, ephemeral?.status, backendDep?.status]);
 
   // Countdown timer for ephemeral deployment
   useEffect(() => {
@@ -1391,6 +1401,42 @@ function ProjectDetailPageInner() {
             }}>
               {String(ephemeral.errorMsg).slice(0, 2000)}
             </Box>
+          )}
+        </Alert>
+      )}
+
+      {/* GATE 1: Card de status do provisionamento BACKEND (Fargate/RDS).
+          Aparece assim que há um backend_deployment (o poller mantém atualizado a cada 5s).
+          Mostra a fase (provisioning→building→…→running), a URL viva quando running, ou o erro. */}
+      {backendDep && (
+        <Alert
+          severity={backendDep.status === "running" ? "success" : backendDep.status === "failed" ? "error" : "info"}
+          icon={["running", "running_degraded"].includes(backendDep.status) ? undefined : backendDep.status === "failed" ? undefined : <CircularProgress size={16} />}
+          sx={{ mb: 2 }}
+        >
+          <Typography variant="body2" fontWeight={600}>
+            {backendDep.status === "running"
+              ? `✅ Backend no ar (${backendDep.klass === "demo" ? "Demo" : "Produção"} · ${backendDep.runtimeTarget})`
+              : backendDep.status === "failed"
+              ? `❌ Provisionamento do backend falhou`
+              : `⏳ Provisionando backend — fase: ${backendDep.status}`}
+          </Typography>
+          {backendDep.appUrl && ["running", "running_degraded"].includes(backendDep.status) && (
+            <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+              <a href={backendDep.appUrl} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", fontWeight: 700 }}>
+                {backendDep.appUrl}
+              </a>{" · "}<a href={`${backendDep.appUrl.replace(/\/$/, "")}/docs`} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>Swagger /docs</a>
+            </Typography>
+          )}
+          {backendDep.status === "failed" && backendDep.errorMsg && (
+            <Box component="pre" sx={{ mt: 1, fontSize: "0.7rem", opacity: 0.8, maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" }}>
+              {String(backendDep.errorMsg).slice(0, 600)}
+            </Box>
+          )}
+          {!["running", "running_degraded", "failed"].includes(backendDep.status) && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+              Atualiza automaticamente a cada 5s. Cadeia: building → pushing → migrating → creating_service → waiting_cert_dns → running.
+            </Typography>
           )}
         </Alert>
       )}

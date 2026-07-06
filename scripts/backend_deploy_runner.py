@@ -90,13 +90,42 @@ def run_backend_deploy(payload: dict) -> dict:
         else:
             svc_dir = clone_dir / "apps" if (clone_dir / "apps").exists() else clone_dir
 
+        # O build CONTEXT é svc_dir (onde vivem package.json, src/). O DOCKERFILE, porém,
+        # pode estar em project/ (convenção do pipeline Genesis — DevOps gera project/Dockerfile
+        # com "Context de build: ../apps"). Além disso o Dockerfile de project/ faz
+        # `COPY docker-entrypoint.sh` — que também vive em project/, não em apps/. Como o
+        # docker build só enxerga arquivos DENTRO do context, quando o Dockerfile está em
+        # project/ copiamos Dockerfile + entrypoint (e afins) para dentro de svc_dir antes
+        # do build. É determinístico e espelha o que o full-test já faz com sucesso.
         dockerfile = svc_dir / "Dockerfile"
         if not dockerfile.exists():
-            raise BackendDeployError(
-                "DOCKERFILE_MISSING",
-                f"Sem Dockerfile em {svc_dir}. Backend elegível exige Dockerfile (backendDeployDetector).",
-                {"repo": git_repo_full_name, "service_dir": service_subdir or "apps"},
-            )
+            project_dir = clone_dir / "project"
+            root_df = clone_dir / "Dockerfile"
+            src_dir = project_dir if (project_dir / "Dockerfile").exists() else (clone_dir if root_df.exists() else None)
+            if src_dir is None:
+                raise BackendDeployError(
+                    "DOCKERFILE_MISSING",
+                    f"Sem Dockerfile em {svc_dir}, project/ ou raiz do repo. "
+                    f"Backend elegível exige Dockerfile (backendDeployDetector).",
+                    {"repo": git_repo_full_name, "service_dir": service_subdir or "apps"},
+                )
+            # Copia Dockerfile + arquivos de infra que o Dockerfile pode COPY-ar (entrypoint,
+            # .dockerignore) do dir de origem para o context svc_dir (não sobrescreve se já existir lá).
+            import shutil as _shutil
+            for _fname in ("Dockerfile", "docker-entrypoint.sh", ".dockerignore"):
+                _src = src_dir / _fname
+                _dst = svc_dir / _fname
+                if _src.exists() and not _dst.exists():
+                    _shutil.copy2(_src, _dst)
+                    log.info(f"[backend-deploy] {deployment_id}: copiado {_fname} de {src_dir.name}/ para o context {svc_dir.name}/")
+            dockerfile = svc_dir / "Dockerfile"
+            if not dockerfile.exists():
+                raise BackendDeployError(
+                    "DOCKERFILE_MISSING",
+                    f"Dockerfile encontrado em {src_dir.name}/ mas falha ao copiar para o context {svc_dir}.",
+                    {"repo": git_repo_full_name},
+                )
+        log.info(f"[backend-deploy] {deployment_id}: Dockerfile={dockerfile.relative_to(clone_dir)} context={svc_dir.name}")
 
         # 3. Determina a URI do ECR (account resolvido via STS get-caller-identity).
         account_id = payload.get("aws_account_id") or _get_account_id(aws_env)
@@ -109,9 +138,9 @@ def run_backend_deploy(payload: dict) -> dict:
         log.info(f"[backend-deploy] {deployment_id}: docker build {image_uri}")
         _run(
             ["docker", "buildx", "build", "--platform", "linux/amd64",
-             "--tag", image_uri, str(svc_dir)],
+             "--tag", image_uri, "-f", str(dockerfile), str(svc_dir)],
             timeout=900, deployment_id=deployment_id, phase="build",
-        )
+        )  # -f explícito + context svc_dir: Dockerfile já garantido dentro do context acima
 
         # 5. Cria o repositório ECR — IDEMPOTENTE (captura RepositoryAlreadyExistsException).
         _ensure_ecr_repo(ecr_repo_name, project_id, tenant_id, deployment_id, aws_env)

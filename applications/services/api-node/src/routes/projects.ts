@@ -2050,6 +2050,59 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   );
 
+  // GET /api/projects/:id/deploy/backend/active — status do provisionamento backend (GATE 1).
+  // Espelha /deploy/ephemeral/active: retorna o deployment ativo (provisioning/…/running) ou
+  // o último failed das últimas 24h, para o portal pollar e mostrar progresso/erro do demo/produção.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/deploy/backend/active",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        // Ativo (qualquer fase de provisionamento) tem prioridade; senão último failed 24h.
+        let dep = (await client.query(
+          `SELECT id, provider, runtime_target, class, status, app_url, error_msg, created_at, expires_at
+             FROM backend_deployments
+            WHERE project_id=$1
+              AND status NOT IN ('failed','destroyed','destroying')
+            ORDER BY created_at DESC LIMIT 1`,
+          [id],
+        )).rows[0];
+        if (!dep) {
+          dep = (await client.query(
+            `SELECT id, provider, runtime_target, class, status, app_url, error_msg, created_at, expires_at
+               FROM backend_deployments
+              WHERE project_id=$1 AND status='failed' AND created_at > now() - interval '24 hours'
+              ORDER BY created_at DESC LIMIT 1`,
+            [id],
+          )).rows[0];
+        }
+        const deployment = dep
+          ? {
+              id: dep.id,
+              provider: dep.provider,
+              runtimeTarget: dep.runtime_target,
+              klass: dep.class,
+              status: dep.status,
+              appUrl: dep.app_url ?? null,
+              errorMsg: dep.error_msg ?? null,
+              createdAt: dep.created_at instanceof Date ? dep.created_at.toISOString() : dep.created_at,
+              expiresAt: dep.expires_at instanceof Date ? dep.expires_at.toISOString() : dep.expires_at,
+            }
+          : null;
+        return reply.send({ deployment });
+      } finally {
+        client.release();
+      }
+    }
+  );
+
   // POST /api/projects/:id/runs — runner registra início/fim de execução do pipeline
   app.post<{
     Params: { id: string };
