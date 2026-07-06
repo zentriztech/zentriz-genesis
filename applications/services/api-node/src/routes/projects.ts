@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
-import { deployEphemeral, destroyDeployment } from "../services/ephemeralDeploy.js";
+import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
 import { resolveRuntimeTarget } from "../services/provision/backendDeployDetector.js";
@@ -1773,14 +1773,13 @@ export async function projectRoutes(app: FastifyInstance) {
         }
       }
 
-      // Fallback legado (Fly/ECS) — hoje não configurado, retorna 503 imediato via deployEphemeral
-      try {
-        const result = await deployEphemeral(id, ttlMinutes);
-        return reply.status(202).send(result);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return reply.status(500).send({ code: "DEPLOY_ERROR", message: msg });
-      }
+      // G1-T17: fallback legado Fly/ECS aposentado. O provisionamento backend agora é o
+      // driver ECS Fargate (deployBackendCloud, ramo acima); o path web é S3. Se chegou
+      // aqui, é web sem S3 configurado — 503 explícito (nada de stub morto).
+      return reply.status(503).send({
+        code: "DEPLOY_NOT_CONFIGURED",
+        message: "Deploy não configurado: projeto web exige S3 (AWS_S3_DEPLOY_*) e backend usa provisionamento ECS.",
+      });
     }
   );
 
