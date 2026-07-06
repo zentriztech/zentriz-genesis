@@ -357,6 +357,25 @@ export async function pushProjectFiles(
   const appsDir = pathMod.join(projectFilesRoot, projectId, "apps");
   await walk(appsDir);
 
+  // GATE 1 fix: o pipeline gera os artefatos de deploy (Dockerfile, entrypoint, compose)
+  // em project/, FORA de apps/. Sem eles no repo, o deploy backend clona e não acha
+  // Dockerfile (DOCKERFILE_MISSING). Incluímos os arquivos de deploy na RAIZ do repo,
+  // ao lado do código (que veio achatado de apps/). Só copiamos se ainda não existirem
+  // em apps/ (não sobrescreve um Dockerfile que o Dev tenha posto no próprio apps/).
+  const DEPLOY_FILES_FROM_PROJECT = ["Dockerfile", "docker-entrypoint.sh", ".dockerignore"];
+  const projectDir = pathMod.join(projectFilesRoot, projectId, "project");
+  const alreadyHave = new Set(allFiles.map((f) => f.relativePath));
+  for (const fname of DEPLOY_FILES_FROM_PROJECT) {
+    if (alreadyHave.has(fname)) continue; // Dev já entregou este arquivo em apps/
+    const candidate = pathMod.join(projectDir, fname);
+    try {
+      const s = await stat(candidate);
+      if (s.isFile() && s.size < 1_500_000) {
+        allFiles.push({ relativePath: fname, absolutePath: candidate });
+      }
+    } catch { /* arquivo não existe em project/ — segue */ }
+  }
+
   if (allFiles.length === 0) return { sha: "", fileCount: 0 };
 
   const octokit = await getOctokitForInstallation(installationId);
