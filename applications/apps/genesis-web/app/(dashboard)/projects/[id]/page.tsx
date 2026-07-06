@@ -1480,8 +1480,14 @@ function ProjectDetailPageInner() {
               ? "AWS ECS Fargate + RDS PostgreSQL · HTTPS em subdomínio Zentriz · Build a partir de dev do repo GitHub."
               : "AWS ECS Fargate + Postgres sidecar · efêmero (TTL 72h, sem RDS) · Build a partir de dev do repo GitHub.")
           : "AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.";
+        // Esconde o bloco de provisionar quando já há um deploy vivo/em andamento:
+        //  - S3 (ephemeral): esconde salvo se failed (permite retry).
+        //  - backend (backendDep): idem — esconde em qualquer fase ≠ failed (o card de
+        //    status acima já mostra progresso/URL). Só reaparece em failed p/ tentar de novo.
+        const _s3Blocks = ephemeral && ephemeral.status !== "failed";
+        const _backendBlocks = backendDep && backendDep.status !== "failed";
         return (
-      (project.status === "accepted" || project.status === "completed") && githubRepo && (!ephemeral || ephemeral.status === "failed") && (
+      (project.status === "accepted" || project.status === "completed") && githubRepo && !_s3Blocks && !_backendBlocks && (
         <Box sx={{ mb: 2 }}>
           {deployError && (
             <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>
