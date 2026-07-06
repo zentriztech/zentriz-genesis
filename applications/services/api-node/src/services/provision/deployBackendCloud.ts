@@ -15,7 +15,7 @@ import { pool } from "../../db/client.js";
 import { getInstallationTokenForClone } from "../github.js";
 import { signDeployCallbackToken } from "../../auth.js";
 import { resolveAwsCredentials } from "./awsCredentials.js";
-import { resolveRuntimeTarget } from "./backendDeployDetector.js";
+import { validateDeployMatrix } from "./deployMatrix.js";
 import { createOrGetActiveDeployment, setStatus, patchDeployment } from "./backendState.js";
 
 export interface BackendDeployResult {
@@ -34,6 +34,8 @@ export interface BackendDeployRequest {
   tenantId: string;
   projectType: string | null;
   extraTarget: string | null;
+  /** DM-T11a: delivery_mode da spec (production→klass durable; demo→klass demo). */
+  extraMode?: string | null;
 }
 
 const FTS_URL = () => (process.env.FULL_TEST_SERVER_URL ?? "http://host.docker.internal:7878").trim();
@@ -44,12 +46,18 @@ export function ecrRepoName(projectId: string): string {
 }
 
 export async function deployBackendCloud(req: BackendDeployRequest): Promise<BackendDeployOutcome> {
-  // 1. Elegibilidade por tipo (mesma função do dispatch — fonte única de verdade).
-  const { runtimeTarget, isBackend, error } = resolveRuntimeTarget(req.projectType, req.extraTarget);
+  // 1. Elegibilidade + modo de entrega (mesma fonte única do dispatch: deployMatrix).
+  const { runtimeTarget, isBackend, deliveryMode, error } = validateDeployMatrix(req.projectType, req.extraTarget, req.extraMode);
   if (error) return { ok: false, code: "INVALID_RUNTIME_TARGET", message: error };
   if (!isBackend || runtimeTarget === "s3") {
     return { ok: false, code: "NOT_BACKEND", message: "Projeto não é backend — use o caminho S3." };
   }
+  // source_only não provisiona (kit IaC no repo) — o dispatch já barra antes; guarda dupla.
+  if (deliveryMode === "source_only") {
+    return { ok: false, code: "SOURCE_ONLY_NO_PROVISION", message: "Modo 'só código' não provisiona infraestrutura." };
+  }
+  // DM-T11a: demo → klass 'demo' (DB sidecar efêmero); production → 'durable' (RDS gerenciado).
+  const klass: "durable" | "demo" = deliveryMode === "demo" ? "demo" : "durable";
 
   // 2. Repo GitHub obrigatório (fonte de verdade do build), como no S3.
   const repoQ = await pool.query<{
@@ -83,7 +91,7 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
     tenantId: req.tenantId,
     provider: "aws",
     runtimeTarget,
-    klass: "durable",
+    klass,
     ecrRepoUri: null, // preenchido no callback 'pushed' com a URI real do ECR
   });
   if (reused) {

@@ -1671,7 +1671,7 @@ export async function projectRoutes(app: FastifyInstance) {
           // roda no callback 'pushed'. NUNCA cai no ramo S3.
           try {
             const outcome = await deployBackendCloud({
-              projectId: id, tenantId, projectType, extraTarget,
+              projectId: id, tenantId, projectType, extraTarget, extraMode,
             });
             if (!outcome.ok) {
               const httpStatus =
