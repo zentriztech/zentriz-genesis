@@ -13,6 +13,7 @@
 
 import { pool } from "../../db/client.js";
 import { getInstallationTokenForClone } from "../github.js";
+import { signDeployCallbackToken } from "../../auth.js";
 import { resolveAwsCredentials } from "./awsCredentials.js";
 import { resolveRuntimeTarget } from "./backendDeployDetector.js";
 import { createOrGetActiveDeployment, setStatus, patchDeployment } from "./backendState.js";
@@ -115,7 +116,9 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
     git_repo_full_name: repoRow.repo_full_name,
     genesis_api_url:
       process.env.GENESIS_PUBLIC_URL ?? process.env.CALLBACK_BASE_URL ?? "http://host.docker.internal:3000",
-    genesis_token: process.env.GENESIS_API_TOKEN ?? "",
+    // G1-T19: token ESCOPADO ao deployment (não o GENESIS_API_TOKEN admin). Se vazar,
+    // só permite reportar progresso deste deployment. 2h cobre build+push longo.
+    genesis_token: signDeployCallbackToken(row.id, req.projectId, "2h"),
     // GATE 1: credenciais da conta Zentriz. Preferimos as dedicadas de provisão; caem
     // no par S3 como último recurso (mesma conta). Região do seam de credencial.
     aws_access_key_id: process.env.GENESIS_PROVISION_ACCESS_KEY_ID ?? process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",

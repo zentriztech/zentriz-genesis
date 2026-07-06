@@ -1894,8 +1894,10 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   );
 
-  // G1-T12: POST /api/projects/:id/deploy/backend/:deploymentId/callback
-  // Callback do backend_deploy_runner (host). Auth idêntica ao callback S3 (zentriz_admin).
+  // G1-T12/T19: POST /api/projects/:id/deploy/backend/:deploymentId/callback
+  // Callback do backend_deploy_runner (host). Auth = token de callback ESCOPADO por
+  // deployment (não role admin genérica): o claim scope='deploy-callback' precisa casar
+  // com params.deploymentId + params.id. Token de outro deployment → 403.
   // installing/building/pushing → avança status; pushed → dispara a cadeia SDK; failed → falha.
   app.post<{
     Params: { id: string; deploymentId: string };
@@ -1903,11 +1905,14 @@ export async function projectRoutes(app: FastifyInstance) {
   }>(
     "/api/projects/:id/deploy/backend/:deploymentId/callback",
     async (request, reply) => {
-      const user = getUser(request);
-      if (user.role !== "zentriz_admin") {
-        return reply.status(403).send({ code: "FORBIDDEN", message: "Só serviço interno pode fazer callback" });
-      }
       const { id, deploymentId } = request.params;
+      const cb = (request as unknown as { deployCallback?: { scope: string; deploymentId: string; projectId: string } }).deployCallback;
+      const user = getUser(request);
+      // Aceita: token escopado casando com o deployment/projeto, OU zentriz_admin (fallback interno).
+      const scopedOk = cb && cb.scope === "deploy-callback" && cb.deploymentId === deploymentId && cb.projectId === id;
+      if (!scopedOk && user.role !== "zentriz_admin") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Token de callback inválido para este deployment" });
+      }
       const result = await handleBackendCallback(id, deploymentId, request.body ?? {});
       return reply.status(result.http).send(result.body);
     }
