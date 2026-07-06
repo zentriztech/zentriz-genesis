@@ -13,9 +13,9 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import { detectRuntime, type Runtime } from "./runtimeDetector.js";
+import { validateDeployMatrix, type RuntimeTarget } from "./deployMatrix.js";
 
-/** Alvos de compute suportados no GATE 1 (escolhíveis na spec). */
-export type RuntimeTarget = "s3" | "ecs_fargate" | "app_runner" | "ec2";
+export type { RuntimeTarget };
 
 export interface BackendEligibility {
   eligible: boolean;
@@ -65,20 +65,9 @@ export function resolveRuntimeTarget(
   projectType: string | null | undefined,
   extraTarget: string | null | undefined,
 ): { runtimeTarget: RuntimeTarget; isBackend: boolean; error?: string } {
-  const pt = (projectType ?? "").toLowerCase();
-  const isBackend = pt.startsWith("backend") || pt.startsWith("fullstack");
-
-  // Alvo explícito na spec (extra.runtime_target) tem precedência quando válido.
-  const explicit = (extraTarget ?? "").toLowerCase().trim();
-  const validTargets: RuntimeTarget[] = ["s3", "ecs_fargate", "app_runner", "ec2"];
-
-  if (explicit && (validTargets as string[]).includes(explicit)) {
-    if (isBackend && explicit === "s3") {
-      return { runtimeTarget: "s3", isBackend, error: "runtime_target='s3' inválido para projeto backend/fullstack" };
-    }
-    return { runtimeTarget: explicit as RuntimeTarget, isBackend };
-  }
-
-  // Backfill de default por grupo.
-  return { runtimeTarget: isBackend ? "ecs_fargate" : "s3", isBackend };
+  // G1-T23: delega a decisão + validação de matriz/allowlist ao deployMatrix
+  // (fonte única, também consumida pela spec). Mantém a assinatura p/ o dispatch (T9)
+  // e o deployBackendCloud (T12) não mudarem.
+  const d = validateDeployMatrix(projectType, extraTarget);
+  return { runtimeTarget: d.runtimeTarget, isBackend: d.isBackend, error: d.error };
 }
