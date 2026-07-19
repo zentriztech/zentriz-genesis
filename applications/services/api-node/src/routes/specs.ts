@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "path";
 import fs from "fs/promises";
+import crypto from "crypto";
 import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
@@ -401,6 +402,9 @@ export async function specRoutes(app: FastifyInstance) {
     let freeDescription: string | null = null;
     let projectType: string | null = null;
     let productId: string | null = null;
+    // SPEC-APPROVED: "Especificações aprovadas por humanos". Quando true, o runner roda o CTO
+    // em Sub-modo C (validar, não regenerar) — sem pular Engineer/charter/PM.
+    let specApproved = false;
     // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
     const deliveryFields: Record<string, string> = {};
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
@@ -461,6 +465,18 @@ export async function specRoutes(app: FastifyInstance) {
           : "";
         if (raw) productId = raw;
       }
+      // SPEC-APPROVED: checkbox "Especificações aprovadas por humanos".
+      // Aceita "true"/"1"/"on" (checkbox HTML) OU reviewMode="validate-only".
+      if (part.fields?.specApproved !== undefined || part.fields?.reviewMode !== undefined) {
+        const saField = part.fields.specApproved ?? part.fields.reviewMode;
+        const v = Array.isArray(saField) ? saField[0] : saField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim().toLowerCase()
+          : "";
+        if (["true", "1", "on", "yes", "validate-only"].includes(raw)) specApproved = true;
+      }
+      // FASE-4/SEC-P1: o campo `approvedBy` do cliente é IGNORADO (falsificável).
+      // O aprovador é sempre o usuário autenticado (JWT), gravado abaixo.
       // DM-T2: campos de entrega opcionais (delivery_mode/runtime_target/db_mode/host_target/domain_mode).
       for (const key of ["deliveryMode", "runtimeTarget", "dbMode", "hostTarget", "domainMode"] as const) {
         if (part.fields?.[key] !== undefined) {
@@ -533,6 +549,23 @@ export async function specRoutes(app: FastifyInstance) {
         versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
       }
 
+      // SPEC-APPROVED: hash do conteúdo bruto das specs (SHA-256), para impedir
+      // "aprovo v1, subo/edito v2". DEVE casar com o hash recomputado pelo runner
+      // (_compute_spec_files_hash).
+      // FASE-4/CORR-P2: ordem DETERMINÍSTICA por filename (não por ordem de inserção /
+      // created_at, que não tem tiebreak e pode reordenar em inserts no mesmo microssegundo).
+      // Ambos os lados ordenam por filename ASC antes de unir por "\n".
+      const specHash = specApproved
+        ? crypto.createHash("sha256")
+            .update(
+              [...files]
+                .sort((a, b) => a.filename.localeCompare(b.filename))
+                .map((f) => f.buffer.toString("utf-8"))
+                .join("\n"),
+              "utf-8",
+            )
+            .digest("hex")
+        : null;
       const extraJson = JSON.stringify({
         ...(freeDescription ? { free_description: freeDescription } : {}),
         ...(projectType    ? { project_type: projectType }           : {}),
@@ -542,6 +575,17 @@ export async function specRoutes(app: FastifyInstance) {
         ...(deliveryFields.dbMode ? { db_mode: deliveryFields.dbMode } : {}),
         ...(deliveryFields.hostTarget ? { host_target: deliveryFields.hostTarget } : {}),
         ...(deliveryFields.domainMode ? { domain_mode: deliveryFields.domainMode } : {}),
+        // SPEC-APPROVED: persistência auditável (não booleano anônimo).
+        // FASE-4/SEC-P1: `approved_by` é SEMPRE derivado do usuário autenticado (JWT),
+        // NUNCA do campo `approvedBy` do multipart — senão a trilha de auditoria seria
+        // falsificável (qualquer um poderia gravar "aprovado por <CEO>"). O campo do
+        // cliente é ignorado de propósito.
+        ...(specApproved ? {
+          spec_approved: true,
+          approved_by: user.email ?? user.id,
+          approved_at: new Date().toISOString(),
+          spec_hash: specHash,
+        } : {}),
       });
       const projectResult = await client.query(
         `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)

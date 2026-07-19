@@ -168,6 +168,10 @@ class PipelineContext:
         self.previous_project_type: str = ""
         self.product_id: str = ""    # ID do produto ao qual este projeto pertence
         self.linked_projects_context: str = ""  # Contexto dos projetos linkados (para o CTO)
+        # SPEC-APPROVED (Especificações aprovadas por humanos): quando True, o CTO roda
+        # em Sub-modo C (VALIDAR, não regenerar). NÃO pula Engineer/charter/PM — só troca
+        # o comportamento do CTO na revisão da spec. Setado pelo runner a partir de projects.extra.
+        self.spec_approved: bool = False
         # Detected backend stack — cached to avoid repeated LLM calls per task
         # {"language": "python"|"nodejs"|..., "source": "pm_backlog_disk"|..., "confidence": "high"|"medium"|"low"}
         self.backend_stack: dict | None = None
@@ -206,6 +210,12 @@ class PipelineContext:
             "spec_ref": self.project_id,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        # SPEC-APPROVED: aciona o Sub-modo C do CTO (validar, não regenerar) — SYSTEM_PROMPT.md:226-255.
+        # Só no spec_intake_and_normalize (revisão inicial); não afeta charter/validate_backlog.
+        # Engineer/charter/PM continuam rodando: isto é modo de VALIDAÇÃO, não bypass de etapas.
+        if self.spec_approved and mode == "spec_intake_and_normalize":
+            inputs["input_type"] = "complete_spec"
+            inputs["constraints"] = ["spec-first", "validate-only"]
         if self.spec_raw:
             inputs["spec_raw"] = self.spec_raw
             inputs["product_spec"] = self.product_spec or self.spec_raw[:20000]

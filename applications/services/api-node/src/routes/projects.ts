@@ -22,6 +22,9 @@ const VALID_PROJECT_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog",
   "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted", "archived",
   "pending_cyborg", "blocked_cyborg",
+  // SPEC-APPROVED: spec marcada como "aprovada por humano" que reprovou na validação
+  // estrutural (formato PRODUCT_SPEC) ou cujo hash divergiu da versão aprovada.
+  "spec_validation_failed",
 ]);
 
 async function checkProjectAccess(

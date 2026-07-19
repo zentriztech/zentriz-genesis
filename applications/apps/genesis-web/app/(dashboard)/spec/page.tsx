@@ -8,8 +8,10 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Checkbox from "@mui/material/Checkbox";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
 import Divider from "@mui/material/Divider";
@@ -40,6 +42,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiGet, apiPatch, apiPost, apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
+import { authStore } from "@/stores/authStore";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
 const ReactMarkdown = dynamic(
@@ -589,6 +592,10 @@ export default function SpecPage() {
   const [linkRelation, setLinkRelation]   = useState("uses_backend");
   const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string; project_type?: string }[]>([]);
 
+  // SPEC-APPROVED: "Especificações aprovadas por humanos". Quando marcado, o CTO VALIDA a spec
+  // (Sub-modo C) em vez de regenerar. Engineer/charter/PM seguem normalmente.
+  const [specApproved, setSpecApproved] = useState(false);
+
   // Texto livre flow
   const [freeText, setFreeText]         = useState("");
   const [projectTitle, setProjectTitle] = useState("");
@@ -754,6 +761,12 @@ export default function SpecPage() {
           if (domainMode) formData.append("domainMode", domainMode);
         }
       }
+      // SPEC-APPROVED: CTO valida (Sub-modo C) em vez de regenerar.
+      if (specApproved) {
+        formData.append("specApproved", "true");
+        const approver = authStore.user?.email || authStore.user?.name;
+        if (approver) formData.append("approvedBy", approver);
+      }
       formData.append("files", file);
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
@@ -801,6 +814,12 @@ export default function SpecPage() {
           if (dbMode) fd.append("dbMode", dbMode);
           if (domainMode) fd.append("domainMode", domainMode);
         }
+      }
+      // SPEC-APPROVED: sinaliza ao backend/runner que o CTO deve VALIDAR (Sub-modo C), não regenerar.
+      if (specApproved) {
+        fd.append("specApproved", "true");
+        const approver = authStore.user?.email || authStore.user?.name;
+        if (approver) fd.append("approvedBy", approver);
       }
       files.forEach((f) => fd.append("files", f));
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
@@ -1087,6 +1106,24 @@ export default function SpecPage() {
                     allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                     linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                   />
+
+                  {/* SPEC-APPROVED: quando o arquivo enviado já é uma spec completa validada por humano,
+                      o CTO deve VALIDAR (Sub-modo C) em vez de regenerá-la. */}
+                  <Box sx={{ mb: 2, p: 1.5, border: "1px solid", borderColor: specApproved ? "success.main" : "divider", borderRadius: 1, bgcolor: specApproved ? "success.main" + "08" : "transparent", transition: "all .15s" }}>
+                    <FormControlLabel
+                      control={<Checkbox checked={specApproved} onChange={(e) => setSpecApproved(e.target.checked)} size="small" color="success" />}
+                      label={
+                        <Box>
+                          <Typography variant="body2" fontWeight={600}>✅ Especificações aprovadas por humanos</Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
+                            A spec já foi revisada e está completa. O CTO irá <strong>validar</strong> a estrutura (não regenerar),
+                            preservando suas decisões. Engineer, Charter e PM seguem normalmente.
+                          </Typography>
+                        </Box>
+                      }
+                      sx={{ alignItems: "flex-start", m: 0 }}
+                    />
+                  </Box>
 
                   <Box
                     onClick={() => inputRef.current?.click()}

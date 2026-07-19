@@ -281,6 +281,77 @@ def load_spec_all(project_id: str) -> str:
         return ""
 
 
+def _compute_spec_files_hash(project_id: str) -> str:
+    """SHA-256 sobre o conteúdo bruto dos project_spec_files (SPEC-APPROVED).
+
+    Deve casar com o hash calculado pela API na ingestão (specs.ts). Usado para
+    impedir "aprovo v1, subo/edito v2" — se a spec mudou após a aprovação, o hash diverge.
+
+    FASE-4/CORR-P2: ordem DETERMINÍSTICA por filename (idêntica ao lado da API), não por
+    created_at (sem tiebreak, pode reordenar). Concatena o texto UTF-8 de cada arquivo
+    ordenado por filename ASC, unido por "\\n".
+    Retorna "" se não for possível computar (nunca crasha o pipeline).
+    """
+    import hashlib
+    try:
+        data, status = _api_get(f"/api/projects/{project_id}/spec-files")
+        if status != 200 or not isinstance(data, list) or not data:
+            return ""
+        # Ordena por filename (mesma chave da API) para hash determinístico.
+        entries = sorted(data, key=lambda e: str(e.get("filename") or ""))
+        parts: list[str] = []
+        for entry in entries:
+            fpath = Path(entry.get("filePath") or entry.get("file_path", ""))
+            if not fpath.exists():
+                return ""
+            parts.append(fpath.read_text(encoding="utf-8"))
+        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    except Exception as exc:
+        logger.warning("[SPEC-APPROVED] Falha ao computar hash da spec: %s", exc)
+        return ""
+
+
+def _validate_product_spec_schema(spec_content: str) -> tuple[list[str], list[str]]:
+    """Validador determinístico SEMPRE-LIGADO do formato Genesis PRODUCT_SPEC.
+
+    Roda na ingestão, independente da flag spec_approved. Valida apenas o FORMATO
+    Genesis (não vocabulário canônico de produto, que é específico de cada produto —
+    isso pertence ao DoD da própria spec, não à fábrica genérica).
+
+    Retorna (hard_issues, soft_issues):
+      - hard = o que o pipeline REALMENTE precisa para não colapsar downstream:
+          * pelo menos 1 Requisito Funcional (FR-NN) — sem isso o backlog/gate T06 quebra;
+          * pelo menos 1 critério de aceite em Gherkin (DADO/QUANDO/ENTÃO ou GIVEN/WHEN/THEN).
+      - soft = seções recomendadas (## 0..## 9) ausentes. NÃO bloqueiam nem em modo
+        aprovado: uma spec humana completa pode legitimamente fundir seções ou usar
+        títulos diferentes (o próprio PRODUCT_SPEC.md de exemplo do repo omite várias),
+        e o CTO Sub-modo C sabe validar o conteúdo. Bloquear no regex seria mais
+        estrito do que o próprio agente — regressão que reprovaria specs legítimos.
+
+    FASE-4/CORR-P1: antes esta função exigia TODAS as seções 0..9 como hard e
+    reprovava specs válidos (inclusive o exemplo do repo). Rebaixadas para soft.
+    O caller decide a política (bloquear só em hard; sempre WARN em soft).
+    """
+    import re as _re
+    hard: list[str] = []
+    soft: list[str] = []
+    text = spec_content or ""
+    # Seções 0-9 — heading markdown "## N" (tolera "## 0." e "## 0 "). SOFT (recomendadas).
+    # Seção 10 (Design Tokens) é opcional — só recomendada p/ produtos visuais; não valida aqui.
+    for _n in range(0, 10):
+        if not _re.search(rf"(?m)^\s{{0,3}}#{{1,3}}\s*{_n}\b", text):
+            soft.append(f"Seção recomendada '## {_n}' ausente")
+    # Pelo menos 1 FR. HARD — backlog/PM/gate T06 dependem disso.
+    if not _re.search(r"\bFR-\d+", text, _re.IGNORECASE):
+        hard.append("Nenhum Requisito Funcional (FR-NN) encontrado")
+    # Gherkin — aceita PT (DADO/QUANDO/ENTÃO) ou EN (GIVEN/WHEN/THEN). HARD (critérios de aceite).
+    _has_pt = all(_re.search(rf"\b{_kw}\b", text, _re.IGNORECASE) for _kw in ("DADO", "QUANDO", "ENT[ÃA]O"))
+    _has_en = all(_re.search(rf"\b{_kw}\b", text, _re.IGNORECASE) for _kw in ("GIVEN", "WHEN", "THEN"))
+    if not (_has_pt or _has_en):
+        hard.append("Nenhum critério de aceite em Gherkin (DADO/QUANDO/ENTÃO) encontrado nos FRs")
+    return hard, soft
+
+
 def _agents_root() -> Path:
     """Returns the agents root directory.
 
@@ -363,6 +434,7 @@ def call_cto(
     pipeline_ctx: "PipelineContext | None" = None,
     extra_instruction: str = "",
     force_mode: str = "",
+    spec_approved: bool = False,
 ) -> dict:
     if force_mode:
         mode = force_mode
@@ -386,6 +458,11 @@ def call_cto(
             inputs["backlog_summary"] = backlog_summary[:15000]
     else:
         inputs = {"spec_ref": spec_ref, "constraints": ["spec-driven", "paths-resilient", "no-invent"]}
+        # SPEC-APPROVED: no montador sem pipeline_ctx, injetar o Sub-modo C do CTO
+        # (validar, não regenerar) apenas na revisão inicial da spec.
+        if spec_approved and mode == "spec_intake_and_normalize":
+            inputs["input_type"] = "complete_spec"
+            inputs["constraints"] = ["spec-first", "validate-only"]
         if engineer_proposal:
             inputs["engineer_stack_proposal"] = engineer_proposal
         if spec_content:
@@ -3788,6 +3865,10 @@ def main() -> int:
     _evolution_request = ""
     _evolution_work_mode = "copy"
     _parent_project_id_evo: str | None = None
+    # SPEC-APPROVED (Especificações aprovadas por humanos): flag lida do mesmo projects.extra.
+    _spec_approved = False
+    _spec_approved_by = ""
+    _spec_approved_hash = ""
     if project_id:
         try:
             _evo_proj_data, _ = _api_get(f"/api/projects/{project_id}")
@@ -3796,6 +3877,8 @@ def main() -> int:
                 import json as _json
                 try: _extra = _json.loads(_extra)
                 except Exception: _extra = {}
+            if not isinstance(_extra, dict):
+                _extra = {}
             if _extra.get("evolution") is True:
                 _is_evolution = True
                 _evolution_request   = _extra.get("evolution_request", "")
@@ -3804,8 +3887,23 @@ def main() -> int:
                 logger.info("[FT-10] Modo EVOLUTION detectado — request=%s work_mode=%s parent=%s",
                             _evolution_request[:80], _evolution_work_mode,
                             (_parent_project_id_evo or "")[:8])
+            # SPEC-APPROVED: precedência — Evolution vence. Evolution injeta charter Delta
+            # obrigatório + patch cirúrgico, semântica incompatível com "validar spec completa".
+            # Se ambos vierem marcados, ignoramos spec_approved e mantemos evolution.
+            if _extra.get("spec_approved") is True:
+                if _is_evolution:
+                    logger.warning("[SPEC-APPROVED] spec_approved + evolution simultâneos; "
+                                   "evolution tem precedência — spec_approved IGNORADO.")
+                else:
+                    _spec_approved = True
+                    _spec_approved_by = str(_extra.get("approved_by") or "")
+                    _spec_approved_hash = str(_extra.get("spec_hash") or "")
+                    if pipeline_ctx:
+                        pipeline_ctx.spec_approved = True  # → CTO Sub-modo C em build_inputs_for_cto
+                    logger.info("[SPEC-APPROVED] Modo validação (CTO Sub-modo C) ATIVO — approved_by=%s hash=%s",
+                                _spec_approved_by or "?", (_spec_approved_hash or "")[:12])
         except Exception as _evo_e:
-            logger.debug("[FT-10] Falha ao detectar modo evolution: %s", _evo_e)
+            logger.debug("[FT-10] Falha ao detectar modo evolution/spec-approved: %s", _evo_e)
 
     if _is_evolution and _parent_project_id_evo and pipeline_ctx:
         # Carregar apps/ do projeto pai como existing_artifacts no contexto
@@ -3917,6 +4015,59 @@ def main() -> int:
         request_id,
     )
 
+    # ── SPEC-APPROVED: validador determinístico de FORMATO PRODUCT_SPEC (SEMPRE-LIGADO) ──────
+    # Roda na ingestão, independente da flag. Idempotente: só na 1ª passada (step < 1).
+    # Política de veredito (GAP-3):
+    #   - spec APROVADA por humano + estrutura inválida  → PARA com status spec_validation_failed
+    #     (não remenda silenciosamente: "aprovada" perderia sentido).
+    #   - spec APROVADA + hash divergente do aprovado     → PARA (impede "aprovo v1, subo v2").
+    #   - spec NÃO aprovada + estrutura inválida           → apenas WARN (CTO normaliza/completa TBDs).
+    if spec_content and (not pipeline_ctx or pipeline_ctx.current_step < 1):
+        _hard_issues, _soft_issues = _validate_product_spec_schema(spec_content)
+        if _spec_approved:
+            # Hash guard: a spec aprovada não pode ter mudado desde a aprovação.
+            if _spec_approved_hash and project_id:
+                _current_hash = _compute_spec_files_hash(project_id)
+                if _current_hash and _current_hash != _spec_approved_hash:
+                    _reason_hash = (
+                        f"[SPEC-APPROVED] Hash da spec ({_current_hash[:12]}) diverge do hash aprovado "
+                        f"({_spec_approved_hash[:12]}). A spec foi alterada após a aprovação — "
+                        f"reaprove antes de iniciar o pipeline."
+                    )
+                    logger.error(_reason_hash)
+                    _post_step("BLOCKED — a spec aprovada foi alterada após a aprovação (hash divergente). "
+                               "Reaprove antes de iniciar.", request_id)
+                    _patch_project({"status": "spec_validation_failed", "blocked_reason": _reason_hash})
+                    if _run_log:
+                        try: _run_log.stop_run(reason="spec_validation_failed")
+                        except Exception: pass
+                    return 1
+            # Só issues HARD bloqueiam (≥1 FR, ≥1 Gherkin). Seções recomendadas ausentes
+            # (soft) NÃO reprovam — o CTO Sub-modo C valida o conteúdo (ver docstring).
+            if _soft_issues:
+                logger.info("[SPEC-APPROVED] Seções recomendadas ausentes (não bloqueiam): %s",
+                            "; ".join(_soft_issues))
+            if _hard_issues:
+                _reason_val = "[SPEC-APPROVED] Spec marcada como aprovada mas reprovou na validação estrutural: " + \
+                              "; ".join(_hard_issues)
+                logger.error(_reason_val)
+                _post_step(
+                    "BLOCKED — a spec foi marcada como 'aprovada por humano' mas falhou na validação "
+                    "estrutural do formato PRODUCT_SPEC: " + "; ".join(_hard_issues) +
+                    ". Corrija a spec e reaprove.",
+                    request_id,
+                )
+                _patch_project({"status": "spec_validation_failed", "blocked_reason": _reason_val})
+                if _run_log:
+                    try: _run_log.stop_run(reason="spec_validation_failed")
+                    except Exception: pass
+                return 1
+            logger.info("[SPEC-APPROVED] Validação estrutural OK — spec aprovada segue para CTO (Sub-modo C).")
+        elif _hard_issues or _soft_issues:
+            logger.warning("[SPEC-VALIDATION] Spec (não aprovada) com %d problema(s) de formato; "
+                           "CTO normalizará: %s", len(_hard_issues) + len(_soft_issues),
+                           "; ".join(_hard_issues + _soft_issues))
+
     # ── GAP-T1: Pré-classificador trivial — detecta na spec bruta ANTES do CTO ──────────────
     # Sinais inequívocos de trivial: HTML puro, CSS puro, arquivo único, sem backend, sem JS.
     # Se detectado E checkpoint não está avançado (step < 1), vai direto ao Dev.
@@ -3932,6 +4083,12 @@ def main() -> int:
     _type_allows_trivial = (not _pt_pre) or (_pt_pre in _TRIVIAL_ELIGIBLE_TYPES)
     if _pt_pre and not _type_allows_trivial:
         logger.info("[GAP-T1-FIX] project_type=%s não é estático → pré-classificador trivial VETADO (segue CTO/Engineer/PM).", _pt_pre)
+    # SPEC-APPROVED (GAP-5c): flag humana > heurística automática. Uma spec aprovada por humano
+    # deve passar pela VALIDAÇÃO completa do CTO (Sub-modo C), nunca ser desviada para o atalho
+    # trivial (1 task hardcoded). A aprovação humana veta o pré-classificador.
+    if _spec_approved and _type_allows_trivial:
+        _type_allows_trivial = False
+        logger.info("[SPEC-APPROVED] Pré-classificador trivial VETADO — spec aprovada segue CTO/Engineer/PM.")
     if _type_allows_trivial and (not pipeline_ctx or pipeline_ctx.current_step < 1) and spec_content:
         _spec_lower = spec_content.lower()
         _trivial_signals = [
@@ -4018,6 +4175,7 @@ def main() -> int:
                 spec_ref, request_id, engineer_proposal="",
                 spec_content=spec_content, spec_template=spec_template_content,
                 pipeline_ctx=pipeline_ctx,
+                spec_approved=_spec_approved,  # SPEC-APPROVED: aciona Sub-modo C do CTO (validar)
             )
             _audit_log("cto", request_id, cto_spec_response)
             spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
