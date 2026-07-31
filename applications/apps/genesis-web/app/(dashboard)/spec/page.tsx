@@ -768,6 +768,10 @@ export default function SpecPage() {
         if (approver) formData.append("approvedBy", approver);
       }
       formData.append("files", file);
+      // RASCUNHO: quando não é "iniciar agora", nasce como 'draft' (aguardando início manual),
+      // não 'spec_submitted' — assim o portal mostra "Rascunho" + botão Iniciar, em vez de
+      // "Em execução" sem ação.
+      if (!startNow) formData.append("draft", "true");
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
 
@@ -822,6 +826,8 @@ export default function SpecPage() {
         if (approver) fd.append("approvedBy", approver);
       }
       files.forEach((f) => fd.append("files", f));
+      // RASCUNHO: upload sem "iniciar agora" nasce como 'draft'.
+      if (!startNow) fd.append("draft", "true");
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
       projectsStore.loadProjects();

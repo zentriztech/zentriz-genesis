@@ -326,13 +326,17 @@ export async function reapExpiredDemos(): Promise<number> {
   return r.rowCount ?? 0;
 }
 
-/** Deployments marcados p/ destruição (worker de cleanup / resume-no-boot). */
+/** Deployments marcados p/ destruição (worker de cleanup / resume-no-boot).
+ *  BUGFIX P2: inclui 'destroy_failed'. Antes só 'destroying'/'failed' eram varridos, então um
+ *  teardown que falhou (destroy_failed) ficava PRESO para sempre com recursos AWS vivos
+ *  (RDS/Fargate/ALB faturando) — contrariando o comentário em teardown.ts (§reconciliação
+ *  repete destroy_failed). Agora o cleanup worker re-tenta a remoção automaticamente. */
 export async function listDeploymentsForTeardown(): Promise<BackendDeploymentRow[]> {
   const r = await pool.query<BackendDeploymentRow>(
     `SELECT id, project_id, tenant_id, provider, runtime_target, class,
             ecr_repo_uri, image_tag, app_url, health_url, status, error_msg
        FROM backend_deployments
-      WHERE status IN ('destroying','failed')
+      WHERE status IN ('destroying','destroy_failed','failed')
         AND EXISTS (
           SELECT 1 FROM backend_deployment_resources r
            WHERE r.deployment_id = backend_deployments.id

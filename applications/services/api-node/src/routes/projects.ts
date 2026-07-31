@@ -18,6 +18,13 @@ function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
 }
 
+// BUGFIX P3: cache in-memory curto do walk de code-files, por projectId. TTL de 3s colapsa a
+// rajada de chamadas (page + grafo + polling) que antes disparavam walks de FS redundantes.
+type CodeFilesPayload = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number; truncated: boolean };
+const CODE_FILES_TTL_MS = 3000;
+const CODE_FILES_MAX = 5000;
+const codeFilesCache = new Map<string, { at: number; payload: CodeFilesPayload }>();
+
 const VALID_PROJECT_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog",
   "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted", "archived",
@@ -1163,28 +1170,44 @@ export async function projectRoutes(app: FastifyInstance) {
       }
 
       const root = process.env.PROJECT_FILES_ROOT?.trim();
-      if (!root) return reply.send({ files: [], appsRoot: null, totalFiles: 0 });
+      if (!root) return reply.send({ files: [], appsRoot: null, totalFiles: 0, truncated: false });
+
+      // BUGFIX P3: cache in-memory com TTL curto (3s). O portal chama este endpoint de 2-3
+      // lugares (page + grafo) e re-busca no polling — sem cache, cada chamada dispara um walk
+      // de FS completo (amplificado em EFS/NFS). TTL de 3s colapsa a rajada sem esconder por muito
+      // tempo os arquivos que os agentes escrevem durante 'running'.
+      const cached = codeFilesCache.get(id);
+      if (cached && Date.now() - cached.at < CODE_FILES_TTL_MS) {
+        return reply.send(cached.payload);
+      }
 
       const appsDir = path.join(root, id, "apps");
       const files: Array<{ path: string; sizeBytes: number; ext: string }> = [];
+      let truncated = false;
 
+      // BUGFIX P3: readdir(withFileTypes) evita 1 stat por DIRETÓRIO (usa dirent.isDirectory()).
+      // Mantemos stat só para ARQUIVOS, pois sizeBytes é exibido na UI (CodeExplorer/ArtifactNode).
+      // Teto de CODE_FILES_MAX com flag truncated propagada — projeto real (~300 arq) fica muito
+      // abaixo; o teto só protege contra um walk patológico.
       async function walk(dir: string): Promise<void> {
-        let entries: string[];
+        if (files.length >= CODE_FILES_MAX) { truncated = true; return; }
+        let entries: import("fs").Dirent[];
         try {
-          entries = await readdir(dir);
+          entries = await readdir(dir, { withFileTypes: true });
         } catch {
           return;
         }
         for (const entry of entries) {
-          if (entry === "node_modules" || entry === ".next" || entry === "dist" || entry === ".git") continue;
-          const full = path.join(dir, entry);
-          let s: Awaited<ReturnType<typeof stat>>;
-          try { s = await stat(full); } catch { continue; }
-          if (s.isDirectory()) {
+          if (files.length >= CODE_FILES_MAX) { truncated = true; return; }
+          const name = entry.name;
+          if (name === "node_modules" || name === ".next" || name === "dist" || name === ".git") continue;
+          const full = path.join(dir, name);
+          if (entry.isDirectory()) {
             await walk(full);
-          } else {
-            const rel = path.relative(appsDir, full);
-            files.push({ path: rel, sizeBytes: s.size, ext: path.extname(entry).slice(1) });
+          } else if (entry.isFile()) {
+            let sizeBytes = 0;
+            try { sizeBytes = (await stat(full)).size; } catch { continue; }
+            files.push({ path: path.relative(appsDir, full), sizeBytes, ext: path.extname(name).slice(1) });
           }
         }
       }
@@ -1194,11 +1217,14 @@ export async function projectRoutes(app: FastifyInstance) {
       files.sort((a, b) => a.path.localeCompare(b.path));
 
       const hostRoot = process.env.HOST_PROJECT_FILES_ROOT?.trim() ?? root;
-      return reply.send({
+      const payload = {
         files,
         appsRoot: path.join(hostRoot, id, "apps"),
         totalFiles: files.length,
-      });
+        truncated,
+      };
+      codeFilesCache.set(id, { at: Date.now(), payload });
+      return reply.send(payload);
     } finally {
       client.release();
     }
@@ -2103,6 +2129,46 @@ export async function projectRoutes(app: FastifyInstance) {
       } finally {
         client.release();
       }
+    }
+  );
+
+  // BUGFIX P2: POST /api/projects/:id/deploy/backend/:deploymentId/retry-teardown
+  // Re-tenta a REMOÇÃO de um backend preso em 'destroy_failed' (teardown anterior falhou,
+  // recursos AWS podem seguir vivos/faturando). NÃO re-provisiona (isso deixaria os órfãos).
+  // Idempotente: teardownDeployment marca destroying → destroyed | destroy_failed.
+  app.post<{ Params: { id: string; deploymentId: string } }>(
+    "/api/projects/:id/deploy/backend/:deploymentId/retry-teardown",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id, deploymentId } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const dep = (await client.query(
+          "SELECT status FROM backend_deployments WHERE id=$1 AND project_id=$2",
+          [deploymentId, id],
+        )).rows[0];
+        if (!dep) return reply.status(404).send({ code: "NOT_FOUND", message: "Deployment não encontrado" });
+        if (!["destroy_failed", "failed"].includes(dep.status as string)) {
+          return reply.status(409).send({
+            code: "CONFLICT",
+            message: `Retry de remoção só se aplica a destroy_failed/failed. Status atual: ${dep.status}`,
+          });
+        }
+      } finally {
+        client.release();
+      }
+      // Fire-and-forget: teardownDeployment marca 'destroying' (reativa o polling do portal) e
+      // reverte os drivers; ao fim vira 'destroyed' (ok) ou volta a 'destroy_failed' (loga erros).
+      const { teardownDeployment } = await import("../services/provision/teardown.js");
+      teardownDeployment(deploymentId).catch((e) => {
+        request.log.error({ deploymentId, err: e }, "[retry-teardown] falha ao re-tentar remoção do backend");
+      });
+      return reply.status(202).send({ ok: true, deploymentId, status: "destroying" });
     }
   );
 

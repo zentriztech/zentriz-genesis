@@ -405,6 +405,12 @@ export async function specRoutes(app: FastifyInstance) {
     // SPEC-APPROVED: "Especificações aprovadas por humanos". Quando true, o runner roda o CTO
     // em Sub-modo C (validar, não regenerar) — sem pular Engineer/charter/PM.
     let specApproved = false;
+    // RASCUNHO: "Salvar Rascunho" (startNow=false no portal) envia draft=true. Quando true, o
+    // projeto nasce com status 'draft' (aguardando início manual), NÃO 'spec_submitted'. Isso
+    // corrige o bug em que um rascunho aparecia como "Em execução" sem botão de iniciar
+    // (spec_submitted é engolido por isRunning no portal). 'draft' já é run-elegível
+    // (ALLOWED_STATUS_FOR_RUN em pipeline.ts) e rotula "Rascunho" no chip.
+    let isDraft = false;
     // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
     const deliveryFields: Record<string, string> = {};
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
@@ -474,6 +480,15 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim().toLowerCase()
           : "";
         if (["true", "1", "on", "yes", "validate-only"].includes(raw)) specApproved = true;
+      }
+      // RASCUNHO: flag draft do multipart (enviada pelo "Salvar Rascunho").
+      if (part.fields?.draft !== undefined) {
+        const dField = part.fields.draft;
+        const v = Array.isArray(dField) ? dField[0] : dField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim().toLowerCase()
+          : "";
+        if (["true", "1", "on", "yes"].includes(raw)) isDraft = true;
       }
       // FASE-4/SEC-P1: o campo `approvedBy` do cliente é IGNORADO (falsificável).
       // O aprovador é sempre o usuário autenticado (JWT), gravado abaixo.
@@ -590,7 +605,7 @@ export async function specRoutes(app: FastifyInstance) {
       const projectResult = await client.query(
         `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
-        [tenantId, user.id, title, files[0].filename, "spec_submitted", rootParentId, versionNumber, extraJson, productId]
+        [tenantId, user.id, title, files[0].filename, isDraft ? "draft" : "spec_submitted", rootParentId, versionNumber, extraJson, productId]
       );
       projectId = projectResult.rows[0].id;
     } finally {
@@ -616,8 +631,10 @@ export async function specRoutes(app: FastifyInstance) {
           [projectId, f.filename, f.filePath, f.mimeType]
         );
       }
+      // Rascunho (isDraft) permanece 'draft' mesmo com anexo não-.md — o usuário decide quando
+      // iniciar; a conversão roda no /run. Só projetos NÃO-rascunho vão a 'pending_conversion'.
       const hasNonMd = saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md");
-      if (hasNonMd) {
+      if (hasNonMd && !isDraft) {
         await client2.query("UPDATE projects SET status = $1, updated_at = now() WHERE id = $2", [
           "pending_conversion",
           projectId,
@@ -629,7 +646,9 @@ export async function specRoutes(app: FastifyInstance) {
 
     return reply.send({
       projectId,
-      status: saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md")
+      status: isDraft
+        ? "draft"
+        : saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md")
         ? "pending_conversion"
         : "spec_submitted",
       message: "Spec(s) recebida(s). O fluxo será iniciado em seguida.",

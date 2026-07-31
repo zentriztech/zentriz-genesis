@@ -104,7 +104,7 @@ type TaskMetricItem   = { taskId: string; calls: number; inputTokens: number; ou
 type TaskLogRow       = { id: string; agent: string; taskId: string; round: number; inputTokens: number; outputTokens: number; totalTokens: number; model: string | null; isOpus: boolean; durationMs: number; durationSec: number; status: string | null; estimatedCostUsd: number; createdAt: string };
 type TaskLogResp      = { rows: TaskLogRow[]; totals: { calls: number; tokens: number; costUsd: number; durationSec: number } };
 type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; title?: string; created_at?: string }>; projectDocsRoot: string | null };
-type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number };
+type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number; truncated?: boolean };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
 type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
@@ -275,21 +275,24 @@ function StatusChip({ status, model, activeStep }: { status: string; model?: str
                      activeStep === 4 ? "DevOps"         : null;
 
   // Status principal — o que o projeto "é" (em execução, aceito, falhou…)
-  const isActiveExecution = status === "running" || status === "spec_submitted" || status === "pending_conversion";
+  // BUGFIX P1: spec_submitted/draft = "Aguardando início" (não "Em execução"); só fases reais
+  // do pipeline (running/cto_charter/pm_backlog/dev_qa/devops) pulsam como execução ativa.
+  const isActiveExecution = status === "running" || status === "cto_charter" ||
+                            status === "pm_backlog" || status === "dev_qa" || status === "devops";
   const mainLabel: Record<string, string> = {
     running: "Em execução", accepted: "Aceito", completed: "Concluído",
     failed: "Falhou", stopped: "Parado", draft: "Rascunho",
-    spec_submitted: "Em execução", cto_charter: "Em execução",
+    spec_submitted: "Aguardando início", cto_charter: "Em execução",
     pm_backlog: "Em execução", dev_qa: "Em execução", devops: "Em execução",
     pending_cyborg: "Validando", blocked_cyborg: "Bloqueado",
-    pending_conversion: "Em execução",
+    pending_conversion: "Convertendo spec",
   };
   const mainColor: Record<string, "default"|"success"|"error"|"info"|"warning"> = {
     completed: "success", accepted: "success", failed: "error", stopped: "error",
-    running: "info", spec_submitted: "info", cto_charter: "info",
+    running: "info", spec_submitted: "default", cto_charter: "info",
     pm_backlog: "info", dev_qa: "info", devops: "info",
     pending_cyborg: "warning", blocked_cyborg: "error",
-    pending_conversion: "info",
+    pending_conversion: "warning",
   };
 
   return (
@@ -449,6 +452,7 @@ function ProjectDetailPageInner() {
   const [linkProductSaving, setLinkProductSaving] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | DeployError | null>(null);
+  const [retryTeardownLoading, setRetryTeardownLoading] = useState(false); // BUGFIX P2
   const [countdown, setCountdown]   = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen]     = useState(false);
   const [linkableProjects, setLinkableProjects] = useState<Array<{ id: string; title: string; status: string; project_type?: string }>>([]);
@@ -629,7 +633,9 @@ function ProjectDetailPageInner() {
     const needsRepoPoll = !githubRepo;
     const needsDeployPoll = ephemeral?.status === "provisioning";
     // Backend em qualquer fase intermediária (não terminal running/failed) → continuar pollando.
-    const backendActive = !!backendDep && !["running", "running_degraded", "failed", "destroyed"].includes(backendDep.status);
+    // BUGFIX P2: 'destroy_failed' é TERMINAL (teardown falhou) — nenhum worker o altera em tempo
+    // real, então pollar a cada 5s era um loop infinito. Incluído nos terminais para parar o poll.
+    const backendActive = !!backendDep && !["running", "running_degraded", "failed", "destroyed", "destroy_failed"].includes(backendDep.status);
     const cyborgActive = project.status === "pending_cyborg";
     if (needsRepoPoll || needsDeployPoll || backendActive || cyborgActive) {
       const t = setInterval(loadRepoAndDeploy, 5000);
@@ -689,6 +695,21 @@ function ProjectDetailPageInner() {
       setRunError(e instanceof Error ? e.message : "Falha ao iniciar");
     } finally {
       setRunLoading(false);
+    }
+  };
+
+  // BUGFIX P2: re-tenta a remoção de um backend preso em 'destroy_failed' (não re-provisiona).
+  const handleRetryTeardown = async () => {
+    if (!backendDep) return;
+    setRetryTeardownLoading(true);
+    try {
+      await apiPost(`/api/projects/${id}/deploy/backend/${backendDep.id}/retry-teardown`, {});
+      // teardownDeployment marca 'destroying' → o poller volta a atualizar sozinho.
+      setBackendDep({ ...backendDep, status: "destroying" });
+    } catch (e) {
+      setDeployError(e instanceof Error ? e.message : "Falha ao re-tentar remoção");
+    } finally {
+      setRetryTeardownLoading(false);
     }
   };
 
@@ -872,9 +893,17 @@ function ProjectDetailPageInner() {
 
   // "running" é o status após o PM concluir. Durante CTO/Engineer/PM o status pode ser
   // spec_submitted — o pipeline já está ativo (runner rodando) mas o DB ainda não atualizou.
-  // Incluir spec_submitted e pending_conversion como "em execução" para o stepper reagir
-  // ao workingStepIndex derivado do diálogo em tempo real.
-  const isRunning   = project.status === "running" || project.status === "spec_submitted" || project.status === "pending_conversion";
+  // BUGFIX P1: isRunning = pipeline REALMENTE ativo (só 'running'). Antes incluía
+  // spec_submitted/pending_conversion, o que escondia o botão Iniciar (canRun && !isRunning)
+  // e travava o banner "Iniciar Agora" (spec_submitted && !isRunning → sempre false),
+  // deixando o projeto preso em "Em execução" sem ação. O /run é o único gatilho (não há
+  // worker que auto-processe spec_submitted), então esses status são "aguardando início".
+  const isRunning   = project.status === "running";
+  // spec_submitted/draft = spec pronta aguardando o usuário iniciar (pode iniciar).
+  const isAwaitingStart = project.status === "spec_submitted" || project.status === "draft";
+  // pending_conversion = anexo não-.md ainda sem markdown → /run FALHA (precisa do .md);
+  // NÃO oferecer Iniciar até converter. Mantido como estado de progresso próprio.
+  const isConverting = project.status === "pending_conversion";
   const isDone      = project.status === "completed" || project.status === "accepted" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
   const canRun      = ALLOW_RUN_STATUS.has(project.status);
   const canAccept   = project.status === "completed" || project.status === "pending_cyborg" || project.status === "blocked_cyborg";
@@ -1005,8 +1034,9 @@ function ProjectDetailPageInner() {
         </Typography>
         <StatusChip status={project.status} model={currentModel} activeStep={activeStep} />
 
-        {/* FT-05: Botões de ação + menu Ações */}
-        {canRun && !isRunning && (
+        {/* FT-05: Botões de ação + menu Ações.
+            BUGFIX P1: exclui pending_conversion (o /run FALHA sem .md — precisa converter antes). */}
+        {canRun && !isRunning && !isConverting && (
           <Button variant="contained" size="small"
             startIcon={project.status === "stopped" || project.status === "failed" ? <ReplayIcon /> : <PlayArrowIcon />}
             disabled={runLoading}
@@ -1037,7 +1067,7 @@ function ProjectDetailPageInner() {
         <Menu anchorEl={actionsAnchor} open={!!actionsAnchor} onClose={() => setActionsAnchor(null)}>
           {isRunning && <MenuItem onClick={handleStopSafe}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Com Segurança</MenuItem>}
           {isRunning && <MenuItem onClick={handleStopNow} sx={{ color: "warning.main" }}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Imediatamente</MenuItem>}
-          {(isRunning || isDone) && <MenuItem onClick={handleReject}><CancelIcon sx={{ mr: 1, fontSize: "1rem" }} />Rejeitar</MenuItem>}
+          {(isRunning || isDone || isAwaitingStart || isConverting) && <MenuItem onClick={handleReject}><CancelIcon sx={{ mr: 1, fontSize: "1rem" }} />Rejeitar</MenuItem>}
           <Divider />
           <MenuItem onClick={handleDeleteKeepFiles} sx={{ color: "warning.main" }}><DeleteOutlineIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir e Manter Arquivos</MenuItem>
           <MenuItem onClick={handleDeleteAll} sx={{ color: "error.main" }}><DeleteForeverIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir Completamente</MenuItem>
@@ -1128,7 +1158,7 @@ function ProjectDetailPageInner() {
       )}
 
       {/* FT-02: Banner para projetos em spec_submitted — revisar spec antes de iniciar */}
-      {project.status === "spec_submitted" && !isRunning && (
+      {isAwaitingStart && (
         <Alert severity="info" sx={{ mb: 2 }}
           action={
             <Stack direction="row" spacing={1}>
@@ -1408,38 +1438,64 @@ function ProjectDetailPageInner() {
       {/* GATE 1: Card de status do provisionamento BACKEND (Fargate/RDS).
           Aparece assim que há um backend_deployment (o poller mantém atualizado a cada 5s).
           Mostra a fase (provisioning→building→…→running), a URL viva quando running, ou o erro. */}
-      {backendDep && (
+      {backendDep && (() => {
+        // BUGFIX P2: estados terminais explícitos. 'destroy_failed'/'destroyed' NÃO são fases de
+        // provisionamento — antes caíam no balde "⏳ Provisionando… + atualiza a cada 5s" (loop
+        // infinito e enganoso). 'destroy_failed' = teardown falhou (recursos podem seguir vivos).
+        const st = backendDep.status;
+        const isUp        = st === "running" || st === "running_degraded";
+        const isFailed    = st === "failed";
+        const isDestroyed = st === "destroyed";
+        const isDestroyFailed = st === "destroy_failed";
+        const isProgress  = !isUp && !isFailed && !isDestroyed && !isDestroyFailed; // fases reais
+        return (
         <Alert
-          severity={backendDep.status === "running" ? "success" : backendDep.status === "failed" ? "error" : "info"}
-          icon={["running", "running_degraded"].includes(backendDep.status) ? undefined : backendDep.status === "failed" ? undefined : <CircularProgress size={16} />}
+          severity={isUp ? "success" : (isFailed || isDestroyFailed) ? "error" : isDestroyed ? "success" : "info"}
+          icon={isProgress ? <CircularProgress size={16} /> : undefined}
           sx={{ mb: 2 }}
+          action={isDestroyFailed ? (
+            <Button size="small" color="inherit" variant="outlined" disabled={retryTeardownLoading}
+              onClick={handleRetryTeardown}>
+              {retryTeardownLoading ? "Removendo…" : "Re-tentar remoção"}
+            </Button>
+          ) : undefined}
         >
           <Typography variant="body2" fontWeight={600}>
-            {backendDep.status === "running"
+            {isUp
               ? `✅ Backend no ar (${backendDep.klass === "demo" ? "Demo" : "Produção"} · ${backendDep.runtimeTarget})`
-              : backendDep.status === "failed"
+              : isFailed
               ? `❌ Provisionamento do backend falhou`
-              : `⏳ Provisionando backend — fase: ${backendDep.status}`}
+              : isDestroyed
+              ? `🗑️ Backend removido`
+              : isDestroyFailed
+              ? `⚠️ Falha ao remover o backend — pode haver recursos AWS ativos gerando custo`
+              : `⏳ Provisionando backend — fase: ${st}`}
           </Typography>
-          {backendDep.appUrl && ["running", "running_degraded"].includes(backendDep.status) && (
+          {backendDep.appUrl && isUp && (
             <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
               <a href={backendDep.appUrl} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", fontWeight: 700 }}>
                 {backendDep.appUrl}
               </a>{" · "}<a href={`${backendDep.appUrl.replace(/\/$/, "")}/docs`} target="_blank" rel="noopener noreferrer" style={{ color: "inherit" }}>Swagger /docs</a>
             </Typography>
           )}
-          {backendDep.status === "failed" && backendDep.errorMsg && (
+          {(isFailed || isDestroyFailed) && backendDep.errorMsg && (
             <Box component="pre" sx={{ mt: 1, fontSize: "0.7rem", opacity: 0.8, maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap" }}>
               {String(backendDep.errorMsg).slice(0, 600)}
             </Box>
           )}
-          {!["running", "running_degraded", "failed"].includes(backendDep.status) && (
+          {isDestroyFailed && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+              A remoção será re-tentada automaticamente pelo cleanup. Use "Re-tentar remoção" para forçar agora. Só provisione de novo após a remoção concluir, para não duplicar recursos.
+            </Typography>
+          )}
+          {isProgress && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
               Atualiza automaticamente a cada 5s. Cadeia: building → pushing → migrating → creating_service → waiting_cert_dns → running.
             </Typography>
           )}
         </Alert>
-      )}
+        );
+      })()}
 
       {/* FT-17 / DM-T2: Cloud deploy — launch button (com LGPD consent)
           Só aparece quando o projeto TEM repositório GitHub (githubRepo truthy) E o Cyborg já terminou.
@@ -1482,10 +1538,13 @@ function ProjectDetailPageInner() {
           : "AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.";
         // Esconde o bloco de provisionar quando já há um deploy vivo/em andamento:
         //  - S3 (ephemeral): esconde salvo se failed (permite retry).
-        //  - backend (backendDep): idem — esconde em qualquer fase ≠ failed (o card de
-        //    status acima já mostra progresso/URL). Só reaparece em failed p/ tentar de novo.
+        //  - backend (backendDep): libera o re-provisionar SÓ quando não há infra viva:
+        //    'failed' (provisionamento abortado, varrido pelo teardown) e 'destroyed' (já removido).
+        //    BUGFIX P2: 'destroy_failed' CONTINUA bloqueando — re-provisionar aí deixaria os
+        //    recursos AWS antigos ÓRFÃOS (RDS/Fargate/ALB faturando). Nesse estado a ação correta
+        //    é "Re-tentar remoção" (no card acima), não provisionar de novo.
         const _s3Blocks = ephemeral && ephemeral.status !== "failed";
-        const _backendBlocks = backendDep && backendDep.status !== "failed";
+        const _backendBlocks = backendDep && !["failed", "destroyed"].includes(backendDep.status);
         return (
       (project.status === "accepted" || project.status === "completed") && githubRepo && !_s3Blocks && !_backendBlocks && (
         <Box sx={{ mb: 2 }}>
