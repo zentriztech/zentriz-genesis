@@ -1485,7 +1485,7 @@ function ProjectDetailPageInner() {
           )}
           {isDestroyFailed && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
-              A remoção será re-tentada automaticamente pelo cleanup. Use "Re-tentar remoção" para forçar agora. Só provisione de novo após a remoção concluir, para não duplicar recursos.
+              A remoção será re-tentada automaticamente pelo cleanup. Use “Re-tentar remoção” para forçar agora. Só provisione de novo após a remoção concluir, para não duplicar recursos.
             </Typography>
           )}
           {isProgress && (
