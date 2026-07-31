@@ -20,7 +20,8 @@
 
 import {
   CreateServiceCommand, UpdateServiceCommand, DescribeServicesCommand,
-  DeleteServiceCommand, type ECSClient,
+  DeleteServiceCommand, DeregisterTaskDefinitionCommand,
+  ListTaskDefinitionsCommand, type ECSClient,
 } from "@aws-sdk/client-ecs";
 import {
   CreateTargetGroupCommand, DescribeTargetGroupsCommand, DeleteTargetGroupCommand,
@@ -190,8 +191,22 @@ export const ecsServiceDriver: ProvisionDriver = {
     const ecs = ecsClient(ctx.creds);
     const cluster = (ctx.scratch.clusterName as string | undefined) ?? "genesis";
     const name = serviceName(ctx);
-    // Só o service (force=true derruba tasks). O target group é do driver "ecs".
+    // Service (force=true derruba tasks). O target group é do driver "ecs".
     await ecs.send(new DeleteServiceCommand({ cluster, service: name, force: true })).catch(() => {});
+    // Deregister TODAS as revisões da família da task-def (best-effort). Sem isso a task-def
+    // fica ACTIVE e a RGTA a lista para sempre — o que fazia sweepRemaining marcar destroy_failed
+    // falsamente. Deregister não gera custo e é idempotente.
+    try {
+      const family = serviceFamily(ctx);
+      let token: string | undefined;
+      do {
+        const out = await ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, status: "ACTIVE", nextToken: token }));
+        for (const arn of out.taskDefinitionArns ?? []) {
+          await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn })).catch(() => {});
+        }
+        token = out.nextToken || undefined;
+      } while (token);
+    } catch { /* best-effort — não bloqueia teardown */ }
   },
 };
 

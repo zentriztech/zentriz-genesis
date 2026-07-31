@@ -60,7 +60,27 @@ async function drainNetworkInterfaces(creds: ResolvedAwsCredentials, securityGro
   // Não trava o teardown se sobrar ENI — o delete do SG apenas falhará e a reconciliação repete.
 }
 
-/** Varredura final por tag: retorna ARNs ainda presentes (RGTA não cobre IAM). */
+/**
+ * ARNs que a RGTA lista pela tag do deployment mas que NÃO representam órfão real
+ * de custo nem são deletáveis por-deployment — logo NÃO devem marcar destroy_failed:
+ *   - `:task-definition/…` — o ECS não deleta task-def (só deregister); ela permanece
+ *     listável na RGTA indefinidamente. Custo ZERO.
+ *   - `:repository/…` (ECR) — repositório é por-PROJETO (compartilhado entre deployments),
+ *     não deve ser removido ao destruir 1 deployment. Custo desprezível (storage).
+ * (Ver memória genesis-teardown-falso-destroy-failed: falso destroy_failed em 2026-07-31.)
+ */
+function isCostlyOrphanArn(arn: string): boolean {
+  if (arn.includes(":task-definition/")) return false; // não deletável, custo 0
+  if (arn.includes(":ecr:") && arn.includes(":repository/")) return false; // compartilhado por projeto
+  return true;
+}
+
+/**
+ * Varredura final por tag: retorna ARNs de recursos que ainda geram custo/são órfãos reais
+ * (RGTA não cobre IAM). Resíduos custo-zero e não-deletáveis (task-def, ECR repo) são
+ * IGNORADOS — senão o teardown marca destroy_failed falsamente mesmo com toda a infra
+ * de custo (Fargate/ALB/RDS) já removida.
+ */
 export async function sweepRemaining(creds: ResolvedAwsCredentials, deploymentId: string): Promise<string[]> {
   const client = new ResourceGroupsTaggingAPIClient({ region: creds.region, credentials: creds.credentials });
   const found: string[] = [];
@@ -70,7 +90,9 @@ export async function sweepRemaining(creds: ResolvedAwsCredentials, deploymentId
       TagFilters: [{ Key: "zentriz:deployment_id", Values: [deploymentId] }],
       PaginationToken: token,
     }));
-    for (const m of out.ResourceTagMappingList ?? []) if (m.ResourceARN) found.push(m.ResourceARN);
+    for (const m of out.ResourceTagMappingList ?? []) {
+      if (m.ResourceARN && isCostlyOrphanArn(m.ResourceARN)) found.push(m.ResourceARN);
+    }
     token = out.PaginationToken || undefined;
   } while (token);
   return found;
@@ -130,6 +152,11 @@ export async function teardownDeployment(deploymentId: string): Promise<Teardown
     await setStatus(deploymentId, "destroyed");
     return { ok: true, remaining: [], errors: [] };
   }
-  await setStatus(deploymentId, "destroy_failed", `teardown incompleto: ${errors.join("; ")}`.slice(0, 900));
+  // Mensagem inclui o que sobrou (recursos de custo real e/ou erros) — antes era
+  // "teardown incompleto:" vazio quando só havia `remaining`, sem pista do motivo.
+  const parts: string[] = [];
+  if (errors.length) parts.push(`erros: ${errors.join("; ")}`);
+  if (remaining.length) parts.push(`recursos remanescentes: ${remaining.join(", ")}`);
+  await setStatus(deploymentId, "destroy_failed", `teardown incompleto — ${parts.join(" | ")}`.slice(0, 900));
   return { ok: false, remaining, errors };
 }
