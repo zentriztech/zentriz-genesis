@@ -20,6 +20,7 @@ version: "0.4.0"
 # são incompatíveis com bugs Node/Drizzle N1-N8.
 type_aliases:
   mobile_app:         mobile_crossplatform    # telegram detectProjectType output
+  mobile_expo:        mobile_crossplatform    # Cenário B/F3: token do manifesto de produto (Expo/RN)
   mobile_ios:         mobile_crossplatform    # portal subtype
   mobile_android:     mobile_crossplatform    # portal subtype
   backend_api_node:   backend_api             # variante nomeada

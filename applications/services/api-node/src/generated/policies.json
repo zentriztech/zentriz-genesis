@@ -93,6 +93,7 @@
     "landing_page": "frontend_landing",
     "mobile_android": "mobile_crossplatform",
     "mobile_app": "mobile_crossplatform",
+    "mobile_expo": "mobile_crossplatform",
     "mobile_ios": "mobile_crossplatform",
     "nestjs_api": "backend_api_nestjs",
     "static_site": "frontend_landing",

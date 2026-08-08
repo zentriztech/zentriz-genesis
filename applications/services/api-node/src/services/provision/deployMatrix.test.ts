@@ -98,4 +98,31 @@ describe("DM-T1: delivery_mode", () => {
     expect(d.error).toBeUndefined();
     expect(d).toMatchObject({ runtimeTarget: "ecs_fargate", isFullstack: true, deliveryMode: "production" });
   });
+
+  // Cenário B / F3: mobile roteia para o canal EAS (ortogonal ao runtimeTarget de container).
+  it("mobile_expo → canal EAS, isMobile=true, sem erro", () => {
+    const d = validateDeployMatrix("mobile_expo", null);
+    expect(d.error).toBeUndefined();
+    expect(d).toMatchObject({ isMobile: true, deliveryChannel: "eas", isBackend: false });
+  });
+
+  it("mobile_crossplatform também roteia para EAS", () => {
+    expect(validateDeployMatrix("mobile_crossplatform", null)).toMatchObject({ isMobile: true, deliveryChannel: "eas" });
+  });
+
+  it("mobile não é backend (não cai na allowlist de container)", () => {
+    const d = validateDeployMatrix("mobile_expo", null);
+    expect(d.isBackend).toBe(false);
+  });
+
+  it("mobile com runtime_target de container é rejeitado (incoerente)", () => {
+    const d = validateDeployMatrix("mobile_expo", "ecs_fargate");
+    expect(d.error).toMatch(/mobile/i);
+    expect(d.isMobile).toBe(true);
+  });
+
+  it("backend/web preenchem deliveryChannel coerente", () => {
+    expect(validateDeployMatrix("backend_api_nestjs", null).deliveryChannel).toBe("container");
+    expect(validateDeployMatrix("frontend_dashboard", null).deliveryChannel).toBe("s3");
+  });
 });

@@ -44,10 +44,25 @@ const VALID_TARGETS: RuntimeTarget[] = ["s3", "ecs_fargate", "app_runner", "ec2"
 /** Alvos que suportam multi-serviço (fullstack). app_runner é single-container. */
 const MULTISERVICE_TARGETS = new Set<RuntimeTarget>(["ecs_fargate", "ec2"]);
 
+/**
+ * Cenário B / B2: canal de entrega — eixo ORTOGONAL ao runtimeTarget (que é de container).
+ * Mobile Expo/RN não roda em container; seu artefato sai por EAS. Mantemos isso fora do
+ * union `RuntimeTarget` (que tem fan-out em backendDeployDetector/deployBackendCloud) para
+ * não poluir o caminho de container — mobile vira um ramo próprio no dispatcher.
+ */
+export type DeliveryChannel = "container" | "s3" | "eas";
+
+/** Tipos mobile reconhecidos (canônico + alias). Roteiam para o canal EAS. */
+export const MOBILE_TYPES = new Set<string>(["mobile_expo", "mobile_crossplatform"]);
+
 export interface MatrixDecision {
   runtimeTarget: RuntimeTarget;
   isBackend: boolean;
   isFullstack: boolean;
+  /** Cenário B: true quando o tipo é mobile (Expo/RN) — roteia para EAS, não container/S3. */
+  isMobile: boolean;
+  /** Cenário B: canal de entrega resolvido (container | s3 | eas). */
+  deliveryChannel: DeliveryChannel;
   /** DM-T1: modo de entrega resolvido (default backend = source_only). */
   deliveryMode: DeliveryMode;
   /** Mensagem de erro quando a combinação é inválida (dispatcher retorna 4xx). */
@@ -87,39 +102,59 @@ export function validateDeployMatrix(
 ): MatrixDecision {
   const pt = (projectType ?? "").toLowerCase().trim();
   const isFullstack = pt.startsWith("fullstack");
-  const isBackend = pt.startsWith("backend") || isFullstack;
+  const isMobile = MOBILE_TYPES.has(pt);
+  const isBackend = !isMobile && (pt.startsWith("backend") || isFullstack);
   const explicit = (extraTarget ?? "").toLowerCase().trim();
 
   // DM-T1: resolve o modo de entrega (default backend = source_only).
   const dm = resolveDeliveryMode(isBackend, extraMode);
   const deliveryMode = dm.deliveryMode;
 
+  // Cenário B / B2: mobile (Expo/RN) roteia para o canal EAS — nunca container nem S3.
+  // Resolvido ANTES dos ramos de container/estático. F3 entrega source_only (kit EAS);
+  // preview_build/store_submit são tratados no dispatcher (aviso), não bloqueiam aqui.
+  if (isMobile) {
+    // Alvo de container/S3 explícito é incoerente com mobile.
+    if (explicit && explicit !== "eas") {
+      return { runtimeTarget: "ecs_fargate", isBackend: false, isFullstack: false,
+        isMobile: true, deliveryChannel: "eas", deliveryMode,
+        error: `runtime_target '${extraTarget}' inválido para projeto mobile (use o canal EAS).` };
+    }
+    return { runtimeTarget: "ecs_fargate", isBackend: false, isFullstack: false,
+      isMobile: true, deliveryChannel: "eas", deliveryMode };
+  }
+
   // Alvo explícito inválido (typo etc.) → erro claro.
   if (explicit && !(VALID_TARGETS as string[]).includes(explicit)) {
     return {
-      runtimeTarget: isBackend ? "ecs_fargate" : "s3", isBackend, isFullstack, deliveryMode,
+      runtimeTarget: isBackend ? "ecs_fargate" : "s3", isBackend, isFullstack,
+      isMobile: false, deliveryChannel: isBackend ? "container" : "s3", deliveryMode,
       error: `runtime_target '${extraTarget}' inválido. Aceitos: ${VALID_TARGETS.join(", ")}.`,
     };
   }
 
   // DM-T1: modo de entrega inválido → erro (antes de decidir compute).
   if (dm.error) {
-    return { runtimeTarget: isBackend ? "ecs_fargate" : "s3", isBackend, isFullstack, deliveryMode, error: dm.error };
+    return { runtimeTarget: isBackend ? "ecs_fargate" : "s3", isBackend, isFullstack,
+      isMobile: false, deliveryChannel: isBackend ? "container" : "s3", deliveryMode, error: dm.error };
   }
 
   if (!isBackend) {
     // Estático/web: só s3 faz sentido; alvo de container p/ web é rejeitado.
     if (explicit && explicit !== "s3") {
-      return { runtimeTarget: "s3", isBackend: false, isFullstack: false, deliveryMode,
+      return { runtimeTarget: "s3", isBackend: false, isFullstack: false,
+        isMobile: false, deliveryChannel: "s3", deliveryMode,
         error: `runtime_target '${extraTarget}' inválido para projeto web/estático (use s3).` };
     }
-    return { runtimeTarget: "s3", isBackend: false, isFullstack: false, deliveryMode };
+    return { runtimeTarget: "s3", isBackend: false, isFullstack: false,
+      isMobile: false, deliveryChannel: "s3", deliveryMode };
   }
 
   // Backend/fullstack: precisa estar na allowlist do provisionador container.
   if (pt && !BACKEND_ALLOWLIST.has(pt)) {
     return {
-      runtimeTarget: "ecs_fargate", isBackend, isFullstack, deliveryMode,
+      runtimeTarget: "ecs_fargate", isBackend, isFullstack,
+      isMobile: false, deliveryChannel: "container", deliveryMode,
       error: `project_type '${projectType}' não é suportado pelo provisionamento de container no GATE 1. ` +
              `Suportados: ${[...BACKEND_ALLOWLIST].join(", ")}.`,
     };
@@ -127,7 +162,8 @@ export function validateDeployMatrix(
 
   // runtime_target='s3' para backend → inválido.
   if (explicit === "s3") {
-    return { runtimeTarget: "ecs_fargate", isBackend, isFullstack, deliveryMode,
+    return { runtimeTarget: "ecs_fargate", isBackend, isFullstack,
+      isMobile: false, deliveryChannel: "container", deliveryMode,
       error: "runtime_target='s3' inválido para projeto backend/fullstack." };
   }
 
@@ -135,9 +171,11 @@ export function validateDeployMatrix(
 
   // fullstack ⇒ alvo multi-serviço (rejeita app_runner+fullstack).
   if (isFullstack && !MULTISERVICE_TARGETS.has(target)) {
-    return { runtimeTarget: "ecs_fargate", isBackend, isFullstack, deliveryMode,
+    return { runtimeTarget: "ecs_fargate", isBackend, isFullstack,
+      isMobile: false, deliveryChannel: "container", deliveryMode,
       error: `runtime_target '${target}' não suporta fullstack (multi-serviço). Use ecs_fargate.` };
   }
 
-  return { runtimeTarget: target, isBackend, isFullstack, deliveryMode };
+  return { runtimeTarget: target, isBackend, isFullstack,
+    isMobile: false, deliveryChannel: "container", deliveryMode };
 }

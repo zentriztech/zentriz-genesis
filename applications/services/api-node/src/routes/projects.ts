@@ -5,9 +5,10 @@ import { pushProjectToGitHub } from "../services/githubPush.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
-import { validateDeployMatrix } from "../services/provision/deployMatrix.js";
+import { validateDeployMatrix, MOBILE_TYPES } from "../services/provision/deployMatrix.js";
 import { buildPlanForProject } from "../services/provision/buildPlanForProject.js";
 import { renderSourceOnlyBundle, bundleManifest } from "../services/provision/renderers/bundle.js";
+import { renderMobileEasBundle } from "../services/provision/renderers/mobileEasRenderer.js";
 import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
@@ -1618,9 +1619,11 @@ export async function projectRoutes(app: FastifyInstance) {
       let projectType: string | null = null;
       let extraTarget: string | null = null;
       let extraMode: string | null = null;
+      let projectTitle = "app";
+      let mobileApiUrl: string | null = null;
       try {
         const row = (await client.query(
-          "SELECT id, tenant_id, created_by, status, extra FROM projects WHERE id=$1",
+          "SELECT id, tenant_id, created_by, status, title, extra FROM projects WHERE id=$1",
           [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
@@ -1635,10 +1638,12 @@ export async function projectRoutes(app: FastifyInstance) {
           });
         }
         tenantId = row.tenant_id as string;
+        projectTitle = (row.title as string | undefined)?.trim() || "app";
         const extra = (row.extra as Record<string, unknown> | null) ?? {};
         projectType = (extra.project_type as string | undefined) ?? null;
         extraTarget = (extra.runtime_target as string | undefined) ?? null;
         extraMode = (extra.delivery_mode as string | undefined) ?? null;
+        mobileApiUrl = (extra.api_url as string | undefined) ?? (extra.apiUrl as string | undefined) ?? null;
       } finally {
         client.release();
       }
@@ -1647,10 +1652,29 @@ export async function projectRoutes(app: FastifyInstance) {
       // container ANTES do caminho S3. Web/estático NÃO é afetado (segue idêntico).
       // Regra inviolável: só desvia quando o tipo/target resolve para backend.
       {
-        const { runtimeTarget, isBackend, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
+        const { runtimeTarget, isBackend, isMobile, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
         if (error) {
           return reply.status(400).send({ code: "INVALID_RUNTIME_TARGET", message: error,
             details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
+        }
+        // Cenário B / F3: mobile (Expo/RN) → canal EAS, nível source_only. Entrega o kit
+        // (app.config.ts/eas.json/CI EAS/MOBILE-DEPLOY.md); a Zentriz não dispara build nem
+        // guarda credenciais. preview_build/store_submit são F3+ (aviso no bundle).
+        if (isMobile) {
+          const { files, warnings } = renderMobileEasBundle({
+            appName: projectTitle,
+            apiUrl: mobileApiUrl ?? undefined,
+            delivery: (extraMode as "source_only" | "preview_build" | "store_submit" | null) ?? "source_only",
+          });
+          return reply.status(200).send({
+            code: "MOBILE_EAS_KIT_READY",
+            message: "Mobile (Expo/RN): baixe o kit EAS (source_only) e conecte sua conta Expo para buildar.",
+            delivery_channel: "eas",
+            delivery_mode: "source_only",
+            warnings,
+            kit_download_url: `/api/projects/${id}/deploy/source-kit`,
+            manifest: bundleManifest(files),
+          });
         }
         // DM-T1/DM-T8b: source_only não provisiona infra — entrega o kit IaC
         // (compose/tf/k8s/CI). Vale p/ QUALQUER tipo (backend ou web): um frontend pode
@@ -1942,20 +1966,42 @@ export async function projectRoutes(app: FastifyInstance) {
       const user = getUser(request);
       const { id } = request.params;
       const client = await pool.connect();
+      let mobileProject: { title: string; apiUrl: string | null; delivery: string | null } | null = null;
       try {
         if (!(await checkProjectAccess(client, id, user))) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
+        // Cenário B / F3: se o projeto é mobile, o kit é o EAS (não o bundle de container).
+        const row = (await client.query("SELECT title, extra FROM projects WHERE id=$1", [id])).rows[0];
+        const extra = (row?.extra as Record<string, unknown> | null) ?? {};
+        const pt = ((extra.project_type as string | undefined) ?? "").toLowerCase().trim();
+        if (MOBILE_TYPES.has(pt)) {
+          mobileProject = {
+            title: (row?.title as string | undefined)?.trim() || "app",
+            apiUrl: (extra.api_url as string | undefined) ?? (extra.apiUrl as string | undefined) ?? null,
+            delivery: (extra.delivery_mode as string | undefined) ?? null,
+          };
+        }
       } finally {
         client.release();
       }
-      const built = await buildPlanForProject(id);
-      if (!built.ok) {
-        return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
-          code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
-        });
+
+      let files: { path: string; content: string }[];
+      if (mobileProject) {
+        files = renderMobileEasBundle({
+          appName: mobileProject.title,
+          apiUrl: mobileProject.apiUrl ?? undefined,
+          delivery: (mobileProject.delivery as "source_only" | "preview_build" | "store_submit" | null) ?? "source_only",
+        }).files;
+      } else {
+        const built = await buildPlanForProject(id);
+        if (!built.ok) {
+          return reply.status(built.code === "NOT_FOUND" ? 404 : 400).send({
+            code: built.code ?? "SOURCE_KIT_ERROR", message: built.message ?? "Falha ao montar o kit.",
+          });
+        }
+        files = renderSourceOnlyBundle(built.plan!);
       }
-      const files = renderSourceOnlyBundle(built.plan!);
       const { default: AdmZip } = await import("adm-zip");
       const zip = new AdmZip();
       for (const f of files) zip.addFile(f.path, Buffer.from(f.content, "utf-8"));
