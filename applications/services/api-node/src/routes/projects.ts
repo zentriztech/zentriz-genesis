@@ -14,6 +14,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
+import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -597,6 +598,10 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const u = updated.rows[0] as Record<string, unknown>;
 
+      // A2: recomputa o ciclo de vida agregado do produto (se o projeto pertence a um).
+      // Não-crítico (função engole erros); usa o mesmo client para refletir o status já gravado.
+      await recomputeProductLifecycle(client, u.product_id as string | null);
+
       // Fechar TSK-FULL-TEST quando projeto é aceito — inclui QA_FAIL (Cyborg corrigiu e validou)
       await client.query(
         `UPDATE project_tasks
@@ -788,9 +793,11 @@ export async function projectRoutes(app: FastifyInstance) {
            VALUES ($1, 'cyborg', 'system', 'step', $2)`,
           [id, `🚫 Cyborg V3 reportou NEEDS_HUMAN. Motivo: ${reason}`]
         );
+        // A2: projeto travado por Cyborg → produto vai a stalled_waiting_human (onda travada).
+        await recomputeProductLifecycle(client, productId);
         return reply.send({ ok: true, status: "blocked_cyborg", cyborgAttempts: newAttempts, retrying: false });
       }
-      void projectType; void productId;
+      void projectType;
 
       // Rejeição humana (ou não-Cyborg) — comportamento original: status failed
       await client.query(
@@ -806,6 +813,8 @@ export async function projectRoutes(app: FastifyInstance) {
          VALUES ($1, 'system', 'system', 'step', $2)`,
         [id, `❌ Projeto rejeitado. Motivo: ${reason}`]
       );
+      // A2: rejeição humana → produto vai a failed (falha dura de uma onda).
+      await recomputeProductLifecycle(client, productId);
       // Notificação push Telegram — fire-and-forget
       setImmediate(async () => {
         try {

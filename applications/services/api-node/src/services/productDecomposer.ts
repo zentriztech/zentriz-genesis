@@ -101,6 +101,13 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       }
     }
 
+    // A2: produto sai de 'ingesting' → 'running' assim que os projetos existem
+    // (a onda 0 será disparada logo após o commit pela rota de ingestão).
+    await client.query(
+      "UPDATE products SET lifecycle_status = 'running', updated_at = now() WHERE id = $1",
+      [productId],
+    );
+
     await client.query("COMMIT");
 
     // 5. onda 0 (sem predecessores) fica elegível para disparo pelo chamador (rota),

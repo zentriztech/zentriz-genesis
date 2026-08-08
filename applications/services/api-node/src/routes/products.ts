@@ -55,7 +55,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     const client = await pool.connect();
     try {
       const res = await client.query(
-        `SELECT p.id, p.name, p.description, p.status, p.created_at,
+        `SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
                 COUNT(proj.id)::int AS project_count
          FROM products p
          LEFT JOIN projects proj ON proj.product_id = p.id

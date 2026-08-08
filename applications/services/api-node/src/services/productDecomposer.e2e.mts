@@ -82,6 +82,30 @@ async function main() {
     [result.projects.map((p) => p.projectId)])).rows[0].n;
   assert(trig === 3, "3 triggers no banco");
 
+  // A2: ciclo de vida agregado do produto (running → stalled_waiting_human → accepted)
+  const { recomputeProductLifecycle } = await import("./productLifecycle.js");
+  const lc = async () => (await pool.query(
+    "SELECT lifecycle_status FROM products WHERE id=$1", [result.productId])).rows[0].lifecycle_status;
+  assert(await lc() === "running", "produto nasce 'running' após decompose");
+
+  const [pA, pB, pC] = rows.map((r) => r.id as string);
+  // aceita 1 → partially_accepted
+  await pool.query("UPDATE projects SET status='accepted' WHERE id=$1", [pA]);
+  await recomputeProductLifecycle(pool, result.productId);
+  assert(await lc() === "partially_accepted", "1 aceito de 3 → partially_accepted");
+  // bloqueia 1 (Cyborg NEEDS_HUMAN) → stalled_waiting_human (esconde progresso)
+  await pool.query("UPDATE projects SET status='blocked_cyborg' WHERE id=$1", [pB]);
+  await recomputeProductLifecycle(pool, result.productId);
+  assert(await lc() === "stalled_waiting_human", "1 blocked_cyborg → stalled_waiting_human");
+  // desbloqueia e aceita todos → accepted
+  await pool.query("UPDATE projects SET status='accepted' WHERE id IN ($1,$2)", [pB, pC]);
+  await recomputeProductLifecycle(pool, result.productId);
+  assert(await lc() === "accepted", "todos aceitos → accepted");
+  // rejeição humana em um → failed (precedência dura)
+  await pool.query("UPDATE projects SET status='failed' WHERE id=$1", [pC]);
+  await recomputeProductLifecycle(pool, result.productId);
+  assert(await lc() === "failed", "1 failed → produto failed (precedência)");
+
   // Teste de rejeição: ciclo
   const badZip = new AdmZip();
   badZip.addFile("PRODUCT.json", Buffer.from(JSON.stringify({
