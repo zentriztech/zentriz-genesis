@@ -27,6 +27,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { extractProductZip } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
 import { ManifestError } from "../services/productManifest.js";
+import { dispatchProjectRun } from "../services/runnerDispatch.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -134,6 +135,18 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         approverEmail: user.email ?? null,
         zip: contents,
         specApprovedOverride,
+      });
+      // Dispara a ONDA 0 automaticamente (projetos sem predecessor). As ondas
+      // seguintes disparam pela cascata de accept existente. Best-effort em background.
+      setImmediate(async () => {
+        for (const pid of result.dispatched) {
+          try {
+            const r = await dispatchProjectRun(pool, pid);
+            request.log.info({ projectId: pid, dispatched: r.dispatched, reason: r.reason }, "[products/ingest] disparo onda 0");
+          } catch (e) {
+            request.log.error({ projectId: pid, err: e }, "[products/ingest] falha ao disparar onda 0");
+          }
+        }
       });
       return reply.status(201).send(result);
     } catch (e) {
