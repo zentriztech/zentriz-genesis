@@ -23,6 +23,8 @@ type_aliases:
   mobile_ios:         mobile_crossplatform    # portal subtype
   mobile_android:     mobile_crossplatform    # portal subtype
   backend_api_node:   backend_api             # variante nomeada
+  backend_nestjs:     backend_api_nestjs      # ADR-019: NestJS+Prisma/Mongoose (não Fastify/Drizzle)
+  nestjs_api:         backend_api_nestjs      # alias amigável
   static_site:        frontend_landing        # telegram detectProjectType output
   landing_page:       frontend_landing        # legado spec/page.tsx:553
   web_app:            frontend_dashboard      # legado spec/page.tsx:558
@@ -158,6 +160,64 @@ types:
       - "seed.mjs referenciado no Dockerfile CMD"
       - "rotas criadas em arquivos mas sem app.register no app.ts"
       - "prefixo duplicado ex /api/api/orders"
+
+  # ── backend_api_nestjs (NestJS + Prisma/Mongoose) — ADR-019 ────────────────
+  # Restaura os guardrails de backend para a stack NestJS (antes NestJS+Prisma caía
+  # em `other` e perdia health/envelope/fingerprint). Prisma/Mongoose são PERMITIDOS
+  # aqui (ao contrário de backend_api, que assume Fastify+Drizzle e proíbe Prisma).
+  backend_api_nestjs:
+    inherit_from: backend
+    labels:
+      pt_br: "🔌 API REST (NestJS)"
+      en: "REST API (NestJS)"
+    scaffold:
+      - src/main.ts
+      - src/app.module.ts
+    required_routes:
+      strict:
+        - "GET /health"
+      expected:
+        - "GET /api/<recurso>"
+    required_components:
+      - "envelope {data, meta}"
+      - "prefixo /api/ (setGlobalPrefix)"
+      - "AuthGuard/JWT (NestJS)"
+      - "exception filter com details:{}"
+      - "health/ready/metrics (Auto-Care §14)"
+    forbidden_patterns:
+      # Guardrails de backend preservados; Prisma NÃO é proibido aqui.
+      - "seed no Dockerfile CMD"                 # seed sempre fora
+      - "204 com body"
+      - "details omitido no errorFilter"
+      - "migrations vazias"
+      - "campo 'token' em vez de 'access_token'"
+      - "Express cru sem @nestjs (mistura de frameworks)"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "@nestjs/common"
+          - "@nestjs/core"
+          - "@Module"
+        soft:
+          - "@Controller"
+          - "@Injectable"
+          - "setGlobalPrefix"
+      forbidden_tokens:
+        # NÃO proíbe prisma/mongoose (permitidos). Proíbe misturar Fastify cru / Next.
+        - "next.config"
+        - "AppShell"
+        - "drizzle.config"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20"
+      - "NestJS 11"
+      - "TypeScript"
+      - "Prisma 7 (Postgres) e/ou Mongoose 9 (Mongo)"
+      - "PostgreSQL 16"
+    smell_signals:
+      - "controllers sem module registrado em app.module.ts"
+      - "prefixo duplicado ex /api/api/orders"
+      - "mistura Express cru com NestJS no mesmo serviço"
 
   # ── backend_api_python (FastAPI) ───────────────────────────────────────────
   backend_api_python:

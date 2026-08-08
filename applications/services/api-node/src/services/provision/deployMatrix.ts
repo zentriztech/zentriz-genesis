@@ -30,6 +30,7 @@ export const DEFAULT_BACKEND_DELIVERY_MODE: DeliveryMode = "source_only";
 export const BACKEND_ALLOWLIST = new Set<string>([
   "backend_api",
   "backend_api_node",
+  "backend_api_nestjs",   // ADR-019: NestJS+Prisma/Mongoose — senão o deploy de container rejeitaria
   "backend_api_python",
   "backend_graphql",
   "backend_worker",

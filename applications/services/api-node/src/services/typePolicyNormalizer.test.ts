@@ -29,6 +29,19 @@ describe("normalizeProjectType", () => {
     expect(normalizeProjectType("backend_api_node")).toBe("backend_api");
   });
 
+  it("resolve aliases NestJS para backend_api_nestjs (ADR-019)", () => {
+    expect(normalizeProjectType("backend_nestjs")).toBe("backend_api_nestjs");
+    expect(normalizeProjectType("nestjs_api")).toBe("backend_api_nestjs");
+    // canônico permanece canônico
+    expect(normalizeProjectType("backend_api_nestjs")).toBe("backend_api_nestjs");
+    // NestJS NÃO deve resolver para backend_api (são tipos distintos: Prisma permitido vs proibido)
+    expect(normalizeProjectType("backend_api_nestjs")).not.toBe("backend_api");
+  });
+
+  it("backend_api_nestjs é tipo conhecido", () => {
+    expect(isKnownProjectType("backend_api_nestjs")).toBe(true);
+  });
+
   it("mantém tipo desconhecido inalterado (Python side resolve para _default)", () => {
     expect(normalizeProjectType("qualquer_coisa_xyz")).toBe("qualquer_coisa_xyz");
     expect(normalizeProjectType("backend_graphql")).toBe("backend_graphql"); // Wave 0 não cobre

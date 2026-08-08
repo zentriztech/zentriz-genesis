@@ -87,12 +87,14 @@
   },
   "type_aliases": {
     "backend_api_node": "backend_api",
+    "backend_nestjs": "backend_api_nestjs",
     "frontend_web": "frontend_dashboard",
     "frontend_webapp": "frontend_dashboard",
     "landing_page": "frontend_landing",
     "mobile_android": "mobile_crossplatform",
     "mobile_app": "mobile_crossplatform",
     "mobile_ios": "mobile_crossplatform",
+    "nestjs_api": "backend_api_nestjs",
     "static_site": "frontend_landing",
     "web_app": "frontend_dashboard"
   },
@@ -190,6 +192,72 @@
         "Node 20",
         "Fastify",
         "Drizzle ORM",
+        "PostgreSQL 16"
+      ]
+    },
+    "backend_api_nestjs": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "next.config",
+          "AppShell",
+          "drizzle.config"
+        ],
+        "required_tokens": {
+          "soft": [
+            "@Controller",
+            "@Injectable",
+            "setGlobalPrefix"
+          ],
+          "strong": [
+            "@nestjs/common",
+            "@nestjs/core",
+            "@Module"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "seed no Dockerfile CMD",
+        "204 com body",
+        "details omitido no errorFilter",
+        "migrations vazias",
+        "campo 'token' em vez de 'access_token'",
+        "Express cru sem @nestjs (mistura de frameworks)"
+      ],
+      "inherit_from": "backend",
+      "labels": {
+        "en": "REST API (NestJS)",
+        "pt_br": "🔌 API REST (NestJS)"
+      },
+      "required_components": [
+        "envelope {data, meta}",
+        "prefixo /api/ (setGlobalPrefix)",
+        "AuthGuard/JWT (NestJS)",
+        "exception filter com details:{}",
+        "health/ready/metrics (Auto-Care §14)"
+      ],
+      "required_routes": {
+        "expected": [
+          "GET /api/<recurso>"
+        ],
+        "strict": [
+          "GET /health"
+        ]
+      },
+      "scaffold": [
+        "src/main.ts",
+        "src/app.module.ts"
+      ],
+      "smell_signals": [
+        "controllers sem module registrado em app.module.ts",
+        "prefixo duplicado ex /api/api/orders",
+        "mistura Express cru com NestJS no mesmo serviço"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20",
+        "NestJS 11",
+        "TypeScript",
+        "Prisma 7 (Postgres) e/ou Mongoose 9 (Mongo)",
         "PostgreSQL 16"
       ]
     },
