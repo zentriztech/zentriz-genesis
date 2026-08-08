@@ -24,6 +24,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { extractProductZip } from "./specs.js";
+import { decomposeProduct } from "../services/productDecomposer.js";
+import { ManifestError } from "../services/productManifest.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -78,6 +81,68 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       );
       return reply.status(201).send(res.rows[0]);
     } finally { client.release(); }
+  });
+
+  // ── POST /api/products/ingest ──────────────────────────────────────────────────
+  // ADR-018 / Cenário A: ingere UM ZIP com PRODUCT.json + N specs → cria produto +
+  // N projetos + arestas do grafo (project_triggers), numa transação. Retorna os
+  // projectIds da onda 0 (`dispatched`) para o chamador acionar POST /run (reusa o
+  // /run endurecido em vez de duplicar rate-limit/gates). Ondas seguintes disparam
+  // pela cascata de accept existente.
+  app.post("/api/products/ingest", async (request, reply) => {
+    const user = getUser(request);
+    const tenantId = user.tenantId ?? (await pool.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
+    if (!tenantId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+
+    // multipart: pega a parte-arquivo .zip e o campo opcional specApproved
+    type Part = {
+      filename?: string; mimetype?: string;
+      toBuffer(): Promise<Buffer>;
+      fields?: Record<string, { value?: unknown } | { value?: unknown }[]>;
+    };
+    const req = request as unknown as { file: () => Promise<Part | undefined> };
+    let zipBuffer: Buffer | null = null;
+    let specApprovedOverride: boolean | undefined;
+    let part: Part | undefined;
+    while ((part = await req.file())) {
+      if (part.fields?.specApproved !== undefined) {
+        const f = part.fields.specApproved;
+        const v = Array.isArray(f) ? f[0] : f;
+        const raw = v && typeof (v as { value?: string }).value === "string" ? (v as { value: string }).value.trim().toLowerCase() : "";
+        if (["true", "1", "on", "yes"].includes(raw)) specApprovedOverride = true;
+      }
+      if (part.filename && part.filename.toLowerCase().endsWith(".zip")) {
+        zipBuffer = await part.toBuffer();
+      } else if (part.filename) {
+        await part.toBuffer(); // drena partes não-zip
+      }
+    }
+    if (!zipBuffer) return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie um arquivo .zip do produto (com PRODUCT.json na raiz)." });
+
+    const contents = extractProductZip(zipBuffer);
+    if (!contents) {
+      return reply.status(400).send({
+        code: "NO_PRODUCT_MANIFEST",
+        message: "ZIP sem PRODUCT.json na raiz. Para um único projeto, use POST /api/specs. Para um produto multi-projeto, inclua PRODUCT.json (ver ADR-018).",
+      });
+    }
+
+    try {
+      const result = await decomposeProduct(pool, {
+        tenantId,
+        createdBy: user.id,
+        approverEmail: user.email ?? null,
+        zip: contents,
+        specApprovedOverride,
+      });
+      return reply.status(201).send(result);
+    } catch (e) {
+      if (e instanceof ManifestError) {
+        return reply.status(422).send({ code: e.code, message: e.message, details: e.details });
+      }
+      request.log.error({ err: e }, "[products/ingest] falha na decomposição");
+      return reply.status(500).send({ code: "INGEST_FAILED", message: e instanceof Error ? e.message : "Erro na ingestão do produto" });
+    }
   });
 
   // ── GET /api/products/:id ────────────────────────────────────────────────────

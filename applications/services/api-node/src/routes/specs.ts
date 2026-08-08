@@ -5,6 +5,7 @@ import crypto from "crypto";
 import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { createProjectFromSpec } from "../services/projectCreation.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -106,6 +107,51 @@ function extractZip(zipBuffer: Buffer, originalName: string): ExtractedFile[] {
     buffer:   Buffer.from(combined, "utf-8"),
     mimeType: "text/markdown",
   }];
+}
+
+/** Nome do manifesto de produto na raiz do ZIP (ADR-018). JSON nativo (sem dep de YAML). */
+export const PRODUCT_MANIFEST_NAME = "PRODUCT.json";
+
+export interface ProductZipContents {
+  manifestText: string;                 // conteúdo do PRODUCT.json
+  files: Map<string, string>;           // path (normalizado) → conteúdo UTF-8 de cada arquivo de texto
+}
+
+/**
+ * ADR-018 / Cenário A: extrai um ZIP PRESERVANDO a estrutura de diretórios e
+ * detecta o manifesto de produto (PRODUCT.json na raiz). Se o manifesto existir,
+ * retorna {manifestText, files} para o Product Architect decompor em N projetos.
+ * Se NÃO existir, retorna null → o chamador cai no fluxo legado extractZip (1 projeto).
+ * Diferença central vs extractZip: NÃO concatena; mantém cada arquivo endereçável por path.
+ */
+export function extractProductZip(zipBuffer: Buffer): ProductZipContents | null {
+  const zip = new AdmZip(zipBuffer);
+  const files = new Map<string, string>();
+  let manifestText: string | null = null;
+
+  for (const e of zip.getEntries()) {
+    if (e.isDirectory) continue;
+    const name = e.entryName;
+    if (name.includes("__MACOSX") || name.includes(".DS_Store")) continue;
+    if (path.basename(name).startsWith("._")) continue; // AppleDouble
+    const norm = name.replace(/^\.\//, "");
+    // manifesto na raiz (aceita em qualquer profundidade, mas prioriza raiz)
+    if (path.basename(norm) === PRODUCT_MANIFEST_NAME) {
+      const txt = e.getData().toString("utf-8");
+      // raiz vence subpasta
+      if (manifestText === null || norm === PRODUCT_MANIFEST_NAME) manifestText = txt;
+      continue;
+    }
+    const ext = path.extname(norm).toLowerCase();
+    if (ZIP_BINARY_SKIP.has(ext)) continue;
+    if (!ZIP_TEXT_EXTS.has(ext) && !ZIP_CODE_EXTS.has(ext)) continue;
+    try {
+      files.set(norm, e.getData().toString("utf-8"));
+    } catch { /* pula arquivos não-UTF8 */ }
+  }
+
+  if (manifestText === null) return null; // sem manifesto → fluxo legado
+  return { manifestText, files };
 }
 
 // ── Message envelope builder — spec from free description (leigo → spec completa) ──
@@ -532,125 +578,41 @@ export async function specRoutes(app: FastifyInstance) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie pelo menos um arquivo" });
     }
 
+    if (files.length === 0) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie pelo menos um arquivo" });
+    }
+
+    // A4 (ADR-018): a criação de projeto agora vive em createProjectFromSpec (função pura),
+    // reutilizada por esta rota E pelo product_decomposer (ingestão de produto em lote).
     const client = await pool.connect();
-    let projectId: string;
+    let result: { projectId: string; status: string };
     try {
       const tenantId =
         user.tenantId ?? (await client.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
       if (!tenantId) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
       }
-
-      // Compute version_number: find the root project and count existing versions
-      let versionNumber = 1;
-      let rootParentId: string | null = parentProjectId;
-      if (parentProjectId) {
-        // Walk up to root if parent is itself a child
-        const parentRow = await client.query(
-          "SELECT parent_project_id, version_number FROM projects WHERE id = $1",
-          [parentProjectId]
-        );
-        const parent = parentRow.rows[0];
-        if (parent?.parent_project_id) {
-          rootParentId = parent.parent_project_id as string;
-        }
-        // Count existing versions in this lineage (root + all children)
-        const countRes = await client.query(
-          `SELECT COUNT(*) FROM projects
-           WHERE id = $1 OR parent_project_id = $1 OR
-                 parent_project_id IN (SELECT id FROM projects WHERE parent_project_id = $1)`,
-          [rootParentId ?? parentProjectId]
-        );
-        versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
-      }
-
-      // SPEC-APPROVED: hash do conteúdo bruto das specs (SHA-256), para impedir
-      // "aprovo v1, subo/edito v2". DEVE casar com o hash recomputado pelo runner
-      // (_compute_spec_files_hash).
-      // FASE-4/CORR-P2: ordem DETERMINÍSTICA por filename (não por ordem de inserção /
-      // created_at, que não tem tiebreak e pode reordenar em inserts no mesmo microssegundo).
-      // Ambos os lados ordenam por filename ASC antes de unir por "\n".
-      const specHash = specApproved
-        ? crypto.createHash("sha256")
-            .update(
-              [...files]
-                .sort((a, b) => a.filename.localeCompare(b.filename))
-                .map((f) => f.buffer.toString("utf-8"))
-                .join("\n"),
-              "utf-8",
-            )
-            .digest("hex")
-        : null;
-      const extraJson = JSON.stringify({
-        ...(freeDescription ? { free_description: freeDescription } : {}),
-        ...(projectType    ? { project_type: projectType }           : {}),
-        // DM-T2: entrega (só grava o que veio; ausência = defaults do deployMatrix no deploy).
-        ...(deliveryFields.deliveryMode ? { delivery_mode: deliveryFields.deliveryMode } : {}),
-        ...(deliveryFields.runtimeTarget ? { runtime_target: deliveryFields.runtimeTarget } : {}),
-        ...(deliveryFields.dbMode ? { db_mode: deliveryFields.dbMode } : {}),
-        ...(deliveryFields.hostTarget ? { host_target: deliveryFields.hostTarget } : {}),
-        ...(deliveryFields.domainMode ? { domain_mode: deliveryFields.domainMode } : {}),
-        // SPEC-APPROVED: persistência auditável (não booleano anônimo).
-        // FASE-4/SEC-P1: `approved_by` é SEMPRE derivado do usuário autenticado (JWT),
-        // NUNCA do campo `approvedBy` do multipart — senão a trilha de auditoria seria
-        // falsificável (qualquer um poderia gravar "aprovado por <CEO>"). O campo do
-        // cliente é ignorado de propósito.
-        ...(specApproved ? {
-          spec_approved: true,
-          approved_by: user.email ?? user.id,
-          approved_at: new Date().toISOString(),
-          spec_hash: specHash,
-        } : {}),
+      result = await createProjectFromSpec(client, {
+        tenantId,
+        createdBy: user.id,
+        approverEmail: user.email ?? null,
+        title,
+        files,
+        productId,
+        parentProjectId,
+        projectType,
+        freeDescription,
+        deliveryFields,
+        specApproved,
+        isDraft,
       });
-      const projectResult = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
-        [tenantId, user.id, title, files[0].filename, isDraft ? "draft" : "spec_submitted", rootParentId, versionNumber, extraJson, productId]
-      );
-      projectId = projectResult.rows[0].id;
     } finally {
       client.release();
     }
 
-    const projectDir = path.join(UPLOAD_DIR, projectId);
-    await fs.mkdir(projectDir, { recursive: true });
-
-    const saved: { filename: string; filePath: string; mimeType: string }[] = [];
-    for (const f of files) {
-      const safeName = `${Date.now()}-${path.basename(f.filename)}`;
-      const filePath = path.join(projectDir, safeName);
-      await fs.writeFile(filePath, f.buffer);
-      saved.push({ filename: f.filename, filePath, mimeType: f.mimeType });
-    }
-
-    const client2 = await pool.connect();
-    try {
-      for (const f of saved) {
-        await client2.query(
-          `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type) VALUES ($1, $2, $3, $4)`,
-          [projectId, f.filename, f.filePath, f.mimeType]
-        );
-      }
-      // Rascunho (isDraft) permanece 'draft' mesmo com anexo não-.md — o usuário decide quando
-      // iniciar; a conversão roda no /run. Só projetos NÃO-rascunho vão a 'pending_conversion'.
-      const hasNonMd = saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md");
-      if (hasNonMd && !isDraft) {
-        await client2.query("UPDATE projects SET status = $1, updated_at = now() WHERE id = $2", [
-          "pending_conversion",
-          projectId,
-        ]);
-      }
-    } finally {
-      client2.release();
-    }
-
     return reply.send({
-      projectId,
-      status: isDraft
-        ? "draft"
-        : saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md")
-        ? "pending_conversion"
-        : "spec_submitted",
+      projectId: result.projectId,
+      status: result.status,
       message: "Spec(s) recebida(s). O fluxo será iniciado em seguida.",
     });
   });
