@@ -52,3 +52,6 @@ secrets/
 *.tfvars
 !*.tfvars.example
 .terraform.lock.hcl
+
+# Multipart upload artifacts (product ZIP ingest, spec attachments) — runtime only
+applications/services/api-node/uploads/
