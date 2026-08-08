@@ -82,6 +82,20 @@ async function main() {
     [result.projects.map((p) => p.projectId)])).rows[0].n;
   assert(trig === 3, "3 triggers no banco");
 
+  // Idempotência (DoD): reingerir o MESMO ZIP não cria produto/projetos duplicados.
+  const reingest = await decomposeProduct(pool, {
+    tenantId, createdBy: userId, approverEmail: "e2e@zentriz.com.br", zip: extractProductZip(buildZip())!,
+  });
+  assert(reingest.idempotentReuse === true, "reingestão do mesmo ZIP → idempotentReuse=true");
+  assert(reingest.productId === result.productId, "reingestão devolve o MESMO productId");
+  assert(reingest.dispatched.length === 0, "reingestão não dispara nada");
+  const prodCount = (await pool.query(
+    "SELECT COUNT(*)::int AS n FROM products WHERE name='E2E-TestProduct' AND tenant_id=$1", [tenantId])).rows[0].n;
+  assert(prodCount === 1, "continua existindo apenas 1 produto (sem duplicata)");
+  const projCount = (await pool.query(
+    "SELECT COUNT(*)::int AS n FROM projects WHERE product_id=$1", [result.productId])).rows[0].n;
+  assert(projCount === 3, "continua com 3 projetos (sem duplicata)");
+
   // A2: ciclo de vida agregado do produto (running → stalled_waiting_human → accepted)
   const { recomputeProductLifecycle } = await import("./productLifecycle.js");
   const lc = async () => (await pool.query(

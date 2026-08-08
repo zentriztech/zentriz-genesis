@@ -11,7 +11,7 @@
  * qualquer projeto; em erro, faz ROLLBACK (nada meia-criado).
  */
 import type { Pool } from "pg";
-import { buildProductSketch, parseManifest, ManifestError, type ProductSketch } from "./productManifest.js";
+import { buildProductSketch, parseManifest, computeProductHash, ManifestError, type ProductSketch } from "./productManifest.js";
 import { createProjectFromSpec } from "./projectCreation.js";
 import type { ProductZipContents } from "../routes/specs.js";
 
@@ -31,6 +31,8 @@ export interface DecomposeResult {
   waves: string[][];
   triggersCreated: number;
   dispatched: string[]; // projectIds da onda 0 marcados para /run
+  /** true quando a ingestão foi no-op idempotente (produto com mesmo hash já existia). */
+  idempotentReuse?: boolean;
 }
 
 /** Deriva deliveryFields a partir do delivery do projeto/manifesto. */
@@ -38,6 +40,34 @@ function deliveryFieldsFor(delivery: string | undefined): Record<string, string>
   if (!delivery) return {};
   // backend usa delivery_mode; mobile/eas será tratado no Cenário B (deliveryChannel).
   return { deliveryMode: delivery };
+}
+
+/**
+ * Monta um DecomposeResult para um produto JÁ existente (no-op idempotente).
+ * Lê os projetos atuais do produto; não dispara nada (dispatched vazio).
+ */
+async function buildReuseResult(
+  pool: Pool, productId: string, productName: string, sketch: ProductSketch,
+): Promise<DecomposeResult> {
+  const rows = (await pool.query(
+    "SELECT id, title, status FROM projects WHERE product_id = $1",
+    [productId],
+  )).rows as Array<{ id: string; title: string; status: string }>;
+  const byTitle = new Map(rows.map((r) => [r.title, r]));
+  const projects = sketch.projects.map((p) => {
+    const r = byTitle.get(p.id);
+    return {
+      manifestId: p.id,
+      projectId: r?.id ?? "",
+      wave: p.wave,
+      type: p.type,
+      status: r?.status ?? "unknown",
+    };
+  });
+  return {
+    productId, productName, projects, waves: sketch.waves,
+    triggersCreated: 0, dispatched: [], idempotentReuse: true,
+  };
 }
 
 export async function decomposeProduct(pool: Pool, params: DecomposeParams): Promise<DecomposeResult> {
@@ -48,16 +78,27 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
   const presentFiles = [...zip.files.keys()];
   const sketch: ProductSketch = buildProductSketch(manifest, presentFiles);
   const specApproved = params.specApprovedOverride ?? !!manifest.product.specApproved;
+  const productHash = computeProductHash(zip.manifestText, zip.files);
+
+  // 1b. idempotência (ADR-018 DoD): se este tenant já ingeriu ESTE produto (hash idêntico),
+  //     não recria nada — devolve o produto existente como no-op. Reingestão é segura.
+  const existing = await pool.query(
+    "SELECT id, name FROM products WHERE tenant_id = $1 AND product_hash = $2 LIMIT 1",
+    [tenantId, productHash],
+  );
+  if (existing.rows[0]) {
+    return buildReuseResult(pool, existing.rows[0].id as string, existing.rows[0].name as string, sketch);
+  }
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // 2. cria o produto
+    // 2. cria o produto (com product_hash p/ idempotência futura)
     const prodRes = await client.query(
-      `INSERT INTO products (tenant_id, created_by, name, description)
-       VALUES ($1, $2, $3, $4) RETURNING id, name`,
-      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null],
+      `INSERT INTO products (tenant_id, created_by, name, description, product_hash)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, name`,
+      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash],
     );
     const productId = prodRes.rows[0].id as string;
 
@@ -124,6 +165,17 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
     };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
+    // Corrida: dois ingests idênticos simultâneos — o pre-check não viu, mas o índice
+    // único (tenant_id, product_hash) barrou. Trata como no-op idempotente.
+    if ((e as { code?: string })?.code === "23505") {
+      const dup = await pool.query(
+        "SELECT id, name FROM products WHERE tenant_id = $1 AND product_hash = $2 LIMIT 1",
+        [tenantId, productHash],
+      );
+      if (dup.rows[0]) {
+        return buildReuseResult(pool, dup.rows[0].id as string, dup.rows[0].name as string, sketch);
+      }
+    }
     throw e;
   } finally {
     client.release();

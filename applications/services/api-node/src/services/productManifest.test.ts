@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseManifest, buildProductSketch, ManifestError } from "./productManifest.js";
+import { parseManifest, buildProductSketch, computeProductHash, ManifestError } from "./productManifest.js";
 
 const FILES = [
   "specs/SPEC-00-contracts.md", "specs/SPEC-20-tokens.md",
@@ -75,5 +75,41 @@ describe("productManifest", () => {
     const m = baseManifest();
     m.projects[1].id = "c";
     expect(() => buildProductSketch(m as any, FILES)).toThrowError(/DUPLICATE_ID|duplicad/);
+  });
+});
+
+describe("computeProductHash (idempotência)", () => {
+  const manifest = '{"product":{"name":"P"},"projects":[]}';
+  const files = () => new Map([["a.md", "conteudo A"], ["b.md", "conteudo B"]]);
+
+  it("é estável para a mesma entrada", () => {
+    expect(computeProductHash(manifest, files())).toBe(computeProductHash(manifest, files()));
+  });
+
+  it("independe da ordem de inserção no Map", () => {
+    const m1 = new Map([["a.md", "A"], ["b.md", "B"]]);
+    const m2 = new Map([["b.md", "B"], ["a.md", "A"]]);
+    expect(computeProductHash(manifest, m1)).toBe(computeProductHash(manifest, m2));
+  });
+
+  it("muda se o conteúdo de um arquivo muda", () => {
+    const m2 = new Map([["a.md", "conteudo A"], ["b.md", "conteudo B MODIFICADO"]]);
+    expect(computeProductHash(manifest, files())).not.toBe(computeProductHash(manifest, m2));
+  });
+
+  it("muda se o manifesto muda", () => {
+    expect(computeProductHash(manifest, files()))
+      .not.toBe(computeProductHash('{"product":{"name":"OUTRO"},"projects":[]}', files()));
+  });
+
+  it("evita colisão por concatenação (comprimento explícito)", () => {
+    // ("ab","c") vs ("a","bc") não devem colidir graças ao length no framing.
+    const m1 = new Map([["x.md", "ab"], ["y.md", "c"]]);
+    const m2 = new Map([["x.md", "a"], ["y.md", "bc"]]);
+    expect(computeProductHash(manifest, m1)).not.toBe(computeProductHash(manifest, m2));
+  });
+
+  it("retorna SHA-256 hex (64 chars)", () => {
+    expect(computeProductHash(manifest, files())).toMatch(/^[0-9a-f]{64}$/);
   });
 });

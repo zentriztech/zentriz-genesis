@@ -136,6 +136,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         zip: contents,
         specApprovedOverride,
       });
+      // Reingestão idempotente (mesmo produto já existe): no-op, 200, sem disparar nada.
+      if (result.idempotentReuse) {
+        request.log.info({ productId: result.productId }, "[products/ingest] no-op idempotente (produto já ingerido)");
+        return reply.status(200).send(result);
+      }
       // Dispara a ONDA 0 automaticamente (projetos sem predecessor). As ondas
       // seguintes disparam pela cascata de accept existente. Best-effort em background.
       setImmediate(async () => {
