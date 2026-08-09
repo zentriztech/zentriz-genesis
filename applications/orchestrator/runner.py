@@ -2015,9 +2015,26 @@ def _structural_gate(project_id: str, pm_module: str) -> tuple[bool, str]:
             return False, "RUNBOOK.md ausente em project/ e docs/devops/"
 
     if pm_module in ("backend", "fullstack"):
-        has_dockerfile = any(root.rglob("Dockerfile"))
-        if not has_dockerfile:
-            return False, f"pm_module={pm_module} sem Dockerfile no projeto"
+        # Libs TS puras (lib_ts/lib_cli/lib_plugin) roteiam para pm_module=backend mas são
+        # publicadas em npm, NÃO containerizadas — não têm (nem devem ter) Dockerfile. Exigir
+        # Dockerfile delas trava a aceitação (achado fatia vertical). Detecta lib pelo project_type.
+        _ptype = ""
+        try:
+            _pd, _ps = _api_get(f"/api/projects/{project_id}")
+            if _pd and isinstance(_pd, dict):
+                _extra = _pd.get("extra") or {}
+                _ptype = str((_extra.get("project_type") if isinstance(_extra, dict) else "") or "").lower()
+        except Exception:
+            _ptype = ""
+        _is_lib = _ptype in ("lib_ts", "lib_cli", "lib_plugin")
+        if not _is_lib:
+            has_dockerfile = any(root.rglob("Dockerfile"))
+            if not has_dockerfile:
+                return False, f"pm_module={pm_module} sem Dockerfile no projeto"
+        else:
+            # Lib: exige package.json em vez de Dockerfile (artefato de publicação npm).
+            if not any(root.rglob("package.json")):
+                return False, f"lib ({_ptype}) sem package.json no projeto"
 
     return True, ""
 
