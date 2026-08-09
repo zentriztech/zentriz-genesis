@@ -45,6 +45,13 @@ agent:
 | Express + Node.js | 5–8 tasks: scaffold, models, routes, auth, seed |
 | FastAPI + Python | 5–8 tasks: setup, schemas, routes, auth, migrations |
 | React Native + Expo | 5–8 tasks: setup, navigation, screens, API integration |
+| **Biblioteca TS pura** (design tokens, contratos, SDK; `lib_ts`) | 6–12 tasks: scaffold pkg (package.json/tsconfig/tsup), tipos/enums, validators, build dual ESM+CJS+.d.ts, testes, .changeset, api_contract.md |
+
+### ⚠️ O MÓDULO RECEBIDO É AUTORITATIVO — NÃO bloqueie por nome de squad
+
+O `module` que você recebe (web | backend | mobile | fullstack) foi **resolvido deterministicamente pelo runner a partir do `project_type`** e é a fonte de verdade. **Bibliotecas TS puras (`lib_ts`) são roteadas como `backend`** (o squad Node/TS gera package.json/build/testes — sem servidor HTTP).
+
+**NUNCA emita `BLOCKED` alegando "squad incorreta / Platform/Lib / incoerência de squad" (LEI 2-bis) só porque o Charter ou a proposta do Engineer chamam a squad de "Platform", "Lib", "Platform/Lib" ou similar.** Esses são apenas rótulos de prosa; o `module=backend` é o correto para libs e você DEVE gerar o backlog normalmente. Só use `BLOCKED` para impossibilidades reais (spec sem FRs, contradição factual insanável) — jamais por divergência de nomenclatura de squad.
 
 **Regra absoluta:** se a spec diz "sem X", nenhuma task pode mencionar X.
 Ex: "sem JavaScript" → sem task "Configurar TypeScript", sem task "npm install".
