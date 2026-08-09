@@ -785,7 +785,14 @@ def run_agent(
             return "openai"
         return ""
 
-    _raw_provider = _provider_override or os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
+    # Se o container está forçado a Foundry (GENESIS_LLM_PROVIDER=foundry), o env VENCE o
+    # override do envelope — o envelope pode trazer provider stale (bedrock/anthropic) da
+    # config LLM no banco, que não conhece Foundry. Foundry é decisão de infraestrutura.
+    _env_provider = os.environ.get("GENESIS_LLM_PROVIDER", "anthropic").strip().lower()
+    if _env_provider == "foundry":
+        _raw_provider = "foundry"
+    else:
+        _raw_provider = _provider_override or _env_provider
     _model_for_inference = _model_override or _get_model_for_role(role)
     _inferred = _infer_provider_from_model(_model_for_inference)
     # Se o provider declarado é openai mas o modelo é Claude → corrigir silenciosamente
@@ -799,7 +806,9 @@ def run_agent(
         provider = _raw_provider
 
     # model e timeout definidos aqui para uso tanto no bloco OpenAI quanto Anthropic/Bedrock
-    model   = _model_override or _get_model_for_role(role)
+    # Foundry: ignora _model_override do envelope (pode ser id bedrock us.anthropic.* que o
+    # Foundry rejeita) e usa os modelos Claude 5 do env (_get_model_for_role lê CLAUDE_MODEL*).
+    model   = _get_model_for_role(role) if provider == "foundry" else (_model_override or _get_model_for_role(role))
     _msg_limits_early = message.get("limits") or {}
     timeout = int(
         _msg_limits_early.get("timeout_sec")
