@@ -204,11 +204,23 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     # ficava VAZIA e a análise a2_fidelidade concluía "nenhum código" (BLOCKER falso).
     # (achado #9 da fatia vertical — viés frontend/web)
     _src_exists = src_root.exists()
+    _apps_root = proj_dir / "apps"
     _all_src: list = []
     if _src_exists:
         for _pat in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs"):
             _all_src.extend(src_root.rglob(_pat))
-    _apps_tree = "\n".join(sorted(str(p.relative_to(proj_dir)) for p in _all_src))[:6000] if _all_src else ""
+    # INCLUIR os arquivos de config na RAIZ de apps/ (package.json, tsconfig, tsup.config,
+    # Dockerfile, vitest.config) — antes o apps_tree só listava apps/src/** e o Cyborg
+    # concluía "sem package.json/tsconfig" (BLOCKER falso). (achado #11)
+    _root_files: list = []
+    if _apps_root.exists():
+        for _cfg in ("package.json", "tsconfig.json", "tsconfig.test.json", "tsup.config.ts",
+                     "vitest.config.ts", "Dockerfile", ".eslintrc.js", "eslint.config.js",
+                     "app.config.ts", "eas.json", "README.md"):
+            if (_apps_root / _cfg).exists():
+                _root_files.append(_apps_root / _cfg)
+    _tree_paths = sorted(str(p.relative_to(proj_dir)) for p in (_root_files + _all_src))
+    _apps_tree = "\n".join(_tree_paths)[:6000] if _tree_paths else ""
 
     # Amostra de código real (para tipos não-web): index/barrel + primeiros fontes.
     def _read_first(patterns: list[str], n: int = 6) -> str:
@@ -247,9 +259,16 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
         # Amostra de fontes reais — cobre lib/backend (index, *.ts) além de web.
         "source_sample": _read_first(["index.ts", "index.tsx", "*.ts", "*.tsx"]),
         "types":      _read_glob("**/types.ts") or _read_glob("**/*.ts"),
+        # Arquivos de config na raiz de apps/ — o analisador precisa vê-los p/ não acusar
+        # "sem package.json/tsconfig" (achado #11).
+        "package_json": _read(_apps_root / "package.json"),
+        "tsconfig":     _read(_apps_root / "tsconfig.json"),
+        "tsup_config":  _read(_apps_root / "tsup.config.ts"),
     }
 
-    # Build output
+    # Build output — tenta o full-test-server (host); se indisponível, roda build LOCAL
+    # (npm ci + build/type-check no diretório apps/) para o a3_build_runtime ter dados reais.
+    _build_done = False
     try:
         status, text = _http("POST", f"{FTS_URL}/cyborg-build",
                              {"project_id": project_id, "prod_id": prod_id or "", "timeout": 300},
@@ -260,8 +279,31 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
             ctx["build_rc"] = bd.get("build_rc", -1)
             ctx["type_check_output"] = bd.get("type_check_output", "")[-2000:]
             ctx["type_check_rc"] = bd.get("type_check_rc", -1)
+            _build_done = True
     except Exception as e:
-        logger.warning(f"[Cyborg V3] Build check falhou: {e}")
+        logger.warning(f"[Cyborg V3] Build check (FTS) falhou: {e}")
+
+    if not _build_done and _apps_root.exists() and (_apps_root / "package.json").exists():
+        # Fallback local: instala deps e roda type-check (tsc --noEmit) + build.
+        import subprocess as _sp
+        try:
+            logger.info("[Cyborg V3] FTS indisponível — build local em %s", _apps_root)
+            _env = {**os.environ, "CI": "1"}
+            _inst = _sp.run(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error"],
+                            cwd=str(_apps_root), capture_output=True, text=True, timeout=600, env=_env)
+            _tc = _sp.run(["npx", "--no-install", "tsc", "--noEmit"],
+                          cwd=str(_apps_root), capture_output=True, text=True, timeout=300, env=_env)
+            ctx["type_check_rc"] = _tc.returncode
+            ctx["type_check_output"] = (_tc.stdout + _tc.stderr)[-2000:]
+            _bd = _sp.run(["npm", "run", "build", "--if-present"],
+                          cwd=str(_apps_root), capture_output=True, text=True, timeout=600, env=_env)
+            ctx["build_rc"] = _bd.returncode
+            ctx["build_output"] = (_bd.stdout + _bd.stderr)[-4000:]
+            logger.info("[Cyborg V3] build local: install_rc=%s tsc_rc=%s build_rc=%s",
+                        _inst.returncode, _tc.returncode, _bd.returncode)
+        except Exception as e:
+            logger.warning(f"[Cyborg V3] Build local falhou: {e}")
+            ctx.setdefault("build_rc", -1)
 
     ctx["_proj_dir"] = str(proj_dir)
 
