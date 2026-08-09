@@ -4554,18 +4554,29 @@ def main() -> int:
                     pm_module = _cached_module
                     logger.info("[Pipeline] pm_module lido do cache (pipeline_ctx.current_module=%s) — sem re-inferir (rodada %s)", pm_module, pm_round)
                 else:
-                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content, project_type=(getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else ""))
-                    # Se a inferência devolver um módulo já rejeitado, tentar próximo candidato
+                    _ptype_for_mod = (getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else "")
+                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content, project_type=_ptype_for_mod)
+                    # Se a inferência devolver um módulo já rejeitado, tentar próximo candidato.
                     if pm_module in _rejected_modules:
-                        # Fallback determinístico: tenta na ordem web→backend→mobile→fullstack os que ainda não foram rejeitados
-                        for _candidate in ("web", "backend", "mobile", "fullstack"):
+                        # Ordem de fallback depende do tipo: libs/backends NUNCA caem p/ web/mobile
+                        # (achado #10: lib_ts rejeitada no backend caía p/ web → backlog errado).
+                        _pt_low = str(_ptype_for_mod or "").lower()
+                        if _pt_low in ("lib_ts", "lib_cli", "lib_plugin") or _pt_low.startswith("backend"):
+                            _fallback_order = ("backend",)  # lib/backend só fazem sentido como backend
+                        else:
+                            _fallback_order = ("web", "backend", "mobile", "fullstack")
+                        _picked = False
+                        for _candidate in _fallback_order:
                             if _candidate not in _rejected_modules:
-                                pm_module = _candidate
+                                pm_module = _candidate; _picked = True
                                 logger.warning(
-                                    "[Pipeline] inferência devolveu %s (rejeitado); usando fallback %s",
-                                    _cached_module or "?", pm_module,
+                                    "[Pipeline] inferência devolveu módulo rejeitado; fallback (tipo=%s) → %s",
+                                    _pt_low or "?", pm_module,
                                 )
                                 break
+                        # lib/backend com backend já rejeitado: mantém backend (não há alternativa válida)
+                        if not _picked and (_pt_low in ("lib_ts","lib_cli","lib_plugin") or _pt_low.startswith("backend")):
+                            pm_module = "backend"
                     logger.info(
                         "[Pipeline] pm_module inferido: %s (rodada %s, cache %s)",
                         pm_module, pm_round, "invalidado" if _cache_invalidated else "miss",
