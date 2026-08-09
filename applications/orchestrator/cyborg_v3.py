@@ -199,22 +199,54 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
             total += len(entry)
         return "\n\n".join(parts)
 
+    # apps_tree GENÉRICO: captura TODO tipo de fonte (.ts/.tsx/.js/.jsx/.mjs), não só .tsx.
+    # Antes só varria *.tsx → para lib TS/backend (que têm .ts, sem page.tsx/Sidebar) a árvore
+    # ficava VAZIA e a análise a2_fidelidade concluía "nenhum código" (BLOCKER falso).
+    # (achado #9 da fatia vertical — viés frontend/web)
+    _src_exists = src_root.exists()
+    _all_src: list = []
+    if _src_exists:
+        for _pat in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.mjs"):
+            _all_src.extend(src_root.rglob(_pat))
+    _apps_tree = "\n".join(sorted(str(p.relative_to(proj_dir)) for p in _all_src))[:6000] if _all_src else ""
+
+    # Amostra de código real (para tipos não-web): index/barrel + primeiros fontes.
+    def _read_first(patterns: list[str], n: int = 6) -> str:
+        if not _src_exists:
+            return ""
+        found: list = []
+        for pat in patterns:
+            found.extend(sorted(src_root.rglob(pat)))
+        seen, parts, total = set(), [], 0
+        for f in found:
+            if f in seen:
+                continue
+            seen.add(f)
+            entry = f"### {f.relative_to(proj_dir)}\n```\n{_read(f, 1500)}\n```"
+            if total + len(entry) > 20000 or len(parts) >= n:
+                break
+            parts.append(entry); total += len(entry)
+        return "\n\n".join(parts)
+
     ctx = {
         "project_id": project_id,
         "spec":                  _read(proj_dir / "docs" / "spec" / "PRODUCT_SPEC.md"),
         "cto_charter":           _read(proj_dir / "docs" / "cto_charter.md"),
         "engineer_architecture": _read(proj_dir / "docs" / "engineer_engineer_architecture.md"),
-        "pm_backlog":            _read(proj_dir / "docs" / "pm" / "web" / "BACKLOG.md")
+        "pm_backlog":            _read(proj_dir / "docs" / "pm" / "backend" / "BACKLOG.md")
+                                  or _read(proj_dir / "docs" / "pm" / "web" / "BACKLOG.md")
                                   or _read(proj_dir / "docs" / "pm_backlog.md"),
-        "apps_tree":             "\n".join(sorted(
-            str(p.relative_to(proj_dir)) for p in src_root.rglob("*.tsx")
-        ))[:6000] if src_root.exists() else "",
-        "root_page":  _read(proj_dir / "apps" / "src" / "app" / "page.tsx"),
+        "apps_tree":             _apps_tree,
+        # Entry points genéricos (web e não-web): index/barrel da lib + app web quando existir.
+        "root_page":  _read(proj_dir / "apps" / "src" / "index.ts")
+                       or _read(proj_dir / "apps" / "src" / "app" / "page.tsx"),
         "layout":     _read(proj_dir / "apps" / "src" / "app" / "layout.tsx"),
         "app_shell":  _read(proj_dir / "apps" / "src" / "components" / "layout" / "AppShell.tsx"),
         "sidebar":    _read(proj_dir / "apps" / "src" / "components" / "layout" / "Sidebar.tsx"),
         "all_pages":  _read_glob("app/**/page.tsx"),
-        "types":      _read_glob("**/types.ts"),
+        # Amostra de fontes reais — cobre lib/backend (index, *.ts) além de web.
+        "source_sample": _read_first(["index.ts", "index.tsx", "*.ts", "*.tsx"]),
+        "types":      _read_glob("**/types.ts") or _read_glob("**/*.ts"),
     }
 
     # Build output
