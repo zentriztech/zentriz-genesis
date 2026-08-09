@@ -93,7 +93,9 @@ scope: code
 
 **Regras:**
 
-1. `module` DEVE ser um de: `web`, `backend`, `mobile`, `fullstack`. **Nada de valores inventados.**
+1. `module` DEVE ser um de: `web`, `backend`, `mobile`, `fullstack`. **Nada de valores inventados** — NUNCA use `platform`, `lib`, `contracts`, `tokens`, `shared` ou qualquer outro rótulo. Esses valores travam o pipeline (o PM da squad certa não é encontrado).
+   - **Bibliotecas TypeScript puras** (design tokens, contratos/`@org/contracts`, SDKs, tipos compartilhados — `project_type: lib_ts`/`lib_cli`) → use **`module: backend`** com `owner_role: DEV_BACKEND` e `variant: nodejs-nestjs` (o squad Node/TS gera `package.json`, build dual ESM/CJS + `.d.ts`, testes; **sem servidor HTTP** — é uma lib). NÃO invente uma squad "platform" para elas.
+   - Regra mental: se não é web nem mobile, é **backend** (Node/TS). Não existe 5º módulo.
 2. `owner_role` DEVE ser: `DEV_WEB`, `DEV_BACKEND`, `DEV_MOBILE` (ou `DEV_WEB` para fullstack).
 3. `variant` = variante concreta do agente (existe em `applications/agents/dev/<module>/<variant>/SYSTEM_PROMPT.md`). Exemplos válidos:
    - Web: `react-next-materialui`, `react-next-tailwind`
