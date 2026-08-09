@@ -540,11 +540,15 @@ def _parse_squads_yaml(text: str) -> list[dict]:
         return []
 
 
-def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "") -> str:
+def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content: str = "", project_type: str = "") -> str:
     """
     Infere o módulo/squad do PM a partir da proposta do Engineer.
 
     Ordem de prioridade (T09):
+      0. project_type determinístico: libs TS puras (lib_ts) → 'backend' (PM/Dev Node/TS
+         sem frontend/mobile — gera package.json, build, testes de biblioteca). Sem isso o
+         classifier LLM chuta 'mobile' para uma lib de tokens (menciona RN) e o PM Mobile
+         bloqueia — achado da fatia vertical 2026-08-09.
       1. YAML frontmatter `squads:` (determinístico, custo zero) — se presente e válido,
          retorna `squads[0].module` sem chamar LLM.
       2. LLM classifier (fallback para projetos legacy sem YAML).
@@ -553,6 +557,14 @@ def infer_pm_module_from_engineer_proposal(engineer_proposal: str, spec_content:
 
     Retorna: 'web' | 'backend' | 'mobile' | 'fullstack'
     """
+    # T0 (fatia vertical): tipos de biblioteca pura mapeiam deterministicamente p/ 'backend'.
+    # Uma lib TS (contracts/tokens/SDK) não é web/mobile/fullstack; o squad Node/TS (backend)
+    # é quem sabe gerar package.json + build dual + testes de export sem servidor.
+    _pt = (project_type or "").strip().lower()
+    if _pt in ("lib_ts", "lib_cli", "lib_plugin"):
+        logger.info("[Pipeline] Módulo via project_type=%s (lib) → backend (determinístico)", _pt)
+        return "backend"
+
     # T09: YAML frontmatter primeiro (determinístico)
     squads = _parse_squads_yaml(engineer_proposal or "")
     if squads:
@@ -4418,7 +4430,7 @@ def main() -> int:
                 "Complexidade trivial detectada. Bypass do PM: 1 task gerada diretamente pelo CTO → Dev (sem backlog, sem rodadas).",
                 request_id,
             )
-            pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
+            pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content, project_type=(getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else ""))
             _owner_role = {"web": "DEV_WEB", "mobile": "DEV_MOBILE"}.get(pm_module, "DEV_BACKEND")
             _trivial_task = {
                 "task_id":   "TSK-TRIVIAL-001",   # snake_case — padrão esperado pela API
@@ -4517,7 +4529,7 @@ def main() -> int:
                     pm_module = _cached_module
                     logger.info("[Pipeline] pm_module lido do cache (pipeline_ctx.current_module=%s) — sem re-inferir (rodada %s)", pm_module, pm_round)
                 else:
-                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content)
+                    pm_module = infer_pm_module_from_engineer_proposal(engineer_summary, spec_content=spec_content, project_type=(getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else ""))
                     # Se a inferência devolver um módulo já rejeitado, tentar próximo candidato
                     if pm_module in _rejected_modules:
                         # Fallback determinístico: tenta na ordem web→backend→mobile→fullstack os que ainda não foram rejeitados
