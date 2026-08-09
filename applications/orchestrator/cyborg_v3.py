@@ -289,7 +289,10 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
         try:
             logger.info("[Cyborg V3] FTS indisponível — build local em %s", _apps_root)
             _env = {**os.environ, "CI": "1"}
-            _inst = _sp.run(["npm", "install", "--no-audit", "--no-fund", "--loglevel=error"],
+            # --legacy-peer-deps: o código gerado pelo LLM frequentemente tem conflitos de
+            # peer deps (ex.: eslint@9 vs @typescript-eslint/parser@7 que pede eslint@^8).
+            # Sem isso, npm install falha (ERESOLVE) e o build inteiro trava (achado #15).
+            _inst = _sp.run(["npm", "install", "--no-audit", "--no-fund", "--legacy-peer-deps", "--loglevel=error"],
                             cwd=str(_apps_root), capture_output=True, text=True, timeout=600, env=_env)
             _tc = _sp.run(["npx", "--no-install", "tsc", "--noEmit"],
                           cwd=str(_apps_root), capture_output=True, text=True, timeout=300, env=_env)
