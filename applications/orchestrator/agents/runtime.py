@@ -897,7 +897,7 @@ def run_agent(
     # Se QA reprovar 3x → BLOCKED (revisão humana). Opus paga para evitar BLOCKED.
     _is_rework_role = (role or "").upper() in ("DEV", "QA")
     if _is_rework_role and _rework_attempt >= 1:
-        _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-8")
+        _rework_model = os.environ.get("CLAUDE_MODEL_REWORK", "us.anthropic.claude-opus-4-6-v1")
         if _rework_model != model:
             model = _rework_model
             logger.info("[REWORK-ESCALATE] %s rework %d → escalando para modelo %s", role, _rework_attempt, model)
