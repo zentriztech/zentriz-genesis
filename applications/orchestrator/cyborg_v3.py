@@ -244,11 +244,18 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
 
 
 def _call_bedrock(prompt: str, ctx: dict, model_id: str) -> str:
+    # Fallback compatível com o provider ativo: em Foundry, ids us.anthropic.* dão 404
+    # (DeploymentNotFound) — usar claude-sonnet-5. (achado #7 da fatia vertical)
+    _fallback = (
+        "claude-sonnet-5"
+        if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry"
+        else "us.anthropic.claude-sonnet-4-6"
+    )
     body = {
         "prompt_override": prompt,
         "user_message": json.dumps({"context": ctx}, ensure_ascii=False)[:60000],
         "model_id": model_id,
-        "model_id_fallback": "us.anthropic.claude-sonnet-4-6",
+        "model_id_fallback": _fallback,
         "max_tokens": 6000,
     }
     status, text = _http("POST", f"http://agents:8000/invoke/raw", body, timeout=ANALYSIS_TIMEOUT)
