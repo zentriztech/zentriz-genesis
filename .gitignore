@@ -58,3 +58,6 @@ applications/services/api-node/uploads/
 
 # Bedrock creds override (credenciais temporárias em claro — nunca commitar)
 docker-compose.override.bedrock.yml
+
+# Runner state local (checkpoints de execução — runtime)
+applications/orchestrator/state/
