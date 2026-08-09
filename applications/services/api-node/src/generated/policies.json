@@ -1058,6 +1058,54 @@
         "Node 20 + TypeScript + Extension API (VS Code / Chrome)"
       ]
     },
+    "lib_ts": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "listen(",
+          "process.exit"
+        ],
+        "required_tokens": {
+          "soft": [
+            "tsup",
+            "changeset",
+            "d.ts"
+          ],
+          "strong": [
+            "export"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "servidor HTTP (express/fastify/nest) — lib não expõe runtime de servidor",
+        "process.exit — lib não controla o processo host",
+        "leitura de env de runtime obrigatória no import (lib deve ser pura)"
+      ],
+      "inherit_from": null,
+      "labels": {
+        "en": "TypeScript Library (npm)",
+        "pt_br": "📦 Biblioteca TypeScript (npm)"
+      },
+      "required_components": [
+        "barrel de exports em src/index.ts (API pública explícita)",
+        "build dual ESM+CJS + .d.ts (tsup/tsc) declarado em package.json exports/types",
+        "versionamento semver (Changesets recomendado)",
+        "testes de contrato dos exports (tipos + runtime validators quando houver)"
+      ],
+      "required_routes": {
+        "expected": [],
+        "strict": []
+      },
+      "scaffold": [
+        "package.json",
+        "tsconfig.json",
+        "src/index.ts",
+        "README.md"
+      ],
+      "stack_when_charter_silent": [
+        "Node 20 + TypeScript + tsup (ESM/CJS + d.ts) + Changesets; Ajv/Zod se exportar validadores"
+      ]
+    },
     "mobile_crossplatform": {
       "fingerprint": {
         "forbidden_tokens": [

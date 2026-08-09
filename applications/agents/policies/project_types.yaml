@@ -862,6 +862,47 @@ types:
     stack_when_charter_silent:
       - "Node 20 + Commander OR Python 3.11 + Click"
 
+  # ── lib_ts ───────────────────────────────────────────────────────────────────
+  # Biblioteca TypeScript PURA publicável em npm (contratos, tokens, SDK, tipos):
+  # sem runtime de servidor, sem rotas HTTP. Ex.: @zentriz/contracts, @zentriz/tokens.
+  # Predecessor universal de build no grafo de produto (onda 0). NÃO é backend/CLI/plugin.
+  lib_ts:
+    inherit_from: null
+    labels:
+      pt_br: "📦 Biblioteca TypeScript (npm)"
+      en: "TypeScript Library (npm)"
+    scaffold:
+      - "package.json"                           # com "exports" (ESM/CJS dual) + "types"
+      - "tsconfig.json"
+      - "src/index.ts"                           # barrel de exports
+      - "README.md"
+    required_routes:
+      strict: []
+      expected: []
+    required_components:
+      - "barrel de exports em src/index.ts (API pública explícita)"
+      - "build dual ESM+CJS + .d.ts (tsup/tsc) declarado em package.json exports/types"
+      - "versionamento semver (Changesets recomendado)"
+      - "testes de contrato dos exports (tipos + runtime validators quando houver)"
+    forbidden_patterns:
+      - "servidor HTTP (express/fastify/nest) — lib não expõe runtime de servidor"
+      - "process.exit — lib não controla o processo host"
+      - "leitura de env de runtime obrigatória no import (lib deve ser pura)"
+    fingerprint:
+      required_tokens:
+        strong:
+          - "export"                              # biblioteca exporta símbolos
+        soft:
+          - "tsup"
+          - "changeset"
+          - "d.ts"
+      forbidden_tokens:
+        - "listen("                               # sem servidor
+        - "process.exit"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "Node 20 + TypeScript + tsup (ESM/CJS + d.ts) + Changesets; Ajv/Zod se exportar validadores"
+
   # ── lib_plugin ─────────────────────────────────────────────────────────────
   # Plugin para VS Code / Figma / Cursor / navegador — não roda standalone.
   lib_plugin:

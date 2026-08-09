@@ -1,0 +1,42 @@
+# Override para rodar a fábrica NESTA máquina Linux (host AWS headless).
+# Corrige premissas Mac do compose base: paths /Users/mac, mount de secrets GitHub
+# inexistente, e desabilita serviços não-essenciais para a fatia vertical (genesis-web).
+# Credenciais Bedrock vêm do override .bedrock.yml (gerado à parte). NÃO commitar dados sensíveis;
+# este arquivo é seguro (só paths), mas fica junto dos overrides locais.
+services:
+  api:
+    ports: !override
+      - "3456:3000"
+    # Remove o mount de /run/secrets (chave GitHub não existe aqui; push fica desabilitado).
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
+      - /tmp/zentriz-files:/project-files
+    environment:
+      - HOST_PROJECT_FILES_ROOT=/tmp/zentriz-files
+      - GITHUB_APP_PRIVATE_KEY_FILE=
+    # cag-seed depende de api healthy; mantemos o healthcheck do base.
+
+  agents:
+    volumes:
+      - /tmp/zentriz-files:/project-files
+    environment:
+      - HOST_PROJECT_FILES_ROOT=/tmp/zentriz-files
+
+  runner:
+    volumes:
+      - zentriz-genesis_uploads:/shared/uploads
+      - /tmp/zentriz-files:/project-files
+      - /tmp/zentriz-files/.runner-state:/orchestrator/state
+      - ../zentriz-connect:/zentriz-connect:ro
+    environment:
+      - HOST_PROJECT_FILES_ROOT=/tmp/zentriz-files
+
+  cyborg:
+    volumes:
+      - /tmp/zentriz-files:/project-files
+      - zentriz-genesis_uploads:/shared/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # genesis-web não é necessário para gerar código (é o portal); fica de fora do up seletivo.
+
+# (append) remapeia a porta da api p/ 3100 no host — :3000 já usado por outro projeto (uxt).

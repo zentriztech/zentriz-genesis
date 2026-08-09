@@ -55,3 +55,6 @@ secrets/
 
 # Multipart upload artifacts (product ZIP ingest, spec attachments) — runtime only
 applications/services/api-node/uploads/
+
+# Bedrock creds override (credenciais temporárias em claro — nunca commitar)
+docker-compose.override.bedrock.yml
