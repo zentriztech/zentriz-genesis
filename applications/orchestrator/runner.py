@@ -445,17 +445,18 @@ def call_cto(
     else:
         mode = "spec_intake_and_normalize"
 
+    _cap = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
     if pipeline_ctx:
         inputs = pipeline_ctx.build_inputs_for_cto(mode, backlog_summary, validate_backlog_only)
         if engineer_proposal:
-            inputs["engineer_stack_proposal"] = engineer_proposal[:15000]
+            inputs["engineer_stack_proposal"] = engineer_proposal[:_cap]
         if spec_content:
-            inputs["spec_raw"] = spec_content[:20000]
-            inputs["product_spec"] = spec_content[:20000]
+            inputs["spec_raw"] = spec_content[:_cap]
+            inputs["product_spec"] = spec_content[:_cap]
         if spec_template:
-            inputs["spec_template"] = spec_template[:15000]
+            inputs["spec_template"] = spec_template[:_cap]
         if backlog_summary:
-            inputs["backlog_summary"] = backlog_summary[:15000]
+            inputs["backlog_summary"] = backlog_summary[:_cap]
     else:
         inputs = {"spec_ref": spec_ref, "constraints": ["spec-driven", "paths-resilient", "no-invent"]}
         # SPEC-APPROVED: no montador sem pipeline_ctx, injetar o Sub-modo C do CTO
@@ -1148,11 +1149,12 @@ def call_pm(
     if pipeline_ctx:
         pipeline_ctx.current_module = module
         inputs = pipeline_ctx.build_inputs_for_pm(cto_questionamentos)
+        _cap_pm = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
         if engineer_proposal:
-            inputs["engineer_proposal"] = engineer_proposal[:15000]
+            inputs["engineer_proposal"] = engineer_proposal[:_cap_pm]
         if charter_summary:
-            inputs["charter"] = charter_summary[:15000]
-            inputs["charter_summary"] = charter_summary[:15000]
+            inputs["charter"] = charter_summary[:_cap_pm]
+            inputs["charter_summary"] = charter_summary[:_cap_pm]
     else:
         inputs = {
             "spec_ref": spec_ref,
@@ -4248,7 +4250,13 @@ def main() -> int:
                                 _ec = _ec.replace("<!-- Created by: engineer -->\n\n", "").strip()
                                 _eng_parts.append(f"### {_ef.name}\n{_ec}")
                         if _eng_parts:
-                            _disk_content = "\n\n".join(_eng_parts)[:15000]
+                            # Cap elevado (env AGENT_INPUT_CHARS, default 40000): os 3 artefatos
+                            # do Engineer (proposal+architecture+dependencies) somam ~35KB; cortar
+                            # em 15000 severa a seção Rationale no meio → CTO (Claude 5, rigoroso)
+                            # reprova por truncamento → PM bloqueia (no-invent) → backlog vazio.
+                            # Claude 5 tem contexto 200K, então 40K é seguro. (achado fatia vertical)
+                            _agent_input_cap = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
+                            _disk_content = "\n\n".join(_eng_parts)[:_agent_input_cap]
                             if len(_disk_content) > len(engineer_summary):
                                 engineer_summary = _disk_content
                                 logger.info("[GAP-ENG1] engineer_summary enriquecido do disco: %d chars (%d artefatos)",
