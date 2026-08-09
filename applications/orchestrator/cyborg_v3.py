@@ -535,6 +535,89 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
         return {"ok": False, "error": f"parse fail: {e}", "raw": text[:2000]}
 
 
+def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_id: str,
+                      max_rounds: int = 2) -> dict:
+    """Correção AUTÔNOMA via /invoke/dev quando o engineer-bridge (Claude CLI) está ausente.
+
+    Fecha o loop de qualidade sem depender do host de produção: pega os BLOCKERs/MAJORs da
+    auditoria, pede ao agente Dev (Foundry) para corrigi-los, grava os artefatos retornados em
+    apps/, e re-audita. Repete até 0 BLOCKER ou esgotar rounds. (achado #16)
+
+    Retorna {"ok": bool, "rounds": n, "final_audit": dict, "delivered": bool}.
+    """
+    from orchestrator.project_storage import write_apps_artifact
+    proj_dir = _resolve_proj_dir(project_id, prod_id)
+    cur_audit = audit
+    for rnd in range(1, max_rounds + 1):
+        # Coletar findings acionáveis (BLOCKER + MAJOR) de todas as dimensões.
+        findings = []
+        for name, ar in cur_audit.items():
+            for f in getattr(ar, "findings", []) or []:
+                if f.severity in ("BLOCKER", "MAJOR"):
+                    findings.append(f"[{f.severity}] {f.area}: {f.description}")
+        if not findings:
+            return {"ok": True, "rounds": rnd - 1, "final_audit": cur_audit, "delivered": True}
+
+        _post_dialogue(project_id,
+            f"🔧 Cyborg — correção autônoma (rodada {rnd}/{max_rounds}): {len(findings)} issue(s) "
+            f"da auditoria enviadas ao Dev via Foundry.")
+
+        # Ler os fontes atuais para dar contexto ao Dev.
+        ctx = _collect_context(project_id, prod_id)
+        _fix_prompt = (
+            "Você é o Dev sênior. O código gerado NÃO cumpre a spec integralmente. "
+            "Corrija TODOS os problemas abaixo, respeitando a spec e a arquitetura. "
+            "Responda APENAS um JSON: {\"artifacts\":[{\"path\":\"<relativo a apps/>\",\"content\":\"<conteúdo completo do arquivo>\"}]}. "
+            "Inclua TODOS os arquivos novos/alterados necessários (código, config, .changeset, api_contract.md em project/). "
+            "Não trunque conteúdo. Não explique fora do JSON."
+        )
+        _fix_user = (
+            f"## Spec (PRODUCT_SPEC)\n{ctx.get('spec','')[:20000]}\n\n"
+            f"## Arquitetura do Engineer\n{ctx.get('engineer_architecture','')[:8000]}\n\n"
+            f"## Código atual (amostra)\n{ctx.get('source_sample','')[:12000]}\n\n"
+            f"## Árvore atual\n{ctx.get('apps_tree','')}\n\n"
+            f"## Problemas a corrigir ({len(findings)})\n" + "\n".join(f"- {x}" for x in findings[:20])
+        )
+        body = {
+            "prompt_override": _fix_prompt, "user_message": _fix_user[:45000],
+            "model_id": model_id,
+            "model_id_fallback": ("claude-opus-5" if os.environ.get("GENESIS_LLM_PROVIDER","").lower()=="foundry" else "us.anthropic.claude-opus-4-6-v1"),
+            "max_tokens": int(os.environ.get("CYBORG_REWORK_MAX_TOKENS", "24000")),
+        }
+        status, text = _http("POST", f"http://agents:8000/invoke/raw", body, timeout=ANALYSIS_TIMEOUT + 120)
+        if status != 200:
+            logger.warning("[Cyborg rework] /invoke/raw %s", status)
+            break
+        try:
+            resp = json.loads(text).get("response", "")
+            s = resp.index("{"); e = resp.rindex("}") + 1
+            obj = json.loads(resp[s:e])
+            arts = obj.get("artifacts", []) or []
+        except Exception as ex:
+            logger.warning("[Cyborg rework] parse artifacts falhou: %s", ex)
+            break
+        written = 0
+        for a in arts:
+            p = (a.get("path") or "").strip().lstrip("/")
+            c = a.get("content")
+            if p and isinstance(c, str) and ".." not in p:
+                # api_contract.md e outros vão em project/; código em apps/.
+                if p.startswith("project/") or p.endswith("api_contract.md"):
+                    from orchestrator.project_storage import write_project_artifact
+                    write_project_artifact(project_id, p if p.startswith("project/") else f"project/{p}", c)
+                else:
+                    write_apps_artifact(project_id, p, c)
+                written += 1
+        _post_dialogue(project_id, f"🔧 Cyborg — Dev gravou {written} arquivo(s). Re-auditando…")
+        logger.info("[Cyborg rework] rodada %d: %d findings → %d artefatos gravados", rnd, len(findings), written)
+        if written == 0:
+            break
+        # Re-auditar com o código corrigido.
+        cur_audit = run_prior_audit(project_id, prod_id, model_id)
+    total_blk = sum(sum(1 for f in ar.findings if f.severity == "BLOCKER") for ar in cur_audit.values())
+    return {"ok": total_blk == 0, "rounds": max_rounds, "final_audit": cur_audit, "delivered": total_blk == 0}
+
+
 # ── Fase 3: Parse resultado do Claude Code ────────────────────────────────────
 
 def parse_cyborg_done(stdout: str) -> dict:
@@ -590,6 +673,14 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
         # default; desligar com CYBORG_AUDIT_ONLY_FALLBACK=0. (achado #8 da fatia vertical)
         _audit_fallback = os.environ.get("CYBORG_AUDIT_ONLY_FALLBACK", "1").strip() != "0"
         if _audit_fallback and audit:
+            # CORREÇÃO AUTÔNOMA (achado #16): se há BLOCKERs, tenta corrigir via /invoke/dev
+            # (Foundry) antes de desistir — fecha o loop de qualidade sem o Claude CLI de produção.
+            if total_blk > 0 and os.environ.get("CYBORG_AUTONOMOUS_REWORK", "1").strip() != "0":
+                _rw = autonomous_rework(project_id, prod_id, audit, model_id,
+                                        max_rounds=int(os.environ.get("CYBORG_REWORK_ROUNDS", "2")))
+                if _rw.get("final_audit"):
+                    audit = _rw["final_audit"]; run.audit = audit
+                    total_blk = sum(sum(1 for f in ar.findings if f.severity == "BLOCKER") for ar in audit.values())
             _scores = [ar.score for ar in audit.values() if ar.ok or ar.score > 0]
             _avg = (sum(_scores) / len(_scores)) if _scores else 0
             _min_avg = float(os.environ.get("CYBORG_AUDIT_MIN_AVG", "7"))
