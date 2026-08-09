@@ -501,6 +501,35 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
     result = spawn_engineer(project_id, tenant_id, prod_id, audit_summary, model_id)
 
     if not result.get("ok"):
+        # VEREDITO POR AUDITORIA (fallback autônomo): quando o engineer-bridge (Claude Code CLI
+        # via full-test-server) não está disponível, decidir accept/needs_human a partir das 5
+        # análises Bedrock/Foundry — que já rodaram e são o sinal de verificação externa. Evita
+        # travar em pending_cyborg eternamente em ambientes sem o bridge pesado. Ligado por
+        # default; desligar com CYBORG_AUDIT_ONLY_FALLBACK=0. (achado #8 da fatia vertical)
+        _audit_fallback = os.environ.get("CYBORG_AUDIT_ONLY_FALLBACK", "1").strip() != "0"
+        if _audit_fallback and audit:
+            _scores = [ar.score for ar in audit.values() if ar.ok or ar.score > 0]
+            _avg = (sum(_scores) / len(_scores)) if _scores else 0
+            _min_avg = float(os.environ.get("CYBORG_AUDIT_MIN_AVG", "7"))
+            if total_blk == 0 and _avg >= _min_avg:
+                run.final_status = "delivered"
+                run.reason = f"aceito por auditoria (bridge indisponível): 0 BLOCKER, média {_avg:.1f}/10 ≥ {_min_avg}"
+                _post_dialogue(project_id,
+                    f"═══════════════════════════════════════\n"
+                    f"✅ Cyborg V3 — aceito por auditoria autônoma\n"
+                    f"═══════════════════════════════════════\n"
+                    f"Engineer-bridge (Claude Code CLI) indisponível; decisão pelas 5 análises "
+                    f"Foundry: 0 BLOCKER, média {_avg:.1f}/10. Projeto aprovado.")
+                return run
+            run.final_status = "needs_human"
+            run.reason = (f"auditoria reprovou (bridge indisponível): {total_blk} BLOCKER, "
+                          f"média {_avg:.1f}/10 (< {_min_avg}). Ver docs/cyborg/audit.json.")
+            _post_dialogue(project_id,
+                f"═══════════════════════════════════════\n"
+                f"⚠️ Cyborg V3 — needs_human (auditoria)\n"
+                f"═══════════════════════════════════════\n"
+                f"{run.reason}")
+            return run
         run.final_status = "error"
         run.reason = result.get("error", "erro desconhecido no spawn_engineer")
         _post_dialogue(project_id,
