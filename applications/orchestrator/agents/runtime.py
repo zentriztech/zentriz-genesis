@@ -634,6 +634,31 @@ def _get_model_for_role(role: str) -> str:
     return os.environ.get("PIPELINE_LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 
+def _build_foundry_client(llm_cfg: dict | None = None):
+    """Cria um cliente anthropic apontando para Azure AI Foundry (Claude Opus 5 / Sonnet 5).
+
+    Foundry serve Claude via SDK anthropic nativo: base_url = <resource>.cognitiveservices.
+    azure.com/anthropic + API key no header. Usado como alternativa ao Bedrock (ex.: cota
+    diária do Bedrock esgotada). Credenciais: envelope do runner > env do container.
+
+    Env: ANTHROPIC_FOUNDRY_API_KEY (key), ANTHROPIC_FOUNDRY_BASE_URL (base completa) OU
+    ANTHROPIC_FOUNDRY_RESOURCE (nome do recurso → monta a base padrão .../anthropic).
+    """
+    from anthropic import Anthropic
+    llm_cfg = llm_cfg or {}
+    key = (llm_cfg.get("foundry_api_key") or os.environ.get("ANTHROPIC_FOUNDRY_API_KEY") or "").strip()
+    if not key:
+        raise ValueError("ANTHROPIC_FOUNDRY_API_KEY não definida para provider=foundry.")
+    base = (llm_cfg.get("foundry_base_url") or os.environ.get("ANTHROPIC_FOUNDRY_BASE_URL") or "").strip()
+    if not base:
+        resource = (llm_cfg.get("foundry_resource") or os.environ.get("ANTHROPIC_FOUNDRY_RESOURCE") or "").strip()
+        if not resource:
+            raise ValueError("Defina ANTHROPIC_FOUNDRY_BASE_URL ou ANTHROPIC_FOUNDRY_RESOURCE para provider=foundry.")
+        base = f"https://{resource}.cognitiveservices.azure.com/anthropic"
+    base = base.rstrip("/")
+    return Anthropic(api_key=key, base_url=base)
+
+
 # OpenAI model limits (context window e max_output)
 _OPENAI_MODEL_LIMITS: dict[str, dict[str, int]] = {
     "gpt-4o":            {"context": 128_000, "max_output": 16_384},
@@ -807,7 +832,13 @@ def run_agent(
     except ImportError:
         raise ImportError("Instale anthropic: pip install anthropic")
 
-    if provider == "bedrock":
+    if provider == "foundry":
+        # Azure AI Foundry serve Claude (Opus 5 / Sonnet 5) via SDK anthropic com base_url
+        # apontando para <resource>.cognitiveservices.azure.com/anthropic + API key.
+        # Alternativa ao Bedrock (usada quando a cota diária do Bedrock esgota).
+        client = _build_foundry_client(_llm_cfg)
+        api_key = None
+    elif provider == "bedrock":
         # Construir cliente Bedrock com credenciais explícitas.
         # Prioridade: envelope do runner (tenant config) > env do container.
         # NUNCA usar profile — AWS_PROFILE vazio ("") causa ProfileNotFound no botocore.
@@ -882,7 +913,9 @@ def run_agent(
 
     user_content = build_user_message(message, role=role)
 
-    if provider != "bedrock":
+    if provider == "foundry":
+        client = _build_foundry_client(_llm_cfg)
+    elif provider != "bedrock":
         client = Anthropic(api_key=api_key)
     request_id = message.get("request_id", "unknown")
     # Bug fix: CLAUDE_MAX_TOKENS é o teto padrão mas roles específicos (Engineer, PM, Dev)
@@ -1099,7 +1132,24 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
 
     Reusa o mesmo cliente AnthropicBedrock configurado para o resto do pipeline.
     Não faz repair, não valida schema, não persiste artefatos — pura chamada.
+
+    Se GENESIS_LLM_PROVIDER=foundry, roteia para Azure AI Foundry (mesmo SDK anthropic,
+    base_url do resource) — alternativa ao Bedrock quando a cota diária deste esgota.
     """
+    if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
+        client = _build_foundry_client()
+        # temperature é depreciada nos modelos Claude 5 servidos pelo Foundry — omitir.
+        resp = client.messages.create(
+            model=model_id, max_tokens=max_tokens,
+            system=system, messages=[{"role": "user", "content": user}],
+        )
+        parts: list[str] = []
+        for block in getattr(resp, "content", []) or []:
+            t = getattr(block, "text", None)
+            if t:
+                parts.append(t)
+        return "".join(parts)
+
     try:
         from anthropic import AnthropicBedrock
     except ImportError:
