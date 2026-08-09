@@ -325,12 +325,17 @@ def _call_bedrock(prompt: str, ctx: dict, model_id: str) -> str:
         if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry"
         else "us.anthropic.claude-sonnet-4-6"
     )
+    # Claude 5 (Foundry) faz thinking extenso: com contexto grande (60KB) e max_tokens baixo
+    # (6000), o output real estoura o budget e volta VAZIO → parse "substring not found" →
+    # score 0/blockers aleatórios. Elevar max_tokens e conter o contexto. (achado #12)
+    _max_toks = int(os.environ.get("CYBORG_ANALYSIS_MAX_TOKENS", "16000"))
+    _ctx_cap = int(os.environ.get("CYBORG_ANALYSIS_CTX_CHARS", "45000"))
     body = {
         "prompt_override": prompt,
-        "user_message": json.dumps({"context": ctx}, ensure_ascii=False)[:60000],
+        "user_message": json.dumps({"context": ctx}, ensure_ascii=False)[:_ctx_cap],
         "model_id": model_id,
         "model_id_fallback": _fallback,
-        "max_tokens": 6000,
+        "max_tokens": _max_toks,
     }
     status, text = _http("POST", f"http://agents:8000/invoke/raw", body, timeout=ANALYSIS_TIMEOUT)
     if status != 200:

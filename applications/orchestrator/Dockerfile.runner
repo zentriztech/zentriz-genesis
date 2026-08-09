@@ -14,6 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js 20 — o Cyborg V3 roda build local (npm ci + tsc + build) para verificar de verdade
+# que o código gerado compila, quando o full-test-server não está disponível. (achado #13)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
+
 WORKDIR /app
 
 COPY applications/agents/ agents/
