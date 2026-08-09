@@ -999,7 +999,20 @@ def run_agent(
                         create_kw["temperature"] = t
                 except (ValueError, TypeError):
                     pass
-                response = client.messages.create(**create_kw)
+                # STREAMING p/ Foundry com max_tokens alto: evita o erro "Streaming is required
+                # for operations that may take longer than 10 minutes" (500). (achado #18)
+                if provider == "foundry" and max_tokens > 8000:
+                    _sparts: list[str] = []
+                    _skw = {k: v for k, v in create_kw.items() if k != "timeout"}
+                    with client.messages.stream(**_skw) as _st:
+                        for _t in _st.text_stream:
+                            _sparts.append(_t)
+                    _joined = "".join(_sparts)
+                    class _R:  # resposta compatível com o parser abaixo (.content[].text)
+                        content = [type("_B", (), {"text": _joined})()]
+                    response = _R()
+                else:
+                    response = client.messages.create(**create_kw)
                 break
             except Exception as e:
                 last_error = e
@@ -1147,12 +1160,24 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     """
     if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
         client = _build_foundry_client()
-        # temperature é depreciada nos modelos Claude 5 servidos pelo Foundry — omitir.
+        # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
+        # STREAMING obrigatório p/ max_tokens alto: o Foundry rejeita chamadas não-streaming
+        # que podem passar de 10 min ("Streaming is required...") → 500. Com stream, acumula
+        # o texto sem esse limite. (achado #18) Usa stream quando max_tokens > 8000.
+        if max_tokens > 8000:
+            parts: list[str] = []
+            with client.messages.stream(
+                model=model_id, max_tokens=max_tokens,
+                system=system, messages=[{"role": "user", "content": user}],
+            ) as _stream:
+                for _txt in _stream.text_stream:
+                    parts.append(_txt)
+            return "".join(parts)
         resp = client.messages.create(
             model=model_id, max_tokens=max_tokens,
             system=system, messages=[{"role": "user", "content": user}],
         )
-        parts: list[str] = []
+        parts = []
         for block in getattr(resp, "content", []) or []:
             t = getattr(block, "text", None)
             if t:
