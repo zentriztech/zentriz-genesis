@@ -102,6 +102,48 @@ def _accept(project_id: str, evidence: str) -> bool:
     return status in (200, 201)
 
 
+def _extract_lessons_on_accept(project_id: str, prod_id: str | None) -> None:
+    """F4 — APRENDIZADO: extrai lições do projeto ACEITO (resultado verificado = oráculo).
+
+    Puxa o diálogo dos agentes + o audit.json do Cyborg e roda o LessonExtractor no modo
+    RAG_ENABLED (off/shadow/live). Em shadow observa/loga; em live persiste em lessons_corpus
+    para futuras execuções recuperarem (context_loader). Nunca lança — aprendizado é best-effort.
+
+    Este é o elo que fecha o loop de aprendizado: o Genesis passa a aprender das próprias
+    entregas verificadas, em vez de depender de correção manual. (Fase F4)
+    """
+    try:
+        import os as _os
+        _mode = _os.environ.get("RAG_ENABLED", "off").strip().lower()
+        if _mode == "off":
+            return
+        # Reúne o diálogo do projeto (fonte das lições) via API.
+        _dlg, _st = _api("GET", f"/api/projects/{project_id}/dialogue")
+        _texts = []
+        if isinstance(_dlg, list):
+            for d in _dlg:
+                m = d.get("summary_human") or d.get("summaryHuman") or ""
+                if m:
+                    _texts.append(f"[{d.get('from_agent') or d.get('fromAgent') or '?'}] {m}")
+        # Anexa o audit.json do Cyborg (findings = lições de qualidade ricas).
+        try:
+            from orchestrator.cyborg_v3 import _resolve_proj_dir
+            _aj = _resolve_proj_dir(project_id, prod_id) / "docs" / "cyborg" / "audit.json"
+            if _aj.exists():
+                _texts.append("## Auditoria Cyborg\n" + _aj.read_text(encoding="utf-8")[:8000])
+        except Exception:
+            pass
+        _dialogue_text = "\n".join(_texts)[:40000]
+        if not _dialogue_text.strip():
+            return
+        from orchestrator.lesson_extractor import LessonExtractor
+        _stack = "generic"
+        lessons = LessonExtractor(mode=_mode).extract(_dialogue_text, project_id=project_id, stack_key=_stack)
+        logger.info("[F4/aprendizado] projeto %s aceito → %d lição(ões) (%s)", project_id[:8], len(lessons), _mode)
+    except Exception as e:
+        logger.warning("[F4/aprendizado] extração de lições falhou (não-crítico): %s", e)
+
+
 def _reject(project_id: str, reason: str) -> bool:
     data, status = _api("POST", f"/api/projects/{project_id}/reject", {
         "rejected_by": "zentriz-cyborg",
@@ -897,6 +939,19 @@ def main() -> int:
                             PRODUCT_ID or proj.get("productId"),
                         )
                         success = (_run.final_status == "delivered")
+                        # ACHADO #22: no veredito por auditoria (sem engineer-bridge/Claude CLI),
+                        # o V3 retorna 'delivered' mas NINGUÉM chamava POST /accept → o projeto
+                        # não virava 'accepted' no banco → a cascata (que dispara no accept)
+                        # nunca acontecia. Aqui garantimos o /accept quando delivered.
+                        if success:
+                            _acc_ev = _run.reason or "Cyborg V3 — aceito por auditoria autônoma"
+                            if _accept(proj_id, _acc_ev[:2000]):
+                                logger.info("[Cyborg V3] Projeto %s ACEITO (delivered) → /accept OK, cascata disparada.", proj_id[:8])
+                                # F4: extrair lições do resultado VERIFICADO (aceite = oráculo externo).
+                                _extract_lessons_on_accept(proj_id, PRODUCT_ID or proj.get("productId"))
+                            else:
+                                logger.error("[Cyborg V3] delivered mas /accept FALHOU para %s", proj_id[:8])
+                                success = False
                     except Exception as _ev3:
                         logger.exception("[Cyborg V3] falhou: %s", _ev3)
                         _reject(proj_id, f"Cyborg V3 crashou: {str(_ev3)[:400]}")
