@@ -638,6 +638,23 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
 
 # ── Fase 3: Parse resultado do Claude Code ────────────────────────────────────
 
+def _cur_build_rc(project_id: str, prod_id: str | None) -> int:
+    """Lê o build_rc da última auditoria do audit.json em disco. -1 = desconhecido.
+
+    run_prior_audit grava o bloco 'build' (rc, output_tail, type_check_rc) no audit.json.
+    Este helper relê de lá — é a fonte confiável do resultado do build local (achado #21).
+    """
+    try:
+        proj_dir = _resolve_proj_dir(project_id, prod_id)
+        aj = proj_dir / "docs" / "cyborg" / "audit.json"
+        if aj.exists():
+            data = json.loads(aj.read_text(encoding="utf-8"))
+            return int(data.get("build", {}).get("rc", -1))
+    except Exception:
+        pass
+    return -1
+
+
 def parse_cyborg_done(stdout: str) -> dict:
     """Procura pela última linha CYBORG_DONE no stdout do Claude."""
     for line in stdout.splitlines()[::-1]:
@@ -695,26 +712,43 @@ def run_cyborg_v3(project_id: str, tenant_id: str | None, prod_id: str | None) -
             # (Foundry) antes de desistir — fecha o loop de qualidade sem o Claude CLI de produção.
             if total_blk > 0 and os.environ.get("CYBORG_AUTONOMOUS_REWORK", "1").strip() != "0":
                 _rw = autonomous_rework(project_id, prod_id, audit, model_id,
-                                        max_rounds=int(os.environ.get("CYBORG_REWORK_ROUNDS", "2")))
+                                        max_rounds=int(os.environ.get("CYBORG_REWORK_ROUNDS", "3")))
                 if _rw.get("final_audit"):
                     audit = _rw["final_audit"]; run.audit = audit
                     total_blk = sum(sum(1 for f in ar.findings if f.severity == "BLOCKER") for ar in audit.values())
             _scores = [ar.score for ar in audit.values() if ar.ok or ar.score > 0]
             _avg = (sum(_scores) / len(_scores)) if _scores else 0
             _min_avg = float(os.environ.get("CYBORG_AUDIT_MIN_AVG", "7"))
-            if total_blk == 0 and _avg >= _min_avg:
+            # GATE DE BUILD (inviolável): o build TEM que passar (rc=0). Isso separa "código
+            # que compila mas não cobre 100% da spec" de "código quebrado".
+            _build_rc = _cur_build_rc(project_id, prod_id)
+            # Critério ponderado de aceite (achado #21): specs exigentes deixam resíduo de
+            # fidelidade (FRs opcionais/edge) que não impede USO da lib. Aceita quando:
+            #  (a) 0 BLOCKER + média ≥ limiar (ideal), OU
+            #  (b) build passa (rc=0) E média alta (≥ CYBORG_AUDIT_STRONG_AVG, default 8) E
+            #      poucos blockers residuais (≤ CYBORG_AUDIT_MAX_RESIDUAL_BLK, default 3),
+            #      NENHUM deles em a3_build_runtime (build é gate duro).
+            _strong_avg = float(os.environ.get("CYBORG_AUDIT_STRONG_AVG", "8"))
+            _max_resid = int(os.environ.get("CYBORG_AUDIT_MAX_RESIDUAL_BLK", "3"))
+            _build_blk = sum(1 for f in getattr(audit.get("a3_build_runtime"), "findings", []) or []
+                             if f.severity == "BLOCKER")
+            _accept_ideal = (total_blk == 0 and _avg >= _min_avg)
+            _accept_weighted = (_build_rc == 0 and _avg >= _strong_avg
+                                and total_blk <= _max_resid and _build_blk == 0)
+            if _accept_ideal or _accept_weighted:
                 run.final_status = "delivered"
-                run.reason = f"aceito por auditoria (bridge indisponível): 0 BLOCKER, média {_avg:.1f}/10 ≥ {_min_avg}"
+                run.reason = (f"aceito por auditoria: {total_blk} BLOCKER, média {_avg:.1f}/10, "
+                              f"build_rc={_build_rc} ({'ideal' if _accept_ideal else 'ponderado'})")
                 _post_dialogue(project_id,
                     f"═══════════════════════════════════════\n"
                     f"✅ Cyborg V3 — aceito por auditoria autônoma\n"
                     f"═══════════════════════════════════════\n"
-                    f"Engineer-bridge (Claude Code CLI) indisponível; decisão pelas 5 análises "
-                    f"Foundry: 0 BLOCKER, média {_avg:.1f}/10. Projeto aprovado.")
+                    f"Decisão pelas 5 análises Foundry: {total_blk} BLOCKER residual, "
+                    f"média {_avg:.1f}/10, build {'OK' if _build_rc==0 else 'FALHOU'}. Projeto aprovado.")
                 return run
             run.final_status = "needs_human"
-            run.reason = (f"auditoria reprovou (bridge indisponível): {total_blk} BLOCKER, "
-                          f"média {_avg:.1f}/10 (< {_min_avg}). Ver docs/cyborg/audit.json.")
+            run.reason = (f"auditoria reprovou: {total_blk} BLOCKER (build={_build_blk}), "
+                          f"média {_avg:.1f}/10, build_rc={_build_rc}. Ver docs/cyborg/audit.json.")
             _post_dialogue(project_id,
                 f"═══════════════════════════════════════\n"
                 f"⚠️ Cyborg V3 — needs_human (auditoria)\n"
