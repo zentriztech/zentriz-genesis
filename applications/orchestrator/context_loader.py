@@ -44,8 +44,18 @@ if CAG_ENABLED not in VALID_MODES:
     logger.warning("CAG_ENABLED='%s' inválido — assumindo 'off'", CAG_ENABLED)
     CAG_ENABLED = "off"
 
-# DB connection — a CLI usa o mesmo DATABASE_URL do api-node
+# DB connection — a CLI usa o mesmo DATABASE_URL do api-node.
+# Fallback para as PG* env vars: os containers Docker do Genesis expõem
+# PGHOST/PGUSER/... e NÃO DATABASE_URL, o que deixava o F4 (leitura de lições)
+# cego dentro do Docker mesmo com RAG_ENABLED=live (achado #23).
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if not DATABASE_URL and os.environ.get("PGHOST", "").strip():
+    DATABASE_URL = (
+        f"postgresql://{os.environ.get('PGUSER', 'genesis')}:"
+        f"{os.environ.get('PGPASSWORD', '')}@"
+        f"{os.environ.get('PGHOST')}:{os.environ.get('PGPORT', '5432')}/"
+        f"{os.environ.get('PGDATABASE', 'zentriz_genesis')}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
