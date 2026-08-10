@@ -589,13 +589,31 @@ def autonomous_rework(project_id: str, prod_id: str | None, audit: dict, model_i
             logger.warning("[Cyborg rework] /invoke/raw %s", status)
             break
         try:
-            resp = json.loads(text).get("response", "")
-            s = resp.index("{"); e = resp.rindex("}") + 1
-            obj = json.loads(resp[s:e])
-            arts = obj.get("artifacts", []) or []
-        except Exception as ex:
-            logger.warning("[Cyborg rework] parse artifacts falhou: %s", ex)
+            resp = json.loads(text).get("response", "") or ""
+        except Exception:
+            resp = text or ""
+        # Extração ROBUSTA do JSON de artifacts (tolera ```json fences```, prosa ao redor,
+        # e resposta vazia). Antes: resp.index("{") lançava "substring not found" e abortava
+        # o rework silenciosamente (achado #20). Agora tenta fence → primeiro-{...}-último.
+        arts = []
+        _obj = None
+        if resp.strip():
+            import re as _re
+            _m = _re.search(r"```(?:json)?\s*(\{.*\})\s*```", resp, _re.DOTALL)
+            _candidate = _m.group(1) if _m else None
+            if not _candidate:
+                _a, _b = resp.find("{"), resp.rfind("}")
+                if _a != -1 and _b != -1 and _b > _a:
+                    _candidate = resp[_a:_b + 1]
+            if _candidate:
+                try:
+                    _obj = json.loads(_candidate)
+                except Exception as ex:
+                    logger.warning("[Cyborg rework] JSON inválido (%s); resp[:200]=%r", ex, resp[:200])
+        if _obj is None:
+            logger.warning("[Cyborg rework] sem JSON de artifacts (resp_len=%d) — encerrando rework", len(resp))
             break
+        arts = _obj.get("artifacts", []) or []
         written = 0
         for a in arts:
             p = (a.get("path") or "").strip().lstrip("/")
