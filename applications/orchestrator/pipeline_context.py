@@ -176,23 +176,28 @@ class PipelineContext:
         # {"language": "python"|"nodejs"|..., "source": "pm_backlog_disk"|..., "confidence": "high"|"medium"|"low"}
         self.backend_stack: dict | None = None
 
+    # Caps de contexto elevados p/ Claude 5 (200K de contexto): cortar em 15-20K severava a
+    # proposta do Engineer no meio da seção Rationale → CTO reprovava por truncamento → PM
+    # recusava gerar backlog (no-invent) → BACKLOG vazio (achados #5 e #19). Env AGENT_INPUT_CHARS.
+    _CTX_CAP = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
+
     def set_spec_raw(self, value: str) -> None:
-        self.spec_raw = (value or "")[:30000]
+        self.spec_raw = (value or "")[: max(self._CTX_CAP, 30000)]
 
     def set_product_spec(self, value: str) -> None:
-        self.product_spec = (value or "")[:20000]
+        self.product_spec = (value or "")[: self._CTX_CAP]
 
     def set_product_spec_template(self, value: str) -> None:
-        self.product_spec_template = (value or "")[:15000]
+        self.product_spec_template = (value or "")[: self._CTX_CAP]
 
     def set_engineer_proposal(self, value: str) -> None:
-        self.engineer_proposal = (value or "")[:15000]
+        self.engineer_proposal = (value or "")[: self._CTX_CAP]
 
     def set_charter(self, value: str) -> None:
-        self.charter = (value or "")[:15000]
+        self.charter = (value or "")[: self._CTX_CAP]
 
     def set_backlog(self, value: str) -> None:
-        self.backlog = (value or "")[:20000]
+        self.backlog = (value or "")[: self._CTX_CAP]
 
     def set_current_task(self, task: dict[str, Any]) -> None:
         self.current_task = task or {}
@@ -218,7 +223,7 @@ class PipelineContext:
             inputs["constraints"] = ["spec-first", "validate-only"]
         if self.spec_raw:
             inputs["spec_raw"] = self.spec_raw
-            inputs["product_spec"] = self.product_spec or self.spec_raw[:20000]
+            inputs["product_spec"] = self.product_spec or self.spec_raw[:self._CTX_CAP]
         if self.product_spec_template:
             inputs["spec_template"] = self.product_spec_template
         if self.project_type:
@@ -233,7 +238,7 @@ class PipelineContext:
         if self.engineer_proposal:
             inputs["engineer_stack_proposal"] = self.engineer_proposal
         if backlog_summary:
-            inputs["backlog_summary"] = backlog_summary[:15000]
+            inputs["backlog_summary"] = backlog_summary[:self._CTX_CAP]
         if validate_backlog_only:
             inputs["validate_backlog_only"] = True
         return inputs
