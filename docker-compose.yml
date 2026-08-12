@@ -253,6 +253,8 @@ services:
       - DEADPOOL_STATE_DIR=/data
       - DEADPOOL_STORE_KIND=${DEADPOOL_STORE_KIND:-json}
       # Auth: em prod, token-only (basic desligado). Local herda defaults (não-protegido → validação leve).
+      # DEADPOOL_API_ENABLE_AUTH=false só é permitido fora de prod (config.py) — usado no local p/ o gateway alcançar sem token.
+      - DEADPOOL_API_ENABLE_AUTH=${DEADPOOL_API_ENABLE_AUTH:-true}
       - DEADPOOL_API_ENABLE_TOKEN_AUTH=${DEADPOOL_API_ENABLE_TOKEN_AUTH:-false}
       - DEADPOOL_API_ENABLE_BASIC_AUTH=${DEADPOOL_API_ENABLE_BASIC_AUTH:-true}
       - DEADPOOL_API_TOKEN=${DEADPOOL_API_TOKEN:-}
