@@ -398,12 +398,14 @@ resource "aws_s3_object" "bootstrap_script" {
 }
 
 # ──────────────────────────────────────────────
-# ECR — 4 repositórios (api, runner, agents, genesis-web)
-# postgres e redis são imagens públicas — não precisam de ECR
+# ECR — repositórios de imagens do Genesis
+# postgres e redis são imagens públicas — não precisam de ECR.
+# Nota: cyborg foi provisionado fora do Terraform (aws ecr create-repository); o mesmo
+# vale para deadpool (#74) — criado no deploy. Mantido aqui para documentar o inventário.
 # ──────────────────────────────────────────────
 
 locals {
-  ecr_images = ["api", "runner", "agents", "genesis-web"]
+  ecr_images = ["api", "runner", "agents", "genesis-web", "deadpool"]
 }
 
 resource "aws_ecr_repository" "genesis" {

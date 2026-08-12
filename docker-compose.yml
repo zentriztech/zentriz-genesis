@@ -41,6 +41,10 @@ services:
       - TELEGRAM_WEBHOOK_PATH=${TELEGRAM_WEBHOOK_PATH:-wh/change-me}
       # FT-17: API precisa chamar full-test-server no host (:7878) para deploy S3
       - FULL_TEST_SERVER_URL=${FULL_TEST_SERVER_URL:-http://host.docker.internal:7878}
+      # #74/#60/#61: integração com o Deadpool co-locado (rede interna do compose).
+      # Vazio = integração OFF (painel /deadpool degrada limpo, available:false). Prod seta no .env.
+      - DEADPOOL_BASE_URL=${DEADPOOL_BASE_URL:-}
+      - DEADPOOL_API_TOKEN=${DEADPOOL_API_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -230,6 +234,44 @@ services:
       - runner
     restart: unless-stopped
 
+  # #74: Zentriz Deadpool — sustainment plane CO-LOCADO no stack do Genesis.
+  # Produto independente (ADR-001): fala com a api SOMENTE pela rede interna do
+  # compose (http://deadpool:8787) — SEM porta pública mapeada. Storage self-contained
+  # (json) em volume nomeado. Modos perigosos ficam OFF (plan/stub) salvo decisão explícita.
+  # Defaults locais seguros (app_env=local, sem token); prod seta via .env:
+  #   DEADPOOL_APP_ENV=production, DEADPOOL_API_ENABLE_TOKEN_AUTH=true,
+  #   DEADPOOL_API_ENABLE_BASIC_AUTH=false, DEADPOOL_API_TOKEN=<secret>.
+  deadpool:
+    build:
+      context: ../zentriz-deadpool-auto-care
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      - DEADPOOL_APP_ENV=${DEADPOOL_APP_ENV:-local}
+      # 0.0.0.0: alcançável pela api via nome de serviço (127.0.0.1 só ligaria o loopback interno).
+      - DEADPOOL_API_HOST=0.0.0.0
+      - DEADPOOL_API_PORT=8787
+      - DEADPOOL_STATE_DIR=/data
+      - DEADPOOL_STORE_KIND=${DEADPOOL_STORE_KIND:-json}
+      # Auth: em prod, token-only (basic desligado). Local herda defaults (não-protegido → validação leve).
+      - DEADPOOL_API_ENABLE_TOKEN_AUTH=${DEADPOOL_API_ENABLE_TOKEN_AUTH:-false}
+      - DEADPOOL_API_ENABLE_BASIC_AUTH=${DEADPOOL_API_ENABLE_BASIC_AUTH:-true}
+      - DEADPOOL_API_TOKEN=${DEADPOOL_API_TOKEN:-}
+      # Salvaguardas: sem efeitos colaterais reais salvo opt-in explícito no .env.
+      - DEADPOOL_EXECUTION_MODE=${DEADPOOL_EXECUTION_MODE:-plan}
+      - DEADPOOL_ALLOW_LIVE_LLM_CALLS=${DEADPOOL_ALLOW_LIVE_LLM_CALLS:-false}
+      - DEADPOOL_ALLOW_NETWORK_CLONE=${DEADPOOL_ALLOW_NETWORK_CLONE:-false}
+      - DEADPOOL_ALLOW_LIVE_GITHUB_CALLS=${DEADPOOL_ALLOW_LIVE_GITHUB_CALLS:-false}
+    volumes:
+      - zentriz-genesis_deadpool_state:/data
+    healthcheck:
+      # /health é isento de auth (http_server retorna antes do _check_auth) — funciona sem token.
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8787/health', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
   cag-seed:
     # Serviço one-shot: popula context_cache com bug checklists CAG.
     # Roda uma vez após a API estar healthy e encerra (restart: no).
@@ -269,3 +311,4 @@ volumes:
   zentriz-genesis_pgdata:
   zentriz-genesis_redis:
   zentriz-genesis_uploads:
+  zentriz-genesis_deadpool_state:

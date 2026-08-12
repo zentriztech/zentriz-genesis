@@ -31,6 +31,7 @@ IMAGES=(
   "zentriz-genesis-agents:agents"
   "zentriz-genesis-genesis-web:genesis-web"
   "zentriz-genesis-cyborg:cyborg"
+  "zentriz-genesis-deadpool:deadpool"
 )
 
 # Filtro opcional: args a partir do 3o = nomes ECR a pushar (ex.: runner agents cyborg).
