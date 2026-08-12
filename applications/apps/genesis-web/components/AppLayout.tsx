@@ -71,14 +71,19 @@ const navTenantAdmin = [
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
 
+// Zentriz admin vê TUDO e TODOS: itens de uso geral (incl. SPECs) +
+// visão global cross-tenant + toda a plataforma/settings.
 const navZentriz = [
-  { label: "Dashboard",     href: "/dashboard",         icon: <DashboardIcon />,  color: "#6366F1" },
+  ...navUser,
   { label: "Tenants",       href: "/zentriz/tenants",   icon: <BusinessIcon />,   color: "#10B981" },
   { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,     color: "#8B5CF6" },
   { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
+  { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
+  { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
   { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
+  { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
   { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];

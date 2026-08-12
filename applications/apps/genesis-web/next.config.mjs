@@ -21,6 +21,23 @@ const nextConfig = {
       { source: "/api/:path*", destination: `${INTERNAL_API}/api/:path*` },
     ];
   },
+  // As páginas do portal são pré-renderizadas (SSG) e o Next as marca com
+  // `Cache-Control: s-maxage=31536000` — o que faz caches compartilhados (CDN/proxy/túnel)
+  // e o cache heurístico do browser segurarem o SHELL do app por até 1 ano. Resultado: após
+  // um deploy, o usuário continua vendo a UI antiga até esvaziar o cache manualmente.
+  // Forçamos o DOCUMENTO HTML a `no-store` (sempre revalida contra a origem, que responde
+  // rápido pelo full-route cache do próprio Next). Os assets versionados por hash em
+  // `/_next/static/*` continuam `immutable` (excluídos abaixo) — sem perda de performance.
+  async headers() {
+    return [
+      {
+        source: "/((?!_next/static|_next/image|favicon.ico).*)",
+        headers: [
+          { key: "Cache-Control", value: "no-store, must-revalidate" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
