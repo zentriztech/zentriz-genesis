@@ -40,6 +40,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudIcon from "@mui/icons-material/Cloud";
 import TelegramIcon from "@mui/icons-material/Telegram";
 import TuneIcon from "@mui/icons-material/Tune";
+import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -62,6 +63,7 @@ const navTenantAdmin = [
   { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,       color: "#8B5CF6" },
   { label: "Projetos",      href: "/tenant/projects", icon: <FolderIcon />,       color: "#F59E0B" },
   { label: "Plano e uso",   href: "/tenant/plan",      icon: <SettingsIcon />,      color: "#64748B" },
+  { label: "Deadpool",      href: "/deadpool",         icon: <HealthAndSafetyIcon />, color: "#EF4444" },
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,     color: "#E2E8F0" },
   { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
@@ -79,6 +81,7 @@ const navZentriz = [
   { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,     color: "#8B5CF6" },
   { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
+  { label: "Deadpool",      href: "/deadpool",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
   { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
