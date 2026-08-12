@@ -41,6 +41,7 @@ import CloudIcon from "@mui/icons-material/Cloud";
 import TelegramIcon from "@mui/icons-material/Telegram";
 import TuneIcon from "@mui/icons-material/Tune";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -54,6 +55,7 @@ const navUser = [
   { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,    color: "#6366F1" },
   { label: "Enviar spec",   href: "/spec",            icon: <SendIcon />,         color: "#10B981" },
   { label: "SPECs",         href: "/specs",           icon: <LightbulbOutlinedIcon />, color: "#0EA5E9" },
+  { label: "Splitter",      href: "/splitter",        icon: <CallSplitIcon />,    color: "#A855F7" },
   { label: "Meus projetos", href: "/projects",        icon: <FolderIcon />,       color: "#F59E0B" },
   { label: "Notificações",  href: "/notifications",   icon: <NotificationsIcon />,color: "#EF4444" },
 ];
