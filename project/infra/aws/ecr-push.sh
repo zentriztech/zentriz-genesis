@@ -30,13 +30,27 @@ IMAGES=(
   "zentriz-genesis-runner:runner"
   "zentriz-genesis-agents:agents"
   "zentriz-genesis-genesis-web:genesis-web"
+  "zentriz-genesis-cyborg:cyborg"
 )
+
+# Filtro opcional: args a partir do 3o = nomes ECR a pushar (ex.: runner agents cyborg).
+# Sem args extras => push de todas as imagens do array.
+SELECT=("${@:3}")
 
 STEP=2
 for ENTRY in "${IMAGES[@]}"; do
   LOCAL_NAME="${ENTRY%%:*}"
   ECR_NAME="${ENTRY##*:}"
   ECR_URI="$REGISTRY/$NAMESPACE/$ECR_NAME:latest"
+
+  if [ "${#SELECT[@]}" -gt 0 ]; then
+    _match=""
+    for _s in "${SELECT[@]}"; do [ "$_s" = "$ECR_NAME" ] && _match=1; done
+    if [ -z "$_match" ]; then
+      echo "[skip] $ECR_NAME (não selecionado)"
+      continue
+    fi
+  fi
 
   echo "[$STEP/6] $LOCAL_NAME -> $ECR_URI"
 
