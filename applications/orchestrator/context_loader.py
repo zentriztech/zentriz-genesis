@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 CAG_ENABLED = os.environ.get("CAG_ENABLED", "off").strip().lower()
 RAG_ENABLED = os.environ.get("RAG_ENABLED", "off").strip().lower()
+# Estratégia de recuperação de lições: 'lexical' (hit_count*confidence, default —
+# comportamento histórico, prod-safe) ou 'semantic' (cosseno via lessons_indexer/
+# pgvector). Semantic cai de volta no lexical se não houver embeddings/embedder.
+RAG_RETRIEVAL = os.environ.get("RAG_RETRIEVAL", "lexical").strip().lower()
 CONNECT_VERSION_PIN = os.environ.get("CONNECT_VERSION_PIN", "1.1.0").strip()
 LEGACY_PROMPT_FALLBACK = os.environ.get(
     "LEGACY_PROMPT_FALLBACK", "true"
@@ -298,6 +302,42 @@ def _query_lessons_top_hits(
             pass
 
 
+def _query_lessons(
+    role: str, stack_key: str, project_id: Optional[str],
+    query: Optional[str] = None, limit: int = 20,
+) -> list[dict[str, Any]]:
+    """
+    Seleciona a estratégia de recuperação de lições.
+
+    RAG_RETRIEVAL='semantic' → busca por cosseno (lessons_indexer.semantic_search)
+    usando `query` (ou, na falta dela, um sinal grosseiro role+stack). Se a busca
+    semântica não devolver nada (sem embeddings/embedder off/DB indisponível), cai
+    de volta no lexical — nunca deixa o call site sem lições por causa do RAG.
+
+    RAG_RETRIEVAL='lexical' (default) → hit_count*confidence, comportamento histórico.
+    Nunca lança.
+    """
+    if RAG_RETRIEVAL == "semantic":
+        q = (query or "").strip() or f"{role} {stack_key}".strip()
+        try:
+            from orchestrator.lessons_indexer import semantic_search  # type: ignore
+        except Exception:
+            try:
+                from lessons_indexer import semantic_search  # type: ignore
+            except Exception as exc:
+                logger.debug("[ContextLoader] semantic_search indisponível: %s", exc)
+                semantic_search = None  # type: ignore
+        if semantic_search is not None:
+            try:
+                hits = semantic_search(q, role=role, stack_key=stack_key,
+                                       project_id=project_id, limit=limit)
+                if hits:
+                    return hits
+            except Exception as exc:
+                logger.debug("[ContextLoader] busca semântica falhou (fallback lexical): %s", exc)
+    return _query_lessons_top_hits(role, stack_key, project_id, limit)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ContextLoader
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,8 +362,15 @@ class ContextLoader:
         role: str,
         stack_key: str = "generic",
         project_id: Optional[str] = None,
+        query: Optional[str] = None,
     ) -> ContextPackage:
-        """Retorna ContextPackage. Nunca lança; falhas viram pacote vazio."""
+        """
+        Retorna ContextPackage. Nunca lança; falhas viram pacote vazio.
+
+        `query` (opcional) é o texto de contexto da tarefa (ex.: resumo da spec/task)
+        usado pela recuperação SEMÂNTICA quando RAG_RETRIEVAL='semantic'. Ausente → a
+        busca semântica usa um sinal grosseiro role+stack, e o modo lexical o ignora.
+        """
         t0 = time.perf_counter()
 
         if self.mode == "off":
@@ -336,7 +383,7 @@ class ContextLoader:
             )
 
         try:
-            return self._load_safe(role, stack_key, project_id, t0)
+            return self._load_safe(role, stack_key, project_id, t0, query)
         except Exception as exc:
             logger.warning(
                 "[ContextLoader] Falha em load(role=%s, stack=%s, project=%s): %s",
@@ -356,6 +403,7 @@ class ContextLoader:
         stack_key: str,
         project_id: Optional[str],
         t0: float,
+        query: Optional[str] = None,
     ) -> ContextPackage:
         # Import resiliente: tenta absoluto via pacote orchestrator, depois flat.
         try:
@@ -388,7 +436,7 @@ class ContextLoader:
 
         lessons_hot: list[dict[str, Any]] = []
         if RAG_ENABLED in {"shadow", "live"}:
-            lessons_hot = _query_lessons_top_hits(role, stack_key, project_id)
+            lessons_hot = _query_lessons(role, stack_key, project_id, query)
 
         # Best-effort: bump dos hits no cache
         _bump_hits(cache_keys_hit)
