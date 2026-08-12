@@ -51,6 +51,12 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     if (!row) { console.warn(`[GitHubPush] Project ${projectId} not found`); return; }
     if (!row.installation_id) {
       console.log(`[GitHubPush] Tenant has no GitHub App installation — skipping`);
+      // #59: never fail silently — surface WHY no repo was created so the portal/tenant sees it.
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, `⚠️ Repositório GitHub não criado: o tenant ainda não instalou o GitHub App da Zentriz. Instale o App (Settings → Integrações) e reprocesse o projeto para publicar o código.`],
+      );
       return;
     }
 
@@ -145,7 +151,26 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     }
   } catch (err) {
     console.error(`[GitHubPush] Failed for project ${projectId}:`, err);
-    // Fire-and-forget: never throw — must not fail the accept request
+    // Fire-and-forget: never throw — must not fail the accept request.
+    // #59: but never swallow silently — record WHY so the portal/tenant sees the failure.
+    try {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = (err as { status?: number })?.status;
+      // #59: 403 "Resource not accessible by integration" ao criar repo em org = o GitHub App
+      // não tem a permissão de REPOSITÓRIO "Administration: Read & write" (distinta de
+      // "Organization administration"). É configuração do App (dono aprova), não erro de código.
+      const hint =
+        status === 403 || /not accessible by integration/i.test(msg)
+          ? " → O GitHub App precisa da permissão de repositório 'Administration: Read & write' (Settings do App → Permissions → Repository → Administration), e o proprietário da organização deve aprovar a nova permissão na instalação."
+          : "";
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
+         VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, `⚠️ Falha ao criar o repositório GitHub: ${msg}. O projeto foi aceito, mas o código ainda não foi publicado.${hint}`],
+      );
+    } catch (dialogueErr) {
+      console.error(`[GitHubPush] Could not record failure dialogue for ${projectId}:`, dialogueErr);
+    }
   } finally {
     client.release();
   }

@@ -224,7 +224,7 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
-function extractSpecMarkdown(data: Record<string, unknown>): string {
+export function extractSpecMarkdown(data: Record<string, unknown>): string {
   const artifacts = (data.artifacts as Array<Record<string, unknown>>) ?? [];
   const artifact = artifacts.find((a) =>
     typeof a.path === "string" && (a.path.endsWith(".md") || a.path.includes("PRODUCT_SPEC") || a.path.includes("spec"))
@@ -240,7 +240,7 @@ function extractSpecMarkdown(data: Record<string, unknown>): string {
  * fetch() connections inside Docker get aborted prematurely even with large timeouts.
  * This function has a plain socket-level timeout (600s) with no AbortController.
  */
-async function httpPost(urlStr: string, body: string, timeoutMs = 720_000): Promise<string> {
+export async function httpPost(urlStr: string, body: string, timeoutMs = 720_000): Promise<string> {
   const url = new URL(urlStr);
   const httpMod = url.protocol === "https:" ? await import("https") : await import("http");
 
@@ -291,7 +291,7 @@ async function httpPost(urlStr: string, body: string, timeoutMs = 720_000): Prom
   });
 }
 
-async function httpGet(urlStr: string, timeoutMs = 10_000): Promise<string> {
+export async function httpGet(urlStr: string, timeoutMs = 10_000): Promise<string> {
   const url = new URL(urlStr);
   const httpMod = url.protocol === "https:" ? await import("https") : await import("http");
   return new Promise((resolve, reject) => {
@@ -436,6 +436,49 @@ export async function specRoutes(app: FastifyInstance) {
       return reply.send({ jobId, status: job.status, elapsed });
     }
   );
+
+  // GET /api/specs — lista as SPECs (rascunhos) do tenant (Feature #64).
+  // Decisão de modelagem (ver migration 042): uma SPEC é apenas uma IDEIA e é modelada
+  // como um projeto com status='draft'. Não há entidade "spec" própria — reusamos a
+  // linha em `projects`. A promoção spec→projeto reusa POST /api/projects/:id/run; o
+  // vínculo a um produto reusa PATCH /api/projects/:id/product (product_id existente).
+  app.get("/api/specs", async (request, reply) => {
+    const user = getUser(request);
+    const client = await pool.connect();
+    try {
+      const cols = `p.id, p.title, p.status, p.product_id, p.parent_project_id,
+                    p.version_number, p.extra, p.created_at, p.updated_at,
+                    pr.name AS product_name`;
+      let rows;
+      if (user.role === "zentriz_admin") {
+        rows = (await client.query(
+          `SELECT ${cols} FROM projects p
+             LEFT JOIN products pr ON pr.id = p.product_id
+            WHERE p.status = 'draft'
+            ORDER BY p.updated_at DESC`,
+        )).rows;
+      } else if (user.tenantId) {
+        rows = (await client.query(
+          `SELECT ${cols} FROM projects p
+             LEFT JOIN products pr ON pr.id = p.product_id
+            WHERE p.status = 'draft' AND p.tenant_id = $1
+            ORDER BY p.updated_at DESC`,
+          [user.tenantId],
+        )).rows;
+      } else {
+        rows = (await client.query(
+          `SELECT ${cols} FROM projects p
+             LEFT JOIN products pr ON pr.id = p.product_id
+            WHERE p.status = 'draft' AND p.created_by = $1
+            ORDER BY p.updated_at DESC`,
+          [user.id],
+        )).rows;
+      }
+      return reply.send(rows);
+    } finally {
+      client.release();
+    }
+  });
 
   app.post("/api/specs", async (request, reply) => {
     const user = getUser(request);

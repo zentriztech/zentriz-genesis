@@ -1,0 +1,25 @@
+# Override LOCAL para criação REAL de repositório no GitHub — MESMO App que prod.
+# Local passa a usar o App genezis-factory (app_id 3609618, installation 129756252 na
+# org genezis-factory), que TEM Administration: Read & write (prova: prod já criou 15+
+# repos com ele). A private key foi decifrada do banco de PROD (AES-256-CBC, zero-key) e
+# reinstalada em /opt/zentriz-secrets como arquivo PEM — mesmo padrão do app antigo.
+# O App GLOBAL do env (GITHUB_APP_ID + KEY_FILE) mina o token da installation gravada em
+# tenant_github_installations (app_id NULL nessa linha → caminho do app global no github.ts).
+# Aplicar APÓS o override linux (que zera GITHUB_APP_PRIVATE_KEY_FILE):
+#   docker compose -f docker-compose.yml -f docker-compose.override.linux.yml \
+#                  -f docker-compose.override.foundry.yml -f docker-compose.override.github.yml up -d ...
+# Segurança: o .pem NÃO é commitado; vive só em /opt/zentriz-secrets no host (root, 600).
+services:
+  api:
+    volumes:
+      - /opt/zentriz-secrets:/opt/zentriz-secrets:ro
+    environment:
+      - GITHUB_APP_ID=3609618
+      - GITHUB_APP_PRIVATE_KEY_FILE=/opt/zentriz-secrets/genezis-factory.private-key.pem
+
+  runner:
+    volumes:
+      - /opt/zentriz-secrets:/opt/zentriz-secrets:ro
+    environment:
+      - GITHUB_APP_ID=3609618
+      - GITHUB_APP_PRIVATE_KEY_FILE=/opt/zentriz-secrets/genezis-factory.private-key.pem

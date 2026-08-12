@@ -35,6 +35,12 @@ const VALID_PROJECT_STATUS = new Set([
   // SPEC-APPROVED: spec marcada como "aprovada por humano" que reprovou na validação
   // estrutural (formato PRODUCT_SPEC) ou cujo hash divergiu da versão aprovada.
   "spec_validation_failed",
+  // Achado #42 — status de bloqueio terminal estendidos (migração 040). Sem estes
+  // no allowlist, o PATCH do runner retornava 400 e o status não persistia →
+  // projeto zumbi em 'running' relançado em loop pelo watchdog.
+  "blocked_structural_gate",        // #37: gate estrutural determinístico
+  "blocked_backlog_empty_with_frs", // #39: backlog vazio apesar de FRs presentes
+  "blocked_awaiting_expo_confirm",  // #44: Expo detectado, aguarda confirmação humana
 ]);
 
 async function checkProjectAccess(

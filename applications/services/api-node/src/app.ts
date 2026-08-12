@@ -5,6 +5,8 @@ import { voucherRoutes } from "./routes/vouchers.js";
 import { authRoutes } from "./routes/auth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { specRoutes } from "./routes/specs.js";
+import { specChatRoutes } from "./routes/specChat.js";
+import { catalogRoutes } from "./routes/catalog.js";
 import { tenantRoutes } from "./routes/tenants.js";
 import { userRoutes } from "./routes/users.js";
 import { signupRoutes } from "./routes/signup.js";
@@ -60,6 +62,8 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(signupRoutes);
   await app.register(projectRoutes);
   await app.register(specRoutes);
+  await app.register(specChatRoutes);
+  await app.register(catalogRoutes);
   await app.register(tenantRoutes);
   await app.register(userRoutes);
   await app.register(dialogueRoutes);

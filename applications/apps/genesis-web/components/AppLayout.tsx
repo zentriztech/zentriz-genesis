@@ -22,6 +22,7 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import FolderIcon from "@mui/icons-material/Folder";
+import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -51,6 +52,7 @@ const PRIMARY = "#6366F1";
 const navUser = [
   { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,    color: "#6366F1" },
   { label: "Enviar spec",   href: "/spec",            icon: <SendIcon />,         color: "#10B981" },
+  { label: "SPECs",         href: "/specs",           icon: <LightbulbOutlinedIcon />, color: "#0EA5E9" },
   { label: "Meus projetos", href: "/projects",        icon: <FolderIcon />,       color: "#F59E0B" },
   { label: "Notificações",  href: "/notifications",   icon: <NotificationsIcon />,color: "#EF4444" },
 ];

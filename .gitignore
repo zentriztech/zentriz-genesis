@@ -61,3 +61,5 @@ docker-compose.override.bedrock.yml
 
 # Runner state local (checkpoints de execução — runtime)
 applications/orchestrator/state/
+
+docker-compose.override.foundry.yml

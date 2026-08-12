@@ -40,3 +40,7 @@ services:
   # genesis-web não é necessário para gerar código (é o portal); fica de fora do up seletivo.
 
 # (append) remapeia a porta da api p/ 3100 no host — :3000 já usado por outro projeto (uxt).
+
+  genesis-web:
+    ports: !override
+      - "3010:3001"

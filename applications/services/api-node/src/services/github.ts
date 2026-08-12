@@ -12,6 +12,67 @@ const GITHUB_APP_CLIENT_SECRET = process.env.GITHUB_APP_CLIENT_SECRET ?? "";
 const ENCRYPTION_KEY = Buffer.from((process.env.ENCRYPTION_KEY ?? "").padEnd(64, "0").slice(0, 64), "hex");
 const IV_LENGTH = 16;
 
+// Limite de blobs criados em paralelo. `Promise.all(batch.map(createBlob))` disparava
+// até 80 requisições simultâneas — em projetos grandes (ex.: mobile RN CLI) isso estoura
+// o SECONDARY RATE LIMIT do GitHub (403 em /git/blobs, sem retry-after útil). Um teto baixo
+// de concorrência + retry com backoff resolve sem quebrar o push de projetos grandes.
+const BLOB_CONCURRENCY = 6;
+
+/** Executa `fn` sobre `items` preservando a ordem, com no máximo `limit` execuções simultâneas. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Cria um blob com retry em rate-limit. GitHub sinaliza secondary rate limit com 403
+ * (às vezes 429) + possíveis headers `retry-after` / `x-ratelimit-remaining=0`. Fazemos
+ * backoff exponencial (respeitando retry-after quando presente) antes de desistir.
+ */
+async function createBlobWithRetry(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  contentBase64: string,
+): Promise<string> {
+  const maxAttempts = 6;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const { data: blob } = await octokit.git.createBlob({ owner, repo, content: contentBase64, encoding: "base64" });
+      return blob.sha;
+    } catch (err: unknown) {
+      const e = err as { status?: number; response?: { headers?: Record<string, string> } };
+      const status = e.status;
+      const headers = e.response?.headers ?? {};
+      const isRateLimit =
+        status === 429 ||
+        (status === 403 && (headers["retry-after"] != null || headers["x-ratelimit-remaining"] === "0" ||
+          /rate limit|abuse|secondary/i.test(String((err as { message?: string }).message ?? ""))));
+      if (!isRateLimit || attempt === maxAttempts - 1) throw err;
+      const retryAfter = Number(headers["retry-after"]);
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(1000 * Math.pow(2, attempt), 30_000);
+      console.log(`[GitHub] createBlob rate-limited (status ${status}) — retrying in ${waitMs}ms (attempt ${attempt + 1}/${maxAttempts})`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  throw new Error("createBlob: esgotou retries de rate-limit");
+}
+
 export function encryptText(text: string): string {
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
@@ -265,18 +326,13 @@ export async function commitAndPush(
   });
   const baseTreeSha = commitData.tree.sha;
 
-  // Create blobs and build tree
-  const treeItems = await Promise.all(
-    opts.files.map(async (file) => {
-      const { data: blob } = await octokit.git.createBlob({
-        owner: opts.owner,
-        repo: opts.repo,
-        content: Buffer.from(file.content).toString("base64"),
-        encoding: "base64",
-      });
-      return { path: file.path, mode: "100644" as const, type: "blob" as const, sha: blob.sha };
-    })
-  );
+  // Create blobs and build tree (concorrência limitada + retry em rate-limit)
+  const treeItems = await mapWithConcurrency(opts.files, BLOB_CONCURRENCY, async (file) => {
+    const sha = await createBlobWithRetry(
+      octokit, opts.owner, opts.repo, Buffer.from(file.content).toString("base64"),
+    );
+    return { path: file.path, mode: "100644" as const, type: "blob" as const, sha };
+  });
 
   const { data: tree } = await octokit.git.createTree({
     owner: opts.owner,
@@ -413,15 +469,13 @@ export async function pushProjectFiles(
     const { data: commitData } = await octokit.git.getCommit({ owner, repo, commit_sha: currentSha });
     const baseTreeSha = commitData.tree.sha;
 
-    // Create blobs for each file
-    const treeItems = await Promise.all(
-      batch.map(async (f) => {
-        const raw = await readFile(f.absolutePath);
-        const content = raw.toString("base64");
-        const { data: blob } = await octokit.git.createBlob({ owner, repo, content, encoding: "base64" });
-        return { path: f.relativePath, mode: "100644" as const, type: "blob" as const, sha: blob.sha };
-      })
-    );
+    // Create blobs for each file (concorrência limitada + retry em rate-limit — evita
+    // secondary rate limit do GitHub em projetos grandes, ex.: mobile RN CLI)
+    const treeItems = await mapWithConcurrency(batch, BLOB_CONCURRENCY, async (f) => {
+      const raw = await readFile(f.absolutePath);
+      const sha = await createBlobWithRetry(octokit, owner, repo, raw.toString("base64"));
+      return { path: f.relativePath, mode: "100644" as const, type: "blob" as const, sha };
+    });
 
     const { data: tree } = await octokit.git.createTree({ owner, repo, base_tree: baseTreeSha, tree: treeItems });
 

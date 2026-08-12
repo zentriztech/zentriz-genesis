@@ -383,6 +383,9 @@ function ProductLinkSection({ products, productId, onProductId, onProductsReload
 
 type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
+// Feature #63 — chat de edição de spec
+type ChatMessage = { role: "user" | "assistant"; content: string };
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number };
 
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
@@ -557,6 +560,93 @@ function SpecEditor({
   );
 }
 
+// ── Chat de edição de spec (Feature #63) ──────────────────────────────────────
+// Painel lateral onde o usuário conversa com a IA para refinar a spec. A cada turno,
+// a IA devolve a spec revisada (aplicada no editor/preview) + uma resposta curta.
+function SpecChatPanel({
+  messages, input, onInput, onSend, sending, error,
+}: {
+  messages: ChatMessage[];
+  input: string;
+  onInput: (v: string) => void;
+  onSend: () => void;
+  sending: boolean;
+  error: string | null;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, sending]);
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100%", bgcolor: "background.paper" }}>
+      <Stack direction="row" spacing={1} alignItems="center"
+        sx={{ px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+        <AutoFixHighIcon sx={{ fontSize: "1rem", color: PRIMARY }} />
+        <Typography variant="subtitle2" fontWeight={600} sx={{ fontSize: "0.8rem" }}>Melhorar com IA</Typography>
+      </Stack>
+
+      <Box ref={scrollRef} sx={{ flexGrow: 1, overflowY: "auto", p: 1.5 }}>
+        {messages.length === 0 && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.6 }}>
+            Peça ajustes em linguagem natural — ex.: &quot;adicione autenticação por Google&quot;,
+            &quot;detalhe melhor o modelo de dados&quot;, &quot;remova o módulo de relatórios&quot;.
+            A spec é revisada no preview a cada resposta.
+          </Typography>
+        )}
+        <Stack spacing={1.25}>
+          {messages.map((m, i) => (
+            <Box key={i} sx={{
+              alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+              maxWidth: "92%",
+              bgcolor: m.role === "user" ? PRIMARY + "22" : "action.hover",
+              border: "1px solid", borderColor: m.role === "user" ? PRIMARY + "44" : "divider",
+              borderRadius: 1.5, px: 1.25, py: 0.75,
+            }}>
+              <Typography variant="caption" sx={{
+                display: "block", fontWeight: 700, fontSize: "0.6rem", textTransform: "uppercase",
+                letterSpacing: "0.06em", color: m.role === "user" ? "primary.main" : "text.secondary", mb: 0.25,
+              }}>
+                {m.role === "user" ? "Você" : "CTO"}
+              </Typography>
+              <Typography variant="body2" sx={{ fontSize: "0.8rem", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+                {m.content}
+              </Typography>
+            </Box>
+          ))}
+          {sending && (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5, py: 0.5 }}>
+              <CircularProgress size={14} />
+              <Typography variant="caption" color="text.secondary">CTO revisando a spec…</Typography>
+            </Stack>
+          )}
+        </Stack>
+      </Box>
+
+      {error && <Alert severity="error" sx={{ mx: 1, mb: 1, fontSize: "0.72rem" }}>{error}</Alert>}
+
+      <Box sx={{ p: 1, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} alignItems="flex-end">
+          <TextField
+            fullWidth multiline maxRows={4} size="small" value={input}
+            onChange={(e) => onInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (input.trim() && !sending) onSend(); }
+            }}
+            placeholder="Peça um ajuste na spec…"
+            sx={{ "& textarea": { fontSize: "0.8rem" } }}
+          />
+          <IconButton color="primary" disabled={!input.trim() || sending} onClick={onSend} sx={{ mb: 0.25 }}>
+            {sending ? <CircularProgress size={18} /> : <SendIcon fontSize="small" />}
+          </IconButton>
+        </Stack>
+      </Box>
+    </Box>
+  );
+}
+
+const PRIMARY = "#6366F1";
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function SpecPage() {
   const router       = useRouter();
@@ -610,6 +700,13 @@ export default function SpecPage() {
   const [editorFullscreen, setEditorFullscreen] = useState(false);
   const [approving, setApproving]       = useState<"save" | "start" | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
+
+  // Chat de edição de spec (Feature #63)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput]       = useState("");
+  const [chatSending, setChatSending]   = useState(false);
+  const [chatError, setChatError]       = useState<string | null>(null);
+  const chatPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Upload flow
   const [files, setFiles]         = useState<File[]>([]);
@@ -725,6 +822,62 @@ export default function SpecPage() {
 
   // Cleanup on unmount
   useEffect(() => () => stopPolling(), [stopPolling]);
+
+  // ── Chat de edição de spec (Feature #63) ────────────────────────────────────
+  const stopChatPolling = useCallback(() => {
+    if (chatPollRef.current) { clearInterval(chatPollRef.current); chatPollRef.current = null; }
+  }, []);
+  useEffect(() => () => stopChatPolling(), [stopChatPolling]);
+
+  const handleChatSend = useCallback(async () => {
+    const text = chatInput.trim();
+    if (!text || !specMarkdown || chatSending) return;
+    const nextMessages: ChatMessage[] = [...chatMessages, { role: "user", content: text }];
+    setChatMessages(nextMessages);
+    setChatInput("");
+    setChatSending(true);
+    setChatError(null);
+    stopChatPolling();
+
+    let jobId: string;
+    try {
+      const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
+        specMarkdown,
+        messages: nextMessages,
+        projectId: editProjectId ?? undefined,
+      });
+      jobId = res.jobId;
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "Erro ao enviar mensagem.");
+      setChatSending(false);
+      return;
+    }
+
+    const startTs = Date.now();
+    chatPollRef.current = setInterval(async () => {
+      if (Date.now() - startTs > 11 * 60_000) {
+        stopChatPolling();
+        setChatError("Tempo esgotado. Tente novamente.");
+        setChatSending(false);
+        return;
+      }
+      try {
+        const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
+        if (poll.status === "done") {
+          stopChatPolling();
+          if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
+          setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Spec atualizada." }]);
+          setChatSending(false);
+        } else if (poll.status === "error") {
+          stopChatPolling();
+          setChatError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
+          setChatSending(false);
+        }
+      } catch (e) {
+        console.warn("[SpecChat] poll error:", e instanceof Error ? e.message : e);
+      }
+    }, 8000);
+  }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, stopChatPolling]);
 
   // ── Save spec (draft or start) ──────────────────────────────────────────────
   const handleSaveSpec = useCallback(async (startNow: boolean) => {
@@ -915,14 +1068,23 @@ export default function SpecPage() {
                   </Button>
                 </Stack>
               </Stack>
-              <Box sx={{ height: 600, overflow: "hidden" }}>
-                <SpecEditor
-                  value={specMarkdown} onChange={setSpecMarkdown}
-                  fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                  onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
-                  onRegen={undefined}
-                  regenDisabled={true}
-                />
+              <Box sx={{ height: 600, overflow: "hidden", display: "flex" }}>
+                <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
+                  <SpecEditor
+                    value={specMarkdown} onChange={setSpecMarkdown}
+                    fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
+                    onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+                    onRegen={undefined}
+                    regenDisabled={true}
+                  />
+                </Box>
+                {/* Feature #63 — painel de chat à direita do editor/preview */}
+                <Box sx={{ width: { xs: 300, md: 380 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider" }}>
+                  <SpecChatPanel
+                    messages={chatMessages} input={chatInput} onInput={setChatInput}
+                    onSend={handleChatSend} sending={chatSending} error={chatError}
+                  />
+                </Box>
               </Box>
             </CardContent>
           </Card>
@@ -1066,15 +1228,23 @@ export default function SpecPage() {
 
                     {approveError && <Alert severity="error" sx={{ mb: 1.5 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
 
-                    {/* Editor inline (600px) */}
-                    <Box sx={{ height: 600, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
-                      <SpecEditor
-                        value={specMarkdown} onChange={setSpecMarkdown}
-                        fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                        onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
-                        onRegen={() => setSpecMarkdown(null)}
-                        regenDisabled={generating}
-                      />
+                    {/* Editor inline (600px) + chat de edição (Feature #63) */}
+                    <Box sx={{ height: 600, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden", display: "flex" }}>
+                      <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
+                        <SpecEditor
+                          value={specMarkdown} onChange={setSpecMarkdown}
+                          fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
+                          onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+                          onRegen={() => setSpecMarkdown(null)}
+                          regenDisabled={generating}
+                        />
+                      </Box>
+                      <Box sx={{ width: { xs: 280, md: 360 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider", display: { xs: "none", sm: "block" } }}>
+                        <SpecChatPanel
+                          messages={chatMessages} input={chatInput} onInput={setChatInput}
+                          onSend={handleChatSend} sending={chatSending} error={chatError}
+                        />
+                      </Box>
                     </Box>
                   </motion.div>
                 </AnimatePresence>

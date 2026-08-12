@@ -45,6 +45,21 @@ export interface CreateProjectResult {
 }
 
 /**
+ * computeSpecFingerprint — SHA-256 do conteúdo NORMALIZADO das specs, para REUSO
+ * SILENCIOSO (Feature #65). Difere do spec_hash (spec-approved), que casa byte-a-byte
+ * com o disco: aqui normalizamos (lowercase + colapso de espaços) para que specs
+ * "materialmente iguais" com pequenas diferenças de formatação colidam de propósito.
+ * Determinístico: arquivos ordenados por filename ASC, unidos por "\n".
+ */
+export function computeSpecFingerprint(files: SpecFileInput[]): string {
+  const normalized = [...files]
+    .sort((a, b) => a.filename.localeCompare(b.filename))
+    .map((f) => f.buffer.toString("utf-8").toLowerCase().replace(/\s+/g, " ").trim())
+    .join("\n");
+  return crypto.createHash("sha256").update(normalized, "utf-8").digest("hex");
+}
+
+/**
  * Cria UM projeto (linha em `projects` + arquivos em disco + `project_spec_files`).
  * Usa o `client` fornecido para o INSERT do projeto (permite transação pelo chamador);
  * a gravação de arquivos e o registro de spec_files usam o mesmo client.
@@ -94,7 +109,39 @@ export async function createProjectFromSpec(
         .digest("hex")
     : null;
 
+  // REUSO SILENCIOSO (Feature #65, parte 2) — INTRA-TENANT apenas, invisível ao usuário.
+  // Fingerprint da spec normalizada; se este tenant já ENTREGOU um projeto com a mesma
+  // spec (accepted/completed), registramos a proveniência para reaproveitar artefatos.
+  // NÃO há texto de UI nem notificação — só log interno em nível debug.
+  const specFingerprint = computeSpecFingerprint(files);
+  let reusedFrom: string | null = null;
+  try {
+    const dup = await client.query(
+      `SELECT id FROM projects
+         WHERE tenant_id = $1 AND spec_fingerprint = $2
+           AND status IN ('accepted', 'completed')
+         ORDER BY updated_at DESC LIMIT 1`,
+      [tenantId, specFingerprint],
+    );
+    if (dup.rows[0]) {
+      reusedFrom = dup.rows[0].id as string;
+      // Log interno (debug) — NUNCA exposto ao usuário.
+      console.debug(
+        `[silent-reuse] tenant=${tenantId} fp=${specFingerprint.slice(0, 12)} ` +
+        `reuses project=${reusedFrom}`,
+      );
+      // TODO(reuse-clone): clonar de fato os artefatos/estrutura (código gerado, grafo de
+      // tasks, repo) do projeto reutilizado para pular a regeneração. Por ora registramos
+      // apenas a REFERÊNCIA de proveniência em extra.reused_from; o pipeline segue normal.
+      // Não afirmamos ao usuário que houve reuso — não é um stub que mente.
+    }
+  } catch {
+    // Coluna spec_fingerprint pode não existir em bancos sem a migração 043 — reuso é
+    // best-effort; a criação de projeto nunca deve falhar por causa da detecção de reuso.
+  }
+
   const extraJson = JSON.stringify({
+    ...(reusedFrom ? { reused_from: reusedFrom } : {}),
     ...(freeDescription ? { free_description: freeDescription } : {}),
     ...(projectType ? { project_type: projectType } : {}),
     ...(deliveryFields.deliveryMode ? { delivery_mode: deliveryFields.deliveryMode } : {}),
@@ -111,10 +158,10 @@ export async function createProjectFromSpec(
   });
 
   const projectResult = await client.query(
-    `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9) RETURNING id`,
+    `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id, spec_fingerprint)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10) RETURNING id`,
     [tenantId, createdBy, title, files[0].filename, isDraft ? "draft" : "spec_submitted",
-     rootParentId, versionNumber, extraJson, productId],
+     rootParentId, versionNumber, extraJson, productId, specFingerprint],
   );
   const projectId = projectResult.rows[0].id as string;
 
