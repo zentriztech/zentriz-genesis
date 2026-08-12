@@ -1016,7 +1016,7 @@ function ProjectDetailPageInner() {
         {(!codeFiles || codeFiles.totalFiles === 0) ? (
           <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>Arquivos de código gerados pelo Dev aparecerão aqui.</Typography>
         ) : (
-          <CodeExplorer projectId={id} files={codeFiles.files} appsRoot={codeFiles.appsRoot} height="100%" />
+          <CodeExplorer projectId={id} files={codeFiles.files} appsRoot={codeFiles.appsRoot} height="100%" truncated={codeFiles.truncated ?? false} totalFiles={codeFiles.totalFiles} />
         )}
       </Box>
     );

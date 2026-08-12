@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import Chip from "@mui/material/Chip";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
 import IconButton from "@mui/material/IconButton";
+import InputAdornment from "@mui/material/InputAdornment";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
@@ -18,6 +20,9 @@ import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import FolderIcon from "@mui/icons-material/Folder";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
+import SearchIcon from "@mui/icons-material/Search";
+import ClearIcon from "@mui/icons-material/Clear";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { apiGet } from "@/lib/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -110,11 +115,15 @@ async function getLanguageExtension(ext: string) {
 
 // ── Tree node component ───────────────────────────────────────────────────────
 function TreeItem({
-  node, depth, selected, onSelect,
+  node, depth, selected, onSelect, filterActive = false,
 }: {
   node: TreeNode; depth: number; selected: string | null; onSelect: (path: string) => void;
+  filterActive?: boolean;
 }) {
   const [open, setOpen] = useState(depth < 2);
+  // Com filtro ativo, toda pasta abre para que as correspondências fiquem visíveis
+  // (sobrepõe o estado manual sem remontar a árvore; ao limpar o filtro, volta ao manual).
+  const effectiveOpen = filterActive || open;
   const isSelected = node.fullPath === selected;
   const color = node.ext ? (EXT_COLOR[node.ext] ?? "#8B949E") : undefined;
 
@@ -130,14 +139,14 @@ function TreeItem({
             userSelect: "none",
           }}
         >
-          {open ? <ExpandMoreIcon sx={{ fontSize: "0.9rem", color: "#8B949E", flexShrink: 0 }} />
+          {effectiveOpen ? <ExpandMoreIcon sx={{ fontSize: "0.9rem", color: "#8B949E", flexShrink: 0 }} />
                 : <ChevronRightIcon sx={{ fontSize: "0.9rem", color: "#8B949E", flexShrink: 0 }} />}
-          {open ? <FolderOpenIcon sx={{ fontSize: "0.85rem", color: "#F59E0B", flexShrink: 0 }} />
+          {effectiveOpen ? <FolderOpenIcon sx={{ fontSize: "0.85rem", color: "#F59E0B", flexShrink: 0 }} />
                 : <FolderIcon sx={{ fontSize: "0.85rem", color: "#F59E0B", flexShrink: 0 }} />}
           <Typography variant="caption" sx={{ color: "#E6EDF3", fontSize: "0.75rem" }}>{node.name}</Typography>
         </Box>
-        {open && node.children?.map((child) => (
-          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} />
+        {effectiveOpen && node.children?.map((child) => (
+          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} filterActive={filterActive} />
         ))}
       </Box>
     );
@@ -284,26 +293,137 @@ interface CodeExplorerProps {
   files: CodeFile[];
   appsRoot: string | null;
   height?: number | string;
+  /** Backend truncou a lista (cap CODE_FILES_MAX) — avisa o usuário que a árvore está incompleta. */
+  truncated?: boolean;
+  /** Total real de arquivos gerados (pode ser > files.length quando truncado). */
+  totalFiles?: number;
 }
 
-export function CodeExplorer({ projectId, files, appsRoot, height = 520 }: CodeExplorerProps) {
+export function CodeExplorer({ projectId, files, appsRoot, height = 520, truncated = false, totalFiles }: CodeExplorerProps) {
   const [selected, setSelected]     = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const tree = buildTree(files);
+  const [query, setQuery]           = useState("");
+  const [activeExts, setActiveExts] = useState<Set<string>>(new Set());
+
+  // Extensões presentes (com contagem), ordenadas por frequência desc — vira os chips de filtro.
+  const extList = useMemo(() => {
+    // Record (não Map) — o target do tsconfig do web não permite iterar Map (TS2802).
+    const counts: Record<string, number> = {};
+    for (const f of files) {
+      const e = f.ext || "—";
+      counts[e] = (counts[e] ?? 0) + 1;
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [files]);
+
+  const q = query.trim().toLowerCase();
+  const filterActive = q !== "" || activeExts.size > 0;
+
+  // Filtro por nome (substring case-insensitive no path) + por extensão (OR entre extensões ativas).
+  const filteredFiles = useMemo(() => {
+    if (!filterActive) return files;
+    return files.filter((f) => {
+      if (activeExts.size > 0 && !activeExts.has(f.ext || "—")) return false;
+      if (q !== "" && !f.path.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [files, q, activeExts, filterActive]);
+
+  const tree = useMemo(() => buildTree(filteredFiles), [filteredFiles]);
   const selectedFile = selected ? files.find((f) => f.path === selected) : null;
+
+  const toggleExt = (ext: string) =>
+    setActiveExts((prev) => {
+      const next = new Set(prev);
+      if (next.has(ext)) next.delete(ext); else next.add(ext);
+      return next;
+    });
 
   const explorerContent = (h: number | string) => (
     <Box sx={{ display: "flex", height: h, overflow: "hidden", bgcolor: "#0D0F14", flex: 1 }}>
-      {/* File tree */}
-      <Box sx={{ width: 240, flexShrink: 0, overflowY: "auto", overflowX: "hidden", borderRight: "1px solid #21262D", bgcolor: "#0D1117", py: 0.5 }}>
-        {appsRoot && (
-          <Typography variant="caption" sx={{ display: "block", px: 1.5, pb: 0.5, color: "#484F58", fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-            apps/
-          </Typography>
-        )}
-        {tree.map((node) => (
-          <TreeItem key={node.fullPath} node={node} depth={0} selected={selected} onSelect={setSelected} />
-        ))}
+      {/* File tree + toolbar */}
+      <Box sx={{ width: 260, flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid #21262D", bgcolor: "#0D1117" }}>
+        {/* Toolbar (não rola): busca + filtro por extensão + avisos */}
+        <Box sx={{ flexShrink: 0, px: 1, pt: 1, pb: 0.5, borderBottom: "1px solid #21262D" }}>
+          <TextField
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar arquivo..."
+            size="small"
+            fullWidth
+            variant="outlined"
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon sx={{ fontSize: "0.9rem", color: "#484F58" }} />
+                </InputAdornment>
+              ),
+              endAdornment: query ? (
+                <InputAdornment position="end">
+                  <IconButton size="small" onClick={() => setQuery("")} sx={{ p: 0.25 }}>
+                    <ClearIcon sx={{ fontSize: "0.85rem", color: "#8B949E" }} />
+                  </IconButton>
+                </InputAdornment>
+              ) : undefined,
+              sx: { fontSize: "0.73rem", color: "#E6EDF3", bgcolor: "#0D0F14" },
+            }}
+          />
+          {extList.length > 1 && (
+            <Stack direction="row" spacing={0.5} sx={{ mt: 0.75, flexWrap: "wrap", gap: 0.5 }} useFlexGap>
+              {extList.slice(0, 12).map(([ext, count]) => {
+                const on = activeExts.has(ext);
+                const color = EXT_COLOR[ext] ?? "#8B949E";
+                return (
+                  <Chip
+                    key={ext}
+                    label={`${ext === "—" ? "s/ext" : ext} ${count}`}
+                    size="small"
+                    onClick={() => toggleExt(ext)}
+                    sx={{
+                      height: 18, fontSize: "0.6rem", cursor: "pointer",
+                      bgcolor: on ? `${color}33` : "transparent",
+                      color: on ? "#E6EDF3" : "#8B949E",
+                      border: `1px solid ${on ? color : "#30363D"}`,
+                    }}
+                  />
+                );
+              })}
+            </Stack>
+          )}
+          {(filterActive || truncated) && (
+            <Typography variant="caption" sx={{ display: "block", mt: 0.75, color: "#8B949E", fontSize: "0.63rem" }}>
+              {filterActive
+                ? `${filteredFiles.length} de ${files.length} arquivos`
+                : `${files.length} arquivos`}
+            </Typography>
+          )}
+          {truncated && (
+            <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.5 }}>
+              <WarningAmberIcon sx={{ fontSize: "0.8rem", color: "#F59E0B", flexShrink: 0 }} />
+              <Typography variant="caption" sx={{ color: "#F59E0B", fontSize: "0.62rem", lineHeight: 1.3 }}>
+                Lista truncada{typeof totalFiles === "number" ? ` (${files.length} de ${totalFiles})` : ""} — use a busca para localizar arquivos não listados.
+              </Typography>
+            </Stack>
+          )}
+        </Box>
+
+        {/* Árvore (rola) */}
+        <Box sx={{ flexGrow: 1, overflowY: "auto", overflowX: "hidden", py: 0.5 }}>
+          {appsRoot && (
+            <Typography variant="caption" sx={{ display: "block", px: 1.5, pb: 0.5, color: "#484F58", fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              apps/
+            </Typography>
+          )}
+          {tree.length === 0 ? (
+            <Typography variant="caption" sx={{ display: "block", px: 1.5, py: 1, color: "#484F58", fontSize: "0.7rem" }}>
+              Nenhum arquivo corresponde ao filtro.
+            </Typography>
+          ) : (
+            tree.map((node) => (
+              <TreeItem key={node.fullPath} node={node} depth={0} selected={selected} onSelect={setSelected} filterActive={filterActive} />
+            ))
+          )}
+        </Box>
       </Box>
       {/* Editor */}
       <Box sx={{ flexGrow: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
