@@ -5,10 +5,11 @@ import { pushProjectToGitHub } from "../services/githubPush.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
-import { validateDeployMatrix, MOBILE_TYPES } from "../services/provision/deployMatrix.js";
+import { validateDeployMatrix, MOBILE_TYPES, mobileDeliveryChannel } from "../services/provision/deployMatrix.js";
 import { buildPlanForProject } from "../services/provision/buildPlanForProject.js";
 import { renderSourceOnlyBundle, bundleManifest } from "../services/provision/renderers/bundle.js";
 import { renderMobileEasBundle } from "../services/provision/renderers/mobileEasRenderer.js";
+import { renderMobileRncliBundle } from "../services/provision/renderers/mobileRncliRenderer.js";
 import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
@@ -1658,24 +1659,27 @@ export async function projectRoutes(app: FastifyInstance) {
       // container ANTES do caminho S3. Web/estático NÃO é afetado (segue idêntico).
       // Regra inviolável: só desvia quando o tipo/target resolve para backend.
       {
-        const { runtimeTarget, isBackend, isMobile, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
+        const { runtimeTarget, isBackend, isMobile, deliveryChannel, deliveryMode, error } = validateDeployMatrix(projectType, extraTarget, extraMode);
         if (error) {
           return reply.status(400).send({ code: "INVALID_RUNTIME_TARGET", message: error,
             details: { project_type: projectType, runtime_target: extraTarget, delivery_mode: extraMode } });
         }
-        // Cenário B / F3: mobile (Expo/RN) → canal EAS, nível source_only. Entrega o kit
-        // (app.config.ts/eas.json/CI EAS/MOBILE-DEPLOY.md); a Zentriz não dispara build nem
-        // guarda credenciais. preview_build/store_submit são F3+ (aviso no bundle).
+        // Cenário B: mobile → canal mobile próprio, nível source_only. O canal é decidido
+        // pelo TIPO (política no-Expo): mobile_expo → eas (kit Expo); demais → rncli (React
+        // Native CLI puro, kit Fastlane/gradlew, SEM eas.json/app.config.ts). A Zentriz não
+        // dispara build nem guarda credenciais. preview_build/store_submit são F3+ (aviso).
         if (isMobile) {
-          const { files, warnings } = renderMobileEasBundle({
-            appName: projectTitle,
-            apiUrl: mobileApiUrl ?? undefined,
-            delivery: (extraMode as "source_only" | "preview_build" | "store_submit" | null) ?? "source_only",
-          });
+          const mobileDelivery = (extraMode as "source_only" | "preview_build" | "store_submit" | null) ?? "source_only";
+          const isExpo = deliveryChannel === "eas";
+          const { files, warnings } = isExpo
+            ? renderMobileEasBundle({ appName: projectTitle, apiUrl: mobileApiUrl ?? undefined, delivery: mobileDelivery })
+            : renderMobileRncliBundle({ appName: projectTitle, apiUrl: mobileApiUrl ?? undefined, delivery: mobileDelivery });
           return reply.status(200).send({
-            code: "MOBILE_EAS_KIT_READY",
-            message: "Mobile (Expo/RN): baixe o kit EAS (source_only) e conecte sua conta Expo para buildar.",
-            delivery_channel: "eas",
+            code: isExpo ? "MOBILE_EAS_KIT_READY" : "MOBILE_RNCLI_KIT_READY",
+            message: isExpo
+              ? "Mobile (Expo): baixe o kit EAS (source_only) e conecte sua conta Expo para buildar."
+              : "Mobile (React Native CLI): baixe o kit (source_only) com Fastlane/gradlew — sem Expo. Configure as credenciais de assinatura para buildar/submeter.",
+            delivery_channel: deliveryChannel,
             delivery_mode: "source_only",
             warnings,
             kit_download_url: `/api/projects/${id}/deploy/source-kit`,
@@ -1972,12 +1976,13 @@ export async function projectRoutes(app: FastifyInstance) {
       const user = getUser(request);
       const { id } = request.params;
       const client = await pool.connect();
-      let mobileProject: { title: string; apiUrl: string | null; delivery: string | null } | null = null;
+      let mobileProject: { title: string; apiUrl: string | null; delivery: string | null; channel: "eas" | "rncli" } | null = null;
       try {
         if (!(await checkProjectAccess(client, id, user))) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
-        // Cenário B / F3: se o projeto é mobile, o kit é o EAS (não o bundle de container).
+        // Cenário B: se o projeto é mobile, o kit é o do canal mobile (não o bundle de container).
+        // Canal pelo tipo (política no-Expo): mobile_expo → eas (Expo); demais → rncli (RN CLI puro).
         const row = (await client.query("SELECT title, extra FROM projects WHERE id=$1", [id])).rows[0];
         const extra = (row?.extra as Record<string, unknown> | null) ?? {};
         const pt = ((extra.project_type as string | undefined) ?? "").toLowerCase().trim();
@@ -1986,6 +1991,7 @@ export async function projectRoutes(app: FastifyInstance) {
             title: (row?.title as string | undefined)?.trim() || "app",
             apiUrl: (extra.api_url as string | undefined) ?? (extra.apiUrl as string | undefined) ?? null,
             delivery: (extra.delivery_mode as string | undefined) ?? null,
+            channel: mobileDeliveryChannel(pt) === "eas" ? "eas" : "rncli",
           };
         }
       } finally {
@@ -1994,11 +2000,14 @@ export async function projectRoutes(app: FastifyInstance) {
 
       let files: { path: string; content: string }[];
       if (mobileProject) {
-        files = renderMobileEasBundle({
+        const mobileArgs = {
           appName: mobileProject.title,
           apiUrl: mobileProject.apiUrl ?? undefined,
           delivery: (mobileProject.delivery as "source_only" | "preview_build" | "store_submit" | null) ?? "source_only",
-        }).files;
+        };
+        files = mobileProject.channel === "eas"
+          ? renderMobileEasBundle(mobileArgs).files
+          : renderMobileRncliBundle(mobileArgs).files;
       } else {
         const built = await buildPlanForProject(id);
         if (!built.ok) {

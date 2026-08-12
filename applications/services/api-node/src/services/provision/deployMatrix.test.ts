@@ -99,15 +99,24 @@ describe("DM-T1: delivery_mode", () => {
     expect(d).toMatchObject({ runtimeTarget: "ecs_fargate", isFullstack: true, deliveryMode: "production" });
   });
 
-  // Cenário B / F3: mobile roteia para o canal EAS (ortogonal ao runtimeTarget de container).
+  // Cenário B: mobile roteia para um canal mobile próprio (ortogonal ao runtimeTarget de container).
+  // Política no-Expo: só mobile_expo (opt-in) → eas; o default mobile_crossplatform → rncli (RN CLI puro).
   it("mobile_expo → canal EAS, isMobile=true, sem erro", () => {
     const d = validateDeployMatrix("mobile_expo", null);
     expect(d.error).toBeUndefined();
     expect(d).toMatchObject({ isMobile: true, deliveryChannel: "eas", isBackend: false });
   });
 
-  it("mobile_crossplatform também roteia para EAS", () => {
-    expect(validateDeployMatrix("mobile_crossplatform", null)).toMatchObject({ isMobile: true, deliveryChannel: "eas" });
+  it("mobile_crossplatform (default, RN CLI puro) → canal rncli, NUNCA eas", () => {
+    const d = validateDeployMatrix("mobile_crossplatform", null);
+    expect(d.error).toBeUndefined();
+    expect(d).toMatchObject({ isMobile: true, deliveryChannel: "rncli" });
+  });
+
+  it("mobile_crossplatform com runtime_target='eas' é rejeitado (canal Expo em projeto RN CLI)", () => {
+    const d = validateDeployMatrix("mobile_crossplatform", "eas");
+    expect(d.error).toMatch(/mobile/i);
+    expect(d.deliveryChannel).toBe("rncli");
   });
 
   it("mobile não é backend (não cai na allowlist de container)", () => {

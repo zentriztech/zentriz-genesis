@@ -46,14 +46,25 @@ const MULTISERVICE_TARGETS = new Set<RuntimeTarget>(["ecs_fargate", "ec2"]);
 
 /**
  * Cenário B / B2: canal de entrega — eixo ORTOGONAL ao runtimeTarget (que é de container).
- * Mobile Expo/RN não roda em container; seu artefato sai por EAS. Mantemos isso fora do
- * union `RuntimeTarget` (que tem fan-out em backendDeployDetector/deployBackendCloud) para
- * não poluir o caminho de container — mobile vira um ramo próprio no dispatcher.
+ * Mobile não roda em container; seu artefato sai por um pipeline mobile próprio. Mantemos
+ * isso fora do union `RuntimeTarget` (que tem fan-out em backendDeployDetector/deployBackendCloud)
+ * para não poluir o caminho de container — mobile vira um ramo próprio no dispatcher.
+ *   - eas   → Expo (tipo mobile_expo, opt-in explícito do tenant).
+ *   - rncli → React Native CLI PURO (tipo mobile_crossplatform, default do ecossistema — no-Expo).
  */
-export type DeliveryChannel = "container" | "s3" | "eas";
+export type DeliveryChannel = "container" | "s3" | "eas" | "rncli";
 
-/** Tipos mobile reconhecidos (canônico + alias). Roteiam para o canal EAS. */
+/** Tipos mobile reconhecidos (canônico + alias). Roteiam para um canal mobile (eas | rncli). */
 export const MOBILE_TYPES = new Set<string>(["mobile_expo", "mobile_crossplatform"]);
+
+/**
+ * Política no-Expo do ecossistema: Expo é opt-in EXPLÍCITO (tipo `mobile_expo`). Qualquer
+ * outro tipo mobile (default `mobile_crossplatform`) é React Native CLI puro → canal `rncli`.
+ * Só `mobile_expo` entrega o kit EAS/Expo; o resto NUNCA recebe `eas.json`/`app.config.ts`.
+ */
+export function mobileDeliveryChannel(projectType: string): DeliveryChannel {
+  return projectType === "mobile_expo" ? "eas" : "rncli";
+}
 
 export interface MatrixDecision {
   runtimeTarget: RuntimeTarget;
@@ -110,18 +121,20 @@ export function validateDeployMatrix(
   const dm = resolveDeliveryMode(isBackend, extraMode);
   const deliveryMode = dm.deliveryMode;
 
-  // Cenário B / B2: mobile (Expo/RN) roteia para o canal EAS — nunca container nem S3.
-  // Resolvido ANTES dos ramos de container/estático. F3 entrega source_only (kit EAS);
+  // Cenário B / B2: mobile roteia para um canal mobile próprio — nunca container nem S3.
+  // O canal é decidido pelo TIPO (política no-Expo): mobile_expo → eas; demais → rncli.
+  // Resolvido ANTES dos ramos de container/estático. Entrega source_only (kit do canal);
   // preview_build/store_submit são tratados no dispatcher (aviso), não bloqueiam aqui.
   if (isMobile) {
-    // Alvo de container/S3 explícito é incoerente com mobile.
-    if (explicit && explicit !== "eas") {
+    const channel = mobileDeliveryChannel(pt);
+    // Alvo de container/S3 (ou canal mobile trocado) explícito é incoerente com o tipo.
+    if (explicit && explicit !== channel) {
       return { runtimeTarget: "ecs_fargate", isBackend: false, isFullstack: false,
-        isMobile: true, deliveryChannel: "eas", deliveryMode,
-        error: `runtime_target '${extraTarget}' inválido para projeto mobile (use o canal EAS).` };
+        isMobile: true, deliveryChannel: channel, deliveryMode,
+        error: `runtime_target '${extraTarget}' inválido para projeto mobile ${pt} (canal '${channel}').` };
     }
     return { runtimeTarget: "ecs_fargate", isBackend: false, isFullstack: false,
-      isMobile: true, deliveryChannel: "eas", deliveryMode };
+      isMobile: true, deliveryChannel: channel, deliveryMode };
   }
 
   // Alvo explícito inválido (typo etc.) → erro claro.
