@@ -22,17 +22,69 @@ import {
 import { notifyTelegramTenant } from "../routes/telegram.js";
 
 const PROJECT_FILES_ROOT = (process.env.PROJECT_FILES_ROOT ?? "/shared/uploads").trim();
+// #60: base URL do Deadpool para registrar o vínculo projeto-deployado → código-fonte.
+// Vazio = integração desligada (skip silencioso; nunca falha o push).
+const DEADPOOL_BASE_URL = (process.env.DEADPOOL_BASE_URL ?? "").trim().replace(/\/+$/, "");
+const DEADPOOL_API_TOKEN = (process.env.DEADPOOL_API_TOKEN ?? "").trim();
 
-// Slugify project title to a valid GitHub repo name
-function toRepoName(title: string): string {
-  const base = title
+/** Slug determinístico (lowercase, sem sufixo) — casa com o systemId/serviceId do envelope Connect. */
+function slugify(value: string): string {
+  return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 50);
+    .slice(0, 60);
+}
+
+// Slugify project title to a valid GitHub repo name
+function toRepoName(title: string): string {
+  const base = slugify(title).slice(0, 50);
   // Append short random suffix to avoid collisions
   const suffix = Math.random().toString(36).slice(2, 6);
   return `${base || "genesis-project"}-${suffix}`;
+}
+
+/**
+ * #60 — Registra o vínculo (systemId, serviceId) → repo_url no Deadpool, para que o
+ * plano de sustainment consiga clonar o código-fonte do projeto deployado.
+ * Out-of-band, best-effort: NUNCA lança (não pode falhar o aceite/push). O Genesis é
+ * quem detém repo_url + installation_id no momento da criação do repositório.
+ */
+async function registerProjectWithDeadpool(args: {
+  systemId: string;
+  serviceId: string | null;
+  repoUrl: string;
+  installationId: number | string;
+}): Promise<void> {
+  if (!DEADPOOL_BASE_URL) return; // integração desligada
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (DEADPOOL_API_TOKEN) headers["Authorization"] = `Bearer ${DEADPOOL_API_TOKEN}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(`${DEADPOOL_BASE_URL}/projects`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          systemId: args.systemId,
+          serviceId: args.serviceId,
+          repoUrl: args.repoUrl,
+          installationId: String(args.installationId),
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        console.warn(`[GitHubPush] Deadpool register-project returned ${res.status} (non-fatal)`);
+      } else {
+        console.log(`[GitHubPush] ✓ registered ${args.systemId}/${args.serviceId ?? "*"} with Deadpool`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err) {
+    console.warn("[GitHubPush] Deadpool register-project failed (non-fatal):", err);
+  }
 }
 
 export async function pushProjectToGitHub(projectId: string): Promise<void> {
@@ -40,9 +92,11 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
   try {
     // ── 1. Load project + tenant ──────────────────────────────────────────────
     const projRes = await client.query(
-      `SELECT p.id, p.title, p.tenant_id, p.created_by,
+      `SELECT p.id, p.title, p.tenant_id, p.created_by, p.product_id,
+              pr.name AS product_name, pr.system_id AS product_system_id,
               gi.installation_id, gi.github_login, gi.installation_type
        FROM projects p
+       LEFT JOIN products pr ON pr.id = p.product_id
        LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
        WHERE p.id = $1`,
       [projectId],
@@ -132,6 +186,22 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
          SET pushed_at = now(), sha_dev = $6`,
       [projectId, repoName, fullName, `https://github.com/${fullName}`, cloneUrl, shaDevResult],
     );
+
+    // ── 7b. Registrar vínculo com o Deadpool (#60) ────────────────────────────
+    // systemId canônico do manifesto (product.systemId, ex.: "zvoices") quando presente;
+    // senão slug do nome do produto; para projeto standalone, slug do título.
+    // serviceId = slug do título do projeto (dentro do produto). Casam com o
+    // systemId/serviceId do envelope Connect que o Deadpool consome.
+    const canonicalSystemId = (row.product_system_id as string | null)?.trim();
+    const systemId = canonicalSystemId
+      || (row.product_name ? slugify(row.product_name as string) : slugify((row.title as string) ?? projectId));
+    const serviceId = (canonicalSystemId || row.product_name) ? slugify((row.title as string) ?? projectId) : null;
+    await registerProjectWithDeadpool({
+      systemId,
+      serviceId,
+      repoUrl: `https://github.com/${fullName}`,
+      installationId,
+    });
 
     // ── 8. Dialogue entry ─────────────────────────────────────────────────────
     await client.query(

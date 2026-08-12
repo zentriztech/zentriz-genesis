@@ -95,10 +95,13 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
     await client.query("BEGIN");
 
     // 2. cria o produto (com product_hash p/ idempotência futura)
+    // #60: persiste o systemId canônico do manifesto (product.systemId), usado no
+    // vínculo com o Deadpool. Ausente no manifesto → NULL (githubPush cai no slug do nome).
+    const systemId = (sketch.product.systemId ?? "").trim() || null;
     const prodRes = await client.query(
-      `INSERT INTO products (tenant_id, created_by, name, description, product_hash)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, name`,
-      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash],
+      `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name`,
+      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash, systemId],
     );
     const productId = prodRes.rows[0].id as string;
 
