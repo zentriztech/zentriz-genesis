@@ -102,21 +102,29 @@ def _accept(project_id: str, evidence: str) -> bool:
     return status in (200, 201)
 
 
-def _extract_lessons_on_accept(project_id: str, prod_id: str | None) -> None:
-    """F4 — APRENDIZADO: extrai lições do projeto ACEITO (resultado verificado = oráculo).
+def _extract_lessons(project_id: str, prod_id: str | None, outcome: str = "accept") -> None:
+    """F4 — APRENDIZADO: extrai lições do projeto (resultado verificado = oráculo).
+
+    `outcome`:
+      "accept" — a entrega passou na auditoria: lições do que FUNCIONOU (boas práticas).
+      "reject" — a entrega foi REPROVADA (rework autônomo esgotado): lições do que DEU
+                 ERRADO (antipadrões, causas-raiz). Sinal tão valioso quanto o aceite —
+                 antes era descartado (só o accept aprendia).
 
     Puxa o diálogo dos agentes + o audit.json do Cyborg e roda o LessonExtractor no modo
     RAG_ENABLED (off/shadow/live). Em shadow observa/loga; em live persiste em lessons_corpus
-    para futuras execuções recuperarem (context_loader). Nunca lança — aprendizado é best-effort.
+    e enfileira a outbox. Ao final, em live, dispara o indexer para gerar embeddings e fechar
+    o loop semântico na hora. Nunca lança — aprendizado é best-effort.
 
     Este é o elo que fecha o loop de aprendizado: o Genesis passa a aprender das próprias
-    entregas verificadas, em vez de depender de correção manual. (Fase F4)
+    entregas verificadas (aceitas E reprovadas), em vez de depender de correção manual. (Fase F4)
     """
     try:
         import os as _os
         _mode = _os.environ.get("RAG_ENABLED", "off").strip().lower()
         if _mode == "off":
             return
+        _outcome = (outcome or "accept").strip().lower()
         # Reúne o diálogo do projeto (fonte das lições) via API.
         _dlg, _st = _api("GET", f"/api/projects/{project_id}/dialogue")
         _texts = []
@@ -136,10 +144,29 @@ def _extract_lessons_on_accept(project_id: str, prod_id: str | None) -> None:
         _dialogue_text = "\n".join(_texts)[:40000]
         if not _dialogue_text.strip():
             return
+        # Cabeçalho de OUTCOME: orienta o LessonExtractor a rotular a lição como
+        # boa-prática (accept) ou antipadrão/causa-raiz (reject).
+        if _outcome == "reject":
+            _header = ("## RESULTADO DA ENTREGA: REPROVADA pelo Cyborg (rework autônomo esgotado).\n"
+                       "Extraia LIÇÕES DE FALHA: antipadrões, causas-raiz e o que evitar em entregas futuras.\n\n")
+        else:
+            _header = ("## RESULTADO DA ENTREGA: ACEITA pela auditoria autônoma do Cyborg.\n"
+                       "Extraia LIÇÕES DE SUCESSO: boas práticas e decisões que funcionaram.\n\n")
         from orchestrator.lesson_extractor import LessonExtractor
         _stack = "generic"
-        lessons = LessonExtractor(mode=_mode).extract(_dialogue_text, project_id=project_id, stack_key=_stack)
-        logger.info("[F4/aprendizado] projeto %s aceito → %d lição(ões) (%s)", project_id[:8], len(lessons), _mode)
+        lessons = LessonExtractor(mode=_mode).extract(
+            _header + _dialogue_text, project_id=project_id, stack_key=_stack)
+        logger.info("[F4/aprendizado] projeto %s %s → %d lição(ões) (%s)",
+                    project_id[:8], _outcome, len(lessons), _mode)
+        # Loop semântico: em live, consumir a outbox recém-produzida e gerar embeddings.
+        if _mode == "live" and lessons:
+            try:
+                from orchestrator.lessons_indexer import run_indexer
+                _res = run_indexer()
+                logger.info("[F4/indexer] embedded=%s pending_consumed=%s (%s)",
+                            _res.get("embedded"), _res.get("pending_consumed"), _res.get("provider"))
+            except Exception as _ie:
+                logger.debug("[F4/indexer] kick do indexer falhou (não-crítico): %s", _ie)
     except Exception as e:
         logger.warning("[F4/aprendizado] extração de lições falhou (não-crítico): %s", e)
 
@@ -948,7 +975,7 @@ def main() -> int:
                             if _accept(proj_id, _acc_ev[:2000]):
                                 logger.info("[Cyborg V3] Projeto %s ACEITO (delivered) → /accept OK, cascata disparada.", proj_id[:8])
                                 # F4: extrair lições do resultado VERIFICADO (aceite = oráculo externo).
-                                _extract_lessons_on_accept(proj_id, PRODUCT_ID or proj.get("productId"))
+                                _extract_lessons(proj_id, PRODUCT_ID or proj.get("productId"), outcome="accept")
                             else:
                                 logger.error("[Cyborg V3] delivered mas /accept FALHOU para %s", proj_id[:8])
                                 success = False
@@ -979,6 +1006,10 @@ def main() -> int:
                             # depois PATCH blocked_cyborg POR ÚLTIMO para o status final ser o que
                             # queremos (terminal + específico do gate do Cyborg, não 'failed' genérico).
                             _reject(proj_id, _reason[:2000])
+                            # F4: reprovação terminal é sinal RICO (o que deu errado). Antes só o
+                            # accept aprendia; agora o reject também alimenta o corpus de lições
+                            # (antipadrões/causas-raiz). Best-effort, nunca lança.
+                            _extract_lessons(proj_id, PRODUCT_ID or proj.get("productId"), outcome="reject")
                             _pd, _ps = _api("PATCH", f"/api/projects/{proj_id}",
                                             {"status": "blocked_cyborg"})
                             if _ps in (200, 201):
@@ -1005,6 +1036,24 @@ def main() -> int:
 
         except Exception as e:
             logger.error("[Cyborg] Erro no poll: %s", e)
+
+        # F4/loop-semântico: sweep periódico do indexer para drenar a outbox de lições
+        # (embeddings pendentes que o kick inline não pegou — ex.: extração em shadow que
+        # depois virou live, ou falha transiente do Bedrock). Só em RAG live; a cada
+        # CYBORG_INDEXER_SWEEP_POLLS ciclos; best-effort, nunca quebra o loop.
+        try:
+            _mode = os.environ.get("RAG_ENABLED", "off").strip().lower()
+            if _mode == "live":
+                cyborg_ctx["_poll_n"] = cyborg_ctx.get("_poll_n", 0) + 1
+                _every = int(os.environ.get("CYBORG_INDEXER_SWEEP_POLLS", "10"))
+                if _every > 0 and cyborg_ctx["_poll_n"] % _every == 0:
+                    from orchestrator.lessons_indexer import run_indexer
+                    _res = run_indexer()
+                    if _res.get("embedded") or _res.get("pending_consumed"):
+                        logger.info("[F4/indexer-sweep] embedded=%s pending_consumed=%s (%s)",
+                                    _res.get("embedded"), _res.get("pending_consumed"), _res.get("provider"))
+        except Exception as _se:
+            logger.debug("[F4/indexer-sweep] falhou (não-crítico): %s", _se)
 
         logger.debug("[Cyborg] Aguardando %ds até próximo poll...", POLL_INTERVAL)
         time.sleep(POLL_INTERVAL)

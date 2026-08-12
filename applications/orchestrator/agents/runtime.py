@@ -307,12 +307,16 @@ def _skill_store_assemble(
 
 
 def _maybe_apply_cag_prefix(
-    base_prompt: str, role: str, stack_key: str, project_id: str | None
+    base_prompt: str, role: str, stack_key: str, project_id: str | None,
+    query: str | None = None,
 ) -> str:
     """
     Aplica CAG (Context-Aware Generation) prefix se CAG_ENABLED=live.
     Em "off" ou "shadow", retorna o prompt inalterado. Falhas viram no-op silencioso
     (LEGACY_PROMPT_FALLBACK garante que o pipeline nunca quebra por causa do CAG).
+
+    `query` (opcional) é o texto da tarefa/spec; alimenta a recuperação SEMÂNTICA de
+    lições (RAG_RETRIEVAL=semantic). Ausente → a busca cai no sinal grosseiro role+stack.
     """
     cag_mode = os.environ.get("CAG_ENABLED", "off").strip().lower()
     if cag_mode not in ("shadow", "live"):
@@ -329,7 +333,8 @@ def _maybe_apply_cag_prefix(
             from context_loader import get_context_loader  # type: ignore
 
         loader = get_context_loader()
-        pkg = loader.load(role=(role or "").lower(), stack_key=stack_key, project_id=project_id)
+        pkg = loader.load(role=(role or "").lower(), stack_key=stack_key,
+                          project_id=project_id, query=query)
 
         if cag_mode == "shadow":
             # Shadow: só observa, não injeta
@@ -359,9 +364,13 @@ def load_system_prompt_with_skills(
     stack_key: str,
     project_id: str | None = None,
     task_id: str | None = None,
+    query: str | None = None,
 ) -> tuple[str, str | None]:
     """
     Versão enriquecida de load_system_prompt() que integra o skill store + CAG.
+
+    `query` (opcional) é o texto da tarefa (descrição da task/spec) usado pela
+    recuperação SEMÂNTICA de lições (RAG_RETRIEVAL=semantic). Repassado ao ContextLoader.
 
     Comportamento por SKILL_STORE_MODE:
       "off"    → retorna (load_system_prompt(path), None) — sem skill store
@@ -378,7 +387,7 @@ def load_system_prompt_with_skills(
     static_prompt = load_system_prompt(system_prompt_path)
 
     if SKILL_STORE_MODE == "off":
-        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id), None
+        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query), None
 
     result = _skill_store_assemble(role, stack_key, project_id, task_id)
 
@@ -396,7 +405,7 @@ def load_system_prompt_with_skills(
             else:
                 logger.debug("[SkillStore/shadow] role=%s stack=%s — hashes idênticos ✓", role, stack_key)
         # shadow sempre usa o prompt estático em runtime
-        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id), None
+        return _maybe_apply_cag_prefix(static_prompt, role, stack_key, project_id, query), None
 
     # SKILL_STORE_MODE == "active"
     if result is not None:
@@ -409,7 +418,7 @@ def load_system_prompt_with_skills(
             opening = "## INÍCIO — Regras críticas (LEI 2)\n\n" + critical + "\n\n---\n\n"
             closing = "\n\n---\n\n## LEMBRETES FINAIS (LEI 2 — leia com atenção)\n\n" + critical + "\n"
             dynamic_prompt = opening + dynamic_prompt.rstrip() + closing
-        return _maybe_apply_cag_prefix(dynamic_prompt, role, stack_key, project_id), bundle_hash
+        return _maybe_apply_cag_prefix(dynamic_prompt, role, stack_key, project_id, query), bundle_hash
 
     # Fallback: skill store indisponível → usar estático
     logger.warning("[SkillStore/active] role=%s stack=%s — sem cobertura, fallback estático", role, stack_key)

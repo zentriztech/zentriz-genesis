@@ -1341,6 +1341,8 @@ def call_dev(
     _dev_system_prompt, _bundle_hash = load_system_prompt_with_skills(
         dev_prompt, role="dev", stack_key=_dev_stack_key,
         project_id=_pid, task_id=task_id,
+        # RAG semântico: a descrição da task é o sinal de recuperação de lições.
+        query=(task or (task_dict.get("description") if task_dict else "") or ""),
     )
     # Gravar bundle_hash na task para auditoria (best-effort)
     if _bundle_hash and task_id:
@@ -1431,6 +1433,8 @@ def call_qa(
             _qa_stack_key = "nodejs"
     _qa_system_prompt, _qa_bundle_hash = load_system_prompt_with_skills(
         qa_prompt, role="qa", stack_key=_qa_stack_key, project_id=_qa_pid,
+        # RAG semântico: a task de validação é o sinal de recuperação de lições de QA.
+        query=(task or spec_ref or ""),
     )
     return run_agent(system_prompt_path=qa_prompt, message=message, role="QA",
                      system_prompt_override=_qa_system_prompt)
