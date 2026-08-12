@@ -58,25 +58,26 @@ agent:
    - Permitido: workaround de bug, invariante não-óbvio, comportamento que surpreenderia um dev
    - Proibido: `// Esta função retorna o token`, `/** @param id */`
 
-2. **Bugs conhecidos — React Native + Expo:**
+2. **Bugs conhecidos — React Native CLI (sem Expo):**
 
    | # | Onde | O que verificar |
    |---|------|----------------|
-   | B1 | `apps/package.json` | Stack correta: se charter diz Expo → `"expo"` presente; se diz bare React Native → sem `"expo"`. Não misturar. |
-   | B2 | `apps/package.json`, `apps/app.json` | `"sdkVersion"` do Expo bate com a versão de `expo` instalada — divergência causa `Module not found` no runtime |
+   | B1 | `apps/package.json` | **DEFAULT = React Native CLI, SEM Expo.** NÃO adicionar `"expo"`, `"expo-router"`, `@expo/*` nem `eas-cli`. Só use Expo se o **charter** disser Expo explicitamente (tipo `mobile_expo`). |
+   | B2 | `apps/package.json`, `apps/index.js`, `apps/App.tsx` | Entrypoint RN CLI: `index.js` com `AppRegistry.registerComponent`; `metro.config.js` + `babel.config.js` presentes. Sem `app.config.ts`/`eas.json` (isso é Expo). |
    | B3 | `apps/src/api/` ou equivalente | Se projeto consome API: campo `email` no login (não `username`), token em `body.data?.token`, paths com `/api/` |
-   | B4 | `apps/src/navigation/` | Cada tela referenciada em `Stack.Screen` tem arquivo correspondente — tela sem arquivo causa crash na navegação |
+   | B4 | `apps/src/navigation/` | Cada tela referenciada em `Stack.Screen` (`@react-navigation/native-stack`) tem arquivo correspondente — tela sem arquivo causa crash na navegação |
 
 ---
 
 ## Type Policy — precedência sobre spec quando ambígua (Wave 1 — T-07)
 
-Este Dev opera sob **`mobile_crossplatform`** (React Native + Expo). Recebe `inputs["type_policy"]`.
+Por **default** este Dev opera sob **`mobile_crossplatform`** = **React Native CLI PURO, SEM Expo** (política do ecossistema, 2026-08-11). Recebe `inputs["type_policy"]`. Só se `type_policy.canonical_type == "mobile_expo"` (opt-in explícito na spec) o Expo é permitido.
 
 **Precedência:** `CONTRACT LAW > user Delta > type_policy > spec`
 
-**Tabus codificados (mobile_crossplatform.forbidden_patterns — todos web-only):**
-- `localStorage` — usar **AsyncStorage** do `@react-native-async-storage/async-storage`
+**Tabus codificados (mobile_crossplatform.forbidden_patterns):**
+- `expo`, `expo-router`, `@expo/*`, `eas.json`, `app.config.ts` — **PROIBIDOS no default RN CLI**. Navegação = `@react-navigation`. (Só permitidos se o tipo for `mobile_expo`.)
+- `localStorage` — usar **react-native-mmkv** (ou AsyncStorage)
 - `document.*` — não existe em React Native
 - `window.*` — não existe em React Native
 - `AppShell.tsx` — padrão web dashboard, não mobile
@@ -86,11 +87,12 @@ Este Dev opera sob **`mobile_crossplatform`** (React Native + Expo). Recebe `inp
 - `middleware.ts` — Next-specific
 
 **Obrigatórios (required_components):**
-- `@react-navigation/native` + Stack/Tabs para navegação
+- `@react-navigation/native` + native-stack/Tabs para navegação (NUNCA expo-router no default)
 - `AuthContext` (Context API) para gerenciar sessão
-- `AsyncStorage` para persistir token
+- `react-native-mmkv` (ou AsyncStorage) para persistir token — nunca localStorage
 - cliente HTTP com envelope `{data, meta}` (padrão Genesis)
-- SplashScreen com Expo
+- splash nativo (`react-native-bootsplash`) — **NUNCA** `expo-splash-screen`
+- entrypoint RN CLI: `index.js` (`AppRegistry`) + `metro.config.js` + `babel.config.js`
 
 **Rotas âncora (required_routes.strict):** Splash, Login, Home.
 

@@ -2373,20 +2373,49 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
         task_header_pattern = _re.compile(
             r'^\s*(?:#{2,4}\s+|\|\s*|\-\s+|\*\s+)(?:\**)?(TSK-[A-Z]+-\d+|TSK-\d+)\b'
         )
+        # achado #41 (2026-08-11): o PM passou a emitir cabeçalhos no formato
+        #   "### TASK-ID: TSK-MOB-001"
+        # com o ID NÃO adjacente ao marcador de heading (vem depois do rótulo "TASK-ID:").
+        # O task_header_pattern (ID logo após #/|/-/*) não casava → 0 tasks parseadas de um
+        # BACKLOG.md rico e válido (33KB, 16 épicos, 17 FRs) → gate #39 bloqueava indevidamente.
+        # heading_with_tsk aceita o ID em QUALQUER posição de uma linha de HEADING (##/###/####).
+        # Restrito a HEADINGS de propósito: linhas de corpo ("- **Dependências**: TSK-001")
+        # NÃO devem virar task (preserva o fix FT-17 contra falso-positivo de menção em prosa).
+        heading_with_tsk = _re.compile(
+            r'^\s*#{2,4}\s+.*?(TSK-[A-Z]+-\d+|TSK-\d+)\b'
+        )
+        title_field_pattern = _re.compile(
+            r'^\s*[-*]?\s*\**\s*(?:T[íi]tulo|Title)\s*\**\s*[:：]\s*(.+?)\s*$',
+            _re.IGNORECASE,
+        )
         seen_ids: set = set()
         lines = content.splitlines()
         i = 0
         while i < len(lines):
             line = lines[i]
-            header_match = task_header_pattern.search(line)
+            header_match = task_header_pattern.search(line) or heading_with_tsk.search(line)
             if header_match:
                 tid = header_match.group(1)
                 if tid not in seen_ids:
                     seen_ids.add(tid)
                     # Extract title from same line (after task_id)
-                    title_raw = task_id_pattern.sub("", line).strip(" #|*-:").strip()
+                    title_raw = task_id_pattern.sub("", line).strip(" #|*-:>").strip()
+                    # achado #41: remover o rótulo "TASK-ID" remanescente do cabeçalho novo
+                    title_raw = _re.sub(r'(?i)\btask[-_ ]?id\b', '', title_raw).strip(" #|*-:>").strip()
                     # Cortar em em-dash/hyphen se separar título de descrição adicional
                     title_raw = _re.split(r'\s+—\s+|\s+-\s+', title_raw, maxsplit=1)[0].strip() if title_raw else ""
+                    # achado #41: cabeçalho sem título legível na mesma linha
+                    # (formato "### TASK-ID: TSK-XXX") → procurar o campo "**Título**:"
+                    # nas próximas linhas do bloco da task (antes do próximo cabeçalho).
+                    _clean_same = _re.sub(r'[^\w\s]', '', title_raw).strip() if title_raw else ""
+                    if not _clean_same or len(_clean_same) < 3:
+                        for _j in range(i + 1, min(i + 13, len(lines))):
+                            if task_header_pattern.search(lines[_j]) or heading_with_tsk.search(lines[_j]):
+                                break
+                            _tf = title_field_pattern.match(lines[_j])
+                            if _tf:
+                                title_raw = _tf.group(1).strip().strip('*').strip()
+                                break
                     # FT-17 fix (2026-07-02): título vazio ou só símbolos → BLOCKED com log
                     # (antes: fallback silencioso para "→ → → →" ou "Implementar TSK-XXX")
                     clean = _re.sub(r'[^\w\s]', '', title_raw).strip() if title_raw else ""
@@ -4099,6 +4128,56 @@ def main() -> int:
                            "CTO normalizará: %s", len(_hard_issues) + len(_soft_issues),
                            "; ".join(_hard_issues + _soft_issues))
 
+    # ── EXPO-GATE (política 2026-08-11): Expo NUNCA é default do ecossistema ────────────────
+    # O default de mobile é React Native CLI. Se a spec pede Expo EXPLICITAMENTE (tipo canônico
+    # resolve p/ mobile_expo) OU uma spec mobile menciona tokens Expo sem marcar "sem expo",
+    # o build é BLOQUEADO com ALERTA até confirmação humana consciente (extra.expo_confirmed=true).
+    # Jean considera Expo um risco → nunca construir Expo em silêncio. Idempotente (só step < 1).
+    if project_id and spec_content and (not pipeline_ctx or pipeline_ctx.current_step < 1):
+        _canon_type_eg = ""
+        try:
+            from orchestrator.pipeline_context import _build_type_policy_input as _btpi_eg
+            _canon_type_eg = str(_btpi_eg(getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else "").get("canonical_type", "")).lower()
+        except Exception as _eg_e:
+            logger.debug("[EXPO-GATE] não foi possível resolver canonical_type: %s", _eg_e)
+        _spec_low_eg = spec_content.lower()
+        _pt_low_eg = (getattr(pipeline_ctx, "project_type", "") if pipeline_ctx else "").lower()
+        _is_mobile_eg = _canon_type_eg.startswith("mobile") or "mobile" in _pt_low_eg
+        # Marca explícita de "RN CLI, sem Expo" na spec → evita falso-positivo na nossa própria
+        # lista de PROIBIDOS (a spec RN CLI cita 'expo-router' etc. justamente para bani-los).
+        _spec_says_no_expo = ("sem expo" in _spec_low_eg) or ("react native cli" in _spec_low_eg and "proibido" in _spec_low_eg)
+        _expo_tokens_eg = ["expo sdk", "expo-router", "expo-cli", "eas build", "eas submit",
+                           "eas update", "@expo/", "expo-audio", "expo-splash-screen",
+                           "expo-speech-recognition", "expo-localization", "app.config.ts"]
+        _spec_mentions_expo = (not _spec_says_no_expo) and any(_t in _spec_low_eg for _t in _expo_tokens_eg)
+        _expo_requested = (_canon_type_eg == "mobile_expo") or (_is_mobile_eg and _spec_mentions_expo)
+        if _expo_requested:
+            _expo_confirmed = False
+            try:
+                _pd_eg, _ps_eg = _api_get(f"/api/projects/{project_id}")
+                if _pd_eg and isinstance(_pd_eg, dict):
+                    _ex_eg = _pd_eg.get("extra") or {}
+                    if isinstance(_ex_eg, dict):
+                        _expo_confirmed = str(_ex_eg.get("expo_confirmed", "")).lower() in ("true", "1", "yes")
+            except Exception:
+                _expo_confirmed = False
+            if not _expo_confirmed:
+                _expo_reason = ("[EXPO-GATE] Expo detectado na spec mobile (canonical=%s). Política do "
+                                "ecossistema: Expo NÃO é o default (React Native CLI é) e é tratado como "
+                                "risco. Confirme conscientemente com extra.expo_confirmed=true e reenvie, "
+                                "OU reescreva a spec para React Native CLI (sem Expo)." % (_canon_type_eg or "?"))
+                logger.warning(_expo_reason)
+                _post_step("⚠️ ALERTA — a spec mobile define Expo. Expo não é o padrão do ecossistema "
+                           "(o padrão é React Native CLI) e é tratado como risco. O build está BLOQUEADO "
+                           "até confirmação explícita (expo_confirmed=true) ou troca para React Native CLI.",
+                           request_id)
+                _patch_project({"status": "blocked_awaiting_expo_confirm", "blocked_reason": _expo_reason})
+                if _run_log:
+                    try: _run_log.stop_run(reason="blocked_awaiting_expo_confirm")
+                    except Exception: pass
+                return 1
+            logger.info("[EXPO-GATE] Expo confirmado por humano (expo_confirmed=true) → segue mobile_expo.")
+
     # ── GAP-T1: Pré-classificador trivial — detecta na spec bruta ANTES do CTO ──────────────
     # Sinais inequívocos de trivial: HTML puro, CSS puro, arquivo único, sem backend, sem JS.
     # Se detectado E checkpoint não está avançado (step < 1), vai direto ao Dev.
@@ -4259,24 +4338,44 @@ def main() -> int:
                 if project_id:
                     try:
                         _eng_docs_dir = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "docs"
-                        _eng_parts = []
-                        for _ef in sorted(_eng_docs_dir.rglob("engineer_*.md")):
+                        # achado #40: o rglob 'engineer_*.md' captura CÓPIAS DUPLICADAS do mesmo
+                        # artefato lógico — ex.: docs/engineer/engineer_proposal.md E
+                        # docs/engineer_engineer_proposal.md (gravados por caminhos de escrita distintos).
+                        # Somadas, as 6 cópias passam de ~43KB > AGENT_INPUT_CHARS(40K) → a proposta real
+                        # chega TRUNCADA ao CTO → falso-positivo de truncamento → PM bloqueia (no-invent)
+                        # → backlog vazio → (antes do #39) projeto zumbi. Dedup por nome LÓGICO
+                        # (strip do prefixo 'engineer_' repetido), mantendo a MAIOR cópia de cada artefato.
+                        _eng_best = {}
+                        for _ef in _eng_docs_dir.rglob("engineer_*.md"):
                             if _ef.is_file() and _ef.stat().st_size > 500:
-                                _ec = _ef.read_text(encoding="utf-8", errors="replace")
-                                # remover cabeçalho "Created by: engineer"
-                                _ec = _ec.replace("<!-- Created by: engineer -->\n\n", "").strip()
-                                _eng_parts.append(f"### {_ef.name}\n{_ec}")
+                                _logical = re.sub(r"^(engineer_)+", "", _ef.stem) or _ef.stem
+                                _prev = _eng_best.get(_logical)
+                                if _prev is None or _ef.stat().st_size > _prev.stat().st_size:
+                                    _eng_best[_logical] = _ef
+                        _eng_parts = []
+                        for _logical in sorted(_eng_best):
+                            _ef = _eng_best[_logical]
+                            _ec = _ef.read_text(encoding="utf-8", errors="replace")
+                            # remover cabeçalho "Created by: engineer"
+                            _ec = _ec.replace("<!-- Created by: engineer -->\n\n", "").strip()
+                            _eng_parts.append(f"### {_ef.name}\n{_ec}")
                         if _eng_parts:
                             # Cap elevado (env AGENT_INPUT_CHARS, default 40000): os 3 artefatos
-                            # do Engineer (proposal+architecture+dependencies) somam ~35KB; cortar
-                            # em 15000 severa a seção Rationale no meio → CTO (Claude 5, rigoroso)
+                            # do Engineer (proposal+architecture+dependencies) somam ~22KB após dedup;
+                            # cortar em 15000 severa a seção Rationale no meio → CTO (Claude 5, rigoroso)
                             # reprova por truncamento → PM bloqueia (no-invent) → backlog vazio.
                             # Claude 5 tem contexto 200K, então 40K é seguro. (achado fatia vertical)
                             _agent_input_cap = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
-                            _disk_content = "\n\n".join(_eng_parts)[:_agent_input_cap]
+                            _disk_full = "\n\n".join(_eng_parts)
+                            _disk_content = _disk_full[:_agent_input_cap]
+                            if len(_disk_full) > _agent_input_cap:
+                                # achado #40: mesmo APÓS dedup o conteúdo excede o cap → ainda trunca.
+                                # Isso é agora um sinal legítimo (artefatos genuinamente grandes), não duplicata.
+                                logger.warning("[GAP-ENG1] conteúdo do Engineer (%d chars, %d artefatos únicos) excede o cap %d → truncado; CTO pode reprovar por truncamento",
+                                               len(_disk_full), len(_eng_parts), _agent_input_cap)
                             if len(_disk_content) > len(engineer_summary):
                                 engineer_summary = _disk_content
-                                logger.info("[GAP-ENG1] engineer_summary enriquecido do disco: %d chars (%d artefatos)",
+                                logger.info("[GAP-ENG1] engineer_summary enriquecido do disco: %d chars (%d artefatos únicos, dedup)",
                                             len(engineer_summary), len(_eng_parts))
                     except Exception as _enge:
                         logger.debug("[GAP-ENG1] Falha ao ler artefatos do Engineer do disco: %s", _enge)
@@ -4563,6 +4662,11 @@ def main() -> int:
                         _pt_low = str(_ptype_for_mod or "").lower()
                         if _pt_low in ("lib_ts", "lib_cli", "lib_plugin") or _pt_low.startswith("backend"):
                             _fallback_order = ("backend",)  # lib/backend só fazem sentido como backend
+                        elif _pt_low.startswith("mobile"):
+                            # achado #39: um app mobile (Expo/RN) NUNCA é web/backend. Antes o
+                            # fallback caía p/ "web" → PM Web gerava backlog vazio → projeto zumbi
+                            # eterno em "running" (SPEC-19). Mobile só faz sentido como mobile.
+                            _fallback_order = ("mobile",)
                         else:
                             _fallback_order = ("web", "backend", "mobile", "fullstack")
                         _picked = False
@@ -4577,6 +4681,15 @@ def main() -> int:
                         # lib/backend com backend já rejeitado: mantém backend (não há alternativa válida)
                         if not _picked and (_pt_low in ("lib_ts","lib_cli","lib_plugin") or _pt_low.startswith("backend")):
                             pm_module = "backend"
+                        # achado #39: mobile com "mobile" já rejeitado não tem alternativa válida —
+                        # mantém mobile (não cai p/ web) e deixa o gate pós-loop bloquear terminalmente
+                        # em vez de seedar backlog vazio → zumbi.
+                        elif not _picked and _pt_low.startswith("mobile"):
+                            pm_module = "mobile"
+                            logger.warning(
+                                "[Pipeline] achado #39: tipo mobile com módulo 'mobile' rejeitado e "
+                                "sem alternativa válida — mantendo mobile (gate pós-loop bloqueará se backlog vazio)."
+                            )
                     logger.info(
                         "[Pipeline] pm_module inferido: %s (rodada %s, cache %s)",
                         pm_module, pm_round, "invalidado" if _cache_invalidated else "miss",
@@ -4620,6 +4733,24 @@ def main() -> int:
                             storage.write_doc(project_id, "pm", f"artifact_{i}", content, title=title)
                 _post_step("O CTO está validando o backlog do PM.", request_id)
                 _post_agent_working("cto", "O CTO está validando o backlog.", request_id)
+                # Achado #29 (2026-08-10): o CTO validava o backlog recebendo apenas
+                # `pm_response.summary` (1 parágrafo), NUNCA o BACKLOG.md real do disco
+                # (que tem as tasks TSK-* com aceites DADO/QUANDO/ENTÃO). Resultado: CTO
+                # reprovava backlog COMPLETO por "insuficiência de detalhe" e queimava as
+                # 3 rodadas PM↔CTO num gap de plumbing. Fix: carregar o BACKLOG.md do disco
+                # (autoritativo) e passá-lo ao CTO; cair no summary só se o disco estiver vazio.
+                _backlog_disk = _load_file_from_disk(project_id, f"docs/pm/{pm_module}/BACKLOG.md")
+                if not _backlog_disk:
+                    # Fallbacks: alguns módulos gravam em docs/pm/web/BACKLOG.md ou docs/pm_backlog.md
+                    _backlog_disk = (
+                        _load_file_from_disk(project_id, "docs/pm/web/BACKLOG.md")
+                        or _load_file_from_disk(project_id, "docs/pm_backlog.md")
+                    )
+                _backlog_for_cto = _backlog_disk or backlog_summary
+                if _backlog_disk:
+                    logger.info("[Pipeline] CTO validará BACKLOG.md do disco (%s chars) — não o summary (achado #29)", len(_backlog_disk))
+                else:
+                    logger.warning("[Pipeline] BACKLOG.md não encontrado no disco para pm_module=%s — CTO validará o summary (achado #29 fallback)", pm_module)
                 # T03 (N1): passar engineer_proposal + pm_module_used ao CTO no modo
                 # validate_backlog para que ele possa cruzar a coerência do backlog
                 # com a proposta do Engineer (evita "PM Backend com 0 tasks" ser
@@ -4627,7 +4758,7 @@ def main() -> int:
                 cto_backlog_response = call_cto(
                     spec_ref, request_id,
                     engineer_proposal=engineer_summary,
-                    backlog_summary=backlog_summary,
+                    backlog_summary=_backlog_for_cto,
                     validate_backlog_only=True,
                     pipeline_ctx=pipeline_ctx,
                     extra_instruction=(
@@ -4745,6 +4876,41 @@ def main() -> int:
             _get_summary_human("module.planned", "pm", "cto", backlog_summary[:200]),
             request_id,
         )
+
+        # ── Gate definitivo pré-seed (achado #39): NUNCA seedar com backlog vazio ──
+        # O gate T06 acima só roda no ramo cto_backlog_ok=True. Quando o loop CTO↔PM
+        # ESGOTA as rodadas com o PM ainda BLOCKED (ex.: coherence_check de módulo — SPEC-19
+        # mobile roteado como web), o pipeline chegava aqui com 0 tasks reais e seedava só o
+        # TSK-FULL-TEST sintético → projeto ZUMBI eterno em "running". Este gate cobre TODOS
+        # os caminhos de saída do loop (OK, max-rounds, resume) antes do _seed_tasks e bloqueia
+        # terminalmente (blocked_backlog_empty_with_frs — não re-despachado), evitando o zumbi.
+        if project_id and _api_available():
+            try:
+                _fr_final = len(re.findall(r"\bFR-\d+", (spec_content or "") + (charter_summary or ""), re.IGNORECASE))
+                _tasks_final = _parse_tasks_from_backlog(project_id, pm_module) or []
+                _scope_final = _read_charter_scope(project_id)
+                if _fr_final > 0 and len(_tasks_final) == 0 and _scope_final in ("code", "mixed"):
+                    _reason_final = (
+                        f"[ACHADO-39 backlog-vazio-pós-loop] spec/charter tem {_fr_final} FRs mas o backlog "
+                        f"parseado tem 0 tasks (module={pm_module}, scope={_scope_final}, pm_status={pm_status}). "
+                        f"Deadlock de módulo (PM BLOCKED por coherence_check e rodadas esgotadas) ou squad errada "
+                        f"convocada. Bloqueio terminal para não seedar TSK-FULL-TEST fantasma → projeto zumbi."
+                    )
+                    logger.error(_reason_final)
+                    _post_step(
+                        f"BLOCKED — backlog sem tasks executáveis para {_fr_final} FRs (módulo={pm_module}). "
+                        "Squad correta não convocada ou deadlock de módulo. Requer intervenção humana.",
+                        request_id,
+                    )
+                    _patch_project({"status": "blocked_backlog_empty_with_frs", "blocked_reason": _reason_final})
+                    if _run_log:
+                        try:
+                            _run_log.stop_run(reason="blocked")
+                        except Exception:
+                            pass
+                    return
+            except Exception as _e_final:
+                logger.warning("[ACHADO-39] gate pós-loop de backlog vazio falhou (não crítico): %s", _e_final)
 
         # ── Fase 2: Monitor Loop (quando API e PROJECT_ID definidos) ───
         if project_id and _api_available():

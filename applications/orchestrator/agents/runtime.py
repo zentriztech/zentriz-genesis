@@ -1164,11 +1164,27 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         # STREAMING obrigatório p/ max_tokens alto: o Foundry rejeita chamadas não-streaming
         # que podem passar de 10 min ("Streaming is required...") → 500. Com stream, acumula
         # o texto sem esse limite. (achado #18) Usa stream quando max_tokens > 8000.
+        #
+        # Achado #51 (2026-08-11): os modelos Claude 5 do Foundry usam "thinking ADAPTATIVO"
+        # LIGADO por padrão, e os tokens de raciocínio contam contra max_tokens. Em prompts
+        # grandes (rework/feature do Cyborg, auditoria com contexto), o thinking consome uma
+        # fatia VARIÁVEL do orçamento e o `text_stream` (que ignora blocos thinking) recebe
+        # só as sobras → o JSON de artifacts sai CORTADO no meio (stop_reason=max_tokens →
+        # "Unterminated string", salvage recupera 1 arquivo) ou VAZIO (thinking comeu tudo).
+        # Estas chamadas emitem JSON/código estruturado onde COMPLETUDE > raciocínio extra:
+        # desligamos o thinking (thinking={"type":"disabled"}) p/ todo o orçamento ir à saída.
+        # Validado ao vivo: opus-5 passou de vazio/truncado p/ JSON completo e end_turn limpo.
+        # Nota: "thinking.type.enabled" dá 400 nesses modelos (só adaptive|disabled); controle
+        # fino seria via output_config.effort. Env GENESIS_FOUNDRY_DISABLE_THINKING=0 reverte.
+        _extra: dict = {}
+        if os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() != "0":
+            _extra["thinking"] = {"type": "disabled"}
         if max_tokens > 8000:
             parts: list[str] = []
             with client.messages.stream(
                 model=model_id, max_tokens=max_tokens,
                 system=system, messages=[{"role": "user", "content": user}],
+                **_extra,
             ) as _stream:
                 for _txt in _stream.text_stream:
                     parts.append(_txt)
@@ -1176,6 +1192,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         resp = client.messages.create(
             model=model_id, max_tokens=max_tokens,
             system=system, messages=[{"role": "user", "content": user}],
+            **_extra,
         )
         parts = []
         for block in getattr(resp, "content", []) or []:

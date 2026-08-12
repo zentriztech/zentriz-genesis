@@ -46,7 +46,8 @@ Responda **somente** o JSON (sem cercas de código, sem prosa ao redor):
   `backend_api_python`, `backend_graphql`, `backend_worker`, `frontend_dashboard`,
   `frontend_landing`, `fullstack_saas`, `mobile_expo`, `mobile_crossplatform`, `other`.
 - Backend NestJS+Prisma/Mongoose → `backend_api_nestjs` (Prisma é proibido em `backend_api`).
-- Mobile Expo/RN → `mobile_expo`.
+- **Mobile (default) → `mobile_crossplatform`** = React Native CLI PURO, **sem Expo** (política do ecossistema, 2026-08-11). Todo app React Native/mobile classifica aqui por padrão.
+- **`mobile_expo` só quando a spec pede Expo EXPLICITAMENTE** (menciona `expo`, `expo-router`, `eas.json`, `EAS Build` etc.). Nesse caso o pipeline ALERTA e exige confirmação humana antes de construir (Expo = risco). Nunca escolha `mobile_expo` por inferência — só com pedido literal na spec.
 
 ## 5) NOTA DE CONFIABILIDADE
 

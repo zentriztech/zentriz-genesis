@@ -960,12 +960,38 @@ def main() -> int:
                         cyborg_ctx["accepted_count"] += 1
                     else:
                         cyborg_ctx["rejected_count"] += 1
-                        # Contar rejeições para evitar loop infinito
                         cyborg_ctx.setdefault("rejection_counts", {})[proj_id] = \
                             cyborg_ctx.get("rejection_counts", {}).get(proj_id, 0) + 1
-                        # Remover do processed para permitir retry no próximo poll
-                        # (somente se ainda estiver pending_cyborg — o runner pode ter relançado)
-                        cyborg_ctx["processed"].discard(proj_id)
+                        # ACHADO #31 (2026-08-10): distinguir veredito TERMINAL de falha transiente.
+                        # 'needs_human' significa que o autonomous_rework JÁ esgotou suas rodadas
+                        # internas (CYBORG_REWORK_ROUNDS) sem zerar os BLOCKERs — re-despachar o
+                        # projeto NÃO vai ajudar, só queima LLM. Antes, esse caso só incrementava um
+                        # contador EM MEMÓRIA e fazia processed.discard() → o projeto ficava
+                        # pending_cyborg PARA SEMPRE (parecia vivo, estava abandonado) e era
+                        # re-auditado em loop; o guard resetava se o watcher reiniciasse. Agora
+                        # persistimos o status terminal 'blocked_cyborg' no banco (sai de
+                        # pending_cyborg → para o loop e sinaliza o humano de verdade).
+                        _terminal = getattr(_run, "final_status", "") in ("needs_human", "error")
+                        _guard_hit = cyborg_ctx["rejection_counts"][proj_id] >= 2
+                        if _terminal or _guard_hit:
+                            _reason = getattr(_run, "reason", "") or "Cyborg V3 esgotou o rework autônomo sem zerar BLOCKERs"
+                            # _reject primeiro (registra o motivo no dialogue/log; pode setar 'failed'),
+                            # depois PATCH blocked_cyborg POR ÚLTIMO para o status final ser o que
+                            # queremos (terminal + específico do gate do Cyborg, não 'failed' genérico).
+                            _reject(proj_id, _reason[:2000])
+                            _pd, _ps = _api("PATCH", f"/api/projects/{proj_id}",
+                                            {"status": "blocked_cyborg"})
+                            if _ps in (200, 201):
+                                logger.warning("[Cyborg V3] Projeto %s → blocked_cyborg (terminal): %s",
+                                               proj_id[:8], _reason[:200])
+                            else:
+                                logger.error("[Cyborg V3] FALHA ao persistir blocked_cyborg em %s (status=%s)",
+                                              proj_id[:8], _ps)
+                            # Mantém em processed p/ NÃO re-despachar (blocked_cyborg é terminal).
+                            cyborg_ctx["processed"].add(proj_id)
+                        else:
+                            # Falha ainda potencialmente transiente e abaixo do guard: permite retry.
+                            cyborg_ctx["processed"].discard(proj_id)
                 except Exception as e:
                     logger.error("[Cyborg] Erro ao processar %s: %s\n%s", proj_id[:8], e, traceback.format_exc()[:1000])
                     _reject(proj_id, f"Erro interno do Cyborg: {str(e)[:500]}")

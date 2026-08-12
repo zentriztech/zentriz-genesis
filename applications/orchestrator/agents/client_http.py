@@ -3,10 +3,12 @@ Cliente HTTP para invocar agentes via serviço (API_AGENTS_URL).
 Usado pelo runner quando não roda no mesmo processo que o serviço agents.
 Resiliência: timeout 300s (repair loop pode fazer 3 chamadas LLM), retry em timeout.
 """
+import http.client
 import json
 import logging
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 
@@ -163,11 +165,37 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
                 "human_message": human_msg,
                 "traceback": tb,
             }, ensure_ascii=False)) from e
-        except (TimeoutError, socket.timeout, OSError) as e:
+        except (TimeoutError, socket.timeout, OSError, http.client.RemoteDisconnected, urllib.error.URLError) as e:
             is_timeout = "timed out" in str(e).lower() or isinstance(e, (TimeoutError, socket.timeout))
-            if is_timeout and attempt < max_attempts - 1:
-                logger.warning("[%s] Timeout (tentativa %s/%s), repetindo...", agent_name, attempt + 1, max_attempts)
+            # Achado #28 (2026-08-10): conexão cortada em voo (RemoteDisconnected /
+            # ConnectionReset / URLError) é TRANSIENTE — ex.: container `agents`
+            # reiniciado (hot-swap de prompt) enquanto uma chamada estava aberta.
+            # Antes só timeout era retriável → um único reset crashava o pipeline
+            # inteiro. Agora tratamos desconexão transiente como retriável.
+            _emsg = str(e).lower()
+            is_transient_conn = (
+                isinstance(e, (http.client.RemoteDisconnected, ConnectionError, urllib.error.URLError))
+                or "remote end closed" in _emsg
+                or "connection reset" in _emsg
+                or "connection refused" in _emsg
+            )
+            is_retriable = is_timeout or is_transient_conn
+            if is_retriable and attempt < max_attempts - 1:
+                _kind = "Timeout" if is_timeout else "Conexão interrompida (transiente)"
+                logger.warning("[%s] %s (tentativa %s/%s), repetindo...", agent_name, _kind, attempt + 1, max_attempts)
+                time.sleep(min(2 * (attempt + 1), 10))  # backoff curto — dá tempo do agents subir
                 continue
+            if is_transient_conn and not is_timeout:
+                logger.error("[%s] Conexão com o serviço de agentes interrompida após %s tentativa(s): %s", agent_name, max_attempts, e)
+                raise RuntimeError(
+                    json.dumps({
+                        "agent": agent_key,
+                        "agent_name": agent_name,
+                        "error": "connection_interrupted",
+                        "human_message": f"A conexão com o agente {agent_name} foi interrompida (serviço reiniciando?). O pipeline será marcado como failed — reinicie com /run para retomar do checkpoint.",
+                        "traceback": "",
+                    }, ensure_ascii=False)
+                ) from e
             if is_timeout:
                 logger.error("[%s] Timeout após %s tentativa(s). Aumente REQUEST_TIMEOUT (ex.: 300) ou verifique o serviço de agentes.", agent_name, max_attempts)
                 raise RuntimeError(

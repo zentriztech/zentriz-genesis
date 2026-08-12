@@ -170,12 +170,35 @@ def _clear_pid(project_id: str) -> None:
 
 
 def _is_process_alive(pid: int) -> bool:
-    """Verifica se o processo com o PID ainda está rodando."""
+    """Verifica se o processo com o PID ainda está rodando.
+
+    Achado #28 (2026-08-10): `os.kill(pid, 0)` retorna sucesso para um processo
+    ZUMBI (defunct) — o /proc/<pid> persiste até o pai fazer waitpid. Se um
+    pipeline crasha (ex.: chamada HTTP em voo cortada por restart do container
+    `agents`) e o runner-server nunca o reap, o pid fica zumbi e `os.kill(0)`
+    diz "vivo" para sempre → /run recusa com 409 eternamente. Aqui detectamos o
+    estado Z e tentamos reap (WNOHANG) para o registry poder liberar o projeto.
+    """
     try:
         os.kill(pid, 0)  # signal 0 = apenas verifica existência
-        return True
     except (ProcessLookupError, PermissionError):
         return False
+    # Existe no /proc — mas pode ser zumbi. Zumbi = morto para fins de pipeline.
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as _f:
+            _fields = _f.read().rsplit(")", 1)[-1].split()
+            if _fields and _fields[0] == "Z":
+                # Tenta reap se for filho deste processo (não bloqueante).
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, OSError):
+                    pass
+                return False
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        pass  # /proc ilegível — assume vivo (comportamento conservador anterior)
+    return True
 
 
 def _kill_process(pid: int, project_id: str) -> str:

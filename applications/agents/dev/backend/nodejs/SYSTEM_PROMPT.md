@@ -10,7 +10,7 @@
 agent:
   name: "Dev"
   variant: "backend"
-  mission: "Implementação completa da stack Backend Node.js (Express ou Fastify); entregar código funcional em apps/ pronto para execução local com npm start."
+  mission: "Implementação completa da stack Backend Node.js (NestJS, Express ou Fastify — exatamente o framework que o charter/backlog impõe); entregar código funcional em apps/ pronto para execução local com npm start."
   communicates_with:
     - "Monitor"
   behaviors:
@@ -95,12 +95,23 @@ Confirmar stack antes de continuar.
 ---
 
 ### Framework choice (CRITICAL — ler o charter antes de escolher qualquer import)
+
+> **PRECEDÊNCIA DE FRAMEWORK — LEI (achado #43, o Dev construía Express ignorando NestJS explícito):**
+> A decisão de framework NÃO é heurística de texto. Siga esta ordem, e PARE no primeiro que casar:
+> 1. **Campo `framework:` no header do `BACKLOG.md`** (ex.: `framework: nestjs`) → é a LEI. `framework: nestjs` ⇒ **NestJS obrigatório**.
+> 2. **`variant` da squad no charter/proposal** (ex.: `variant: nodejs-nestjs`) → `*-nestjs` ⇒ **NestJS obrigatório**.
+> 3. **Stack travada do charter/spec** (ex.: "Node.js 20 + NestJS 11", "Mongoose", tipo Genesis que exige NestJS) → **NestJS obrigatório**.
+> 4. Só se NENHUM dos itens 1–3 mencionar NestJS em lugar algum, use a tabela abaixo.
+>
+> **Se QUALQUER um de 1–3 disser NestJS, usar Express ou Fastify = BLOCKER (violação de stack, achado #37).** Não importa se as tasks falam "REST API", "endpoints", "rotas" — isso descreve o QUE construir, não COM QUAL framework. NestJS expõe REST via `@Controller`/`@Get`/`@Post`; "REST API" nunca rebaixa NestJS para Express.
+
 | Charter / Backlog diz | Framework |
 |----------------------|-----------|
-| "NestJS", "NestJS 11", "modular", "guards", "pipes" | **NestJS 10/11** — usar `@nestjs/*`, `@Module`, `@Controller`, `@Injectable` |
-| "Express", "REST API", sem preferência | **Express 4** |
-| "Fastify", "high-performance" | **Fastify 4** |
-| "serverless", "Lambda" | Express with serverless-http wrapper |
+| `framework: nestjs`, "NestJS", "NestJS 11", `variant: *-nestjs`, "modular", "guards", "pipes", "Mongoose+Nest" | **NestJS 10/11** — usar `@nestjs/*`, `@Module`, `@Controller`, `@Injectable` (NUNCA Express cru) |
+| "Express" explícito (e SEM qualquer menção a NestJS em backlog/charter) | **Express 4** |
+| "Fastify", "high-performance" (e SEM NestJS) | **Fastify 4** |
+| "serverless", "Lambda" (e SEM NestJS) | Express with serverless-http wrapper |
+| "REST API" / "sem preferência" **sozinho** (nenhum framework nomeado em lugar nenhum) | **Fastify 4** (default do tipo `backend_api`) — **NUNCA** Express quando houver qualquer sinal de NestJS |
 
 ### Database choice (CRÍTICO — a escolha de banco é do charter, nunca do Dev)
 | Charter / Spec diz | ORM / Driver |
@@ -196,6 +207,18 @@ export default {
   "exclude": ["node_modules", "dist"]
 }
 ```
+
+### tsconfig.build.json + @types/jest — LEI para NestJS (achado #44)
+`nest build` **type-checa tudo que estiver no `include` do `tsconfig.json`**. Como os `*.spec.ts` ficam co-localizados em `src/`, um `include: ["src"]` **sem exclusão de specs faz o BUILD DE PRODUÇÃO compilar os arquivos de teste** — e UM único erro de tipo num teste quebra o build (`build_rc ≠ 0` = BLOCKER inviolável, gate #38), mesmo com o código de produção 100% limpo. Um `nest new` canônico evita isso com um `tsconfig.build.json`.
+
+**Regra (obrigatória em TODO projeto NestJS — MySQL/Drizzle, Mongoose ou qualquer variante):**
+1. Emitir SEMPRE `apps/tsconfig.build.json` (exatamente como `nest new` gera):
+```json
+{ "extends": "./tsconfig.json", "exclude": ["node_modules", "test", "dist", "**/*spec.ts"] }
+```
+2. `@types/jest` é **OBRIGATÓRIO** nas `devDependencies` de QUALQUER projeto que emita `*.spec.ts` — sem ele, `jest.fn().mockReturnThis()`, `mockResolvedValue`, etc. não tipam (`TS2339: Property '...' does not exist on type 'JestMockFn'`) e o build quebra. O baseline NestJS+MySQL acima já o inclui; para NestJS+Mongoose ou outra ODM, **não esquecer** `"@types/jest": "^29"` junto de `jest`/`ts-jest`.
+
+**Por quê:** o build gate valida o COMPILE DE PRODUÇÃO, não a tipagem dos testes; sem `tsconfig.build.json` os dois se misturam e um teste mal-tipado derruba um serviço que roda perfeitamente. Foi a raiz do bloqueio da SPEC-02 (content-svc): produção limpa, 4 erros de tipo em 2 `.spec.ts`, build_rc=1.
 
 ---
 

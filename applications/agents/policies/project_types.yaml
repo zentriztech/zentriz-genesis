@@ -9,7 +9,7 @@
 #
 # Ver README.md para schema completo e política de linguagem PT-BR/EN.
 
-version: "0.4.0"
+version: "0.5.0"   # 2026-08-11: mobile default = React Native CLI (sem Expo); Expo vira opt-in consciente (tipo mobile_expo) + ALERTA
 
 # ── type_aliases ─────────────────────────────────────────────────────────────
 # Normaliza saídas de detectProjectType (telegram.ts:955-963) + subtipos do
@@ -19,10 +19,13 @@ version: "0.4.0"
 # Regra: backend_api_python NÃO tem alias para backend_api — bugs Python 1-9
 # são incompatíveis com bugs Node/Drizzle N1-N8.
 type_aliases:
-  mobile_app:         mobile_crossplatform    # telegram detectProjectType output
-  mobile_expo:        mobile_crossplatform    # Cenário B/F3: token do manifesto de produto (Expo/RN)
-  mobile_ios:         mobile_crossplatform    # portal subtype
-  mobile_android:     mobile_crossplatform    # portal subtype
+  mobile_app:         mobile_crossplatform    # telegram detectProjectType output → RN CLI (default)
+  mobile_ios:         mobile_crossplatform    # portal subtype → RN CLI (default)
+  mobile_android:     mobile_crossplatform    # portal subtype → RN CLI (default)
+  # POLÍTICA 2026-08-11: Expo NUNCA é default. O token 'mobile_expo' NÃO tem alias
+  # para mobile_crossplatform — resolve direto ao canônico types.mobile_expo (Expo
+  # permitido) e dispara ALERTA/confirmação (Expo = risco). Ver types.mobile_expo e
+  # o gate determinístico no runner (expo_confirmation_gate).
   backend_api_node:   backend_api             # variante nomeada
   backend_nestjs:     backend_api_nestjs      # ADR-019: NestJS+Prisma/Mongoose (não Fastify/Drizzle)
   nestjs_api:         backend_api_nestjs      # alias amigável
@@ -412,12 +415,17 @@ types:
   # ── mobile_crossplatform (Wave 1 — política completa v0.2.0) ─────────────
   mobile_crossplatform:
     inherit_from: mobile
+    # DEFAULT do ecossistema para mobile (2026-08-11): React Native CLI PURO, SEM Expo.
+    # Expo só via tipo mobile_expo (opt-in explícito na spec) + ALERTA. Ver type_aliases.
     labels:
-      pt_br: "📱 Mobile Multiplataforma"
-      en: "Mobile Cross-Platform"
+      pt_br: "📱 Mobile (React Native CLI)"
+      en: "Mobile (React Native CLI)"
     scaffold:
-      - eas.json                                      # Expo Application Services
-      - app.config.ts
+      - package.json                                  # RN CLI (react-native init), não Expo
+      - index.js                                       # AppRegistry entrypoint
+      - App.tsx
+      - metro.config.js
+      - babel.config.js
     required_routes:
       strict:
         - "Splash"                                    # tela inicial obrigatória
@@ -426,11 +434,11 @@ types:
       expected:
         - "Settings"
     required_components:
-      - "@react-navigation/native + stack ou tabs"
+      - "@react-navigation/native + native-stack ou tabs"
       - "AuthContext ou similar (Context API)"
       - "cliente HTTP com envelope {data, meta}"      # padrão Genesis
-      - "AsyncStorage para token (nunca localStorage)"
-      - "SplashScreen com Expo"
+      - "MMKV (react-native-mmkv) ou AsyncStorage para token (nunca localStorage)"
+      - "splash nativo (react-native-bootsplash) — NUNCA expo-splash-screen"
     forbidden_patterns:
       - "localStorage"                                # web-only API
       - "document."                                   # web-only
@@ -440,15 +448,89 @@ types:
       - "sitemap.xml"                                 # é mobile, não site
       - "hero-section"                                # padrão web landing
       - "middleware.ts"                               # Next-specific
+      - "expo"                                         # POLÍTICA: RN CLI puro, sem Expo (use mobile_expo se explícito)
+      - "expo-router"                                  # roteamento = @react-navigation
+      - "@expo/"                                       # qualquer pacote @expo
+      - "eas.json"                                     # EAS = Expo; use Fastlane/CodePush
+      - "app.config.ts"                                # config Expo; RN CLI usa app.json nativo + react-native.config.js
     fingerprint:
       required_tokens:
         strong:
           - "react-native"
           - "@react-navigation"
-          - "AsyncStorage"
         soft:
+          - "react-native-mmkv"
+          - "SafeAreaView"
+          - "react-native-bootsplash"
+      forbidden_tokens:
+        - "localStorage"
+        - "AppShell"
+        - "sitemap"
+        - "next.config"
+        - "expo"                                       # Expo proibido no default RN CLI
+        - "expo-router"
+        - "eas.json"
+        - "@expo/"
+      synonyms_pt_br: {}
+    stack_when_charter_silent:
+      - "React Native CLI 0.76+"                       # NÃO Expo
+      - "TypeScript"
+      - "@react-navigation/native (native-stack)"
+      - "react-native-mmkv"
+    smell_signals:
+      - "uso de localStorage/document/window (web-only APIs)"
+      - "AppShell.tsx (padrão web dashboard)"
+      - "import next/* ou react-router-dom (não é web)"
+      - "fetch sem headers Content-Type application/json"
+      - "import de expo/expo-router/@expo em projeto RN CLI (violação de política — deve ser mobile_expo)"
+
+  # ── mobile_expo (opt-in CONSCIENTE — Expo permitido, mas com ALERTA) ─────────
+  # 2026-08-11: Expo NÃO é default no ecossistema (Jean considera Expo um risco).
+  # Este tipo só é resolvido quando a spec do tenant pede Expo EXPLICITAMENTE.
+  # O runner dispara um gate de confirmação (expo_confirmation_gate): notifica o
+  # usuário que Expo está definido e bloqueia o build até confirmação
+  # (extra.expo_confirmed=true). Ver runner.py.
+  mobile_expo:
+    inherit_from: mobile
+    labels:
+      pt_br: "📱 Mobile (Expo — opt-in, requer confirmação)"
+      en: "Mobile (Expo — opt-in, needs confirmation)"
+    meta:
+      requires_human_confirmation: true               # lido pelo expo_confirmation_gate
+      risk_note: "Expo definido explicitamente na spec — confirmar com o usuário (risco de lock-in/limite de módulos nativos)."
+    scaffold:
+      - app.json                                       # Expo config
+      - app.config.ts
+      - eas.json                                       # Expo Application Services (permitido AQUI)
+    required_routes:
+      strict:
+        - "Splash"
+        - "Login"
+        - "Home"
+      expected:
+        - "Settings"
+    required_components:
+      - "expo-router OU @react-navigation/native"
+      - "AuthContext ou similar (Context API)"
+      - "cliente HTTP com envelope {data, meta}"
+      - "expo-secure-store/MMKV para token (nunca localStorage)"
+    forbidden_patterns:
+      - "localStorage"
+      - "document."
+      - "window."
+      - "AppShell.tsx"
+      - "next/*"
+      - "sitemap.xml"
+      - "hero-section"
+      - "middleware.ts"
+    fingerprint:
+      required_tokens:
+        strong:
           - "expo"
-          - "SplashScreen"
+          - "react-native"
+        soft:
+          - "expo-router"
+          - "eas"
           - "SafeAreaView"
       forbidden_tokens:
         - "localStorage"
@@ -458,15 +540,12 @@ types:
       synonyms_pt_br: {}
     stack_when_charter_silent:
       - "Expo SDK 51+"
-      - "React Native 0.74+"
+      - "React Native (via Expo)"
       - "TypeScript"
-      - "@react-navigation/native"
-      - "react-native-async-storage"
+      - "expo-router OU @react-navigation/native"
     smell_signals:
       - "uso de localStorage/document/window (web-only APIs)"
-      - "AppShell.tsx (padrão web dashboard)"
       - "import next/* ou react-router-dom (não é web)"
-      - "fetch sem headers Content-Type application/json"
 
   # ── fullstack_saas (Wave 1 — união backend_api + frontend_dashboard + auth) ───
   # SaaS multi-tenant típico: API + dashboard admin + auth-service separado (LEI 11).

@@ -583,22 +583,33 @@ def invoke_raw(body: dict):
     if not system_prompt or not user_message:
         raise HTTPException(status_code=400, detail="prompt_override + user_message obrigatórios")
 
+    # Achado #30 (2026-08-10): uma resposta VAZIA (200, response="") é uma falha real —
+    # o Foundry às vezes devolve content vazio (stop precoce/streaming interrompido) sem lançar
+    # exceção. Antes só o `except` acionava o fallback → o Cyborg recebia "" e desistia do rework.
+    # Agora tratamos resposta vazia como falha e escalamos para o modelo de reforço também.
     try:
         resp = call_bedrock_direct(system=system_prompt, user=user_message,
                                     model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id))
-        return {"response": resp, "model_used": model_id}
+        if resp and resp.strip():
+            return {"response": resp, "model_used": model_id}
+        logger.warning(f"[/invoke/raw] Principal ({model_id}) retornou resposta VAZIA — escalando para fallback")
     except Exception as e:
         logger.warning(f"[/invoke/raw] Principal falhou ({model_id}): {e}")
-        if fallback_id:
-            try:
-                resp = call_bedrock_direct(system=system_prompt, user=user_message,
-                                            model_id=fallback_id, max_tokens=max_tokens,
-                                            temperature=_temp_for(fallback_id))
-                return {"response": resp, "model_used": fallback_id, "fallback": True}
-            except Exception as e2:
-                raise HTTPException(status_code=500,
-                                    detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e} / {e2}")
-        raise HTTPException(status_code=500, detail=str(e))
+        resp = ""
+        if not fallback_id:
+            raise HTTPException(status_code=500, detail=str(e))
+    # Chega aqui em 2 casos: exceção no principal OU resposta vazia do principal.
+    if fallback_id:
+        try:
+            resp = call_bedrock_direct(system=system_prompt, user=user_message,
+                                        model_id=fallback_id, max_tokens=max_tokens,
+                                        temperature=_temp_for(fallback_id))
+            return {"response": resp, "model_used": fallback_id, "fallback": True}
+        except Exception as e2:
+            raise HTTPException(status_code=500,
+                                detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e2}")
+    # Sem fallback configurado e principal veio vazio → devolve o vazio (comportamento antigo).
+    return {"response": resp, "model_used": model_id}
 
 
 if __name__ == "__main__":

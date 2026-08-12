@@ -25,6 +25,22 @@ Se você recebe uma task cuja **stack ou módulo destoa** do que o charter/engin
 
 Ver `contracts/SYSTEM_PROMPT_CRITICAL_RULES_LEI2.md` seção "LEI 2-bis — No-silent-nop" para detalhes completos.
 
+### 0.2) LEI 2-ter — Zero invenção de PRODUTO/DOMÍNIO (INVIOLÁVEL)
+
+A identidade do produto (nome, domínio, área de negócio) vem **EXCLUSIVAMENTE** da spec/charter — nunca de pistas técnicas (`BillingCharge`/`PaymentProvider` **não** implicam produto fiscal). Nunca invente um nome de produto (ex.: "Zentriz Ledger BR"); use literalmente o que a spec escreveu. Antes de emitir `BLOCKED` por "domínio incompatível", cite o FR/NFR exato da spec violado — se a task casa com um FR (ex.: "LocaleConfig e proficiency scale" ↔ FR-05), **está no escopo**, implemente. Detalhes completos em `contracts/SYSTEM_PROMPT_CRITICAL_RULES_LEI2.md` seção "LEI 2-ter" (injetada em todos os agentes).
+
+### 0.3) LEI 2-quater — Fidelidade ao MODELO DE DOMÍNIO canônico (INVIOLÁVEL)
+
+Acertar o *nome* do produto (LEI 2-ter) não basta — você tem que acertar o **formato do domínio**. Quando a spec / `@zentriz/contracts` **define** as entidades, enums e a hierarquia, você constrói com os **mesmos nomes, formas e restrições** — nunca stand-ins genéricos "equivalentes":
+
+- **Hierarquia e campos vêm da spec, não do seu repertório.** Se a spec pede `Course → Level → Book/Theme → Block → Lesson → Hour → ActivityItem`, construa **essa** hierarquia — não um CMS/LMS genérico com `Course.slug` / `Hour.dayOfWeek`. Nome plausível ≠ nome canônico.
+- **Enum fechado é fechado.** 18 `ACTIVITY_ITEM_TYPES` `snake_case` com discriminators = exatamente esses 18 — não um enum reduzido `VIDEO`/`QUIZ`.
+- **Sub-shape canônico não vira primitivo.** `locale: LocaleConfig` ≠ `languageCode: string`; `provenance`/`rights`/`counters`/`version` existem se a spec os define.
+- **Build verde NÃO valida domínio.** Compilar 100% e ainda ser o produto errado é possível — a fidelidade de domínio é um gate independente (`a2_fidelidade_spec`/`a5_dominio`).
+- **Aterrisse no contrato ANTES de codificar.** Liste no `<thinking>` as entidades/enums/hierarquia canônicas da spec e construa a partir delas. Na dúvida entre canônico e genérico "melhor", **o canônico vence**.
+
+Detalhes completos e o anti-padrão banido (achados #48/#55, LMS genérico no lugar do `content-svc` do ZVoices) em `contracts/SYSTEM_PROMPT_CRITICAL_RULES_LEI2.md` seção "LEI 2-quater".
+
 ---
 
 ## 1) AGENT CONTRACT

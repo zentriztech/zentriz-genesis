@@ -93,7 +93,6 @@
     "landing_page": "frontend_landing",
     "mobile_android": "mobile_crossplatform",
     "mobile_app": "mobile_crossplatform",
-    "mobile_expo": "mobile_crossplatform",
     "mobile_ios": "mobile_crossplatform",
     "nestjs_api": "backend_api_nestjs",
     "static_site": "frontend_landing",
@@ -1112,18 +1111,100 @@
           "localStorage",
           "AppShell",
           "sitemap",
+          "next.config",
+          "expo",
+          "expo-router",
+          "eas.json",
+          "@expo/"
+        ],
+        "required_tokens": {
+          "soft": [
+            "react-native-mmkv",
+            "SafeAreaView",
+            "react-native-bootsplash"
+          ],
+          "strong": [
+            "react-native",
+            "@react-navigation"
+          ]
+        },
+        "synonyms_pt_br": {}
+      },
+      "forbidden_patterns": [
+        "localStorage",
+        "document.",
+        "window.",
+        "AppShell.tsx",
+        "next/*",
+        "sitemap.xml",
+        "hero-section",
+        "middleware.ts",
+        "expo",
+        "expo-router",
+        "@expo/",
+        "eas.json",
+        "app.config.ts"
+      ],
+      "inherit_from": "mobile",
+      "labels": {
+        "en": "Mobile (React Native CLI)",
+        "pt_br": "📱 Mobile (React Native CLI)"
+      },
+      "required_components": [
+        "@react-navigation/native + native-stack ou tabs",
+        "AuthContext ou similar (Context API)",
+        "cliente HTTP com envelope {data, meta}",
+        "MMKV (react-native-mmkv) ou AsyncStorage para token (nunca localStorage)",
+        "splash nativo (react-native-bootsplash) — NUNCA expo-splash-screen"
+      ],
+      "required_routes": {
+        "expected": [
+          "Settings"
+        ],
+        "strict": [
+          "Splash",
+          "Login",
+          "Home"
+        ]
+      },
+      "scaffold": [
+        "package.json",
+        "index.js",
+        "App.tsx",
+        "metro.config.js",
+        "babel.config.js"
+      ],
+      "smell_signals": [
+        "uso de localStorage/document/window (web-only APIs)",
+        "AppShell.tsx (padrão web dashboard)",
+        "import next/* ou react-router-dom (não é web)",
+        "fetch sem headers Content-Type application/json",
+        "import de expo/expo-router/@expo em projeto RN CLI (violação de política — deve ser mobile_expo)"
+      ],
+      "stack_when_charter_silent": [
+        "React Native CLI 0.76+",
+        "TypeScript",
+        "@react-navigation/native (native-stack)",
+        "react-native-mmkv"
+      ]
+    },
+    "mobile_expo": {
+      "fingerprint": {
+        "forbidden_tokens": [
+          "localStorage",
+          "AppShell",
+          "sitemap",
           "next.config"
         ],
         "required_tokens": {
           "soft": [
-            "expo",
-            "SplashScreen",
+            "expo-router",
+            "eas",
             "SafeAreaView"
           ],
           "strong": [
-            "react-native",
-            "@react-navigation",
-            "AsyncStorage"
+            "expo",
+            "react-native"
           ]
         },
         "synonyms_pt_br": {}
@@ -1140,15 +1221,18 @@
       ],
       "inherit_from": "mobile",
       "labels": {
-        "en": "Mobile Cross-Platform",
-        "pt_br": "📱 Mobile Multiplataforma"
+        "en": "Mobile (Expo — opt-in, needs confirmation)",
+        "pt_br": "📱 Mobile (Expo — opt-in, requer confirmação)"
+      },
+      "meta": {
+        "requires_human_confirmation": true,
+        "risk_note": "Expo definido explicitamente na spec — confirmar com o usuário (risco de lock-in/limite de módulos nativos)."
       },
       "required_components": [
-        "@react-navigation/native + stack ou tabs",
+        "expo-router OU @react-navigation/native",
         "AuthContext ou similar (Context API)",
         "cliente HTTP com envelope {data, meta}",
-        "AsyncStorage para token (nunca localStorage)",
-        "SplashScreen com Expo"
+        "expo-secure-store/MMKV para token (nunca localStorage)"
       ],
       "required_routes": {
         "expected": [
@@ -1161,21 +1245,19 @@
         ]
       },
       "scaffold": [
-        "eas.json",
-        "app.config.ts"
+        "app.json",
+        "app.config.ts",
+        "eas.json"
       ],
       "smell_signals": [
         "uso de localStorage/document/window (web-only APIs)",
-        "AppShell.tsx (padrão web dashboard)",
-        "import next/* ou react-router-dom (não é web)",
-        "fetch sem headers Content-Type application/json"
+        "import next/* ou react-router-dom (não é web)"
       ],
       "stack_when_charter_silent": [
         "Expo SDK 51+",
-        "React Native 0.74+",
+        "React Native (via Expo)",
         "TypeScript",
-        "@react-navigation/native",
-        "react-native-async-storage"
+        "expo-router OU @react-navigation/native"
       ]
     },
     "other": {
@@ -1212,5 +1294,5 @@
       "stack_when_charter_silent": []
     }
   },
-  "version": "0.4.0"
+  "version": "0.5.0"
 }

@@ -59,6 +59,17 @@ async function getRunnerStatus(): Promise<RunnerStatus | null> {
   }
 }
 
+// Marcos INTERMEDIÁRIOS do pipeline (achado #49): estados em que o runner grava um marco e,
+// se o processo morre logo em seguida (queda/hot-swap/restart), o projeto fica PARADO PARA
+// SEMPRE — o watchdog só resgatava 'running'. Agora também resgatamos estes, desde que sem PID
+// ativo e ESTAGNADOS há > MILESTONE_GRACE_MINUTES (evita corrida com um pipeline vivo que só
+// passou brevemente pelo marco entre etapas). Honra [[feedback-cyborg-deve-entregar-nao-parar]]:
+// nenhum estado não-terminal pode ficar sem um watcher que o faça progredir.
+// NÃO incluímos estados do Cyborg (pending_cyborg/blocked_cyborg/blocked_*) — são do watcher
+// zentriz_cyborg.py — nem estados terminais (completed/accepted/failed/stopped/archived).
+const MILESTONE_STATUSES = ["cto_charter", "pm_backlog", "dev_qa", "devops"];
+const MILESTONE_GRACE_MINUTES = parseInt(process.env.WATCHDOG_MILESTONE_GRACE_MINUTES ?? "10", 10);
+
 async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanProject[]> {
   const client = await pool.connect();
   try {
@@ -68,9 +79,14 @@ async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanPr
               stopped_by,
               created_by, tenant_id
        FROM projects
-       WHERE status = 'running'
+       WHERE (
+               status = 'running'
+               OR (status = ANY($1::text[])
+                   AND updated_at < now() - ($2 || ' minutes')::interval)
+             )
          AND (stopped_by IS NULL OR stopped_by != 'user')
        ORDER BY started_at ASC NULLS LAST`,
+      [MILESTONE_STATUSES, MILESTONE_GRACE_MINUTES],
     );
     // Filtra apenas os que não têm processo ativo no runner
     const orphans = result.rows.filter((p) => !runnerActiveIds.has(p.id));
@@ -78,23 +94,33 @@ async function getOrphanProjects(runnerActiveIds: Set<string>): Promise<OrphanPr
     // Antes de relangar, verificar se todas as tasks já estão terminais.
     // Se sim, o pipeline concluiu normalmente mas o status não foi atualizado
     // (ex: runner foi derrubado logo após o DevOps). Marcar como completed em vez de relangar.
+    //
+    // Achado #49 (colateral): este atalho de 'completed' SÓ vale para 'running'. Um projeto num
+    // MARCO intermediário (ex.: pm_backlog) pode ter tasks todas 'DONE' no DB e mesmo assim ter
+    // apps/ VAZIO e sem checkpoint (estado inconsistente família #26/#42) — marcá-lo completed
+    // cegamente entregaria um produto fantasma. Para marcos, SEMPRE relançamos (resume do
+    // checkpoint; se estiver inconsistente, o pipeline reconstrói) em vez de fechar às cegas.
     const TERMINAL = new Set(["DONE", "QA_PASS", "QA_FAIL", "BLOCKED", "CANCELLED"]);
     const safe: OrphanProject[] = [];
     for (const p of orphans) {
-      const tasks = await client.query<{ status: string }>(
-        `SELECT status FROM project_tasks WHERE project_id = $1`,
-        [p.id],
-      );
-      if (tasks.rows.length > 0 && tasks.rows.every((t) => TERMINAL.has(t.status))) {
-        const now = new Date().toISOString();
-        await client.query(
-          `UPDATE projects SET status = 'completed', completed_at = $1, finished_at = $1, updated_at = now() WHERE id = $2`,
-          [now, p.id],
+      if (p.status === "running") {
+        const tasks = await client.query<{ status: string }>(
+          `SELECT status FROM project_tasks WHERE project_id = $1`,
+          [p.id],
         );
-        console.log(`[Watchdog] Projeto ${p.id} marcado como completed (todas as tasks terminais — sem necessidade de relangar).`);
+        if (tasks.rows.length > 0 && tasks.rows.every((t) => TERMINAL.has(t.status))) {
+          const now = new Date().toISOString();
+          await client.query(
+            `UPDATE projects SET status = 'completed', completed_at = $1, finished_at = $1, updated_at = now() WHERE id = $2`,
+            [now, p.id],
+          );
+          console.log(`[Watchdog] Projeto ${p.id} marcado como completed (todas as tasks terminais — sem necessidade de relangar).`);
+          continue;
+        }
       } else {
-        safe.push(p);
+        console.log(`[Watchdog] Projeto ${p.id} órfão em marco intermediário '${p.status}' (sem PID ativo, estagnado > ${MILESTONE_GRACE_MINUTES}min) — relançando (achado #49).`);
       }
+      safe.push(p);
     }
     return safe;
   } finally {
