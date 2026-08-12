@@ -24,9 +24,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
-import { extractProductZip } from "./specs.js";
+import { extractProductZip, httpPost, httpGet, type ProductZipContents } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
-import { ManifestError } from "../services/productManifest.js";
+import { buildProductSketch, parseManifest, ManifestError, type ProductManifest } from "../services/productManifest.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 
 function getUser(r: FastifyRequest): AuthUser {
@@ -44,6 +44,100 @@ const RELATION_LABELS: Record<RelationType, string> = {
   related:      "Relacionado",
   part_of:      "Componente de",
 };
+
+// ── D-1: in-memory job store para /api/products/propose (transiente, sem DB) ────
+type ProposeStatus = "pending" | "running" | "done" | "error";
+interface ProposeJob {
+  id: string;
+  status: ProposeStatus;
+  manifest?: ProductManifest;
+  specs?: Record<string, string>;
+  waves?: string[][];
+  projects?: Array<{ id: string; type: string; wave: number; dependsOn: string[] }>;
+  warnings?: string[];
+  error?: string;
+  createdAt: number;
+}
+const _proposeJobs = new Map<string, ProposeJob>();
+
+// Limpa jobs com mais de 30 minutos.
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60_000;
+  for (const [id, job] of _proposeJobs) if (job.createdAt < cutoff) _proposeJobs.delete(id);
+}, 5 * 60_000);
+
+/**
+ * Roda a proposta do splitter em background: chama o Product Architect no serviço agents
+ * (job async + poll), e ao concluir valida o grafo no lado TS (buildProductSketch reusa os
+ * MESMOS gates: DAG/tipos/spec presente) e computa as ondas. Não persiste nada — só a proposta.
+ */
+function runProposeJob(jobId: string, document: string, modelId: string | undefined, agentsUrl: string): void {
+  const job = _proposeJobs.get(jobId);
+  if (!job) return;
+  job.status = "running";
+  const base = agentsUrl.replace(/\/$/, "");
+  const startedAt = Date.now();
+  const MAX_MS = 660_000; // 11 min
+
+  const payload = JSON.stringify({ document, ...(modelId ? { model_id: modelId } : {}) });
+  httpPost(`${base}/invoke/product_architect/async`, payload, 30_000)
+    .then((startText) => {
+      const agentsJobId = (JSON.parse(startText) as { jobId?: string }).jobId;
+      if (!agentsJobId) throw new Error("agents /invoke/product_architect/async não retornou jobId");
+      console.log(`[Propose] job=${jobId} agents_job=${agentsJobId} started`);
+
+      const timer = setInterval(() => {
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        if (elapsed > MAX_MS / 1000) {
+          clearInterval(timer);
+          const j = _proposeJobs.get(jobId);
+          if (j) { j.status = "error"; j.error = "Timeout: Product Architect demorou mais de 11 minutos."; }
+          return;
+        }
+        httpGet(`${base}/invoke/product_architect/status/${agentsJobId}`, 60_000)
+          .then((pollText) => {
+            const poll = JSON.parse(pollText) as {
+              status: string;
+              result?: { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[] };
+              error?: string;
+            };
+            const j = _proposeJobs.get(jobId);
+            if (!j) { clearInterval(timer); return; }
+            if (poll.status === "done" && poll.result?.manifest && poll.result?.specs) {
+              clearInterval(timer);
+              try {
+                const manifest = poll.result.manifest;
+                const specs = poll.result.specs;
+                // Valida o grafo no lado TS e computa as ondas (double-check dos gates).
+                const parsed = parseManifest(JSON.stringify(manifest));
+                const sketch = buildProductSketch(parsed, Object.keys(specs));
+                j.manifest = manifest;
+                j.specs = specs;
+                j.waves = sketch.waves;
+                j.projects = sketch.projects.map((p) => ({ id: p.id, type: p.type, wave: p.wave, dependsOn: p.dependsOn }));
+                j.warnings = poll.result.warnings ?? [];
+                j.status = "done";
+                console.log(`[Propose] ✓ job=${jobId} DONE — ${sketch.projects.length} projetos, ${sketch.waves.length} ondas`);
+              } catch (e) {
+                j.status = "error";
+                j.error = e instanceof ManifestError ? `[${e.code}] ${e.message}` : (e instanceof Error ? e.message : String(e));
+              }
+            } else if (poll.status === "error") {
+              clearInterval(timer);
+              j.status = "error";
+              j.error = poll.error ?? "Product Architect falhou";
+            }
+          })
+          .catch((pollErr) => {
+            console.warn(`[Propose] poll error job=${jobId}: ${pollErr instanceof Error ? pollErr.message : String(pollErr)}`);
+          });
+      }, 8_000);
+    })
+    .catch((err) => {
+      const j = _proposeJobs.get(jobId);
+      if (j) { j.status = "error"; j.error = err instanceof Error ? err.message.slice(0, 300) : String(err); }
+    });
+}
 
 export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
@@ -162,6 +256,104 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(500).send({ code: "INGEST_FAILED", message: e instanceof Error ? e.message : "Erro na ingestão do produto" });
     }
   });
+
+  // ── D-1: SPLITTER doc→N — POST /api/products/propose (async) ───────────────────
+  // ADR-018 / Cenário A (submodo SPLITTER): recebe UM documento em prosa, chama o
+  // Product Architect (serviço agents) e devolve uma PROPOSTA (manifest + specs geradas +
+  // ondas do grafo). NÃO executa nada — o humano revisa e depois aprova via /ingest-proposal.
+  // Job-based (igual spec-preview): a decomposição é um LLM call longo → não segura a conexão.
+  app.post<{ Body: { document?: string; modelId?: string } }>(
+    "/api/products/propose",
+    async (request, reply) => {
+      const body = request.body ?? {};
+      const document = (body.document ?? "").trim();
+      if (document.length < 40) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie o documento do produto com pelo menos 40 caracteres." });
+      }
+      const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
+      if (!agentsUrl) {
+        return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes (Product Architect) não configurado." });
+      }
+      const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now() });
+      runProposeJob(jobId, document, body.modelId, agentsUrl);
+      return reply.status(202).send({ jobId, status: "pending" });
+    }
+  );
+
+  // ── GET /api/products/propose/:jobId — poll da proposta ────────────────────────
+  app.get<{ Params: { jobId: string } }>(
+    "/api/products/propose/:jobId",
+    async (request, reply) => {
+      const job = _proposeJobs.get(request.params.jobId);
+      if (!job) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
+      if (job.status === "done") {
+        return reply.send({
+          jobId: job.id, status: "done", needsHuman: true,
+          manifest: job.manifest, specs: job.specs, waves: job.waves, projects: job.projects, warnings: job.warnings,
+        });
+      }
+      if (job.status === "error") return reply.send({ jobId: job.id, status: "error", error: job.error });
+      const elapsed = Math.round((Date.now() - job.createdAt) / 1000);
+      return reply.send({ jobId: job.id, status: job.status, elapsed });
+    }
+  );
+
+  // ── POST /api/products/ingest-proposal — ingere a proposta APROVADA ────────────
+  // Recebe {manifest, specs, specApproved} JSON (o que /propose devolveu, após revisão
+  // humana) e reusa o executor determinístico (decomposeProduct) SEM exigir um ZIP:
+  // monta o ProductZipContents em memória. Depois dispara a onda 0 (igual /ingest).
+  app.post<{ Body: { manifest?: ProductManifest; specs?: Record<string, string>; specApproved?: boolean } }>(
+    "/api/products/ingest-proposal",
+    async (request, reply) => {
+      const user = getUser(request);
+      const tenantId = user.tenantId ?? (await pool.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
+      if (!tenantId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+
+      const { manifest, specs, specApproved } = request.body ?? {};
+      if (!manifest || typeof manifest !== "object" || !specs || typeof specs !== "object") {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "manifest + specs (mapa caminho→conteúdo) são obrigatórios." });
+      }
+
+      // Monta o ProductZipContents em memória a partir da proposta (sem ZIP real).
+      const contents: ProductZipContents = {
+        manifestText: JSON.stringify(manifest),
+        files: new Map(Object.entries(specs).map(([k, v]) => [k.replace(/^\.\//, ""), String(v)])),
+      };
+
+      try {
+        const result = await decomposeProduct(pool, {
+          tenantId,
+          createdBy: user.id,
+          approverEmail: user.email ?? null,
+          zip: contents,
+          specApprovedOverride: specApproved === true ? true : undefined,
+        });
+        if (result.idempotentReuse) {
+          request.log.info({ productId: result.productId }, "[products/ingest-proposal] no-op idempotente");
+          return reply.status(200).send(result);
+        }
+        // Dispara a ONDA 0 (mesma cascata do /ingest). Best-effort em background.
+        setImmediate(async () => {
+          for (const pid of result.dispatched) {
+            try {
+              const r = await dispatchProjectRun(pool, pid);
+              request.log.info({ projectId: pid, dispatched: r.dispatched, reason: r.reason }, "[products/ingest-proposal] disparo onda 0");
+            } catch (e) {
+              request.log.error({ projectId: pid, err: e }, "[products/ingest-proposal] falha ao disparar onda 0");
+            }
+          }
+        });
+        return reply.status(201).send(result);
+      } catch (e) {
+        if (e instanceof ManifestError) {
+          return reply.status(422).send({ code: e.code, message: e.message, details: e.details });
+        }
+        request.log.error({ err: e }, "[products/ingest-proposal] falha na decomposição");
+        return reply.status(500).send({ code: "INGEST_FAILED", message: e instanceof Error ? e.message : "Erro na ingestão da proposta" });
+      }
+    }
+  );
 
   // ── GET /api/products/:id ────────────────────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {

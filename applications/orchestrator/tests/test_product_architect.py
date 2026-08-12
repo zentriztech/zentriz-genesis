@@ -10,6 +10,8 @@ from orchestrator.product_architect import (
     infer_manifest,
     validate_proposal,
     build_prompt,
+    build_split_prompt,
+    split_document,
     _extract_json,
     ManifestProposalError,
 )
@@ -163,3 +165,79 @@ def test_proposta_ruim_do_llm_lanca_no_infer():
     m["projects"][0]["dependsOn"] = ["web"]
     with pytest.raises(ManifestProposalError):
         infer_manifest("prosa", PRESENT, llm_fn=_stub(m))
+
+
+# ── SPLITTER (split_document): doc → N specs geradas + grafo ──────────────────
+LONG = "# App de idiomas\n\nUm produto B2B2C com contracts, backend e app mobile."
+
+
+def _split_proposal():
+    """Proposta do splitter: cada projeto carrega specContent (a spec markdown gerada)."""
+    return {
+        "schemaVersion": "1.1.0",
+        "product": {"name": "ZVoices", "systemId": "zvoices", "specApproved": False, "deliveryDefault": "source_only"},
+        "projects": [
+            {"id": "contracts", "spec": "specs/contracts.md", "type": "lib_ts", "dependsOn": [],
+             "specContent": "# Contracts\n\n## Objetivo\nContratos compartilhados do produto ZVoices para os demais projetos."},
+            {"id": "api", "spec": "specs/api.md", "type": "backend_api_nestjs", "dependsOn": ["contracts"],
+             "specContent": "# API\n\n## Objetivo\nBackend NestJS que expõe os endpoints do produto ZVoices e consome os contracts."},
+            {"id": "mobile", "spec": "specs/mobile.md", "type": "mobile_crossplatform", "dependsOn": ["contracts", "api"],
+             "specContent": "# Mobile\n\n## Objetivo\nApp React Native CLI que consome a API e os contracts do produto ZVoices."},
+        ],
+    }
+
+
+def test_build_split_prompt_inclui_doc_e_contrato():
+    p = build_split_prompt(LONG)
+    assert "App de idiomas" in p
+    assert "specContent" in p
+    assert "DAG" in p
+
+
+def test_split_happy_path_separa_manifest_e_specs():
+    out = split_document(LONG, llm_fn=_stub(_split_proposal()))
+    assert out["needs_human"] is True
+    assert len(out["manifest"]["projects"]) == 3
+    # specs foram extraídas e endereçadas por caminho
+    assert set(out["specs"].keys()) == {"specs/contracts.md", "specs/api.md", "specs/mobile.md"}
+    assert out["specs"]["specs/api.md"].startswith("# API")
+    # o manifest limpo NÃO carrega specContent (formato canônico PRODUCT.json)
+    for p in out["manifest"]["projects"]:
+        assert "specContent" not in p
+
+
+def test_split_tolera_cerca_de_codigo():
+    out = split_document(LONG, llm_fn=_stub(_split_proposal(), wrap="fence"))
+    assert out["manifest"]["product"]["name"] == "ZVoices"
+
+
+def test_split_rejeita_spec_content_vazio():
+    m = _split_proposal()
+    m["projects"][1]["specContent"] = "curto"  # < MIN_SPEC_CONTENT_CHARS
+    with pytest.raises(ManifestProposalError) as e:
+        split_document(LONG, llm_fn=_stub(m))
+    assert e.value.code == "PROPOSAL_EMPTY_SPEC"
+
+
+def test_split_rejeita_caminho_de_spec_duplicado():
+    m = _split_proposal()
+    m["projects"][1]["spec"] = "specs/contracts.md"  # colide com o projeto 0
+    with pytest.raises(ManifestProposalError) as e:
+        split_document(LONG, llm_fn=_stub(m))
+    assert e.value.code == "PROPOSAL_SPEC_DUPLICATE_PATH"
+
+
+def test_split_propaga_gate_de_ciclo():
+    m = _split_proposal()
+    m["projects"][0]["dependsOn"] = ["mobile"]  # contracts→mobile→api→contracts = ciclo
+    with pytest.raises(ManifestProposalError) as e:
+        split_document(LONG, llm_fn=_stub(m))
+    assert e.value.code == "PROPOSAL_CYCLE"
+
+
+def test_split_needs_human_e_spec_approved_false():
+    m = _split_proposal()
+    m["product"]["specApproved"] = True
+    out = split_document(LONG, llm_fn=_stub(m))
+    assert out["needs_human"] is True
+    assert out["manifest"]["product"]["specApproved"] is False

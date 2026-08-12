@@ -516,6 +516,77 @@ def get_cto_job_status(job_id: str):
     return {"jobId": job_id, "status": "running", "elapsed": elapsed}
 
 
+# ── Product Architect / SPLITTER (D-1) — doc grande → N specs + grafo ───────────
+# Async job (mesmo padrão do CTO): a decomposição gera N specs num único LLM call
+# potencialmente longo → não segurar a conexão HTTP. PROPÕE, nunca executa (ADR-018):
+# a resposta é uma proposta (manifest + specs) que exige aprovação humana antes de ingerir.
+
+def _run_splitter(document: str, model_id: str) -> dict:
+    """Chama o splitter (split_document) com call_bedrock_direct como llm_fn."""
+    from orchestrator.product_architect import split_document
+    from orchestrator.agents.runtime import call_bedrock_direct
+
+    max_tokens = int(os.environ.get("SPLITTER_MAX_TOKENS", "32000"))
+
+    def _llm(system: str, user: str, mid: str) -> str:
+        # temperature: modelos extended-thinking exigem 1.0; senão 0.2 (determinístico).
+        ml = (mid or "").lower()
+        temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")) else 0.2
+        return call_bedrock_direct(system=system, user=user, model_id=mid,
+                                   max_tokens=max_tokens, temperature=temp)
+
+    return split_document(document, llm_fn=_llm, model_id=model_id)
+
+
+def _run_splitter_async(job_id: str, body: dict) -> None:
+    """Roda o splitter numa thread e guarda o resultado em _async_jobs."""
+    try:
+        document = (body.get("document") or body.get("master_md") or "").strip()
+        if not document:
+            raise ValueError("document (o texto do produto) é obrigatório")
+        model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+        result = _run_splitter(document, model_id)
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "done"
+                _async_jobs[job_id]["result"] = result
+    except Exception as e:
+        # Erros de gate (ManifestProposalError) trazem .code — expõe estruturado.
+        code = getattr(e, "code", None)
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "error"
+                _async_jobs[job_id]["error"] = (f"[{code}] " if code else "") + str(e)[:500]
+
+
+@app.post("/invoke/product_architect/async")
+def invoke_product_architect_async(body: dict):
+    """Inicia a decomposição doc→N em background. Retorna jobId imediatamente.
+    Poll GET /invoke/product_architect/status/{job_id}. Guardrail: PROPÕE, não executa."""
+    _cleanup_old_jobs()
+    job_id = f"pa-{uuid.uuid4().hex[:12]}"
+    with _jobs_lock:
+        _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
+    thread = threading.Thread(target=_run_splitter_async, args=(job_id, body), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+
+@app.get("/invoke/product_architect/status/{job_id}")
+def get_product_architect_status(job_id: str):
+    """Poll do job do splitter. Retorna {status, result} (proposta) ou {status, error}."""
+    with _jobs_lock:
+        job = _async_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    elapsed = int(time.time() - job.get("created_at", time.time()))
+    if job["status"] == "done":
+        return {"jobId": job_id, "status": "done", "result": job.get("result"), "elapsed": elapsed}
+    if job["status"] == "error":
+        return {"jobId": job_id, "status": "error", "error": job.get("error"), "elapsed": elapsed}
+    return {"jobId": job_id, "status": "running", "elapsed": elapsed}
+
+
 @app.post("/invoke/engineer")
 def invoke_engineer(body: dict):
     return _invoke_agent(body, ENGINEER_SYSTEM_PROMPT_PATH, "ENGINEER")

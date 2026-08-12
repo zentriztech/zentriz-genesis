@@ -28,6 +28,10 @@ VALID_TYPES = {
 }
 
 SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "agents" / "product_architect" / "SYSTEM_PROMPT.md"
+SPLIT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "agents" / "product_architect" / "SPLIT_SYSTEM_PROMPT.md"
+
+# Conteúdo mínimo aceitável para a spec de um projeto (evita specs vazias/triviais do LLM).
+MIN_SPEC_CONTENT_CHARS = 80
 
 
 class ManifestProposalError(Exception):
@@ -37,6 +41,19 @@ class ManifestProposalError(Exception):
         super().__init__(message)
         self.code = code
         self.details = details or {}
+
+
+def _load_split_system_prompt() -> str:
+    try:
+        return SPLIT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        # Fallback embutido — o módulo não deve quebrar se o arquivo não existir ainda.
+        return (
+            "Você é o Product Architect em modo SPLITTER. Dado UM documento em prosa, decomponha o "
+            "produto em N projetos interdependentes. Para cada projeto emita id, spec (specs/<id>.md), "
+            "type, dependsOn e specContent (a spec markdown COMPLETA daquele projeto). Use APENAS tipos "
+            "válidos. O grafo dependsOn deve ser um DAG (sem ciclo). specApproved=false. Responda só o JSON."
+        )
 
 
 def _load_system_prompt() -> str:
@@ -182,3 +199,109 @@ def infer_manifest(
         warnings.append("specApproved forçado a false: proposta inferida exige revisão humana antes de aprovar specs.")
 
     return {"manifest": manifest, "needs_human": True, "warnings": warnings}
+
+
+# ── MODO SPLITTER: 1 documento grande → N specs geradas + grafo ────────────────
+
+def build_split_prompt(master_md: str) -> str:
+    """Monta a mensagem de usuário do SPLITTER: o documento inteiro + contrato de saída.
+
+    Diferença vs. build_prompt (modo inferência): NÃO recebe specs presentes — o LLM GERA
+    o conteúdo de cada spec (campo specContent) além do grafo.
+    """
+    types_block = ", ".join(sorted(VALID_TYPES))
+    return (
+        "# Documento do produto (prosa — pode ser longo)\n\n"
+        f"{master_md.strip()}\n\n"
+        "# Tipos de projeto válidos\n\n"
+        f"{types_block}\n\n"
+        "# Sua tarefa\n\n"
+        "Decomponha ESTE produto em projetos interdependentes. Para CADA projeto gere também a "
+        "spec markdown COMPLETA no campo `specContent`. Formato EXATO (responda somente o JSON, "
+        "sem cercas de código):\n"
+        '{"schemaVersion":"1.1.0","product":{"name":"...","systemId":"...",'
+        '"specApproved":false,"deliveryDefault":"source_only"},'
+        '"projects":[{"id":"...","spec":"specs/<id>.md","type":"<um tipo válido>",'
+        '"dependsOn":[],"specContent":"# ...spec markdown completa..."}]}\n'
+        "Regras: `id`s únicos; `spec` = `specs/<id>.md`; `dependsOn` referencia apenas `id`s "
+        "deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts (type lib_ts) são "
+        "predecessores dos consumidores; `specContent` é a spec inteira, não um resumo."
+    )
+
+
+def _split_manifest_and_specs(proposal: dict) -> tuple[dict, dict]:
+    """Separa a proposta do SPLITTER em (manifest limpo, specs).
+
+    `manifest` tem os projetos SEM o campo specContent (formato canônico PRODUCT.json).
+    `specs` é {caminho_da_spec: conteúdo_markdown}. Valida presença/tamanho do specContent e
+    unicidade do caminho `spec` por projeto (uma spec por projeto, sem colisão).
+    """
+    projects = proposal.get("projects")
+    if not isinstance(projects, list) or not projects:
+        raise ManifestProposalError("PROPOSAL_NO_PROJECTS", "Proposta sem projects (mínimo 1).")
+
+    specs: dict[str, str] = {}
+    clean_projects: list[dict] = []
+    seen_paths: set[str] = set()
+    for p in projects:
+        if not isinstance(p, dict):
+            raise ManifestProposalError("PROPOSAL_INVALID_JSON", "Projeto não é um objeto.")
+        pid = str(p.get("id") or "").strip()
+        spec_path = str(p.get("spec") or "").replace("./", "").strip()
+        if not spec_path:
+            raise ManifestProposalError("PROPOSAL_SPEC_MISSING", f'Projeto "{pid or "?"}": sem caminho `spec`.')
+        if spec_path in seen_paths:
+            raise ManifestProposalError("PROPOSAL_SPEC_DUPLICATE_PATH",
+                                        f'Caminho de spec duplicado entre projetos: "{spec_path}".')
+        content = p.get("specContent")
+        if not isinstance(content, str) or len(content.strip()) < MIN_SPEC_CONTENT_CHARS:
+            raise ManifestProposalError("PROPOSAL_EMPTY_SPEC",
+                                        f'Projeto "{pid or "?"}": specContent ausente ou trivial '
+                                        f"(mínimo {MIN_SPEC_CONTENT_CHARS} caracteres).")
+        seen_paths.add(spec_path)
+        specs[spec_path] = content
+        clean = {k: v for k, v in p.items() if k != "specContent"}
+        clean["spec"] = spec_path
+        clean_projects.append(clean)
+
+    manifest = {k: v for k, v in proposal.items() if k != "projects"}
+    manifest["projects"] = clean_projects
+    return manifest, specs
+
+
+def split_document(
+    master_md: str,
+    llm_fn: Optional[Callable[[str, str, str], str]] = None,
+    model_id: str = "us.anthropic.claude-sonnet-4-6",
+) -> dict:
+    """SPLITTER: a partir de UM documento grande, PROPÕE (NÃO executa) N specs + o grafo.
+
+    Retorna {"manifest": <dict>, "specs": {path: content}, "needs_human": True, "warnings": [...]}.
+    `needs_human` é SEMPRE True — a proposta (specs geradas + grafo) exige aprovação humana antes
+    de ingerir pelo caminho determinístico (productDecomposer no api-node).
+
+    `llm_fn(system, user, model_id) -> str` é injetável (default: call_bedrock_direct).
+    Lança ManifestProposalError se a proposta falhar nos gates determinísticos (os MESMOS do
+    modo inferência: tipos válidos, dependsOn sem órfão/self/ciclo — reusa validate_proposal).
+    """
+    if llm_fn is None:
+        from orchestrator.agents.runtime import call_bedrock_direct  # import tardio (evita dep de SDK nos testes)
+        llm_fn = call_bedrock_direct
+
+    system = _load_split_system_prompt()
+    user = build_split_prompt(master_md)
+    raw = llm_fn(system, user, model_id)
+
+    proposal = _extract_json(raw)
+    manifest, specs = _split_manifest_and_specs(proposal)
+
+    # Gates determinísticos reusados: as specs geradas são as "specs presentes".
+    validate_proposal(manifest, list(specs.keys()))
+
+    warnings: list[str] = []
+    product = manifest.get("product", {})
+    if product.get("specApproved") is True:
+        product["specApproved"] = False
+        warnings.append("specApproved forçado a false: proposta do splitter exige revisão humana antes de aprovar specs.")
+
+    return {"manifest": manifest, "specs": specs, "needs_human": True, "warnings": warnings}
