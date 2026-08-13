@@ -25,6 +25,20 @@ import { skillsRoutes } from "./routes/skills.js";
 import { reportsRoutes } from "./routes/reports.js";
 import { deploymentRoutes } from "./routes/deployments.js";
 import { deadpoolRoutes } from "./routes/deadpool.js";
+import { readFileSync } from "node:fs";
+
+// Versão da aplicação — fonte única é o package.json (record de release). Resolvido relativo ao
+// módulo, funciona tanto rodando de src/ (dev) quanto de dist/ (imagem: package.json em /app).
+const APP_VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
+      version?: string;
+    };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? true });
@@ -52,10 +66,10 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   });
 
   app.get("/health", async (_request, reply) => {
-    return reply.send({ status: "ok", timestamp: new Date().toISOString() });
+    return reply.send({ status: "ok", version: APP_VERSION, timestamp: new Date().toISOString() });
   });
   app.get("/api/health", async (_request, reply) => {
-    return reply.send({ status: "ok", timestamp: new Date().toISOString() });
+    return reply.send({ status: "ok", version: APP_VERSION, timestamp: new Date().toISOString() });
   });
 
   await app.register(voucherRoutes);
