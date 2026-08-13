@@ -10,6 +10,11 @@ import { createProjectFromSpec } from "../services/projectCreation.js";
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 
+// Statuses de projeto que representam uma SPEC ainda NÃO promovida ao pipeline de build.
+// Listados em /api/specs (ver comentário do handler GET /api/specs). Manter em sincronia
+// com o enum de status em db/migrations/001_initial_schema.sql.
+const SPEC_LISTING_STATUSES = ["draft", "spec_submitted", "pending_conversion"];
+
 // Extensões legíveis extraídas de ZIPs — código é incluído como EXEMPLO DE REFERÊNCIA
 const ZIP_TEXT_EXTS  = new Set([".md", ".txt", ".yaml", ".yml", ".json"]);
 const ZIP_CODE_EXTS  = new Set([".ts", ".js", ".tsx", ".jsx", ".py", ".sql", ".sh"]);
@@ -437,11 +442,20 @@ export async function specRoutes(app: FastifyInstance) {
     }
   );
 
-  // GET /api/specs — lista as SPECs (rascunhos) do tenant (Feature #64).
+  // GET /api/specs — lista as SPECs do tenant (Feature #64).
   // Decisão de modelagem (ver migration 042): uma SPEC é apenas uma IDEIA e é modelada
-  // como um projeto com status='draft'. Não há entidade "spec" própria — reusamos a
-  // linha em `projects`. A promoção spec→projeto reusa POST /api/projects/:id/run; o
-  // vínculo a um produto reusa PATCH /api/projects/:id/product (product_id existente).
+  // como um projeto. Não há entidade "spec" própria — reusamos a linha em `projects`.
+  // A promoção spec→projeto reusa POST /api/projects/:id/run; o vínculo a um produto
+  // reusa PATCH /api/projects/:id/product (product_id existente).
+  //
+  // Uma SPEC é qualquer projeto AINDA NÃO promovido ao pipeline de build:
+  //   - 'draft'              = rascunho salvo ("Salvar Rascunho");
+  //   - 'spec_submitted'     = enviada, aguardando início manual (não promovida);
+  //   - 'pending_conversion' = enviada com anexos não-.md aguardando conversão.
+  // (cto_charter/pm_backlog/dev_qa/devops/running já estão no pipeline → aparecem na
+  //  lista de projetos; stopped/failed/completed/accepted = build encerrada.)
+  // Antes o filtro era só status='draft', o que escondia specs 'spec_submitted' —
+  // uma ideia enviada via "Iniciar agora" nunca aparecia em /specs (bug relatado).
   app.get("/api/specs", async (request, reply) => {
     const user = getUser(request);
     const client = await pool.connect();
@@ -454,24 +468,25 @@ export async function specRoutes(app: FastifyInstance) {
         rows = (await client.query(
           `SELECT ${cols} FROM projects p
              LEFT JOIN products pr ON pr.id = p.product_id
-            WHERE p.status = 'draft'
+            WHERE p.status = ANY($1)
             ORDER BY p.updated_at DESC`,
+          [SPEC_LISTING_STATUSES],
         )).rows;
       } else if (user.tenantId) {
         rows = (await client.query(
           `SELECT ${cols} FROM projects p
              LEFT JOIN products pr ON pr.id = p.product_id
-            WHERE p.status = 'draft' AND p.tenant_id = $1
+            WHERE p.status = ANY($1) AND p.tenant_id = $2
             ORDER BY p.updated_at DESC`,
-          [user.tenantId],
+          [SPEC_LISTING_STATUSES, user.tenantId],
         )).rows;
       } else {
         rows = (await client.query(
           `SELECT ${cols} FROM projects p
              LEFT JOIN products pr ON pr.id = p.product_id
-            WHERE p.status = 'draft' AND p.created_by = $1
+            WHERE p.status = ANY($1) AND p.created_by = $2
             ORDER BY p.updated_at DESC`,
-          [user.id],
+          [SPEC_LISTING_STATUSES, user.id],
         )).rows;
       }
       return reply.send(rows);

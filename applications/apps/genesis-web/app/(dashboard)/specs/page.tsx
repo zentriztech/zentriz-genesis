@@ -60,6 +60,18 @@ function formatDate(s: string): string {
   catch { return s; }
 }
 
+// Rótulo do chip por status da SPEC. /api/specs lista projetos ainda não promovidos ao
+// pipeline: 'draft' (rascunho), 'spec_submitted' (enviada) e 'pending_conversion' (anexos
+// em conversão). Antes o chip era fixo em "Rascunho" — enganoso para specs enviadas.
+function specStatusLabel(status: string): string {
+  switch (status) {
+    case "draft": return "Rascunho";
+    case "spec_submitted": return "Enviada";
+    case "pending_conversion": return "Em conversão";
+    default: return "SPEC";
+  }
+}
+
 export default function SpecsPage() {
   const router = useRouter();
   const [tab, setTab] = useState(0);
@@ -169,7 +181,7 @@ function MySpecs({ router }: { router: ReturnType<typeof useRouter> }) {
                   <Box sx={{ flexGrow: 1, minWidth: 220 }}>
                     <Stack direction="row" spacing={1} alignItems="center">
                       <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
-                      <Chip label="Rascunho" size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
+                      <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
                       {s.product_name && (
                         <Chip label={s.product_name} size="small" color="info" variant="outlined"
                           sx={{ fontSize: "0.62rem", height: 18 }} />
