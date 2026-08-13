@@ -5,12 +5,13 @@
  * do Deadpool. Mantém as credenciais do Deadpool no servidor (services/deadpoolClient.ts)
  * e aplica o RBAC do Genesis. O portal web só chama o Genesis, nunca o Deadpool direto.
  *
- * Auth/RBAC: app.addHook("preHandler", authMiddleware). As rotas AGREGADAS globais (status,
- * projects, incidents, incidents/:id, knowledge) espelham dados de TODOS os tenants do Deadpool
- * (painel interno #61) → exigem zentriz_admin. As rotas por PROJETO (entitlement GET, monitoring,
- * activate, deactivate) são escopadas por ownership de tenant → tenant_admin do próprio tenant.
+ * Auth/RBAC: app.addHook("preHandler", authMiddleware). As leituras do PAINEL (status, projects,
+ * incidents, incidents/:id, knowledge) exigem admin (tenant_admin OU zentriz_admin) — mesmo nível
+ * do painel #61 original. Só a decisão COMERCIAL de conceder/revogar licença (PUT entitlement) é
+ * restrita a zentriz_admin. As rotas por PROJETO (entitlement GET, monitoring) são escopadas por
+ * ownership de tenant → tenant_admin do próprio tenant.
  *
- * Rotas agregadas globais (GET, JSON, zentriz_admin only):
+ * Rotas de leitura do painel (GET, JSON, tenant_admin | zentriz_admin):
  *   GET /api/deadpool/status          → Deadpool GET /health + GET /ready
  *   GET /api/deadpool/projects        → Deadpool GET /projects
  *   GET /api/deadpool/incidents       → Deadpool GET /incidents?view=summary
@@ -68,7 +69,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
   // ── GET /api/deadpool/status ─────────────────────────────────────────────────
   app.get("/api/deadpool/status", async (request, reply) => {
-    if (!requireZentrizAdmin(request, reply)) return;
+    if (!requireAdmin(request, reply)) return;
     if (!isDeadpoolConfigured()) {
       return reply.send({ available: false, reason: "not_configured" });
     }
@@ -98,7 +99,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
   // ── GET /api/deadpool/projects ───────────────────────────────────────────────
   app.get("/api/deadpool/projects", async (request, reply) => {
-    if (!requireZentrizAdmin(request, reply)) return;
+    if (!requireAdmin(request, reply)) return;
     try {
       const data = await deadpoolGet<{ projects?: unknown[] }>("/projects");
       return reply.send({ available: true, projects: data?.projects ?? [] });
@@ -110,7 +111,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
   // ── GET /api/deadpool/incidents ──────────────────────────────────────────────
   app.get("/api/deadpool/incidents", async (request, reply) => {
-    if (!requireZentrizAdmin(request, reply)) return;
+    if (!requireAdmin(request, reply)) return;
     try {
       const data = await deadpoolGet<{ incidents?: unknown[] }>("/incidents?view=summary");
       return reply.send({ available: true, incidents: data?.incidents ?? [] });
@@ -122,7 +123,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
   // ── GET /api/deadpool/incidents/:id ──────────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/deadpool/incidents/:id", async (request, reply) => {
-    if (!requireZentrizAdmin(request, reply)) return;
+    if (!requireAdmin(request, reply)) return;
     const id = encodeURIComponent(request.params.id);
     try {
       const data = await deadpoolGet(`/incidents/${id}`);
@@ -135,7 +136,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
   // ── GET /api/deadpool/knowledge ──────────────────────────────────────────────
   app.get("/api/deadpool/knowledge", async (request, reply) => {
-    if (!requireZentrizAdmin(request, reply)) return;
+    if (!requireAdmin(request, reply)) return;
     try {
       const data = await deadpoolGet<{ entries?: unknown[] }>("/knowledge");
       return reply.send({ available: true, entries: data?.entries ?? [] });
