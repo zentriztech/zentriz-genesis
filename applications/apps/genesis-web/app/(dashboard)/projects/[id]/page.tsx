@@ -58,6 +58,7 @@ import AccountTreeIcon from "@mui/icons-material/AccountTree";
 import AddLinkIcon from "@mui/icons-material/AddLink";
 import BoltIcon from "@mui/icons-material/Bolt";
 import ForumIcon from "@mui/icons-material/Forum";
+import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import { projectsStore } from "@/stores/projectsStore";
 import { ResourceBadges } from "@/components/ResourceBadges";
 import { LiveDialogue } from "@/components/LiveDialogue";
@@ -359,6 +360,11 @@ function ProjectDetailPageInner() {
   const [evolveLoading, setEvolveLoading] = useState(false);
   const [copiedCmd, setCopiedCmd]   = useState(false);
   const [tasksOpen, setTasksOpen]   = useState(true);
+  // Barra de entrega & operação (pós-aceite): qual detalhe está expandido (null = nenhum).
+  // Consolida validação Cyborg + GitHub + rodar local + monitoramento Deadpool + deploy numa barra fina.
+  const [deliveryTab, setDeliveryTab] = useState<null | "github" | "run" | "monitor" | "deploy">(null);
+  // Estado do Deadpool reportado pelo DeadpoolMonitorCard — decide se o botão "Monitorar" aparece.
+  const [dpState, setDpState] = useState<{ entitled: boolean; active: boolean } | null>(null);
   // Tab routing: centerTabs = tabs shown in center panel; rightTabs = tabs shown in right panel (alongside Tasks)
   // All 4 tabs: 0=Diálogo, 1=Grafo, 2=Documentos, 3=Código
   const [centerTabs, setCenterTabs] = useState<number[]>([0, 1, 2, 3]);
@@ -1180,15 +1186,145 @@ function ProjectDetailPageInner() {
         </Alert>
       )}
 
-      {/* Badge: projeto aceito pelo Cyborg */}
-      {project.status === "accepted" && (project.extra as Record<string,unknown>)?.accepted_by === "zentriz-cyborg" && (
-        <Alert severity="info" icon={<span style={{ fontSize: "1.1rem" }}>🤖</span>} sx={{ mb: 2 }}>
-          <Typography variant="body2" fontWeight={600}>Validado pelo Zentriz Cyborg</Typography>
-          <Typography variant="caption" color="text.secondary">
-            Este projeto foi testado e aceito automaticamente pelo Cyborg. Nenhuma intervenção humana necessária.
-          </Typography>
-        </Alert>
-      )}
+      {/* ── Barra de Entrega & Operação (pós-aceite) ──────────────────────────────
+          Consolida validação Cyborg + GitHub + rodar local + monitoramento Deadpool +
+          deploy numa barra FINA; cada detalhe expande sob demanda. Substitui a antiga
+          pilha de banners de largura total (feedback do Jean: topo bagunçado).
+          Banners transitórios/críticos (erros, deploy provisionando, backend, repo-não-criado,
+          pending/blocked_cyborg) permanecem fora da barra, logo abaixo. */}
+      {isDone && (() => {
+        const hasRepo = !!githubRepo;
+        const acceptedByCyborg =
+          project.status === "accepted" &&
+          (project.extra as Record<string, unknown> | null)?.accepted_by === "zentriz-cyborg";
+        // Sem repo E sem selo Cyborg não há nada a mostrar → não renderiza a barra.
+        // (O selo sobrevive mesmo sem repo: caso "Cyborg aceitou mas o push do repo falhou".)
+        if (!hasRepo && !acceptedByCyborg) return null;
+        const canRunLocal = hasRepo && !!runInfo?.runCommand;
+        const s3Blocks = !!ephemeral && ephemeral.status !== "failed";
+        const backendBlocks = !!backendDep && !["failed", "destroyed"].includes(backendDep.status);
+        const canDeploy =
+          hasRepo && (project.status === "accepted" || project.status === "completed") && !s3Blocks && !backendBlocks;
+        const canMonitor = hasRepo && !!dpState?.entitled;
+
+        const renderTab = (
+          k: NonNullable<typeof deliveryTab>,
+          icon: React.ReactNode,
+          label: string,
+          color: "primary" | "success" = "primary",
+        ) => (
+          <Button
+            size="small"
+            variant={deliveryTab === k ? "contained" : "outlined"}
+            color={deliveryTab === k ? color : "inherit"}
+            startIcon={icon}
+            onClick={() => setDeliveryTab(deliveryTab === k ? null : k)}
+            sx={{ textTransform: "none", py: 0.4 }}
+          >
+            {label}
+          </Button>
+        );
+
+        return (
+          <Box sx={{ mb: 2 }}>
+            {/* Barra fina */}
+            <Stack
+              direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap
+              sx={{ p: 1, border: "1px solid", borderColor: "divider", borderRadius: 1, bgcolor: "background.paper" }}
+            >
+              {acceptedByCyborg && (
+                <Tooltip title="Testado e aceito automaticamente pelo Zentriz Cyborg — nenhuma intervenção humana necessária.">
+                  <Chip
+                    size="small"
+                    icon={<span style={{ fontSize: "0.85rem", marginLeft: 4 }}>🤖</span>}
+                    label="Validado pelo Cyborg"
+                    color="success" variant="outlined"
+                    sx={{ fontWeight: 600 }}
+                  />
+                </Tooltip>
+              )}
+              <Box sx={{ flexGrow: 1 }} />
+              {hasRepo && renderTab("github", <GitHubIcon sx={{ fontSize: "1rem" }} />, "GitHub")}
+              {canRunLocal && renderTab("run", <PlayArrowIcon sx={{ fontSize: "1rem" }} />, "Rodar")}
+              {canMonitor && renderTab(
+                "monitor",
+                <HealthAndSafetyIcon sx={{ fontSize: "1rem" }} />,
+                dpState?.active ? "Monitorando" : "Monitorar",
+                dpState?.active ? "success" : "primary",
+              )}
+              {canDeploy && renderTab("deploy", <Box component="span" sx={{ fontSize: "0.95rem", lineHeight: 1 }}>☁️</Box>, "Deploy")}
+            </Stack>
+
+            {/* Detalhes GitHub / Rodar — expandem logo sob a barra */}
+            <Collapse in={deliveryTab === "github" || deliveryTab === "run"}>
+              <Box sx={{ mt: 1 }}>
+                {deliveryTab === "github" && githubRepo && (
+                  <Alert
+                    severity="info" icon={<GitHubIcon />}
+                    action={
+                      <Button size="small" endIcon={<OpenInNewIcon />}
+                        href={githubRepo.url} target="_blank" rel="noopener noreferrer" component="a">
+                        Ver no GitHub
+                      </Button>
+                    }
+                  >
+                    <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
+                      🐙 Código publicado em{" "}
+                      <Box component="code" sx={{ bgcolor: "action.hover", px: 0.75, borderRadius: 0.5, fontSize: "0.78rem" }}>{githubRepo.fullName}</Box>
+                    </Typography>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                      {(["dev", "staging", "main"] as const).map((b) => (
+                        <Button key={b} size="small" variant="outlined" startIcon={<CallSplitIcon sx={{ fontSize: "0.8rem !important" }} />}
+                          href={githubRepo.branchUrls[b]} target="_blank" rel="noopener noreferrer" component="a"
+                          sx={{ fontSize: "0.7rem", py: 0.3, px: 0.75 }}>
+                          {b}
+                        </Button>
+                      ))}
+                    </Stack>
+                  </Alert>
+                )}
+                {deliveryTab === "run" && runInfo?.runCommand && (
+                  <Alert
+                    severity="success" icon={<CheckCircleIcon />}
+                    action={runInfo.appUrl ? (
+                      <Button size="small" color="success" endIcon={<OpenInNewIcon />}
+                        href={runInfo.appUrl} target="_blank" rel="noopener noreferrer" component="a">
+                        {runInfo.projectType === "backend" ? "Swagger /docs" : "Abrir app"}
+                      </Button>
+                    ) : undefined}
+                  >
+                    <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
+                      {runInfo.projectType === "backend" ? "API Backend — executar via Docker (local):" : "Executar localmente:"}
+                    </Typography>
+                    {runInfo.setupSteps ? (
+                      <Box component="pre" sx={{ m: 0, p: 0.5, bgcolor: "action.hover", borderRadius: 0.5, fontSize: "0.72rem", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
+                        {runInfo.setupSteps.join("\n")}
+                      </Box>
+                    ) : (
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <Box component="code" sx={{ bgcolor: "action.hover", px: 1, py: 0.3, borderRadius: 0.5, fontSize: "0.78rem", flexGrow: 1 }}>
+                          {runInfo.runCommand}
+                        </Box>
+                        <Tooltip title="Copiar">
+                          <IconButton size="small" onClick={() => navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true))}>
+                            <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
+                    )}
+                  </Alert>
+                )}
+              </Box>
+            </Collapse>
+
+            {/* Monitor Deadpool: SEMPRE montado (dirige o estado do botão via onState); visível só
+                quando a aba "monitor" está ativa. O card se auto-oculta se não houver licença/role. */}
+            <Box sx={{ display: deliveryTab === "monitor" ? "block" : "none", mt: 1 }}>
+              <DeadpoolMonitorCard projectId={id} onState={setDpState} />
+            </Box>
+          </Box>
+        );
+      })()}
 
       {/* Card: Cyborg em validação (pending_cyborg) */}
       {project.status === "pending_cyborg" && (
@@ -1263,70 +1399,11 @@ function ProjectDetailPageInner() {
         </DialogContent>
       </Dialog>
 
-      {/* Post-accept run banner (execução LOCAL — só faz sentido no host do Genesis) */}
-      {isDone && runInfo?.runCommand && !ephemeral && (
-        <Alert
-          severity="success" sx={{ mb: 2 }} icon={<CheckCircleIcon />}
-          action={runInfo.appUrl ? (
-            <Button size="small" color="success" endIcon={<OpenInNewIcon />}
-              href={runInfo.appUrl} target="_blank" rel="noopener noreferrer" component="a">
-              {runInfo.projectType === "backend" ? "Swagger /docs" : "Abrir app"}
-            </Button>
-          ) : undefined}
-        >
-          <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
-            {runInfo.projectType === "backend" ? "API Backend — executar via Docker (local):" : "Executar localmente:"}
-          </Typography>
-          {runInfo.setupSteps ? (
-            <Box component="pre" sx={{ m: 0, p: 0.5, bgcolor: "action.hover", borderRadius: 0.5, fontSize: "0.72rem", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
-              {runInfo.setupSteps.join("\n")}
-            </Box>
-          ) : (
-            <Stack direction="row" spacing={1} alignItems="center">
-              <Box component="code" sx={{ bgcolor: "action.hover", px: 1, py: 0.3, borderRadius: 0.5, fontSize: "0.78rem", flexGrow: 1 }}>
-                {runInfo.runCommand}
-              </Box>
-              <Tooltip title="Copiar">
-                <IconButton size="small" onClick={() => navigator.clipboard.writeText(runInfo.runCommand!).then(() => setCopiedCmd(true))}>
-                  <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
-                </IconButton>
-              </Tooltip>
-            </Stack>
-          )}
-        </Alert>
-      )}
+      {/* NB: run banner, banner GitHub e card Deadpool foram consolidados na Barra de Entrega
+          & Operação (topo). O Snackbar de "comando copiado" segue aqui (usado pela aba Rodar). */}
       <Snackbar open={copiedCmd} autoHideDuration={2000} onClose={() => setCopiedCmd(false)}
         message="Comando copiado!" anchorOrigin={{ vertical: "bottom", horizontal: "center" }} />
 
-      {/* GitHub repo banner — shown once repo is created (after accept) */}
-      {isDone && githubRepo && (
-        <Alert
-          severity="info" sx={{ mb: 2 }}
-          icon={<GitHubIcon />}
-          action={
-            <Button size="small" endIcon={<OpenInNewIcon />}
-              href={githubRepo.url} target="_blank" rel="noopener noreferrer" component="a">
-              Ver no GitHub
-            </Button>
-          }
-        >
-          <Typography variant="body2" fontWeight={500} sx={{ mb: 0.5 }}>
-            🐙 Código publicado em <Box component="code" sx={{ bgcolor: "action.hover", px: 0.75, borderRadius: 0.5, fontSize: "0.78rem" }}>{githubRepo.fullName}</Box>
-          </Typography>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            {(["dev","staging","main"] as const).map((b) => (
-              <Button key={b} size="small" variant="outlined" startIcon={<CallSplitIcon sx={{ fontSize: "0.8rem !important" }} />}
-                href={githubRepo.branchUrls[b]} target="_blank" rel="noopener noreferrer" component="a"
-                sx={{ fontSize: "0.7rem", py: 0.3, px: 0.75 }}>
-                {b}
-              </Button>
-            ))}
-          </Stack>
-        </Alert>
-      )}
-      {/* #1 — Monitoramento Deadpool: só renderiza se o tenant tem licença + projeto aceito com repo.
-          O card se auto-oculta (entitlement/role) — seguro deixar sempre montado quando há repo. */}
-      {isDone && githubRepo && <DeadpoolMonitorCard projectId={id} />}
       {/* Repo not created — fallback manual só depois que o Cyborg terminou.
           Enquanto pending_cyborg o V3 está trabalhando e criará o repo via zentriz-github-push.
           Em blocked_cyborg o Cyborg desistiu — fallback manual faz sentido.
@@ -1507,8 +1584,9 @@ function ProjectDetailPageInner() {
           já roteia certo — aqui só corrigimos o rótulo/aviso para não mostrar "S3 público" a um backend):
             - backend/fullstack demo|production → provisiona ECS Fargate (+ Postgres), NÃO S3.
             - web + source_only → baixa o kit IaC (.zip), não publica nada.
-            - web + publish/default → S3 static hosting (comportamento FT-17 original). */}
-      {(() => {
+            - web + publish/default → S3 static hosting (comportamento FT-17 original).
+          Renderiza sob a Barra de Entrega & Operação apenas quando a aba "Deploy" está ativa. */}
+      {deliveryTab === "deploy" && (() => {
         const _pt = (project.projectType ?? "").toLowerCase();
         const _isBackendDeploy = _pt.startsWith("backend") || _pt.startsWith("fullstack");
         const _dmode = ((project.extra as Record<string, unknown> | null)?.delivery_mode as string | undefined ?? "").toLowerCase();

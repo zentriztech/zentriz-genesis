@@ -46,7 +46,15 @@ function friendlyError(msg: string): string {
   return msg;
 }
 
-export default function DeadpoolMonitorCard({ projectId }: { projectId: string }) {
+export default function DeadpoolMonitorCard({
+  projectId,
+  onState,
+}: {
+  projectId: string;
+  /** Reporta ao pai o estado (entitled/active) após cada refresh — usado pela barra de entrega
+   *  para decidir se mostra o botão "Monitorar" e refletir se está ativo. null = indisponível. */
+  onState?: (s: { entitled: boolean; active: boolean } | null) => void;
+}) {
   const [state, setState] = useState<MonitoringState | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -58,13 +66,15 @@ export default function DeadpoolMonitorCard({ projectId }: { projectId: string }
     try {
       const data = await apiGet<MonitoringState>(`/api/deadpool/projects/${projectId}/monitoring`);
       setState(data);
+      onState?.({ entitled: data.entitled, active: data.active });
     } catch {
       // Degrada limpo: sem estado, o card não renderiza (não polui a página do projeto).
       setState(null);
+      onState?.(null);
     } finally {
       setLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, onState]);
 
   useEffect(() => {
     if (!isAdmin) { setLoading(false); return; }
