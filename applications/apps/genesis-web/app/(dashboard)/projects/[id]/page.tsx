@@ -63,6 +63,7 @@ import { ResourceBadges } from "@/components/ResourceBadges";
 import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
+import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
@@ -1323,6 +1324,9 @@ function ProjectDetailPageInner() {
           </Stack>
         </Alert>
       )}
+      {/* #1 — Monitoramento Deadpool: só renderiza se o tenant tem licença + projeto aceito com repo.
+          O card se auto-oculta (entitlement/role) — seguro deixar sempre montado quando há repo. */}
+      {isDone && githubRepo && <DeadpoolMonitorCard projectId={id} />}
       {/* Repo not created — fallback manual só depois que o Cyborg terminou.
           Enquanto pending_cyborg o V3 está trabalhando e criará o repo via zentriz-github-push.
           Em blocked_cyborg o Cyborg desistiu — fallback manual faz sentido.

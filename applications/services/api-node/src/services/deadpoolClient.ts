@@ -48,3 +48,38 @@ export async function deadpoolGet<T = unknown>(path: string): Promise<T> {
     clearTimeout(timeout);
   }
 }
+
+/**
+ * POST autenticado na API do Deadpool (JSON in/out). Mesmas garantias do GET.
+ * Lança em: base URL ausente, timeout, erro de rede, status não-2xx ou JSON inválido.
+ * NUNCA loga o token nem os headers de autorização.
+ */
+export async function deadpoolPost<T = unknown>(path: string, body: unknown): Promise<T> {
+  if (!DEADPOOL_BASE_URL) {
+    throw new Error("DEADPOOL_BASE_URL not configured");
+  }
+  const url = `${DEADPOOL_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  if (DEADPOOL_API_TOKEN) headers["Authorization"] = `Bearer ${DEADPOOL_API_TOKEN}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DEADPOOL_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Deadpool POST ${path} returned ${res.status}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

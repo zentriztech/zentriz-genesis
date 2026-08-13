@@ -47,46 +47,103 @@ function toRepoName(title: string): string {
   return `${base || "genesis-project"}-${suffix}`;
 }
 
-/**
- * #60 — Registra o vínculo (systemId, serviceId) → repo_url no Deadpool, para que o
- * plano de sustainment consiga clonar o código-fonte do projeto deployado.
- * Out-of-band, best-effort: NUNCA lança (não pode falhar o aceite/push). O Genesis é
- * quem detém repo_url + installation_id no momento da criação do repositório.
- */
-async function registerProjectWithDeadpool(args: {
+/** Argumentos do registro projeto→Deadpool. Campos runtime são opcionais (enviados ao ATIVAR monitoramento). */
+export interface DeadpoolRegisterArgs {
   systemId: string;
   serviceId: string | null;
   repoUrl: string;
   installationId: number | string;
-}): Promise<void> {
-  if (!DEADPOOL_BASE_URL) return; // integração desligada
+  // Runtime (opcional): enviado quando o monitoramento é ativado para um projeto deployado.
+  appUrl?: string | null;
+  healthUrl?: string | null;
+  environment?: string | null;
+  awsRegion?: string | null;
+  logGroup?: string | null;
+  /** true = habilitar monitoramento ativo de logs; false = desligar. undefined = não altera (registro #60 legado). */
+  monitoring?: boolean;
+}
+
+/** Resultado do registro. Nunca lança — best-effort — mas informa sucesso/falha ao chamador. */
+export interface DeadpoolRegisterResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  /** true quando a integração está desligada (DEADPOOL_BASE_URL ausente). */
+  skipped?: boolean;
+}
+
+/**
+ * Deriva (systemId, serviceId) canônicos — casam com o envelope Connect que o Deadpool consome.
+ * systemId = product.systemId do manifesto quando presente; senão slug do nome do produto;
+ * para projeto standalone, slug do título. serviceId = slug do título dentro do produto (ou null).
+ * FONTE ÚNICA: usada tanto no push (#60) quanto no botão Ativar Monitoramento (#1).
+ */
+export function deriveSystemService(opts: {
+  productSystemId?: string | null;
+  productName?: string | null;
+  title?: string | null;
+  projectId: string;
+}): { systemId: string; serviceId: string | null } {
+  const canonicalSystemId = opts.productSystemId?.trim();
+  const systemId =
+    canonicalSystemId ||
+    (opts.productName ? slugify(opts.productName) : slugify(opts.title ?? opts.projectId));
+  const serviceId =
+    canonicalSystemId || opts.productName ? slugify(opts.title ?? opts.projectId) : null;
+  return { systemId, serviceId };
+}
+
+/**
+ * #60/#1 — Registra o vínculo (systemId, serviceId) → repo_url no Deadpool, para que o
+ * plano de sustainment consiga clonar o código-fonte do projeto deployado, e (no #1) receba
+ * os dados de runtime (appUrl/healthUrl/logGroup) + o flag de monitoramento ativo.
+ * Out-of-band, best-effort: NUNCA lança (não pode falhar o aceite/push). Retorna o resultado
+ * para que o botão Ativar Monitoramento possa reportar sucesso/falha ao usuário.
+ */
+export async function registerProjectWithDeadpool(
+  args: DeadpoolRegisterArgs,
+): Promise<DeadpoolRegisterResult> {
+  if (!DEADPOOL_BASE_URL) return { ok: false, skipped: true }; // integração desligada
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (DEADPOOL_API_TOKEN) headers["Authorization"] = `Bearer ${DEADPOOL_API_TOKEN}`;
+    const body: Record<string, unknown> = {
+      systemId: args.systemId,
+      serviceId: args.serviceId,
+      repoUrl: args.repoUrl,
+      installationId: String(args.installationId),
+    };
+    // Campos runtime/monitoring só entram no payload quando fornecidos → retrocompatível
+    // com o registro #60 (que manda apenas systemId/serviceId/repoUrl/installationId).
+    if (args.appUrl != null) body.appUrl = args.appUrl;
+    if (args.healthUrl != null) body.healthUrl = args.healthUrl;
+    if (args.environment != null) body.environment = args.environment;
+    if (args.awsRegion != null) body.awsRegion = args.awsRegion;
+    if (args.logGroup != null) body.logGroup = args.logGroup;
+    if (args.monitoring != null) body.monitoring = args.monitoring;
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const res = await fetch(`${DEADPOOL_BASE_URL}/projects`, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          systemId: args.systemId,
-          serviceId: args.serviceId,
-          repoUrl: args.repoUrl,
-          installationId: String(args.installationId),
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       if (!res.ok) {
         console.warn(`[GitHubPush] Deadpool register-project returned ${res.status} (non-fatal)`);
-      } else {
-        console.log(`[GitHubPush] ✓ registered ${args.systemId}/${args.serviceId ?? "*"} with Deadpool`);
+        return { ok: false, status: res.status };
       }
+      console.log(`[GitHubPush] ✓ registered ${args.systemId}/${args.serviceId ?? "*"} with Deadpool`);
+      return { ok: true, status: res.status };
     } finally {
       clearTimeout(timeout);
     }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.warn("[GitHubPush] Deadpool register-project failed (non-fatal):", err);
+    return { ok: false, error: msg };
   }
 }
 
@@ -224,10 +281,15 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     // senão slug do nome do produto; para projeto standalone, slug do título.
     // serviceId = slug do título do projeto (dentro do produto). Casam com o
     // systemId/serviceId do envelope Connect que o Deadpool consome.
-    const canonicalSystemId = (row.product_system_id as string | null)?.trim();
-    const systemId = canonicalSystemId
-      || (row.product_name ? slugify(row.product_name as string) : slugify((row.title as string) ?? projectId));
-    const serviceId = (canonicalSystemId || row.product_name) ? slugify((row.title as string) ?? projectId) : null;
+    const { systemId, serviceId } = deriveSystemService({
+      productSystemId: row.product_system_id as string | null,
+      productName: row.product_name as string | null,
+      title: row.title as string | null,
+      projectId,
+    });
+    // #60: registro base no push (sem runtime/monitoring). O monitoramento ativo é
+    // habilitado depois, sob demanda, pelo botão Ativar Monitoramento (#1) — que envia
+    // os dados de runtime e monitoring=true. Best-effort: resultado ignorado aqui.
     await registerProjectWithDeadpool({
       systemId,
       serviceId,

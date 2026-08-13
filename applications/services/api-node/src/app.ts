@@ -25,6 +25,7 @@ import { skillsRoutes } from "./routes/skills.js";
 import { reportsRoutes } from "./routes/reports.js";
 import { deploymentRoutes } from "./routes/deployments.js";
 import { deadpoolRoutes } from "./routes/deadpool.js";
+import { learningRoutes } from "./routes/learning.js";
 import { readFileSync } from "node:fs";
 
 // Versão da aplicação — fonte única é o package.json (record de release). Resolvido relativo ao
@@ -96,6 +97,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(reportsRoutes);
   await app.register(deploymentRoutes);
   await app.register(deadpoolRoutes);
+  await app.register(learningRoutes);
 
   return app;
 }
