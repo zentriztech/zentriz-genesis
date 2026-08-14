@@ -145,7 +145,7 @@ const PHASE_COLOR_FG: Record<string, string> = {
 };
 
 function inferPhaseFG(filename: string, creator?: string): string {
-  const f = filename.toLowerCase(); const c = (creator ?? "").toLowerCase();
+  const f = (filename ?? "").toLowerCase(); const c = (creator ?? "").toLowerCase();
   if (f.includes("spec") || c === "spec") return "spec";
   if (f.includes("cto") || c === "cto") return "cto";
   if (f.includes("engineer") || c === "engineer") return "engineer";
@@ -212,7 +212,7 @@ function buildForceData(
   };
   const skipDocs = [".json", "spec__", "raw_response"];
   const visibleDocs = planningDocs.filter(d => {
-    if (skipDocs.some(p => d.filename.toLowerCase().includes(p))) return false;
+    if (skipDocs.some(p => (d.filename ?? "").toLowerCase().includes(p))) return false;
     return phaseVisible[inferPhaseFG(d.filename, d.creator)] ?? false;
   });
   for (let i = 0; i < visibleDocs.length; i++) {
@@ -220,7 +220,7 @@ function buildForceData(
     const phase = inferPhaseFG(doc.filename, doc.creator);
     const color = PHASE_COLOR_FG[phase] ?? "#484F58";
     const owner = baseRole(PHASE_AGENT_KEY[phase] ?? CORE_ROLE);
-    const shortName = (doc.filename.split("/").pop() ?? doc.filename).replace(/\.md$/i, "");
+    const shortName = ((doc.filename ?? "").split("/").pop() ?? doc.filename ?? "").replace(/\.md$/i, "");
     const label = (doc.title ?? shortName).slice(0, 30);
     const nodeId = `doc-${i}`;
     const seed = seededNear(owner, i, 8);
@@ -574,23 +574,39 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const lastWorkAtRef = useRef<number>(0);
   useEffect(() => { activeKeyRef.current = activeAgent; }, [activeAgent]);
 
-  const containerRef   = useRef<HTMLDivElement>(null);
+  const containerRef   = useRef<HTMLDivElement | null>(null);
   const prevSignature  = useRef<string>("");
   const needsFitRef    = useRef<boolean>(true);
+  // Enquadramento (zoomToFit) no PRIMEIRO assentamento, na troca de modelo e quando o grafo
+  // CRESCE organicamente (novas tasks/docs entram via poll) — mas NUNCA por toggle de filtro
+  // (senão a câmera "voa"/reescala e o usuário percebe como "o grafo sumiu"). hasFitRef marca
+  // que o fit inicial já ocorreu; lastFitCountRef guarda quantos nós couberam no último fit
+  // (base p/ detectar crescimento); suppressFitRef silencia o fit durante um rebuild vindo do
+  // filtro (câmera estável ao filtrar, mesmo se o filtro REVELAR nós).
+  const hasFitRef      = useRef<boolean>(false);
+  const lastFitCountRef = useRef<number>(0);
+  const suppressFitRef = useRef<boolean>(false);
+  const roRef          = useRef<ResizeObserver | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef          = useRef<any>(null);
 
-  // ── ResizeObserver — tracks real container size ───────────────────────────
-  useEffect(() => {
-    const el = containerRef.current;
+  // ── ResizeObserver via CALLBACK REF — segue o elemento REAL montado ───────────
+  // Bug anterior: o RO era anexado 1× no mount ao container de "loading"; quando
+  // loading→false o React troca de Box e o RO ficava observando o nó detachado (dispara
+  // 0×0 e nunca mais mede o Box vivo) → canvas travava em 800×(height||600), notável em
+  // tela cheia. Com callback ref, re-observamos sempre que o nó montado muda.
+  const setContainerNode = useCallback((el: HTMLDivElement | null) => {
+    containerRef.current = el;
+    roRef.current?.disconnect();
     if (!el) return;
     const obs = new ResizeObserver(entries => {
       const r = entries[0]?.contentRect;
       if (r) setContainerSize({ width: Math.floor(r.width), height: Math.floor(r.height) });
     });
     obs.observe(el);
-    return () => obs.disconnect();
+    roRef.current = obs;
   }, []);
+  useEffect(() => () => roRef.current?.disconnect(), []);
 
   // Fontes cacheadas. O diálogo tem DUAS origens unidas no rebuild:
   //  • histórico via refresh() (funciona mesmo com projeto ocioso/stream desligado)
@@ -646,7 +662,12 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       // Reaplica os pins do modo atual aos nós frescos (idempotente, sem re-simular).
       applyLayout(layoutModeRef.current, merged);
       if (countChanged) {
-        needsFitRef.current = true;
+        // Reenquadra no PRIMEIRO povoamento OU quando o grafo CRESCE de verdade (poll trouxe
+        // novos nós além do que coube no último fit) — assim o crescimento orgânico volta a
+        // caber em tela (paridade com o comportamento pré-fix). NUNCA reenquadra por toggle de
+        // filtro (suppressFitRef), mesmo que o filtro revele nós → câmera estável ao filtrar.
+        const grew = merged.length > lastFitCountRef.current;
+        if (!hasFitRef.current || (grew && !suppressFitRef.current)) needsFitRef.current = true;
         // Nós entraram/saíram → reaquece a simulação uma vez para assentar.
         try { fgRef.current?.d3ReheatSimulation?.(); } catch { /* engine pode não estar montada */ }
       }
@@ -725,8 +746,17 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // Diálogo ao vivo mudou → atualiza a fonte viva e rebuild (early-return se nada mudou).
   useEffect(() => {
     dialogueLiveRef.current = liveEntries;
-    rebuild();
+    try { rebuild(); } catch { /* rebuild JAMAIS pode derrubar/branquear o grafo */ }
   }, [liveEntries, rebuild]);
+
+  // Troca de projeto → zera o estado de enquadramento (o novo grafo deve reenquadrar do
+  // zero, sem herdar hasFit/contagem do projeto anterior) e força um rebuild fresco.
+  useEffect(() => {
+    hasFitRef.current     = false;
+    needsFitRef.current   = true;
+    lastFitCountRef.current = 0;
+    prevSignature.current = "";
+  }, [projectId]);
 
   // Poll de tasks/arquivos/histórico.
   useEffect(() => {
@@ -734,10 +764,14 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
 
-  // filter mudou → invalida cache e força rebuild imediato.
+  // filter mudou → rebuild. NÃO forçamos prevSignature="" : a assinatura do rebuild já
+  // detecta qualquer mudança real do conjunto visível. Forçar re-ingest a cada toggle
+  // reaquecia a física (alpha=1) SEM necessidade — e um toggle "no-op" (ex.: alternar uma
+  // fase que não tem docs) não deve mexer no grafo. try/catch: rebuild nunca branqueia.
   useEffect(() => {
-    prevSignature.current = "";
-    rebuild();
+    suppressFitRef.current = true; // este rebuild é do filtro → não reenquadra a câmera
+    try { rebuild(); } catch { /* rebuild JAMAIS pode derrubar/branquear o grafo */ }
+    finally { suppressFitRef.current = false; }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
@@ -1088,7 +1122,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   if (loading) {
     return (
-      <Box ref={containerRef} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
+      <Box ref={setContainerNode} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1 }}>
         <Typography variant="body2" color="text.secondary">Inicializando física…</Typography>
       </Box>
     );
@@ -1096,7 +1130,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   if (graphData.nodes.length === 0) {
     return (
-      <Box ref={containerRef} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
+      <Box ref={setContainerNode} sx={{ height: "100%", minHeight: height, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "#0D0F14", borderRadius: 1, flexDirection: "column", gap: 1 }}>
         <Typography variant="body2" color="text.secondary">Sem dados ainda.</Typography>
         <Typography variant="caption" color="text.secondary">O grafo cresce conforme os agentes trabalham.</Typography>
       </Box>
@@ -1105,7 +1139,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
 
   return (
     <Box
-      ref={containerRef}
+      ref={setContainerNode}
       sx={{ height: "100%", minHeight: height, bgcolor: "#0A0C11", borderRadius: 1, overflow: "hidden", position: "relative" }}
     >
       <ForceGraph2D
@@ -1156,10 +1190,27 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         cooldownTicks={220}
         cooldownTime={9000}
         onEngineStop={() => {
-          // Enquadra UMA vez quando o layout assenta (ou quando a topologia muda).
+          // Enquadra UMA vez quando o layout assenta / na troca de modelo. GUARDA CRÍTICA:
+          // só chama zoomToFit se o bbox for FINITO. Se algum nó chegasse sem posição (x/y
+          // NaN numa janela de re-ingest / tweens sobrepostos por toggles rápidos), o
+          // zoomToFit escreveria NaN no transform do d3-zoom — e transform NaN NUNCA se
+          // recupera → canvas em branco PERMANENTE (o "grafo desaparece"). Com bbox não
+          // finito, adiamos o fit para o próximo onEngineStop (nunca envenenamos a câmera).
           if (needsFitRef.current && fgRef.current) {
-            try { fgRef.current.zoomToFit?.(700, 80); } catch { /* fgRef pode sumir */ }
-            needsFitRef.current = false;
+            try {
+              const bbox = fgRef.current.getGraphBbox?.();
+              const finite = !!bbox &&
+                Number.isFinite(bbox.x?.[0]) && Number.isFinite(bbox.x?.[1]) &&
+                Number.isFinite(bbox.y?.[0]) && Number.isFinite(bbox.y?.[1]);
+              if (finite) {
+                fgRef.current.zoomToFit?.(700, 80);
+                needsFitRef.current = false;
+                hasFitRef.current   = true;
+                // Registra quantos nós couberam neste fit → base p/ detectar crescimento
+                // orgânico futuro (rebuild reenquadra só quando merged.length ultrapassa isto).
+                try { lastFitCountRef.current = fgRef.current.graphData?.()?.nodes?.length ?? lastFitCountRef.current; } catch { /* noop */ }
+              }
+            } catch { /* fgRef pode sumir */ }
           }
         }}
         onBackgroundClick={handleBackgroundClick}
