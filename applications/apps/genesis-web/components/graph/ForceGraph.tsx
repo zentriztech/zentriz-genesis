@@ -16,8 +16,13 @@ import { useDialogueStream } from "@/lib/useDialogueStream";
 import { DEFAULT_FILTER, type PlanningDoc, type GraphFilter } from "@/lib/useGraphData";
 import { forceCollide } from "d3-force";
 import dynamic from "next/dynamic";
+import { useVoice } from "@/lib/useVoice";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
+// Modelo JARVIS 3D — carregado só quando o modo 3D é selecionado (three.js fora do
+// bundle dos 7 modelos 2D). ssr:false: WebGL só existe no cliente.
+const JarvisGraph3D = dynamic(() => import("@/components/graph/JarvisGraph3D").then(m => m.JarvisGraph3D), { ssr: false });
+import type { Jarvis3DNode, Jarvis3DLink } from "@/components/graph/JarvisGraph3D";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type TaskItem = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
@@ -64,9 +69,9 @@ const HUB_SIZE  = 8.5;   // monitor — 2º hub (orquestra a execução)
 // Reúne as DUAS gerações: os modelos que já existiam (cérebro, radial, pipeline,
 // fluxo, livre) — agora melhorados — MAIS os novos (neurônio, constelação).
 export type LayoutMode =
-  | "neural" | "constellation" | "brain" | "radial" | "pipeline" | "flow" | "free";
+  | "neural" | "constellation" | "brain" | "radial" | "pipeline" | "flow" | "free" | "jarvis";
 const LAYOUT_CYCLE: LayoutMode[] =
-  ["neural", "constellation", "brain", "radial", "pipeline", "flow", "free"];
+  ["neural", "constellation", "brain", "radial", "pipeline", "flow", "free", "jarvis"];
 const LAYOUT_META: Record<LayoutMode, { icon: string; label: string; tip: string }> = {
   neural:        { icon: "🧠", label: "Neurônio",    tip: "Cérebro orgânico — anel irregular + sinapses curvas vivas" },
   constellation: { icon: "🌌", label: "Constelação", tip: "Time em órbita estável e limpa ao redor do núcleo" },
@@ -75,6 +80,25 @@ const LAYOUT_META: Record<LayoutMode, { icon: string; label: string; tip: string
   pipeline:      { icon: "➡️", label: "Pipeline",     tip: "Esquerda → direita pela fase, em colunas alinhadas" },
   flow:          { icon: "🌊", label: "Fluxo",        tip: "Colunas por fase, mas com dispersão orgânica + arestas curvas" },
   free:          { icon: "✦",  label: "Livre",        tip: "Física livre (Obsidian) — assenta e congela sozinho" },
+  jarvis:        { icon: "🛰️", label: "JARVIS 3D",   tip: "3D real (Three.js) — esfera de luz flutuante, bloom, órbita e voz" },
+};
+
+// ── Comandos de voz → modelo (PT-BR, tolerante a acento/variações) ─────────────
+const stripAccents = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+const VOICE_MODE_WORDS: Array<[LayoutMode, string[]]> = [
+  ["jarvis",        ["jarvis", "3d", "tres de", "espacial", "esfera"]],
+  ["neural",        ["neuronio", "neural"]],
+  ["constellation", ["constelacao", "orbita"]],
+  ["brain",         ["cerebro", "hemisferio"]],
+  ["radial",        ["radial", "cebola"]],
+  ["pipeline",      ["pipeline", "esteira"]],
+  ["flow",          ["fluxo", "flow"]],
+  ["free",          ["livre", "solto"]],
+];
+// Rótulo falado (PT-BR) de cada agente do roster — separações ajudam a síntese.
+const ROLE_SPOKEN: Record<string, string> = {
+  system: "Genesis", cto: "C T O", engineer: "Engenheiro", pm: "P M",
+  dev: "Desenvolvedor", qa: "Q A", devops: "Dev Ops", monitor: "Monitor",
 };
 
 // Cor base do tráfego sináptico AMBIENTE (repouso) — azul-elétrico frio, tipo HUD.
@@ -305,7 +329,7 @@ function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, Pin> {
   const agents = nodes.filter(n => n.type === "agent");
   const byRole = (role: string) => agents.find(a => a.role === role);
 
-  if (mode === "free") return pins; // física livre — sem pins
+  if (mode === "free" || mode === "jarvis") return pins; // física livre (2D) / 3D free-float — sem pins
 
   if (mode === "constellation") {
     for (const a of agents) { const p = rosterPosition(a.role ?? CORE_ROLE); pins.set(a.id, { fx: p.fx, fy: p.fy }); }
@@ -557,6 +581,36 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // Task drawer — abre ao clicar num nó de task
   const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
   const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
+
+  // ── Voz JARVIS (Web Speech API, zero-dep) ──────────────────────────────────────
+  // Comando de voz troca o modelo por nome falado; a narração (TTS) anuncia o agente
+  // que começou a trabalhar enquanto o microfone estiver ativo.
+  const handleVoiceCommand = useCallback((raw: string) => {
+    const t = stripAccents(raw.toLowerCase());
+    for (const [mode, words] of VOICE_MODE_WORDS) {
+      if (words.some(w => t.includes(stripAccents(w)))) { setLayoutMode(mode); return; }
+    }
+  }, []);
+  const voice = useVoice({ onCommand: handleVoiceCommand });
+  // Clique num nó vindo do renderizador 3D → abre o drawer da task (paridade com o 2D).
+  const handleNode3DClick = useCallback((id: string, type: string) => {
+    if (type === "task") { const task = taskMapRef.current.get(id); if (task) setTaskDrawer(task); }
+  }, []);
+  // Narra a troca de agente ativo (só quando o microfone/voz está engajado).
+  const lastSpokeRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!voice.listening || !activeAgent || lastSpokeRef.current === activeAgent) return;
+    lastSpokeRef.current = activeAgent;
+    voice.speak(`${ROLE_SPOKEN[activeAgent] ?? activeAgent} trabalhando.`);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAgent, voice.listening]);
+  // Os controles de voz só aparecem no modo JARVIS; ao sair dele (por comando de voz,
+  // clique no fundo ou switcher), desliga o microfone — senão ele fica ativo e narrando
+  // sem nenhum botão visível para parar. TTS narração é gated em voice.listening → para junto.
+  useEffect(() => {
+    if (layoutMode !== "jarvis" && voice.listening) voice.toggleListening();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutMode, voice.listening]);
 
   const filterRef = useRef(filter);
   useEffect(() => { filterRef.current = filter; }, [filter]);
@@ -817,7 +871,14 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   }, [layoutMode]);
 
   // ── Configuração de forças — física que ASSENTA e congela (SEM reheat loop) ──
+  // Chaveado TAMBÉM em layoutMode: o modelo JARVIS 3D é renderizado por um ramo
+  // condicional que DESMONTA o ForceGraph2D; ao voltar p/ um modelo 2D, monta uma
+  // instância NOVA com forças d3 padrão. Sem reagir a layoutMode, a troca de modelo
+  // (mesma contagem de nós) não re-rodava este efeito → os 7 modelos 2D ficavam com
+  // charge/link/collide padrão após qualquer visita ao 3D (regressão). O retry cobre
+  // o fgRef ainda não pronto logo após a remontagem.
   useEffect(() => {
+    if (layoutMode === "jarvis") return;          // 2D desmontado — nada a configurar
     if (graphData.nodes.length === 0) return;
     let tries = 0;
     const configure = () => {
@@ -837,7 +898,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       } catch { /* força pode não existir ainda — o retry acima cobre */ }
     };
     configure();
-  }, [graphData.nodes.length]);
+  }, [graphData.nodes.length, layoutMode]);
 
   // ── Clique no fundo → próximo modelo de layout (o gesto que o Jean gostava). ─
   // A troca dispara o efeito de layoutMode: repõe graphData (repinta) + reaquece.
@@ -1142,6 +1203,18 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       ref={setContainerNode}
       sx={{ height: "100%", minHeight: height, bgcolor: "#0A0C11", borderRadius: 1, overflow: "hidden", position: "relative" }}
     >
+      {layoutMode === "jarvis" ? (
+        // Modelo JARVIS 3D — recebe o MESMO graphData vivo (roster + streams). Usa ref
+        // próprio; não toca o fgRef/onEngineStop do 2D (o fix do "grafo some" fica intacto).
+        <JarvisGraph3D
+          nodes={fgData.nodes as unknown as Jarvis3DNode[]}
+          links={fgData.links as unknown as Jarvis3DLink[]}
+          width={canvasW}
+          height={canvasH}
+          activeAgent={activeAgent}
+          onNodeClick={handleNode3DClick}
+        />
+      ) : (
       <ForceGraph2D
         ref={fgRef}
         graphData={fgData}
@@ -1228,6 +1301,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           setTooltip({ label: n.label, detail: n.detail });
         }}
       />
+      )}
 
       {/* Switcher de MODELOS — top left (glassy/HUD). O ativo mostra ícone + rótulo. */}
       <Box sx={{ position: "absolute", top: 8, left: 8, display: "flex", gap: 0.5, p: 0.5,
@@ -1256,6 +1330,41 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           );
         })}
       </Box>
+
+      {/* Controles de VOZ — só no modelo JARVIS 3D. Microfone troca o modelo por comando
+          falado ("jarvis", "neurônio", "constelação"…); alto-falante narra o agente ativo. */}
+      {layoutMode === "jarvis" && (voice.sttSupported || voice.ttsSupported) && (
+        <Box sx={{ position: "absolute", top: 52, left: 8, display: "flex", gap: 0.5, p: 0.5,
+          bgcolor: "#0C111BE6", border: "1px solid #1E2636", borderRadius: 2,
+          backdropFilter: "blur(6px)", zIndex: 3 }}>
+          {voice.sttSupported && (
+            <Box component="button" title="Comando de voz — diga o nome de um modelo (ex.: “constelação”, “jarvis”)"
+              onClick={voice.toggleListening}
+              sx={{ cursor: "pointer", border: "1px solid",
+                borderColor: voice.listening ? "#F26D6D" : "transparent",
+                bgcolor: voice.listening ? "#F26D6D22" : "transparent",
+                color: voice.listening ? "#FFD5D5" : "#7C8698",
+                borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1, display: "flex", alignItems: "center", gap: 0.5,
+                fontSize: "0.72rem", fontFamily: "inherit",
+                boxShadow: voice.listening ? "0 0 10px #F26D6D66" : "none", transition: "all .18s ease",
+                "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" } }}>
+              <span style={{ fontSize: "0.9rem" }}>🎙️</span>
+              <span style={{ fontWeight: 600 }}>{voice.listening ? "ouvindo…" : "voz"}</span>
+            </Box>
+          )}
+          {voice.ttsSupported && (
+            <Box component="button" title={voice.muted ? "Ativar narração" : "Silenciar narração"}
+              onClick={voice.toggleMuted}
+              sx={{ cursor: "pointer", border: "1px solid transparent", bgcolor: "transparent",
+                color: voice.muted ? "#5A6474" : "#7C8698",
+                borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1, display: "flex", alignItems: "center",
+                fontSize: "0.72rem", fontFamily: "inherit", transition: "all .18s ease",
+                "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" } }}>
+              <span style={{ fontSize: "0.9rem" }}>{voice.muted ? "🔇" : "🔊"}</span>
+            </Box>
+          )}
+        </Box>
+      )}
 
       {/* Indicador do sistema nervoso — top right */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
