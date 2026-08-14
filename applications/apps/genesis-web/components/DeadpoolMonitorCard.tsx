@@ -18,11 +18,18 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import MenuItem from "@mui/material/MenuItem";
+import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import { apiGet, apiPost } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
+
+type MonitorProvider = "cloudwatch" | "azure" | "gcp";
 
 type MonitoringState = {
   entitled: boolean;
@@ -33,6 +40,19 @@ type MonitoringState = {
   deactivatedAt: string | null;
   lastRegisteredAt: string | null;
   lastError: string | null;
+  // Multi-cloud (M1/M2): nuvem monitorada + ponteiros (null = CloudWatch/nunca ativado).
+  monitorProvider: MonitorProvider | null;
+  azureWorkspaceId: string | null;
+  azureTable: string | null;
+  azureMessageColumn: string | null;
+  gcpProjectId: string | null;
+  gcpLogFilter: string | null;
+};
+
+const PROVIDER_LABELS: Record<MonitorProvider, string> = {
+  cloudwatch: "AWS CloudWatch",
+  azure: "Azure Monitor (Log Analytics)",
+  gcp: "GCP Cloud Logging",
 };
 
 /** Mensagem amigável para os códigos de pré-condição do endpoint activate. */
@@ -43,6 +63,9 @@ function friendlyError(msg: string): string {
   if (/NO_GITHUB_INSTALLATION/.test(msg)) return "O tenant precisa instalar o GitHub App da Zentriz.";
   if (/DEADPOOL_NOT_CONFIGURED/.test(msg)) return "Integração com o Deadpool não está configurada neste ambiente.";
   if (/DEADPOOL_REGISTER_FAILED/.test(msg)) return "Falha ao registrar o projeto no Deadpool. Tente novamente.";
+  if (/AZURE_TABLE_REQUIRED/.test(msg)) return "Para Azure, informe a tabela do Log Analytics (ex.: AppTraces).";
+  if (/GCP_LOG_FILTER_REQUIRED/.test(msg)) return "Para GCP, informe o filtro de logs do Cloud Logging.";
+  if (/UNKNOWN_MONITOR_PROVIDER/.test(msg)) return "Nuvem de monitoramento inválida.";
   return msg;
 }
 
@@ -59,6 +82,14 @@ export default function DeadpoolMonitorCard({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Config multi-cloud escolhida ANTES de ativar (default = CloudWatch, sem campos → comportamento #1).
+  const [provider, setProvider] = useState<MonitorProvider>("cloudwatch");
+  const [azureWorkspaceId, setAzureWorkspaceId] = useState("");
+  const [azureTable, setAzureTable] = useState("");
+  const [azureMessageColumn, setAzureMessageColumn] = useState("");
+  const [gcpProjectId, setGcpProjectId] = useState("");
+  const [gcpLogFilter, setGcpLogFilter] = useState("");
 
   const isAdmin = authStore.isTenantAdmin; // inclui zentriz_admin
 
@@ -86,7 +117,20 @@ export default function DeadpoolMonitorCard({
       setBusy(true);
       setError(null);
       try {
-        await apiPost(`/api/deadpool/projects/${projectId}/${activate ? "activate" : "deactivate"}`, {});
+        // Ao ativar, envia a nuvem escolhida + ponteiros. Ao desativar, corpo vazio.
+        const body: Record<string, unknown> = {};
+        if (activate) {
+          body.monitorProvider = provider;
+          if (provider === "azure") {
+            body.azureWorkspaceId = azureWorkspaceId.trim() || null;
+            body.azureTable = azureTable.trim() || null;
+            body.azureMessageColumn = azureMessageColumn.trim() || null;
+          } else if (provider === "gcp") {
+            body.gcpProjectId = gcpProjectId.trim() || null;
+            body.gcpLogFilter = gcpLogFilter.trim() || null;
+          }
+        }
+        await apiPost(`/api/deadpool/projects/${projectId}/${activate ? "activate" : "deactivate"}`, body);
         await refresh();
       } catch (e) {
         setError(friendlyError(e instanceof Error ? e.message : String(e)));
@@ -94,7 +138,7 @@ export default function DeadpoolMonitorCard({
         setBusy(false);
       }
     },
-    [projectId, refresh],
+    [projectId, refresh, provider, azureWorkspaceId, azureTable, azureMessageColumn, gcpProjectId, gcpLogFilter],
   );
 
   // Só admin, só se o tenant tem licença Deadpool. Enquanto carrega, nada.
@@ -102,6 +146,11 @@ export default function DeadpoolMonitorCard({
   if (!state || !state.entitled) return null;
 
   const active = state.active;
+  // Client-side guard: Azure exige tabela, GCP exige filtro (o servidor também valida com 400).
+  const canActivate =
+    provider === "cloudwatch" ||
+    (provider === "azure" && azureTable.trim().length > 0) ||
+    (provider === "gcp" && gcpLogFilter.trim().length > 0);
 
   return (
     <Alert
@@ -113,7 +162,7 @@ export default function DeadpoolMonitorCard({
           size="small"
           variant={active ? "outlined" : "contained"}
           color={active ? "inherit" : "primary"}
-          disabled={busy}
+          disabled={busy || (!active && !canActivate)}
           startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <HealthAndSafetyIcon />}
           onClick={() => void toggle(!active)}
         >
@@ -138,9 +187,58 @@ export default function DeadpoolMonitorCard({
       </Stack>
       <Typography variant="caption" color="text.secondary" component="div">
         {active
-          ? "O Deadpool monitora os logs deste projeto (CloudWatch) e recebe chamados de erro em tempo real, atuando em correções no repositório."
-          : "Ative para o Deadpool passar a monitorar os logs e receber chamados de erro deste projeto, atuando em correções no repositório."}
+          ? `O Deadpool monitora os logs deste projeto (${PROVIDER_LABELS[state.monitorProvider ?? "cloudwatch"]}) e recebe chamados de erro em tempo real, atuando em correções no repositório.`
+          : "Escolha a nuvem onde o app está deployado e ative — o Deadpool passa a monitorar os logs e a receber chamados de erro, atuando em correções no repositório."}
       </Typography>
+      {/* Seletor de nuvem + ponteiros de escopo (só ao ATIVAR). CloudWatch não pede campos: o
+          log group vem do deployment. Azure/GCP precisam do escopo de logs para o poll ativo. */}
+      {!active && (
+        <Box sx={{ mt: 1.25 }}>
+          <FormControl size="small" sx={{ minWidth: 260 }}>
+            <InputLabel id="deadpool-provider-label">Nuvem monitorada</InputLabel>
+            <Select
+              labelId="deadpool-provider-label"
+              label="Nuvem monitorada"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value as MonitorProvider)}
+              disabled={busy}
+            >
+              <MenuItem value="cloudwatch">{PROVIDER_LABELS.cloudwatch}</MenuItem>
+              <MenuItem value="azure">{PROVIDER_LABELS.azure}</MenuItem>
+              <MenuItem value="gcp">{PROVIDER_LABELS.gcp}</MenuItem>
+            </Select>
+          </FormControl>
+          {provider === "azure" && (
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <TextField
+                size="small" label="Tabela do Log Analytics (obrigatório)" placeholder="AppTraces"
+                value={azureTable} onChange={(e) => setAzureTable(e.target.value)} disabled={busy} required
+              />
+              <TextField
+                size="small" label="Workspace ID (opcional)"
+                value={azureWorkspaceId} onChange={(e) => setAzureWorkspaceId(e.target.value)} disabled={busy}
+              />
+              <TextField
+                size="small" label="Coluna da mensagem (opcional)" placeholder="Message"
+                value={azureMessageColumn} onChange={(e) => setAzureMessageColumn(e.target.value)} disabled={busy}
+              />
+            </Stack>
+          )}
+          {provider === "gcp" && (
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <TextField
+                size="small" label="Filtro de logs (obrigatório)"
+                placeholder='resource.type="cloud_run_revision"'
+                value={gcpLogFilter} onChange={(e) => setGcpLogFilter(e.target.value)} disabled={busy} required
+              />
+              <TextField
+                size="small" label="Project ID (opcional)"
+                value={gcpProjectId} onChange={(e) => setGcpProjectId(e.target.value)} disabled={busy}
+              />
+            </Stack>
+          )}
+        </Box>
+      )}
       {state.lastError && !active && (
         <Typography variant="caption" color="error" component="div" sx={{ mt: 0.5 }}>
           Último erro de registro: {String(state.lastError).slice(0, 300)}

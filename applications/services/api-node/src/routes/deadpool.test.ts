@@ -104,4 +104,51 @@ describe("deadpool gateway RBAC", () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).ok).toBe(true);
   });
+
+  // ── activate: validação multi-cloud (parseMonitoringConfig, 400 antes de qualquer I/O) ──
+  const PID = "22222222-2222-4222-8222-222222222222";
+
+  it("activate rejeita nuvem desconhecida (400 UNKNOWN_MONITOR_PROVIDER)", async () => {
+    currentRole = "tenant_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/deadpool/projects/${PID}/activate`,
+      payload: { monitorProvider: "oraculo" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("UNKNOWN_MONITOR_PROVIDER");
+  });
+
+  it("activate Azure sem tabela é rejeitado (400 AZURE_TABLE_REQUIRED)", async () => {
+    currentRole = "tenant_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/deadpool/projects/${PID}/activate`,
+      payload: { monitorProvider: "azure", azureWorkspaceId: "ws-1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("AZURE_TABLE_REQUIRED");
+  });
+
+  it("activate GCP sem filtro de logs é rejeitado (400 GCP_LOG_FILTER_REQUIRED)", async () => {
+    currentRole = "tenant_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/deadpool/projects/${PID}/activate`,
+      payload: { monitorProvider: "gcp", gcpProjectId: "proj-1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("GCP_LOG_FILTER_REQUIRED");
+  });
+
+  it("activate CloudWatch (default) não é barrado pela validação de config", async () => {
+    // Sem monitorProvider → cloudwatch; a config valida e o fluxo segue para o DB (não é 400).
+    currentRole = "tenant_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/deadpool/projects/${PID}/activate`,
+      payload: {},
+    });
+    expect(res.statusCode).not.toBe(400);
+  });
 });

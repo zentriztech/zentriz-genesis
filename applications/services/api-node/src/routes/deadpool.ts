@@ -64,6 +64,71 @@ function degradeReason(err: unknown): string {
   return "unreachable";
 }
 
+// ── Configuração multi-cloud de monitoramento (M1/M2) ────────────────────────────
+// Nuvens suportadas para monitoramento ativo de logs. Default = CloudWatch (retrocompat #1).
+const MONITOR_PROVIDERS = ["cloudwatch", "azure", "gcp"] as const;
+type MonitorProvider = (typeof MONITOR_PROVIDERS)[number];
+
+/** Aliases aceitos no corpo do activate → chave canônica. Espelha normalize_provider do Deadpool. */
+const PROVIDER_ALIASES: Record<string, MonitorProvider> = {
+  "": "cloudwatch", aws: "cloudwatch", cloudwatch: "cloudwatch", "cloudwatch-logs": "cloudwatch",
+  azure: "azure", "azure-monitor": "azure", "azure-log-analytics": "azure", "log-analytics": "azure",
+  gcp: "gcp", "gcp-monitoring": "gcp", "gcp-cloud-logging": "gcp", google: "gcp", stackdriver: "gcp",
+};
+
+interface MonitoringActivateBody {
+  monitorProvider?: string | null;
+  azureWorkspaceId?: string | null;
+  azureTable?: string | null;
+  azureMessageColumn?: string | null;
+  gcpProjectId?: string | null;
+  gcpLogFilter?: string | null;
+}
+
+/** Ponteiros normalizados a persistir/propagar; provider sempre canônico. */
+interface MonitoringConfig {
+  provider: MonitorProvider;
+  azureWorkspaceId: string | null;
+  azureTable: string | null;
+  azureMessageColumn: string | null;
+  gcpProjectId: string | null;
+  gcpLogFilter: string | null;
+}
+
+function str(v: unknown): string | null {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s.length ? s : null;
+}
+
+/**
+ * Valida e normaliza o corpo do activate para uma config multi-cloud.
+ * Sem corpo (ou provider ausente/cloudwatch) → CloudWatch, ponteiros nulos (comportamento #1).
+ * Azure exige `azureTable`; GCP exige `gcpLogFilter` — sem eles o Deadpool não teria escopo para
+ * pollar (list_monitorable_projects). Provider desconhecido é rejeitado (nunca cai mudo em CloudWatch).
+ * Retorna `{ code }` em erro de validação (o handler responde 400).
+ */
+function parseMonitoringConfig(
+  body: MonitoringActivateBody | undefined,
+): MonitoringConfig | { code: string } {
+  const raw = (str(body?.monitorProvider) ?? "").toLowerCase();
+  const provider = PROVIDER_ALIASES[raw];
+  if (provider === undefined) return { code: "UNKNOWN_MONITOR_PROVIDER" };
+  const cfg: MonitoringConfig = {
+    provider,
+    // Ponteiros são ESCOPADOS ao provider: só sobrevive o da nuvem escolhida. Isso impede que um
+    // chamador direto contrabandeie azureTable/gcpLogFilter num registro CloudWatch (violando a
+    // byte-identidade do #1) e evita semear ponteiros órfãos de outra nuvem no registry do Deadpool.
+    azureWorkspaceId: provider === "azure" ? str(body?.azureWorkspaceId) : null,
+    azureTable: provider === "azure" ? str(body?.azureTable) : null,
+    azureMessageColumn: provider === "azure" ? str(body?.azureMessageColumn) : null,
+    gcpProjectId: provider === "gcp" ? str(body?.gcpProjectId) : null,
+    gcpLogFilter: provider === "gcp" ? str(body?.gcpLogFilter) : null,
+  };
+  if (provider === "azure" && !cfg.azureTable) return { code: "AZURE_TABLE_REQUIRED" };
+  if (provider === "gcp" && !cfg.gcpLogFilter) return { code: "GCP_LOG_FILTER_REQUIRED" };
+  return cfg;
+}
+
 export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
 
@@ -207,7 +272,9 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
       const entitled = await hasEntitlement(proj.tenant_id, "deadpool");
       const monRes = await pool.query(
         `SELECT active, system_id, service_id, activated_at, deactivated_at,
-                last_registered_at, last_error
+                last_registered_at, last_error,
+                monitor_provider, azure_workspace_id, azure_table, azure_message_column,
+                gcp_project_id, gcp_log_filter
            FROM project_deadpool_monitoring WHERE project_id = $1`,
         [id],
       );
@@ -221,6 +288,13 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         deactivatedAt: m?.deactivated_at ?? null,
         lastRegisteredAt: m?.last_registered_at ?? null,
         lastError: m?.last_error ?? null,
+        // Multi-cloud (M1/M2): nuvem monitorada + ponteiros (null = CloudWatch/nunca ativado).
+        monitorProvider: m?.monitor_provider ?? null,
+        azureWorkspaceId: m?.azure_workspace_id ?? null,
+        azureTable: m?.azure_table ?? null,
+        azureMessageColumn: m?.azure_message_column ?? null,
+        gcpProjectId: m?.gcp_project_id ?? null,
+        gcpLogFilter: m?.gcp_log_filter ?? null,
       });
     },
   );
@@ -233,12 +307,16 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
   //   2. projeto aceito (status='accepted') — só código aceito é sustentável
   //   3. repo GitHub existe (project_github_repos) — Deadpool precisa clonar p/ corrigir
   //   4. tenant tem GitHub App instalado (installationId) — acesso ao repo p/ commit/deploy
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: string }; Body: MonitoringActivateBody }>(
     "/api/deadpool/projects/:id/activate",
     async (request, reply) => {
       if (!requireAdmin(request, reply)) return;
       const user = getUser(request);
       const { id } = request.params;
+
+      // Config multi-cloud (M1/M2). Sem corpo → CloudWatch (retrocompat #1). Azure/GCP exigem escopo.
+      const cfg = parseMonitoringConfig(request.body);
+      if ("code" in cfg) return reply.status(400).send({ code: cfg.code });
 
       // Carrega projeto + produto + repo + installation numa query (espelha githubPush).
       const res = await pool.query(
@@ -297,7 +375,12 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         projectId: id,
       });
 
-      // Registra o vínculo runtime + liga o monitoramento no Deadpool.
+      const isCloudwatch = cfg.provider === "cloudwatch";
+      // Registra o vínculo runtime + liga o monitoramento no Deadpool. O activate é a declaração
+      // AUTORITATIVA do escopo de nuvem: enviamos SEMPRE o provider explícito (inclusive "cloudwatch")
+      // e só os ponteiros da nuvem escolhida (os demais vão null). Isso permite ao Deadpool RESETAR o
+      // escopo ao trocar de nuvem — ex.: voltar de Azure para CloudWatch limpa azure_table lá. Para
+      // CloudWatch, logGroup/awsRegion vêm do deployment (comportamento #1); Azure/GCP não os usam.
       const result = await registerProjectWithDeadpool({
         systemId,
         serviceId,
@@ -306,9 +389,16 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         appUrl: dep?.app_url ?? null,
         healthUrl: dep?.health_url ?? null,
         environment: dep ? (dep.class === "demo" ? "demo" : "production") : null,
-        awsRegion,
-        logGroup: dep?.log_group ?? null,
+        awsRegion: isCloudwatch ? awsRegion : null,
+        logGroup: isCloudwatch ? (dep?.log_group ?? null) : null,
         monitoring: true,
+        // Provider SEMPRE explícito (o Deadpool trata "cloudwatch" como reset do escopo de nuvem).
+        monitorProvider: cfg.provider,
+        azureWorkspaceId: cfg.azureWorkspaceId,
+        azureTable: cfg.azureTable,
+        azureMessageColumn: cfg.azureMessageColumn,
+        gcpProjectId: cfg.gcpProjectId,
+        gcpLogFilter: cfg.gcpLogFilter,
       });
 
       if (result.skipped) {
@@ -339,8 +429,11 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         await pool.query(
           `INSERT INTO project_deadpool_monitoring
              (project_id, active, system_id, service_id, activated_by, activated_at,
-              last_registered_at, last_error, updated_at)
-           VALUES ($1, true, $2, $3, $4, now(), now(), NULL, now())
+              last_registered_at, last_error, updated_at,
+              monitor_provider, azure_workspace_id, azure_table, azure_message_column,
+              gcp_project_id, gcp_log_filter)
+           VALUES ($1, true, $2, $3, $4, now(), now(), NULL, now(),
+                   $5, $6, $7, $8, $9, $10)
            ON CONFLICT (project_id) DO UPDATE
              SET active = true,
                  system_id = EXCLUDED.system_id,
@@ -349,13 +442,26 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
                  activated_at = now(),
                  last_registered_at = now(),
                  last_error = NULL,
-                 updated_at = now()`,
-          [id, systemId, serviceId, user.id],
+                 updated_at = now(),
+                 monitor_provider = EXCLUDED.monitor_provider,
+                 azure_workspace_id = EXCLUDED.azure_workspace_id,
+                 azure_table = EXCLUDED.azure_table,
+                 azure_message_column = EXCLUDED.azure_message_column,
+                 gcp_project_id = EXCLUDED.gcp_project_id,
+                 gcp_log_filter = EXCLUDED.gcp_log_filter`,
+          [id, systemId, serviceId, user.id,
+           cfg.provider, cfg.azureWorkspaceId, cfg.azureTable, cfg.azureMessageColumn,
+           cfg.gcpProjectId, cfg.gcpLogFilter],
         );
+        // Rótulo humano do escopo por nuvem (para o histórico do projeto).
+        const scopeLabel =
+          cfg.provider === "azure" ? ` (Azure: ${cfg.azureTable})`
+          : cfg.provider === "gcp" ? ` (GCP: ${cfg.gcpLogFilter})`
+          : dep?.log_group ? ` (${dep.log_group})` : "";
         await pool.query(
           `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
            VALUES ($1, 'system', 'deadpool', 'step', $2)`,
-          [id, `🛡️ Monitoramento Deadpool ATIVADO para ${systemId}/${serviceId ?? "*"} — monitoramento ativo de logs${dep?.log_group ? ` (${dep.log_group})` : ""} + intake reativo de incidentes.`],
+          [id, `🛡️ Monitoramento Deadpool ATIVADO para ${systemId}/${serviceId ?? "*"} — monitoramento ativo de logs${scopeLabel} + intake reativo de incidentes.`],
         );
       } catch (err) {
         app.log.error({ err, projectId: id }, "Deadpool registrado mas falha ao persistir estado ativo no Genesis (divergência)");
@@ -374,8 +480,8 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         }
         return reply.status(500).send({ code: "MONITORING_STATE_PERSIST_FAILED", deadpoolMonitoring: true });
       }
-      app.log.info({ projectId: id, systemId, serviceId, by: user.id }, "Monitoramento Deadpool ativado");
-      return reply.send({ ok: true, active: true, systemId, serviceId });
+      app.log.info({ projectId: id, systemId, serviceId, provider: cfg.provider, by: user.id }, "Monitoramento Deadpool ativado");
+      return reply.send({ ok: true, active: true, systemId, serviceId, provider: cfg.provider });
     },
   );
 

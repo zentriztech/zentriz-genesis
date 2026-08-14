@@ -61,6 +61,13 @@ export interface DeadpoolRegisterArgs {
   logGroup?: string | null;
   /** true = habilitar monitoramento ativo de logs; false = desligar. undefined = não altera (registro #60 legado). */
   monitoring?: boolean;
+  // Multi-cloud (M1/M2): provider + ponteiros por nuvem. Ausência = CloudWatch (default histórico).
+  monitorProvider?: string | null;
+  azureWorkspaceId?: string | null;
+  azureTable?: string | null;
+  azureMessageColumn?: string | null;
+  gcpProjectId?: string | null;
+  gcpLogFilter?: string | null;
 }
 
 /** Resultado do registro. Nunca lança — best-effort — mas informa sucesso/falha ao chamador. */
@@ -121,6 +128,13 @@ export async function registerProjectWithDeadpool(
     if (args.awsRegion != null) body.awsRegion = args.awsRegion;
     if (args.logGroup != null) body.logGroup = args.logGroup;
     if (args.monitoring != null) body.monitoring = args.monitoring;
+    // Multi-cloud: só entram quando fornecidos → retrocompatível com CloudWatch (sem esses campos).
+    if (args.monitorProvider != null) body.monitorProvider = args.monitorProvider;
+    if (args.azureWorkspaceId != null) body.azureWorkspaceId = args.azureWorkspaceId;
+    if (args.azureTable != null) body.azureTable = args.azureTable;
+    if (args.azureMessageColumn != null) body.azureMessageColumn = args.azureMessageColumn;
+    if (args.gcpProjectId != null) body.gcpProjectId = args.gcpProjectId;
+    if (args.gcpLogFilter != null) body.gcpLogFilter = args.gcpLogFilter;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
