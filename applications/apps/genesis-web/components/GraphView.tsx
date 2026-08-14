@@ -43,6 +43,10 @@ import { buildGraphData, DEFAULT_FILTER, type GraphFilter, type GraphNode, type 
 import { apiGet } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 
+// Identidade estável p/ o modo "vivo" (sem docs): um array literal inline mudaria de
+// referência a cada render do pai e re-dispararia o efeito de poll do ForceGraph.
+const EMPTY_DOCS: PlanningDoc[] = [];
+
 // ── Task Detail Drawer (Hierarquia) ───────────────────────────────────────────
 const STATUS_COLOR_GV: Record<string, string> = {
   DONE: "#10B981", QA_PASS: "#10B981", IN_PROGRESS: "#6366F1",
@@ -629,8 +633,8 @@ function FullscreenLayout({
         <Box sx={{ flexGrow: 1, width: `${centerPct}%`, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
           <Box sx={{ flexGrow: 1, overflow: "hidden", height: 0 }}>
             {mode === "force"
-              ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={[]} filter={filter} />
-              : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={[]} filter={filter} onClickTask={handleClickTaskId} />}
+              ? <ForceGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={EMPTY_DOCS} filter={filter} />
+              : <HierarchyGraph projectId={projectId} pollIntervalMs={pollIntervalMs} height="100%" planningDocs={EMPTY_DOCS} filter={filter} onClickTask={handleClickTaskId} />}
           </Box>
         </Box>
 

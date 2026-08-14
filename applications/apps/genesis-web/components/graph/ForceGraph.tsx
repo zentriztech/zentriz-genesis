@@ -14,6 +14,7 @@ import { getAgentProfile } from "@/lib/agentProfiles";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import { useDialogueStream } from "@/lib/useDialogueStream";
 import { DEFAULT_FILTER, type PlanningDoc, type GraphFilter } from "@/lib/useGraphData";
+import { forceCollide } from "d3-force";
 import dynamic from "next/dynamic";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -26,59 +27,79 @@ type CodeFilesResponse = { files: CodeFile[]; appsRoot: string | null; totalFile
 interface FGNode {
   id: string; label: string;
   type: "agent" | "task" | "artifact" | "doc";
-  color: string; size: number; isActive?: boolean; detail?: string;
+  role?: string;              // role base (system/cto/…) para nós de agente
+  color: string; size: number; detail?: string;
+  fx?: number; fy?: number;   // constelação: agentes do roster são FIXADOS
+  // runtime (mutado pela engine — NÃO entra na assinatura de rebuild)
+  x?: number; y?: number; vx?: number; vy?: number;
 }
-interface FGLink { source: string | FGNode; target: string | FGNode; color: string }
+interface FGLink {
+  source: string | FGNode; target: string | FGNode;
+  color: string;
+  kind?: "spoke" | "flow" | "orch" | "satellite"; // backbone estrutural × satélite
+  // runtime (mutado no evento ao vivo — repintado durante a partícula do pacote)
+  __packetColor?: string; __hotUntil?: number;
+}
 interface GraphData { nodes: FGNode[]; links: FGLink[] }
-type NodeWithPos = FGNode & { fx?: number; fy?: number; x?: number; y?: number; vx?: number; vy?: number };
+type NodeWithPos = FGNode;
 
-// ── Layout modes ──────────────────────────────────────────────────────────────
-type LayoutMode = "free" | "flow" | "brain" | "radial" | "pipeline";
-const LAYOUT_CYCLE: LayoutMode[] = ["free", "flow", "brain", "radial", "pipeline"];
-const LAYOUT_META: Record<LayoutMode, { label: string; tip: string; icon: string }> = {
-  free:     { icon: "🌌", label: "Obsidian",  tip: "Física livre — clique no fundo para próximo layout" },
-  flow:     { icon: "🌊", label: "Fluxo",     tip: "Pipeline orgânico — esquerda→direita com curvas" },
-  brain:    { icon: "🧠", label: "Cérebro",   tip: "Agentes no núcleo, conexões bidirecionais" },
-  radial:   { icon: "⭕", label: "Radial",    tip: "CTO no centro, camadas por tipo" },
-  pipeline: { icon: "➡️", label: "Pipeline",  tip: "Esquerda→direita por fase do pipeline" },
-};
+// ── Roster canônico — SEMPRE presente (desacoplado do diálogo/stream) ──────────
+// O grafo é uma CONSTELAÇÃO fixa do time de agentes de AI do Genesis: o núcleo
+// (Genesis/system) no centro e o pipeline em órbita. Tasks/docs/artefatos entram
+// como satélites que gravitam ao redor do dono. Isso garante que os agentes nunca
+// "somem" — o diálogo apenas ACENDE atividade (pulso + pacotes), nunca cria os nós.
+const CORE_ROLE = "system";
+const RING_ROLES = ["cto", "engineer", "pm", "dev", "qa", "devops", "monitor"] as const;
+const ROSTER_ROLES: string[] = [CORE_ROLE, ...RING_ROLES];
+const ROSTER_SET = new Set<string>(ROSTER_ROLES);
 
-// Pares de agentes que têm relação bidirecional forte (consulta ↔ resposta)
-// Sistema/Monitor é o hub central — conecta em duplo sentido com TODOS
-const BIDIRECTIONAL_PAIRS = new Set([
-  // CTO ↔ Engineer ↔ PM (planejamento)
-  "cto|engineer", "engineer|cto",
-  "cto|pm",       "pm|cto",
-  // Sistema/Monitor ↔ TODOS (hub central)
-  "system|cto",      "cto|system",
-  "system|engineer", "engineer|system",
-  "system|pm",       "pm|system",
-  "system|dev",      "dev|system",
-  "system|qa",       "qa|system",
-  "system|devops",   "devops|system",
-  "monitor|cto",     "cto|monitor",
-  "monitor|engineer","engineer|monitor",
-  "monitor|pm",      "pm|monitor",
-  "monitor|dev",     "dev|monitor",
-  "monitor|qa",      "qa|monitor",
-  "monitor|devops",  "devops|monitor",
-  // PM ↔ Dev ↔ QA (ciclo de desenvolvimento)
-  "pm|dev",  "dev|pm",
-  "pm|qa",   "qa|pm",
-  "dev|qa",  "qa|dev",
-]);
+const RING_RADIUS = 190; // raio da órbita (unidades de grafo; zoomToFit escala p/ caber)
+const CORE_SIZE = 11;    // núcleo Genesis — o maior/mais luminoso
+const RING_SIZE = 7.5;   // agentes do pipeline
+const HUB_SIZE  = 8.5;   // monitor — 2º hub (orquestra a execução)
+
+// Posição fixa (fx/fy) de cada agente na constelação: núcleo no centro; anel
+// começando no topo (-90°) em sentido horário, na ordem do pipeline.
+function rosterPosition(role: string): { fx: number; fy: number } {
+  if (role === CORE_ROLE) return { fx: 0, fy: 0 };
+  const i = RING_ROLES.indexOf(role as (typeof RING_ROLES)[number]);
+  const idx = i < 0 ? 0 : i;
+  const angle = -Math.PI / 2 + (idx / RING_ROLES.length) * 2 * Math.PI;
+  return { fx: RING_RADIUS * Math.cos(angle), fy: RING_RADIUS * Math.sin(angle) };
+}
+
+// Topologia do mesh (backbone SEMPRE desenhado, faint em repouso). Reflete como o
+// time realmente conversa: núcleo↔brain-trust, monitor↔execução, handoff PM→Dev.
+const TEAM_EDGES: Array<[string, string, NonNullable<FGLink["kind"]>]> = [
+  ["system", "cto", "spoke"], ["system", "engineer", "spoke"],
+  ["system", "pm", "spoke"], ["system", "monitor", "spoke"],
+  ["cto", "engineer", "flow"], ["cto", "pm", "flow"], ["engineer", "pm", "flow"],
+  ["pm", "dev", "flow"],
+  ["monitor", "dev", "orch"], ["monitor", "qa", "orch"], ["monitor", "devops", "orch"],
+  ["dev", "qa", "flow"], ["qa", "devops", "flow"],
+];
 
 // Normaliza um nome de agente para a chave usada nos ids de nó (agent-<key>).
 const normKey = (raw?: string) => (raw ?? "").toLowerCase().replace(/[^a-z_]/g, "_");
 
+// Mapeia qualquer agente (inclusive especializados: dev_backend_python, qa_web…)
+// para a role base do roster. Fora do roster (spec/error/vazio) → cai no núcleo.
+function baseRole(raw?: string): string {
+  const k = normKey(raw);
+  if (ROSTER_SET.has(k)) return k;
+  const stem = k.replace(/_.*$/, "");
+  if (ROSTER_SET.has(stem)) return stem;
+  return CORE_ROLE;
+}
+
 // Cor do "pacote" de mensagem por tipo de evento — é o que dá leitura instantânea
 // ao observador: verde = entrega, vermelho = erro, índigo = trabalhando, azul = passo.
 const EVENT_PACKET_COLOR: Record<string, string> = {
-  error: "#EF4444",
-  product_ready: "#10B981",
-  product: "#10B981",
-  agent_working: "#818CF8",
-  step: "#38BDF8",
+  error: "#F26D6D",
+  product_ready: "#2FBF71",
+  product: "#2FBF71",
+  agent_working: "#7C93F0",
+  step: "#4FA8E8",
 };
 
 // ── Colors ────────────────────────────────────────────────────────────────────
@@ -115,43 +136,53 @@ function inferPhaseFG(filename: string, creator?: string): string {
 // ── Build raw graph data ──────────────────────────────────────────────────────
 function buildForceData(
   dialogue: DialogueEntry[], tasks: TaskItem[], codeFiles: CodeFile[],
-  activeAgentId?: string, planningDocs: PlanningDoc[] = [],
-  compactArtifacts = false,
-  filter?: GraphFilter,
+  planningDocs: PlanningDoc[] = [], compactArtifacts = false, filter?: GraphFilter,
 ): GraphData {
   const f: GraphFilter = { ...DEFAULT_FILTER, ...(filter ?? {}) };
   const nodes: FGNode[] = []; const links: FGLink[] = [];
-  const seenAgents = new Map<string, FGNode>(); const linkSet = new Set<string>();
+  const linkSet = new Set<string>();
 
-  const addLink = (s: string, t: string, color = "#6366F140") => {
-    const key = `${s}|${t}`;
-    if (!linkSet.has(key)) { linkSet.add(key); links.push({ source: s, target: t, color }); }
+  const linkKey = (s: string, t: string) => [s, t].sort().join("|"); // não-direcionado
+  const addLink = (s: string, t: string, color: string, kind: NonNullable<FGLink["kind"]>) => {
+    const k = linkKey(s, t);
+    if (s === t || linkSet.has(k)) return;
+    linkSet.add(k); links.push({ source: s, target: t, color, kind });
   };
 
-  for (const e of dialogue) {
-    for (const raw of [e.fromAgent, e.toAgent]) {
-      if (!raw) continue;
-      const key = raw.toLowerCase().replace(/[^a-z_]/g, "_");
-      if (seenAgents.has(key)) continue;
-      const profile = getAgentProfile(key);
-      const isActive = activeAgentId?.toLowerCase().replace(/[^a-z_]/g, "_") === key;
-      const rolePrefix = (profile.role ?? "").toUpperCase().replace(/\s+/g, "-");
-      const humanName  = profile.name.replace(/^IA-/, "");
-      const nodeLabel  = rolePrefix ? `${rolePrefix}-IA-${humanName}` : profile.name;
-      const node: FGNode = {
-        id: `agent-${key}`, label: nodeLabel, type: "agent",
-        color: profile.color, size: isActive ? 10 : 7, isActive,
-        detail: profile.avatar,
-      };
-      seenAgents.set(key, node); nodes.push(node);
-    }
-    const fk = e.fromAgent.toLowerCase().replace(/[^a-z_]/g, "_");
-    const tk = e.toAgent.toLowerCase().replace(/[^a-z_]/g, "_");
-    if (fk !== tk && seenAgents.has(fk) && seenAgents.has(tk)) {
-      addLink(`agent-${fk}`, `agent-${tk}`, getAgentProfile(fk).color + "60");
-    }
+  // 1) ROSTER canônico — SEMPRE presente, fixado na constelação.
+  for (const role of ROSTER_ROLES) {
+    const profile = getAgentProfile(role);
+    const pos = rosterPosition(role);
+    const size = role === CORE_ROLE ? CORE_SIZE : role === "monitor" ? HUB_SIZE : RING_SIZE;
+    const human = profile.name.replace(/^IA-/, "");
+    const rolePrefix = (profile.role ?? "").toUpperCase().replace(/\s+/g, "-");
+    const label = rolePrefix ? `${rolePrefix}·${human}` : profile.name;
+    nodes.push({
+      id: `agent-${role}`, label, type: "agent", role,
+      color: role === CORE_ROLE ? "#4C8DFF" : profile.color, // núcleo mais luminoso
+      size, detail: profile.avatar, fx: pos.fx, fy: pos.fy,
+    });
   }
 
+  // 2) BACKBONE estrutural (sempre desenhado, faint).
+  for (const [a, b, kind] of TEAM_EDGES) addLink(`agent-${a}`, `agent-${b}`, "#5A6480", kind);
+
+  // 3) Pares OBSERVADOS no diálogo (mapeados p/ role base) — enriquecem o mesh e
+  //    garantem que o pacote ao vivo sempre tenha uma aresta para percorrer.
+  for (const e of dialogue) {
+    const a = baseRole(e.fromAgent); const b = baseRole(e.toAgent);
+    if (a !== b) addLink(`agent-${a}`, `agent-${b}`, "#5A6480", "flow");
+  }
+
+  // Semente de posição perto do dono (satélites nascem próximos e assentam rápido).
+  const seededNear = (role: string, i: number, spread: number) => {
+    const base = rosterPosition(role);
+    const a = (i * 2.399963) % (2 * Math.PI); // ângulo áureo determinístico
+    const rad = 34 + (i % 4) * 10 + spread;
+    return { x: base.fx + Math.cos(a) * rad, y: base.fy + Math.sin(a) * rad };
+  };
+
+  // 4) DOCS (satélites) — por fase, ligados ao agente da fase.
   const phaseVisible: Record<string, boolean> = {
     spec: f.docsSpec, cto: f.docsCto, engineer: f.docsEngineer,
     pm: f.docsPm, qa: f.docsQa, devops: f.docsDevops, other: false,
@@ -165,14 +196,16 @@ function buildForceData(
     const doc = visibleDocs[i];
     const phase = inferPhaseFG(doc.filename, doc.creator);
     const color = PHASE_COLOR_FG[phase] ?? "#484F58";
-    const agentKey = PHASE_AGENT_KEY[phase] ?? "system";
+    const owner = baseRole(PHASE_AGENT_KEY[phase] ?? CORE_ROLE);
     const shortName = (doc.filename.split("/").pop() ?? doc.filename).replace(/\.md$/i, "");
     const label = (doc.title ?? shortName).slice(0, 30);
     const nodeId = `doc-${i}`;
-    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.5, detail: phase });
-    if (seenAgents.has(agentKey)) addLink(`agent-${agentKey}`, nodeId, color + "70");
+    const seed = seededNear(owner, i, 8);
+    nodes.push({ id: nodeId, label, type: "doc", color, size: 3.2, detail: phase, x: seed.x, y: seed.y });
+    addLink(`agent-${owner}`, nodeId, color + "66", "satellite");
   }
 
+  // 5) TASKS (satélites) — por dono, cor por status.
   const DONE_STATUSES   = new Set(["DONE", "QA_PASS"]);
   const ACTIVE_STATUSES = new Set(["IN_PROGRESS", "WAITING_REVIEW"]);
   const ownerMap: Record<string, string> = {
@@ -181,15 +214,7 @@ function buildForceData(
     DEVOPS: "devops", DEVOPS_DOCKER: "devops", PM: "pm", PM_WEB: "pm",
     PM_BACKEND: "pm", PM_MOBILE: "pm", CTO: "cto", ENGINEER: "engineer", MONITOR: "monitor",
   };
-  const agentKeyInDialogue = (ownerRole: string) => {
-    const mapped = ownerMap[(ownerRole ?? "").toUpperCase()];
-    if (!mapped) return undefined;
-    if (seenAgents.has(mapped)) return mapped;
-    for (const k of Array.from(seenAgents.keys()))
-      if (k.startsWith(mapped) || mapped.startsWith(k.replace(/_.*/, ""))) return k;
-    return undefined;
-  };
-
+  let ti = 0;
   for (const t of tasks) {
     const s = t.status ?? "NEW";
     if (!ACTIVE_STATUSES.has(s)) {
@@ -197,172 +222,53 @@ function buildForceData(
       if (!DONE_STATUSES.has(s) && !f.tasksPending)  continue;
     }
     const color = TASK_COLOR[s] ?? "#4B5563";
-    nodes.push({ id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4, detail: s });
-    const ownerKey = agentKeyInDialogue(t.ownerRole ?? "");
-    if (ownerKey) addLink(`agent-${ownerKey}`, `task-${t.taskId}`, color + "70");
+    const owner = baseRole(ownerMap[(t.ownerRole ?? "").toUpperCase()] ?? "dev");
+    const seed = seededNear(owner, ti++, 4);
+    nodes.push({ id: `task-${t.taskId}`, label: t.taskId, type: "task", color, size: 4, detail: s, x: seed.x, y: seed.y });
+    addLink(`agent-${owner}`, `task-${t.taskId}`, color + "66", "satellite");
   }
 
+  // 6) ARTEFATOS (satélites de código) — ligados ao Dev.
   if (!f.artifacts) return { nodes, links };
-
   const allFiles = codeFiles.filter(f2 => !f2.path.includes("node_modules") && !f2.path.endsWith(".lock"));
-  const devAgentKey = Array.from(seenAgents.keys()).find(k => k.startsWith("dev")) ?? null;
+  const devRole = "dev";
 
   if (compactArtifacts && allFiles.length > 0) {
-    // Modo compacto: mostrar 5 artefatos recentes + 1 nó agregador com o restante
+    // Modo compacto: 5 artefatos recentes + 1 nó agregador com o restante.
     const MAX_SHOWN = 5;
     const shown = allFiles.slice(-MAX_SHOWN);
     const hidden = allFiles.length - shown.length;
-
     for (let i = 0; i < shown.length; i++) {
-      const f = shown[i];
-      const color = EXT_COLOR[f.ext] ?? "#8B949E";
-      nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
-      if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
+      const fi = shown[i];
+      const color = EXT_COLOR[fi.ext] ?? "#8B949E";
+      const seed = seededNear(devRole, i, 16);
+      nodes.push({ id: `artifact-${i}`, label: fi.path.split("/").pop() ?? fi.path, type: "artifact", color, size: 2.4, detail: fi.path, x: seed.x, y: seed.y });
+      addLink(`agent-${devRole}`, `artifact-${i}`, color + "44", "satellite");
     }
-
     if (hidden > 0) {
       const label = hidden >= 500 ? "500+" : hidden >= 100 ? `${Math.floor(hidden / 100) * 100}+` : hidden >= 10 ? `${Math.floor(hidden / 10) * 10}+` : `${hidden}+`;
-      nodes.push({ id: "artifact-group", label: `${label} arquivos`, type: "artifact", color: "#484F58", size: 5.5, detail: `${allFiles.length} arquivos no projeto` });
-      if (devAgentKey) addLink(`agent-${devAgentKey}`, "artifact-group", "#484F5880");
+      const seed = seededNear(devRole, 6, 26);
+      nodes.push({ id: "artifact-group", label: `${label} arquivos`, type: "artifact", color: "#484F58", size: 5, detail: `${allFiles.length} arquivos no projeto`, x: seed.x, y: seed.y });
+      addLink(`agent-${devRole}`, "artifact-group", "#484F5866", "satellite");
     }
   } else {
-    // Modo completo: até 20 artefatos individuais
+    // Modo completo: até 20 artefatos individuais.
     const showable = allFiles.slice(0, 20);
     for (let i = 0; i < showable.length; i++) {
-      const f = showable[i];
-      const color = EXT_COLOR[f.ext] ?? "#8B949E";
-      nodes.push({ id: `artifact-${i}`, label: f.path.split("/").pop() ?? f.path, type: "artifact", color, size: 2.5, detail: f.path });
-      if (devAgentKey) addLink(`agent-${devAgentKey}`, `artifact-${i}`, color + "50");
+      const fi = showable[i];
+      const color = EXT_COLOR[fi.ext] ?? "#8B949E";
+      const seed = seededNear(devRole, i, 16);
+      nodes.push({ id: `artifact-${i}`, label: fi.path.split("/").pop() ?? fi.path, type: "artifact", color, size: 2.4, detail: fi.path, x: seed.x, y: seed.y });
+      addLink(`agent-${devRole}`, `artifact-${i}`, color + "44", "satellite");
     }
   }
 
   return { nodes, links };
 }
 
-// ── Layout position computation ───────────────────────────────────────────────
-function computePositions(
-  nodes: FGNode[], layout: LayoutMode, W: number, H: number,
-): Map<string, { fx: number; fy: number }> | null {
-  if (layout === "free" || layout === "flow") return null; // physics handles both free modes
-
-  const map = new Map<string, { fx: number; fy: number }>();
-  const cx = 0; const cy = 0;
-  const agents    = nodes.filter(n => n.type === "agent");
-  const tasks     = nodes.filter(n => n.type === "task");
-  const docs      = nodes.filter(n => n.type === "doc");
-  const artifacts = nodes.filter(n => n.type === "artifact");
-  const rScale    = Math.min(W * 0.45, H * 0.85);
-
-  if (layout === "brain") {
-    // Monitor/Sistema no centro exato, demais agentes em elipse ao redor
-    const hubNode   = agents.find(n => n.id.includes("monitor") || n.id.includes("system"));
-    const otherAgents = agents.filter(n => n !== hubNode);
-    if (hubNode) map.set(hubNode.id, { fx: cx, fy: cy });
-    const aR = Math.max(rScale * 0.13, 40);
-    otherAgents.forEach((n, i) => {
-      const angle = otherAgents.length === 1 ? 0 : (i / otherAgents.length) * 2 * Math.PI;
-      map.set(n.id, { fx: cx + aR * Math.cos(angle) * 1.3, fy: cy + aR * Math.sin(angle) * 0.8 });
-    });
-    // Tasks: first neuron ring
-    const tR = Math.max(rScale * 0.32, 100);
-    tasks.forEach((n, i) => {
-      const angle = (i / Math.max(tasks.length, 1)) * 2 * Math.PI;
-      map.set(n.id, { fx: cx + tR * Math.cos(angle), fy: cy + tR * Math.sin(angle) });
-    });
-    // Docs: second ring
-    const dR = Math.max(rScale * 0.52, 160);
-    docs.forEach((n, i) => {
-      const angle = (i / Math.max(docs.length, 1)) * 2 * Math.PI + Math.PI / 5;
-      map.set(n.id, { fx: cx + dR * Math.cos(angle), fy: cy + dR * Math.sin(angle) });
-    });
-    // Artifacts: outer ring
-    const arR = Math.max(rScale * 0.70, 210);
-    artifacts.forEach((n, i) => {
-      const angle = (i / Math.max(artifacts.length, 1)) * 2 * Math.PI + Math.PI / 8;
-      map.set(n.id, { fx: cx + arR * Math.cos(angle), fy: cy + arR * Math.sin(angle) });
-    });
-
-  } else if (layout === "radial") {
-    // Monitor/Sistema no centro — fallback para CTO se não existir
-    const centerNode = agents.find(n => n.id.includes("monitor") || n.id.includes("system")) ?? agents.find(n => n.id.includes("cto")) ?? agents[0];
-    const others  = agents.filter(n => n !== centerNode);
-    if (centerNode) map.set(centerNode.id, { fx: cx, fy: cy });
-    const aR = Math.max(rScale * 0.20, 60);
-    others.forEach((n, i) => {
-      const angle = (i / Math.max(others.length, 1)) * 2 * Math.PI;
-      map.set(n.id, { fx: cx + aR * Math.cos(angle), fy: cy + aR * Math.sin(angle) });
-    });
-    const tR = Math.max(rScale * 0.38, 120);
-    tasks.forEach((n, i) => {
-      const angle = (i / Math.max(tasks.length, 1)) * 2 * Math.PI;
-      map.set(n.id, { fx: cx + tR * Math.cos(angle), fy: cy + tR * Math.sin(angle) });
-    });
-    const dR = Math.max(rScale * 0.55, 170);
-    docs.forEach((n, i) => {
-      const angle = (i / Math.max(docs.length, 1)) * 2 * Math.PI + 0.5;
-      map.set(n.id, { fx: cx + dR * Math.cos(angle), fy: cy + dR * Math.sin(angle) });
-    });
-    const arR = Math.max(rScale * 0.70, 220);
-    artifacts.forEach((n, i) => {
-      const angle = (i / Math.max(artifacts.length, 1)) * 2 * Math.PI + 0.2;
-      map.set(n.id, { fx: cx + arR * Math.cos(angle), fy: cy + arR * Math.sin(angle) });
-    });
-
-  } else if (layout === "pipeline") {
-    const phaseX: Record<string, number> = {
-      system: -3.5, spec: -3.5, cto: -2.5, engineer: -1.5, pm: -0.5, monitor: 0.3,
-      dev: 1.5, dev_backend: 1.5, dev_web: 1.5,
-      qa: 2.5, qa_backend: 2.5, qa_web: 2.5, devops: 3.5,
-    };
-    const colW = Math.min(rScale * 0.22, 100);
-
-    const agentCols = new Map<number, FGNode[]>();
-    for (const n of agents) {
-      const key = n.id.replace("agent-", "");
-      let phase = -2.5;
-      for (const [p, x] of Object.entries(phaseX))
-        if (key === p || key.startsWith(p + "_")) { phase = x; break; }
-      const col = Math.round(phase * 10);
-      if (!agentCols.has(col)) agentCols.set(col, []);
-      agentCols.get(col)!.push(n);
-    }
-    for (const [col, nodesInCol] of Array.from(agentCols.entries())) {
-      nodesInCol.forEach((n, i) => {
-        map.set(n.id, {
-          fx: cx + (col / 10) * colW,
-          fy: cy + (i - (nodesInCol.length - 1) / 2) * 45,
-        });
-      });
-    }
-
-    const devColX = cx + 1.5 * colW;
-    const taskSpan = Math.min(H * 0.38, 200);
-    tasks.forEach((n, i) => {
-      map.set(n.id, {
-        fx: devColX + (i % 3 - 1) * 22,
-        fy: cy - taskSpan / 2 + (i / Math.max(tasks.length - 1, 1)) * taskSpan,
-      });
-    });
-
-    const phaseDocX: Record<string, number> = {
-      spec: -3.5, cto: -2.5, engineer: -1.5, pm: -0.5, qa: 2.5, devops: 3.5, other: 0.5,
-    };
-    docs.forEach((n, i) => {
-      const x = phaseDocX[n.detail ?? "other"] ?? 0.5;
-      map.set(n.id, { fx: cx + x * colW + 12, fy: cy + (i % 4 - 1.5) * 28 + 45 });
-    });
-
-    const arColX = cx + 3.8 * colW;
-    artifacts.forEach((n, i) => {
-      map.set(n.id, {
-        fx: arColX + (i % 2) * 22,
-        fy: cy - (artifacts.length / 2) * 16 + i * 16,
-      });
-    });
-  }
-
-  return map;
-}
+// ── Constelação: as posições dos AGENTES são fixadas em buildForceData (fx/fy). ─
+// Não há mais múltiplos modos de layout — um único mapa estável e legível. Os
+// satélites (tasks/docs/artefatos) assentam por física perto do dono e congelam.
 
 // ── Task status colors (shared) ───────────────────────────────────────────────
 const STATUS_CHIP_COLOR: Record<string, string> = {
@@ -503,28 +409,28 @@ interface ForceGraphProps {
 export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, planningDocs = [], filter }: ForceGraphProps) {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [loading, setLoading]     = useState(true);
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>("free");
-  const filterRef = useRef(filter);
   // Start at 0 — ResizeObserver will set the real size; canvas won't render until measured
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
-  const [justCycled, setJustCycled] = useState(false);
-  const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  const [activeAgent, setActiveAgent] = useState<string | null>(null); // role base ativa (pulso)
   // Task drawer — abre ao clicar num nó de task
   const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
   const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
 
-  // Pulso animado — valor 0..1 que oscila para o efeito de luz no agente ativo
-  const pulseRef        = useRef<number>(0);
-  const rafRef          = useRef<number>(0);
-  const layoutModeRef   = useRef<LayoutMode>("free"); // acessível em refresh sem closure stale
-  // Sync filter → ref para que refresh() leia sem closure stale
+  const filterRef = useRef(filter);
   useEffect(() => { filterRef.current = filter; }, [filter]);
-  // Animação de entrada: nós nascem um a um
-  const [revealCount, setRevealCount] = useState<number | null>(null); // null = mostrar todos
+
+  // Pulso animado (0..1) para o halo do agente ativo. activeKeyRef é lido pelo painter
+  // SEM disparar rebuild — mudar o agente ativo não re-simula a física.
+  const pulseRef      = useRef<number>(0);
+  const rafRef        = useRef<number>(0);
+  const activeKeyRef  = useRef<string | null>(null);
+  const lastWorkAtRef = useRef<number>(0);
+  useEffect(() => { activeKeyRef.current = activeAgent; }, [activeAgent]);
 
   const containerRef   = useRef<HTMLDivElement>(null);
   const prevSignature  = useRef<string>("");
+  const needsFitRef    = useRef<boolean>(true);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fgRef          = useRef<any>(null);
 
@@ -540,30 +446,40 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     return () => obs.disconnect();
   }, []);
 
-  // Fontes cacheadas: diálogo vem do stream (sistema nervoso); tasks/arquivos vêm do poll.
-  const dialogueRef = useRef<DialogueEntry[]>([]);
-  const tasksRef     = useRef<TaskItem[]>([]);
-  const filesRef     = useRef<CodeFile[]>([]);
+  // Fontes cacheadas. O diálogo tem DUAS origens unidas no rebuild:
+  //  • histórico via refresh() (funciona mesmo com projeto ocioso/stream desligado)
+  //  • ao vivo via useDialogueStream (deltas enquanto o projeto roda).
+  const dialogueHistRef = useRef<DialogueEntry[]>([]);
+  const dialogueLiveRef = useRef<DialogueEntry[]>([]);
+  const tasksRef        = useRef<TaskItem[]>([]);
+  const filesRef        = useRef<CodeFile[]>([]);
 
-  // ── Rebuild (SEM rede): monta o grafo a partir das fontes cacheadas ────────
-  // Chamado a cada evento novo do stream (barato) e ao fim de cada poll de tasks/arquivos.
+  // ── Rebuild (SEM rede): monta a constelação a partir das fontes cacheadas ───
   const rebuild = useCallback(() => {
-    const dialogue = dialogueRef.current;
-    const tasks    = tasksRef.current;
-    const files    = filesRef.current;
-    const lastWorking   = [...dialogue].reverse().find(e => e.eventType === "agent_working");
-    const activeAgentId = lastWorking?.fromAgent;
-    setActiveAgent(activeAgentId ? normKey(activeAgentId) : null);
+    // União dedup por id (histórico + ao vivo); ordena por created p/ "último working".
+    const byId = new Map<string, DialogueEntry>();
+    for (const e of dialogueHistRef.current) byId.set(e.id, e);
+    for (const e of dialogueLiveRef.current) byId.set(e.id, e);
+    const dialogue = Array.from(byId.values()).sort((a, b) =>
+      (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+    const tasks = tasksRef.current;
+    const files = filesRef.current;
+
+    // Agente ativo = último "agent_working" (só alimenta o pulso, não a estrutura).
+    const lastWorking = [...dialogue].reverse().find(e => e.eventType === "agent_working");
+    if (lastWorking) {
+      const key = baseRole(lastWorking.fromAgent);
+      setActiveAgent(prev => (prev === key ? prev : key));
+      lastWorkAtRef.current = performance.now();
+    }
+
     tasks.forEach(t => taskMapRef.current.set(`task-${t.taskId}`, t));
-    const data = buildForceData(
-      dialogue, tasks, files, activeAgentId, planningDocs,
-      layoutModeRef.current === "flow", // compactArtifacts no modo Fluxo
-      filterRef.current,                // filtro de visibilidade
-    );
+    const data = buildForceData(dialogue, tasks, files, planningDocs, false, filterRef.current);
+
+    // Assinatura: ids + detail (cobre status/cor de task) + nº de links. NÃO inclui
+    // "ativo" (isso é só pulso via ref) → evita re-simular a cada fala.
     const sig = [
-      // Inclui a cor: mudança só-de-cor (ex.: nó muda de estado sem mudar id/detail) ainda
-      // dispara rebuild — senão o early-return abaixo engoliria a atualização visual.
-      data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}:${n.color ?? ""}`).sort().join("|"),
+      data.nodes.map(n => `${n.id}:${n.detail ?? ""}:${n.color}`).sort().join("|"),
       data.links.length,
     ].join("§");
     if (sig === prevSignature.current) return;
@@ -573,33 +489,41 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       const prevNodeMap = new Map(prev.nodes.map(n => [n.id, n]));
       const merged = data.nodes.map(n => {
         const ex = prevNodeMap.get(n.id) as NodeWithPos | undefined;
-        // Preserve physics position (x,y,vx,vy) AND layout pins (fx,fy)
-        if (ex) return { ...ex, isActive: n.isActive, detail: n.detail, color: n.color };
+        if (ex) {
+          // Preserva posição física (x,y,vx,vy); reafirma pin (fx/fy) e visual.
+          return { ...ex, fx: n.fx, fy: n.fy, color: n.color, detail: n.detail, size: n.size, label: n.label, role: n.role };
+        }
         return n;
       });
+      if (merged.length !== prev.nodes.length) needsFitRef.current = true;
       return { nodes: merged, links: data.links };
     });
   }, [planningDocs]);
 
-  // ── Poll de tasks/arquivos (o diálogo já flui pelo stream) ─────────────────
+  // ── Poll de tasks/arquivos + histórico de diálogo (robusto p/ projeto ocioso) ─
   const refresh = useCallback(async () => {
     try {
-      const [tasks, codeFilesData] = await Promise.all([
+      const [tasks, codeFilesData, dlg] = await Promise.all([
         apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`).catch(() => [] as TaskItem[]),
         apiGet<CodeFilesResponse>(`/api/projects/${projectId}/code-files`).catch(() => ({ files: [], appsRoot: null, totalFiles: 0 })),
+        apiGet<DialogueEntry[]>(`/api/projects/${projectId}/dialogue`).catch(() => [] as DialogueEntry[]),
       ]);
       tasksRef.current = Array.isArray(tasks) ? tasks : [];
       filesRef.current = (codeFilesData as CodeFilesResponse).files ?? [];
+      dialogueHistRef.current = Array.isArray(dlg) ? dlg : [];
       rebuild();
     } catch { /* silent */ } finally { setLoading(false); }
   }, [projectId, rebuild]);
 
   // ── Stream ao vivo do diálogo: dispara o "pacote" na aresta real ───────────
   const handleLiveEvent = useCallback((entry: DialogueEntry) => {
-    const fk = normKey(entry.fromAgent);
-    const tk = normKey(entry.toAgent);
-    // Reage NA HORA: o halo pulsante acende no agente que começou a trabalhar.
-    if (entry.eventType === "agent_working" && fk) setActiveAgent(fk);
+    const fk = baseRole(entry.fromAgent);
+    const tk = baseRole(entry.toAgent);
+    // Reage NA HORA: acende o halo no agente que começou a trabalhar.
+    if (entry.eventType === "agent_working") {
+      setActiveAgent(fk);
+      lastWorkAtRef.current = performance.now();
+    }
     if (!fk || !tk || fk === tk) return;
     // graphData() do react-force-graph devolve os objetos de link REAIS que a engine anima.
     const g = fgRef.current?.graphData?.() as GraphData | undefined;
@@ -609,17 +533,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     const link = g.links.find(l => {
       const s = idOf(l.source); const t = idOf(l.target);
       return (s === fromId && t === toId) || (s === toId && t === fromId);
-    }) as (FGLink & { __burstColor?: string }) | undefined;
-    if (!link) return; // aresta ainda não existe — o próximo rebuild a cria
-    const color = EVENT_PACKET_COLOR[entry.eventType ?? ""] ?? "#8B949E";
-    link.__burstColor = color + "FF";
+    }) as FGLink | undefined;
+    if (!link) return; // aresta ainda não existe — o próximo rebuild a cria (par observado)
+    const color = EVENT_PACKET_COLOR[entry.eventType ?? ""] ?? "#9AA4C0";
+    link.__packetColor = color;
+    // A janela "quente" precisa esfriar ENQUANTO a partícula ainda voa (é o que mantém
+    // o canvas repintando quando não há agente ativo). Partícula a speed 0.012 cruza em
+    // ~83 frames (~0.7s a 120Hz, ~1.4s a 60Hz); 650ms fica sob a menor janela → o
+    // esfriamento é sempre pintado, sem aresta "presa acesa" após a engine congelar.
+    link.__hotUntil = performance.now() + 650;
     try {
-      // Rajada: 2 partículas para o pacote "encorpar" visualmente.
       fgRef.current?.emitParticle?.(link);
       fgRef.current?.emitParticle?.(link);
     } catch { /* engine ainda não montada */ }
-    // Limpa o tint depois que o pacote atravessa (partícula dura ~1/speed).
-    setTimeout(() => { link.__burstColor = undefined; }, 1600);
   }, []);
 
   const { entries: liveEntries, connected: liveConnected } = useDialogueStream({
@@ -628,229 +554,218 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     onEvent: handleLiveEvent,
   });
 
-  // Diálogo mudou (histórico carregou ou chegou evento ao vivo) → rebuild sem rede.
+  // Diálogo ao vivo mudou → atualiza a fonte viva e rebuild (early-return se nada mudou).
   useEffect(() => {
-    dialogueRef.current = liveEntries;
+    dialogueLiveRef.current = liveEntries;
     rebuild();
   }, [liveEntries, rebuild]);
 
-  // Poll de tasks/arquivos (estrutura que não vem pelo stream).
+  // Poll de tasks/arquivos/histórico.
   useEffect(() => {
     refresh();
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
   }, [refresh, pollIntervalMs]);
 
-  // Quando filter muda: invalida cache e força rebuild imediato
+  // filter mudou → invalida cache e força rebuild imediato.
   useEffect(() => {
     prevSignature.current = "";
     rebuild();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
-  // ── RAF loop para pulso do agente ativo ───────────────────────────────────
+  // ── RAF: pulso do agente ativo (auto-desliga após 6s sem novo "working") ────
   useEffect(() => {
     if (!activeAgent) { pulseRef.current = 0; return; }
     const t0 = performance.now();
     const tick = (now: number) => {
-      pulseRef.current = (Math.sin((now - t0) / 400) + 1) / 2; // 0..1, ~2.5Hz
-      fgRef.current?.refresh?.(); // força repaint do canvas sem re-render React
+      // Expira o estado ativo se faz tempo que ninguém trabalha (evita RAF eterno).
+      if (now - lastWorkAtRef.current > 6000) { pulseRef.current = 0; setActiveAgent(null); return; }
+      pulseRef.current = (Math.sin((now - t0) / 420) + 1) / 2; // 0..1 suave
+      // NÃO chamamos refresh() — esse método não existe em react-force-graph-2d@1.29.1.
+      // O repaint contínuo do pulso vem de autoPauseRedraw={false} enquanto há agente
+      // ativo (o loop de render interno do force-graph lê pulseRef a cada frame).
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
   }, [activeAgent]);
 
-  // ── Apply layout whenever mode or container size changes ──────────────────
+  // ── Configuração de forças — física que ASSENTA e congela (SEM reheat loop) ──
   useEffect(() => {
     if (graphData.nodes.length === 0) return;
-    const positions = computePositions(graphData.nodes, layoutMode, containerSize.width, containerSize.height);
-
-    setGraphData(prev => {
-      // Ao trocar de layout, resetar links para strings puras (IDs) para forçar
-      // o ForceGraph2D a re-resolver source/target do zero.
-      // Sem isso, links resolvidos para objetos de nós anteriores ficam apontando
-      // para nós com posições erradas após a mutação de fx/fy.
-      const freshLinks = prev.links.map(l => ({
-        ...l,
-        source: typeof l.source === "object" ? (l.source as FGNode).id : l.source as string,
-        target: typeof l.target === "object" ? (l.target as FGNode).id : l.target as string,
-      }));
-      return {
-      ...prev,
-      links: freshLinks,
-      nodes: prev.nodes.map(n => {
-        const nw = n as NodeWithPos;
-        if (!positions) {
-          // Free: strip fx/fy so physics takes over
-          const copy = { ...nw };
-          delete (copy as NodeWithPos).fx;
-          delete (copy as NodeWithPos).fy;
-          return copy as FGNode;
+    let tries = 0;
+    const configure = () => {
+      const g = fgRef.current;
+      if (!g) { if (tries++ < 6) setTimeout(configure, 60); return; } // fgRef pode não estar pronto
+      try {
+        g.d3Force("charge")?.strength(-160).distanceMax(340);
+        const linkF = g.d3Force("link");
+        if (linkF) {
+          linkF.distance((l: FGLink) => (l.kind === "satellite" ? 44 : 132))
+               .strength((l: FGLink) => (l.kind === "satellite" ? 0.55 : 0.03));
         }
-        const pos = positions.get(n.id);
-        return pos ? { ...nw, fx: pos.fx, fy: pos.fy } : { ...nw };
-      }),
-    }; }); // fechamento do setGraphData
+        // Sem força de centro: agentes já são fixados; satélites ancoram nos links.
+        g.d3Force("center", null);
+        g.d3Force("collide", forceCollide((n: FGNode) => (n.size ?? 4) + 3.5).strength(0.9));
+        g.d3ReheatSimulation?.();
+      } catch { /* força pode não existir ainda — o retry acima cobre */ }
+    };
+    configure();
+  }, [graphData.nodes.length]);
 
-    // Atualizar ref e forçar re-build do grafo se compactArtifacts mudou
-    const wasFlow = layoutModeRef.current === "flow";
-    const isFlow  = layoutMode === "flow";
-    layoutModeRef.current = layoutMode;
-    if (wasFlow !== isFlow) {
-      prevSignature.current = ""; // invalidar cache para forçar rebuild
-    }
-
-    // Reheat physics so nodes animate to new positions
-    setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutMode, containerSize.width, containerSize.height]);
-
-  // ── Cycle layout on background click ─────────────────────────────────────
+  // ── Recentraliza ao clicar no fundo (não embaralha o layout) ───────────────
   const handleBackgroundClick = useCallback(() => {
-    setLayoutMode(prev => {
-      const idx = LAYOUT_CYCLE.indexOf(prev);
-      // Último da lista → volta ao primeiro ("free") em vez de wrap implícito
-      return LAYOUT_CYCLE[(idx + 1) % LAYOUT_CYCLE.length];
-    });
-    setJustCycled(true);
-    setTimeout(() => setJustCycled(false), 1200);
+    needsFitRef.current = true;
+    fgRef.current?.zoomToFit?.(600, 70);
   }, []);
 
-  // Reset explícito para "free" (clique duplo no badge ou botão)
-  const handleResetLayout = useCallback(() => {
-    setLayoutMode("free");
-    setJustCycled(true);
-    setTimeout(() => setJustCycled(false), 1200);
-    setTimeout(() => fgRef.current?.d3ReheatSimulation?.(), 30);
+  // Links já vêm prontos do rebuild; a pintura decide largura/cor/curvatura por kind.
+  const displayLinks = useMemo(() => graphData.links, [graphData.links]);
+
+  // ── Aparência das arestas por tipo (backbone × satélite) + estado "quente" ────
+  // Backbone (spoke/flow/orch) sempre visível dá estrutura ao mesh em repouso.
+  // Uma aresta fica "quente" (__hotUntil) enquanto o pacote a atravessa.
+  const linkColorFn = useCallback((link: object) => {
+    const l = link as FGLink;
+    if ((l.__hotUntil ?? 0) > performance.now()) return (l.__packetColor ?? l.color) + "F0";
+    if (l.kind === "satellite") return "#2B3242";      // satélites: traço tênue
+    if (l.kind === "orch")      return "#4B5570";
+    return l.color;                                     // spoke/flow: backbone
+  }, []);
+  const linkWidthFn = useCallback((link: object) => {
+    const l = link as FGLink;
+    if ((l.__hotUntil ?? 0) > performance.now()) return 2.4;
+    if (l.kind === "satellite") return 0.5;
+    if (l.kind === "spoke")     return 1.4;
+    return 1;
+  }, []);
+  const linkCurveFn = useCallback((link: object) => {
+    const l = link as FGLink;
+    if (l.kind === "flow" || l.kind === "orch") return 0.18; // curva orgânica no pipeline
+    return 0; // spoke/satellite retos = leitura estrutural limpa
   }, []);
 
-  // ── Enriquecer links: bidirecional + espessura + partículas por relação ──
-  const displayLinks = useMemo(() => {
-    const existing = new Set(graphData.links.map(l => {
-      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
-      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
-      return `${s}|${t}`;
-    }));
-
-    // Sempre adicionar links reversos para pares bidirecionais (não só no brain)
-    const reversed: FGLink[] = [];
-    for (const l of graphData.links) {
-      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
-      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
-      const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
-      if (s.startsWith("agent-") && t.startsWith("agent-") &&
-          (BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`) || BIDIRECTIONAL_PAIRS.has(`${tk}|${sk}`)) &&
-          !existing.has(`${t}|${s}`)) {
-        reversed.push({ source: t, target: s, color: l.color });
+  // ── Fundo: gradiente radial profundo + starfield sutil (sob os nós) ────────
+  const paintBackground = useCallback((ctx: CanvasRenderingContext2D) => {
+    const W = ctx.canvas.width; const H = ctx.canvas.height; // device px
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // espaço de tela
+    const bg = ctx.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, Math.max(W, H) * 0.75);
+    bg.addColorStop(0, "#141B2B");
+    bg.addColorStop(1, "#0A0C11");
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    // starfield determinístico (sem Math.random) — pontos discretos, muito sutis
+    ctx.fillStyle = "rgba(255,255,255,0.035)";
+    const step = 54;
+    for (let gx = (W % step) / 2; gx < W; gx += step)
+      for (let gy = (H % step) / 2; gy < H; gy += step) {
+        const jx = ((gx * 13.13 + gy * 7.7) % 13) - 6.5;
+        const jy = ((gx * 5.31 + gy * 9.19) % 13) - 6.5;
+        ctx.beginPath(); ctx.arc(gx + jx, gy + jy, 0.7, 0, 2 * Math.PI); ctx.fill();
       }
-    }
+    ctx.restore();
+  }, []);
 
-    return [...graphData.links, ...reversed].map(l => {
-      const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
-      const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
-      const isAgentLink = s.startsWith("agent-") && t.startsWith("agent-");
-      const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
-      const isBidi = BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`);
-      // Link fica mais vivo quando o agente de origem ou destino está ativo
-      const isHot = activeAgent && (sk === activeAgent || tk === activeAgent);
-      return {
-        ...l,
-        _width:     isBidi ? 2.5 : isAgentLink ? 1.5 : 1,
-        _particles: isBidi ? (isHot ? 6 : 3) : isAgentLink ? (isHot ? 4 : 2) : 1,
-        _pWidth:    isBidi ? (isHot ? 3.5 : 2) : 1.5,
-        _color:     isHot ? (l.color.slice(0, 7) + "FF") : l.color,
-      };
-    });
-  }, [graphData.links, activeAgent]);
+  // ── Vinheta (sobre os nós) — foca o olhar no centro ────────────────────────
+  const paintVignette = useCallback((ctx: CanvasRenderingContext2D) => {
+    const W = ctx.canvas.width; const H = ctx.canvas.height;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.34, W / 2, H / 2, Math.max(W, H) * 0.72);
+    vg.addColorStop(0, "rgba(10,12,17,0)");
+    vg.addColorStop(1, "rgba(6,8,12,0.55)");
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }, []);
 
-  // ── Node canvas painter ───────────────────────────────────────────────────
+  // ── Node painter — premium: glow por gradiente + rim light + label com halo ─
   const paintNode = useCallback((node: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
-    const n = node as FGNode & { x?: number; y?: number };
+    const n = node as FGNode;
     if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
     const x = n.x as number; const y = n.y as number;
-    const r = (n.size ?? 5) * (n.isActive ? 1.4 : 1);
-    const pulse = pulseRef.current; // 0..1 oscilando via RAF
+    const isAgent = n.type === "agent";
+    const isActive = isAgent && activeKeyRef.current === n.role;
+    const pulse = pulseRef.current; // 0..1 via RAF (só quando há agente ativo)
+    const r = (n.size ?? 4) * (isActive ? 1.15 + pulse * 0.12 : 1);
 
-    if (n.isActive) {
-      // Halo pulsante — 3 anéis concêntricos com opacidade variável
-      const haloR1 = r * (2.2 + pulse * 1.0);
-      const haloR2 = r * (3.5 + pulse * 1.5);
-      const haloR3 = r * (5.0 + pulse * 2.0);
-      const alpha1 = Math.round((0.45 + pulse * 0.35) * 255).toString(16).padStart(2, "0");
-      const alpha2 = Math.round((0.25 + pulse * 0.20) * 255).toString(16).padStart(2, "0");
-      const alpha3 = Math.round((0.10 + pulse * 0.10) * 255).toString(16).padStart(2, "0");
+    // 1) GLOW — halo suave por gradiente radial (barato; shadowBlur fica só p/ ativo).
+    const glowR = r * (isActive ? 3.6 + pulse * 1.2 : isAgent ? 2.4 : 1.9);
+    const glowA = isActive ? 0.42 + pulse * 0.30 : isAgent ? 0.20 : 0.14;
+    const ga = Math.round(Math.min(glowA, 1) * 255).toString(16).padStart(2, "0");
+    const grad = ctx.createRadialGradient(x, y, r * 0.6, x, y, glowR);
+    grad.addColorStop(0, n.color + ga);
+    grad.addColorStop(1, n.color + "00");
+    ctx.beginPath(); ctx.arc(x, y, glowR, 0, 2 * Math.PI);
+    ctx.fillStyle = grad; ctx.fill();
 
-      // Anel 1 — mais próximo, mais denso
-      ctx.beginPath(); ctx.arc(x, y, haloR1, 0, 2 * Math.PI);
-      const g1 = ctx.createRadialGradient(x, y, r, x, y, haloR1);
-      g1.addColorStop(0, n.color + alpha1); g1.addColorStop(1, n.color + "00");
-      ctx.fillStyle = g1; ctx.fill();
-
-      // Anel 2 — médio
-      ctx.beginPath(); ctx.arc(x, y, haloR2, 0, 2 * Math.PI);
-      const g2 = ctx.createRadialGradient(x, y, haloR1 * 0.6, x, y, haloR2);
-      g2.addColorStop(0, n.color + alpha2); g2.addColorStop(1, n.color + "00");
-      ctx.fillStyle = g2; ctx.fill();
-
-      // Anel 3 — externo, suave
-      ctx.beginPath(); ctx.arc(x, y, haloR3, 0, 2 * Math.PI);
-      const g3 = ctx.createRadialGradient(x, y, haloR2 * 0.7, x, y, haloR3);
-      g3.addColorStop(0, n.color + alpha3); g3.addColorStop(1, n.color + "00");
-      ctx.fillStyle = g3; ctx.fill();
-
-      // Borda pulsante brilhante
-      ctx.beginPath(); ctx.arc(x, y, r + 1.5 + pulse * 2, 0, 2 * Math.PI);
-      ctx.strokeStyle = n.color + Math.round((0.6 + pulse * 0.4) * 255).toString(16).padStart(2, "0");
-      ctx.lineWidth = 1.5 + pulse * 1.5; ctx.stroke();
+    if (isActive) {
+      // Anel pulsante externo — reservamos shadowBlur para os pouquíssimos ativos.
+      ctx.save();
+      ctx.beginPath(); ctx.arc(x, y, r + 2.5 + pulse * 3, 0, 2 * Math.PI);
+      ctx.strokeStyle = n.color + Math.round((0.5 + pulse * 0.4) * 255).toString(16).padStart(2, "0");
+      ctx.lineWidth = 1 + pulse * 1.4;
+      ctx.shadowColor = n.color; ctx.shadowBlur = 12 + pulse * 10;
+      ctx.stroke();
+      ctx.restore();
     }
 
-    ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
-    ctx.fillStyle = n.type === "agent" ? n.color : n.color + "CC";
-    ctx.fill();
-
-    if (n.type === "agent") {
-      ctx.strokeStyle = n.color; ctx.lineWidth = n.isActive ? 2 : 0.8; ctx.stroke();
+    // 2) DISCO — corpo do nó.
+    if (n.id === "artifact-group") {
+      // Agregador de artefatos — círculo tracejado.
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.setLineDash([2, 2]); ctx.strokeStyle = "#8A93A8"; ctx.lineWidth = 1.1; ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.fillStyle = isAgent ? n.color : n.color + "D8";
+      ctx.fill();
+      // 3) RIM LIGHT — aro fino claro que dá volume/leitura sobre o fundo escuro.
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
+      ctx.strokeStyle = isAgent ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.28)";
+      ctx.lineWidth = isAgent ? 1 : 0.6;
+      ctx.stroke();
     }
 
-    const drawCentered = (text: string, cx2: number, cy2: number, fontSize: number, font: string) => {
-      ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    // 4) GLYPH — avatar/ícone dentro do nó.
+    const drawCentered = (text: string, size: number, font: string, fill: string) => {
+      ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = fill;
       const m = ctx.measureText(text);
-      const ascent  = m.actualBoundingBoxAscent  ?? fontSize * 0.7;
-      const descent = m.actualBoundingBoxDescent ?? fontSize * 0.2;
-      ctx.fillText(text, cx2, cy2 + (ascent - descent) / 2);
+      const ascent = m.actualBoundingBoxAscent ?? size * 0.7;
+      const descent = m.actualBoundingBoxDescent ?? size * 0.2;
+      ctx.fillText(text, x, y + (ascent - descent) / 2);
     };
-
-    if (n.type === "agent") {
-      const es = Math.max(r * 1.05, 6);
-      ctx.fillStyle = "#FFFFFF";
-      drawCentered(n.detail ?? "🤖", x, y, es, `${es}px serif`);
+    if (isAgent) {
+      const es = Math.max(r * 1.0, 5);
+      drawCentered(n.detail ?? "⬡", es, `${es}px serif`, "#FFFFFF");
     } else if (n.type === "task") {
       const icon = n.detail === "DONE" || n.detail === "QA_PASS" ? "✓"
         : n.detail === "IN_PROGRESS" || n.detail === "WAITING_REVIEW" ? "⟳"
         : n.detail === "QA_FAIL" || n.detail === "BLOCKED" ? "✗" : "·";
-      const ts = Math.max(r * 0.85, 4); ctx.fillStyle = "#E6EDF3";
-      drawCentered(icon, x, y, ts, `bold ${ts}px Inter, sans-serif`);
+      const ts = Math.max(r * 0.9, 4);
+      drawCentered(icon, ts, `bold ${ts}px Inter, sans-serif`, "#0B0E14");
     } else if (n.id === "artifact-group") {
-      // Nó agregador de artefatos — círculo tracejado com contagem
-      ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI);
-      ctx.setLineDash([2, 2]);
-      ctx.strokeStyle = "#6B7280AA"; ctx.lineWidth = 1.2; ctx.stroke();
-      ctx.setLineDash([]);
-      const countStr = n.label.split(" ")[0]; // ex: "99+"
-      const cs = Math.max(r * 0.8, 4); ctx.fillStyle = "#9CA3AF";
-      drawCentered(countStr, x, y, cs, `bold ${cs}px Inter, sans-serif`);
+      const countStr = n.label.split(" ")[0]; // ex.: "99+"
+      const cs = Math.max(r * 0.8, 4);
+      drawCentered(countStr, cs, `bold ${cs}px Inter, sans-serif`, "#E6EDF3");
     } else if (n.type === "doc") {
       const iconMap: Record<string, string> = { cto: "🎯", engineer: "⚙️", pm: "📋", qa: "✅", devops: "🐳", spec: "📄", other: "📁" };
       const ds = Math.max(r * 0.85, 4);
-      drawCentered(iconMap[n.detail ?? "other"] ?? "📁", x, y, ds, `${ds}px serif`);
+      drawCentered(iconMap[n.detail ?? "other"] ?? "📁", ds, `${ds}px serif`, "#FFFFFF");
     }
 
-    const fontSize = Math.max(10 / globalScale, 1.5);
-    if (globalScale > 0.6 || n.type === "agent") {
-      ctx.font = `${n.type === "agent" ? "bold " : ""}${fontSize}px Inter, sans-serif`;
+    // 5) LABEL — rótulo com halo escuro para contraste. Roster SEMPRE rotulado;
+    //    satélites só quando dá zoom (evita poluição visual em repouso).
+    const showLabel = isAgent || globalScale > 1.3;
+    if (showLabel) {
+      const fontSize = Math.max((isAgent ? 12 : 10) / globalScale, 1.5);
+      ctx.font = `${isAgent ? "600 " : ""}${fontSize}px Inter, system-ui, sans-serif`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillStyle = n.type === "agent" ? "#E6EDF3" : n.color;
-      ctx.fillText(n.id === "artifact-group" ? n.label : n.label, x, y + r + fontSize * 1.1);
+      const ly = y + r + fontSize * 1.15;
+      ctx.lineWidth = 3 / globalScale;
+      ctx.strokeStyle = "rgba(8,10,16,0.9)";
+      ctx.strokeText(n.label, x, ly);
+      ctx.fillStyle = isAgent ? "#EAECEF" : "#9AA4B8";
+      ctx.fillText(n.label, x, ly);
     }
   }, []);
 
@@ -876,79 +791,58 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     );
   }
 
-  const meta = LAYOUT_META[layoutMode];
-
-  // Filtro de reveal: ao animar, mostrar nós progressivamente (agentes primeiro)
-  const visibleNodes = revealCount !== null
-    ? graphData.nodes
-        .slice()
-        .sort((a, b) => {
-          // Ordem: agentes → tasks → docs → artifacts
-          const order = (n: FGNode) => n.type === "agent" ? 0 : n.type === "task" ? 1 : n.type === "doc" ? 2 : 3;
-          return order(a) - order(b);
-        })
-        .slice(0, revealCount)
-    : graphData.nodes;
-
-  const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
-  const visibleLinks = revealCount !== null
-    ? displayLinks.filter(l => {
-        const s = typeof l.source === "object" ? (l.source as FGNode).id : l.source as string;
-        const t = typeof l.target === "object" ? (l.target as FGNode).id : l.target as string;
-        return visibleNodeIds.has(s) && visibleNodeIds.has(t);
-      })
-    : displayLinks;
-
   return (
     <Box
       ref={containerRef}
-      sx={{ height: "100%", minHeight: height, bgcolor: "#0D0F14", borderRadius: 1, overflow: "hidden", position: "relative" }}
+      sx={{ height: "100%", minHeight: height, bgcolor: "#0A0C11", borderRadius: 1, overflow: "hidden", position: "relative" }}
     >
       <ForceGraph2D
         ref={fgRef}
-        graphData={{ nodes: visibleNodes as object[], links: visibleLinks as object[] }}
+        graphData={{ nodes: graphData.nodes as object[], links: displayLinks as object[] }}
         width={canvasW}
         height={canvasH}
-        backgroundColor="#0D0F14"
+        backgroundColor="#0A0C11"
+        // Enquanto um agente pulsa, mantém o canvas repintando (o RAF anima pulseRef);
+        // em repouso, deixa o force-graph pausar o render (a partícula de um evento
+        // ainda dispara redraw sozinha por __photons). Evita 60fps eternos à toa.
+        autoPauseRedraw={!activeAgent}
+        onRenderFramePre={paintBackground}
+        onRenderFramePost={paintVignette}
         nodeCanvasObject={paintNode}
         nodeCanvasObjectMode={() => "replace"}
-        linkColor={(link) => (link as FGLink & { _color?: string })._color ?? (link as FGLink).color}
-        linkWidth={(link) => (link as FGLink & { _width?: number })._width ?? 1}
-        linkCurvature={(link) => {
-          const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
-          const t = typeof (link as FGLink).target === "object" ? ((link as FGLink).target as FGNode).id : (link as FGLink).target as string;
-          const sk = s.replace("agent-", ""); const tk = t.replace("agent-", "");
-          const isBidi = BIDIRECTIONAL_PAIRS.has(`${sk}|${tk}`);
-          // flow: curvas orgânicas em todos os links de agente; bidi: mais curvado
-          if (layoutMode === "flow") return isBidi ? 0.4 : 0.15;
-          return isBidi ? 0.2 : 0;
+        nodePointerAreaPaint={(node, color, ctx) => {
+          const n = node as FGNode;
+          if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(n.x as number, n.y as number, (n.size ?? 4) + 3, 0, 2 * Math.PI);
+          ctx.fill();
         }}
-        linkDirectionalParticles={(link) => (link as FGLink & { _particles?: number })._particles ?? 1}
-        linkDirectionalParticleWidth={(link) => (link as FGLink & { _pWidth?: number })._pWidth ?? 1.5}
+        linkColor={linkColorFn}
+        linkWidth={linkWidthFn}
+        linkCurvature={linkCurveFn}
+        // Sem partículas permanentes — os pacotes vivos são emitidos via emitParticle
+        // no instante do evento (handleLiveEvent). Cor por tipo de evento.
+        linkDirectionalParticles={0}
+        linkDirectionalParticleWidth={2.4}
         linkDirectionalParticleColor={(link) => {
-          const l = link as FGLink & { __burstColor?: string; _color?: string };
-          return l.__burstColor ?? l._color ?? l.color; // pacote ao vivo tem prioridade
+          const l = link as FGLink;
+          return l.__packetColor ?? l.color;
         }}
-        linkDirectionalParticleSpeed={0.005}
-        linkDirectionalArrowLength={(link) => {
-          const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
-          const t = typeof (link as FGLink).target === "object" ? ((link as FGLink).target as FGNode).id : (link as FGLink).target as string;
-          return s.startsWith("agent-") && t.startsWith("agent-") ? 5 : 0;
-        }}
-        linkDirectionalArrowRelPos={0.85}
+        linkDirectionalParticleSpeed={0.012}
         nodeRelSize={1}
-        // Manter agentes mais próximos entre si — força de carga menor para agentes
-        d3AlphaDecay={layoutMode === "free" || layoutMode === "flow" ? 0.015 : 0.025}
-        d3VelocityDecay={layoutMode === "free" || layoutMode === "flow" ? 0.25 : 0.45}
-        cooldownTicks={layoutMode === "free" || layoutMode === "flow" ? 150 : 100}
+        // Física estável: assenta e CONGELA (sem reheat perpétuo).
+        d3AlphaDecay={0.035}
+        d3VelocityDecay={0.55}
+        d3AlphaMin={0.02}
+        warmupTicks={40}
+        cooldownTicks={220}
+        cooldownTime={9000}
         onEngineStop={() => {
-          if ((layoutMode === "free" || layoutMode === "flow") && fgRef.current) {
-            try {
-              fgRef.current.d3Force("charge")?.strength?.((n: FGNode) =>
-                n.type === "agent" ? -120 : n.type === "task" ? -30 : -15
-              );
-              fgRef.current.d3ReheatSimulation?.();
-            } catch { /* silent — força pode não existir */ }
+          // Enquadra UMA vez quando o layout assenta (ou quando a topologia muda).
+          if (needsFitRef.current && fgRef.current) {
+            try { fgRef.current.zoomToFit?.(700, 80); } catch { /* fgRef pode sumir */ }
+            needsFitRef.current = false;
           }
         }}
         onBackgroundClick={handleBackgroundClick}
@@ -967,89 +861,42 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
       />
 
-      {/* Layout badge — top right — clicável para reset */}
+      {/* Indicador do sistema nervoso — top right */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
-          {/* Indicador do sistema nervoso: stream ao vivo × fallback de polling */}
           <Chip
-            label={liveConnected ? "● ao vivo" : "○ polling"}
+            label={liveConnected ? "● ao vivo" : "○ em espera"}
             size="small"
             sx={{
-              bgcolor: "#161B22EE",
+              bgcolor: "#0F1420EE",
               color: liveConnected ? "#34D399" : "#8B949E",
               border: "1px solid",
-              borderColor: liveConnected ? "#34D39955" : "#30363D",
+              borderColor: liveConnected ? "#34D39955" : "#2A3040",
               fontSize: "0.6rem", height: 22, pointerEvents: "none",
               transition: "all 0.3s ease",
             }}
           />
-          {/* Botão Animar — nós nascem um a um em sequência rápida */}
-          <Chip
-            label={activeAgent ? "⚡ ativo" : revealCount !== null ? "…" : "▶ animar"}
-            size="small"
-            onClick={() => {
-              if (revealCount !== null) return; // já animando
-              const total = graphData.nodes.length;
-              if (total === 0) return;
-              // Velocidade: ~30ms por nó, mín 15ms, máx 80ms — mais rápido para muitos nós
-              const delay = Math.max(15, Math.min(80, Math.round(2000 / total)));
-              setRevealCount(0);
-              let count = 0;
-              const iv = setInterval(() => {
-                count++;
-                setRevealCount(count);
-                if (count >= total) {
-                  clearInterval(iv);
-                  setTimeout(() => setRevealCount(null), 400);
-                }
-              }, delay);
-              fgRef.current?.d3ReheatSimulation?.();
-            }}
-            sx={{
-              bgcolor: activeAgent ? "#6366F122" : "#161B22EE",
-              color: activeAgent ? "#6366F1" : "#484F58",
-              border: "1px solid", borderColor: activeAgent ? "#6366F155" : "#30363D",
-              fontSize: "0.6rem", height: 22, cursor: "pointer",
-              transition: "all 0.3s ease",
-            }}
-          />
-          {/* Botão reset — só aparece quando não está em "free" */}
-          {layoutMode !== "free" && (
+          {activeAgent && (
             <Chip
-              label="↩ reset"
+              label="⚡ trabalhando"
               size="small"
-              onClick={handleResetLayout}
               sx={{
-                bgcolor: "#161B22EE", color: "#6366F1",
-                border: "1px solid #6366F155", fontSize: "0.6rem", height: 22,
-                cursor: "pointer",
-                "&:hover": { bgcolor: "#6366F122", borderColor: "#6366F1" },
-                transition: "all 0.2s ease",
+                bgcolor: "#4C8DFF22", color: "#7FB0FF",
+                border: "1px solid #4C8DFF55",
+                fontSize: "0.6rem", height: 22, pointerEvents: "none",
+                transition: "all 0.3s ease",
               }}
             />
           )}
-          <Chip
-            label={`${meta.icon} ${meta.label}`}
-            size="small"
-            sx={{
-              bgcolor: justCycled ? "#6366F1" : "#161B22EE",
-              color: justCycled ? "#fff" : "#8B949E",
-              border: "1px solid",
-              borderColor: justCycled ? "#6366F1" : "#30363D",
-              fontSize: "0.65rem", height: 22,
-              pointerEvents: "none",
-              transition: "all 0.3s ease",
-            }}
-          />
         </Box>
-        <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.58rem", textAlign: "right", maxWidth: 160, lineHeight: 1.3, pointerEvents: "none" }}>
-          {justCycled ? meta.tip : "clique no fundo para próximo layout"}
+        <Typography variant="caption" sx={{ color: "#4A5266", fontSize: "0.58rem", textAlign: "right", maxWidth: 180, lineHeight: 1.3, pointerEvents: "none" }}>
+          time de IA do Genesis · clique no fundo para reenquadrar
         </Typography>
       </Box>
 
       {/* Tooltip */}
       {tooltip && (
-        <Box sx={{ position: "absolute", top: 8, left: 8, bgcolor: "#161B22EE", border: "1px solid #30363D", borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none" }}>
+        <Box sx={{ position: "absolute", top: 8, left: 8, bgcolor: "#0F1420EE", border: "1px solid #2A3040", borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none" }}>
           <Typography variant="caption" fontWeight={600} color="text.primary">{tooltip.label}</Typography>
           {tooltip.detail && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>{tooltip.detail}</Typography>
@@ -1057,11 +904,11 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         </Box>
       )}
 
-      {/* Legend */}
+      {/* Legenda */}
       <Box sx={{ position: "absolute", bottom: 8, left: 8, display: "flex", gap: 1.5, flexWrap: "wrap", pointerEvents: "none" }}>
         {[
-          { color: "#6366F1", label: "Agente" }, { color: "#10B981", label: "Task OK" },
-          { color: "#EF4444", label: "Task Fail" }, { color: "#61DAFB", label: "Artefato" },
+          { color: "#4C8DFF", label: "Time de IA" }, { color: "#2FBF71", label: "Task OK" },
+          { color: "#F26D6D", label: "Task Fail" }, { color: "#61DAFB", label: "Artefato" },
         ].map(item => (
           <Box key={item.label} sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
             <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: item.color }} />
