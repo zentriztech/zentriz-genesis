@@ -61,14 +61,20 @@ const HUB_SIZE  = 8.5;   // monitor — 2º hub (orquestra a execução)
 // ── Modelos de layout — o usuário troca no switcher OU clicando no fundo. ──────
 // Em TODOS os modos o roster de 8 agentes está sempre presente (nunca "somem");
 // muda só a geometria. A camada de luz (streams sinápticos) é comum a todos.
-export type LayoutMode = "neural" | "constellation" | "radial" | "pipeline" | "free";
-const LAYOUT_CYCLE: LayoutMode[] = ["neural", "constellation", "radial", "pipeline", "free"];
+// Reúne as DUAS gerações: os modelos que já existiam (cérebro, radial, pipeline,
+// fluxo, livre) — agora melhorados — MAIS os novos (neurônio, constelação).
+export type LayoutMode =
+  | "neural" | "constellation" | "brain" | "radial" | "pipeline" | "flow" | "free";
+const LAYOUT_CYCLE: LayoutMode[] =
+  ["neural", "constellation", "brain", "radial", "pipeline", "flow", "free"];
 const LAYOUT_META: Record<LayoutMode, { icon: string; label: string; tip: string }> = {
-  neural:        { icon: "🧠", label: "Neurônio",    tip: "Cérebro orgânico — sinapses vivas entre os agentes" },
-  constellation: { icon: "🌌", label: "Constelação", tip: "Time em órbita estável ao redor do núcleo" },
-  radial:        { icon: "⭕", label: "Radial",       tip: "Núcleo no centro, camadas concêntricas por tipo" },
-  pipeline:      { icon: "➡️", label: "Pipeline",     tip: "Esquerda → direita pela fase do pipeline" },
-  free:          { icon: "🌊", label: "Fluxo",        tip: "Física livre — assenta e congela sozinho" },
+  neural:        { icon: "🧠", label: "Neurônio",    tip: "Cérebro orgânico — anel irregular + sinapses curvas vivas" },
+  constellation: { icon: "🌌", label: "Constelação", tip: "Time em órbita estável e limpa ao redor do núcleo" },
+  brain:         { icon: "🧬", label: "Cérebro",     tip: "Dois hemisférios — núcleo no centro, lobos à esquerda/direita" },
+  radial:        { icon: "⭕", label: "Radial",       tip: "Núcleo no centro, camadas concêntricas por tipo (cebola)" },
+  pipeline:      { icon: "➡️", label: "Pipeline",     tip: "Esquerda → direita pela fase, em colunas alinhadas" },
+  flow:          { icon: "🌊", label: "Fluxo",        tip: "Colunas por fase, mas com dispersão orgânica + arestas curvas" },
+  free:          { icon: "✦",  label: "Livre",        tip: "Física livre (Obsidian) — assenta e congela sozinho" },
 };
 
 // Cor base do tráfego sináptico AMBIENTE (repouso) — azul-elétrico frio, tipo HUD.
@@ -284,12 +290,18 @@ function buildForceData(
 }
 
 // ── Geometria por modelo ────────────────────────────────────────────────────
-// Retorna o mapa de PINS (fx/fy) por id de nó para o modo dado. Modos "físicos"
-// (free) retornam vazio → a engine assenta e congela sozinha. Os demais fixam os
-// agentes (e, no radial, também os satélites em camadas). Chave: os agentes SEMPRE
-// existem, então todo modo mostra o time — a diferença é só a disposição.
-function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, { fx: number; fy: number }> {
-  const pins = new Map<string, { fx: number; fy: number }>();
+// Retorna o mapa de PINS por id de nó para o modo dado. Cada pin pode fixar fx,
+// fy ou ambos: modos "físicos" (free) retornam vazio (a engine assenta e congela
+// sozinha); "flow" fixa só fx (colunas por fase) e deixa fy livre → dispersão
+// orgânica vertical; os demais fixam ambos. Chave: os agentes SEMPRE existem,
+// então todo modo mostra o time — a diferença é só a disposição.
+type Pin = { fx?: number; fy?: number };
+// Colunas por fase (esq→dir) — compartilhado por pipeline (rígido) e flow (orgânico).
+const PHASE_COL: Record<string, number> = {
+  system: -3, cto: -2, engineer: -1.35, pm: -0.45, monitor: 0.45, dev: 1.25, qa: 2.2, devops: 3,
+};
+function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, Pin> {
+  const pins = new Map<string, Pin>();
   const agents = nodes.filter(n => n.type === "agent");
   const byRole = (role: string) => agents.find(a => a.role === role);
 
@@ -314,6 +326,26 @@ function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, { fx: num
     return pins;
   }
 
+  if (mode === "brain") {
+    // Dois hemisférios: núcleo ao centro; metade dos agentes num lobo à esquerda,
+    // metade num lobo à direita, cada um numa coluna que se curva para fora (bow) →
+    // silhueta clássica de cérebro. Satélites flutuam (física) ao redor do dono.
+    const core = byRole(CORE_ROLE); if (core) pins.set(core.id, { fx: 0, fy: 0 });
+    const ring = RING_ROLES.filter(r => byRole(r));
+    const half = Math.ceil(ring.length / 2);
+    ring.forEach((role, i) => {
+      const a = byRole(role); if (!a) return;
+      const left = i < half;
+      const idxIn = left ? i : i - half;
+      const cntIn = Math.max(left ? half : ring.length - half, 1);
+      const t = cntIn <= 1 ? 0 : (idxIn / (cntIn - 1)) * 2 - 1; // -1..1 ao longo do lobo
+      const bow = Math.cos((t * Math.PI) / 2);                   // 1 no centro, 0 nas pontas
+      const fx = (left ? -1 : 1) * (RING_RADIUS * 0.42 + bow * RING_RADIUS * 0.34);
+      pins.set(a.id, { fx, fy: t * RING_RADIUS * 0.92 });
+    });
+    return pins;
+  }
+
   if (mode === "radial") {
     const core = byRole(CORE_ROLE) ?? agents[0]; if (core) pins.set(core.id, { fx: 0, fy: 0 });
     const others = agents.filter(a => a !== core);
@@ -332,23 +364,29 @@ function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, { fx: num
     return pins;
   }
 
-  // pipeline — agentes em colunas por fase (esq→dir); satélites flutuam perto do dono.
-  const colOf: Record<string, number> = {
-    system: -3, cto: -2, engineer: -1.35, pm: -0.45, monitor: 0.45, dev: 1.25, qa: 2.2, devops: 3,
-  };
+  if (mode === "flow") {
+    // Colunas por fase, mas fixando SÓ fx → os agentes alinham em colunas esq→dir
+    // enquanto o eixo Y fica livre (física distribui verticalmente) → fluxo orgânico.
+    const COLW = 90;
+    agents.forEach(a => { const c = PHASE_COL[a.role ?? "system"] ?? 0; pins.set(a.id, { fx: c * COLW }); });
+    return pins;
+  }
+
+  // pipeline — agentes em colunas por fase (esq→dir), fy=0 → linha rígida alinhada.
   const COLW = 96;
-  agents.forEach(a => { const c = colOf[a.role ?? "system"] ?? 0; pins.set(a.id, { fx: c * COLW, fy: 0 }); });
+  agents.forEach(a => { const c = PHASE_COL[a.role ?? "system"] ?? 0; pins.set(a.id, { fx: c * COLW, fy: 0 }); });
   return pins;
 }
 
-// Aplica (ou remove) os pins no ARRAY REAL de nós que a engine anima. Muta fx/fy
-// diretamente — combinado com d3ReheatSimulation() na troca de modo, reposiciona.
-function applyPins(mode: LayoutMode, nodes: FGNode[]): void {
+// Aplica (ou remove) os pins no array de nós dado, mutando fx/fy in-place. Usado
+// no rebuild (nós já são cópias frescas). Um pin pode fixar só fx (flow) → o eixo
+// não-fixado é liberado (delete) para a física agir.
+function applyLayout(mode: LayoutMode, nodes: FGNode[]): void {
   const pins = computeLayout(mode, nodes);
   for (const n of nodes) {
     const p = pins.get(n.id);
-    if (p) { n.fx = p.fx; n.fy = p.fy; }
-    else { delete n.fx; delete n.fy; }   // modo físico / nó sem pin → livre
+    if (p && p.fx !== undefined) n.fx = p.fx; else delete n.fx;
+    if (p && p.fy !== undefined) n.fy = p.fy; else delete n.fy;
   }
 }
 
@@ -506,6 +544,15 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [layoutMode, setLayoutMode]   = useState<LayoutMode>("neural"); // modelo atual
   const layoutModeRef = useRef<LayoutMode>("neural");                   // p/ ler em rebuild sem closure velha
   useEffect(() => { layoutModeRef.current = layoutMode; }, [layoutMode]);
+  // "▶ animar": revela os nós um a um (null = mostra todos). O intervalo é guardado
+  // p/ limpar no unmount e não vazar timer se o componente sair no meio da animação.
+  const [revealCount, setRevealCount] = useState<number | null>(null);
+  const revealIvRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const revealEndRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (revealIvRef.current)  clearInterval(revealIvRef.current);
+    if (revealEndRef.current) clearTimeout(revealEndRef.current);
+  }, []);
   const lastScaleRef  = useRef<number>(1); // globalScale capturado no paint (p/ dimensionar cometas)
   // Task drawer — abre ao clicar num nó de task
   const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
@@ -596,8 +643,8 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         return n;
       });
       const countChanged = merged.length !== prev.nodes.length;
-      // Reaplica os pins do modo atual ao ARRAY REAL (idempotente, sem re-simular).
-      applyPins(layoutModeRef.current, merged);
+      // Reaplica os pins do modo atual aos nós frescos (idempotente, sem re-simular).
+      applyLayout(layoutModeRef.current, merged);
       if (countChanged) {
         needsFitRef.current = true;
         // Nós entraram/saíram → reaquece a simulação uma vez para assentar.
@@ -706,16 +753,33 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     return () => clearInterval(t);
   }, [activeAgent]);
 
-  // ── Troca de modelo: reposiciona (pins) e reaquece a simulação uma vez. ──────
+  // ── Troca de modelo — repinta DE VERDADE. ───────────────────────────────────
+  // Lição custosa: mutar fx/fy nos nós que a engine já segura + d3ReheatSimulation()
+  // NÃO reposicionava de forma confiável (a identidade de graphData.nodes não muda,
+  // o wrapper react-force-graph não re-ingere). O mecanismo que SEMPRE funcionou é
+  // trocar a PROP graphData por um NOVO array de nós (com os fx/fy do modo, ou sem
+  // eles) — o que força o wrapper a re-ingerir e reposicionar — E resetar os links
+  // para ids-STRING, pois o force-graph só re-resolve source/target string→objeto se
+  // NÃO forem objeto; reusar objetos resolvidos apontaria para os nós velhos (órfãos).
   useEffect(() => {
-    const g = fgRef.current;
-    if (!g) return;
-    const nodes = (g.graphData?.() as GraphData | undefined)?.nodes;
-    if (nodes && nodes.length) {
-      applyPins(layoutMode, nodes);
-      needsFitRef.current = true;
-      try { g.d3ReheatSimulation?.(); } catch { /* engine ainda montando */ }
-    }
+    setGraphData(prev => {
+      if (!prev.nodes.length) return prev;
+      const pins = computeLayout(layoutMode, prev.nodes);
+      const nodes = prev.nodes.map(n => {
+        const copy: FGNode = { ...n }; // novo objeto → nova identidade do array
+        const p = pins.get(n.id);
+        if (p && p.fx !== undefined) copy.fx = p.fx; else delete copy.fx;
+        if (p && p.fy !== undefined) copy.fy = p.fy; else delete copy.fy;
+        return copy;
+      });
+      const idOf = (x: string | FGNode) => (typeof x === "object" ? x.id : x);
+      const links = prev.links.map(l => ({ ...l, source: idOf(l.source), target: idOf(l.target) }));
+      return { nodes, links };
+    });
+    // Não é preciso reaquecer à mão: ao re-ingerir o novo graphData, o force-graph já
+    // faz forceLayout.stop().alpha(1) + 40 warmup ticks (mjs:862,910) → os fx/fy do modo
+    // são aplicados e o layout assenta. Só marcamos o reenquadramento pós-assentamento.
+    needsFitRef.current = true;
   }, [layoutMode]);
 
   // ── Configuração de forças — física que ASSENTA e congela (SEM reheat loop) ──
@@ -742,13 +806,63 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   }, [graphData.nodes.length]);
 
   // ── Clique no fundo → próximo modelo de layout (o gesto que o Jean gostava). ─
-  // A troca dispara o efeito de layoutMode: reposiciona os pins + reaquece + reenquadra.
+  // A troca dispara o efeito de layoutMode: repõe graphData (repinta) + reaquece.
   const handleBackgroundClick = useCallback(() => {
     setLayoutMode(prev => LAYOUT_CYCLE[(LAYOUT_CYCLE.indexOf(prev) + 1) % LAYOUT_CYCLE.length]);
   }, []);
 
-  // Links já vêm prontos do rebuild; a pintura decide largura/cor/curvatura por kind.
-  const displayLinks = useMemo(() => graphData.links, [graphData.links]);
+  // ── "▶ animar" — revela o mesh nó a nó (agentes → tasks → docs → artefatos). ─
+  const handleAnimate = useCallback(() => {
+    const total = graphData.nodes.length;
+    if (!total) return;
+    if (revealIvRef.current)  clearInterval(revealIvRef.current);
+    if (revealEndRef.current) clearTimeout(revealEndRef.current);
+    const delay = Math.max(15, Math.min(80, Math.round(2000 / total)));
+    setRevealCount(0);
+    let count = 0;
+    revealIvRef.current = setInterval(() => {
+      count++;
+      setRevealCount(count);
+      if (count >= total) {
+        if (revealIvRef.current) clearInterval(revealIvRef.current);
+        revealIvRef.current = null;
+        revealEndRef.current = setTimeout(() => setRevealCount(null), 400); // volta a "mostrar todos"
+      }
+    }, delay);
+    try { fgRef.current?.d3ReheatSimulation?.(); } catch { /* engine montando */ }
+  }, [graphData.nodes.length]);
+
+  // Ordem de revelação estável (agente → task → doc → artefato).
+  const revealOrder: Record<FGNode["type"], number> = useMemo(
+    () => ({ agent: 0, task: 1, doc: 2, artifact: 3 }), []);
+  const sortedNodes = useMemo(
+    () => [...graphData.nodes].sort((a, b) => revealOrder[a.type] - revealOrder[b.type]),
+    [graphData.nodes, revealOrder]);
+  // Nós visíveis: todos (revealCount=null) ou o prefixo revelado. Mesma referência
+  // quando não está animando → zero churn no caminho normal.
+  const visibleNodes = useMemo(
+    () => (revealCount === null ? graphData.nodes : sortedNodes.slice(0, revealCount)),
+    [graphData.nodes, sortedNodes, revealCount]);
+  // Links visíveis: no caminho normal, os objetos REAIS (fótons/rajadas preservados).
+  // Durante a revelação, só arestas com AMBAS as pontas visíveis, resetadas p/ ids-string.
+  const displayLinks = useMemo(() => {
+    if (revealCount === null) return graphData.links;
+    const idOf = (x: string | FGNode) => (typeof x === "object" ? x.id : x);
+    const vis = new Set(visibleNodes.map(n => n.id));
+    return graphData.links
+      .filter(l => vis.has(idOf(l.source)) && vis.has(idOf(l.target)))
+      .map(l => ({ ...l, source: idOf(l.source), target: idOf(l.target) }));
+  }, [graphData.links, visibleNodes, revealCount]);
+
+  // Wrapper do graphData MEMOIZADO: identidade estável enquanto nós/links não mudam.
+  // Sem isto, o literal `{nodes,links}` era recriado a cada render (hover/tooltip/pulso)
+  // → react-kapsule re-ingeria e reaquecia a física (alpha=1 + 40 warmup ticks) sem
+  // necessidade, sabotando o "assenta e congela". Numa TROCA de modelo real, visibleNodes/
+  // displayLinks viram arrays novos → o memo recalcula → re-ingest acontece (troca segue OK).
+  const fgData = useMemo(
+    () => ({ nodes: visibleNodes as object[], links: displayLinks as object[] }),
+    [visibleNodes, displayLinks],
+  );
 
   // ── Aparência das arestas por tipo (backbone × satélite) + estado "quente" ────
   // Backbone (spoke/flow/orch) sempre visível dá estrutura ao mesh em repouso.
@@ -769,10 +883,16 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   }, []);
   const linkCurveFn = useCallback((link: object) => {
     const l = link as FGLink;
-    if (layoutModeRef.current === "neural") {
+    const m = layoutModeRef.current;
+    if (m === "neural" || m === "brain") {
       // Sinapses curvas — dá o ar de dendritos; satélites retos p/ não poluir.
       if (l.kind === "satellite") return 0;
       return 0.14 + linkPhase(l) * 0.22; // curva variando por aresta (0.14..0.36)
+    }
+    if (m === "flow") {
+      // Fluxo orgânico: todas as arestas do backbone curvam (dá o ar de correnteza).
+      if (l.kind === "satellite") return 0;
+      return 0.22 + linkPhase(l) * 0.14;
     }
     if (l.kind === "flow" || l.kind === "orch") return 0.18; // curva orgânica no pipeline
     return 0; // spoke/satellite retos = leitura estrutural limpa
@@ -990,7 +1110,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     >
       <ForceGraph2D
         ref={fgRef}
-        graphData={{ nodes: graphData.nodes as object[], links: displayLinks as object[] }}
+        graphData={fgData}
         width={canvasW}
         height={canvasH}
         backgroundColor="#0A0C11"
@@ -1089,6 +1209,22 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       {/* Indicador do sistema nervoso — top right */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+          <Chip
+            label={revealCount !== null ? "◐ revelando…" : "▶ animar"}
+            size="small"
+            onClick={revealCount === null ? handleAnimate : undefined}
+            clickable={revealCount === null}
+            title="Revela o time nó a nó"
+            sx={{
+              bgcolor: "#0F1420EE",
+              color: revealCount !== null ? "#7FB0FF" : "#9AA4B8",
+              border: "1px solid",
+              borderColor: revealCount !== null ? "#4C8DFF55" : "#2A3040",
+              fontSize: "0.6rem", height: 22, cursor: revealCount === null ? "pointer" : "default",
+              transition: "all 0.3s ease",
+              "&:hover": revealCount === null ? { color: "#DCE6FF", borderColor: "#4C8DFF55", bgcolor: "#4C8DFF18" } : {},
+            }}
+          />
           <Chip
             label={liveConnected ? "● ao vivo" : "○ em espera"}
             size="small"
