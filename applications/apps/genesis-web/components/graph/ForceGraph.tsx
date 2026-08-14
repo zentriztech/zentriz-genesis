@@ -12,6 +12,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import { apiGet } from "@/lib/api";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import type { DialogueEntry } from "@/components/LiveDialogue";
+import { useDialogueStream } from "@/lib/useDialogueStream";
 import { DEFAULT_FILTER, type PlanningDoc, type GraphFilter } from "@/lib/useGraphData";
 import dynamic from "next/dynamic";
 
@@ -66,6 +67,19 @@ const BIDIRECTIONAL_PAIRS = new Set([
   "pm|qa",   "qa|pm",
   "dev|qa",  "qa|dev",
 ]);
+
+// Normaliza um nome de agente para a chave usada nos ids de nó (agent-<key>).
+const normKey = (raw?: string) => (raw ?? "").toLowerCase().replace(/[^a-z_]/g, "_");
+
+// Cor do "pacote" de mensagem por tipo de evento — é o que dá leitura instantânea
+// ao observador: verde = entrega, vermelho = erro, índigo = trabalhando, azul = passo.
+const EVENT_PACKET_COLOR: Record<string, string> = {
+  error: "#EF4444",
+  product_ready: "#10B981",
+  product: "#10B981",
+  agent_working: "#818CF8",
+  step: "#38BDF8",
+};
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 const TASK_COLOR: Record<string, string> = {
@@ -526,50 +540,101 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     return () => obs.disconnect();
   }, []);
 
-  // ── Fetch & build graph ───────────────────────────────────────────────────
+  // Fontes cacheadas: diálogo vem do stream (sistema nervoso); tasks/arquivos vêm do poll.
+  const dialogueRef = useRef<DialogueEntry[]>([]);
+  const tasksRef     = useRef<TaskItem[]>([]);
+  const filesRef     = useRef<CodeFile[]>([]);
+
+  // ── Rebuild (SEM rede): monta o grafo a partir das fontes cacheadas ────────
+  // Chamado a cada evento novo do stream (barato) e ao fim de cada poll de tasks/arquivos.
+  const rebuild = useCallback(() => {
+    const dialogue = dialogueRef.current;
+    const tasks    = tasksRef.current;
+    const files    = filesRef.current;
+    const lastWorking   = [...dialogue].reverse().find(e => e.eventType === "agent_working");
+    const activeAgentId = lastWorking?.fromAgent;
+    setActiveAgent(activeAgentId ? normKey(activeAgentId) : null);
+    tasks.forEach(t => taskMapRef.current.set(`task-${t.taskId}`, t));
+    const data = buildForceData(
+      dialogue, tasks, files, activeAgentId, planningDocs,
+      layoutModeRef.current === "flow", // compactArtifacts no modo Fluxo
+      filterRef.current,                // filtro de visibilidade
+    );
+    const sig = [
+      // Inclui a cor: mudança só-de-cor (ex.: nó muda de estado sem mudar id/detail) ainda
+      // dispara rebuild — senão o early-return abaixo engoliria a atualização visual.
+      data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}:${n.color ?? ""}`).sort().join("|"),
+      data.links.length,
+    ].join("§");
+    if (sig === prevSignature.current) return;
+    prevSignature.current = sig;
+
+    setGraphData(prev => {
+      const prevNodeMap = new Map(prev.nodes.map(n => [n.id, n]));
+      const merged = data.nodes.map(n => {
+        const ex = prevNodeMap.get(n.id) as NodeWithPos | undefined;
+        // Preserve physics position (x,y,vx,vy) AND layout pins (fx,fy)
+        if (ex) return { ...ex, isActive: n.isActive, detail: n.detail, color: n.color };
+        return n;
+      });
+      return { nodes: merged, links: data.links };
+    });
+  }, [planningDocs]);
+
+  // ── Poll de tasks/arquivos (o diálogo já flui pelo stream) ─────────────────
   const refresh = useCallback(async () => {
     try {
-      const [dialogue, tasks, codeFilesData] = await Promise.all([
-        apiGet<DialogueEntry[]>(`/api/projects/${projectId}/dialogue`).catch(() => [] as DialogueEntry[]),
+      const [tasks, codeFilesData] = await Promise.all([
         apiGet<TaskItem[]>(`/api/projects/${projectId}/tasks`).catch(() => [] as TaskItem[]),
         apiGet<CodeFilesResponse>(`/api/projects/${projectId}/code-files`).catch(() => ({ files: [], appsRoot: null, totalFiles: 0 })),
       ]);
-      const lastWorking  = [...(Array.isArray(dialogue) ? dialogue : [])].reverse().find(e => e.eventType === "agent_working");
-      const activeAgentId = lastWorking?.fromAgent;
-      setActiveAgent(activeAgentId ? activeAgentId.toLowerCase().replace(/[^a-z_]/g, "_") : null);
-      // Atualiza map de tasks para o drawer
-      const taskArr = Array.isArray(tasks) ? tasks : [];
-      taskArr.forEach(t => taskMapRef.current.set(`task-${t.taskId}`, t));
-      const currentFilter = filterRef.current;
-      const data = buildForceData(
-        Array.isArray(dialogue) ? dialogue : [],
-        Array.isArray(tasks) ? tasks : [],
-        (codeFilesData as CodeFilesResponse).files ?? [],
-        activeAgentId,
-        planningDocs,
-        layoutModeRef.current === "flow",  // compactArtifacts no modo Fluxo
-        currentFilter,                     // filtro de visibilidade
-      );
-      const sig = [
-        data.nodes.map(n => `${n.id}:${n.isActive ? "A" : ""}:${n.detail ?? ""}`).sort().join("|"),
-        data.links.length,
-      ].join("§");
-      if (sig === prevSignature.current) return;
-      prevSignature.current = sig;
-
-      setGraphData(prev => {
-        const prevNodeMap = new Map(prev.nodes.map(n => [n.id, n]));
-        const merged = data.nodes.map(n => {
-          const ex = prevNodeMap.get(n.id) as NodeWithPos | undefined;
-          // Preserve physics position (x,y,vx,vy) AND layout pins (fx,fy)
-          if (ex) return { ...ex, isActive: n.isActive, detail: n.detail, color: n.color };
-          return n;
-        });
-        return { nodes: merged, links: data.links };
-      });
+      tasksRef.current = Array.isArray(tasks) ? tasks : [];
+      filesRef.current = (codeFilesData as CodeFilesResponse).files ?? [];
+      rebuild();
     } catch { /* silent */ } finally { setLoading(false); }
-  }, [projectId, planningDocs]);
+  }, [projectId, rebuild]);
 
+  // ── Stream ao vivo do diálogo: dispara o "pacote" na aresta real ───────────
+  const handleLiveEvent = useCallback((entry: DialogueEntry) => {
+    const fk = normKey(entry.fromAgent);
+    const tk = normKey(entry.toAgent);
+    // Reage NA HORA: o halo pulsante acende no agente que começou a trabalhar.
+    if (entry.eventType === "agent_working" && fk) setActiveAgent(fk);
+    if (!fk || !tk || fk === tk) return;
+    // graphData() do react-force-graph devolve os objetos de link REAIS que a engine anima.
+    const g = fgRef.current?.graphData?.() as GraphData | undefined;
+    if (!g) return;
+    const fromId = `agent-${fk}`; const toId = `agent-${tk}`;
+    const idOf = (x: string | FGNode) => (typeof x === "object" ? x.id : x);
+    const link = g.links.find(l => {
+      const s = idOf(l.source); const t = idOf(l.target);
+      return (s === fromId && t === toId) || (s === toId && t === fromId);
+    }) as (FGLink & { __burstColor?: string }) | undefined;
+    if (!link) return; // aresta ainda não existe — o próximo rebuild a cria
+    const color = EVENT_PACKET_COLOR[entry.eventType ?? ""] ?? "#8B949E";
+    link.__burstColor = color + "FF";
+    try {
+      // Rajada: 2 partículas para o pacote "encorpar" visualmente.
+      fgRef.current?.emitParticle?.(link);
+      fgRef.current?.emitParticle?.(link);
+    } catch { /* engine ainda não montada */ }
+    // Limpa o tint depois que o pacote atravessa (partícula dura ~1/speed).
+    setTimeout(() => { link.__burstColor = undefined; }, 1600);
+  }, []);
+
+  const { entries: liveEntries, connected: liveConnected } = useDialogueStream({
+    projectId,
+    enabled: pollIntervalMs > 0,
+    onEvent: handleLiveEvent,
+  });
+
+  // Diálogo mudou (histórico carregou ou chegou evento ao vivo) → rebuild sem rede.
+  useEffect(() => {
+    dialogueRef.current = liveEntries;
+    rebuild();
+  }, [liveEntries, rebuild]);
+
+  // Poll de tasks/arquivos (estrutura que não vem pelo stream).
   useEffect(() => {
     refresh();
     if (pollIntervalMs > 0) { const t = setInterval(refresh, pollIntervalMs); return () => clearInterval(t); }
@@ -578,7 +643,7 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // Quando filter muda: invalida cache e força rebuild imediato
   useEffect(() => {
     prevSignature.current = "";
-    refresh();
+    rebuild();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
@@ -860,7 +925,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
         linkDirectionalParticles={(link) => (link as FGLink & { _particles?: number })._particles ?? 1}
         linkDirectionalParticleWidth={(link) => (link as FGLink & { _pWidth?: number })._pWidth ?? 1.5}
-        linkDirectionalParticleColor={(link) => (link as FGLink & { _color?: string })._color ?? (link as FGLink).color}
+        linkDirectionalParticleColor={(link) => {
+          const l = link as FGLink & { __burstColor?: string; _color?: string };
+          return l.__burstColor ?? l._color ?? l.color; // pacote ao vivo tem prioridade
+        }}
         linkDirectionalParticleSpeed={0.005}
         linkDirectionalArrowLength={(link) => {
           const s = typeof (link as FGLink).source === "object" ? ((link as FGLink).source as FGNode).id : (link as FGLink).source as string;
@@ -902,6 +970,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       {/* Layout badge — top right — clicável para reset */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
+          {/* Indicador do sistema nervoso: stream ao vivo × fallback de polling */}
+          <Chip
+            label={liveConnected ? "● ao vivo" : "○ polling"}
+            size="small"
+            sx={{
+              bgcolor: "#161B22EE",
+              color: liveConnected ? "#34D399" : "#8B949E",
+              border: "1px solid",
+              borderColor: liveConnected ? "#34D39955" : "#30363D",
+              fontSize: "0.6rem", height: 22, pointerEvents: "none",
+              transition: "all 0.3s ease",
+            }}
+          />
           {/* Botão Animar — nós nascem um a um em sequência rápida */}
           <Chip
             label={activeAgent ? "⚡ ativo" : revealCount !== null ? "…" : "▶ animar"}
