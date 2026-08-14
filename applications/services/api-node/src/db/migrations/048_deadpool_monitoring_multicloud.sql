@@ -12,4 +12,7 @@ ALTER TABLE project_deadpool_monitoring
   ADD COLUMN IF NOT EXISTS gcp_project_id       TEXT,
   ADD COLUMN IF NOT EXISTS gcp_log_filter       TEXT;
 
-COMMENT ON COLUMN project_deadpool_monitoring.monitor_provider IS 'Nuvem monitorada: cloudwatch (default) | azure | gcp. Linhas ativadas pós-048 gravam o valor explícito (inclusive cloudwatch); NULL só em linhas legadas pré-048.';
+-- NOTA: o runner de migrations (db/init.ts) faz split ingênuo por ';' — NENHUM ';' pode
+-- aparecer dentro de statement/string literal (senão quebra o parser). Por isso o texto
+-- do COMMENT abaixo usa travessão em vez de ponto-e-vírgula.
+COMMENT ON COLUMN project_deadpool_monitoring.monitor_provider IS 'Nuvem monitorada: cloudwatch (default) | azure | gcp. Linhas ativadas pos-048 gravam o valor explicito (inclusive cloudwatch) — NULL apenas em linhas legadas pre-048.';
