@@ -58,6 +58,22 @@ const CORE_SIZE = 11;    // núcleo Genesis — o maior/mais luminoso
 const RING_SIZE = 7.5;   // agentes do pipeline
 const HUB_SIZE  = 8.5;   // monitor — 2º hub (orquestra a execução)
 
+// ── Modelos de layout — o usuário troca no switcher OU clicando no fundo. ──────
+// Em TODOS os modos o roster de 8 agentes está sempre presente (nunca "somem");
+// muda só a geometria. A camada de luz (streams sinápticos) é comum a todos.
+export type LayoutMode = "neural" | "constellation" | "radial" | "pipeline" | "free";
+const LAYOUT_CYCLE: LayoutMode[] = ["neural", "constellation", "radial", "pipeline", "free"];
+const LAYOUT_META: Record<LayoutMode, { icon: string; label: string; tip: string }> = {
+  neural:        { icon: "🧠", label: "Neurônio",    tip: "Cérebro orgânico — sinapses vivas entre os agentes" },
+  constellation: { icon: "🌌", label: "Constelação", tip: "Time em órbita estável ao redor do núcleo" },
+  radial:        { icon: "⭕", label: "Radial",       tip: "Núcleo no centro, camadas concêntricas por tipo" },
+  pipeline:      { icon: "➡️", label: "Pipeline",     tip: "Esquerda → direita pela fase do pipeline" },
+  free:          { icon: "🌊", label: "Fluxo",        tip: "Física livre — assenta e congela sozinho" },
+};
+
+// Cor base do tráfego sináptico AMBIENTE (repouso) — azul-elétrico frio, tipo HUD.
+const AMBIENT_STREAM_COLOR = "#5FB8FF";
+
 // Posição fixa (fx/fy) de cada agente na constelação: núcleo no centro; anel
 // começando no topo (-90°) em sentido horário, na ordem do pipeline.
 function rosterPosition(role: string): { fx: number; fy: number } {
@@ -160,7 +176,8 @@ function buildForceData(
     nodes.push({
       id: `agent-${role}`, label, type: "agent", role,
       color: role === CORE_ROLE ? "#4C8DFF" : profile.color, // núcleo mais luminoso
-      size, detail: profile.avatar, fx: pos.fx, fy: pos.fy,
+      // Semente de posição (x/y); o PIN (fx/fy) é aplicado por computeLayout conforme o modo.
+      size, detail: profile.avatar, x: pos.fx, y: pos.fy,
     });
   }
 
@@ -266,9 +283,82 @@ function buildForceData(
   return { nodes, links };
 }
 
-// ── Constelação: as posições dos AGENTES são fixadas em buildForceData (fx/fy). ─
-// Não há mais múltiplos modos de layout — um único mapa estável e legível. Os
-// satélites (tasks/docs/artefatos) assentam por física perto do dono e congelam.
+// ── Geometria por modelo ────────────────────────────────────────────────────
+// Retorna o mapa de PINS (fx/fy) por id de nó para o modo dado. Modos "físicos"
+// (free) retornam vazio → a engine assenta e congela sozinha. Os demais fixam os
+// agentes (e, no radial, também os satélites em camadas). Chave: os agentes SEMPRE
+// existem, então todo modo mostra o time — a diferença é só a disposição.
+function computeLayout(mode: LayoutMode, nodes: FGNode[]): Map<string, { fx: number; fy: number }> {
+  const pins = new Map<string, { fx: number; fy: number }>();
+  const agents = nodes.filter(n => n.type === "agent");
+  const byRole = (role: string) => agents.find(a => a.role === role);
+
+  if (mode === "free") return pins; // física livre — sem pins
+
+  if (mode === "constellation") {
+    for (const a of agents) { const p = rosterPosition(a.role ?? CORE_ROLE); pins.set(a.id, { fx: p.fx, fy: p.fy }); }
+    return pins;
+  }
+
+  if (mode === "neural") {
+    // Cérebro orgânico: núcleo no centro; anel com raio/ângulo IRREGULARES (jitter
+    // determinístico) e eixo Y comprimido → silhueta de rede neural, não círculo perfeito.
+    const core = byRole(CORE_ROLE); if (core) pins.set(core.id, { fx: 0, fy: 0 });
+    RING_ROLES.forEach((role, i) => {
+      const a = byRole(role); if (!a) return;
+      const base = -Math.PI / 2 + (i / RING_ROLES.length) * 2 * Math.PI;
+      const jitterA = (((i * 2.3999632) % 1) - 0.5) * 0.5;   // ±0.25 rad determinístico
+      const rad = RING_RADIUS * (0.80 + ((i * 7) % 5) / 11);  // raio irregular 0.80..1.16
+      pins.set(a.id, { fx: Math.cos(base + jitterA) * rad, fy: Math.sin(base + jitterA) * rad * 0.84 });
+    });
+    return pins;
+  }
+
+  if (mode === "radial") {
+    const core = byRole(CORE_ROLE) ?? agents[0]; if (core) pins.set(core.id, { fx: 0, fy: 0 });
+    const others = agents.filter(a => a !== core);
+    others.forEach((a, i) => {
+      const ang = -Math.PI / 2 + (i / Math.max(others.length, 1)) * 2 * Math.PI;
+      pins.set(a.id, { fx: Math.cos(ang) * (RING_RADIUS * 0.60), fy: Math.sin(ang) * (RING_RADIUS * 0.60) });
+    });
+    // Satélites em camadas concêntricas por tipo (leitura "cebola").
+    const ring = (arr: FGNode[], r: number, off: number) => arr.forEach((n, i) => {
+      const ang = off + (i / Math.max(arr.length, 1)) * 2 * Math.PI;
+      pins.set(n.id, { fx: Math.cos(ang) * r, fy: Math.sin(ang) * r });
+    });
+    ring(nodes.filter(n => n.type === "task"),     RING_RADIUS * 1.12, 0.30);
+    ring(nodes.filter(n => n.type === "doc"),      RING_RADIUS * 1.48, 0.70);
+    ring(nodes.filter(n => n.type === "artifact"), RING_RADIUS * 1.82, 0.15);
+    return pins;
+  }
+
+  // pipeline — agentes em colunas por fase (esq→dir); satélites flutuam perto do dono.
+  const colOf: Record<string, number> = {
+    system: -3, cto: -2, engineer: -1.35, pm: -0.45, monitor: 0.45, dev: 1.25, qa: 2.2, devops: 3,
+  };
+  const COLW = 96;
+  agents.forEach(a => { const c = colOf[a.role ?? "system"] ?? 0; pins.set(a.id, { fx: c * COLW, fy: 0 }); });
+  return pins;
+}
+
+// Aplica (ou remove) os pins no ARRAY REAL de nós que a engine anima. Muta fx/fy
+// diretamente — combinado com d3ReheatSimulation() na troca de modo, reposiciona.
+function applyPins(mode: LayoutMode, nodes: FGNode[]): void {
+  const pins = computeLayout(mode, nodes);
+  for (const n of nodes) {
+    const p = pins.get(n.id);
+    if (p) { n.fx = p.fx; n.fy = p.fy; }
+    else { delete n.fx; delete n.fy; }   // modo físico / nó sem pin → livre
+  }
+}
+
+// Fase determinística [0,1) por aresta (des-sincroniza os streams).
+function linkPhase(l: FGLink): number {
+  const idOf = (x: string | FGNode) => (typeof x === "object" ? x.id : x);
+  const s = idOf(l.source) + "→" + idOf(l.target);
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 997;
+  return h / 997;
+}
 
 // ── Task status colors (shared) ───────────────────────────────────────────────
 const STATUS_CHIP_COLOR: Record<string, string> = {
@@ -413,6 +503,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [tooltip, setTooltip]     = useState<{ label: string; detail?: string } | null>(null);
   const [activeAgent, setActiveAgent] = useState<string | null>(null); // role base ativa (pulso)
+  const [layoutMode, setLayoutMode]   = useState<LayoutMode>("neural"); // modelo atual
+  const layoutModeRef = useRef<LayoutMode>("neural");                   // p/ ler em rebuild sem closure velha
+  useEffect(() => { layoutModeRef.current = layoutMode; }, [layoutMode]);
+  const lastScaleRef  = useRef<number>(1); // globalScale capturado no paint (p/ dimensionar cometas)
   // Task drawer — abre ao clicar num nó de task
   const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
   const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
@@ -420,10 +514,15 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const filterRef = useRef(filter);
   useEffect(() => { filterRef.current = filter; }, [filter]);
 
+  // planningDocs via ref → rebuild/refresh ficam com identidade ESTÁVEL. Sem isto, um
+  // caller que passe `docs ?? []` (nova referência a cada render) recriava rebuild→refresh,
+  // e o efeito de poll re-disparava a cada render do pai (tempestade de 3 fetches) e ainda
+  // rodava refresh() mesmo com pollIntervalMs=0 (projeto ocioso). Ref mantém o efeito 1×/mount.
+  const planningDocsRef = useRef(planningDocs);
+  useEffect(() => { planningDocsRef.current = planningDocs; }, [planningDocs]);
+
   // Pulso animado (0..1) para o halo do agente ativo. activeKeyRef é lido pelo painter
   // SEM disparar rebuild — mudar o agente ativo não re-simula a física.
-  const pulseRef      = useRef<number>(0);
-  const rafRef        = useRef<number>(0);
   const activeKeyRef  = useRef<string | null>(null);
   const lastWorkAtRef = useRef<number>(0);
   useEffect(() => { activeKeyRef.current = activeAgent; }, [activeAgent]);
@@ -473,8 +572,9 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       lastWorkAtRef.current = performance.now();
     }
 
-    tasks.forEach(t => taskMapRef.current.set(`task-${t.taskId}`, t));
-    const data = buildForceData(dialogue, tasks, files, planningDocs, false, filterRef.current);
+    // Mapa fresco a cada rebuild (não acumula tasks obsoletas entre sessões longas).
+    taskMapRef.current = new Map(tasks.map(t => [`task-${t.taskId}`, t]));
+    const data = buildForceData(dialogue, tasks, files, planningDocsRef.current, false, filterRef.current);
 
     // Assinatura: ids + detail (cobre status/cor de task) + nº de links. NÃO inclui
     // "ativo" (isso é só pulso via ref) → evita re-simular a cada fala.
@@ -490,15 +590,36 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       const merged = data.nodes.map(n => {
         const ex = prevNodeMap.get(n.id) as NodeWithPos | undefined;
         if (ex) {
-          // Preserva posição física (x,y,vx,vy); reafirma pin (fx/fy) e visual.
-          return { ...ex, fx: n.fx, fy: n.fy, color: n.color, detail: n.detail, size: n.size, label: n.label, role: n.role };
+          // Preserva posição física (x,y,vx,vy); atualiza só o visual/rotulagem.
+          return { ...ex, color: n.color, detail: n.detail, size: n.size, label: n.label, role: n.role };
         }
         return n;
       });
-      if (merged.length !== prev.nodes.length) needsFitRef.current = true;
-      return { nodes: merged, links: data.links };
+      const countChanged = merged.length !== prev.nodes.length;
+      // Reaplica os pins do modo atual ao ARRAY REAL (idempotente, sem re-simular).
+      applyPins(layoutModeRef.current, merged);
+      if (countChanged) {
+        needsFitRef.current = true;
+        // Nós entraram/saíram → reaquece a simulação uma vez para assentar.
+        try { fgRef.current?.d3ReheatSimulation?.(); } catch { /* engine pode não estar montada */ }
+      }
+      // Merge de links por chave não-direcionada: REUSA o objeto de link anterior quando a
+      // aresta persiste, para carregar as flags "quentes" em voo (__hotUntil/__packetColor)
+      // através de um rebuild por mudança de status de task. CRÍTICO: force-graph resolve
+      // source/target string→objeto in-place (mjs:857) e o d3-force só re-resolve se NÃO for
+      // objeto — então reafirmamos os ids-STRING frescos no objeto reusado, senão a aresta
+      // ficaria presa a um nó órfão (o merge de nós cria novas referências). Assim a física
+      // re-resolve corretamente contra os nós novos e nada fica detached.
+      const idOf = (x: string | FGNode) => (typeof x === "object" ? x.id : x);
+      const prevLinkMap = new Map(prev.links.map(l => [[idOf(l.source), idOf(l.target)].sort().join("|"), l]));
+      const mergedLinks = data.links.map(l => {
+        const ex = prevLinkMap.get([idOf(l.source), idOf(l.target)].sort().join("|"));
+        if (ex) { ex.source = l.source; ex.target = l.target; ex.color = l.color; ex.kind = l.kind; return ex; }
+        return l;
+      });
+      return { nodes: merged, links: mergedLinks };
     });
-  }, [planningDocs]);
+  }, []);
 
   // ── Poll de tasks/arquivos + histórico de diálogo (robusto p/ projeto ocioso) ─
   const refresh = useCallback(async () => {
@@ -573,22 +694,29 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
 
-  // ── RAF: pulso do agente ativo (auto-desliga após 6s sem novo "working") ────
+  // ── Expiração do agente ativo (auto-desliga após 6s sem novo "working"). ─────
+  // O pulso/breathing é derivado de performance.now() DENTRO de paintNode; o canvas
+  // repinta sozinho porque há sempre fótons ambientes nas arestas (item confirmado
+  // na engine: um link com __photons força doRedraw mesmo com a física congelada).
   useEffect(() => {
-    if (!activeAgent) { pulseRef.current = 0; return; }
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      // Expira o estado ativo se faz tempo que ninguém trabalha (evita RAF eterno).
-      if (now - lastWorkAtRef.current > 6000) { pulseRef.current = 0; setActiveAgent(null); return; }
-      pulseRef.current = (Math.sin((now - t0) / 420) + 1) / 2; // 0..1 suave
-      // NÃO chamamos refresh() — esse método não existe em react-force-graph-2d@1.29.1.
-      // O repaint contínuo do pulso vem de autoPauseRedraw={false} enquanto há agente
-      // ativo (o loop de render interno do force-graph lê pulseRef a cada frame).
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
+    if (!activeAgent) return;
+    const t = setInterval(() => {
+      if (performance.now() - lastWorkAtRef.current > 6000) setActiveAgent(null);
+    }, 1000);
+    return () => clearInterval(t);
   }, [activeAgent]);
+
+  // ── Troca de modelo: reposiciona (pins) e reaquece a simulação uma vez. ──────
+  useEffect(() => {
+    const g = fgRef.current;
+    if (!g) return;
+    const nodes = (g.graphData?.() as GraphData | undefined)?.nodes;
+    if (nodes && nodes.length) {
+      applyPins(layoutMode, nodes);
+      needsFitRef.current = true;
+      try { g.d3ReheatSimulation?.(); } catch { /* engine ainda montando */ }
+    }
+  }, [layoutMode]);
 
   // ── Configuração de forças — física que ASSENTA e congela (SEM reheat loop) ──
   useEffect(() => {
@@ -613,10 +741,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
     configure();
   }, [graphData.nodes.length]);
 
-  // ── Recentraliza ao clicar no fundo (não embaralha o layout) ───────────────
+  // ── Clique no fundo → próximo modelo de layout (o gesto que o Jean gostava). ─
+  // A troca dispara o efeito de layoutMode: reposiciona os pins + reaquece + reenquadra.
   const handleBackgroundClick = useCallback(() => {
-    needsFitRef.current = true;
-    fgRef.current?.zoomToFit?.(600, 70);
+    setLayoutMode(prev => LAYOUT_CYCLE[(LAYOUT_CYCLE.indexOf(prev) + 1) % LAYOUT_CYCLE.length]);
   }, []);
 
   // Links já vêm prontos do rebuild; a pintura decide largura/cor/curvatura por kind.
@@ -641,9 +769,67 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   }, []);
   const linkCurveFn = useCallback((link: object) => {
     const l = link as FGLink;
+    if (layoutModeRef.current === "neural") {
+      // Sinapses curvas — dá o ar de dendritos; satélites retos p/ não poluir.
+      if (l.kind === "satellite") return 0;
+      return 0.14 + linkPhase(l) * 0.22; // curva variando por aresta (0.14..0.36)
+    }
     if (l.kind === "flow" || l.kind === "orch") return 0.18; // curva orgânica no pipeline
     return 0; // spoke/satellite retos = leitura estrutural limpa
   }, []);
+
+  // ── STREAMS: nº de fótons por aresta (tráfego sináptico ambiente). ───────────
+  // Backbone (spoke/flow/orch) recebe 1 fóton contínuo (loop eterno) → o "cérebro
+  // em repouso" nunca fica morto. Satélites não streamam (leitura limpa). Bursts de
+  // evento entram por emitParticle (aditivos, one-shot) por cima destes.
+  const particleCountFn = useCallback((link: object) => {
+    const l = link as FGLink;
+    return l.kind === "satellite" ? 0 : 1;
+  }, []);
+  const particleSpeedFn = useCallback((link: object) => {
+    const l = link as FGLink;
+    return (l.__hotUntil ?? 0) > performance.now() ? 0.016 : 0.0045; // quente=rápido, ambiente=lento
+  }, []);
+  const particleOffsetFn = useCallback((link: object) => linkPhase(link as FGLink), []);
+
+  // ── Cometa por partícula — o efeito JARVIS. Recebe (x,y) exatos do fóton. ────
+  // Desenha, com blend ADITIVO: rastro (gradiente ao longo da aresta) + cabeça
+  // (glow radial) + núcleo branco. Cor por estado da aresta: quente=cor do evento,
+  // repouso=azul-elétrico ambiente. Renderiza SOB os nós (ordem da engine) — as
+  // luzes correm por trás dos neurônios, que brilham por cima.
+  const particleCanvasObject = useCallback(
+    (x: number, y: number, link: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
+      if (!isFinite(x) || !isFinite(y)) return;
+      const l = link as FGLink;
+      const src = l.source as FGNode; const tgt = l.target as FGNode;
+      const now = performance.now();
+      const hot = (l.__hotUntil ?? 0) > now;
+      const color = hot ? (l.__packetColor ?? AMBIENT_STREAM_COLOR) : AMBIENT_STREAM_COLOR;
+      const scale = globalScale || lastScaleRef.current || 1;
+      const headR = (hot ? 2.8 : 1.6) / Math.sqrt(scale);
+
+      // Direção do movimento (source→target) p/ orientar o rastro atrás da cabeça.
+      let dx = (tgt?.x ?? x) - (src?.x ?? x);
+      let dy = (tgt?.y ?? y) - (src?.y ?? y);
+      const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+      const tailLen = (hot ? 15 : 8) / Math.sqrt(scale);
+      const tx = x - dx * tailLen; const ty = y - dy * tailLen;
+
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter"; // acúmulo luminoso = look de energia
+      // rastro
+      const tg = ctx.createLinearGradient(x, y, tx, ty);
+      tg.addColorStop(0, color + "CC"); tg.addColorStop(1, color + "00");
+      ctx.strokeStyle = tg; ctx.lineWidth = headR * 1.25; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(tx, ty); ctx.stroke();
+      // cabeça (glow)
+      const hg = ctx.createRadialGradient(x, y, 0, x, y, headR * 2.6);
+      hg.addColorStop(0, color + "FF"); hg.addColorStop(0.4, color + "AA"); hg.addColorStop(1, color + "00");
+      ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(x, y, headR * 2.6, 0, 2 * Math.PI); ctx.fill();
+      // núcleo branco
+      ctx.fillStyle = "#FFFFFF"; ctx.beginPath(); ctx.arc(x, y, headR * 0.55, 0, 2 * Math.PI); ctx.fill();
+      ctx.restore();
+    }, []);
 
   // ── Fundo: gradiente radial profundo + starfield sutil (sob os nós) ────────
   const paintBackground = useCallback((ctx: CanvasRenderingContext2D) => {
@@ -682,15 +868,21 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const paintNode = useCallback((node: object, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const n = node as FGNode;
     if (!isFinite(n.x ?? NaN) || !isFinite(n.y ?? NaN)) return;
+    lastScaleRef.current = globalScale; // reaproveitado pelo pintor de cometa
     const x = n.x as number; const y = n.y as number;
     const isAgent = n.type === "agent";
     const isActive = isAgent && activeKeyRef.current === n.role;
-    const pulse = pulseRef.current; // 0..1 via RAF (só quando há agente ativo)
+    const now = performance.now();
+    // Pulso FORTE do agente ativo (evento recente) + RESPIRAÇÃO sutil de todos os
+    // neurônios (o cérebro nunca está inerte). Fase por role → não pulsam em uníssono.
+    const roleSeed = (n.role ? n.role.charCodeAt(0) : 0) * 0.7;
+    const pulse  = isActive ? (Math.sin(now / 300) + 1) / 2 : 0;             // 0..1 rápido
+    const breath = isAgent  ? (Math.sin(now / 1100 + roleSeed) + 1) / 2 : 0; // 0..1 lento
     const r = (n.size ?? 4) * (isActive ? 1.15 + pulse * 0.12 : 1);
 
     // 1) GLOW — halo suave por gradiente radial (barato; shadowBlur fica só p/ ativo).
-    const glowR = r * (isActive ? 3.6 + pulse * 1.2 : isAgent ? 2.4 : 1.9);
-    const glowA = isActive ? 0.42 + pulse * 0.30 : isAgent ? 0.20 : 0.14;
+    const glowR = r * (isActive ? 3.6 + pulse * 1.2 : isAgent ? 2.4 + breath * 0.5 : 1.9);
+    const glowA = isActive ? 0.42 + pulse * 0.30 : isAgent ? 0.18 + breath * 0.14 : 0.14;
     const ga = Math.round(Math.min(glowA, 1) * 255).toString(16).padStart(2, "0");
     const grad = ctx.createRadialGradient(x, y, r * 0.6, x, y, glowR);
     grad.addColorStop(0, n.color + ga);
@@ -802,10 +994,11 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         width={canvasW}
         height={canvasH}
         backgroundColor="#0A0C11"
-        // Enquanto um agente pulsa, mantém o canvas repintando (o RAF anima pulseRef);
-        // em repouso, deixa o force-graph pausar o render (a partícula de um evento
-        // ainda dispara redraw sozinha por __photons). Evita 60fps eternos à toa.
-        autoPauseRedraw={!activeAgent}
+        // Fótons AMBIENTES (1 por aresta do backbone) mantêm o canvas repintando mesmo
+        // com a física congelada (a engine faz doRedraw quando há __photons ativos) →
+        // streams + breathing animam sozinhos. autoPauseRedraw fica ligado: se só
+        // sobrarem satélites (sem fóton), o canvas pausa e poupa CPU.
+        autoPauseRedraw
         onRenderFramePre={paintBackground}
         onRenderFramePost={paintVignette}
         nodeCanvasObject={paintNode}
@@ -821,15 +1014,19 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         linkColor={linkColorFn}
         linkWidth={linkWidthFn}
         linkCurvature={linkCurveFn}
-        // Sem partículas permanentes — os pacotes vivos são emitidos via emitParticle
-        // no instante do evento (handleLiveEvent). Cor por tipo de evento.
-        linkDirectionalParticles={0}
+        // STREAMS sinápticos — o "cérebro conversando": 1 fóton contínuo por aresta do
+        // backbone (tráfego ambiente), dessincronizados por offset de fase; velocidade
+        // sobe quando a aresta fica "quente" (evento). Bursts extras via emitParticle.
+        // Cada fóton é desenhado como COMETA (glow aditivo + rastro) pelo canvasObject.
+        linkDirectionalParticles={particleCountFn}
+        linkDirectionalParticleSpeed={particleSpeedFn}
+        linkDirectionalParticleOffset={particleOffsetFn}
         linkDirectionalParticleWidth={2.4}
         linkDirectionalParticleColor={(link) => {
           const l = link as FGLink;
-          return l.__packetColor ?? l.color;
+          return (l.__hotUntil ?? 0) > performance.now() ? (l.__packetColor ?? AMBIENT_STREAM_COLOR) : AMBIENT_STREAM_COLOR;
         }}
-        linkDirectionalParticleSpeed={0.012}
+        linkDirectionalParticleCanvasObject={particleCanvasObject}
         nodeRelSize={1}
         // Física estável: assenta e CONGELA (sem reheat perpétuo).
         d3AlphaDecay={0.035}
@@ -861,6 +1058,34 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
         }}
       />
 
+      {/* Switcher de MODELOS — top left (glassy/HUD). O ativo mostra ícone + rótulo. */}
+      <Box sx={{ position: "absolute", top: 8, left: 8, display: "flex", gap: 0.5, p: 0.5,
+        bgcolor: "#0C111BE6", border: "1px solid #1E2636", borderRadius: 2,
+        backdropFilter: "blur(6px)", zIndex: 3 }}>
+        {LAYOUT_CYCLE.map(m => {
+          const meta = LAYOUT_META[m]; const active = layoutMode === m;
+          return (
+            <Box key={m} component="button" title={meta.tip}
+              onClick={() => setLayoutMode(m)}
+              sx={{
+                cursor: "pointer", border: "1px solid",
+                borderColor: active ? "#4C8DFF" : "transparent",
+                bgcolor: active ? "#4C8DFF22" : "transparent",
+                color: active ? "#CFE0FF" : "#7C8698",
+                borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1,
+                display: "flex", alignItems: "center", gap: 0.5,
+                fontSize: "0.72rem", fontFamily: "inherit",
+                boxShadow: active ? "0 0 10px #4C8DFF55" : "none",
+                transition: "all .18s ease",
+                "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" },
+              }}>
+              <span style={{ fontSize: "0.9rem" }}>{meta.icon}</span>
+              {active && <span style={{ fontWeight: 600 }}>{meta.label}</span>}
+            </Box>
+          );
+        })}
+      </Box>
+
       {/* Indicador do sistema nervoso — top right */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
         <Box sx={{ display: "flex", gap: 0.5, alignItems: "center" }}>
@@ -890,13 +1115,13 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           )}
         </Box>
         <Typography variant="caption" sx={{ color: "#4A5266", fontSize: "0.58rem", textAlign: "right", maxWidth: 180, lineHeight: 1.3, pointerEvents: "none" }}>
-          time de IA do Genesis · clique no fundo para reenquadrar
+          time de IA do Genesis · clique no fundo troca de modelo
         </Typography>
       </Box>
 
       {/* Tooltip */}
       {tooltip && (
-        <Box sx={{ position: "absolute", top: 8, left: 8, bgcolor: "#0F1420EE", border: "1px solid #2A3040", borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none" }}>
+        <Box sx={{ position: "absolute", top: 52, left: 8, bgcolor: "#0F1420EE", border: "1px solid #2A3040", borderRadius: 1, px: 1.5, py: 1, maxWidth: 220, pointerEvents: "none", zIndex: 3 }}>
           <Typography variant="caption" fontWeight={600} color="text.primary">{tooltip.label}</Typography>
           {tooltip.detail && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>{tooltip.detail}</Typography>
