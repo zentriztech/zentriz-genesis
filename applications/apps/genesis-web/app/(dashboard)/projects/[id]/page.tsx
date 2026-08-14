@@ -65,6 +65,7 @@ import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
 import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
+import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import type { DialogueEntry } from "@/components/LiveDialogue";
@@ -1321,6 +1322,7 @@ function ProjectDetailPageInner() {
                 quando a aba "monitor" está ativa. O card se auto-oculta se não houver licença/role. */}
             <Box sx={{ display: deliveryTab === "monitor" ? "block" : "none", mt: 1 }}>
               <DeadpoolMonitorCard projectId={id} onState={setDpState} />
+              <DeadpoolPromotionApprovals projectId={id} />
             </Box>
           </Box>
         );

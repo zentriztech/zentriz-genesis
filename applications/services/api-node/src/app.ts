@@ -25,6 +25,7 @@ import { skillsRoutes } from "./routes/skills.js";
 import { reportsRoutes } from "./routes/reports.js";
 import { deploymentRoutes } from "./routes/deployments.js";
 import { deadpoolRoutes } from "./routes/deadpool.js";
+import { deadpoolApprovalsRoutes } from "./routes/deadpoolApprovals.js";
 import { learningRoutes } from "./routes/learning.js";
 import { readFileSync } from "node:fs";
 
@@ -97,6 +98,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(reportsRoutes);
   await app.register(deploymentRoutes);
   await app.register(deadpoolRoutes);
+  await app.register(deadpoolApprovalsRoutes);
   await app.register(learningRoutes);
 
   return app;
