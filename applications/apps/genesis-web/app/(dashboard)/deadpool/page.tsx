@@ -25,6 +25,8 @@ import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
 import { deadpoolStore } from "@/stores/deadpoolStore";
+import { authStore } from "@/stores/authStore";
+import DeadpoolPollFlagsCard from "@/components/DeadpoolPollFlagsCard";
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "#EF4444",
@@ -94,6 +96,9 @@ export default observer(function DeadpoolPage() {
         </Box>
       ) : (
         <Stack spacing={4}>
+          {/* ── Flags de poll ativo por nuvem (toggle) — só Zentriz admin ──── */}
+          {authStore.isZentrizAdmin && <DeadpoolPollFlagsCard />}
+
           {/* ── Projetos monitorados ──────────────────────────────────────── */}
           <Box>
             <Typography variant="h6" fontWeight={700} mb={1.5}>Projetos monitorados</Typography>

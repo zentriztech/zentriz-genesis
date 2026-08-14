@@ -20,6 +20,11 @@ vi.mock("../middleware/auth.js", () => ({
 }));
 
 // Deadpool "vivo": /health + /ready respondem objetos ricos.
+const OFF_FLAGS = {
+  allow_cloudwatch_poll: { value: false, source: "env", env_default: false },
+  allow_azure_poll: { value: false, source: "env", env_default: false },
+  allow_gcp_poll: { value: false, source: "env", env_default: false },
+};
 vi.mock("../services/deadpoolClient.js", () => ({
   isDeadpoolConfigured: () => true,
   deadpoolGet: vi.fn(async (path: string) => {
@@ -28,6 +33,19 @@ vi.mock("../services/deadpoolClient.js", () => ({
     if (path === "/projects") return { projects: [] };
     if (path.startsWith("/incidents")) return { incidents: [] };
     if (path === "/knowledge") return { entries: [] };
+    if (path === "/monitoring/flags") return { status: "ok", monitor_enabled: false, flags: OFF_FLAGS };
+    return {};
+  }),
+  // Echoa o override recebido como se o Deadpool tivesse persistido — o gateway só valida e repassa.
+  deadpoolPost: vi.fn(async (path: string, body: unknown) => {
+    if (path === "/monitoring/flags") {
+      const updates = (body as { flags?: Record<string, unknown> })?.flags ?? {};
+      const flags = { ...OFF_FLAGS } as Record<string, unknown>;
+      for (const [k, v] of Object.entries(updates)) {
+        flags[k] = v === null ? { value: false, source: "env", env_default: false } : { value: v, source: "override", env_default: false };
+      }
+      return { status: "ok", monitor_enabled: false, flags };
+    }
     return {};
   }),
 }));
@@ -150,5 +168,78 @@ describe("deadpool gateway RBAC", () => {
       payload: {},
     });
     expect(res.statusCode).not.toBe(400);
+  });
+
+  // ── monitoring/flags: toggle das flags de poll por nuvem (zentriz_admin-only) ──
+  it("GET flags exige zentriz_admin — tenant_admin é 403", async () => {
+    currentRole = "tenant_admin";
+    const res = await app.inject({ method: "GET", url: "/api/deadpool/monitoring/flags" });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("zentriz_admin lê o estado efetivo das flags (todas OFF por env)", async () => {
+    currentRole = "zentriz_admin";
+    const res = await app.inject({ method: "GET", url: "/api/deadpool/monitoring/flags" });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.available).toBe(true);
+    expect(body.monitorEnabled).toBe(false);
+    expect(body.flags.allow_cloudwatch_poll).toEqual({ value: false, source: "env", env_default: false });
+  });
+
+  it("POST flags exige zentriz_admin — tenant_admin é 403", async () => {
+    currentRole = "tenant_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deadpool/monitoring/flags",
+      payload: { flags: { allow_gcp_poll: true } },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("zentriz_admin liga uma nuvem → 200, flag vira override=true", async () => {
+    currentRole = "zentriz_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deadpool/monitoring/flags",
+      payload: { flags: { allow_gcp_poll: true } },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.available).toBe(true);
+    expect(body.flags.allow_gcp_poll).toEqual({ value: true, source: "override", env_default: false });
+  });
+
+  it("POST rejeita flag não gerenciável no gateway (400 UNMANAGED_FLAG, sem I/O)", async () => {
+    currentRole = "zentriz_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deadpool/monitoring/flags",
+      payload: { flags: { monitor_enabled: true } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("UNMANAGED_FLAG");
+  });
+
+  it("POST rejeita valor não-bool/null (400 BAD_VALUE)", async () => {
+    currentRole = "zentriz_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deadpool/monitoring/flags",
+      payload: { flags: { allow_azure_poll: "on" } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("BAD_VALUE");
+  });
+
+  it("POST rejeita corpo sem objeto 'flags' (400 BAD_REQUEST)", async () => {
+    currentRole = "zentriz_admin";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/deadpool/monitoring/flags",
+      payload: { nope: 1 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("BAD_REQUEST");
   });
 });

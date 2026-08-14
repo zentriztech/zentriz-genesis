@@ -1,7 +1,7 @@
 "use client";
 
 import { makeAutoObservable, runInAction } from "mobx";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 
 // ── Tipos (defensivos — o backend é externo; tudo pode faltar) ────────────────
 
@@ -65,6 +65,21 @@ export interface DeadpoolKnowledgeEntry {
   tags?: string[];
 }
 
+/** Estado efetivo de uma flag de poll por nuvem: valor vigente, origem e o default de env. */
+export interface PollFlagState {
+  value: boolean;
+  source: "env" | "override";
+  env_default: boolean;
+}
+export type MonitoringFlags = Record<string, PollFlagState>;
+
+/** Nuvens de poll ativo, na ordem de exibição, com rótulo amigável. */
+export const POLL_FLAG_META: { flag: string; cloud: string }[] = [
+  { flag: "allow_cloudwatch_poll", cloud: "AWS CloudWatch" },
+  { flag: "allow_azure_poll", cloud: "Azure Monitor" },
+  { flag: "allow_gcp_poll", cloud: "GCP Monitoring" },
+];
+
 class DeadpoolStore {
   status: DeadpoolStatus | null = null;
   projects: DeadpoolProject[] = [];
@@ -83,6 +98,17 @@ class DeadpoolStore {
   incidentLoading = false;
   incidentError: string | null = null;
   incidentDetailId: string | null = null;
+
+  // ── Flags de poll ativo por nuvem (toggle via Portal, zentriz_admin) ──
+  monitorEnabled = false;
+  flags: MonitoringFlags = {};
+  flagsAvailable = false;
+  flagsReason: string | null = null;
+  flagsLoading = false;
+  flagsError: string | null = null;
+  flagsLoaded = false;
+  /** flag em gravação no momento (desabilita o switch dela) ou null. */
+  flagSaving: string | null = null;
 
   constructor() {
     makeAutoObservable(this);
@@ -148,6 +174,66 @@ class DeadpoolStore {
     } finally {
       runInAction(() => {
         this.knowledgeLoading = false;
+      });
+    }
+  }
+
+  /** true se QUALQUER nuvem está com poll ativo ligado (para o resumo do card). */
+  get anyPollOn(): boolean {
+    return Object.values(this.flags).some((f) => f?.value === true);
+  }
+
+  /** Carrega o estado efetivo das flags de poll por nuvem (env × override). */
+  async loadMonitoringFlags() {
+    if (this.flagsLoading) return;
+    this.flagsLoading = true;
+    this.flagsError = null;
+    try {
+      const data = await apiGet<{ available?: boolean; reason?: string; monitorEnabled?: boolean; flags?: MonitoringFlags }>(
+        "/api/deadpool/monitoring/flags",
+      );
+      runInAction(() => {
+        this.flagsAvailable = data?.available === true;
+        this.flagsReason = data?.reason ?? null;
+        this.monitorEnabled = data?.monitorEnabled === true;
+        this.flags = data?.flags && typeof data.flags === "object" ? data.flags : {};
+        this.flagsLoaded = true;
+      });
+    } catch (err) {
+      runInAction(() => {
+        this.flagsError = err instanceof Error ? err.message : "Falha ao carregar as flags de monitoramento";
+        this.flagsAvailable = false;
+        this.flags = {};
+      });
+    } finally {
+      runInAction(() => {
+        this.flagsLoading = false;
+      });
+    }
+  }
+
+  /** Liga/desliga o override de uma flag de poll (null remove o override → volta ao env). */
+  async setPollFlag(flag: string, value: boolean | null) {
+    if (this.flagSaving) return; // evita toggles concorrentes
+    this.flagSaving = flag;
+    this.flagsError = null;
+    try {
+      const data = await apiPost<{ available?: boolean; monitorEnabled?: boolean; flags?: MonitoringFlags }>(
+        "/api/deadpool/monitoring/flags",
+        { flags: { [flag]: value } },
+      );
+      runInAction(() => {
+        this.flagsAvailable = data?.available === true;
+        this.monitorEnabled = data?.monitorEnabled === true;
+        this.flags = data?.flags && typeof data.flags === "object" ? data.flags : this.flags;
+      });
+    } catch (err) {
+      runInAction(() => {
+        this.flagsError = err instanceof Error ? err.message : "Falha ao atualizar a flag";
+      });
+    } finally {
+      runInAction(() => {
+        this.flagSaving = null;
       });
     }
   }

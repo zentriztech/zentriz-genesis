@@ -25,7 +25,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
-import { deadpoolGet, isDeadpoolConfigured } from "../services/deadpoolClient.js";
+import { deadpoolGet, deadpoolPost, isDeadpoolConfigured } from "../services/deadpoolClient.js";
 import { pool } from "../db/client.js";
 import { hasEntitlement, setEntitlement } from "../services/entitlements.js";
 import { registerProjectWithDeadpool, deriveSystemService } from "../services/githubPush.js";
@@ -210,6 +210,76 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
       return reply.send({ available: false, entries: [] });
     }
   });
+
+  // ── GET /api/deadpool/monitoring/flags ───────────────────────────────────────
+  // Estado efetivo das flags de poll ativo por nuvem (allow_{cloudwatch,azure,gcp}_poll) +
+  // monitor_enabled (gate do loop, READ-ONLY). Ligar poll ativo bate no SDK de nuvem do CLIENTE:
+  // é decisão OPERACIONAL global da Zentriz (não escopada por tenant) → só zentriz_admin.
+  app.get("/api/deadpool/monitoring/flags", async (request, reply) => {
+    if (!requireZentrizAdmin(request, reply)) return;
+    if (!isDeadpoolConfigured()) {
+      return reply.send({ available: false, reason: "not_configured", monitorEnabled: false, flags: {} });
+    }
+    try {
+      const data = await deadpoolGet<{ status?: string; monitor_enabled?: boolean; flags?: unknown }>(
+        "/monitoring/flags",
+      );
+      return reply.send({
+        available: true,
+        monitorEnabled: data?.monitor_enabled === true,
+        flags: data?.flags ?? {},
+      });
+    } catch (err) {
+      const reason = degradeReason(err);
+      app.log.warn({ route: "deadpool/monitoring/flags", reason }, "Deadpool flags indisponível (degradado)");
+      return reply.send({ available: false, reason, monitorEnabled: false, flags: {} });
+    }
+  });
+
+  // ── POST /api/deadpool/monitoring/flags ──────────────────────────────────────
+  // Liga/desliga um override de poll por nuvem em runtime (sem redeploy). Corpo:
+  // { flags: { allow_<cloud>_poll: true|false|null } } — null remove o override (volta ao env).
+  // Valida no gateway antes de repassar (defesa em profundidade) — nunca 500 por Deadpool ausente.
+  app.post<{ Body: { flags?: Record<string, unknown> } }>(
+    "/api/deadpool/monitoring/flags",
+    async (request, reply) => {
+      if (!requireZentrizAdmin(request, reply)) return;
+      const updates = request.body?.flags;
+      if (typeof updates !== "object" || updates === null || Array.isArray(updates)) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "corpo deve conter objeto 'flags'" });
+      }
+      const MANAGED = ["allow_cloudwatch_poll", "allow_azure_poll", "allow_gcp_poll"];
+      for (const [key, value] of Object.entries(updates)) {
+        if (!MANAGED.includes(key)) {
+          return reply.status(400).send({ code: "UNMANAGED_FLAG", message: `flag não gerenciável: ${key}` });
+        }
+        if (value !== null && typeof value !== "boolean") {
+          return reply.status(400).send({ code: "BAD_VALUE", message: `valor de ${key} deve ser bool ou null` });
+        }
+      }
+      if (!isDeadpoolConfigured()) {
+        return reply.status(503).send({ code: "DEADPOOL_UNAVAILABLE", reason: "not_configured" });
+      }
+      try {
+        const data = await deadpoolPost<{ status?: string; monitor_enabled?: boolean; flags?: unknown; reason?: string }>(
+          "/monitoring/flags",
+          { flags: updates },
+        );
+        if (data?.status !== "ok") {
+          return reply.status(400).send({ code: "REJECTED", message: data?.reason ?? "rejeitado pelo Deadpool" });
+        }
+        return reply.send({
+          available: true,
+          monitorEnabled: data?.monitor_enabled === true,
+          flags: data?.flags ?? {},
+        });
+      } catch (err) {
+        const reason = degradeReason(err);
+        app.log.warn({ route: "deadpool/monitoring/flags:POST", reason }, "Deadpool set-flags falhou (degradado)");
+        return reply.status(503).send({ code: "DEADPOOL_UNAVAILABLE", reason });
+      }
+    },
+  );
 
   // ── GET /api/deadpool/entitlement ────────────────────────────────────────────
   // Licença Deadpool do tenant do CHAMADOR. É o que a UI consulta para decidir se o
