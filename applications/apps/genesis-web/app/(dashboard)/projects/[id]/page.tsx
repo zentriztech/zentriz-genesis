@@ -1033,11 +1033,11 @@ function ProjectDetailPageInner() {
   return (
     <Box sx={{ minHeight: "100%" }}>
       {/* ── Top header bar ── */}
-      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 2 }}>
+      <Stack direction="row" alignItems="center" spacing={1.5} useFlexGap flexWrap="wrap" sx={{ mb: 2, rowGap: 1 }}>
         <IconButton size="small" onClick={() => router.push("/projects")}>
           <ArrowBackIcon fontSize="small" />
         </IconButton>
-        <Typography variant="h5" fontWeight={700} noWrap sx={{ flexGrow: 1 }}>
+        <Typography variant="h5" fontWeight={700} noWrap sx={{ flexGrow: 1, minWidth: { xs: 120, sm: 160 }, fontSize: { xs: "1.15rem", sm: "1.5rem" } }}>
           {project.title ?? "Spec sem título"}
         </Typography>
         <StatusChip status={project.status} model={currentModel} activeStep={activeStep} />
@@ -1728,10 +1728,10 @@ function ProjectDetailPageInner() {
         );
       })()}
 
-      {/* ── Main cockpit layout — 3 resizable columns ── */}
-      <Box ref={layoutRef} sx={{ display: "flex", gap: 0, alignItems: "flex-start", userSelect: dragRef.current ? "none" : "auto" }}>
+      {/* ── Main cockpit layout — 3 resizable columns (desktop) / stacked (mobile) ── */}
+      <Box ref={layoutRef} sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, gap: 0, alignItems: { xs: "stretch", md: "flex-start" }, userSelect: dragRef.current ? "none" : "auto" }}>
         {/* LEFT COLUMN */}
-        <Box sx={{ width: `${colWidths.left}%`, flexShrink: 0, pr: 1 }}>
+        <Box sx={{ width: { xs: "100%", md: `${colWidths.left}%` }, flexShrink: 0, pr: { xs: 0, md: 1 }, mb: { xs: 2, md: 0 } }}>
           <Stack spacing={2}>
             {/* Pipeline stepper vertical */}
             <Card>
@@ -2406,15 +2406,15 @@ function ProjectDetailPageInner() {
           </Stack>
         </Box>
 
-        {/* Drag handle left↔center */}
+        {/* Drag handle left↔center (só desktop — arraste é mouse-only) */}
         <Box onMouseDown={(e) => startDrag("lc", e)}
-          sx={{ width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
+          sx={{ display: { xs: "none", md: "block" }, width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
             bgcolor: "transparent", "&:hover": { bgcolor: "primary.main" + "40" },
             transition: "background-color 0.15s", borderRadius: 1, mx: 0.25 }} />
 
         {/* ── CENTER PANEL ── */}
-        <Box sx={{ width: `${colWidths.center}%`, flexShrink: 0, px: 0.5 }}>
-          <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
+        <Box sx={{ width: { xs: "100%", md: `${colWidths.center}%` }, flexShrink: 0, px: { xs: 0, md: 0.5 }, mb: { xs: 2, md: 0 } }}>
+          <Card sx={{ height: { xs: "75vh", md: "calc(100vh - 180px)" }, minHeight: { xs: 420, md: 600 }, display: "flex", flexDirection: "column" }}>
             {centerTabs.length === 0 ? (
               <Box sx={{ flexGrow: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 1 }}>
                 <Typography variant="body2" color="text.secondary">Todas as abas foram movidas para o painel direito.</Typography>
@@ -2451,18 +2451,18 @@ function ProjectDetailPageInner() {
           </Card>
         </Box>
 
-        {/* Drag handle center↔right — only when right panel open */}
+        {/* Drag handle center↔right — only when right panel open (só desktop) */}
         {tasksOpen && (
           <Box onMouseDown={(e) => startDrag("cr", e)}
-            sx={{ width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
+            sx={{ display: { xs: "none", md: "block" }, width: 6, flexShrink: 0, cursor: "col-resize", alignSelf: "stretch",
               bgcolor: "transparent", "&:hover": { bgcolor: "primary.main" + "40" },
               transition: "background-color 0.15s", borderRadius: 1, mx: 0.25 }} />
         )}
 
         {/* ── RIGHT PANEL: Tasks + moved tabs (collapsible) ── */}
         {tasksOpen ? (
-          <Box sx={{ width: `${colWidths.right}%`, flexShrink: 0, pl: 0.5 }}>
-            <Card sx={{ height: "calc(100vh - 180px)", minHeight: 600, display: "flex", flexDirection: "column" }}>
+          <Box sx={{ width: { xs: "100%", md: `${colWidths.right}%` }, flexShrink: 0, pl: { xs: 0, md: 0.5 } }}>
+            <Card sx={{ height: { xs: "75vh", md: "calc(100vh - 180px)" }, minHeight: { xs: 420, md: 600 }, display: "flex", flexDirection: "column" }}>
               {/* Header: unified Tabs — Tasks first, then moved tabs */}
               <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid", borderColor: "divider", pr: 0.5, flexShrink: 0 }}>
                 <Tabs
@@ -2688,19 +2688,19 @@ function ProjectDetailPageInner() {
             </Card>
           </Box>
         ) : (
-          <Box sx={{ display: "flex", alignItems: "center", height: "calc(100vh - 180px)", minHeight: 600 }}>
+          <Box sx={{ display: "flex", alignItems: "center", width: { xs: "100%", md: "auto" }, height: { xs: "auto", md: "calc(100vh - 180px)" }, minHeight: { xs: 0, md: 600 } }}>
             <Tooltip title="Abrir painel direito" placement="left">
               <Box onClick={() => setTasksOpen(true)} sx={{
-                cursor: "pointer", display: "flex", flexDirection: "column",
+                cursor: "pointer", display: "flex", flexDirection: { xs: "row", md: "column" },
                 alignItems: "center", justifyContent: "center", gap: 1,
-                width: 28, height: "100%", bgcolor: "background.paper",
+                width: { xs: "100%", md: 28 }, height: { xs: 44, md: "100%" }, bgcolor: "background.paper",
                 border: "1px solid", borderColor: "divider", borderRadius: 1,
                 "&:hover": { borderColor: "primary.main", bgcolor: "primary.main" + "08" },
                 transition: "all 0.15s",
               }}>
                 <ChevronLeftIcon sx={{ fontSize: "1rem", color: "text.secondary" }} />
                 <Typography variant="caption" color="text.secondary"
-                  sx={{ fontSize: "0.6rem", writingMode: "vertical-rl", textOrientation: "mixed", letterSpacing: "0.05em" }}>
+                  sx={{ fontSize: "0.6rem", writingMode: { xs: "horizontal-tb", md: "vertical-rl" }, textOrientation: "mixed", letterSpacing: "0.05em" }}>
                   {rightTabs.length > 0 ? TAB_LABELS[rightTabs[0]] : `Tasks ${tasks?.length ? `${tasksDone}/${tasks.length}` : ""}`}
                 </Typography>
               </Box>

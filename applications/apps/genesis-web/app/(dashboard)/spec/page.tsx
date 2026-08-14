@@ -1041,15 +1041,15 @@ export default function SpecPage() {
           <Card>
             <CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
               {approveError && <Alert severity="error" sx={{ m: 2 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
-              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ px: 2, py: 1.5, borderBottom: "1px solid", borderColor: "divider" }}>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <CheckCircleIcon sx={{ color: "warning.main", fontSize: "1.1rem" }} />
+              <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap sx={{ px: 2, py: 1.5, rowGap: 1, borderBottom: "1px solid", borderColor: "divider" }}>
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ flexGrow: 1, minWidth: 0 }}>
+                  <CheckCircleIcon sx={{ color: "warning.main", fontSize: "1.1rem", flexShrink: 0 }} />
                   <TextField
                     size="small" variant="standard" value={projectTitle}
                     onChange={(e) => setProjectTitle(e.target.value)}
                     placeholder="Título do projeto"
                     InputProps={{ disableUnderline: false, sx: { fontWeight: 600, fontSize: "0.95rem" } }}
-                    sx={{ minWidth: 260 }}
+                    sx={{ minWidth: { xs: 140, sm: 260 }, flexGrow: { xs: 1, sm: 0 } }}
                   />
                 </Stack>
                 <Stack direction="row" spacing={1}>
@@ -1068,7 +1068,7 @@ export default function SpecPage() {
                   </Button>
                 </Stack>
               </Stack>
-              <Box sx={{ height: 600, overflow: "hidden", display: "flex" }}>
+              <Box sx={{ height: { xs: 520, sm: 600 }, overflow: "hidden", display: "flex" }}>
                 <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
                   <SpecEditor
                     value={specMarkdown} onChange={setSpecMarkdown}
@@ -1078,8 +1078,8 @@ export default function SpecPage() {
                     regenDisabled={true}
                   />
                 </Box>
-                {/* Feature #63 — painel de chat à direita do editor/preview */}
-                <Box sx={{ width: { xs: 300, md: 380 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider" }}>
+                {/* Feature #63 — painel de chat à direita do editor/preview (oculto no mobile: editor ocupa a tela; usar tela cheia p/ chat) */}
+                <Box sx={{ width: { xs: 300, md: 380 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider", display: { xs: "none", md: "block" } }}>
                   <SpecChatPanel
                     messages={chatMessages} input={chatInput} onInput={setChatInput}
                     onSend={handleChatSend} sending={chatSending} error={chatError}
@@ -1215,8 +1215,8 @@ export default function SpecPage() {
               {specMarkdown !== null && (
                 <AnimatePresence mode="wait">
                   <motion.div key="editor" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-                    <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
-                      <Stack direction="row" spacing={1} alignItems="center">
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap sx={{ mb: 1.5, rowGap: 1 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ rowGap: 0.5 }}>
                         <CheckCircleIcon sx={{ color: "success.main", fontSize: "1.1rem" }} />
                         <Typography variant="subtitle2" fontWeight={600}>Spec gerada pelo CTO</Typography>
                         <Chip label="Revise e edite antes de aprovar" size="small" color="warning" sx={{ fontSize: "0.65rem" }} />
@@ -1228,8 +1228,8 @@ export default function SpecPage() {
 
                     {approveError && <Alert severity="error" sx={{ mb: 1.5 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
 
-                    {/* Editor inline (600px) + chat de edição (Feature #63) */}
-                    <Box sx={{ height: 600, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden", display: "flex" }}>
+                    {/* Editor inline + chat de edição (Feature #63) */}
+                    <Box sx={{ height: { xs: 520, sm: 600 }, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden", display: "flex" }}>
                       <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
                         <SpecEditor
                           value={specMarkdown} onChange={setSpecMarkdown}
@@ -1239,7 +1239,7 @@ export default function SpecPage() {
                           regenDisabled={generating}
                         />
                       </Box>
-                      <Box sx={{ width: { xs: 280, md: 360 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider", display: { xs: "none", sm: "block" } }}>
+                      <Box sx={{ width: { xs: 280, md: 360 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider", display: { xs: "none", md: "block" } }}>
                         <SpecChatPanel
                           messages={chatMessages} input={chatInput} onInput={setChatInput}
                           onSend={handleChatSend} sending={chatSending} error={chatError}

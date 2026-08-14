@@ -375,8 +375,8 @@ function ProjectsPageInner() {
   return (
     <Box>
       {/* ── Header ── */}
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 3 }}>
-        <Box>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 3, rowGap: 1.5 }}>
+        <Box sx={{ minWidth: 0 }}>
           <Stack direction="row" alignItems="center" spacing={1}>
             <Typography variant="h4">Meus projetos</Typography>
             {selectedProductId && (

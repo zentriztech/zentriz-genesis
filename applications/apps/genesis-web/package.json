@@ -35,14 +35,14 @@
     "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "three": "^0.170.0"
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/d3-force": "^3.0.0",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
-    "@types/three": "^0.170.0",
+    "@types/three": "^0.185.4",
     "eslint": "^8",
     "eslint-config-next": "14.2.35",
     "postcss": "^8",

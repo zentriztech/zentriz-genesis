@@ -453,7 +453,7 @@ function TaskDetailDrawer({ task, onClose }: { task: TaskItem | null; onClose: (
       anchor="right"
       open={!!task}
       onClose={onClose}
-      PaperProps={{ sx: { width: 360, bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}
+      PaperProps={{ sx: { width: { xs: "100%", sm: 360 }, maxWidth: "100vw", bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}
     >
       {/* Header */}
       <Stack direction="row" alignItems="center" justifyContent="space-between"

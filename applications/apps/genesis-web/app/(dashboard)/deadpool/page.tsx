@@ -59,11 +59,11 @@ export default observer(function DeadpoolPage() {
 
   return (
     <Box sx={{ maxWidth: 960, mx: "auto", p: { xs: 2, md: 4 } }}>
-      <Stack direction="row" alignItems="center" spacing={1.5} mb={3}>
+      <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap mb={3} sx={{ rowGap: 1 }}>
         <HealthAndSafetyIcon sx={{ color: "#EF4444", fontSize: 28 }} />
         <Typography variant="h5" fontWeight={700}>Deadpool</Typography>
         <Chip label="Sustainment / Auto-Care" size="small" sx={{ bgcolor: "#EF4444", color: "#fff" }} />
-        <Box sx={{ flexGrow: 1 }} />
+        <Box sx={{ flexGrow: 1, minWidth: { xs: 0, sm: 16 } }} />
         <Tooltip title="Base de conhecimento">
           <IconButton onClick={() => router.push("/deadpool/knowledge")}><MenuBookIcon /></IconButton>
         </Tooltip>

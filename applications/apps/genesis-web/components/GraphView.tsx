@@ -71,7 +71,7 @@ function TaskDetailDrawerView({ task, onClose }: { task: TaskItem | null; onClos
 
   return (
     <Drawer anchor="right" open={!!task} onClose={onClose}
-      PaperProps={{ sx: { width: 360, bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}>
+      PaperProps={{ sx: { width: { xs: "100%", sm: 360 }, maxWidth: "100vw", bgcolor: "#0D0F14", borderLeft: "1px solid #30363D", p: 0 } }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between"
         sx={{ px: 2, py: 1.5, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
         <Stack spacing={0.25}>
@@ -534,11 +534,15 @@ function FullscreenLayout({
   onClose: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // < 600px: 3 painéis lado a lado não cabem → começa com os laterais colapsados
+  // (o grafo ocupa a tela toda) e, quando o usuário expande um, ele abre em largura
+  // utilizável. GraphView é client-only (dynamic ssr:false) → matchMedia no init é seguro.
+  const mobileInit = typeof window !== "undefined" && window.matchMedia("(max-width: 600px)").matches;
   // larguras em % dos 3 painéis
   const [leftPct,  setLeftPct]  = useState(20);
   const [rightPct, setRightPct] = useState(20);
-  const [leftCollapsed,  setLeftCollapsed]  = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [leftCollapsed,  setLeftCollapsed]  = useState(mobileInit);
+  const [rightCollapsed, setRightCollapsed] = useState(mobileInit);
 
   // task detail
   const [drawerTask, setDrawerTask] = useState<TaskItem | null>(null);
@@ -576,6 +580,13 @@ function FullscreenLayout({
   const effectiveRight = rightCollapsed ? 0 : rightPct;
   const centerPct      = 100 - effectiveLeft - effectiveRight;
 
+  // No mobile os painéis são largos (82%) → abrir os dois ao mesmo tempo estouraria a
+  // largura e cortaria o grafo. Ao expandir um, recolhe o outro (só em telas estreitas;
+  // client-only ssr:false → matchMedia no handler é seguro). No desktop os dois convivem.
+  const isNarrow = () => typeof window !== "undefined" && window.matchMedia("(max-width: 600px)").matches;
+  const expandLeft  = () => { setLeftCollapsed(false);  if (isNarrow()) setRightCollapsed(true); };
+  const expandRight = () => { setRightCollapsed(false); if (isNarrow()) setLeftCollapsed(true); };
+
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100vh", bgcolor: "#0D0F14" }}>
       {/* Top bar */}
@@ -595,7 +606,7 @@ function FullscreenLayout({
 
         {/* ── Painel Esquerdo — Diálogo ao vivo ── */}
         {!leftCollapsed && (
-          <Box sx={{ width: `${effectiveLeft}%`, flexShrink: 0, display: "flex", flexDirection: "column",
+          <Box sx={{ width: { xs: "82%", sm: `${effectiveLeft}%` }, flexShrink: 0, display: "flex", flexDirection: "column",
             borderRight: "1px solid #30363D", overflow: "hidden" }}>
             <Stack direction="row" alignItems="center" justifyContent="space-between"
               sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #30363D", flexShrink: 0 }}>
@@ -618,7 +629,7 @@ function FullscreenLayout({
 
         {/* Collapse tab — esquerdo */}
         {leftCollapsed && (
-          <Box onClick={() => setLeftCollapsed(false)} sx={{
+          <Box onClick={expandLeft} sx={{
             width: 20, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
             bgcolor: "#161B22", borderRight: "1px solid #30363D", "&:hover": { bgcolor: "#1e2430" },
           }}>
@@ -626,8 +637,10 @@ function FullscreenLayout({
           </Box>
         )}
 
-        {/* Resize handle esquerdo */}
-        {!leftCollapsed && <ResizeHandle onDrag={handleLeftDrag} />}
+        {/* Resize handle esquerdo — arraste com o mouse; oculto no mobile (touch) */}
+        {!leftCollapsed && (
+          <Box sx={{ display: { xs: "none", sm: "contents" } }}><ResizeHandle onDrag={handleLeftDrag} /></Box>
+        )}
 
         {/* ── Painel Centro — Grafo ── */}
         <Box sx={{ flexGrow: 1, width: `${centerPct}%`, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
@@ -638,12 +651,14 @@ function FullscreenLayout({
           </Box>
         </Box>
 
-        {/* Resize handle direito */}
-        {!rightCollapsed && <ResizeHandle onDrag={handleRightDrag} />}
+        {/* Resize handle direito — arraste com o mouse; oculto no mobile (touch) */}
+        {!rightCollapsed && (
+          <Box sx={{ display: { xs: "none", sm: "contents" } }}><ResizeHandle onDrag={handleRightDrag} /></Box>
+        )}
 
         {/* Collapse tab — direito */}
         {rightCollapsed && (
-          <Box onClick={() => setRightCollapsed(false)} sx={{
+          <Box onClick={expandRight} sx={{
             width: 20, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
             bgcolor: "#161B22", borderLeft: "1px solid #30363D", "&:hover": { bgcolor: "#1e2430" },
           }}>
@@ -653,7 +668,7 @@ function FullscreenLayout({
 
         {/* ── Painel Direito — Tasks ── */}
         {!rightCollapsed && (
-          <Box sx={{ width: `${effectiveRight}%`, flexShrink: 0, display: "flex", flexDirection: "column",
+          <Box sx={{ width: { xs: "82%", sm: `${effectiveRight}%` }, flexShrink: 0, display: "flex", flexDirection: "column",
             borderLeft: "1px solid #30363D", overflow: "hidden" }}>
             <Stack direction="row" alignItems="center" justifyContent="space-between"
               sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid #30363D", flexShrink: 0 }}>

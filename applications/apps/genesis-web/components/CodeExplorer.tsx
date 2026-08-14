@@ -340,9 +340,9 @@ export function CodeExplorer({ projectId, files, appsRoot, height = 520, truncat
     });
 
   const explorerContent = (h: number | string) => (
-    <Box sx={{ display: "flex", height: h, overflow: "hidden", bgcolor: "#0D0F14", flex: 1 }}>
-      {/* File tree + toolbar */}
-      <Box sx={{ width: 260, flexShrink: 0, display: "flex", flexDirection: "column", borderRight: "1px solid #21262D", bgcolor: "#0D1117" }}>
+    <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, height: h, overflow: "hidden", bgcolor: "#0D0F14", flex: 1 }}>
+      {/* File tree + toolbar — no mobile empilha no topo (altura contida) e o editor fica abaixo */}
+      <Box sx={{ width: { xs: "100%", md: 260 }, flexShrink: 0, maxHeight: { xs: "40%", md: "none" }, display: "flex", flexDirection: "column", borderRight: { xs: "none", md: "1px solid #21262D" }, borderBottom: { xs: "1px solid #21262D", md: "none" }, bgcolor: "#0D1117" }}>
         {/* Toolbar (não rola): busca + filtro por extensão + avisos */}
         <Box sx={{ flexShrink: 0, px: 1, pt: 1, pb: 0.5, borderBottom: "1px solid #21262D" }}>
           <TextField
