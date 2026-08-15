@@ -16,7 +16,6 @@ import { useDialogueStream } from "@/lib/useDialogueStream";
 import { DEFAULT_FILTER, type PlanningDoc, type GraphFilter } from "@/lib/useGraphData";
 import { forceCollide } from "d3-force";
 import dynamic from "next/dynamic";
-import { useVoice } from "@/lib/useVoice";
 
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 // Modelo JARVIS 3D — carregado só quando o modo 3D é selecionado (three.js fora do
@@ -80,25 +79,7 @@ const LAYOUT_META: Record<LayoutMode, { icon: string; label: string; tip: string
   pipeline:      { icon: "➡️", label: "Pipeline",     tip: "Esquerda → direita pela fase, em colunas alinhadas" },
   flow:          { icon: "🌊", label: "Fluxo",        tip: "Colunas por fase, mas com dispersão orgânica + arestas curvas" },
   free:          { icon: "✦",  label: "Livre",        tip: "Física livre (Obsidian) — assenta e congela sozinho" },
-  jarvis:        { icon: "🛰️", label: "JARVIS 3D",   tip: "3D real (Three.js) — esfera de luz flutuante, bloom, órbita e voz" },
-};
-
-// ── Comandos de voz → modelo (PT-BR, tolerante a acento/variações) ─────────────
-const stripAccents = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "");
-const VOICE_MODE_WORDS: Array<[LayoutMode, string[]]> = [
-  ["jarvis",        ["jarvis", "3d", "tres de", "espacial", "esfera"]],
-  ["neural",        ["neuronio", "neural"]],
-  ["constellation", ["constelacao", "orbita"]],
-  ["brain",         ["cerebro", "hemisferio"]],
-  ["radial",        ["radial", "cebola"]],
-  ["pipeline",      ["pipeline", "esteira"]],
-  ["flow",          ["fluxo", "flow"]],
-  ["free",          ["livre", "solto"]],
-];
-// Rótulo falado (PT-BR) de cada agente do roster — separações ajudam a síntese.
-const ROLE_SPOKEN: Record<string, string> = {
-  system: "Genesis", cto: "C T O", engineer: "Engenheiro", pm: "P M",
-  dev: "Desenvolvedor", qa: "Q A", devops: "Dev Ops", monitor: "Monitor",
+  jarvis:        { icon: "🛰️", label: "3D",          tip: "3D real (Three.js) — malha viva de agentes: halos, anéis, órbita cinematográfica e partículas de dados" },
 };
 
 // Cor base do tráfego sináptico AMBIENTE (repouso) — azul-elétrico frio, tipo HUD.
@@ -582,35 +563,10 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
   const [taskDrawer, setTaskDrawer] = useState<TaskItem | null>(null);
   const taskMapRef = useRef<Map<string, TaskItem>>(new Map());
 
-  // ── Voz JARVIS (Web Speech API, zero-dep) ──────────────────────────────────────
-  // Comando de voz troca o modelo por nome falado; a narração (TTS) anuncia o agente
-  // que começou a trabalhar enquanto o microfone estiver ativo.
-  const handleVoiceCommand = useCallback((raw: string) => {
-    const t = stripAccents(raw.toLowerCase());
-    for (const [mode, words] of VOICE_MODE_WORDS) {
-      if (words.some(w => t.includes(stripAccents(w)))) { setLayoutMode(mode); return; }
-    }
-  }, []);
-  const voice = useVoice({ onCommand: handleVoiceCommand });
   // Clique num nó vindo do renderizador 3D → abre o drawer da task (paridade com o 2D).
   const handleNode3DClick = useCallback((id: string, type: string) => {
     if (type === "task") { const task = taskMapRef.current.get(id); if (task) setTaskDrawer(task); }
   }, []);
-  // Narra a troca de agente ativo (só quando o microfone/voz está engajado).
-  const lastSpokeRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!voice.listening || !activeAgent || lastSpokeRef.current === activeAgent) return;
-    lastSpokeRef.current = activeAgent;
-    voice.speak(`${ROLE_SPOKEN[activeAgent] ?? activeAgent} trabalhando.`);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeAgent, voice.listening]);
-  // Os controles de voz só aparecem no modo JARVIS; ao sair dele (por comando de voz,
-  // clique no fundo ou switcher), desliga o microfone — senão ele fica ativo e narrando
-  // sem nenhum botão visível para parar. TTS narração é gated em voice.listening → para junto.
-  useEffect(() => {
-    if (layoutMode !== "jarvis" && voice.listening) voice.toggleListening();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutMode, voice.listening]);
 
   const filterRef = useRef(filter);
   useEffect(() => { filterRef.current = filter; }, [filter]);
@@ -1303,23 +1259,29 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
       />
       )}
 
-      {/* Switcher de MODELOS — top left (glassy/HUD). O ativo mostra ícone + rótulo. */}
+      {/* Switcher de MODELOS — top left (glassy/HUD). O ativo mostra ícone + rótulo.
+          Mobile: rola HORIZONTALMENTE (nowrap + overflowX) para nenhum modelo ser cortado;
+          maxWidth deixa espaço para o indicador do topo-direito. Scrollbar oculta (estética HUD). */}
       <Box sx={{ position: "absolute", top: 8, left: 8, display: "flex", gap: 0.5, p: 0.5,
         bgcolor: "#0C111BE6", border: "1px solid #1E2636", borderRadius: 2,
-        backdropFilter: "blur(6px)", zIndex: 3 }}>
+        backdropFilter: "blur(6px)", zIndex: 3,
+        flexWrap: "nowrap", overflowX: "auto", overflowY: "hidden",
+        maxWidth: { xs: "calc(100vw - 96px)", sm: "calc(100% - 120px)" },
+        WebkitOverflowScrolling: "touch",
+        scrollbarWidth: "none", "&::-webkit-scrollbar": { display: "none" } }}>
         {LAYOUT_CYCLE.map(m => {
           const meta = LAYOUT_META[m]; const active = layoutMode === m;
           return (
             <Box key={m} component="button" title={meta.tip}
               onClick={() => setLayoutMode(m)}
               sx={{
-                cursor: "pointer", border: "1px solid",
+                cursor: "pointer", border: "1px solid", flex: "0 0 auto",
                 borderColor: active ? "#4C8DFF" : "transparent",
                 bgcolor: active ? "#4C8DFF22" : "transparent",
                 color: active ? "#CFE0FF" : "#7C8698",
                 borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1,
                 display: "flex", alignItems: "center", gap: 0.5,
-                fontSize: "0.72rem", fontFamily: "inherit",
+                fontSize: "0.72rem", fontFamily: "inherit", whiteSpace: "nowrap",
                 boxShadow: active ? "0 0 10px #4C8DFF55" : "none",
                 transition: "all .18s ease",
                 "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" },
@@ -1330,41 +1292,6 @@ export function ForceGraph({ projectId, pollIntervalMs = 8000, height = 500, pla
           );
         })}
       </Box>
-
-      {/* Controles de VOZ — só no modelo JARVIS 3D. Microfone troca o modelo por comando
-          falado ("jarvis", "neurônio", "constelação"…); alto-falante narra o agente ativo. */}
-      {layoutMode === "jarvis" && (voice.sttSupported || voice.ttsSupported) && (
-        <Box sx={{ position: "absolute", top: 52, left: 8, display: "flex", gap: 0.5, p: 0.5,
-          bgcolor: "#0C111BE6", border: "1px solid #1E2636", borderRadius: 2,
-          backdropFilter: "blur(6px)", zIndex: 3 }}>
-          {voice.sttSupported && (
-            <Box component="button" title="Comando de voz — diga o nome de um modelo (ex.: “constelação”, “jarvis”)"
-              onClick={voice.toggleListening}
-              sx={{ cursor: "pointer", border: "1px solid",
-                borderColor: voice.listening ? "#F26D6D" : "transparent",
-                bgcolor: voice.listening ? "#F26D6D22" : "transparent",
-                color: voice.listening ? "#FFD5D5" : "#7C8698",
-                borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1, display: "flex", alignItems: "center", gap: 0.5,
-                fontSize: "0.72rem", fontFamily: "inherit",
-                boxShadow: voice.listening ? "0 0 10px #F26D6D66" : "none", transition: "all .18s ease",
-                "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" } }}>
-              <span style={{ fontSize: "0.9rem" }}>🎙️</span>
-              <span style={{ fontWeight: 600 }}>{voice.listening ? "ouvindo…" : "voz"}</span>
-            </Box>
-          )}
-          {voice.ttsSupported && (
-            <Box component="button" title={voice.muted ? "Ativar narração" : "Silenciar narração"}
-              onClick={voice.toggleMuted}
-              sx={{ cursor: "pointer", border: "1px solid transparent", bgcolor: "transparent",
-                color: voice.muted ? "#5A6474" : "#7C8698",
-                borderRadius: 1.5, px: 0.9, py: 0.5, lineHeight: 1, display: "flex", alignItems: "center",
-                fontSize: "0.72rem", fontFamily: "inherit", transition: "all .18s ease",
-                "&:hover": { color: "#DCE6FF", bgcolor: "#4C8DFF18" } }}>
-              <span style={{ fontSize: "0.9rem" }}>{voice.muted ? "🔇" : "🔊"}</span>
-            </Box>
-          )}
-        </Box>
-      )}
 
       {/* Indicador do sistema nervoso — top right */}
       <Box sx={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5 }}>
