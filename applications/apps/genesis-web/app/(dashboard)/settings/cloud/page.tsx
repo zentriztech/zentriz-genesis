@@ -262,7 +262,7 @@ function CloudSlotCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDel
   return (
     <Card variant="outlined" sx={{ borderColor: color + "55", borderLeft: `4px solid ${color}` }}>
       <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-        <Stack direction="row" alignItems="center" spacing={1.5}>
+        <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap>
           {/* Badge posição */}
           <Chip label={SLOT_LABEL(index)} size="small"
             sx={{ bgcolor: color + "20", color, fontWeight: 700, border: `1px solid ${color}44`, minWidth: 90 }} />
@@ -292,7 +292,7 @@ function CloudSlotCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDel
           </Box>
 
           {/* Ações */}
-          <Stack direction="row" spacing={0.25}>
+          <Stack direction="row" spacing={0.25} sx={{ flexShrink: 0 }}>
             <Tooltip title="Testar credenciais">
               <IconButton size="small" onClick={onTest} disabled={testing}>
                 {testing ? <CircularProgress size={14} /> : <VerifiedIcon fontSize="small" />}
@@ -404,7 +404,7 @@ function CloudSettingsPageInner() {
   return (
     <Box sx={{ maxWidth: 800, mx: "auto", p: { xs: 2, md: 4 } }}>
       {/* Cabeçalho */}
-      <Stack direction="row" alignItems="flex-start" spacing={1.5} sx={{ mb: 3 }}>
+      <Stack direction="row" alignItems="flex-start" spacing={1.5} flexWrap="wrap" useFlexGap sx={{ mb: 3 }}>
         <CloudIcon sx={{ color: "primary.main", fontSize: 28, mt: 0.25 }} />
         <Box sx={{ flexGrow: 1, minWidth: 0 }}>
           <Typography variant="h5" fontWeight={700}>Conectar Cloud</Typography>

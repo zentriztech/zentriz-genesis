@@ -180,7 +180,7 @@ function DeadpoolPromotionApprovals({ projectId }: { projectId: string }) {
   return (
     <Box sx={{ mb: 2 }}>
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <GavelIcon fontSize="small" sx={{ color: "#EF4444" }} />
           <Typography variant="body2" fontWeight={700} sx={{ flexGrow: 1 }}>
             Aprovações de promoção (Deadpool)
@@ -207,8 +207,8 @@ function DeadpoolPromotionApprovals({ projectId }: { projectId: string }) {
             Nenhum pedido de promoção registrado para este projeto.
           </Typography>
         ) : (
-          <TableContainer component={Paper} variant="outlined">
-            <Table size="small">
+          <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto" }}>
+            <Table size="small" sx={{ minWidth: 640 }}>
               <TableHead>
                 <TableRow>
                   <TableCell>Ambiente</TableCell>

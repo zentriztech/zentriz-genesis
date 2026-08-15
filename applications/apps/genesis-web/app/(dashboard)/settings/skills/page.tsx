@@ -127,7 +127,7 @@ export default observer(function SkillsPage() {
   const totalDeprecated = skills.filter((s) => s.status === "deprecated").length;
 
   return (
-    <Box sx={{ p: 3, maxWidth: 1200, mx: "auto" }}>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1200, mx: "auto" }}>
       {/* Cabeçalho */}
       <Stack direction="row" alignItems="center" spacing={1.5} mb={3}>
         <AutoAwesomeIcon sx={{ color: "#3B82F6", fontSize: 28 }} />
@@ -167,15 +167,15 @@ export default observer(function SkillsPage() {
       </Stack>
 
       {/* Filtros */}
-      <Stack direction="row" spacing={2} mb={3} alignItems="center">
-        <FormControl size="small" sx={{ minWidth: 130 }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} mb={3} alignItems="center" flexWrap="wrap" useFlexGap>
+        <FormControl size="small" sx={{ minWidth: { xs: "100%", sm: 130 } }}>
           <InputLabel>Role</InputLabel>
           <Select value={roleFilter} label="Role" onChange={(e) => setRoleFilter(e.target.value)}>
             <MenuItem value="all">Todos</MenuItem>
             {ROLES.map((r) => <MenuItem key={r} value={r}>{r}</MenuItem>)}
           </Select>
         </FormControl>
-        <FormControl size="small" sx={{ minWidth: 140 }}>
+        <FormControl size="small" sx={{ minWidth: { xs: "100%", sm: 140 } }}>
           <InputLabel>Status</InputLabel>
           <Select value={statusFilter} label="Status" onChange={(e) => setStatusFilter(e.target.value)}>
             <MenuItem value="all">Todos</MenuItem>

@@ -39,7 +39,7 @@ function FlagRow({ flag, cloud }: { flag: string; cloud: string }) {
   const disabled = saving || deadpoolStore.flagSaving !== null || !deadpoolStore.flagsAvailable;
 
   return (
-    <Stack direction="row" alignItems="center" spacing={1.5} sx={{ py: 1 }}>
+    <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap sx={{ py: 1 }}>
       <CloudQueueIcon sx={{ color: on ? "#10B981" : "#6B7280", fontSize: 20 }} />
       <Box sx={{ minWidth: 150 }}>
         <Typography fontWeight={600}>{cloud}</Typography>

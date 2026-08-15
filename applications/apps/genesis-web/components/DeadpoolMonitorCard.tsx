@@ -157,22 +157,6 @@ export default function DeadpoolMonitorCard({
       severity={active ? "success" : "info"}
       icon={<HealthAndSafetyIcon />}
       sx={{ mb: 2 }}
-      action={
-        <Button
-          size="small"
-          variant={active ? "outlined" : "contained"}
-          color={active ? "inherit" : "primary"}
-          disabled={busy || (!active && !canActivate)}
-          startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <HealthAndSafetyIcon />}
-          onClick={() => void toggle(!active)}
-        >
-          {busy
-            ? "Processando..."
-            : active
-              ? "Desativar Monitoramento"
-              : "Ativar Monitoramento Deadpool"}
-        </Button>
-      }
     >
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
         <Typography variant="body2" fontWeight={600}>
@@ -194,7 +178,7 @@ export default function DeadpoolMonitorCard({
           log group vem do deployment. Azure/GCP precisam do escopo de logs para o poll ativo. */}
       {!active && (
         <Box sx={{ mt: 1.25 }}>
-          <FormControl size="small" sx={{ minWidth: 260 }}>
+          <FormControl size="small" sx={{ minWidth: { xs: "100%", sm: 260 }, width: { xs: "100%", sm: "auto" } }}>
             <InputLabel id="deadpool-provider-label">Nuvem monitorada</InputLabel>
             <Select
               labelId="deadpool-provider-label"
@@ -211,14 +195,17 @@ export default function DeadpoolMonitorCard({
           {provider === "azure" && (
             <Stack spacing={1} sx={{ mt: 1 }}>
               <TextField
+                fullWidth
                 size="small" label="Tabela do Log Analytics (obrigatório)" placeholder="AppTraces"
                 value={azureTable} onChange={(e) => setAzureTable(e.target.value)} disabled={busy} required
               />
               <TextField
+                fullWidth
                 size="small" label="Workspace ID (opcional)"
                 value={azureWorkspaceId} onChange={(e) => setAzureWorkspaceId(e.target.value)} disabled={busy}
               />
               <TextField
+                fullWidth
                 size="small" label="Coluna da mensagem (opcional)" placeholder="Message"
                 value={azureMessageColumn} onChange={(e) => setAzureMessageColumn(e.target.value)} disabled={busy}
               />
@@ -227,11 +214,13 @@ export default function DeadpoolMonitorCard({
           {provider === "gcp" && (
             <Stack spacing={1} sx={{ mt: 1 }}>
               <TextField
+                fullWidth
                 size="small" label="Filtro de logs (obrigatório)"
                 placeholder='resource.type="cloud_run_revision"'
                 value={gcpLogFilter} onChange={(e) => setGcpLogFilter(e.target.value)} disabled={busy} required
               />
               <TextField
+                fullWidth
                 size="small" label="Project ID (opcional)"
                 value={gcpProjectId} onChange={(e) => setGcpProjectId(e.target.value)} disabled={busy}
               />
@@ -249,6 +238,23 @@ export default function DeadpoolMonitorCard({
           <Typography variant="caption" color="error">{error}</Typography>
         </Box>
       )}
+      <Box sx={{ mt: 1 }}>
+        <Button
+          size="small"
+          variant={active ? "outlined" : "contained"}
+          color={active ? "inherit" : "primary"}
+          disabled={busy || (!active && !canActivate)}
+          startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <HealthAndSafetyIcon />}
+          onClick={() => void toggle(!active)}
+          sx={{ width: { xs: "100%", sm: "auto" } }}
+        >
+          {busy
+            ? "Processando..."
+            : active
+              ? "Desativar Monitoramento"
+              : "Ativar Monitoramento Deadpool"}
+        </Button>
+      </Box>
     </Alert>
   );
 }

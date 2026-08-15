@@ -24,7 +24,7 @@ function ZentrizProjectsPageInner() {
     <Box>
       <Typography variant="h4" gutterBottom>Gestão global de projetos</Typography>
       <TableContainer component={Paper} sx={{ mt: 2 }}>
-        <Table>
+        <Table sx={{ minWidth: 760 }}>
           <TableHead>
             <TableRow>
               <TableCell>Título</TableCell>

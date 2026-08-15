@@ -2426,6 +2426,7 @@ function ProjectDetailPageInner() {
               <>
                 <Stack direction="row" alignItems="center" sx={{ borderBottom: "1px solid", borderColor: "divider", pr: 0.5 }}>
                   <Tabs value={Math.min(centerTab, centerTabs.length - 1)} onChange={(_e, v) => setCenterTab(v as number)}
+                    variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile
                     sx={{ flex: 1, minHeight: 44 }}>
                     {centerTabs.map((tabId, idx) => (
                       <Tab key={tabId}
@@ -2471,6 +2472,7 @@ function ProjectDetailPageInner() {
                     const idx = v as number;
                     setRightActiveTab(idx === 0 ? -1 : idx - 1);
                   }}
+                  variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile
                   sx={{ flex: 1, minHeight: 44 }}
                 >
                   {/* Tasks always first tab */}

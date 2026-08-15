@@ -22,7 +22,7 @@ export default function ZentrizTenantsPage() {
     <Box>
       <Typography variant="h4" gutterBottom>Gestão de tenants</Typography>
       <TableContainer component={Paper} sx={{ mt: 2 }}>
-        <Table>
+        <Table sx={{ minWidth: 520 }}>
           <TableHead>
             <TableRow>
               <TableCell>Nome</TableCell>

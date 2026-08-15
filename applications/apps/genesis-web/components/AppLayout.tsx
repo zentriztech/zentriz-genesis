@@ -117,7 +117,7 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
       )}
 
       {/* Nav items */}
-      <List sx={{ px: collapsed ? 0.5 : 1, py: 1 }}>
+      <List sx={{ px: collapsed ? 0.5 : 1, py: 1, pb: 2, flexGrow: 1, overflowY: "auto", overflowX: "hidden", minHeight: 0 }}>
         {nav.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
@@ -162,7 +162,7 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
       </List>
 
       {/* Footer */}
-      <Box sx={{ px: collapsed ? 1 : 2, py: 1.5, borderTop: "1px solid", borderColor: "divider", textAlign: collapsed ? "center" : "left" }}>
+      <Box sx={{ px: collapsed ? 1 : 2, py: 1.5, borderTop: "1px solid", borderColor: "divider", textAlign: collapsed ? "center" : "left", flexShrink: 0 }}>
         <Typography variant="caption" color="text.secondary">
           {collapsed
             ? `v${process.env.NEXT_PUBLIC_APP_VERSION ?? "?"}`

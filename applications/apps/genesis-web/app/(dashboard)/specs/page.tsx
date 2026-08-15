@@ -90,6 +90,7 @@ export default function SpecsPage() {
 
       <Card>
         <Tabs value={tab} onChange={(_e, v) => setTab(v as number)}
+          variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile
           sx={{ borderBottom: "1px solid", borderColor: "divider", px: 2 }}>
           <Tab label="Minhas SPECs" sx={{ textTransform: "none", minHeight: 48 }} />
           <Tab label="Catálogo" sx={{ textTransform: "none", minHeight: 48 }} />

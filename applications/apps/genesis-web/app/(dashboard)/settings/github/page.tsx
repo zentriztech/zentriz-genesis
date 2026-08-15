@@ -83,7 +83,7 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
           fullWidth
           required
         />
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
           Encontre em: <code>github.com/organizations/<strong>seu-org</strong>/settings/installations</code>
         </Typography>
 

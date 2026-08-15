@@ -250,7 +250,7 @@ export default function SplitterPage() {
       {/* ── Entrada do documento ──────────────────────────────────────────── */}
       <Card variant="outlined" sx={{ mb: 3 }}>
         <CardContent>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
+          <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile sx={{ mb: 2 }}>
             <Tab label="Colar texto" />
             <Tab label="Anexar arquivo" icon={<UploadFileIcon fontSize="small" />} iconPosition="start" />
           </Tabs>

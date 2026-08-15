@@ -15,6 +15,7 @@ import FormControlLabel from "@mui/material/FormControlLabel";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
 import Divider from "@mui/material/Divider";
+import Fab from "@mui/material/Fab";
 import IconButton from "@mui/material/IconButton";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
@@ -448,17 +449,17 @@ function SpecEditor({
   const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split">("split");
 
   const toolbar = (
-    <Stack direction="row" alignItems="center" justifyContent="space-between"
-      sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", flexShrink: 0 }}>
-      <Stack direction="row" spacing={0.5} alignItems="center">
-        <Tabs value={editorTab} onChange={(_e, v) => setEditorTab(v as typeof editorTab)} sx={{ minHeight: 32 }}>
+    <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap
+      sx={{ px: 1.5, py: 0.75, rowGap: 0.75, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", flexShrink: 0 }}>
+      <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 0 }}>
+        <Tabs value={editorTab} onChange={(_e, v) => setEditorTab(v as typeof editorTab)} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile sx={{ minHeight: 32 }}>
           <Tab value="edit"    icon={<EditIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Editar"    sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           <Tab value="split"   icon={<PreviewIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Lado a lado" sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           <Tab value="preview" icon={<PreviewIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Preview"  sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
         </Tabs>
         <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.65rem", height: 18, ml: 1 }} />
       </Stack>
-      <Stack direction="row" spacing={0.75} alignItems="center">
+      <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap sx={{ rowGap: 0.5 }}>
         {onRegen && (
           <Tooltip title="Regenerar spec com IA">
             <span>
@@ -707,6 +708,17 @@ export default function SpecPage() {
   const [chatSending, setChatSending]   = useState(false);
   const [chatError, setChatError]       = useState<string | null>(null);
   const chatPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // No mobile o chat não cabe ao lado do editor → abre em tela cheia via FAB.
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  // Ao cruzar para o desktop (≥md), o chat volta a ser inline → fecha o dialog fullScreen
+  // (senão ele ficaria aberto sobre o layout desktop após um resize/rotação).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mq = window.matchMedia("(min-width:900px)");
+    const onChange = () => { if (mq.matches) setMobileChatOpen(false); };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   // Upload flow
   const [files, setFiles]         = useState<File[]>([]);
@@ -1009,6 +1021,39 @@ export default function SpecPage() {
     </Dialog>
   );
 
+  // ── Chat de IA em tela cheia no mobile (FAB) ──────────────────────────────
+  // No desktop o SpecChatPanel aparece ao lado do editor; no mobile não cabe,
+  // então um FAB (só xs) abre o MESMO painel num Dialog fullScreen. Reutilizado
+  // pelos dois modos (edição e criação) — só um render por vez (edição faz early return).
+  const mobileChat = (
+    <>
+      <Fab
+        color="primary" aria-label="Abrir assistente de IA"
+        onClick={() => setMobileChatOpen(true)}
+        sx={{ display: { xs: "flex", md: "none" }, position: "fixed", bottom: 24, right: 24, zIndex: (t) => t.zIndex.speedDial }}
+      >
+        <AutoFixHighIcon />
+      </Fab>
+      <Dialog open={mobileChatOpen} onClose={() => setMobileChatOpen(false)} fullScreen
+        PaperProps={{ sx: { bgcolor: "background.default", m: 0 } }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between"
+          sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <AutoFixHighIcon sx={{ color: "primary.main", fontSize: "1.2rem" }} />
+            <Typography variant="subtitle1" fontWeight={700}>Assistente de spec (IA)</Typography>
+          </Stack>
+          <IconButton onClick={() => setMobileChatOpen(false)} aria-label="Fechar"><CloseIcon /></IconButton>
+        </Stack>
+        <DialogContent sx={{ p: 0, display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
+          <SpecChatPanel
+            messages={chatMessages} input={chatInput} onInput={setChatInput}
+            onSend={handleChatSend} sending={chatSending} error={chatError}
+          />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+
   // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
   if (editProjectId) {
     return (
@@ -1091,6 +1136,7 @@ export default function SpecPage() {
         )}
 
         {editorDialog}
+        {specMarkdown !== null && !editLoading && mobileChat}
       </Box>
     );
   }
@@ -1117,6 +1163,7 @@ export default function SpecPage() {
       {/* Tabs */}
       <Card>
         <Tabs value={tab} onChange={(_e, v) => setTab(v as number)}
+          variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile
           sx={{ borderBottom: "1px solid", borderColor: "divider", px: 2 }}>
           <Tab label={<Stack direction="row" spacing={0.75} alignItems="center"><AutoFixHighIcon sx={{ fontSize: "0.9rem" }} /><span>Descrever com texto livre</span></Stack>} sx={{ textTransform: "none", minHeight: 48 }} />
           <Tab label={<Stack direction="row" spacing={0.75} alignItems="center"><UploadFileIcon sx={{ fontSize: "0.9rem" }} /><span>Upload de arquivo</span></Stack>} sx={{ textTransform: "none", minHeight: 48 }} />
@@ -1360,6 +1407,7 @@ export default function SpecPage() {
       </Card>
 
       {editorDialog}
+      {tab === 0 && specMarkdown !== null && mobileChat}
     </Box>
   );
 }

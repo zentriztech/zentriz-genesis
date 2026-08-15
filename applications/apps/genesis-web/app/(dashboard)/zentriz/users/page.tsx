@@ -22,7 +22,7 @@ export default function ZentrizUsersPage() {
     <Box>
       <Typography variant="h4" gutterBottom>Gestão de usuários</Typography>
       <TableContainer component={Paper} sx={{ mt: 2 }}>
-        <Table>
+        <Table sx={{ minWidth: 640 }}>
           <TableHead>
             <TableRow>
               <TableCell>E-mail</TableCell>

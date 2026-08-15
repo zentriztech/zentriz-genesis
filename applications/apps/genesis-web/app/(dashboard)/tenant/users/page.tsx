@@ -175,7 +175,7 @@ const TenantUsersPage = observer(function TenantUsersPage() {
         </Box>
       ) : (
         <TableContainer component={Paper} sx={{ mt: 2 }}>
-          <Table>
+          <Table sx={{ minWidth: 640 }}>
             <TableHead>
               <TableRow>
                 <TableCell>Nome</TableCell>

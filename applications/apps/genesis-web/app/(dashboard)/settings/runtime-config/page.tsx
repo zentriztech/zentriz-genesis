@@ -223,7 +223,7 @@ export default observer(function RuntimeConfigPage() {
                                   : undefined,
                               }}
                               inputProps={{ min: item.min, max: item.max }}
-                              sx={{ width: 120 }}
+                              sx={{ width: { xs: "100%", sm: 120 } }}
                               disabled={isSaving}
                             />
 
@@ -257,7 +257,7 @@ export default observer(function RuntimeConfigPage() {
                           </Stack>
 
                           {/* Linha de referência */}
-                          <Stack direction="row" spacing={2} mt={0.5}>
+                          <Stack direction="row" spacing={2} mt={0.5} flexWrap="wrap" useFlexGap>
                             {item.globalValue && (
                               <Typography variant="caption" color="text.secondary">
                                 Global: {item.globalValue}{item.unit}

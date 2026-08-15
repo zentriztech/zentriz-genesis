@@ -98,7 +98,7 @@ export default observer(function DeploymentsPage() {
 
   return (
     <Box sx={{ maxWidth: 960, mx: "auto", p: { xs: 2, md: 4 } }}>
-      <Stack direction="row" alignItems="center" spacing={1.5} mb={3}>
+      <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap mb={3}>
         <RocketLaunchIcon sx={{ color: "#0EA5E9", fontSize: 28 }} />
         <Typography variant="h5" fontWeight={700}>Deployments</Typography>
         <Chip
@@ -149,7 +149,7 @@ export default observer(function DeploymentsPage() {
                       />
                     </Stack>
                     {d.appUrl && (
-                      <Link href={d.appUrl} target="_blank" rel="noopener" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5, fontSize: "0.85rem" }}>
+                      <Link href={d.appUrl} target="_blank" rel="noopener" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5, fontSize: "0.85rem", wordBreak: "break-all" }}>
                         {d.appUrl} <OpenInNewIcon sx={{ fontSize: "0.85rem" }} />
                       </Link>
                     )}

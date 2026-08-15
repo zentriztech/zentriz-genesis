@@ -24,7 +24,7 @@ function TenantProjectsPageInner() {
     <Box>
       <Typography variant="h4" gutterBottom>Projetos do tenant</Typography>
       <TableContainer component={Paper} sx={{ mt: 2 }}>
-        <Table>
+        <Table sx={{ minWidth: 640 }}>
           <TableHead><TableRow><TableCell>Título</TableCell><TableCell>Status</TableCell><TableCell>Recursos</TableCell><TableCell>Atualizado</TableCell><TableCell align="right">Ações</TableCell></TableRow></TableHead>
           <TableBody>
             {projects.map((p) => (

@@ -282,7 +282,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
         </Stack>
 
         {/* Modelo principal + Fallback */}
-        <Stack direction="row" spacing={1.5} sx={{ mb: 2 }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mb: 2 }}>
           <FormControl size="small" fullWidth>
             <InputLabel>Modelo principal</InputLabel>
             <Select value={modelId || meta.models[0]} label="Modelo principal"
@@ -321,7 +321,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
             O Cyborg audita o produto entregue pelo squad, corrige gaps residuais e publica no S3.
             Use o modelo mais capaz disponível — é a etapa mais importante do pipeline.
           </Typography>
-          <Stack direction="row" spacing={1.5}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
             <FormControl size="small" fullWidth sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
               <InputLabel>Cyborg principal</InputLabel>
               <Select value={cyborgId} label="Cyborg principal"
@@ -433,7 +433,7 @@ function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, d
   return (
     <Card variant="outlined" sx={{ borderColor: color + "55", borderLeft: `4px solid ${color}` }}>
       <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
-        <Stack direction="row" alignItems="center" spacing={1.5}>
+        <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap>
           {/* Badge de posição */}
           <Chip label={SLOT_LABEL(index)} size="small"
             sx={{ bgcolor: color + "20", color, fontWeight: 700, border: `1px solid ${color}44`, minWidth: 100 }} />
@@ -469,7 +469,7 @@ function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, d
           </Box>
 
           {/* Ações */}
-          <Stack direction="row" spacing={0.25}>
+          <Stack direction="row" spacing={0.25} sx={{ flexShrink: 0 }}>
             <Tooltip title="Mover para cima (aumentar prioridade)">
               <span>
                 <IconButton size="small" onClick={onMoveUp} disabled={index === 0}>
@@ -629,7 +629,7 @@ function LlmSettingsInner() {
   return (
     <Box sx={{ maxWidth: 800, mx: "auto", p: { xs: 2, md: 4 } }}>
       {/* Cabeçalho */}
-      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 3 }}>
+      <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap sx={{ mb: 3 }}>
         <PsychologyIcon sx={{ color: "primary.main", fontSize: 28 }} />
         <Box sx={{ flexGrow: 1 }}>
           <Typography variant="h5" fontWeight={700}>Configuração de LLM</Typography>
