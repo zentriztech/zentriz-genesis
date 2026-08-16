@@ -7,7 +7,7 @@ const STORAGE_KEY = "genesis_selected_tenant";
 /**
  * Escopo de tenant selecionado pelo master (zentriz_admin) no seletor do topo.
  * Persistido em localStorage para lembrar a última escolha ao trocar de tela.
- *   - null  → "Todos os tenants" (visão global, sem filtro)
+ *   - null  → "Nenhum" (modo gestão Zentriz; o menu enxuga para gerir só tenants)
  *   - <id>  → filtra dados daquele tenant
  * Só afeta o master; para tenant_admin/user o backend já escopa pelo próprio tenant.
  */

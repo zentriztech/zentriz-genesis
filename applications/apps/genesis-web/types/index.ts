@@ -6,6 +6,8 @@ export interface Plan {
   name: string;
   maxProjects: number;
   maxUsersPerTenant: number;
+  /** Preço mensal em centavos (BRL). 0 = gratuito/a definir. */
+  monthlyPriceCents: number;
 }
 
 export type TenantStatus = "active" | "suspended" | "inactive";

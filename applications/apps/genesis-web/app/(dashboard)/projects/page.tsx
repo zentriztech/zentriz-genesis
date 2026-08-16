@@ -1,8 +1,8 @@
 "use client";
 
 import { observer } from "mobx-react-lite";
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -336,12 +336,20 @@ function buildProductSections(
 
 function ProjectsPageInner() {
   const router   = useRouter();
+  // Filtro vindo do dashboard: /projects?product=<uuid> deve abrir já filtrado.
+  const searchParams   = useSearchParams();
+  const productParam   = searchParams.get("product");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   // Mapa productId → nome real buscado de GET /api/products
   const [productNameMap, setProductNameMap] = useState<Map<string, string>>(new Map());
-  // null = mostrar todos; string = filtrar pelo produto clicado
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
+  // null = mostrar todos; string = filtrar pelo produto clicado. Semeado pelo ?product= da URL.
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(productParam);
+
+  // Reaplica o filtro quando a URL muda (ex.: clicar outro produto no dashboard já estando aqui).
+  useEffect(() => {
+    setSelectedProductId(productParam);
+  }, [productParam]);
 
   const allProjects = projectsStore.list;
   // Aplicar filtro de produto se selecionado
@@ -559,4 +567,13 @@ function ProjectsPageInner() {
   );
 }
 
-export default observer(ProjectsPageInner);
+const ObservedProjectsPage = observer(ProjectsPageInner);
+
+// useSearchParams() exige um boundary de Suspense no App Router (Next 15) senão o build falha.
+export default function ProjectsPage() {
+  return (
+    <Suspense fallback={<LinearProgress sx={{ borderRadius: 1, mt: 2 }} />}>
+      <ObservedProjectsPage />
+    </Suspense>
+  );
+}

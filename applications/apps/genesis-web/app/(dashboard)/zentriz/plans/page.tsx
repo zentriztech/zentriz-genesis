@@ -20,10 +20,24 @@ import type { Plan } from "@/types";
 import { plansStore, type UpdatePlanPayload } from "@/stores/plansStore";
 import { authStore } from "@/stores/authStore";
 
+/** Formata centavos (BRL) como moeda: 9900 -> "R$ 99,00". */
+function formatBRL(cents: number): string {
+  return ((cents ?? 0) / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+/** Converte texto em reais (aceita vírgula ou ponto) para centavos inteiros; null se inválido. */
+function parseReaisToCents(input: string): number | null {
+  const normalized = input.trim().replace(/\./g, "").replace(",", ".");
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 100);
+}
+
 function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; onClose: () => void }) {
   const [name, setName] = useState(plan.name);
   const [maxProjects, setMaxProjects] = useState(String(plan.maxProjects));
   const [maxUsers, setMaxUsers] = useState(String(plan.maxUsersPerTenant));
+  const [price, setPrice] = useState(((plan.monthlyPriceCents ?? 0) / 100).toFixed(2).replace(".", ","));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,6 +51,13 @@ function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; on
       const mu = parseInt(maxUsers, 10);
       if (!isNaN(mp) && mp !== plan.maxProjects) payload.maxProjects = mp;
       if (!isNaN(mu) && mu !== plan.maxUsersPerTenant) payload.maxUsersPerTenant = mu;
+      const cents = parseReaisToCents(price);
+      if (cents === null) {
+        setError("Valor mensal inválido. Use um número em reais (ex.: 99,00).");
+        setSaving(false);
+        return;
+      }
+      if (cents !== (plan.monthlyPriceCents ?? 0)) payload.monthlyPriceCents = cents;
       await plansStore.update(plan.id, payload);
       onClose();
     } catch (err) {
@@ -54,6 +75,13 @@ function EditPlanDialog({ plan, open, onClose }: { plan: Plan; open: boolean; on
         <TextField label="Nome" value={name} onChange={(e) => setName(e.target.value)} fullWidth />
         <TextField label="Máx. projetos" type="number" value={maxProjects} onChange={(e) => setMaxProjects(e.target.value)} fullWidth />
         <TextField label="Máx. usuários por tenant" type="number" value={maxUsers} onChange={(e) => setMaxUsers(e.target.value)} fullWidth />
+        <TextField
+          label="Valor mensal (R$)"
+          value={price}
+          onChange={(e) => setPrice(e.target.value)}
+          fullWidth
+          helperText="Preço mensal do plano em reais (ex.: 99,00). 0 = gratuito/a definir."
+        />
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={saving}>Cancelar</Button>
@@ -106,6 +134,12 @@ const ZentrizPlansPage = observer(function ZentrizPlansPage() {
                 <CardContent>
                   <Typography variant="h6">{plan.name}</Typography>
                   <Typography variant="body2" color="text.secondary">slug: {plan.slug}</Typography>
+                  <Typography variant="h5" color="primary" sx={{ mt: 1, mb: 0.5, fontWeight: 700 }}>
+                    {formatBRL(plan.monthlyPriceCents)}
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                      /mês
+                    </Typography>
+                  </Typography>
                   <Typography variant="body2">Projetos máx.: {plan.maxProjects}</Typography>
                   <Typography variant="body2">Usuários por tenant: {plan.maxUsersPerTenant}</Typography>
                 </CardContent>

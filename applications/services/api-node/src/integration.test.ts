@@ -448,16 +448,41 @@ describe("Plans API (CRUD)", () => {
         slug: "integration-test",
         maxProjects: 99,
         maxUsersPerTenant: 50,
+        monthlyPriceCents: 12345,
       },
     });
     expect([201, 409]).toContain(res.statusCode);
     if (res.statusCode === 201) {
       const body = JSON.parse(res.body);
       expect(body.maxProjects).toBe(99);
+      expect(body.monthlyPriceCents).toBe(12345); // preço persiste em centavos
       createdPlanId = body.id;
     } else {
       createdPlanId = "plan_integration_test";
     }
+  });
+
+  it("PATCH /api/plans/:id updates monthly_price_cents", async () => {
+    if (!dbAvailable || !app || !adminToken || !createdPlanId) return;
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/plans/${createdPlanId}`,
+      headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+      payload: { monthlyPriceCents: 55555 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).monthlyPriceCents).toBe(55555);
+  });
+
+  it("POST /api/plans rejects negative monthlyPriceCents with 400", async () => {
+    if (!dbAvailable || !app || !adminToken) return;
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/plans",
+      headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+      payload: { id: "plan_bad_price", name: "Bad", slug: "bad-price", maxProjects: 1, maxUsersPerTenant: 1, monthlyPriceCents: -5 },
+    });
+    expect(res.statusCode).toBe(400);
   });
 
   it("GET /api/plans/:id returns plan (admin)", async () => {

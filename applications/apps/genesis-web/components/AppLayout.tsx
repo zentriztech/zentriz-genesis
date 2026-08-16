@@ -46,6 +46,7 @@ import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
 import { themeStore } from "@/stores/themeStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { TenantSelector } from "@/components/TenantSelector";
 
 const DRAWER_WIDTH = 240;
@@ -94,12 +95,36 @@ const navZentriz = [
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
 
+// Itens ocultados quando o master está em MODO GESTÃO (nenhum tenant selecionado).
+// Zentriz não cria produtos/projetos nem envia specs, e não opera infra de tenant:
+// nesse modo o menu foca só em gerir Tenants, usuários e projetos DE tenants.
+const HIDE_WHEN_NO_TENANT = new Set<string>([
+  "/spec",
+  "/specs",
+  "/splitter",
+  "/projects",
+  "/deadpool",
+  "/settings/llm",
+  "/settings/github",
+  "/settings/cloud",
+  "/settings/deployments",
+  "/settings/telegram",
+  "/settings/runtime-config",
+  "/settings/skills",
+]);
+
 // ── Sidebar content (shared between permanent and temporary drawer) ────────────
-// observer obrigatório — lê authStore.isTenantAdmin que muda após hydrate()
+// observer obrigatório — lê authStore.isTenantAdmin + tenantScopeStore (mudam após hydrate())
 const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
   const pathname = usePathname();
   const router   = useRouter();
-  const nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
+  let nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
+
+  // Master sem tenant selecionado ("Nenhum") = modo gestão Zentriz: enxuga o menu.
+  // Só aplica após hydrate() para não piscar o menu completo→reduzido de quem já tinha tenant.
+  if (authStore.isZentrizAdmin && tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null) {
+    nav = nav.filter((item) => !HIDE_WHEN_NO_TENANT.has(item.href));
+  }
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

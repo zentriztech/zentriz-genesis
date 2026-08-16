@@ -7,13 +7,14 @@ CREATE TABLE IF NOT EXISTS plans (
   name TEXT NOT NULL,
   slug TEXT NOT NULL UNIQUE,
   max_projects INTEGER NOT NULL DEFAULT 3,
-  max_users_per_tenant INTEGER NOT NULL DEFAULT 5
+  max_users_per_tenant INTEGER NOT NULL DEFAULT 5,
+  monthly_price_cents INTEGER NOT NULL DEFAULT 0
 );
 
-INSERT INTO plans (id, name, slug, max_projects, max_users_per_tenant) VALUES
-  ('plan_prata', 'Prata', 'prata', 3, 5),
-  ('plan_ouro', 'Ouro', 'ouro', 10, 20),
-  ('plan_diamante', 'Diamante', 'diamante', 50, 100)
+INSERT INTO plans (id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents) VALUES
+  ('plan_prata', 'Prata', 'prata', 3, 5, 9900),
+  ('plan_ouro', 'Ouro', 'ouro', 10, 20, 29900),
+  ('plan_diamante', 'Diamante', 'diamante', 50, 100, 99900)
 ON CONFLICT (id) DO NOTHING;
 
 -- Tenants (status inactive = cadastrado, aguardando confirmação de pagamento)

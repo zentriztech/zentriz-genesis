@@ -17,7 +17,8 @@ import { tenantScopeStore } from "@/stores/tenantScopeStore";
  * Seletor de tenant no topo (AppBar) — visível SÓ para o master (zentriz_admin).
  * Escolhe de qual tenant ver/gerenciar os dados (specs, projetos, usuários...).
  * A escolha é lembrada entre telas (tenantScopeStore → localStorage).
- * "Todos os tenants" (valor vazio) = visão global sem filtro.
+ * "Nenhum" (valor vazio) = modo gestão Zentriz: o menu enxuga para gerir apenas
+ * Tenants, usuários e projetos DE tenants (sem criar specs/projetos nem infra).
  */
 function TenantSelectorInner() {
   // Só o master escolhe escopo; demais papeis já são escopados pelo backend.
@@ -47,7 +48,7 @@ function TenantSelectorInner() {
             disableUnderline
             displayEmpty
             renderValue={(v) => {
-              if (!v) return "Todos os tenants";
+              if (!v) return "Nenhum";
               return tenantsStore.getById(v as string)?.name ?? "Tenant";
             }}
             sx={{
@@ -60,7 +61,7 @@ function TenantSelectorInner() {
             MenuProps={{ PaperProps: { sx: { maxHeight: 420, mt: 0.5 } } }}
           >
             <MenuItem value="">
-              <em>Todos os tenants</em>
+              <em>Nenhum — só gestão Zentriz</em>
             </MenuItem>
             {tenantsStore.tenants.map((t) => (
               <MenuItem key={t.id} value={t.id}>

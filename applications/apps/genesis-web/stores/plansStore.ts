@@ -10,12 +10,14 @@ export type CreatePlanPayload = {
   slug: string;
   maxProjects: number;
   maxUsersPerTenant: number;
+  monthlyPriceCents?: number;
 };
 
 export type UpdatePlanPayload = {
   name?: string;
   maxProjects?: number;
   maxUsersPerTenant?: number;
+  monthlyPriceCents?: number;
 };
 
 class PlansStore {

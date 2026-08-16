@@ -16,12 +16,14 @@ type CreatePlanBody = {
   slug?: string;
   maxProjects?: number;
   maxUsersPerTenant?: number;
+  monthlyPriceCents?: number;
 };
 
 type UpdatePlanBody = {
   name?: string;
   maxProjects?: number;
   maxUsersPerTenant?: number;
+  monthlyPriceCents?: number;
 };
 
 function mapRow(row: Record<string, unknown>) {
@@ -31,7 +33,13 @@ function mapRow(row: Record<string, unknown>) {
     slug: row.slug,
     maxProjects: row.max_projects,
     maxUsersPerTenant: row.max_users_per_tenant,
+    monthlyPriceCents: row.monthly_price_cents,
   };
+}
+
+/** Valida um valor monetário em centavos: inteiro >= 0. */
+function isValidPriceCents(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 export async function planRoutes(app: FastifyInstance) {
@@ -44,7 +52,7 @@ export async function planRoutes(app: FastifyInstance) {
    */
   app.get("/api/plans", async (_request, reply) => {
     const result = await pool.query(
-      `SELECT id, name, slug, max_projects, max_users_per_tenant FROM plans ORDER BY max_projects`
+      `SELECT id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents FROM plans ORDER BY max_projects`
     );
     return reply.send(result.rows.map(mapRow));
   });
@@ -64,7 +72,7 @@ function registerAdminPlanRoutes(app: FastifyInstance) {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Acesso restrito a Zentriz Admin" });
     }
     const result = await pool.query(
-      `SELECT id, name, slug, max_projects, max_users_per_tenant FROM plans WHERE id = $1`,
+      `SELECT id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents FROM plans WHERE id = $1`,
       [request.params.id]
     );
     if (result.rows.length === 0) {
@@ -95,6 +103,11 @@ function registerAdminPlanRoutes(app: FastifyInstance) {
     if (typeof body.maxUsersPerTenant !== "number" || body.maxUsersPerTenant < 1) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "maxUsersPerTenant deve ser inteiro positivo" });
     }
+    // Preço é opcional na criação; ausente = 0 (gratuito/a definir). Se enviado, valida.
+    const monthlyPriceCents = body.monthlyPriceCents ?? 0;
+    if (!isValidPriceCents(monthlyPriceCents)) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "monthlyPriceCents deve ser inteiro >= 0 (centavos)" });
+    }
 
     const existing = await pool.query(`SELECT id FROM plans WHERE id = $1 OR slug = $2`, [body.id, body.slug]);
     if (existing.rows.length > 0) {
@@ -102,10 +115,10 @@ function registerAdminPlanRoutes(app: FastifyInstance) {
     }
 
     const result = await pool.query(
-      `INSERT INTO plans (id, name, slug, max_projects, max_users_per_tenant)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, slug, max_projects, max_users_per_tenant`,
-      [body.id, body.name, body.slug, body.maxProjects, body.maxUsersPerTenant]
+      `INSERT INTO plans (id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents`,
+      [body.id, body.name, body.slug, body.maxProjects, body.maxUsersPerTenant, monthlyPriceCents]
     );
     return reply.status(201).send(mapRow(result.rows[0]));
   });
@@ -140,6 +153,13 @@ function registerAdminPlanRoutes(app: FastifyInstance) {
       updates.push(`max_users_per_tenant = $${idx++}`);
       values.push(body.maxUsersPerTenant);
     }
+    if (body.monthlyPriceCents !== undefined) {
+      if (!isValidPriceCents(body.monthlyPriceCents)) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "monthlyPriceCents deve ser inteiro >= 0 (centavos)" });
+      }
+      updates.push(`monthly_price_cents = $${idx++}`);
+      values.push(body.monthlyPriceCents);
+    }
 
     if (updates.length === 0) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum campo válido para atualizar" });
@@ -148,7 +168,7 @@ function registerAdminPlanRoutes(app: FastifyInstance) {
     values.push(id);
     const result = await pool.query(
       `UPDATE plans SET ${updates.join(", ")} WHERE id = $${idx}
-       RETURNING id, name, slug, max_projects, max_users_per_tenant`,
+       RETURNING id, name, slug, max_projects, max_users_per_tenant, monthly_price_cents`,
       values
     );
     return reply.send(mapRow(result.rows[0]));
