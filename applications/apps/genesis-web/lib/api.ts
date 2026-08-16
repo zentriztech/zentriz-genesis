@@ -21,6 +21,16 @@ async function getErrorMessage(res: Response): Promise<string> {
   return text || "Erro na requisição";
 }
 
+/** Anexa query params a um path, ignorando valores null/undefined/"". Ex.: withQuery("/api/projects", { tenantId }) */
+export function withQuery(path: string, params: Record<string, string | number | null | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== null && v !== undefined && v !== "") qs.append(k, String(v));
+  }
+  const s = qs.toString();
+  return s ? `${path}?${s}` : path;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     credentials: "include",

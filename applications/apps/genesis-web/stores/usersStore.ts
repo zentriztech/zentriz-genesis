@@ -2,7 +2,8 @@
 
 import { makeAutoObservable, runInAction } from "mobx";
 import type { User } from "@/types";
-import { apiGet, apiPatch, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiPatch, apiDelete, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 export type UpdateUserPayload = {
   name?: string;
@@ -11,32 +12,57 @@ export type UpdateUserPayload = {
   role?: string;
 };
 
+export type CreateUserPayload = {
+  email: string;
+  name: string;
+  password: string;
+  role: "user" | "tenant_admin" | "zentriz_admin";
+  tenant_id?: string | null;
+};
+
 class UsersStore {
   users: User[] = [];
   loading = false;
   error: string | null = null;
+  // Latest-wins: troca rápida de escopo não pode aplicar uma resposta obsoleta.
+  private reqSeq = 0;
 
   constructor() {
     makeAutoObservable(this);
   }
 
   async loadUsers() {
+    const seq = ++this.reqSeq;
     this.loading = true;
     this.error = null;
     try {
-      const data = await apiGet<User[]>("/api/users");
+      // Master: escopa pelo tenant selecionado no topo (null = todos). Backend ignora o
+      // param para papeis não-master (já escopados pelo próprio tenant).
+      const data = await apiGet<User[]>(
+        withQuery("/api/users", { tenantId: tenantScopeStore.effectiveTenantId })
+      );
       runInAction(() => {
+        if (seq !== this.reqSeq) return; // resposta obsoleta
         this.users = data;
       });
     } catch (err) {
       runInAction(() => {
+        if (seq !== this.reqSeq) return;
         this.error = err instanceof Error ? err.message : "Erro ao carregar usuários";
       });
     } finally {
       runInAction(() => {
-        this.loading = false;
+        if (seq === this.reqSeq) this.loading = false;
       });
     }
+  }
+
+  async createUser(payload: CreateUserPayload): Promise<User> {
+    const created = await apiPost<User>("/api/users", payload);
+    runInAction(() => {
+      this.users.unshift(created);
+    });
+    return created;
   }
 
   async updateUser(id: string, payload: UpdateUserPayload): Promise<User> {

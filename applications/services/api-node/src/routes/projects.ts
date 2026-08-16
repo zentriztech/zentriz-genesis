@@ -29,6 +29,8 @@ const CODE_FILES_TTL_MS = 3000;
 const CODE_FILES_MAX = 5000;
 const codeFilesCache = new Map<string, { at: number; payload: CodeFilesPayload }>();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const VALID_PROJECT_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog",
   "dev_qa", "devops", "completed", "failed", "running", "stopped", "accepted", "archived",
@@ -63,6 +65,11 @@ export async function projectRoutes(app: FastifyInstance) {
 
   app.get("/api/projects", async (request, reply) => {
     const user = getUser(request);
+    // O master pode escopar a listagem a um tenant via ?tenantId= (seletor de tenant do portal).
+    const q = (request.query ?? {}) as { tenantId?: string };
+    // tenantId inválido (não-UUID) é ignorado → evita erro de cast uuid (500).
+    const scopeTenantId =
+      user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId) ? q.tenantId : null;
     const client = await pool.connect();
     try {
       // Ordena: projetos agrupados por produto seguem ordem topológica (depth no grafo de triggers).
@@ -114,11 +121,13 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
+           WHERE ($1::uuid IS NULL OR p.tenant_id = $1)
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
              COALESCE(d.depth, 0) ASC,
-             p.created_at ASC`
+             p.created_at ASC`,
+          [scopeTenantId]
         );
       } else if (user.tenantId) {
         result = await client.query(

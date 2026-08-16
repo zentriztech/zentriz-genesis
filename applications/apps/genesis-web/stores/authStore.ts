@@ -3,6 +3,7 @@
 import { makeAutoObservable } from "mobx";
 import type { User, Tenant } from "@/types";
 import { apiPost } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 export const PLANS = [
   { id: "prata", slug: "prata" as const, name: "Prata", maxProjects: 3, maxUsersPerTenant: 5 },
@@ -47,7 +48,13 @@ class AuthStore {
   ) {
     this.loginError = null;
     try {
-      const data = await apiPost<LoginResponse>("/api/auth/login", { email, password });
+      // Envia o papel ao backend: as contas internas da Zentriz compartilham o mesmo
+      // e-mail em papeis distintos (unicidade (email, role)) — o role desambigua o login.
+      const data = await apiPost<LoginResponse>("/api/auth/login", {
+        email,
+        password,
+        ...(expectedRole ? { role: expectedRole } : {}),
+      });
       if (expectedRole && data.user.role !== expectedRole) {
         this.loginError =
           expectedRole === "zentriz_admin"
@@ -94,6 +101,10 @@ class AuthStore {
     this.tenant = null;
     this.token = null;
     this.loginError = null;
+    // Zera o escopo de tenant EM MEMÓRIA + localStorage + flag hydrated (clear()).
+    // Só remover a chave do localStorage deixaria o observável em memória com o tenant
+    // anterior (SPA não recarrega no logout) → a próxima sessão herdaria o filtro errado.
+    tenantScopeStore.clear();
     if (typeof window !== "undefined") {
       localStorage.removeItem("genesis_token");
       localStorage.removeItem("genesis_user");

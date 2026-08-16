@@ -24,6 +24,7 @@ type UpdateUserBody = {
 };
 
 const ROLES = new Set(["user", "tenant_admin", "zentriz_admin"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function userRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
@@ -73,9 +74,11 @@ export async function userRoutes(app: FastifyInstance) {
 
     const client = await pool.connect();
     try {
-      const existing = await client.query("SELECT id FROM users WHERE email = $1", [email]);
+      // A unicidade é (email, role): o mesmo e-mail pode existir em papeis distintos
+      // (contas internas Zentriz — migration 049). Checar por e-mail E papel.
+      const existing = await client.query("SELECT id FROM users WHERE email = $1 AND role = $2", [email, role]);
       if (existing.rows.length > 0) {
-        return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado" });
+        return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado para este papel" });
       }
       const passwordHash = await hashPassword(password);
       const insert = await client.query(
@@ -187,11 +190,20 @@ export async function userRoutes(app: FastifyInstance) {
     }
 
     values.push(id);
-    const result = await pool.query(
-      `UPDATE users SET ${updates.join(", ")} WHERE id = $${idx}
-       RETURNING id, email, name, tenant_id, role, status, created_at`,
-      values
-    );
+    let result;
+    try {
+      result = await pool.query(
+        `UPDATE users SET ${updates.join(", ")} WHERE id = $${idx}
+         RETURNING id, email, name, tenant_id, role, status, created_at`,
+        values
+      );
+    } catch (err) {
+      // Colisão com a unicidade (email, role) → 409 em vez de 500.
+      if ((err as { code?: string }).code === "23505") {
+        return reply.status(409).send({ code: "CONFLICT", message: "Já existe um usuário com este e-mail e papel" });
+      }
+      throw err;
+    }
     const row = result.rows[0];
     return reply.send({
       id: row.id,
@@ -228,24 +240,41 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão para remover este usuário" });
     }
 
-    const activeProjects = await pool.query(
-      `SELECT id FROM projects WHERE user_id = $1 AND status NOT IN ('accepted','stopped') LIMIT 1`,
+    // projects.created_by referencia users(id) sem ON DELETE — QUALQUER projeto vinculado
+    // (mesmo já aceito/parado) bloquearia o DELETE com violação de FK → 409 explícito.
+    const ownedProjects = await pool.query(
+      `SELECT id FROM projects WHERE created_by = $1 LIMIT 1`,
       [id]
     );
-    if (activeProjects.rows.length > 0) {
-      return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui projetos ativos; conclua-os antes de remover" });
+    if (ownedProjects.rows.length > 0) {
+      return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui projetos vinculados; transfira ou remova-os antes de excluir o usuário" });
     }
 
-    await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+    try {
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+    } catch (err) {
+      // Rede de segurança: qualquer outra FK remanescente vira 409 em vez de 500.
+      if ((err as { code?: string }).code === "23503") {
+        return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui registros vinculados; remova-os antes de excluir" });
+      }
+      throw err;
+    }
     return reply.status(204).send();
   });
 
   app.get("/api/users", async (request, reply) => {
     const user = getUser(request);
+    // O master pode escopar a listagem a um tenant via ?tenantId= (seletor de tenant do portal).
+    const q = (request.query ?? {}) as { tenantId?: string };
+    // tenantId inválido (não-UUID) é ignorado → evita erro de cast uuid (500).
+    const scopeTenantId =
+      user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId) ? q.tenantId : null;
     let result;
     if (user.role === "zentriz_admin") {
       result = await pool.query(
-        `SELECT u.id, u.email, u.name, u.tenant_id, u.role, u.status, u.created_at FROM users u ORDER BY u.email`
+        `SELECT u.id, u.email, u.name, u.tenant_id, u.role, u.status, u.created_at FROM users u
+          WHERE ($1::uuid IS NULL OR u.tenant_id = $1) ORDER BY u.email`,
+        [scopeTenantId]
       );
     } else if (user.tenantId) {
       result = await pool.query(

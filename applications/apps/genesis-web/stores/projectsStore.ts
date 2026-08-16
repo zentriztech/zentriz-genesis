@@ -2,13 +2,17 @@
 
 import { makeAutoObservable } from "mobx";
 import type { Project } from "@/types";
-import { apiGet } from "@/lib/api";
+import { apiGet, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 class ProjectsStore {
   list: Project[] = [];
   loading = false;
   error: string | null = null;
   loaded = false;
+  // Token da requisição mais recente (latest-wins). Evita que uma troca rápida de
+  // escopo de tenant seja engolida por um fetch anterior ainda em voo.
+  private reqSeq = 0;
 
   constructor() {
     makeAutoObservable(this);
@@ -31,18 +35,25 @@ class ProjectsStore {
   }
 
   async loadProjects() {
-    if (this.loading) return;
+    // Não usamos guarda por `loading` (engoliria a recarga disparada por troca de escopo).
+    // Em vez disso: cada chamada recebe um token; só a resposta do token mais recente aplica.
+    const seq = ++this.reqSeq;
     this.loading = true;
     this.error = null;
     try {
-      const data = await apiGet<Project[]>("/api/projects");
+      // Master: escopa pelo tenant selecionado no topo (null = todos os tenants).
+      const data = await apiGet<Project[]>(
+        withQuery("/api/projects", { tenantId: tenantScopeStore.effectiveTenantId })
+      );
+      if (seq !== this.reqSeq) return; // resposta obsoleta — chegou um fetch mais novo
       this.list = Array.isArray(data) ? data : [];
       this.loaded = true;
     } catch (err) {
+      if (seq !== this.reqSeq) return;
       this.error = err instanceof Error ? err.message : "Falha ao carregar projetos";
       this.list = [];
     } finally {
-      this.loading = false;
+      if (seq === this.reqSeq) this.loading = false;
     }
   }
 

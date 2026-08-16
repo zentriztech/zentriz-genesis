@@ -2,6 +2,7 @@
 
 import { observer } from "mobx-react-lite";
 import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
@@ -14,16 +15,33 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
 import { projectsStore } from "@/stores/projectsStore";
+import { tenantsStore } from "@/stores/tenantsStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
 function ZentrizProjectsPageInner() {
   const router = useRouter();
   const projects = projectsStore.list;
+  // Recarrega quando o tenant selecionado no topo muda (null = todos).
+  const scopeTenantId = tenantScopeStore.selectedTenantId;
+
+  useEffect(() => {
+    projectsStore.loadProjects();
+    if (tenantsStore.tenants.length === 0) tenantsStore.load();
+  }, [scopeTenantId]);
+
+  const tenantName = (tenantId: string) =>
+    tenantsStore.getById(tenantId)?.name ?? tenantId.slice(0, 8);
 
   return (
     <Box>
       <Typography variant="h4" gutterBottom>Gestão global de projetos</Typography>
-      <TableContainer component={Paper} sx={{ mt: 2 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        {scopeTenantId
+          ? `Filtrando por: ${tenantName(scopeTenantId)}`
+          : "Exibindo projetos de todos os tenants — use o seletor no topo para filtrar."}
+      </Typography>
+      <TableContainer component={Paper} sx={{ mt: 1 }}>
         <Table sx={{ minWidth: 760 }}>
           <TableHead>
             <TableRow>
@@ -37,15 +55,24 @@ function ZentrizProjectsPageInner() {
           </TableHead>
           <TableBody>
             {projects.map((p) => (
-              <TableRow key={p.id}>
+              <TableRow key={p.id} hover>
                 <TableCell>{p.title}</TableCell>
-                <TableCell>Tenant Demo</TableCell>
+                <TableCell>{tenantName(p.tenantId)}</TableCell>
                 <TableCell><Chip label={p.status} size="small" /></TableCell>
                 <TableCell><ResourceBadges repoUrl={p.repoUrl} repoFullName={p.repoFullName} deployUrl={p.deployUrl} deployStatus={p.deployStatus} /></TableCell>
                 <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
                 <TableCell align="right"><Button size="small" onClick={() => router.push(`/projects/${p.id}`)}>Ver</Button></TableCell>
               </TableRow>
             ))}
+            {projects.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6}>
+                  <Typography variant="body2" color="text.secondary" sx={{ py: 2, textAlign: "center" }}>
+                    Nenhum projeto encontrado{scopeTenantId ? " para este tenant" : ""}.
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </TableContainer>

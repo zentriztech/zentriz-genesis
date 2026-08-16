@@ -1,35 +1,54 @@
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { pool } from "../db/client.js";
-import { signToken, hashPassword, comparePassword } from "../auth.js";
+import { signToken, comparePassword, hashPassword } from "../auth.js";
 
-type LoginBody = { email: string; password: string };
+type Role = "user" | "tenant_admin" | "zentriz_admin";
+type LoginBody = { email: string; password: string; role?: Role };
+
+const VALID_ROLES: Role[] = ["user", "tenant_admin", "zentriz_admin"];
+
+// Hash "isca" reutilizado para equalizar o tempo de resposta quando o e-mail não
+// existe — remove o oráculo de enumeração de contas por timing. Calculado sob demanda.
+let dummyHashPromise: Promise<string> | null = null;
+function getDummyHash(): Promise<string> {
+  if (!dummyHashPromise) dummyHashPromise = hashPassword("::genesis-timing-guard::");
+  return dummyHashPromise;
+}
 
 export async function authRoutes(app: FastifyInstance) {
   app.post<{ Body: LoginBody }>("/api/auth/login", async (request, reply) => {
-    const { email, password } = request.body ?? {};
+    const { email, password, role } = request.body ?? {};
     if (!email || !password) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "email e password são obrigatórios" });
     }
+    // O papel é opcional; quando informado (pela tela de login) desambigua contas
+    // que compartilham o mesmo e-mail em papeis distintos (ver migration 049).
+    const wantRole: Role | null = role && VALID_ROLES.includes(role) ? role : null;
 
     const client = await pool.connect();
     try {
       const userResult = await client.query(
-        `SELECT id, email, name, password_hash, tenant_id, role, status, created_at FROM users WHERE email = $1`,
-        [email.toLowerCase()]
+        `SELECT id, email, name, password_hash, tenant_id, role, status, created_at
+           FROM users
+          WHERE email = $1 AND ($2::text IS NULL OR role = $2)
+          ORDER BY CASE role WHEN 'zentriz_admin' THEN 0 WHEN 'tenant_admin' THEN 1 ELSE 2 END
+          LIMIT 1`,
+        [email.toLowerCase(), wantRole]
       );
       const user = userResult.rows[0];
       if (!user) {
+        // Compara contra um hash isca para não vazar (por timing) se o e-mail existe.
+        await comparePassword(password, await getDummyHash());
         return reply.status(401).send({ code: "UNAUTHORIZED", message: "Credenciais inválidas" });
-      }
-      if (user.status !== "active") {
-        return reply.status(403).send({ code: "FORBIDDEN", message: "Usuário inativo" });
       }
 
-      const ok = user.password_hash
-        ? await comparePassword(password, user.password_hash)
-        : password === "demo";
+      const ok = user.password_hash ? await comparePassword(password, user.password_hash) : false;
       if (!ok) {
         return reply.status(401).send({ code: "UNAUTHORIZED", message: "Credenciais inválidas" });
+      }
+      // Só revelamos o estado da conta após a senha conferir (evita enumeração de contas inativas).
+      if (user.status !== "active") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Usuário inativo" });
       }
 
       let tenant = null;
@@ -54,6 +73,11 @@ export async function authRoutes(app: FastifyInstance) {
             },
             status: row.status,
           };
+        }
+        // Bloqueio de acesso: nenhum usuário de um tenant não-ativo pode entrar.
+        // O master (zentriz_admin, tenant_id NULL) não passa por aqui e nunca é bloqueado.
+        if (!tenant || tenant.status !== "active") {
+          return reply.status(403).send({ code: "TENANT_INACTIVE", message: "Tenant inativo. Acesso indisponível até a ativação." });
         }
       }
 

@@ -23,6 +23,7 @@ import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import { projectsStore } from "@/stores/projectsStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import type { Project } from "@/types";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
@@ -358,6 +359,9 @@ function ProjectsPageInner() {
     groups.slice(0, visibleCount).map(g => g.root.id)
   );
 
+  // Master: recarrega quando o tenant selecionado no topo muda (null = todos).
+  const scopeTenantId = tenantScopeStore.selectedTenantId;
+
   useEffect(() => {
     projectsStore.loadProjects();
     // Buscar nomes dos produtos para exibir em vez do ID truncado
@@ -370,7 +374,7 @@ function ProjectsPageInner() {
         })
         .catch(() => {/* falha silenciosa — fallback para ID curto */});
     });
-  }, []);
+  }, [scopeTenantId]);
 
   return (
     <Box>

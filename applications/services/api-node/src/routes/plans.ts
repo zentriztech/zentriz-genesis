@@ -35,7 +35,13 @@ function mapRow(row: Record<string, unknown>) {
 }
 
 export async function planRoutes(app: FastifyInstance) {
-  /** GET /api/plans — public, no auth required */
+  /**
+   * GET /api/plans — público (sem auth). Usado pela tela pública /tenant/signup para
+   * exibir os planos/preços. Fica FORA do contexto encapsulado autenticado abaixo:
+   * um `addHook("preHandler", authMiddleware)` no MESMO escopo do Fastify se aplica a
+   * TODAS as rotas do escopo (inclusive as declaradas antes do hook) — por isso as
+   * rotas autenticadas vivem num child plugin próprio, sem contaminar esta rota pública.
+   */
   app.get("/api/plans", async (_request, reply) => {
     const result = await pool.query(
       `SELECT id, name, slug, max_projects, max_users_per_tenant FROM plans ORDER BY max_projects`
@@ -43,8 +49,14 @@ export async function planRoutes(app: FastifyInstance) {
     return reply.send(result.rows.map(mapRow));
   });
 
-  app.addHook("preHandler", authMiddleware);
+  // Rotas autenticadas (admin) em contexto encapsulado — o hook fica restrito a elas.
+  await app.register(async (authed) => {
+    authed.addHook("preHandler", authMiddleware);
+    registerAdminPlanRoutes(authed);
+  });
+}
 
+function registerAdminPlanRoutes(app: FastifyInstance) {
   /** GET /api/plans/:id — admin only */
   app.get<{ Params: { id: string } }>("/api/plans/:id", async (request, reply) => {
     const user = getUser(request);

@@ -8,13 +8,18 @@ export interface Plan {
   maxUsersPerTenant: number;
 }
 
+export type TenantStatus = "active" | "suspended" | "inactive";
+
 export interface Tenant {
   id: string;
   name: string;
   planId: string;
   plan: Plan;
-  status: "active" | "suspended";
+  status: TenantStatus;
   createdAt: string;
+  /** Contadores de uso (só na listagem do master GET /api/tenants). */
+  usersCount?: number;
+  projectsCount?: number;
 }
 
 export type UserRole = "user" | "tenant_admin" | "zentriz_admin";

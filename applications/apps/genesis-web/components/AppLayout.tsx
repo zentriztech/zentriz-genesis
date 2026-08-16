@@ -46,6 +46,7 @@ import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
 import { themeStore } from "@/stores/themeStore";
+import { TenantSelector } from "@/components/TenantSelector";
 
 const DRAWER_WIDTH = 240;
 const DRAWER_COLLAPSED = 56;
@@ -221,6 +222,9 @@ function AppLayoutInner({ children }: { children: React.ReactNode }) {
           </Box>
 
           <Box sx={{ flexGrow: 1 }} />
+
+          {/* Seletor de tenant — só master; lembra a última escolha entre telas */}
+          <TenantSelector />
 
           {/* Theme toggle */}
           <Tooltip title={themeStore.isDark ? "Tema claro" : "Tema escuro"}>

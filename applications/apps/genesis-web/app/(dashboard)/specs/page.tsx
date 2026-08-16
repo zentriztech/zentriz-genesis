@@ -7,6 +7,7 @@
 // - Aba "Catálogo": SPECs pré-prontas categorizadas (GET /api/catalog); "Usar" cria uma SPEC
 //   a partir do template (POST /api/catalog/:slug/use) e abre a edição.
 
+import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Alert from "@mui/material/Alert";
@@ -33,7 +34,8 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import LinkIcon from "@mui/icons-material/Link";
 import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
-import { apiGet, apiPatch, apiPost } from "@/lib/api";
+import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 interface SpecItem {
   id: string;
@@ -72,7 +74,7 @@ function specStatusLabel(status: string): string {
   }
 }
 
-export default function SpecsPage() {
+function SpecsPageInner() {
   const router = useRouter();
   const [tab, setTab] = useState(0);
 
@@ -104,7 +106,10 @@ export default function SpecsPage() {
 }
 
 // ── Aba: Minhas SPECs ─────────────────────────────────────────────────────────
-function MySpecs({ router }: { router: ReturnType<typeof useRouter> }) {
+// observer: lê tenantScopeStore.selectedTenantId; sem isso a troca de tenant no
+// seletor do topo não recarregaria a listagem (o pai é observer, mas não observa
+// o escopo por si só, e este componente não re-renderiza sozinho).
+const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeof useRouter> }) {
   const [specs, setSpecs] = useState<SpecItem[]>([]);
   const [products, setProducts] = useState<ProductOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,17 +118,20 @@ function MySpecs({ router }: { router: ReturnType<typeof useRouter> }) {
   const [linkTarget, setLinkTarget] = useState<SpecItem | null>(null);
   const [linkProductId, setLinkProductId] = useState("");
 
+  // Master: escopa a listagem pelo tenant selecionado no topo (null = todos).
+  const scopeTenantId = tenantScopeStore.selectedTenantId;
+
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const data = await apiGet<SpecItem[]>("/api/specs");
+      const data = await apiGet<SpecItem[]>(withQuery("/api/specs", { tenantId: scopeTenantId }));
       setSpecs(Array.isArray(data) ? data : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao carregar SPECs");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [scopeTenantId]);
 
   useEffect(() => {
     load();
@@ -236,7 +244,7 @@ function MySpecs({ router }: { router: ReturnType<typeof useRouter> }) {
       </Dialog>
     </Box>
   );
-}
+});
 
 // ── Aba: Catálogo ───────────────────────────────────────────────────────────
 function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
@@ -313,3 +321,5 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
     </Box>
   );
 }
+
+export default observer(SpecsPageInner);

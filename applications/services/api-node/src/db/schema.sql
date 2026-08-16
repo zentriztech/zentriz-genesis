@@ -28,13 +28,15 @@ CREATE TABLE IF NOT EXISTS tenants (
 -- Users (global e por tenant)
 CREATE TABLE IF NOT EXISTS users (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email      TEXT NOT NULL UNIQUE,
+  email      TEXT NOT NULL,
   name       TEXT NOT NULL,
   password_hash TEXT,
   tenant_id  UUID REFERENCES tenants(id),
   role       TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'tenant_admin', 'zentriz_admin')),
   status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Unicidade por papel: o mesmo e-mail pode existir em papeis distintos (ver migration 049)
+  CONSTRAINT users_email_role_key UNIQUE (email, role)
 );
 
 -- Projects

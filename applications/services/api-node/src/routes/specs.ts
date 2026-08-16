@@ -14,6 +14,7 @@ const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 // Listados em /api/specs (ver comentário do handler GET /api/specs). Manter em sincronia
 // com o enum de status em db/migrations/001_initial_schema.sql.
 const SPEC_LISTING_STATUSES = ["draft", "spec_submitted", "pending_conversion"];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Extensões legíveis extraídas de ZIPs — código é incluído como EXEMPLO DE REFERÊNCIA
 const ZIP_TEXT_EXTS  = new Set([".md", ".txt", ".yaml", ".yml", ".json"]);
@@ -458,19 +459,24 @@ export async function specRoutes(app: FastifyInstance) {
   // uma ideia enviada via "Iniciar agora" nunca aparecia em /specs (bug relatado).
   app.get("/api/specs", async (request, reply) => {
     const user = getUser(request);
+    // O master pode escopar a listagem a um tenant via ?tenantId= (seletor de tenant do portal).
+    const q = (request.query ?? {}) as { tenantId?: string };
+    // tenantId inválido (não-UUID) é ignorado → evita erro de cast uuid (500).
+    const scopeTenantId =
+      user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId) ? q.tenantId : null;
     const client = await pool.connect();
     try {
       const cols = `p.id, p.title, p.status, p.product_id, p.parent_project_id,
-                    p.version_number, p.extra, p.created_at, p.updated_at,
+                    p.tenant_id, p.version_number, p.extra, p.created_at, p.updated_at,
                     pr.name AS product_name`;
       let rows;
       if (user.role === "zentriz_admin") {
         rows = (await client.query(
           `SELECT ${cols} FROM projects p
              LEFT JOIN products pr ON pr.id = p.product_id
-            WHERE p.status = ANY($1)
+            WHERE p.status = ANY($1) AND ($2::uuid IS NULL OR p.tenant_id = $2)
             ORDER BY p.updated_at DESC`,
-          [SPEC_LISTING_STATUSES],
+          [SPEC_LISTING_STATUSES, scopeTenantId],
         )).rows;
       } else if (user.tenantId) {
         rows = (await client.query(
