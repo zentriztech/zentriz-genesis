@@ -2,7 +2,7 @@
 
 # Credenciais Zentriz, gestão de tenants, seletor de tenant, signup e endurecimento RBAC
 
-**Data:** 2026-08-16 · **Repo:** `zentriz-genesis` · **Branch:** `dev` · **Status:** implementado e verificado (gates verdes) — **sem deploy em produção** (aguardando OK).
+**Data:** 2026-08-16 · **Repo:** `zentriz-genesis` · **Branch:** `dev` (commit `5973b9e`) · **Status:** **DEPLOYADO EM PRODUÇÃO** 2026-08-16 (api `sha256:6eb66b5a…` / web `sha256:d513d268…`; migration 049 aplicada; rollback `pre-credentials-rbac`).
 
 Documento de referência de **todas as modificações** feitas nesta frente. Segue os padrões do
 ecossistema (Database-per-Product, RBAC por papel, PT-BR na prosa / inglês no código) e a
@@ -155,8 +155,27 @@ Total: **22 arquivos modificados + 4 novos** (~1824 inserções / 221 remoções
 
 ---
 
-## 7. Pendências / próximos passos
-- **Commit em `dev`** (escopo por repositório) — aguardando pedido do Jean.
-- **Deploy em produção** — só com **OK explícito**. Requer aplicar a migration 049 no `zentriz_genesis`
-  de prod (renomeia contas/tenant + troca a unicidade para `(email, role)`).
-- **Endurecimento de prod:** trocar `ZENTRIZ_DEFAULT_PASSWORD` e usar contas/e-mails distintos por papel.
+## 7. Promoção para produção (2026-08-16 — EXECUTADA)
+
+Autorizada por Jean ("promover para prod"). Fluxo build-based (ver runbook e gotcha de deploy):
+1. Commit `dev` **5973b9e** (pushado `c77b011..5973b9e`).
+2. `docker compose build api genesis-web` → `ecr-push.sh 820198199720 us-east-1 api genesis-web`
+   (`--profile zentriz`; guard anti-localhost do genesis-web aprovado).
+3. **Rollback tags** `pre-credentials-rbac` gravadas no ECR **antes** de sobrescrever `latest`
+   (api `sha256:9942170c…` / web `sha256:621bd197…`).
+4. **Backup do DB** antes do deploy: `/opt/zentriz-genesis/backups/pre-credentials-rbac-20260816-213250.sql` (1.9 MB).
+5. EC2 `3.220.66.113` (`/opt/zentriz-genesis`, instance role): `pull` do ECR + **retag** para
+   `zentriz-genesis-<svc>:latest` + `docker compose up -d --force-recreate api genesis-web`.
+6. **Migration 049 auto-aplicada no boot** do `api` (`initDb` roda migrations pendentes: 048 → 049).
+   O Postgres de prod é **container** do compose (não RDS).
+
+**Verificação (tudo verde):** `container.Image` == digests pushados (api `6eb66b5a`, web `d513d268`);
+`schema_migrations` max = `049`; `/api/health` = `{status:ok, version:1.3.0-beta}`; login
+`jean@zentriz.com.br` / `#Jean@2026!` nos 3 papéis → **200**; senha errada → **401**; contas dos
+tenants reais (`admin@saliforg.com`, `admin@cabralorg.com`) **intactas**; `Tenant Demo` → `ZFactory`.
+
+**Rollback (se necessário):** retag `latest` de volta para o manifesto `pre-credentials-rbac` (api/web),
+repetir pull+retag+recreate; restaurar o dump acima se preciso reverter a migration 049.
+
+### Endurecimento de produção (pendente, quando for implantação de cliente)
+- Trocar `ZENTRIZ_DEFAULT_PASSWORD` e usar contas/e-mails distintos por papel (o compartilhamento é conveniência interna).
