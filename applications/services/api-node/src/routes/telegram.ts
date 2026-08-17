@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signTokenWithExpiry } from "../auth.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import type { FastifyRequest } from "fastify";
 
 const BOT_TOKEN        = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -93,9 +94,41 @@ export async function telegramRoutes(app: FastifyInstance) {
     return authMiddleware(req, reply);
   });
 
-  /** GET /api/telegram/status — verifica se o usuário já está vinculado */
-  app.get("/api/telegram/status", async (req, reply) => {
+  /** GET /api/telegram/status — verifica se o usuário já está vinculado.
+   *  Master (zentriz_admin) com tenant selecionado no topo vê a vinculação DO TENANT
+   *  (a config de Telegram é por-usuário, mas a linha carrega tenant_id) — leitura apenas;
+   *  vincular/revogar continuam por conta própria (o master não vincula a conta de um usuário
+   *  do tenant no lugar dele). Sem tenant selecionado ou para os demais papéis: comportamento
+   *  original por-usuário (byte-idêntico). */
+  app.get<{ Querystring: { tenantId?: string } }>("/api/telegram/status", async (req, reply) => {
     const caller = getUser(req);
+
+    // Para zentriz_admin: query.tenantId se UUID-válido, senão null. Para os demais: user.tenantId.
+    const scopedTenantId = resolveScopedTenantId(caller, req.query);
+    const tenantScoped = caller.role === "zentriz_admin" && scopedTenantId !== null;
+
+    if (tenantScoped) {
+      const result = await pool.query(
+        // Paridade com notifyTelegramTenant: só contas de usuários ativos.
+        `SELECT ut.username, ut.linked_at, u.email, u.name
+         FROM user_telegram ut JOIN users u ON u.id = ut.user_id
+         WHERE ut.tenant_id = $1 AND ut.active = true AND u.status = 'active'
+         ORDER BY ut.linked_at DESC`,
+        [scopedTenantId]
+      );
+      if (!result.rows.length) return reply.send({ linked: false, scope: "tenant" });
+      return reply.send({
+        linked: true,
+        scope: "tenant",
+        accounts: result.rows.map((r) => ({
+          username: r.username,
+          linkedAt: r.linked_at,
+          email:    r.email,
+          name:     r.name,
+        })),
+      });
+    }
+
     const result = await pool.query(
       `SELECT chat_id, username, linked_at FROM user_telegram
        WHERE user_id = $1 AND active = true`,

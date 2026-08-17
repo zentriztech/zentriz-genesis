@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -18,13 +19,17 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import TelegramIcon from "@mui/icons-material/Telegram";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
-import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiDelete, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 const BOT_NAME = "@zgenezis_bot";
 
+type TenantAccount = { username: string | null; linkedAt: string; email: string; name: string };
+
 type TelegramStatus =
-  | { linked: false }
-  | { linked: true; username: string | null; linkedAt: string };
+  | { linked: false; scope?: "tenant" }
+  | { linked: true; username: string | null; linkedAt: string }
+  | { linked: true; scope: "tenant"; accounts: TenantAccount[] };
 
 type LinkCodeResponse = {
   code: string;
@@ -223,24 +228,31 @@ function UnlinkDialog({
   );
 }
 
-export default function TelegramSettingsPage() {
+const TelegramSettingsPage = observer(function TelegramSettingsPage() {
   const [status, setStatus]         = useState<TelegramStatus | null>(null);
   const [loading, setLoading]       = useState(true);
   const [linkOpen, setLinkOpen]     = useState(false);
   const [unlinkOpen, setUnlinkOpen] = useState(false);
 
+  // Master: com tenant selecionado no topo, vê a vinculação DESSE tenant (somente leitura).
+  const tenantId = tenantScopeStore.effectiveTenantId;
+
   const fetchStatus = useCallback(async () => {
     try {
-      const data = await apiGet<TelegramStatus>("/api/telegram/status");
+      const data = await apiGet<TelegramStatus>(withQuery("/api/telegram/status", { tenantId }));
       setStatus(data);
     } catch {
       setStatus({ linked: false });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+  // View escopada ao tenant (master + tenant selecionado): somente leitura.
+  const tenantScoped = status !== null && "scope" in status && status.scope === "tenant";
+  const tenantAccounts = status && "accounts" in status ? status.accounts : [];
 
   if (loading) {
     return (
@@ -262,9 +274,56 @@ export default function TelegramSettingsPage() {
         </Box>
       </Box>
 
+      {tenantScoped && (
+        <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+          Você está vendo a vinculação do <strong>tenant selecionado no topo</strong>. A vinculação de
+          Telegram é por usuário — vincular ou revogar deve ser feito pela conta do próprio tenant.
+        </Alert>
+      )}
+
       <Card variant="outlined" sx={{ borderRadius: 3 }}>
         <CardContent sx={{ p: 3 }}>
-          {status?.linked ? (
+          {tenantScoped ? (
+            tenantAccounts.length ? (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                  <CheckCircleIcon sx={{ color: "success.main", fontSize: 28 }} />
+                  <Typography fontWeight={600}>
+                    {tenantAccounts.length} conta(s) vinculada(s) neste tenant
+                  </Typography>
+                  <Chip label="Ativo" color="success" size="small" sx={{ ml: "auto" }} />
+                </Box>
+                <Divider />
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+                  {tenantAccounts.map((a, i) => (
+                    <Box key={`${a.email}-${i}`} sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                      <TelegramIcon sx={{ color: "#229ED9", fontSize: 22 }} />
+                      <Box>
+                        <Typography variant="body2" fontWeight={600}>
+                          {a.name || a.email}
+                          {a.username && (
+                            <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
+                              @{a.username}
+                            </Typography>
+                          )}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {a.email} · vinculado em {new Date(a.linkedAt).toLocaleDateString("pt-BR")}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+            ) : (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                <LinkOffIcon sx={{ color: "text.secondary", fontSize: 24 }} />
+                <Typography color="text.secondary">
+                  Nenhuma conta deste tenant está vinculada ao {BOT_NAME}.
+                </Typography>
+              </Box>
+            )
+          ) : status?.linked && "username" in status ? (
             <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                 <CheckCircleIcon sx={{ color: "success.main", fontSize: 28 }} />
@@ -374,4 +433,6 @@ export default function TelegramSettingsPage() {
       />
     </Box>
   );
-}
+});
+
+export default TelegramSettingsPage;
