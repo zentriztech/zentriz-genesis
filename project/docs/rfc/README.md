@@ -20,6 +20,7 @@ Cada RFC segue o template em [0000-template.md](0000-template.md).
 | RFC | Título | Status |
 |-----|--------|--------|
 | [RFC-0001](RFC-0001-GRAPH-VIEW-EXECUTIVE_COMMAND_CENTER.md) | Graph View Executivo para Orquestracao Multiagente | Rascunho |
+| [RFC-0002](RFC-0002-GENESIS-ADMIN-E-MODULO-FINANCEIRO.md) | Genesis Admin (conta de gestão) e Módulo Financeiro | Rascunho |
 
 ## Convenções
 
