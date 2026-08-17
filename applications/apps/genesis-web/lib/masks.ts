@@ -30,6 +30,49 @@ export function maskCnpj(raw: string): string {
   return out;
 }
 
+/**
+ * Unidades federativas do Brasil (27: 26 estados + Distrito Federal), em ordem alfabética
+ * de sigla. Fonte única para os selects de UF nos formulários de endereço.
+ */
+export const BR_UFS: ReadonlyArray<{ uf: string; name: string }> = [
+  { uf: "AC", name: "Acre" },
+  { uf: "AL", name: "Alagoas" },
+  { uf: "AP", name: "Amapá" },
+  { uf: "AM", name: "Amazonas" },
+  { uf: "BA", name: "Bahia" },
+  { uf: "CE", name: "Ceará" },
+  { uf: "DF", name: "Distrito Federal" },
+  { uf: "ES", name: "Espírito Santo" },
+  { uf: "GO", name: "Goiás" },
+  { uf: "MA", name: "Maranhão" },
+  { uf: "MT", name: "Mato Grosso" },
+  { uf: "MS", name: "Mato Grosso do Sul" },
+  { uf: "MG", name: "Minas Gerais" },
+  { uf: "PA", name: "Pará" },
+  { uf: "PB", name: "Paraíba" },
+  { uf: "PR", name: "Paraná" },
+  { uf: "PE", name: "Pernambuco" },
+  { uf: "PI", name: "Piauí" },
+  { uf: "RJ", name: "Rio de Janeiro" },
+  { uf: "RN", name: "Rio Grande do Norte" },
+  { uf: "RS", name: "Rio Grande do Sul" },
+  { uf: "RO", name: "Rondônia" },
+  { uf: "RR", name: "Roraima" },
+  { uf: "SC", name: "Santa Catarina" },
+  { uf: "SP", name: "São Paulo" },
+  { uf: "SE", name: "Sergipe" },
+  { uf: "TO", name: "Tocantins" },
+];
+
+/** Conjunto de siglas válidas de UF, para validação O(1). */
+export const BR_UF_SET: ReadonlySet<string> = new Set(BR_UFS.map((s) => s.uf));
+
+/** Normaliza um valor de UF: uppercase, só letras, mantém apenas se for sigla válida. */
+export function normalizeUf(raw: string): string {
+  const s = (raw ?? "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
+  return BR_UF_SET.has(s) ? s : "";
+}
+
 /** Só dígitos do CEP (máx. 8). */
 export function normalizeCep(raw: string): string {
   return (raw ?? "").replace(/\D+/g, "").slice(0, 8);

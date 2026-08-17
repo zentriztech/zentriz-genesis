@@ -42,7 +42,7 @@ import {
   type UpdateTenantPayload,
 } from "@/stores/tenantsStore";
 import { plansStore } from "@/stores/plansStore";
-import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone } from "@/lib/masks";
+import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone, normalizeUf, BR_UFS } from "@/lib/masks";
 
 const STATUS_OPTIONS: TenantStatus[] = ["active", "suspended", "inactive"];
 
@@ -96,7 +96,7 @@ function TenantDialog({
   const [addressComplement, setAddressComplement] = useState(editing?.addressComplement ?? "");
   const [addressDistrict, setAddressDistrict] = useState(editing?.addressDistrict ?? "");
   const [addressCity, setAddressCity] = useState(editing?.addressCity ?? "");
-  const [addressState, setAddressState] = useState(editing?.addressState ?? "");
+  const [addressState, setAddressState] = useState(normalizeUf(editing?.addressState ?? ""));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cnpjBusy, setCnpjBusy] = useState(false);
@@ -127,7 +127,7 @@ function TenantDialog({
       if (a.complement) setAddressComplement(a.complement);
       if (a.district) setAddressDistrict(a.district);
       if (a.city) setAddressCity(a.city);
-      if (a.state) setAddressState(a.state);
+      if (a.state) setAddressState(normalizeUf(a.state));
       setCnpjMsg({ severity: "success", text: `Dados de ${data.name || "CNPJ"} carregados.` });
     } catch (err) {
       setCnpjMsg({ severity: "error", text: err instanceof Error ? err.message : "Falha ao consultar CNPJ" });
@@ -151,7 +151,10 @@ function TenantDialog({
       ["addressComplement", addressComplement.trim(), editing?.addressComplement ?? null],
       ["addressDistrict", addressDistrict.trim(), editing?.addressDistrict ?? null],
       ["addressCity", addressCity.trim(), editing?.addressCity ?? null],
-      ["addressState", addressState.trim().toUpperCase(), editing?.addressState ?? null],
+      // Compara o valor do select contra a forma NORMALIZADA do original: assim, se o
+      // usuário não mexer na UF, um valor legado não-representável (ex.: "XX") não é
+      // apagado nem um "sp" é reescrito silenciosamente ao salvar outro campo.
+      ["addressState", addressState.trim().toUpperCase(), normalizeUf(editing?.addressState ?? "") || null],
     ];
     for (const [key, value, original] of pairs) {
       const normalizedOriginal = original ?? "";
@@ -318,7 +321,27 @@ function TenantDialog({
         </Stack>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
           <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} fullWidth />
-          <TextField label="UF" value={addressState} onChange={(e) => setAddressState(e.target.value)} inputProps={{ maxLength: 2 }} sx={{ width: { sm: 100 } }} fullWidth />
+          <TextField
+            select
+            label="UF"
+            value={addressState}
+            onChange={(e) => setAddressState(e.target.value)}
+            sx={{ width: { sm: 160 } }}
+            fullWidth
+            SelectProps={{
+              renderValue: (v) => (v as string) || "",
+              MenuProps: { PaperProps: { style: { maxHeight: 360 } } },
+            }}
+          >
+            <MenuItem value="">
+              <em>Selecione</em>
+            </MenuItem>
+            {BR_UFS.map((s) => (
+              <MenuItem key={s.uf} value={s.uf}>
+                {s.uf} — {s.name}
+              </MenuItem>
+            ))}
+          </TextField>
         </Stack>
       </DialogContent>
       <DialogActions>

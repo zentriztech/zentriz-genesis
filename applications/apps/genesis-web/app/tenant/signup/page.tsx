@@ -7,6 +7,7 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import TextField from "@mui/material/TextField";
+import MenuItem from "@mui/material/MenuItem";
 import InputAdornment from "@mui/material/InputAdornment";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
@@ -21,7 +22,7 @@ import StepLabel from "@mui/material/StepLabel";
 import { motion } from "framer-motion";
 import { apiGet, apiPost } from "@/lib/api";
 import { PlanInstallments } from "@/components/PlanInstallments";
-import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone } from "@/lib/masks";
+import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone, normalizeUf, BR_UFS } from "@/lib/masks";
 
 const PRIMARY = "#6366F1";
 const PRIMARY_D = "#4F46E5";
@@ -161,7 +162,7 @@ export default function TenantSignupPage() {
       if (a.complement) setAddressComplement(a.complement);
       if (a.district) setAddressDistrict(a.district);
       if (a.city) setAddressCity(a.city);
-      if (a.state) setAddressState(a.state);
+      if (a.state) setAddressState(normalizeUf(a.state));
       setCnpjMsg({ severity: "success", text: `Dados de ${data.name || "CNPJ"} carregados.` });
     } catch (err) {
       setCnpjMsg({ severity: "error", text: err instanceof Error ? err.message : "Falha ao consultar CNPJ." });
@@ -624,7 +625,28 @@ export default function TenantSignupPage() {
               </Stack>
               <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
                 <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} margin="normal" fullWidth />
-                <TextField label="UF" value={addressState} onChange={(e) => setAddressState(e.target.value)} margin="normal" inputProps={{ maxLength: 2 }} sx={{ width: { sm: 100 } }} fullWidth />
+                <TextField
+                  select
+                  label="UF"
+                  value={addressState}
+                  onChange={(e) => setAddressState(e.target.value)}
+                  margin="normal"
+                  sx={{ width: { sm: 140 } }}
+                  fullWidth
+                  SelectProps={{
+                    renderValue: (v) => (v as string) || "",
+                    MenuProps: { PaperProps: { style: { maxHeight: 360 } } },
+                  }}
+                >
+                  <MenuItem value="">
+                    <em>Selecione</em>
+                  </MenuItem>
+                  {BR_UFS.map((s) => (
+                    <MenuItem key={s.uf} value={s.uf}>
+                      {s.uf} — {s.name}
+                    </MenuItem>
+                  ))}
+                </TextField>
               </Stack>
 
               <Alert severity="info" sx={{ mt: 2.5 }}>
