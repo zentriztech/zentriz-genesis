@@ -21,6 +21,7 @@ import StepLabel from "@mui/material/StepLabel";
 import { motion } from "framer-motion";
 import { apiGet, apiPost } from "@/lib/api";
 import { PlanInstallments } from "@/components/PlanInstallments";
+import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone } from "@/lib/masks";
 
 const PRIMARY = "#6366F1";
 const PRIMARY_D = "#4F46E5";
@@ -118,7 +119,8 @@ export default function TenantSignupPage() {
   const [addressState, setAddressState] = useState("");
 
   const emailOk = EMAIL_RE.test(adminEmail.trim());
-  const cnpjDigits = cnpj.replace(/\D+/g, "");
+  // Valor canônico do CNPJ (sem máscara), ciente do novo modelo alfanumérico da SEFAZ.
+  const cnpjNorm = normalizeCnpjInput(cnpj);
 
   async function handleSendCode() {
     if (!emailOk || sendingCode) return;
@@ -145,15 +147,15 @@ export default function TenantSignupPage() {
   }
 
   async function handleCnpjLookup() {
-    if (cnpjDigits.length !== 14 || cnpjBusy) return;
+    if (cnpjNorm.length !== 14 || cnpjBusy) return;
     setCnpjBusy(true);
     setCnpjMsg(null);
     try {
-      const data = await apiGet<CnpjResponse>(`/api/cnpj/${cnpjDigits}`);
+      const data = await apiGet<CnpjResponse>(`/api/cnpj/${cnpjNorm}`);
       if (data.name && !tenantName.trim()) setTenantName(data.name);
-      if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(data.phone);
+      if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(maskPhone(data.phone));
       const a = data.address ?? {};
-      if (a.cep) setAddressCep(a.cep);
+      if (a.cep) setAddressCep(maskCep(a.cep));
       if (a.street) setAddressStreet(a.street);
       if (a.number) setAddressNumber(a.number);
       if (a.complement) setAddressComplement(a.complement);
@@ -221,7 +223,7 @@ export default function TenantSignupPage() {
         adminEmail: adminEmail.trim(),
         password,
         code: code.trim(),
-        cnpj: cnpjDigits || undefined,
+        cnpj: cnpjNorm || undefined,
         responsibleName: responsibleName.trim() || undefined,
         responsiblePhone: responsiblePhone.trim() || undefined,
         addressCep: addressCep.trim() || undefined,
@@ -452,17 +454,18 @@ export default function TenantSignupPage() {
                 fullWidth
                 label="CNPJ (opcional)"
                 value={cnpj}
-                onChange={(e) => setCnpj(e.target.value)}
+                onChange={(e) => setCnpj(maskCnpj(e.target.value))}
                 margin="normal"
-                placeholder="00.000.000/0000-00"
-                helperText="Consulte para preencher automaticamente nome e endereço."
+                placeholder="12.ABC.345/01DE-35"
+                helperText="Aceita o novo formato alfanumérico da SEFAZ. Consulte para preencher nome e endereço."
+                inputProps={{ maxLength: 18, autoCapitalize: "characters", style: { textTransform: "uppercase" } }}
                 InputProps={{
                   endAdornment: (
                     <InputAdornment position="end">
                       <Button
                         size="small"
                         onClick={handleCnpjLookup}
-                        disabled={cnpjDigits.length !== 14 || cnpjBusy}
+                        disabled={cnpjNorm.length !== 14 || cnpjBusy}
                       >
                         {cnpjBusy ? <CircularProgress size={16} /> : "Consultar"}
                       </Button>
@@ -523,6 +526,7 @@ export default function TenantSignupPage() {
                 placeholder="admin@empresa.com"
                 error={touched && !!fieldErrors.adminEmail}
                 helperText={touched ? fieldErrors.adminEmail : undefined}
+                inputProps={{ inputMode: "email", autoComplete: "email", autoCapitalize: "none", spellCheck: false }}
                 InputProps={{
                   endAdornment: (
                     <InputAdornment position="end">
@@ -604,11 +608,13 @@ export default function TenantSignupPage() {
                 fullWidth
                 label="Telefone do responsável"
                 value={responsiblePhone}
-                onChange={(e) => setResponsiblePhone(e.target.value)}
+                onChange={(e) => setResponsiblePhone(maskPhone(e.target.value))}
                 margin="normal"
+                placeholder="(11) 99999-9999"
+                inputProps={{ inputMode: "tel", maxLength: 15, autoComplete: "tel" }}
               />
               <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(e.target.value)} margin="normal" sx={{ width: { sm: 180 } }} fullWidth />
+                <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(maskCep(e.target.value))} margin="normal" placeholder="00000-000" inputProps={{ inputMode: "numeric", maxLength: 9, autoComplete: "postal-code" }} sx={{ width: { sm: 180 } }} fullWidth />
                 <TextField label="Logradouro" value={addressStreet} onChange={(e) => setAddressStreet(e.target.value)} margin="normal" fullWidth />
                 <TextField label="Número" value={addressNumber} onChange={(e) => setAddressNumber(e.target.value)} margin="normal" sx={{ width: { sm: 120 } }} fullWidth />
               </Stack>

@@ -7,7 +7,7 @@ import {
   invalidatePending,
 } from "../services/emailVerification.js";
 import { isSesConfigured, sendEmail, renderVerificationEmail } from "../services/emailSender.js";
-import { isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
+import { isValidCnpj, normalizeCnpjAlnum } from "../services/cnpjLookup.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
 
 // ── Rate limiting dos endpoints públicos de signup ──────────────────────────────
@@ -166,7 +166,7 @@ export async function signupRoutes(app: FastifyInstance) {
     const cnpjRaw = optStr(body.cnpj);
     let cnpj: string | null = null;
     if (cnpjRaw) {
-      cnpj = normalizeCnpjDigits(cnpjRaw);
+      cnpj = normalizeCnpjAlnum(cnpjRaw);
       if (!isValidCnpj(cnpj)) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "CNPJ inválido" });
       }

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   isValidCnpj,
   normalizeCnpjDigits,
+  normalizeCnpjAlnum,
   lookupCnpj,
   setCnpjLookupProvider,
   clearCnpjCache,
@@ -26,6 +27,23 @@ describe("cnpjLookup — validação e normalização (puro)", () => {
     expect(isValidCnpj("00000000000000")).toBe(false);
     expect(isValidCnpj("11111111111111")).toBe(false);
     expect(isValidCnpj("11222333000182")).toBe(false); // DV incorreto
+  });
+
+  it("normalizeCnpjAlnum mantém letras (maiúsculas) e remove pontuação", () => {
+    expect(normalizeCnpjAlnum("12.ABC.345/01DE-35")).toBe("12ABC34501DE35");
+    expect(normalizeCnpjAlnum("12abc34501de35")).toBe("12ABC34501DE35");
+    expect(normalizeCnpjAlnum("11.222.333/0001-81")).toBe("11222333000181");
+  });
+
+  it("isValidCnpj aceita o novo CNPJ alfanumérico da SEFAZ", () => {
+    // Exemplo canônico da Receita (12 posições alfanuméricas + 2 DV numéricos).
+    expect(isValidCnpj("12.ABC.345/01DE-35")).toBe(true);
+    expect(isValidCnpj("12ABC34501DE35")).toBe(true);
+  });
+
+  it("isValidCnpj rejeita alfanumérico com DV errado ou letras nos DV", () => {
+    expect(isValidCnpj("12ABC34501DE34")).toBe(false); // DV incorreto
+    expect(isValidCnpj("12ABC34501DE3A")).toBe(false); // DV não-numérico
   });
 });
 

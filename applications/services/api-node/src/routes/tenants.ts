@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { validateEmail } from "../auth.js";
-import { isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
+import { isValidCnpj, normalizeCnpjAlnum } from "../services/cnpjLookup.js";
 import { bustTenantStatus } from "../services/tenantStatusCache.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -35,7 +35,7 @@ type UpdateTenantBody = { name?: string; planId?: string; status?: string } & Te
 /** Campos textuais editáveis: chave do body (camelCase) → coluna + normalização. */
 const TENANT_TEXT_FIELDS: { key: keyof TenantExtraBody; col: string; transform: (v: string) => string }[] = [
   { key: "email", col: "email", transform: (v) => v.trim().toLowerCase() },
-  { key: "cnpj", col: "cnpj", transform: (v) => normalizeCnpjDigits(v) },
+  { key: "cnpj", col: "cnpj", transform: (v) => normalizeCnpjAlnum(v) },
   { key: "responsibleName", col: "responsible_name", transform: (v) => v.trim() },
   { key: "responsibleEmail", col: "responsible_email", transform: (v) => v.trim().toLowerCase() },
   { key: "responsiblePhone", col: "responsible_phone", transform: (v) => v.trim() },

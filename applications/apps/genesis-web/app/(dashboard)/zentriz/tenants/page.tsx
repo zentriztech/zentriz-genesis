@@ -42,6 +42,7 @@ import {
   type UpdateTenantPayload,
 } from "@/stores/tenantsStore";
 import { plansStore } from "@/stores/plansStore";
+import { maskCnpj, normalizeCnpjInput, maskCep, maskPhone } from "@/lib/masks";
 
 const STATUS_OPTIONS: TenantStatus[] = ["active", "suspended", "inactive"];
 
@@ -85,11 +86,11 @@ function TenantDialog({
   const [status, setStatus] = useState<TenantStatus>(editing?.status ?? "active");
   const [email, setEmail] = useState(editing?.email ?? "");
   const [emailConfirmed, setEmailConfirmed] = useState(editing?.emailConfirmed ?? false);
-  const [cnpj, setCnpj] = useState(editing?.cnpj ?? "");
+  const [cnpj, setCnpj] = useState(maskCnpj(editing?.cnpj ?? ""));
   const [responsibleName, setResponsibleName] = useState(editing?.responsibleName ?? "");
   const [responsibleEmail, setResponsibleEmail] = useState(editing?.responsibleEmail ?? "");
-  const [responsiblePhone, setResponsiblePhone] = useState(editing?.responsiblePhone ?? "");
-  const [addressCep, setAddressCep] = useState(editing?.addressCep ?? "");
+  const [responsiblePhone, setResponsiblePhone] = useState(maskPhone(editing?.responsiblePhone ?? ""));
+  const [addressCep, setAddressCep] = useState(maskCep(editing?.addressCep ?? ""));
   const [addressStreet, setAddressStreet] = useState(editing?.addressStreet ?? "");
   const [addressNumber, setAddressNumber] = useState(editing?.addressNumber ?? "");
   const [addressComplement, setAddressComplement] = useState(editing?.addressComplement ?? "");
@@ -105,22 +106,22 @@ function TenantDialog({
   const nameValid = trimmedName.length >= 2;
   const planValid = planId.length > 0;
   const emailValid = email.trim() === "" || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
-  const cnpjDigits = cnpj.replace(/\D+/g, "");
-  const cnpjValid = cnpjDigits.length === 0 || cnpjDigits.length === 14;
+  const cnpjNorm = normalizeCnpjInput(cnpj);
+  const cnpjValid = cnpjNorm.length === 0 || cnpjNorm.length === 14;
   const canSubmit = nameValid && planValid && emailValid && cnpjValid && !saving;
 
   async function handleCnpjLookup() {
-    if (cnpjDigits.length !== 14 || cnpjBusy) return;
+    if (cnpjNorm.length !== 14 || cnpjBusy) return;
     setCnpjBusy(true);
     setCnpjMsg(null);
     try {
-      const data = await tenantsStore.lookupCnpj(cnpjDigits);
+      const data = await tenantsStore.lookupCnpj(cnpjNorm);
       // Preenche só o que veio (sem sobrescrever com vazio).
       if (data.name && !name.trim()) setName(data.name);
       if (data.email && !email.trim()) setEmail(data.email);
-      if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(data.phone);
+      if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(maskPhone(data.phone));
       const a = data.address ?? {};
-      if (a.cep) setAddressCep(a.cep);
+      if (a.cep) setAddressCep(maskCep(a.cep));
       if (a.street) setAddressStreet(a.street);
       if (a.number) setAddressNumber(a.number);
       if (a.complement) setAddressComplement(a.complement);
@@ -140,7 +141,7 @@ function TenantDialog({
     const p: UpdateTenantPayload = {};
     const pairs: [keyof UpdateTenantPayload, string, string | null][] = [
       ["email", email.trim().toLowerCase(), editing?.email ?? null],
-      ["cnpj", cnpjDigits, editing?.cnpj ?? null],
+      ["cnpj", cnpjNorm, editing?.cnpj ?? null],
       ["responsibleName", responsibleName.trim(), editing?.responsibleName ?? null],
       ["responsibleEmail", responsibleEmail.trim().toLowerCase(), editing?.responsibleEmail ?? null],
       ["responsiblePhone", responsiblePhone.trim(), editing?.responsiblePhone ?? null],
@@ -267,10 +268,11 @@ function TenantDialog({
           <TextField
             label="CNPJ"
             value={cnpj}
-            onChange={(e) => setCnpj(e.target.value)}
+            onChange={(e) => setCnpj(maskCnpj(e.target.value))}
             error={!cnpjValid}
-            helperText={!cnpjValid ? "CNPJ deve ter 14 dígitos." : "Somente números por ora."}
+            helperText={!cnpjValid ? "CNPJ deve ter 14 caracteres." : "Aceita o novo formato alfanumérico da SEFAZ."}
             fullWidth
+            inputProps={{ maxLength: 18, autoCapitalize: "characters", style: { textTransform: "uppercase" } }}
             InputProps={{
               endAdornment: (
                 <InputAdornment position="end">
@@ -279,7 +281,7 @@ function TenantDialog({
                       <Button
                         size="small"
                         onClick={handleCnpjLookup}
-                        disabled={cnpjDigits.length !== 14 || cnpjBusy}
+                        disabled={cnpjNorm.length !== 14 || cnpjBusy}
                         startIcon={cnpjBusy ? <CircularProgress size={14} /> : <SearchIcon />}
                       >
                         Consultar
@@ -299,14 +301,14 @@ function TenantDialog({
         <TextField label="Nome do responsável" value={responsibleName} onChange={(e) => setResponsibleName(e.target.value)} fullWidth />
         <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
           <TextField label="E-mail do responsável" type="email" value={responsibleEmail} onChange={(e) => setResponsibleEmail(e.target.value)} fullWidth />
-          <TextField label="Telefone" value={responsiblePhone} onChange={(e) => setResponsiblePhone(e.target.value)} fullWidth />
+          <TextField label="Telefone" value={responsiblePhone} onChange={(e) => setResponsiblePhone(maskPhone(e.target.value))} placeholder="(11) 99999-9999" inputProps={{ inputMode: "tel", maxLength: 15 }} fullWidth />
         </Stack>
 
         <Divider textAlign="left">
           <Typography variant="overline" color="text.secondary">Endereço</Typography>
         </Divider>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-          <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(e.target.value)} sx={{ width: { sm: 160 } }} fullWidth />
+          <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(maskCep(e.target.value))} placeholder="00000-000" inputProps={{ inputMode: "numeric", maxLength: 9 }} sx={{ width: { sm: 160 } }} fullWidth />
           <TextField label="Logradouro" value={addressStreet} onChange={(e) => setAddressStreet(e.target.value)} fullWidth />
           <TextField label="Número" value={addressNumber} onChange={(e) => setAddressNumber(e.target.value)} sx={{ width: { sm: 120 } }} fullWidth />
         </Stack>

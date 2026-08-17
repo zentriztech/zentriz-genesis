@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { lookupCnpj, isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
+import { lookupCnpj, isValidCnpj, normalizeCnpjAlnum } from "../services/cnpjLookup.js";
 import { createRateLimiter } from "../services/rateLimit.js";
 
 // Endpoint público/anônimo: limita por IP (defesa em profundidade junto do cache do
@@ -17,12 +17,12 @@ const cnpjIpLimiter = createRateLimiter({ name: "cnpj-ip", windowMs: 60_000, max
 export async function cnpjRoutes(app: FastifyInstance) {
   app.get<{ Params: { cnpj: string } }>("/api/cnpj/:cnpj", { preHandler: cnpjIpLimiter }, async (request, reply) => {
     const raw = request.params.cnpj ?? "";
-    const digits = normalizeCnpjDigits(raw);
-    if (!isValidCnpj(digits)) {
+    const cnpj = normalizeCnpjAlnum(raw);
+    if (!isValidCnpj(cnpj)) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "CNPJ inválido" });
     }
     try {
-      const data = await lookupCnpj(digits);
+      const data = await lookupCnpj(cnpj);
       return reply.send(data);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Falha ao consultar CNPJ";
