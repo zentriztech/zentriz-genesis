@@ -1054,6 +1054,11 @@ async function saveProjectSpec(
 }
 
 async function handleNew(chatId: number, user: UserRow, type: string, _spec: string, rawText: string) {
+  // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria specs/projetos/produtos.
+  if (user.role === "zentriz_admin") {
+    await sendMessage(chatId, "⚠️ Conta de gestão Zentriz não cria specs/projetos/produtos. Use uma conta de tenant.");
+    return;
+  }
   const normalizedType = type?.toLowerCase();
 
   if (normalizedType !== "product" && normalizedType !== "project") {
@@ -1215,6 +1220,11 @@ async function handleDocumentNew(
   fileType: string | null,
   caption: string,
 ) {
+  // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria specs/projetos/produtos.
+  if (user.role === "zentriz_admin") {
+    await sendMessage(chatId, "⚠️ Conta de gestão Zentriz não cria specs/projetos/produtos. Use uma conta de tenant.");
+    return;
+  }
   const ALLOWED_MIME = new Set([
     "text/plain", "text/markdown", "application/pdf",
     "application/msword",

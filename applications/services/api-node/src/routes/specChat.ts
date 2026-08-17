@@ -17,6 +17,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 
 interface ChatMessage {
@@ -188,6 +189,8 @@ export async function specChatRoutes(app: FastifyInstance) {
   app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string } }>(
     "/api/spec-chat",
     async (request, reply) => {
+      // RFC-0002 A.1: conta de gestão (zentriz_admin) não refina spec (autoria + LLM).
+      if (denyCreationForManagement(getUser(request), reply)) return;
       const body = request.body ?? {};
       const specMarkdown = (body.specMarkdown ?? "").trim();
       const messages = Array.isArray(body.messages) ? body.messages : [];

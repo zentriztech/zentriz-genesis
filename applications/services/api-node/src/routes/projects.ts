@@ -14,6 +14,7 @@ import { deployBackendCloud } from "../services/provision/deployBackendCloud.js"
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
@@ -2599,6 +2600,8 @@ export async function projectRoutes(app: FastifyInstance) {
     Body: { request?: string; workMode?: "copy" | "branch" };
   }>("/api/projects/:id/evolve", async (request, reply) => {
     const user = getUser(request);
+    // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria/evolui projeto (autoria).
+    if (denyCreationForManagement(user, reply)) return;
     const { id: parentId } = request.params;
     const evolutionRequest = request.body?.request?.trim() ?? "";
     const workMode: "copy" | "branch" = request.body?.workMode === "branch" ? "branch" : "copy";

@@ -95,14 +95,20 @@ const navZentriz = [
   { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
 ];
 
-// Itens ocultados quando o master está em MODO GESTÃO (nenhum tenant selecionado).
-// Zentriz não cria produtos/projetos nem envia specs, e não opera infra de tenant:
-// nesse modo o menu foca só em gerir Tenants, usuários e projetos DE tenants.
-const HIDE_WHEN_NO_TENANT = new Set<string>([
+// RFC-0002 A.2: Genesis Admin (zentriz_admin) é conta de GESTÃO pura — nunca autora.
+// Estes itens de autoria somem SEMPRE para o master, mesmo com um tenant selecionado
+// (o backend também bloqueia a criação via 403 — ver managementGuard.ts). O master
+// acompanha specs/projetos de tenants pela visão cross-tenant (/zentriz/projects).
+const ZENTRIZ_AUTHORING_HIDE_ALWAYS = new Set<string>([
   "/spec",
   "/specs",
   "/splitter",
   "/projects",
+]);
+
+// Itens OPERACIONAIS de tenant (Deadpool + settings de infra): o master só os vê
+// enquanto atua DENTRO de um tenant selecionado; em modo gestão (nenhum tenant) somem.
+const HIDE_WHEN_NO_TENANT = new Set<string>([
   "/deadpool",
   "/settings/llm",
   "/settings/github",
@@ -120,10 +126,15 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
   const router   = useRouter();
   let nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
 
-  // Master sem tenant selecionado ("Nenhum") = modo gestão Zentriz: enxuga o menu.
-  // Só aplica após hydrate() para não piscar o menu completo→reduzido de quem já tinha tenant.
-  if (authStore.isZentrizAdmin && tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null) {
-    nav = nav.filter((item) => !HIDE_WHEN_NO_TENANT.has(item.href));
+  if (authStore.isZentrizAdmin) {
+    // RFC-0002 A.2: autoria some SEMPRE para conta de gestão (independe de tenant/hydrate;
+    // o papel já é conhecido no auth, sem flicker).
+    nav = nav.filter((item) => !ZENTRIZ_AUTHORING_HIDE_ALWAYS.has(item.href));
+    // Operacional de tenant: só aparece com um tenant selecionado. Só aplica após
+    // hydrate() para não piscar o menu completo→reduzido de quem já tinha tenant.
+    if (tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null) {
+      nav = nav.filter((item) => !HIDE_WHEN_NO_TENANT.has(item.href));
+    }
   }
 
   return (

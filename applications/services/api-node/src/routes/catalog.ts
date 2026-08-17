@@ -12,6 +12,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
 
 function getUser(request: FastifyRequest): AuthUser {
@@ -61,7 +62,9 @@ export async function catalogRoutes(app: FastifyInstance) {
     "/api/catalog/:slug/use",
     async (request, reply) => {
       const user = getUser(request);
-      if (!user.tenantId && user.role !== "zentriz_admin") {
+      // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria spec a partir do catálogo.
+      if (denyCreationForManagement(user, reply)) return;
+      if (!user.tenantId) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
       }
       const { slug } = request.params;
@@ -77,10 +80,10 @@ export async function catalogRoutes(app: FastifyInstance) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Template não encontrado no catálogo" });
         }
 
-        const tenantId =
-          user.tenantId ?? (await client.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
+        // RFC-0002 A.1 (M6): sem fallback para "primeiro tenant" — exige tenant do chamador.
+        const tenantId = user.tenantId;
         if (!tenantId) {
-          return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
         }
 
         const title = (body.title ?? "").trim() || (tpl.title as string);

@@ -24,6 +24,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { extractProductZip, httpPost, httpGet, type ProductZipContents } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
 import { buildProductSketch, parseManifest, ManifestError, type ProductManifest } from "../services/productManifest.js";
@@ -164,6 +165,8 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // ── POST /api/products ───────────────────────────────────────────────────────
   app.post("/api/products", async (request, reply) => {
     const user = getUser(request);
+    // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria produto.
+    if (denyCreationForManagement(user, reply)) return;
     if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
     const { name, description } = request.body as Record<string, string>;
     if (!name?.trim()) return reply.status(400).send({ code: "BAD_REQUEST", message: "name obrigatório" });
@@ -186,8 +189,10 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // pela cascata de accept existente.
   app.post("/api/products/ingest", async (request, reply) => {
     const user = getUser(request);
-    const tenantId = user.tenantId ?? (await pool.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
-    if (!tenantId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+    // RFC-0002 A.1: conta de gestão não ingere produto; sem fallback "primeiro tenant" (M6).
+    if (denyCreationForManagement(user, reply)) return;
+    const tenantId = user.tenantId;
+    if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
 
     // multipart: pega a parte-arquivo .zip e o campo opcional specApproved
     type Part = {
@@ -265,6 +270,8 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { document?: string; modelId?: string } }>(
     "/api/products/propose",
     async (request, reply) => {
+      // RFC-0002 A.1: conta de gestão (zentriz_admin) não propõe/decompõe produto.
+      if (denyCreationForManagement(getUser(request), reply)) return;
       const body = request.body ?? {};
       const document = (body.document ?? "").trim();
       if (document.length < 40) {
@@ -307,8 +314,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     "/api/products/ingest-proposal",
     async (request, reply) => {
       const user = getUser(request);
-      const tenantId = user.tenantId ?? (await pool.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
-      if (!tenantId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+      // RFC-0002 A.1: conta de gestão (zentriz_admin) não ingere proposta de produto.
+      if (denyCreationForManagement(user, reply)) return;
+      // RFC-0002 A.1 (M6): sem fallback para "primeiro tenant" — exige tenant do chamador.
+      const tenantId = user.tenantId;
+      if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
 
       const { manifest, specs, specApproved } = request.body ?? {};
       if (!manifest || typeof manifest !== "object" || !specs || typeof specs !== "object") {

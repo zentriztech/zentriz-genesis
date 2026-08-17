@@ -5,6 +5,7 @@ import crypto from "crypto";
 import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
@@ -393,6 +394,9 @@ export async function specRoutes(app: FastifyInstance) {
   app.post<{ Body: { freeText: string; title?: string } }>(
     "/api/spec-preview",
     async (request, reply) => {
+      // RFC-0002 A.1: conta de gestão (zentriz_admin) não gera prévia de spec (autoria +
+      // consumo de LLM sem finalidade de gestão). Revisão adversarial unânime (3/3).
+      if (denyCreationForManagement(getUser(request), reply)) return;
       const body = request.body ?? {} as { freeText?: string; title?: string };
       const freeText = (body.freeText ?? "").trim();
       if (!freeText || freeText.length < 20) {
@@ -503,7 +507,9 @@ export async function specRoutes(app: FastifyInstance) {
 
   app.post("/api/specs", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId && user.role !== "zentriz_admin") {
+    // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria/envia spec.
+    if (denyCreationForManagement(user, reply)) return;
+    if (!user.tenantId) {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório para enviar spec" });
     }
 
@@ -651,10 +657,10 @@ export async function specRoutes(app: FastifyInstance) {
     const client = await pool.connect();
     let result: { projectId: string; status: string };
     try {
-      const tenantId =
-        user.tenantId ?? (await client.query("SELECT id FROM tenants LIMIT 1")).rows[0]?.id;
+      // RFC-0002 A.1 (M6): sem fallback para "primeiro tenant" — exige tenant do chamador.
+      const tenantId = user.tenantId;
       if (!tenantId) {
-        return reply.status(400).send({ code: "BAD_REQUEST", message: "Nenhum tenant disponível" });
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório para enviar spec" });
       }
       result = await createProjectFromSpec(client, {
         tenantId,
