@@ -12,13 +12,27 @@ function getAuthHeaders(): Record<string, string> {
 /** Extrai mensagem amigável do corpo de erro da API (ex.: { code, message }) */
 async function getErrorMessage(res: Response): Promise<string> {
   const text = await res.text().catch(() => res.statusText);
+  let message = text || "Erro na requisição";
   try {
-    const obj = JSON.parse(text) as { message?: string };
-    if (obj && typeof obj.message === "string") return obj.message;
+    const obj = JSON.parse(text) as { message?: string; code?: string };
+    if (obj && typeof obj.message === "string") message = obj.message;
+    // F2/H3: tenant suspenso/inativado no meio da sessão. O token ainda é válido,
+    // mas o gate de inadimplência bloqueia. Encerra a sessão e volta ao login, onde
+    // a mensagem de bloqueio (mesma origem) é exibida de forma clara.
+    if (
+      res.status === 403 &&
+      obj?.code === "TENANT_INACTIVE" &&
+      typeof window !== "undefined"
+    ) {
+      localStorage.removeItem("genesis_token");
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
+    }
   } catch {
     // não é JSON, usa o texto
   }
-  return text || "Erro na requisição";
+  return message;
 }
 
 /** Anexa query params a um path, ignorando valores null/undefined/"". Ex.: withQuery("/api/projects", { tenantId }) */

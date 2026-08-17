@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { bustTenantStatus } from "../services/tenantStatusCache.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -117,7 +118,7 @@ function mapPayment(r: Record<string, unknown>) {
 // ── Auditoria append-only (best-effort dentro da mesma transação) ─────────────
 async function audit(
   client: PoolClient,
-  entityType: "charge" | "payment" | "bank_account" | "invoice",
+  entityType: "charge" | "payment" | "bank_account" | "invoice" | "tenant",
   entityId: string,
   action: string,
   actorUserId: string | null,
@@ -170,6 +171,33 @@ export async function recalcChargeStatus(
     [next, chargeId],
   );
   return { status: next, paidCents, amountCents };
+}
+
+/**
+ * maybeActivateTenant — RFC-0002 F2. Reativa (ou ativa pela primeira vez) um tenant
+ * `inactive`/`suspended` quando ele fica em dia: sem NENHUMA cobrança de assinatura
+ * vencida (`overdue`). Idempotente e no-op para tenant já `active`. Roda dentro da
+ * transação do pagamento (usa FOR UPDATE para evitar corrida com o job de suspensão).
+ * Retorna true se houve ativação (o chamador deve invalidar o cache após o COMMIT).
+ */
+export async function maybeActivateTenant(
+  client: PoolClient,
+  tenantId: string,
+  actorUserId: string | null,
+): Promise<boolean> {
+  const t = await client.query(`SELECT status FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
+  if (t.rows.length === 0) return false;
+  const from = String(t.rows[0].status);
+  if (from === "active") return false;
+  // Só ativa se estiver em dia com a assinatura (nenhuma cobrança de assinatura vencida).
+  const overdue = await client.query(
+    `SELECT 1 FROM charges WHERE tenant_id = $1 AND kind = 'subscription' AND status = 'overdue' LIMIT 1`,
+    [tenantId],
+  );
+  if (overdue.rows.length > 0) return false;
+  await client.query(`UPDATE tenants SET status = 'active' WHERE id = $1`, [tenantId]);
+  await audit(client, "tenant", tenantId, "activate", actorUserId, { from, reason: "payment" });
+  return true;
 }
 
 export async function financeRoutes(app: FastifyInstance) {
@@ -577,7 +605,7 @@ function registerFinanceRoutes(app: FastifyInstance) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const charge = await client.query(`SELECT id, tenant_id, status FROM charges WHERE id = $1 FOR UPDATE`, [chargeId]);
+      const charge = await client.query(`SELECT id, tenant_id, status, kind FROM charges WHERE id = $1 FOR UPDATE`, [chargeId]);
       if (charge.rows.length === 0) {
         await client.query("ROLLBACK");
         return reply.status(404).send({ code: "NOT_FOUND", message: "Cobrança não encontrada" });
@@ -594,6 +622,7 @@ function registerFinanceRoutes(app: FastifyInstance) {
         });
       }
       const tenantId = charge.rows[0].tenant_id;
+      const chargeKind = String(charge.rows[0].kind);
       const insert = await client.query(
         `INSERT INTO payments
            (charge_id, tenant_id, amount_cents, method, received_at, bank_account_id, external_id, reference, notes, created_by)
@@ -602,12 +631,22 @@ function registerFinanceRoutes(app: FastifyInstance) {
       );
       const recalc = await recalcChargeStatus(client, chargeId);
       // Reflete o método de pagamento predominante na cobrança quando quitada.
+      let activated = false;
       if (recalc?.status === "paid") {
         await client.query(`UPDATE charges SET payment_method = $1 WHERE id = $2`, [method, chargeId]);
+        // F2: só o pagamento de uma cobrança de ASSINATURA reativa o tenant. Quitar uma
+        // cobrança avulsa (one_off/proration/setup) NÃO deve ligar um tenant novo que nunca
+        // pagou assinatura, nem reverter uma suspensão manual do master feita por outro
+        // motivo (abuso/legal). O gatilho de "voltar a ativo" é a assinatura em dia.
+        if (chargeKind === "subscription") {
+          activated = await maybeActivateTenant(client, tenantId, user.id);
+        }
       }
       await audit(client, "payment", insert.rows[0].id, "create", user.id, { chargeId, amountCents: b.amountCents, method, chargeStatus: recalc?.status });
       await client.query("COMMIT");
-      return reply.status(201).send({ payment: mapPayment(insert.rows[0]), charge: recalc });
+      // Invalida o cache de status SÓ após o COMMIT (senão outra requisição recacheia o valor antigo).
+      if (activated) bustTenantStatus(tenantId);
+      return reply.status(201).send({ payment: mapPayment(insert.rows[0]), charge: recalc, tenantActivated: activated });
     } catch (e) {
       await client.query("ROLLBACK").catch(() => {});
       if ((e as { code?: string })?.code === "23505") {

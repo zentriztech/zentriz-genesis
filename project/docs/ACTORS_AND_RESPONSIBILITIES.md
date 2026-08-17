@@ -311,7 +311,8 @@ flowchart TB
 
 - **`zentriz_admin` (conta de gestão)**: única responsável pelo Módulo Financeiro — cadastra contas bancárias da empresa, emite/cancela cobranças, registra pagamentos (baixa manual) e acompanha o sumário (MRR, a receber, vencidas, recebido no mês). Não cria specs/produtos/projetos (Parte A).
 - **`tenant_admin` / `user`**: sem acesso ao Financeiro (rotas `/api/finance/*` retornam 403). O tenant vê apenas seu "Plano e uso".
-- **Sistema (signup)**: emite a cobrança de assinatura inicial (H2) no cadastro de um novo tenant, atada ao mesmo COMMIT. Ativação por pagamento e job de vencimento chegam em F2.
+- **Sistema (signup)**: emite a cobrança de assinatura inicial (H2) no cadastro de um novo tenant, atada ao mesmo COMMIT.
+- **Sistema (billing — F2, entregue)**: job periódico marca cobranças vencidas (`overdue`) e suspende (`suspended`) tenants com assinatura vencida além da carência (`FINANCE_SUSPEND_GRACE_DAYS`, default 3d). A reativação (`→ active`) acontece **só** na baixa de um pagamento de assinatura (`kind='subscription'`) sem vencidos remanescentes — nunca no job (anti-flapping). O gate H3 revalida o status do tenant a cada requisição e barra (`403 TENANT_INACTIVE`) usuários de tenant suspenso/inativado no meio da sessão; `zentriz_admin` e os callbacks do runner (token `svc:"runner"`, RFC H1) são isentos.
 
 ---
 

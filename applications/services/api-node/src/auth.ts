@@ -30,6 +30,15 @@ export type TokenPayload = {
   email: string;
   role: string;
   tenantId: string | null;
+  /**
+   * Marcador de token de MÁQUINA (não emitido por login). Cunhado no lado servidor
+   * ao despachar o pipeline (pipeline/watchdog/runnerDispatch) e usado pelo
+   * orquestrador/runner nos callbacks. `svc: "runner"` isenta o token do gate de
+   * suspensão H3 (RFC-0002 F2 / H1): os callbacks do runner NUNCA podem ser
+   * bloqueados por inadimplência do tenant, senão um pipeline em voo quebra.
+   * Um usuário jamais consegue cunhar este claim (não possui o JWT_SECRET).
+   */
+  svc?: string;
 };
 
 export function signToken(payload: TokenPayload, expiresIn: string = "7d"): string {

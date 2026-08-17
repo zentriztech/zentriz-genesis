@@ -2,7 +2,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-const connectionString =
+export const connectionString =
   process.env.DATABASE_URL ??
   (process.env.PGHOST
     ? `postgres://${process.env.PGUSER ?? "genesis"}:${process.env.PGPASSWORD ?? "genesis_dev"}@${process.env.PGHOST}:${process.env.PGPORT ?? "5432"}/${process.env.PGDATABASE ?? "zentriz_genesis"}`

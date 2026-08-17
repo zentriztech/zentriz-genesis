@@ -241,6 +241,8 @@ export async function pipelineRoutes(app: FastifyInstance) {
           email: user.email,
           role: user.role,
           tenantId: user.tenantId,
+          // Token de máquina: isenta os callbacks do runner do gate de suspensão H3 (RFC H1).
+          svc: "runner",
         },
         "24h"
       );

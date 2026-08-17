@@ -43,7 +43,8 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   const u = userRes.rows[0] as Record<string, unknown> | undefined;
   if (!u) return { projectId, dispatched: false, reason: "usuário dono não encontrado" };
   const token = signToken(
-    { sub: u.id as string, email: u.email as string, role: u.role as string, tenantId: tp.tenant_id as string | null },
+    // Token de máquina (svc:"runner"): isenta os callbacks do runner do gate H3 (RFC H1).
+    { sub: u.id as string, email: u.email as string, role: u.role as string, tenantId: tp.tenant_id as string | null, svc: "runner" },
     "24h",
   );
 

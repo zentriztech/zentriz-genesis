@@ -6,6 +6,8 @@ import { startS3CleanupWorker, stopS3CleanupWorker } from "./services/s3CleanupW
 import { startS3ReconciliationWorker, stopS3ReconciliationWorker } from "./services/s3ReconciliationWorker.js";
 import { startBackendResumeWorker, stopBackendResumeWorker } from "./services/provision/backendResumeWorker.js";
 import { startBackendCleanupWorker, stopBackendCleanupWorker } from "./services/provision/backendCleanupWorker.js";
+import { startFinanceBillingWorker, stopFinanceBillingWorker } from "./services/financeBillingWorker.js";
+import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
 
 const app = await buildApp();
 
@@ -23,6 +25,12 @@ if (process.env.NODE_ENV === "production") {
   }
   if (!process.env.JWT_SECRET) {
     console.error("[boot] FATAL: NODE_ENV=production sem JWT_SECRET — verifyToken usaria o default de dev. Abortando.");
+    process.exit(1);
+  }
+  // Rejeita também o valor default de dev: com ele, qualquer um forjaria tokens
+  // (inclusive svc:"runner"/zentriz_admin) e furaria o gate H3 + RBAC (RFC-0002 F2).
+  if (process.env.JWT_SECRET === "zentriz-genesis-dev-secret") {
+    console.error("[boot] FATAL: NODE_ENV=production com JWT_SECRET igual ao default de dev — tokens forjáveis. Abortando.");
     process.exit(1);
   }
   // G1-T3: cifra de credenciais de cloud exige chave 64-hex real em produção.
@@ -50,11 +58,15 @@ try {
   startBackendResumeWorker();
   // G1-T22: watchdog por fase + sweep de teardown (separado do s3CleanupWorker).
   startBackendCleanupWorker();
+  // RFC-0002 F2: vencimento de cobranças + suspensão por inadimplência.
+  startFinanceBillingWorker();
+  // RFC-0002 F2 / H3: invalidação cross-instância do cache de status de tenant (LISTEN/NOTIFY).
+  startTenantStatusListener();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); process.exit(0); });

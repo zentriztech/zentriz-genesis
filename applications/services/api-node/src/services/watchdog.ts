@@ -267,7 +267,8 @@ async function relaunchPipeline(project: OrphanProject): Promise<boolean> {
   }
 
   const token = signToken(
-    { sub: userInfo.userId, email: userInfo.email, role: userInfo.role, tenantId: userInfo.tenantId },
+    // Token de máquina (svc:"runner"): isenta os callbacks do runner do gate H3 (RFC H1).
+    { sub: userInfo.userId, email: userInfo.email, role: userInfo.role, tenantId: userInfo.tenantId, svc: "runner" },
     "24h",
   );
 

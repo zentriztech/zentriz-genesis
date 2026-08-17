@@ -3,6 +3,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { validateEmail } from "../auth.js";
 import { isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
+import { bustTenantStatus } from "../services/tenantStatusCache.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -285,6 +286,9 @@ export async function tenantRoutes(app: FastifyInstance) {
     );
     const row = result.rows[0];
     if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Tenant não encontrado" });
+    // F2/H3: mudança manual de status pelo master precisa refletir de imediato no
+    // gate de suspensão (senão o cache de status seguraria o valor antigo por ~30s).
+    if (status !== undefined) bustTenantStatus(request.params.id);
     return reply.send({
       id: row.id,
       name: row.name,
