@@ -976,44 +976,68 @@ function ProjectDetailPageInner() {
                 <Box component="code" sx={{ bgcolor: "action.hover", px: 0.5, borderRadius: 0.5 }}>{artifacts.projectDocsRoot}</Box>
               </Typography>
             )}
-            <Table size="small">
-              <TableHead><TableRow>
-                <TableCell>Arquivo</TableCell>
-                <TableCell sx={{ width: 110 }}>Agente</TableCell>
-                <TableCell sx={{ width: 140 }}>Data</TableCell>
-              </TableRow></TableHead>
-              <TableBody>
-                {artifacts.docs.map((d, i) => (
-                  <TableRow key={i} onClick={() => setDocModal({ filename: d.filename, title: d.title ?? d.filename })}
-                    sx={{ cursor: "pointer", "&:hover": { bgcolor: "action.hover" } }}>
-                    <TableCell>
-                      <Stack direction="row" spacing={1} alignItems="center">
-                        <Typography variant="caption" sx={{ fontSize: "0.65rem", color: "#484F58", fontFamily: "monospace", flexShrink: 0 }}>
-                          {(d.filename.split(".").pop() ?? "").toUpperCase()}
-                        </Typography>
-                        <Box>
-                          <Typography variant="body2">{d.title ?? d.filename}</Typography>
-                          {d.title && d.filename !== d.title && (
-                            <Typography variant="caption" color="text.secondary" fontFamily="monospace" sx={{ fontSize: "0.6rem" }}>{d.filename}</Typography>
-                          )}
+            {(() => {
+              type Doc = { filename: string; creator?: string; title?: string; created_at?: string };
+              const docs: Doc[] = artifacts?.docs ?? [];
+              // Agrupa por owner = agente que gerou (creator). Sem creator → "system".
+              const groups = new Map<string, { profile: ReturnType<typeof getAgentProfile>; docs: Doc[] }>();
+              for (const d of docs) {
+                const key = d.creator || "system";
+                if (!groups.has(key)) groups.set(key, { profile: getAgentProfile(key, id), docs: [] });
+                groups.get(key)!.docs.push(d);
+              }
+              // Ordena grupos por nome do agente (estável), com "IA-Genesis"/Sistema por último.
+              const ordered = Array.from(groups.values()).sort((a, b) => {
+                const aSys = a.profile.role === "Sistema", bSys = b.profile.role === "Sistema";
+                if (aSys !== bSys) return aSys ? 1 : -1;
+                return a.profile.name.localeCompare(b.profile.name, "pt-BR");
+              });
+              return (
+                <Stack spacing={2}>
+                  {ordered.map(({ profile, docs: ownerDocs }) => (
+                    <Box key={profile.id}>
+                      {/* Cabeçalho do owner (agente) */}
+                      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                        <Box sx={{
+                          width: 30, height: 30, borderRadius: "8px", flexShrink: 0,
+                          display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1rem",
+                          bgcolor: `${profile.color}22`, color: profile.color, border: `1px solid ${profile.color}44`,
+                        }}>
+                          {profile.avatar}
                         </Box>
+                        <Typography variant="subtitle2" sx={{ fontWeight: 700, color: profile.color }}>{profile.name}</Typography>
+                        <Typography variant="caption" color="text.secondary">{profile.role}</Typography>
+                        <Chip size="small" label={`${ownerDocs.length} doc${ownerDocs.length !== 1 ? "s" : ""}`}
+                          sx={{ height: 18, fontSize: "0.62rem", ml: "auto" }} />
                       </Stack>
-                    </TableCell>
-                    <TableCell>
-                      {(() => { const p = d.creator ? getAgentProfile(d.creator) : null; return (
-                        <Chip size="small" label={p?.name ?? d.creator ?? "—"}
-                          sx={{ fontSize: "0.62rem", bgcolor: p ? `${p.color}22` : undefined, color: p?.color, border: `1px solid ${p?.color ?? "#30363D"}44` }} />
-                      ); })()}
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="caption" color="text.secondary">
-                        {d.created_at ? new Date(d.created_at).toLocaleString("pt-BR") : "—"}
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                      {/* Documentos do owner */}
+                      <Stack spacing={0.75}>
+                        {ownerDocs.map((d, i) => (
+                          <Card key={i} variant="outlined"
+                            onClick={() => setDocModal({ filename: d.filename, title: d.title ?? d.filename })}
+                            sx={{ cursor: "pointer", borderLeft: `3px solid ${profile.color}`, "&:hover": { boxShadow: 2, bgcolor: "action.hover" } }}>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, px: 1.5, py: 1 }}>
+                              <Typography variant="caption" sx={{ fontSize: "0.6rem", color: "#8B949E", fontFamily: "monospace", fontWeight: 700, flexShrink: 0, minWidth: 34 }}>
+                                {(d.filename.split(".").pop() ?? "").toUpperCase()}
+                              </Typography>
+                              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                                <Typography variant="body2" noWrap>{d.title ?? d.filename}</Typography>
+                                {d.title && d.filename !== d.title && (
+                                  <Typography variant="caption" color="text.secondary" fontFamily="monospace" sx={{ fontSize: "0.6rem", display: "block" }} noWrap>{d.filename}</Typography>
+                                )}
+                              </Box>
+                              <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0 }}>
+                                {d.created_at ? new Date(d.created_at).toLocaleDateString("pt-BR") : ""}
+                              </Typography>
+                            </Box>
+                          </Card>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ))}
+                </Stack>
+              );
+            })()}
           </>
         )}
       </Box>

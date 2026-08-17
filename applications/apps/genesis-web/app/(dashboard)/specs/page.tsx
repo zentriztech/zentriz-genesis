@@ -8,7 +8,7 @@
 //   a partir do template (POST /api/catalog/:slug/use) e abre a edição.
 
 import { observer } from "mobx-react-lite";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -22,18 +22,23 @@ import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import FormControl from "@mui/material/FormControl";
+import InputAdornment from "@mui/material/InputAdornment";
 import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
+import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import { alpha } from "@mui/material/styles";
 import EditIcon from "@mui/icons-material/Edit";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import LinkIcon from "@mui/icons-material/Link";
 import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import SearchIcon from "@mui/icons-material/Search";
+import SearchOffIcon from "@mui/icons-material/SearchOff";
 import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
@@ -246,12 +251,26 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   );
 });
 
+// Cor estável por categoria: deriva um índice do nome (hash simples) e mapeia numa
+// paleta fixa. Categorias novas ganham cor consistente sem manutenção manual.
+const CATEGORY_PALETTE = [
+  "#0EA5E9", "#22C55E", "#F59E0B", "#EF4444", "#8B5CF6",
+  "#EC4899", "#14B8A6", "#F97316", "#6366F1", "#84CC16",
+  "#06B6D4", "#D946EF", "#3B82F6", "#10B981",
+];
+function categoryColor(category: string): string {
+  let h = 0;
+  for (let i = 0; i < category.length; i++) h = (h * 31 + category.charCodeAt(i)) >>> 0;
+  return CATEGORY_PALETTE[h % CATEGORY_PALETTE.length];
+}
+
 // ── Aba: Catálogo ───────────────────────────────────────────────────────────
 function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [category, setCategory] = useState<string>("");
+  const [query, setQuery] = useState("");
   const [usingSlug, setUsingSlug] = useState<string | null>(null);
 
   useEffect(() => {
@@ -262,8 +281,25 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const categories = Array.from(new Set(items.map((i) => i.category))).sort();
-  const filtered = category ? items.filter((i) => i.category === category) : items;
+  // Categorias ordenadas com contagem (para os chips de filtro).
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const it of items) counts.set(it.category, (counts.get(it.category) ?? 0) + 1);
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  }, [items]);
+
+  // Filtra por categoria + busca textual (título, descrição, tags e categoria).
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return items.filter((it) => {
+      if (category && it.category !== category) return false;
+      if (!q) return true;
+      const haystack = `${it.title} ${it.description} ${it.category} ${(it.tags ?? []).join(" ")}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [items, category, query]);
 
   const use = async (slug: string) => {
     setUsingSlug(slug);
@@ -285,39 +321,121 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-        Modelos prontos para começar rápido. Ao usar, uma SPEC editável é criada a partir do template.
+        {items.length} modelos prontos para começar rápido. Ao usar, uma SPEC editável é criada a partir do template.
       </Typography>
 
-      {/* Filtros por categoria */}
+      {/* Busca textual */}
+      <TextField
+        fullWidth
+        size="small"
+        placeholder="Buscar por nome, descrição, categoria ou tag…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        sx={{ mb: 2 }}
+        InputProps={{
+          startAdornment: (
+            <InputAdornment position="start">
+              <SearchIcon fontSize="small" sx={{ color: "text.disabled" }} />
+            </InputAdornment>
+          ),
+        }}
+      />
+
+      {/* Filtros por categoria (com contagem e cor) */}
       <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: "wrap", gap: 1 }}>
-        <Chip label="Todas" size="small" color={category === "" ? "primary" : "default"}
-          onClick={() => setCategory("")} />
-        {categories.map((c) => (
-          <Chip key={c} label={c} size="small" color={category === c ? "primary" : "default"}
-            onClick={() => setCategory(c)} />
-        ))}
+        <Chip
+          label={`Todas · ${items.length}`}
+          size="small"
+          variant={category === "" ? "filled" : "outlined"}
+          color={category === "" ? "primary" : "default"}
+          onClick={() => setCategory("")}
+        />
+        {categories.map((c) => {
+          const color = categoryColor(c.name);
+          const active = category === c.name;
+          return (
+            <Chip
+              key={c.name}
+              label={`${c.name} · ${c.count}`}
+              size="small"
+              onClick={() => setCategory(active ? "" : c.name)}
+              variant={active ? "filled" : "outlined"}
+              sx={{
+                fontWeight: 600,
+                ...(active
+                  ? { bgcolor: color, color: "#fff", "&:hover": { bgcolor: color } }
+                  : { borderColor: alpha(color, 0.5), color }),
+              }}
+            />
+          );
+        })}
       </Stack>
 
-      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr", md: "1fr 1fr 1fr" }, gap: 1.5 }}>
-        {filtered.map((it) => (
-          <Card key={it.slug} variant="outlined" sx={{ display: "flex", flexDirection: "column" }}>
-            <CardContent sx={{ flexGrow: 1 }}>
-              <Chip label={it.category} size="small" sx={{ fontSize: "0.6rem", height: 18, mb: 1 }} />
-              <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 0.5 }}>{it.title}</Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
-                {it.description}
-              </Typography>
-            </CardContent>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <Button size="small" variant="contained" fullWidth
-                startIcon={usingSlug === it.slug ? <CircularProgress size={14} color="inherit" /> : <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={!!usingSlug} onClick={() => use(it.slug)}>
-                {usingSlug === it.slug ? "Criando…" : "Usar este modelo"}
-              </Button>
-            </Box>
-          </Card>
-        ))}
-      </Box>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+        {filtered.length} {filtered.length === 1 ? "modelo encontrado" : "modelos encontrados"}
+        {category ? ` em ${category}` : ""}{query.trim() ? ` para “${query.trim()}”` : ""}
+      </Typography>
+
+      {filtered.length === 0 ? (
+        <Box sx={{ textAlign: "center", py: 6 }}>
+          <SearchOffIcon sx={{ fontSize: 40, color: "text.disabled", mb: 1 }} />
+          <Typography variant="body2" color="text.secondary">
+            Nenhum modelo corresponde ao filtro. Tente outra busca ou categoria.
+          </Typography>
+        </Box>
+      ) : (
+        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr", md: "1fr 1fr 1fr" }, gap: 1.5 }}>
+          {filtered.map((it) => {
+            const color = categoryColor(it.category);
+            const busy = usingSlug === it.slug;
+            return (
+              <Card
+                key={it.slug}
+                variant="outlined"
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  borderTop: `3px solid ${color}`,
+                  transition: "box-shadow 0.15s, transform 0.15s",
+                  "&:hover": { boxShadow: 3, transform: "translateY(-2px)" },
+                }}
+              >
+                <CardContent sx={{ flexGrow: 1, pb: 1 }}>
+                  <Chip
+                    label={it.category}
+                    size="small"
+                    sx={{ fontSize: "0.6rem", height: 18, mb: 1, fontWeight: 700, bgcolor: alpha(color, 0.15), color }}
+                  />
+                  <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>{it.title}</Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
+                    {it.description}
+                  </Typography>
+                  {it.tags && it.tags.length > 0 && (
+                    <Stack direction="row" spacing={0.5} sx={{ mt: 1, flexWrap: "wrap", gap: 0.5 }}>
+                      {it.tags.slice(0, 4).map((t) => (
+                        <Chip
+                          key={t}
+                          label={t}
+                          size="small"
+                          variant="outlined"
+                          sx={{ fontSize: "0.58rem", height: 18, color: "text.secondary" }}
+                        />
+                      ))}
+                    </Stack>
+                  )}
+                </CardContent>
+                <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
+                  <Button size="small" variant="contained" fullWidth
+                    startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
+                    disabled={!!usingSlug} onClick={() => use(it.slug)}>
+                    {busy ? "Criando…" : "Usar este modelo"}
+                  </Button>
+                </Box>
+              </Card>
+            );
+          })}
+        </Box>
+      )}
     </Box>
   );
 }
