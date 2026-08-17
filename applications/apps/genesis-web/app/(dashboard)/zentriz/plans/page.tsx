@@ -19,11 +19,8 @@ import Typography from "@mui/material/Typography";
 import type { Plan } from "@/types";
 import { plansStore, type UpdatePlanPayload } from "@/stores/plansStore";
 import { authStore } from "@/stores/authStore";
-
-/** Formata centavos (BRL) como moeda: 9900 -> "R$ 99,00". */
-function formatBRL(cents: number): string {
-  return ((cents ?? 0) / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-}
+import { formatBRL } from "@/lib/planPricing";
+import { PlanInstallments } from "@/components/PlanInstallments";
 
 /** Converte texto em reais (aceita vírgula ou ponto) para centavos inteiros; null se inválido. */
 function parseReaisToCents(input: string): number | null {
@@ -140,6 +137,7 @@ const ZentrizPlansPage = observer(function ZentrizPlansPage() {
                       /mês
                     </Typography>
                   </Typography>
+                  <PlanInstallments monthlyPriceCents={plan.monthlyPriceCents} sx={{ mb: 1 }} />
                   <Typography variant="body2">Projetos máx.: {plan.maxProjects}</Typography>
                   <Typography variant="body2">Usuários por tenant: {plan.maxUsersPerTenant}</Typography>
                 </CardContent>

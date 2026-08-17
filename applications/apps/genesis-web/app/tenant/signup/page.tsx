@@ -20,6 +20,7 @@ import Step from "@mui/material/Step";
 import StepLabel from "@mui/material/StepLabel";
 import { motion } from "framer-motion";
 import { apiGet, apiPost } from "@/lib/api";
+import { PlanInstallments } from "@/components/PlanInstallments";
 
 const PRIMARY = "#6366F1";
 const PRIMARY_D = "#4F46E5";
@@ -32,6 +33,7 @@ type Plan = {
   slug: string;
   maxProjects: number;
   maxUsersPerTenant: number;
+  monthlyPriceCents: number;
 };
 
 type SignupResponse = {
@@ -427,6 +429,7 @@ export default function TenantSignupPage() {
                           <Typography variant="body2" color="text.secondary">
                             {plan.maxUsersPerTenant} usuários
                           </Typography>
+                          <PlanInstallments monthlyPriceCents={plan.monthlyPriceCents} sx={{ mt: 1 }} />
                         </CardContent>
                       </Card>
                     );
