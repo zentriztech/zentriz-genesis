@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { getInstallationInfo, encryptText } from "../services/github.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -14,6 +15,7 @@ type ConnectBody = {
   privateKey?: string;    // PEM raw — encrypted before storing
   appClientId?: string;
   appClientSecret?: string;
+  tenantId?: string;      // master (zentriz_admin) alvo o tenant selecionado no portal
 };
 
 export async function githubRoutes(app: FastifyInstance) {
@@ -22,7 +24,9 @@ export async function githubRoutes(app: FastifyInstance) {
   /** GET /api/github/installation — retorna instalação ativa do tenant */
   app.get("/api/github/installation", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) {
+    // Master escopa via ?tenantId= (seletor do portal); demais usam o próprio JWT.
+    const scopedTenantId = resolveScopedTenantId(user, request.query);
+    if (!scopedTenantId) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Usuário sem tenant associado" });
     }
 
@@ -31,7 +35,7 @@ export async function githubRoutes(app: FastifyInstance) {
               selected_repos, scope_genesis, scope_deadpool, installed_at, revoked_at,
               app_id, app_client_id
        FROM tenant_github_installations WHERE tenant_id = $1`,
-      [user.tenantId]
+      [scopedTenantId]
     );
 
     if (result.rows.length === 0) {
@@ -60,7 +64,9 @@ export async function githubRoutes(app: FastifyInstance) {
   /** POST /api/github/installation — conecta GitHub App ao tenant */
   app.post<{ Body: ConnectBody }>("/api/github/installation", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) {
+    // Master escopa via body.tenantId / ?tenantId= (seletor do portal); demais usam o próprio JWT.
+    const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+    if (!scopedTenantId) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Usuário sem tenant associado" });
     }
 
@@ -123,7 +129,7 @@ export async function githubRoutes(app: FastifyInstance) {
          revoked_at            = NULL,
          installed_at          = now()`,
       [
-        user.tenantId,
+        scopedTenantId,
         installationId,
         info.githubLogin || `installation-${installationId}`,
         info.installationType,
@@ -145,9 +151,11 @@ export async function githubRoutes(app: FastifyInstance) {
   });
 
   /** DELETE /api/github/installation — revoga acesso GitHub do tenant */
-  app.delete("/api/github/installation", async (request, reply) => {
+  app.delete<{ Querystring: { tenantId?: string } }>("/api/github/installation", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) {
+    // Master escopa via ?tenantId= (seletor do portal); demais usam o próprio JWT.
+    const scopedTenantId = resolveScopedTenantId(user, request.query);
+    if (!scopedTenantId) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Usuário sem tenant associado" });
     }
 
@@ -155,7 +163,7 @@ export async function githubRoutes(app: FastifyInstance) {
       `UPDATE tenant_github_installations SET revoked_at = now()
        WHERE tenant_id = $1 AND revoked_at IS NULL
        RETURNING installation_id`,
-      [user.tenantId]
+      [scopedTenantId]
     );
 
     if (result.rows.length === 0) {

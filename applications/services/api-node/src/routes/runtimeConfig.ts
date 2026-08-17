@@ -13,6 +13,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -73,7 +74,9 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
     }
 
-    const tenantId = user.role === "zentriz_admin" ? null : user.tenantId;
+    // Master: com ?tenantId= (seletor do portal) mostra global + overrides do tenant;
+    // sem seleção, só os defaults globais. tenant_admin: sempre o próprio tenant.
+    const tenantId = resolveScopedTenantId(user, request.query);
 
     const result = await pool.query(
       `SELECT key, value, description, tenant_id, updated_at, updated_by
@@ -127,7 +130,7 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user     = getUser(request);
       const { key }  = request.params;
-      const { value, tenantId: bodyTenantId } = request.body ?? {};
+      const { value } = request.body ?? {};
 
       if (user.role !== "zentriz_admin" && user.role !== "tenant_admin") {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
@@ -146,14 +149,14 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      // Determinar target_tenant_id
-      let targetTenantId: string | null = null;
-      if (user.role === "zentriz_admin") {
-        // zentriz_admin sem tenantId no body = global
-        targetTenantId = bodyTenantId ?? null;
-      } else {
-        // tenant_admin só pode editar seu próprio override
-        targetTenantId = user.tenantId ?? null;
+      // Determinar target_tenant_id via helper compartilhado:
+      // zentriz_admin → body.tenantId se UUID-válido (senão null = global);
+      // tenant_admin → sempre o próprio JWT (body.tenantId ignorado).
+      const targetTenantId = resolveScopedTenantId(user, request.body);
+
+      // Espelha a guarda do DELETE: tenant_admin nunca pode gravar o default global.
+      if (user.role === "tenant_admin" && targetTenantId === null) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "tenant_admin não pode alterar configuração global" });
       }
 
       await pool.query(
@@ -187,10 +190,9 @@ export async function runtimeConfigRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
-      // tenant_admin só pode remover seu próprio override
-      const targetTenantId = user.role === "zentriz_admin"
-        ? (request.query.tenantId ?? user.tenantId ?? null)
-        : user.tenantId ?? null;
+      // zentriz_admin → ?tenantId= se UUID-válido (senão null = global);
+      // tenant_admin → sempre o próprio JWT (query ignorada).
+      const targetTenantId = resolveScopedTenantId(user, request.query);
 
       // Nunca deixar deletar os defaults globais via tenant_admin
       if (user.role === "tenant_admin" && targetTenantId === null) {

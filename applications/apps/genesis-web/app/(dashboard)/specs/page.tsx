@@ -258,10 +258,28 @@ const CATEGORY_PALETTE = [
   "#EC4899", "#14B8A6", "#F97316", "#6366F1", "#84CC16",
   "#06B6D4", "#D946EF", "#3B82F6", "#10B981",
 ];
+// Chave canônica de categoria: remove acentos + caixa baixa + trim.
+// Usada para AGRUPAR variantes de escrita (ex.: "Logística" e "Logistica" → mesma chave),
+// deduplicando os filtros/chips independentemente do estado do dado no banco.
+function normCategoryKey(category: string): string {
+  return category.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+}
+// Cor derivada da CHAVE canônica → variantes de escrita compartilham a mesma cor.
 function categoryColor(category: string): string {
+  const key = normCategoryKey(category);
   let h = 0;
-  for (let i = 0; i < category.length; i++) h = (h * 31 + category.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return CATEGORY_PALETTE[h % CATEGORY_PALETTE.length];
+}
+// Escolhe o melhor rótulo de exibição entre variantes de uma mesma chave:
+// prefere a que TEM acento (difere do próprio ASCII), depois a mais longa, depois alfabética.
+function pickCanonicalLabel(a: string, b: string): string {
+  const strip = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const aAcc = a !== strip(a);
+  const bAcc = b !== strip(b);
+  if (aAcc !== bAcc) return aAcc ? a : b;
+  if (a.length !== b.length) return a.length > b.length ? a : b;
+  return a.localeCompare(b, "pt-BR") <= 0 ? a : b;
 }
 
 // ── Aba: Catálogo ───────────────────────────────────────────────────────────
@@ -281,20 +299,33 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
       .finally(() => setLoading(false));
   }, []);
 
-  // Categorias ordenadas com contagem (para os chips de filtro).
+  // Categorias agrupadas por CHAVE canônica (dedup por acento/caixa) com contagem e rótulo
+  // canônico. `key` é usado no estado do filtro; `name` é o rótulo exibido.
   const categories = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const it of items) counts.set(it.category, (counts.get(it.category) ?? 0) + 1);
-    return Array.from(counts.entries())
-      .map(([name, count]) => ({ name, count }))
+    const byKey = new Map<string, { name: string; count: number }>();
+    for (const it of items) {
+      const key = normCategoryKey(it.category);
+      const prev = byKey.get(key);
+      if (prev) byKey.set(key, { name: pickCanonicalLabel(prev.name, it.category), count: prev.count + 1 });
+      else byKey.set(key, { name: it.category, count: 1 });
+    }
+    return Array.from(byKey.entries())
+      .map(([key, v]) => ({ key, name: v.name, count: v.count }))
       .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
   }, [items]);
 
-  // Filtra por categoria + busca textual (título, descrição, tags e categoria).
+  // Mapa chave-canônica → rótulo exibido (para normalizar o chip de cada card também).
+  const canonLabelByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of categories) m.set(c.key, c.name);
+    return m;
+  }, [categories]);
+
+  // Filtra por categoria (comparando a CHAVE canônica) + busca textual.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return items.filter((it) => {
-      if (category && it.category !== category) return false;
+      if (category && normCategoryKey(it.category) !== category) return false;
       if (!q) return true;
       const haystack = `${it.title} ${it.description} ${it.category} ${(it.tags ?? []).join(" ")}`.toLowerCase();
       return haystack.includes(q);
@@ -352,13 +383,13 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
         />
         {categories.map((c) => {
           const color = categoryColor(c.name);
-          const active = category === c.name;
+          const active = category === c.key;
           return (
             <Chip
-              key={c.name}
+              key={c.key}
               label={`${c.name} · ${c.count}`}
               size="small"
-              onClick={() => setCategory(active ? "" : c.name)}
+              onClick={() => setCategory(active ? "" : c.key)}
               variant={active ? "filled" : "outlined"}
               sx={{
                 fontWeight: 600,
@@ -373,7 +404,7 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
 
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
         {filtered.length} {filtered.length === 1 ? "modelo encontrado" : "modelos encontrados"}
-        {category ? ` em ${category}` : ""}{query.trim() ? ` para “${query.trim()}”` : ""}
+        {category ? ` em ${canonLabelByKey.get(category) ?? category}` : ""}{query.trim() ? ` para “${query.trim()}”` : ""}
       </Typography>
 
       {filtered.length === 0 ? (
@@ -402,7 +433,7 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
               >
                 <CardContent sx={{ flexGrow: 1, pb: 1 }}>
                   <Chip
-                    label={it.category}
+                    label={canonLabelByKey.get(normCategoryKey(it.category)) ?? it.category}
                     size="small"
                     sx={{ fontSize: "0.6rem", height: 18, mb: 1, fontWeight: 700, bgcolor: alpha(color, 0.15), color }}
                   />

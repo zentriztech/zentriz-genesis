@@ -301,9 +301,15 @@ function buildProductSections(
   allProjects: Project[],
   productNameMap: Map<string, string>
 ): ProductSection[] {
-  // Fallback para IDs curtos quando o nome não veio da API
-  const getProductName = (pid: string) =>
-    productNameMap.get(pid) ?? `Produto ${pid.slice(0, 8)}`;
+  // Nome do produto: 1) nome vindo em algum projeto do grupo (JOIN escopo-correto),
+  // 2) mapa de /api/products, 3) fallback para ID curto.
+  const getProductName = (pid: string, gs: ProjectGroup[]) => {
+    for (const g of gs) {
+      const withName = g.versions.find(p => p.productName);
+      if (withName?.productName) return withName.productName;
+    }
+    return productNameMap.get(pid) ?? `Produto ${pid.slice(0, 8)}`;
+  };
 
   const sections = new Map<string | null, ProjectGroup[]>();
   groups.forEach(g => {
@@ -317,7 +323,7 @@ function buildProductSections(
   sections.forEach((gs, pid) => {
     const hasRunning = gs.some(g => g.versions.some(p => p.status === "running"));
     if (pid !== null) {
-      result.push({ productId: pid, productName: getProductName(pid), groups: gs, hasRunning });
+      result.push({ productId: pid, productName: getProductName(pid, gs), groups: gs, hasRunning });
     }
   });
 
@@ -352,6 +358,13 @@ function ProjectsPageInner() {
   }, [productParam]);
 
   const allProjects = projectsStore.list;
+  // Mapa final de nomes de produto: prioriza o nome que veio no próprio projeto
+  // (GET /api/projects já faz JOIN em products sob o escopo de tenant correto),
+  // e só então recorre ao mapa de /api/products (pode faltar sob o seletor do master).
+  const mergedProductNames = new Map<string, string>(productNameMap);
+  allProjects.forEach((p) => {
+    if (p.productId && p.productName) mergedProductNames.set(p.productId, p.productName);
+  });
   // Aplicar filtro de produto se selecionado
   const projects  = selectedProductId
     ? allProjects.filter(p => p.productId === selectedProductId || (!selectedProductId && !p.productId))
@@ -361,7 +374,7 @@ function ProjectsPageInner() {
   const sorted    = [...running, ...rest];
   const groups    = buildLineageGroups(sorted);
   // FT-04: todas as linhagens agrupadas por produto, ordenadas com running primeiro
-  const productSections = buildProductSections(groups, sorted, productNameMap);
+  const productSections = buildProductSections(groups, sorted, mergedProductNames);
   const totalGroups = groups.length;
   const visibleGroups = new Set(
     groups.slice(0, visibleCount).map(g => g.root.id)
@@ -393,7 +406,7 @@ function ProjectsPageInner() {
             <Typography variant="h4">Meus projetos</Typography>
             {selectedProductId && (
               <Chip
-                label={`🧩 ${productNameMap.get(selectedProductId) ?? selectedProductId.slice(0, 8)}`}
+                label={`🧩 ${mergedProductNames.get(selectedProductId) ?? selectedProductId.slice(0, 8)}`}
                 size="small"
                 color="primary"
                 onDelete={() => setSelectedProductId(null)}

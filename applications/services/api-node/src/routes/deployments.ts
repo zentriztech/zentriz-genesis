@@ -11,6 +11,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -40,7 +41,7 @@ export async function deploymentRoutes(app: FastifyInstance): Promise<void> {
   // ── GET /api/deployments ────────────────────────────────────────────────
   // zentriz_admin → todos; demais → apenas do próprio tenant.
   // ?includeInactive=1 inclui failed/destroyed (default: só ativos).
-  app.get<{ Querystring: { includeInactive?: string } }>(
+  app.get<{ Querystring: { includeInactive?: string; tenantId?: string } }>(
     "/api/deployments",
     async (request, reply) => {
       const user = getUser(request);
@@ -49,9 +50,15 @@ export async function deploymentRoutes(app: FastifyInstance): Promise<void> {
       const where: string[] = ["e.provider = 's3-static'"];
       const params: unknown[] = [];
 
+      // Master: sem ?tenantId= vê todos; com ?tenantId= (seletor do portal) filtra ao tenant.
+      // Demais papéis: sempre restritos ao próprio tenant (helper ignora qualquer ?tenantId=).
+      const scopedTenantId = resolveScopedTenantId(user, request.query);
       if (user.role !== "zentriz_admin") {
-        if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Sem tenant" });
-        params.push(user.tenantId);
+        if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Sem tenant" });
+        params.push(scopedTenantId);
+        where.push(`e.tenant_id = $${params.length}`);
+      } else if (scopedTenantId) {
+        params.push(scopedTenantId);
         where.push(`e.tenant_id = $${params.length}`);
       }
       if (!includeInactive) {

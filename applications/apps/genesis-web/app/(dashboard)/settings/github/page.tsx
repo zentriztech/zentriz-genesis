@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { observer } from "mobx-react-lite";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -18,7 +18,8 @@ import Typography from "@mui/material/Typography";
 import GitHubIcon from "@mui/icons-material/GitHub";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
-import { apiGet, apiPost, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiDelete, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 type InstallationStatus =
   | { connected: false }
@@ -35,7 +36,7 @@ type InstallationStatus =
       revokedAt: string | null;
     };
 
-function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose: () => void; onConnected: () => void }) {
+function ConnectDialog({ open, onClose, onConnected, tenantId }: { open: boolean; onClose: () => void; onConnected: () => void; tenantId: string | null }) {
   const [installationId, setInstallationId] = useState("");
   const [appId, setAppId]       = useState("");
   const [privateKey, setPrivateKey] = useState("");
@@ -54,6 +55,8 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
         installationId: id,
         appId: parseInt(appId, 10),
         privateKey: privateKey.trim(),
+        // Master: conecta no tenant selecionado no topo (backend valida UUID/role).
+        ...(tenantId ? { tenantId } : {}),
       });
       onConnected();
       onClose();
@@ -121,32 +124,34 @@ function ConnectDialog({ open, onClose, onConnected }: { open: boolean; onClose:
 }
 
 const GitHubSettingsPage = observer(function GitHubSettingsPage() {
+  // Master: escopa a leitura ao tenant selecionado no topo (null = próprio JWT).
+  const tenantId = tenantScopeStore.effectiveTenantId;
   const [status, setStatus] = useState<InstallationStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const [revoking, setRevoking] = useState(false);
 
-  async function loadStatus() {
+  const loadStatus = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await apiGet<InstallationStatus>("/api/github/installation");
+      const data = await apiGet<InstallationStatus>(withQuery("/api/github/installation", { tenantId }));
       setStatus(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao carregar status");
     } finally {
       setLoading(false);
     }
-  }
+  }, [tenantId]);
 
-  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => { void loadStatus(); }, [loadStatus]);
 
   async function handleRevoke() {
     setRevoking(true);
     setError(null);
     try {
-      await apiDelete("/api/github/installation");
+      await apiDelete(withQuery("/api/github/installation", { tenantId }));
       await loadStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao revogar acesso");
@@ -234,6 +239,7 @@ const GitHubSettingsPage = observer(function GitHubSettingsPage() {
         open={showConnect}
         onClose={() => setShowConnect(false)}
         onConnected={loadStatus}
+        tenantId={tenantId}
       />
     </Box>
   );

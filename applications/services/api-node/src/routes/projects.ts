@@ -110,11 +110,13 @@ export async function projectRoutes(app: FastifyInstance) {
                   COALESCE(d.depth, 0) AS execution_order,
                   COALESCE(tc.total, 0)::int AS task_count,
                   COALESCE(tc.done, 0)::int  AS task_done_count,
-                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status
+                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  pr.name AS product_name
            FROM projects p
            JOIN users u ON p.created_by = u.id
            LEFT JOIN depths d ON d.id = p.id
            LEFT JOIN task_counts tc ON tc.project_id = p.id
+           LEFT JOIN products pr ON pr.id = p.product_id
            LEFT JOIN project_github_repos gr ON gr.project_id = p.id
            LEFT JOIN LATERAL (
              SELECT app_url, status FROM ephemeral_deployments e
@@ -133,10 +135,12 @@ export async function projectRoutes(app: FastifyInstance) {
         result = await client.query(
           `${baseSelect}
            SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order,
-                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status
+                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  pr.name AS product_name
            FROM projects p
            JOIN users u ON p.created_by = u.id
            LEFT JOIN depths d ON d.id = p.id
+           LEFT JOIN products pr ON pr.id = p.product_id
            LEFT JOIN project_github_repos gr ON gr.project_id = p.id
            LEFT JOIN LATERAL (
              SELECT app_url, status FROM ephemeral_deployments e
@@ -155,10 +159,12 @@ export async function projectRoutes(app: FastifyInstance) {
         result = await client.query(
           `${baseSelect}
            SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order,
-                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status
+                  gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  pr.name AS product_name
            FROM projects p
            JOIN users u ON p.created_by = u.id
            LEFT JOIN depths d ON d.id = p.id
+           LEFT JOIN products pr ON pr.id = p.product_id
            LEFT JOIN project_github_repos gr ON gr.project_id = p.id
            LEFT JOIN LATERAL (
              SELECT app_url, status FROM ephemeral_deployments e
@@ -192,6 +198,7 @@ export async function projectRoutes(app: FastifyInstance) {
         freeDescription: ((row.extra as Record<string, unknown> | null)?.free_description as string | undefined) ?? null,
         projectType:    ((row.extra as Record<string, unknown> | null)?.project_type    as string | undefined) ?? null,
         productId:       (row.product_id as string | null) ?? null,
+        productName:     (row.product_name as string | null) ?? null,
         complexityHint:  (row.complexity_hint as string | null) ?? null,
         executionOrder:  (row.execution_order as number | null) ?? 0,
         taskCount:       (row.task_count as number | null) ?? null,

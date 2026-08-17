@@ -31,7 +31,8 @@ import EditIcon from "@mui/icons-material/Edit";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import SaveIcon from "@mui/icons-material/Save";
 import VerifiedIcon from "@mui/icons-material/Verified";
-import { apiGet, apiPost, apiPut, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiPut, apiDelete, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -101,11 +102,12 @@ const SLOT_COLOR = (i: number) => ["#6366F1","#10B981","#F59E0B","#EF4444"][i] ?
 interface ModalProps {
   open: boolean;
   slot: CloudSlot | null;   // null = novo
+  tenantId: string | null;  // tenant selecionado no topo (master); null = próprio JWT
   onClose: () => void;
   onSaved: () => void;
 }
 
-function CloudModal({ open, slot, onClose, onSaved }: ModalProps) {
+function CloudModal({ open, slot, tenantId, onClose, onSaved }: ModalProps) {
   const isEdit = Boolean(slot);
   const [tab, setTab]     = useState(isEdit ? PROVIDERS.indexOf(slot!.provider) : 0);
   const [label, setLabel] = useState(slot?.label ?? "");
@@ -138,13 +140,13 @@ function CloudModal({ open, slot, onClose, onSaved }: ModalProps) {
         if (missing.length) throw new Error(`Campos obrigatórios: ${missing.join(", ")}`);
       }
       if (isEdit) {
-        await apiPut(`/api/tenant/cloud-connections/${slot!.id}`, {
+        await apiPut(withQuery(`/api/tenant/cloud-connections/${slot!.id}`, { tenantId }), {
           provider,
           label: label || null,
           credentials: form,
         });
       } else {
-        await apiPost("/api/tenant/cloud-connections", {
+        await apiPost(withQuery("/api/tenant/cloud-connections", { tenantId }), {
           provider,
           label: label || null,
           credentials: form,
@@ -332,6 +334,8 @@ function CloudSlotCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDel
 // ── Página principal ──────────────────────────────────────────────────────────
 
 function CloudSettingsPageInner() {
+  // Master: escopa as leituras/escritas ao tenant selecionado no topo (null = próprio JWT).
+  const tenantId = tenantScopeStore.effectiveTenantId;
   const [slots, setSlots]     = useState<CloudSlot[]>([]);
   const [loading, setLoading] = useState(true);
   const [globalMsg, setGlobalMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
@@ -344,12 +348,12 @@ function CloudSettingsPageInner() {
 
   const load = useCallback(async () => {
     try {
-      const res = await apiGet("/api/tenant/cloud-connections") as CloudSlot[];
+      const res = await apiGet(withQuery("/api/tenant/cloud-connections", { tenantId })) as CloudSlot[];
       setSlots(Array.isArray(res) ? res : []);
     } catch {
       setGlobalMsg({ type: "error", text: "Não foi possível carregar as configurações." });
     } finally { setLoading(false); }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -363,7 +367,7 @@ function CloudSettingsPageInner() {
     [next[indexA], next[indexB]] = [next[indexB], next[indexA]];
     setSlots(next);
     try {
-      await apiPost("/api/tenant/cloud-connections/reorder", { idA, idB });
+      await apiPost(withQuery("/api/tenant/cloud-connections/reorder", { tenantId }), { idA, idB });
       await load();
     } catch {
       setGlobalMsg({ type: "error", text: "Erro ao reordenar." });
@@ -378,7 +382,7 @@ function CloudSettingsPageInner() {
     if (!confirm(`Remover "${SLOT_LABEL(slots.indexOf(slot))} — ${displayName}"?`)) return;
     setDeletingId(slot.id);
     try {
-      await apiDelete(`/api/tenant/cloud-connections/${slot.id}`);
+      await apiDelete(withQuery(`/api/tenant/cloud-connections/${slot.id}`, { tenantId }));
       await load();
     } catch {
       setGlobalMsg({ type: "error", text: "Erro ao remover." });
@@ -390,7 +394,7 @@ function CloudSettingsPageInner() {
   const handleTest = async (slot: CloudSlot) => {
     setTestingId(slot.id);
     try {
-      const res = await apiPost(`/api/tenant/cloud-connections/${slot.id}/test`, {}) as { ok: boolean; message: string };
+      const res = await apiPost(withQuery(`/api/tenant/cloud-connections/${slot.id}/test`, { tenantId }), {}) as { ok: boolean; message: string };
       setGlobalMsg({ type: res.ok ? "success" : "error", text: res.message });
     } catch (e) {
       setGlobalMsg({ type: "error", text: e instanceof Error ? e.message : "Erro ao testar" });
@@ -508,6 +512,7 @@ function CloudSettingsPageInner() {
       <CloudModal
         open={modalOpen}
         slot={editSlot}
+        tenantId={tenantId}
         onClose={() => setModalOpen(false)}
         onSaved={load}
       />

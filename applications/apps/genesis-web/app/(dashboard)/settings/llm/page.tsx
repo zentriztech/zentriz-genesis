@@ -35,7 +35,8 @@ import EditIcon from "@mui/icons-material/Edit";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import SaveIcon from "@mui/icons-material/Save";
-import { apiGet, apiPut, apiDelete } from "@/lib/api";
+import { apiGet, apiPut, apiDelete, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 // ── Tipos ─────────────────────────────────────────────────────────────────────
 
@@ -153,13 +154,14 @@ interface AddModalProps {
   open: boolean;
   slot: LlmSlot | null;          // null = novo
   priority: number;              // posição onde será inserido
+  tenantId: string | null;       // tenant selecionado no topo (master); null = próprio JWT
   onClose: () => void;
   onSaved: () => void;
   globalLimits: { maxConc: number; quota: string; dpRes: number };
   onLimitsChange: (v: { maxConc: number; quota: string; dpRes: number }) => void;
 }
 
-function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimitsChange }: AddModalProps) {
+function AddModal({ open, slot, priority, tenantId, onClose, onSaved, globalLimits, onLimitsChange }: AddModalProps) {
   const initialProvider = (slot?.provider as Provider) ?? "bedrock";
   const [tab, setTab]           = useState(PROVIDERS.indexOf(initialProvider));
   const [modelId, setModelId]   = useState(slot?.model_id ?? "");
@@ -203,7 +205,7 @@ function AddModal({ open, slot, priority, onClose, onSaved, globalLimits, onLimi
     try {
       const selected         = modelId || meta.models[0];
       const resolvedProvider = resolveProvider(selected, provider);
-      await apiPut(`/api/tenant/llm-config/${priority}`, {
+      await apiPut(withQuery(`/api/tenant/llm-config/${priority}`, { tenantId }), {
         provider:                resolvedProvider,
         model_id:                selected,
         model_id_fallback:       fallbackId || null,
@@ -504,6 +506,8 @@ function LlmCard({ slot, index, total, onMoveUp, onMoveDown, onEdit, onDelete, d
 // ── Página principal ──────────────────────────────────────────────────────────
 
 function LlmSettingsInner() {
+  // Master: escopa as leituras/escritas ao tenant selecionado no topo (null = próprio JWT).
+  const tenantId = tenantScopeStore.effectiveTenantId;
   const [slots, setSlots]   = useState<LlmSlot[]>([]);
   const [sysDefault, setSysDefault] = useState({ provider: "bedrock", model_id: "us.anthropic.claude-sonnet-4-6" });
   const [loading, setLoading] = useState(true);
@@ -524,7 +528,7 @@ function LlmSettingsInner() {
 
   const load = useCallback(async () => {
     try {
-      const raw = await apiGet("/api/tenant/llm-config") as LlmConfigResponse | { configured: boolean };
+      const raw = await apiGet(withQuery("/api/tenant/llm-config", { tenantId })) as LlmConfigResponse | { configured: boolean };
       if ("slots" in raw) {
         const resp = raw as LlmConfigResponse;
         setSysDefault(resp.system_default);
@@ -543,7 +547,7 @@ function LlmSettingsInner() {
     } catch {
       setGlobalMsg({ type: "error", text: "Não foi possível carregar as configurações." });
     } finally { setLoading(false); }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -559,10 +563,10 @@ function LlmSettingsInner() {
     // Persistir: DELETE tudo → re-inserir na nova ordem
     setGlobalMsg(null);
     try {
-      await apiDelete("/api/tenant/llm-config");
+      await apiDelete(withQuery("/api/tenant/llm-config", { tenantId }));
       for (let i = 0; i < next.length; i++) {
         const s = next[i];
-        await apiPut(`/api/tenant/llm-config/${i}`, {
+        await apiPut(withQuery(`/api/tenant/llm-config/${i}`, { tenantId }), {
           provider:                s.provider,
           model_id:                s.model_id,
           credentials:             {},                  // vazio = mantém credenciais salvas
@@ -587,9 +591,9 @@ function LlmSettingsInner() {
     try {
       // Remove, então reorganiza priorities dos que ficaram
       const remaining = configuredSlots.filter((_, i) => i !== slotIndex);
-      await apiDelete("/api/tenant/llm-config");
+      await apiDelete(withQuery("/api/tenant/llm-config", { tenantId }));
       for (let i = 0; i < remaining.length; i++) {
-        await apiPut(`/api/tenant/llm-config/${i}`, {
+        await apiPut(withQuery(`/api/tenant/llm-config/${i}`, { tenantId }), {
           provider:                remaining[i].provider,
           model_id:                remaining[i].model_id,
           credentials:             {},
@@ -721,6 +725,7 @@ function LlmSettingsInner() {
         open={modalOpen}
         slot={editSlot}
         priority={editPriority}
+        tenantId={tenantId}
         onClose={() => setModalOpen(false)}
         onSaved={load}
         globalLimits={globalLimits}

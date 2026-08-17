@@ -11,6 +11,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -134,7 +135,9 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
   // ── GET /api/tenant/llm-config — retorna os 4 slots (preenchidos ou vazios) ──
   app.get("/api/tenant/llm-config", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
+    // O master (zentriz_admin) escopa via ?tenantId= (seletor do portal); demais usam o próprio JWT.
+    const scopedTenantId = resolveScopedTenantId(user, request.query);
+    if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN" });
 
     const client = await pool.connect();
     try {
@@ -144,7 +147,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
                 credentials, max_concurrent_projects,
                 daily_token_quota, deadpool_token_reserve, is_active, priority
          FROM tenant_llm_configs WHERE tenant_id = $1 ORDER BY priority ASC`,
-        [user.tenantId]
+        [scopedTenantId]
       );
 
       const byPriority = new Map(
@@ -190,9 +193,10 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     "/api/tenant/llm-config/:priority",
     async (request, reply) => {
       const user = getUser(request);
-      if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
       if (user.role !== "tenant_admin" && user.role !== "zentriz_admin")
         return reply.status(403).send({ code: "FORBIDDEN" });
+      const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+      if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN" });
 
       const priority = Number(request.params.priority);
       if (![0, 1, 2, 3].includes(priority))
@@ -202,7 +206,7 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
       if (!ALLOWED_PROVIDERS.includes(provider as Provider))
         return reply.status(400).send({ code: "BAD_REQUEST", message: `Provider inválido: ${provider}` });
 
-      const result = await upsertConfig(user.tenantId, priority, request.body as Record<string,unknown>);
+      const result = await upsertConfig(scopedTenantId, priority, request.body as Record<string,unknown>);
       return reply.send(result);
     }
   );
@@ -210,15 +214,16 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
   // ── PUT /api/tenant/llm-config (compat — sem priority → priority=0) ──────────
   app.put("/api/tenant/llm-config", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
     if (user.role !== "tenant_admin" && user.role !== "zentriz_admin")
       return reply.status(403).send({ code: "FORBIDDEN" });
+    const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+    if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN" });
 
     const provider = String((request.body as Record<string,unknown>).provider ?? "bedrock");
     if (!ALLOWED_PROVIDERS.includes(provider as Provider))
       return reply.status(400).send({ code: "BAD_REQUEST", message: `Provider inválido: ${provider}` });
 
-    const result = await upsertConfig(user.tenantId, 0, request.body as Record<string,unknown>);
+    const result = await upsertConfig(scopedTenantId, 0, request.body as Record<string,unknown>);
     return reply.send(result);
   });
 
@@ -227,14 +232,15 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
     "/api/tenant/llm-config/:priority",
     async (request, reply) => {
       const user = getUser(request);
-      if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
       if (user.role !== "tenant_admin" && user.role !== "zentriz_admin")
         return reply.status(403).send({ code: "FORBIDDEN" });
+      const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+      if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN" });
 
       const priority = Number(request.params.priority);
       await pool.query(
         "DELETE FROM tenant_llm_configs WHERE tenant_id = $1 AND priority = $2",
-        [user.tenantId, priority]
+        [scopedTenantId, priority]
       );
       return reply.send({ ok: true, message: `${PRIORITY_LABELS[priority] ?? `Prioridade ${priority}`} removida.` });
     }
@@ -243,11 +249,12 @@ export async function llmRoutes(app: FastifyInstance): Promise<void> {
   // ── DELETE /api/tenant/llm-config — remove todas ─────────────────────────────
   app.delete("/api/tenant/llm-config", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
     if (user.role !== "tenant_admin" && user.role !== "zentriz_admin")
       return reply.status(403).send({ code: "FORBIDDEN" });
+    const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+    if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN" });
 
-    await pool.query("DELETE FROM tenant_llm_configs WHERE tenant_id = $1", [user.tenantId]);
+    await pool.query("DELETE FROM tenant_llm_configs WHERE tenant_id = $1", [scopedTenantId]);
     return reply.send({ ok: true, message: "Todas as configs removidas. Usando provider padrão." });
   });
 }

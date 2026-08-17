@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { encryptCredentials, decryptCredentials } from "../services/crypto.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
 
 function getUser(req: FastifyRequest): AuthUser {
   return (req as unknown as { user: AuthUser }).user;
@@ -83,14 +84,16 @@ export async function cloudRoutes(app: FastifyInstance) {
   // ── GET /api/tenant/cloud-connections ─────────────────────────────────────
   app.get("/api/tenant/cloud-connections", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) return reply.send([]);
+    // Master escopa via ?tenantId= (seletor do portal); demais usam o próprio JWT.
+    const scopedTenantId = resolveScopedTenantId(user, request.query);
+    if (!scopedTenantId) return reply.send([]);
     const res = await pool.query(
       `SELECT id, provider, label, region, service_type, slot_index,
               github_secrets_synced_at, status, created_at
        FROM tenant_cloud_connections
        WHERE tenant_id = $1 AND status = 'active'
        ORDER BY slot_index ASC`,
-      [user.tenantId]
+      [scopedTenantId]
     );
     return reply.send(res.rows.map(formatRow));
   });
@@ -103,7 +106,7 @@ export async function cloudRoutes(app: FastifyInstance) {
       if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Requer role tenant_admin" });
       }
-      const tenantId = user.tenantId!;
+      const tenantId = resolveScopedTenantId(user, request.query, request.body);
       if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
 
       const { provider, credentials, region, label } = request.body ?? {};
@@ -160,12 +163,14 @@ export async function cloudRoutes(app: FastifyInstance) {
     if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Requer role tenant_admin" });
     }
+    const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+    if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
     const { id } = request.params;
     const { provider, credentials, region, label } = request.body ?? {};
 
     const existing = await pool.query(
       "SELECT * FROM tenant_cloud_connections WHERE id = $1 AND tenant_id = $2",
-      [id, user.tenantId]
+      [id, scopedTenantId]
     );
     if (!existing.rows.length) return reply.status(404).send({ code: "NOT_FOUND" });
 
@@ -213,16 +218,18 @@ export async function cloudRoutes(app: FastifyInstance) {
       if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Requer role tenant_admin" });
       }
+      const scopedTenantId = resolveScopedTenantId(user, request.query);
+      if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
       const { id } = request.params;
       const client = await pool.connect();
       try {
         await client.query(
           "UPDATE tenant_cloud_connections SET status='revoked', updated_at=now() WHERE id=$1 AND tenant_id=$2",
-          [id, user.tenantId]
+          [id, scopedTenantId]
         );
         await recompactSlots(
           client as Parameters<typeof recompactSlots>[0],
-          user.tenantId!
+          scopedTenantId
         );
         return reply.send({ ok: true });
       } finally { client.release(); }
@@ -237,12 +244,14 @@ export async function cloudRoutes(app: FastifyInstance) {
       if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Requer role tenant_admin" });
       }
+      const scopedTenantId = resolveScopedTenantId(user, request.query, request.body);
+      if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
       const { idA, idB } = request.body ?? {};
       const client = await pool.connect();
       try {
         const rows = await client.query(
           "SELECT id, slot_index FROM tenant_cloud_connections WHERE id = ANY($1) AND tenant_id = $2",
-          [[idA, idB], user.tenantId]
+          [[idA, idB], scopedTenantId]
         );
         if (rows.rows.length !== 2) return reply.status(400).send({ code: "BAD_REQUEST", message: "IDs inválidos" });
         const [r1, r2] = rows.rows as { id: string; slot_index: number }[];
@@ -260,11 +269,12 @@ export async function cloudRoutes(app: FastifyInstance) {
     "/api/tenant/cloud-connections/:id/test",
     async (request, reply) => {
       const user = getUser(request);
-      if (!user.tenantId) return reply.status(400).send({ ok: false, message: "Sem tenant" });
+      const scopedTenantId = resolveScopedTenantId(user, request.query);
+      if (!scopedTenantId) return reply.status(400).send({ ok: false, message: "Sem tenant" });
       const { id } = request.params;
       const res = await pool.query(
         "SELECT provider, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_cloud_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
-        [id, user.tenantId]
+        [id, scopedTenantId]
       );
       const row = res.rows[0] as Record<string, unknown> | undefined;
       if (!row) return reply.send({ ok: false, message: "Slot não encontrado" });

@@ -24,8 +24,9 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { apiGet, apiDelete } from "@/lib/api";
+import { apiGet, apiDelete, withQuery } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 interface Deployment {
   id:           string;
@@ -67,18 +68,20 @@ export default observer(function DeploymentsPage() {
   const [confirm, setConfirm] = useState<{ dep: Deployment; typed: string; deleting: boolean } | null>(null);
 
   const isZentrizAdmin = authStore.isZentrizAdmin;
+  // Master: com tenant selecionado no topo, filtra os deploys a esse tenant (null = todos).
+  const tenantId = tenantScopeStore.effectiveTenantId;
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiGet<{ deployments: Deployment[] }>("/api/deployments");
+      const data = await apiGet<{ deployments: Deployment[] }>(withQuery("/api/deployments", { tenantId }));
       setDeployments(data.deployments ?? []);
     } catch {
       setGlobalAlert({ type: "error", msg: "Erro ao carregar deployments." });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => { void load(); }, [load]);
 

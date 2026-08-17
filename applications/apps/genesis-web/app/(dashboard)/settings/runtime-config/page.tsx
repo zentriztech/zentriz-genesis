@@ -21,8 +21,9 @@ import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import RestoreIcon from "@mui/icons-material/Restore";
 import SaveIcon from "@mui/icons-material/Save";
 import TuneIcon from "@mui/icons-material/Tune";
-import { apiGet, apiPut, apiDelete } from "@/lib/api";
+import { apiGet, apiPut, apiDelete, withQuery } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 interface ConfigItem {
   key:            string;
@@ -54,11 +55,13 @@ export default observer(function RuntimeConfigPage() {
   const [globalAlert, setGlobalAlert] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   const isAdmin = authStore.isZentrizAdmin || authStore.isTenantAdmin;
+  // Master: com tenant selecionado no topo, edita/lê os overrides desse tenant (null = global).
+  const tenantId = tenantScopeStore.effectiveTenantId;
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiGet<ConfigItem[]>("/api/admin/runtime-config");
+      const data = await apiGet<ConfigItem[]>(withQuery("/api/admin/runtime-config", { tenantId }));
       setConfigs(data);
       // Inicializar values com o valor efetivo atual
       const init: Record<string, string> = {};
@@ -71,7 +74,7 @@ export default observer(function RuntimeConfigPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tenantId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -81,7 +84,8 @@ export default observer(function RuntimeConfigPage() {
     setSaving((s) => ({ ...s, [item.key]: true }));
     setFeedback((f) => ({ ...f, [item.key]: { type: "success", msg: "" } }));
     try {
-      await apiPut(`/api/admin/runtime-config/${item.key}`, { value: val });
+      // Backend runtimeConfig PUT lê tenantId do BODY (não da query) para zentriz_admin.
+      await apiPut(`/api/admin/runtime-config/${item.key}`, { value: val, tenantId });
       setFeedback((f) => ({ ...f, [item.key]: { type: "success", msg: "Salvo!" } }));
       await load();
     } catch (e: unknown) {
@@ -95,7 +99,7 @@ export default observer(function RuntimeConfigPage() {
   async function handleRestore(item: ConfigItem) {
     setSaving((s) => ({ ...s, [item.key]: true }));
     try {
-      await apiDelete(`/api/admin/runtime-config/${item.key}`);
+      await apiDelete(withQuery(`/api/admin/runtime-config/${item.key}`, { tenantId }));
       setFeedback((f) => ({ ...f, [item.key]: { type: "success", msg: "Restaurado para padrão global!" } }));
       await load();
     } catch {
@@ -136,15 +140,21 @@ export default observer(function RuntimeConfigPage() {
         <TuneIcon sx={{ color: "#F97316", fontSize: 28 }} />
         <Typography variant="h5" fontWeight={700}>Runtime Config</Typography>
         <Chip
-          label={authStore.isZentrizAdmin ? "Global (zentriz_admin)" : "Override do seu tenant"}
+          label={
+            authStore.isZentrizAdmin
+              ? (tenantId ? `Override do tenant ${tenantId.slice(0, 8)}` : "Global (zentriz_admin)")
+              : "Override do seu tenant"
+          }
           size="small"
-          sx={{ bgcolor: authStore.isZentrizAdmin ? "#F97316" : "#6366F1", color: "#fff" }}
+          sx={{ bgcolor: authStore.isZentrizAdmin && !tenantId ? "#F97316" : "#6366F1", color: "#fff" }}
         />
       </Stack>
 
       <Alert severity="info" sx={{ mb: 3 }}>
         {authStore.isZentrizAdmin
-          ? "Você está editando os valores globais. Tenants sem override herdam estes valores."
+          ? (tenantId
+              ? "Tenant selecionado no topo: você está editando os overrides deste tenant. Restaurar remove o override e volta ao global."
+              : "Nenhum tenant selecionado: você está editando os valores globais. Tenants sem override herdam estes valores.")
           : "Você pode sobrescrever valores globais para o seu tenant. Deixe no padrão para herdar o global."}
       </Alert>
 
