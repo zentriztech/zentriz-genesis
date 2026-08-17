@@ -46,12 +46,14 @@ Duas frentes independentes, entregues em fases. **Dinheiro sempre em inteiro de 
 
 Não é um novo tier de conta. É o `zentriz_admin` **refinado**: reusa RBAC, login e JWT atuais. A conta de gestão **pode**: gerenciar Tenants (CRUD, ativar/suspender), usuários, planos, e **operar o ciclo de vida** de projetos de tenants (ver, mudar status, cancelar, limpar, relatórios, DLQ, watchdog) + o novo Módulo Financeiro. A conta de gestão **não pode**: criar/enviar spec, criar projeto, criar produto, adicionar tasks, evoluir versão, disparar pipeline (`/run`).
 
-**A.1 — Enforcement no backend (o coração desta parte).** Centralizar um guard único e aplicá-lo aos endpoints de criação, negando `zentriz_admin`:
+**A.1 — Enforcement no backend (o coração desta parte).** Centralizar um guard único e aplicá-lo **apenas aos endpoints de AUTORIA** (não aos de operação de ciclo de vida), negando `zentriz_admin`:
 
 - Novo helper compartilhado (ex.: `middleware/managementGuard.ts`) — `denyCreationForManagement(user, reply)`: se `user.role === "zentriz_admin"` → `403 { code: "MANAGEMENT_ACCOUNT_READONLY_CREATE", message: "Conta de gestão não cria specs/projetos/produtos" }`.
-- Aplicar em: `POST /api/specs` (`specs.ts:504`), `POST /api/catalog/:slug` (`catalog.ts:60`), `POST /api/products` (`products.ts:165`), `POST /api/products/propose` (`products.ts:265`), `POST /api/products/ingest` (`products.ts:187`), `POST /api/products/ingest-proposal`, `POST /api/projects/:id/tasks` (`projects.ts:401`), `POST /api/projects/:id/evolve` (`projects.ts:2590`), `POST /api/projects/:id/run` (`pipeline.ts:80`), e o gatilho de criação por Telegram (`telegram.ts:1002`).
-- **Remover os fallbacks "primeiro tenant"** (`catalog.ts:80-81`, `products.ts:189`): criação sempre exige tenant explícito do próprio chamador (agora só `tenant_admin`/`user` com tenant criam).
-- Endpoints de gestão/leitura permanecem liberados ao `zentriz_admin` (Tenants/Plans CRUD, `?tenantId=` scoping, cleanup, reports, DLQ, watchdog — já mapeados em `tenants.ts`, `plans.ts`, `projects.ts`, `pipeline.ts:400-481`).
+- Aplicar SOMENTE em endpoints de autoria: `POST /api/specs` (`specs.ts:504`), `POST /api/catalog/:slug/use` (`catalog.ts:60`), `POST /api/products` (`products.ts:165`), `POST /api/products/propose` (`products.ts:265`), `POST /api/products/ingest` (`products.ts:187`), `POST /api/products/ingest-proposal` (`products.ts:~300`), `POST /api/projects/:id/evolve` (`projects.ts:2590` — evolve cria projeto-filho = autoria), e o gatilho de criação por Telegram (`telegram.ts:1002`).
+- **⚠️ NÃO aplicar o guard em `POST /api/projects/:id/run` (`pipeline.ts:80`) nem `POST /api/projects/:id/tasks` (`projects.ts:401`)** — descoberta da revisão adversarial (H1): esses são endpoints de **ciclo de vida/operação**, exercitados por chamadores INTERNOS com token `zentriz_admin`/derivado-do-dono: o watchdog cunha `signToken({sub:"watchdog", role:"zentriz_admin"})` e chama `/run` (`watchdog.ts:473`), e o runner semeia tasks via `/tasks` (`runner.py`). Um 403 cego aqui **mataria a promoção da fila e o seed de tasks do pipeline**. A conta de gestão MAY operar o ciclo de vida (o próprio A diz isso). Se um dia for preciso separar identidade de máquina da gestão humana, fazer via **role de serviço dedicada** (`sub:"runner"/"watchdog"` → `role:"service"`), nunca por `role:"zentriz_admin"` sozinho.
+- **Remover TODOS os fallbacks "primeiro tenant"** — a revisão (M6) encontrou três, não dois: `catalog.ts:80-81`, `products.ts:189` (ingest) **e `products.ts:310` (ingest-proposal)**; conferir também `specs.ts:655`. `/ingest` e `/ingest-proposal` hoje não têm guard de papel algum — qualquer token com `tenantId=null` cria produto+N projetos num tenant arbitrário. Os quatro handlers de criação passam a EXIGIR tenant explícito do chamador e rejeitar chamador sem tenant (400/403), nunca escolher o primeiro silenciosamente.
+- Endpoints de gestão/leitura permanecem liberados ao `zentriz_admin` (Tenants/Plans CRUD, `?tenantId=` scoping, cleanup, reports, DLQ, watchdog, **`/run` e `/tasks` como alavancas operacionais de suporte** — já mapeados em `tenants.ts`, `plans.ts`, `projects.ts`, `pipeline.ts:400-481`).
+- **Nota (L5):** `POST /api/products` (`products.ts:165`) já retorna 403 para chamador sem tenant, e `zentriz_admin` tem `tenantId=null` → o guard ali é redundante (inócuo). O nome real da rota de catálogo é `POST /api/catalog/:slug/use`.
 
 **A.2 — Nav sempre em modo gestão para `zentriz_admin`.** Hoje `HIDE_WHEN_NO_TENANT` só filtra quando não há tenant selecionado (`AppLayout.tsx:125-127`). Refinar: para `zentriz_admin`, os itens de criação (`/spec`, `/specs`, `/splitter`, `/projects` de criação) ficam **sempre** ocultos — mesmo com tenant selecionado. Mantêm-se Dashboard, Notificações, Tenants, Usuários, Projetos (gestão `/zentriz/projects`), Planos, **Financeiro** (novo) e os painéis operacionais (Deadpool, LLM/IA, GitHub, Cloud, Deployments, Runtime Config, Skill Store) — que são gestão/observação, não criação de produto.
 
@@ -131,9 +133,10 @@ Seguir o padrão de `routes/plans.ts`: plugin `financeRoutes(app)`, `pool` param
 
 #### B.4 — Ciclo de ativação/suspensão
 
+- **A PRIMEIRA cobrança precisa nascer para tenant `inactive`/recém-criado** (revisão H2): o gerador `generate-month` mira tenants `ativos`, mas o signup cria `inactive` e promete ativar *após pagamento* — sem primeira cobrança, o tenant nunca paga e nunca ativa (o loop de ativação seria inalcançável justamente para o caso que existe para servir). Solução (movida para **F1**): (a) a criação/signup do tenant emite uma cobrança de onboarding imediata, OU (b) `generate-month` inclui `('inactive','active')` na primeira competência. Ativação: quando a cobrança vira `paid` E `tenant.status='inactive'` → `active`. Competências seguintes miram só `active` (e opcionalmente `suspended`).
 - Registrar pagamento que quita a 1ª cobrança → tenant `inactive → active` (fecha a promessa do signup, `signup.ts:211`).
 - Cobrança vencida além de N dias → `overdue` e (opcional, configurável) tenant `active → suspended`.
-- **Gap conhecido a tratar:** `middleware/auth.ts:11-40` só valida o JWT — **não** recheca status do tenant por request; hoje a suspensão só vale no **próximo login** (`auth.ts:79-81`). O spec propõe, na fase de suspensão automática, adicionar recheque leve de status (cache curto) no `authMiddleware` ou reduzir o TTL do token. Decisão fica para a fase F2.
+- **⚠️ Requisito DURO de F2 (não "opcional") — recheque de status por request (revisão H3):** `signToken` tem TTL **de 7 dias** (`auth.ts:35`, `expiresIn:"7d"`) e o status do tenant só é checado **no login** e **só para usuários com `tenant_id`** (`auth.ts:79-81`). Logo, marcar `tenant.status='suspended'` tem **efeito ZERO por até 7 dias** em qualquer sessão já autenticada — suspender seria um no-op. Reduzir só o TTL é insuficiente (deixa janela + piora UX). F2 **DEVE** adicionar no `authMiddleware`, após `verifyToken`: se `user.tenantId` setado, consultar `tenants.status` via cache curto em memória (30–60s por `tenantId`); se `suspended`/`inactive` → `403 { code:"TENANT_INACTIVE" }`. `zentriz_admin` (`tenantId=null`) e o usuário `deploy-callback` fazem bypass. Isso também fecha o gap pré-existente da suspensão manual (`PATCH /api/tenants/:id`) que hoje só vale no próximo login. Por ser transversal (toca toda request), é um **passo próprio, gated e deployado isoladamente** dentro de F2.
 
 #### B.5 — Frontend
 
@@ -161,13 +164,32 @@ Novo grupo **"Financeiro"** no nav do `zentriz_admin` (é gestão, permitido). P
 2. Ajustar `AppLayout.tsx` para ocultar criação sempre que `zentriz_admin`.
 3. Testes: garantir que `zentriz_admin` recebe 403 em criação e 200 em gestão; `tenant_admin` inalterado.
 
-**Parte B — faseada:**
-- **F1 (MVP):** migration 053 (bank_accounts, charges, payments) + `financeRoutes` (bank-accounts, charges CRUD, payments manual, summary) + telas Financeiro + `financeStore`. Sem gateway, sem NF.
-- **F2:** `generate-month` idempotente + hook ativação (pagamento → active) + suspensão por vencimento + recheque de status no `authMiddleware`.
-- **F3:** migration de `invoices` + porta `InvoiceProvider` (adapter manual) + telas de NF (emitida/recebida, registro + upload PDF/XML).
-- **F4 (opcional):** porta `PaymentGateway` real (Asaas/Mercado Pago) + webhook de baixa; `InvoiceProvider` real (eNotas/NFe.io) homologado.
+**Parte B — faseada (revisada após revisão adversarial):**
+- **F1 (MVP):** migration 053 (bank_accounts, charges [com `kind` + índice único parcial], payments) + `financeRoutes` (bank-accounts, charges CRUD, payments manual, summary) + **geração/emissão da PRIMEIRA cobrança para tenant recém-criado** (H2) + telas Financeiro + `financeStore`. Sem gateway, sem NF.
+- **F2:** `generate-month` idempotente (competências seguintes) + hook ativação (pagamento quita → active) + suspensão por vencimento + **[passo próprio, gated] recheque de status no `authMiddleware`** (H3).
+- **F3:** migration de `invoices` **modeladas como NFS-e** (M1) + porta `InvoiceProvider` (adapter manual) + telas de NF (emitida/recebida, registro + upload PDF/XML).
+- **F4 (opcional):** porta `PaymentGateway` real (Asaas/Mercado Pago) + webhook de baixa (idempotente, L2); `InvoiceProvider` real (eNotas/NFe.io/Focus) homologado.
 
 Cada fase: gates verdes (tsc + vitest + guard de migration + build) e deploy só com OK explícito do Jean.
+
+## Revisão Adversarial (3 lentes) — Ajustes Incorporados
+
+Esta RFC passou por **3 revisões adversariais** independentes (2026-08-17): (1) correção de código do fluxo já em produção — signup/OTP/SES/CNPJ; (2) infraestrutura SES/credenciais; (3) design desta RFC contra o código real. As premissas centrais foram **confirmadas no código** (`specs.ts:506` e `catalog.ts:64` liberam `zentriz_admin` sem tenant; os fallbacks "primeiro tenant" existem). Os achados de design abaixo já foram refletidos acima (A.1, B.4, faseamento) e/ou ficam registrados como requisito de implementação:
+
+- **H1 — não bloquear `/run` e `/tasks`** (corrigido em A.1): são operação de ciclo de vida usada por watchdog/runner com token `zentriz_admin`; guard só em endpoints de autoria.
+- **H2 — primeira cobrança para tenant `inactive`** (movido para F1 em B.4): sem ela a ativação é inalcançável.
+- **H3 — recheque de status no `authMiddleware`** (requisito duro de F2 em B.4): TTL de token = 7 dias; suspender sem recheque é no-op.
+- **M1 — documento fiscal correto = NFS-e, não NF-e.** SaaS é **serviço** (ISS municipal), não mercadoria. `invoices` deve carregar `service_code TEXT` (LC-116), `municipal_code TEXT`, `iss_rate NUMERIC`, `iss_cents INTEGER` e colunas de retenção (`pis_cents, cofins_cents, csll_cents, irrf_cents, inss_cents`), com `tax_cents` agregado derivado. `nfe_key` (44 dígitos) passa a anulável, só para o caso NF-e/mercadoria. Emitente (Zentriz) em config explícita: tabela `company_profile` de linha única OU env dedicadas (CNPJ, inscrição municipal, regime, código de serviço, código do município). A porta `InvoiceProvider` fala NFS-e.
+- **M2 — `UNIQUE(tenant_id, competence_month)` bloqueia cobrança avulsa legítima.** Adicionar `kind TEXT CHECK IN ('subscription','one_off','proration')` e trocar por índice único **parcial**: `... ON charges (tenant_id, competence_month) WHERE kind='subscription' AND status <> 'canceled'`. Avulsas/proration isentas; cancelar+reemitir na mesma competência funciona.
+- **M3 — `status` da charge com dois donos; `overdue` sem escritor; `refunded` inalcançável.** Escritor único `recalcChargeStatus(chargeId)` em toda mudança de payment + job agendado `open/partially_paid → overdue` após `due_date`. Reembolso via payment negativo (`method='refund'`) ou tabela `refunds`; reembolsar pagamento ativador reavalia status do tenant. Ativação só quando charge atinge `paid`.
+- **M4 — numeração/série de NF sem autoridade.** Sequência é do `InvoiceProvider` real; em manual, declarar que entrada manual NÃO garante sequência legal. `UNIQUE (direction, series, number) WHERE direction='issued' AND number IS NOT NULL`; sem unicidade em `received` (número é do fornecedor).
+- **M5 — FKs sem `ON DELETE`, sem auditoria, `PATCH` mutando charge emitida.** `charges.tenant_id`/`payments.charge_id`/`payments.tenant_id`/`invoices.charge_id` → `ON DELETE RESTRICT`; `invoices.tenant_id` e `*.created_by` → `ON DELETE SET NULL`. **Nunca CASCADE em dinheiro/fisco.** Charge imutável após `status <> 'draft'` (PATCH só cancela ou edita rascunho; valor muda só por cancelar+reemitir). Tabela append-only `finance_audit`.
+- **M6 — remoção de fallback incompleta** (corrigido em A.1): incluir `products.ts:310` (ingest-proposal) e `specs.ts:655`.
+- **L1** — `CHECK (competence_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')`; competência em `America/Sao_Paulo`.
+- **L2** — `payments.external_id` + `UNIQUE(method, external_id) WHERE external_id IS NOT NULL` (webhook cria `payments`).
+- **L3** — `UNIQUE INDEX ON company_bank_accounts (is_default) WHERE is_default`; DELETE vira soft-delete (`active=false`).
+- **L4** — A.2 descreve mal o nav: hoje `HIDE_WHEN_NO_TENANT` esconde `/deadpool` e `/settings/*` em gestão; torná-los sempre visíveis é mudança, não preservação. Enumerar o conjunto novo escondido (só autoria) e declarar painéis operacionais visíveis sem tenant.
+- **L5** — rota real `POST /api/catalog/:slug/use`; guard em `products.ts:165` redundante (inócuo); `GET /finance/summary` assume moeda única (BRL).
 
 ## Referências
 

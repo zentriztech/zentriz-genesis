@@ -42,10 +42,13 @@ export async function createVerificationCode(
   const normEmail = email.trim().toLowerCase();
   const client = await pool.connect();
   try {
-    // Cooldown: existe código recente (não consumido) criado há menos de RESEND_COOLDOWN?
+    // Cooldown: existe QUALQUER código criado há menos de RESEND_COOLDOWN? Considera
+    // consumidos também (não só pendentes) — senão consumir/invalidar um código zeraria
+    // o cooldown e abriria bombardeio de e-mail. O caminho de falha de envio usa
+    // invalidatePending(), que APAGA a linha, liberando reenvio imediato de propósito.
     const recent = await client.query(
       `SELECT created_at FROM email_verification_codes
-       WHERE email = $1 AND purpose = $2 AND consumed_at IS NULL
+       WHERE email = $1 AND purpose = $2
        ORDER BY created_at DESC LIMIT 1`,
       [normEmail, purpose],
     );
@@ -102,7 +105,7 @@ export async function verifyCode(
   const client = await pool.connect();
   try {
     const row = await client.query(
-      `SELECT id, code_hash, attempts, expires_at FROM email_verification_codes
+      `SELECT id, code_hash, expires_at FROM email_verification_codes
        WHERE email = $1 AND purpose = $2 AND consumed_at IS NULL
        ORDER BY created_at DESC LIMIT 1`,
       [normEmail, purpose],
@@ -110,33 +113,41 @@ export async function verifyCode(
     if (row.rows.length === 0) {
       return { ok: false, reason: "not_found" };
     }
-    const rec = row.rows[0] as { id: string; code_hash: string; attempts: number; expires_at: string };
+    const rec = row.rows[0] as { id: string; code_hash: string; expires_at: string };
 
     if (new Date(rec.expires_at).getTime() <= Date.now()) {
-      await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1`, [rec.id]);
+      await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL`, [rec.id]);
       return { ok: false, reason: "expired" };
     }
 
-    if (rec.attempts >= MAX_ATTEMPTS) {
-      await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1`, [rec.id]);
+    // Consome uma tentativa ATOMICAMENTE antes de comparar. O UPDATE incrementa e
+    // retorna sob lock de linha; requisições concorrentes (brute-force) são serializadas
+    // pelo Postgres, então no máximo MAX_ATTEMPTS comparações são "cobradas" — fecha a
+    // corrida em que várias requisições liam attempts < MAX simultaneamente e passavam.
+    const claim = await client.query(
+      `UPDATE email_verification_codes
+         SET attempts = attempts + 1
+       WHERE id = $1 AND consumed_at IS NULL AND attempts < $2
+       RETURNING attempts`,
+      [rec.id, MAX_ATTEMPTS],
+    );
+    if (claim.rows.length === 0) {
+      // Estourou o cap (ou foi consumido/verificado por outra requisição): consome em definitivo.
+      await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL`, [rec.id]);
       return { ok: false, reason: "too_many_attempts" };
     }
+    const attempts = claim.rows[0].attempts as number;
 
     const match = candidate.length > 0 && (await comparePassword(candidate, rec.code_hash));
     if (!match) {
-      const updated = await client.query(
-        `UPDATE email_verification_codes SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts`,
-        [rec.id],
-      );
-      const attempts = (updated.rows[0]?.attempts as number) ?? rec.attempts + 1;
       if (attempts >= MAX_ATTEMPTS) {
-        await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1`, [rec.id]);
+        await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL`, [rec.id]);
         return { ok: false, reason: "too_many_attempts" };
       }
       return { ok: false, reason: "mismatch" };
     }
 
-    await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1`, [rec.id]);
+    await client.query(`UPDATE email_verification_codes SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL`, [rec.id]);
     return { ok: true };
   } finally {
     client.release();
@@ -144,13 +155,15 @@ export async function verifyCode(
 }
 
 /**
- * Invalida (consome sem uso) todos os códigos pendentes de (email,purpose). Usado
- * quando o envio do e-mail falha, para liberar reenvio imediato sem esbarrar no cooldown.
+ * Descarta (APAGA) todos os códigos pendentes de (email,purpose). Usado quando o envio
+ * do e-mail falha, para liberar reenvio imediato. Precisa ser DELETE (não soft-consume):
+ * o cooldown agora considera created_at de qualquer linha, então uma linha consumida
+ * ainda bloquearia o reenvio; apagá-la é o que permite o retry imediato pretendido.
  */
 export async function invalidatePending(email: string, purpose: string = DEFAULT_PURPOSE): Promise<void> {
   const normEmail = email.trim().toLowerCase();
   await pool.query(
-    `UPDATE email_verification_codes SET consumed_at = now()
+    `DELETE FROM email_verification_codes
      WHERE email = $1 AND purpose = $2 AND consumed_at IS NULL`,
     [normEmail, purpose],
   );

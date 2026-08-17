@@ -142,7 +142,39 @@ export function cnpjLookupProvider(): CnpjLookup {
   return _provider;
 }
 
-/** Atalho de consulta usando o provider padrão. */
+/** Injeta um provider (usado nos testes). */
+export function setCnpjLookupProvider(p: CnpjLookup | null): void {
+  _provider = p;
+}
+
+// ─── Cache em memória (TTL) ───────────────────────────────────────────────────
+// O endpoint /api/cnpj é público e anônimo (o form de signup precisa consultar antes
+// do login). Sem cache, cada request bate na ReceitaWS (que tem limite ~3/min no plano
+// grátis) — um atacante amplifica DoS contra o provider + esgota nossa cota. Cache por
+// CNPJ com TTL curto absorve repetição sem servir dado velho por muito tempo.
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+const CACHE_MAX = 5000;
+type CacheEntry = { at: number; value: CnpjLookupResult };
+const _cache = new Map<string, CacheEntry>();
+
+/** Limpa o cache (usado nos testes para isolamento). */
+export function clearCnpjCache(): void {
+  _cache.clear();
+}
+
+/** Atalho de consulta usando o provider padrão, com cache por CNPJ. */
 export async function lookupCnpj(cnpj: string): Promise<CnpjLookupResult> {
-  return cnpjLookupProvider().lookup(cnpj);
+  const key = normalizeCnpjDigits(cnpj);
+  const now = Date.now();
+  const hit = _cache.get(key);
+  if (hit && now - hit.at < CACHE_TTL_MS) return hit.value;
+
+  const value = await cnpjLookupProvider().lookup(cnpj);
+
+  // Poda oportunista quando o Map cresce (não vaza memória em pico de consultas).
+  if (_cache.size > CACHE_MAX) {
+    for (const [k, e] of _cache) if (now - e.at >= CACHE_TTL_MS) _cache.delete(k);
+  }
+  _cache.set(key, { at: now, value });
+  return value;
 }

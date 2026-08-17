@@ -8,6 +8,25 @@ import {
 } from "../services/emailVerification.js";
 import { isSesConfigured, sendEmail, renderVerificationEmail } from "../services/emailSender.js";
 import { isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
+import { createRateLimiter, clientIp } from "../services/rateLimit.js";
+
+// ── Rate limiting dos endpoints públicos de signup ──────────────────────────────
+// request-code: por IP (bloqueia scripts) + por e-mail (bloqueia bombardeio de UMA
+// caixa de entrada, robusto mesmo atrás de proxy/NAT). signup: por IP.
+const requestCodeIpLimiter = createRateLimiter({ name: "signup-request-code-ip", windowMs: 60_000, max: 12 });
+const requestCodeEmailLimiter = createRateLimiter({
+  name: "signup-request-code-email",
+  windowMs: 60 * 60_000, // 1h
+  max: 8,
+  keyFn: (r) => {
+    const email = typeof (r.body as RequestCodeBody | undefined)?.email === "string"
+      ? (r.body as RequestCodeBody).email!.trim().toLowerCase()
+      : "";
+    // Sem e-mail no corpo, cai no IP para não colapsar todos num só balde.
+    return email ? `email:${email}` : `ip:${clientIp(r)}`;
+  },
+});
+const signupIpLimiter = createRateLimiter({ name: "signup-submit-ip", windowMs: 60_000, max: 20 });
 
 type SignupBody = {
   name?: string;
@@ -50,24 +69,30 @@ function optStr(v: unknown): string | undefined {
  * GET /api/plans foi movido para routes/plans.ts (canônico). */
 export async function signupRoutes(app: FastifyInstance) {
   // ── Solicitar código de verificação de e-mail ────────────────────────────────
-  app.post<{ Body: RequestCodeBody }>("/api/tenant/signup/request-code", async (request, reply) => {
+  app.post<{ Body: RequestCodeBody }>(
+    "/api/tenant/signup/request-code",
+    { preHandler: [requestCodeIpLimiter, requestCodeEmailLimiter] },
+    async (request, reply) => {
     const email = typeof request.body?.email === "string" ? request.body.email.trim().toLowerCase() : "";
     if (!validateEmail(email)) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "E-mail inválido" });
     }
 
-    // Se o e-mail já existe como usuário, não revela (anti-enumeração) mas também não
-    // gera código — retorna genérico. O signup final valida de novo com 409 claro.
-    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
-    if (existing.rows.length > 0) {
-      return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado no sistema" });
-    }
-
+    // Cria o código primeiro — o custo (bcrypt) e o cooldown ficam IGUAIS para e-mail
+    // existente ou novo, evitando oráculo de enumeração por timing/comportamento.
     const created = await createVerificationCode(email, "tenant_signup");
     if (!created.ok) {
       return reply
         .status(429)
         .send({ code: "TOO_MANY_REQUESTS", message: "Aguarde alguns segundos antes de solicitar um novo código.", retryAfterMs: created.retryAfterMs });
+    }
+
+    // Anti-enumeração: se o e-mail já pertence a um usuário, NÃO enviamos código (não há
+    // cadastro novo a confirmar), mas respondemos de forma IDÊNTICA ao sucesso — o cliente
+    // não distingue "existe" de "não existe" por esta rota. O signup final valida de novo.
+    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
+    if (existing.rows.length > 0) {
+      return reply.send({ sent: true, expiresAt: created.expiresAt.toISOString() });
     }
 
     // Envio real via SES (prod). Em dev/test (SES OFF), devolve devCode para permitir o fluxo.
@@ -99,7 +124,10 @@ export async function signupRoutes(app: FastifyInstance) {
   });
 
   // ── Concluir cadastro (exige código verificado) ───────────────────────────────
-  app.post<{ Body: SignupBody }>("/api/tenant/signup", async (request, reply) => {
+  app.post<{ Body: SignupBody }>(
+    "/api/tenant/signup",
+    { preHandler: signupIpLimiter },
+    async (request, reply) => {
     const body = request.body ?? {};
     const tenantName = typeof body.name === "string" ? body.name.trim() : "";
     const planId = typeof body.planId === "string" ? body.planId.trim() : "";
@@ -148,7 +176,20 @@ export async function signupRoutes(app: FastifyInstance) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "E-mail do responsável inválido" });
     }
 
-    // Verifica o código ANTES de qualquer escrita.
+    // Validações baratas ANTES de consumir o código: plano válido e e-mail livre.
+    // Assim um plano inválido ou e-mail já cadastrado não "queima" o código do usuário
+    // (que teria de pedir outro à toa). O código só é consumido quando o cadastro pode
+    // de fato prosseguir. A corrida (TOCTOU) de duplicidade é fechada pelo 23505 abaixo.
+    const planRow0 = await pool.query("SELECT id FROM plans WHERE id = $1", [planId]);
+    if (planRow0.rows.length === 0) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: "Plano inválido" });
+    }
+    const existingUser0 = await pool.query("SELECT id FROM users WHERE email = $1", [adminEmail]);
+    if (existingUser0.rows.length > 0) {
+      return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado no sistema" });
+    }
+
+    // Verifica o código (consome no acerto) só após as validações baratas.
     const verified = await verifyCode(adminEmail, code, "tenant_signup");
     if (!verified.ok) {
       return reply.status(400).send({ code: "INVALID_CODE", message: VERIFY_ERROR_MESSAGES[verified.reason] ?? "Código inválido." });
@@ -156,16 +197,6 @@ export async function signupRoutes(app: FastifyInstance) {
 
     const client = await pool.connect();
     try {
-      const planRow = await client.query("SELECT id FROM plans WHERE id = $1", [planId]);
-      if (planRow.rows.length === 0) {
-        return reply.status(400).send({ code: "BAD_REQUEST", message: "Plano inválido" });
-      }
-
-      const existingUser = await client.query("SELECT id FROM users WHERE email = $1", [adminEmail]);
-      if (existingUser.rows.length > 0) {
-        return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado no sistema" });
-      }
-
       await client.query("BEGIN");
       const tenantInsert = await client.query(
         `INSERT INTO tenants
@@ -221,6 +252,11 @@ export async function signupRoutes(app: FastifyInstance) {
       });
     } catch (e) {
       await client.query("ROLLBACK").catch(() => {});
+      // Corrida de duplicidade: outro signup inseriu o mesmo e-mail entre o pre-check e o
+      // INSERT (violação de UNIQUE em users.email) → 409 claro em vez de 500.
+      if ((e as { code?: string })?.code === "23505") {
+        return reply.status(409).send({ code: "CONFLICT", message: "E-mail já cadastrado no sistema" });
+      }
       throw e;
     } finally {
       client.release();

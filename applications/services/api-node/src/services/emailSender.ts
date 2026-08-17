@@ -42,9 +42,17 @@ function sesClient(): SESv2Client {
   return _ses;
 }
 
-/** Verdadeiro quando o envio real está habilitado (não-teste e não desligado por env). */
+/** Verdadeiro quando o envio real está habilitado E credenciável.
+ *
+ * Em produção exigimos credenciais DEDICADAS (AWS_SES_*): a cadeia default do SDK
+ * resolveria a env genérica AWS_ACCESS_KEY_ID do container, que é de OUTRA conta
+ * (896…, sem ses:SendEmail) — enviar assim falha sempre. Fail-closed: sem creds
+ * dedicadas em prod tratamos como OFF, e o endpoint público responde 503 claro em
+ * vez de tentar e devolver um erro cru do SES. Ver memory genesis-tenants-reform-ses. */
 export function isSesConfigured(): boolean {
-  return sesEnabled();
+  if (!sesEnabled()) return false;
+  if (process.env.NODE_ENV === "production" && !sesCredentials()) return false;
+  return true;
 }
 
 export type SendEmailInput = {
