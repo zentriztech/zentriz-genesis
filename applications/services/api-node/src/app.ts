@@ -28,6 +28,7 @@ import { deploymentRoutes } from "./routes/deployments.js";
 import { deadpoolRoutes } from "./routes/deadpool.js";
 import { deadpoolApprovalsRoutes } from "./routes/deadpoolApprovals.js";
 import { learningRoutes } from "./routes/learning.js";
+import { financeRoutes } from "./routes/finance.js";
 import { readFileSync } from "node:fs";
 
 // Versão da aplicação — fonte única é o package.json (record de release). Resolvido relativo ao
@@ -102,6 +103,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(deadpoolRoutes);
   await app.register(deadpoolApprovalsRoutes);
   await app.register(learningRoutes);
+  await app.register(financeRoutes);
 
   return app;
 }

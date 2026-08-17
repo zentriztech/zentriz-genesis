@@ -97,4 +97,6 @@ As telas devem cobrir **todo o gerenciamento e controle** que tenants e usuário
 
 **Implementação atual:** três telas de login discriminadas por role (`/login`, `/login/tenant`, `/login/genesis`), integração com API (auth, projetos, upload de spec multi-arquivo). Credenciais e estado do projeto: [context/CONTEXT.md](../context/CONTEXT.md), [context/GENESIS_WEB_CONTEXT.md](../context/GENESIS_WEB_CONTEXT.md).
 
+**Financeiro (RFC-0002 Parte B — F1):** nova tela `Financeiro` (`/zentriz/finance`), visível apenas para `zentriz_admin`, com abas Resumo (KPIs + gerar cobranças do mês), Cobranças (criar/cancelar/registrar pagamento), Pagamentos e Contas bancárias. Valores em BRL; dinheiro em centavos. Ao assinar (signup), o tenant nasce `inactive` com a 1ª cobrança de assinatura em aberto (H2); a ativação por confirmação de pagamento vem em F2.
+
 *Documento criado em 2026-02-17 — Zentriz Genesis. Deve ser alinhado ao [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) (domínio, stack) e ao [ORCHESTRATION_GUIDE.md](ORCHESTRATION_GUIDE.md) (fluxo de agentes).*

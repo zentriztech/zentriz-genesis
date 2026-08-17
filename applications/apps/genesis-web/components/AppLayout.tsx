@@ -42,6 +42,7 @@ import TelegramIcon from "@mui/icons-material/Telegram";
 import TuneIcon from "@mui/icons-material/Tune";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -85,6 +86,7 @@ const navZentriz = [
   { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,     color: "#8B5CF6" },
   { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
+  { label: "Financeiro",    href: "/zentriz/finance",   icon: <AccountBalanceIcon />, color: "#22C55E" },
   { label: "Deadpool",      href: "/deadpool",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },

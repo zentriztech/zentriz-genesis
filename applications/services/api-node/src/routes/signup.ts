@@ -236,6 +236,32 @@ export async function signupRoutes(app: FastifyInstance) {
          RETURNING id, email, name, tenant_id, role, status, created_at`,
         [adminEmail, adminName, passwordHash, tenantId]
       );
+
+      // H2 (RFC-0002 Parte B — Módulo Financeiro): emite a cobrança de onboarding
+      // (assinatura da competência corrente) para o tenant recém-criado, atada ao MESMO
+      // COMMIT do cadastro. O tenant nasce 'inactive' com a 1ª fatura em aberto; a ativação
+      // ocorre na confirmação do pagamento (F2). Só cobra se o plano tiver preço definido.
+      // O valor vem SEMPRE do preço do plano no servidor (nunca de input do usuário).
+      // Competência/vencimento no fuso America/Sao_Paulo (L1). O ON CONFLICT DO NOTHING
+      // torna a operação idempotente frente a um posterior generate-month da MESMA competência
+      // (cada signup cria um tenant_id novo, então não é sobre reprocessar o cadastro).
+      const planPriceRow = await client.query(
+        "SELECT monthly_price_cents FROM plans WHERE id = $1",
+        [planId]
+      );
+      const onboardingCents = Number(planPriceRow.rows[0]?.monthly_price_cents ?? 0);
+      if (onboardingCents > 0) {
+        await client.query(
+          `INSERT INTO charges
+             (tenant_id, plan_id, amount_cents, description, competence_month, kind, due_date, status, issued_at)
+           VALUES ($1, $2, $3, 'Assinatura inicial',
+                   to_char(now() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM'), 'subscription',
+                   (date_trunc('month', now() AT TIME ZONE 'America/Sao_Paulo') + interval '9 days')::date, 'open', now())
+           ON CONFLICT (tenant_id, competence_month) WHERE kind = 'subscription' AND status <> 'canceled'
+           DO NOTHING`,
+          [tenantId, planId, onboardingCents]
+        );
+      }
       await client.query("COMMIT");
 
       return reply.status(201).send({

@@ -307,4 +307,12 @@ flowchart TB
 
 ---
 
+## Financeiro (RFC-0002 Parte B)
+
+- **`zentriz_admin` (conta de gestão)**: única responsável pelo Módulo Financeiro — cadastra contas bancárias da empresa, emite/cancela cobranças, registra pagamentos (baixa manual) e acompanha o sumário (MRR, a receber, vencidas, recebido no mês). Não cria specs/produtos/projetos (Parte A).
+- **`tenant_admin` / `user`**: sem acesso ao Financeiro (rotas `/api/finance/*` retornam 403). O tenant vê apenas seu "Plano e uso".
+- **Sistema (signup)**: emite a cobrança de assinatura inicial (H2) no cadastro de um novo tenant, atada ao mesmo COMMIT. Ativação por pagamento e job de vencimento chegam em F2.
+
+---
+
 *Documento criado em 2026-02-17 — Zentriz Genesis. Referência para desenvolvimento de agentes, orquestrador, infra, reports, scripts, services, spec e tests.*
