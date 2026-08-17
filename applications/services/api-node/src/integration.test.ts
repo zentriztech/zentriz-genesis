@@ -854,4 +854,97 @@ describe("RBAC + integridade (regressões da revisão adversarial)", () => {
     expect(del.statusCode).toBe(409);
     expect(JSON.parse(del.body).code).toBe("CONFLICT");
   });
+
+  it("signup exige código: sem código → 400 INVALID_CODE", async () => {
+    if (!dbAvailable || !app) return;
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup",
+      payload: {
+        name: "Empresa Sem Codigo",
+        planId: "plan_prata",
+        adminEmail: "sem-codigo@exemplo.com",
+        adminName: "Fulano",
+        password: "Senha@2026!",
+      },
+    });
+    // Sem code → 400 (BAD_REQUEST: código obrigatório)
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("fluxo signup com código: request-code (devCode) → signup 201 com email_confirmed", async () => {
+    if (!dbAvailable || !app) return;
+    const email = "novo-tenant@exemplo.com";
+
+    const codeRes = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup/request-code",
+      payload: { email },
+    });
+    expect(codeRes.statusCode).toBe(200);
+    const codeBody = JSON.parse(codeRes.body);
+    // Em teste, SES OFF → devCode presente
+    expect(codeBody.devCode).toBeDefined();
+    const devCode = codeBody.devCode as string;
+    expect(devCode).toMatch(/^\d{6}$/);
+
+    const signupRes = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup",
+      payload: {
+        name: "Empresa Verificada",
+        planId: "plan_prata",
+        adminEmail: email,
+        adminName: "Responsável Legal",
+        password: "Senha@2026!",
+        code: devCode,
+        cnpj: "11.222.333/0001-81",
+        responsibleName: "Responsável Legal",
+        responsiblePhone: "(11) 99999-0000",
+        addressCity: "São Paulo",
+        addressState: "sp",
+      },
+    });
+    expect(signupRes.statusCode).toBe(201);
+    const signupBody = JSON.parse(signupRes.body);
+    expect(signupBody.tenant.emailConfirmed).toBe(true);
+    expect(signupBody.tenant.email).toBe(email);
+    expect(signupBody.tenant.status).toBe("inactive");
+  });
+
+  it("signup com código errado → 400 INVALID_CODE", async () => {
+    if (!dbAvailable || !app) return;
+    const email = "codigo-errado@exemplo.com";
+    const codeRes = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup/request-code",
+      payload: { email },
+    });
+    expect(codeRes.statusCode).toBe(200);
+
+    const signupRes = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup",
+      payload: {
+        name: "Empresa Codigo Errado",
+        planId: "plan_prata",
+        adminEmail: email,
+        adminName: "Fulano",
+        password: "Senha@2026!",
+        code: "000000",
+      },
+    });
+    expect(signupRes.statusCode).toBe(400);
+    expect(JSON.parse(signupRes.body).code).toBe("INVALID_CODE");
+  });
+
+  it("request-code para e-mail já cadastrado → 409", async () => {
+    if (!dbAvailable || !app) return;
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/tenant/signup/request-code",
+      payload: { email: ZENTRIZ_EMAIL },
+    });
+    expect(res.statusCode).toBe(409);
+  });
 });

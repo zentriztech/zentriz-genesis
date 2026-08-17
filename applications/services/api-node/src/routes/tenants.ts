@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { validateEmail } from "../auth.js";
+import { isValidCnpj, normalizeCnpjDigits } from "../services/cnpjLookup.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -9,8 +11,104 @@ function getUser(request: FastifyRequest): AuthUser {
 const TENANT_STATUSES = ["active", "suspended", "inactive"] as const;
 type TenantStatus = (typeof TENANT_STATUSES)[number];
 
-type CreateTenantBody = { name?: string; planId?: string; status?: string };
-type UpdateTenantBody = { name?: string; planId?: string; status?: string };
+/** Campos de contato/CNPJ/responsável/endereço aceitos em create + patch. */
+type TenantExtraBody = {
+  email?: string | null;
+  emailConfirmed?: boolean;
+  cnpj?: string | null;
+  responsibleName?: string | null;
+  responsibleEmail?: string | null;
+  responsiblePhone?: string | null;
+  addressCep?: string | null;
+  addressStreet?: string | null;
+  addressNumber?: string | null;
+  addressComplement?: string | null;
+  addressDistrict?: string | null;
+  addressCity?: string | null;
+  addressState?: string | null;
+};
+
+type CreateTenantBody = { name?: string; planId?: string; status?: string } & TenantExtraBody;
+type UpdateTenantBody = { name?: string; planId?: string; status?: string } & TenantExtraBody;
+
+/** Campos textuais editáveis: chave do body (camelCase) → coluna + normalização. */
+const TENANT_TEXT_FIELDS: { key: keyof TenantExtraBody; col: string; transform: (v: string) => string }[] = [
+  { key: "email", col: "email", transform: (v) => v.trim().toLowerCase() },
+  { key: "cnpj", col: "cnpj", transform: (v) => normalizeCnpjDigits(v) },
+  { key: "responsibleName", col: "responsible_name", transform: (v) => v.trim() },
+  { key: "responsibleEmail", col: "responsible_email", transform: (v) => v.trim().toLowerCase() },
+  { key: "responsiblePhone", col: "responsible_phone", transform: (v) => v.trim() },
+  { key: "addressCep", col: "address_cep", transform: (v) => v.trim() },
+  { key: "addressStreet", col: "address_street", transform: (v) => v.trim() },
+  { key: "addressNumber", col: "address_number", transform: (v) => v.trim() },
+  { key: "addressComplement", col: "address_complement", transform: (v) => v.trim() },
+  { key: "addressDistrict", col: "address_district", transform: (v) => v.trim() },
+  { key: "addressCity", col: "address_city", transform: (v) => v.trim() },
+  { key: "addressState", col: "address_state", transform: (v) => v.trim().toUpperCase() },
+];
+
+/** Colunas extras para os SELECTs (prefixadas com o alias t). */
+const TENANT_EXTRA_SELECT =
+  "t.email, t.email_confirmed, t.cnpj, t.responsible_name, t.responsible_email, t.responsible_phone, " +
+  "t.address_cep, t.address_street, t.address_number, t.address_complement, t.address_district, t.address_city, t.address_state";
+
+/** Colunas extras para RETURNING (sem alias). */
+const TENANT_EXTRA_RETURNING =
+  "email, email_confirmed, cnpj, responsible_name, responsible_email, responsible_phone, " +
+  "address_cep, address_street, address_number, address_complement, address_district, address_city, address_state";
+
+/** Mapeia colunas extras de uma linha para o shape camelCase da API. */
+function mapTenantExtra(row: Record<string, unknown>) {
+  return {
+    email: (row.email as string) ?? null,
+    emailConfirmed: !!row.email_confirmed,
+    cnpj: (row.cnpj as string) ?? null,
+    responsibleName: (row.responsible_name as string) ?? null,
+    responsibleEmail: (row.responsible_email as string) ?? null,
+    responsiblePhone: (row.responsible_phone as string) ?? null,
+    addressCep: (row.address_cep as string) ?? null,
+    addressStreet: (row.address_street as string) ?? null,
+    addressNumber: (row.address_number as string) ?? null,
+    addressComplement: (row.address_complement as string) ?? null,
+    addressDistrict: (row.address_district as string) ?? null,
+    addressCity: (row.address_city as string) ?? null,
+    addressState: (row.address_state as string) ?? null,
+  };
+}
+
+/**
+ * Coleta colunas/valores dos campos extras a partir do body. Valida e-mail e CNPJ.
+ * String vazia / null → NULL (limpa o campo). Campo ausente → não tocado.
+ * Retorna { cols, vals } ou { error } em caso de valor inválido.
+ */
+function collectTenantExtra(body: TenantExtraBody): { cols: string[]; vals: unknown[] } | { error: string } {
+  const cols: string[] = [];
+  const vals: unknown[] = [];
+  for (const f of TENANT_TEXT_FIELDS) {
+    const raw = body[f.key];
+    if (raw === undefined) continue;
+    if (raw === null || (typeof raw === "string" && raw.trim() === "")) {
+      cols.push(f.col);
+      vals.push(null);
+      continue;
+    }
+    if (typeof raw !== "string") return { error: `Campo ${f.key} inválido` };
+    const val = f.transform(raw);
+    if ((f.key === "email" || f.key === "responsibleEmail") && !validateEmail(val)) {
+      return { error: "E-mail inválido" };
+    }
+    if (f.key === "cnpj" && !isValidCnpj(val)) {
+      return { error: "CNPJ inválido" };
+    }
+    cols.push(f.col);
+    vals.push(val);
+  }
+  if (body.emailConfirmed !== undefined) {
+    cols.push("email_confirmed");
+    vals.push(!!body.emailConfirmed);
+  }
+  return { cols, vals };
+}
 
 /** Garante que o chamador é o master Zentriz; caso contrário responde 403 e retorna false. */
 function requireZentrizAdmin(request: FastifyRequest, reply: { status: (c: number) => { send: (b: unknown) => unknown } }): boolean {
@@ -29,7 +127,7 @@ export async function tenantRoutes(app: FastifyInstance) {
   app.get("/api/tenants", async (request, reply) => {
     if (!requireZentrizAdmin(request, reply)) return;
     const result = await pool.query(
-      `SELECT t.id, t.name, t.plan_id, t.status, t.created_at,
+      `SELECT t.id, t.name, t.plan_id, t.status, t.created_at, ${TENANT_EXTRA_SELECT},
               p.name AS plan_name, p.slug AS plan_slug, p.max_projects, p.max_users_per_tenant,
               (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id)     AS users_count,
               (SELECT COUNT(*) FROM projects pr WHERE pr.tenant_id = t.id) AS projects_count
@@ -48,6 +146,7 @@ export async function tenantRoutes(app: FastifyInstance) {
           maxUsersPerTenant: row.max_users_per_tenant,
         },
         status: row.status,
+        ...mapTenantExtra(row),
         usersCount: Number(row.users_count),
         projectsCount: Number(row.projects_count),
         createdAt: (row.created_at as Date)?.toISOString(),
@@ -61,7 +160,7 @@ export async function tenantRoutes(app: FastifyInstance) {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
     }
     const result = await pool.query(
-      `SELECT t.id, t.name, t.plan_id, t.status, t.created_at, p.id as plan_pk, p.name as plan_name, p.slug as plan_slug, p.max_projects, p.max_users_per_tenant
+      `SELECT t.id, t.name, t.plan_id, t.status, t.created_at, ${TENANT_EXTRA_SELECT}, p.id as plan_pk, p.name as plan_name, p.slug as plan_slug, p.max_projects, p.max_users_per_tenant
        FROM tenants t JOIN plans p ON t.plan_id = p.id WHERE t.id = $1`,
       [request.params.id]
     );
@@ -79,6 +178,7 @@ export async function tenantRoutes(app: FastifyInstance) {
         maxUsersPerTenant: row.max_users_per_tenant,
       },
       status: row.status,
+      ...mapTenantExtra(row),
       createdAt: (row.created_at as Date).toISOString(),
     });
   });
@@ -99,16 +199,24 @@ export async function tenantRoutes(app: FastifyInstance) {
     }
     const finalStatus: TenantStatus = (status as TenantStatus | undefined) ?? "active";
 
+    const extra = collectTenantExtra(request.body ?? {});
+    if ("error" in extra) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: extra.error });
+    }
+
     const client = await pool.connect();
     try {
       const plan = await client.query("SELECT id FROM plans WHERE id = $1", [planId]);
       if (plan.rows.length === 0) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Plano inexistente" });
       }
+      const cols = ["name", "plan_id", "status", ...extra.cols];
+      const vals: unknown[] = [name.trim(), planId, finalStatus, ...extra.vals];
+      const placeholders = cols.map((_, idx) => `$${idx + 1}`).join(", ");
       const result = await client.query(
-        `INSERT INTO tenants (name, plan_id, status) VALUES ($1, $2, $3)
-         RETURNING id, name, plan_id, status, created_at`,
-        [name.trim(), planId, finalStatus]
+        `INSERT INTO tenants (${cols.join(", ")}) VALUES (${placeholders})
+         RETURNING id, name, plan_id, status, created_at, ${TENANT_EXTRA_RETURNING}`,
+        vals
       );
       const row = result.rows[0];
       return reply.status(201).send({
@@ -116,6 +224,7 @@ export async function tenantRoutes(app: FastifyInstance) {
         name: row.name,
         planId: row.plan_id,
         status: row.status,
+        ...mapTenantExtra(row),
         createdAt: (row.created_at as Date).toISOString(),
       });
     } finally {
@@ -155,6 +264,15 @@ export async function tenantRoutes(app: FastifyInstance) {
       params.push(status);
     }
 
+    const extra = collectTenantExtra(request.body ?? {});
+    if ("error" in extra) {
+      return reply.status(400).send({ code: "BAD_REQUEST", message: extra.error });
+    }
+    for (let k = 0; k < extra.cols.length; k++) {
+      sets.push(`${extra.cols[k]} = $${i++}`);
+      params.push(extra.vals[k]);
+    }
+
     if (sets.length === 0) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Nada para atualizar" });
     }
@@ -162,7 +280,7 @@ export async function tenantRoutes(app: FastifyInstance) {
     params.push(request.params.id);
     const result = await pool.query(
       `UPDATE tenants SET ${sets.join(", ")} WHERE id = $${i}
-       RETURNING id, name, plan_id, status, created_at`,
+       RETURNING id, name, plan_id, status, created_at, ${TENANT_EXTRA_RETURNING}`,
       params
     );
     const row = result.rows[0];
@@ -172,6 +290,7 @@ export async function tenantRoutes(app: FastifyInstance) {
       name: row.name,
       planId: row.plan_id,
       status: row.status,
+      ...mapTenantExtra(row),
       createdAt: (row.created_at as Date).toISOString(),
     });
   });

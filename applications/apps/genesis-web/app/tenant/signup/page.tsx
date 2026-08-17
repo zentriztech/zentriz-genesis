@@ -7,6 +7,7 @@ import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import TextField from "@mui/material/TextField";
+import InputAdornment from "@mui/material/InputAdornment";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import AlertTitle from "@mui/material/AlertTitle";
@@ -38,6 +39,29 @@ type SignupResponse = {
   tenant: { id: string; name: string; planId: string; status: string; createdAt: string };
 };
 
+type RequestCodeResponse = {
+  sent: boolean;
+  devCode?: string;
+  expiresAt?: string;
+};
+
+type CnpjResponse = {
+  cnpj: string;
+  name: string;
+  tradeName?: string;
+  email?: string;
+  phone?: string;
+  address?: {
+    cep?: string;
+    street?: string;
+    number?: string;
+    complement?: string;
+    district?: string;
+    city?: string;
+    state?: string;
+  };
+};
+
 type FieldErrors = {
   tenantName?: string;
   adminName?: string;
@@ -45,6 +69,7 @@ type FieldErrors = {
   password?: string;
   confirmPassword?: string;
   planId?: string;
+  code?: string;
 };
 
 const cardMotion = {
@@ -69,6 +94,77 @@ export default function TenantSignupPage() {
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [touched, setTouched] = useState(false);
   const [success, setSuccess] = useState<SignupResponse | null>(null);
+
+  // Verificação de e-mail por código
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [codeMsg, setCodeMsg] = useState<{ severity: "success" | "info" | "error"; text: string } | null>(null);
+
+  // Dados adicionais da empresa (opcionais)
+  const [cnpj, setCnpj] = useState("");
+  const [cnpjBusy, setCnpjBusy] = useState(false);
+  const [cnpjMsg, setCnpjMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
+  const [responsibleName, setResponsibleName] = useState("");
+  const [responsiblePhone, setResponsiblePhone] = useState("");
+  const [addressCep, setAddressCep] = useState("");
+  const [addressStreet, setAddressStreet] = useState("");
+  const [addressNumber, setAddressNumber] = useState("");
+  const [addressComplement, setAddressComplement] = useState("");
+  const [addressDistrict, setAddressDistrict] = useState("");
+  const [addressCity, setAddressCity] = useState("");
+  const [addressState, setAddressState] = useState("");
+
+  const emailOk = EMAIL_RE.test(adminEmail.trim());
+  const cnpjDigits = cnpj.replace(/\D+/g, "");
+
+  async function handleSendCode() {
+    if (!emailOk || sendingCode) return;
+    setSendingCode(true);
+    setCodeMsg(null);
+    setError(null);
+    try {
+      const res = await apiPost<RequestCodeResponse>("/api/tenant/signup/request-code", {
+        email: adminEmail.trim().toLowerCase(),
+      });
+      setCodeSent(true);
+      if (res.devCode) {
+        // Ambiente sem envio real (dev): mostra o código para prosseguir.
+        setCode(res.devCode);
+        setCodeMsg({ severity: "info", text: `Ambiente de desenvolvimento: código ${res.devCode} preenchido automaticamente.` });
+      } else {
+        setCodeMsg({ severity: "success", text: "Código enviado para o seu e-mail. Verifique a caixa de entrada." });
+      }
+    } catch (err) {
+      setCodeMsg({ severity: "error", text: err instanceof Error ? err.message : "Não foi possível enviar o código." });
+    } finally {
+      setSendingCode(false);
+    }
+  }
+
+  async function handleCnpjLookup() {
+    if (cnpjDigits.length !== 14 || cnpjBusy) return;
+    setCnpjBusy(true);
+    setCnpjMsg(null);
+    try {
+      const data = await apiGet<CnpjResponse>(`/api/cnpj/${cnpjDigits}`);
+      if (data.name && !tenantName.trim()) setTenantName(data.name);
+      if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(data.phone);
+      const a = data.address ?? {};
+      if (a.cep) setAddressCep(a.cep);
+      if (a.street) setAddressStreet(a.street);
+      if (a.number) setAddressNumber(a.number);
+      if (a.complement) setAddressComplement(a.complement);
+      if (a.district) setAddressDistrict(a.district);
+      if (a.city) setAddressCity(a.city);
+      if (a.state) setAddressState(a.state);
+      setCnpjMsg({ severity: "success", text: `Dados de ${data.name || "CNPJ"} carregados.` });
+    } catch (err) {
+      setCnpjMsg({ severity: "error", text: err instanceof Error ? err.message : "Falha ao consultar CNPJ." });
+    } finally {
+      setCnpjBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +197,8 @@ export default function TenantSignupPage() {
     if (!confirmPassword) errs.confirmPassword = "Confirme a senha.";
     else if (password !== confirmPassword) errs.confirmPassword = "As senhas não coincidem.";
     if (!planId) errs.planId = "Selecione um plano.";
+    if (!code.trim()) errs.code = "Informe o código enviado ao seu e-mail.";
+    else if (!/^\d{6}$/.test(code.trim())) errs.code = "O código tem 6 dígitos.";
     return errs;
   };
 
@@ -120,6 +218,17 @@ export default function TenantSignupPage() {
         adminName: adminName.trim(),
         adminEmail: adminEmail.trim(),
         password,
+        code: code.trim(),
+        cnpj: cnpjDigits || undefined,
+        responsibleName: responsibleName.trim() || undefined,
+        responsiblePhone: responsiblePhone.trim() || undefined,
+        addressCep: addressCep.trim() || undefined,
+        addressStreet: addressStreet.trim() || undefined,
+        addressNumber: addressNumber.trim() || undefined,
+        addressComplement: addressComplement.trim() || undefined,
+        addressDistrict: addressDistrict.trim() || undefined,
+        addressCity: addressCity.trim() || undefined,
+        addressState: addressState.trim() || undefined,
       });
       setSuccess(data);
     } catch (err) {
@@ -333,6 +442,36 @@ export default function TenantSignupPage() {
               <Divider sx={{ my: 3 }} />
 
               {/* ── Dados da empresa ── */}
+              <Typography variant="subtitle2" sx={{ color: "text.primary", mb: 0.5 }}>
+                Dados da empresa
+              </Typography>
+              <TextField
+                fullWidth
+                label="CNPJ (opcional)"
+                value={cnpj}
+                onChange={(e) => setCnpj(e.target.value)}
+                margin="normal"
+                placeholder="00.000.000/0000-00"
+                helperText="Consulte para preencher automaticamente nome e endereço."
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <Button
+                        size="small"
+                        onClick={handleCnpjLookup}
+                        disabled={cnpjDigits.length !== 14 || cnpjBusy}
+                      >
+                        {cnpjBusy ? <CircularProgress size={16} /> : "Consultar"}
+                      </Button>
+                    </InputAdornment>
+                  ),
+                }}
+              />
+              {cnpjMsg && (
+                <Alert severity={cnpjMsg.severity} sx={{ mt: 1 }} onClose={() => setCnpjMsg(null)}>
+                  {cnpjMsg.text}
+                </Alert>
+              )}
               <TextField
                 fullWidth
                 label="Nome da empresa"
@@ -366,13 +505,59 @@ export default function TenantSignupPage() {
                 label="E-mail"
                 type="email"
                 value={adminEmail}
-                onChange={(e) => setAdminEmail(e.target.value)}
+                onChange={(e) => {
+                  setAdminEmail(e.target.value);
+                  // E-mail mudou → código anterior não vale mais.
+                  if (codeSent) {
+                    setCodeSent(false);
+                    setCode("");
+                    setCodeMsg(null);
+                  }
+                }}
                 onBlur={revalidate}
                 margin="normal"
                 required
                 placeholder="admin@empresa.com"
                 error={touched && !!fieldErrors.adminEmail}
                 helperText={touched ? fieldErrors.adminEmail : undefined}
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <Button
+                        size="small"
+                        onClick={handleSendCode}
+                        disabled={!emailOk || sendingCode}
+                      >
+                        {sendingCode ? <CircularProgress size={16} /> : codeSent ? "Reenviar" : "Enviar código"}
+                      </Button>
+                    </InputAdornment>
+                  ),
+                }}
+              />
+              {codeMsg && (
+                <Alert severity={codeMsg.severity} sx={{ mt: 1 }} onClose={() => setCodeMsg(null)}>
+                  {codeMsg.text}
+                </Alert>
+              )}
+              <TextField
+                fullWidth
+                label="Código de verificação"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D+/g, "").slice(0, 6))}
+                onBlur={revalidate}
+                margin="normal"
+                required
+                placeholder="6 dígitos enviados ao seu e-mail"
+                disabled={!codeSent}
+                error={touched && !!fieldErrors.code}
+                helperText={
+                  touched && fieldErrors.code
+                    ? fieldErrors.code
+                    : codeSent
+                      ? "Digite o código de 6 dígitos que enviamos."
+                      : "Clique em “Enviar código” no campo de e-mail acima."
+                }
+                inputProps={{ inputMode: "numeric", maxLength: 6 }}
               />
               <TextField
                 fullWidth
@@ -400,6 +585,38 @@ export default function TenantSignupPage() {
                 error={touched && !!fieldErrors.confirmPassword}
                 helperText={touched ? fieldErrors.confirmPassword : undefined}
               />
+
+              <Divider sx={{ my: 3 }} />
+              <Typography variant="subtitle2" sx={{ color: "text.primary", mb: 0.5 }}>
+                Responsável e endereço (opcional)
+              </Typography>
+              <TextField
+                fullWidth
+                label="Nome do responsável"
+                value={responsibleName}
+                onChange={(e) => setResponsibleName(e.target.value)}
+                margin="normal"
+              />
+              <TextField
+                fullWidth
+                label="Telefone do responsável"
+                value={responsiblePhone}
+                onChange={(e) => setResponsiblePhone(e.target.value)}
+                margin="normal"
+              />
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                <TextField label="CEP" value={addressCep} onChange={(e) => setAddressCep(e.target.value)} margin="normal" sx={{ width: { sm: 180 } }} fullWidth />
+                <TextField label="Logradouro" value={addressStreet} onChange={(e) => setAddressStreet(e.target.value)} margin="normal" fullWidth />
+                <TextField label="Número" value={addressNumber} onChange={(e) => setAddressNumber(e.target.value)} margin="normal" sx={{ width: { sm: 120 } }} fullWidth />
+              </Stack>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                <TextField label="Complemento" value={addressComplement} onChange={(e) => setAddressComplement(e.target.value)} margin="normal" fullWidth />
+                <TextField label="Bairro" value={addressDistrict} onChange={(e) => setAddressDistrict(e.target.value)} margin="normal" fullWidth />
+              </Stack>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                <TextField label="Cidade" value={addressCity} onChange={(e) => setAddressCity(e.target.value)} margin="normal" fullWidth />
+                <TextField label="UF" value={addressState} onChange={(e) => setAddressState(e.target.value)} margin="normal" inputProps={{ maxLength: 2 }} sx={{ width: { sm: 100 } }} fullWidth />
+              </Stack>
 
               <Alert severity="info" sx={{ mt: 2.5 }}>
                 Após o cadastro, a conta é criada <strong>inativa</strong>. O acesso só é liberado

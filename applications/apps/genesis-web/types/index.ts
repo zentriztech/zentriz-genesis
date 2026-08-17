@@ -12,7 +12,24 @@ export interface Plan {
 
 export type TenantStatus = "active" | "suspended" | "inactive";
 
-export interface Tenant {
+/** Campos de contato / CNPJ / responsável / endereço do tenant (reforma Fase B). */
+export interface TenantContact {
+  email: string | null;
+  emailConfirmed: boolean;
+  cnpj: string | null;
+  responsibleName: string | null;
+  responsibleEmail: string | null;
+  responsiblePhone: string | null;
+  addressCep: string | null;
+  addressStreet: string | null;
+  addressNumber: string | null;
+  addressComplement: string | null;
+  addressDistrict: string | null;
+  addressCity: string | null;
+  addressState: string | null;
+}
+
+export interface Tenant extends TenantContact {
   id: string;
   name: string;
   planId: string;
@@ -22,6 +39,25 @@ export interface Tenant {
   /** Contadores de uso (só na listagem do master GET /api/tenants). */
   usersCount?: number;
   projectsCount?: number;
+}
+
+/** Resultado normalizado de GET /api/cnpj/:cnpj. */
+export interface CnpjLookupResult {
+  cnpj: string;
+  name: string;
+  tradeName?: string;
+  status?: string;
+  email?: string;
+  phone?: string;
+  address: {
+    cep?: string;
+    street?: string;
+    number?: string;
+    complement?: string;
+    district?: string;
+    city?: string;
+    state?: string;
+  };
 }
 
 export type UserRole = "user" | "tenant_admin" | "zentriz_admin";

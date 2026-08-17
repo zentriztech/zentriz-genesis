@@ -23,8 +23,36 @@ CREATE TABLE IF NOT EXISTS tenants (
   name       TEXT NOT NULL,
   plan_id    TEXT NOT NULL REFERENCES plans(id),
   status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'inactive')),
+  -- Contato + confirmação de e-mail, CNPJ, responsável e endereço (ver migration 052)
+  email               TEXT,
+  email_confirmed     BOOLEAN NOT NULL DEFAULT false,
+  cnpj                TEXT,
+  responsible_name    TEXT,
+  responsible_email   TEXT,
+  responsible_phone   TEXT,
+  address_cep         TEXT,
+  address_street      TEXT,
+  address_number      TEXT,
+  address_complement  TEXT,
+  address_district    TEXT,
+  address_city        TEXT,
+  address_state       TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Códigos de verificação de e-mail (OTP curto, só o hash em repouso — ver migration 052)
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       TEXT NOT NULL,
+  code_hash   TEXT NOT NULL,
+  purpose     TEXT NOT NULL DEFAULT 'tenant_signup',
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_email_verification_email_purpose ON email_verification_codes (email, purpose);
+CREATE INDEX IF NOT EXISTS idx_email_verification_created ON email_verification_codes (email, purpose, created_at);
 
 -- Users (global e por tenant)
 CREATE TABLE IF NOT EXISTS users (

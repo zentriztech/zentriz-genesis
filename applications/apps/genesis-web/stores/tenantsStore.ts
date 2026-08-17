@@ -1,20 +1,37 @@
 "use client";
 
 import { makeAutoObservable, runInAction } from "mobx";
-import type { Tenant, TenantStatus } from "@/types";
+import type { Tenant, TenantStatus, CnpjLookupResult } from "@/types";
 import { apiGet, apiPost, apiPatch } from "@/lib/api";
+
+/** Campos de contato/CNPJ/responsável/endereço aceitos em create/update. */
+export type TenantContactPayload = {
+  email?: string | null;
+  emailConfirmed?: boolean;
+  cnpj?: string | null;
+  responsibleName?: string | null;
+  responsibleEmail?: string | null;
+  responsiblePhone?: string | null;
+  addressCep?: string | null;
+  addressStreet?: string | null;
+  addressNumber?: string | null;
+  addressComplement?: string | null;
+  addressDistrict?: string | null;
+  addressCity?: string | null;
+  addressState?: string | null;
+};
 
 export type CreateTenantPayload = {
   name: string;
   planId: string;
   status?: TenantStatus;
-};
+} & TenantContactPayload;
 
 export type UpdateTenantPayload = {
   name?: string;
   planId?: string;
   status?: TenantStatus;
-};
+} & TenantContactPayload;
 
 /**
  * Governança de tenants (só master / zentriz_admin). Lista com contadores de uso,
@@ -74,6 +91,12 @@ class TenantsStore {
 
   async setStatus(id: string, status: TenantStatus): Promise<Tenant> {
     return this.update(id, { status });
+  }
+
+  /** Consulta dados cadastrais por CNPJ (GET /api/cnpj/:cnpj). Lança em erro/indisponível. */
+  async lookupCnpj(cnpj: string): Promise<CnpjLookupResult> {
+    const digits = cnpj.replace(/\D+/g, "");
+    return apiGet<CnpjLookupResult>(`/api/cnpj/${digits}`);
   }
 }
 
