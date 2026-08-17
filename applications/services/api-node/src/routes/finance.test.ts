@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { PoolClient } from "pg";
-import { recalcChargeStatus, maybeActivateTenant } from "./finance.js";
+import { recalcChargeStatus, maybeActivateTenant, issueInvoiceForCharge } from "./finance.js";
 
 /**
  * Fake PoolClient dirigido por substring do SQL. Cada teste programa:
@@ -134,5 +134,87 @@ describe("maybeActivateTenant (F2 — reativação por pagamento)", () => {
   it("suspenso e sem assinatura vencida → reativa", async () => {
     const { client } = fakeTenantClient("suspended", false);
     expect(await maybeActivateTenant(client, "t1", "u1")).toBe(true);
+  });
+});
+
+/**
+ * Fake para issueInvoiceForCharge (F3): programa a cobrança devolvida pelo SELECT ...
+ * FOR UPDATE e se já existe nota emitida (dup). Captura INSERT/UPDATE/audit e devolve
+ * uma linha de nota com número sequencial fixo (42) para checar a referência do provedor.
+ */
+function fakeInvoiceClient(
+  charge: Record<string, unknown> | null,
+  hasIssuedInvoice: boolean,
+) {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params: params ?? [] });
+      if (sql.includes("FOR UPDATE OF c")) {
+        return { rows: charge ? [charge] : [] };
+      }
+      if (sql.includes("FROM invoices WHERE charge_id")) {
+        return { rows: hasIssuedInvoice ? [{ id: "inv-existing" }] : [] };
+      }
+      if (sql.startsWith("INSERT INTO invoices")) {
+        return { rows: [{ id: "inv1", number: 42, tenant_id: charge?.tenant_id, charge_id: "c1", amount_cents: charge?.amount_cents, status: "issued", provider: "internal", provider_ref: null }] };
+      }
+      if (sql.startsWith("UPDATE invoices SET provider")) {
+        return { rows: [{ id: "inv1", number: 42, tenant_id: charge?.tenant_id, charge_id: "c1", amount_cents: charge?.amount_cents, status: "issued", provider: params?.[0], provider_ref: params?.[1] }] };
+      }
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+  return { client, calls };
+}
+
+describe("issueInvoiceForCharge (F3 — emissão de nota interna a partir de cobrança paga)", () => {
+  it("cobrança inexistente → 404, sem INSERT", async () => {
+    const { client, calls } = fakeInvoiceClient(null, false);
+    const r = await issueInvoiceForCharge(client, "c1", "u1");
+    expect(r).toEqual({ ok: false, httpStatus: 404, code: "NOT_FOUND", message: "Cobrança não encontrada" });
+    expect(calls.some((c) => c.sql.startsWith("INSERT INTO invoices"))).toBe(false);
+  });
+
+  it("cobrança não paga → 409, sem INSERT", async () => {
+    const { client, calls } = fakeInvoiceClient({ id: "c1", tenant_id: "t1", amount_cents: 10000, status: "open", competence_month: "2026-08", description: null }, false);
+    const r = await issueInvoiceForCharge(client, "c1", "u1");
+    expect(r.ok).toBe(false);
+    if (!r.ok) { expect(r.httpStatus).toBe(409); expect(r.message).toContain("cobrança paga"); }
+    expect(calls.some((c) => c.sql.startsWith("INSERT INTO invoices"))).toBe(false);
+  });
+
+  it("cobrança paga que já tem nota emitida → 409 (dupla emissão)", async () => {
+    const { client, calls } = fakeInvoiceClient({ id: "c1", tenant_id: "t1", amount_cents: 10000, status: "paid", competence_month: "2026-08", description: "Assinatura 2026-08" }, true);
+    const r = await issueInvoiceForCharge(client, "c1", "u1");
+    expect(r.ok).toBe(false);
+    if (!r.ok) { expect(r.httpStatus).toBe(409); expect(r.code).toBe("CONFLICT"); }
+    expect(calls.some((c) => c.sql.startsWith("INSERT INTO invoices"))).toBe(false);
+  });
+
+  it("cobrança paga sem nota → emite, deriva ref do provedor e audita", async () => {
+    const { client, calls } = fakeInvoiceClient({ id: "c1", tenant_id: "t1", amount_cents: 10000, status: "paid", competence_month: "2026-08", description: "Assinatura 2026-08", tenant_name: "ACME" }, false);
+    const r = await issueInvoiceForCharge(client, "c1", "u1");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // Provedor interno deriva INT-<número zero-padded 6>.
+      expect(r.invoice.provider).toBe("internal");
+      expect(r.invoice.provider_ref).toBe("INT-000042");
+    }
+    // UPDATE grava o provider_ref e há uma linha de auditoria 'invoice'/'issue'.
+    const upd = calls.find((c) => c.sql.startsWith("UPDATE invoices SET provider"));
+    expect(upd?.params[1]).toBe("INT-000042");
+    const auditCall = calls.find((c) => c.sql.includes("INSERT INTO finance_audit"));
+    expect(auditCall?.params[0]).toBe("invoice");
+    expect(auditCall?.params[2]).toBe("issue");
+  });
+
+  it("cobrança paga sem descrição → usa descrição sintética por cobrança", async () => {
+    const { client, calls } = fakeInvoiceClient({ id: "c1", tenant_id: "t1", amount_cents: 5000, status: "paid", competence_month: null, description: null }, false);
+    const r = await issueInvoiceForCharge(client, "c1", "u1");
+    expect(r.ok).toBe(true);
+    const ins = calls.find((c) => c.sql.startsWith("INSERT INTO invoices"));
+    // params: [tenant_id, charge_id, amount_cents, description, competence_month, created_by]
+    expect(String(ins?.params[3])).toContain("Nota referente à cobrança c1");
   });
 });

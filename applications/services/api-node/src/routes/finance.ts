@@ -1,24 +1,28 @@
 /**
- * finance.ts — Módulo Financeiro F1 (MVP) — RFC-0002 Parte B.
+ * finance.ts — Módulo Financeiro (F1+F2+F3) — RFC-0002 Parte B.
  *
- * Escopo desta fase:
+ * Escopo acumulado:
  *   • Contas bancárias da empresa (recebedora) — CRUD.
  *   • Cobranças (charges) — listar, detalhar, criar (avulsa/assinatura), gerar mês, ajustar/cancelar.
- *   • Pagamentos (baixa manual) — listar, criar (recalcula status da cobrança).
+ *   • Pagamentos (baixa manual) — listar, criar (recalcula status da cobrança) [F1].
+ *   • Ciclo de vida da assinatura — ativação por pagamento (maybeActivateTenant) [F2].
  *   • Sumário financeiro (MRR, em aberto, vencidas, recebido no mês).
+ *   • Notas fiscais internas (invoices) — emitir a partir de cobrança PAGA, listar,
+ *     detalhar, cancelar. Emissão via porta InvoiceProvider (stub interno em F3) [F3].
  *
  * TODAS as rotas são exclusivas de `zentriz_admin` — o Financeiro É a conta de gestão.
  * Por isso NÃO aplicamos o `denyCreationForManagement` aqui (aquele guard barra AUTORIA
  * de specs/produtos/projetos por conta de gestão; finanças são função legítima da gestão).
  *
- * Dinheiro sempre em centavos inteiros. Moeda única BRL nesta fase.
- * SEM gateway de pagamento e SEM nota fiscal (F3/F4).
+ * Dinheiro sempre em centavos inteiros. Moeda única BRL.
+ * SEM gateway de pagamento real e SEM NFS-e municipal (F4).
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { bustTenantStatus } from "../services/tenantStatusCache.js";
+import { getInvoiceProvider } from "../services/invoiceProvider.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -115,6 +119,27 @@ function mapPayment(r: Record<string, unknown>) {
   };
 }
 
+function mapInvoice(r: Record<string, unknown>) {
+  return {
+    id: r.id,
+    number: r.number !== undefined && r.number !== null ? Number(r.number) : undefined,
+    tenantId: r.tenant_id,
+    tenantName: r.tenant_name ?? undefined,
+    chargeId: r.charge_id,
+    amountCents: r.amount_cents,
+    currency: r.currency,
+    description: r.description,
+    competenceMonth: r.competence_month,
+    status: r.status,
+    provider: r.provider,
+    providerRef: r.provider_ref,
+    issuedAt: (r.issued_at as Date)?.toISOString?.() ?? r.issued_at,
+    canceledAt: (r.canceled_at as Date)?.toISOString?.() ?? r.canceled_at ?? null,
+    createdBy: r.created_by,
+    createdAt: (r.created_at as Date)?.toISOString?.() ?? r.created_at,
+  };
+}
+
 // ── Auditoria append-only (best-effort dentro da mesma transação) ─────────────
 async function audit(
   client: PoolClient,
@@ -198,6 +223,87 @@ export async function maybeActivateTenant(
   await client.query(`UPDATE tenants SET status = 'active' WHERE id = $1`, [tenantId]);
   await audit(client, "tenant", tenantId, "activate", actorUserId, { from, reason: "payment" });
   return true;
+}
+
+/**
+ * issueInvoiceForCharge — RFC-0002 F3 (MVP interno). Emite (ou recusa) a nota de uma
+ * cobrança PAGA. Deve rodar DENTRO de uma transação (o chamador faz BEGIN/COMMIT); usa
+ * FOR UPDATE na cobrança para consistência. Regras: cobrança precisa existir e estar
+ * `paid`; no máximo UMA nota `issued` por cobrança (dupla emissão → conflito). A emissão
+ * passa pela porta InvoiceProvider (stub 'internal' em F3). Retorna a linha da nota
+ * emitida ou um erro tipado que o chamador mapeia para HTTP.
+ */
+export type IssueInvoiceResult =
+  | { ok: true; invoice: Record<string, unknown> }
+  | { ok: false; httpStatus: number; code: string; message: string };
+
+export async function issueInvoiceForCharge(
+  client: PoolClient,
+  chargeId: string,
+  actorUserId: string | null,
+): Promise<IssueInvoiceResult> {
+  // Trava a cobrança para derivar dados consistentes e evitar corrida com baixa/estorno.
+  const chargeRes = await client.query(
+    `SELECT c.id, c.tenant_id, c.amount_cents, c.status, c.competence_month, c.description,
+            t.name AS tenant_name
+     FROM charges c JOIN tenants t ON t.id = c.tenant_id
+     WHERE c.id = $1 FOR UPDATE OF c`,
+    [chargeId],
+  );
+  if (chargeRes.rows.length === 0) {
+    return { ok: false, httpStatus: 404, code: "NOT_FOUND", message: "Cobrança não encontrada" };
+  }
+  const charge = chargeRes.rows[0];
+  // Só emitimos nota de cobrança efetivamente quitada (evita nota sem lastro de caixa).
+  if (String(charge.status) !== "paid") {
+    return {
+      ok: false, httpStatus: 409, code: "CONFLICT",
+      message: `Só é possível emitir nota de cobrança paga (status atual: '${charge.status}')`,
+    };
+  }
+  // Pré-checagem amigável de dupla emissão (o índice único parcial é a garantia real).
+  const dup = await client.query(
+    `SELECT id FROM invoices WHERE charge_id = $1 AND status = 'issued' LIMIT 1`,
+    [chargeId],
+  );
+  if (dup.rows.length > 0) {
+    return { ok: false, httpStatus: 409, code: "CONFLICT", message: "Já existe nota emitida para esta cobrança" };
+  }
+
+  const description = typeof charge.description === "string" && charge.description.trim()
+    ? charge.description.trim()
+    : `Nota referente à cobrança ${chargeId}`;
+  // Insere reservando o número sequencial; provider_ref é preenchido logo após.
+  const ins = await client.query(
+    `INSERT INTO invoices
+       (tenant_id, charge_id, amount_cents, description, competence_month, status, provider, created_by)
+     VALUES ($1,$2,$3,$4,$5,'issued','internal',$6) RETURNING *`,
+    [charge.tenant_id, chargeId, charge.amount_cents, description, charge.competence_month, actorUserId],
+  );
+  const row = ins.rows[0];
+
+  // Porta de emissão (F3 = stub interno, síncrono e sem falha; F4 troca o adaptador).
+  const provider = getInvoiceProvider();
+  const issued = await provider.issue({
+    number: Number(row.number),
+    tenantId: String(charge.tenant_id),
+    tenantName: charge.tenant_name ?? undefined,
+    amountCents: Number(charge.amount_cents),
+    competenceMonth: charge.competence_month ?? null,
+    description,
+    chargeId,
+  });
+  const upd = await client.query(
+    `UPDATE invoices SET provider = $1, provider_ref = $2 WHERE id = $3 RETURNING *`,
+    [issued.provider, issued.providerRef, row.id],
+  );
+  await audit(client, "invoice", String(row.id), "issue", actorUserId, {
+    chargeId, tenantId: charge.tenant_id, amountCents: charge.amount_cents,
+    provider: issued.provider, providerRef: issued.providerRef,
+  });
+  // Enriquece a resposta com o nome do tenant (RETURNING * não tem o JOIN) — paridade com o GET.
+  const invoice = { ...upd.rows[0], tenant_name: charge.tenant_name ?? null };
+  return { ok: true, invoice };
 }
 
 export async function financeRoutes(app: FastifyInstance) {
@@ -699,5 +805,112 @@ function registerFinanceRoutes(app: FastifyInstance) {
       receivedThisMonthCents: Number(received.rows[0].total),
       receivedThisMonthCount: received.rows[0].n,
     });
+  });
+
+  // ═══════════════════ Notas fiscais (invoices) — F3 (MVP interno) ═══════════════════
+  app.get<{ Querystring: { tenantId?: string; status?: string; competence?: string } }>(
+    "/api/finance/invoices",
+    async (request, reply) => {
+      if (!requireAdmin(getUser(request))) return reply.status(403).send(FORBIDDEN);
+      const q = request.query ?? {};
+      const conds: string[] = [];
+      const vals: unknown[] = [];
+      let i = 1;
+      if (q.tenantId) { conds.push(`inv.tenant_id = $${i++}`); vals.push(q.tenantId); }
+      if (q.status) { conds.push(`inv.status = $${i++}`); vals.push(q.status); }
+      if (q.competence) { conds.push(`inv.competence_month = $${i++}`); vals.push(q.competence); }
+      const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+      const res = await pool.query(
+        `SELECT inv.*, t.name AS tenant_name
+         FROM invoices inv JOIN tenants t ON t.id = inv.tenant_id
+         ${where}
+         ORDER BY inv.number DESC LIMIT 500`,
+        vals,
+      );
+      return reply.send(res.rows.map(mapInvoice));
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/api/finance/invoices/:id", async (request, reply) => {
+    if (!requireAdmin(getUser(request))) return reply.status(403).send(FORBIDDEN);
+    const res = await pool.query(
+      `SELECT inv.*, t.name AS tenant_name
+       FROM invoices inv JOIN tenants t ON t.id = inv.tenant_id WHERE inv.id = $1`,
+      [request.params.id],
+    );
+    if (res.rows.length === 0) return reply.status(404).send({ code: "NOT_FOUND", message: "Nota não encontrada" });
+    return reply.send(mapInvoice(res.rows[0]));
+  });
+
+  /**
+   * POST /api/finance/invoices — emite uma nota (interna) a partir de uma cobrança PAGA.
+   * Deriva tenant/valor/competência/descrição da própria cobrança. Uma cobrança só pode
+   * ter UMA nota emitida por vez (índice único parcial); dupla emissão → 409. Cancelar a
+   * nota libera reemissão. A emissão passa pela porta InvoiceProvider (stub 'internal' em F3).
+   */
+  app.post<{ Body: { chargeId?: string } }>("/api/finance/invoices", async (request, reply) => {
+    const user = getUser(request);
+    if (!requireAdmin(user)) return reply.status(403).send(FORBIDDEN);
+    const chargeId = typeof request.body?.chargeId === "string" ? request.body.chargeId.trim() : "";
+    if (!chargeId) return reply.status(400).send({ code: "BAD_REQUEST", message: "chargeId é obrigatório" });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await issueInvoiceForCharge(client, chargeId, user.id);
+      if (!result.ok) {
+        await client.query("ROLLBACK");
+        return reply.status(result.httpStatus).send({ code: result.code, message: result.message });
+      }
+      await client.query("COMMIT");
+      return reply.status(201).send(mapInvoice(result.invoice));
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      // Corrida de dupla emissão barrada pelo índice único parcial.
+      if ((e as { code?: string })?.code === "23505") {
+        return reply.status(409).send({ code: "CONFLICT", message: "Já existe nota emitida para esta cobrança" });
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /api/finance/invoices/:id/cancel — cancela uma nota emitida (libera reemissão da cobrança).
+  app.post<{ Params: { id: string } }>("/api/finance/invoices/:id/cancel", async (request, reply) => {
+    const user = getUser(request);
+    if (!requireAdmin(user)) return reply.status(403).send(FORBIDDEN);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const cur = await client.query(
+        `SELECT inv.id, inv.status, t.name AS tenant_name
+         FROM invoices inv JOIN tenants t ON t.id = inv.tenant_id
+         WHERE inv.id = $1 FOR UPDATE OF inv`,
+        [id],
+      );
+      if (cur.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return reply.status(404).send({ code: "NOT_FOUND", message: "Nota não encontrada" });
+      }
+      if (String(cur.rows[0].status) === "canceled") {
+        await client.query("ROLLBACK");
+        return reply.status(409).send({ code: "CONFLICT", message: "Nota já está cancelada" });
+      }
+      const res = await client.query(
+        `UPDATE invoices SET status = 'canceled', canceled_at = now() WHERE id = $1 RETURNING *`,
+        [id],
+      );
+      await audit(client, "invoice", id, "cancel", user.id, {});
+      await client.query("COMMIT");
+      // Paridade com o GET: inclui tenantName (o RETURNING * não tem o JOIN).
+      return reply.send(mapInvoice({ ...res.rows[0], tenant_name: cur.rows[0].tenant_name }));
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
   });
 }

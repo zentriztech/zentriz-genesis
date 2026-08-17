@@ -32,10 +32,11 @@ import PaymentsIcon from "@mui/icons-material/Payments";
 import CancelIcon from "@mui/icons-material/Cancel";
 import StarIcon from "@mui/icons-material/Star";
 import DeleteIcon from "@mui/icons-material/Delete";
+import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import { authStore } from "@/stores/authStore";
 import { tenantsStore } from "@/stores/tenantsStore";
 import {
-  financeStore, type Charge, type ChargeStatus, type BankAccount,
+  financeStore, type Charge, type ChargeStatus, type BankAccount, type InvoiceStatus,
 } from "@/stores/financeStore";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -69,6 +70,8 @@ const PAYMENT_METHODS = [
   { v: "pix", l: "PIX" }, { v: "boleto", l: "Boleto" }, { v: "card", l: "Cartão" },
   { v: "transfer", l: "Transferência" }, { v: "cash", l: "Dinheiro" }, { v: "manual", l: "Manual" },
 ];
+const INVOICE_STATUS_LABEL: Record<InvoiceStatus, string> = { issued: "Emitida", canceled: "Cancelada" };
+const INVOICE_STATUS_COLOR: Record<InvoiceStatus, "success" | "default"> = { issued: "success", canceled: "default" };
 
 // ═══════════════ Diálogo: nova cobrança ═══════════════
 function NewChargeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -261,6 +264,7 @@ function FinancePage() {
   const [genCompetence, setGenCompetence] = useState(currentCompetence());
   const [genMsg, setGenMsg] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
+  const [noteMsg, setNoteMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authStore.isZentrizAdmin) return;
@@ -279,6 +283,18 @@ function FinancePage() {
   if (!authStore.isZentrizAdmin) {
     return <Alert severity="warning" sx={{ m: 3 }}>Acesso restrito à conta de gestão Zentriz.</Alert>;
   }
+
+  const issueInvoice = async (chargeId: string) => {
+    setNoteMsg(null);
+    try {
+      await financeStore.issueInvoice(chargeId);
+      setTab(3);
+      await financeStore.loadInvoices();
+      setNoteMsg("Nota fiscal emitida com sucesso.");
+    } catch (e) {
+      setNoteMsg(e instanceof Error ? e.message : "Erro ao emitir nota fiscal");
+    }
+  };
 
   const runGenerate = async () => {
     setGenMsg(null);
@@ -299,11 +315,13 @@ function FinancePage() {
       </Typography>
 
       {financeStore.error && <Alert severity="error" sx={{ mb: 2 }}>{financeStore.error}</Alert>}
+      {noteMsg && <Alert severity="info" sx={{ mb: 2 }} onClose={() => setNoteMsg(null)}>{noteMsg}</Alert>}
 
       <Tabs value={tab} onChange={(_e, v) => setTab(v)} sx={{ mb: 2 }} variant="scrollable" scrollButtons="auto">
         <Tab label="Resumo" />
         <Tab label="Cobranças" />
         <Tab label="Pagamentos" onClick={() => void financeStore.loadPayments()} />
+        <Tab label="Notas fiscais" onClick={() => void financeStore.loadInvoices()} />
         <Tab label="Contas bancárias" />
       </Tabs>
 
@@ -393,6 +411,11 @@ function FinancePage() {
                           <IconButton size="small" color="error" onClick={() => void financeStore.cancelCharge(c.id)}><CancelIcon fontSize="small" /></IconButton>
                         </Tooltip>
                       )}
+                      {c.status === "paid" && (
+                        <Tooltip title="Emitir nota fiscal">
+                          <IconButton size="small" color="primary" onClick={() => void issueInvoice(c.id)}><ReceiptLongIcon fontSize="small" /></IconButton>
+                        </Tooltip>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -436,8 +459,58 @@ function FinancePage() {
         </Card>
       )}
 
-      {/* ── Contas bancárias ── */}
+      {/* ── Notas fiscais ── */}
       {tab === 3 && (
+        <Box>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Notas internas geradas a partir de cobranças pagas. Emissão pela aba Cobranças (ação
+            &ldquo;Emitir nota fiscal&rdquo; em cobranças quitadas). Sem integração com NFS-e municipal nesta fase.
+          </Typography>
+          {financeStore.loading && <CircularProgress size={22} />}
+          <Card>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Número</TableCell>
+                  <TableCell>Tenant</TableCell>
+                  <TableCell>Competência</TableCell>
+                  <TableCell align="right">Valor</TableCell>
+                  <TableCell>Referência</TableCell>
+                  <TableCell>Emitida em</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell align="right">Ações</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {financeStore.invoices.map((inv) => (
+                  <TableRow key={inv.id} hover>
+                    <TableCell>{inv.number != null ? String(inv.number).padStart(6, "0") : "—"}</TableCell>
+                    <TableCell>{inv.tenantName ?? "—"}</TableCell>
+                    <TableCell>{inv.competenceMonth ?? "—"}</TableCell>
+                    <TableCell align="right">{formatBRL(inv.amountCents)}</TableCell>
+                    <TableCell>{inv.providerRef ?? "—"}</TableCell>
+                    <TableCell>{new Date(inv.issuedAt).toLocaleString("pt-BR")}</TableCell>
+                    <TableCell><Chip size="small" label={INVOICE_STATUS_LABEL[inv.status]} color={INVOICE_STATUS_COLOR[inv.status]} /></TableCell>
+                    <TableCell align="right">
+                      {inv.status === "issued" && (
+                        <Tooltip title="Cancelar nota">
+                          <IconButton size="small" color="error" onClick={() => void financeStore.cancelInvoice(inv.id)}><CancelIcon fontSize="small" /></IconButton>
+                        </Tooltip>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {financeStore.invoices.length === 0 && (
+                  <TableRow><TableCell colSpan={8} align="center"><Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>Nenhuma nota emitida.</Typography></TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </Card>
+        </Box>
+      )}
+
+      {/* ── Contas bancárias ── */}
+      {tab === 4 && (
         <Box>
           <Button variant="contained" sx={{ mb: 2 }} onClick={() => setNewBank(true)}>Nova conta</Button>
           <Grid container spacing={2}>

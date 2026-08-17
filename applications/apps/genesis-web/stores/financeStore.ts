@@ -59,6 +59,25 @@ export type Payment = {
   createdAt: string;
 };
 
+export type InvoiceStatus = "issued" | "canceled";
+export type Invoice = {
+  id: string;
+  number?: number;
+  tenantId: string;
+  tenantName?: string;
+  chargeId: string | null;
+  amountCents: number;
+  currency: string;
+  description: string | null;
+  competenceMonth: string | null;
+  status: InvoiceStatus;
+  provider: string;
+  providerRef: string | null;
+  issuedAt: string;
+  canceledAt: string | null;
+  createdAt: string;
+};
+
 export type FinanceSummary = {
   currency: string;
   mrrCents: number;
@@ -94,6 +113,7 @@ class FinanceStore {
   charges: Charge[] = [];
   payments: Payment[] = [];
   bankAccounts: BankAccount[] = [];
+  invoices: Invoice[] = [];
   loading = false;
   error: string | null = null;
 
@@ -179,6 +199,27 @@ class FinanceStore {
   async createPayment(payload: CreatePaymentPayload): Promise<void> {
     await apiPost("/api/finance/payments", payload);
     await Promise.all([this.loadCharges(), this.loadSummary()]);
+  }
+
+  // ── Notas fiscais (F3 — MVP interno) ──────────────────────────────────────
+  async loadInvoices(filters?: { tenantId?: string; status?: string; competence?: string }) {
+    const data = await this.guard(
+      () => apiGet<Invoice[]>(withQuery("/api/finance/invoices", filters ?? {})),
+      "Erro ao carregar notas fiscais",
+    );
+    if (data) runInAction(() => { this.invoices = data; });
+  }
+
+  /** Emite uma nota a partir de uma cobrança PAGA (o backend deriva valor/tenant/competência). */
+  async issueInvoice(chargeId: string): Promise<Invoice> {
+    const created = await apiPost<Invoice>("/api/finance/invoices", { chargeId });
+    runInAction(() => { this.invoices.unshift(created); });
+    return created;
+  }
+
+  async cancelInvoice(id: string): Promise<void> {
+    await apiPost(`/api/finance/invoices/${id}/cancel`, {});
+    await this.loadInvoices();
   }
 }
 
