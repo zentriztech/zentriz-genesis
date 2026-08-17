@@ -228,6 +228,46 @@ function UnlinkDialog({
   );
 }
 
+// Referência dos comandos do bot — documentação estática, útil em qualquer estado
+// (conta própria vinculada OU visão do tenant pelo master). Extraída para não sumir
+// da tela quando a visão é escopada ao tenant.
+function TelegramCommandReference() {
+  return (
+    <Box>
+      <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
+        Comandos disponíveis no bot
+      </Typography>
+      <Box component="pre" sx={{
+        bgcolor: "#1e1e2e", color: "#e2e8f0", borderRadius: 2, p: 1.5,
+        fontSize: "0.78rem", fontFamily: "monospace",
+        whiteSpace: "pre-wrap", m: 0, overflowX: "auto",
+      }}>
+{`📋 Consultas
+/list                — produtos e projetos com barra de progresso
+/status              — todos os projetos (incluindo parados/falhos)
+/status <id>         — detalhes: progresso, tasks, 2 últimas mensagens
+/tasks <id>          — tasks pendentes (não-DONE)
+/log <id>            — últimas 10 mensagens do diálogo
+
+➕ Criação
+/new product <desc>  — cria produto com projetos numerados
+/new project <desc>  — cria projeto standalone
+📎 Envie PDF/TXT/MD com caption "product" ou "project"
+
+⚠️  Requerem confirmação (código 4 dígitos):
+/run <id>            — iniciar pipeline
+/stop <id>           — interromper pipeline com segurança
+/accept <id>         — aceitar projeto finalizado
+/reject <id>         — rejeitar projeto
+/delete project:<id> — remover projeto do banco (arquivos mantidos)
+/delete product:<id> — remover produto e filhos do banco (arquivos mantidos)
+
+🔗 /unlink            — revogar vinculação Telegram`}
+      </Box>
+    </Box>
+  );
+}
+
 const TelegramSettingsPage = observer(function TelegramSettingsPage() {
   const [status, setStatus]         = useState<TelegramStatus | null>(null);
   const [loading, setLoading]       = useState(true);
@@ -354,41 +394,6 @@ const TelegramSettingsPage = observer(function TelegramSettingsPage() {
                 </Box>
               </Box>
 
-              <Divider />
-
-              <Box>
-                <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
-                  Comandos disponíveis no bot
-                </Typography>
-                <Box component="pre" sx={{
-                  bgcolor: "#1e1e2e", color: "#e2e8f0", borderRadius: 2, p: 1.5,
-                  fontSize: "0.78rem", fontFamily: "monospace",
-                  whiteSpace: "pre-wrap", m: 0,
-                }}>
-{`📋 Consultas
-/list                — produtos e projetos com barra de progresso
-/status              — todos os projetos (incluindo parados/falhos)
-/status <id>         — detalhes: progresso, tasks, 2 últimas mensagens
-/tasks <id>          — tasks pendentes (não-DONE)
-/log <id>            — últimas 10 mensagens do diálogo
-
-➕ Criação
-/new product <desc>  — cria produto com projetos numerados
-/new project <desc>  — cria projeto standalone
-📎 Envie PDF/TXT/MD com caption "product" ou "project"
-
-⚠️  Requerem confirmação (código 4 dígitos):
-/run <id>            — iniciar pipeline
-/stop <id>           — interromper pipeline com segurança
-/accept <id>         — aceitar projeto finalizado
-/reject <id>         — rejeitar projeto
-/delete project:<id> — remover projeto do banco (arquivos mantidos)
-/delete product:<id> — remover produto e filhos do banco (arquivos mantidos)
-
-🔗 /unlink            — revogar vinculação Telegram`}
-                </Box>
-              </Box>
-
               <Button
                 variant="outlined"
                 color="error"
@@ -418,6 +423,13 @@ const TelegramSettingsPage = observer(function TelegramSettingsPage() {
               </Button>
             </Box>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Referência de comandos — sempre visível (independe de vínculo ou escopo de tenant) */}
+      <Card variant="outlined" sx={{ borderRadius: 3, mt: 2 }}>
+        <CardContent sx={{ p: 3 }}>
+          <TelegramCommandReference />
         </CardContent>
       </Card>
 
