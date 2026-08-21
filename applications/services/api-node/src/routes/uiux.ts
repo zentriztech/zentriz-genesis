@@ -18,6 +18,8 @@ import { encryptCredentials, decryptCredentials } from "../services/crypto.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import {
   listProjectsForConnection,
+  parseFigmaFileKey,
+  fetchFigmaFileMeta,
   UIUX_REQUIRED_KEY,
   isCanvaOAuthConfigured,
   canvaRedirectUri,
@@ -364,4 +366,42 @@ export async function uiuxRoutes(app: FastifyInstance) {
       return reply.status(502).send({ code: "UPSTREAM_ERROR", message: err instanceof Error ? err.message : "Falha ao listar projetos" });
     }
   });
+
+  // ── GET resolve de arquivo Figma por URL → { key, name } (form de spec) ──────────
+  // Substitui a listagem de projetos (endpoint /projects exige projects:read, deprecado).
+  // O usuário cola a URL do arquivo; resolvemos o nome real via /v1/files/:key (file_content:read).
+  app.get<{ Params: { id: string }; Querystring: { url?: string } }>(
+    "/api/tenant/uiux-connections/:id/figma-file",
+    async (request, reply) => {
+      const user = getUser(request);
+      const scopedTenantId = resolveScopedTenantId(user, request.query);
+      if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
+      const { id } = request.params;
+      const url = typeof request.query?.url === "string" ? request.query.url : "";
+      const key = parseFigmaFileKey(url);
+      if (!key) {
+        return reply.status(400).send({
+          code: "BAD_REQUEST",
+          message: "URL de arquivo Figma inválida. Cole o link do arquivo (Compartilhar › Copiar link).",
+        });
+      }
+      const res = await pool.query(
+        "SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
+        [id, scopedTenantId],
+      );
+      const row = res.rows[0] as Record<string, unknown> | undefined;
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (row.provider !== "figma") {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolução por URL só se aplica a conexões Figma." });
+      }
+      try {
+        const creds = await ensureFreshUiuxCreds(row);
+        if (!creds.accessToken) throw new Error("Token Figma ausente na conexão.");
+        const meta = await fetchFigmaFileMeta(creds.accessToken, key);
+        return reply.send(meta);
+      } catch (err) {
+        return reply.status(502).send({ code: "UPSTREAM_ERROR", message: err instanceof Error ? err.message : "Falha ao ler o arquivo Figma" });
+      }
+    },
+  );
 }

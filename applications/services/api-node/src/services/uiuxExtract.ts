@@ -373,11 +373,29 @@ export function renderUiuxSpecMarkdown(
 
 // ── Fetchers HTTP (Figma) ────────────────────────────────────────────────────────
 
-// Escopos que um Personal Access Token do Figma precisa ter marcados para a extração funcionar.
-// Desde 2024 o PAT nasce SEM escopos por padrão; sem eles as leituras de conteúdo/projetos dão 403,
-// mesmo com o token autenticando (o /v1/me usado no "conectar" passa com qualquer token).
+// Escopo que um Personal Access Token do Figma precisa ter marcado para a extração funcionar.
+// Desde 2024 o PAT nasce SEM escopos por padrão; sem ele a leitura de conteúdo dá 403, mesmo com o
+// token autenticando (o /v1/me usado no "conectar" passa com qualquer token). No painel do Figma
+// o rótulo é "Leia o conteúdo de arquivos e renderize imagens a partir deles".
+// NÃO usamos mais o endpoint de listar projetos do time (/v1/teams/:id/projects) — ele exige
+// projects:read, que foi DEPRECADO e não aparece mais ao criar um PAT; extraímos direto do arquivo.
 export const FIGMA_REQUIRED_SCOPES =
-  "file_content:read, file_metadata:read (marque também os demais escopos de leitura *:read)";
+  'file_content:read ("Leia o conteúdo de arquivos e renderize imagens a partir deles")';
+
+/**
+ * Extrai a fileKey de uma URL de arquivo Figma (design/file/proto/board) ou aceita a própria key.
+ * A fileKey do Figma é alfanumérica (sem hífens). Retorna null se não reconhecer.
+ * Ex.: https://www.figma.com/design/AbC123xyz/Meu-App?node-id=0-1  →  "AbC123xyz"
+ */
+export function parseFigmaFileKey(input: string): string | null {
+  const s = (input ?? "").trim();
+  if (!s) return null;
+  const m = s.match(/figma\.com\/(?:design|file|proto|board)\/([A-Za-z0-9]+)/i);
+  if (m) return m[1];
+  // Chave nua colada sem URL (aceita token alfanumérico plausível).
+  if (/^[A-Za-z0-9]{10,128}$/.test(s)) return s;
+  return null;
+}
 
 /** Extrai o campo `err` do corpo de erro do Figma (formato {status, err}). Best-effort. */
 function parseFigmaErr(body: string): string | null {
@@ -444,12 +462,10 @@ export async function listFigmaProjects(token: string, teamId: string): Promise<
   return (data.projects ?? []).map((p) => ({ id: String(p.id), name: p.name }));
 }
 
-async function listFigmaProjectFiles(token: string, projectId: string): Promise<Array<{ key: string; name: string }>> {
-  const data = await figmaFetch<{ files?: Array<{ key: string; name: string }> }>(
-    `/v1/projects/${encodeURIComponent(projectId)}/files`,
-    token,
-  );
-  return (data.files ?? []).map((f) => ({ key: String(f.key), name: f.name }));
+/** Lê apenas o nome do arquivo (depth=1, payload mínimo) para confirmar a seleção no form. */
+export async function fetchFigmaFileMeta(token: string, fileKey: string): Promise<{ key: string; name: string }> {
+  const data = await figmaFetch<{ name?: string }>(`/v1/files/${encodeURIComponent(fileKey)}?depth=1`, token);
+  return { key: fileKey, name: data.name ?? fileKey };
 }
 
 async function fetchFigmaFile(token: string, fileKey: string): Promise<FigmaFileExtract> {
@@ -745,41 +761,40 @@ export async function extractUiuxSpec(opts: {
   }
   if (!creds.accessToken) throw new Error("Token Figma ausente.");
 
-  // Expande projetos → arquivos (cap MAX_FILES_PER_EXTRACT). projectIds vêm do listFigmaProjects
-  // (são IDs de PROJETO, nunca fileKeys), então um projeto que falha ao listar é apenas pulado —
-  // NÃO tratamos o id como fileKey (isso garantiria um 404 depois e abortaria tudo).
-  const fileKeys: Array<{ key: string; name: string }> = [];
-  for (const projectId of projectIds) {
+  // As entradas para Figma são URLs (ou chaves) de ARQUIVO — a extração lê /v1/files/:key
+  // (escopo file_content:read do PAT). Não dependemos mais de listar projetos do time
+  // (/v1/teams/:id/projects exige projects:read, deprecado e ausente em PATs novos).
+  const fileKeys: string[] = [];
+  for (const entry of projectIds) {
+    const key = parseFigmaFileKey(entry);
+    if (key && !fileKeys.includes(key)) fileKeys.push(key);
     if (fileKeys.length >= MAX_FILES_PER_EXTRACT) break;
-    try {
-      const files = await listFigmaProjectFiles(creds.accessToken, projectId);
-      for (const f of files) {
-        if (fileKeys.length >= MAX_FILES_PER_EXTRACT) break;
-        fileKeys.push(f);
-      }
-    } catch {
-      // Projeto inacessível/inválido: pula, mantém os demais.
-      continue;
-    }
   }
 
-  if (!fileKeys.length) throw new Error("Nenhum arquivo Figma encontrado para os projetos escolhidos.");
+  if (!fileKeys.length) {
+    throw new Error("Nenhuma URL de arquivo Figma válida. Cole o link do arquivo (Compartilhar › Copiar link).");
+  }
 
   // Um arquivo inacessível (não compartilhado com o token, 404, timeout) não deve abortar a
-  // extração inteira: pula o arquivo e segue com os que deram certo.
+  // extração inteira: pula o arquivo e segue com os que deram certo. Guarda o último erro para
+  // superficiá-lo caso NENHUM arquivo seja lido (ex.: 403 por escopo faltando).
   const summaries: FileSummary[] = [];
-  for (const fk of fileKeys) {
+  let lastErr: unknown = null;
+  for (const key of fileKeys) {
     try {
-      const extract = await fetchFigmaFile(creds.accessToken, fk.key);
-      if (!extract.fileName || extract.fileName === fk.key) extract.fileName = fk.name;
-      summaries.push(summarizeFigmaFile(extract));
-    } catch {
+      summaries.push(summarizeFigmaFile(await fetchFigmaFile(creds.accessToken, key)));
+    } catch (e) {
+      lastErr = e;
       continue;
     }
   }
 
   if (!summaries.length) {
-    throw new Error("Nenhum arquivo Figma pôde ser lido (verifique o compartilhamento com o token).");
+    const detail = lastErr instanceof Error ? lastErr.message : "";
+    throw new Error(
+      detail ||
+        `Nenhum arquivo Figma pôde ser lido. Verifique o escopo do token (${FIGMA_REQUIRED_SCOPES}) e o acesso ao arquivo.`,
+    );
   }
 
   const content = renderUiuxSpecMarkdown(provider, accountLabel || accountRef || "Conta de design", summaries);

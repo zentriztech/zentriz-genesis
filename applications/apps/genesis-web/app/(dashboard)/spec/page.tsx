@@ -234,16 +234,20 @@ interface DeliverySectionProps {
   dbMode: string; onDbMode: (v: string) => void;
   runtimeTarget: string; onRuntimeTarget: (v: string) => void;
   domainMode: string; onDomainMode: (v: string) => void;
-  // Item 3: Ferramentas UI/UX — conta conectada + projetos escolhidos da conta.
+  // Item 3: Ferramentas UI/UX — conta conectada + arquivos Figma escolhidos (por URL).
   uiuxConnections: Array<{ id: string; provider: string; label: string | null }>;
   uiuxConnId: string; onUiuxConn: (v: string) => void;
   uiuxSelectedProvider: string;
+  // Figma: arquivos resolvidos {id: fileKey, name}; uiuxProjectIds carrega as fileKeys escolhidas.
   uiuxProjects: Array<{ id: string; name: string }>;
   uiuxProjectIds: string[]; onUiuxProjectIds: (v: string[]) => void;
   uiuxLoadingProjects: boolean;
   uiuxProjectsError: string | null;
+  onUiuxAddFigma: (url: string) => void;
+  onUiuxRemoveFigma: (key: string) => void;
 }
 function DeliverySection(p: DeliverySectionProps) {
+  const [figmaUrl, setFigmaUrl] = useState("");
   if (!p.visible) return null;
   const modes = p.isBackend ? DELIVERY_MODES_BACKEND : DELIVERY_MODES_WEB;
   return (
@@ -339,29 +343,43 @@ function DeliverySection(p: DeliverySectionProps) {
             </Typography>
           )}
           {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && (
-            <FormControl size="small" fullWidth sx={{ mb: 1 }}
-              disabled={p.uiuxLoadingProjects || p.uiuxProjects.length === 0}>
-              <InputLabel>Projetos da conta</InputLabel>
-              <Select multiple value={p.uiuxProjectIds} label="Projetos da conta"
-                onChange={(e) => p.onUiuxProjectIds(
-                  typeof e.target.value === "string" ? e.target.value.split(",") : (e.target.value as string[]),
-                )}
-                renderValue={(sel) => {
-                  const ids = sel as string[];
-                  const names = ids.map((id) => p.uiuxProjects.find((x) => x.id === id)?.name ?? id);
-                  return names.join(", ");
-                }}>
-                {p.uiuxProjects.map((proj) => (
-                  <MenuItem key={proj.id} value={proj.id}>{proj.name}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          )}
-          {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && p.uiuxLoadingProjects && (
-            <Typography sx={{ fontSize: "0.72rem", color: "#8B949E", mb: 1 }}>Carregando projetos…</Typography>
-          )}
-          {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && p.uiuxProjectsError && (
-            <Typography sx={{ fontSize: "0.72rem", color: "#F85149", mb: 1 }}>{p.uiuxProjectsError}</Typography>
+            <Box sx={{ mb: 1 }}>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
+                <TextField size="small" fullWidth label="URL do arquivo Figma"
+                  placeholder="https://www.figma.com/design/…"
+                  value={figmaUrl}
+                  onChange={(e) => setFigmaUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && figmaUrl.trim()) {
+                      e.preventDefault();
+                      p.onUiuxAddFigma(figmaUrl.trim());
+                      setFigmaUrl("");
+                    }
+                  }} />
+                <Button size="small" variant="outlined"
+                  disabled={!figmaUrl.trim() || p.uiuxLoadingProjects}
+                  onClick={() => { p.onUiuxAddFigma(figmaUrl.trim()); setFigmaUrl(""); }}>
+                  Adicionar
+                </Button>
+              </Stack>
+              {p.uiuxProjects.length > 0 && (
+                <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.5, mb: 1 }}>
+                  {p.uiuxProjects.map((f) => (
+                    <Chip key={f.id} label={f.name} size="small" onDelete={() => p.onUiuxRemoveFigma(f.id)} />
+                  ))}
+                </Stack>
+              )}
+              {p.uiuxLoadingProjects && (
+                <Typography sx={{ fontSize: "0.72rem", color: "#8B949E", mb: 1 }}>Lendo arquivo no Figma…</Typography>
+              )}
+              {p.uiuxProjectsError && (
+                <Typography sx={{ fontSize: "0.72rem", color: "#F85149", mb: 1 }}>{p.uiuxProjectsError}</Typography>
+              )}
+              <Typography sx={{ fontSize: "0.7rem", color: "#8B949E" }}>
+                No Figma: abra o arquivo › Compartilhar › Copiar link e cole aqui. O token precisa do escopo
+                “Leia o conteúdo de arquivos e renderize imagens a partir deles”.
+              </Typography>
+            </Box>
           )}
         </>
       )}
@@ -827,12 +845,14 @@ export default function SpecPage() {
     return () => { alive = false; };
   }, []);
 
-  // Item 3: Ferramentas UI/UX — conta conectada + projetos escolhidos da conta.
-  // uiuxConnId "" = nenhuma; ao escolher uma conta, buscamos os projetos dela sob demanda.
+  // Item 3: Ferramentas UI/UX — conta conectada + arquivos Figma escolhidos (por URL).
+  // uiuxConnId "" = nenhuma. Figma: o usuário cola a URL do arquivo e resolvemos o nome via
+  // /v1/files/:key (escopo file_content:read). Não listamos mais projetos do time (endpoint
+  // /projects exige projects:read, escopo deprecado e ausente em PATs novos).
   const [uiuxConnId, setUiuxConnId] = useState<string>("");
   const [uiuxConnections, setUiuxConnections] = useState<Array<{ id: string; provider: string; label: string | null }>>([]);
-  const [uiuxProjects, setUiuxProjects] = useState<Array<{ id: string; name: string }>>([]);
-  const [uiuxProjectIds, setUiuxProjectIds] = useState<string[]>([]);
+  const [uiuxProjects, setUiuxProjects] = useState<Array<{ id: string; name: string }>>([]); // arquivos resolvidos {id:key, name}
+  const [uiuxProjectIds, setUiuxProjectIds] = useState<string[]>([]); // fileKeys escolhidas
   const [uiuxLoadingProjects, setUiuxLoadingProjects] = useState(false);
   const [uiuxProjectsError, setUiuxProjectsError] = useState<string | null>(null);
   useEffect(() => {
@@ -844,25 +864,33 @@ export default function SpecPage() {
   }, []);
   // Provider da conta UI/UX selecionada (governa: Figma extrai; Canva ainda não).
   const uiuxSelectedProvider = uiuxConnections.find((c) => c.id === uiuxConnId)?.provider ?? "";
-  // Ao trocar de conta, zera a seleção de projetos e (se for Figma) busca os projetos dela.
-  // Canva: extração ainda indisponível (requer app OAuth) → não buscamos projetos.
+  // Ao trocar de conta, zera os arquivos escolhidos e o erro.
   useEffect(() => {
     setUiuxProjectIds([]);
     setUiuxProjects([]);
     setUiuxProjectsError(null);
-    if (!uiuxConnId || uiuxSelectedProvider !== "figma") return;
-    let alive = true;
+  }, [uiuxConnId]);
+  // Resolve uma URL de arquivo Figma → { key, name } e adiciona à seleção (evita duplicatas).
+  const addFigmaFile = useCallback((url: string) => {
+    const raw = (url ?? "").trim();
+    if (!uiuxConnId || !raw) return;
+    setUiuxProjectsError(null);
     setUiuxLoadingProjects(true);
-    apiGet<Array<{ id: string; name: string }>>(`/api/tenant/uiux-connections/${uiuxConnId}/projects`)
-      .then((r) => { if (alive) setUiuxProjects(Array.isArray(r) ? r : []); })
-      .catch((e) => {
-        if (!alive) return;
-        setUiuxProjects([]);
-        setUiuxProjectsError(e instanceof Error ? e.message : "Não foi possível listar os projetos desta conta.");
+    apiGet<{ key: string; name: string }>(
+      `/api/tenant/uiux-connections/${uiuxConnId}/figma-file?url=${encodeURIComponent(raw)}`,
+    )
+      .then((r) => {
+        if (!r?.key) return;
+        setUiuxProjects((prev) => (prev.some((f) => f.id === r.key) ? prev : [...prev, { id: r.key, name: r.name || r.key }]));
+        setUiuxProjectIds((prev) => (prev.includes(r.key) ? prev : [...prev, r.key]));
       })
-      .finally(() => { if (alive) setUiuxLoadingProjects(false); });
-    return () => { alive = false; };
-  }, [uiuxConnId, uiuxSelectedProvider]);
+      .catch((e) => setUiuxProjectsError(e instanceof Error ? e.message : "Não foi possível ler o arquivo Figma."))
+      .finally(() => setUiuxLoadingProjects(false));
+  }, [uiuxConnId]);
+  const removeFigmaFile = useCallback((key: string) => {
+    setUiuxProjects((prev) => prev.filter((f) => f.id !== key));
+    setUiuxProjectIds((prev) => prev.filter((k) => k !== key));
+  }, []);
 
   // Produto e links
   const [products, setProducts]       = useState<{ id: string; name: string }[]>([]);
@@ -1123,8 +1151,8 @@ export default function SpecPage() {
         if (deployFormat) formData.append("deployFormat", deployFormat);
         if (deliveryMode === "demo") formData.append("ttlDays", String(deployTtlDays));
       }
-      // Item 3: Ferramentas UI/UX — conta + projetos escolhidos; o backend extrai as
-      // definições de design e injeta um documento UI/UX no bundle da spec.
+      // Item 3: Ferramentas UI/UX — conta + arquivos Figma escolhidos (fileKeys); o backend
+      // extrai as definições de design e injeta um documento UI/UX no bundle da spec.
       if (uiuxConnId && uiuxProjectIds.length > 0) {
         formData.append("uiuxConnectionId", uiuxConnId);
         uiuxProjectIds.forEach((pid) => formData.append("uiuxProjectIds", pid));
@@ -1436,7 +1464,8 @@ export default function SpecPage() {
                       uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
                       uiuxSelectedProvider={uiuxSelectedProvider}
                       uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}
-                      uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError} />
+                      uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError}
+                      onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
                       onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
@@ -1578,7 +1607,8 @@ export default function SpecPage() {
                     uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
                     uiuxSelectedProvider={uiuxSelectedProvider}
                     uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}
-                    uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError} />
+                    uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError}
+                    onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
                     onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}

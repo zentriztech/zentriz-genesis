@@ -3,6 +3,7 @@ import {
   rgbaToHex,
   summarizeFigmaFile,
   renderUiuxSpecMarkdown,
+  parseFigmaFileKey,
   type FigmaFileExtract,
 } from "./uiuxExtract.js";
 
@@ -90,6 +91,24 @@ describe("summarizeFigmaFile", () => {
     expect(summary.componentCounts["BotãoPrimário"]).toBe(1);
     expect(summary.colorCounts["#6366F2"]).toBe(1);
     expect(summary.typographyCounts["Inter 24px w700"]).toBe(1);
+  });
+});
+
+describe("parseFigmaFileKey", () => {
+  it("extrai a fileKey de URLs de arquivo Figma (design/file/proto/board)", () => {
+    expect(parseFigmaFileKey("https://www.figma.com/design/AbC123xyz/Meu-App?node-id=0-1")).toBe("AbC123xyz");
+    expect(parseFigmaFileKey("https://figma.com/file/KEY456/Projeto")).toBe("KEY456");
+    expect(parseFigmaFileKey("https://www.figma.com/proto/pRoTo789/Fluxo")).toBe("pRoTo789");
+    expect(parseFigmaFileKey("https://www.figma.com/board/BoArD01/Quadro")).toBe("BoArD01");
+  });
+  it("aceita a própria chave alfanumérica colada sem URL", () => {
+    expect(parseFigmaFileKey("aBcD1234efGh")).toBe("aBcD1234efGh");
+  });
+  it("rejeita entradas vazias/inválidas (sem chave reconhecível)", () => {
+    expect(parseFigmaFileKey("")).toBeNull();
+    expect(parseFigmaFileKey("   ")).toBeNull();
+    expect(parseFigmaFileKey("https://exemplo.com/algo")).toBeNull();
+    expect(parseFigmaFileKey("curto")).toBeNull(); // < 10 chars e não é URL Figma
   });
 });
 
