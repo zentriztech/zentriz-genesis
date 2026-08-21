@@ -22,6 +22,8 @@ import TableCell from "@mui/material/TableCell";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import Tabs from "@mui/material/Tabs";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import Collapse from "@mui/material/Collapse";
@@ -68,7 +70,7 @@ import { DocViewerModal } from "@/components/DocViewerModal";
 import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
 import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
 import { getAgentProfile } from "@/lib/agentProfiles";
-import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
@@ -134,6 +136,10 @@ type DeployOptionsResp = {
   requires_teardown_consent: boolean;
   default_ttl_days: number;
   connections: DeployConnItem[];
+  // Defaults pré-selecionados no envio da spec (Item 2) — pré-preenchem o form (trocáveis).
+  deploy_connection_id?: string | null;
+  deploy_format?: CloudDeployFormat | null;
+  deploy_ttl_days?: number | null;
 };
 type CloudDeploymentRow = {
   id: string; provider: string; deploy_format: string; status: string;
@@ -492,6 +498,15 @@ function ProjectDetailPageInner() {
   const [selectedFormat, setSelectedFormat] = useState<CloudDeployFormat | "">("");
   const [cloudTtlDays, setCloudTtlDays]     = useState<number>(7);
   const [teardownConsent, setTeardownConsent] = useState<boolean>(false);
+  const [prefsSaving, setPrefsSaving]       = useState<boolean>(false);
+  // Pré-preenche o form de deploy com os defaults escolhidos no envio da spec (Item 2), sem
+  // sobrescrever uma escolha que o usuário já fez nesta tela (só semeia quando ainda está vazio).
+  useEffect(() => {
+    if (!deployOptions) return;
+    if (deployOptions.deploy_connection_id) setSelectedConnId((prev) => prev || deployOptions.deploy_connection_id || "");
+    if (deployOptions.deploy_format) setSelectedFormat((prev) => prev || deployOptions.deploy_format || "");
+    if (deployOptions.deploy_ttl_days) setCloudTtlDays((prev) => (prev === 7 ? deployOptions.deploy_ttl_days! : prev));
+  }, [deployOptions]);
   const [cloudDeployments, setCloudDeployments] = useState<CloudDeploymentRow[]>([]);
   const [retryTeardownLoading, setRetryTeardownLoading] = useState(false); // BUGFIX P2
   const [countdown, setCountdown]   = useState<string>("");
@@ -1813,6 +1828,45 @@ function ProjectDetailPageInner() {
                   </Select>
                 </FormControl>
               </Stack>
+
+              {/* Demo ↔ Produção — troca o modo de entrega do projeto (persiste no extra).
+                  Depois de testar como demo, dá pra tornar PERMANENTE (produção) sem refazer a spec. */}
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                  Modo de entrega
+                </Typography>
+                <ToggleButtonGroup
+                  size="small" exclusive
+                  value={isDemo ? "demo" : "production"}
+                  disabled={prefsSaving || deployLoading || !!activeCloud}
+                  onChange={async (_e, val) => {
+                    if (!val || (val === "demo") === isDemo) return;
+                    setPrefsSaving(true); setDeployError(null);
+                    try {
+                      await apiPut(`/api/projects/${id}/deploy/prefs`, { deliveryMode: val });
+                      const d = await apiGet<DeployOptionsResp>(`/api/projects/${id}/deploy/options`).catch(() => null);
+                      if (d) {
+                        setDeployOptions(d);
+                        // Ao virar produção, o consentimento de teardown deixa de fazer sentido.
+                        if (val === "production") setTeardownConsent(false);
+                      }
+                    } catch (e) {
+                      const msg = e instanceof Error ? e.message : "Falha ao trocar o modo de entrega";
+                      try { setDeployError(JSON.parse(msg) as DeployError); } catch { setDeployError(msg); }
+                    } finally {
+                      setPrefsSaving(false);
+                    }
+                  }}
+                >
+                  <ToggleButton value="demo">🧪 Demo (expira)</ToggleButton>
+                  <ToggleButton value="production">🚀 Produção (permanente)</ToggleButton>
+                </ToggleButtonGroup>
+                {activeCloud && (
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+                    Conclua ou remova o deploy em andamento antes de trocar o modo.
+                  </Typography>
+                )}
+              </Box>
 
               {/* (c) Expiração — híbrida pelo modo de entrega */}
               {isDemo ? (

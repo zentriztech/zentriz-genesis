@@ -19,9 +19,15 @@ import { resolveScopedTenantId } from "../lib/tenantScope.js";
 import {
   listProjectsForConnection,
   UIUX_REQUIRED_KEY,
+  isCanvaOAuthConfigured,
+  canvaRedirectUri,
+  buildCanvaAuthorizeUrl,
+  generatePkcePair,
+  generateOAuthState,
   type UiuxProvider,
   type UiuxCredentials,
 } from "../services/uiuxExtract.js";
+import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 
 function getUser(req: FastifyRequest): AuthUser {
   return (req as unknown as { user: AuthUser }).user;
@@ -266,23 +272,70 @@ export async function uiuxRoutes(app: FastifyInstance) {
   // ── POST test ─────────────────────────────────────────────────────────────────
   app.post<{ Params: { id: string } }>("/api/tenant/uiux-connections/:id/test", async (request, reply) => {
     const user = getUser(request);
+    // Ação de gestão (tela admin-only) → consistente com POST/PUT/DELETE/reorder/authorize.
+    if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
+      return reply.status(403).send({ ok: false, message: "Requer role tenant_admin" });
+    }
     const scopedTenantId = resolveScopedTenantId(user, request.query);
     if (!scopedTenantId) return reply.status(400).send({ ok: false, message: "Sem tenant" });
     const { id } = request.params;
     const res = await pool.query(
-      "SELECT provider, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
+      "SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
       [id, scopedTenantId],
     );
     const row = res.rows[0] as Record<string, unknown> | undefined;
     if (!row) return reply.send({ ok: false, message: "Conexão não encontrada" });
+    const prov = row.provider as UiuxProvider;
     try {
-      const creds = decryptCreds(row) as unknown as Record<string, string>;
-      const prov = row.provider as UiuxProvider;
+      // Para Canva, renova o token se necessário (e persiste) → reporta a saúde REAL, não só a
+      // presença do campo (um token expirado/revogado não deve aparecer como "ok").
+      const creds = await ensureFreshUiuxCreds(row);
       const ok = Boolean(creds[UIUX_REQUIRED_KEY[prov]]);
-      return reply.send({ ok, provider: prov, message: ok ? "Credenciais presentes" : "Credenciais incompletas" });
+      return reply.send({ ok, provider: prov, message: ok ? "Credenciais válidas" : "Credenciais incompletas" });
     } catch {
-      return reply.send({ ok: false, message: "Erro ao descriptografar credenciais" });
+      return reply.send({ ok: false, provider: prov, message: "Falha ao validar credenciais (token pode ter expirado)" });
     }
+  });
+
+  // ── GET config do OAuth do Canva (a UI decide entre OAuth 1-clique x token manual) ──
+  app.get("/api/tenant/uiux-connections/canva/config", async (_request, reply) => {
+    return reply.send({ configured: isCanvaOAuthConfigured() && Boolean(canvaRedirectUri()) });
+  });
+
+  // ── GET authorize (inicia OAuth2+PKCE do Canva; devolve a URL de autorização) ─────
+  app.get("/api/tenant/uiux-connections/canva/authorize", async (request, reply) => {
+    const user = getUser(request);
+    if (user.role !== "tenant_admin" && user.role !== "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Requer role tenant_admin" });
+    }
+    const tenantId = resolveScopedTenantId(user, request.query);
+    if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
+
+    const redirectUri = canvaRedirectUri();
+    if (!isCanvaOAuthConfigured() || !redirectUri) {
+      return reply.status(501).send({
+        code: "CANVA_OAUTH_NOT_CONFIGURED",
+        message: "App OAuth do Canva não configurado. Configure CANVA_CLIENT_ID/SECRET e CANVA_REDIRECT_URI.",
+      });
+    }
+
+    const label = typeof (request.query as Record<string, unknown>)?.label === "string"
+      ? String((request.query as Record<string, string>).label).slice(0, 120)
+      : null;
+
+    const { verifier, challenge } = generatePkcePair();
+    const state = generateOAuthState();
+
+    // Limpeza best-effort de estados vencidos + grava o novo (uso único, 10 min).
+    await pool.query("DELETE FROM canva_oauth_states WHERE expires_at < now()");
+    await pool.query(
+      `INSERT INTO canva_oauth_states (state, tenant_id, code_verifier, redirect_uri, label, created_by, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6, now() + INTERVAL '10 minutes')`,
+      [state, tenantId, verifier, redirectUri, label, user.id ?? null],
+    );
+
+    const authorizeUrl = buildCanvaAuthorizeUrl({ state, codeChallenge: challenge, redirectUri });
+    return reply.send({ authorizeUrl });
   });
 
   // ── GET projetos da conta (proxy Figma/Canva) ───────────────────────────────
@@ -292,13 +345,14 @@ export async function uiuxRoutes(app: FastifyInstance) {
     if (!scopedTenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
     const { id } = request.params;
     const res = await pool.query(
-      "SELECT provider, account_ref, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
+      "SELECT id, provider, account_ref, encrypted_credentials, encryption_iv, encryption_tag FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
       [id, scopedTenantId],
     );
     const row = res.rows[0] as Record<string, unknown> | undefined;
     if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
     try {
-      const creds = decryptCreds(row);
+      // Canva: renova o access token (e persiste) antes de listar, se necessário.
+      const creds = await ensureFreshUiuxCreds(row);
       const projects = await listProjectsForConnection(
         row.provider as UiuxProvider,
         creds,

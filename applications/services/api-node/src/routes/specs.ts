@@ -7,8 +7,8 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
-import { decryptCredentials } from "../services/crypto.js";
-import { extractUiuxSpec, type UiuxProvider, type UiuxCredentials } from "../services/uiuxExtract.js";
+import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
+import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -615,7 +615,8 @@ export async function specRoutes(app: FastifyInstance) {
       // FASE-4/SEC-P1: o campo `approvedBy` do cliente é IGNORADO (falsificável).
       // O aprovador é sempre o usuário autenticado (JWT), gravado abaixo.
       // DM-T2: campos de entrega opcionais (delivery_mode/runtime_target/db_mode/host_target/domain_mode).
-      for (const key of ["deliveryMode", "runtimeTarget", "dbMode", "hostTarget", "domainMode"] as const) {
+      for (const key of ["deliveryMode", "runtimeTarget", "dbMode", "hostTarget", "domainMode",
+                          "cloudConnectionId", "deployFormat", "ttlDays"] as const) {
         if (part.fields?.[key] !== undefined) {
           const f = part.fields[key];
           const v = Array.isArray(f) ? f[0] : f;
@@ -679,7 +680,7 @@ export async function specRoutes(app: FastifyInstance) {
       }
       try {
         const connRes = await pool.query(
-          `SELECT provider, label, account_ref, encrypted_credentials, encryption_iv, encryption_tag
+          `SELECT id, provider, label, account_ref, encrypted_credentials, encryption_iv, encryption_tag
            FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'`,
           [uiuxConnectionId, user.tenantId],
         );
@@ -687,13 +688,8 @@ export async function specRoutes(app: FastifyInstance) {
         if (!row) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Conexão UI/UX não encontrada" });
         }
-        const creds = JSON.parse(
-          decryptCredentials({
-            encrypted: row.encrypted_credentials as string,
-            iv: row.encryption_iv as string,
-            tag: row.encryption_tag as string,
-          }),
-        ) as UiuxCredentials;
+        // Canva: renova o access token (e persiste) antes de extrair, se necessário. Figma passthrough.
+        const creds = await ensureFreshUiuxCreds(row);
         const generated = await extractUiuxSpec({
           provider: row.provider as UiuxProvider,
           creds,
@@ -731,6 +727,16 @@ export async function specRoutes(app: FastifyInstance) {
       const tenantId = user.tenantId;
       if (!tenantId) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório para enviar spec" });
+      }
+      // Item 2 (pré-seleção): se veio uma conexão de cloud, confirma que pertence a este tenant
+      // e está ativa. É só uma PREFERÊNCIA (default do cockpit) — não falha o envio: apenas
+      // descarta o id se não for do tenant, evitando gravar uma referência inválida no extra.
+      if (deliveryFields.cloudConnectionId) {
+        const owned = await pool.query(
+          "SELECT 1 FROM tenant_cloud_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
+          [deliveryFields.cloudConnectionId, tenantId],
+        );
+        if (owned.rows.length === 0) delete deliveryFields.cloudConnectionId;
       }
       result = await createProjectFromSpec(client, {
         tenantId,

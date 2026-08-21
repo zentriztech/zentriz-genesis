@@ -14,8 +14,30 @@ import type { PoolClient } from "pg";
 import path from "path";
 import fs from "fs/promises";
 import crypto from "crypto";
+import { DEPLOY_FORMATS, type DeployFormat } from "./provision/deployTargets.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Preferências de deploy escolhidas JÁ no envio da spec (Item 2, pré-seleção): conexão de
+ * cloud + formato + prazo (demo). São só DEFAULTS que pré-preenchem o cockpit — a validação
+ * de propriedade da conexão acontece no chamador (specs.ts) e no disparo do deploy. Aqui só
+ * sanitizamos o formato/prazo e o formato do id.
+ */
+function sanitizeDeployPrefs(f: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const connId = (f.cloudConnectionId ?? "").trim();
+  if (connId && UUID_RE.test(connId)) out.deploy_connection_id = connId;
+  const fmt = (f.deployFormat ?? "").trim() as DeployFormat;
+  if (fmt && DEPLOY_FORMATS.includes(fmt)) out.deploy_format = fmt;
+  const ttlRaw = Number((f.ttlDays ?? "").trim());
+  if (Number.isFinite(ttlRaw) && ttlRaw > 0) {
+    out.deploy_ttl_days = Math.min(Math.max(Math.round(ttlRaw), 1), 30);
+  }
+  return out;
+}
 
 export interface SpecFileInput {
   filename: string;
@@ -149,6 +171,8 @@ export async function createProjectFromSpec(
     ...(deliveryFields.dbMode ? { db_mode: deliveryFields.dbMode } : {}),
     ...(deliveryFields.hostTarget ? { host_target: deliveryFields.hostTarget } : {}),
     ...(deliveryFields.domainMode ? { domain_mode: deliveryFields.domainMode } : {}),
+    // Item 2 (pré-seleção no envio da spec): conexão de cloud + formato + prazo (demo).
+    ...sanitizeDeployPrefs(deliveryFields),
     ...(specApproved ? {
       spec_approved: true,
       approved_by: approverEmail ?? createdBy,

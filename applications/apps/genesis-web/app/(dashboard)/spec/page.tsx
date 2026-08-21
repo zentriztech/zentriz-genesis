@@ -194,10 +194,42 @@ const DELIVERY_MODES_WEB = [
   { value: "source_only", icon: "📦", label: "Só o código", desc: "Repo testado + kit de deploy (Docker/estático). Você publica onde quiser." },
   { value: "publish",     icon: "🌐", label: "Publicar (S3)", desc: "Site publicado com URL pública (hospedagem estática S3)." },
 ];
+// ── Deploy na nuvem: pré-seleção no envio da spec (Item 2) ──────────────────────
+// Espelha `viableFormatsForProjectType` do backend (services/provision/deployTargets.ts):
+// só os formatos que fazem sentido para o tipo do projeto. É um DEFAULT — pode ser trocado
+// depois no cockpit (/projects/:id). Duplicação intencional e localizada (cliente sem backend).
+type DeployFmt = "container" | "static" | "vm" | "serverless";
+function viableDeployFormats(projectType: string): DeployFmt[] {
+  const pt = (projectType ?? "").toLowerCase().trim();
+  if (!pt) return [];
+  if (pt.startsWith("mobile") || pt.startsWith("lib") || pt.startsWith("infra")) return [];
+  if (pt === "other" || pt === "_default") return ["container", "static"];
+  if (pt.startsWith("fullstack")) return ["container", "vm"];
+  if (pt.startsWith("frontend") || pt.includes("landing") || pt.includes("static") || pt.includes("dashboard") || pt.includes("ecommerce")) return ["static", "container"];
+  if (pt.startsWith("backend")) { return pt.includes("worker") ? ["serverless", "container"] : ["container", "vm", "serverless"]; }
+  if (pt.startsWith("bot")) return ["serverless", "container"];
+  return ["container", "static"];
+}
+const FMT_GENERIC: Record<DeployFmt, string> = {
+  container: "Container", static: "Site estático", vm: "Máquina virtual (VM)", serverless: "Serverless",
+};
+const PROVIDER_FMT_LABELS: Record<string, Record<DeployFmt, string>> = {
+  aws:   { container: "ECS Fargate (ECR)", static: "S3 static website", vm: "EC2 (via SSM)", serverless: "Lambda" },
+  azure: { container: "Container Apps (ACR)", static: "Static Web Apps / Blob", vm: "Virtual Machine", serverless: "Azure Functions" },
+  gcp:   { container: "Cloud Run (GCR)", static: "Cloud Storage website", vm: "Compute Engine", serverless: "Cloud Functions" },
+};
+const CLOUD_PROVIDER_LABEL: Record<string, string> = { aws: "AWS", azure: "Azure", gcp: "Google Cloud" };
+
 interface DeliverySectionProps {
   visible: boolean;
   isBackend: boolean;
   mode: string; onMode: (v: string) => void;
+  // Item 2: pré-seleção de deploy na nuvem (conexão + formato + prazo p/ demo).
+  projectType: string;
+  cloudConnections: Array<{ id: string; provider: string; label: string | null }>;
+  cloudConnId: string; onCloudConn: (v: string) => void;
+  deployFormat: string; onDeployFormat: (v: string) => void;
+  deployTtlDays: number; onDeployTtlDays: (v: number) => void;
   advancedOpen: boolean; onAdvancedOpen: (v: boolean) => void;
   dbMode: string; onDbMode: (v: string) => void;
   runtimeTarget: string; onRuntimeTarget: (v: string) => void;
@@ -235,6 +267,58 @@ function DeliverySection(p: DeliverySectionProps) {
           );
         })}
       </Stack>
+      {/* Item 2: onde e como publicar — pré-seleção (default do cockpit). Só aparece quando o
+          tipo é publicável na nuvem E existe conexão de cloud configurada. */}
+      {(() => {
+        const viable = viableDeployFormats(p.projectType);
+        if (viable.length === 0 || p.cloudConnections.length === 0) return null;
+        const activeConn = p.cloudConnections.find((c) => c.id === p.cloudConnId) ?? null;
+        const fmtLabel = (f: DeployFmt) =>
+          activeConn ? PROVIDER_FMT_LABELS[activeConn.provider]?.[f] ?? FMT_GENERIC[f] : FMT_GENERIC[f];
+        return (
+          <Box sx={{ mb: 1 }}>
+            <Typography sx={{ fontSize: "0.72rem", fontWeight: 700, textTransform: "uppercase",
+              letterSpacing: "0.06em", color: "#8B949E", mb: 1 }}>
+              Onde publicar (opcional — dá pra trocar depois)
+            </Typography>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Nuvem (conexão)</InputLabel>
+                <Select value={p.cloudConnId} label="Nuvem (conexão)"
+                  onChange={(e) => { p.onCloudConn(e.target.value); p.onDeployFormat(""); }}>
+                  <MenuItem value="">Decidir depois</MenuItem>
+                  {p.cloudConnections.map((c) => (
+                    <MenuItem key={c.id} value={c.id}>
+                      {CLOUD_PROVIDER_LABEL[c.provider] ?? c.provider}{c.label ? ` · ${c.label}` : ""}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl size="small" fullWidth disabled={!p.cloudConnId}>
+                <InputLabel>Tipo de deploy</InputLabel>
+                <Select value={viable.includes(p.deployFormat as DeployFmt) ? p.deployFormat : ""}
+                  label="Tipo de deploy" onChange={(e) => p.onDeployFormat(e.target.value)}>
+                  <MenuItem value="">Recomendado</MenuItem>
+                  {viable.map((f, i) => (
+                    <MenuItem key={f} value={f}>{fmtLabel(f)}{i === 0 ? " · recomendado" : ""}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Stack>
+            {p.mode === "demo" && (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mb: 1 }}>
+                <TextField size="small" type="number" label="Demo expira em (dias, 1–30)"
+                  value={p.deployTtlDays}
+                  onChange={(e) => p.onDeployTtlDays(Math.min(Math.max(Math.round(Number(e.target.value) || 0), 1), 30))}
+                  inputProps={{ min: 1, max: 30, step: 1 }} sx={{ width: { xs: "100%", sm: 220 } }} />
+                <Typography sx={{ fontSize: "0.72rem", color: "#8B949E" }}>
+                  Demo é removida automaticamente ao fim do prazo (você confirma o teardown no disparo).
+                </Typography>
+              </Stack>
+            )}
+          </Box>
+        );
+      })()}
       {p.uiuxConnections.length > 0 && (
         <>
           <FormControl size="small" fullWidth sx={{ mb: 1 }}>
@@ -730,6 +814,19 @@ export default function SpecPage() {
   const [domainMode, setDomainMode] = useState("");       // "" = subdomínio Zentriz
   const isBackendType = /^(backend|fullstack)/.test(projectType);
 
+  // Item 2: pré-seleção de deploy na nuvem no envio da spec (default do cockpit, trocável depois).
+  const [cloudConnections, setCloudConnections] = useState<Array<{ id: string; provider: string; label: string | null }>>([]);
+  const [cloudConnId, setCloudConnId] = useState<string>("");
+  const [deployFormat, setDeployFormat] = useState<string>("");
+  const [deployTtlDays, setDeployTtlDays] = useState<number>(7);
+  useEffect(() => {
+    let alive = true;
+    apiGet<Array<{ id: string; provider: string; label: string | null }>>("/api/tenant/cloud-connections")
+      .then((r) => { if (alive) setCloudConnections(Array.isArray(r) ? r : []); })
+      .catch(() => { if (alive) setCloudConnections([]); });
+    return () => { alive = false; };
+  }, []);
+
   // Item 3: Ferramentas UI/UX — conta conectada + projetos escolhidos da conta.
   // uiuxConnId "" = nenhuma; ao escolher uma conta, buscamos os projetos dela sob demanda.
   const [uiuxConnId, setUiuxConnId] = useState<string>("");
@@ -790,6 +887,9 @@ export default function SpecPage() {
   // Spec editor
   const [specMarkdown, setSpecMarkdown] = useState<string | null>(null);
   const [editorFullscreen, setEditorFullscreen] = useState(false);
+  // Em tela cheia, no mobile não cabem editor e chat lado a lado → alterna o painel visível.
+  // No desktop os dois aparecem juntos (o toggle fica oculto).
+  const [fsPane, setFsPane] = useState<"editor" | "chat">("editor");
   const [approving, setApproving]       = useState<"save" | "start" | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
 
@@ -1017,6 +1117,12 @@ export default function SpecPage() {
           if (domainMode) formData.append("domainMode", domainMode);
         }
       }
+      // Item 2: pré-seleção de deploy na nuvem (conexão + formato + prazo demo) — default do cockpit.
+      if (cloudConnId) {
+        formData.append("cloudConnectionId", cloudConnId);
+        if (deployFormat) formData.append("deployFormat", deployFormat);
+        if (deliveryMode === "demo") formData.append("ttlDays", String(deployTtlDays));
+      }
       // Item 3: Ferramentas UI/UX — conta + projetos escolhidos; o backend extrai as
       // definições de design e injeta um documento UI/UX no bundle da spec.
       if (uiuxConnId && uiuxProjectIds.length > 0) {
@@ -1055,7 +1161,8 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds, router]);
+  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
+      projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router]);
 
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1080,6 +1187,12 @@ export default function SpecPage() {
           if (dbMode) fd.append("dbMode", dbMode);
           if (domainMode) fd.append("domainMode", domainMode);
         }
+      }
+      // Item 2: pré-seleção de deploy na nuvem (conexão + formato + prazo demo) — default do cockpit.
+      if (cloudConnId) {
+        fd.append("cloudConnectionId", cloudConnId);
+        if (deployFormat) fd.append("deployFormat", deployFormat);
+        if (deliveryMode === "demo") fd.append("ttlDays", String(deployTtlDays));
       }
       // Item 3: Ferramentas UI/UX — conta + projetos escolhidos; backend extrai e injeta doc UI/UX.
       if (uiuxConnId && uiuxProjectIds.length > 0) {
@@ -1112,13 +1225,38 @@ export default function SpecPage() {
       PaperProps={{ sx: { bgcolor: "background.default", m: 0 } }}>
       <DialogContent sx={{ p: 0, height: "100vh", display: "flex", flexDirection: "column" }}>
         {approveError && <Alert severity="error" sx={{ mx: 2, mt: 1 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
-        <SpecEditor
-          value={specMarkdown} onChange={setSpecMarkdown}
-          fullscreen={true} onToggleFullscreen={() => setEditorFullscreen(false)}
-          onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
-          onRegen={() => { setEditorFullscreen(false); setSpecMarkdown(null); }}
-          regenDisabled={generating}
-        />
+        {/* Toggle editor↔chat só no mobile (xs); no desktop os dois painéis ficam lado a lado. */}
+        <Stack direction="row" spacing={1}
+          sx={{ display: { xs: "flex", md: "none" }, p: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+          <Button fullWidth size="small" startIcon={<EditIcon />}
+            variant={fsPane === "editor" ? "contained" : "outlined"} onClick={() => setFsPane("editor")}>Editor</Button>
+          <Button fullWidth size="small" startIcon={<AutoFixHighIcon />}
+            variant={fsPane === "chat" ? "contained" : "outlined"} onClick={() => setFsPane("chat")}>Melhorar com IA</Button>
+        </Stack>
+        <Box sx={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
+          {/* Editor: sempre visível no desktop; no mobile só quando o painel selecionado é 'editor'. */}
+          <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden", display: { xs: fsPane === "editor" ? "flex" : "none", md: "flex" } }}>
+            <SpecEditor
+              value={specMarkdown} onChange={setSpecMarkdown}
+              fullscreen={true} onToggleFullscreen={() => setEditorFullscreen(false)}
+              onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+              onRegen={editProjectId ? undefined : () => { setEditorFullscreen(false); setSpecMarkdown(null); }}
+              regenDisabled={editProjectId ? true : generating}
+            />
+          </Box>
+          {/* Feature #63 — chat "Melhorar com IA" TAMBÉM em tela cheia: painel à direita no desktop;
+              no mobile ocupa a tela quando selecionado. Antes o dialog só mostrava o editor (bug). */}
+          <Box sx={{
+            width: { xs: "100%", md: 380 }, flexShrink: 0, minWidth: 0, overflow: "hidden",
+            borderLeft: { md: "1px solid" }, borderColor: { md: "divider" },
+            display: { xs: fsPane === "chat" ? "flex" : "none", md: "flex" },
+          }}>
+            <SpecChatPanel
+              messages={chatMessages} input={chatInput} onInput={setChatInput}
+              onSend={handleChatSend} sending={chatSending} error={chatError}
+            />
+          </Box>
+        </Box>
       </DialogContent>
     </Dialog>
   );
@@ -1291,6 +1429,10 @@ export default function SpecPage() {
                       dbMode={dbMode} onDbMode={setDbMode}
                       runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
                       domainMode={domainMode} onDomainMode={setDomainMode}
+                      projectType={projectType}
+                      cloudConnections={cloudConnections} cloudConnId={cloudConnId} onCloudConn={setCloudConnId}
+                      deployFormat={deployFormat} onDeployFormat={setDeployFormat}
+                      deployTtlDays={deployTtlDays} onDeployTtlDays={setDeployTtlDays}
                       uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
                       uiuxSelectedProvider={uiuxSelectedProvider}
                       uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}
@@ -1429,6 +1571,10 @@ export default function SpecPage() {
                     dbMode={dbMode} onDbMode={setDbMode}
                     runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
                     domainMode={domainMode} onDomainMode={setDomainMode}
+                    projectType={projectType}
+                    cloudConnections={cloudConnections} cloudConnId={cloudConnId} onCloudConn={setCloudConnId}
+                    deployFormat={deployFormat} onDeployFormat={setDeployFormat}
+                    deployTtlDays={deployTtlDays} onDeployTtlDays={setDeployTtlDays}
                     uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
                     uiuxSelectedProvider={uiuxSelectedProvider}
                     uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}

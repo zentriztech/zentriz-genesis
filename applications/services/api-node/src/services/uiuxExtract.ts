@@ -14,10 +14,48 @@
  *   fetcher usa um access token armazenado. Sem token configurado, lança erro claro.
  */
 
+import { createHash, randomBytes } from "crypto";
+
 export type UiuxProvider = "figma" | "canva";
 
 const FIGMA_API_BASE = process.env.FIGMA_API_BASE ?? "https://api.figma.com";
 const CANVA_API_BASE = process.env.CANVA_API_BASE ?? "https://api.canva.com/rest/v1";
+
+// ── Config do app OAuth do Canva (Connect API) ────────────────────────────────
+// Registrado uma vez no Developer Portal da Zentriz (ver project/docs/integrations/
+// canva-oauth-setup.md). CLIENT_ID/SECRET são da CONTA ZENTRIZ (não do tenant); cada
+// tenant apenas autoriza (consent) e recebe tokens próprios. Sem CLIENT_ID/SECRET o
+// fluxo OAuth fica indisponível e a UI orienta o admin — nada quebra.
+const CANVA_CLIENT_ID = (process.env.CANVA_CLIENT_ID ?? "").trim();
+const CANVA_CLIENT_SECRET = (process.env.CANVA_CLIENT_SECRET ?? "").trim();
+const CANVA_AUTHORIZE_URL = process.env.CANVA_AUTHORIZE_URL ?? "https://www.canva.com/api/oauth/authorize";
+const CANVA_TOKEN_URL = process.env.CANVA_TOKEN_URL ?? "https://api.canva.com/rest/v1/oauth/token";
+// Escopos mínimos p/ ler metadados e conteúdo de designs + perfil (account_ref).
+const CANVA_SCOPES =
+  process.env.CANVA_SCOPES ?? "design:meta:read design:content:read folder:read asset:read profile:read";
+
+/** true quando o app OAuth do Canva está configurado (CLIENT_ID + CLIENT_SECRET). */
+export function isCanvaOAuthConfigured(): boolean {
+  return Boolean(CANVA_CLIENT_ID && CANVA_CLIENT_SECRET);
+}
+
+/**
+ * redirect_uri do callback OAuth do Canva. DEVE bater EXATAMENTE com o registrado no
+ * Developer Portal. Prioriza CANVA_REDIRECT_URI explícito; senão deriva de GENESIS_PUBLIC_URL.
+ * Vazio quando não há como determinar (a UI/rota trata como "não configurado").
+ */
+export function canvaRedirectUri(): string {
+  const explicit = (process.env.CANVA_REDIRECT_URI ?? "").trim();
+  if (explicit) return explicit;
+  const base = (process.env.GENESIS_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  if (base && /^https?:\/\//.test(base)) return `${base}/api/tenant/uiux-connections/canva/callback`;
+  return "";
+}
+
+/** URL para onde o browser volta após o consent (relativa → mesmo origin do portal). */
+export function canvaPostAuthUrl(): string {
+  return (process.env.CANVA_POST_AUTH_URL ?? "/settings/ui-ux").trim() || "/settings/ui-ux";
+}
 
 // Limites de segurança para não explodir custo/latência num único request de spec.
 const MAX_FILES_PER_EXTRACT = 8;
@@ -418,6 +456,184 @@ export async function listCanvaProjects(accessToken: string): Promise<UiuxProjec
   return (data.items ?? []).map((d) => ({ id: String(d.id), name: d.title ?? d.id }));
 }
 
+// ── OAuth2 + PKCE (Canva Connect API) ─────────────────────────────────────────────
+
+/** base64url (sem padding) de um Buffer — formato exigido pelo PKCE (RFC 7636). */
+function base64url(buf: Buffer): string {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Gera um par PKCE: code_verifier (aleatório) + code_challenge (S256 do verifier). */
+export function generatePkcePair(): { verifier: string; challenge: string } {
+  const verifier = base64url(randomBytes(64)); // ~86 chars (dentro de 43..128)
+  const challenge = base64url(createHash("sha256").update(verifier).digest());
+  return { verifier, challenge };
+}
+
+/** Gera um 'state' opaco e imprevisível para amarrar authorize↔callback. */
+export function generateOAuthState(): string {
+  return base64url(randomBytes(32));
+}
+
+/** Monta a URL de autorização do Canva (o browser é redirecionado para ela). */
+export function buildCanvaAuthorizeUrl(opts: {
+  state: string;
+  codeChallenge: string;
+  redirectUri: string;
+}): string {
+  const u = new URL(CANVA_AUTHORIZE_URL);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("client_id", CANVA_CLIENT_ID);
+  u.searchParams.set("redirect_uri", opts.redirectUri);
+  u.searchParams.set("scope", CANVA_SCOPES);
+  u.searchParams.set("code_challenge", opts.codeChallenge);
+  u.searchParams.set("code_challenge_method", "S256");
+  u.searchParams.set("state", opts.state);
+  return u.toString();
+}
+
+export interface CanvaTokenSet {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  token_type?: string;
+  scope?: string;
+}
+
+/** POST form-encoded ao token endpoint do Canva (client confidencial → HTTP Basic). */
+async function canvaTokenRequest(body: Record<string, string>): Promise<CanvaTokenSet> {
+  if (!isCanvaOAuthConfigured()) {
+    throw new Error("App OAuth do Canva não configurado (CANVA_CLIENT_ID/SECRET ausentes).");
+  }
+  const basic = Buffer.from(`${CANVA_CLIENT_ID}:${CANVA_CLIENT_SECRET}`).toString("base64");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(CANVA_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${basic}`,
+        Accept: "application/json",
+      },
+      body: new URLSearchParams(body).toString(),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      // Não reflete o corpo do upstream (pode vazar detalhe para o cliente/logs de chamador
+      // não privilegiado). Só o status entra na mensagem; drena o corpo para liberar a conexão.
+      await res.text().catch(() => "");
+      throw new Error(`Canva token endpoint retornou ${res.status}.`);
+    }
+    return (await res.json()) as CanvaTokenSet;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Troca o authorization code (+ PKCE verifier) por access/refresh tokens. */
+export async function exchangeCanvaCode(
+  code: string,
+  codeVerifier: string,
+  redirectUri: string,
+): Promise<CanvaTokenSet> {
+  return canvaTokenRequest({
+    grant_type: "authorization_code",
+    code,
+    code_verifier: codeVerifier,
+    redirect_uri: redirectUri,
+    client_id: CANVA_CLIENT_ID,
+  });
+}
+
+/** Renova o access token a partir do refresh token. */
+export async function refreshCanvaToken(refreshToken: string): Promise<CanvaTokenSet> {
+  return canvaTokenRequest({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: CANVA_CLIENT_ID,
+  });
+}
+
+/** Perfil da conta autorizada (best-effort) — usado como account_ref/label. */
+export async function fetchCanvaAccountRef(accessToken: string): Promise<string | null> {
+  try {
+    const me = await canvaFetch<{ team_id?: string; user_id?: string }>(`/users/me`, accessToken);
+    return me.team_id ?? me.user_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Extração de designs Canva (macro) ─────────────────────────────────────────────
+// A Connect API do Canva NÃO expõe a árvore de nós/elementos de um design (ao contrário
+// do Figma). Extraímos o nível MACRO disponível: título, nº de páginas, dimensões e links.
+// O nível MICRO (elementos individuais) fica registrado como limitação explícita da API.
+
+interface CanvaDesignMeta {
+  id: string;
+  title: string;
+  pageCount: number | null;
+  width: number | null;
+  height: number | null;
+  viewUrl: string | null;
+  editUrl: string | null;
+}
+
+async function fetchCanvaDesign(accessToken: string, designId: string): Promise<CanvaDesignMeta> {
+  const data = await canvaFetch<{
+    design?: {
+      id?: string;
+      title?: string;
+      page_count?: number;
+      urls?: { view_url?: string; edit_url?: string };
+      thumbnail?: { width?: number; height?: number };
+    };
+  }>(`/designs/${encodeURIComponent(designId)}`, accessToken);
+  const d = data.design ?? {};
+  return {
+    id: String(d.id ?? designId),
+    title: d.title ?? designId,
+    pageCount: typeof d.page_count === "number" ? d.page_count : null,
+    width: typeof d.thumbnail?.width === "number" ? d.thumbnail.width : null,
+    height: typeof d.thumbnail?.height === "number" ? d.thumbnail.height : null,
+    viewUrl: d.urls?.view_url ?? null,
+    editUrl: d.urls?.edit_url ?? null,
+  };
+}
+
+/** Renderiza a spec UI/UX (macro) a partir dos designs Canva. */
+export function renderCanvaSpecMarkdown(accountLabel: string, designs: CanvaDesignMeta[]): string {
+  const lines: string[] = [];
+  lines.push(`# Especificação UI/UX — ${accountLabel}`);
+  lines.push("");
+  lines.push(`> Gerado automaticamente pelo Genesis a partir de **Canva** (Connect API).`);
+  lines.push(`> Fonte: ${designs.length} design(s). A API do Canva expõe estrutura macro (telas/páginas);`);
+  lines.push(`> o detalhamento micro por elemento não é disponibilizado pela API pública do Canva.`);
+  lines.push("");
+
+  lines.push("## 1. Visão Macro (designs / telas)");
+  lines.push("");
+  if (!designs.length) lines.push("- _(nenhum design acessível)_");
+  for (const d of designs) {
+    const dim = d.width && d.height ? `${d.width}×${d.height}px (thumb)` : "dimensão n/d";
+    const pages = d.pageCount != null ? `${d.pageCount} página(s)` : "páginas n/d";
+    lines.push(`### 🖼️ ${d.title}`);
+    lines.push(`- **ID:** \`${d.id}\` · ${pages} · ${dim}`);
+    if (d.viewUrl) lines.push(`- **Visualizar:** ${d.viewUrl}`);
+    if (d.editUrl) lines.push(`- **Editar:** ${d.editUrl}`);
+    lines.push("");
+  }
+
+  lines.push("## 2. Notas para implementação");
+  lines.push("");
+  lines.push("- Cada design Canva corresponde a uma tela/artefato visual do produto.");
+  lines.push("- A API do Canva não fornece geometria por elemento; use os links acima como referência visual.");
+  lines.push("- Combine este documento com a spec funcional para o build.");
+  lines.push("");
+  return lines.join("\n");
+}
+
 // ── Credenciais por provider ─────────────────────────────────────────────────────
 
 export interface UiuxCredentials {
@@ -426,6 +642,7 @@ export interface UiuxCredentials {
   teamId?: string;
   // Canva
   refreshToken?: string;
+  tokenExpiresAt?: string; // ISO — quando o access token do Canva expira (p/ refresh proativo)
 }
 
 /** Chave de credencial usada pelo endpoint /test para checar "configurado". */
@@ -472,9 +689,25 @@ export async function extractUiuxSpec(opts: {
 }): Promise<ExtractedUiuxSpec> {
   const { provider, creds, accountRef, accountLabel, projectIds } = opts;
 
-  if (provider !== "figma") {
-    // Canva: extração de conteúdo detalhado depende do app OAuth + escopos de export.
-    throw new Error("Extração Canva ainda não disponível (requer app OAuth registrado).");
+  if (provider === "canva") {
+    if (!creds.accessToken) {
+      throw new Error("Canva: conexão sem access token. Reautorize a conta (OAuth).");
+    }
+    const designs: CanvaDesignMeta[] = [];
+    for (const designId of projectIds) {
+      if (designs.length >= MAX_FILES_PER_EXTRACT) break;
+      try {
+        designs.push(await fetchCanvaDesign(creds.accessToken, designId));
+      } catch {
+        // Design inacessível/removido: pula, mantém os demais.
+        continue;
+      }
+    }
+    if (!designs.length) {
+      throw new Error("Nenhum design Canva pôde ser lido (verifique o acesso da conta autorizada).");
+    }
+    const content = renderCanvaSpecMarkdown(accountLabel || accountRef || "Conta Canva", designs);
+    return { filename: "10-uiux-spec.md", content, fileCount: designs.length };
   }
   if (!creds.accessToken) throw new Error("Token Figma ausente.");
 

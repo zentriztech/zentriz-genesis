@@ -85,6 +85,9 @@ function UiuxModal({ open, slot, tenantId, onClose, onSaved }: ModalProps) {
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // canvaConfigured: null = ainda checando; true/false = há app OAuth registrado.
+  const [canvaConfigured, setCanvaConfigured] = useState<boolean | null>(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -93,13 +96,36 @@ function UiuxModal({ open, slot, tenantId, onClose, onSaved }: ModalProps) {
       setAccountRef(slot?.accountRef ?? "");
       setForm({});
       setErr(null);
+      setCanvaConfigured(null);
+      let cancelled = false;
+      // Descobre se o app OAuth do Canva está configurado → 1-clique x token manual.
+      apiGet(withQuery("/api/tenant/uiux-connections/canva/config", { tenantId }))
+        .then((r) => { if (!cancelled) setCanvaConfigured(Boolean((r as { configured?: boolean })?.configured)); })
+        .catch(() => { if (!cancelled) setCanvaConfigured(false); });
+      return () => { cancelled = true; };
     }
-  }, [open, slot, isEdit]);
+  }, [open, slot, isEdit, tenantId]);
 
   useEffect(() => { setForm({}); }, [tab]);
 
   const provider = PROVIDERS[tab];
   const meta = PROVIDER_META[provider];
+  // Modo OAuth 1-clique: só ao criar uma conexão Canva com app configurado.
+  const canvaOAuthMode = provider === "canva" && !isEdit && canvaConfigured === true;
+
+  const handleCanvaOAuth = async () => {
+    setOauthLoading(true); setErr(null);
+    try {
+      const r = await apiGet(
+        withQuery("/api/tenant/uiux-connections/canva/authorize", { tenantId, label: label || undefined }),
+      ) as { authorizeUrl?: string };
+      if (!r?.authorizeUrl) throw new Error("URL de autorização indisponível.");
+      window.location.href = r.authorizeUrl; // sai do portal → consent no Canva → volta no callback
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Não foi possível iniciar o OAuth do Canva.");
+      setOauthLoading(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true); setErr(null);
@@ -167,35 +193,67 @@ function UiuxModal({ open, slot, tenantId, onClose, onSaved }: ModalProps) {
           ))}
         </Tabs>
 
-        {meta.note && (
-          <Alert severity="info" sx={{ mb: 2 }} icon={<InfoOutlinedIcon />}>
-            <Typography variant="caption">{meta.note}</Typography>
-          </Alert>
-        )}
+        {/* Canva ao criar: checando app OAuth → spinner; com app → 1-clique; sem app → token manual. */}
+        {provider === "canva" && !isEdit && canvaConfigured === null ? (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 2 }}>
+            <CircularProgress size={16} />
+            <Typography variant="caption" color="text.secondary">Verificando integração do Canva…</Typography>
+          </Stack>
+        ) : canvaOAuthMode ? (
+          <Box>
+            <Alert severity="success" sx={{ mb: 2 }} icon={<InfoOutlinedIcon />}>
+              <Typography variant="caption">
+                App OAuth do Canva configurado. Conecte com 1 clique — você será levado ao Canva para autorizar
+                o acesso aos seus designs e voltará automaticamente ao portal.
+              </Typography>
+            </Alert>
+            <Button
+              variant="contained" fullWidth onClick={handleCanvaOAuth} disabled={oauthLoading}
+              // Fundo Canva escurecido + texto branco explícito para contraste AA (o cyan claro
+              // #00C4CC com texto branco herdado ficava ~2:1). Regra de ouro: texto claro → fundo escuro.
+              sx={{ bgcolor: "#008E95", color: "#fff", "&:hover": { bgcolor: "#00787E" } }}
+              startIcon={oauthLoading ? <CircularProgress size={14} color="inherit" /> : <span>🖌️</span>}
+            >
+              {oauthLoading ? "Redirecionando…" : "Conectar com Canva"}
+            </Button>
+          </Box>
+        ) : (
+          <>
+            {meta.note && (
+              <Alert severity="info" sx={{ mb: 2 }} icon={<InfoOutlinedIcon />}>
+                <Typography variant="caption">{meta.note}</Typography>
+              </Alert>
+            )}
 
-        <Stack spacing={1.5}>
-          {meta.fields.map((f) => (
-            <TextField
-              key={f.key}
-              label={f.label + (f.required ? " *" : "")}
-              placeholder={isEdit && slot?.provider === provider ? "(manter atual — deixe em branco)" : f.placeholder}
-              type={f.secret ? "password" : "text"}
-              size="small"
-              value={form[f.key] ?? ""}
-              onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
-              helperText={f.helperText ?? (isEdit ? "Deixe em branco para manter o valor atual" : undefined)}
-              fullWidth
-            />
-          ))}
-        </Stack>
+            <Stack spacing={1.5}>
+              {meta.fields.map((f) => (
+                <TextField
+                  key={f.key}
+                  label={f.label + (f.required ? " *" : "")}
+                  placeholder={isEdit && slot?.provider === provider ? "(manter atual — deixe em branco)" : f.placeholder}
+                  type={f.secret ? "password" : "text"}
+                  size="small"
+                  value={form[f.key] ?? ""}
+                  onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                  helperText={f.helperText ?? (isEdit ? "Deixe em branco para manter o valor atual" : undefined)}
+                  fullWidth
+                />
+              ))}
+            </Stack>
+          </>
+        )}
       </DialogContent>
 
       <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
-        <Button variant="outlined" onClick={onClose} disabled={saving}>Cancelar</Button>
-        <Button variant="contained" onClick={handleSave} disabled={saving}
-          startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <SaveIcon />}>
-          {saving ? "Salvando…" : "Salvar"}
-        </Button>
+        <Button variant="outlined" onClick={onClose} disabled={saving || oauthLoading}>Cancelar</Button>
+        {/* No modo OAuth 1-clique a ação é o botão "Conectar com Canva"; não há o que salvar.
+            Enquanto o config do Canva ainda carrega (só o spinner à mostra), também não há campo. */}
+        {!canvaOAuthMode && !(provider === "canva" && !isEdit && canvaConfigured === null) && (
+          <Button variant="contained" onClick={handleSave} disabled={saving}
+            startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <SaveIcon />}>
+            {saving ? "Salvando…" : "Salvar"}
+          </Button>
+        )}
       </DialogActions>
     </Dialog>
   );
@@ -273,6 +331,34 @@ function UiuxSettingsPageInner() {
   }, [tenantId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Retorno do callback OAuth do Canva: ?canva=connected|error[&reason=...]. Mostra feedback,
+  // limpa a query da URL (sem recarregar) e recarrega a lista quando conectou.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const canva = params.get("canva");
+    if (!canva) return;
+    const reason = params.get("reason");
+    const REASONS: Record<string, string> = {
+      denied: "Autorização cancelada no Canva.",
+      missing_params: "Retorno do Canva incompleto.",
+      not_configured: "App OAuth do Canva não configurado.",
+      invalid_state: "Sessão de autorização inválida ou já usada.",
+      expired_state: "Sessão de autorização expirada — tente novamente.",
+      slot_limit: "Máximo de conexões UI/UX atingido.",
+      exchange_failed: "Falha ao concluir a autorização com o Canva.",
+    };
+    if (canva === "connected") {
+      setGlobalMsg({ type: "success", text: "Canva conectado com sucesso." });
+      void load();
+    } else {
+      setGlobalMsg({ type: "error", text: (reason && REASONS[reason]) || "Não foi possível conectar o Canva." });
+    }
+    params.delete("canva"); params.delete("reason");
+    const qs = params.toString();
+    window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+  }, [load]);
 
   const handleDelete = async (slot: UiuxConnection) => {
     const displayName = slot.label ?? PROVIDER_META[slot.provider].label;

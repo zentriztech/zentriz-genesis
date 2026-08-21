@@ -1100,6 +1100,14 @@ export async function projectRoutes(app: FastifyInstance) {
     }));
     // Expiração híbrida pelo modo de entrega. demo → prazo + teardown (com consentimento).
     const expirationPolicy = deliveryMode === "demo" ? "ephemeral" : "permanent";
+    // Pré-seleção feita no envio da spec (Item 2): só devolve a conexão salva se ela ainda
+    // existir e for viável para a conexão ativa — evita pré-preencher com lixo (conexão removida).
+    const savedConnId = (extra.deploy_connection_id as string | undefined) ?? null;
+    const savedConn = savedConnId ? connections.find((c) => c.id === savedConnId) ?? null : null;
+    const savedFormat = (extra.deploy_format as DeployFormat | undefined) ?? null;
+    const deployTtlDays = Number.isFinite(Number(extra.deploy_ttl_days))
+      ? Math.min(Math.max(Math.round(Number(extra.deploy_ttl_days)), 1), 30)
+      : null;
     return reply.send({
       project_type: projectType,
       delivery_mode: deliveryMode,
@@ -1108,6 +1116,10 @@ export async function projectRoutes(app: FastifyInstance) {
       requires_teardown_consent: expirationPolicy === "ephemeral",
       default_ttl_days: 7,
       connections,
+      // Defaults salvos na spec p/ pré-preencher o cockpit (podem ser trocados na tela).
+      deploy_connection_id: savedConn ? savedConnId : null,
+      deploy_format: savedFormat && viable.includes(savedFormat) ? savedFormat : null,
+      deploy_ttl_days: deployTtlDays,
     });
   });
 
@@ -1207,6 +1219,90 @@ export async function projectRoutes(app: FastifyInstance) {
       [id],
     )).rows;
     return reply.send({ deployments: rows });
+  });
+
+  // PUT /api/projects/:id/deploy/prefs — troca as PREFERÊNCIAS de deploy do projeto:
+  //   • delivery_mode (Demo ↔ Produção): muda a política de expiração — permite tornar
+  //     PERMANENTE um projeto testado como demo (e vice-versa);
+  //   • conexão de cloud (default) e formato (default) que pré-preenchem o disparo.
+  // Ação de ESCRITA: a conta de gestão (master) só visualiza; exige pertencer ao tenant.
+  const VALID_DELIVERY_MODES = new Set(["demo", "production", "source_only", "publish"]);
+  app.put<{
+    Params: { id: string };
+    Body: { deliveryMode?: string; connectionId?: string; format?: string; ttlDays?: number };
+  }>("/api/projects/:id/deploy/prefs", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const body = (request.body ?? {}) as { deliveryMode?: string; connectionId?: string; format?: string; ttlDays?: number };
+
+    if (user.role === "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN_MASTER", message: "Conta de gestão não altera deploy — apenas visualiza." });
+    }
+    const row = (await pool.query(
+      "SELECT id, tenant_id, extra FROM projects WHERE id=$1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    if (row.tenant_id !== user.tenantId) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+
+    const extra = (row.extra as Record<string, unknown> | null) ?? {};
+    const projectType = (extra.project_type as string | undefined) ?? null;
+    const patch: Record<string, unknown> = {};
+
+    if (body.deliveryMode !== undefined) {
+      const dm = String(body.deliveryMode).trim();
+      if (!VALID_DELIVERY_MODES.has(dm)) {
+        return reply.status(400).send({ code: "INVALID_DELIVERY_MODE",
+          message: "Modo de entrega inválido.", details: { accepted: [...VALID_DELIVERY_MODES] } });
+      }
+      patch.delivery_mode = dm;
+    }
+
+    if (body.connectionId !== undefined && body.connectionId !== null && String(body.connectionId).trim() !== "") {
+      const connId = String(body.connectionId).trim();
+      const owned = await pool.query(
+        "SELECT 1 FROM tenant_cloud_connections WHERE id=$1 AND tenant_id=$2 AND status='active'",
+        [connId, row.tenant_id],
+      );
+      if (owned.rows.length === 0) {
+        return reply.status(404).send({ code: "CONNECTION_NOT_FOUND", message: "Conexão de cloud não encontrada." });
+      }
+      patch.deploy_connection_id = connId;
+    }
+
+    if (body.format !== undefined && body.format !== null && String(body.format).trim() !== "") {
+      const fmt = String(body.format).trim() as DeployFormat;
+      // Viabilidade é provider-agnóstica (os 3 provedores suportam a lista viável do tipo).
+      if (!viableFormatsForProjectType(projectType).includes(fmt)) {
+        return reply.status(400).send({ code: "INVALID_FORMAT",
+          message: "Formato de deploy não é viável para o tipo deste projeto.",
+          details: { project_type: projectType, viable: viableFormatsForProjectType(projectType) } });
+      }
+      patch.deploy_format = fmt;
+    }
+
+    if (body.ttlDays !== undefined && body.ttlDays !== null) {
+      const ttl = Math.round(Number(body.ttlDays));
+      if (!Number.isFinite(ttl) || ttl < 1 || ttl > 30) {
+        return reply.status(400).send({ code: "INVALID_TTL", message: "Prazo (dias) deve estar entre 1 e 30." });
+      }
+      patch.deploy_ttl_days = ttl;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return reply.status(400).send({ code: "NO_CHANGES", message: "Nenhuma preferência informada." });
+    }
+
+    // Merge atômico no jsonb (concat de topo mescla as chaves; COALESCE cobre extra NULL).
+    await pool.query(
+      "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $1::jsonb, updated_at = now() WHERE id = $2",
+      [JSON.stringify(patch), id],
+    );
+
+    const newMode = (patch.delivery_mode as string | undefined) ?? (extra.delivery_mode as string | undefined) ?? null;
+    const expirationPolicy = newMode === "demo" ? "ephemeral" : "permanent";
+    return reply.send({ ok: true, delivery_mode: newMode, expiration_policy: expirationPolicy });
   });
 
   // GET /api/projects/:id/run-info — retorna run_command e app_url do DevOps (para pós-aceite)
