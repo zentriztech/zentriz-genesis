@@ -12,6 +12,9 @@ import { renderMobileEasBundle } from "../services/provision/renderers/mobileEas
 import { renderMobileRncliBundle } from "../services/provision/renderers/mobileRncliRenderer.js";
 import { deployBackendCloud } from "../services/provision/deployBackendCloud.js";
 import { handleBackendCallback } from "../services/provision/backendCallback.js";
+import { listCloudConnections } from "../services/cloudConnector.js";
+import { startCloudDeploy } from "../services/provision/cloudDeploy.js";
+import { deployOptionsFor, viableFormatsForProjectType, type DeployFormat } from "../services/provision/deployTargets.js";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
@@ -1066,6 +1069,146 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── Item 2 (corrigido): deploy na nuvem do TENANT via pipeline GitHub ──────────
+  //
+  // GET /api/projects/:id/deploy/options — conexões de cloud do tenant + formatos VIÁVEIS
+  // por (tipo de projeto × nuvem) + política de expiração (híbrida pelo delivery_mode:
+  // demo = prazo + teardown; produção = permanente). Read-only (master pode visualizar).
+  const DEPLOY_FORMAT_SET = new Set<DeployFormat>(["container", "static", "vm", "serverless"]);
+
+  app.get<{ Params: { id: string } }>("/api/projects/:id/deploy/options", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const row = (await pool.query(
+      "SELECT id, tenant_id, created_by, status, extra FROM projects WHERE id=$1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    // Master (zentriz_admin) tem leitura; caso contrário exige pertencer ao tenant do projeto.
+    if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+    const extra = (row.extra as Record<string, unknown> | null) ?? {};
+    const projectType = (extra.project_type as string | undefined) ?? null;
+    const deliveryMode = (extra.delivery_mode as string | undefined) ?? null;
+    const viable = viableFormatsForProjectType(projectType);
+    const connections = (await listCloudConnections(row.tenant_id as string)).map((c) => ({
+      id: c.id,
+      provider: c.provider,
+      slotIndex: c.slotIndex,
+      label: c.label,
+      options: deployOptionsFor(projectType, c.provider),
+    }));
+    // Expiração híbrida pelo modo de entrega. demo → prazo + teardown (com consentimento).
+    const expirationPolicy = deliveryMode === "demo" ? "ephemeral" : "permanent";
+    return reply.send({
+      project_type: projectType,
+      delivery_mode: deliveryMode,
+      cloud_deployable: viable.length > 0,
+      expiration_policy: expirationPolicy,
+      requires_teardown_consent: expirationPolicy === "ephemeral",
+      default_ttl_days: 7,
+      connections,
+    });
+  });
+
+  // POST /api/projects/:id/deploy/cloud — dispara o deploy escolhido (conexão + formato +
+  // expiração). O GitHub EXECUTA; o worker MONITORA e AUTO-CURA até retornar OK.
+  app.post<{
+    Params: { id: string };
+    Body: { connectionId?: string; format?: string; ttlDays?: number; consentedTeardown?: boolean };
+  }>("/api/projects/:id/deploy/cloud", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const body = (request.body ?? {}) as { connectionId?: string; format?: string; ttlDays?: number; consentedTeardown?: boolean };
+
+    // "master só visualiza" (RFC-0002/Item 1): a conta de gestão não deploya na conta
+    // (paga) do tenant. Endpoint novo → estrito desde o início.
+    if (user.role === "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN_MASTER", message: "Conta de gestão não executa deploy — apenas visualiza." });
+    }
+
+    const row = (await pool.query(
+      "SELECT id, tenant_id, created_by, status, extra FROM projects WHERE id=$1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    // Ação de ESCRITA (deploy na conta paga do tenant): exige pertencer AO tenant do projeto.
+    // Não usamos o OR de created_by aqui — quem criou o projeto mas não é mais do tenant não
+    // pode disparar deploy/secrets na conta do ex-tenant.
+    if (row.tenant_id !== user.tenantId) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+    if (!["completed", "accepted"].includes(row.status as string)) {
+      return reply.status(409).send({ code: "PROJECT_NOT_READY",
+        message: "Deploy só disponível para projetos concluídos ou aceitos.", details: { current_status: row.status } });
+    }
+
+    const connectionId = (body.connectionId ?? "").trim();
+    if (!connectionId) return reply.status(400).send({ code: "CONNECTION_REQUIRED", message: "Escolha uma conexão de cloud." });
+    const format = (body.format ?? "").trim() as DeployFormat;
+    if (!DEPLOY_FORMAT_SET.has(format)) {
+      return reply.status(400).send({ code: "INVALID_FORMAT", message: "Formato de deploy inválido.", details: { accepted: [...DEPLOY_FORMAT_SET] } });
+    }
+
+    const extra = (row.extra as Record<string, unknown> | null) ?? {};
+    const deliveryMode = (extra.delivery_mode as string | undefined) ?? null;
+
+    // Expiração HÍBRIDA pelo modo de entrega:
+    //   demo → prazo (1-30d) + teardown automático, EXIGE consentimento (recursos na conta paga do tenant);
+    //   produção (ou qualquer outro) → permanente (nunca expira por idade; apagar seria destrutivo).
+    let expiresAt: Date | null = null;
+    let consentedTeardown = false;
+    if (deliveryMode === "demo") {
+      if (body.consentedTeardown !== true) {
+        return reply.status(400).send({ code: "CONSENT_REQUIRED",
+          message: "Deploy demo expira por prazo — confirme que autoriza o Genesis a remover os recursos da sua conta ao expirar.",
+          details: { field: "consentedTeardown", expected: true } });
+      }
+      const ttlDays = Math.min(Math.max(Number(body.ttlDays ?? 7), 1), 30);
+      expiresAt = new Date(Date.now() + ttlDays * 86_400_000);
+      consentedTeardown = true;
+    }
+
+    const result = await startCloudDeploy({
+      projectId: id, tenantId: row.tenant_id as string, userId: user.id,
+      connectionId, format, expiresAt, consentedTeardown,
+    });
+    if (!result.ok) {
+      const status = result.code === "REPO_REQUIRED" ? 409 :
+        result.code === "CONNECTION_NOT_FOUND" ? 404 :
+        result.code === "INVALID_FORMAT" ? 400 : 500;
+      return reply.status(status).send({ code: result.code, message: result.message });
+    }
+    return reply.status(202).send({
+      code: "CLOUD_DEPLOY_STARTED",
+      message: "Deploy iniciado. O GitHub Actions executa e o Genesis monitora até concluir.",
+      deployment_id: result.deploymentId,
+      provider: result.provider,
+      format: result.format,
+      branch: result.branch,
+      expires_at: expiresAt ? expiresAt.toISOString() : null,
+    });
+  });
+
+  // GET /api/projects/:id/deploy/cloud — histórico/estado dos deploys de nuvem do projeto.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/deploy/cloud", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const proj = (await pool.query(
+      "SELECT tenant_id, created_by FROM projects WHERE id=$1", [id],
+    )).rows[0];
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+    const rows = (await pool.query(
+      `SELECT id, provider, deploy_format, status, run_url, attempts, last_error,
+              expires_at, consented_teardown, created_at, updated_at
+         FROM cloud_deployments WHERE project_id=$1 ORDER BY created_at DESC LIMIT 20`,
+      [id],
+    )).rows;
+    return reply.send({ deployments: rows });
+  });
+
   // GET /api/projects/:id/run-info — retorna run_command e app_url do DevOps (para pós-aceite)
   app.get<{ Params: { id: string } }>("/api/projects/:id/run-info", async (request, reply) => {
     const user = getUser(request);
@@ -1627,14 +1770,16 @@ export async function projectRoutes(app: FastifyInstance) {
   //   consented=true é OBRIGATÓRIO (LGPD — projeto pode ter dados sensíveis).
   app.post<{
     Params: { id: string };
-    Body: { ttlMinutes?: number; ttlDays?: number; consented?: boolean };
+    Body: { ttlMinutes?: number; ttlDays?: number; consented?: boolean; permanent?: boolean };
   }>(
     "/api/projects/:id/deploy/ephemeral",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
-      const body = (request.body ?? {}) as { ttlMinutes?: number; ttlDays?: number; consented?: boolean };
-      const ttlDays = Math.min(body.ttlDays ?? 7, 30);
+      const body = (request.body ?? {}) as { ttlMinutes?: number; ttlDays?: number; consented?: boolean; permanent?: boolean };
+      // Item 2(b): deploy permanente (nunca expira por idade) OU prazo em dias (default 7, máx 30).
+      const permanent = body.permanent === true;
+      const ttlDays = permanent ? null : Math.min(Math.max(Number(body.ttlDays ?? 7), 1), 30);
       const ttlMinutes = Math.min(body.ttlMinutes ?? 30, 60);
       const consented = body.consented === true;
 
@@ -1793,7 +1938,7 @@ export async function projectRoutes(app: FastifyInstance) {
             const oldest = await rateClient.query<{ id: string }>(
               `SELECT id FROM ephemeral_deployments
                 WHERE tenant_id = $1 AND status IN ('provisioning','running','running_degraded')
-                ORDER BY created_at ASC
+                ORDER BY (expires_at IS NULL) ASC, created_at ASC
                 LIMIT $2`,
               [tenantId, evictCount],
             );

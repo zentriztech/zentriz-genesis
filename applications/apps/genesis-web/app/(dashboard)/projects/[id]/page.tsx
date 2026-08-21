@@ -42,6 +42,7 @@ import DeleteForeverIcon from "@mui/icons-material/DeleteForever";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import EditIcon from "@mui/icons-material/Edit";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -68,6 +69,7 @@ import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
 import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { authStore } from "@/stores/authStore";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
 
@@ -112,12 +114,33 @@ type RunInfoResp      = { runCommand: string | null; appUrl: string | null; star
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
 type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
 type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
-type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string | null; bucketName: string | null; status: string; expiresAt: string; ttlMinutes: number; errorMsg?: string | null } | null };
-type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string; ttlMinutes?: number; ttlDays?: number; status?: string; bucketName?: string; errorMsg?: string | null };
+type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string | null; bucketName: string | null; status: string; expiresAt: string | null; ttlMinutes: number; errorMsg?: string | null } | null };
+type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string | null; ttlMinutes?: number; ttlDays?: number | null; status?: string; bucketName?: string; errorMsg?: string | null };
 // GATE 1: status do provisionamento backend (ECS Fargate/RDS). Distinto do ephemeral (S3).
 type BackendDep        = { id: string; provider: string; runtimeTarget: string; klass: string; status: string; appUrl: string | null; errorMsg: string | null; createdAt: string; expiresAt: string | null };
 type BackendDeplResp   = { deployment: BackendDep | null };
 type DeployError       = { code: string; message: string; details?: Record<string, unknown> };
+// Item 2 (corrigido): deploy na nuvem do TENANT via pipeline GitHub. Escolha de
+// conexão de cloud + formato (viável por tipo de projeto × nuvem) + expiração
+// (híbrida pelo delivery_mode). O GitHub Actions EXECUTA; o Genesis monitora/cura.
+type CloudDeployFormat = "container" | "static" | "vm" | "serverless";
+type DeployOptionItem  = { format: CloudDeployFormat; label: string; recommended: boolean };
+type DeployConnItem    = { id: string; provider: string; slotIndex: number; label: string | null; options: DeployOptionItem[] };
+type DeployOptionsResp = {
+  project_type: string | null;
+  delivery_mode: string | null;
+  cloud_deployable: boolean;
+  expiration_policy: "ephemeral" | "permanent";
+  requires_teardown_consent: boolean;
+  default_ttl_days: number;
+  connections: DeployConnItem[];
+};
+type CloudDeploymentRow = {
+  id: string; provider: string; deploy_format: string; status: string;
+  run_url: string | null; attempts: number; last_error: string | null;
+  expires_at: string | null; consented_teardown: boolean;
+  created_at: string; updated_at: string;
+};
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -445,7 +468,6 @@ function ProjectDetailPageInner() {
   const [pushingToGitHub, setPushingToGitHub] = useState(false);
   const [ephemeral, setEphemeral]   = useState<EphemeralResult | null>(null);
   const [backendDep, setBackendDep] = useState<BackendDep | null>(null);
-  const [lgpdConsent, setLgpdConsent] = useState<boolean>(false); // FT-17
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
   const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null }> } | null>(null);
@@ -460,6 +482,17 @@ function ProjectDetailPageInner() {
   const [linkProductSaving, setLinkProductSaving] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
   const [deployError, setDeployError]     = useState<string | DeployError | null>(null);
+  // Item 2 (corrigido): estado do deploy na nuvem do tenant via GitHub.
+  //  - deployOptions: conexões de cloud + formatos viáveis + política de expiração (do backend).
+  //  - selectedConnId / selectedFormat: escolha do usuário (nuvem + tipo de deploy).
+  //  - cloudTtlDays / teardownConsent: só para demo (expiração por prazo + autorização de teardown).
+  //  - cloudDeployments: histórico/estado dos deploys (o worker monitora e auto-cura).
+  const [deployOptions, setDeployOptions]   = useState<DeployOptionsResp | null>(null);
+  const [selectedConnId, setSelectedConnId] = useState<string>("");
+  const [selectedFormat, setSelectedFormat] = useState<CloudDeployFormat | "">("");
+  const [cloudTtlDays, setCloudTtlDays]     = useState<number>(7);
+  const [teardownConsent, setTeardownConsent] = useState<boolean>(false);
+  const [cloudDeployments, setCloudDeployments] = useState<CloudDeploymentRow[]>([]);
   const [retryTeardownLoading, setRetryTeardownLoading] = useState(false); // BUGFIX P2
   const [countdown, setCountdown]   = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen]     = useState(false);
@@ -588,6 +621,14 @@ function ProjectDetailPageInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, project?.productId]);
 
+  // Assinaturas ESTÁVEIS (primitivos) para as deps do efeito abaixo. Depender dos objetos/arrays
+  // crus (githubRepo, cloudDeployments) causava loop: loadRepoAndDeploy() roda a cada execução do
+  // efeito e faz setGithubRepo(novo obj)/setCloudDeployments(novo array) → nova referência a cada
+  // fetch → o efeito re-executava imediatamente (tempestade de ~9 GETs por iteração, sem throttle).
+  // Só re-executamos quando algo RELEVANTE muda: repo passou a existir, ou um status de deploy mudou.
+  const hasRepo = !!githubRepo;
+  const cloudStatusSig = cloudDeployments.map((d) => d.status).join(",");
+
   useEffect(() => {
     if (!id || !project) return;
     const showsPostAccept =
@@ -621,6 +662,10 @@ function ProjectDetailPageInner() {
       apiGet<BackendDeplResp>(`/api/projects/${id}/deploy/backend/active`)
         .then((d) => setBackendDep(d.deployment))
         .catch(() => null);
+      // Item 2 (corrigido): estado dos deploys de nuvem do tenant (o worker monitora/cura).
+      apiGet<{ deployments: CloudDeploymentRow[] }>(`/api/projects/${id}/deploy/cloud`)
+        .then((d) => setCloudDeployments(Array.isArray(d.deployments) ? d.deployments : []))
+        .catch(() => null);
     };
     loadRepoAndDeploy();
 
@@ -633,6 +678,11 @@ function ProjectDetailPageInner() {
         .catch(() => setVersions([]));
       apiGet<import("@/types").ProjectLink[]>(`/api/projects/${id}/links`)
         .then(setLinks).catch(() => setLinks([]));
+      // Item 2 (corrigido): opções de deploy na nuvem do tenant (conexões + formatos viáveis
+      // por tipo de projeto × nuvem + política de expiração). Read-only inclusive p/ master.
+      apiGet<DeployOptionsResp>(`/api/projects/${id}/deploy/options`)
+        .then((d) => setDeployOptions(d))
+        .catch(() => setDeployOptions(null));
     }
 
     // Polling: enquanto o repo não existe OU o deploy está provisionando,
@@ -645,14 +695,30 @@ function ProjectDetailPageInner() {
     // real, então pollar a cada 5s era um loop infinito. Incluído nos terminais para parar o poll.
     const backendActive = !!backendDep && !["running", "running_degraded", "failed", "destroyed", "destroy_failed"].includes(backendDep.status);
     const cyborgActive = project.status === "pending_cyborg";
-    if (needsRepoPoll || needsDeployPoll || backendActive || cyborgActive) {
+    // Item 2 (corrigido): deploy de nuvem em fase não-terminal (o worker ainda vai mudar o estado).
+    // Terminais: failed / expired / torn_down. 'deployed' também é terminal para produção
+    // (permanente), MAS um demo 'deployed' JÁ VENCIDO ainda vai a tearing_down→torn_down pelo
+    // worker — mantemos o poll a partir do vencimento p/ mostrar o teardown ao vivo (sem custo
+    // no caso comum: expira ~30 dias à frente).
+    const nowMs = Date.now();
+    const cloudActive = cloudDeployments.some((d) => {
+      if (!["deployed", "failed", "expired", "torn_down"].includes(d.status)) return true;
+      if (d.status === "deployed" && d.expires_at) {
+        return new Date(d.expires_at).getTime() <= nowMs; // demo vencido → teardown iminente
+      }
+      return false;
+    });
+    if (needsRepoPoll || needsDeployPoll || backendActive || cyborgActive || cloudActive) {
       const t = setInterval(loadRepoAndDeploy, 5000);
       return () => clearInterval(t);
     }
-  }, [id, project?.status, githubRepo, ephemeral?.status, backendDep?.status]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, project?.status, hasRepo, ephemeral?.status, backendDep?.status, cloudStatusSig]);
 
   // Countdown timer for ephemeral deployment
   useEffect(() => {
+    // Item 2(b): deploy permanente não tem expiração — mostra "Permanente" em vez de contagem.
+    if (ephemeral && !ephemeral.expiresAt) { setCountdown("Permanente"); return; }
     if (!ephemeral?.expiresAt) return;
     const expiresMs = new Date(ephemeral.expiresAt).getTime();
     if (!Number.isFinite(expiresMs)) { setCountdown("—"); return; }
@@ -682,7 +748,15 @@ function ProjectDetailPageInner() {
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restartFromTask, setRestartFromTask]     = useState<string>("");
 
+  // Conta Master de Gestão (zentriz_admin) atuando dentro de um tenant: SÓ VISUALIZA.
+  // O backend só bloqueia autoria de spec (managementGuard); ações operacionais do cockpit
+  // (/run, /accept, /deploy, /stop, /reject, DELETE, /triggers, /links, /product, monitor)
+  // NÃO são bloqueadas por papel — então o read-only do master é garantido AQUI (front):
+  // guarda nos handlers + ocultação das CTAs de escrita. O watchdog usa seu próprio token.
+  const isMaster = authStore.isZentrizAdmin;
+
   const handleRun = async (fromTaskId?: string) => {
+    if (isMaster) return;
     setRunError(null); setRunLoading(true);
     try {
       // Se fromTaskId especificado, resetar tasks a partir daquela para ASSIGNED
@@ -708,6 +782,7 @@ function ProjectDetailPageInner() {
 
   // BUGFIX P2: re-tenta a remoção de um backend preso em 'destroy_failed' (não re-provisiona).
   const handleRetryTeardown = async () => {
+    if (isMaster) return;
     if (!backendDep) return;
     setRetryTeardownLoading(true);
     try {
@@ -740,6 +815,7 @@ function ProjectDetailPageInner() {
   }>({ open: false, title: "", message: "", action: async () => {} });
 
   const openConfirm = (title: string, message: string, action: () => Promise<void>, critical = false) => {
+    if (isMaster) return;
     setActionsAnchor(null);
     setConfirmDialog({ open: true, title, message, critical, action });
   };
@@ -795,6 +871,7 @@ function ProjectDetailPageInner() {
   );
 
   const handleOpenLinkDialog = async () => {
+    if (isMaster) return;
     try {
       const data = await apiGet<Array<{ id: string; title: string; status: string; project_type?: string }>>("/api/projects");
       setLinkableProjects((data ?? []).filter(p => p.id !== id));
@@ -806,6 +883,7 @@ function ProjectDetailPageInner() {
   };
 
   const handleCreateLink = async () => {
+    if (isMaster) return;
     if (!linkTargetId) { setLinkError("Selecione um projeto"); return; }
     setLinkSaving(true);
     setLinkError(null);
@@ -822,6 +900,7 @@ function ProjectDetailPageInner() {
   };
 
   const handleAccept = async () => {
+    if (isMaster) return;
     setAcceptLoading(true);
     setWorkingStepIndex(6);
     setWorkingMessage("Aceito");
@@ -836,6 +915,7 @@ function ProjectDetailPageInner() {
   };
 
   const handleEvolve = async () => {
+    if (isMaster) return;
     if (!evolveRequest.trim()) return;
     setEvolveLoading(true);
     try {
@@ -1066,8 +1146,17 @@ function ProjectDetailPageInner() {
         </Typography>
         <StatusChip status={project.status} model={currentModel} activeStep={activeStep} />
 
+        {/* Conta Master de Gestão: read-only. Vê o cockpit do tenant, mas sem CTAs de escrita. */}
+        {isMaster && (
+          <Tooltip title="Conta de gestão Zentriz — acesso somente de visualização a este tenant.">
+            <Chip size="small" variant="outlined" color="default" icon={<VisibilityOutlinedIcon sx={{ fontSize: "0.9rem !important" }} />}
+              label="Somente leitura" sx={{ fontWeight: 600 }} />
+          </Tooltip>
+        )}
+
         {/* FT-05: Botões de ação + menu Ações.
             BUGFIX P1: exclui pending_conversion (o /run FALHA sem .md — precisa converter antes). */}
+        {!isMaster && (<>
         {canRun && !isRunning && !isConverting && (
           <Button variant="contained" size="small"
             startIcon={project.status === "stopped" || project.status === "failed" ? <ReplayIcon /> : <PlayArrowIcon />}
@@ -1104,6 +1193,7 @@ function ProjectDetailPageInner() {
           <MenuItem onClick={handleDeleteKeepFiles} sx={{ color: "warning.main" }}><DeleteOutlineIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir e Manter Arquivos</MenuItem>
           <MenuItem onClick={handleDeleteAll} sx={{ color: "error.main" }}><DeleteForeverIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir Completamente</MenuItem>
         </Menu>
+        </>)}
         {/* Diálogo de confirmação */}
         <Dialog open={confirmDialog.open} onClose={() => setConfirmDialog(d => ({ ...d, open: false }))} maxWidth="xs" fullWidth>
           <DialogTitle>{confirmDialog.title}</DialogTitle>
@@ -1192,7 +1282,7 @@ function ProjectDetailPageInner() {
       {/* FT-02: Banner para projetos em spec_submitted — revisar spec antes de iniciar */}
       {isAwaitingStart && (
         <Alert severity="info" sx={{ mb: 2 }}
-          action={
+          action={!isMaster ? (
             <Stack direction="row" spacing={1}>
               <Button size="small" color="info" startIcon={<EditIcon />}
                 onClick={() => router.push(`/spec?editProjectId=${id}`)}>
@@ -1203,7 +1293,7 @@ function ProjectDetailPageInner() {
                 Iniciar Agora
               </Button>
             </Stack>
-          }>
+          ) : undefined}>
           <Typography variant="body2" fontWeight={500}>Spec enviada — aguardando início</Typography>
           <Typography variant="caption" color="text.secondary">
             Revise a spec antes de iniciar ou clique em Iniciar Agora.
@@ -1277,7 +1367,7 @@ function ProjectDetailPageInner() {
                 dpState?.active ? "Monitorando" : "Monitorar",
                 dpState?.active ? "success" : "primary",
               )}
-              {canDeploy && renderTab("deploy", <Box component="span" sx={{ fontSize: "0.95rem", lineHeight: 1 }}>☁️</Box>, "Deploy")}
+              {canDeploy && !isMaster && renderTab("deploy", <Box component="span" sx={{ fontSize: "0.95rem", lineHeight: 1 }}>☁️</Box>, "Deploy")}
             </Stack>
 
             {/* Detalhes GitHub / Rodar — expandem logo sob a barra */}
@@ -1345,8 +1435,8 @@ function ProjectDetailPageInner() {
             {/* Monitor Deadpool: SEMPRE montado (dirige o estado do botão via onState); visível só
                 quando a aba "monitor" está ativa. O card se auto-oculta se não houver licença/role. */}
             <Box sx={{ display: deliveryTab === "monitor" ? "block" : "none", mt: 1 }}>
-              <DeadpoolMonitorCard projectId={id} onState={setDpState} />
-              <DeadpoolPromotionApprovals projectId={id} />
+              <DeadpoolMonitorCard projectId={id} onState={setDpState} readOnly={isMaster} />
+              {!isMaster && <DeadpoolPromotionApprovals projectId={id} />}
             </Box>
           </Box>
         );
@@ -1363,11 +1453,11 @@ function ProjectDetailPageInner() {
           severity="error"
           icon={<span style={{ fontSize: "1.1rem" }}>🚫</span>}
           sx={{ mb: 2 }}
-          action={
+          action={!isMaster ? (
             <Button size="small" color="inherit" variant="outlined" onClick={() => handleAccept()}>
               Aceitar manualmente
             </Button>
-          }
+          ) : undefined}
         >
           <Typography variant="body2" fontWeight={600}>Cyborg esgotou 5 tentativas sem validar o projeto</Typography>
           <Typography variant="caption" color="text.secondary">
@@ -1437,7 +1527,7 @@ function ProjectDetailPageInner() {
       {(project.status === "accepted" || project.status === "blocked_cyborg") && githubRepo === null && (
         <Alert
           severity="warning" sx={{ mb: 2 }} icon={<GitHubIcon />}
-          action={
+          action={!isMaster ? (
             <Button
               size="small"
               variant="contained"
@@ -1463,7 +1553,7 @@ function ProjectDetailPageInner() {
             >
               {pushingToGitHub ? "Criando..." : "Criar Repositório"}
             </Button>
-          }
+          ) : undefined}
         >
           <Typography variant="body2" fontWeight={500}>
             Repositório GitHub não foi criado automaticamente
@@ -1498,7 +1588,7 @@ function ProjectDetailPageInner() {
                   Abrir app
                 </Button>
               )}
-              {ephemeral.status !== "failed" && (
+              {!isMaster && ephemeral.status !== "failed" && (
                 <Button size="small" color="error" variant="outlined"
                   onClick={async () => {
                     await apiPost(`/api/projects/${id}/deploy/ephemeral/${ephemeral.deploymentId}/destroy`, {}).catch(() => null);
@@ -1521,6 +1611,10 @@ function ProjectDetailPageInner() {
               <>⏳ Provisionando deploy S3…</>
             ) : ephemeral.status === "failed" ? (
               <>❌ Última tentativa de publicar no S3 falhou</>
+            ) : !ephemeral.expiresAt ? (
+              <>☁️ Deploy S3 ativo ·{" "}
+                <Box component="span" sx={{ fontFamily: "monospace", color: "success.main", fontWeight: 700 }}>permanente</Box>
+              </>
             ) : (
               <>☁️ Deploy S3 ativo · expira em{" "}
                 <Box component="span" sx={{ fontFamily: "monospace", color: "warning.main", fontWeight: 700 }}>{countdown}</Box>
@@ -1560,7 +1654,7 @@ function ProjectDetailPageInner() {
           severity={isUp ? "success" : (isFailed || isDestroyFailed) ? "error" : isDestroyed ? "success" : "info"}
           icon={isProgress ? <CircularProgress size={16} /> : undefined}
           sx={{ mb: 2 }}
-          action={isDestroyFailed ? (
+          action={isDestroyFailed && !isMaster ? (
             <Button size="small" color="inherit" variant="outlined" disabled={retryTeardownLoading}
               onClick={handleRetryTeardown}>
               {retryTeardownLoading ? "Removendo…" : "Re-tentar remoção"}
@@ -1604,58 +1698,54 @@ function ProjectDetailPageInner() {
         );
       })()}
 
-      {/* FT-17 / DM-T2: Cloud deploy — launch button (com LGPD consent)
-          Só aparece quando o projeto TEM repositório GitHub (githubRepo truthy) E o Cyborg já terminou.
-          O TEXTO e a AÇÃO se adaptam ao delivery_mode do projeto (o backend /deploy/ephemeral
-          já roteia certo — aqui só corrigimos o rótulo/aviso para não mostrar "S3 público" a um backend):
-            - backend/fullstack demo|production → provisiona ECS Fargate (+ Postgres), NÃO S3.
-            - web + source_only → baixa o kit IaC (.zip), não publica nada.
-            - web + publish/default → S3 static hosting (comportamento FT-17 original).
-          Renderiza sob a Barra de Entrega & Operação apenas quando a aba "Deploy" está ativa. */}
+      {/* ── Item 2 (corrigido): Deploy na nuvem do TENANT via pipeline GitHub ──────────
+          Escolha de (a) CONEXÃO de cloud do tenant (AWS/Azure/GCP de Configurações → Cloud),
+          (b) TIPO/FORMATO do deploy (viável por tipo de projeto × nuvem: Container/Static/VM/
+          Serverless) e (c) EXPIRAÇÃO (híbrida pelo delivery_mode: demo = prazo + teardown com
+          consentimento; produção = permanente). O GitHub Actions EXECUTA o deploy; o Genesis
+          EMPURRA e MONITORA — se o run falhar, corrige e re-dispara até retornar OK.
+          Renderiza só quando a aba "Deploy" está ativa (a barra já a esconde para o master). */}
       {deliveryTab === "deploy" && (() => {
-        const _pt = (project.projectType ?? "").toLowerCase();
-        const _isBackendDeploy = _pt.startsWith("backend") || _pt.startsWith("fullstack");
-        const _dmode = ((project.extra as Record<string, unknown> | null)?.delivery_mode as string | undefined ?? "").toLowerCase();
-        const _isSourceOnly = _dmode === "source_only";
-        const _isProduction = _dmode === "production";
-        // Rótulos por modo
-        const _deployKind = _isSourceOnly ? "source_only" : _isBackendDeploy ? "backend" : "s3";
-        const _consentText = _deployKind === "source_only"
-          ? "✓ Modo 'só código': o kit não provisiona nada — você recebe o repositório + arquivos de deploy (Docker/Terraform/k8s)."
-          : _deployKind === "backend"
-          ? (_isProduction
-              ? "⚠️ Marque para autorizar o provisionamento em PRODUÇÃO na conta AWS Zentriz (ECS Fargate + RDS gerenciado + HTTPS). Gera custo real."
-              : "⚠️ Marque para autorizar a Demo: ECS Fargate + Postgres na mesma task (efêmero, TTL 72h, sem RDS). Sem dados pessoais/segredos reais.")
-          : "⚠️ Marque aqui para autorizar: o app não contém dados pessoais reais nem segredos. O bucket S3 é público e indexável.";
-        const _consentDone = _deployKind === "source_only"
-          ? "✓ Kit pronto para baixar."
-          : _deployKind === "backend"
-          ? "✓ Autorizado — pode provisionar."
-          : "✓ Consentimento LGPD confirmado — pode publicar.";
-        const _btnLabel = _deployKind === "source_only"
-          ? "📦 Baixar kit de código"
-          : _deployKind === "backend"
-          ? (_isProduction ? "🚀 Provisionar Produção (RDS+Fargate)" : "🚀 Provisionar Demo (Fargate, 72h)")
-          : "🚀 Publicar no S3 (7 dias)";
-        const _footNote = _deployKind === "source_only"
-          ? "Kit source_only · Docker Compose + Terraform + Kubernetes + GitHub Actions · roda local ou na sua nuvem."
-          : _deployKind === "backend"
-          ? (_isProduction
-              ? "AWS ECS Fargate + RDS PostgreSQL · HTTPS em subdomínio Zentriz · Build a partir de dev do repo GitHub."
-              : "AWS ECS Fargate + Postgres sidecar · efêmero (TTL 72h, sem RDS) · Build a partir de dev do repo GitHub.")
-          : "AWS S3 static hosting · TTL 7 dias · URL pública HTTP · Build a partir de dev do repo GitHub.";
-        // Esconde o bloco de provisionar quando já há um deploy vivo/em andamento:
-        //  - S3 (ephemeral): esconde salvo se failed (permite retry).
-        //  - backend (backendDep): libera o re-provisionar SÓ quando não há infra viva:
-        //    'failed' (provisionamento abortado, varrido pelo teardown) e 'destroyed' (já removido).
-        //    BUGFIX P2: 'destroy_failed' CONTINUA bloqueando — re-provisionar aí deixaria os
-        //    recursos AWS antigos ÓRFÃOS (RDS/Fargate/ALB faturando). Nesse estado a ação correta
-        //    é "Re-tentar remoção" (no card acima), não provisionar de novo.
-        const _s3Blocks = ephemeral && ephemeral.status !== "failed";
-        const _backendBlocks = backendDep && !["failed", "destroyed"].includes(backendDep.status);
+        const PROVIDER_LABEL: Record<string, string> = { aws: "AWS", azure: "Azure", gcp: "Google Cloud" };
+        const STATUS_META: Record<string, { label: string; color: "default" | "info" | "success" | "error" | "warning" }> = {
+          pending:     { label: "Na fila",      color: "default" },
+          dispatching: { label: "Disparando",   color: "info" },
+          running:     { label: "Executando",   color: "info" },
+          deployed:    { label: "No ar",        color: "success" },
+          failed:      { label: "Falhou",       color: "error" },
+          expired:     { label: "Expirado",     color: "warning" },
+          tearing_down:{ label: "Removendo",    color: "warning" },
+          torn_down:   { label: "Removido",     color: "default" },
+        };
+        const conns = deployOptions?.connections ?? [];
+        // Resolução controlada sem efeito: cai para a 1ª conexão e o formato recomendado
+        // quando a escolha do usuário ainda não existe / não é válida para a conexão ativa.
+        const activeConnId = selectedConnId && conns.some((c) => c.id === selectedConnId)
+          ? selectedConnId : (conns[0]?.id ?? "");
+        const activeConn = conns.find((c) => c.id === activeConnId) ?? null;
+        const fmtOptions = activeConn?.options ?? [];
+        const activeFormat: CloudDeployFormat | "" =
+          selectedFormat && fmtOptions.some((o) => o.format === selectedFormat)
+            ? selectedFormat
+            : (fmtOptions.find((o) => o.recommended)?.format ?? fmtOptions[0]?.format ?? "");
+        const policy = deployOptions?.expiration_policy ?? "permanent";
+        const isDemo = policy === "ephemeral";
+        // Deploy de nuvem em fase não-terminal → não deixar disparar outro em paralelo.
+        const activeCloud = cloudDeployments.find(
+          (d) => !["deployed", "failed", "expired", "torn_down"].includes(d.status),
+        );
+        const canSubmit =
+          !deployLoading && !!githubRepo && !!activeConnId && !!activeFormat &&
+          !activeCloud && (!isDemo || teardownConsent);
         return (
-      (project.status === "accepted" || project.status === "completed") && githubRepo && !_s3Blocks && !_backendBlocks && (
-        <Box sx={{ mb: 2 }}>
+      !isMaster && (project.status === "accepted" || project.status === "completed") && githubRepo && (
+        <Box sx={{ mb: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 1, bgcolor: "background.paper" }}>
+          <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>☁️ Deploy na sua nuvem (via GitHub)</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+            O GitHub Actions executa o deploy no repositório do projeto (branch <code>dev</code>) usando a
+            conexão de cloud escolhida. O Genesis monitora o run e, se falhar, corrige e reenvia até concluir.
+          </Typography>
+
           {deployError && (
             <Alert severity="error" sx={{ mb: 1 }} onClose={() => setDeployError(null)}>
               <Typography variant="body2" fontWeight={600}>
@@ -1671,82 +1761,187 @@ function ProjectDetailPageInner() {
               )}
             </Alert>
           )}
-          <Box
-            component="label"
-            htmlFor="lgpd-consent"
-            sx={{
-              display: "flex", alignItems: "center", gap: 1,
-              mb: 1, p: 1, borderRadius: 1, cursor: "pointer",
-              bgcolor: lgpdConsent ? "success.main" : "warning.light",
-              color: lgpdConsent ? "success.contrastText" : "warning.contrastText",
-              border: (t) => `1px solid ${lgpdConsent ? t.palette.success.dark : t.palette.warning.dark}`,
-              transition: "background-color .15s ease-in-out",
-              "&:hover": { opacity: 0.95 },
-            }}
-          >
-            <Checkbox
-              id="lgpd-consent"
-              checked={lgpdConsent}
-              onChange={(e) => setLgpdConsent(e.target.checked)}
-              sx={{ p: 0.5, color: "inherit", "&.Mui-checked": { color: "inherit" } }}
-            />
-            <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
-              {lgpdConsent ? _consentDone : _consentText}
-            </Typography>
-          </Box>
-          <Button
-            variant="outlined" size="small"
-            disabled={deployLoading || !lgpdConsent || !githubRepo}
-            startIcon={deployLoading ? <CircularProgress size={14} /> : <Box sx={{ fontSize: "0.9rem" }}>☁️</Box>}
-            onClick={async () => {
-              setDeployLoading(true); setDeployError(null);
-              try {
-                const result = await apiPost<EphemeralResult & { code?: string; kit_download_url?: string }>(
-                  `/api/projects/${id}/deploy/ephemeral`, { ttlDays: 7, consented: true },
-                );
-                // DM-T8b: modo 'só código' → baixa o kit de provisionamento (zip), não é deploy.
-                // Fetch autenticado (Bearer no header) + download via blob — window.open não
-                // levaria o token e daria 403.
-                if (result && (result as { code?: string }).code === "SOURCE_ONLY_KIT_READY") {
-                  const token = localStorage.getItem("genesis_token");
-                  const resp = await fetch(`/api/projects/${id}/deploy/source-kit`, {
-                    headers: token ? { Authorization: `Bearer ${token}` } : {},
-                    credentials: "include",
-                  });
-                  if (!resp.ok) throw new Error(`Falha ao gerar o kit (${resp.status})`);
-                  const blob = await resp.blob();
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url; a.download = `genesis-deploy-kit-${id.slice(0, 8)}.zip`;
-                  document.body.appendChild(a); a.click(); a.remove();
-                  URL.revokeObjectURL(url);
-                } else {
-                  setEphemeral(result);
-                }
-              } catch (e) {
-                // Erro do apiPost pode vir com body estruturado
-                const msg = e instanceof Error ? e.message : "Falha ao provisionar deploy";
-                try {
-                  const parsed = JSON.parse(msg) as DeployError;
-                  if (parsed && typeof parsed === "object" && "code" in parsed) {
-                    setDeployError(parsed);
-                  } else {
-                    setDeployError(msg);
+
+          {/* Sem conexões OU tipo de projeto sem formato viável → orientar o usuário. */}
+          {!deployOptions ? (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 1 }}>
+              <CircularProgress size={16} /><Typography variant="caption" color="text.secondary">Carregando opções de deploy…</Typography>
+            </Stack>
+          ) : conns.length === 0 ? (
+            <Alert severity="info"
+              action={<Button size="small" color="inherit" onClick={() => router.push("/settings/cloud")}>Configurar</Button>}>
+              Nenhuma conexão de cloud configurada. Adicione uma em <b>Configurações → Cloud</b> para publicar na sua nuvem.
+            </Alert>
+          ) : !deployOptions.cloud_deployable ? (
+            <Alert severity="info">
+              O tipo deste projeto{deployOptions.project_type ? ` (${PROJECT_TYPE_LABELS[deployOptions.project_type] ?? deployOptions.project_type})` : ""} não
+              tem um formato de deploy automatizado nesta versão (ex.: apps mobile publicam nas lojas; libs se distribuem por registry).
+            </Alert>
+          ) : (
+            <>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
+                {/* (a) Conexão de cloud do tenant */}
+                <FormControl size="small" fullWidth>
+                  <InputLabel id="deploy-conn-label">Nuvem (conexão)</InputLabel>
+                  <Select
+                    labelId="deploy-conn-label" label="Nuvem (conexão)"
+                    value={activeConnId}
+                    onChange={(e) => { setSelectedConnId(String(e.target.value)); setSelectedFormat(""); }}
+                    disabled={deployLoading}
+                  >
+                    {conns.map((c) => (
+                      <MenuItem key={c.id} value={c.id}>
+                        {PROVIDER_LABEL[c.provider] ?? c.provider}
+                        {c.label ? ` · ${c.label}` : ` · slot ${c.slotIndex}`}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                {/* (b) Tipo/formato do deploy — viável por tipo de projeto × nuvem */}
+                <FormControl size="small" fullWidth disabled={deployLoading || fmtOptions.length === 0}>
+                  <InputLabel id="deploy-fmt-label">Tipo de deploy</InputLabel>
+                  <Select
+                    labelId="deploy-fmt-label" label="Tipo de deploy"
+                    value={activeFormat}
+                    onChange={(e) => setSelectedFormat(e.target.value as CloudDeployFormat)}
+                  >
+                    {fmtOptions.map((o) => (
+                      <MenuItem key={o.format} value={o.format}>
+                        {o.label}{o.recommended ? " · recomendado" : ""}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Stack>
+
+              {/* (c) Expiração — híbrida pelo modo de entrega */}
+              {isDemo ? (
+                <Box sx={{ mb: 1 }}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+                    <TextField
+                      size="small" type="number" label="Expira em (dias, 1–30)"
+                      value={cloudTtlDays}
+                      onChange={(e) => setCloudTtlDays(Math.min(Math.max(Math.round(Number(e.target.value) || 0), 1), 30))}
+                      inputProps={{ min: 1, max: 30, step: 1 }}
+                      disabled={deployLoading}
+                      sx={{ width: { xs: "100%", sm: 200 } }}
+                    />
+                    <Typography variant="caption" color="text.secondary">
+                      Deploy de <b>demonstração</b>: expira por prazo e é removido automaticamente da sua conta.
+                    </Typography>
+                  </Stack>
+                  <Box
+                    component="label" htmlFor="teardown-consent"
+                    sx={{
+                      display: "flex", alignItems: "center", gap: 1, mt: 1, p: 1, borderRadius: 1, cursor: "pointer",
+                      bgcolor: teardownConsent ? "success.main" : "warning.light",
+                      color: teardownConsent ? "success.contrastText" : "warning.contrastText",
+                      border: (t) => `1px solid ${teardownConsent ? t.palette.success.dark : t.palette.warning.dark}`,
+                    }}
+                  >
+                    <Checkbox id="teardown-consent" checked={teardownConsent}
+                      onChange={(e) => setTeardownConsent(e.target.checked)}
+                      sx={{ p: 0.5, color: "inherit", "&.Mui-checked": { color: "inherit" } }} />
+                    <Typography variant="body2" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
+                      {teardownConsent
+                        ? "✓ Autorizo o Genesis a remover os recursos desta demo ao expirar."
+                        : "⚠️ Autorizo o Genesis a remover automaticamente os recursos criados na minha conta ao fim do prazo."}
+                    </Typography>
+                  </Box>
+                </Box>
+              ) : (
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                  <Chip size="small" color="success" variant="outlined" label="Permanente" sx={{ fontWeight: 600 }} />
+                  <Typography variant="caption" color="text.secondary">
+                    Deploy de <b>produção</b>: não expira por prazo (remover seria destrutivo).
+                  </Typography>
+                </Stack>
+              )}
+
+              {activeCloud && (
+                <Alert severity="info" sx={{ mb: 1 }}>
+                  Já há um deploy em andamento ({STATUS_META[activeCloud.status]?.label ?? activeCloud.status}).
+                  Aguarde concluir antes de disparar outro.
+                </Alert>
+              )}
+
+              <Button
+                variant="contained" size="small"
+                disabled={!canSubmit}
+                startIcon={deployLoading ? <CircularProgress size={14} color="inherit" /> : <Box component="span" sx={{ fontSize: "0.9rem", lineHeight: 1 }}>🚀</Box>}
+                onClick={async () => {
+                  setDeployLoading(true); setDeployError(null);
+                  try {
+                    const body: { connectionId: string; format: string; ttlDays?: number; consentedTeardown?: boolean } = {
+                      connectionId: activeConnId, format: activeFormat as string,
+                    };
+                    if (isDemo) { body.ttlDays = cloudTtlDays; body.consentedTeardown = teardownConsent; }
+                    await apiPost(`/api/projects/${id}/deploy/cloud`, body);
+                    // Reflete o novo estado sem esperar o poll (o worker assume a partir daqui).
+                    const d = await apiGet<{ deployments: CloudDeploymentRow[] }>(`/api/projects/${id}/deploy/cloud`).catch(() => null);
+                    if (d) setCloudDeployments(Array.isArray(d.deployments) ? d.deployments : []);
+                  } catch (e) {
+                    const msg = e instanceof Error ? e.message : "Falha ao iniciar deploy";
+                    try {
+                      const parsed = JSON.parse(msg) as DeployError;
+                      setDeployError(parsed && typeof parsed === "object" && "code" in parsed ? parsed : msg);
+                    } catch { setDeployError(msg); }
+                  } finally {
+                    setDeployLoading(false);
                   }
-                } catch {
-                  setDeployError(msg);
-                }
-              } finally {
-                setDeployLoading(false);
-              }
-            }}
-            sx={{ borderStyle: "dashed" }}
-          >
-            {deployLoading ? "Provisionando…" : _btnLabel}
-          </Button>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, fontSize: "0.65rem" }}>
-            {_footNote}
-          </Typography>
+                }}
+              >
+                {deployLoading ? "Iniciando…" : "Disparar deploy via GitHub"}
+              </Button>
+            </>
+          )}
+
+          {/* Histórico/estado dos deploys de nuvem (o worker monitora e auto-cura). */}
+          {cloudDeployments.length > 0 && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.06em", fontSize: "0.6rem" }}>
+                Deploys na nuvem
+              </Typography>
+              <Stack spacing={0.75} sx={{ mt: 0.75 }}>
+                {cloudDeployments.map((d) => {
+                  const meta = STATUS_META[d.status] ?? { label: d.status, color: "default" as const };
+                  return (
+                    <Box key={d.id} sx={{ p: 1, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Chip size="small" label={meta.label} color={meta.color} sx={{ fontWeight: 600, height: 20 }} />
+                        <Typography variant="caption" fontWeight={600}>
+                          {PROVIDER_LABEL[d.provider] ?? d.provider} · {d.deploy_format}
+                        </Typography>
+                        {d.expires_at ? (
+                          <Chip size="small" variant="outlined" label={`expira ${fmtTime(d.expires_at)}`} sx={{ height: 20, fontSize: "0.62rem" }} />
+                        ) : (
+                          <Chip size="small" variant="outlined" label="permanente" sx={{ height: 20, fontSize: "0.62rem" }} />
+                        )}
+                        {d.attempts > 1 && (
+                          <Tooltip title="Tentativas de disparo (auto-cura do Genesis)">
+                            <Chip size="small" variant="outlined" color="warning" label={`${d.attempts}×`} sx={{ height: 20, fontSize: "0.62rem" }} />
+                          </Tooltip>
+                        )}
+                        <Box sx={{ flexGrow: 1 }} />
+                        {d.run_url && (
+                          <Button size="small" endIcon={<OpenInNewIcon sx={{ fontSize: "0.9rem !important" }} />}
+                            href={d.run_url} target="_blank" rel="noopener noreferrer" component="a"
+                            sx={{ fontSize: "0.7rem", py: 0.2 }}>
+                            Ver run
+                          </Button>
+                        )}
+                      </Stack>
+                      {d.status === "failed" && d.last_error && (
+                        <Box component="pre" sx={{ mt: 0.75, fontSize: "0.68rem", opacity: 0.85, maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", m: 0 }}>
+                          {String(d.last_error).slice(0, 600)}
+                        </Box>
+                      )}
+                    </Box>
+                  );
+                })}
+              </Stack>
+            </Box>
+          )}
         </Box>
       )
         );
@@ -2024,7 +2219,7 @@ function ProjectDetailPageInner() {
                       sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                       Versões do produto
                     </Typography>
-                    {isDone && (
+                    {isDone && !isMaster && (
                       <Tooltip title="Nova versão — enviar nova spec">
                         <Button size="small" startIcon={<PlayArrowIcon sx={{ fontSize: "0.8rem !important" }} />}
                           onClick={() => router.push(`/spec?parentProjectId=${id}&parentTitle=${encodeURIComponent(project.title ?? "")}`)}
@@ -2091,7 +2286,7 @@ function ProjectDetailPageInner() {
                     🧩 Produto
                   </Typography>
                   <Stack direction="row" alignItems="center" spacing={0.25}>
-                    {!product && (
+                    {!isMaster && !product && (
                       <Tooltip title="Associar a um produto">
                         <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
                           apiGet<Array<{ id: string; name: string }>>("/api/products").then(setAllProducts).catch(() => {});
@@ -2114,6 +2309,7 @@ function ProjectDetailPageInner() {
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1 }}>
                       <Chip size="small" label={product.name}
                         sx={{ fontSize: "0.72rem", fontWeight: 600, bgcolor: "primary.main" + "22", color: "primary.main" }} />
+                      {!isMaster && (
                       <Tooltip title="Desvincular do produto">
                         <IconButton size="small" sx={{ p: 0.1 }} onClick={async () => {
                           await apiPatch(`/api/projects/${id}/product`, { productId: null });
@@ -2123,6 +2319,7 @@ function ProjectDetailPageInner() {
                           <DeleteOutlineIcon sx={{ fontSize: "0.75rem", color: "text.disabled" }} />
                         </IconButton>
                       </Tooltip>
+                      )}
                     </Stack>
 
                     {/* Projetos do produto — scroll quando muitos (evita esticar o card) */}
@@ -2181,6 +2378,7 @@ function ProjectDetailPageInner() {
                     sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                     ⚡ Gatilhos
                   </Typography>
+                  {!isMaster && (
                   <Tooltip title="Adicionar gatilho">
                     <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
                       if (product?.projects) setTriggerDialogOpen(true);
@@ -2189,6 +2387,7 @@ function ProjectDetailPageInner() {
                       <BoltIcon sx={{ fontSize: "0.85rem" }} />
                     </IconButton>
                   </Tooltip>
+                  )}
                 </Stack>
                 {triggers.length === 0 ? (
                   <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.68rem" }}>
@@ -2204,6 +2403,7 @@ function ProjectDetailPageInner() {
                         </Typography>
                         <Chip size="small" label={t.trigger_status}
                           sx={{ height: 14, fontSize: "0.55rem", bgcolor: "warning.main" + "22", color: "warning.main" }} />
+                        {!isMaster && (
                         <Tooltip title="Remover gatilho">
                           <IconButton size="small" sx={{ p: 0.1 }} onClick={async () => {
                             await apiDelete(`/api/projects/${id}/triggers/${t.id}`);
@@ -2212,6 +2412,7 @@ function ProjectDetailPageInner() {
                             <DeleteOutlineIcon sx={{ fontSize: "0.7rem", color: "text.disabled" }} />
                           </IconButton>
                         </Tooltip>
+                        )}
                       </Box>
                     ))}
                   </Stack>
@@ -2235,6 +2436,7 @@ function ProjectDetailPageInner() {
                 <Button onClick={() => setProductDialogOpen(false)}>Cancelar</Button>
                 <Button variant="contained" disabled={!linkProductId || linkProductSaving}
                   onClick={async () => {
+                    if (isMaster) return; // Conta de gestão: somente leitura
                     setLinkProductSaving(true);
                     try {
                       await apiPatch(`/api/projects/${id}/product`, { productId: linkProductId });
@@ -2286,6 +2488,7 @@ function ProjectDetailPageInner() {
                 <Button onClick={() => setTriggerDialogOpen(false)}>Cancelar</Button>
                 <Button variant="contained" disabled={!triggerProjectId || triggerSaving}
                   onClick={async () => {
+                    if (isMaster) return; // Conta de gestão: somente leitura
                     setTriggerSaving(true);
                     try {
                       const res = await apiPost<{ id: string; trigger_project_id: string; trigger_status: string }>(
@@ -2359,10 +2562,12 @@ function ProjectDetailPageInner() {
                     sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.6rem" }}>
                     🔗 Projetos relacionados
                   </Typography>
+                  {!isMaster && (
                   <Button size="small" variant="outlined" onClick={handleOpenLinkDialog}
                     sx={{ fontSize: "0.6rem", py: 0.25, px: 0.75, minWidth: 0, lineHeight: 1.4, borderRadius: 1 }}>
                     + Ligar
                   </Button>
+                  )}
                 </Stack>
                 {links.length > 0 ? (
                   <Stack spacing={0.75}>

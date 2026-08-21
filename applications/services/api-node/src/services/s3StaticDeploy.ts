@@ -18,8 +18,9 @@ export interface S3StaticDeployResult {
   provider: "s3-static";
   status: "provisioning";
   bucketName: string;
-  ttlDays: number;
-  expiresAt: string;
+  // Item 2(b): ttlDays null + expiresAt null = deploy permanente (nunca expira por idade).
+  ttlDays: number | null;
+  expiresAt: string | null;
 }
 
 export interface S3StaticDeployReject {
@@ -37,7 +38,8 @@ export interface DeployRequest {
   projectId: string;
   tenantId: string;
   consentedByUserId: string;
-  ttlDays?: number;
+  // null = permanente (nunca expira por idade). undefined = usa default do ambiente/7d.
+  ttlDays?: number | null;
 }
 
 const FTS_URL = () => (process.env.FULL_TEST_SERVER_URL ?? "http://host.docker.internal:7878").trim();
@@ -49,7 +51,11 @@ const HOST_PROJECT_FILES_ROOT = () => (process.env.HOST_PROJECT_FILES_ROOT ?? "/
  * Retorna 202 imediato — o build é assíncrono.
  */
 export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeployOutcome> {
-  const ttlDays = Math.min(Number(req.ttlDays ?? process.env.S3_STATIC_TTL_DAYS ?? "7"), 30);
+  // Item 2(b): req.ttlDays === null → permanente. undefined → default. Número → prazo em dias.
+  const permanent = req.ttlDays === null;
+  const ttlDays = permanent
+    ? null
+    : Math.min(Number(req.ttlDays ?? process.env.S3_STATIC_TTL_DAYS ?? "7"), 30);
 
   if (!isS3Configured()) {
     return {
@@ -129,7 +135,7 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
 
   try {
     // Idempotência: já existe deployment ativo?
-    const existing = await client.query<{ id: string; bucket_name: string | null; app_url: string | null; expires_at: Date }>(
+    const existing = await client.query<{ id: string; bucket_name: string | null; app_url: string | null; expires_at: Date | null }>(
       `SELECT id, bucket_name, app_url, expires_at
          FROM ephemeral_deployments
         WHERE project_id = $1
@@ -147,13 +153,14 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
           status: "provisioning",
           bucketName: row.bucket_name ?? "",
           ttlDays,
-          expiresAt: row.expires_at.toISOString(),
+          expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
         },
       };
     }
 
     bucketName = generateBucketName(req.projectId);
-    const expiresAt = new Date(Date.now() + ttlDays * 86400_000);
+    // Permanente → expires_at NULL (não expira). Caso contrário, agora + ttlDays.
+    const expiresAt = permanent ? null : new Date(Date.now() + (ttlDays as number) * 86400_000);
 
     // FT-18 fix (2026-07-03): quando Cyborg V2/V3 chama este endpoint via GENESIS_API_TOKEN
     // (JWT de serviço), o `user.id` no controller é a string "runner-service" (não UUID).
@@ -174,9 +181,9 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
       [
         req.projectId,
         req.tenantId,
-        ttlDays * 24 * 60, // ttl_minutes para retrocompat
-        ttlDays,
-        expiresAt,
+        permanent ? 0 : (ttlDays as number) * 24 * 60, // ttl_minutes para retrocompat (0 = permanente)
+        ttlDays,       // null = permanente
+        expiresAt,     // null = permanente
         bucketName,
         detection.type,
         consentedByValue,
@@ -223,7 +230,8 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     deployment_id: deploymentId,
     bucket_name: bucketName,
     deployment_type: detection.type,
-    ttl_days: ttlDays,
+    // Item 2(b): 0 = PERMANENTE (o host s3_deploy_runner.py pula a regra de lifecycle/TTL).
+    ttl_days: permanent ? 0 : ttlDays,
     warnings: detection.warnings,
     // FT-17: fonte do build = clone do repo GitHub
     git_clone_url: cloneUrl,
@@ -277,7 +285,7 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
       status: "provisioning",
       bucketName,
       ttlDays,
-      expiresAt: new Date(Date.now() + ttlDays * 86400_000).toISOString(),
+      expiresAt: permanent ? null : new Date(Date.now() + (ttlDays as number) * 86400_000).toISOString(),
     },
   };
 }

@@ -41,6 +41,7 @@ import SearchIcon from "@mui/icons-material/Search";
 import SearchOffIcon from "@mui/icons-material/SearchOff";
 import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
+import { authStore } from "@/stores/authStore";
 
 interface SpecItem {
   id: string;
@@ -125,6 +126,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
 
   // Master: escopa a listagem pelo tenant selecionado no topo (null = todos).
   const scopeTenantId = tenantScopeStore.selectedTenantId;
+  // Conta de gestão (zentriz_admin) só VISUALIZA specs do tenant — sem CTAs de escrita
+  // (o backend também bloqueia a autoria via 403 — managementGuard.ts).
+  const isMaster = authStore.isZentrizAdmin;
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -179,11 +183,15 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
       {specs.length === 0 ? (
         <Box sx={{ textAlign: "center", py: 6 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Nenhuma SPEC ainda. Crie uma ideia do zero ou parta de um template do catálogo.
+            {isMaster
+              ? "Este tenant ainda não possui SPECs."
+              : "Nenhuma SPEC ainda. Crie uma ideia do zero ou parta de um template do catálogo."}
           </Typography>
-          <Button variant="contained" startIcon={<AddCircleOutlineIcon />} onClick={() => router.push("/spec")}>
-            Nova SPEC
-          </Button>
+          {!isMaster && (
+            <Button variant="contained" startIcon={<AddCircleOutlineIcon />} onClick={() => router.push("/spec")}>
+              Nova SPEC
+            </Button>
+          )}
         </Box>
       ) : (
         <Stack spacing={1.5}>
@@ -205,21 +213,23 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                       Atualizada em {formatDate(s.updated_at)}
                     </Typography>
                   </Box>
-                  <Stack direction="row" spacing={1}>
-                    <Button size="small" variant="outlined" startIcon={<EditIcon sx={{ fontSize: "0.9rem" }} />}
-                      disabled={busy} onClick={() => router.push(`/spec?editProjectId=${s.id}`)}>
-                      Editar
-                    </Button>
-                    <Button size="small" variant="outlined" startIcon={<LinkIcon sx={{ fontSize: "0.9rem" }} />}
-                      disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
-                      Vincular a produto
-                    </Button>
-                    <Button size="small" variant="contained" color="success"
-                      startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon sx={{ fontSize: "0.9rem" }} />}
-                      disabled={busy} onClick={() => promote(s.id)}>
-                      Promover a projeto
-                    </Button>
-                  </Stack>
+                  {!isMaster && (
+                    <Stack direction="row" spacing={1}>
+                      <Button size="small" variant="outlined" startIcon={<EditIcon sx={{ fontSize: "0.9rem" }} />}
+                        disabled={busy} onClick={() => router.push(`/spec?editProjectId=${s.id}`)}>
+                        Editar
+                      </Button>
+                      <Button size="small" variant="outlined" startIcon={<LinkIcon sx={{ fontSize: "0.9rem" }} />}
+                        disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
+                        Vincular a produto
+                      </Button>
+                      <Button size="small" variant="contained" color="success"
+                        startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon sx={{ fontSize: "0.9rem" }} />}
+                        disabled={busy} onClick={() => promote(s.id)}>
+                        Promover a projeto
+                      </Button>
+                    </Stack>
+                  )}
                 </Box>
               </Card>
             );
@@ -290,6 +300,8 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
   const [category, setCategory] = useState<string>("");
   const [query, setQuery] = useState("");
   const [usingSlug, setUsingSlug] = useState<string | null>(null);
+  // Conta de gestão só navega o catálogo (visualização); "Usar" é autoria (403 no backend).
+  const isMaster = authStore.isZentrizAdmin;
 
   useEffect(() => {
     setLoading(true);
@@ -455,13 +467,15 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
                     </Stack>
                   )}
                 </CardContent>
-                <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
-                  <Button size="small" variant="contained" fullWidth
-                    startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
-                    disabled={!!usingSlug} onClick={() => use(it.slug)}>
-                    {busy ? "Criando…" : "Usar este modelo"}
-                  </Button>
-                </Box>
+                {!isMaster && (
+                  <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
+                    <Button size="small" variant="contained" fullWidth
+                      startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
+                      disabled={!!usingSlug} onClick={() => use(it.slug)}>
+                      {busy ? "Criando…" : "Usar este modelo"}
+                    </Button>
+                  </Box>
+                )}
               </Card>
             );
           })}

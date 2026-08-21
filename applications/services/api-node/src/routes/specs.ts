@@ -7,6 +7,8 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
+import { decryptCredentials } from "../services/crypto.js";
+import { extractUiuxSpec, type UiuxProvider, type UiuxCredentials } from "../services/uiuxExtract.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -529,6 +531,10 @@ export async function specRoutes(app: FastifyInstance) {
     let isDraft = false;
     // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
     const deliveryFields: Record<string, string> = {};
+    // Item 3: conexão de Ferramenta UI/UX escolhida no form + projetos da conta. Quando
+    // presentes, o Genesis extrai a estrutura de design e gera um arquivo de spec UI/UX.
+    let uiuxConnectionId: string | null = null;
+    const uiuxProjectIds: string[] = [];
     const files: { filename: string; buffer: Buffer; mimeType: string }[] = [];
     // Em @fastify/multipart v8, req.file() retorna apenas partes do tipo FILE; campos como "title"
     // vêm em part.fields (objeto acumulado pelo busboy). Cada part retornado é MultipartFile com .fields.
@@ -618,6 +624,26 @@ export async function specRoutes(app: FastifyInstance) {
           if (raw) deliveryFields[key] = raw;
         }
       }
+      // Item 3: id da conexão UI/UX + projetos escolhidos (multi-valor: repetido ou CSV).
+      if (part.fields?.uiuxConnectionId !== undefined) {
+        const f = part.fields.uiuxConnectionId;
+        const v = Array.isArray(f) ? f[0] : f;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim() : "";
+        if (raw && UUID_RE.test(raw)) uiuxConnectionId = raw;
+      }
+      if (part.fields?.uiuxProjectIds !== undefined) {
+        const f = part.fields.uiuxProjectIds;
+        const arr = Array.isArray(f) ? f : [f];
+        for (const entry of arr) {
+          const raw = entry && typeof (entry as { value?: string }).value === "string"
+            ? (entry as { value: string }).value.trim() : "";
+          for (const piece of raw.split(",")) {
+            const id = piece.trim();
+            if (id && !uiuxProjectIds.includes(id)) uiuxProjectIds.push(id);
+          }
+        }
+      }
       if (part.filename) {
         if (!isAllowed(part.filename)) {
           return reply.status(400).send({
@@ -644,8 +670,52 @@ export async function specRoutes(app: FastifyInstance) {
       }
     }
 
-    if (files.length === 0) {
-      return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie pelo menos um arquivo" });
+    // Item 3: se uma conexão UI/UX foi escolhida, extrai a estrutura de design (Figma/Canva)
+    // e injeta o arquivo de spec UI/UX gerado no bundle. Este doc PODE ser a única fonte da
+    // spec (sem upload manual), então roda ANTES do check de "pelo menos um arquivo".
+    if (uiuxConnectionId && uiuxProjectIds.length > 0) {
+      if (!user.tenantId) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório para extração UI/UX" });
+      }
+      try {
+        const connRes = await pool.query(
+          `SELECT provider, label, account_ref, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_uiux_connections WHERE id=$1 AND tenant_id=$2 AND status='active'`,
+          [uiuxConnectionId, user.tenantId],
+        );
+        const row = connRes.rows[0] as Record<string, unknown> | undefined;
+        if (!row) {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Conexão UI/UX não encontrada" });
+        }
+        const creds = JSON.parse(
+          decryptCredentials({
+            encrypted: row.encrypted_credentials as string,
+            iv: row.encryption_iv as string,
+            tag: row.encryption_tag as string,
+          }),
+        ) as UiuxCredentials;
+        const generated = await extractUiuxSpec({
+          provider: row.provider as UiuxProvider,
+          creds,
+          accountRef: (row.account_ref as string | null) ?? null,
+          accountLabel: (row.label as string | null) ?? (row.provider as string),
+          projectIds: uiuxProjectIds,
+        });
+        files.unshift({
+          filename: generated.filename,
+          buffer: Buffer.from(generated.content, "utf-8"),
+          mimeType: "text/markdown",
+        });
+      } catch (err) {
+        request.log.warn({ uiuxConnectionId, err: String(err) }, "[specs] falha na extração UI/UX");
+        // Só falha o request se a extração era a única fonte da spec (sem outro arquivo no bundle).
+        if (files.length === 0) {
+          return reply.status(502).send({
+            code: "UIUX_EXTRACT_FAILED",
+            message: err instanceof Error ? err.message : "Falha ao extrair definições UI/UX",
+          });
+        }
+      }
     }
 
     if (files.length === 0) {

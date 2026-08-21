@@ -24,7 +24,7 @@
 
 import { pool } from "../db/client.js";
 import { decryptCredentials, type EncryptedPayload } from "./crypto.js";
-import { setRepoSecret } from "./github.js";
+import { setRepoSecret, deleteRepoSecret } from "./github.js";
 
 // ── Credential shapes ─────────────────────────────────────────────────────────
 
@@ -66,6 +66,8 @@ export interface CloudConnection {
   provider: "aws" | "azure" | "gcp";
   region: string | null;
   serviceType: string;
+  slotIndex: number;
+  label: string | null;
   githubSecretsSyncedAt: string | null;
   status: string;
   createdAt: string;
@@ -124,16 +126,26 @@ export async function syncSecretsToGitHub(
   owner: string,
   repoName: string,
   installationId: number,
+  connectionId?: string,
 ): Promise<{ synced: number; provider: string }> {
   const client = await pool.connect();
   try {
-    const res = await client.query(
-      `SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag
-       FROM tenant_cloud_connections
-       WHERE tenant_id = $1 AND status = 'active'
-       ORDER BY slot_index ASC LIMIT 1`,
-      [tenantId],
-    );
+    // Item 2 (corrigido): quando o deploy escolhe uma conexão específica, sincroniza
+    // ELA (não o slot 0). Sem connectionId (push inicial legado), mantém slot 0.
+    const res = connectionId
+      ? await client.query(
+          `SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE id = $1 AND tenant_id = $2 AND status = 'active' LIMIT 1`,
+          [connectionId, tenantId],
+        )
+      : await client.query(
+          `SELECT id, provider, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE tenant_id = $1 AND status = 'active'
+           ORDER BY slot_index ASC LIMIT 1`,
+          [tenantId],
+        );
     const row = res.rows[0];
     if (!row) return { synced: 0, provider: "none" };
 
@@ -171,31 +183,96 @@ export async function syncSecretsToGitHub(
   }
 }
 
+/** Nomes COMPLETOS de secrets que este módulo pode ter sincronizado, por provider (inclui os
+ *  opcionais). Usado no teardown para purgar as credenciais do repo (deleteRepoSecret é 404-safe). */
+const SECRET_NAMES_BY_PROVIDER: Record<"aws" | "azure" | "gcp", string[]> = {
+  aws:   ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_ECR_REGISTRY", "AWS_ECS_CLUSTER"],
+  azure: ["AZURE_CREDENTIALS", "AZURE_RESOURCE_GROUP", "AZURE_CONTAINER_APP"],
+  gcp:   ["GCP_SA_KEY", "GCP_PROJECT_ID", "GCP_REGION", "GCP_SERVICE_NAME"],
+};
+
 /**
- * Returns the active cloud connection for a tenant (without credentials).
+ * Remove do repo os secrets de cloud sincronizados para um provider. Chamado no teardown de
+ * demo (após o run de destruição concluir com sucesso — o run de teardown ainda precisa das
+ * credenciais em runtime). Idempotente e best-effort.
  */
-export async function getCloudConnection(tenantId: string): Promise<CloudConnection | null> {
+export async function removeSyncedSecrets(
+  installationId: number,
+  owner: string,
+  repoName: string,
+  provider: "aws" | "azure" | "gcp",
+): Promise<number> {
+  let removed = 0;
+  for (const name of SECRET_NAMES_BY_PROVIDER[provider]) {
+    try {
+      await deleteRepoSecret(installationId, owner, repoName, name);
+      removed++;
+    } catch (err) {
+      console.warn(`[CloudConnector] falha ao remover secret ${name} de ${owner}/${repoName}:`, err);
+    }
+  }
+  console.log(`[CloudConnector] Removidos ${removed} secrets ${provider} de ${owner}/${repoName}`);
+  return removed;
+}
+
+function mapConnRow(row: Record<string, unknown>): CloudConnection {
+  return {
+    id: row.id as string,
+    tenantId: row.tenant_id as string,
+    provider: row.provider as "aws" | "azure" | "gcp",
+    region: (row.region as string | null) ?? null,
+    serviceType: row.service_type as string,
+    slotIndex: Number(row.slot_index ?? 0),
+    label: (row.label as string | null) ?? null,
+    githubSecretsSyncedAt: (row.github_secrets_synced_at as Date | null)?.toISOString() ?? null,
+    status: row.status as string,
+    createdAt: (row.created_at as Date).toISOString(),
+  };
+}
+
+const CONN_COLS =
+  "id, tenant_id, provider, region, service_type, slot_index, label, github_secrets_synced_at, status, created_at";
+
+/**
+ * Returns a cloud connection for a tenant (without credentials). Sem connectionId,
+ * devolve o slot 0 (compat). Com connectionId, devolve ELA (scoped ao tenant).
+ */
+export async function getCloudConnection(
+  tenantId: string,
+  connectionId?: string,
+): Promise<CloudConnection | null> {
+  const client = await pool.connect();
+  try {
+    const res = connectionId
+      ? await client.query(
+          `SELECT ${CONN_COLS} FROM tenant_cloud_connections
+           WHERE id = $1 AND tenant_id = $2 AND status = 'active' LIMIT 1`,
+          [connectionId, tenantId],
+        )
+      : await client.query(
+          `SELECT ${CONN_COLS} FROM tenant_cloud_connections
+           WHERE tenant_id = $1 AND status = 'active'
+           ORDER BY slot_index ASC LIMIT 1`,
+          [tenantId],
+        );
+    const row = res.rows[0];
+    return row ? mapConnRow(row) : null;
+  } finally {
+    client.release();
+  }
+}
+
+/** Lista TODAS as conexões ativas do tenant (p/ o select de deploy). Sem credenciais. */
+export async function listCloudConnections(tenantId: string): Promise<CloudConnection[]> {
   const client = await pool.connect();
   try {
     const res = await client.query(
-      `SELECT id, tenant_id, provider, region, service_type, github_secrets_synced_at, status, created_at
-       FROM tenant_cloud_connections
+      `SELECT ${CONN_COLS} FROM tenant_cloud_connections
        WHERE tenant_id = $1 AND status = 'active'
-       ORDER BY slot_index ASC LIMIT 1`,
+       ORDER BY slot_index ASC`,
       [tenantId],
     );
-    const row = res.rows[0];
-    if (!row) return null;
-    return {
-      id: row.id as string,
-      tenantId: row.tenant_id as string,
-      provider: row.provider as "aws" | "azure" | "gcp",
-      region: row.region as string | null,
-      serviceType: row.service_type as string,
-      githubSecretsSyncedAt: (row.github_secrets_synced_at as Date | null)?.toISOString() ?? null,
-      status: row.status as string,
-      createdAt: (row.created_at as Date).toISOString(),
-    };
+    return res.rows.map(mapConnRow);
   } finally {
     client.release();
   }

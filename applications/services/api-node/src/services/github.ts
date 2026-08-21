@@ -590,6 +590,25 @@ export async function setRepoSecret(
   });
 }
 
+/**
+ * Remove um secret do repo (idempotente — 404 é tratado como sucesso). Usado no teardown de
+ * demos: as credenciais de cloud sincronizadas não devem permanecer no repo depois que o
+ * ambiente efêmero é destruído.
+ */
+export async function deleteRepoSecret(
+  installationId: number,
+  owner: string,
+  repo: string,
+  secretName: string,
+): Promise<void> {
+  const octokit = await getOctokitForInstallation(installationId);
+  try {
+    await octokit.rest.actions.deleteRepoSecret({ owner, repo, secret_name: secretName });
+  } catch (err: unknown) {
+    if ((err as { status?: number }).status !== 404) throw err;
+  }
+}
+
 export async function createWorkflow(
   installationId: number,
   opts: {
@@ -613,4 +632,88 @@ export async function createWorkflow(
       },
     ],
   });
+}
+
+// ── Item 2 (deploy via GitHub): dispatch on-demand + monitoramento ──────────────
+//
+// Genesis dispara o workflow (workflow_dispatch) e MONITORA/auto-cura até o GitHub
+// retornar OK. Um workflow só é dispatchável se existir na branch DEFAULT do repo,
+// então o caller garante o commit em main+branch-de-deploy antes de disparar.
+
+/**
+ * Dispara um workflow por workflow_dispatch. `workflowFile` é o basename do arquivo
+ * em .github/workflows/ (ex.: "genesis-deploy.yml"). `ref` é a branch/tag alvo (o
+ * checkout roda contra ela). `inputs` chega ao workflow como github.event.inputs.
+ */
+export async function dispatchWorkflow(
+  installationId: number,
+  opts: { owner: string; repo: string; workflowFile: string; ref: string; inputs?: Record<string, string> },
+): Promise<void> {
+  const octokit = await getOctokitForInstallation(installationId);
+  await octokit.rest.actions.createWorkflowDispatch({
+    owner: opts.owner,
+    repo: opts.repo,
+    workflow_id: opts.workflowFile,
+    ref: opts.ref,
+    inputs: opts.inputs,
+  });
+}
+
+export interface WorkflowRunInfo {
+  id: number;
+  status: string | null;          // queued | in_progress | completed
+  conclusion: string | null;      // success | failure | cancelled | ...
+  htmlUrl: string;
+  displayTitle: string;
+  createdAt: string;
+}
+
+/**
+ * Lista runs recentes do repo (opcionalmente filtrando por branch/evento). Usado pelo
+ * monitor p/ correlacionar o run disparado (o dispatch não retorna o run id — casamos
+ * pelo `display_title`, que o workflow carimba com o genesis_deploy_id via run-name).
+ */
+export async function listRecentWorkflowRuns(
+  installationId: number,
+  opts: { owner: string; repo: string; branch?: string; event?: string; perPage?: number },
+): Promise<WorkflowRunInfo[]> {
+  const octokit = await getOctokitForInstallation(installationId);
+  const { data } = await octokit.rest.actions.listWorkflowRunsForRepo({
+    owner: opts.owner,
+    repo: opts.repo,
+    branch: opts.branch,
+    event: opts.event,
+    per_page: opts.perPage ?? 20,
+  });
+  return (data.workflow_runs ?? []).map((r) => ({
+    id: r.id,
+    status: r.status ?? null,
+    conclusion: r.conclusion ?? null,
+    htmlUrl: r.html_url,
+    displayTitle: r.display_title ?? r.name ?? "",
+    createdAt: r.created_at,
+  }));
+}
+
+/** Estado de um run específico. */
+export async function getWorkflowRunStatus(
+  installationId: number,
+  opts: { owner: string; repo: string; runId: number },
+): Promise<WorkflowRunInfo | null> {
+  const octokit = await getOctokitForInstallation(installationId);
+  try {
+    const { data: r } = await octokit.rest.actions.getWorkflowRun({
+      owner: opts.owner, repo: opts.repo, run_id: opts.runId,
+    });
+    return {
+      id: r.id,
+      status: r.status ?? null,
+      conclusion: r.conclusion ?? null,
+      htmlUrl: r.html_url,
+      displayTitle: r.display_title ?? r.name ?? "",
+      createdAt: r.created_at,
+    };
+  } catch {
+    return null;
+  }
 }

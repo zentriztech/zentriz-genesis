@@ -7,6 +7,7 @@
 // então aprova → POST /api/products/ingest-proposal (guardrail ADR-018/Cenário A:
 // o splitter PROPÕE, nunca executa — needs_human sempre true).
 
+import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Box from "@mui/material/Box";
@@ -42,6 +43,8 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { apiPost, apiGet } from "@/lib/api";
+import { authStore } from "@/stores/authStore";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 
 // ── contratos com a API (espelham products.ts) ────────────────────────────────
 type ProposeProject = { id: string; type: string; wave: number; dependsOn: string[] };
@@ -126,7 +129,7 @@ function buildProposalGraph(projects: ProposeProject[]): { nodes: Node[]; edges:
   return { nodes, edges };
 }
 
-export default function SplitterPage() {
+function SplitterPage() {
   const router = useRouter();
   const [tab, setTab] = useState(0);
   const [document, setDocument] = useState("");
@@ -231,6 +234,25 @@ export default function SplitterPage() {
     () => (proposal?.specs ? Object.entries(proposal.specs) : []),
     [proposal?.specs],
   );
+
+  // Conta de gestão (zentriz_admin) só VISUALIZA. O Splitter é uma ferramenta de
+  // AUTORIA (propõe/cria produtos → 403 no backend) e não tem estado a visualizar,
+  // então o master vê apenas um aviso read-only. O item de menu permanece visível.
+  if (authStore.isZentrizAdmin) {
+    return (
+      <Container maxWidth="lg" sx={{ py: 4 }}>
+        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
+          <CallSplitIcon sx={{ color: ACCENT }} />
+          <Typography variant="h4" sx={{ fontWeight: 800 }}>Splitter</Typography>
+        </Stack>
+        <Alert severity="info" icon={<InfoOutlinedIcon />} sx={{ mt: 2 }}>
+          O Splitter é uma ferramenta de <strong>autoria</strong> (decompõe um documento em
+          projetos e cria produtos). A conta de gestão da Zentriz tem acesso somente de
+          visualização — a decomposição é executada pela conta do tenant.
+        </Alert>
+      </Container>
+    );
+  }
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -499,3 +521,6 @@ export default function SplitterPage() {
     </Container>
   );
 }
+
+// observer — lê authStore.isZentrizAdmin (muda após hydrate()) para o gate de somente-leitura do master.
+export default observer(SplitterPage);

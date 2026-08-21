@@ -38,6 +38,7 @@ import LightModeIcon from "@mui/icons-material/LightMode";
 import PsychologyIcon from "@mui/icons-material/Psychology";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudIcon from "@mui/icons-material/Cloud";
+import DesignServicesIcon from "@mui/icons-material/DesignServices";
 import TelegramIcon from "@mui/icons-material/Telegram";
 import TuneIcon from "@mui/icons-material/Tune";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
@@ -72,6 +73,7 @@ const navTenantAdmin = [
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,     color: "#E2E8F0" },
   { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
+  { label: "Ferramentas UI/UX", href: "/settings/ui-ux",        icon: <DesignServicesIcon />, color: "#A259FF" },
   { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
   { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
   { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
@@ -91,6 +93,7 @@ const navZentriz = [
   { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
   { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
   { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
+  { label: "Ferramentas UI/UX", href: "/settings/ui-ux",        icon: <DesignServicesIcon />, color: "#A259FF" },
   { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
   { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
   { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
@@ -98,23 +101,25 @@ const navZentriz = [
 ];
 
 // RFC-0002 A.2: Genesis Admin (zentriz_admin) é conta de GESTÃO pura — nunca autora.
-// Estes itens de autoria somem SEMPRE para o master, mesmo com um tenant selecionado
-// (o backend também bloqueia a criação via 403 — ver managementGuard.ts). O master
-// acompanha specs/projetos de tenants pela visão cross-tenant (/zentriz/projects).
+// A SUBMISSÃO de spec (/spec = "Enviar spec") some SEMPRE para o master; o backend
+// também bloqueia a criação via 403 (managementGuard.ts). O master não envia specs.
 const ZENTRIZ_AUTHORING_HIDE_ALWAYS = new Set<string>([
   "/spec",
+]);
+
+// Itens de tenant que o master só VISUALIZA enquanto atua DENTRO de um tenant selecionado
+// (em modo gestão, sem tenant, somem). Inclui operacionais (Deadpool + settings de infra)
+// e as telas de acompanhamento read-only de autoria (SPECs, Splitter, Projetos) — o master
+// as vê para visualizar o trabalho do tenant, mas a escrita continua bloqueada no backend.
+const HIDE_WHEN_NO_TENANT = new Set<string>([
   "/specs",
   "/splitter",
   "/projects",
-]);
-
-// Itens OPERACIONAIS de tenant (Deadpool + settings de infra): o master só os vê
-// enquanto atua DENTRO de um tenant selecionado; em modo gestão (nenhum tenant) somem.
-const HIDE_WHEN_NO_TENANT = new Set<string>([
   "/deadpool",
   "/settings/llm",
   "/settings/github",
   "/settings/cloud",
+  "/settings/ui-ux",
   "/settings/deployments",
   "/settings/telegram",
   "/settings/runtime-config",
@@ -129,11 +134,12 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
   let nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
 
   if (authStore.isZentrizAdmin) {
-    // RFC-0002 A.2: autoria some SEMPRE para conta de gestão (independe de tenant/hydrate;
+    // Enviar spec some SEMPRE para conta de gestão (independe de tenant/hydrate;
     // o papel já é conhecido no auth, sem flicker).
     nav = nav.filter((item) => !ZENTRIZ_AUTHORING_HIDE_ALWAYS.has(item.href));
-    // Operacional de tenant: só aparece com um tenant selecionado. Só aplica após
-    // hydrate() para não piscar o menu completo→reduzido de quem já tinha tenant.
+    // Itens de tenant (operacionais + acompanhamento read-only): só aparecem com um
+    // tenant selecionado. Só aplica após hydrate() para não piscar o menu
+    // completo→reduzido de quem já tinha tenant.
     if (tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null) {
       nav = nav.filter((item) => !HIDE_WHEN_NO_TENANT.has(item.href));
     }

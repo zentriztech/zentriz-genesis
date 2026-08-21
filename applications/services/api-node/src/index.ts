@@ -8,6 +8,7 @@ import { startBackendResumeWorker, stopBackendResumeWorker } from "./services/pr
 import { startBackendCleanupWorker, stopBackendCleanupWorker } from "./services/provision/backendCleanupWorker.js";
 import { startFinanceBillingWorker, stopFinanceBillingWorker } from "./services/financeBillingWorker.js";
 import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
+import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
 
 const app = await buildApp();
 
@@ -62,11 +63,13 @@ try {
   startFinanceBillingWorker();
   // RFC-0002 F2 / H3: invalidação cross-instância do cache de status de tenant (LISTEN/NOTIFY).
   startTenantStatusListener();
+  // Item 2 (corrigido): monitor + auto-cura dos deploys na nuvem do tenant via GitHub.
+  startCloudDeployWorker();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });

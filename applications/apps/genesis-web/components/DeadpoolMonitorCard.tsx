@@ -72,11 +72,15 @@ function friendlyError(msg: string): string {
 export default function DeadpoolMonitorCard({
   projectId,
   onState,
+  readOnly = false,
 }: {
   projectId: string;
   /** Reporta ao pai o estado (entitled/active) após cada refresh — usado pela barra de entrega
    *  para decidir se mostra o botão "Monitorar" e refletir se está ativo. null = indisponível. */
   onState?: (s: { entitled: boolean; active: boolean } | null) => void;
+  /** Conta Master de Gestão (zentriz_admin) atuando dentro de um tenant: só visualiza — o
+   *  botão Ativar/Desativar some e o toggle é bloqueado. O estado segue sendo reportado ao pai. */
+  readOnly?: boolean;
 }) {
   const [state, setState] = useState<MonitoringState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -114,6 +118,7 @@ export default function DeadpoolMonitorCard({
 
   const toggle = useCallback(
     async (activate: boolean) => {
+      if (readOnly) return;
       setBusy(true);
       setError(null);
       try {
@@ -138,7 +143,7 @@ export default function DeadpoolMonitorCard({
         setBusy(false);
       }
     },
-    [projectId, refresh, provider, azureWorkspaceId, azureTable, azureMessageColumn, gcpProjectId, gcpLogFilter],
+    [readOnly, projectId, refresh, provider, azureWorkspaceId, azureTable, azureMessageColumn, gcpProjectId, gcpLogFilter],
   );
 
   // Só admin, só se o tenant tem licença Deadpool. Enquanto carrega, nada.
@@ -176,7 +181,7 @@ export default function DeadpoolMonitorCard({
       </Typography>
       {/* Seletor de nuvem + ponteiros de escopo (só ao ATIVAR). CloudWatch não pede campos: o
           log group vem do deployment. Azure/GCP precisam do escopo de logs para o poll ativo. */}
-      {!active && (
+      {!active && !readOnly && (
         <Box sx={{ mt: 1.25 }}>
           <FormControl size="small" sx={{ minWidth: { xs: "100%", sm: 260 }, width: { xs: "100%", sm: "auto" } }}>
             <InputLabel id="deadpool-provider-label">Nuvem monitorada</InputLabel>
@@ -238,6 +243,11 @@ export default function DeadpoolMonitorCard({
           <Typography variant="caption" color="error">{error}</Typography>
         </Box>
       )}
+      {readOnly ? (
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1, fontStyle: "italic" }}>
+          Conta de gestão — somente leitura. A ativação/desativação do monitoramento é feita pelo tenant.
+        </Typography>
+      ) : (
       <Box sx={{ mt: 1 }}>
         <Button
           size="small"
@@ -255,6 +265,7 @@ export default function DeadpoolMonitorCard({
               : "Ativar Monitoramento Deadpool"}
         </Button>
       </Box>
+      )}
     </Alert>
   );
 }

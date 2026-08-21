@@ -17,6 +17,7 @@ import { notificationRoutes } from "./routes/notifications.js";
 import { planRoutes } from "./routes/plans.js";
 import { githubRoutes } from "./routes/github.js";
 import { cloudRoutes } from "./routes/cloud.js";
+import { uiuxRoutes } from "./routes/uiux.js";
 import { llmRoutes } from "./routes/llm.js";
 import { productRoutes } from "./routes/products.js";
 import { internalLlmRoutes } from "./routes/internalLlm.js";
@@ -92,6 +93,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(planRoutes);
   await app.register(githubRoutes);
   await app.register(cloudRoutes);
+  await app.register(uiuxRoutes);
   await app.register(llmRoutes);
   await app.register(productRoutes);
   await app.register(internalLlmRoutes);

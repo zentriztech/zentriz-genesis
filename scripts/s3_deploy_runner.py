@@ -434,7 +434,11 @@ def _run(cmd: list, cwd: Path, timeout: int, env: Optional[dict] = None) -> None
 def _provision_s3(bucket: str, project_id: str, tenant_id: str, deployment_id: str,
                   ttl_days: int, aws_env: dict) -> None:
     region = aws_env.get("AWS_DEFAULT_REGION", "us-east-1")
-    expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + ttl_days * 86400))
+    # Item 2(b): ttl_days <= 0 = deploy PERMANENTE — sem regra de expiração por idade e
+    # sem data de expiração na tag (a limpeza por TTL do Genesis também ignora expires_at NULL).
+    permanent = ttl_days <= 0
+    expires_at = "permanent" if permanent else time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + ttl_days * 86400))
 
     _run_aws(["s3api", "create-bucket", "--bucket", bucket, "--region", region], aws_env)
     _run_aws([
@@ -488,15 +492,17 @@ def _provision_s3(bucket: str, project_id: str, tenant_id: str, deployment_id: s
     })
     _run_aws(["s3api", "put-bucket-website", "--bucket", bucket, "--website-configuration", website], aws_env)
 
-    lifecycle = json.dumps({
-        "Rules": [{
-            "ID": "genesis-ephemeral-ttl",
-            "Status": "Enabled",
-            "Filter": {},
-            "Expiration": {"Days": ttl_days},
-            "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
-        }]
-    })
+    # Permanente: sem Expiration por idade (só a higiene de multipart abortado). Com prazo:
+    # regra de expiração de objetos em ttl_days dias.
+    ttl_rule = {
+        "ID": "genesis-ephemeral-ttl",
+        "Status": "Enabled",
+        "Filter": {},
+        "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1},
+    }
+    if not permanent:
+        ttl_rule["Expiration"] = {"Days": ttl_days}
+    lifecycle = json.dumps({"Rules": [ttl_rule]})
     _run_aws(["s3api", "put-bucket-lifecycle-configuration", "--bucket", bucket,
               "--lifecycle-configuration", lifecycle], aws_env)
 

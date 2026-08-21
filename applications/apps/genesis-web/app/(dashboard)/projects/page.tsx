@@ -24,6 +24,7 @@ import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import { projectsStore } from "@/stores/projectsStore";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
+import { authStore } from "@/stores/authStore";
 import type { Project } from "@/types";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
@@ -109,6 +110,8 @@ function NewVersionButton({ project }: { project: Project }) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
 
+  // Conta de gestão (zentriz_admin) só visualiza — não cria novas versões (autoria).
+  if (authStore.isZentrizAdmin) return null;
   if (project.status !== "accepted" && project.status !== "completed") return null;
 
   const handleNewVersion = async () => {
@@ -428,9 +431,11 @@ function ProjectsPageInner() {
             <ToggleButton value="grid"><Tooltip title="Cards"><GridViewIcon fontSize="small" /></Tooltip></ToggleButton>
             <ToggleButton value="list"><Tooltip title="Lista"><ListIcon fontSize="small" /></Tooltip></ToggleButton>
           </ToggleButtonGroup>
-          <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
-            Nova spec
-          </Button>
+          {!authStore.isZentrizAdmin && (
+            <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
+              Nova spec
+            </Button>
+          )}
         </Stack>
       </Stack>
 
@@ -445,11 +450,15 @@ function ProjectsPageInner() {
           <CardContent>
             <Typography variant="h6" color="text.secondary" gutterBottom>Nenhum projeto ainda</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Envie uma spec para o Genesis criar seu primeiro produto.
+              {authStore.isZentrizAdmin
+                ? "Este tenant ainda não possui projetos."
+                : "Envie uma spec para o Genesis criar seu primeiro produto."}
             </Typography>
-            <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
-              Enviar spec
-            </Button>
+            {!authStore.isZentrizAdmin && (
+              <Button variant="contained" startIcon={<SendIcon />} onClick={() => router.push("/spec")}>
+                Enviar spec
+              </Button>
+            )}
           </CardContent>
         </Card>
       )}

@@ -202,6 +202,14 @@ interface DeliverySectionProps {
   dbMode: string; onDbMode: (v: string) => void;
   runtimeTarget: string; onRuntimeTarget: (v: string) => void;
   domainMode: string; onDomainMode: (v: string) => void;
+  // Item 3: Ferramentas UI/UX — conta conectada + projetos escolhidos da conta.
+  uiuxConnections: Array<{ id: string; provider: string; label: string | null }>;
+  uiuxConnId: string; onUiuxConn: (v: string) => void;
+  uiuxSelectedProvider: string;
+  uiuxProjects: Array<{ id: string; name: string }>;
+  uiuxProjectIds: string[]; onUiuxProjectIds: (v: string[]) => void;
+  uiuxLoadingProjects: boolean;
+  uiuxProjectsError: string | null;
 }
 function DeliverySection(p: DeliverySectionProps) {
   if (!p.visible) return null;
@@ -227,6 +235,52 @@ function DeliverySection(p: DeliverySectionProps) {
           );
         })}
       </Stack>
+      {p.uiuxConnections.length > 0 && (
+        <>
+          <FormControl size="small" fullWidth sx={{ mb: 1 }}>
+            <InputLabel>Ferramenta UI/UX (opcional)</InputLabel>
+            <Select value={p.uiuxConnId} label="Ferramenta UI/UX (opcional)"
+              onChange={(e) => p.onUiuxConn(e.target.value)}>
+              <MenuItem value="">Nenhuma</MenuItem>
+              {p.uiuxConnections.map((c) => (
+                <MenuItem key={c.id} value={c.id}>
+                  {c.label ? `${c.label} · ${c.provider}` : c.provider}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {p.uiuxConnId && p.uiuxSelectedProvider === "canva" && (
+            <Typography sx={{ fontSize: "0.72rem", color: "#D29922", mb: 1 }}>
+              Extração Canva em breve (requer app OAuth registrado). Selecione uma conta Figma para extrair as definições de UI/UX.
+            </Typography>
+          )}
+          {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && (
+            <FormControl size="small" fullWidth sx={{ mb: 1 }}
+              disabled={p.uiuxLoadingProjects || p.uiuxProjects.length === 0}>
+              <InputLabel>Projetos da conta</InputLabel>
+              <Select multiple value={p.uiuxProjectIds} label="Projetos da conta"
+                onChange={(e) => p.onUiuxProjectIds(
+                  typeof e.target.value === "string" ? e.target.value.split(",") : (e.target.value as string[]),
+                )}
+                renderValue={(sel) => {
+                  const ids = sel as string[];
+                  const names = ids.map((id) => p.uiuxProjects.find((x) => x.id === id)?.name ?? id);
+                  return names.join(", ");
+                }}>
+                {p.uiuxProjects.map((proj) => (
+                  <MenuItem key={proj.id} value={proj.id}>{proj.name}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          )}
+          {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && p.uiuxLoadingProjects && (
+            <Typography sx={{ fontSize: "0.72rem", color: "#8B949E", mb: 1 }}>Carregando projetos…</Typography>
+          )}
+          {p.uiuxConnId && p.uiuxSelectedProvider === "figma" && p.uiuxProjectsError && (
+            <Typography sx={{ fontSize: "0.72rem", color: "#F85149", mb: 1 }}>{p.uiuxProjectsError}</Typography>
+          )}
+        </>
+      )}
       {p.isBackend && (
       <Button size="small" variant="text" onClick={() => p.onAdvancedOpen(!p.advancedOpen)}
         sx={{ fontSize: "0.72rem", textTransform: "none", color: "text.secondary" }}>
@@ -676,6 +730,43 @@ export default function SpecPage() {
   const [domainMode, setDomainMode] = useState("");       // "" = subdomínio Zentriz
   const isBackendType = /^(backend|fullstack)/.test(projectType);
 
+  // Item 3: Ferramentas UI/UX — conta conectada + projetos escolhidos da conta.
+  // uiuxConnId "" = nenhuma; ao escolher uma conta, buscamos os projetos dela sob demanda.
+  const [uiuxConnId, setUiuxConnId] = useState<string>("");
+  const [uiuxConnections, setUiuxConnections] = useState<Array<{ id: string; provider: string; label: string | null }>>([]);
+  const [uiuxProjects, setUiuxProjects] = useState<Array<{ id: string; name: string }>>([]);
+  const [uiuxProjectIds, setUiuxProjectIds] = useState<string[]>([]);
+  const [uiuxLoadingProjects, setUiuxLoadingProjects] = useState(false);
+  const [uiuxProjectsError, setUiuxProjectsError] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    apiGet<Array<{ id: string; provider: string; label: string | null }>>("/api/tenant/uiux-connections")
+      .then((r) => { if (alive) setUiuxConnections(Array.isArray(r) ? r : []); })
+      .catch(() => { if (alive) setUiuxConnections([]); });
+    return () => { alive = false; };
+  }, []);
+  // Provider da conta UI/UX selecionada (governa: Figma extrai; Canva ainda não).
+  const uiuxSelectedProvider = uiuxConnections.find((c) => c.id === uiuxConnId)?.provider ?? "";
+  // Ao trocar de conta, zera a seleção de projetos e (se for Figma) busca os projetos dela.
+  // Canva: extração ainda indisponível (requer app OAuth) → não buscamos projetos.
+  useEffect(() => {
+    setUiuxProjectIds([]);
+    setUiuxProjects([]);
+    setUiuxProjectsError(null);
+    if (!uiuxConnId || uiuxSelectedProvider !== "figma") return;
+    let alive = true;
+    setUiuxLoadingProjects(true);
+    apiGet<Array<{ id: string; name: string }>>(`/api/tenant/uiux-connections/${uiuxConnId}/projects`)
+      .then((r) => { if (alive) setUiuxProjects(Array.isArray(r) ? r : []); })
+      .catch((e) => {
+        if (!alive) return;
+        setUiuxProjects([]);
+        setUiuxProjectsError(e instanceof Error ? e.message : "Não foi possível listar os projetos desta conta.");
+      })
+      .finally(() => { if (alive) setUiuxLoadingProjects(false); });
+    return () => { alive = false; };
+  }, [uiuxConnId, uiuxSelectedProvider]);
+
   // Produto e links
   const [products, setProducts]       = useState<{ id: string; name: string }[]>([]);
   const [productId, setProductId]     = useState("");
@@ -926,6 +1017,12 @@ export default function SpecPage() {
           if (domainMode) formData.append("domainMode", domainMode);
         }
       }
+      // Item 3: Ferramentas UI/UX — conta + projetos escolhidos; o backend extrai as
+      // definições de design e injeta um documento UI/UX no bundle da spec.
+      if (uiuxConnId && uiuxProjectIds.length > 0) {
+        formData.append("uiuxConnectionId", uiuxConnId);
+        uiuxProjectIds.forEach((pid) => formData.append("uiuxProjectIds", pid));
+      }
       // SPEC-APPROVED: CTO valida (Sub-modo C) em vez de regenerar.
       if (specApproved) {
         formData.append("specApproved", "true");
@@ -958,7 +1055,7 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, router]);
+  }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds, router]);
 
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -983,6 +1080,11 @@ export default function SpecPage() {
           if (dbMode) fd.append("dbMode", dbMode);
           if (domainMode) fd.append("domainMode", domainMode);
         }
+      }
+      // Item 3: Ferramentas UI/UX — conta + projetos escolhidos; backend extrai e injeta doc UI/UX.
+      if (uiuxConnId && uiuxProjectIds.length > 0) {
+        fd.append("uiuxConnectionId", uiuxConnId);
+        uiuxProjectIds.forEach((pid) => fd.append("uiuxProjectIds", pid));
       }
       // SPEC-APPROVED: sinaliza ao backend/runner que o CTO deve VALIDAR (Sub-modo C), não regenerar.
       if (specApproved) {
@@ -1188,7 +1290,11 @@ export default function SpecPage() {
                       advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
                       dbMode={dbMode} onDbMode={setDbMode}
                       runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
-                      domainMode={domainMode} onDomainMode={setDomainMode} />
+                      domainMode={domainMode} onDomainMode={setDomainMode}
+                      uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
+                      uiuxSelectedProvider={uiuxSelectedProvider}
+                      uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}
+                      uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
                       onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
@@ -1322,7 +1428,11 @@ export default function SpecPage() {
                     advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen}
                     dbMode={dbMode} onDbMode={setDbMode}
                     runtimeTarget={runtimeTarget} onRuntimeTarget={setRuntimeTarget}
-                    domainMode={domainMode} onDomainMode={setDomainMode} />
+                    domainMode={domainMode} onDomainMode={setDomainMode}
+                    uiuxConnections={uiuxConnections} uiuxConnId={uiuxConnId} onUiuxConn={setUiuxConnId}
+                    uiuxSelectedProvider={uiuxSelectedProvider}
+                    uiuxProjects={uiuxProjects} uiuxProjectIds={uiuxProjectIds} onUiuxProjectIds={setUiuxProjectIds}
+                    uiuxLoadingProjects={uiuxLoadingProjects} uiuxProjectsError={uiuxProjectsError} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
                     onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}

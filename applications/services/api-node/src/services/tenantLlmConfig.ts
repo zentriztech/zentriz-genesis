@@ -113,8 +113,8 @@ export async function resolveProjectLlmConfig(projectId: string): Promise<Resolv
       [projectId]
     );
     if (proj.rows.length > 0) {
-      createdByRole = String(proj.rows[0].creator_role ?? "user");
-      tenantId      = String(proj.rows[0].tenant_id ?? "");
+      createdByRole  = String(proj.rows[0].creator_role ?? "user");
+      tenantId       = String(proj.rows[0].tenant_id ?? "");
     }
   } catch { /* fall through */ }
 
