@@ -373,6 +373,26 @@ export function renderUiuxSpecMarkdown(
 
 // ── Fetchers HTTP (Figma) ────────────────────────────────────────────────────────
 
+// Escopos que um Personal Access Token do Figma precisa ter marcados para a extração funcionar.
+// Desde 2024 o PAT nasce SEM escopos por padrão; sem eles as leituras de conteúdo/projetos dão 403,
+// mesmo com o token autenticando (o /v1/me usado no "conectar" passa com qualquer token).
+export const FIGMA_REQUIRED_SCOPES =
+  "file_content:read, file_metadata:read (marque também os demais escopos de leitura *:read)";
+
+/** Extrai o campo `err` do corpo de erro do Figma (formato {status, err}). Best-effort. */
+function parseFigmaErr(body: string): string | null {
+  if (!body) return null;
+  try {
+    const j = JSON.parse(body) as { err?: unknown; message?: unknown };
+    const e = j.err ?? j.message;
+    return typeof e === "string" && e.trim() ? e.trim() : null;
+  } catch {
+    // Corpo não-JSON: devolve um trecho curto para diagnóstico.
+    const t = body.trim();
+    return t ? t.slice(0, 200) : null;
+  }
+}
+
 async function figmaFetch<T>(pathAndQuery: string, token: string): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
@@ -381,14 +401,28 @@ async function figmaFetch<T>(pathAndQuery: string, token: string): Promise<T> {
       headers: { "X-Figma-Token": token, Accept: "application/json" },
       signal: controller.signal,
     });
-    if (res.status === 403 || res.status === 401) {
-      throw new Error("Token Figma inválido ou sem acesso (403/401).");
-    }
-    if (res.status === 404) {
-      throw new Error("Recurso Figma não encontrado (404).");
-    }
     if (!res.ok) {
-      throw new Error(`Figma API retornou ${res.status}.`);
+      // Preserva o motivo REAL do Figma — o corpo traz "Invalid scope(s)…", "Invalid token", etc.
+      const detail = parseFigmaErr(await res.text().catch(() => ""));
+      const scopeIssue = detail ? /scope/i.test(detail) : false;
+      if (res.status === 401) {
+        throw new Error(`Token Figma inválido ou revogado (401)${detail ? ` — ${detail}` : ""}.`);
+      }
+      if (res.status === 403) {
+        // 403 quase sempre = PAT sem os escopos necessários (ou sem acesso ao time/arquivo).
+        // O "conectar" passa porque só valida presença do token; a extração é a 1ª chamada real.
+        throw new Error(
+          scopeIssue || !detail
+            ? `Figma recusou o acesso (403). O Personal Access Token precisa dos escopos: ${FIGMA_REQUIRED_SCOPES}. ` +
+              `Gere um novo token em figma.com › Settings › Security com esses escopos marcados e reconecte` +
+              (detail ? ` (Figma: ${detail})` : "") + "."
+            : `Figma recusou o acesso (403) — ${detail}. Verifique escopos do token (${FIGMA_REQUIRED_SCOPES}) e acesso ao time/arquivo.`,
+        );
+      }
+      if (res.status === 404) {
+        throw new Error(`Recurso Figma não encontrado (404)${detail ? ` — ${detail}` : ""}.`);
+      }
+      throw new Error(`Figma API retornou ${res.status}${detail ? ` — ${detail}` : ""}.`);
     }
     return (await res.json()) as T;
   } finally {
