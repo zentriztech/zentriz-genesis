@@ -570,6 +570,7 @@ function registerFinanceRoutes(app: FastifyInstance) {
       `SELECT t.id, t.plan_id, p.monthly_price_cents
        FROM tenants t JOIN plans p ON p.id = t.plan_id
        WHERE COALESCE(p.monthly_price_cents, 0) > 0
+         AND t.billing_exempt = false
          AND (
            t.status = 'active'
            OR (t.status = 'inactive' AND NOT EXISTS (

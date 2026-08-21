@@ -76,6 +76,8 @@ describe("runFinanceBillingOnce (F2 — vencimento + suspensão)", () => {
     await runFinanceBillingOnce();
     const upd = calls.find((c) => c.sql.startsWith("UPDATE tenants"))!;
     expect(upd.sql).toContain("t.status = 'active'");
+    // tenants internos isentos (billing_exempt) nunca são suspensos por inadimplência
+    expect(upd.sql).toContain("t.billing_exempt = false");
     expect(upd.sql).toContain("c.kind = 'subscription'");
     expect(upd.sql).toContain("c.status = 'overdue'");
     // carência passada como parâmetro inteiro (default 3)

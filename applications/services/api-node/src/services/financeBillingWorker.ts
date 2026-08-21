@@ -38,10 +38,12 @@ export async function runFinanceBillingOnce(): Promise<{ markedOverdue: number; 
     );
 
     // 2) Suspensão — tenant ativo com assinatura vencida além do período de carência.
+    //    Tenants internos isentos (billing_exempt) nunca são suspensos por inadimplência.
     const suspended = await client.query<{ id: string }>(
       `UPDATE tenants t
           SET status = 'suspended'
         WHERE t.status = 'active'
+          AND t.billing_exempt = false
           AND EXISTS (
             SELECT 1 FROM charges c
              WHERE c.tenant_id = t.id
