@@ -110,3 +110,15 @@ export async function apiDelete(path: string): Promise<void> {
   });
   if (!res.ok) throw new Error(await getErrorMessage(res));
 }
+
+// DELETE que envia body JSON (ex.: confirmação de exclusão) e devolve a resposta parseada.
+export async function apiDeleteJson<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "DELETE",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  if (!res.ok) throw new Error(await getErrorMessage(res));
+  return res.json() as Promise<T>;
+}

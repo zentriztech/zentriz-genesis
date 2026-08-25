@@ -5,7 +5,7 @@
  * POST   /api/products                           — criar produto
  * GET    /api/products/:id                       — detalhe + projetos do produto
  * PATCH  /api/products/:id                       — atualizar nome/descrição
- * DELETE /api/products/:id                       — arquivar produto
+ * DELETE /api/products/:id                       — sem projetos: apaga de verdade; com projetos: arquiva (soft)
  *
  * POST   /api/products/:id/projects/:projectId   — adicionar projeto ao produto
  * DELETE /api/products/:id/projects/:projectId   — remover projeto do produto
@@ -640,52 +640,100 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── DELETE /api/products/:id ─────────────────────────────────────────────────
-  // Remove produto e todos os projetos filhos do banco. Arquivos em disco mantidos.
-  // Bloqueia se algum projeto filho estiver em execução (running).
-  app.delete<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {
-    const user = getUser(request);
-    const { id } = request.params;
-    const client = await pool.connect();
-    try {
-      const prod = await client.query(
-        "SELECT id, name, tenant_id FROM products WHERE id = $1",
-        [id]
-      );
-      const row = prod.rows[0];
-      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
-        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
-      }
+  // Exclusão de produto com DOIS regimes (apagar de verdade é arriscado demais quando há
+  // projetos, então só é permitido no caso vazio):
+  //   • SEM projetos  → HARD DELETE real (remove a linha; nada de valor se perde).
+  //   • COM projetos  → SOFT DELETE: apenas marca status='archived' (some do portal, pois o
+  //                     LIST filtra status='active'). Produto + projetos + histórico ficam no
+  //                     banco, reversível via PATCH status='active'. NUNCA apaga de verdade.
+  // Guardas de segurança (o portal reforça, mas o servidor é a autoridade):
+  //   • confirmId deve reescrever EXATAMENTE o id do produto (anti-engano);
+  //   • quando há projetos, acknowledge=true é OBRIGATÓRIO (a caixa "sei o que faço");
+  //   • bloqueia se algum filho estiver em execução (running).
+  app.delete<{ Params: { id: string }; Body: { confirmId?: string; acknowledge?: boolean } }>(
+    "/api/products/:id",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+      const { confirmId, acknowledge } = (request.body ?? {}) as { confirmId?: string; acknowledge?: boolean };
+      const client = await pool.connect();
+      try {
+        const prod = await client.query(
+          "SELECT id, name, tenant_id, status FROM products WHERE id = $1",
+          [id]
+        );
+        const row = prod.rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
 
-      // Bloquear se algum filho estiver rodando
-      const running = await client.query(
-        "SELECT id, title FROM projects WHERE product_id = $1 AND status = 'running'",
-        [id]
-      );
-      if (running.rows.length > 0) {
-        return reply.status(409).send({
-          code: "CONFLICT",
-          message: `Pare o pipeline antes de excluir. Projetos em execução: ${running.rows.map((r) => r.title).join(", ")}`,
+        // Confirmação obrigatória: o cliente deve reescrever o id exato (guarda anti-engano).
+        if (confirmId !== id) {
+          return reply.status(400).send({
+            code: "CONFIRM_MISMATCH",
+            message: "Confirmação inválida: reescreva o ID exato do produto para excluir.",
+          });
+        }
+
+        // Bloquear se algum filho estiver rodando (vale para hard e soft).
+        const running = await client.query(
+          "SELECT id, title FROM projects WHERE product_id = $1 AND status = 'running'",
+          [id]
+        );
+        if (running.rows.length > 0) {
+          return reply.status(409).send({
+            code: "CONFLICT",
+            message: `Pare o pipeline antes de excluir. Projetos em execução: ${running.rows.map((r) => r.title).join(", ")}`,
+          });
+        }
+
+        const countRes = await client.query("SELECT COUNT(*) AS n FROM projects WHERE product_id = $1", [id]);
+        const projectCount = Number(countRes.rows[0]?.n ?? 0);
+
+        // CASO 1 — sem projetos: exclusão REAL. CASCADE cuida de eventuais filhas.
+        if (projectCount === 0) {
+          await client.query("DELETE FROM products WHERE id = $1", [id]);
+          return reply.send({
+            ok: true,
+            mode: "deleted",
+            productId: id,
+            projectsDeleted: 0,
+            message: "Produto sem projetos removido definitivamente do banco.",
+          });
+        }
+
+        // CASO 2 — com projetos: apagar de verdade é arriscado → exige reconhecimento e ARQUIVA.
+        if (acknowledge !== true) {
+          return reply.status(400).send({
+            code: "ACK_REQUIRED",
+            message: `Este produto tem ${projectCount} projeto(s). Marque a confirmação de que entende o que está fazendo — o produto será ocultado (arquivado), não apagado.`,
+            projectCount,
+          });
+        }
+        if (row.status === "archived") {
+          return reply.send({
+            ok: true,
+            mode: "already_archived",
+            productId: id,
+            projectCount,
+            message: "Produto já estava arquivado (oculto no portal).",
+          });
+        }
+        await client.query("UPDATE products SET status = 'archived', updated_at = NOW() WHERE id = $1", [id]);
+        return reply.send({
+          ok: true,
+          mode: "archived",
+          productId: id,
+          projectCount,
+          message: `Produto com ${projectCount} projeto(s) ocultado do portal (arquivado). Nada foi apagado do banco — reversível.`,
         });
+      } finally {
+        client.release();
       }
-
-      // Contar projetos filhos antes de remover
-      const countRes = await client.query("SELECT COUNT(*) AS n FROM projects WHERE product_id = $1", [id]);
-      const projectCount = Number(countRes.rows[0]?.n ?? 0);
-
-      // ON DELETE CASCADE remove projetos e todas as tabelas filhas (tasks, diálogos, etc.)
-      await client.query("DELETE FROM products WHERE id = $1", [id]);
-
-      return reply.send({
-        ok: true,
-        productId: id,
-        projectsDeleted: projectCount,
-        message: `Produto e ${projectCount} projeto(s) removidos do banco. Arquivos em disco mantidos.`,
-      });
-    } finally {
-      client.release();
     }
-  });
+  );
 
   // ── PATCH /api/products/:id ──────────────────────────────────────────────────
   app.patch<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {

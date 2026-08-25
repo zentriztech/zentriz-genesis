@@ -246,3 +246,76 @@ describe("link produto↔projeto — validação de id (B3)", () => {
     expect(captured).toHaveLength(0);
   });
 });
+
+describe("DELETE /api/products/:id — hard delete (sem projetos) vs soft archive (com projetos)", () => {
+  const deleteHandler =
+    (opts: { tenant?: string | null; status?: string; projectCount: number; running?: string[] }) =>
+    (sql: string) => {
+      if (sql.includes("SELECT id, name, tenant_id, status FROM products"))
+        return { rows: [{ id: PROD_ID, name: "P", tenant_id: opts.tenant ?? null, status: opts.status ?? "active" }] };
+      if (sql.includes("status = 'running'"))
+        return { rows: (opts.running ?? []).map((t, i) => ({ id: `r${i}`, title: t })) };
+      if (sql.includes("COUNT(*) AS n FROM projects"))
+        return { rows: [{ n: String(opts.projectCount) }] };
+      return { rows: [] }; // DELETE / UPDATE
+    };
+  const touchedWrite = () =>
+    captured.some((q) => /DELETE FROM products|SET status = 'archived'/.test(q.sql));
+
+  it("id não-UUID → 400 sem tocar o banco", async () => {
+    const res = await app.inject({ method: "DELETE", url: "/api/products/abc", payload: { confirmId: "abc" } });
+    expect(res.statusCode).toBe(400);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("confirmId errado → 400 CONFIRM_MISMATCH sem apagar nem arquivar", async () => {
+    queryHandler = deleteHandler({ projectCount: 0 });
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: "nope" } });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("CONFIRM_MISMATCH");
+    expect(touchedWrite()).toBe(false);
+  });
+
+  it("sem projetos + confirmId correto → HARD DELETE real", async () => {
+    queryHandler = deleteHandler({ projectCount: 0 });
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID } });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).mode).toBe("deleted");
+    expect(captured.some((q) => q.sql.includes("DELETE FROM products WHERE id"))).toBe(true);
+  });
+
+  it("com projetos SEM acknowledge → 400 ACK_REQUIRED (não arquiva)", async () => {
+    queryHandler = deleteHandler({ projectCount: 3 });
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID } });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).code).toBe("ACK_REQUIRED");
+    expect(touchedWrite()).toBe(false);
+  });
+
+  it("com projetos + acknowledge → SOFT archive (nunca apaga)", async () => {
+    queryHandler = deleteHandler({ projectCount: 3 });
+    const res = await app.inject({
+      method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID, acknowledge: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).mode).toBe("archived");
+    expect(captured.some((q) => q.sql.includes("SET status = 'archived'"))).toBe(true);
+    expect(captured.some((q) => q.sql.includes("DELETE FROM products"))).toBe(false);
+  });
+
+  it("filho em execução → 409 sem apagar/arquivar", async () => {
+    queryHandler = deleteHandler({ projectCount: 3, running: ["Proj A"] });
+    const res = await app.inject({
+      method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID, acknowledge: true },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(touchedWrite()).toBe(false);
+  });
+
+  it("não-master de outro tenant → 403", async () => {
+    currentUser = { id: "u3", role: "tenant_admin", tenantId: TENANT };
+    queryHandler = deleteHandler({ tenant: OTHER_TENANT, projectCount: 0 });
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID } });
+    expect(res.statusCode).toBe(403);
+  });
+});
