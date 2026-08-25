@@ -185,8 +185,20 @@ function ProductsPageInner() {
                 <CardActionArea onClick={() => router.push(`/products/${p.id}/projects`)} sx={{ flexGrow: 1 }}>
                   <CardContent>
                     <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} sx={{ mb: 0.25 }}>
-                      <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.3 }}>{p.name}</Typography>
-                      <Chip label={lc.label} size="small" color={lc.color} sx={{ fontSize: "0.62rem", height: 20, flexShrink: 0 }} />
+                      <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.3, minWidth: 0, flexGrow: 1 }}>{p.name}</Typography>
+                      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                        <Chip label={lc.label} size="small" color={lc.color} sx={{ fontSize: "0.62rem", height: 20 }} />
+                        {/* Excluir — só o ícone, canto superior direito, na mesma linha do título. */}
+                        <Tooltip title="Excluir produto">
+                          <IconButton
+                            size="small" color="error" aria-label="Excluir produto"
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); openDelete(p); }}
+                            sx={{ p: 0.25 }}
+                          >
+                            <DeleteOutlineIcon sx={{ fontSize: "1rem" }} />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
                     </Stack>
                     {/* ID do produto (letra pequena) — copiável para colar na confirmação de exclusão. */}
                     <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 1 }}>
@@ -215,9 +227,10 @@ function ProductsPageInner() {
                     />
                   </CardContent>
                 </CardActionArea>
-                <Box sx={{ px: 2, pb: 2, pt: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-                  {/* Promover produto inteiro — só quando ainda na Bancada (draft). Operação: master OK. */}
-                  {p.lifecycle_status === "draft" && (
+                {/* Promover produto inteiro — só quando ainda na Bancada (draft). Operação: master OK.
+                    Excluir virou ícone no topo do card (canto superior direito, junto ao título). */}
+                {p.lifecycle_status === "draft" && (
+                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
                     <Button
                       size="small" fullWidth variant="contained" color="success"
                       startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
@@ -226,15 +239,8 @@ function ProductsPageInner() {
                     >
                       Promover à fábrica
                     </Button>
-                  )}
-                  <Button
-                    size="small" fullWidth variant="outlined" color="error"
-                    startIcon={<DeleteOutlineIcon sx={{ fontSize: "0.9rem" }} />}
-                    onClick={() => openDelete(p)}
-                  >
-                    Excluir
-                  </Button>
-                </Box>
+                  </Box>
+                )}
               </Card>
             );
           })}

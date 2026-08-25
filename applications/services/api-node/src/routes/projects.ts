@@ -127,7 +127,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
-           WHERE ($1::uuid IS NULL OR p.tenant_id = $1)
+           WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -151,7 +151,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
-           WHERE p.tenant_id = $1
+           WHERE p.tenant_id = $1 AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -175,7 +175,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
-           WHERE p.created_by = $1
+           WHERE p.created_by = $1 AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -2581,14 +2581,23 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
-  // DELETE /api/projects/:id?keepFiles=true — exclui projeto do banco (keepFiles=true mantém disco)
-  // keepFiles=false (default): remove banco + arquivos do disco
-  app.delete<{ Params: { id: string }; Querystring: { keepFiles?: string } }>(
+  // DELETE /api/projects/:id — dois modos (espelha /api/products):
+  //  • Legado (menu Ações da tela de detalhe): sem body `confirmId` → apaga direto
+  //    (?keepFiles=true mantém disco). Mantido intacto para não quebrar o fluxo existente.
+  //  • Guardado (botão-ícone da lista /projects): com body `confirmId` → confirmação por
+  //    reescrita do ID; sem artefatos (repo git / estado terminal de sucesso) apaga de
+  //    verdade; COM artefatos apenas ARQUIVA (status='archived', some do portal, reversível),
+  //    exigindo `acknowledge=true`. Apagar trabalho durável de verdade é arriscado.
+  app.delete<{ Params: { id: string }; Querystring: { keepFiles?: string }; Body: { confirmId?: string; acknowledge?: boolean } }>(
     "/api/projects/:id",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
+      if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PROJECT_ID", message: "ID de projeto inválido" });
       const keepFiles = (request.query as { keepFiles?: string }).keepFiles === "true";
+      const body = (request.body ?? {}) as { confirmId?: string; acknowledge?: boolean };
+      // O fluxo guardado só é exigido quando o cliente manda `confirmId` (lista /projects).
+      const guarded = body.confirmId !== undefined;
       const client = await pool.connect();
       try {
         const proj = await client.query(
@@ -2599,6 +2608,12 @@ export async function projectRoutes(app: FastifyInstance) {
         if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
+        if (guarded && body.confirmId !== id) {
+          return reply.status(400).send({
+            code: "CONFIRM_MISMATCH",
+            message: "Confirmação inválida: reescreva o ID exato do projeto para excluir.",
+          });
+        }
         // Permitir excluir qualquer projeto que não está em execução ativa
         if (row.status === "running") {
           return reply.status(409).send({
@@ -2606,6 +2621,31 @@ export async function projectRoutes(app: FastifyInstance) {
             message: "Pare o pipeline antes de excluir. Use Interromper Imediatamente no menu Ações.",
           });
         }
+
+        // Modo guardado: decide entre apagar de verdade (sem artefatos) e arquivar (com artefatos).
+        if (guarded) {
+          const repo = await client.query("SELECT 1 FROM project_github_repos WHERE project_id = $1 LIMIT 1", [id]);
+          const hasArtifacts = (repo.rowCount ?? 0) > 0 || row.status === "completed" || row.status === "accepted";
+          if (hasArtifacts) {
+            if (body.acknowledge !== true) {
+              return reply.status(400).send({
+                code: "ACK_REQUIRED",
+                hasArtifacts: true,
+                message: "Este projeto tem trabalho gerado (repositório/entrega). Marque a confirmação — ele será OCULTADO (arquivado), não apagado.",
+              });
+            }
+            if (row.status === "archived") {
+              return reply.send({ ok: true, mode: "already_archived", projectId: id, message: "Projeto já estava arquivado." });
+            }
+            await client.query("UPDATE projects SET status = 'archived', updated_at = now() WHERE id = $1", [id]);
+            return reply.send({
+              ok: true, mode: "archived", projectId: id,
+              message: "Projeto ocultado do portal (arquivado). Nada foi apagado — reversível.",
+            });
+          }
+          // Sem artefatos → cai no hard delete abaixo (mode: "deleted").
+        }
+
         // Deletar do banco (ON DELETE CASCADE cuida das tabelas filhas)
         await client.query("DELETE FROM projects WHERE id = $1", [id]);
         // Deletar arquivos do disco se keepFiles=false
@@ -2622,6 +2662,7 @@ export async function projectRoutes(app: FastifyInstance) {
         }
         return reply.send({
           ok: true,
+          mode: "deleted",
           projectId: id,
           filesDeleted: !keepFiles,
           message: keepFiles

@@ -4,14 +4,23 @@ import { observer } from "mobx-react-lite";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
+import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
+import Checkbox from "@mui/material/Checkbox";
 import Chip from "@mui/material/Chip";
+import CircularProgress from "@mui/material/CircularProgress";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import IconButton from "@mui/material/IconButton";
 import LinearProgress from "@mui/material/LinearProgress";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import Tooltip from "@mui/material/Tooltip";
@@ -22,11 +31,21 @@ import SendIcon from "@mui/icons-material/Send";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { projectsStore } from "@/stores/projectsStore";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
+import { apiDeleteJson } from "@/lib/api";
 import type { Project } from "@/types";
 import { ResourceBadges } from "@/components/ResourceBadges";
+
+// Um projeto tem "trabalho durável" (arriscado apagar de verdade) quando já produziu
+// repositório git ou chegou a um estado terminal de sucesso. Nesse caso a exclusão da
+// lista apenas ARQUIVA (oculta); sem artefatos, apaga de verdade. Espelha o servidor.
+function projectHasArtifacts(p: Project): boolean {
+  return !!p.repoUrl || p.status === "completed" || p.status === "accepted";
+}
 
 const MotionCard = motion(Card);
 const MotionBox  = motion(Box);
@@ -142,7 +161,7 @@ function NewVersionButton({ project }: { project: Project }) {
 }
 
 // ── Project Card (grid view) ──────────────────────────────────────────────────
-function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number }) {
+function ProjectCard({ project, delay = 0, onDelete }: { project: Project; delay?: number; onDelete: (p: Project) => void }) {
   const router  = useRouter();
   const pct     = stepPercent(project.status, project.taskCount, project.taskDoneCount);
   const isRun   = project.status === "running";
@@ -187,6 +206,16 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
               color={statusColor(project.status)}
               sx={{ fontSize: "0.65rem" }}
             />
+            {/* Excluir — só o ícone, canto superior direito, na linha do título. */}
+            <Tooltip title="Excluir projeto">
+              <IconButton
+                size="small" color="error" aria-label="Excluir projeto"
+                onClick={(e) => { e.stopPropagation(); onDelete(project); }}
+                sx={{ p: 0.25 }}
+              >
+                <DeleteOutlineIcon sx={{ fontSize: "0.9rem" }} />
+              </IconButton>
+            </Tooltip>
           </Stack>
         </Stack>
 
@@ -243,7 +272,7 @@ function ProjectCard({ project, delay = 0 }: { project: Project; delay?: number 
 }
 
 // ── Project Row (list view) ───────────────────────────────────────────────────
-function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }) {
+function ProjectRow({ project, delay = 0, onDelete }: { project: Project; delay?: number; onDelete: (p: Project) => void }) {
   const router  = useRouter();
   const pct     = stepPercent(project.status, project.taskCount, project.taskDoneCount);
   const isDone  = project.status === "completed" || project.status === "accepted";
@@ -281,6 +310,12 @@ function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }
         repoUrl={project.repoUrl} repoFullName={project.repoFullName}
         deployUrl={project.deployUrl} deployStatus={project.deployStatus}
       />
+      <Tooltip title="Excluir projeto">
+        <IconButton size="small" color="error" aria-label="Excluir projeto"
+          onClick={(e) => { e.stopPropagation(); onDelete(project); }}>
+          <DeleteOutlineIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
       <IconButton size="small" onClick={(e) => { e.stopPropagation(); router.push(`/projects/${project.id}`); }}>
         <ArrowForwardIcon fontSize="small" />
       </IconButton>
@@ -365,8 +400,47 @@ function ProjectsPageInner() {
     setSelectedProductId(productParam);
   }, [productParam]);
 
-  // F2: exclui rascunhos pré-fábrica (agora exclusivos da Bancada) da listagem.
-  const allProjects = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
+  // ── Exclusão de projeto (mesmo sistema de /products) ──────────────────────────
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [confirmText, setConfirmText] = useState("");
+  const [ack, setAck] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const openDelete = (p: Project) => { setDeleteTarget(p); setConfirmText(""); setAck(false); setError(null); };
+  const closeDelete = () => { if (deleting) return; setDeleteTarget(null); setConfirmText(""); setAck(false); };
+  const copyId = async (id: string) => {
+    try { await navigator.clipboard.writeText(id); setNotice("ID copiado para a área de transferência."); }
+    catch { setError("Não foi possível copiar automaticamente — selecione e copie manualmente."); }
+  };
+
+  const hasArtifacts = !!deleteTarget && projectHasArtifacts(deleteTarget);
+  const idMatches = !!deleteTarget && confirmText.trim() === deleteTarget.id;
+  const canDelete = idMatches && (!hasArtifacts || ack);
+
+  const doDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const res = await apiDeleteJson<{ mode: string; message?: string }>(`/api/projects/${deleteTarget.id}`, {
+        confirmId: confirmText.trim(),
+        acknowledge: ack,
+      });
+      setNotice(res.message ?? "Projeto excluído.");
+      setDeleteTarget(null); setConfirmText(""); setAck(false);
+      await projectsStore.loadProjects();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao excluir o projeto");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // F2: exclui rascunhos pré-fábrica (Bancada) e projetos arquivados (ocultos via Excluir).
+  const allProjects = projectsStore.list.filter(
+    (p) => !PRE_FACTORY_STATUSES.has(p.status) && p.status !== "archived"
+  );
   // Mapa final de nomes de produto: prioriza o nome que veio no próprio projeto
   // (GET /api/projects já faz JOIN em products sob o escopo de tenant correto),
   // e só então recorre ao mapa de /api/products (pode faltar sob o seletor do master).
@@ -445,6 +519,9 @@ function ProjectsPageInner() {
         </Stack>
       </Stack>
 
+      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>}
+
       {/* Loading */}
       {projectsStore.loading && (
         <LinearProgress sx={{ borderRadius: 1, mb: 2 }} />
@@ -516,7 +593,7 @@ function ProjectsPageInner() {
                       <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
                         {group.versions.map((p, i) => (
                           <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
-                            <ProjectCard project={p} delay={i} />
+                            <ProjectCard project={p} delay={i} onDelete={openDelete} />
                           </Box>
                         ))}
                       </Box>
@@ -530,7 +607,7 @@ function ProjectsPageInner() {
                       <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
                         {singles.map((p, i) => (
                           <Box key={p.id} sx={{ flex: "1 1 260px", maxWidth: { xs: "100%", sm: "calc(50% - 8px)", md: "calc(33.33% - 11px)" }, minWidth: 240 }}>
-                            <ProjectCard project={p} delay={i} />
+                            <ProjectCard project={p} delay={i} onDelete={openDelete} />
                           </Box>
                         ))}
                       </Box>
@@ -575,7 +652,7 @@ function ProjectsPageInner() {
                   )}
                   <Card>
                     {sectionProjects.slice(0, visibleCount).map((p, i) => (
-                      <ProjectRow key={p.id} project={p} delay={i} />
+                      <ProjectRow key={p.id} project={p} delay={i} onDelete={openDelete} />
                     ))}
                   </Card>
                 </Box>
@@ -591,6 +668,78 @@ function ProjectsPageInner() {
           </Box>
         )}
       </AnimatePresence>
+
+      {/* Diálogo de exclusão — mesmo sistema de /products: reescrever o ID + (se houver
+          artefatos) marcar a caixa. Sem artefatos apaga de verdade; com, arquiva (oculta). */}
+      <Dialog open={!!deleteTarget} onClose={closeDelete} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <DeleteOutlineIcon color="error" /> Excluir projeto
+        </DialogTitle>
+        <DialogContent>
+          {deleteTarget && (
+            <Stack spacing={2} sx={{ pt: 1 }}>
+              <Alert severity={hasArtifacts ? "warning" : "error"}>
+                {hasArtifacts
+                  ? "Este projeto já tem trabalho gerado (repositório e/ou entrega). Por segurança ele NÃO será apagado — apenas ocultado do portal (arquivado). O histórico permanece no banco e a ação é reversível."
+                  : "Este projeto não tem artefatos e será REMOVIDO definitivamente do banco (e do disco). Esta ação não pode ser desfeita."}
+              </Alert>
+
+              <Box>
+                <Typography variant="caption" color="text.secondary">Projeto</Typography>
+                <Typography variant="body2" fontWeight={700}>{deleteTarget.title ?? "Sem título"}</Typography>
+              </Box>
+
+              <Box>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                  ID (copie e cole abaixo para confirmar)
+                </Typography>
+                <Stack direction="row" alignItems="center" spacing={1}>
+                  <Typography variant="caption" fontFamily="monospace" sx={{ wordBreak: "break-all" }}>
+                    {deleteTarget.id}
+                  </Typography>
+                  <Tooltip title="Copiar ID">
+                    <IconButton size="small" aria-label="Copiar ID" onClick={() => void copyId(deleteTarget.id)} sx={{ p: 0.25 }}>
+                      <ContentCopyIcon sx={{ fontSize: "0.9rem" }} />
+                    </IconButton>
+                  </Tooltip>
+                </Stack>
+              </Box>
+
+              <TextField
+                label="Reescreva o ID para confirmar"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                fullWidth size="small" autoComplete="off"
+                error={confirmText.trim().length > 0 && !idMatches}
+                helperText={confirmText.trim().length > 0 && !idMatches ? "O ID não confere." : " "}
+                inputProps={{ style: { fontFamily: "monospace", fontSize: "0.78rem" } }}
+              />
+
+              {hasArtifacts && (
+                <FormControlLabel
+                  control={<Checkbox checked={ack} onChange={(e) => setAck(e.target.checked)} color="warning" />}
+                  label={
+                    <Typography variant="body2">
+                      Entendo o que estou fazendo: o projeto será arquivado (oculto no portal), com o histórico preservado.
+                    </Typography>
+                  }
+                />
+              )}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeDelete} disabled={deleting}>Cancelar</Button>
+          <Button
+            color="error" variant="contained"
+            startIcon={deleting ? <CircularProgress size={14} color="inherit" /> : <DeleteOutlineIcon />}
+            disabled={deleting || !canDelete}
+            onClick={doDelete}
+          >
+            {hasArtifacts ? "Arquivar" : "Excluir definitivamente"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

@@ -86,7 +86,8 @@ export type ProjectStatus =
   | "running"
   | "stopped"
   | "pending_cyborg"
-  | "blocked_cyborg";
+  | "blocked_cyborg"
+  | "archived";
 
 export interface Project {
   id: string;
