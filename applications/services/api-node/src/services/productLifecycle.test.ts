@@ -16,6 +16,16 @@ describe("deriveProductLifecycle", () => {
     expect(deriveProductLifecycle(["pending_cyborg", "running"])).toBe("running");
   });
 
+  it("RFC-0003 B1: TODOS 'draft' → draft (produto na Bancada, nada na fábrica)", () => {
+    expect(deriveProductLifecycle(["draft"])).toBe("draft");
+    expect(deriveProductLifecycle(["draft", "draft", "draft"])).toBe("draft");
+    // estreito: basta 1 fora de 'draft' para NÃO ser Bancada (já entrou na fábrica)
+    expect(deriveProductLifecycle(["draft", "spec_submitted"])).toBe("running");
+    expect(deriveProductLifecycle(["draft", "pending_conversion"])).toBe("running");
+    // com aceitos misturados a drafts → parcial (draft conta como em andamento)
+    expect(deriveProductLifecycle(["accepted", "draft"])).toBe("partially_accepted");
+  });
+
   it("alguns aceitos + outros em andamento → partially_accepted", () => {
     expect(deriveProductLifecycle(["accepted", "running"])).toBe("partially_accepted");
     expect(deriveProductLifecycle(["accepted", "accepted", "spec_submitted"])).toBe("partially_accepted");

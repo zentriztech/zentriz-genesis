@@ -1,14 +1,17 @@
 "use client";
 
-// Tela "SPECs" (Feature #64 + Feature #65 parte 1).
-// - Aba "Minhas SPECs": lista as SPECs (rascunhos) do tenant. Uma SPEC é apenas uma IDEIA;
-//   pode ser promovida a projeto solo (POST /api/projects/:id/run) ou vinculada a um produto
-//   (PATCH /api/projects/:id/product). Editar leva à tela de edição de spec existente.
-// - Aba "Catálogo": SPECs pré-prontas categorizadas (GET /api/catalog); "Usar" cria uma SPEC
-//   a partir do template (POST /api/catalog/:slug/use) e abre a edição.
+// Tela "Bancada" (RFC-0003 F1 — antes "SPECs", Feature #64/#65).
+// A Bancada é o espaço de DESENHO anterior à fábrica: especifica-se à vontade e de graça;
+// só o que é viável é promovido. Uma SPEC/rascunho vive AQUI (nunca em "Meus projetos").
+// - Aba "Minhas SPECs": lista rascunhos do tenant, AGRUPADOS por produto. Cada SPEC pode:
+//   Editar; Vincular a produto (PATCH /api/projects/:id/product); Decompor em vários projetos
+//   (DecomposeDialog → /decompose, salva rascunhos na Bancada, dispatch:false); ou
+//   Promover à fábrica (POST /api/projects/:id/run). Um produto inteiro promove pelas raízes
+//   (POST /api/products/:id/promote). "Decompor uma ideia" abre o mesmo diálogo em modo cru.
+// - Aba "Catálogo": SPECs pré-prontas (GET /api/catalog); "Usar" cria uma SPEC do template.
 
 import { observer } from "mobx-react-lite";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -29,19 +32,28 @@ import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
+import ToggleButton from "@mui/material/ToggleButton";
+import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { alpha } from "@mui/material/styles";
 import EditIcon from "@mui/icons-material/Edit";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import LinkIcon from "@mui/icons-material/Link";
-import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
+import HandymanIcon from "@mui/icons-material/Handyman";
+import Inventory2OutlinedIcon from "@mui/icons-material/Inventory2Outlined";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import SearchIcon from "@mui/icons-material/Search";
 import SearchOffIcon from "@mui/icons-material/SearchOff";
+import ViewListIcon from "@mui/icons-material/ViewList";
+import ViewKanbanIcon from "@mui/icons-material/ViewKanban";
 import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
+import { projectsStore } from "@/stores/projectsStore";
+import { DecomposeDialog, type DecomposeSpecRef } from "@/components/DecomposeDialog";
+import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
 
 interface SpecItem {
   id: string;
@@ -53,6 +65,10 @@ interface SpecItem {
   extra?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  // RFC-0003 E2/E3 — anexados por /api/specs (determinístico). Opcionais: ambientes
+  // antigos ou falha de enriquecimento degradam para specs sem esses campos.
+  readiness?: Readiness | null;
+  estimate?: Estimate | null;
 }
 interface CatalogItem {
   slug: string;
@@ -80,6 +96,10 @@ function specStatusLabel(status: string): string {
   }
 }
 
+// Status pré-fábrica: rascunhos que vivem na Bancada. Tudo além disso já foi promovido
+// (fábrica/concluído) → alimenta a coluna "Promovido" do board de triagem (E1).
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+
 function SpecsPageInner() {
   const router = useRouter();
   const [tab, setTab] = useState(0);
@@ -87,11 +107,12 @@ function SpecsPageInner() {
   return (
     <Box>
       <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 3 }}>
-        <LightbulbOutlinedIcon sx={{ color: "#0EA5E9" }} />
+        <HandymanIcon sx={{ color: "#0EA5E9" }} />
         <Box>
-          <Typography variant="h5" fontWeight={700}>SPECs</Typography>
+          <Typography variant="h5" fontWeight={700}>Bancada</Typography>
           <Typography variant="body2" color="text.secondary">
-            Uma SPEC é uma ideia. Guarde, refine e promova a projeto quando quiser — ou comece a partir do catálogo.
+            Desenhe à vontade antes da fábrica: especifique, decomponha em projetos e refine.
+            Só o que for viável você promove — e só aí a fábrica roda.
           </Typography>
         </Box>
       </Stack>
@@ -120,14 +141,23 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   const [products, setProducts] = useState<ProductOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [linkTarget, setLinkTarget] = useState<SpecItem | null>(null);
   const [linkProductId, setLinkProductId] = useState("");
+  // Decompor: alvo é uma SPEC salva (modo spec). ideaOpen abre o mesmo diálogo em modo cru.
+  const [decomposeSpec, setDecomposeSpec] = useState<DecomposeSpecRef | null>(null);
+  const [ideaOpen, setIdeaOpen] = useState(false);
+  // E1: alterna entre lista agrupada e board de triagem (rascunho · pronto · promovido).
+  const [view, setView] = useState<"list" | "triage">("list");
+  // E3: confirmação de promoção mostra estimativa + pré-flight antes de queimar fábrica.
+  const [promoteTarget, setPromoteTarget] = useState<SpecItem | null>(null);
 
   // Master: escopa a listagem pelo tenant selecionado no topo (null = todos).
   const scopeTenantId = tenantScopeStore.selectedTenantId;
-  // Conta de gestão (zentriz_admin) só VISUALIZA specs do tenant — sem CTAs de escrita
-  // (o backend também bloqueia a autoria via 403 — managementGuard.ts).
+  // Conta de gestão (zentriz_admin) só VISUALIZA specs do tenant — sem CTAs de AUTORIA
+  // (Editar/Vincular/Decompor/Promover à fábrica; backend bloqueia via 403). Promover o
+  // PRODUTO inteiro é operação (C6) — permitida ao master, tratada à parte.
   const isMaster = authStore.isZentrizAdmin;
 
   const load = useCallback(async () => {
@@ -144,16 +174,33 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
 
   useEffect(() => {
     load();
-    apiGet<ProductOption[]>("/api/products").then(setProducts).catch(() => {});
-  }, [load]);
+    apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId })).then(setProducts).catch(() => {});
+    // Projetos já promovidos alimentam a coluna "Promovido" do board de triagem (E1).
+    projectsStore.loadProjects();
+  }, [load, scopeTenantId]);
 
-  const promote = async (id: string) => {
+  // Promover à FÁBRICA (spec individual). POST /run — o backend barra dependência não-pronta.
+  const promoteToFactory = async (id: string) => {
     setBusyId(id);
     try {
       await apiPost(`/api/projects/${id}/run`, {});
       router.push(`/projects/${id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao promover a projeto");
+      setError(e instanceof Error ? e.message : "Falha ao promover à fábrica");
+      setBusyId(null);
+    }
+  };
+
+  // Promover PRODUTO inteiro (raízes disparadas em cascata pela fábrica). Operação: master OK.
+  const promoteProduct = async (productId: string) => {
+    setBusyId(`prod:${productId}`);
+    try {
+      const res = await apiPost<{ promoted?: string[] }>(`/api/products/${productId}/promote`, {});
+      const n = res.promoted?.length ?? 0;
+      setNotice(`Produto promovido à fábrica — ${n} raiz(es) em execução. As ondas seguintes disparam automaticamente.`);
+      router.push("/projects");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao promover o produto");
       setBusyId(null);
     }
   };
@@ -172,6 +219,123 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     }
   };
 
+  // Agrupa specs por produto (product_id). Grupos de produto primeiro (nome ↑), avulsas por fim.
+  const groups = useMemo(() => {
+    const byProduct = new Map<string, { name: string; specs: SpecItem[] }>();
+    const standalone: SpecItem[] = [];
+    for (const s of specs) {
+      if (s.product_id) {
+        const g = byProduct.get(s.product_id) ?? { name: s.product_name ?? "Produto", specs: [] };
+        if (s.product_name) g.name = s.product_name;
+        g.specs.push(s);
+        byProduct.set(s.product_id, g);
+      } else {
+        standalone.push(s);
+      }
+    }
+    const productGroups = Array.from(byProduct.entries())
+      .map(([id, g]) => ({ productId: id as string | null, name: g.name, specs: g.specs }))
+      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+    if (standalone.length > 0) {
+      productGroups.push({ productId: null, name: "Avulsas (sem produto)", specs: standalone });
+    }
+    return productGroups;
+  }, [specs]);
+
+  // E1 · Board de triagem — duas colunas de Bancada por prontidão + uma coluna do que já
+  // foi promovido. "Pronto para promover" = readiness.level === "ready" (título+tech+deps ok).
+  // "Rascunho" = todo o resto (incompleta/quase, ou sem enriquecimento). "Promovido" vem do
+  // projectsStore (já escopado por tenant) filtrando fora os status pré-fábrica.
+  const triage = useMemo(() => {
+    const rascunho: SpecItem[] = [];
+    const pronto: SpecItem[] = [];
+    for (const s of specs) {
+      if (s.readiness?.level === "ready") pronto.push(s);
+      else rascunho.push(s);
+    }
+    return { rascunho, pronto };
+  }, [specs]);
+  const promoted = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
+
+  // Card de uma SPEC (reusado em cada grupo).
+  const renderSpec = (s: SpecItem) => {
+    const busy = busyId === s.id;
+    return (
+      <Card key={s.id} variant="outlined" sx={{ p: 0 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, p: 2, flexWrap: "wrap" }}>
+          <Box sx={{ flexGrow: 1, minWidth: 220 }}>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+              <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
+              <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
+              {s.readiness && <ReadinessBadge readiness={s.readiness} />}
+            </Stack>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                Atualizada em {formatDate(s.updated_at)}
+              </Typography>
+              {s.estimate && <EstimateChip estimate={s.estimate} />}
+            </Stack>
+          </Box>
+          {!isMaster && (
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Button size="small" variant="outlined" startIcon={<EditIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={busy} onClick={() => router.push(`/spec?editProjectId=${s.id}`)}>
+                Editar
+              </Button>
+              <Button size="small" variant="outlined" startIcon={<LinkIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
+                Vincular
+              </Button>
+              {/* Decompor só faz sentido para spec AINDA sem produto (backend: 409 se já em produto). */}
+              {!s.product_id && (
+                <Button size="small" variant="outlined" color="secondary" startIcon={<CallSplitIcon sx={{ fontSize: "0.9rem" }} />}
+                  disabled={busy} onClick={() => setDecomposeSpec({ id: s.id, title: s.title })}>
+                  Decompor
+                </Button>
+              )}
+              <Button size="small" variant="contained" color="success"
+                startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={busy} onClick={() => setPromoteTarget(s)}>
+                Promover à fábrica
+              </Button>
+            </Stack>
+          )}
+        </Box>
+      </Card>
+    );
+  };
+
+  // Card compacto de um projeto já promovido (coluna "Promovido" do board).
+  const renderPromoted = (p: (typeof promoted)[number]) => (
+    <Card key={p.id} variant="outlined" sx={{ p: 0, cursor: "pointer" }}
+      onClick={() => router.push(`/projects/${p.id}`)}>
+      <Box sx={{ p: 1.5 }}>
+        <Typography variant="subtitle2" fontWeight={600} noWrap>{p.title}</Typography>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }} flexWrap="wrap" useFlexGap>
+          <Chip label={p.status} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+          {p.productName && (
+            <Typography variant="caption" color="text.secondary" noWrap>{p.productName}</Typography>
+          )}
+        </Stack>
+      </Box>
+    </Card>
+  );
+
+  // Uma coluna do board de triagem (E1). accent tinge o cabeçalho.
+  const triageColumn = (title: string, accent: string, hint: string, count: number, children: ReactNode) => (
+    <Box sx={{ flex: 1, minWidth: 260, bgcolor: alpha(accent, 0.04), border: "1px solid", borderColor: alpha(accent, 0.25), borderRadius: 2, p: 1.5 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+        <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: accent }} />
+        <Typography variant="subtitle2" fontWeight={700}>{title}</Typography>
+        <Chip label={count} size="small" sx={{ fontSize: "0.6rem", height: 18, bgcolor: alpha(accent, 0.18), color: accent, fontWeight: 700 }} />
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, lineHeight: 1.4 }}>{hint}</Typography>
+      {count === 0
+        ? <Typography variant="caption" color="text.disabled" sx={{ fontStyle: "italic" }}>Nada aqui ainda.</Typography>
+        : <Stack spacing={1.5}>{children}</Stack>}
+    </Box>
+  );
+
   if (loading) {
     return <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}><CircularProgress size={28} /></Box>;
   }
@@ -179,63 +343,110 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   return (
     <Box>
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>}
+
+      {/* Barra de ações da Bancada (autoria) */}
+      {!isMaster && (
+        <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: "wrap", gap: 1 }}>
+          <Button variant="contained" startIcon={<AddCircleOutlineIcon />} onClick={() => router.push("/spec")}>
+            Nova SPEC
+          </Button>
+          <Button variant="outlined" color="secondary" startIcon={<CallSplitIcon />} onClick={() => setIdeaOpen(true)}>
+            Decompor uma ideia
+          </Button>
+        </Stack>
+      )}
 
       {specs.length === 0 ? (
         <Box sx={{ textAlign: "center", py: 6 }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography variant="body2" color="text.secondary">
             {isMaster
-              ? "Este tenant ainda não possui SPECs."
-              : "Nenhuma SPEC ainda. Crie uma ideia do zero ou parta de um template do catálogo."}
+              ? "Este tenant ainda não possui SPECs na Bancada."
+              : "Bancada vazia. Crie uma SPEC do zero, decomponha uma ideia, ou parta de um template do catálogo."}
           </Typography>
-          {!isMaster && (
-            <Button variant="contained" startIcon={<AddCircleOutlineIcon />} onClick={() => router.push("/spec")}>
-              Nova SPEC
-            </Button>
-          )}
         </Box>
       ) : (
-        <Stack spacing={1.5}>
-          {specs.map((s) => {
-            const busy = busyId === s.id;
-            return (
-              <Card key={s.id} variant="outlined" sx={{ p: 0 }}>
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, p: 2, flexWrap: "wrap" }}>
-                  <Box sx={{ flexGrow: 1, minWidth: 220 }}>
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
-                      <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
-                      {s.product_name && (
-                        <Chip label={s.product_name} size="small" color="info" variant="outlined"
-                          sx={{ fontSize: "0.62rem", height: 18 }} />
-                      )}
-                    </Stack>
-                    <Typography variant="caption" color="text.secondary">
-                      Atualizada em {formatDate(s.updated_at)}
-                    </Typography>
-                  </Box>
-                  {!isMaster && (
-                    <Stack direction="row" spacing={1}>
-                      <Button size="small" variant="outlined" startIcon={<EditIcon sx={{ fontSize: "0.9rem" }} />}
-                        disabled={busy} onClick={() => router.push(`/spec?editProjectId=${s.id}`)}>
-                        Editar
-                      </Button>
-                      <Button size="small" variant="outlined" startIcon={<LinkIcon sx={{ fontSize: "0.9rem" }} />}
-                        disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
-                        Vincular a produto
-                      </Button>
-                      <Button size="small" variant="contained" color="success"
-                        startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon sx={{ fontSize: "0.9rem" }} />}
-                        disabled={busy} onClick={() => promote(s.id)}>
-                        Promover a projeto
-                      </Button>
-                    </Stack>
-                  )}
-                </Box>
-              </Card>
-            );
-          })}
+        <>
+          {/* E1 · alterna entre a lista agrupada por produto e o board de triagem por prontidão. */}
+          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
+            <ToggleButtonGroup size="small" exclusive value={view}
+              onChange={(_e, v) => { if (v) setView(v); }}>
+              <ToggleButton value="list" sx={{ textTransform: "none", px: 1.5 }}>
+                <ViewListIcon sx={{ fontSize: "1rem", mr: 0.5 }} /> Por produto
+              </ToggleButton>
+              <ToggleButton value="triage" sx={{ textTransform: "none", px: 1.5 }}>
+                <ViewKanbanIcon sx={{ fontSize: "1rem", mr: 0.5 }} /> Triagem
+              </ToggleButton>
+            </ToggleButtonGroup>
+          </Stack>
+
+          {view === "triage" ? (
+            <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems="stretch">
+              {triageColumn(
+                "Rascunho", "#94A3B8",
+                "Ainda incompletas — falta título, tecnologia ou dependência. Refine antes de promover.",
+                triage.rascunho.length,
+                triage.rascunho.map(renderSpec),
+              )}
+              {triageColumn(
+                "Pronto para promover", "#22C55E",
+                "Passaram no pré-flight (título · tecnologia · dependências). É só promover à fábrica.",
+                triage.pronto.length,
+                triage.pronto.map(renderSpec),
+              )}
+              {triageColumn(
+                "Promovido", "#6366F1",
+                "Já saíram da Bancada e estão em fábrica ou concluídos. Clique para abrir o cockpit.",
+                promoted.length,
+                promoted.map(renderPromoted),
+              )}
+            </Stack>
+          ) : (
+        <Stack spacing={3}>
+          {groups.map((g) => (
+            <Box key={g.productId ?? "standalone"}>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: "wrap", gap: 1 }}>
+                {g.productId
+                  ? <Inventory2OutlinedIcon sx={{ fontSize: "1rem", color: "#8B5CF6" }} />
+                  : <HandymanIcon sx={{ fontSize: "1rem", color: "text.disabled" }} />}
+                <Typography variant="subtitle2" fontWeight={700} sx={{ color: g.productId ? "#8B5CF6" : "text.secondary" }}>
+                  {g.name}
+                </Typography>
+                <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                {/* Promover produto inteiro — operação; master também pode (C6). Só para grupo de produto. */}
+                {g.productId && (
+                  <Button size="small" variant="contained" color="success"
+                    startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+                    disabled={busyId === `prod:${g.productId}`}
+                    onClick={() => promoteProduct(g.productId as string)}>
+                    Promover produto inteiro
+                  </Button>
+                )}
+              </Stack>
+              <Stack spacing={1.5}>
+                {g.specs.map(renderSpec)}
+              </Stack>
+            </Box>
+          ))}
         </Stack>
+          )}
+        </>
       )}
+
+      {/* Diálogo de decomposição — modo SPEC (a partir de uma spec salva) */}
+      <DecomposeDialog
+        open={!!decomposeSpec}
+        spec={decomposeSpec}
+        onClose={() => setDecomposeSpec(null)}
+        onSaved={() => { setNotice("Projetos salvos na Bancada como rascunhos. Promova quando quiser."); load(); }}
+      />
+      {/* Diálogo de decomposição — modo IDEIA (texto cru) */}
+      <DecomposeDialog
+        open={ideaOpen}
+        spec={null}
+        onClose={() => setIdeaOpen(false)}
+        onSaved={() => { setNotice("Ideia decomposta e salva na Bancada como rascunhos."); load(); }}
+      />
 
       {/* Dialog: vincular a produto */}
       <Dialog open={!!linkTarget} onClose={() => setLinkTarget(null)} maxWidth="xs" fullWidth>
@@ -255,6 +466,49 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
         <DialogActions>
           <Button onClick={() => setLinkTarget(null)}>Cancelar</Button>
           <Button variant="contained" onClick={confirmLink} disabled={busyId === linkTarget?.id}>Salvar</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* E3 · Confirmação de promoção — mostra estimativa (tempo/custo) + pré-flight ANTES de
+          queimar fábrica. Promover é irreversível (roda o pipeline), então nunca é 1-clique. */}
+      <Dialog open={!!promoteTarget} onClose={() => busyId ? undefined : setPromoteTarget(null)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontSize: "1rem", display: "flex", alignItems: "center", gap: 1 }}>
+          <RocketLaunchIcon sx={{ fontSize: "1.1rem", color: "success.main" }} /> Promover à fábrica
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            A SPEC <b>{promoteTarget?.title}</b> sairá da Bancada e a fábrica começará a executá-la.
+            Esta ação dispara o pipeline — confira a prontidão e a estimativa antes.
+          </Typography>
+
+          {promoteTarget?.readiness && (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+              <Typography variant="caption" color="text.secondary">Prontidão:</Typography>
+              <ReadinessBadge readiness={promoteTarget.readiness} />
+            </Stack>
+          )}
+          {promoteTarget?.estimate && (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary">Estimativa:</Typography>
+              <EstimateChip estimate={promoteTarget.estimate} />
+            </Stack>
+          )}
+
+          {promoteTarget?.readiness && promoteTarget.readiness.level !== "ready" && (
+            <Alert severity="warning" sx={{ mt: 1.5, py: 0.5 }}>
+              Esta SPEC ainda não passou no pré-flight. Você pode promover mesmo assim, mas a fábrica
+              pode barrar dependências não concluídas. Abra a prontidão acima para ver o que falta.
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPromoteTarget(null)} disabled={!!busyId}>Cancelar</Button>
+          <Button variant="contained" color="success"
+            startIcon={busyId === promoteTarget?.id ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+            disabled={!!busyId}
+            onClick={() => { if (promoteTarget) promoteToFactory(promoteTarget.id); }}>
+            Promover agora
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

@@ -222,3 +222,86 @@ export async function enqueueOrStart(
   );
   return "queued";
 }
+
+export interface SlotClaim {
+  outcome: "started" | "queued";
+  /** Status do projeto ANTES do claim — usado por revertSlotClaim se o dispatch falhar. */
+  previousStatus: string | null;
+}
+
+/**
+ * Claim ATÔMICO de slot de concorrência (RFC-0003, fix C2 — elimina o TOCTOU do
+ * `enqueueOrStart`, onde N chamadas concorrentes liam a mesma contagem de 'running' e
+ * todas decidiam "started", furando o teto).
+ *
+ * Serializa por tenant via `pg_advisory_xact_lock` e, DENTRO da mesma transação, conta os
+ * projetos 'running' e RESERVA o slot marcando o projeto como 'running' (o próprio marcador
+ * que a contagem observa) — ou o enfileira ('queued'). Como a reserva acontece sob o lock,
+ * dois claimers do mesmo tenant nunca veem a mesma contagem estável duas vezes.
+ *
+ * Retorna também o status anterior, para reverter (revertSlotClaim) se o dispatch falhar.
+ */
+export async function claimSlotOrQueue(
+  projectId: string,
+  tenantId: string
+): Promise<SlotClaim> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // hashtext(uuid::text) → int4, promovido ao overload bigint de pg_advisory_xact_lock.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [tenantId]);
+
+    const cur = await client.query("SELECT status FROM projects WHERE id = $1 FOR UPDATE", [projectId]);
+    const previousStatus = (cur.rows[0]?.status as string | undefined) ?? null;
+
+    const cfg = await client.query(
+      `SELECT max_concurrent_projects FROM tenant_llm_configs
+       WHERE tenant_id = $1 AND is_active = TRUE ORDER BY priority ASC LIMIT 1`,
+      [tenantId]
+    );
+    const maxConcurrent = cfg.rows[0]
+      ? Number(cfg.rows[0].max_concurrent_projects)
+      : SYSTEM_DEFAULT.maxConcurrentProjects;
+
+    const cnt = await client.query(
+      `SELECT COUNT(*) AS running_count FROM projects WHERE tenant_id = $1 AND status = 'running'`,
+      [tenantId]
+    );
+    const runningCount = Number(cnt.rows[0]?.running_count ?? 0);
+
+    if (runningCount < maxConcurrent) {
+      await client.query(
+        `UPDATE projects SET status = 'running', started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $1`,
+        [projectId]
+      );
+      await client.query("COMMIT");
+      return { outcome: "started", previousStatus };
+    }
+
+    await client.query(
+      `UPDATE projects SET status = 'queued', queued_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [projectId]
+    );
+    await client.query("COMMIT");
+    return { outcome: "queued", previousStatus };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Reverte um claim de slot (status 'running' reservado) de volta ao status anterior quando o
+ * dispatch subsequente falha — liberando o slot. Só age se o projeto ainda estiver 'running'
+ * (não sobrescreve um estado já avançado pelo runner via callback).
+ */
+export async function revertSlotClaim(projectId: string, previousStatus: string | null): Promise<void> {
+  if (!previousStatus) return;
+  await pool.query(
+    `UPDATE projects SET status = $1, started_at = NULL, updated_at = now()
+     WHERE id = $2 AND status = 'running'`,
+    [previousStatus, projectId]
+  );
+}

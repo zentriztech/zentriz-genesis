@@ -12,13 +12,20 @@
  * 8. Add dialogue entry so portal shows the repo link
  */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { access } from "node:fs/promises";
+import { join } from "node:path";
 import { pool } from "../db/client.js";
 import { syncSecretsToGitHub, getCloudConnection } from "./cloudConnector.js";
 import {
   createRepository,
   ensureThreeBranches,
   pushProjectFiles,
+  getInstallationTokenForClone,
 } from "./github.js";
+
+const execFileAsync = promisify(execFile);
 import { notifyTelegramTenant } from "../routes/telegram.js";
 import { validateDeployMatrix } from "./provision/deployMatrix.js";
 import { renderMobileRncliBundle } from "./provision/renderers/mobileRncliRenderer.js";
@@ -53,6 +60,11 @@ export interface DeadpoolRegisterArgs {
   serviceId: string | null;
   repoUrl: string;
   installationId: number | string;
+  // Ponto 3 (git-link): caminho da árvore de trabalho LOCAL git-linkada ao repo, no volume
+  // compartilhado (/shared/uploads/<projectId>/apps). O Deadpool a usa como repo_dir para
+  // manutenção/evolução SEM clone de rede (allow_network_clone=OFF por padrão). Opcional →
+  // retrocompatível: ausente = Deadpool cai no fluxo antigo (clone quando habilitado).
+  localPath?: string | null;
   // Runtime (opcional): enviado quando o monitoramento é ativado para um projeto deployado.
   appUrl?: string | null;
   healthUrl?: string | null;
@@ -122,6 +134,7 @@ export async function registerProjectWithDeadpool(
     };
     // Campos runtime/monitoring só entram no payload quando fornecidos → retrocompatível
     // com o registro #60 (que manda apenas systemId/serviceId/repoUrl/installationId).
+    if (args.localPath != null) body.localPath = args.localPath;
     if (args.appUrl != null) body.appUrl = args.appUrl;
     if (args.healthUrl != null) body.healthUrl = args.healthUrl;
     if (args.environment != null) body.environment = args.environment;
@@ -158,6 +171,74 @@ export async function registerProjectWithDeadpool(
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[GitHubPush] Deadpool register-project failed (non-fatal):", err);
     return { ok: false, error: msg };
+  }
+}
+
+/** Resultado do git-link da pasta local (Ponto 3). Nunca lança — best-effort. */
+export interface GitLinkResult {
+  ok: boolean;
+  localPath?: string;
+  error?: string;
+}
+
+/**
+ * Ponto 3 (Jean) — git-linka a pasta LOCAL do projeto ao repositório recém-criado, para que
+ * o Deadpool a use como working tree (`repo_dir`) nas manutenções/melhorias/evolução SEM
+ * clone de rede (o executor do Deadpool usa `repo_dir` local quando
+ * `DEADPOOL_ALLOW_NETWORK_CLONE` está OFF — o default). Genesis e Deadpool compartilham o
+ * volume (/shared/uploads), então a árvore linkada aqui é lida diretamente pelo Deadpool.
+ *
+ * O layout do repo = conteúdo achatado de `<root>/<projectId>/apps/` (a MESMA pasta que
+ * `pushProjectFiles` envia). Passos: `git init` → remote `origin` com URL LIMPA (o token de
+ * instalação é curto — ~1h; o Deadpool injeta o SEU token na hora do push/PR, como já faz no
+ * clone) → `fetch` autenticado pontual do branch (token só no header `http.extraheader`,
+ * NUNCA persistido em config/URL) → `checkout -B <branch> origin/<branch>`. Resultado: a
+ * árvore local vira um espelho fiel do branch remoto, com histórico COMUM — os PRs do
+ * Deadpool nascem limpos (sem "unrelated histories"). Idempotente e não-fatal: NUNCA derruba
+ * o push (roda depois do repo já criado e salvo).
+ */
+export async function gitLinkProjectFolder(opts: {
+  projectId: string;
+  fullName: string;
+  installationId: number;
+  branch: string;
+  /** Seam de teste: sobrescreve a URL do remote (default = repo do GitHub). */
+  remoteUrl?: string;
+}): Promise<GitLinkResult> {
+  const localPath = join(PROJECT_FILES_ROOT, opts.projectId, "apps");
+  try {
+    await access(localPath); // pasta de código existe? (sem apps/, nada a linkar)
+  } catch {
+    return { ok: false, error: `pasta local ausente: ${localPath}` };
+  }
+  const git = (args: string[]) =>
+    execFileAsync("git", ["-C", localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+  try {
+    const token = await getInstallationTokenForClone(opts.installationId);
+    const plainUrl = opts.remoteUrl ?? `https://github.com/${opts.fullName}.git`;
+    // Auth via header (Basic x-access-token:token) só no fetch — não fica em nenhum config.
+    const authHeader = `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+
+    // `-b <branch>`: o branch inicial já nasce com o nome alvo (idempotente em repo existente).
+    await git(["init", "-q", "-b", opts.branch]);
+    await git(["config", "user.email", "genesis@zentriz.com.br"]);
+    await git(["config", "user.name", "Zentriz Genesis"]);
+    await git(["config", "commit.gpgsign", "false"]);
+    // Remote LIMPO (sem token), idempotente entre re-execuções.
+    await git(["remote", "remove", "origin"]).catch(() => {});
+    await git(["remote", "add", "origin", plainUrl]);
+    // Fetch autenticado pontual do branch alvo (token só no header desta invocação).
+    await git(["-c", authHeader, "fetch", "--depth=1", "-q", "origin", opts.branch]);
+    // Alinha a árvore local ao tip remoto (histórico comum p/ PRs limpos do Deadpool).
+    // reset --hard (e não checkout) porque a pasta JÁ contém os arquivos enviados como
+    // NÃO-rastreados: o checkout recusaria ("untracked would be overwritten"); o reset
+    // sobrescreve as colisões e faz o branch nascer apontando ao tip remoto.
+    await git(["reset", "--hard", "-q", `origin/${opts.branch}`]);
+    // Rastreio upstream = origin/<branch> (o reset não seta upstream sozinho).
+    await git(["branch", `--set-upstream-to=origin/${opts.branch}`, opts.branch]).catch(() => {});
+    return { ok: true, localPath };
+  } catch (err) {
+    return { ok: false, localPath, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -290,6 +371,17 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
       [projectId, repoName, fullName, `https://github.com/${fullName}`, cloneUrl, shaDevResult],
     );
 
+    // ── 7a-bis. Ponto 3: git-linka a pasta local ao repo ─────────────────────
+    // Transforma <root>/<projectId>/apps/ num working tree git espelhando o branch dev
+    // remoto (histórico comum). O Deadpool, no volume compartilhado, usa essa pasta como
+    // repo_dir para manutenção/evolução sem clone de rede. Best-effort: nunca falha o push.
+    const gitLink = await gitLinkProjectFolder({ projectId, fullName, installationId, branch: "dev" });
+    if (gitLink.ok) {
+      console.log(`[GitHubPush] ✓ pasta local git-linkada ao dev p/ Deadpool: ${gitLink.localPath}`);
+    } else {
+      console.warn(`[GitHubPush] git-link da pasta local falhou (non-fatal): ${gitLink.error}`);
+    }
+
     // ── 7b. Registrar vínculo com o Deadpool (#60) ────────────────────────────
     // systemId canônico do manifesto (product.systemId, ex.: "zvoices") quando presente;
     // senão slug do nome do produto; para projeto standalone, slug do título.
@@ -309,6 +401,8 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
       serviceId,
       repoUrl: `https://github.com/${fullName}`,
       installationId,
+      // Ponto 3: informa ao Deadpool o repo_dir local (só quando o git-link deu certo).
+      localPath: gitLink.ok ? gitLink.localPath : null,
     });
 
     // ── 8. Dialogue entry ─────────────────────────────────────────────────────

@@ -22,6 +22,22 @@ export interface DecomposeParams {
   zip: ProductZipContents;
   /** força specApproved em todos os projetos (default: do manifesto product.specApproved) */
   specApprovedOverride?: boolean;
+  /**
+   * RFC-0003 B1 (decomposição sem disparo — a alma do pivô). Default `false`:
+   * a decomposição SALVA os N projetos como rascunhos na Bancada (status 'draft')
+   * e o produto nasce 'draft' — a fábrica NÃO roda. A promoção (B2) é um ato
+   * deliberado posterior. Quando `true`, preserva o atalho express legado:
+   * projetos entram na fábrica (specApproved do manifesto), produto nasce 'running'
+   * e a onda 0 (raízes) fica elegível para disparo pelo chamador.
+   */
+  dispatch?: boolean;
+  /**
+   * RFC-0003 B4: id da spec da Bancada que originou esta decomposição (POST
+   * /api/projects/:id/decompose). Persistido em products.origin_project_id — dá o
+   * vínculo de origem (evita produto órfão, gap U#4/C7). null quando a decomposição
+   * vem de um ZIP/documento avulso (sem spec de origem).
+   */
+  originProjectId?: string | null;
 }
 
 export interface DecomposeResult {
@@ -72,6 +88,8 @@ async function buildReuseResult(
 
 export async function decomposeProduct(pool: Pool, params: DecomposeParams): Promise<DecomposeResult> {
   const { tenantId, createdBy, approverEmail, zip } = params;
+  // B1: sem disparo por padrão — decompor SALVA rascunhos na Bancada, não roda a fábrica.
+  const dispatch = params.dispatch === true;
 
   // 1. parse + validação determinística (fora da transação — não toca o banco)
   const manifest = parseManifest(zip.manifestText);
@@ -98,10 +116,12 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
     // #60: persiste o systemId canônico do manifesto (product.systemId), usado no
     // vínculo com o Deadpool. Ausente no manifesto → NULL (githubPush cai no slug do nome).
     const systemId = (sketch.product.systemId ?? "").trim() || null;
+    // B4: vínculo de origem (spec da Bancada que gerou o produto). null quando avulso.
+    const originProjectId = params.originProjectId ?? null;
     const prodRes = await client.query(
-      `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name`,
-      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash, systemId],
+      `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id, origin_project_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name`,
+      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash, systemId, originProjectId],
     );
     const productId = prodRes.rows[0].id as string;
 
@@ -123,7 +143,11 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
         productId,
         projectType: p.type,
         deliveryFields: deliveryFieldsFor(p.delivery ?? sketch.product.deliveryDefault),
-        specApproved,
+        // B1: no modo Bancada (sem disparo) os projetos nascem 'draft' (isDraft) e NÃO
+        // 'pending_conversion' — nada é elegível a auto-run até a promoção. No modo express
+        // preserva-se o specApproved do manifesto (doorstep da fábrica).
+        specApproved: dispatch ? specApproved : false,
+        isDraft: !dispatch,
       });
       idMap.set(p.id, created.projectId);
       projects.push({ manifestId: p.id, projectId: created.projectId, wave: p.wave, type: p.type, status: created.status });
@@ -145,18 +169,20 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       }
     }
 
-    // A2: produto sai de 'ingesting' → 'running' assim que os projetos existem
-    // (a onda 0 será disparada logo após o commit pela rota de ingestão).
+    // Lifecycle inicial do produto:
+    //  • Bancada (B1, sem disparo): 'draft' — especificado, aguardando promoção.
+    //  • Express (dispatch=true, A2): 'running' — a onda 0 dispara logo após o commit.
     await client.query(
-      "UPDATE products SET lifecycle_status = 'running', updated_at = now() WHERE id = $1",
-      [productId],
+      "UPDATE products SET lifecycle_status = $2, updated_at = now() WHERE id = $1",
+      [productId, dispatch ? "running" : "draft"],
     );
 
     await client.query("COMMIT");
 
     // 5. onda 0 (sem predecessores) fica elegível para disparo pelo chamador (rota),
-    //    que aciona o runner /run. As ondas seguintes disparam pela cascata de accept.
-    const dispatched = sketch.waves[0].map((mid) => idMap.get(mid)!);
+    //    que aciona o runner /run — SÓ no modo express. Na Bancada, `dispatched` é
+    //    vazio: nada roda até a promoção (B2). As ondas seguintes disparam pela cascata.
+    const dispatched = dispatch ? sketch.waves[0].map((mid) => idMap.get(mid)!) : [];
 
     return {
       productId,

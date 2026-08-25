@@ -291,6 +291,11 @@ function ProjectRow({ project, delay = 0 }: { project: Project; delay?: number }
 // ── Page ─────────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 10;
 
+// RFC-0003 F2: rascunhos pré-fábrica (draft/spec_submitted/pending_conversion) vivem
+// na BANCADA (/specs), não aqui. "Meus projetos" mostra só o que foi PROMOVIDO (solto)
+// ou já está em/depois da fábrica. Mesma lista de status pré-fábrica do backend /api/specs.
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+
 // FT-04: agrupa grupos por produto (product_id), depois por linhagem dentro de cada produto
 interface ProductSection {
   productId: string | null;
@@ -360,7 +365,8 @@ function ProjectsPageInner() {
     setSelectedProductId(productParam);
   }, [productParam]);
 
-  const allProjects = projectsStore.list;
+  // F2: exclui rascunhos pré-fábrica (agora exclusivos da Bancada) da listagem.
+  const allProjects = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
   // Mapa final de nomes de produto: prioriza o nome que veio no próprio projeto
   // (GET /api/projects já faz JOIN em products sob o escopo de tenant correto),
   // e só então recorre ao mapa de /api/products (pode faltar sob o seletor do master).

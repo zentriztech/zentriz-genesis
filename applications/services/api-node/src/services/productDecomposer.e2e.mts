@@ -51,8 +51,10 @@ async function main() {
   if (!contents) throw new Error("extractProductZip retornou null (manifesto não detectado)");
   console.log("✓ manifesto detectado; arquivos:", [...contents.files.keys()]);
 
+  // Modo express (dispatch:true): projetos entram na fábrica e onda 0 é elegível a disparo.
+  // (B1/RFC-0003 introduziu o default save-only — coberto por decompose.no-dispatch.test.ts.)
   const result = await decomposeProduct(pool, {
-    tenantId, createdBy: userId, approverEmail: "e2e@zentriz.com.br", zip: contents,
+    tenantId, createdBy: userId, approverEmail: "e2e@zentriz.com.br", zip: contents, dispatch: true,
   });
   console.log("✓ produto criado:", result.productId, result.productName);
   console.log("✓ projetos:", result.projects.map((p) => `${p.manifestId}→${p.projectId.slice(0,8)} (onda ${p.wave}, ${p.status})`));
@@ -84,7 +86,7 @@ async function main() {
 
   // Idempotência (DoD): reingerir o MESMO ZIP não cria produto/projetos duplicados.
   const reingest = await decomposeProduct(pool, {
-    tenantId, createdBy: userId, approverEmail: "e2e@zentriz.com.br", zip: extractProductZip(buildZip())!,
+    tenantId, createdBy: userId, approverEmail: "e2e@zentriz.com.br", zip: extractProductZip(buildZip())!, dispatch: true,
   });
   assert(reingest.idempotentReuse === true, "reingestão do mesmo ZIP → idempotentReuse=true");
   assert(reingest.productId === result.productId, "reingestão devolve o MESMO productId");

@@ -9,6 +9,8 @@
  * Só dispara projetos em status elegível para /run.
  */
 import type { Pool } from "pg";
+import { checkDependencyGate } from "./dependencyGate.js";
+import { claimSlotOrQueue, revertSlotClaim } from "./tenantLlmConfig.js";
 
 const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed"]);
 
@@ -31,12 +33,33 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
     return { projectId, dispatched: false, reason: `status não elegível: ${tp.status}` };
   }
 
+  // RFC-0003 (G3/C3): a cascata/promoção passa pelo MESMO gate de dependência+contrato do
+  // /run interativo — antes só o /run validava, e a onda-1+ podia começar sem o contrato do
+  // predecessor em disco.
+  const gate = await checkDependencyGate(pool, projectId);
+  if (!gate.ok) {
+    return { projectId, dispatched: false, reason: `${gate.block.code}: ${gate.block.message.slice(0, 160)}` };
+  }
+
   const specRes = await pool.query(
     `SELECT file_path FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`,
     [projectId],
   );
   const specPath = specRes.rows[0]?.file_path as string | undefined;
   if (!specPath) return { projectId, dispatched: false, reason: "spec não encontrada" };
+
+  // RFC-0003 (C2): claim ATÔMICO de slot de concorrência antes de disparar (fecha o TOCTOU
+  // do fan-out — promover N raízes de um produto de uma vez). Sem tenant (projeto solto),
+  // não há teto por tenant → dispara direto. Guarda o status anterior p/ revert em falha.
+  const tenantId = (tp.tenant_id as string | null) ?? null;
+  let previousStatus: string | null = null;
+  if (tenantId) {
+    const claim = await claimSlotOrQueue(projectId, tenantId);
+    if (claim.outcome === "queued") {
+      return { projectId, dispatched: false, reason: "enfileirado — sem slot de concorrência" };
+    }
+    previousStatus = claim.previousStatus;
+  }
 
   const { signToken } = await import("../auth.js");
   const userRes = await pool.query(`SELECT id, email, role FROM users WHERE id = $1`, [tp.created_by]);
@@ -58,15 +81,23 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
     runBody = { projectId, specContent: readFileSync(specPath).toString("base64"), apiBaseUrl, token };
   }
 
-  const res = await fetch(`${runnerServiceUrl.replace(/\/$/, "")}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(runBody),
-    signal: AbortSignal.timeout(15000),
-  });
-  if (res.ok || res.status === 409) {
-    return { projectId, dispatched: true };
+  try {
+    const res = await fetch(`${runnerServiceUrl.replace(/\/$/, "")}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(runBody),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.ok || res.status === 409) {
+      return { projectId, dispatched: true };
+    }
+    const txt = await res.text().catch(() => "");
+    // RFC-0003 (C2): dispatch falhou → libera o slot reservado no claim atômico.
+    await revertSlotClaim(projectId, previousStatus);
+    return { projectId, dispatched: false, reason: `runner ${res.status}: ${txt.slice(0, 160)}` };
+  } catch (err) {
+    await revertSlotClaim(projectId, previousStatus);
+    const msg = err instanceof Error ? err.message : String(err);
+    return { projectId, dispatched: false, reason: `falha ao chamar runner: ${msg.slice(0, 160)}` };
   }
-  const txt = await res.text().catch(() => "");
-  return { projectId, dispatched: false, reason: `runner ${res.status}: ${txt.slice(0, 160)}` };
 }

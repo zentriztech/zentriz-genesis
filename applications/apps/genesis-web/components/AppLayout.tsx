@@ -13,6 +13,7 @@ import List from "@mui/material/List";
 import ListItemButton from "@mui/material/ListItemButton";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import ListItemText from "@mui/material/ListItemText";
+import Collapse from "@mui/material/Collapse";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Toolbar from "@mui/material/Toolbar";
@@ -22,7 +23,6 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import { useTheme } from "@mui/material/styles";
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import FolderIcon from "@mui/icons-material/Folder";
-import LightbulbOutlinedIcon from "@mui/icons-material/LightbulbOutlined";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import MenuIcon from "@mui/icons-material/Menu";
@@ -42,8 +42,11 @@ import DesignServicesIcon from "@mui/icons-material/DesignServices";
 import TelegramIcon from "@mui/icons-material/Telegram";
 import TuneIcon from "@mui/icons-material/Tune";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
-import CallSplitIcon from "@mui/icons-material/CallSplit";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+import HandymanIcon from "@mui/icons-material/Handyman";
+import Inventory2Icon from "@mui/icons-material/Inventory2";
+import ExpandLess from "@mui/icons-material/ExpandLess";
+import ExpandMore from "@mui/icons-material/ExpandMore";
 import { useState } from "react";
 import { authStore } from "@/stores/authStore";
 import { notificationsStore } from "@/stores/notificationsStore";
@@ -55,49 +58,61 @@ const DRAWER_WIDTH = 240;
 const DRAWER_COLLAPSED = 56;
 const PRIMARY = "#6366F1";
 
-const navUser = [
-  { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,    color: "#6366F1" },
-  { label: "Enviar spec",   href: "/spec",            icon: <SendIcon />,         color: "#10B981" },
-  { label: "SPECs",         href: "/specs",           icon: <LightbulbOutlinedIcon />, color: "#0EA5E9" },
-  { label: "Splitter",      href: "/splitter",        icon: <CallSplitIcon />,    color: "#A855F7" },
-  { label: "Meus projetos", href: "/projects",        icon: <FolderIcon />,       color: "#F59E0B" },
-  { label: "Notificações",  href: "/notifications",   icon: <NotificationsIcon />,color: "#EF4444" },
+// RFC-0003 F4: navegação por ciclo de vida. Uma FOLHA é um link; um GRUPO é uma
+// seção colapsável (ex.: "Configuração", que agrega settings/*). O tipo discrimina
+// pelos campos: folha tem `href`, grupo tem `group`+`items`.
+type NavLeaf = { label: string; href: string; icon: React.ReactNode; color: string };
+type NavGroup = { group: string; icon: React.ReactNode; color: string; items: NavLeaf[] };
+type NavEntry = NavLeaf | NavGroup;
+const isGroup = (e: NavEntry): e is NavGroup => "group" in e;
+
+// Grupo "Configuração" — settings/* colapsados sob um header (RFC-0003 F4).
+const settingsGroup: NavGroup = {
+  group: "Configuração",
+  icon: <SettingsIcon />,
+  color: "#64748B",
+  items: [
+    { label: "LLM / IA",          href: "/settings/llm",            icon: <PsychologyIcon />,     color: "#6366F1" },
+    { label: "GitHub",            href: "/settings/github",         icon: <GitHubIcon />,         color: "#E2E8F0" },
+    { label: "Cloud Deploy",      href: "/settings/cloud",          icon: <CloudIcon />,          color: "#10B981" },
+    { label: "Ferramentas UI/UX", href: "/settings/ui-ux",          icon: <DesignServicesIcon />, color: "#A259FF" },
+    { label: "Deployments",       href: "/settings/deployments",    icon: <RocketLaunchIcon />,   color: "#0EA5E9" },
+    { label: "Telegram",          href: "/settings/telegram",       icon: <TelegramIcon />,       color: "#229ED9" },
+    { label: "Runtime Config",    href: "/settings/runtime-config", icon: <TuneIcon />,           color: "#F97316" },
+    { label: "Skill Store",       href: "/settings/skills",         icon: <AutoAwesomeIcon />,    color: "#3B82F6" },
+  ],
+};
+
+// Itens de uso geral (autoria/ciclo de vida). Ordem RFC-0003: Bancada→Projetos→Produtos→Notificações.
+// "SPECs"/"Splitter" foram unificados: a Bancada (/specs) é o pré-fábrica e embute o Decompor.
+const navUser: NavEntry[] = [
+  { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,         color: "#6366F1" },
+  { label: "Enviar spec",   href: "/spec",           icon: <SendIcon />,              color: "#10B981" },
+  { label: "Bancada",       href: "/specs",          icon: <HandymanIcon />,          color: "#0EA5E9" },
+  { label: "Meus projetos", href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
+  { label: "Meus produtos", href: "/products",       icon: <Inventory2Icon />,        color: "#8B5CF6" },
+  { label: "Notificações",  href: "/notifications",  icon: <NotificationsIcon />,     color: "#EF4444" },
 ];
 
-const navTenantAdmin = [
+const navTenantAdmin: NavEntry[] = [
   ...navUser,
-  { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,       color: "#8B5CF6" },
-  { label: "Projetos",      href: "/tenant/projects", icon: <FolderIcon />,       color: "#F59E0B" },
-  { label: "Plano e uso",   href: "/tenant/plan",      icon: <SettingsIcon />,      color: "#64748B" },
-  { label: "Deadpool",      href: "/deadpool",         icon: <HealthAndSafetyIcon />, color: "#EF4444" },
-  { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
-  { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,     color: "#E2E8F0" },
-  { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
-  { label: "Ferramentas UI/UX", href: "/settings/ui-ux",        icon: <DesignServicesIcon />, color: "#A259FF" },
-  { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
-  { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
-  { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
-  { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
+  { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,          color: "#8B5CF6" },
+  { label: "Plano e uso",   href: "/tenant/plan",     icon: <AccountBalanceIcon />,  color: "#64748B" },
+  { label: "Auto Care",     href: "/autocare",        icon: <HealthAndSafetyIcon />, color: "#EF4444" },
+  settingsGroup,
 ];
 
-// Zentriz admin vê TUDO e TODOS: itens de uso geral (incl. SPECs) +
-// visão global cross-tenant + toda a plataforma/settings.
-const navZentriz = [
+// Zentriz admin vê TUDO e TODOS: itens de uso geral + visão global cross-tenant +
+// toda a plataforma/settings (agrupados em "Configuração").
+const navZentriz: NavEntry[] = [
   ...navUser,
-  { label: "Tenants",       href: "/zentriz/tenants",   icon: <BusinessIcon />,   color: "#10B981" },
-  { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,     color: "#8B5CF6" },
-  { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,     color: "#F59E0B" },
-  { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,   color: "#64748B" },
+  { label: "Tenants",       href: "/zentriz/tenants",   icon: <BusinessIcon />,       color: "#10B981" },
+  { label: "Usuários",      href: "/zentriz/users",     icon: <PeopleIcon />,         color: "#8B5CF6" },
+  { label: "Projetos",      href: "/zentriz/projects",  icon: <FolderIcon />,         color: "#F59E0B" },
+  { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,       color: "#64748B" },
   { label: "Financeiro",    href: "/zentriz/finance",   icon: <AccountBalanceIcon />, color: "#22C55E" },
-  { label: "Deadpool",      href: "/deadpool",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
-  { label: "LLM / IA",       href: "/settings/llm",           icon: <PsychologyIcon />, color: "#6366F1" },
-  { label: "GitHub",          href: "/settings/github",         icon: <GitHubIcon />,        color: "#E2E8F0" },
-  { label: "Cloud Deploy",    href: "/settings/cloud",          icon: <CloudIcon />,      color: "#10B981" },
-  { label: "Ferramentas UI/UX", href: "/settings/ui-ux",        icon: <DesignServicesIcon />, color: "#A259FF" },
-  { label: "Deployments",     href: "/settings/deployments",    icon: <RocketLaunchIcon />, color: "#0EA5E9" },
-  { label: "Telegram",        href: "/settings/telegram",       icon: <TelegramIcon />,      color: "#229ED9" },
-  { label: "Runtime Config",  href: "/settings/runtime-config", icon: <TuneIcon />,          color: "#F97316" },
-  { label: "Skill Store",     href: "/settings/skills",         icon: <AutoAwesomeIcon />,   color: "#3B82F6" },
+  { label: "Auto Care",     href: "/autocare",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
+  settingsGroup,
 ];
 
 // RFC-0002 A.2: Genesis Admin (zentriz_admin) é conta de GESTÃO pura — nunca autora.
@@ -108,14 +123,14 @@ const ZENTRIZ_AUTHORING_HIDE_ALWAYS = new Set<string>([
 ]);
 
 // Itens de tenant que o master só VISUALIZA enquanto atua DENTRO de um tenant selecionado
-// (em modo gestão, sem tenant, somem). Inclui operacionais (Deadpool + settings de infra)
-// e as telas de acompanhamento read-only de autoria (SPECs, Splitter, Projetos) — o master
+// (em modo gestão, sem tenant, somem). Inclui operacionais (Auto Care + settings de infra)
+// e as telas de acompanhamento read-only de autoria (Bancada, Projetos, Produtos) — o master
 // as vê para visualizar o trabalho do tenant, mas a escrita continua bloqueada no backend.
 const HIDE_WHEN_NO_TENANT = new Set<string>([
   "/specs",
-  "/splitter",
   "/projects",
-  "/deadpool",
+  "/products",
+  "/autocare",
   "/settings/llm",
   "/settings/github",
   "/settings/cloud",
@@ -131,19 +146,56 @@ const HIDE_WHEN_NO_TENANT = new Set<string>([
 const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
   const pathname = usePathname();
   const router   = useRouter();
-  let nav = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  let nav: NavEntry[] = authStore.isZentrizAdmin ? navZentriz : authStore.isTenantAdmin ? navTenantAdmin : navUser;
 
   if (authStore.isZentrizAdmin) {
-    // Enviar spec some SEMPRE para conta de gestão (independe de tenant/hydrate;
-    // o papel já é conhecido no auth, sem flicker).
-    nav = nav.filter((item) => !ZENTRIZ_AUTHORING_HIDE_ALWAYS.has(item.href));
-    // Itens de tenant (operacionais + acompanhamento read-only): só aparecem com um
-    // tenant selecionado. Só aplica após hydrate() para não piscar o menu
-    // completo→reduzido de quem já tinha tenant.
-    if (tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null) {
-      nav = nav.filter((item) => !HIDE_WHEN_NO_TENANT.has(item.href));
-    }
+    // Enviar spec some SEMPRE para conta de gestão (independe de tenant/hydrate; o papel já é
+    // conhecido no auth, sem flicker). Itens de tenant (operacionais + acompanhamento read-only)
+    // só aparecem com um tenant selecionado — e só após hydrate() para não piscar o menu.
+    // O filtro percorre folhas E filhos de grupo (um grupo que esvazia some inteiro).
+    const hideNoTenant = tenantScopeStore.hydrated && tenantScopeStore.selectedTenantId === null;
+    const hidden = (href: string) =>
+      ZENTRIZ_AUTHORING_HIDE_ALWAYS.has(href) || (hideNoTenant && HIDE_WHEN_NO_TENANT.has(href));
+    nav = nav
+      .map((entry) => (isGroup(entry) ? { ...entry, items: entry.items.filter((it) => !hidden(it.href)) } : entry))
+      .filter((entry) => (isGroup(entry) ? entry.items.length > 0 : !hidden(entry.href)));
   }
+
+  // Renderiza uma folha de navegação. `nested` indenta filhos de um grupo (Configuração).
+  const renderLeaf = (item: NavLeaf, nested = false) => {
+    const active = pathname === item.href || pathname.startsWith(item.href + "/");
+    return (
+      <Tooltip key={item.href} title={collapsed ? item.label : ""} placement="right">
+        <ListItemButton
+          selected={active}
+          onClick={() => { router.push(item.href); onNavigate?.(); }}
+          sx={{
+            mb: 0.25,
+            px: collapsed ? 1 : 1.5, py: 0.75,
+            pl: !collapsed && nested ? 3 : undefined,
+            justifyContent: collapsed ? "center" : "flex-start",
+            minHeight: 40,
+          }}
+        >
+          <ListItemIcon
+            sx={{
+              minWidth: collapsed ? "unset" : 32,
+              "& svg": { fontSize: "1.1rem", color: active ? item.color : "text.secondary", transition: "color 0.15s" },
+            }}
+          >
+            {item.icon}
+          </ListItemIcon>
+          {!collapsed && (
+            <>
+              <ListItemText primary={item.label} primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }} />
+              {active && (<Box sx={{ width: 3, height: 16, borderRadius: 2, background: item.color, ml: 0.5, flexShrink: 0 }} />)}
+            </>
+          )}
+        </ListItemButton>
+      </Tooltip>
+    );
+  };
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -163,45 +215,30 @@ const SidebarContent = observer(function SidebarContent({ onNavigate, collapsed 
 
       {/* Nav items */}
       <List sx={{ px: collapsed ? 0.5 : 1, py: 1, pb: 2, flexGrow: 1, overflowY: "auto", overflowX: "hidden", minHeight: 0 }}>
-        {nav.map((item) => {
-          const active = pathname === item.href || pathname.startsWith(item.href + "/");
+        {nav.map((entry) => {
+          if (!isGroup(entry)) return renderLeaf(entry);
+          // Sidebar recolhido (só ícones): o header colapsável não cabe → achata os filhos.
+          if (collapsed) return entry.items.map((it) => renderLeaf(it));
+          const groupActive = entry.items.some((it) => pathname === it.href || pathname.startsWith(it.href + "/"));
+          const open = openGroups[entry.group] ?? groupActive; // auto-abre se um filho está ativo
           return (
-            <Tooltip key={item.href} title={collapsed ? item.label : ""} placement="right">
+            <Box key={entry.group}>
               <ListItemButton
-                selected={active}
-                onClick={() => { router.push(item.href); onNavigate?.(); }}
-                sx={{
-                  mb: 0.25,
-                  px: collapsed ? 1 : 1.5, py: 0.75,
-                  justifyContent: collapsed ? "center" : "flex-start",
-                  minHeight: 40,
-                }}
+                onClick={() => setOpenGroups((s) => ({ ...s, [entry.group]: !open }))}
+                sx={{ mb: 0.25, px: 1.5, py: 0.75, minHeight: 40 }}
               >
-                <ListItemIcon
-                  sx={{
-                    minWidth: collapsed ? "unset" : 32,
-                    "& svg": {
-                      fontSize: "1.1rem",
-                      color: active ? item.color : "text.secondary",
-                      transition: "color 0.15s",
-                    },
-                  }}
-                >
-                  {item.icon}
+                <ListItemIcon sx={{ minWidth: 32, "& svg": { fontSize: "1.1rem", color: groupActive ? entry.color : "text.secondary" } }}>
+                  {entry.icon}
                 </ListItemIcon>
-                {!collapsed && (
-                  <>
-                    <ListItemText
-                      primary={item.label}
-                      primaryTypographyProps={{ variant: "body2", fontWeight: active ? 600 : 400 }}
-                    />
-                    {active && (
-                      <Box sx={{ width: 3, height: 16, borderRadius: 2, background: item.color, ml: 0.5, flexShrink: 0 }} />
-                    )}
-                  </>
-                )}
+                <ListItemText primary={entry.group} primaryTypographyProps={{ variant: "body2", fontWeight: groupActive ? 600 : 400 }} />
+                {open ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
               </ListItemButton>
-            </Tooltip>
+              <Collapse in={open} timeout="auto" unmountOnExit>
+                <List disablePadding>
+                  {entry.items.map((it) => renderLeaf(it, true))}
+                </List>
+              </Collapse>
+            </Box>
           );
         })}
       </List>

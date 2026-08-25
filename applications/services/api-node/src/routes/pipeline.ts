@@ -4,7 +4,8 @@ import path from "path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signToken } from "../auth.js";
-import { enqueueOrStart, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
+import { claimSlotOrQueue, revertSlotClaim, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
+import { checkDependencyGate } from "../services/dependencyGate.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -53,6 +54,10 @@ const ALLOWED_STATUS_FOR_RUN = new Set([
   "pm_backlog",
   "stopped",
   "failed",
+  // RFC-0003 (Task 3): 'queued' é elegível para /run — o drainer do watchdog (G39) re-chama
+  // /run nos projetos enfileirados quando abre slot; sem isto eles nunca sairiam da fila. O
+  // claim atômico reserva o slot (ou re-enfileira se ainda não houver).
+  "queued",
 ]);
 
 /**
@@ -118,89 +123,13 @@ export async function pipelineRoutes(app: FastifyInstance) {
         });
       }
 
-      // ── Validação de dependências (project_triggers) ─────────────────────────
-      // I-4: Bloqueia /run se:
-      //   (a) algum predecessor não está completed/accepted, OU
-      //   (b) predecessor está accepted mas não tem api_contract.md no disco
-      // Garante que CTO/Engineer/Dev recebem contratos reais dos predecessores.
-      const triggersRes = await client.query(
-        `SELECT pt.trigger_project_id, p.title, p.status, p.product_id
-         FROM project_triggers pt
-         JOIN projects p ON p.id = pt.trigger_project_id
-         WHERE pt.project_id = $1`,
-        [projectId]
-      );
-
-      // (a) predecessores não concluídos
-      const blockers = triggersRes.rows.filter(
-        (r) => !["completed", "accepted"].includes(r.status as string)
-      ) as Array<{ trigger_project_id: string; title: string; status: string }>;
-      if (blockers.length > 0) {
-        const list = blockers.map((b) => `"${b.title}" (${b.status})`).join(", ");
-        request.log.warn({ projectId, blockers: blockers.map((b) => b.trigger_project_id) },
-          "[Pipeline] Bloqueado por dependências não concluídas");
-        return reply.status(409).send({
-          code: "DEPENDENCY_NOT_READY",
-          message: `Aguardando conclusão dos projetos predecessores: ${list}. Eles precisam estar completed ou accepted antes de iniciar este projeto.`,
-          blockers: blockers.map((b) => ({ id: b.trigger_project_id, title: b.title, status: b.status })),
-        });
-      }
-
-      // (b) I-4: predecessores accepted mas sem api_contract.md no disco
-      // Aviso: bloqueia apenas para projetos do mesmo produto (shared_db/auth context)
-      // Projeto DB (só migrations) não gera api_contract.md — verificar apenas se há endpoint HTTP.
-      const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
-      if (filesRoot && triggersRes.rows.length > 0) {
-        const { existsSync } = await import("fs");
-        const { join } = await import("path");
-        // Buscar product_id deste projeto
-        const thisProjectRes = await client.query("SELECT product_id, title FROM projects WHERE id=$1", [projectId]);
-        const thisProductId = thisProjectRes.rows[0]?.product_id as string | null;
-
-        const contractMissing: string[] = [];
-        for (const pred of triggersRes.rows as Array<Record<string, unknown>>) {
-          const predId = pred.trigger_project_id as string;
-          const predTitle = pred.title as string;
-          const predProductId = pred.product_id as string | null;
-
-          // Caminhos onde o contrato pode estar (nova estrutura e legacy)
-          const contractCandidates = [
-            // Nova estrutura: <product>/<project>/project/api_contract.md
-            ...(predProductId ? [join(filesRoot, predProductId, predId, "project", "api_contract.md")] : []),
-            // Centralizado: <product>/contracts/<slug>.api_contract.md
-            ...(predProductId ? [join(filesRoot, predProductId, "contracts")] : []),
-            // Legacy standalone
-            join(filesRoot, predId, "project", "api_contract.md"),
-          ];
-
-          const hasContract = contractCandidates.some((p) => {
-            // Para o diretório de contracts, verificar se tem algum arquivo
-            if (p.endsWith("contracts")) {
-              try {
-                const { readdirSync } = require("fs");
-                return readdirSync(p).some((f: string) => f.includes(predId.slice(0, 8)) || f.includes("api_contract"));
-              } catch { return false; }
-            }
-            return existsSync(p);
-          });
-
-          // Projetos de banco (só migrations) não precisam de api_contract — exceção
-          const isDbOnly = predTitle.toLowerCase().includes("-db") || predTitle.toLowerCase().includes("database");
-          if (!hasContract && !isDbOnly) {
-            contractMissing.push(`"${predTitle}" (aceito mas sem api_contract.md no disco)`);
-            request.log.warn({ projectId, predId, predTitle }, "[I-4] Predecessor sem api_contract.md");
-          }
-        }
-
-        if (contractMissing.length > 0) {
-          const list = contractMissing.join(", ");
-          return reply.status(409).send({
-            code: "CONTRACT_MISSING",
-            message: `Predecessores accepted mas sem contratos de API no disco: ${list}. ` +
-              `Execute 'bash project/start.sh' nos predecessores ou verifique se api_contract.md foi gerado pelo DevOps.`,
-            missingContracts: contractMissing,
-          });
-        }
+      // ── Gate de dependência + contrato (I-4) ─────────────────────────────────
+      // RFC-0003 (G3/C3): regra centralizada em services/dependencyGate.ts, compartilhada
+      // com a cascata/promoção (dispatchProjectRun) — antes só o /run a aplicava.
+      const gate = await checkDependencyGate(client, projectId);
+      if (!gate.ok) {
+        request.log.warn({ projectId, code: gate.block.code }, "[Pipeline] Bloqueado pelo gate de dependência");
+        return reply.status(409).send(gate.block);
       }
 
       const specFilePath = await getProjectSpecFilePath(client, projectId);
@@ -221,10 +150,13 @@ export async function pipelineRoutes(app: FastifyInstance) {
           "[G38] Usando LLM config do tenant");
       }
 
-      // G39: Verifica slot de concorrência — coloca na fila se tenant atingiu máximo
+      // G39 / RFC-0003 (C2): claim ATÔMICO de slot de concorrência (substitui o enqueueOrStart
+      // TOCTOU). Reserva o slot marcando 'running' sob advisory-lock por tenant; se não houver
+      // slot, enfileira. previousStatus permite reverter se o dispatch subsequente falhar.
+      let slotPreviousStatus: string | null = null;
       if (tenantId) {
-        const queueResult = await enqueueOrStart(projectId, tenantId);
-        if (queueResult === "queued") {
+        const claim = await claimSlotOrQueue(projectId, tenantId);
+        if (claim.outcome === "queued") {
           request.log.info({ projectId, tenantId }, "[G39] Projeto enfileirado — tenant atingiu máximo de concorrência");
           return reply.send({
             ok: true,
@@ -232,6 +164,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
             message: "Pipeline enfileirado. Será iniciado automaticamente quando houver slot disponível.",
           });
         }
+        slotPreviousStatus = claim.previousStatus;
       }
 
       const apiBaseUrl = process.env.API_BASE_URL ?? "http://localhost:3000";
@@ -322,6 +255,8 @@ export async function pipelineRoutes(app: FastifyInstance) {
           }
           const text = await res.text();
           request.log.error({ projectId, runnerStatus: res.status, body: text.slice(0, 300) }, "[Pipeline] Runner retornou erro");
+          // RFC-0003 (C2): dispatch falhou → libera o slot reservado no claim atômico.
+          await revertSlotClaim(projectId, slotPreviousStatus);
           return reply.status(500).send({
             code: "RUNNER_ERROR",
             message: text || `Serviço runner retornou ${res.status}`,
@@ -329,6 +264,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           request.log.error({ err, projectId }, "[Pipeline] Falha ao chamar runner");
+          await revertSlotClaim(projectId, slotPreviousStatus);
           return reply.status(500).send({
             code: "RUNNER_ERROR",
             message: `Falha ao chamar serviço runner: ${message}`,
@@ -337,6 +273,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
       }
 
       request.log.warn("[Pipeline] Nenhum runner configurado (RUNNER_COMMAND e RUNNER_SERVICE_URL vazios)");
+      await revertSlotClaim(projectId, slotPreviousStatus);
       return reply.status(503).send({
         code: "SERVICE_UNAVAILABLE",
         message: "Nenhum runner configurado. Defina RUNNER_COMMAND ou RUNNER_SERVICE_URL.",

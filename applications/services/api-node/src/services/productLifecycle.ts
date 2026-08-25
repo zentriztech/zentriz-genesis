@@ -14,6 +14,7 @@
 import type { Pool, PoolClient } from "pg";
 
 export type ProductLifecycle =
+  | "draft"
   | "ingesting"
   | "running"
   | "partially_accepted"
@@ -24,7 +25,7 @@ export type ProductLifecycle =
 /** Status de projeto que contam como "ainda não terminou / em andamento". */
 const IN_PROGRESS = new Set<string>([
   "draft", "spec_submitted", "pending_conversion", "spec_validation_failed",
-  "running", "dev_qa", "devops", "completed", "stopped", "pending_cyborg",
+  "running", "queued", "dev_qa", "devops", "completed", "stopped", "pending_cyborg",
 ]);
 
 /**
@@ -33,6 +34,12 @@ const IN_PROGRESS = new Set<string>([
  */
 export function deriveProductLifecycle(projectStatuses: string[]): ProductLifecycle {
   if (projectStatuses.length === 0) return "ingesting";
+
+  // RFC-0003 B1: produto ainda na Bancada — TODOS os projetos são rascunhos ('draft'),
+  // nada entrou na fábrica. 'draft' distingue "especificado, aguardando promoção" de
+  // 'running' (já rodando). Estreito de propósito: basta um projeto fora de 'draft'
+  // (ex.: pending_conversion, spec_submitted) para o produto ser considerado em fábrica.
+  if (projectStatuses.every((s) => s === "draft")) return "draft";
 
   const hasFailed  = projectStatuses.some((s) => s === "failed");
   const hasBlocked = projectStatuses.some((s) => s === "blocked_cyborg");

@@ -48,3 +48,32 @@ describe("migrations sanity (split-by-semicolon runner)", () => {
     });
   }
 });
+
+// RFC-0003 / Task 2: invariantes de CHECK que já foram quebrados por reconstrução silenciosa.
+// A migration 040 reconstruiu projects_status_check SEM 'queued' (gap G5) → promover sob teto
+// de concorrência estourava 500. Estes testes garantem que a ÚLTIMA reconstrução de cada CHECK
+// preserva os valores exigidos; uma futura migration que os derrube volta a falhar aqui.
+describe("RFC-0003 — invariantes de CHECK preservados na última reconstrução", () => {
+  function lastAddConstraintBody(pattern: RegExp): string {
+    let body = "";
+    for (const file of files) {
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+      const stripped = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+      const matches = stripped.match(pattern);
+      if (matches && matches.length > 0) body = matches[matches.length - 1];
+    }
+    return body;
+  }
+
+  it("projects_status_check ainda aceita 'queued' (gap G5)", () => {
+    const body = lastAddConstraintBody(/ADD CONSTRAINT projects_status_check[\s\S]*?\)\s*\)/g);
+    expect(body, "nenhuma migration define projects_status_check").not.toBe("");
+    expect(body).toContain("'queued'");
+  });
+
+  it("products_lifecycle_status_check aceita 'draft' (estado pré-fábrica, gap C1/G2)", () => {
+    const body = lastAddConstraintBody(/ADD CONSTRAINT products_lifecycle_status_check[\s\S]*?\)\s*\)/g);
+    expect(body, "nenhuma migration define products_lifecycle_status_check").not.toBe("");
+    expect(body).toContain("'draft'");
+  });
+});

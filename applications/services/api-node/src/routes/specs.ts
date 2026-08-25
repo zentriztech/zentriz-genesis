@@ -9,6 +9,7 @@ import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
+import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -473,7 +474,8 @@ export async function specRoutes(app: FastifyInstance) {
     const client = await pool.connect();
     try {
       const cols = `p.id, p.title, p.status, p.product_id, p.parent_project_id,
-                    p.tenant_id, p.version_number, p.extra, p.created_at, p.updated_at,
+                    p.tenant_id, p.version_number, p.extra, p.complexity_hint,
+                    p.created_at, p.updated_at,
                     pr.name AS product_name`;
       let rows;
       if (user.role === "zentriz_admin") {
@@ -501,7 +503,16 @@ export async function specRoutes(app: FastifyInstance) {
           [SPEC_LISTING_STATUSES, user.id],
         )).rows;
       }
-      return reply.send(rows);
+      // RFC-0003 E2/E3: anexa prontidão (viabilidade) + estimativa de custo/tempo,
+      // tudo determinístico. Se o enriquecimento falhar (ex.: tabela ausente em ambiente
+      // antigo), degrada para as specs cruas — a listagem nunca quebra por causa disso.
+      try {
+        const enriched = await enrichSpecs(client, rows as unknown as SpecForEnrichment[]);
+        return reply.send(enriched);
+      } catch (err) {
+        request.log.warn({ err }, "spec enrichment failed; returning bare specs");
+        return reply.send(rows);
+      }
     } finally {
       client.release();
     }

@@ -279,9 +279,12 @@ function StatCard({ label, value, icon, gradient, delay = 0 }: {
 // ── Page ──────────────────────────────────────────────────────────────────────
 const STANDALONE_PAGE_SIZE = 10;
 
+// RFC-0003 F2: rascunhos pré-fábrica vivem na Bancada (/specs), não no painel de projetos.
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+
 function DashboardPageInner() {
   const router   = useRouter();
-  const projects = projectsStore.list;
+  const projects = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
   const [products, setProducts] = useState<Product[]>([]);
   const [standaloneVisible, setStandaloneVisible] = useState(STANDALONE_PAGE_SIZE);
 
@@ -384,7 +387,7 @@ function DashboardPageInner() {
                   product={prod}
                   projects={projectsByProduct.get(prod.id) ?? []}
                   delay={5 + i}
-                  onFilter={(id) => router.push(`/projects?product=${id}`)}
+                  onFilter={(id) => router.push(`/products/${id}/projects`)}
                 />
               ))}
             </Box>

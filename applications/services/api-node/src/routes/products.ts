@@ -22,6 +22,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { readFile } from "node:fs/promises";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
@@ -33,6 +34,13 @@ import { dispatchProjectRun } from "../services/runnerDispatch.js";
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
 }
+
+// UUID v-agnóstico (mesmo formato usado em projects.ts/specs.ts) — valida o ?tenantId do
+// master antes de usá-lo num cast ::uuid (não-UUID → 500 no Postgres), e valida params :id.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// B4: uma spec da Bancada (pré-fábrica) pode ser decomposta. Espelha SPEC_LISTING_STATUSES.
+const SPEC_DECOMPOSABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
 
 const RELATION_TYPES = ["uses_backend","shares_auth","shares_db","depends_on","related","part_of"] as const;
 type RelationType = typeof RELATION_TYPES[number];
@@ -58,6 +66,8 @@ interface ProposeJob {
   warnings?: string[];
   error?: string;
   createdAt: number;
+  /** B4: spec da Bancada de origem (quando o job veio de /api/projects/:id/decompose). */
+  originProjectId?: string | null;
 }
 const _proposeJobs = new Map<string, ProposeJob>();
 
@@ -144,20 +154,38 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
 
   // ── GET /api/products ────────────────────────────────────────────────────────
+  // B3 (RFC-0003): o master (zentriz_admin) escopa a listagem via ?tenantId= (seletor de
+  // tenant do portal), espelhando GET /api/projects e /api/specs. Sem esse fix a conta de
+  // gestão recebia sempre [] → "Meus Produtos" ficava vazio permanentemente (gap U#3/C5).
   app.get("/api/products", async (request, reply) => {
     const user = getUser(request);
-    if (!user.tenantId) return reply.send([]);
+    const q = (request.query ?? {}) as { tenantId?: string };
+    // tenantId inválido (não-UUID) é ignorado → evita erro de cast uuid (500).
+    const scopeTenantId =
+      user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId) ? q.tenantId : null;
+    // Não-master sem tenant não possui produtos.
+    if (user.role !== "zentriz_admin" && !user.tenantId) return reply.send([]);
     const client = await pool.connect();
     try {
-      const res = await client.query(
-        `SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
-                COUNT(proj.id)::int AS project_count
-         FROM products p
-         LEFT JOIN projects proj ON proj.product_id = p.id
-         WHERE p.tenant_id = $1 AND p.status = 'active'
-         GROUP BY p.id ORDER BY p.created_at DESC`,
-        [user.tenantId]
-      );
+      const selectFragment = `
+        SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
+               COUNT(proj.id)::int AS project_count
+        FROM products p
+        LEFT JOIN projects proj ON proj.product_id = p.id`;
+      const res =
+        user.role === "zentriz_admin"
+          ? await client.query(
+              `${selectFragment}
+               WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status = 'active'
+               GROUP BY p.id ORDER BY p.created_at DESC`,
+              [scopeTenantId]
+            )
+          : await client.query(
+              `${selectFragment}
+               WHERE p.tenant_id = $1 AND p.status = 'active'
+               GROUP BY p.id ORDER BY p.created_at DESC`,
+              [user.tenantId]
+            );
       return reply.send(res.rows);
     } finally { client.release(); }
   });
@@ -203,14 +231,21 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     const req = request as unknown as { file: () => Promise<Part | undefined> };
     let zipBuffer: Buffer | null = null;
     let specApprovedOverride: boolean | undefined;
+    // Caminho ZIP legado: por padrão dispara a onda 0 (dispatch=true). B1 permite opt-out
+    // explícito (dispatch=false → salva só na Bancada) para o mesmo endpoint.
+    let dispatchZip = true;
     let part: Part | undefined;
+    const parseBoolField = (f: { value?: unknown } | { value?: unknown }[] | undefined): boolean | undefined => {
+      if (f === undefined) return undefined;
+      const v = Array.isArray(f) ? f[0] : f;
+      const raw = v && typeof (v as { value?: string }).value === "string" ? (v as { value: string }).value.trim().toLowerCase() : "";
+      if (["true", "1", "on", "yes"].includes(raw)) return true;
+      if (["false", "0", "off", "no"].includes(raw)) return false;
+      return undefined;
+    };
     while ((part = await req.file())) {
-      if (part.fields?.specApproved !== undefined) {
-        const f = part.fields.specApproved;
-        const v = Array.isArray(f) ? f[0] : f;
-        const raw = v && typeof (v as { value?: string }).value === "string" ? (v as { value: string }).value.trim().toLowerCase() : "";
-        if (["true", "1", "on", "yes"].includes(raw)) specApprovedOverride = true;
-      }
+      if (parseBoolField(part.fields?.specApproved) === true) specApprovedOverride = true;
+      { const d = parseBoolField(part.fields?.dispatch); if (d !== undefined) dispatchZip = d; }
       if (part.filename && part.filename.toLowerCase().endsWith(".zip")) {
         zipBuffer = await part.toBuffer();
       } else if (part.filename) {
@@ -234,6 +269,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         approverEmail: user.email ?? null,
         zip: contents,
         specApprovedOverride,
+        dispatch: dispatchZip,
       });
       // Reingestão idempotente (mesmo produto já existe): no-op, 200, sem disparar nada.
       if (result.idempotentReuse) {
@@ -298,6 +334,8 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         return reply.send({
           jobId: job.id, status: "done", needsHuman: true,
           manifest: job.manifest, specs: job.specs, waves: job.waves, projects: job.projects, warnings: job.warnings,
+          // B4: eco da origem — o cliente devolve isto em /ingest-proposal para gravar o vínculo.
+          originProjectId: job.originProjectId ?? null,
         });
       }
       if (job.status === "error") return reply.send({ jobId: job.id, status: "error", error: job.error });
@@ -310,7 +348,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // Recebe {manifest, specs, specApproved} JSON (o que /propose devolveu, após revisão
   // humana) e reusa o executor determinístico (decomposeProduct) SEM exigir um ZIP:
   // monta o ProductZipContents em memória. Depois dispara a onda 0 (igual /ingest).
-  app.post<{ Body: { manifest?: ProductManifest; specs?: Record<string, string>; specApproved?: boolean } }>(
+  app.post<{ Body: { manifest?: ProductManifest; specs?: Record<string, string>; specApproved?: boolean; dispatch?: boolean; originProjectId?: string } }>(
     "/api/products/ingest-proposal",
     async (request, reply) => {
       const user = getUser(request);
@@ -320,9 +358,23 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const tenantId = user.tenantId;
       if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
 
-      const { manifest, specs, specApproved } = request.body ?? {};
+      const { manifest, specs, specApproved, dispatch, originProjectId } = request.body ?? {};
       if (!manifest || typeof manifest !== "object" || !specs || typeof specs !== "object") {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "manifest + specs (mapa caminho→conteúdo) são obrigatórios." });
+      }
+      // B4: origem opcional (spec da Bancada). Valida UUID para não estourar o cast ::uuid
+      // E confirma a POSSE — o vínculo de origem só vale se a spec for do mesmo tenant do
+      // produto que está nascendo. Sem isso, um id de outro tenant viraria um vínculo
+      // cross-tenant (vazamento de integridade). Origem inválida/alheia → simplesmente null
+      // (produto avulso), nunca 4xx: a origem é um enriquecimento, não um requisito.
+      let origin: string | null = null;
+      if (originProjectId && UUID_RE.test(originProjectId)) {
+        const owned = await pool.query(
+          "SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2 LIMIT 1",
+          [originProjectId, tenantId],
+        );
+        if (owned.rowCount) origin = originProjectId;
+        else request.log.warn({ originProjectId, tenantId }, "[products/ingest-proposal] originProjectId de outro tenant ou inexistente — vínculo de origem descartado");
       }
 
       // Monta o ProductZipContents em memória a partir da proposta (sem ZIP real).
@@ -332,18 +384,24 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       };
 
       try {
+        // RFC-0003 B1: aprovar uma decomposição do Splitter SALVA os N projetos como
+        // rascunhos na Bancada (produto 'draft') SEM rodar a fábrica — mata o proposal
+        // efêmero de 30 min. Só quando o cliente pede explicitamente `dispatch:true`
+        // (atalho express "salvar e iniciar") a onda 0 é disparada.
         const result = await decomposeProduct(pool, {
           tenantId,
           createdBy: user.id,
           approverEmail: user.email ?? null,
           zip: contents,
           specApprovedOverride: specApproved === true ? true : undefined,
+          dispatch: dispatch === true,
+          originProjectId: origin,
         });
         if (result.idempotentReuse) {
           request.log.info({ productId: result.productId }, "[products/ingest-proposal] no-op idempotente");
           return reply.status(200).send(result);
         }
-        // Dispara a ONDA 0 (mesma cascata do /ingest). Best-effort em background.
+        // Dispara a ONDA 0 só no modo express (dispatched vazio na Bancada → no-op).
         setImmediate(async () => {
           for (const pid of result.dispatched) {
             try {
@@ -365,17 +423,85 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     }
   );
 
+  // ── POST /api/projects/:id/decompose — RFC-0003 B4: decompor uma spec já salva ──
+  // Decompõe uma spec que JÁ está na Bancada (linha de projects pré-fábrica) em uma
+  // proposta de produto multi-projeto, reusando o Product Architect (mesmo job async de
+  // /propose). Preserva: (1) ownership — o produto herdará o tenant da spec no ingest;
+  // (2) multi-md — concatena TODOS os .md da spec; (3) vínculo de origem — o job carrega
+  // originProjectId, gravado em products.origin_project_id no /ingest-proposal (evita
+  // produto órfão, gap U#4/C7).
+  app.post<{ Params: { id: string }; Body: { modelId?: string } }>(
+    "/api/projects/:id/decompose",
+    async (request, reply) => {
+      const user = getUser(request);
+      // Decompor é AUTORIA (gera specs/produto) → conta de gestão (master) vetada, igual /propose.
+      if (denyCreationForManagement(user, reply)) return;
+      const { id } = request.params;
+      if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PROJECT_ID" });
+      const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
+      if (!agentsUrl) {
+        return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes (Product Architect) não configurado." });
+      }
+      const client = await pool.connect();
+      try {
+        const proj = (await client.query(
+          "SELECT id, tenant_id, created_by, title, status, product_id FROM projects WHERE id = $1", [id],
+        )).rows[0];
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada" });
+        // Ownership: não-master só decompõe spec do próprio tenant (ou que criou).
+        if (proj.tenant_id !== user.tenantId && proj.created_by !== user.id) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão sobre esta spec" });
+        }
+        // Spec já em um produto → não re-decompor (evita duplicata/órfão).
+        if (proj.product_id) {
+          return reply.status(409).send({ code: "ALREADY_IN_PRODUCT", message: "Spec já pertence a um produto." });
+        }
+        // Só specs pré-fábrica podem ser decompostas.
+        if (!SPEC_DECOMPOSABLE_STATUSES.has(proj.status)) {
+          return reply.status(409).send({ code: "NOT_A_SPEC", message: `Só specs na Bancada podem ser decompostas (estado atual: ${proj.status}).` });
+        }
+        // multi-md: concatena TODOS os .md da spec (ordem de criação), tolerando arquivo sumido.
+        const files = (await client.query(
+          "SELECT filename, file_path FROM project_spec_files WHERE project_id = $1 AND LOWER(filename) LIKE '%.md' ORDER BY created_at ASC", [id],
+        )).rows as Array<{ filename: string; file_path: string }>;
+        if (files.length === 0) {
+          return reply.status(422).send({ code: "NO_SPEC_FILES", message: "Spec sem arquivos markdown para decompor." });
+        }
+        const parts: string[] = [];
+        for (const f of files) {
+          try {
+            const content = await readFile(f.file_path, "utf-8");
+            if (content.trim()) parts.push(files.length > 1 ? `# ${f.filename}\n\n${content}` : content);
+          } catch {
+            request.log.warn({ file: f.file_path }, "[projects/decompose] arquivo de spec ausente no disco — ignorado");
+          }
+        }
+        const document = parts.join("\n\n---\n\n").trim();
+        if (document.length < 40) {
+          return reply.status(422).send({ code: "SPEC_TOO_SHORT", message: "Conteúdo da spec insuficiente para decompor (mín. 40 caracteres legíveis)." });
+        }
+        const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now(), originProjectId: id });
+        runProposeJob(jobId, document, request.body?.modelId, agentsUrl);
+        return reply.status(202).send({ jobId, status: "pending", originProjectId: id });
+      } finally { client.release(); }
+    },
+  );
+
   // ── GET /api/products/:id ────────────────────────────────────────────────────
   app.get<{ Params: { id: string } }>("/api/products/:id", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
+    // B3 (RFC-0003): valida UUID (evita 500 no cast) e autoriza por papel — o master
+    // abre qualquer produto; não-master só o do próprio tenant.
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
     const client = await pool.connect();
     try {
-      const prod = await client.query(
-        "SELECT * FROM products WHERE id = $1 AND tenant_id = $2",
-        [id, user.tenantId ?? ""]
-      );
+      const prod = await client.query("SELECT * FROM products WHERE id = $1", [id]);
       if (!prod.rows[0]) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (user.role !== "zentriz_admin" && prod.rows[0].tenant_id !== user.tenantId) {
+        return reply.status(404).send({ code: "NOT_FOUND" });
+      }
 
       // Ordenação topológica: projetos raiz (sem predecessores) primeiro,
       // depois seus dependentes em ordem de profundidade no grafo de triggers.
@@ -438,6 +564,81 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     } finally { client.release(); }
   });
 
+  // ── POST /api/products/:id/promote — RFC-0003 B2: promover produto da Bancada ──
+  // Promove um produto 'draft' (Bancada) para a fábrica. DISPATCH-ONLY sobre as RAÍZES
+  // (projetos sem predecessores dentro do produto) — NUNCA re-decompõe (fecha o gap G1:
+  // os projetos já existem como rascunhos). As ondas seguintes disparam pela cascata de
+  // accept, cada uma passando pelo gate de dependência/contrato (Task 3, G3/C3). A
+  // promoção INDIVIDUAL de um projeto é o /run existente: um projeto-filho 'draft' com
+  // dependências não-aceitas é barrado pelo mesmo gate (DEPENDENCY_NOT_READY).
+  app.post<{ Params: { id: string } }>("/api/products/:id/promote", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const client = await pool.connect();
+    try {
+      const prod = await client.query(
+        "SELECT id, tenant_id, lifecycle_status FROM products WHERE id = $1", [id],
+      );
+      const row = prod.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+      // C6: o master (zentriz_admin) PODE promover qualquer produto — promover é operação,
+      // não autoria (não passa por denyCreationForManagement). Não-master: só o próprio tenant.
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+        return reply.status(404).send({ code: "NOT_FOUND" });
+      }
+      // Só promove da Bancada. Já em fábrica/terminal → 409 informativo (idempotente-safe).
+      if (row.lifecycle_status !== "draft") {
+        return reply.status(409).send({
+          code: "NOT_ON_WORKBENCH",
+          message: `Produto não está na Bancada (estado atual: ${row.lifecycle_status}).`,
+          lifecycleStatus: row.lifecycle_status,
+        });
+      }
+      // Raízes AINDA em rascunho (mesma definição de raiz do GET :id — predecessores só
+      // contam DENTRO do produto).
+      const roots = await client.query(
+        `SELECT p.id FROM projects p
+         WHERE p.product_id = $1 AND p.status = 'draft'
+           AND NOT EXISTS (
+             SELECT 1 FROM project_triggers pt
+             WHERE pt.project_id = p.id
+               AND pt.trigger_project_id IN (SELECT id FROM projects WHERE product_id = $1)
+           )`,
+        [id],
+      );
+      const rootIds = roots.rows.map((r) => r.id as string);
+      if (rootIds.length === 0) {
+        return reply.status(409).send({
+          code: "NO_PROMOTABLE_ROOTS",
+          message: "Nenhuma raiz em rascunho para promover (produto sem projetos ou já em andamento).",
+        });
+      }
+      // Transição atômica draft→running: guarda contra dupla promoção concorrente
+      // (rowCount 0 ⇒ outra requisição já promoveu entre o SELECT e o UPDATE).
+      const upd = await client.query(
+        "UPDATE products SET lifecycle_status = 'running', updated_at = now() WHERE id = $1 AND lifecycle_status = 'draft'",
+        [id],
+      );
+      if (upd.rowCount === 0) {
+        return reply.status(409).send({ code: "ALREADY_PROMOTED", message: "Produto já promovido por outra requisição." });
+      }
+      // Dispara as raízes (dispatch-only). Gate de dependência + claim atômico de slot
+      // são aplicados por dispatchProjectRun (Task 3). Best-effort em background.
+      setImmediate(async () => {
+        for (const pid of rootIds) {
+          try {
+            const r = await dispatchProjectRun(pool, pid);
+            request.log.info({ projectId: pid, dispatched: r.dispatched, reason: r.reason }, "[products/promote] disparo de raiz");
+          } catch (e) {
+            request.log.error({ projectId: pid, err: e }, "[products/promote] falha ao disparar raiz");
+          }
+        }
+      });
+      return reply.status(202).send({ productId: id, promoted: rootIds, lifecycleStatus: "running" });
+    } finally { client.release(); }
+  });
+
   // ── DELETE /api/products/:id ─────────────────────────────────────────────────
   // Remove produto e todos os projetos filhos do banco. Arquivos em disco mantidos.
   // Bloqueia se algum projeto filho estiver em execução (running).
@@ -491,16 +692,24 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     const user = getUser(request);
     const { id } = request.params;
     const { name, description, status } = request.body as Record<string, string>;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
     const client = await pool.connect();
     try {
+      // B3 (RFC-0003): autoriza por papel (mesmo padrão do DELETE) em vez de fixar
+      // tenant_id = user.tenantId (que dava 404 para o master, cujo tenantId é null).
+      const owner = (await client.query("SELECT tenant_id FROM products WHERE id = $1", [id])).rows[0];
+      if (!owner) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (user.role !== "zentriz_admin" && owner.tenant_id !== user.tenantId) {
+        return reply.status(403).send({ code: "FORBIDDEN" });
+      }
       const res = await client.query(
         `UPDATE products SET
            name        = COALESCE($1, name),
            description = COALESCE($2, description),
            status      = COALESCE($3, status),
            updated_at  = NOW()
-         WHERE id = $4 AND tenant_id = $5 RETURNING *`,
-        [name?.trim() ?? null, description?.trim() ?? null, status ?? null, id, user.tenantId ?? ""]
+         WHERE id = $4 RETURNING *`,
+        [name?.trim() ?? null, description?.trim() ?? null, status ?? null, id]
       );
       if (!res.rows[0]) return reply.status(404).send({ code: "NOT_FOUND" });
       return reply.send(res.rows[0]);
@@ -513,14 +722,21 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user = getUser(request);
       const { id: productId, projectId } = request.params;
+      if (!UUID_RE.test(productId) || !UUID_RE.test(projectId)) {
+        return reply.status(400).send({ code: "INVALID_ID" });
+      }
       const client = await pool.connect();
       try {
-        // verify product belongs to tenant
-        const prod = await client.query("SELECT id FROM products WHERE id=$1 AND tenant_id=$2", [productId, user.tenantId ?? ""]);
+        // B3 (RFC-0003): autoriza por papel; escopa o UPDATE ao tenant do PRODUTO
+        // (garante coerência produto↔projeto e funciona para o master, cujo tenantId é null).
+        const prod = await client.query("SELECT id, tenant_id FROM products WHERE id=$1", [productId]);
         if (!prod.rows[0]) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+        if (user.role !== "zentriz_admin" && prod.rows[0].tenant_id !== user.tenantId) {
+          return reply.status(403).send({ code: "FORBIDDEN" });
+        }
         await client.query(
           "UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2 AND tenant_id=$3",
-          [productId, projectId, user.tenantId ?? ""]
+          [productId, projectId, prod.rows[0].tenant_id]
         );
         return reply.send({ ok: true });
       } finally { client.release(); }
@@ -533,11 +749,18 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const user = getUser(request);
       const { projectId } = request.params;
+      if (!UUID_RE.test(projectId)) return reply.status(400).send({ code: "INVALID_ID" });
       const client = await pool.connect();
       try {
+        // B3 (RFC-0003): autoriza por papel; idempotente (projeto ausente → ok).
+        const proj = (await client.query("SELECT tenant_id FROM projects WHERE id=$1", [projectId])).rows[0];
+        if (!proj) return reply.send({ ok: true });
+        if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
+          return reply.status(403).send({ code: "FORBIDDEN" });
+        }
         await client.query(
-          "UPDATE projects SET product_id=NULL, updated_at=NOW() WHERE id=$1 AND tenant_id=$2",
-          [projectId, user.tenantId ?? ""]
+          "UPDATE projects SET product_id=NULL, updated_at=NOW() WHERE id=$1",
+          [projectId]
         );
         return reply.send({ ok: true });
       } finally { client.release(); }
@@ -628,7 +851,9 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           return reply.status(403).send({ code: "FORBIDDEN" });
         }
         if (productId) {
-          const prod = (await client.query("SELECT id FROM products WHERE id=$1 AND tenant_id=$2", [productId, user.tenantId ?? ""])).rows[0];
+          // B3 (RFC-0003): produto deve existir e pertencer ao MESMO tenant do projeto
+          // (coerência produto↔projeto) — funciona para o master (tenantId null).
+          const prod = (await client.query("SELECT id FROM products WHERE id=$1 AND tenant_id=$2", [productId, proj.tenant_id])).rows[0];
           if (!prod) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
         }
         await client.query("UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2", [productId ?? null, id]);
