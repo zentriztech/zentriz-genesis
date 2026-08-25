@@ -166,7 +166,7 @@ const GitHubSettingsPage = observer(function GitHubSettingsPage() {
         Integração GitHub
       </Typography>
       <Typography color="text.secondary" sx={{ mb: 3 }}>
-        Conecte sua conta GitHub para que Genesis e Deadpool possam criar repositórios,
+        Conecte sua conta GitHub para que Genesis e Auto Care possam criar repositórios,
         fazer commits e abrir Pull Requests no seu org.
       </Typography>
 
@@ -198,7 +198,7 @@ const GitHubSettingsPage = observer(function GitHubSettingsPage() {
               <Typography variant="caption" color="text.secondary" display="block">Escopos autorizados</Typography>
               <Box sx={{ display: "flex", gap: 1, mt: 0.5 }}>
                 <Chip label="Genesis" color={status.scopeGenesis ? "success" : "default"} size="small" />
-                <Chip label="Deadpool" color={status.scopeDeadpool ? "success" : "default"} size="small" />
+                <Chip label="Auto Care" color={status.scopeDeadpool ? "success" : "default"} size="small" />
               </Box>
             </Box>
 

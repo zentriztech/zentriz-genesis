@@ -66,7 +66,7 @@ type Approval = {
 
 /** Mensagem amigável para os códigos de pré-condição dos endpoints de approval. */
 function friendlyError(msg: string): string {
-  if (/NO_DEADPOOL_ENTITLEMENT/.test(msg)) return "Este tenant não possui licença Deadpool.";
+  if (/NO_DEADPOOL_ENTITLEMENT/.test(msg)) return "Este tenant não possui licença Auto Care.";
   if (/INVALID_TARGET_ENVIRONMENT/.test(msg)) return "Ambiente-alvo inválido (use staging/homolog/prod).";
   if (/INVALID_EXPIRES_AT/.test(msg)) return "Data de expiração inválida.";
   if (/PROD_REQUIRES_ZENTRIZ_ADMIN/.test(msg)) return "Decidir promoções de produção exige um zentriz_admin.";
@@ -183,7 +183,7 @@ function DeadpoolPromotionApprovals({ projectId }: { projectId: string }) {
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <GavelIcon fontSize="small" sx={{ color: "#EF4444" }} />
           <Typography variant="body2" fontWeight={700} sx={{ flexGrow: 1 }}>
-            Aprovações de promoção (Deadpool)
+            Aprovações de promoção (Auto Care)
           </Typography>
           <Button
             size="small"
@@ -195,7 +195,7 @@ function DeadpoolPromotionApprovals({ projectId }: { projectId: string }) {
           </Button>
         </Stack>
         <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1.5 }}>
-          Sob autonomia por ambiente, o Deadpool corrige e promove em <strong>dev</strong> sozinho; promoções
+          Sob autonomia por ambiente, o Auto Care corrige e promove em <strong>dev</strong> sozinho; promoções
           para <strong>staging</strong>/<strong>prod</strong> exigem uma aprovação humana registrada aqui
           (produção só por zentriz_admin). Sem registro válido, a promoção fica bloqueada (fail-closed).
         </Typography>

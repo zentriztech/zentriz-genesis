@@ -61,8 +61,8 @@ export default observer(function DeadpoolPage() {
     <Box sx={{ maxWidth: 960, mx: "auto", p: { xs: 2, md: 4 } }}>
       <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap mb={3} sx={{ rowGap: 1 }}>
         <HealthAndSafetyIcon sx={{ color: "#EF4444", fontSize: 28 }} />
-        <Typography variant="h5" fontWeight={700}>Deadpool</Typography>
-        <Chip label="Sustainment / Auto-Care" size="small" sx={{ bgcolor: "#EF4444", color: "#fff" }} />
+        <Typography variant="h5" fontWeight={700}>Auto Care</Typography>
+        <Chip label="Sustainment" size="small" sx={{ bgcolor: "#EF4444", color: "#fff" }} />
         <Box sx={{ flexGrow: 1, minWidth: { xs: 0, sm: 16 } }} />
         <Tooltip title="Base de conhecimento">
           <IconButton onClick={() => router.push("/deadpool/knowledge")}><MenuBookIcon /></IconButton>
@@ -75,12 +75,12 @@ export default observer(function DeadpoolPage() {
       {/* ── Banner de saúde ─────────────────────────────────────────────────── */}
       {unavailable ? (
         <Alert severity="info" sx={{ mb: 3 }}>
-          Deadpool indisponível ou desconectado
+          Auto Care indisponível ou desconectado
           {status?.reason ? ` — ${status.reason}` : "."}
         </Alert>
       ) : status ? (
         <Alert severity={status.ready ? "success" : "warning"} sx={{ mb: 3 }}>
-          Deadpool conectado
+          Auto Care conectado
           {status.health ? ` · saúde: ${status.health}` : ""}
           {typeof status.ready === "boolean" ? ` · ${status.ready ? "pronto" : "não pronto"}` : ""}
         </Alert>
@@ -104,7 +104,7 @@ export default observer(function DeadpoolPage() {
             <Typography variant="h6" fontWeight={700} mb={1.5}>Projetos monitorados</Typography>
             {projects.length === 0 ? (
               <Card variant="outlined"><CardContent>
-                <Typography color="text.secondary">Nenhum projeto monitorado pelo Deadpool.</Typography>
+                <Typography color="text.secondary">Nenhum projeto monitorado pelo Auto Care.</Typography>
               </CardContent></Card>
             ) : (
               <TableContainer component={Paper} variant="outlined">

@@ -66,44 +66,52 @@ type NavGroup = { group: string; icon: React.ReactNode; color: string; items: Na
 type NavEntry = NavLeaf | NavGroup;
 const isGroup = (e: NavEntry): e is NavGroup => "group" in e;
 
-// Grupo "Configuração" — settings/* colapsados sob um header (RFC-0003 F4).
-const settingsGroup: NavGroup = {
-  group: "Configuração",
-  icon: <SettingsIcon />,
-  color: "#64748B",
-  items: [
-    { label: "LLM / IA",          href: "/settings/llm",            icon: <PsychologyIcon />,     color: "#6366F1" },
-    { label: "GitHub",            href: "/settings/github",         icon: <GitHubIcon />,         color: "#E2E8F0" },
-    { label: "Cloud Deploy",      href: "/settings/cloud",          icon: <CloudIcon />,          color: "#10B981" },
-    { label: "Ferramentas UI/UX", href: "/settings/ui-ux",          icon: <DesignServicesIcon />, color: "#A259FF" },
-    { label: "Deployments",       href: "/settings/deployments",    icon: <RocketLaunchIcon />,   color: "#0EA5E9" },
-    { label: "Telegram",          href: "/settings/telegram",       icon: <TelegramIcon />,       color: "#229ED9" },
-    { label: "Runtime Config",    href: "/settings/runtime-config", icon: <TuneIcon />,           color: "#F97316" },
-    { label: "Skill Store",       href: "/settings/skills",         icon: <AutoAwesomeIcon />,    color: "#3B82F6" },
-  ],
-};
+// Folhas de plataforma/settings — base do grupo colapsável "Configuração" (RFC-0003 F4),
+// ORDENADAS por importância (pedido do Jean 2026-08-25): motor de IA → código → deploy →
+// histórico de deploys → aprendizado → design → notificações → tuning avançado.
+const settingsItems: NavLeaf[] = [
+  { label: "LLM / IA",          href: "/settings/llm",            icon: <PsychologyIcon />,     color: "#6366F1" },
+  { label: "GitHub",            href: "/settings/github",         icon: <GitHubIcon />,         color: "#E2E8F0" },
+  { label: "Cloud Deploy",      href: "/settings/cloud",          icon: <CloudIcon />,          color: "#10B981" },
+  { label: "Deployments",       href: "/settings/deployments",    icon: <RocketLaunchIcon />,   color: "#0EA5E9" },
+  { label: "Skill Store",       href: "/settings/skills",         icon: <AutoAwesomeIcon />,    color: "#3B82F6" },
+  { label: "Ferramentas UI/UX", href: "/settings/ui-ux",          icon: <DesignServicesIcon />, color: "#A259FF" },
+  { label: "Telegram",          href: "/settings/telegram",       icon: <TelegramIcon />,       color: "#229ED9" },
+  { label: "Runtime Config",    href: "/settings/runtime-config", icon: <TuneIcon />,           color: "#F97316" },
+];
 
-// Itens de uso geral (autoria/ciclo de vida). Ordem RFC-0003: Bancada→Projetos→Produtos→Notificações.
+// Itens de uso geral (autoria/ciclo de vida). Ordem (pedido do Jean 2026-08-25):
+// Dashboard → Meus produtos → Meus projetos → Enviar spec → Bancada → Notificações.
 // "SPECs"/"Splitter" foram unificados: a Bancada (/specs) é o pré-fábrica e embute o Decompor.
 const navUser: NavEntry[] = [
   { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,         color: "#6366F1" },
+  { label: "Meus produtos", href: "/products",       icon: <Inventory2Icon />,        color: "#8B5CF6" },
+  { label: "Meus projetos", href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
   { label: "Enviar spec",   href: "/spec",           icon: <SendIcon />,              color: "#10B981" },
   { label: "Bancada",       href: "/specs",          icon: <HandymanIcon />,          color: "#0EA5E9" },
-  { label: "Meus projetos", href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
-  { label: "Meus produtos", href: "/products",       icon: <Inventory2Icon />,        color: "#8B5CF6" },
   { label: "Notificações",  href: "/notifications",  icon: <NotificationsIcon />,     color: "#EF4444" },
 ];
 
+// Tenant admin: Usuários e Plano e uso ficam DENTRO de "Configuração"; Auto Care fica FORA,
+// como item de topo LOGO ACIMA do grupo (mudança de ideia do Jean 2026-08-25).
 const navTenantAdmin: NavEntry[] = [
   ...navUser,
-  { label: "Usuários",      href: "/tenant/users",    icon: <PeopleIcon />,          color: "#8B5CF6" },
-  { label: "Plano e uso",   href: "/tenant/plan",     icon: <AccountBalanceIcon />,  color: "#64748B" },
-  { label: "Auto Care",     href: "/autocare",        icon: <HealthAndSafetyIcon />, color: "#EF4444" },
-  settingsGroup,
+  { label: "Auto Care", href: "/autocare", icon: <HealthAndSafetyIcon />, color: "#EF4444" },
+  {
+    group: "Configuração",
+    icon: <SettingsIcon />,
+    color: "#64748B",
+    items: [
+      { label: "Usuários",    href: "/tenant/users", icon: <PeopleIcon />,          color: "#8B5CF6" },
+      { label: "Plano e uso", href: "/tenant/plan",  icon: <AccountBalanceIcon />,  color: "#64748B" },
+      ...settingsItems,
+    ],
+  },
 ];
 
-// Zentriz admin vê TUDO e TODOS: itens de uso geral + visão global cross-tenant +
-// toda a plataforma/settings (agrupados em "Configuração").
+// Zentriz admin vê TUDO e TODOS. As visões globais cross-tenant primárias (Tenants, Usuários,
+// Projetos, Planos, Financeiro) ficam no topo; Auto Care fica LOGO ACIMA de "Configuração"
+// (item de topo), e o grupo agrega só os settings/* (mudança de ideia do Jean 2026-08-25).
 const navZentriz: NavEntry[] = [
   ...navUser,
   { label: "Tenants",       href: "/zentriz/tenants",   icon: <BusinessIcon />,       color: "#10B981" },
@@ -112,7 +120,14 @@ const navZentriz: NavEntry[] = [
   { label: "Planos",        href: "/zentriz/plans",     icon: <SettingsIcon />,       color: "#64748B" },
   { label: "Financeiro",    href: "/zentriz/finance",   icon: <AccountBalanceIcon />, color: "#22C55E" },
   { label: "Auto Care",     href: "/autocare",          icon: <HealthAndSafetyIcon />, color: "#EF4444" },
-  settingsGroup,
+  {
+    group: "Configuração",
+    icon: <SettingsIcon />,
+    color: "#64748B",
+    items: [
+      ...settingsItems,
+    ],
+  },
 ];
 
 // RFC-0002 A.2: Genesis Admin (zentriz_admin) é conta de GESTÃO pura — nunca autora.

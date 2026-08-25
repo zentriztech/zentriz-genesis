@@ -57,12 +57,12 @@ const PROVIDER_LABELS: Record<MonitorProvider, string> = {
 
 /** Mensagem amigável para os códigos de pré-condição do endpoint activate. */
 function friendlyError(msg: string): string {
-  if (/NO_DEADPOOL_ENTITLEMENT/.test(msg)) return "Este tenant não possui licença Deadpool.";
+  if (/NO_DEADPOOL_ENTITLEMENT/.test(msg)) return "Este tenant não possui licença Auto Care.";
   if (/PROJECT_NOT_ACCEPTED/.test(msg)) return "O projeto precisa estar aceito antes de ativar o monitoramento.";
   if (/NO_REPOSITORY/.test(msg)) return "O projeto ainda não tem repositório GitHub publicado.";
   if (/NO_GITHUB_INSTALLATION/.test(msg)) return "O tenant precisa instalar o GitHub App da Zentriz.";
-  if (/DEADPOOL_NOT_CONFIGURED/.test(msg)) return "Integração com o Deadpool não está configurada neste ambiente.";
-  if (/DEADPOOL_REGISTER_FAILED/.test(msg)) return "Falha ao registrar o projeto no Deadpool. Tente novamente.";
+  if (/DEADPOOL_NOT_CONFIGURED/.test(msg)) return "Integração com o Auto Care não está configurada neste ambiente.";
+  if (/DEADPOOL_REGISTER_FAILED/.test(msg)) return "Falha ao registrar o projeto no Auto Care. Tente novamente.";
   if (/AZURE_TABLE_REQUIRED/.test(msg)) return "Para Azure, informe a tabela do Log Analytics (ex.: AppTraces).";
   if (/GCP_LOG_FILTER_REQUIRED/.test(msg)) return "Para GCP, informe o filtro de logs do Cloud Logging.";
   if (/UNKNOWN_MONITOR_PROVIDER/.test(msg)) return "Nuvem de monitoramento inválida.";
@@ -165,7 +165,7 @@ export default function DeadpoolMonitorCard({
     >
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
         <Typography variant="body2" fontWeight={600}>
-          Monitoramento Deadpool
+          Monitoramento Auto Care
         </Typography>
         <Chip
           size="small"
@@ -176,8 +176,8 @@ export default function DeadpoolMonitorCard({
       </Stack>
       <Typography variant="caption" color="text.secondary" component="div">
         {active
-          ? `O Deadpool monitora os logs deste projeto (${PROVIDER_LABELS[state.monitorProvider ?? "cloudwatch"]}) e recebe chamados de erro em tempo real, atuando em correções no repositório.`
-          : "Escolha a nuvem onde o app está deployado e ative — o Deadpool passa a monitorar os logs e a receber chamados de erro, atuando em correções no repositório."}
+          ? `O Auto Care monitora os logs deste projeto (${PROVIDER_LABELS[state.monitorProvider ?? "cloudwatch"]}) e recebe chamados de erro em tempo real, atuando em correções no repositório.`
+          : "Escolha a nuvem onde o app está deployado e ative — o Auto Care passa a monitorar os logs e a receber chamados de erro, atuando em correções no repositório."}
       </Typography>
       {/* Seletor de nuvem + ponteiros de escopo (só ao ATIVAR). CloudWatch não pede campos: o
           log group vem do deployment. Azure/GCP precisam do escopo de logs para o poll ativo. */}
@@ -262,7 +262,7 @@ export default function DeadpoolMonitorCard({
             ? "Processando..."
             : active
               ? "Desativar Monitoramento"
-              : "Ativar Monitoramento Deadpool"}
+              : "Ativar Monitoramento Auto Care"}
         </Button>
       </Box>
       )}

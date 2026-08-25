@@ -112,7 +112,7 @@ export default observer(function DeadpoolPollFlagsCard() {
         <CardContent>
           <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
             Liga/desliga o <strong>poll ativo de logs</strong> por nuvem em runtime (sem redeploy).
-            Por padrão tudo fica desligado. Ligar uma nuvem faz o Deadpool consultar o SDK dela
+            Por padrão tudo fica desligado. Ligar uma nuvem faz o Auto Care consultar o SDK dela
             periodicamente à procura de sinais de incidente.
           </Typography>
 
@@ -155,7 +155,7 @@ export default observer(function DeadpoolPollFlagsCard() {
 
               {!anyPollOn && (
                 <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 1.5 }}>
-                  Nenhuma nuvem com poll ativo — o Deadpool segue reativo (webhooks) apenas.
+                  Nenhuma nuvem com poll ativo — o Auto Care segue reativo (webhooks) apenas.
                 </Typography>
               )}
             </>

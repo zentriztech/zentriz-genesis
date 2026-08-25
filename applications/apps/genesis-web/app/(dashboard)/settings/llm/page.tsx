@@ -383,8 +383,8 @@ function AddModal({ open, slot, priority, tenantId, onClose, onSaved, globalLimi
                 <Box>
                   <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
                     <Stack direction="row" spacing={0.5} alignItems="center">
-                      <Typography variant="body2">Reserva Deadpool</Typography>
-                      <Tooltip title="Tokens reservados para o Deadpool.">
+                      <Typography variant="body2">Reserva Auto Care</Typography>
+                      <Tooltip title="Tokens reservados para o Auto Care.">
                         <InfoOutlinedIcon sx={{ fontSize: "0.85rem", color: "text.secondary" }} />
                       </Tooltip>
                     </Stack>
