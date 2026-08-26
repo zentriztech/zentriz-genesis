@@ -145,7 +145,8 @@ ALTER TABLE finance_audit DROP CONSTRAINT IF EXISTS finance_audit_entity_type_ch
 ALTER TABLE finance_audit ADD CONSTRAINT finance_audit_entity_type_check
   CHECK (entity_type IN ('charge','payment','bank_account','invoice','tenant','credit_ledger'));
 
-COMMENT ON TABLE credit_ledger_transactions IS 'Creditos de cortesia (dupla entrada, append-only enforced por trigger 065b). Concessao/reversal = injecao manual server-side; consumo = acoplado ao ciclo. Saldo derivado da view tenant_credit_balance. amount_cents do header e denormalizado; fonte de verdade sao as pernas.';
+-- ATENCAO: string do COMMENT NAO pode conter ';' (o runner faz split ingenuo por ';' - bug 048).
+COMMENT ON TABLE credit_ledger_transactions IS 'Creditos de cortesia (dupla entrada, append-only enforced por trigger 065b). Concessao/reversal = injecao manual server-side, consumo = acoplado ao ciclo. Saldo derivado da view tenant_credit_balance. amount_cents do header e denormalizado -- fonte de verdade sao as pernas.';
 ```
 
 ### 2.6 Guards por trigger — `065b_credit_ledger_guards.sql` (aplicado por psql, fora do runner)
@@ -172,6 +173,17 @@ CREATE TRIGGER trg_credit_entries_append_only
   BEFORE UPDATE OR DELETE ON credit_ledger_entries
   FOR EACH ROW EXECUTE FUNCTION credit_ledger_append_only();
 
+-- (1b) TRUNCATE e statement-level: trigger de linha NAO o pega. Bloquear explicitamente.
+DROP TRIGGER IF EXISTS trg_credit_tx_no_truncate ON credit_ledger_transactions;
+CREATE TRIGGER trg_credit_tx_no_truncate
+  BEFORE TRUNCATE ON credit_ledger_transactions
+  FOR EACH STATEMENT EXECUTE FUNCTION credit_ledger_append_only();
+
+DROP TRIGGER IF EXISTS trg_credit_entries_no_truncate ON credit_ledger_entries;
+CREATE TRIGGER trg_credit_entries_no_truncate
+  BEFORE TRUNCATE ON credit_ledger_entries
+  FOR EACH STATEMENT EXECUTE FUNCTION credit_ledger_append_only();
+
 -- (2) Zero-sum por transacao, validado no COMMIT (CONSTRAINT TRIGGER DEFERRED):
 --     permite inserir as duas pernas na mesma tx e checa o balanceamento so no commit.
 CREATE OR REPLACE FUNCTION credit_ledger_zero_sum() RETURNS trigger AS $fn$
@@ -193,7 +205,7 @@ CREATE CONSTRAINT TRIGGER trg_credit_entries_zero_sum
   FOR EACH ROW EXECUTE FUNCTION credit_ledger_zero_sum();
 ```
 
-> **Decisão para o Jean (não bloqueante, ver §11):** o trigger fecha o buraco contra `UPDATE`/`DELETE` acidental ou ad-hoc, **inclusive do owner** (o trigger dispara independentemente de privilégio). O único jeito de contorná-lo é um `ALTER TABLE … DISABLE TRIGGER` deliberado — barra muito mais alta que um `DELETE` distraído. O **hardening completo** (recomendado, mas fora do escopo mínimo) é rodar migrations por um role owner e a API por um role **não-owner** com apenas `INSERT`/`SELECT` nas tabelas do ledger; aí `REVOKE UPDATE,DELETE` passa a ser efetivo e nem `DISABLE TRIGGER` é possível pela conexão da API. Recomendo (b) trigger agora + (a) separação de roles como próxima onda.
+> **Decisão para o Jean (não bloqueante, ver §11):** o trigger fecha o buraco contra `UPDATE`/`DELETE` acidental ou ad-hoc, **inclusive do owner** (o trigger dispara independentemente de privilégio). Contorná-lo exige ato **deliberado** de owner: `ALTER TABLE … DISABLE TRIGGER`, ou **`TRUNCATE`** — trigger de linha `FOR EACH ROW ON UPDATE/DELETE` **NÃO** dispara em `TRUNCATE` (é statement-level). Para cobrir também o TRUNCATE, adicionar no `065b` um `CREATE TRIGGER … BEFORE TRUNCATE ON <tabela> FOR EACH STATEMENT EXECUTE FUNCTION credit_ledger_append_only()` (a mesma função `RAISE`). De todo modo, é barra muito mais alta que um `DELETE` distraído. O **hardening completo** (recomendado, mas fora do escopo mínimo) é rodar migrations por um role owner e a API por um role **não-owner** com apenas `INSERT`/`SELECT` nas tabelas do ledger; aí `REVOKE UPDATE,DELETE` passa a ser efetivo e nem `DISABLE TRIGGER` é possível pela conexão da API. Recomendo (b) trigger agora + (a) separação de roles como próxima onda.
 
 ### 2.7 Justificativa das colunas (resumo)
 `tenant_id ON DELETE RESTRICT` (preserva histórico, `054:33`); `amount_cents INTEGER CHECK > 0` (bruto; teto `MAX_CENTS=2_000_000_000` de `finance.ts:38` vale igual); `competence_month` regex `YYYY-MM` (mesma de `charges`), `NULL` para `grant`; `charge_id ON DELETE SET NULL`; `reverses_transaction_id` (estorno rastreável); `idempotency_key NOT NULL UNIQUE`; `ref`/`memo` sem PII (plano/ID/motivo + marcador de operador — §3.3); `created_by` (actor da concessão manual; `NULL` no consumo automático). `credit_ledger_entries` é imutável por design (guardado pelo trigger).
@@ -207,7 +219,7 @@ Ver §1.4. Mantemos server-side de propósito.
 
 ### 3.2 Dimensionamento do grant — **valor VIVO, não hardcodado** (corrige BLOCKER)
 
-> **Correção do blocker:** o rascunho afirmava "Diamante = 7.700.000 confirmado por `050:8`", mas **`050_plan_monthly_price.sql:13` semeia diamante em `99900` (R$ 999)** — a própria fonte citada prova o contrário. Hardcodar `46.200.000` correria o risco de **over-grant massivo**: se o preço vivo for `99900`, esse valor cobriria ~462 ciclos (~38 anos), jamais "acabando" como pretendido; e, como o plano remove `billing_exempt`, a Venuxx passaria a receber charge (abatida) todo mês por décadas.
+> **Correção do blocker:** o rascunho afirmava "Diamante = 7.700.000 confirmado por `050:8`", mas **`050_plan_monthly_price.sql:12` semeia diamante em `99900` (R$ 999)** — a própria fonte citada prova o contrário. Hardcodar `46.200.000` correria o risco de **over-grant massivo**: se o preço vivo for `99900`, esse valor cobriria ~462 ciclos (~38 anos), jamais "acabando" como pretendido; e, como o plano remove `billing_exempt`, a Venuxx passaria a receber charge (abatida) todo mês por décadas.
 
 **Regra dura:** o grant é `N_ciclos × preço_VIVO`, onde `preço_VIVO` é lido em prod **imediatamente antes** de conceder, e `N_ciclos` é a decisão comercial explícita (Venuxx = 6). O rollout **falha** se o preço divergir do premissado sem decisão do Jean.
 
@@ -238,7 +250,7 @@ WITH tx AS (
   VALUES
     ('0931c5dc-46eb-474a-a54a-dad12733b4b2', 'grant', :grant_cents, NULL,
      'grant:venuxx:courtesy-6cycles-v1',
-     'plan_diamante|operator=:operator|via=psql-prod',
+     'plan_diamante|operator=' || :'operator' || '|via=psql-prod',  -- :'operator' (quoted): psql NAO interpola :var dentro de aspas simples
      'Cortesia 6 ciclos (Diamante, preco vivo verificado) - migra billing_exempt para saldo de credito',
      NULL)
   ON CONFLICT (idempotency_key) DO NOTHING
@@ -253,7 +265,7 @@ SELECT id, tenant_id, 'courtesy_offset', 'debit',  amount_cents FROM tx;
 INSERT INTO finance_audit (entity_type, entity_id, action, actor_user_id, detail)
 SELECT 'credit_ledger', t.id, 'grant', NULL,
        jsonb_build_object('amount_cents', :grant_cents, 'reason', 'courtesy', 'cycles', 6,
-                          'plan', 'plan_diamante', 'operator', ':operator', 'granted_via', 'psql-prod')
+                          'plan', 'plan_diamante', 'operator', :'operator', 'granted_via', 'psql-prod')
 FROM credit_ledger_transactions t
 WHERE t.idempotency_key = 'grant:venuxx:courtesy-6cycles-v1'
   AND NOT EXISTS (SELECT 1 FROM finance_audit a
@@ -287,7 +299,7 @@ WITH orig AS (
     (tenant_id, entry_type, amount_cents, reverses_transaction_id, idempotency_key, ref, memo, created_by)
   SELECT tenant_id, 'reversal', amount_cents, id,
          'reversal:' || id::text,               -- chave deterministica derivada do original
-         'operator=:operator|via=psql-prod', 'Estorno manual', NULL
+         'operator=' || :'operator' || '|via=psql-prod', 'Estorno manual', NULL  -- :'operator' quoted (psql nao interpola dentro de aspas simples)
   FROM orig
   ON CONFLICT (idempotency_key) DO NOTHING       -- rerun = no-op
   RETURNING id, tenant_id, amount_cents, reverses_transaction_id
@@ -345,7 +357,7 @@ WHERE c.kind = 'subscription'
 4. `applied = min(balance, outstanding)`. Se `applied > 0`:
    - `INSERT credit_ledger_transactions (entry_type='consume', amount_cents=applied, competence_month, charge_id, idempotency_key='consume:{tenant}:{competence}') ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`.
    - Se retornou `txId`: inserir as **duas pernas** (`tenant_credit` debit / `billing_consumption` credit, ambas `applied`) — o CONSTRAINT TRIGGER valida zero-sum no commit.
-   - `INSERT payments (charge_id, tenant_id, amount_cents=applied, method='credit', external_id='credit:{tenant}:{competence}') ON CONFLICT (method, external_id) DO NOTHING` — `uq_payments_method_external` (`054:78-80`) garante um pagamento-crédito por ciclo.
+   - `INSERT payments (charge_id, tenant_id, amount_cents=applied, method='credit', external_id='credit:{tenant}:{competence}') ON CONFLICT (method, external_id) WHERE external_id IS NOT NULL DO NOTHING` — `uq_payments_method_external` (`054:78-80`) é **índice PARCIAL** (`WHERE external_id IS NOT NULL`); o Postgres **exige o predicado no ON CONFLICT**, senão lança `42P10` (reproduzido no `zentriz-genesis-postgres-1`) e a tx aborta. Com o predicado, garante um pagamento-crédito por ciclo.
    - `await recalcChargeStatus(client, chargeId)` (`finance.ts:165-199`): `applied>=outstanding`→`paid`; `0<applied<outstanding`→`partially_paid`.
    - **Se ficou `paid` e `kind='subscription'`**: `await maybeActivateTenant(client, tenantId, null)` **dentro da tx** (`finance.ts:208-226` faz `UPDATE tenants` + `audit`), e **coletar** o tenant para bustar cache depois.
    - `await audit(client, 'credit_ledger', txId, 'consume', null, { competence, applied, chargeId })`.
@@ -390,7 +402,7 @@ for (const row of eligible.rows) {
         await client.query(
           `INSERT INTO payments (charge_id, tenant_id, amount_cents, method, external_id, reference, created_by)
            VALUES ($1,$2,$3,'credit',$4,'credit-auto',NULL)
-           ON CONFLICT (method, external_id) DO NOTHING`,
+           ON CONFLICT (method, external_id) WHERE external_id IS NOT NULL DO NOTHING`,  // indice PARCIAL: predicado obrigatorio (senao 42P10)
           [row.charge_id, row.tenant_id, applied, `credit:${row.tenant_id}:${competence}`]);
         const rc = await recalcChargeStatus(client, row.charge_id);
         if (rc.status === 'paid') {
@@ -408,7 +420,7 @@ for (const row of eligible.rows) {
 for (const tId of activatedTenants) bustTenantStatus(tId); // apos COMMIT (padrao finance.ts:748-755)
 ```
 
-> **Ajuste de tipo (corrige major/nit ops):** `audit()` hoje tem união `"charge"|"payment"|"bank_account"|"invoice"|"tenant"` (`finance.ts:145`); chamar com `'credit_ledger'` é `TS2345` e o build `tsc && cp` **falha** (bloqueia `ecr-push.sh` e todo o rollout). **F2 inclui, explicitamente, estender essa união para `'credit_ledger'`** (e qualquer type equivalente). Rodar `npm run typecheck` local antes do build ECR.
+> **Ajuste de tipo (corrige major/nit ops):** `audit()` hoje tem união `"charge"|"payment"|"bank_account"|"invoice"|"tenant"` (`finance.ts:146`); chamar com `'credit_ledger'` é `TS2345` e o build `tsc && cp` **falha** (bloqueia `ecr-push.sh` e todo o rollout). **F2 inclui, explicitamente, estender essa união para `'credit_ledger'`** (e qualquer type equivalente). Rodar `npm run typecheck` local antes do build ECR.
 
 ### 4.6 Saldo esgotado / parcial
 Sem `applied` (`balance = 0`) a charge não é tocada e segue o fluxo padrão: passo 1 do worker → `overdue` (`financeBillingWorker.ts:31-38`); passo 2 → suspensão após `FINANCE_SUSPEND_GRACE_DAYS` (`:42-56`). Com saldo parcial, `partially_paid`: a parte não coberta é o valor a receber.
@@ -431,7 +443,7 @@ Sem `applied` (`balance = 0`) a charge não é tocada e segue o fluxo padrão: p
 1. **`GET /api/finance/tenants/:tenantId/credit`** — `zentriz_admin` (todo o módulo é dele: `finance.ts:13`, `requireAdmin` `:31-33`). Saldo + extrato (últimas transações).
    ```js
    app.get('/api/finance/tenants/:tenantId/credit', async (req, reply) => {
-     if (!requireAdmin(req.user)) return reply.status(403).send(FORBIDDEN);
+     if (!requireAdmin(getUser(req))) return reply.status(403).send(FORBIDDEN);  // getUser: req.user NAO e tipado (TS2339)
      const { tenantId } = req.params;
      const bal = await pool.query('SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id=$1', [tenantId]);
      const ledger = await pool.query(
@@ -440,13 +452,14 @@ Sem `applied` (`balance = 0`) a charge não é tocada e segue o fluxo padrão: p
      return reply.send({ tenantId, balanceCents: bal.rows[0]?.balance_cents ?? 0, entries: ledger.rows });
    });
    ```
-2. **`GET /api/me/credit`** — self-service (**DECIDIDO: implementar, §11**). O papel `tenant_admin` **existe** (`signup.ts:236`, `users.ts:26`); a rota **exige** `role === 'tenant_admin' || role === 'zentriz_admin'` e retorna **403** para `role='user'` (saldo de cortesia é dado comercial sensível). `tenant_id` vem **só do JWT** (`req.user.tenant_id`), **jamais** de query/param (sem IDOR). Retorna **apenas** `balanceCents` (sem extrato).
+2. **`GET /api/me/credit`** — self-service (**DECIDIDO: implementar, §11**). O papel `tenant_admin` **existe** (`signup.ts:236`, `users.ts:26`); a rota **exige** `role === 'tenant_admin' || role === 'zentriz_admin'` e retorna **403** para `role='user'` (saldo de cortesia é dado comercial sensível). `tenant_id` vem **só do JWT** (`getUser(req).tenantId`), **jamais** de query/param (sem IDOR). Retorna **apenas** `balanceCents` (sem extrato).
    **Exibir só para crédito positivo (decisão C do Jean):** se `balance_cents > 0`, retorna `{ hasCredit: true, balanceCents }`; se `0`/inexistente, retorna `{ hasCredit: false }` **sem valor** — o portal só mostra o cartão de crédito para quem tem saldo. Não vaza "R$ 0,00" nem existência de conta zerada.
    ```js
    app.get('/api/me/credit', async (req, reply) => {
-     const role = req.user.role;
-     if (role !== 'tenant_admin' && role !== 'zentriz_admin') return reply.status(403).send(FORBIDDEN);
-     const r = await pool.query('SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id=$1', [req.user.tenant_id]);
+     const user = getUser(req);                 // req.user NAO e tipado no repo (TS2339); AuthUser tem { role, tenantId } (auth.ts)
+     if (user.role !== 'tenant_admin' && user.role !== 'zentriz_admin') return reply.status(403).send(FORBIDDEN);
+     if (!user.tenantId) return reply.send({ hasCredit: false });   // zentriz_admin pode ter tenantId null
+     const r = await pool.query('SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id=$1', [user.tenantId]);
      const balance = r.rows[0]?.balance_cents ?? 0;
      if (balance > 0) return reply.send({ hasCredit: true, balanceCents: balance });
      return reply.send({ hasCredit: false });   // saldo 0/negativo/inexistente: nao expoe valor
@@ -459,7 +472,7 @@ Nenhuma rota escreve. **Não existe rota que crie `grant`/`consume`/`reversal`**
 
 ## 7. Segurança e invariantes
 
-- **Append-only — enforced (não só convenção):** trigger `trg_*_append_only` (§2.6) rejeita `UPDATE`/`DELETE` nas duas tabelas, inclusive do owner. Correções são novos `reversal`. Residual (`DISABLE TRIGGER` deliberado) e hardening por role em §11.
+- **Append-only — enforced (não só convenção):** trigger `trg_*_append_only` (§2.6) rejeita `UPDATE`/`DELETE` nas duas tabelas, inclusive do owner. Correções são novos `reversal`. **Ressalva:** trigger de linha não cobre `TRUNCATE` (statement-level) — adicionar trigger `BEFORE TRUNCATE FOR EACH STATEMENT` no `065b` (§2.6). Residual (`DISABLE TRIGGER` deliberado) e hardening por role em §11.
 - **Zero-sum — enforced no commit:** `CONSTRAINT TRIGGER trg_credit_entries_zero_sum` (DEFERRED) aborta o commit de qualquer transação cujas pernas não somem zero (single-leg ou débito≠crédito). Substitui a defesa "só reconciliação depois do fato".
 - **Saldo nunca negativo:** (a) consumo usa `applied = min(balance, outstanding)`; (b) grant/consume/**reversal** e qualquer débito manual tomam `pg_advisory_xact_lock(hashtext(tenant_id))` **na mesma chave** e re-leem o saldo na tx; (c) o reversal tem guard explícito que aborta se deixaria `tenant_credit < 0` (§3.4). A reconciliação (abaixo) é **invariante com alerta**, não checagem ad-hoc.
 - **`method='credit'` só nasce no consumo interno (invariante dura, corrige minor security):** `'credit'` **NUNCA** entra no array de aplicação `PAYMENT_METHODS` (`finance.ts:53`) usado por `POST /api/finance/payments` (`:696,706`). Só o passo de consumo de §4 emite `payment method='credit'`. Comentário no código + **teste** garantindo que `POST /api/finance/payments` com `method='credit'` → **400**. (Sem isso, um admin quitaria charges "de graça" via API, quebrando `consumido==pago_credito`.)
@@ -467,7 +480,7 @@ Nenhuma rota escreve. **Não existe rota que crie `grant`/`consume`/`reversal`**
 - **Auditoria com operador:** `finance_audit` (`entity_type='credit_ledger'`) via `audit()`; na concessão manual, `detail.operator` + `granted_via='psql-prod'` (§3.3) — corrige a cegueira de ator do rascunho.
 - **PII fora de logs:** `memo`/`ref`/`detail` usam plano/ID/motivo/operador, **nunca** nome/e-mail-de-cliente/documento.
 
-**Reconciliação — invariante agendada e com alerta (não consulta ad-hoc; corrige major):** worker próprio (ou job cron do host, decisão em §11) roda estas queries a cada ciclo; **qualquer linha retornada dispara alerta** e há **teste** que injeta violação e exige detecção. Enquanto não houver o worker, a mesma bateria roda no checklist de rollout (§10) e após cada F4.
+**Reconciliação — invariante agendada e com alerta (não consulta ad-hoc; corrige major):** **worker Node dentro do processo da API** (decisão B travada, padrão `financeBillingWorker` — sem cron no host) roda estas queries a cada ciclo; **qualquer linha retornada dispara alerta** e há **teste** que injeta violação e exige detecção. Enquanto o worker (F6) não existir, a mesma bateria roda no checklist de rollout (§10) e após cada F4.
 ```sql
 -- (1) zero-sum por transacao (redundante com o trigger; guarda contra trigger desabilitado).
 SELECT transaction_id FROM credit_ledger_entries
@@ -476,10 +489,11 @@ HAVING SUM(CASE WHEN direction='credit' THEN amount_cents ELSE -amount_cents END
 -- (2) saldo nunca negativo.
 SELECT tenant_id FROM tenant_credit_balance WHERE balance_cents < 0;                        -- 0 linhas
 -- (3) header denormalizado casa com as pernas (corrige minor amount_cents).
+--     LEFT JOIN + one_side IS NULL: pega tambem transacao-header SEM nenhuma perna (orfa).
 SELECT t.id FROM credit_ledger_transactions t
-JOIN (SELECT transaction_id, SUM(amount_cents) FILTER (WHERE direction='credit') AS one_side
+LEFT JOIN (SELECT transaction_id, SUM(amount_cents) FILTER (WHERE direction='credit') AS one_side
       FROM credit_ledger_entries GROUP BY transaction_id) s ON s.transaction_id = t.id
-WHERE t.amount_cents <> s.one_side;                                                         -- 0 linhas
+WHERE s.one_side IS NULL OR t.amount_cents <> s.one_side;                                    -- 0 linhas
 -- (4) consumo casado com pagamentos-credito.
 SELECT c.tenant_id,
        SUM(c.amount_cents) FILTER (WHERE c.entry_type='consume') AS consumido,
@@ -510,7 +524,7 @@ F4 **depende** de F2 **e F0b** em prod: só desligar `billing_exempt` **depois**
 
 ## 9. Testes
 
-`migrations.test.ts` **deve passar para o 065** (aspas balanceadas por statement pós-split, `:38-49`). O bloco de invariantes de CHECK (`:52-79`) deve asserir que `payments_method_check` contém `'credit'` **e todos** os valores prévios (`'pix'…'manual'`), e `finance_audit_entity_type_check` contém `'tenant'` **e** `'credit_ledger'` (evita o gap G5 da 040, que derrubou `'queued'`).
+`migrations.test.ts` **deve passar para o 065** (aspas balanceadas por statement pós-split, `:38-49`). **Adicionar em F0** (o teste hoje não cobre esses dois CHECKs) asserção de que `payments_method_check` contém `'credit'` **e todos** os valores prévios (`'pix'…'manual'`), e `finance_audit_entity_type_check` contém `'tenant'` **e** `'credit_ledger'` (evita o gap G5 da 040, que derrubou `'queued'`).
 
 **Guards (F0b):**
 - `UPDATE`/`DELETE` em `credit_ledger_transactions`/`entries` → exceção (append-only).
@@ -561,7 +575,7 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 ## 11. Riscos e assunções
 
 **Riscos:**
-- **Reconstrução de CHECK derruba valor** (gap G5, 040 removeu `'queued'`) → mitigado por `migrations.test.ts` listando **todos** os valores.
+- **Reconstrução de CHECK derruba valor** (gap G5, 040 removeu `'queued'`) → mitigação **a adicionar em F0**: estender `migrations.test.ts` para asserir que os CHECKs reconstruídos listam **todos** os valores prévios + o novo (o teste hoje não cobre esses dois CHECKs).
 - **Trigger de append-only pode ser desabilitado pelo owner** (`DISABLE TRIGGER`) → residual aceito; hardening por separação de roles é a próxima onda (decisão abaixo). A reconciliação (1) re-checa zero-sum como rede.
 - **Split ingênuo do runner**: um `;`/aspas ímpares no `065` derruba a API em crash-loop no boot (bug 048) → comentários em linha própria, sem CTE/dollar-quote no `065`; triggers isolados no `065b` via psql; `migrations.test.ts` antes.
 - **Semântica de `payments.method='credit'`**: infla `payments` com valores que não são caixa real → reconciliável contra `billing_consumption`; relatórios de caixa devem filtrar `method<>'credit'`; **API bloqueia `'credit'`**.
@@ -573,12 +587,10 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 - **B — Reconciliação:** **worker Node dentro do processo da API** (mesmo padrão de `financeBillingWorker`), roda a bateria de invariantes por ciclo e **alerta** em qualquer linha retornada. Sem cron no host.
 - **C — `/api/me/credit`:** **implementar** self-service, mas **exibir o saldo apenas para quem tem crédito positivo** (`balance_cents > 0`); saldo `0`/inexistente → não expõe valor (§6.2 ajustada). Role `tenant_admin`/`zentriz_admin`; `tenant_id` só do JWT.
 
-**Assunções / decisões remanescentes:**
-- **DECISÃO (append-only hardening):** adotar agora os **triggers `065b`** (pragmático, enforced inclusive contra owner acidental). Para blindagem contra ato deliberado, migrar para **API sob role não-owner** com só `INSERT`/`SELECT` no ledger e migrations sob role owner (próxima onda). Confirmar se autoriza essa segunda etapa.
-- **DECISÃO (preço/N ciclos):** o grant é `6 × monthly_price_cents VIVO` (PASSO 0). **`050:13` semeia `99900` (R$ 999)**; o valor R$ 77.000 (7.700.000) só existiria como edição manual em prod não verificada nesta cadeia. **O rollout lê o valor vivo e falha se divergir do premissado** — o Jean decide o `N_ciclos` e confirma o preço observado antes de conceder.
-- **DECISÃO (reconciliação):** dono e cadência do job de reconciliação/alerta (§7/F6) — worker Node no processo da API vs. cron no host. Enquanto não existir, a bateria roda no rollout e pós-F4.
-- **`/api/me/credit`** só é implementada se expor saldo a `tenant_admin` for desejado (papel existe); senão, saldo só por `zentriz_admin`.
-- **Consumo aplicado no passo de §4** (existência da charge da competência); **não** duplicado no worker. Abatimento retroativo de competências antigas é **manual** (rodar o passo/`generate-month` da competência-alvo), não automático.
+**Assunções e itens de próxima onda (não bloqueiam o escopo mínimo F0–F7):**
+- **Próxima onda — append-only hardening por roles:** os **triggers `065b`** entram agora (enforced inclusive contra owner acidental). A blindagem contra ato deliberado — migrar a **API para role não-owner** com só `INSERT`/`SELECT` no ledger e migrations sob role owner — fica para uma onda posterior (não pré-requisito de F0–F7). Depende de nova autorização do Jean.
+- **Preço/N ciclos (decisão A aplicada):** o grant é `N × monthly_price_cents VIVO` lido no PASSO 0 (§3.2); o rollout **falha se o valor vivo divergir do premissado**. **`050:12` semeia `99900` (R$ 999)**; qualquer valor diferente em prod (ex.: R$ 77.000) só existe como edição manual — por isso o PASSO 0 lê antes de conceder, nunca hardcoda. O Jean confirma preço observado e `N_ciclos` na hora.
+- **Consumo aplicado no passo de §4** (existência da charge da competência); **não** duplicado no worker de reconciliação (que só verifica/alerta, decisão B). Abatimento retroativo de competências antigas é **manual** (rodar o passo/`generate-month` da competência-alvo), não automático.
 - **Estorno (`reversal`)** é manual server-side, sem API (mesma política da concessão).
 - `pg_advisory_xact_lock`/`hashtext`/`gen_random_uuid` disponíveis (Postgres padrão) — são.
 
@@ -594,12 +606,14 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 □ 065b_credit_ledger_guards.sql (triggers append-only + zero-sum) — aplicar via psql, NAO pelo runner
 □ npm test -- migrations.test.ts  (aspas por statement + invariantes de CHECK com TODOS os valores)
 □ F1: services/credit-ledger.ts (getBalance / consumeEligibleCharges) — SQL isolado (hexagonal)
-□ F1: ESTENDER uniao de audit() para 'credit_ledger' (finance.ts:145) + npm run typecheck
+□ F1: ESTENDER uniao de audit() para 'credit_ledger' (finance.ts:144-157) + npm run typecheck
 □ F2: passo de CONSUMO por EXISTENCIA da charge em generate-month (§4.1-4.5) + bustTenantStatus pos-commit
 □ F2: blindar PAYMENT_METHODS (finance.ts:53) contra 'credit' + teste POST /payments method='credit' => 400
 □ F3: GET /api/finance/tenants/:id/credit (requireAdmin/403) + /api/me/credit (role tenant_admin/zentriz_admin; SO exibe se balance>0, senao {hasCredit:false})
 □ F5: testes §9 — guards (append-only+zero-sum), consumo por existencia (blocker), reativacao suspenso,
    idempotencia grant/consume/reversal, esgotado, parcial, saldo>=0, concorrencia consume×reversal
+□ F6: worker Node de reconciliacao DENTRO da API (decisao B, padrao financeBillingWorker) — roda §7 (1)(2)(3)(4)
+   por ciclo + alerta em qualquer linha; teste que injeta violacao e exige deteccao. SEM cron no host
 □ Subir stack local com os 3 -f; aplicar 065b via psql local; validar generate-month + consumo
 □ Commit em dev (SEM git add -A) — so quando o Jean pedir; merge main
 □ ecr-push.sh (api genesis-web) — build padrao, guard localhost
@@ -621,7 +635,7 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 - `applications/services/api-node/src/db/migrations.test.ts` — invariantes (deve cobrir 065; asserts de CHECK com todos os valores).
 - `applications/services/api-node/src/routes/finance.ts` — `generate-month` (`:556-613`) + **novo passo de consumo por existência**; `recalcChargeStatus` (`:165-199`); `maybeActivateTenant` (`:208-226`, chamado dentro da tx); `audit` (`:144-157`, **estender união para `'credit_ledger'`**); `requireAdmin`/`FORBIDDEN` (`:31-34`); `PAYMENT_METHODS` (`:53`, **bloquear `'credit'`**); `PAYABLE_STATUSES`/`MAX_CENTS` (`:38-48`); novas rotas de leitura.
 - `applications/services/api-node/src/routes/signup.ts` — charge de onboarding (`:262-269`): **coberta** pelo consumo por existência (não requer alteração).
-- `applications/services/api-node/src/workers/financeBillingWorker.ts` — overdue/suspensão (`:31-56`); **não alterado**.
+- `applications/services/api-node/src/services/financeBillingWorker.ts` — overdue/suspensão (`:31-56`); **não alterado**.
 - `applications/services/api-node/src/services/credit-ledger.ts` (novo) — serviço de ledger (hexagonal).
 - `applications/services/api-node/src/db/init.ts` — runner (restrições de formato) e auto-migração no boot.
 
@@ -634,7 +648,7 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 ### Lente `finance-integration`
 - **[BLOCKER] Consumo acoplado à criação da charge, não à existência** → **RESOLVIDO** (§4.1–4.5): o consumo virou **passo independente por existência** que seleciona charges de assinatura `open/partially_paid/overdue` da competência (cobrindo onboarding `signup.ts:262-269` e POST manual `finance.ts:531-538`), sem depender do `RETURNING` do INSERT. Teste dedicado (§9) reproduz o cenário Venuxx.
 - **[MAJOR] Reativação de `suspended` não funcionava** (query de elegibilidade exclui suspended) → **RESOLVIDO** (§4.4): seleção por charge existente inclui suspensos; abater a overdue → `maybeActivateTenant`. Teste explícito.
-- **[MAJOR] Preço Diamante = 46.200.000 hardcodado, `050:13`=99900** → **RESOLVIDO** (§3.2, tratado também como blocker `ops`): PASSO 0 lê o valor vivo; grant = `6 × preço`; rollout aborta se divergir.
+- **[MAJOR] Preço Diamante = 46.200.000 hardcodado, `050:12`=99900** → **RESOLVIDO** (§3.2, tratado também como blocker `ops`): PASSO 0 lê o valor vivo; grant = `6 × preço`; rollout aborta se divergir.
 - **[MINOR] `inserted.amount_cents` não existe no RETURNING** → **RESOLVIDO** (§4.5): usa `c.amount_cents`/`t.monthly_price_cents`; não lê do RETURNING.
 - **[MINOR] `audit()` type + `maybeActivateTenant` fora do `recalc`** → **RESOLVIDO** (§4.5): união estendida; `maybeActivateTenant` chamado explicitamente antes do COMMIT; `bustTenantStatus` depois.
 
