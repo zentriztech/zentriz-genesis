@@ -13,6 +13,7 @@ Documentos que refletem a aplicação atual: arquitetura, atores, fluxo, deploy,
 | Arquivo | Descrição |
 |---------|-----------|
 | [NAVIGATION.md](NAVIGATION.md) | Índice central — comece por aqui |
+| ⭐ [PRODUCT_APP_INBOX_MODEL.md](PRODUCT_APP_INBOX_MODEL.md) | **Modelo de domínio canônico** — Produto · App · INBOX "Rascunhos" · Spec (migração 064). Onde tudo mora. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Componentes e responsabilidades |
 | [PROJECT_CHARTER.md](PROJECT_CHARTER.md) | Escopo e módulos |
 | [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md) | Linguagens, infra e requisitos |

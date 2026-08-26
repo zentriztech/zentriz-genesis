@@ -22,6 +22,7 @@
 
 | Documento | Descrição |
 |-----------|-----------|
+| ⭐ [docs/PRODUCT_APP_INBOX_MODEL.md](PRODUCT_APP_INBOX_MODEL.md) | **Modelo de domínio canônico** — Produto · App · INBOX "Rascunhos" · Spec; as três casas, invariantes, migração 064, fluxos e UX do portal |
 | [spec/PRODUCT_SPEC.md](../spec/PRODUCT_SPEC.md) | Entrada do projeto (FR/NFR) |
 | [spec/PRODUCT_SPEC_TEMPLATE.md](../spec/PRODUCT_SPEC_TEMPLATE.md) | Template de spec |
 | [docs/PROJECT_CHARTER.md](PROJECT_CHARTER.md) | Escopo e módulos |
