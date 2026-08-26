@@ -335,3 +335,112 @@ describe("DELETE /api/products/:id — hard delete (sem projetos) vs soft archiv
     expect(res.statusCode).toBe(403);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §6.3 — proteções do modelo "todo App vive num Produto" (migration 064).
+// Códigos: INBOX_PROTECTED (§4.10), INBOX_NOT_PROMOTABLE (§4.12),
+// RESERVED_PRODUCT_NAME (§4.14), APP_RUNNING_CANNOT_INBOX (§4.9).
+// ─────────────────────────────────────────────────────────────────────────────
+describe("INBOX/solo — proteções estruturais (migration 064)", () => {
+  const PROJ_ID = "66666666-6666-4666-8666-666666666666";
+  const SOLO_ID = "77777777-7777-4777-8777-777777777777";
+  const INBOX_ID = "88888888-8888-4888-8888-888888888888";
+
+  it("§4.10: DELETE do INBOX → 409 INBOX_PROTECTED (nem hard nem soft)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT id, name, tenant_id, status, is_inbox FROM products"))
+        return { rows: [{ id: PROD_ID, name: "Rascunhos", tenant_id: OTHER_TENANT, status: "active", is_inbox: true }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}`, payload: { confirmId: PROD_ID } });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("INBOX_PROTECTED");
+    // Nunca escreve (não apaga nem arquiva).
+    expect(captured.some((q) => /DELETE FROM products|SET status = 'archived'/.test(q.sql))).toBe(false);
+  });
+
+  it("§4.10: PATCH do INBOX mudando nome → 409 INBOX_PROTECTED", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT tenant_id, is_inbox FROM products WHERE id"))
+        return { rows: [{ tenant_id: OTHER_TENANT, is_inbox: true }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "PATCH", url: `/api/products/${PROD_ID}`, payload: { name: "Outro nome" } });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("INBOX_PROTECTED");
+    expect(captured.some((q) => q.sql.includes("UPDATE products"))).toBe(false);
+  });
+
+  it("§4.10: PATCH do INBOX mudando só a descrição → permitido", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT tenant_id, is_inbox FROM products WHERE id"))
+        return { rows: [{ tenant_id: OTHER_TENANT, is_inbox: true }] };
+      if (sql.includes("UPDATE products")) return { rows: [{ id: PROD_ID }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "PATCH", url: `/api/products/${PROD_ID}`, payload: { description: "nova desc" } });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("§4.14: POST criar produto chamado 'Rascunhos' → 409 RESERVED_PRODUCT_NAME (sem tocar o banco)", async () => {
+    currentUser = { id: "u3", role: "tenant_admin", tenantId: TENANT };
+    const res = await app.inject({ method: "POST", url: "/api/products", payload: { name: "Rascunhos" } });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("RESERVED_PRODUCT_NAME");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("§4.14: PATCH renomear produto comum para 'Rascunhos' → 409 RESERVED_PRODUCT_NAME", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT tenant_id, is_inbox FROM products WHERE id"))
+        return { rows: [{ tenant_id: OTHER_TENANT, is_inbox: false }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "PATCH", url: `/api/products/${PROD_ID}`, payload: { name: "Rascunhos" } });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("RESERVED_PRODUCT_NAME");
+    expect(captured.some((q) => q.sql.includes("UPDATE products"))).toBe(false);
+  });
+
+  it("§4.12: promover o INBOX em bloco → 409 INBOX_NOT_PROMOTABLE, não dispara", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id"))
+        return { rows: [{ id: PROD_ID, tenant_id: OTHER_TENANT, lifecycle_status: "draft", is_inbox: true }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("INBOX_NOT_PROMOTABLE");
+    await flushImmediate();
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("§4.9: 'tirar do produto' App em fábrica (running) → 409 APP_RUNNING_CANNOT_INBOX", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT tenant_id, created_by, status, product_id FROM projects WHERE id"))
+        return { rows: [{ tenant_id: OTHER_TENANT, created_by: "u9", status: "running", product_id: SOLO_ID }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}/projects/${PROJ_ID}` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("APP_RUNNING_CANNOT_INBOX");
+    // Não moveu nada.
+    expect(captured.some((q) => q.sql.includes("UPDATE projects SET product_id"))).toBe(false);
+  });
+
+  it("§4.9: 'tirar do produto' App rascunho (draft) → move ao INBOX (200)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("SELECT tenant_id, created_by, status, product_id FROM projects WHERE id"))
+        return { rows: [{ tenant_id: OTHER_TENANT, created_by: "u9", status: "draft", product_id: SOLO_ID }] };
+      // resolveInboxProductId: find-or-create idempotente do INBOX.
+      if (sql.includes("INSERT INTO products") && sql.includes("is_inbox"))
+        return { rows: [{ id: INBOX_ID }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "DELETE", url: `/api/products/${PROD_ID}/projects/${PROJ_ID}` });
+    expect(res.statusCode).toBe(200);
+    const moved = captured.find((q) => q.sql.includes("UPDATE projects SET product_id"));
+    expect(moved?.params[0]).toBe(INBOX_ID);
+    expect(moved?.params[1]).toBe(PROJ_ID);
+  });
+});

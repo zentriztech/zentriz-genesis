@@ -11,6 +11,7 @@
  * " ou rode na máquina local com PGHOST=localhost.
  */
 import { pool } from "./client.js";
+import { resolveInboxProductId } from "../services/inbox.js";
 
 const TITLE_DEV = "Portal de Vouchers (em desenvolvimento)";
 const TITLE_DONE = "Sistema de Cadastro MVP (concluído)";
@@ -27,6 +28,9 @@ async function main(): Promise<void> {
     }
     const userId = tenantUser.rows[0].id as string;
     const tenantId = tenantUser.rows[0].tenant_id as string;
+    // Pós-064 projects.product_id é NOT NULL. Estes exemplos são rascunhos → vão para o
+    // INBOX "Rascunhos" do tenant (find-or-create idempotente).
+    const inboxProductId = await resolveInboxProductId(client, tenantId, userId);
 
     const existingByTitle = await client.query(
       `SELECT id, title FROM projects WHERE tenant_id = $1 AND (title = $2 OR title = $3)`,
@@ -44,11 +48,12 @@ async function main(): Promise<void> {
 
     if (!hasDev) {
       const ins = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, charter_summary, started_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, now()) RETURNING id`,
+        `INSERT INTO projects (tenant_id, created_by, product_id, title, spec_ref, status, charter_summary, started_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) RETURNING id`,
         [
           tenantId,
           userId,
+          inboxProductId,
           TITLE_DEV,
           "spec/vouchers-portal.md",
           "dev_qa",
@@ -62,11 +67,12 @@ async function main(): Promise<void> {
 
     if (!hasDone) {
       const ins = await client.query(
-        `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, charter_summary, started_at, completed_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) RETURNING id`,
+        `INSERT INTO projects (tenant_id, created_by, product_id, title, spec_ref, status, charter_summary, started_at, completed_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now()) RETURNING id`,
         [
           tenantId,
           userId,
+          inboxProductId,
           TITLE_DONE,
           "spec/cadastro-mvp.md",
           "completed",

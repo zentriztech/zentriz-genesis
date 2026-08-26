@@ -272,7 +272,7 @@ export async function userRoutes(app: FastifyInstance) {
         if (heir.rows.length === 0) {
           await client.query("ROLLBACK").catch(() => {});
           return reply.status(409).send({
-            code: "CONFLICT",
+            code: "LAST_USER_OWNS_PRODUCTS",
             message: "Usuário possui produtos e é o último do tenant; não há a quem transferi-los. Crie outro usuário antes de excluir.",
           });
         }
