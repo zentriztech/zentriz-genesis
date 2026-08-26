@@ -102,11 +102,20 @@ export function deriveSystemService(opts: {
   productName?: string | null;
   title?: string | null;
   projectId: string;
+  /**
+   * §4.17 (migration 064): App solo — o produto homônimo criado na graduação. Um App solo
+   * é um SISTEMA MONO-SERVIÇO (o sistema É o app), não um produto com um serviço dentro.
+   * Preserva a semântica do antigo standalone (serviceId=null): mantém a topologia do
+   * Deadpool limpa e o systemId estável frente a renomeações do título.
+   */
+  soloApp?: boolean;
 }): { systemId: string; serviceId: string | null } {
   const canonicalSystemId = opts.productSystemId?.trim();
   const systemId =
     canonicalSystemId ||
     (opts.productName ? slugify(opts.productName) : slugify(opts.title ?? opts.projectId));
+  // App solo → sistema mono-serviço: sem serviceId (o serviço é o próprio sistema).
+  if (opts.soloApp) return { systemId, serviceId: null };
   const serviceId =
     canonicalSystemId || opts.productName ? slugify(opts.title ?? opts.projectId) : null;
   return { systemId, serviceId };
@@ -248,7 +257,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     // ── 1. Load project + tenant ──────────────────────────────────────────────
     const projRes = await client.query(
       `SELECT p.id, p.title, p.tenant_id, p.created_by, p.product_id, p.extra,
-              pr.name AS product_name, pr.system_id AS product_system_id,
+              pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app,
               gi.installation_id, gi.github_login, gi.installation_type
        FROM projects p
        LEFT JOIN products pr ON pr.id = p.product_id
@@ -392,6 +401,7 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
       productName: row.product_name as string | null,
       title: row.title as string | null,
       projectId,
+      soloApp: (row.product_solo_app as boolean | null) ?? false,
     });
     // #60: registro base no push (sem runtime/monitoring). O monitoramento ativo é
     // habilitado depois, sob demanda, pelo botão Ativar Monitoramento (#1) — que envia

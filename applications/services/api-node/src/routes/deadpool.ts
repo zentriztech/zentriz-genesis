@@ -391,7 +391,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
       // Carrega projeto + produto + repo + installation numa query (espelha githubPush).
       const res = await pool.query(
         `SELECT p.id, p.title, p.tenant_id, p.status,
-                pr.name AS product_name, pr.system_id AS product_system_id,
+                pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app,
                 gr.repo_url,
                 gi.installation_id
            FROM projects p
@@ -443,6 +443,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         productName: row.product_name as string | null,
         title: row.title as string | null,
         projectId: id,
+        soloApp: (row.product_solo_app as boolean | null) ?? false,
       });
 
       const isCloudwatch = cfg.provider === "cloudwatch";
@@ -566,7 +567,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
       const res = await pool.query(
         `SELECT p.tenant_id, p.title,
-                pr.name AS product_name, pr.system_id AS product_system_id,
+                pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app,
                 gr.repo_url, gi.installation_id
            FROM projects p
            LEFT JOIN products pr ON pr.id = p.product_id
@@ -586,6 +587,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         productName: row.product_name as string | null,
         title: row.title as string | null,
         projectId: id,
+        soloApp: (row.product_solo_app as boolean | null) ?? false,
       });
 
       // Best-effort: se o repo/installation existir, avisa o Deadpool para parar de monitorar.

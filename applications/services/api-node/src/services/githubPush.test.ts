@@ -8,7 +8,35 @@
  *  - política no-Expo: crossplatform NUNCA emite artefato/workflow Expo.
  */
 import { describe, it, expect } from "vitest";
-import { getMobileBuildWorkflow } from "./githubPush.js";
+import { getMobileBuildWorkflow, deriveSystemService } from "./githubPush.js";
+
+describe("deriveSystemService — App solo mono-serviço (§4.17, migration 064)", () => {
+  it("App solo → serviceId null (o sistema É o app), systemId estável do produto", () => {
+    const { systemId, serviceId } = deriveSystemService({
+      productSystemId: "minha-app", productName: "Minha App", title: "Minha App",
+      projectId: "p1", soloApp: true,
+    });
+    expect(systemId).toBe("minha-app");
+    expect(serviceId).toBeNull();
+  });
+
+  it("produto multi-projeto (não-solo) → serviceId = slug do título dentro do sistema", () => {
+    const { systemId, serviceId } = deriveSystemService({
+      productSystemId: "zvoices", productName: "Zentriz Voices", title: "API Gateway",
+      projectId: "p2", soloApp: false,
+    });
+    expect(systemId).toBe("zvoices");
+    expect(serviceId).toBe("api-gateway");
+  });
+
+  it("sem produto (regressão standalone) → systemId do título, serviceId null", () => {
+    const { systemId, serviceId } = deriveSystemService({
+      productSystemId: null, productName: null, title: "App Avulsa", projectId: "p3",
+    });
+    expect(systemId).toBe("app-avulsa");
+    expect(serviceId).toBeNull();
+  });
+});
 
 describe("getMobileBuildWorkflow (#82 / D-2)", () => {
   it("mobile_crossplatform → workflow RN CLI (mobile-build.yml, sem Expo)", () => {

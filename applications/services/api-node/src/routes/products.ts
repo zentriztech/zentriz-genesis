@@ -182,9 +182,14 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     if (user.role !== "zentriz_admin" && !user.tenantId) return reply.send([]);
     const client = await pool.connect();
     try {
+      // §4.15 (migration 064): expõe is_inbox/solo_app (o portal renderiza o INBOX à parte
+      // e distingue produtos homônimos de App solo) + oldest_project_at (para o "aging" de
+      // rascunhos parados no INBOX). O INBOX é fixado no topo (is_inbox DESC).
       const selectFragment = `
         SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
-               COUNT(proj.id)::int AS project_count
+               p.is_inbox, p.solo_app,
+               COUNT(proj.id)::int AS project_count,
+               MIN(proj.created_at) AS oldest_project_at
         FROM products p
         LEFT JOIN projects proj ON proj.product_id = p.id`;
       const res =
@@ -192,13 +197,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           ? await client.query(
               `${selectFragment}
                WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status = 'active'
-               GROUP BY p.id ORDER BY p.created_at DESC`,
+               GROUP BY p.id ORDER BY p.is_inbox DESC, p.created_at DESC`,
               [scopeTenantId]
             )
           : await client.query(
               `${selectFragment}
                WHERE p.tenant_id = $1 AND p.status = 'active'
-               GROUP BY p.id ORDER BY p.created_at DESC`,
+               GROUP BY p.id ORDER BY p.is_inbox DESC, p.created_at DESC`,
               [user.tenantId]
             );
       return reply.send(res.rows);
