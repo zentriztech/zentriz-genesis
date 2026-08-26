@@ -30,9 +30,24 @@ import { extractProductZip, httpPost, httpGet, type ProductZipContents } from ".
 import { decomposeProduct } from "../services/productDecomposer.js";
 import { buildProductSketch, parseManifest, ManifestError, type ProductManifest } from "../services/productManifest.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
+import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbox.js";
+import { isPreFactory } from "../services/projectStatus.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
+}
+
+/**
+ * "rascunhos" (case/acento/trim-insensível) é o nome RESERVADO do INBOX do sistema
+ * (migration 064). Bloqueia POST/PATCH de produto comum que tente usá-lo (§4.14).
+ */
+function isReservedInboxName(name: string): boolean {
+  const norm = name
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim()
+    .toLowerCase();
+  return norm === "rascunhos";
 }
 
 // UUID v-agnóstico (mesmo formato usado em projects.ts/specs.ts) — valida o ?tenantId do
@@ -198,6 +213,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN" });
     const { name, description } = request.body as Record<string, string>;
     if (!name?.trim()) return reply.status(400).send({ code: "BAD_REQUEST", message: "name obrigatório" });
+    // §4.14 (migration 064): "Rascunhos" é reservado ao INBOX do sistema.
+    if (isReservedInboxName(name)) {
+      return reply.status(409).send({
+        code: "RESERVED_PRODUCT_NAME",
+        message: '"Rascunhos" é um nome reservado do sistema (INBOX).',
+      });
+    }
     const client = await pool.connect();
     try {
       const res = await client.query(
@@ -445,15 +467,20 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const client = await pool.connect();
       try {
         const proj = (await client.query(
-          "SELECT id, tenant_id, created_by, title, status, product_id FROM projects WHERE id = $1", [id],
+          `SELECT p.id, p.tenant_id, p.created_by, p.title, p.status, p.product_id,
+                  pr.is_inbox AS product_is_inbox
+             FROM projects p
+             LEFT JOIN products pr ON pr.id = p.product_id
+            WHERE p.id = $1`, [id],
         )).rows[0];
         if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada" });
         // Ownership: não-master só decompõe spec do próprio tenant (ou que criou).
         if (proj.tenant_id !== user.tenantId && proj.created_by !== user.id) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão sobre esta spec" });
         }
-        // Spec já em um produto → não re-decompor (evita duplicata/órfão).
-        if (proj.product_id) {
+        // §4.7 (migration 064): pós-064 toda spec tem product_id (ao menos o INBOX). Só barra
+        // re-decomposição se já pertence a um produto REAL (não-inbox) — evita duplicata/órfão.
+        if (proj.product_id && !proj.product_is_inbox) {
           return reply.status(409).send({ code: "ALREADY_IN_PRODUCT", message: "Spec já pertence a um produto." });
         }
         // Só specs pré-fábrica podem ser decompostas.
@@ -480,6 +507,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         if (document.length < 40) {
           return reply.status(422).send({ code: "SPEC_TOO_SHORT", message: "Conteúdo da spec insuficiente para decompor (mín. 40 caracteres legíveis)." });
         }
+        // §4.7 (migration 064): fecha a janela entre o dispatch e o consumo — marca a origem
+        // como pending_conversion (ainda pré-fábrica, ainda no INBOX). O decomposer consome a
+        // spec (status='archived') dentro da transação, com guarda de status contra /run concorrente.
+        await client.query(
+          "UPDATE projects SET status='pending_conversion', updated_at=NOW() WHERE id=$1 AND status IN ('draft','spec_submitted')",
+          [id],
+        );
         const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now(), originProjectId: id });
         runProposeJob(jobId, document, request.body?.modelId, agentsUrl);
@@ -578,10 +612,18 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     const client = await pool.connect();
     try {
       const prod = await client.query(
-        "SELECT id, tenant_id, lifecycle_status FROM products WHERE id = $1", [id],
+        "SELECT id, tenant_id, lifecycle_status, is_inbox FROM products WHERE id = $1", [id],
       );
       const row = prod.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+      // §4.12 (migration 064): o INBOX "Rascunhos" não é promovível em bloco — cada spec
+      // gradua individualmente ao rodar (/run) ou ao ser movida para um produto.
+      if (row.is_inbox) {
+        return reply.status(409).send({
+          code: "INBOX_NOT_PROMOTABLE",
+          message: "O INBOX (Rascunhos) não pode ser promovido em bloco. Promova cada spec individualmente.",
+        });
+      }
       // C6: o master (zentriz_admin) PODE promover qualquer produto — promover é operação,
       // não autoria (não passa por denyCreationForManagement). Não-master: só o próprio tenant.
       if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
@@ -660,13 +702,20 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const client = await pool.connect();
       try {
         const prod = await client.query(
-          "SELECT id, name, tenant_id, status FROM products WHERE id = $1",
+          "SELECT id, name, tenant_id, status, is_inbox FROM products WHERE id = $1",
           [id]
         );
         const row = prod.rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
         if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        // §4.10 (migration 064): o INBOX é estrutural do tenant — nunca some (hard nem soft).
+        if (row.is_inbox) {
+          return reply.status(409).send({
+            code: "INBOX_PROTECTED",
+            message: "O INBOX (Rascunhos) é do sistema e não pode ser excluído nem arquivado.",
+          });
         }
 
         // Confirmação obrigatória: o cliente deve reescrever o id exato (guarda anti-engano).
@@ -745,10 +794,24 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     try {
       // B3 (RFC-0003): autoriza por papel (mesmo padrão do DELETE) em vez de fixar
       // tenant_id = user.tenantId (que dava 404 para o master, cujo tenantId é null).
-      const owner = (await client.query("SELECT tenant_id FROM products WHERE id = $1", [id])).rows[0];
+      const owner = (await client.query("SELECT tenant_id, is_inbox FROM products WHERE id = $1", [id])).rows[0];
       if (!owner) return reply.status(404).send({ code: "NOT_FOUND" });
       if (user.role !== "zentriz_admin" && owner.tenant_id !== user.tenantId) {
         return reply.status(403).send({ code: "FORBIDDEN" });
+      }
+      // §4.10 (migration 064): no INBOX só a descrição é editável — nome e status são fixos.
+      if (owner.is_inbox && (name !== undefined || status !== undefined)) {
+        return reply.status(409).send({
+          code: "INBOX_PROTECTED",
+          message: "O INBOX (Rascunhos) tem nome e status fixos; apenas a descrição pode ser editada.",
+        });
+      }
+      // §4.14: bloquear renomear um produto comum para o nome reservado do INBOX.
+      if (!owner.is_inbox && name !== undefined && isReservedInboxName(name)) {
+        return reply.status(409).send({
+          code: "RESERVED_PRODUCT_NAME",
+          message: '"Rascunhos" é um nome reservado do sistema (INBOX).',
+        });
       }
       const res = await client.query(
         `UPDATE products SET
@@ -801,15 +864,40 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const client = await pool.connect();
       try {
         // B3 (RFC-0003): autoriza por papel; idempotente (projeto ausente → ok).
-        const proj = (await client.query("SELECT tenant_id FROM projects WHERE id=$1", [projectId])).rows[0];
+        const proj = (await client.query(
+          "SELECT tenant_id, created_by, status, product_id FROM projects WHERE id=$1",
+          [projectId],
+        )).rows[0];
         if (!proj) return reply.send({ ok: true });
         if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
           return reply.status(403).send({ code: "FORBIDDEN" });
         }
-        await client.query(
-          "UPDATE projects SET product_id=NULL, updated_at=NOW() WHERE id=$1",
-          [projectId]
-        );
+        // §4.9 (migration 064): "tirar do produto" = mover ao INBOX, SÓ se ainda for rascunho.
+        // App em fábrica/terminal nunca volta ao inbox.
+        if (!isPreFactory(String(proj.status))) {
+          return reply.status(409).send({
+            code: "APP_RUNNING_CANNOT_INBOX",
+            message: "App em fábrica/terminal não pode voltar ao INBOX. Mova-o para outro produto.",
+          });
+        }
+        const previousProductId = (proj.product_id as string | null) ?? null;
+        await client.query("BEGIN");
+        try {
+          const inboxId = await resolveInboxProductId(
+            client, String(proj.tenant_id), String(proj.created_by),
+          );
+          await client.query(
+            "UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2",
+            [inboxId, projectId],
+          );
+          if (previousProductId && previousProductId !== inboxId) {
+            await cleanupEmptySoloProduct(client, previousProductId);
+          }
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK");
+          throw e;
+        }
         return reply.send({ ok: true });
       } finally { client.release(); }
     }
@@ -893,19 +981,61 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const { productId } = request.body ?? {};
       const client = await pool.connect();
       try {
-        const proj = (await client.query("SELECT id, tenant_id FROM projects WHERE id=$1", [id])).rows[0];
+        const proj = (await client.query(
+          "SELECT id, tenant_id, created_by, status, product_id FROM projects WHERE id=$1",
+          [id],
+        )).rows[0];
         if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
         if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId) {
           return reply.status(403).send({ code: "FORBIDDEN" });
         }
+        const tenantId = String(proj.tenant_id);
+        const previousProductId = (proj.product_id as string | null) ?? null;
+
+        // §4.8 (migration 064): resolve o produto ALVO e se é uma operação de "inbox".
+        //  • productId presente e NÃO-inbox → mover livremente (inclui App em fábrica).
+        //  • productId ausente/null OU alvo é o INBOX → "mover ao inbox", SÓ se rascunho.
+        let targetProductId: string;
+        let movingToInbox: boolean;
         if (productId) {
-          // B3 (RFC-0003): produto deve existir e pertencer ao MESMO tenant do projeto
-          // (coerência produto↔projeto) — funciona para o master (tenantId null).
-          const prod = (await client.query("SELECT id FROM products WHERE id=$1 AND tenant_id=$2", [productId, proj.tenant_id])).rows[0];
+          const prod = (await client.query(
+            "SELECT id, is_inbox FROM products WHERE id=$1 AND tenant_id=$2",
+            [productId, proj.tenant_id],
+          )).rows[0];
           if (!prod) return reply.status(404).send({ code: "NOT_FOUND", message: "Produto não encontrado" });
+          movingToInbox = prod.is_inbox === true;
+          targetProductId = String(prod.id);
+        } else {
+          movingToInbox = true;
+          targetProductId = ""; // resolvido abaixo (inbox) dentro da transação
         }
-        await client.query("UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2", [productId ?? null, id]);
-        return reply.send({ ok: true, productId: productId ?? null });
+
+        if (movingToInbox && !isPreFactory(String(proj.status))) {
+          return reply.status(409).send({
+            code: "APP_RUNNING_CANNOT_INBOX",
+            message: "App em fábrica/terminal não pode voltar ao INBOX. Mova-o para outro produto.",
+          });
+        }
+
+        await client.query("BEGIN");
+        try {
+          if (!productId) {
+            targetProductId = await resolveInboxProductId(client, tenantId, String(proj.created_by));
+          }
+          await client.query(
+            "UPDATE projects SET product_id=$1, updated_at=NOW() WHERE id=$2",
+            [targetProductId, id],
+          );
+          // Se o produto de origem era solo_app e ficou vazio, remove o homônimo-fantasma.
+          if (previousProductId && previousProductId !== targetProductId) {
+            await cleanupEmptySoloProduct(client, previousProductId);
+          }
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK");
+          throw e;
+        }
+        return reply.send({ ok: true, productId: targetProductId });
       } finally { client.release(); }
     }
   );

@@ -42,11 +42,12 @@ vi.mock("node:fs/promises", () => ({ readFile: (p: string) => readFileSpy(p) }))
 let app: FastifyInstance;
 
 // Roteador default: spec pré-fábrica do próprio tenant, sem produto, com 1 arquivo .md.
-function defaultHandler(over: { tenant?: string; createdBy?: string; status?: string; productId?: string | null; mdFiles?: number } = {}) {
-  const { tenant = TENANT, createdBy = "u1", status = "spec_submitted", productId = null, mdFiles = 1 } = over;
+function defaultHandler(over: { tenant?: string; createdBy?: string; status?: string; productId?: string | null; productIsInbox?: boolean; mdFiles?: number } = {}) {
+  const { tenant = TENANT, createdBy = "u1", status = "spec_submitted", productId = null, productIsInbox = false, mdFiles = 1 } = over;
   return (sql: string) => {
-    if (sql.includes("FROM projects WHERE id")) {
-      return { rows: [{ id: SPEC_ID, tenant_id: tenant, created_by: createdBy, title: "Minha Spec", status, product_id: productId }] };
+    // §4.7 (migration 064): a rota faz LEFT JOIN products p/ obter product_is_inbox.
+    if (sql.includes("FROM projects") && sql.includes("product_is_inbox")) {
+      return { rows: [{ id: SPEC_ID, tenant_id: tenant, created_by: createdBy, title: "Minha Spec", status, product_id: productId, product_is_inbox: productId ? productIsInbox : null }] };
     }
     if (sql.includes("FROM project_spec_files")) {
       return { rows: Array.from({ length: mdFiles }, (_v, i) => ({ filename: `spec${i}.md`, file_path: `/uploads/${SPEC_ID}/spec${i}.md` })) };

@@ -13,6 +13,7 @@
 import type { Pool } from "pg";
 import { buildProductSketch, parseManifest, computeProductHash, ManifestError, type ProductSketch } from "./productManifest.js";
 import { createProjectFromSpec } from "./projectCreation.js";
+import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import type { ProductZipContents } from "../routes/specs.js";
 
 export interface DecomposeParams {
@@ -49,6 +50,11 @@ export interface DecomposeResult {
   dispatched: string[]; // projectIds da onda 0 marcados para /run
   /** true quando a ingestão foi no-op idempotente (produto com mesmo hash já existia). */
   idempotentReuse?: boolean;
+  /**
+   * §4.7 (migration 064): true quando a spec de origem NÃO foi consumida porque já havia
+   * graduado (via /run concorrente) — o App vivo NÃO é desvinculado; a decomposição segue.
+   */
+  originAlreadyPromoted?: boolean;
 }
 
 /** Deriva deliveryFields a partir do delivery do projeto/manifesto. */
@@ -64,7 +70,19 @@ function deliveryFieldsFor(delivery: string | undefined): Record<string, string>
  */
 async function buildReuseResult(
   pool: Pool, productId: string, productName: string, sketch: ProductSketch,
+  originProjectId?: string | null,
 ): Promise<DecomposeResult> {
+  // §4.7 (migration 064): mesmo no no-op idempotente, consumir a spec de origem para o
+  // produto existente (mesma guarda de status; se já graduou → não desvincula o App vivo).
+  let originAlreadyPromoted = false;
+  if (originProjectId) {
+    const consumed = await pool.query(
+      `UPDATE projects SET product_id = $1, status = 'archived', updated_at = now()
+       WHERE id = $2 AND status = ANY($3::text[])`,
+      [productId, originProjectId, [...PRE_FACTORY_STATUSES]],
+    );
+    if (consumed.rowCount === 0) originAlreadyPromoted = true;
+  }
   const rows = (await pool.query(
     "SELECT id, title, status FROM projects WHERE product_id = $1",
     [productId],
@@ -82,7 +100,7 @@ async function buildReuseResult(
   });
   return {
     productId, productName, projects, waves: sketch.waves,
-    triggersCreated: 0, dispatched: [], idempotentReuse: true,
+    triggersCreated: 0, dispatched: [], idempotentReuse: true, originAlreadyPromoted,
   };
 }
 
@@ -105,7 +123,7 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
     [tenantId, productHash],
   );
   if (existing.rows[0]) {
-    return buildReuseResult(pool, existing.rows[0].id as string, existing.rows[0].name as string, sketch);
+    return buildReuseResult(pool, existing.rows[0].id as string, existing.rows[0].name as string, sketch, params.originProjectId ?? null);
   }
 
   const client = await pool.connect();
@@ -177,6 +195,19 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       [productId, dispatch ? "running" : "draft"],
     );
 
+    // §4.7 (migration 064): consumir a spec de ORIGEM — move-a para o novo produto e arquiva-a,
+    // DENTRO da transação. Guarda de status: se a origem já graduou via /run concorrente (não é
+    // mais pré-fábrica), rowCount=0 → NÃO desvincula o App vivo; sinaliza originAlreadyPromoted.
+    let originAlreadyPromoted = false;
+    if (params.originProjectId) {
+      const consumed = await client.query(
+        `UPDATE projects SET product_id = $1, status = 'archived', updated_at = now()
+         WHERE id = $2 AND status = ANY($3::text[])`,
+        [productId, params.originProjectId, [...PRE_FACTORY_STATUSES]],
+      );
+      if (consumed.rowCount === 0) originAlreadyPromoted = true;
+    }
+
     await client.query("COMMIT");
 
     // 5. onda 0 (sem predecessores) fica elegível para disparo pelo chamador (rota),
@@ -191,6 +222,7 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       waves: sketch.waves,
       triggersCreated,
       dispatched,
+      originAlreadyPromoted,
     };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
@@ -202,7 +234,7 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
         [tenantId, productHash],
       );
       if (dup.rows[0]) {
-        return buildReuseResult(pool, dup.rows[0].id as string, dup.rows[0].name as string, sketch);
+        return buildReuseResult(pool, dup.rows[0].id as string, dup.rows[0].name as string, sketch, params.originProjectId ?? null);
       }
     }
     throw e;

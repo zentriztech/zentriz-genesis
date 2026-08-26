@@ -139,7 +139,7 @@ describe("PATCH /api/products/:id — autorização por papel (B3)", () => {
   it("não-master de outro tenant → 403", async () => {
     currentUser = { id: "u3", role: "tenant_admin", tenantId: TENANT };
     queryHandler = (sql) => {
-      if (sql.includes("SELECT tenant_id FROM products WHERE id")) return { rows: [{ tenant_id: OTHER_TENANT }] };
+      if (sql.includes("SELECT tenant_id, is_inbox FROM products WHERE id")) return { rows: [{ tenant_id: OTHER_TENANT, is_inbox: false }] };
       return { rows: [] };
     };
     const res = await app.inject({ method: "PATCH", url: `/api/products/${PROD_ID}`, payload: { name: "novo" } });
@@ -148,7 +148,7 @@ describe("PATCH /api/products/:id — autorização por papel (B3)", () => {
 
   it("master edita produto de qualquer tenant", async () => {
     queryHandler = (sql) => {
-      if (sql.includes("SELECT tenant_id FROM products WHERE id")) return { rows: [{ tenant_id: OTHER_TENANT }] };
+      if (sql.includes("SELECT tenant_id, is_inbox FROM products WHERE id")) return { rows: [{ tenant_id: OTHER_TENANT, is_inbox: false }] };
       if (sql.startsWith("UPDATE products") || sql.includes("UPDATE products SET")) return { rows: [{ id: PROD_ID, name: "novo" }] };
       return { rows: [] };
     };
@@ -165,8 +165,8 @@ describe("POST /api/products/:id/promote — B2 (promover da Bancada)", () => {
   function promoteHandler(opts: { tenant?: string | null; lifecycle?: string; roots?: string[]; updRowCount?: number }) {
     const { tenant = TENANT, lifecycle = "draft", roots = [R1, R2], updRowCount = 1 } = opts;
     return (sql: string) => {
-      if (sql.includes("lifecycle_status FROM products WHERE id")) {
-        return { rows: [{ id: PROD_ID, tenant_id: tenant, lifecycle_status: lifecycle }] };
+      if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id")) {
+        return { rows: [{ id: PROD_ID, tenant_id: tenant, lifecycle_status: lifecycle, is_inbox: false }] };
       }
       if (sql.includes("p.status = 'draft'")) return { rows: roots.map((id) => ({ id })) };
       if (sql.includes("UPDATE products SET lifecycle_status = 'running'")) return { rows: [], rowCount: updRowCount } as { rows: unknown[]; rowCount: number };
@@ -251,8 +251,8 @@ describe("DELETE /api/products/:id — hard delete (sem projetos) vs soft archiv
   const deleteHandler =
     (opts: { tenant?: string | null; status?: string; projectCount: number; running?: string[] }) =>
     (sql: string) => {
-      if (sql.includes("SELECT id, name, tenant_id, status FROM products"))
-        return { rows: [{ id: PROD_ID, name: "P", tenant_id: opts.tenant ?? null, status: opts.status ?? "active" }] };
+      if (sql.includes("SELECT id, name, tenant_id, status, is_inbox FROM products"))
+        return { rows: [{ id: PROD_ID, name: "P", tenant_id: opts.tenant ?? null, status: opts.status ?? "active", is_inbox: false }] };
       if (sql.includes("status = 'running'"))
         return { rows: (opts.running ?? []).map((t, i) => ({ id: `r${i}`, title: t })) };
       if (sql.includes("COUNT(*) AS n FROM projects"))
