@@ -14,6 +14,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
+import { InboxError } from "../services/inbox.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -102,6 +103,13 @@ export async function catalogRoutes(app: FastifyInstance) {
         });
 
         return reply.status(201).send({ projectId: result.projectId, status: result.status, slug });
+      } catch (e) {
+        // Funil de criação (§4.2): produto explícito inexistente/de outro tenant → 404.
+        if (e instanceof InboxError) {
+          return reply.status(e.code === "PRODUCT_NOT_FOUND" ? 404 : 409)
+            .send({ code: e.code, message: e.message });
+        }
+        throw e;
       } finally {
         client.release();
       }

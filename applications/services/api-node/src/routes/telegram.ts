@@ -1,6 +1,9 @@
 // Telegram Bot integration — webhook, vinculação e notificações push
 import type { FastifyInstance } from "fastify";
+import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
+import { normalizeProductId, resolveInboxProductId } from "../services/inbox.js";
+import { PRE_FACTORY_STATUSES } from "../services/projectStatus.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signTokenWithExpiry } from "../auth.js";
 import { resolveScopedTenantId } from "../lib/tenantScope.js";
@@ -782,10 +785,11 @@ async function handleList(chatId: number, user: UserRow) {
      LEFT JOIN products pd  ON pd.id  = pr.product_id
      LEFT JOIN project_tasks pt ON pt.project_id = pr.id
      WHERE pr.tenant_id = $1
-       AND pr.status NOT IN ('archived', 'draft')
+       AND pr.status <> 'archived'
+       AND pr.status <> ALL($2::text[])
      GROUP BY pr.id, pr.title, pr.status, pr.product_id, pd.name
      ORDER BY pd.name NULLS LAST, pr.updated_at DESC`,
-    [user.tenant_id]
+    [user.tenant_id, [...PRE_FACTORY_STATUSES]]
   );
 
   if (!result.rows.length) {
@@ -793,11 +797,12 @@ async function handleList(chatId: number, user: UserRow) {
     return;
   }
 
-  // Agrupar por produto
+  // Agrupar por produto. Pós-migração 064, product_id é NOT NULL e todo App em fábrica
+  // pertence a um produto (o bucket "__standalone__" virou código morto e foi removido).
   const groups = new Map<string, { name: string; rows: typeof result.rows }>();
   for (const row of result.rows) {
-    const key  = row.product_id ?? "__standalone__";
-    const name = row.product_name ?? "Projetos avulsos";
+    const key  = String(row.product_id);
+    const name = (row.product_name as string | null) ?? "Produto";
     if (!groups.has(key)) groups.set(key, { name, rows: [] });
     groups.get(key)!.rows.push(row);
   }
@@ -1012,7 +1017,7 @@ function detectTechHints(desc: string): string {
 }
 
 async function saveProjectSpec(
-  client: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  client: PoolClient,
   params: {
     tenantId: string; userId: string; title: string;
     specMd: string; productId: string | null;
@@ -1031,10 +1036,15 @@ async function saveProjectSpec(
   const { normalizeProjectType } = await import("../services/typePolicyNormalizer.js");
   const projectType = normalizeProjectType(rawType) ?? rawType;
 
+  // Funil de criação (§4.5, migration 064): product_id NUNCA é null. Explícito → mantém
+  // (produto derivado do servidor, posse garantida); ausente → INBOX "Rascunhos" do tenant.
+  const productId = normalizeProductId(params.productId)
+    ?? await resolveInboxProductId(client, params.tenantId, params.userId);
+
   const projRes = await client.query(
     `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, product_id, extra)
      VALUES ($1, $2, $3, $4, 'spec_submitted', $5, $6::jsonb) RETURNING id`,
-    [params.tenantId, params.userId, params.title, specRef, params.productId,
+    [params.tenantId, params.userId, params.title, specRef, productId,
      JSON.stringify({ created_via: "telegram", project_type: projectType, project_type_raw: rawType })]
   );
   const projectId = projRes.rows[0].id as string;

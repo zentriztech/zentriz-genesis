@@ -7,6 +7,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
+import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
@@ -763,6 +764,13 @@ export async function specRoutes(app: FastifyInstance) {
         specApproved,
         isDraft,
       });
+    } catch (e) {
+      // Funil de criação (§4.2): produto explícito inexistente/de outro tenant → 404.
+      if (e instanceof InboxError) {
+        return reply.status(e.code === "PRODUCT_NOT_FOUND" ? 404 : 409)
+          .send({ code: e.code, message: e.message });
+      }
+      throw e;
     } finally {
       client.release();
     }

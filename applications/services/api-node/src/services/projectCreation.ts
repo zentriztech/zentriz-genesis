@@ -15,6 +15,7 @@ import path from "path";
 import fs from "fs/promises";
 import crypto from "crypto";
 import { DEPLOY_FORMATS, type DeployFormat } from "./provision/deployTargets.js";
+import { normalizeProductId, resolveInboxProductId, assertProductOwnership } from "./inbox.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -98,6 +99,16 @@ export async function createProjectFromSpec(
   } = params;
 
   if (!files.length) throw new Error("createProjectFromSpec: nenhum arquivo de spec.");
+
+  // Funil de criação (§4.2, migration 064): product_id NUNCA é null. Entrada vazia →
+  // INBOX "Rascunhos" do tenant (find-or-create idempotente); entrada explícita → valida
+  // posse no tenant (assertProductOwnership lança InboxError('PRODUCT_NOT_FOUND'), que os
+  // chamadores mapeiam para 4xx). Cobre POST /api/specs, catalog/:slug/use e o decomposer.
+  const requestedProductId = normalizeProductId(productId);
+  const resolvedProductId =
+    requestedProductId === null
+      ? await resolveInboxProductId(client, tenantId, createdBy)
+      : (await assertProductOwnership(client, requestedProductId, tenantId)).id;
 
   // version_number por linhagem (idêntico à rota /api/specs)
   let versionNumber = 1;
@@ -185,7 +196,7 @@ export async function createProjectFromSpec(
     `INSERT INTO projects (tenant_id, created_by, title, spec_ref, status, parent_project_id, version_number, extra, product_id, spec_fingerprint)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10) RETURNING id`,
     [tenantId, createdBy, title, files[0].filename, isDraft ? "draft" : "spec_submitted",
-     rootParentId, versionNumber, extraJson, productId, specFingerprint],
+     rootParentId, versionNumber, extraJson, resolvedProductId, specFingerprint],
   );
   const projectId = projectResult.rows[0].id as string;
 
