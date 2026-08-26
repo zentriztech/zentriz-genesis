@@ -68,6 +68,14 @@ export async function recomputeProductLifecycle(
 ): Promise<ProductLifecycle | null> {
   if (!productId) return null;
   try {
+    // §4.13 (migration 064): o INBOX "Rascunhos" agrega specs pré-fábrica de vários
+    // produtos-a-nascer — seu lifecycle agregado não tem significado e não deve ser
+    // sobrescrito. Se o produto não existe (null), também nada a fazer.
+    const prod = await db.query(
+      "SELECT is_inbox FROM products WHERE id = $1",
+      [productId],
+    );
+    if (!prod.rows[0] || (prod.rows[0] as { is_inbox: boolean }).is_inbox === true) return null;
     const res = await db.query(
       "SELECT status FROM projects WHERE product_id = $1",
       [productId],

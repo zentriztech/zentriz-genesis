@@ -6,6 +6,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signToken } from "../auth.js";
 import { claimSlotOrQueue, revertSlotClaim, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
 import { checkDependencyGate } from "../services/dependencyGate.js";
+import { graduateFromInbox, demoteToInbox } from "../services/inbox.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -106,7 +107,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
       }
 
       const projectRow = await client.query(
-        "SELECT status FROM projects WHERE id = $1",
+        "SELECT status, product_id, title, created_by FROM projects WHERE id = $1",
         [projectId]
       );
       const project = projectRow.rows[0];
@@ -165,6 +166,34 @@ export async function pipelineRoutes(app: FastifyInstance) {
           });
         }
         slotPreviousStatus = claim.previousStatus;
+      }
+
+      // ── §4.11 (migration 064): auto-graduação do INBOX (saga com compensação) ────
+      // Um App que ENTRA NA FÁBRICA não pode viver no INBOX (invariante 064). Se a spec
+      // ainda está no inbox, cria/reusa o produto HOMÔNIMO (solo) e move o App para lá
+      // ANTES do dispatch. Se o dispatch falhar depois, `compensateGraduation` reverte
+      // (demoteToInbox: volta o App ao inbox e remove o produto solo recém-criado vazio).
+      let graduatedSolo: string | null = null;
+      const compensateGraduation = async () => {
+        if (!graduatedSolo || !tenantId) return;
+        await demoteToInbox(client, {
+          projectId, tenantId, createdBy: String(project.created_by), soloProductId: graduatedSolo,
+        }).catch((e) => request.log.error({ e, projectId }, "[Pipeline §4.11] compensação de graduação falhou"));
+      };
+      if (tenantId && project.product_id) {
+        try {
+          const prod = await client.query("SELECT is_inbox FROM products WHERE id = $1", [project.product_id]);
+          if ((prod.rows[0] as { is_inbox?: boolean } | undefined)?.is_inbox === true) {
+            graduatedSolo = await graduateFromInbox(client, {
+              projectId, tenantId, createdBy: String(project.created_by), title: String(project.title ?? projectId),
+            });
+            request.log.info({ projectId, soloProductId: graduatedSolo }, "[Pipeline §4.11] App graduou do INBOX para produto homônimo");
+          }
+        } catch (err) {
+          request.log.error({ err, projectId }, "[Pipeline §4.11] Falha ao graduar App do INBOX");
+          await revertSlotClaim(projectId, slotPreviousStatus);
+          return reply.status(500).send({ code: "GRADUATION_FAILED", message: "Falha ao promover o App para produto próprio." });
+        }
       }
 
       const apiBaseUrl = process.env.API_BASE_URL ?? "http://localhost:3000";
@@ -257,6 +286,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           request.log.error({ projectId, runnerStatus: res.status, body: text.slice(0, 300) }, "[Pipeline] Runner retornou erro");
           // RFC-0003 (C2): dispatch falhou → libera o slot reservado no claim atômico.
           await revertSlotClaim(projectId, slotPreviousStatus);
+          await compensateGraduation(); // §4.11: desfaz a graduação (App volta ao inbox)
           return reply.status(500).send({
             code: "RUNNER_ERROR",
             message: text || `Serviço runner retornou ${res.status}`,
@@ -265,6 +295,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           const message = err instanceof Error ? err.message : String(err);
           request.log.error({ err, projectId }, "[Pipeline] Falha ao chamar runner");
           await revertSlotClaim(projectId, slotPreviousStatus);
+          await compensateGraduation(); // §4.11: desfaz a graduação (App volta ao inbox)
           return reply.status(500).send({
             code: "RUNNER_ERROR",
             message: `Falha ao chamar serviço runner: ${message}`,
@@ -274,6 +305,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
 
       request.log.warn("[Pipeline] Nenhum runner configurado (RUNNER_COMMAND e RUNNER_SERVICE_URL vazios)");
       await revertSlotClaim(projectId, slotPreviousStatus);
+      await compensateGraduation(); // §4.11: desfaz a graduação (App volta ao inbox)
       return reply.status(503).send({
         code: "SERVICE_UNAVAILABLE",
         message: "Nenhum runner configurado. Defina RUNNER_COMMAND ou RUNNER_SERVICE_URL.",
