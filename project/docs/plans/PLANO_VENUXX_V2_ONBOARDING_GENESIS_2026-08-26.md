@@ -1,11 +1,19 @@
 > **Jean Ol'Bar** — AI Engineer · jean@zentriz.com.br
 
-# Plano (VERSÃO FINAL) — Plugar o Venuxx V2 no Zentriz Genesis + Auto Care (Deadpool)
+# Plano (REV. 2) — Plugar o Venuxx V2 no Zentriz Genesis + Auto Care (Deadpool)
 
 > **Objetivo operacional:** trazer os **28 apps do Venuxx V2** para dentro do Genesis **como se tivessem nascido lá** — com Produto, Apps tipados e diálogos/logs autênticos em `project_dialogue` — respeitando o modelo canônico Produto · App · INBOX (migração 064), e, para os apps com serviço vivo, habilitando monitoramento no Auto Care (Deadpool) **pelo caminho que a topologia brownfield permite**, sem tocar produção às cegas.
 > **Documento de referência inviolável:** `project/docs/PRODUCT_APP_INBOX_MODEL.md` (vence qualquer divergência de organização Produto/App/Spec/INBOX).
-> **Data:** 2026-08-26 · **Ambiente-alvo final:** `genesis.zentriz.com.br` (EC2 `3.220.66.113`). **Nunca prod direto — dev primeiro.**
+> **Data:** 2026-08-26 (REV. 2) · **Ambiente:** `genesis.zentriz.com.br` (EC2 `3.220.66.113`). A Fase 1 (tenant) **já foi feita em PROD**; para o seed dos 28 apps (Fase 2–3) vale `--dry-run` antes do `--commit` + `pg_dump` de rollback (o tenant só existe em PROD — ver §8.1).
 > **Nota da versão final:** este plano foi submetido a uma banca adversarial (1 blocker, 11 majors, minors). Todas as correções estão incorporadas no corpo; a seção 12 mapeia cada achado. **Duas mudanças estruturais** em relação ao rascunho: (1) o `max_projects` do plano é **display-only** — não há enforcement, logo a escolha de plano é decisão comercial, não bloqueio técnico; (2) o Auto Care via `activate` (caminho A) é **inviável para apps semeados** (exige GitHub App + repos + deployments reais) — adotamos formalmente o **caminho B (Connect/`/diagnose`, ADR-015)** como rota de monitoramento, com o caminho A registrado como esforço de provisionamento separado.
+
+> ### 🟢 REV. 2 (2026-08-26) — Fase 1 JÁ EXECUTADA em PRODUÇÃO
+> O tenant **já foi criado pelo Jean no portal de PROD** e **ativado** (não em dev). Isto **resolve as decisões A1 e A2** e muda três coisas no plano abaixo:
+> 1. **Plano escolhido = Diamante (definido, não mais "a decidir").** `tenant_id=0931c5dc-46eb-474a-a54a-dad12733b4b2` · **VENUXX TECHNOLOGIES LTDA** · `plan_diamante` · admin `jeanolbar@venuxx.com` (tenant_admin, active) · INBOX "Rascunhos" (`016cad3b-…`) criado. A barra de uso lerá `28/50` (cosmético; `max_projects` não tem enforcement).
+> 2. **Carência aplicada.** `status='active'` + `billing_exempt=true`; a cobrança inicial (`Assinatura inicial`) foi **cancelada**. **Flip D+90 = 2026-11-24** (`billing_exempt=false` + `generate-month`) — não expira sozinho.
+> 3. **O tenant só existe em PROD** → o **seed dos 28 apps (Fases 2–3) roda contra o Postgres de PROD** (o dev não tem esse tenant). O ensaio em dev, se desejado, exige recriar o tenant em dev antes; caso contrário, roda-se direto em prod com `--dry-run` obrigatório antes do `--commit`. Ver §8/§9 (chave de idempotência do tenant **corrigida**: buscar por `id`/`email`, não por `lower(name)='venuxx'` — o nome real é `VENUXX TECHNOLOGIES LTDA`).
+>
+> **Pendências herdadas da criação (não bloqueiam o seed, confirmar com o Jean):** `tenants.responsible_name` está como **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o *usuário admin* está correto como Jean). A cobrança cancelada era de **R$ 77.000,00** — anômala para Diamante (R$ 999/mês). Ver §11 (A1/A2 atualizadas) e §13.
 
 ---
 
@@ -68,57 +76,58 @@ ssh -i ~/.ssh/zentriz_id ubuntu@3.220.66.113 \
 ```
 - **Vazio/ausente** → Fase 4 fica pendente até setar as envs. **Fases 1–3 não dependem disso.**
 
-**0.5 — Idempotência (contrato do script).** Reexecutável sem duplicar: tenant por `SELECT lower(name)='venuxx'`; produto por `uq_products_system_id_per_tenant`; app por `SELECT (tenant_id, product_id, title)`; diálogos por `DELETE FROM project_dialogue WHERE project_id=$1` antes de reinserir. **Nunca** gerar `id` aleatório de tenant em rerun. Ver §9.
+**0.5 — Idempotência (contrato do script).** Reexecutável sem duplicar: **tenant JÁ existe** (`id=0931c5dc-…b4b2`) → o seed **não cria tenant**; reusa esse `id` (parâmetro fixo `--tenant-id=0931c5dc-…b4b2` ou `SELECT id FROM tenants WHERE lower(email)='jeanolbar@venuxx.com'` — **não** por `lower(name)='venuxx'`, pois o nome real é `VENUXX TECHNOLOGIES LTDA`); produto por `uq_products_system_id_per_tenant`; app por `SELECT (tenant_id, product_id, title)`; diálogos por `DELETE FROM project_dialogue WHERE project_id=$1` antes de reinserir. **Nunca** gerar `id` aleatório de tenant em rerun. Ver §9.
 
 **0.6 — Snapshot de rollback (dev).** `pg_dump` do schema `public` antes do seed.
 
 ---
 
-## 3. Fase 1 — Criar o Tenant Venuxx
+## 3. Fase 1 — Criar o Tenant Venuxx — ✅ CONCLUÍDA (PROD, 2026-08-26)
 
-**Responsável / admin:** Jean Ol'Bar · **jeanolbar@venuxx.com** · role `tenant_admin`.
-**Senha:** credencial fornecida pelo Jean **na execução**, lida de `process.env.VENUXX_ADMIN_PASSWORD` (nunca em claro no doc/script/commit) e passada por `hashPassword` (bcrypt `SALT_ROUNDS=10`, `auth.ts:123`; validação 8–128 chars, `auth.ts:8-17`). **A injeção segura da senha em prod está detalhada em §8.3** (nunca por argv/`-e VAR=valor` — vaza em `ps aux` e histórico de shell).
+> **Esta fase já foi executada.** O Jean criou o tenant pelo portal de PROD e a ativação/carência foi aplicada. O que segue passa a ser **registro do estado real** (não mais um passo a fazer). O restante do plano (Fases 2–6) parte deste estado.
 
-**Caminho de criação:** replicar a transação do `POST /api/tenant/signup` (`signup.ts:201-272`) **dentro do script de seed** (não a rota pública, que exige OTP). Cria numa transação: `tenants`, admin `tenant_admin` `status='active'`, o **INBOX "Rascunhos"** (`resolveInboxProductId`) e — como o tenant é isento (§3.2) — sem 1ª cobrança.
+**Estado final verificado em PROD (`3.220.66.113`):**
 
-### 3.1 — Escolha do plano: `max_projects` é DISPLAY-ONLY (correção estrutural)
+| Campo | Valor |
+|-------|-------|
+| `tenant_id` | `0931c5dc-46eb-474a-a54a-dad12733b4b2` |
+| `name` | **VENUXX TECHNOLOGIES LTDA** |
+| `plan_id` | **`plan_diamante`** (50 proj / 100 users / R$ 999) |
+| `status` | **`active`** |
+| `billing_exempt` | **`true`** (carência — ver §3.2) |
+| Admin | `jeanolbar@venuxx.com` · role `tenant_admin` · `status='active'` · nome "Jean Ol'Bar" (user `15eb29fd-…`) |
+| INBOX | produto **"Rascunhos"** `016cad3b-…` (`is_inbox=true`) |
+| Cobrança inicial | **cancelada** (`Assinatura inicial`, era `open`/vencida) |
+| Projetos/apps | **0** (o seed dos 28 apps é a Fase 2–3, ainda não executada) |
 
-A banca verificou que **não existe enforcement de `max_projects` em lugar nenhum** — nem em `projectCreation.ts`, nem em rotas, nem em trigger/constraint de migração, nem no orchestrator. O valor só é **lido e desenhado** como barra de uso no portal (`{activeCount} / {n}` em `tenant/plan/page.tsx`). Consequências:
+**Responsável / admin:** Jean Ol'Bar · **jeanolbar@venuxx.com** · role `tenant_admin` (confirmado no user).
+**Senha:** definida na criação pelo Jean; passada por `hashPassword` (bcrypt `SALT_ROUNDS=10`, `auth.ts:123`). Nunca em claro no doc/commit.
 
-- Os 28 apps **não são bloqueados** por quota alguma, nem no seed nem no portal.
-- **Não há "tensão central" técnica** com o Prata (`max_projects=3`) — os 28 apps seriam semeados normalmente; apenas a **barra de uso** exibiria `28/3` (overflow cosmético).
-- A escolha de plano é **puramente comercial/de posicionamento e de estética da barra de uso** — não um gate técnico.
+> **⚠️ Divergências herdadas da criação (confirmar com o Jean — §13):** `tenants.responsible_name` = **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o usuário admin, porém, está correto como Jean). A cobrança cancelada era **R$ 77.000,00** — anômala para Diamante.
 
-**Opções (agora sob a ótica correta):**
+### 3.1 — Escolha do plano: RESOLVIDA → Diamante · `max_projects` é DISPLAY-ONLY
 
-| Opção | O que fazer | Efeito real |
-|-------|-------------|-------------|
-| **(a) `UPDATE plan_prata max_projects`** | — | **Rejeitada.** Muda a barra de uso de **todos** os tenants Prata (cosmético, mas confuso) e polui o SKU comercial. |
-| **(b) Migrar para Diamante** ⟵ **RECOMENDADO** | `planId='plan_diamante'` (50 proj/100 users/R$999) | SKU **existente**; barra lê `28/50` coerente; **não** cria item novo no catálogo público. |
-| **(c) Plano custom `plan_venuxx`** | `INSERT plans (...max_projects=30, R$99...)` | **Rejeitada por exposição pública** — ver §3.1.1. |
+**Decidido:** o tenant foi criado em **`plan_diamante`** (50 proj / 100 users / R$ 999) — SKU existente, sem poluir o catálogo público. A barra de uso do portal lerá **`28/50`** ao fim do seed.
 
-#### 3.1.1 — Por que NÃO criar `plan_venuxx` (achado major da banca)
+A banca verificou que **não existe enforcement de `max_projects` em lugar nenhum** — nem em `projectCreation.ts`, nem em rotas, nem em trigger/constraint de migração, nem no orchestrator. O valor só é **lido e desenhado** como barra de uso no portal (`{activeCount} / {n}` em `tenant/plan/page.tsx`). Consequências (confirmam que Diamante foi a escolha certa e sem risco técnico):
 
-`GET /api/plans` é **público, sem auth** (`plans.ts:53`) e alimenta a tela pública `/tenant/signup`, que lista todos os planos com preço; o signup aceita **qualquer** `planId` existente (`signup.ts:184`). Não há flag `is_public`/`active` em `plans`. Criar `plan_venuxx` (R$99 / 30 projetos) o torna **publicamente selecionável** no cadastro — subcotando Ouro (R$299/10) e Diamante (R$999/50) e abrindo vetor de auto-registro abusivo. Logo "isolado, não afeta outros tenants" é **falso**.
+- Os 28 apps **não são bloqueados** por quota alguma, nem no seed nem no portal — o teto de 50 do Diamante é confortável e cosmético.
+- A escolha foi **comercial/de estética da barra de uso** — não um gate técnico.
 
-> **DECISÃO DO JEAN (marcar):** recomendo **(b) Diamante** — SKU existente, barra `28/50` coerente, zero exposição de catálogo. Se o Jean quiser mesmo um SKU de preço-Prata com teto alto, isso vira **pré-requisito de schema/rota** (adicionar coluna `is_public`/`active` em `plans`, filtrá-la no `GET /api/plans` público e validar `planId` contra allowlist no `signup`) **antes** de criar `plan_venuxx` — mudança fora do escopo deste seed. Alternativa sem SKU novo: criar o tenant pela rota master `POST /api/tenants` e ajustar o `plan_id` direto.
+#### 3.1.1 — Por que NÃO foi criado `plan_venuxx` (achado major da banca — mantido como registro)
 
-### 3.2 — "3 meses grátis (carência)" — workaround explícito
+`GET /api/plans` é **público, sem auth** (`plans.ts:53`) e alimenta a tela pública `/tenant/signup`, que lista todos os planos com preço; o signup aceita **qualquer** `planId` existente (`signup.ts:184`). Não há flag `is_public`/`active` em `plans`. Criar `plan_venuxx` (R$99 / 30 projetos) o tornaria **publicamente selecionável** no cadastro — subcotando Ouro (R$299/10) e Diamante (R$999/50) e abrindo vetor de auto-registro abusivo. Por isso optou-se por **Diamante existente**. Se no futuro o Jean quiser um SKU de preço-Prata com teto alto, isso vira **pré-requisito de schema/rota** (coluna `is_public`/`active` em `plans` + filtro no `GET /api/plans` público + allowlist de `planId` no `signup`) — fora do escopo deste onboarding.
 
-**Não existe trial nativo** (`schema.sql:25`: status só `active|suspended|inactive`; sem `trial_ends_at`). A carência nativa (`FINANCE_SUSPEND_GRACE_DAYS=3`) é em **dias**. Modelagem adotada (padrão do tenant interno ZFactory, `migration 061`):
+### 3.2 — "3 meses grátis (carência)" — ✅ APLICADA
 
-1. Criar o tenant e `status='active'` (`bustTenantStatus` invalida cache).
-2. `UPDATE tenants SET billing_exempt=true` → `generate-month` não gera assinatura (`finance.ts:573`); o worker não suspende por inadimplência (`financeBillingWorker.ts:45`).
-3. **D+90 (manual/job externo):** flipar `billing_exempt=false` e rodar `generate-month`. **Não há expiração automática** — lembrete operacional obrigatório (Riscos/Assunções).
+**Não existe trial nativo** (`schema.sql:25`: status só `active|suspended|inactive`; sem `trial_ends_at`). A carência nativa (`FINANCE_SUSPEND_GRACE_DAYS=3`) é em **dias**. Modelagem adotada (padrão do tenant interno ZFactory, `migration 061`) — **já executada em PROD**:
 
-```sql
--- resumo Fase 1 (find-or-create dentro da transação; ver §9 para o padrão real)
--- tenant por chave estável (tenants NÃO tem unique em name/email → SELECT-first, nunca INSERT cego):
---   SELECT id FROM tenants WHERE lower(name)='venuxx';  -- reusa se existir
-INSERT INTO tenants (id, name, plan_id, status, billing_exempt, email, responsible_name, responsible_email)
-  VALUES (:tid,'Venuxx','plan_diamante','active',true,'jeanolbar@venuxx.com','Jean Ol''Bar','jeanolbar@venuxx.com');
--- admin tenant_admin (senha via env → bcrypt), INBOX 'Rascunhos' (resolveInboxProductId), sem 1ª cobrança (exempt)
-```
+1. ✅ `status='active'` (com `pg_notify('tenant_status_bust', tid)` invalidando o cache em todas as réplicas).
+2. ✅ `billing_exempt=true` → `generate-month` não gera assinatura (`finance.ts:573`); o worker **não** suspende por inadimplência (`financeBillingWorker.ts:45-46`).
+3. ✅ Cobrança inicial em aberto/vencida **cancelada** (`UPDATE charges SET status='canceled'`) — sem ela, o worker marcaria `open→overdue` e, se o tenant não fosse isento, re-suspenderia (vencida há >3 dias). Com `billing_exempt=true` a suspensão já não ocorreria, mas a fatura fantasma foi removida por coerência com "grátis".
+4. ⏳ **D+90 = 2026-11-24 (manual/job externo):** flipar `billing_exempt=false` e rodar `generate-month`. **Não há expiração automática** — lembrete operacional obrigatório (Riscos/Assunções §11-A2).
+
+> **Nota:** por ter sido criado pela rota do portal (não pelo script de seed), a 1ª cobrança foi gerada e **depois** cancelada — daí o passo 3. Um seed futuro que crie tenant do zero já nasce isento (sem cobrança). O passo 3 é específico deste caso real.
 
 ---
 
@@ -344,7 +353,9 @@ SELECT is_inbox, count(*) FROM products WHERE tenant_id=:tid GROUP BY 1;        
 
 ## 8. Fase 6 — Rollout dev → main → prod
 
-**8.1 — dev.** Rodar `db/seed-venuxx-v2.ts` no Postgres dev (`:5432`). Validar 7.1–7.4. Ajustar textos/tipos.
+**8.1 — Alvo do seed = PROD (o tenant só existe lá).** O tenant `0931c5dc-…b4b2` foi criado no portal de PROD; **não existe em dev**. Logo o seed dos 28 apps roda contra o Postgres de PROD. Dois caminhos:
+- **(recomendado) Ensaio em dev com tenant espelho:** recriar um tenant equivalente em dev (mesmo `system_id` de produto), rodar o seed com `--dry-run` e depois `--commit` em dev, validar 7.1–7.4, ajustar textos/tipos — e só então repetir em PROD apontando ao `tenant_id` real. Evita estrear o script direto em produção.
+- **(mínimo) Direto em PROD com `--dry-run` obrigatório:** `--dry-run` primeiro (loga as operações, não commita), conferir contagens, depois `--commit`. Snapshot `pg_dump` do schema `public` de PROD antes (rollback §8.4).
 
 **8.2 — Código.** Commitar **só** o script e docs (branch `dev`), **nunca `git add -A`** (evitar `.next/`, `pnpm-lock.yaml`, `._*`; repo usa **npm**). Merge `dev`→`main` após revisão.
 
@@ -379,7 +390,7 @@ DELETE FROM products  WHERE name='Venuxx V2' AND tenant_id=:tid;
 
 > Correções majors/minors da banca sobre o esqueleto do rascunho.
 
-- **Tenant:** `tenants` **não** tem unique em `name`/`email`. `SELECT id FROM tenants WHERE lower(name)='venuxx'` **antes** de inserir; reusar o id se existir. **Nunca** `INSERT` com UUID novo em rerun (duplicaria tenant+admin+produto+28 apps). Opcional: unique index parcial para blindar.
+- **Tenant:** **já criado** (`id=0931c5dc-…b4b2`) — o seed **não insere tenant**; recebe o `id` fixo por parâmetro ou faz `SELECT id FROM tenants WHERE lower(email)='jeanolbar@venuxx.com'`. **Não** buscar por `lower(name)='venuxx'` (o nome real é `VENUXX TECHNOLOGIES LTDA` — não casaria). **Nunca** `INSERT` com UUID novo (duplicaria tudo). `tenants` não tem unique em `name`/`email`, então a segurança é usar o `id` conhecido.
 - **Produto:** `INSERT ... ON CONFLICT (tenant_id, lower(system_id))` é válido (existe `uq_products_system_id_per_tenant`).
 - **Apps:** **não** há unique em `projects(tenant_id, product_id, title)` → `ON CONFLICT` sobre essa tripla **falha em runtime**. Usar find-or-create: `SELECT id FROM projects WHERE tenant_id=$1 AND product_id=$2 AND title=$3`; inserir só se ausente (padrão de `seed-example-projects.ts:33-42`).
 - **Diálogos:** `DELETE FROM project_dialogue WHERE project_id=$1` antes de reinserir o arco.
@@ -429,11 +440,11 @@ async function main() {
       await client.query("COMMIT");
       return;
     }
-    // 1) plan escolhido: NÃO criar plan_venuxx (§3.1.1); usar plan_diamante existente
-    // 2) tenant: SELECT lower(name)='venuxx' → reusar id; senão INSERT (active, billing_exempt=true,
-    //            responsible_name/responsible_email — NÃO 'responsible')
-    // 3) admin tenant_admin: hashPassword(await readPassword())
-    // 4) resolveInboxProductId(tenant)   // INBOX garantido, não recebe apps
+    // 1) tenant JÁ existe (plan_diamante, active, billing_exempt=true) — NÃO criar.
+    //    const tid = argTenantId ?? (SELECT id FROM tenants WHERE lower(email)='jeanolbar@venuxx.com');
+    //    if (!tid) throw new Error("tenant Venuxx não encontrado — criar antes");  // seed NÃO cria tenant
+    // 2) admin JÁ existe (jeanolbar@venuxx.com, tenant_admin) — NÃO recriar; readPassword() dispensável neste caso.
+    // 3) INBOX 'Rascunhos' JÁ existe (resolveInboxProductId apenas confirma; não recebe apps)
     // 5) produto 'Venuxx V2': INSERT direto com system_id='venuxx-v2'
     //    ON CONFLICT (tenant_id, lower(system_id)) DO NOTHING  // unique real
     // 6) por APP: SELECT-first (tenant_id,product_id,title); INSERT se ausente
@@ -474,8 +485,8 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 
 ## 11. Assunções e decisões explícitas (para o Jean)
 
-- **A1 (plano).** `max_projects` é **display-only**. Recomendo **Diamante** (SKU existente, barra `28/50`). **Não** criar `plan_venuxx` (exposição pública via `GET /api/plans`/signup). Se o Jean insistir num SKU R$99/teto-alto → pré-requisito de schema (`is_public`/allowlist), fora deste seed.
-- **A2 (carência).** "3 meses grátis" = `status='active'` + `billing_exempt=true`; flip manual **D+90 = 2026-11-24**. Não é trial nativo.
+- **A1 (plano) — ✅ RESOLVIDA.** Tenant criado em **`plan_diamante`** (SKU existente, barra `28/50`). `max_projects` é display-only (sem enforcement). Não foi criado `plan_venuxx` (evitou exposição pública via `GET /api/plans`/signup).
+- **A2 (carência) — ✅ APLICADA (com pendência de data).** "3 meses grátis" = `status='active'` + `billing_exempt=true` + cobrança inicial cancelada. **Flip manual D+90 = 2026-11-24** (`billing_exempt=false` + `generate-month`) — não expira sozinho. Não é trial nativo.
 - **A3 (senha).** Fornecida na execução via **stdin** (`--password-stdin`) — cobre commit, doc, **histórico de shell e process table** (§8.3). Nunca por argv.
 - **A4 (materialização).** Apps por **seed** (não pela pipeline real). Topologia fiel; textos autorados "como se `SUMMARY_LLM_URL` ligado" (§5.1); pares from/to e event_type canônicos.
 - **A5 (produto).** Entrega (`solo_app=false`); `system_id='venuxx-v2'` setado por INSERT direto (rota pública não seta).
@@ -510,9 +521,24 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 
 **Lente: ops-idempotencia-rollback**
 - **[major] `--rollback` só fazia `ROLLBACK` da transação (falso rollback).** → §8.4/§9: `--rollback` executa DELETEs reais com COMMIT, escopados por tenant+produto.
-- **[major] `tenants` sem unique → rerun duplica tenant.** → §9: find-or-create por `SELECT lower(name)='venuxx'`; nunca UUID novo em rerun.
+- **[major] `tenants` sem unique → rerun duplica tenant.** → §9 (REV.2): tenant já existe; seed reusa `id` fixo ou `SELECT ... WHERE lower(email)='jeanolbar@venuxx.com'` — **nunca** `lower(name)='venuxx'` (nome real é `VENUXX TECHNOLOGIES LTDA`, não casaria) nem UUID novo.
 - **[major] `ON CONFLICT` em `projects(tenant_id,product_id,title)` sem unique falha.** → §9: SELECT-first para apps; `ON CONFLICT` só onde há unique real (`plans.id`, `products` uq per-tenant).
 - **[minor] Sem `catch`/ROLLBACK → pool envenenado; sem `pool.end()`.** → §9 esqueleto: `catch{ ROLLBACK; throw }` + `await pool.end()`.
 - **[minor] `tenants.responsible` inexistente (dup).** → Corrigido junto com o achado de modelo-invariantes.
 
 **Ajustes menores agrupados:** normalização de `project_type` via `normalizeProjectType` (Risco #8); auditoria de DDL antes de inserir em `project_tasks`/`project_spec_files` (§0.3, Risco #10); verificação de monotonicidade e coerência status↔step em 7.2.
+
+---
+
+## 13. Estado atual e pendências (REV. 2 — 2026-08-26)
+
+**✅ Concluído (PROD):** Fase 1 — tenant `0931c5dc-46eb-474a-a54a-dad12733b4b2` (**VENUXX TECHNOLOGIES LTDA**, `plan_diamante`, `active`, `billing_exempt=true`), admin Jean (`tenant_admin`, active), INBOX "Rascunhos" (`016cad3b-…`), cobrança inicial cancelada, cache de status invalidado (`pg_notify`).
+
+**⏳ Pendente (aguarda ok do Jean):**
+- **Fase 2–3 — seed dos 28 apps** (produto `Venuxx V2` + apps tipados + diálogos/logs). Roda contra PROD (o tenant só existe lá); `--dry-run` antes do `--commit`; snapshot `pg_dump` antes. **Não** cria tenant/admin/INBOX (já existem).
+- **Fase 4 — Auto Care (caminho B):** `setEntitlement(tenant,'deadpool',true)` + contratos Connect `/diagnose`. Verificar `DEADPOOL_BASE_URL` no container api de PROD (§0.4).
+- **D+90 = 2026-11-24 — flip da carência:** `billing_exempt=false` + `generate-month`. **Não expira sozinho.**
+
+**⚠️ Confirmar com o Jean (não altera o seed; foram introduzidos na criação manual):**
+1. **Responsável do tenant.** `responsible_name` = "Diogo Della Gomes" e `responsible_email` **vazio**. O pedido inicial dizia responsável = Jean Ol'Bar (o *usuário admin* está correto como Jean). Ajustar `responsible_name`/`responsible_email` para Jean? (`UPDATE tenants SET responsible_name='Jean Ol''Bar', responsible_email='jeanolbar@venuxx.com' WHERE id=…`).
+2. **Fatura anômala.** A cobrança inicial cancelada era **R$ 77.000,00** — incompatível com Diamante (R$ 999/mês). Provável erro de entrada no cadastro. Ao fim da carência (D+90), recriar uma cobrança correta (Diamante mensal) via `generate-month`.
