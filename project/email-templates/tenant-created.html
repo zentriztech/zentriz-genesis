@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<!--
+  Template: tenant-created — "Ambiente criado"
+  Placeholders: {{GREETING_NAME}} {{TENANT_NAME}} {{PLAN_NAME}} {{RESPONSIBLE_NAME}} {{PLATFORM_URL}}
+  Envio: brand-mail --zentriz --to <responsavel> --reply-to jean@zentriz.com.br --subject "Ambiente {{TENANT_NAME}} criado no Zentriz Genesis" --html <arquivo-renderizado>
+  Ver project/email-templates/README.md (valores dos planos vêm de GET /api/plans, nunca chutar).
+-->
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0b1120;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0b1120;padding:24px 0;">
+ <tr><td align="center">
+  <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:14px;overflow:hidden;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+
+   <tr><td style="padding:28px 32px;background:linear-gradient(135deg,#8b5cf6 0%,#6366f1 100%);">
+     <div style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#ede9fe;font-weight:600;">Zentriz Genesis · Provisionamento</div>
+     <div style="font-size:22px;color:#ffffff;font-weight:700;margin-top:8px;line-height:1.3;">✅ Ambiente da {{TENANT_NAME}} criado com sucesso</div>
+     <div style="font-size:13px;color:#e0e7ff;margin-top:8px;">Seu tenant já existe na plataforma — pronto para o próximo passo.</div>
+   </td></tr>
+
+   <tr><td style="padding:24px 32px 6px;color:#e2e8f0;font-size:14px;line-height:1.65;">
+     <p style="margin:0 0 14px;">Olá, {{GREETING_NAME}}.</p>
+     <p style="margin:0 0 14px;color:#cbd5e1;">É com satisfação que confirmamos: o <strong style="color:#fff;">ambiente da {{TENANT_NAME}}</strong> foi <strong style="color:#fff;">criado</strong> no <strong style="color:#c4b5fd;">Zentriz Genesis</strong>, nossa plataforma de engenharia e governança autônoma de software. A partir de agora, sua organização passa a ter um espaço próprio, isolado e seguro, dentro do ecossistema.</p>
+   </td></tr>
+
+   <tr><td style="padding:8px 32px 6px;">
+     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0b1120;border:1px solid #334155;border-radius:10px;">
+       <tr><td style="padding:16px 18px;color:#cbd5e1;font-size:13px;line-height:1.9;">
+         <div style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#818cf8;font-weight:700;margin-bottom:10px;">Resumo do ambiente</div>
+         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;">
+           <tr><td style="padding:4px 0;color:#94a3b8;width:42%;">Organização</td><td style="padding:4px 0;color:#fff;font-weight:600;">{{TENANT_NAME}}</td></tr>
+           <tr><td style="padding:4px 0;color:#94a3b8;">Plano contratado</td><td style="padding:4px 0;color:#86efac;font-weight:600;">{{PLAN_NAME}}</td></tr>
+           <tr><td style="padding:4px 0;color:#94a3b8;">Responsável</td><td style="padding:4px 0;color:#e2e8f0;">{{RESPONSIBLE_NAME}}</td></tr>
+           <tr><td style="padding:4px 0;color:#94a3b8;">Status</td><td style="padding:4px 0;"><span style="background:#422006;color:#fcd34d;border:1px solid #a16207;border-radius:6px;padding:2px 9px;font-size:12px;font-weight:600;">Aguardando ativação</span></td></tr>
+         </table>
+       </td></tr>
+     </table>
+   </td></tr>
+
+   <tr><td style="padding:16px 32px 6px;color:#e2e8f0;font-size:14px;line-height:1.65;">
+     <p style="margin:0 0 14px;color:#cbd5e1;">O ambiente já está provisionado. O próximo passo é a <strong style="color:#fff;">ativação</strong>, que libera o acesso pleno à plataforma — você receberá em instantes um segundo e-mail confirmando esse marco.</p>
+   </td></tr>
+
+   <tr><td style="padding:20px 32px 28px;border-top:1px solid #1e293b;">
+     <p style="margin:14px 0 4px;color:#94a3b8;font-size:12px;line-height:1.6;">Este é um envio automático da plataforma. Para qualquer dúvida, basta responder a este e-mail — falará diretamente com a equipe Zentriz.</p>
+     <p style="margin:8px 0 0;color:#64748b;font-size:12px;">Zentriz · Genesis + Auto Care<br><span style="color:#818cf8;">{{PLATFORM_URL}}</span></p>
+   </td></tr>
+
+  </table>
+ </td></tr>
+</table>
+</body>
+</html>

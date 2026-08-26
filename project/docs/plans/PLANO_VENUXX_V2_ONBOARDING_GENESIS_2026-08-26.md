@@ -13,7 +13,7 @@
 > 2. **Carência aplicada.** `status='active'` + `billing_exempt=true`; a cobrança inicial (`Assinatura inicial`) foi **cancelada**. **Flip D+180 = 2027-02-26** (`billing_exempt=false` + `generate-month`) — não expira sozinho.
 > 3. **O tenant só existe em PROD** → o **seed dos 28 apps (Fases 2–3) roda contra o Postgres de PROD** (o dev não tem esse tenant). O ensaio em dev, se desejado, exige recriar o tenant em dev antes; caso contrário, roda-se direto em prod com `--dry-run` obrigatório antes do `--commit`. Ver §8/§9 (chave de idempotência do tenant **corrigida**: buscar por `id`/`email`, não por `lower(name)='venuxx'` — o nome real é `VENUXX TECHNOLOGIES LTDA`).
 >
-> **Pendências herdadas da criação (não bloqueiam o seed, confirmar com o Jean):** `tenants.responsible_name` está como **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o *usuário admin* está correto como Jean). A cobrança cancelada era de **R$ 77.000,00** — anômala para Diamante (R$ 999/mês). Ver §11 (A1/A2 atualizadas) e §13.
+> **Pendências herdadas da criação (não bloqueiam o seed, confirmar com o Jean):** `tenants.responsible_name` está como **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o *usuário admin* está correto como Jean). A cobrança cancelada era de **R$ 77.000,00** — que é **exatamente a mensalidade do plano Diamante** (não é anômala; ver valores reais em §3.1). Ver §11 (A1/A2 atualizadas) e §13.
 
 ---
 
@@ -92,7 +92,7 @@ ssh -i ~/.ssh/zentriz_id ubuntu@3.220.66.113 \
 |-------|-------|
 | `tenant_id` | `0931c5dc-46eb-474a-a54a-dad12733b4b2` |
 | `name` | **VENUXX TECHNOLOGIES LTDA** |
-| `plan_id` | **`plan_diamante`** (50 proj / 100 users / R$ 999) |
+| `plan_id` | **`plan_diamante`** (50 proj / 25 users / **R$ 77.000/mês**) |
 | `status` | **`active`** |
 | `billing_exempt` | **`true`** (carência — ver §3.2) |
 | Admin | `jeanolbar@venuxx.com` · role `tenant_admin` · `status='active'` · nome "Jean Ol'Bar" (user `15eb29fd-…`) |
@@ -103,11 +103,19 @@ ssh -i ~/.ssh/zentriz_id ubuntu@3.220.66.113 \
 **Responsável / admin:** Jean Ol'Bar · **jeanolbar@venuxx.com** · role `tenant_admin` (confirmado no user).
 **Senha:** definida na criação pelo Jean; passada por `hashPassword` (bcrypt `SALT_ROUNDS=10`, `auth.ts:123`). Nunca em claro no doc/commit.
 
-> **⚠️ Divergências herdadas da criação (confirmar com o Jean — §13):** `tenants.responsible_name` = **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o usuário admin, porém, está correto como Jean). A cobrança cancelada era **R$ 77.000,00** — anômala para Diamante.
+> **⚠️ Divergências herdadas da criação (confirmar com o Jean — §13):** `tenants.responsible_name` = **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o usuário admin, porém, está correto como Jean). A cobrança cancelada era **R$ 77.000,00** — que é a mensalidade correta do Diamante (não anômala).
 
 ### 3.1 — Escolha do plano: RESOLVIDA → Diamante · `max_projects` é DISPLAY-ONLY
 
-**Decidido:** o tenant foi criado em **`plan_diamante`** (50 proj / 100 users / R$ 999) — SKU existente, sem poluir o catálogo público. A barra de uso do portal lerá **`28/50`** ao fim do seed.
+**Decidido:** o tenant foi criado em **`plan_diamante`** — SKU existente, sem poluir o catálogo público. A barra de uso do portal lerá **`28/50`** ao fim do seed.
+
+> **Valores reais dos planos** (fonte canônica: `GET /api/plans`, exibidos em `https://genesis.zentriz.com.br/tenant/signup` — verificados 2026-08-26). São a **única** referência de preço; nunca chutar:
+>
+> | Plano | max_projects | max_users | Mensalidade |
+> |-------|-------------|-----------|-------------|
+> | Prata (`plan_prata`) | 10 | 5 | **R$ 23.000** |
+> | Ouro (`plan_ouro`) | 20 | 10 | **R$ 38.000** |
+> | Diamante (`plan_diamante`) | 50 | 25 | **R$ 77.000** |
 
 A banca verificou que **não existe enforcement de `max_projects` em lugar nenhum** — nem em `projectCreation.ts`, nem em rotas, nem em trigger/constraint de migração, nem no orchestrator. O valor só é **lido e desenhado** como barra de uso no portal (`{activeCount} / {n}` em `tenant/plan/page.tsx`). Consequências (confirmam que Diamante foi a escolha certa e sem risco técnico):
 
@@ -116,7 +124,7 @@ A banca verificou que **não existe enforcement de `max_projects` em lugar nenhu
 
 #### 3.1.1 — Por que NÃO foi criado `plan_venuxx` (achado major da banca — mantido como registro)
 
-`GET /api/plans` é **público, sem auth** (`plans.ts:53`) e alimenta a tela pública `/tenant/signup`, que lista todos os planos com preço; o signup aceita **qualquer** `planId` existente (`signup.ts:184`). Não há flag `is_public`/`active` em `plans`. Criar `plan_venuxx` (R$99 / 30 projetos) o tornaria **publicamente selecionável** no cadastro — subcotando Ouro (R$299/10) e Diamante (R$999/50) e abrindo vetor de auto-registro abusivo. Por isso optou-se por **Diamante existente**. Se no futuro o Jean quiser um SKU de preço-Prata com teto alto, isso vira **pré-requisito de schema/rota** (coluna `is_public`/`active` em `plans` + filtro no `GET /api/plans` público + allowlist de `planId` no `signup`) — fora do escopo deste onboarding.
+`GET /api/plans` é **público, sem auth** (`plans.ts:53`) e alimenta a tela pública `/tenant/signup`, que lista todos os planos com preço; o signup aceita **qualquer** `planId` existente (`signup.ts:184`). Não há flag `is_public`/`active` em `plans`. Criar um `plan_venuxx` barato o tornaria **publicamente selecionável** no cadastro — subcotando Ouro (R$ 38.000 / 20) e Diamante (R$ 77.000 / 50) e abrindo vetor de auto-registro abusivo. Por isso optou-se por **Diamante existente**. Se no futuro o Jean quiser um SKU de preço-Prata com teto alto, isso vira **pré-requisito de schema/rota** (coluna `is_public`/`active` em `plans` + filtro no `GET /api/plans` público + allowlist de `planId` no `signup`) — fora do escopo deste onboarding.
 
 ### 3.2 — "6 meses grátis (carência)" — ✅ APLICADA
 
@@ -129,7 +137,7 @@ A banca verificou que **não existe enforcement de `max_projects` em lugar nenhu
 
 > **Nota:** por ter sido criado pela rota do portal (não pelo script de seed), a 1ª cobrança foi gerada e **depois** cancelada — daí o passo 3. Um seed futuro que crie tenant do zero já nasce isento (sem cobrança). O passo 3 é específico deste caso real.
 
-> **Carência = 6 meses de créditos de cortesia (decisão do Jean, 2026-08-26).** A Venuxx recebe **créditos suficientes para cobrir 6 faturas do plano Diamante** (6 × R$ 999,00 = R$ 5.994,00). Enquanto durar o crédito, a fatura mensal é abatida integralmente (R$ 0,00 a pagar). Hoje isso é **modelado** via `billing_exempt=true` (não há saldo/ledger de crédito nativo). **Pendência futura (fora deste onboarding):** construir um **sistema de créditos "extremamente seguro"** (ledger auditável, débito por ciclo, saldo consultável, idempotência de lançamento) para refletir a realidade — hoje o abatimento é apenas a isenção de billing, sem saldo decrescente. Ver §13.
+> **Carência = 6 meses de créditos de cortesia (decisão do Jean, 2026-08-26).** A Venuxx recebe **créditos suficientes para cobrir 6 faturas do plano Diamante** (6 × **R$ 77.000,00** = **R$ 462.000,00**). Enquanto durar o crédito, a fatura mensal é abatida integralmente (R$ 0,00 a pagar). Hoje isso é **modelado** via `billing_exempt=true` (não há saldo/ledger de crédito nativo). **Pendência futura (fora deste onboarding):** construir um **sistema de créditos "extremamente seguro"** (ledger auditável, débito por ciclo, saldo consultável, idempotência de lançamento) para refletir a realidade — hoje o abatimento é apenas a isenção de billing, sem saldo decrescente. **Concessão de créditos NÃO será por API** — injeção manual controlada pelo Jean (ver §13). Ver §13.
 
 ---
 
@@ -547,5 +555,6 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 3. **Campo no signup.** Adicionado o campo **"E-mail do responsável"** (`responsibleEmail`) ao formulário público `/tenant/signup` (`genesis-web`) — o backend já aceitava/persistia; faltava só o input no form. Commit local, **não** deployado.
 
 **⚠️ Confirmar com o Jean:**
-1. **Fatura anômala.** A cobrança inicial cancelada era **R$ 77.000,00** — incompatível com Diamante (R$ 999/mês). Provável erro de entrada no cadastro. Ao fim da carência (D+180), recriar uma cobrança correta (Diamante mensal) via `generate-month`.
-2. **Sistema de créditos (futuro).** Hoje "6 meses de crédito" é modelado por `billing_exempt` (isenção binária, sem saldo). Construir ledger de créditos auditável e seguro (ver nota em §3.2) para refletir a realidade — decrementando saldo por ciclo em vez de isenção plana.
+1. **Cobrança inicial (corrigido 2026-08-26).** A cobrança cancelada de **R$ 77.000,00** **NÃO era anômala** — é exatamente a mensalidade do Diamante (`GET /api/plans` → `monthlyPriceCents=7700000`; ver §3.1). Foi cancelada corretamente por causa da carência. Ao fim da carência (D+180), o `generate-month` recria a mensal correta (R$ 77.000). Meu registro anterior que a chamava de "anômala / R$ 999" estava errado.
+2. **Sistema de créditos (futuro) — NÃO temos plano de implementação ainda; só a anotação de pendência.** Estado real hoje: **não existe** tabela/ledger de créditos no schema (só `pipeline_cost_ledger`, que é custo de IA, e as migrations 054–056 de `charges`/finance); `tenants` não tem coluna de saldo. "6 meses de crédito" é modelado por `billing_exempt` (isenção binária, sem saldo decrescente). Quando for implementado, refletir a realidade: ledger auditável de dupla entrada, débito por ciclo, saldo consultável, idempotência de lançamento.
+   - **Restrição dura (decisão do Jean, 2026-08-26):** a **concessão** de créditos **NÃO** deve ser exposta por nenhuma API. Quando o Jean conceder créditos a uma empresa, o lançamento é **injetado manualmente** (SQL controlado / seed), para manter controle. O sistema futuro pode expor **consulta/uso** (débito automático por ciclo, saldo), mas a **entrada de crédito** permanece manual até segunda ordem.

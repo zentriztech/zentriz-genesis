@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<!--
+  Template: invoice-covered-by-credits — "Fatura abatida em créditos"
+  Placeholders: {{GREETING_NAME}} {{TENANT_NAME}} {{PLAN_NAME}} {{PLAN_PRICE}} {{CREDIT_APPLIED}} {{TOTAL_DUE}} {{CREDIT_MONTHS}} {{PLATFORM_URL}}
+  {{PLAN_PRICE}} e {{CREDIT_APPLIED}} vêm de GET /api/plans (monthlyPriceCents) — NUNCA chutar. Ex. Diamante = R$ 77.000,00.
+  Envio: brand-mail --zentriz --to <responsavel> --reply-to jean@zentriz.com.br --subject "Fatura do mês abatida em créditos Zentriz — nada a pagar" --html <arquivo-renderizado>
+  Ver project/email-templates/README.md.
+-->
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0b1120;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0b1120;padding:24px 0;">
+ <tr><td align="center">
+  <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:14px;overflow:hidden;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+
+   <tr><td style="padding:28px 32px;background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);">
+     <div style="font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#ede9fe;font-weight:600;">Zentriz Genesis · Faturamento</div>
+     <div style="font-size:22px;color:#ffffff;font-weight:700;margin-top:8px;line-height:1.3;">💳 Fatura do mês abatida integralmente</div>
+     <div style="font-size:13px;color:#e0e7ff;margin-top:8px;">Créditos de cortesia concedidos pela Zentriz — nada a pagar.</div>
+   </td></tr>
+
+   <tr><td style="padding:24px 32px 6px;color:#e2e8f0;font-size:14px;line-height:1.65;">
+     <p style="margin:0 0 14px;">Olá, {{GREETING_NAME}}.</p>
+     <p style="margin:0 0 14px;color:#cbd5e1;">Temos uma boa notícia sobre o faturamento da <strong style="color:#fff;">{{TENANT_NAME}}</strong>: o valor da <strong style="color:#fff;">fatura do mês foi integralmente abatido</strong> pelos <strong style="color:#c4b5fd;">créditos de cortesia concedidos pela Zentriz</strong>. Ou seja, <strong style="color:#6ee7b7;">não há nada a pagar</strong> neste ciclo.</p>
+   </td></tr>
+
+   <tr><td style="padding:8px 32px 6px;">
+     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0b1120;border:1px solid #334155;border-radius:10px;">
+       <tr><td style="padding:16px 18px;color:#cbd5e1;font-size:13px;line-height:1.7;">
+         <div style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#818cf8;font-weight:700;margin-bottom:12px;">Demonstrativo do ciclo</div>
+         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px;">
+           <tr><td style="padding:6px 0;color:#94a3b8;border-bottom:1px solid #1e293b;">Plano {{PLAN_NAME}} — mensalidade</td><td style="padding:6px 0;color:#e2e8f0;text-align:right;border-bottom:1px solid #1e293b;">{{PLAN_PRICE}}</td></tr>
+           <tr><td style="padding:6px 0;color:#94a3b8;border-bottom:1px solid #1e293b;">Créditos Zentriz aplicados</td><td style="padding:6px 0;color:#6ee7b7;text-align:right;border-bottom:1px solid #1e293b;">{{CREDIT_APPLIED}}</td></tr>
+           <tr><td style="padding:10px 0 2px;color:#fff;font-weight:700;font-size:15px;">Total a pagar</td><td style="padding:10px 0 2px;color:#6ee7b7;font-weight:700;font-size:15px;text-align:right;">{{TOTAL_DUE}}</td></tr>
+         </table>
+       </td></tr>
+     </table>
+   </td></tr>
+
+   <tr><td style="padding:16px 32px 6px;">
+     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#1e1b4b;border:1px solid #4338ca;border-radius:10px;">
+       <tr><td style="padding:15px 18px;color:#e0e7ff;font-size:13px;line-height:1.7;">
+         <strong style="color:#c4b5fd;">🎁 Cortesia estendida.</strong> Sua organização recebeu créditos suficientes para cobrir os <strong style="color:#fff;">próximos {{CREDIT_MONTHS}} meses</strong> de plano {{PLAN_NAME}}. Durante esse período, as faturas seguirão sendo abatidas automaticamente — sem qualquer custo.
+       </td></tr>
+     </table>
+   </td></tr>
+
+   <tr><td style="padding:18px 32px 6px;color:#e2e8f0;font-size:14px;line-height:1.65;">
+     <p style="margin:0 0 14px;color:#cbd5e1;">Nenhuma ação é necessária da sua parte. Ao término do período de cortesia, entraremos em contato com antecedência para tratar da continuidade.</p>
+   </td></tr>
+
+   <tr><td style="padding:20px 32px 28px;border-top:1px solid #1e293b;">
+     <p style="margin:14px 0 4px;color:#94a3b8;font-size:12px;line-height:1.6;">Este é um envio automático da plataforma. Para qualquer dúvida, basta responder a este e-mail — falará diretamente com a equipe Zentriz.</p>
+     <p style="margin:8px 0 0;color:#64748b;font-size:12px;">Zentriz · Genesis + Auto Care<br><span style="color:#818cf8;">{{PLATFORM_URL}}</span></p>
+   </td></tr>
+
+  </table>
+ </td></tr>
+</table>
+</body>
+</html>
