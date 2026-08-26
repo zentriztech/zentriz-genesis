@@ -440,7 +440,18 @@ Sem `applied` (`balance = 0`) a charge não é tocada e segue o fluxo padrão: p
      return reply.send({ tenantId, balanceCents: bal.rows[0]?.balance_cents ?? 0, entries: ledger.rows });
    });
    ```
-2. **`GET /api/me/credit`** — *opcional*, self-service. **Corrige o minor de role:** o papel `tenant_admin` **existe** (`signup.ts:236`, `users.ts:26`), então esta rota **exige explicitamente** `role === 'tenant_admin' || role === 'zentriz_admin'` e retorna **403** para `role='user'` (saldo de cortesia é dado comercial sensível). `tenant_id` vem **só do JWT** (`req.user.tenant_id`), **jamais** de query/param (sem IDOR). Retorna **apenas** `balanceCents` (sem extrato). Se não quiser expor a `tenant_admin` nesta fase, não implementar.
+2. **`GET /api/me/credit`** — self-service (**DECIDIDO: implementar, §11**). O papel `tenant_admin` **existe** (`signup.ts:236`, `users.ts:26`); a rota **exige** `role === 'tenant_admin' || role === 'zentriz_admin'` e retorna **403** para `role='user'` (saldo de cortesia é dado comercial sensível). `tenant_id` vem **só do JWT** (`req.user.tenant_id`), **jamais** de query/param (sem IDOR). Retorna **apenas** `balanceCents` (sem extrato).
+   **Exibir só para crédito positivo (decisão C do Jean):** se `balance_cents > 0`, retorna `{ hasCredit: true, balanceCents }`; se `0`/inexistente, retorna `{ hasCredit: false }` **sem valor** — o portal só mostra o cartão de crédito para quem tem saldo. Não vaza "R$ 0,00" nem existência de conta zerada.
+   ```js
+   app.get('/api/me/credit', async (req, reply) => {
+     const role = req.user.role;
+     if (role !== 'tenant_admin' && role !== 'zentriz_admin') return reply.status(403).send(FORBIDDEN);
+     const r = await pool.query('SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id=$1', [req.user.tenant_id]);
+     const balance = r.rows[0]?.balance_cents ?? 0;
+     if (balance > 0) return reply.send({ hasCredit: true, balanceCents: balance });
+     return reply.send({ hasCredit: false });   // saldo 0/negativo/inexistente: nao expoe valor
+   });
+   ```
 
 Nenhuma rota escreve. **Não existe rota que crie `grant`/`consume`/`reversal`** (§1.4).
 
@@ -487,10 +498,10 @@ FROM credit_ledger_transactions c GROUP BY c.tenant_id;   -- consumido == pago_c
 | **F0b** | `065b_credit_ledger_guards.sql` (triggers append-only + zero-sum), aplicado **via psql**; teste de integração assere que `UPDATE`/`DELETE` e insert desbalanceado são rejeitados. | F0 |
 | **F1** | Serviço `credit-ledger.ts` (`getBalance`, `consumeEligibleCharges(client, competence)`, helpers). SQL isolado (hexagonal). **Estender união de `audit()` para `'credit_ledger'`.** | F0 |
 | **F2** | Integrar **passo de consumo** por existência em `generate-month` (§4). `bustTenantStatus` pós-commit. Blindar `PAYMENT_METHODS` contra `'credit'` + teste 400. | F1 |
-| **F3** | Rotas de **leitura** (§6): admin (+ opcional `/api/me/credit` com role). | F0 |
+| **F3** | Rotas de **leitura** (§6): admin + `/api/me/credit` (self-service, **só saldo positivo** — decisão C). | F0 |
 | **F4** | Migração Venuxx: **ler preço vivo (PASSO 0)** → grant `6 × preço` + `billing_exempt=false` (§3). | F0, F0b, F2 em prod |
 | **F5** | Testes (§9). | F1–F4 |
-| **F6** | Reconciliação como invariante agendada + alerta (§7). | F1 |
+| **F6** | Reconciliação como invariante agendada + alerta (§7) — **worker Node dentro da API** (decisão B, padrão `financeBillingWorker`). | F1 |
 | **F7** | Rollout dev→prod (§10). | tudo |
 
 F4 **depende** de F2 **e F0b** em prod: só desligar `billing_exempt` **depois** que o abatimento por existência e os guards existam, senão a Venuxx recebe cobrança sem abatimento e é suspensa.
@@ -557,7 +568,12 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 - **F4 antes de F2/F0b**: Venuxx cobrada sem abatimento → suspensão indevida → dependência explícita (§8/§10).
 - **`generate-month` não roda numa competência** → não há charge nem consumo naquele mês (consumo depende do disparo manual do admin). Cobertura de N ciclos pressupõe execução mensal.
 
-**Assunções / decisões explícitas para o Jean:**
+**✅ DECIDIDO PELO JEAN (2026-08-26):**
+- **A — Preço/N ciclos:** usar o **valor real/vivo dos planos** — o grant é `N × monthly_price_cents lido no PASSO 0` em prod (§3.2). Nunca hardcodar. Hardening por separação de roles (owner p/ migrations × não-owner p/ API) fica para a **próxima onda** (triggers `065b` cobrem o risco imediato).
+- **B — Reconciliação:** **worker Node dentro do processo da API** (mesmo padrão de `financeBillingWorker`), roda a bateria de invariantes por ciclo e **alerta** em qualquer linha retornada. Sem cron no host.
+- **C — `/api/me/credit`:** **implementar** self-service, mas **exibir o saldo apenas para quem tem crédito positivo** (`balance_cents > 0`); saldo `0`/inexistente → não expõe valor (§6.2 ajustada). Role `tenant_admin`/`zentriz_admin`; `tenant_id` só do JWT.
+
+**Assunções / decisões remanescentes:**
 - **DECISÃO (append-only hardening):** adotar agora os **triggers `065b`** (pragmático, enforced inclusive contra owner acidental). Para blindagem contra ato deliberado, migrar para **API sob role não-owner** com só `INSERT`/`SELECT` no ledger e migrations sob role owner (próxima onda). Confirmar se autoriza essa segunda etapa.
 - **DECISÃO (preço/N ciclos):** o grant é `6 × monthly_price_cents VIVO` (PASSO 0). **`050:13` semeia `99900` (R$ 999)**; o valor R$ 77.000 (7.700.000) só existiria como edição manual em prod não verificada nesta cadeia. **O rollout lê o valor vivo e falha se divergir do premissado** — o Jean decide o `N_ciclos` e confirma o preço observado antes de conceder.
 - **DECISÃO (reconciliação):** dono e cadência do job de reconciliação/alerta (§7/F6) — worker Node no processo da API vs. cron no host. Enquanto não existir, a bateria roda no rollout e pós-F4.
@@ -581,7 +597,7 @@ Prod é a **EC2 `3.220.66.113`** (`/opt/zentriz-genesis`, branch `main`), **≠*
 □ F1: ESTENDER uniao de audit() para 'credit_ledger' (finance.ts:145) + npm run typecheck
 □ F2: passo de CONSUMO por EXISTENCIA da charge em generate-month (§4.1-4.5) + bustTenantStatus pos-commit
 □ F2: blindar PAYMENT_METHODS (finance.ts:53) contra 'credit' + teste POST /payments method='credit' => 400
-□ F3: GET /api/finance/tenants/:id/credit (requireAdmin/403) [+ /api/me/credit com role tenant_admin/zentriz_admin]
+□ F3: GET /api/finance/tenants/:id/credit (requireAdmin/403) + /api/me/credit (role tenant_admin/zentriz_admin; SO exibe se balance>0, senao {hasCredit:false})
 □ F5: testes §9 — guards (append-only+zero-sum), consumo por existencia (blocker), reativacao suspenso,
    idempotencia grant/consume/reversal, esgotado, parcial, saldo>=0, concorrencia consume×reversal
 □ Subir stack local com os 3 -f; aplicar 065b via psql local; validar generate-month + consumo
