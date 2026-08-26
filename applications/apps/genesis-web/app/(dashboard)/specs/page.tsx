@@ -61,6 +61,8 @@ interface SpecItem {
   status: string;
   product_id: string | null;
   product_name: string | null;
+  /** §5.4: true quando a SPEC ainda mora no INBOX "Rascunhos" do tenant (pré-fábrica, re-alocável). */
+  product_is_inbox?: boolean | null;
   version_number?: number | null;
   extra?: Record<string, unknown> | null;
   created_at: string;
@@ -77,11 +79,20 @@ interface CatalogItem {
   description: string;
   tags: string[];
 }
-interface ProductOption { id: string; name: string }
+interface ProductOption { id: string; name: string; is_inbox?: boolean }
 
 function formatDate(s: string): string {
   try { return new Date(s).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }); }
   catch { return s; }
+}
+
+// §5.4: rascunho "esquecido" no inbox = sem atualização há mais de STALE_DAYS dias.
+// Alimenta o badge de higiene da caixa de entrada (organize ou descarte).
+const STALE_DAYS = 14;
+function isStale(updatedAt: string): boolean {
+  const t = new Date(updatedAt).getTime();
+  if (Number.isNaN(t)) return false;
+  return Date.now() - t > STALE_DAYS * 24 * 60 * 60 * 1000;
 }
 
 // Rótulo do chip por status da SPEC. /api/specs lista projetos ainda não promovidos ao
@@ -98,7 +109,7 @@ function specStatusLabel(status: string): string {
 
 // Status pré-fábrica: rascunhos que vivem na Bancada. Tudo além disso já foi promovido
 // (fábrica/concluído) → alimenta a coluna "Promovido" do board de triagem (E1).
-const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "spec_validation_failed"]);
 
 function SpecsPageInner() {
   const router = useRouter();
@@ -174,7 +185,8 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
 
   useEffect(() => {
     load();
-    apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId })).then(setProducts).catch(() => {});
+    // includeInbox=1: o diálogo "Vincular" precisa oferecer o INBOX como destino (devolver à caixa).
+    apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId, includeInbox: "1" })).then(setProducts).catch(() => {});
     // Projetos já promovidos alimentam a coluna "Promovido" do board de triagem (E1).
     projectsStore.loadProjects();
   }, [load, scopeTenantId]);
@@ -209,7 +221,10 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     if (!linkTarget) return;
     setBusyId(linkTarget.id);
     try {
-      await apiPatch(`/api/projects/${linkTarget.id}/product`, { productId: linkProductId || null });
+      // §5.4: product_id é NOT NULL pós-064. "Sem produto" não existe mais — vazio devolve
+      // a SPEC ao INBOX (nunca null). O backend também resolve null→inbox, mas mandamos o id.
+      const inboxId = products.find((p) => p.is_inbox)?.id ?? null;
+      await apiPatch(`/api/projects/${linkTarget.id}/product`, { productId: linkProductId || inboxId });
       setLinkTarget(null); setLinkProductId("");
       await load();
     } catch (e) {
@@ -219,27 +234,26 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     }
   };
 
-  // Agrupa specs por produto (product_id). Grupos de produto primeiro (nome ↑), avulsas por fim.
+  // §5.4: agrupa specs por produto (product_id, NOT NULL pós-064). O INBOX "Rascunhos" é um
+  // grupo como outro qualquer, mas rotulado e ordenado à parte (sempre primeiro) — é a caixa
+  // de entrada pré-fábrica, o único lugar onde rascunhos ainda não organizados vivem.
   const groups = useMemo(() => {
-    const byProduct = new Map<string, { name: string; specs: SpecItem[] }>();
-    const standalone: SpecItem[] = [];
+    const byProduct = new Map<string, { name: string; isInbox: boolean; specs: SpecItem[] }>();
     for (const s of specs) {
-      if (s.product_id) {
-        const g = byProduct.get(s.product_id) ?? { name: s.product_name ?? "Produto", specs: [] };
-        if (s.product_name) g.name = s.product_name;
-        g.specs.push(s);
-        byProduct.set(s.product_id, g);
-      } else {
-        standalone.push(s);
-      }
+      const pid = s.product_id;
+      if (!pid) continue; // pós-064 não deve ocorrer; ignora órfã defensivamente.
+      const g = byProduct.get(pid) ?? { name: s.product_name ?? "Produto", isInbox: s.product_is_inbox === true, specs: [] };
+      if (s.product_name) g.name = s.product_name;
+      if (s.product_is_inbox === true) g.isInbox = true;
+      g.specs.push(s);
+      byProduct.set(pid, g);
     }
-    const productGroups = Array.from(byProduct.entries())
-      .map(([id, g]) => ({ productId: id as string | null, name: g.name, specs: g.specs }))
-      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
-    if (standalone.length > 0) {
-      productGroups.push({ productId: null, name: "Avulsas (sem produto)", specs: standalone });
-    }
-    return productGroups;
+    return Array.from(byProduct.entries())
+      .map(([id, g]) => ({ productId: id, name: g.isInbox ? "Rascunhos (inbox)" : g.name, isInbox: g.isInbox, specs: g.specs }))
+      .sort((a, b) => {
+        if (a.isInbox !== b.isInbox) return a.isInbox ? -1 : 1; // inbox primeiro
+        return a.name.localeCompare(b.name, "pt-BR");
+      });
   }, [specs]);
 
   // E1 · Board de triagem — duas colunas de Bancada por prontidão + uma coluna do que já
@@ -286,8 +300,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                 disabled={busy} onClick={() => { setLinkTarget(s); setLinkProductId(s.product_id ?? ""); }}>
                 Vincular
               </Button>
-              {/* Decompor só faz sentido para spec AINDA sem produto (backend: 409 se já em produto). */}
-              {!s.product_id && (
+              {/* §5.4: Decompor só faz sentido para spec AINDA no INBOX (não organizada num produto).
+                  Uma vez alocada a um produto real, o vínculo é definitivo (backend: 409 se já em produto). */}
+              {s.product_is_inbox === true && (
                 <Button size="small" variant="outlined" color="secondary" startIcon={<CallSplitIcon sx={{ fontSize: "0.9rem" }} />}
                   disabled={busy} onClick={() => setDecomposeSpec({ id: s.id, title: s.title })}>
                   Decompor
@@ -403,31 +418,46 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             </Stack>
           ) : (
         <Stack spacing={3}>
-          {groups.map((g) => (
-            <Box key={g.productId ?? "standalone"}>
+          {groups.map((g) => {
+            // Badge de higiene do inbox: quantos rascunhos estão "esquecidos" (§5.4).
+            const staleCount = g.isInbox ? g.specs.filter((s) => isStale(s.updated_at)).length : 0;
+            return (
+            <Box key={g.productId}>
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: "wrap", gap: 1 }}>
-                {g.productId
-                  ? <Inventory2OutlinedIcon sx={{ fontSize: "1rem", color: "#8B5CF6" }} />
-                  : <HandymanIcon sx={{ fontSize: "1rem", color: "text.disabled" }} />}
-                <Typography variant="subtitle2" fontWeight={700} sx={{ color: g.productId ? "#8B5CF6" : "text.secondary" }}>
+                {g.isInbox
+                  ? <HandymanIcon sx={{ fontSize: "1rem", color: "#F59E0B" }} />
+                  : <Inventory2OutlinedIcon sx={{ fontSize: "1rem", color: "#8B5CF6" }} />}
+                <Typography variant="subtitle2" fontWeight={700} sx={{ color: g.isInbox ? "#F59E0B" : "#8B5CF6" }}>
                   {g.name}
                 </Typography>
                 <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
-                {/* Promover produto inteiro — operação; master também pode (C6). Só para grupo de produto. */}
-                {g.productId && (
+                {staleCount > 0 && (
+                  <Chip label={`${staleCount} parada(s) há +${STALE_DAYS}d`} size="small" color="warning" variant="outlined"
+                    sx={{ fontSize: "0.6rem", height: 18 }} />
+                )}
+                {/* Promover produto inteiro — operação; master também pode (C6). Só para PRODUTO real:
+                    o INBOX não é um produto promovível (§5.4) — cada rascunho promove por si. */}
+                {!g.isInbox && (
                   <Button size="small" variant="contained" color="success"
                     startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
                     disabled={busyId === `prod:${g.productId}`}
-                    onClick={() => promoteProduct(g.productId as string)}>
+                    onClick={() => promoteProduct(g.productId)}>
                     Promover produto inteiro
                   </Button>
                 )}
               </Stack>
+              {g.isInbox && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, ml: 0.25 }}>
+                  Caixa de entrada pré-fábrica: rascunhos ainda não organizados. Decomponha, vincule a um produto
+                  ou promova cada um. Ao promover, um rascunho solo vira produto próprio.
+                </Typography>
+              )}
               <Stack spacing={1.5}>
                 {g.specs.map(renderSpec)}
               </Stack>
             </Box>
-          ))}
+            );
+          })}
         </Stack>
           )}
         </>
@@ -453,13 +483,15 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
         <DialogTitle sx={{ fontSize: "1rem" }}>Vincular SPEC a um produto</DialogTitle>
         <DialogContent>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-            Um produto agrupa projetos relacionados. Deixe em branco para manter a SPEC standalone.
+            Um produto agrupa projetos relacionados. Escolha “Rascunhos (inbox)” para devolver a SPEC
+            à caixa de entrada pré-fábrica (toda SPEC pertence a um produto — não existe mais “sem produto”).
           </Typography>
           <FormControl fullWidth size="small">
             <InputLabel>Produto</InputLabel>
             <Select value={linkProductId} label="Produto" onChange={(e) => setLinkProductId(e.target.value)}>
-              <MenuItem value=""><em>Nenhum / standalone</em></MenuItem>
-              {products.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+              {products.map((p) => (
+                <MenuItem key={p.id} value={p.id}>{p.is_inbox ? <em>Rascunhos (inbox)</em> : p.name}</MenuItem>
+              ))}
             </Select>
           </FormControl>
         </DialogContent>

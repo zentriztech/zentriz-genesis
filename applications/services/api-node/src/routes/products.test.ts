@@ -100,6 +100,22 @@ describe("GET /api/products — escopo por tenant (B3)", () => {
     expect(listQuery?.params[0]).toBe(TENANT);
     expect(listQuery?.sql).toContain("WHERE p.tenant_id = $1");
   });
+
+  it("§4.15: sem ?includeInbox o INBOX é ocultado (param false) e solo vazio some (HAVING)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/products" });
+    expect(res.statusCode).toBe(200);
+    const listQuery = captured.find((q) => q.sql.includes("FROM products"));
+    expect(listQuery?.sql).toContain("p.is_inbox = false OR $2::boolean = true");
+    expect(listQuery?.sql).toContain("HAVING (p.solo_app = false OR COUNT(proj.id) > 0)");
+    expect(listQuery?.params[1]).toBe(false);
+  });
+
+  it("§4.15: ?includeInbox=1 passa true → INBOX entra na listagem (Bancada/select de spec)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/products?includeInbox=1" });
+    expect(res.statusCode).toBe(200);
+    const listQuery = captured.find((q) => q.sql.includes("FROM products"));
+    expect(listQuery?.params[1]).toBe(true);
+  });
 });
 
 describe("GET /api/products/:id — autorização por papel (B3)", () => {

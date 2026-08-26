@@ -116,6 +116,8 @@ export interface Project {
   productId?: string | null;
   /** Nome legível do produto (vem do JOIN em GET /api/projects, sob o mesmo escopo de tenant). */
   productName?: string | null;
+  /** true quando o produto é o INBOX "Rascunhos" do tenant (pré-fábrica, re-alocável). */
+  productIsInbox?: boolean | null;
   /** Complexidade do projeto: trivial / low / medium / high */
   complexityHint?: string | null;
   /** Quantidade de tasks (quando disponível no contexto de listagem de produto) */

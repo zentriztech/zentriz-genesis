@@ -4,11 +4,13 @@ import { observer } from "mobx-react-lite";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
+import Alert from "@mui/material/Alert";
+import AlertTitle from "@mui/material/AlertTitle";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
+import CardActionArea from "@mui/material/CardActionArea";
 import CardContent from "@mui/material/CardContent";
-import Chip from "@mui/material/Chip";
 import Divider from "@mui/material/Divider";
 import Grid from "@mui/material/Grid";
 import LinearProgress from "@mui/material/LinearProgress";
@@ -51,22 +53,6 @@ function productPercent(projects: Project[]): number {
   if (projects.length === 0) return 0;
   const sum = projects.reduce((acc, p) => acc + projectPercent(p), 0);
   return Math.round(sum / projects.length);
-}
-
-function statusLabel(s: string) {
-  const m: Record<string, string> = {
-    running: "em execução", completed: "concluído", accepted: "aceito",
-    failed: "falhou", stopped: "parado", draft: "rascunho",
-    spec_submitted: "spec enviada", cto_charter: "charter", pm_backlog: "backlog",
-  };
-  return m[s] ?? s;
-}
-function statusColor(s: string): "default" | "success" | "error" | "info" | "warning" {
-  if (s === "completed" || s === "accepted") return "success";
-  if (s === "failed" || s === "stopped")     return "error";
-  if (s === "running")                        return "info";
-  if (["spec_submitted","cto_charter","pm_backlog"].includes(s)) return "warning";
-  return "default";
 }
 
 // ── Linha de projeto dentro de um produto ─────────────────────────────────────
@@ -200,57 +186,6 @@ function ProductCard({ product, projects, delay, onFilter }: {
   );
 }
 
-// ── Linha de projeto avulso ────────────────────────────────────────────────────
-function StandaloneRow({ project, onClick }: { project: Project; onClick: () => void }) {
-  return (
-    <Box
-      onClick={onClick}
-      sx={{
-        display: "flex", alignItems: "center", gap: 2, px: 2, py: 1.25,
-        borderRadius: 1, cursor: "pointer", transition: "background 0.15s",
-        "&:hover": { bgcolor: "action.hover" },
-      }}
-    >
-      <Box sx={{
-        width: 32, height: 32, borderRadius: "8px", flexShrink: 0,
-        background: project.status === "running" ? "#6366F122"
-          : project.status === "completed" || project.status === "accepted" ? "#10B98122" : "#8B949E22",
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}>
-        {project.status === "running" ? <PlayArrowIcon sx={{ fontSize: "0.9rem", color: "#6366F1" }} />
-          : project.status === "completed" || project.status === "accepted" ? <CheckCircleIcon sx={{ fontSize: "0.9rem", color: "#10B981" }} />
-          : project.status === "failed" ? <ErrorIcon sx={{ fontSize: "0.9rem", color: "#EF4444" }} />
-          : <FolderIcon sx={{ fontSize: "0.9rem", color: "#8B949E" }} />}
-      </Box>
-      <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-        <Typography variant="body2" fontWeight={500} noWrap>{project.title ?? "Sem título"}</Typography>
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.25 }}>
-          {project.status === "running" ? (
-            <>
-              <LinearProgress variant="determinate" value={projectPercent(project)}
-                sx={{ flexGrow: 1, height: 3, borderRadius: 2, bgcolor: "divider" }} />
-              <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, fontSize: "0.62rem" }}>
-                {project.taskDoneCount != null && project.taskCount
-                  ? `${project.taskDoneCount}/${project.taskCount}`
-                  : `${projectPercent(project)}%`}
-              </Typography>
-            </>
-          ) : (
-            <Typography variant="caption" color="text.secondary">
-              {new Date(project.updatedAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
-            </Typography>
-          )}
-        </Stack>
-      </Box>
-      <ResourceBadges
-        repoUrl={project.repoUrl} repoFullName={project.repoFullName}
-        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
-      />
-      <Chip label={statusLabel(project.status)} size="small" color={statusColor(project.status)} />
-    </Box>
-  );
-}
-
 // ── Stat card ─────────────────────────────────────────────────────────────────
 function StatCard({ label, value, icon, gradient, delay = 0 }: {
   label: string; value: string | number; icon: React.ReactNode; gradient: string; delay?: number;
@@ -277,16 +212,30 @@ function StatCard({ label, value, icon, gradient, delay = 0 }: {
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
-const STANDALONE_PAGE_SIZE = 10;
 
-// RFC-0003 F2: rascunhos pré-fábrica vivem na Bancada (/specs), não no painel de projetos.
-const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+// RFC-0003 F2 / §5.6: rascunhos pré-fábrica vivem na Bancada (/specs), não no painel de apps.
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "spec_validation_failed"]);
 
 function DashboardPageInner() {
   const router   = useRouter();
   const projects = projectsStore.list.filter((p) => !PRE_FACTORY_STATUSES.has(p.status));
+  // §5.8: o INBOX "Rascunhos" não é uma seção de apps — vira atalho p/ a Bancada com contador.
+  // Conta da lista BRUTA (os rascunhos foram filtrados de `projects` acima).
+  const inboxCount = projectsStore.list.filter((p) => p.productIsInbox === true).length;
   const [products, setProducts] = useState<Product[]>([]);
-  const [standaloneVisible, setStandaloneVisible] = useState(STANDALONE_PAGE_SIZE);
+
+  // §5.7: aviso único (primeira visita) da migração 064. Persiste o "dispensar" no localStorage.
+  // Guardado em useEffect p/ não quebrar a hidratação do Next (localStorage só existe no client).
+  const [showMigrationNotice, setShowMigrationNotice] = useState(false);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("genesis.notice.mandatory-inbox") !== "dismissed") setShowMigrationNotice(true);
+    } catch { /* localStorage indisponível: não mostra */ }
+  }, []);
+  const dismissMigrationNotice = () => {
+    setShowMigrationNotice(false);
+    try { localStorage.setItem("genesis.notice.mandatory-inbox", "dismissed"); } catch { /* ignore */ }
+  };
 
   const active    = projects.filter(p => p.status === "running").length;
   const completed = projects.filter(p => p.status === "completed" || p.status === "accepted").length;
@@ -306,14 +255,13 @@ function DashboardPageInner() {
   // Mapear produtos com projetos, ordenar por updated_at (mais recentes / com running primeiro)
   const productMap = new Map<string, Product>(products.map(p => [p.id, p]));
   const projectsByProduct = new Map<string, Project[]>();
-  const standaloneProjects: Project[] = [];
 
   for (const p of projects) {
+    // product_id é NOT NULL pós-064; se o produto não veio na lista (ex.: excluído/arquivado),
+    // o App ainda aparece em /projects — aqui no painel apenas o omitimos.
     if (p.productId && productMap.has(p.productId)) {
       if (!projectsByProduct.has(p.productId)) projectsByProduct.set(p.productId, []);
       projectsByProduct.get(p.productId)!.push(p);
-    } else {
-      standaloneProjects.push(p);
     }
   }
 
@@ -329,10 +277,6 @@ function DashboardPageInner() {
       return bDate - aDate;
     });
 
-  // Projetos avulsos ordenados por updated_at desc
-  const sortedStandalone = [...standaloneProjects]
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
   return (
     <Box>
       {/* ── Header ── */}
@@ -344,6 +288,29 @@ function DashboardPageInner() {
           {authStore.tenant ? `${authStore.tenant.name} · Plano ${authStore.tenant.plan.name}` : "Painel de controle Genesis"}
         </Typography>
       </MotionBox>
+
+      {/* ── Aviso da migração 064 (§5.7) — primeira visita, dispensável ── */}
+      {showMigrationNotice && (
+        <Alert
+          severity="info"
+          icon={<AutoAwesomeIcon fontSize="inherit" />}
+          onClose={dismissMigrationNotice}
+          sx={{ mb: 3 }}
+          action={
+            <Button color="inherit" size="small" onClick={dismissMigrationNotice}>
+              Entendi
+            </Button>
+          }
+        >
+          <AlertTitle>Novidade: todo App agora vive num produto</AlertTitle>
+          <Box component="span" sx={{ display: "block" }}>
+            • Suas ideias e rascunhos ainda não organizados ficam em <b>“Rascunhos”</b>, a caixa de entrada da <b>Bancada</b> — especifique à vontade e promova quando quiser.
+          </Box>
+          <Box component="span" sx={{ display: "block", mt: 0.5 }}>
+            • Cada App que rodava sozinho <b>virou seu próprio produto</b> (marcado como <b>App solo</b> em “Meus produtos”). Nada foi perdido — só ficou mais organizado.
+          </Box>
+        </Alert>
+      )}
 
       {/* ── Stat cards ── */}
       <Grid container spacing={2} sx={{ mb: 3 }}>
@@ -393,39 +360,35 @@ function DashboardPageInner() {
             </Box>
           )}
 
-          {/* ── Seção Projetos avulsos ── */}
-          {sortedStandalone.length > 0 && (
-            <MotionCard {...fadeUp(5 + sortedProducts.length)}>
-              <CardContent sx={{ pb: "0 !important" }}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ pb: 1 }}>
-                  <Typography variant="caption" color="text.secondary"
-                    sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem" }}>
-                    Projetos avulsos
-                  </Typography>
-                  <Button size="small" endIcon={<ArrowForwardIcon />} onClick={() => router.push("/projects")}>
-                    Ver todos
-                  </Button>
-                </Stack>
-              </CardContent>
-              <Box sx={{ pb: 1 }}>
-                {sortedStandalone.slice(0, standaloneVisible).map(p => (
-                  <StandaloneRow key={p.id} project={p} onClick={() => router.push(`/projects/${p.id}`)} />
-                ))}
-                {standaloneVisible < sortedStandalone.length && (
-                  <Box sx={{ px: 2, py: 1 }}>
-                    <Button size="small" variant="text" onClick={() => setStandaloneVisible(v => v + STANDALONE_PAGE_SIZE)}>
-                      Carregar mais ({sortedStandalone.length - standaloneVisible} restantes)
+          {/* ── Atalho INBOX "Rascunhos" (§5.8) — os rascunhos pré-fábrica vivem na Bancada;
+                aqui só um atalho com contador, não uma seção de apps. ── */}
+          {inboxCount > 0 && (
+            <MotionCard {...fadeUp(5 + sortedProducts.length)} sx={{ mb: 3 }}>
+              <CardActionArea onClick={() => router.push("/specs")}>
+                <CardContent>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center">
+                    <Box>
+                      <Typography variant="caption" color="text.secondary"
+                        sx={{ textTransform: "uppercase", letterSpacing: "0.08em", fontSize: "0.65rem" }}>
+                        Rascunhos (inbox)
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        {inboxCount} spec{inboxCount !== 1 ? "s" : ""} na caixa de entrada — organize na Bancada.
+                      </Typography>
+                    </Box>
+                    <Button size="small" endIcon={<ArrowForwardIcon />} component="span">
+                      Abrir Bancada
                     </Button>
-                  </Box>
-                )}
-              </Box>
+                  </Stack>
+                </CardContent>
+              </CardActionArea>
             </MotionCard>
           )}
 
-          {!projectsStore.loading && sortedProducts.length === 0 && sortedStandalone.length === 0 && (
+          {!projectsStore.loading && sortedProducts.length === 0 && inboxCount === 0 && (
             <Card sx={{ textAlign: "center", py: 4 }}>
               <CardContent>
-                <Typography color="text.secondary">Nenhum projeto ainda.</Typography>
+                <Typography color="text.secondary">Nenhum app ainda.</Typography>
                 <Button variant="contained" startIcon={<SendIcon />} sx={{ mt: 2 }} onClick={() => router.push("/spec")}>
                   Enviar primeira spec
                 </Button>

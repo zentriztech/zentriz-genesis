@@ -174,17 +174,22 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // gestão recebia sempre [] → "Meus Produtos" ficava vazio permanentemente (gap U#3/C5).
   app.get("/api/products", async (request, reply) => {
     const user = getUser(request);
-    const q = (request.query ?? {}) as { tenantId?: string };
+    const q = (request.query ?? {}) as { tenantId?: string; includeInbox?: string };
     // tenantId inválido (não-UUID) é ignorado → evita erro de cast uuid (500).
     const scopeTenantId =
       user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId) ? q.tenantId : null;
+    // §4.15: por padrão o INBOX "Rascunhos" NÃO aparece em "Meus produtos" (é infra pré-fábrica).
+    // A Bancada e o select de spec pedem ?includeInbox=1 para poder listá-lo/vinculá-lo.
+    const includeInbox = q.includeInbox === "1" || q.includeInbox === "true";
     // Não-master sem tenant não possui produtos.
     if (user.role !== "zentriz_admin" && !user.tenantId) return reply.send([]);
     const client = await pool.connect();
     try {
       // §4.15 (migration 064): expõe is_inbox/solo_app (o portal renderiza o INBOX à parte
       // e distingue produtos homônimos de App solo) + oldest_project_at (para o "aging" de
-      // rascunhos parados no INBOX). O INBOX é fixado no topo (is_inbox DESC).
+      // rascunhos parados no INBOX). O INBOX é fixado no topo (is_inbox DESC). Filtros:
+      //  • INBOX oculto salvo ?includeInbox=1;
+      //  • homônimo solo_app SEM projetos é fantasma (App ainda não graduou) → oculto via HAVING.
       const selectFragment = `
         SELECT p.id, p.name, p.description, p.status, p.lifecycle_status, p.created_at,
                p.is_inbox, p.solo_app,
@@ -192,19 +197,23 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                MIN(proj.created_at) AS oldest_project_at
         FROM products p
         LEFT JOIN projects proj ON proj.product_id = p.id`;
+      const tail = `
+               GROUP BY p.id
+               HAVING (p.solo_app = false OR COUNT(proj.id) > 0)
+               ORDER BY p.is_inbox DESC, p.created_at DESC`;
       const res =
         user.role === "zentriz_admin"
           ? await client.query(
               `${selectFragment}
                WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status = 'active'
-               GROUP BY p.id ORDER BY p.is_inbox DESC, p.created_at DESC`,
-              [scopeTenantId]
+                 AND (p.is_inbox = false OR $2::boolean = true)${tail}`,
+              [scopeTenantId, includeInbox]
             )
           : await client.query(
               `${selectFragment}
                WHERE p.tenant_id = $1 AND p.status = 'active'
-               GROUP BY p.id ORDER BY p.is_inbox DESC, p.created_at DESC`,
-              [user.tenantId]
+                 AND (p.is_inbox = false OR $2::boolean = true)${tail}`,
+              [user.tenantId, includeInbox]
             );
       return reply.send(res.rows);
     } finally { client.release(); }

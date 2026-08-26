@@ -48,6 +48,10 @@ interface ProductRow {
   lifecycle_status: string | null;
   created_at: string;
   project_count: number;
+  /** §4.15: true = INBOX "Rascunhos" (a API já o oculta aqui por padrão; defesa extra client-side). */
+  is_inbox?: boolean;
+  /** §4.15: true = produto homônimo de um App solo (auto-criado ao promover do inbox ou na migração 064). */
+  solo_app?: boolean;
 }
 
 // Rótulo + cor do ciclo de vida do produto (Bancada vs fábrica vs terminal).
@@ -82,7 +86,8 @@ function ProductsPageInner() {
     setLoading(true); setError(null);
     try {
       const data = await apiGet<ProductRow[]>(withQuery("/api/products", { tenantId: scopeTenantId }));
-      setProducts(Array.isArray(data) ? data : []);
+      // A API já exclui o INBOX aqui (sem ?includeInbox), mas filtramos por garantia (§5.9).
+      setProducts(Array.isArray(data) ? data.filter((p) => p.is_inbox !== true) : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao carregar produtos");
     } finally {
@@ -180,13 +185,22 @@ function ProductsPageInner() {
           {products.map((p) => {
             const lc = lifecycleChip(p.lifecycle_status);
             const busy = busyId === p.id;
+            // Homônimos (mesmo name no tenant) recebem sufixo curto client-side p/ desambiguar —
+            // sem mexer no name do banco (§5.9).
+            const nameClash = products.filter((o) => o.name === p.name).length > 1;
+            const displayName = nameClash ? `${p.name} ·${p.id.slice(0, 8)}` : p.name;
             return (
               <Card key={p.id} variant="outlined" sx={{ display: "flex", flexDirection: "column" }}>
                 <CardActionArea onClick={() => router.push(`/products/${p.id}/projects`)} sx={{ flexGrow: 1 }}>
                   <CardContent>
                     <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} sx={{ mb: 0.25 }}>
-                      <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.3, minWidth: 0, flexGrow: 1 }}>{p.name}</Typography>
+                      <Typography variant="subtitle1" fontWeight={700} sx={{ lineHeight: 1.3, minWidth: 0, flexGrow: 1 }}>{displayName}</Typography>
                       <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                        {p.solo_app && (
+                          <Tooltip title="Produto criado automaticamente para um App que roda sozinho (ao promover do inbox ou na migração 064).">
+                            <Chip label="App solo (auto-criado)" size="small" variant="outlined" color="secondary" sx={{ fontSize: "0.62rem", height: 20 }} />
+                          </Tooltip>
+                        )}
                         <Chip label={lc.label} size="small" color={lc.color} sx={{ fontSize: "0.62rem", height: 20 }} />
                         {/* Excluir — só o ícone, canto superior direito, na mesma linha do título. */}
                         <Tooltip title="Excluir produto">

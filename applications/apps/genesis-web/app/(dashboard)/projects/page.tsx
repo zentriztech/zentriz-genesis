@@ -326,14 +326,15 @@ function ProjectRow({ project, delay = 0, onDelete }: { project: Project; delay?
 // ── Page ─────────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 10;
 
-// RFC-0003 F2: rascunhos pré-fábrica (draft/spec_submitted/pending_conversion) vivem
-// na BANCADA (/specs), não aqui. "Meus projetos" mostra só o que foi PROMOVIDO (solto)
-// ou já está em/depois da fábrica. Mesma lista de status pré-fábrica do backend /api/specs.
-const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion"]);
+// RFC-0003 F2 + §5.6: rascunhos pré-fábrica vivem na BANCADA (/specs), não aqui. "Meus apps"
+// mostra só o que já está em/depois da fábrica. Mesma lista de status pré-fábrica do backend
+// (projectStatus.ts / PRE_FACTORY_STATUSES) — inclui spec_validation_failed.
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "spec_validation_failed"]);
 
-// FT-04: agrupa grupos por produto (product_id), depois por linhagem dentro de cada produto
+// FT-04: agrupa grupos por produto (product_id), depois por linhagem dentro de cada produto.
+// Pós-migração 064: product_id é NOT NULL — não há mais seção "standalone" (productId null).
 interface ProductSection {
-  productId: string | null;
+  productId: string;
   productName: string | null;
   groups: ProjectGroup[];
   hasRunning: boolean; // true se algum projeto do produto está em execução
@@ -354,9 +355,12 @@ function buildProductSections(
     return productNameMap.get(pid) ?? `Produto ${pid.slice(0, 8)}`;
   };
 
-  const sections = new Map<string | null, ProjectGroup[]>();
+  // product_id é NOT NULL (migração 064): grupos sem productId não deveriam existir; se algum
+  // vier assim (dado legado em cache), é ignorado — não há mais bucket "standalone".
+  const sections = new Map<string, ProjectGroup[]>();
   groups.forEach(g => {
-    const key = g.root.productId ?? null;
+    const key = g.root.productId;
+    if (!key) return;
     if (!sections.has(key)) sections.set(key, []);
     sections.get(key)!.push(g);
   });
@@ -365,9 +369,7 @@ function buildProductSections(
 
   sections.forEach((gs, pid) => {
     const hasRunning = gs.some(g => g.versions.some(p => p.status === "running"));
-    if (pid !== null) {
-      result.push({ productId: pid, productName: getProductName(pid, gs), groups: gs, hasRunning });
-    }
+    result.push({ productId: pid, productName: getProductName(pid, gs), groups: gs, hasRunning });
   });
 
   // Produtos com projetos em execução SEMPRE primeiro, depois por nome
@@ -376,10 +378,6 @@ function buildProductSections(
     return (a.productName ?? "").localeCompare(b.productName ?? "");
   });
 
-  // Projetos standalone (sem produto) por último
-  if (sections.has(null)) {
-    result.push({ productId: null, productName: null, groups: sections.get(null)!, hasRunning: false });
-  }
   return result;
 }
 
@@ -437,9 +435,10 @@ function ProjectsPageInner() {
     }
   };
 
-  // F2: exclui rascunhos pré-fábrica (Bancada) e projetos arquivados (ocultos via Excluir).
+  // F2/§5.6: exclui rascunhos pré-fábrica (Bancada), arquivados (ocultos via Excluir) e qualquer
+  // App ainda no INBOX (defesa robusta e independente do set de status — o inbox só vive na Bancada).
   const allProjects = projectsStore.list.filter(
-    (p) => !PRE_FACTORY_STATUSES.has(p.status) && p.status !== "archived"
+    (p) => !PRE_FACTORY_STATUSES.has(p.status) && p.status !== "archived" && p.productIsInbox !== true
   );
   // Mapa final de nomes de produto: prioriza o nome que veio no próprio projeto
   // (GET /api/projects já faz JOIN em products sob o escopo de tenant correto),
@@ -448,9 +447,9 @@ function ProjectsPageInner() {
   allProjects.forEach((p) => {
     if (p.productId && p.productName) mergedProductNames.set(p.productId, p.productName);
   });
-  // Aplicar filtro de produto se selecionado
+  // Aplicar filtro de produto se selecionado (o ramo standalone deixou de existir pós-064)
   const projects  = selectedProductId
-    ? allProjects.filter(p => p.productId === selectedProductId || (!selectedProductId && !p.productId))
+    ? allProjects.filter(p => p.productId === selectedProductId)
     : allProjects;
   const running   = projects.filter((p) => p.status === "running");
   const rest      = projects.filter((p) => p.status !== "running");
@@ -486,7 +485,7 @@ function ProjectsPageInner() {
       <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 3, rowGap: 1.5 }}>
         <Box sx={{ minWidth: 0 }}>
           <Stack direction="row" alignItems="center" spacing={1}>
-            <Typography variant="h4">Meus projetos</Typography>
+            <Typography variant="h4">Meus apps</Typography>
             {selectedProductId && (
               <Chip
                 label={`🧩 ${mergedProductNames.get(selectedProductId) ?? selectedProductId.slice(0, 8)}`}
@@ -498,7 +497,7 @@ function ProjectsPageInner() {
             )}
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            {projects.length} projeto{projects.length !== 1 ? "s" : ""}
+            {projects.length} app{projects.length !== 1 ? "s" : ""}
             {selectedProductId ? " neste produto" : ` · ${allProjects.length} total`}
             {running.length > 0 ? ` · ${running.length} em execução` : ""}
           </Typography>
@@ -531,10 +530,10 @@ function ProjectsPageInner() {
       {!projectsStore.loading && sorted.length === 0 && (
         <Card sx={{ textAlign: "center", py: 6 }}>
           <CardContent>
-            <Typography variant="h6" color="text.secondary" gutterBottom>Nenhum projeto ainda</Typography>
+            <Typography variant="h6" color="text.secondary" gutterBottom>Nenhum app ainda</Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               {authStore.isZentrizAdmin
-                ? "Este tenant ainda não possui projetos."
+                ? "Este tenant ainda não possui apps."
                 : "Envie uma spec para o Genesis criar seu primeiro produto."}
             </Typography>
             {!authStore.isZentrizAdmin && (
@@ -555,8 +554,8 @@ function ProjectsPageInner() {
               const sectionGroups = section.groups.filter(g => visibleGroups.has(g.root.id));
               if (sectionGroups.length === 0) return null;
               return (
-                <Box key={section.productId ?? "standalone"} sx={{ mb: 3 }}>
-                  {/* Cabeçalho de produto */}
+                <Box key={section.productId} sx={{ mb: 3 }}>
+                  {/* Cabeçalho de produto (product_id sempre presente pós-064) */}
                   {section.productId && (
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1.5 }}>
                       <Typography
@@ -634,14 +633,14 @@ function ProjectsPageInner() {
               const sectionProjects = section.groups.flatMap(g => g.versions);
               if (sectionProjects.length === 0) return null;
               return (
-                <Box key={section.productId ?? "standalone"} sx={{ mb: 2 }}>
+                <Box key={section.productId} sx={{ mb: 2 }}>
                   {section.productId && (
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.75, mt: 1 }}>
                       <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.72rem", color: section.hasRunning ? "success.main" : "primary.main" }}>
                         🧩 {section.productName ?? `Produto ${section.productId.slice(0, 8)}`}
                       </Typography>
                       <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.65rem" }}>
-                        · {sectionProjects.length} projeto(s)
+                        · {sectionProjects.length} app(s)
                       </Typography>
                       {section.hasRunning && (
                         <Typography variant="caption" sx={{ fontSize: "0.62rem", color: "success.main", fontWeight: 600 }}>

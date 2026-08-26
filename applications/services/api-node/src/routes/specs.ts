@@ -477,7 +477,7 @@ export async function specRoutes(app: FastifyInstance) {
       const cols = `p.id, p.title, p.status, p.product_id, p.parent_project_id,
                     p.tenant_id, p.version_number, p.extra, p.complexity_hint,
                     p.created_at, p.updated_at,
-                    pr.name AS product_name`;
+                    pr.name AS product_name, pr.is_inbox AS product_is_inbox`;
       let rows;
       if (user.role === "zentriz_admin") {
         rows = (await client.query(

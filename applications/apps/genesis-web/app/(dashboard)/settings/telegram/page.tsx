@@ -251,7 +251,7 @@ function TelegramCommandReference() {
 
 ➕ Criação
 /new product <desc>  — cria produto com projetos numerados
-/new project <desc>  — cria projeto standalone
+/new project <desc>  — cria um App em Rascunhos (inbox), na Bancada; ao promover, vira produto próprio
 📎 Envie PDF/TXT/MD com caption "product" ou "project"
 
 ⚠️  Requerem confirmação (código 4 dígitos):

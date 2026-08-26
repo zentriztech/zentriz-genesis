@@ -431,7 +431,7 @@ const RELATION_LABELS: Record<string, string> = {
 };
 
 interface ProductLinkSectionProps {
-  products: { id: string; name: string }[];
+  products: { id: string; name: string; is_inbox?: boolean }[];
   productId: string; onProductId: (v: string) => void;
   onProductsReload: () => void;
   allProjects: { id: string; title: string; status: string }[];
@@ -472,8 +472,17 @@ function ProductLinkSection({ products, productId, onProductId, onProductsReload
         <FormControl fullWidth size="small">
           <InputLabel>Adicionar a um produto</InputLabel>
           <Select value={productId} label="Adicionar a um produto" onChange={(e) => onProductId(e.target.value)}>
-            <MenuItem value=""><em>Nenhum / Projeto standalone</em></MenuItem>
-            {products.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
+            {/* §5.3: sem "Nenhum/standalone" — todo App pertence a um produto. O INBOX "Rascunhos"
+                aparece rotulado; se a lista não trouxe o inbox, injeta opção sintética com value ""
+                (sentinela → o backend resolve para o INBOX do tenant). */}
+            {!products.some((p) => p.is_inbox) && (
+              <MenuItem value=""><em>Rascunhos (inbox)</em></MenuItem>
+            )}
+            {products.map((p) => (
+              <MenuItem key={p.id} value={p.id}>
+                {p.is_inbox ? <em>Rascunhos (inbox)</em> : p.name}
+              </MenuItem>
+            ))}
           </Select>
         </FormControl>
         <Tooltip title="Criar novo produto">
@@ -501,11 +510,9 @@ function ProductLinkSection({ products, productId, onProductId, onProductsReload
       {!showNewProduct && (
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, fontSize: "0.68rem", lineHeight: 1.5 }}>
           Um produto agrupa projetos relacionados (backend + frontend + mobile do mesmo sistema).
+          Deixe em <em>Rascunhos (inbox)</em> se ainda não sabe onde organizar — dá para mover depois.
         </Typography>
       )}
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, fontSize: "0.68rem", lineHeight: 1.5 }}>
-        Um produto agrupa projetos relacionados (backend + frontend + mobile do mesmo sistema).
-      </Typography>
 
       <Divider sx={{ mb: 1.5 }} />
 
@@ -892,12 +899,13 @@ export default function SpecPage() {
     setUiuxProjectIds((prev) => prev.filter((k) => k !== key));
   }, []);
 
-  // Produto e links
-  const [products, setProducts]       = useState<{ id: string; name: string }[]>([]);
+  // Produto e links (§5.3: inclui o INBOX "Rascunhos" via ?includeInbox=1; is_inbox marca-o)
+  const [products, setProducts]       = useState<{ id: string; name: string; is_inbox?: boolean }[]>([]);
+  // "" = sentinela → o backend resolve para o INBOX do tenant (normalizeProductId→resolveInboxProductId).
   const [productId, setProductId]     = useState("");
   const [linkProjectId, setLinkProjectId] = useState("");
   const [linkRelation, setLinkRelation]   = useState("uses_backend");
-  const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string; project_type?: string }[]>([]);
+  const [allProjects, setAllProjects]     = useState<{ id: string; title: string; status: string; project_type?: string; productId?: string | null }[]>([]);
 
   // SPEC-APPROVED: "Especificações aprovadas por humanos". Quando marcado, o CTO VALIDA a spec
   // (Sub-modo C) em vez de regenerar. Engineer/charter/PM seguem normalmente.
@@ -968,11 +976,23 @@ export default function SpecPage() {
       .finally(() => setEditLoading(false));
   }, [editProjectId]);
 
-  // Load products + projects for linking
+  // Load products + projects for linking (§5.3: ?includeInbox=1 traz o INBOX p/ o select)
   useEffect(() => {
-    apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {});
-    apiGet<{ id: string; title: string; status: string; project_type?: string }[]>("/api/projects").then(setAllProjects).catch(() => {});
+    apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {});
+    apiGet<{ id: string; title: string; status: string; project_type?: string; productId?: string | null }[]>("/api/projects").then(setAllProjects).catch(() => {});
   }, []);
+
+  // §5.3: default do produto = herdado do pai (nova versão) senão o INBOX. Só semeia enquanto
+  // o usuário não escolheu nada (productId === "") — não sobrescreve escolha manual.
+  useEffect(() => {
+    if (productId !== "") return;
+    if (parentProjectId) {
+      const parent = allProjects.find((p) => p.id === parentProjectId);
+      if (parent?.productId) { setProductId(parent.productId); return; }
+    }
+    const inbox = products.find((p) => p.is_inbox);
+    if (inbox) setProductId(inbox.id);
+  }, [products, allProjects, parentProjectId, productId]);
 
   // Auto-sugerir backend quando projectType é frontend E produto selecionado tem backend
   // T-15: legado `landing_page` e `web_*` removido; usar frontend_/mobile_/fullstack_ canônicos.
@@ -1136,7 +1156,9 @@ export default function SpecPage() {
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
-      if (productId) formData.append("productId", productId);
+      // §5.3: SEMPRE envia productId. Normalmente é o INBOX (default effect) ou o produto
+      // herdado do pai; vazio só no fallback raro → o backend resolve para o inbox do tenant.
+      formData.append("productId", productId);
       if (projectType) {
         formData.append("deliveryMode", deliveryMode);
         if (isBackendType) {
@@ -1207,7 +1229,8 @@ export default function SpecPage() {
       fd.append("title", projectTitle.trim() || "Spec sem título");
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
-      if (productId) fd.append("productId", productId);
+      // §5.3: SEMPRE envia productId (ver handleSaveSpec). Vazio → backend resolve o inbox.
+      fd.append("productId", productId);
       if (projectType) {
         fd.append("deliveryMode", deliveryMode);
         if (isBackendType) {
@@ -1468,7 +1491,7 @@ export default function SpecPage() {
                       onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
-                      onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
+                      onProductsReload={() => apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {})}
                       allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                       linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                     />
@@ -1611,7 +1634,7 @@ export default function SpecPage() {
                     onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
-                    onProductsReload={() => apiGet<{ id: string; name: string }[]>("/api/products").then(setProducts).catch(() => {})}
+                    onProductsReload={() => apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {})}
                     allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                     linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                   />

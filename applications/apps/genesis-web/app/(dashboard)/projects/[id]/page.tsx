@@ -58,7 +58,7 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import ReplayIcon from "@mui/icons-material/Replay";
 import StopIcon from "@mui/icons-material/Stop";
 import AccountTreeIcon from "@mui/icons-material/AccountTree";
-import AddLinkIcon from "@mui/icons-material/AddLink";
+import DriveFileMoveOutlinedIcon from "@mui/icons-material/DriveFileMoveOutlined";
 import BoltIcon from "@mui/icons-material/Bolt";
 import ForumIcon from "@mui/icons-material/Forum";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
@@ -104,6 +104,11 @@ const CYBORG_LETTERS = ["C", "Y", "B", "O", "R", "G"];
 const ALLOW_RUN_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog", "stopped", "failed",
 ]);
+
+// §5.5 (migration 064): status pré-fábrica. Só um App pré-fábrica pode voltar ao INBOX
+// (espelha isPreFactory do backend → 409 APP_RUNNING_CANNOT_INBOX). App em fábrica/terminal
+// tem de ser movido para um PRODUTO real, nunca para o inbox.
+const PRE_FACTORY_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "spec_validation_failed"]);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type TaskItem         = { id: string; taskId: string; module?: string; ownerRole?: string; requirements?: string; status?: string; createdAt?: string; updatedAt?: string };
@@ -476,14 +481,14 @@ function ProjectDetailPageInner() {
   const [backendDep, setBackendDep] = useState<BackendDep | null>(null);
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
-  const [product, setProduct]       = useState<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null }> } | null>(null);
+  const [product, setProduct]       = useState<{ id: string; name: string; is_inbox?: boolean; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null }> } | null>(null);
   const [triggers, setTriggers]     = useState<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>([]);
   const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
   const [triggerProjectId, setTriggerProjectId]   = useState("");
   const [triggerStatus, setTriggerStatus]         = useState("accepted");
   const [triggerSaving, setTriggerSaving]         = useState(false);
   const [productDialogOpen, setProductDialogOpen] = useState(false);
-  const [allProducts, setAllProducts]             = useState<Array<{ id: string; name: string }>>([]);
+  const [allProducts, setAllProducts]             = useState<Array<{ id: string; name: string; is_inbox?: boolean }>>([]);
   const [linkProductId, setLinkProductId]         = useState("");
   const [linkProductSaving, setLinkProductSaving] = useState(false);
   const [deployLoading, setDeployLoading] = useState(false);
@@ -624,7 +629,7 @@ function ProjectDetailPageInner() {
     if (!id || !project) return;
     const pid = projectsStore.getById(id)?.productId;
     if (pid) {
-      apiGet<{ id: string; name: string; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> }>(
+      apiGet<{ id: string; name: string; is_inbox?: boolean; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string }> }>(
         `/api/products/${pid}`
       ).then(setProduct).catch(() => {});
     } else {
@@ -2340,13 +2345,17 @@ function ProjectDetailPageInner() {
                     🧩 Produto
                   </Typography>
                   <Stack direction="row" alignItems="center" spacing={0.25}>
-                    {!isMaster && !product && (
-                      <Tooltip title="Associar a um produto">
+                    {/* §5.5: todo App pertence a um produto (NOT NULL pós-064). Não há "associar/
+                        desvincular" — só MOVER para outro produto (ou devolver ao inbox, se rascunho). */}
+                    {!isMaster && (
+                      <Tooltip title="Mover para outro produto">
                         <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
-                          apiGet<Array<{ id: string; name: string }>>("/api/products").then(setAllProducts).catch(() => {});
+                          // includeInbox=1: o inbox é destino válido quando o App ainda é rascunho.
+                          apiGet<Array<{ id: string; name: string; is_inbox?: boolean }>>("/api/products?includeInbox=1").then(setAllProducts).catch(() => {});
+                          setLinkProductId(product?.id ?? "");
                           setProductDialogOpen(true);
                         }}>
-                          <AddLinkIcon sx={{ fontSize: "0.85rem" }} />
+                          <DriveFileMoveOutlinedIcon sx={{ fontSize: "0.85rem" }} />
                         </IconButton>
                       </Tooltip>
                     )}
@@ -2361,19 +2370,12 @@ function ProjectDetailPageInner() {
                 {product ? (
                   <>
                     <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1 }}>
-                      <Chip size="small" label={product.name}
-                        sx={{ fontSize: "0.72rem", fontWeight: 600, bgcolor: "primary.main" + "22", color: "primary.main" }} />
-                      {!isMaster && (
-                      <Tooltip title="Desvincular do produto">
-                        <IconButton size="small" sx={{ p: 0.1 }} onClick={async () => {
-                          await apiPatch(`/api/projects/${id}/product`, { productId: null });
-                          setProduct(null);
-                          projectsStore.loadProject(id);
-                        }}>
-                          <DeleteOutlineIcon sx={{ fontSize: "0.75rem", color: "text.disabled" }} />
-                        </IconButton>
-                      </Tooltip>
-                      )}
+                      {/* §5.5: rótulo do produto. Se o App ainda mora no INBOX, deixa isso explícito
+                          (rascunho pré-fábrica) — sem chip de produto real. */}
+                      <Chip size="small" label={product.is_inbox ? "Rascunhos (inbox)" : product.name}
+                        sx={{ fontSize: "0.72rem", fontWeight: 600,
+                              bgcolor: (product.is_inbox ? "#F59E0B" : "#6366F1") + "22",
+                              color: product.is_inbox ? "#F59E0B" : "primary.main" }} />
                     </Stack>
 
                     {/* Projetos do produto — scroll quando muitos (evita esticar o card) */}
@@ -2420,8 +2422,9 @@ function ProjectDetailPageInner() {
                     )}
                   </>
                 ) : (
+                  // §5.5: pós-064 todo App tem produto (NOT NULL). Aqui só o carregamento do detalhe.
                   <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.68rem" }}>
-                    Sem produto vinculado
+                    Carregando produto…
                   </Typography>
                 )}
 
@@ -2475,35 +2478,48 @@ function ProjectDetailPageInner() {
               </CardContent>
             </Card>
 
-            {/* Modal: associar a produto */}
+            {/* Modal: mover para outro produto (§5.5) */}
             <Dialog open={productDialogOpen} onClose={() => setProductDialogOpen(false)} maxWidth="xs" fullWidth>
-              <DialogTitle>Associar a Produto</DialogTitle>
+              <DialogTitle>Mover para outro produto</DialogTitle>
               <DialogContent>
-                <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel>Produto</InputLabel>
-                  <Select label="Produto" value={linkProductId} onChange={(e) => setLinkProductId(e.target.value as string)}>
-                    {allProducts.map((p) => <MenuItem key={p.id} value={p.id}>{p.name}</MenuItem>)}
-                  </Select>
-                </FormControl>
+                {/* Regra 064: só um App PRÉ-FÁBRICA pode voltar ao INBOX. Em fábrica/terminal, o
+                    inbox some das opções (o backend também barra com 409 APP_RUNNING_CANNOT_INBOX). */}
+                {(() => {
+                  const appIsPreFactory = PRE_FACTORY_STATUSES.has(project.status);
+                  return (
+                    <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+                      <InputLabel>Produto</InputLabel>
+                      <Select label="Produto" value={linkProductId} onChange={(e) => setLinkProductId(e.target.value as string)}>
+                        {allProducts
+                          .filter((p) => !p.is_inbox || appIsPreFactory)
+                          .map((p) => (
+                            <MenuItem key={p.id} value={p.id}>{p.is_inbox ? <em>Rascunhos (inbox)</em> : p.name}</MenuItem>
+                          ))}
+                      </Select>
+                    </FormControl>
+                  );
+                })()}
+                {!PRE_FACTORY_STATUSES.has(project.status) && (
+                  <Typography variant="caption" color="text.disabled" sx={{ display: "block", mt: 1 }}>
+                    Este App já saiu da Bancada — não pode voltar ao inbox. Escolha um produto real.
+                  </Typography>
+                )}
               </DialogContent>
               <DialogActions>
                 <Button onClick={() => setProductDialogOpen(false)}>Cancelar</Button>
-                <Button variant="contained" disabled={!linkProductId || linkProductSaving}
+                <Button variant="contained" disabled={!linkProductId || linkProductId === product?.id || linkProductSaving}
                   onClick={async () => {
                     if (isMaster) return; // Conta de gestão: somente leitura
                     setLinkProductSaving(true);
                     try {
                       await apiPatch(`/api/projects/${id}/product`, { productId: linkProductId });
-                      const prod = allProducts.find((p) => p.id === linkProductId);
-                      if (prod) {
-                        const fullProd = await apiGet<typeof product>(`/api/products/${linkProductId}`);
-                        setProduct(fullProd);
-                      }
+                      const fullProd = await apiGet<typeof product>(`/api/products/${linkProductId}`);
+                      setProduct(fullProd);
                       projectsStore.loadProject(id);
                       setProductDialogOpen(false);
                     } finally { setLinkProductSaving(false); }
                   }}>
-                  {linkProductSaving ? "Salvando…" : "Associar"}
+                  {linkProductSaving ? "Movendo…" : "Mover"}
                 </Button>
               </DialogActions>
             </Dialog>
