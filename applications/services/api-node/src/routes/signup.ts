@@ -9,6 +9,7 @@ import {
 import { isSesConfigured, sendEmail, renderVerificationEmail } from "../services/emailSender.js";
 import { isValidCnpj, normalizeCnpjAlnum } from "../services/cnpjLookup.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
+import { resolveInboxProductId } from "../services/inbox.js";
 
 // ── Rate limiting dos endpoints públicos de signup ──────────────────────────────
 // request-code: por IP (bloqueia scripts) + por e-mail (bloqueia bombardeio de UMA
@@ -230,12 +231,18 @@ export async function signupRoutes(app: FastifyInstance) {
       const tenantId = tenant.id;
 
       const passwordHash = await hashPassword(password);
-      await client.query(
+      const userInsert = await client.query(
         `INSERT INTO users (email, name, password_hash, tenant_id, role, status)
          VALUES ($1, $2, $3, $4, 'tenant_admin', 'active')
          RETURNING id, email, name, tenant_id, role, status, created_at`,
         [adminEmail, adminName, passwordHash, tenantId]
       );
+      const adminUserId = String(userInsert.rows[0].id);
+
+      // §4.16 (migration 064): todo tenant nasce com o INBOX "Rascunhos" (products.is_inbox),
+      // atado ao MESMO COMMIT do cadastro. created_by = o admin recém-criado (NOT NULL).
+      // Idempotente (ON CONFLICT em is_inbox por tenant) — não duplica se já existir.
+      await resolveInboxProductId(client, tenantId, adminUserId);
 
       // H2 (RFC-0002 Parte B — Módulo Financeiro): emite a cobrança de onboarding
       // (assinatura da competência corrente) para o tenant recém-criado, atada ao MESMO

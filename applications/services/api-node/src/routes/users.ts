@@ -250,14 +250,48 @@ export async function userRoutes(app: FastifyInstance) {
       return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui projetos vinculados; transfira ou remova-os antes de excluir o usuário" });
     }
 
+    // §4.19 (migration 064): products.created_by é NOT NULL e referencia users(id). O usuário
+    // pode "possuir" o INBOX e produtos (created_by), que NÃO devem sumir com ele. Antes do
+    // DELETE, reatribui esses produtos a outro usuário ativo do MESMO tenant (prefere um admin).
+    // Se não houver a quem reatribuir (era o último usuário do tenant) → 409 (não órfã produtos).
+    const client = await pool.connect();
     try {
-      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      await client.query("BEGIN");
+      const ownedProducts = await client.query(
+        `SELECT 1 FROM products WHERE created_by = $1 LIMIT 1`,
+        [id]
+      );
+      if (ownedProducts.rows.length > 0) {
+        const heir = await client.query(
+          `SELECT id FROM users
+            WHERE tenant_id = $1 AND id <> $2 AND status = 'active'
+            ORDER BY (role = 'tenant_admin') DESC, created_at ASC
+            LIMIT 1`,
+          [target.tenant_id, id]
+        );
+        if (heir.rows.length === 0) {
+          await client.query("ROLLBACK").catch(() => {});
+          return reply.status(409).send({
+            code: "CONFLICT",
+            message: "Usuário possui produtos e é o último do tenant; não há a quem transferi-los. Crie outro usuário antes de excluir.",
+          });
+        }
+        await client.query(
+          `UPDATE products SET created_by = $1, updated_at = now() WHERE created_by = $2`,
+          [String(heir.rows[0].id), id]
+        );
+      }
+      await client.query(`DELETE FROM users WHERE id = $1`, [id]);
+      await client.query("COMMIT");
     } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
       // Rede de segurança: qualquer outra FK remanescente vira 409 em vez de 500.
       if ((err as { code?: string }).code === "23503") {
         return reply.status(409).send({ code: "CONFLICT", message: "Usuário possui registros vinculados; remova-os antes de excluir" });
       }
       throw err;
+    } finally {
+      client.release();
     }
     return reply.status(204).send();
   });
