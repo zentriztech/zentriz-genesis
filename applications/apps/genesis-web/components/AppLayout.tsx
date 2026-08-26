@@ -80,9 +80,9 @@ const settingsItems: NavLeaf[] = [
   { label: "Runtime Config",    href: "/settings/runtime-config", icon: <TuneIcon />,           color: "#F97316" },
 ];
 
-// Itens de uso geral (autoria/ciclo de vida). Ordem POR FLUXO (Decisão 6, 2026-08-26 —
-// supersede o pedido de 2026-08-25): entrada/desenho antes de saída →
-// Dashboard → Enviar spec → Bancada → Meus apps → Meus produtos → Notificações.
+// Itens de uso geral (autoria/ciclo de vida). Ordem POR FLUXO (pedido do Jean 2026-08-26 —
+// supersede a ordem anterior): o Produto é o guarda-chuva, então vem antes do App →
+// Dashboard → Enviar spec → Bancada → Meus produtos → Meus apps → Notificações.
 // "Meus projetos" virou "Meus apps" (a Spec nasce como App dentro de um Produto).
 // "SPECs"/"Splitter" foram unificados: a Bancada (/specs) é o pré-fábrica (o INBOX
 // "Rascunhos" vive só lá) e embute o Decompor.
@@ -90,8 +90,8 @@ const navUser: NavEntry[] = [
   { label: "Dashboard",     href: "/dashboard",      icon: <DashboardIcon />,         color: "#6366F1" },
   { label: "Enviar spec",   href: "/spec",           icon: <SendIcon />,              color: "#10B981" },
   { label: "Bancada",       href: "/specs",          icon: <HandymanIcon />,          color: "#0EA5E9" },
-  { label: "Meus apps",     href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
   { label: "Meus produtos", href: "/products",       icon: <Inventory2Icon />,        color: "#8B5CF6" },
+  { label: "Meus apps",     href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
   { label: "Notificações",  href: "/notifications",  icon: <NotificationsIcon />,     color: "#EF4444" },
 ];
 
