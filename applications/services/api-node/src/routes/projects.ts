@@ -21,6 +21,7 @@ import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
+import { resolveInboxProductId } from "../services/inbox.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -2912,6 +2913,24 @@ export async function projectRoutes(app: FastifyInstance) {
       const nextVersion = ((parentRow.version_number as number) ?? 1) + 1;
       const childTitle  = `${parentRow.title} — Evolução v${nextVersion}`;
 
+      // Produto da nova versão (§4.6, migration 064): herdar o produto do pai; mas se o
+      // produto-pai estiver arquivado OU for o INBOX (ou tiver sumido), cair no INBOX
+      // "Rascunhos" do tenant — NUNCA gravar product_id null.
+      const tenantId = String(parentRow.tenant_id);
+      const parentProductId = (parentRow.product_id as string | null) ?? null;
+      let childProductId: string;
+      if (parentProductId) {
+        const prod = (await client.query(
+          "SELECT status, is_inbox FROM products WHERE id = $1 AND tenant_id = $2",
+          [parentProductId, tenantId],
+        )).rows[0] as { status: string; is_inbox: boolean } | undefined;
+        childProductId = (!prod || prod.is_inbox || prod.status === "archived")
+          ? await resolveInboxProductId(client, tenantId, user.id)
+          : parentProductId;
+      } else {
+        childProductId = await resolveInboxProductId(client, tenantId, user.id);
+      }
+
       // Criar projeto filho
       const childRes = await client.query(
         `INSERT INTO projects
@@ -2923,7 +2942,7 @@ export async function projectRoutes(app: FastifyInstance) {
           parentRow.tenant_id,
           user.id,
           childTitle,
-          parentRow.product_id ?? null,
+          childProductId,
           parentId,
           nextVersion,
           JSON.stringify({
