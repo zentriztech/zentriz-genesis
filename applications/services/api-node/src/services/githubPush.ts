@@ -38,7 +38,7 @@ const DEADPOOL_BASE_URL = (process.env.DEADPOOL_BASE_URL ?? "").trim().replace(/
 const DEADPOOL_API_TOKEN = (process.env.DEADPOOL_API_TOKEN ?? "").trim();
 
 /** Slug determinístico (lowercase, sem sufixo) — casa com o systemId/serviceId do envelope Connect. */
-function slugify(value: string): string {
+export function slugify(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
