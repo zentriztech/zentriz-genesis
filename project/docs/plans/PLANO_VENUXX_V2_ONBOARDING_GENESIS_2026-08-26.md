@@ -10,7 +10,7 @@
 > ### 🟢 REV. 2 (2026-08-26) — Fase 1 JÁ EXECUTADA em PRODUÇÃO
 > O tenant **já foi criado pelo Jean no portal de PROD** e **ativado** (não em dev). Isto **resolve as decisões A1 e A2** e muda três coisas no plano abaixo:
 > 1. **Plano escolhido = Diamante (definido, não mais "a decidir").** `tenant_id=0931c5dc-46eb-474a-a54a-dad12733b4b2` · **VENUXX TECHNOLOGIES LTDA** · `plan_diamante` · admin `jeanolbar@venuxx.com` (tenant_admin, active) · INBOX "Rascunhos" (`016cad3b-…`) criado. A barra de uso lerá `28/50` (cosmético; `max_projects` não tem enforcement).
-> 2. **Carência aplicada.** `status='active'` + `billing_exempt=true`; a cobrança inicial (`Assinatura inicial`) foi **cancelada**. **Flip D+90 = 2026-11-24** (`billing_exempt=false` + `generate-month`) — não expira sozinho.
+> 2. **Carência aplicada.** `status='active'` + `billing_exempt=true`; a cobrança inicial (`Assinatura inicial`) foi **cancelada**. **Flip D+180 = 2027-02-26** (`billing_exempt=false` + `generate-month`) — não expira sozinho.
 > 3. **O tenant só existe em PROD** → o **seed dos 28 apps (Fases 2–3) roda contra o Postgres de PROD** (o dev não tem esse tenant). O ensaio em dev, se desejado, exige recriar o tenant em dev antes; caso contrário, roda-se direto em prod com `--dry-run` obrigatório antes do `--commit`. Ver §8/§9 (chave de idempotência do tenant **corrigida**: buscar por `id`/`email`, não por `lower(name)='venuxx'` — o nome real é `VENUXX TECHNOLOGIES LTDA`).
 >
 > **Pendências herdadas da criação (não bloqueiam o seed, confirmar com o Jean):** `tenants.responsible_name` está como **"Diogo Della Gomes"** e `responsible_email` **vazio** (o pedido inicial dizia responsável = Jean; o *usuário admin* está correto como Jean). A cobrança cancelada era de **R$ 77.000,00** — anômala para Diamante (R$ 999/mês). Ver §11 (A1/A2 atualizadas) e §13.
@@ -118,16 +118,18 @@ A banca verificou que **não existe enforcement de `max_projects` em lugar nenhu
 
 `GET /api/plans` é **público, sem auth** (`plans.ts:53`) e alimenta a tela pública `/tenant/signup`, que lista todos os planos com preço; o signup aceita **qualquer** `planId` existente (`signup.ts:184`). Não há flag `is_public`/`active` em `plans`. Criar `plan_venuxx` (R$99 / 30 projetos) o tornaria **publicamente selecionável** no cadastro — subcotando Ouro (R$299/10) e Diamante (R$999/50) e abrindo vetor de auto-registro abusivo. Por isso optou-se por **Diamante existente**. Se no futuro o Jean quiser um SKU de preço-Prata com teto alto, isso vira **pré-requisito de schema/rota** (coluna `is_public`/`active` em `plans` + filtro no `GET /api/plans` público + allowlist de `planId` no `signup`) — fora do escopo deste onboarding.
 
-### 3.2 — "3 meses grátis (carência)" — ✅ APLICADA
+### 3.2 — "6 meses grátis (carência)" — ✅ APLICADA
 
 **Não existe trial nativo** (`schema.sql:25`: status só `active|suspended|inactive`; sem `trial_ends_at`). A carência nativa (`FINANCE_SUSPEND_GRACE_DAYS=3`) é em **dias**. Modelagem adotada (padrão do tenant interno ZFactory, `migration 061`) — **já executada em PROD**:
 
 1. ✅ `status='active'` (com `pg_notify('tenant_status_bust', tid)` invalidando o cache em todas as réplicas).
 2. ✅ `billing_exempt=true` → `generate-month` não gera assinatura (`finance.ts:573`); o worker **não** suspende por inadimplência (`financeBillingWorker.ts:45-46`).
 3. ✅ Cobrança inicial em aberto/vencida **cancelada** (`UPDATE charges SET status='canceled'`) — sem ela, o worker marcaria `open→overdue` e, se o tenant não fosse isento, re-suspenderia (vencida há >3 dias). Com `billing_exempt=true` a suspensão já não ocorreria, mas a fatura fantasma foi removida por coerência com "grátis".
-4. ⏳ **D+90 = 2026-11-24 (manual/job externo):** flipar `billing_exempt=false` e rodar `generate-month`. **Não há expiração automática** — lembrete operacional obrigatório (Riscos/Assunções §11-A2).
+4. ⏳ **D+180 = 2027-02-26 (manual/job externo):** flipar `billing_exempt=false` e rodar `generate-month`. **Não há expiração automática** — lembrete operacional obrigatório (Riscos/Assunções §11-A2).
 
 > **Nota:** por ter sido criado pela rota do portal (não pelo script de seed), a 1ª cobrança foi gerada e **depois** cancelada — daí o passo 3. Um seed futuro que crie tenant do zero já nasce isento (sem cobrança). O passo 3 é específico deste caso real.
+
+> **Carência = 6 meses de créditos de cortesia (decisão do Jean, 2026-08-26).** A Venuxx recebe **créditos suficientes para cobrir 6 faturas do plano Diamante** (6 × R$ 999,00 = R$ 5.994,00). Enquanto durar o crédito, a fatura mensal é abatida integralmente (R$ 0,00 a pagar). Hoje isso é **modelado** via `billing_exempt=true` (não há saldo/ledger de crédito nativo). **Pendência futura (fora deste onboarding):** construir um **sistema de créditos "extremamente seguro"** (ledger auditável, débito por ciclo, saldo consultável, idempotência de lançamento) para refletir a realidade — hoje o abatimento é apenas a isenção de billing, sem saldo decrescente. Ver §13.
 
 ---
 
@@ -382,7 +384,7 @@ DELETE FROM products  WHERE name='Venuxx V2' AND tenant_id=:tid;
 ```
 **Imagem:** `sudo docker tag rollback-api:pre-venuxx-seed zentriz-genesis-api:latest && docker compose up -d --no-build --force-recreate api`.
 
-**8.5 — Persistir memória (LEI 0).** Antes de fechar: gravar IDs (tenant_id, product_id Venuxx V2, plan escolhido, digests, tags de rollback, `billing_exempt` + **D+90 = 2026-11-24**, caminho de Auto Care escolhido) em `~/.claude/projects/.../memory/` com ponteiro no `MEMORY.md`.
+**8.5 — Persistir memória (LEI 0).** Antes de fechar: gravar IDs (tenant_id, product_id Venuxx V2, plan escolhido, digests, tags de rollback, `billing_exempt` + **D+180 = 2027-02-26**, caminho de Auto Care escolhido) em `~/.claude/projects/.../memory/` com ponteiro no `MEMORY.md`.
 
 ---
 
@@ -470,7 +472,7 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 ## 10. Riscos
 
 1. **Colisão cross-tenant no registry Deadpool** (chave global `systemId/serviceId`). Mitigação: prefixo `venuxx-v2`. Central.
-2. **`billing_exempt` não expira sozinho** — flip manual em D+90 (2026-11-24) + `generate-month`. Sem lembrete, tenant fica grátis indefinidamente.
+2. **`billing_exempt` não expira sozinho** — flip manual em D+180 (2027-02-26) + `generate-month`. Sem lembrete, tenant fica grátis indefinidamente.
 3. **Escolha de plano é cosmética** — `max_projects` é display-only (sem enforcement). Barra `28/50` (Diamante). **Não** criar `plan_venuxx` público (§3.1.1).
 4. **`DEADPOOL_BASE_URL` vazio em prod** → Fase 4 é no-op. Mitigação: 0.4 antes de prometer cura.
 5. **Caminho A (`activate`) inviável para seed** — exige GitHub App + repos + `backend_deployments` reais. Mitigação: caminho B (Connect/`/diagnose`) ou provisionamento separado (§6.4).
@@ -486,7 +488,7 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 ## 11. Assunções e decisões explícitas (para o Jean)
 
 - **A1 (plano) — ✅ RESOLVIDA.** Tenant criado em **`plan_diamante`** (SKU existente, barra `28/50`). `max_projects` é display-only (sem enforcement). Não foi criado `plan_venuxx` (evitou exposição pública via `GET /api/plans`/signup).
-- **A2 (carência) — ✅ APLICADA (com pendência de data).** "3 meses grátis" = `status='active'` + `billing_exempt=true` + cobrança inicial cancelada. **Flip manual D+90 = 2026-11-24** (`billing_exempt=false` + `generate-month`) — não expira sozinho. Não é trial nativo.
+- **A2 (carência) — ✅ APLICADA (com pendência de data).** "6 meses grátis" = `status='active'` + `billing_exempt=true` + cobrança inicial cancelada. **Flip manual D+180 = 2027-02-26** (`billing_exempt=false` + `generate-month`) — não expira sozinho. Não é trial nativo.
 - **A3 (senha).** Fornecida na execução via **stdin** (`--password-stdin`) — cobre commit, doc, **histórico de shell e process table** (§8.3). Nunca por argv.
 - **A4 (materialização).** Apps por **seed** (não pela pipeline real). Topologia fiel; textos autorados "como se `SUMMARY_LLM_URL` ligado" (§5.1); pares from/to e event_type canônicos.
 - **A5 (produto).** Entrega (`solo_app=false`); `system_id='venuxx-v2'` setado por INSERT direto (rota pública não seta).
@@ -537,8 +539,13 @@ O Auto Care (Fase 4) fica **fora** do seed (chamadas ao gateway `/api/deadpool/.
 **⏳ Pendente (aguarda ok do Jean):**
 - **Fase 2–3 — seed dos 28 apps** (produto `Venuxx V2` + apps tipados + diálogos/logs). Roda contra PROD (o tenant só existe lá); `--dry-run` antes do `--commit`; snapshot `pg_dump` antes. **Não** cria tenant/admin/INBOX (já existem).
 - **Fase 4 — Auto Care (caminho B):** `setEntitlement(tenant,'deadpool',true)` + contratos Connect `/diagnose`. Verificar `DEADPOOL_BASE_URL` no container api de PROD (§0.4).
-- **D+90 = 2026-11-24 — flip da carência:** `billing_exempt=false` + `generate-month`. **Não expira sozinho.**
+- **D+180 = 2027-02-26 — flip da carência:** `billing_exempt=false` + `generate-month`. **Não expira sozinho.**
 
-**⚠️ Confirmar com o Jean (não altera o seed; foram introduzidos na criação manual):**
-1. **Responsável do tenant.** `responsible_name` = "Diogo Della Gomes" e `responsible_email` **vazio**. O pedido inicial dizia responsável = Jean Ol'Bar (o *usuário admin* está correto como Jean). Ajustar `responsible_name`/`responsible_email` para Jean? (`UPDATE tenants SET responsible_name='Jean Ol''Bar', responsible_email='jeanolbar@venuxx.com' WHERE id=…`).
-2. **Fatura anômala.** A cobrança inicial cancelada era **R$ 77.000,00** — incompatível com Diamante (R$ 999/mês). Provável erro de entrada no cadastro. Ao fim da carência (D+90), recriar uma cobrança correta (Diamante mensal) via `generate-month`.
+**✅ Resolvido (2026-08-26, decisão do Jean):**
+1. **Responsável do tenant.** Diogo Della Gomes **é** o responsável legal da Venuxx; Jean permanece como *usuário admin*. `responsible_email` estava vazio → **setado para `diogo@venuxx.com`** em PROD (`UPDATE tenants SET responsible_email='diogo@venuxx.com' WHERE id='0931c5dc-…'`). `responsible_name` mantido como "Diogo Della Gomes".
+2. **Comunicação ao cliente.** Enviados 3 e-mails Zentriz-branded (dark, responsivos) a `diogo@venuxx.com`, reply-to `jean@zentriz.com.br`: (1) ambiente criado, (2) ambiente ativado, (3) fatura do mês abatida integralmente em créditos de cortesia (6 meses).
+3. **Campo no signup.** Adicionado o campo **"E-mail do responsável"** (`responsibleEmail`) ao formulário público `/tenant/signup` (`genesis-web`) — o backend já aceitava/persistia; faltava só o input no form. Commit local, **não** deployado.
+
+**⚠️ Confirmar com o Jean:**
+1. **Fatura anômala.** A cobrança inicial cancelada era **R$ 77.000,00** — incompatível com Diamante (R$ 999/mês). Provável erro de entrada no cadastro. Ao fim da carência (D+180), recriar uma cobrança correta (Diamante mensal) via `generate-month`.
+2. **Sistema de créditos (futuro).** Hoje "6 meses de crédito" é modelado por `billing_exempt` (isenção binária, sem saldo). Construir ledger de créditos auditável e seguro (ver nota em §3.2) para refletir a realidade — decrementando saldo por ciclo em vez de isenção plana.

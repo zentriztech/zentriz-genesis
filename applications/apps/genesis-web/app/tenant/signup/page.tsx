@@ -74,6 +74,7 @@ type FieldErrors = {
   confirmPassword?: string;
   planId?: string;
   code?: string;
+  responsibleEmail?: string;
 };
 
 const cardMotion = {
@@ -110,6 +111,7 @@ export default function TenantSignupPage() {
   const [cnpjBusy, setCnpjBusy] = useState(false);
   const [cnpjMsg, setCnpjMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
   const [responsibleName, setResponsibleName] = useState("");
+  const [responsibleEmail, setResponsibleEmail] = useState("");
   const [responsiblePhone, setResponsiblePhone] = useState("");
   const [addressCep, setAddressCep] = useState("");
   const [addressStreet, setAddressStreet] = useState("");
@@ -154,6 +156,7 @@ export default function TenantSignupPage() {
     try {
       const data = await apiGet<CnpjResponse>(`/api/cnpj/${cnpjNorm}`);
       if (data.name && !tenantName.trim()) setTenantName(data.name);
+      if (data.email && !responsibleEmail.trim()) setResponsibleEmail(data.email);
       if (data.phone && !responsiblePhone.trim()) setResponsiblePhone(maskPhone(data.phone));
       const a = data.address ?? {};
       if (a.cep) setAddressCep(maskCep(a.cep));
@@ -204,6 +207,8 @@ export default function TenantSignupPage() {
     if (!planId) errs.planId = "Selecione um plano.";
     if (!code.trim()) errs.code = "Informe o código enviado ao seu e-mail.";
     else if (!/^\d{6}$/.test(code.trim())) errs.code = "O código tem 6 dígitos.";
+    if (responsibleEmail.trim() && !EMAIL_RE.test(responsibleEmail.trim()))
+      errs.responsibleEmail = "E-mail do responsável inválido.";
     return errs;
   };
 
@@ -226,6 +231,7 @@ export default function TenantSignupPage() {
         code: code.trim(),
         cnpj: cnpjNorm || undefined,
         responsibleName: responsibleName.trim() || undefined,
+        responsibleEmail: responsibleEmail.trim() || undefined,
         responsiblePhone: responsiblePhone.trim() || undefined,
         addressCep: addressCep.trim() || undefined,
         addressStreet: addressStreet.trim() || undefined,
@@ -604,6 +610,18 @@ export default function TenantSignupPage() {
                 value={responsibleName}
                 onChange={(e) => setResponsibleName(e.target.value)}
                 margin="normal"
+              />
+              <TextField
+                fullWidth
+                type="email"
+                label="E-mail do responsável"
+                value={responsibleEmail}
+                onChange={(e) => setResponsibleEmail(e.target.value)}
+                margin="normal"
+                placeholder="responsavel@empresa.com"
+                error={touched && Boolean(fieldErrors.responsibleEmail)}
+                helperText={touched ? fieldErrors.responsibleEmail : undefined}
+                inputProps={{ inputMode: "email", autoComplete: "email" }}
               />
               <TextField
                 fullWidth
