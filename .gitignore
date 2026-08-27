@@ -10,6 +10,9 @@ env/
 .env
 .env.local
 .env.*.local
+# Env extra de prod do Deadpool (chaves AWS do tenant + CREDENTIALS_ENCRYPTION_KEY do fork B).
+# Vive só no host de prod (root:600); NUNCA deve ser commitado. Blinda contra git add -A acidental.
+.env.deadpool-aws
 
 # Build outputs
 dist/
