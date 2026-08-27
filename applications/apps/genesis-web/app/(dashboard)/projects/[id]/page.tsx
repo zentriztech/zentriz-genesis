@@ -481,7 +481,7 @@ function ProjectDetailPageInner() {
   const [backendDep, setBackendDep] = useState<BackendDep | null>(null);
   const [versions, setVersions]     = useState<VersionEntry[]>([]);
   const [links, setLinks]           = useState<import("@/types").ProjectLink[]>([]);
-  const [product, setProduct]       = useState<{ id: string; name: string; is_inbox?: boolean; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null }> } | null>(null);
+  const [product, setProduct]       = useState<{ id: string; name: string; is_inbox?: boolean; projects?: Array<{ id: string; title: string; status: string; project_type?: string; complexity_hint?: string; repo_url?: string | null; repo_full_name?: string | null; deploy_url?: string | null; deploy_status?: string | null; backend_deploy_status?: string | null }> } | null>(null);
   const [triggers, setTriggers]     = useState<Array<{ id: string; trigger_project_id: string; trigger_project_title: string; trigger_project_status: string; trigger_status: string }>>([]);
   const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
   const [triggerProjectId, setTriggerProjectId]   = useState("");
@@ -2413,7 +2413,7 @@ function ProjectDetailPageInner() {
                               <Typography variant="caption" sx={{ fontSize: "0.68rem", flexGrow: 1 }} noWrap>
                                 {p.title ?? "Sem título"}
                               </Typography>
-                              <ResourceBadges repoUrl={p.repo_url} repoFullName={p.repo_full_name} deployUrl={p.deploy_url} deployStatus={p.deploy_status} />
+                              <ResourceBadges repoUrl={p.repo_url} repoFullName={p.repo_full_name} deployUrl={p.deploy_url} deployStatus={p.deploy_status} backendDeployStatus={p.backend_deploy_status} />
                               {isCurrent && <Chip size="small" label="Este" sx={{ height: 14, fontSize: "0.55rem", bgcolor: "primary.main" + "22", color: "primary.main" }} />}
                             </Box>
                           );

@@ -105,7 +105,7 @@ function ProductProjectRow({ project, onClick }: { project: Project; onClick: ()
       )}
       <ResourceBadges
         repoUrl={project.repoUrl} repoFullName={project.repoFullName}
-        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+        deployUrl={project.deployUrl} deployStatus={project.deployStatus} backendDeployStatus={project.backendDeployStatus}
       />
     </Box>
   );

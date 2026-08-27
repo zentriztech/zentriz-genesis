@@ -584,6 +584,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                 p.complexity_hint, p.started_at, p.completed_at, p.updated_at, p.created_at,
                 COALESCE(d.depth, 0) AS execution_order,
                 gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                bdep.status AS backend_deploy_status,
                 COALESCE(
                   json_agg(
                     json_build_object(
@@ -603,8 +604,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
            WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
            ORDER BY e.created_at DESC LIMIT 1
          ) dep ON true
+         LEFT JOIN LATERAL (
+           SELECT status FROM backend_deployments b
+           WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
+           ORDER BY b.created_at DESC LIMIT 1
+         ) bdep ON true
          WHERE p.product_id = $1
-         GROUP BY p.id, d.depth, gr.repo_url, gr.repo_full_name, dep.app_url, dep.status
+         GROUP BY p.id, d.depth, gr.repo_url, gr.repo_full_name, dep.app_url, dep.status, bdep.status
          ORDER BY COALESCE(d.depth, 0) ASC, p.created_at ASC`,
         [id]
       );

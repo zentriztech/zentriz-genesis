@@ -138,6 +138,8 @@ export interface Project {
   deployUrl?: string | null;
   /** Status do deploy S3 ativo (running / provisioning / running_degraded). */
   deployStatus?: string | null;
+  /** Status do deploy de backend durável quando ativo (running / running_degraded) — indica app deployado e no ar. */
+  backendDeployStatus?: string | null;
 }
 
 export interface Product {

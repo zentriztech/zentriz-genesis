@@ -54,6 +54,7 @@ import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import { DecomposeDialog, type DecomposeSpecRef } from "@/components/DecomposeDialog";
 import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
+import { ResourceBadges } from "@/components/ResourceBadges";
 
 interface SpecItem {
   id: string;
@@ -331,6 +332,12 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
           {p.productName && (
             <Typography variant="caption" color="text.secondary" noWrap>{p.productName}</Typography>
           )}
+          <Box sx={{ flexGrow: 1 }} />
+          <ResourceBadges
+            repoUrl={p.repoUrl} repoFullName={p.repoFullName}
+            deployUrl={p.deployUrl} deployStatus={p.deployStatus}
+            backendDeployStatus={p.backendDeployStatus}
+          />
         </Stack>
       </Box>
     </Card>

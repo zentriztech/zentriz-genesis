@@ -264,7 +264,7 @@ function ProjectCard({ project, delay = 0, onDelete }: { project: Project; delay
         </Typography>
         <ResourceBadges
           repoUrl={project.repoUrl} repoFullName={project.repoFullName}
-          deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+          deployUrl={project.deployUrl} deployStatus={project.deployStatus} backendDeployStatus={project.backendDeployStatus}
         />
       </Box>
     </MotionCard>
@@ -308,7 +308,7 @@ function ProjectRow({ project, delay = 0, onDelete }: { project: Project; delay?
       </Typography>
       <ResourceBadges
         repoUrl={project.repoUrl} repoFullName={project.repoFullName}
-        deployUrl={project.deployUrl} deployStatus={project.deployStatus}
+        deployUrl={project.deployUrl} deployStatus={project.deployStatus} backendDeployStatus={project.backendDeployStatus}
       />
       <Tooltip title="Excluir projeto">
         <IconButton size="small" color="error" aria-label="Excluir projeto"

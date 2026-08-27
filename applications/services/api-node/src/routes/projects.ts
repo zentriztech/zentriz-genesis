@@ -116,6 +116,7 @@ export async function projectRoutes(app: FastifyInstance) {
                   COALESCE(tc.total, 0)::int AS task_count,
                   COALESCE(tc.done, 0)::int  AS task_done_count,
                   gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  bdep.status AS backend_deploy_status,
                   pr.name AS product_name, pr.is_inbox AS product_is_inbox
            FROM projects p
            JOIN users u ON p.created_by = u.id
@@ -128,6 +129,11 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
+           LEFT JOIN LATERAL (
+             SELECT status FROM backend_deployments b
+             WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
+             ORDER BY b.created_at DESC LIMIT 1
+           ) bdep ON true
            WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
@@ -141,6 +147,7 @@ export async function projectRoutes(app: FastifyInstance) {
           `${baseSelect}
            SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order,
                   gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  bdep.status AS backend_deploy_status,
                   pr.name AS product_name, pr.is_inbox AS product_is_inbox
            FROM projects p
            JOIN users u ON p.created_by = u.id
@@ -152,6 +159,11 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
+           LEFT JOIN LATERAL (
+             SELECT status FROM backend_deployments b
+             WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
+             ORDER BY b.created_at DESC LIMIT 1
+           ) bdep ON true
            WHERE p.tenant_id = $1 AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
@@ -165,6 +177,7 @@ export async function projectRoutes(app: FastifyInstance) {
           `${baseSelect}
            SELECT p.*, u.email as created_by_email, COALESCE(d.depth, 0) AS execution_order,
                   gr.repo_url, gr.repo_full_name, dep.app_url AS deploy_url, dep.status AS deploy_status,
+                  bdep.status AS backend_deploy_status,
                   pr.name AS product_name, pr.is_inbox AS product_is_inbox
            FROM projects p
            JOIN users u ON p.created_by = u.id
@@ -176,6 +189,11 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE e.project_id = p.id AND e.status IN ('provisioning','running','running_degraded')
              ORDER BY e.created_at DESC LIMIT 1
            ) dep ON true
+           LEFT JOIN LATERAL (
+             SELECT status FROM backend_deployments b
+             WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
+             ORDER BY b.created_at DESC LIMIT 1
+           ) bdep ON true
            WHERE p.created_by = $1 AND p.status <> 'archived'
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
@@ -214,6 +232,7 @@ export async function projectRoutes(app: FastifyInstance) {
         repoFullName:    (row.repo_full_name as string | null) ?? null,
         deployUrl:       (row.deploy_url as string | null) ?? null,
         deployStatus:    (row.deploy_status as string | null) ?? null,
+        backendDeployStatus: (row.backend_deploy_status as string | null) ?? null,
       }));
       return reply.send(projects);
     } finally {

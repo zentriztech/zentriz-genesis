@@ -80,7 +80,7 @@ function ZentrizProjectsPageInner() {
                   )}
                 </TableCell>
                 <TableCell><Chip label={p.status} size="small" /></TableCell>
-                <TableCell><ResourceBadges repoUrl={p.repoUrl} repoFullName={p.repoFullName} deployUrl={p.deployUrl} deployStatus={p.deployStatus} /></TableCell>
+                <TableCell><ResourceBadges repoUrl={p.repoUrl} repoFullName={p.repoFullName} deployUrl={p.deployUrl} deployStatus={p.deployStatus} backendDeployStatus={p.backendDeployStatus} /></TableCell>
                 <TableCell>{new Date(p.updatedAt).toLocaleDateString("pt-BR")}</TableCell>
                 <TableCell align="right"><Button size="small" onClick={() => router.push(`/projects/${p.id}`)}>Ver</Button></TableCell>
               </TableRow>
