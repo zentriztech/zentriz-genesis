@@ -245,6 +245,14 @@ services:
     build:
       context: ../zentriz-deadpool-auto-care
       dockerfile: deploy/docker/Dockerfile
+    # Durabilidade do monitoramento multi-tenant (fork A + fork B): env extra que vive SÓ no host de
+    # prod em /opt/zentriz-genesis/.env.deadpool-aws (root:600, NUNCA commitado — contém chaves AWS
+    # do tenant p/ cross-account CloudWatch + CREDENTIALS_ENCRYPTION_KEY do path de chaves estáticas
+    # do fork B). Antes esta referência existia só no working-tree de prod → um git checkout/reset em
+    # /opt a perderia. required:false garante que dev/local (sem o arquivo) não quebre.
+    env_file:
+      - path: .env.deadpool-aws
+        required: false
     environment:
       - DEADPOOL_APP_ENV=${DEADPOOL_APP_ENV:-local}
       # 0.0.0.0: alcançável pela api via nome de serviço (127.0.0.1 só ligaria o loopback interno).
