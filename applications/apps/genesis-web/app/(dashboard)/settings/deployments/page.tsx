@@ -29,30 +29,44 @@ import { authStore } from "@/stores/authStore";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 interface Deployment {
-  id:           string;
-  projectId:    string;
-  projectTitle: string | null;
-  tenantId:     string | null;
-  status:       string;
-  appUrl:       string | null;
-  bucketName:   string | null;
-  provider:     string;
-  createdAt:    string | null;
-  expiresAt:    string | null;
-  errorMsg:     string | null;
+  kind:            "ephemeral" | "backend";
+  id:              string;
+  projectId:       string;
+  projectTitle:    string | null;
+  tenantId:        string | null;
+  status:          string;
+  appUrl:          string | null;
+  healthUrl:       string | null;
+  bucketName:      string | null;
+  provider:        string;
+  runtimeTarget:   string | null;
+  deploymentClass: string | null;
+  logGroup:        string | null;
+  createdAt:       string | null;
+  expiresAt:       string | null;
+  errorMsg:        string | null;
 }
 
 const STATUS_COLORS: Record<string, string> = {
   running:          "#10B981",
   running_degraded: "#F59E0B",
   provisioning:     "#3B82F6",
+  building:         "#3B82F6",
+  pushing:          "#3B82F6",
+  migrating:        "#3B82F6",
+  creating_service: "#3B82F6",
+  waiting_cert_dns: "#3B82F6",
   failed:           "#EF4444",
+  destroying:       "#F59E0B",
+  destroy_failed:   "#EF4444",
   destroyed:        "#6B7280",
 };
 
-function relativeExpiry(iso: string | null): string {
-  if (!iso) return "—";
-  const ms = new Date(iso).getTime() - Date.now();
+// Deploy durável (backend) usa expires_at NULL = sem TTL. Efêmero mostra a contagem regressiva.
+function relativeExpiry(d: Deployment): string {
+  if (d.kind === "backend") return d.expiresAt ? "" : "sem expiração (durável)";
+  if (!d.expiresAt) return "permanente";
+  const ms = new Date(d.expiresAt).getTime() - Date.now();
   if (Number.isNaN(ms)) return "—";
   if (ms <= 0) return "expirado";
   const days = Math.floor(ms / 86_400_000);
@@ -116,8 +130,10 @@ export default observer(function DeploymentsPage() {
       </Stack>
 
       <Alert severity="info" sx={{ mb: 3 }}>
-        Deploys estáticos publicados no S3. Cada deploy expira automaticamente por TTL, mas você pode
-        excluir manualmente para liberar espaço. A exclusão remove o site publicado e é irreversível.
+        <strong>Preview S3</strong>: sites estáticos efêmeros publicados pelo Genesis — expiram por TTL
+        e podem ser excluídos aqui para liberar espaço (exclusão irreversível).{" "}
+        <strong>Backend durável</strong>: serviços de runtime provisionados/onboarded que o Auto Care
+        monitora — mostrados para referência (sem exclusão por esta tela).
       </Alert>
 
       {globalAlert && (
@@ -141,10 +157,19 @@ export default observer(function DeploymentsPage() {
               <CardContent>
                 <Stack direction="row" alignItems="flex-start" spacing={2}>
                   <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                    <Stack direction="row" alignItems="center" spacing={1} mb={0.5}>
+                    <Stack direction="row" alignItems="center" spacing={1} mb={0.5} flexWrap="wrap" useFlexGap>
                       <Typography variant="subtitle1" fontWeight={700} noWrap>
                         {d.projectTitle ?? d.projectId}
                       </Typography>
+                      <Chip
+                        label={d.kind === "backend" ? "Backend durável" : "Preview S3"}
+                        size="small"
+                        sx={{
+                          bgcolor: d.kind === "backend" ? "#6366F122" : "#0EA5E922",
+                          color:   d.kind === "backend" ? "#6366F1" : "#0EA5E9",
+                          fontWeight: 600,
+                        }}
+                      />
                       <Chip
                         label={d.status}
                         size="small"
@@ -156,10 +181,20 @@ export default observer(function DeploymentsPage() {
                         {d.appUrl} <OpenInNewIcon sx={{ fontSize: "0.85rem" }} />
                       </Link>
                     )}
+                    {d.kind === "backend" && d.healthUrl && (
+                      <Link href={d.healthUrl} target="_blank" rel="noopener" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5, fontSize: "0.8rem", wordBreak: "break-all" }}>
+                        health: {d.healthUrl} <OpenInNewIcon sx={{ fontSize: "0.8rem" }} />
+                      </Link>
+                    )}
                     <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-                      {relativeExpiry(d.expiresAt)}
-                      {isZentrizAdmin && d.tenantId ? ` · tenant ${d.tenantId.slice(0, 8)}` : ""}
-                      {` · ${d.projectId}`}
+                      {[
+                        relativeExpiry(d),
+                        d.kind === "backend"
+                          ? [d.provider, d.runtimeTarget].filter(Boolean).join("/")
+                          : null,
+                        isZentrizAdmin && d.tenantId ? `tenant ${d.tenantId.slice(0, 8)}` : null,
+                        d.projectId,
+                      ].filter(Boolean).join(" · ")}
                     </Typography>
                     {d.errorMsg && d.status !== "running" && (
                       <Typography variant="caption" color="error" display="block" mt={0.5} noWrap>
@@ -167,14 +202,24 @@ export default observer(function DeploymentsPage() {
                       </Typography>
                     )}
                   </Box>
-                  <Tooltip title="Excluir deploy">
-                    <IconButton
-                      color="error"
-                      onClick={() => setConfirm({ dep: d, typed: "", deleting: false })}
-                    >
-                      <DeleteOutlineIcon />
-                    </IconButton>
-                  </Tooltip>
+                  {d.kind === "ephemeral" ? (
+                    <Tooltip title="Excluir deploy">
+                      <IconButton
+                        color="error"
+                        onClick={() => setConfirm({ dep: d, typed: "", deleting: false })}
+                      >
+                        <DeleteOutlineIcon />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip title="Deploy durável de runtime — gerenciado fora desta tela (não excluível aqui)">
+                      <span>
+                        <IconButton disabled>
+                          <DeleteOutlineIcon />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  )}
                 </Stack>
               </CardContent>
             </Card>
