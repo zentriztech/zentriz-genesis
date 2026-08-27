@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+node_modules
 __pycache__/
 *.py[cod]
 .Python
@@ -15,6 +16,12 @@ dist/
 build/
 *.egg-info/
 .eggs/
+.next/
+
+# Cruft — nunca versionar (o repo usa npm/package-lock.json)
+pnpm-lock.yaml
+._*
+.AppleDouble
 
 # IDE / Editor
 .idea/
