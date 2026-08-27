@@ -262,6 +262,77 @@ export async function getCloudConnection(
   }
 }
 
+/** Material de credencial AWS que o Deadpool precisa para monitorar a CONTA do tenant (fork B). */
+export interface AwsMonitoringCredentials {
+  /** Região da conta do tenant (coluna ou credencial); o poller passa a pollar NELA, não no default. */
+  region: string | null;
+  /** AssumeRole cross-account (preferido). NÃO é segredo. */
+  roleArn: string | null;
+  externalId: string | null;
+  /**
+   * Payload CIFRADO das chaves estáticas, encaminhado AS-IS ao Deadpool (que decripta em memória
+   * com a chave compartilhada). ``null`` quando a conexão é só-role (nada estático a propagar) —
+   * assim nunca movemos chave em claro nem obrigamos o Deadpool a decriptar um payload inútil.
+   */
+  credentialsEnc: { encrypted: string; iv: string; tag: string } | null;
+}
+
+/**
+ * Fork B — resolve as credenciais AWS de monitoramento do tenant para propagar ao Deadpool no
+ * activate. Lê a conexão AWS ativa (a específica por ``connectionId``, senão o menor slot), decripta
+ * SÓ para extrair region/roleArn/externalId (não-segredos) e reencaminha o CIPHERTEXT das chaves
+ * estáticas. Retorna ``null`` se o tenant não tem conexão AWS ativa (Deadpool cai na identidade do
+ * container / instance role — comportamento fork A). NUNCA lança por erro de decrypt: nesse caso
+ * devolve só a região conhecida (degradação limpa; o activate segue e o poller usa o default).
+ */
+export async function getAwsMonitoringCredentials(
+  tenantId: string,
+  connectionId?: string,
+): Promise<AwsMonitoringCredentials | null> {
+  const client = await pool.connect();
+  try {
+    const res = connectionId
+      ? await client.query(
+          `SELECT id, provider, region, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE id = $1 AND tenant_id = $2 AND provider = 'aws' AND status = 'active' LIMIT 1`,
+          [connectionId, tenantId],
+        )
+      : await client.query(
+          `SELECT id, provider, region, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE tenant_id = $1 AND provider = 'aws' AND status = 'active'
+           ORDER BY slot_index ASC LIMIT 1`,
+          [tenantId],
+        );
+    const row = res.rows[0];
+    if (!row) return null;
+
+    const rawPayload = {
+      encrypted: row.encrypted_credentials as string,
+      iv: row.encryption_iv as string,
+      tag: row.encryption_tag as string,
+    };
+    const columnRegion = (row.region as string | null) ?? null;
+    try {
+      const creds = JSON.parse(decryptCredentials(rawPayload)) as AWSCredentials;
+      const hasStatic = Boolean(creds.accessKeyId && creds.secretAccessKey);
+      return {
+        region: creds.region ?? columnRegion,
+        roleArn: creds.roleArn ?? null,
+        externalId: creds.externalId ?? null,
+        // Só propaga o ciphertext quando há chaves estáticas de fato; conexão só-role → null.
+        credentialsEnc: hasStatic ? rawPayload : null,
+      };
+    } catch (err) {
+      console.warn(`[CloudConnector] falha ao decriptar conexão AWS ${row.id} p/ monitoramento (degradado):`, err);
+      return { region: columnRegion, roleArn: null, externalId: null, credentialsEnc: null };
+    }
+  } finally {
+    client.release();
+  }
+}
+
 /** Lista TODAS as conexões ativas do tenant (p/ o select de deploy). Sem credenciais. */
 export async function listCloudConnections(tenantId: string): Promise<CloudConnection[]> {
   const client = await pool.connect();

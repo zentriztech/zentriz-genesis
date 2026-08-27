@@ -80,6 +80,13 @@ export interface DeadpoolRegisterArgs {
   azureMessageColumn?: string | null;
   gcpProjectId?: string | null;
   gcpLogFilter?: string | null;
+  // Fork B (multi-tenant): credenciais AWS POR PROJETO, para o poller do Deadpool ler a CONTA do
+  // tenant (não a identidade única do container). roleArn/externalId NÃO são segredos (assume-role
+  // cross-account). awsCredentialsEnc é o PAYLOAD CIFRADO (crypto.ts) das chaves estáticas — enviamos
+  // o CIPHERTEXT, nunca a chave em claro; o Deadpool decripta em memória com a chave compartilhada.
+  awsRoleArn?: string | null;
+  awsExternalId?: string | null;
+  awsCredentialsEnc?: { encrypted: string; iv: string; tag: string; keyVersion?: number } | null;
 }
 
 /** Resultado do registro. Nunca lança — best-effort — mas informa sucesso/falha ao chamador. */
@@ -157,6 +164,10 @@ export async function registerProjectWithDeadpool(
     if (args.azureMessageColumn != null) body.azureMessageColumn = args.azureMessageColumn;
     if (args.gcpProjectId != null) body.gcpProjectId = args.gcpProjectId;
     if (args.gcpLogFilter != null) body.gcpLogFilter = args.gcpLogFilter;
+    // Fork B: credenciais AWS por projeto (só quando fornecidas → retrocompatível).
+    if (args.awsRoleArn != null) body.awsRoleArn = args.awsRoleArn;
+    if (args.awsExternalId != null) body.awsExternalId = args.awsExternalId;
+    if (args.awsCredentialsEnc != null) body.awsCredentialsEnc = args.awsCredentialsEnc;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);

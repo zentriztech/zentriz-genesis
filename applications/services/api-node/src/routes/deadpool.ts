@@ -29,6 +29,7 @@ import { deadpoolGet, deadpoolPost, isDeadpoolConfigured } from "../services/dea
 import { pool } from "../db/client.js";
 import { hasEntitlement, setEntitlement } from "../services/entitlements.js";
 import { registerProjectWithDeadpool, deriveSystemService } from "../services/githubPush.js";
+import { getAwsMonitoringCredentials } from "../services/cloudConnector.js";
 
 /** UUID v1–v5 (formato canônico do Postgres) — valida params de tenantId antes de bater no banco. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -436,7 +437,17 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         [id],
       );
       const dep = depRes.rows[0] ?? null;
-      const awsRegion = (process.env.AWS_REGION ?? process.env.DEADPOOL_AWS_REGION ?? "").trim() || null;
+      const isCloudwatch = cfg.provider === "cloudwatch";
+
+      // Fork B (multi-tenant): para CloudWatch, resolvemos as credenciais AWS da CONTA do tenant e as
+      // propagamos ao Deadpool, para que ele monitore a conta/região DELE — não a identidade do
+      // container Zentriz (fork A). role_arn/external_id não são segredos; awsCredentialsEnc é o payload
+      // CIFRADO das chaves estáticas (crypto.ts), encaminhado as-is e decriptado só em memória pelo poller.
+      // Sem conexão AWS ativa → creds null → Deadpool cai na cadeia default (retrocompat fork A).
+      const awsCreds = isCloudwatch ? await getAwsMonitoringCredentials(row.tenant_id as string) : null;
+      // Região: a da conexão do tenant tem precedência; senão a env do host Deadpool (comportamento #1).
+      const envRegion = (process.env.AWS_REGION ?? process.env.DEADPOOL_AWS_REGION ?? "").trim() || null;
+      const awsRegion = awsCreds?.region ?? envRegion;
 
       const { systemId, serviceId } = deriveSystemService({
         productSystemId: row.product_system_id as string | null,
@@ -446,7 +457,6 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         soloApp: (row.product_solo_app as boolean | null) ?? false,
       });
 
-      const isCloudwatch = cfg.provider === "cloudwatch";
       // Registra o vínculo runtime + liga o monitoramento no Deadpool. O activate é a declaração
       // AUTORITATIVA do escopo de nuvem: enviamos SEMPRE o provider explícito (inclusive "cloudwatch")
       // e só os ponteiros da nuvem escolhida (os demais vão null). Isso permite ao Deadpool RESETAR o
@@ -470,6 +480,11 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         azureMessageColumn: cfg.azureMessageColumn,
         gcpProjectId: cfg.gcpProjectId,
         gcpLogFilter: cfg.gcpLogFilter,
+        // Fork B: credenciais AWS por projeto (só CloudWatch). null quando não há conexão AWS ativa
+        // ou a nuvem monitorada não é CloudWatch — o Deadpool então usa a identidade default.
+        awsRoleArn: isCloudwatch ? (awsCreds?.roleArn ?? null) : null,
+        awsExternalId: isCloudwatch ? (awsCreds?.externalId ?? null) : null,
+        awsCredentialsEnc: isCloudwatch ? (awsCreds?.credentialsEnc ?? null) : null,
       });
 
       if (result.skipped) {
