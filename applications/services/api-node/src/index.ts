@@ -7,6 +7,7 @@ import { startS3ReconciliationWorker, stopS3ReconciliationWorker } from "./servi
 import { startBackendResumeWorker, stopBackendResumeWorker } from "./services/provision/backendResumeWorker.js";
 import { startBackendCleanupWorker, stopBackendCleanupWorker } from "./services/provision/backendCleanupWorker.js";
 import { startFinanceBillingWorker, stopFinanceBillingWorker } from "./services/financeBillingWorker.js";
+import { startCreditReconciliationWorker, stopCreditReconciliationWorker } from "./services/creditReconciliationWorker.js";
 import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
 import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
 
@@ -61,6 +62,8 @@ try {
   startBackendCleanupWorker();
   // RFC-0002 F2: vencimento de cobranças + suspensão por inadimplência.
   startFinanceBillingWorker();
+  // Plano de Créditos F6 (decisão B): reconciliação do ledger de crédito por ciclo + alerta.
+  startCreditReconciliationWorker();
   // RFC-0002 F2 / H3: invalidação cross-instância do cache de status de tenant (LISTEN/NOTIFY).
   startTenantStatusListener();
   // Item 2 (corrigido): monitor + auto-cura dos deploys na nuvem do tenant via GitHub.
@@ -71,5 +74,5 @@ try {
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });

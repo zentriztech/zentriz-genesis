@@ -23,6 +23,7 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { bustTenantStatus } from "../services/tenantStatusCache.js";
 import { getInvoiceProvider } from "../services/invoiceProvider.js";
+import { consumeEligibleCharges } from "../services/credit-ledger.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -50,6 +51,9 @@ const COMPETENCE_RE = /^[0-9]{4}-(0[1-9]|1[0-2])$/;
 function isCompetence(value: unknown): value is string {
   return typeof value === "string" && COMPETENCE_RE.test(value);
 }
+// INVARIANTE DURA: 'credit' NUNCA entra aqui. Pagamento method='credit' só nasce no passo de
+// consumo interno (credit-ledger.consumeEligibleCharges); permitir 'credit' via POST /payments
+// deixaria um admin quitar charges "de graça", quebrando a igualdade consumido==pago_credito.
 const PAYMENT_METHODS = ["pix", "boleto", "card", "transfer", "cash", "manual"] as const;
 const CHARGE_KINDS = ["subscription", "one_off", "proration"] as const;
 
@@ -141,9 +145,12 @@ function mapInvoice(r: Record<string, unknown>) {
 }
 
 // ── Auditoria append-only (best-effort dentro da mesma transação) ─────────────
-async function audit(
+// Exportada porque o serviço de crédito (credit-ledger.ts) audita 'credit_ledger'
+// na mesma transação do consumo. A união inclui 'credit_ledger' — o CHECK correspondente
+// em finance_audit.entity_type é estendido na migração 065.
+export async function audit(
   client: PoolClient,
-  entityType: "charge" | "payment" | "bank_account" | "invoice" | "tenant",
+  entityType: "charge" | "payment" | "bank_account" | "invoice" | "tenant" | "credit_ledger",
   entityId: string,
   action: string,
   actorUserId: string | null,
@@ -609,7 +616,12 @@ function registerFinanceRoutes(app: FastifyInstance) {
     } finally {
       client.release();
     }
-    return reply.send({ competence, created, skipped, eligible: tenants.rows.length });
+    // Passo de CONSUMO por EXISTÊNCIA (§4 do plano): abate por crédito TODA charge de
+    // assinatura em aberto da competência de tenants com saldo — inclui charges de onboarding
+    // e manuais, e reativa suspensos. Independente do loop de geração acima. Cada charge é
+    // abatida em sua própria tx com advisory lock; bustTenantStatus roda pós-commit lá dentro.
+    const credit = await consumeEligibleCharges(competence);
+    return reply.send({ competence, created, skipped, eligible: tenants.rows.length, credit });
   });
 
   /**
@@ -763,6 +775,59 @@ function registerFinanceRoutes(app: FastifyInstance) {
     } finally {
       client.release();
     }
+  });
+
+  // ═══════════════════ Crédito de cortesia (somente leitura) ═══════════════════
+  // Nenhuma rota ESCREVE no ledger. grant/consume/reversal jamais têm rota (§1.4 do plano):
+  // concessão/estorno são injeção manual via psql; consumo é acoplado ao ciclo (generate-month).
+
+  // Saldo + extrato de um tenant — exclusivo de zentriz_admin (como todo o módulo financeiro).
+  app.get<{ Params: { tenantId: string } }>(
+    "/api/finance/tenants/:tenantId/credit",
+    async (request, reply) => {
+      if (!requireAdmin(getUser(request))) return reply.status(403).send(FORBIDDEN);
+      const { tenantId } = request.params;
+      const bal = await pool.query(
+        `SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      const ledger = await pool.query(
+        `SELECT id, entry_type, amount_cents, competence_month, charge_id, memo, created_at
+           FROM credit_ledger_transactions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100`,
+        [tenantId],
+      );
+      return reply.send({
+        tenantId,
+        balanceCents: bal.rows[0]?.balance_cents ?? 0,
+        entries: ledger.rows.map((r) => ({
+          id: r.id,
+          entryType: r.entry_type,
+          amountCents: r.amount_cents,
+          competenceMonth: r.competence_month,
+          chargeId: r.charge_id,
+          memo: r.memo,
+          createdAt: (r.created_at as Date)?.toISOString?.() ?? r.created_at,
+        })),
+      });
+    },
+  );
+
+  // Self-service: o próprio tenant consulta seu saldo. Só exibe se houver crédito POSITIVO
+  // (decisão C do Jean): saldo 0/negativo/inexistente → { hasCredit:false } sem valor. tenant_id
+  // vem SÓ do JWT (sem IDOR). Restrito a tenant_admin/zentriz_admin — 'user' recebe 403.
+  app.get("/api/me/credit", async (request, reply) => {
+    const user = getUser(request);
+    if (user?.role !== "tenant_admin" && user?.role !== "zentriz_admin") {
+      return reply.status(403).send(FORBIDDEN);
+    }
+    if (!user.tenantId) return reply.send({ hasCredit: false }); // zentriz_admin pode ter tenantId null
+    const r = await pool.query(
+      `SELECT balance_cents FROM tenant_credit_balance WHERE tenant_id = $1`,
+      [user.tenantId],
+    );
+    const balance = r.rows[0]?.balance_cents ?? 0;
+    if (balance > 0) return reply.send({ hasCredit: true, balanceCents: balance });
+    return reply.send({ hasCredit: false });
   });
 
   // ═══════════════════ Sumário ═══════════════════

@@ -76,4 +76,24 @@ describe("RFC-0003 — invariantes de CHECK preservados na última reconstruçã
     expect(body, "nenhuma migration define products_lifecycle_status_check").not.toBe("");
     expect(body).toContain("'draft'");
   });
+
+  // 065 reconstrói payments_method_check para adicionar 'credit' (pagamento de crédito interno).
+  // Guarda contra o gap G5: a reconstrução deve preservar TODOS os métodos prévios (054:66) + 'credit'.
+  it("payments_method_check aceita 'credit' e todos os métodos prévios (065)", () => {
+    const body = lastAddConstraintBody(/ADD CONSTRAINT payments_method_check[\s\S]*?\)\s*\)/g);
+    expect(body, "nenhuma migration define payments_method_check").not.toBe("");
+    for (const m of ["'pix'", "'boleto'", "'card'", "'transfer'", "'cash'", "'manual'", "'credit'"]) {
+      expect(body, `payments_method_check perdeu ${m}`).toContain(m);
+    }
+  });
+
+  // 065 reconstrói finance_audit_entity_type_check para adicionar 'credit_ledger'. Deve preservar
+  // 'tenant' (055) e todos os anteriores — o consumo/concessão audita entity_type='credit_ledger'.
+  it("finance_audit_entity_type_check aceita 'credit_ledger' e 'tenant' + prévios (065)", () => {
+    const body = lastAddConstraintBody(/ADD CONSTRAINT finance_audit_entity_type_check[\s\S]*?\)\s*\)/g);
+    expect(body, "nenhuma migration define finance_audit_entity_type_check").not.toBe("");
+    for (const e of ["'charge'", "'payment'", "'bank_account'", "'invoice'", "'tenant'", "'credit_ledger'"]) {
+      expect(body, `finance_audit_entity_type_check perdeu ${e}`).toContain(e);
+    }
+  });
 });
