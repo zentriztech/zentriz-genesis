@@ -260,6 +260,11 @@ services:
       - DEADPOOL_API_PORT=8787
       - DEADPOOL_STATE_DIR=/data
       - DEADPOOL_STORE_KIND=${DEADPOOL_STORE_KIND:-json}
+      # Raiz dos schemas do Connect DENTRO do container (montada em read-only abaixo). Sem ela,
+      # resolve_connect_schema_root() levanta ConnectContractError e QUALQUER /diagnose que traga
+      # contexto Connect (serviceManifest/ownershipManifest/integrationReadyContract) responde 400.
+      # Habilita a validação Connect e o perfil de suporte (tier1-connect-ready) no gateway.
+      - DEADPOOL_CONNECT_ROOT=/zentriz-connect
       # Auth: em prod, token-only (basic desligado). Local herda defaults (não-protegido → validação leve).
       # DEADPOOL_API_ENABLE_AUTH=false só é permitido fora de prod (config.py) — usado no local p/ o gateway alcançar sem token.
       - DEADPOOL_API_ENABLE_AUTH=${DEADPOOL_API_ENABLE_AUTH:-true}
@@ -273,6 +278,10 @@ services:
       - DEADPOOL_ALLOW_LIVE_GITHUB_CALLS=${DEADPOOL_ALLOW_LIVE_GITHUB_CALLS:-false}
     volumes:
       - zentriz-genesis_deadpool_state:/data
+      # Schemas do Connect em read-only (mesmo idioma do runner, linha ~198): em prod o default
+      # ../zentriz-connect resolve para /opt/zentriz-connect (pasta irmã de /opt/zentriz-genesis);
+      # em dev/local resolve para a pasta irmã do repo. Consumido por DEADPOOL_CONNECT_ROOT acima.
+      - ${ZENTRIZ_CONNECT_PATH:-../zentriz-connect}:/zentriz-connect:ro
     healthcheck:
       # /health é isento de auth (http_server retorna antes do _check_auth) — funciona sem token.
       test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8787/health', timeout=2)\""]
