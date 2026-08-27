@@ -8,6 +8,7 @@ import LinearProgress from "@mui/material/LinearProgress";
 import Typography from "@mui/material/Typography";
 import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
+import CourtesyCreditCard from "@/components/CourtesyCreditCard";
 
 function TenantPlanPageInner() {
   const tenant = authStore.tenant;
@@ -27,6 +28,7 @@ function TenantPlanPageInner() {
           <LinearProgress variant="determinate" value={usage} sx={{ mt: 1, height: 8, borderRadius: 1 }} />
         </CardContent>
       </Card>
+      <CourtesyCreditCard />
     </Box>
   );
 }
