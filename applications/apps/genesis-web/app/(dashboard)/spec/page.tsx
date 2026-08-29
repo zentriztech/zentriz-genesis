@@ -81,6 +81,9 @@ function MermaidBlock({ code }: { code: string }) {
 
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf,.zip";
 
+// INTAKE-GATE: mínimo de caracteres da descrição em texto livre (espelha o backend intakeGate.ts).
+const MIN_FREE_TEXT_CHARS = 500;
+
 interface ProjectTypeOption { value: string; label: string; group: string }
 
 const PROJECT_TYPES: ProjectTypeOption[] = [
@@ -164,7 +167,7 @@ function ProjectTypeSelect({ value, onChange }: { value: string; onChange: (v: s
       onChange={(_e, v) => onChange(v?.value ?? "")}
       isOptionEqualToValue={(o, v) => o.value === v.value}
       renderInput={(params) => (
-        <TextField {...params} label="Tipo do projeto (opcional)"
+        <TextField {...params} label="Tipo do projeto" required
           placeholder="Digite para filtrar…" sx={{ mb: 2 }} />
       )}
       renderGroup={(params) => (
@@ -1022,8 +1025,8 @@ export default function SpecPage() {
   }, []);
 
   const handleGenerate = useCallback(async () => {
-    if (!freeText.trim() || freeText.trim().length < 20) {
-      setGenError("Descreva o produto com pelo menos 20 caracteres.");
+    if (!freeText.trim() || freeText.trim().length < MIN_FREE_TEXT_CHARS) {
+      setGenError(`Descreva o produto com pelo menos ${MIN_FREE_TEXT_CHARS} caracteres.`);
       return;
     }
     setGenerating(true); setGenError(null); setGenElapsed(0); setGenPhase("queued");
@@ -1133,6 +1136,14 @@ export default function SpecPage() {
   // ── Save spec (draft or start) ──────────────────────────────────────────────
   const handleSaveSpec = useCallback(async (startNow: boolean) => {
     if (!specMarkdown) return;
+    // INTAKE-GATE (espelha o backend): título e tipo são obrigatórios; texto livre >=500 letras.
+    if (!editProjectId) {
+      if (!projectTitle.trim()) { setApproveError("Informe o Título do projeto."); return; }
+      if (!projectType) { setApproveError("Selecione o Tipo do projeto."); return; }
+      if (freeText.trim() && freeText.trim().length < MIN_FREE_TEXT_CHARS) {
+        setApproveError(`A descrição em texto livre precisa de no mínimo ${MIN_FREE_TEXT_CHARS} caracteres.`); return;
+      }
+    }
     setApproving(startNow ? "start" : "save"); setApproveError(null);
     try {
       // Modo edição: PATCH spec existente sem criar novo projeto
@@ -1152,7 +1163,8 @@ export default function SpecPage() {
       const filename = `${(projectTitle || "spec").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
       const file = new File([blob], filename, { type: "text/markdown" });
       const formData = new FormData();
-      formData.append("title", projectTitle.trim() || "Spec sem título");
+      formData.append("title", projectTitle.trim());
+      formData.append("intakeMode", "free_text");
       if (parentProjectId) formData.append("parentProjectId", parentProjectId);
       if (freeText.trim()) formData.append("freeDescription", freeText.trim());
       if (projectType) formData.append("projectType", projectType);
@@ -1222,11 +1234,15 @@ export default function SpecPage() {
   const removeFile = (i: number) => setFiles((p) => p.filter((_, idx) => idx !== i));
   const handleUploadSubmit = async (e: React.FormEvent, startNow = false) => {
     e.preventDefault();
+    // INTAKE-GATE (espelha o backend): título e tipo obrigatórios; pelo menos 1 anexo.
+    if (!projectTitle.trim()) { setUploadError("Informe o Título do projeto."); return; }
+    if (!projectType) { setUploadError("Selecione o Tipo do projeto."); return; }
     if (!files.length) { setUploadError("Selecione pelo menos um arquivo."); return; }
     setSubmitting(true); setUploadError(null); setResult(null);
     try {
       const fd = new FormData();
-      fd.append("title", projectTitle.trim() || "Spec sem título");
+      fd.append("title", projectTitle.trim());
+      fd.append("intakeMode", "attachments");
       if (parentProjectId) fd.append("parentProjectId", parentProjectId);
       if (projectType) fd.append("projectType", projectType);
       // §5.3: SEMPRE envia productId (ver handleSaveSpec). Vazio → backend resolve o inbox.
@@ -1496,9 +1512,11 @@ export default function SpecPage() {
                       linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                     />
                     <TextField
-                      fullWidth multiline rows={8}
+                      fullWidth multiline rows={8} required
                       label="Descreva o produto que você quer construir"
                       value={freeText} onChange={(e) => setFreeText(e.target.value)}
+                      error={freeText.trim().length > 0 && freeText.trim().length < MIN_FREE_TEXT_CHARS}
+                      helperText={`${freeText.trim().length}/${MIN_FREE_TEXT_CHARS} caracteres mínimos — descreva o produto (o que faz, para quem, requisitos).`}
                       placeholder={"Exemplo:\n\nQuero um sistema de agendamento para barbearia. Precisa ter:\n- Cadastro de barbeiros e clientes\n- Agendamento online pelo cliente\n- Notificações por WhatsApp\n- Painel admin para os barbeiros\n- Relatório de atendimentos\n\nTecnologia: Node.js, MySQL, sem frontend por enquanto."}
                       sx={{ mb: 2, "& textarea": { fontFamily: "Inter, sans-serif", fontSize: "0.85rem", lineHeight: 1.7 } }}
                     />
@@ -1508,7 +1526,7 @@ export default function SpecPage() {
                       <Button
                         variant="contained" size="large"
                         startIcon={generating ? <CircularProgress size={18} color="inherit" /> : <AutoFixHighIcon />}
-                        disabled={generating || freeText.trim().length < 20}
+                        disabled={generating || freeText.trim().length < MIN_FREE_TEXT_CHARS}
                         onClick={handleGenerate}
                         sx={{ px: 3 }}
                       >

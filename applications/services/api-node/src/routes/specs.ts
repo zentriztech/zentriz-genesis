@@ -11,6 +11,8 @@ import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
+import { validateIntake } from "../services/intakeGate.js";
+import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -39,6 +41,100 @@ function isAllowed(filename: string): boolean {
 }
 
 type ExtractedFile = { filename: string; buffer: Buffer; mimeType: string };
+
+/** Extensões cujo conteúdo é texto legível direto — alimentam o gate semântico. */
+const GATE_TEXT_EXT = new Set([".md", ".txt", ".yaml", ".yml", ".json", ".csv", ".xml", ".html"]);
+
+/** Decodifica as entidades XML básicas de um texto extraído de docx. */
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * Extrai texto de um .docx (que é um zip OOXML): lê word/document.xml e derivados,
+ * insere quebras onde há <w:p>/<w:br>, remove as tags e decodifica entidades.
+ * Retorna "" se não parecer um docx válido.
+ */
+function extractDocxText(buffer: Buffer): string {
+  try {
+    const zip = new AdmZip(buffer);
+    const entries = zip.getEntries().filter(
+      (e) => !e.isDirectory && /^word\/(document|header\d*|footer\d*)\.xml$/.test(e.entryName),
+    );
+    if (entries.length === 0) return "";
+    let out = "";
+    for (const e of entries) {
+      const xml = e.getData().toString("utf-8");
+      out += " " + xml
+        .replace(/<w:(p|br|tab)\b[^>]*\/?>/g, " ")
+        .replace(/<\/w:p>/g, "\n")
+        .replace(/<[^>]+>/g, "");
+    }
+    return decodeXmlEntities(out).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Extração BEST-EFFORT de texto de PDF sem dependência nova: pega tokens de texto
+ * mostrados por operadores Tj/TJ (strings entre parênteses) em streams NÃO comprimidos.
+ * PDFs de texto simples rendem conteúdo; PDFs em branco/lixo/comprimidos rendem ~nada
+ * (e então o gate trata como "sem conteúdo legível"). Não pretende ser um parser completo.
+ */
+function extractPdfTextBestEffort(buffer: Buffer): string {
+  try {
+    const raw = buffer.toString("latin1");
+    const chunks: string[] = [];
+    // strings de texto entre parênteses (operadores Tj/TJ). Escapes \( \) \\ tolerados.
+    const re = /\(((?:\\.|[^()\\])*)\)\s*T[jJ]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw)) !== null) {
+      const s = m[1]
+        .replace(/\\([()\\])/g, "$1")
+        .replace(/\\n/g, "\n").replace(/\\r/g, "").replace(/\\t/g, " ");
+      if (s.trim()) chunks.push(s);
+    }
+    return chunks.join(" ").replace(/[ \t]+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Monta o texto a ser julgado pelo gate semântico. Prefere a descrição em texto livre
+ * (o que o usuário realmente digitou); na ausência dela (modo anexos), extrai o texto
+ * dos arquivos: .md/.txt/.yaml/… direto, .docx via OOXML, .pdf best-effort. Binários
+ * ilegíveis (imagens, PDF só-imagem, docx corrompido) rendem "" para aquele arquivo.
+ */
+function buildGateContent(
+  freeDescription: string | null,
+  files: { filename: string; buffer: Buffer }[],
+): string {
+  const fd = (freeDescription ?? "").trim();
+  if (fd.length > 0) return fd;
+  const parts: string[] = [];
+  for (const f of files) {
+    const ext = path.extname(f.filename).toLowerCase();
+    try {
+      if (GATE_TEXT_EXT.has(ext)) {
+        parts.push(f.buffer.toString("utf-8"));
+      } else if (ext === ".docx" || ext === ".doc") {
+        const t = extractDocxText(f.buffer);
+        if (t) parts.push(t);
+      } else if (ext === ".pdf") {
+        const t = extractPdfTextBestEffort(f.buffer);
+        if (t) parts.push(t);
+      }
+    } catch {
+      /* ignora arquivo ilegível */
+    }
+  }
+  return parts.join("\n\n").trim();
+}
 
 /**
  * Extrai um ZIP e produz UM ÚNICO arquivo spec.md concatenando todo o conteúdo.
@@ -541,6 +637,9 @@ export async function specRoutes(app: FastifyInstance) {
     // (spec_submitted é engolido por isRunning no portal). 'draft' já é run-elegível
     // (ALLOWED_STATUS_FOR_RUN em pipeline.ts) e rotula "Rascunho" no chip.
     let isDraft = false;
+    // INTAKE-GATE: modo de intake enviado pelo portal ("free_text" | "attachments").
+    // Determina qual regra de conteúdo mínimo se aplica (texto ≥500 letras vs ≥1 anexo).
+    let intakeMode: string | null = null;
     // DM-T2: campos de entrega (vão para extra; validados no dispatch de deploy pelo deployMatrix).
     const deliveryFields: Record<string, string> = {};
     // Item 3: conexão de Ferramenta UI/UX escolhida no form + projetos da conta. Quando
@@ -614,6 +713,15 @@ export async function specRoutes(app: FastifyInstance) {
           ? (v as { value: string }).value.trim().toLowerCase()
           : "";
         if (["true", "1", "on", "yes", "validate-only"].includes(raw)) specApproved = true;
+      }
+      // INTAKE-GATE: modo de intake ("free_text" | "attachments").
+      if (part.fields?.intakeMode !== undefined) {
+        const imField = part.fields.intakeMode;
+        const v = Array.isArray(imField) ? imField[0] : imField;
+        const raw = v && typeof (v as { value?: string }).value === "string"
+          ? (v as { value: string }).value.trim()
+          : "";
+        if (raw) intakeMode = raw;
       }
       // RASCUNHO: flag draft do multipart (enviada pelo "Salvar Rascunho").
       if (part.fields?.draft !== undefined) {
@@ -728,6 +836,62 @@ export async function specRoutes(app: FastifyInstance) {
 
     if (files.length === 0) {
       return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie pelo menos um arquivo" });
+    }
+
+    // INTAKE-GATE (determinístico, custo ZERO de LLM): título + tipo obrigatórios e conteúdo
+    // mínimo por modo (texto ≥500 letras | ≥1 anexo). Barra junk ANTES de criar o projeto.
+    // Não se aplica ao caminho de decomposição de produto (batch), que usa createProjectFromSpec
+    // diretamente com specs já validadas.
+    const intake = validateIntake({
+      title: title === "Spec sem título" ? "" : title, // o default silencioso não conta como título real
+      projectType,
+      freeDescription,
+      attachmentCount: files.length,
+      intakeMode,
+    });
+    if (!intake.ok) {
+      return reply.status(422).send(intake.block);
+    }
+
+    // GATE SEMÂNTICO (LLM barato, fail-open): confirma que o conteúdo é minimamente uma spec
+    // de verdade (não gibberish/placeholder que passou nas regras de tamanho). Só bloqueia com
+    // veredito confiante de "não é spec"; qualquer incerteza/erro de infra deixa passar.
+    const gateContent = buildGateContent(freeDescription, files);
+
+    // HIGH-1 (adversarial): em modo ANEXOS, se não conseguimos extrair texto legível de
+    // NENHUM anexo (PDF só-imagem/corrompido, docx ilegível, binário sem texto), a LLM não
+    // tem o que validar. Por padrão barramos (fail-CLOSED) — a regra do Jean é "a LLM deve
+    // validar que o anexo é minimamente uma spec ANTES de aceitar". Afrouxável para o
+    // comportamento antigo (skip/fail-open) via SPEC_ATTACHMENT_REQUIRE_TEXT=false.
+    const requireAttachmentText =
+      (process.env.SPEC_ATTACHMENT_REQUIRE_TEXT ?? "true").trim().toLowerCase() !== "false";
+    const readableLetters = (gateContent.match(/\p{L}/gu) ?? []).length;
+    if (intake.mode === "attachments" && requireAttachmentText && readableLetters < 30) {
+      request.log.warn(
+        { files: files.map((f) => f.filename), readableLetters },
+        "[specs] intake barrado: anexo sem texto legível para validar como spec",
+      );
+      return reply.status(422).send({
+        code: "SPEC_ATTACHMENT_UNREADABLE",
+        message:
+          "Não foi possível ler texto do(s) anexo(s) para validar que é uma especificação. " +
+          "Envie um arquivo com texto (.md, .txt, .pdf com texto selecionável ou .docx) " +
+          "ou descreva o produto em Texto livre (mínimo 500 caracteres).",
+        fields: ["attachments"],
+      });
+    }
+
+    const semantic = await checkSpecIsMinimallyValid({
+      title: intake.title,
+      projectType: intake.projectType,
+      content: gateContent,
+    });
+    if (!semantic.ok) {
+      request.log.warn(
+        { signals: semantic.block.reason, confidence: semantic.block.confidence },
+        "[specs] intake barrado pelo gate semântico (não é spec)",
+      );
+      return reply.status(422).send(semantic.block);
     }
 
     // A4 (ADR-018): a criação de projeto agora vive em createProjectFromSpec (função pura),
