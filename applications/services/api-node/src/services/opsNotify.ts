@@ -45,6 +45,14 @@ export function isBlockStatus(status: string): boolean {
   return status.startsWith("blocked") || status === "failed" || status === "spec_validation_failed";
 }
 
+/**
+ * true se `status` marca um projeto PRODUZIDO / entregue (100%): aceito ou concluído.
+ * `delivered` também conta (deploy final). Usado pelo e-mail de fechamento de ciclo.
+ */
+export function isDoneStatus(status: string): boolean {
+  return status === "accepted" || status === "completed" || status === "delivered";
+}
+
 interface ProjectEnrichment {
   title: string;
   status: string;
@@ -71,6 +79,58 @@ async function enrich(pool: Pool, projectId: string): Promise<ProjectEnrichment 
   return (res.rows[0] as ProjectEnrichment | undefined) ?? null;
 }
 
+interface DoneStats {
+  tasks_total: number;
+  tasks_done: number;
+  duration_sec: number | null;
+}
+
+/** Estatísticas de fechamento: tarefas totais/concluídas e duração da fabricação. */
+async function doneStats(pool: Pool, projectId: string): Promise<DoneStats> {
+  try {
+    const res = await pool.query(
+      `SELECT
+         (SELECT count(*) FROM project_tasks pt WHERE pt.project_id = $1)::int AS tasks_total,
+         (SELECT count(*) FROM project_tasks pt WHERE pt.project_id = $1
+            AND upper(pt.status) IN ('DONE','QA_PASS','ACCEPTED','COMPLETED','DELIVERED'))::int AS tasks_done,
+         (SELECT extract(epoch FROM (COALESCE(finished_at, completed_at, updated_at) - started_at))::int
+            FROM projects WHERE id = $1) AS duration_sec`,
+      [projectId],
+    );
+    const r = res.rows[0] as { tasks_total?: number; tasks_done?: number; duration_sec?: number | null } | undefined;
+    return {
+      tasks_total: r?.tasks_total ?? 0,
+      tasks_done: r?.tasks_done ?? 0,
+      duration_sec: r?.duration_sec ?? null,
+    };
+  } catch {
+    return { tasks_total: 0, tasks_done: 0, duration_sec: null };
+  }
+}
+
+/**
+ * Último passo humano-legível do pipeline (cyborg/system/watchdog) — usado como MOTIVO
+ * do bloqueio quando o chamador não passou um `reason` explícito. Ex.: "deploy S3 bloqueado:
+ * tenant sem GitHub App". Colapsa espaços e trunca. Nunca lança.
+ */
+async function latestBlockReason(pool: Pool, projectId: string): Promise<string | null> {
+  try {
+    const res = await pool.query(
+      `SELECT summary_human FROM project_dialogue
+        WHERE project_id = $1 AND from_agent IN ('cyborg','system','watchdog')
+          AND summary_human IS NOT NULL AND btrim(summary_human) <> ''
+        ORDER BY created_at DESC LIMIT 1`,
+      [projectId],
+    );
+    const s = res.rows[0]?.summary_human as string | undefined;
+    if (!s) return null;
+    const clean = s.replace(/[═\s]+/g, " ").trim();
+    return clean ? clean.slice(0, 300) : null;
+  } catch {
+    return null;
+  }
+}
+
 function esc(s: string | null | undefined): string {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -78,27 +138,47 @@ function esc(s: string | null | undefined): string {
     .replace(/>/g, "&gt;");
 }
 
+/** Formata segundos em "Xh YYm" / "Ym" / "Zs". */
+function fmtDuration(sec: number | null): string {
+  if (sec == null || !Number.isFinite(sec) || sec < 0) return "—";
+  const s = Math.round(sec);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+}
+
 /** Molde HTML branded escuro (contraste: fundo #0b1220, texto claro). */
-function renderEmail(kind: "start" | "block", e: ProjectEnrichment, meta: { origin?: string; reason?: string }): {
+function renderEmail(
+  kind: "start" | "block" | "done",
+  e: ProjectEnrichment,
+  meta: { origin?: string; reason?: string; stats?: DoneStats },
+): {
   subject: string;
   html: string;
   text: string;
 } {
   const isStart = kind === "start";
-  const accent = isStart ? "#3b82f6" : "#ef4444";
+  const isDone = kind === "done";
+  const accent = isStart ? "#3b82f6" : isDone ? "#22c55e" : "#ef4444";
   const who = e.user_name || e.user_email || "desconhecido";
   const whoFull = e.user_email && e.user_name ? `${e.user_name} &lt;${esc(e.user_email)}&gt;` : esc(who);
   const tenant = e.tenant_name || "(sem tenant)";
   const product = e.product_name || "(sem produto)";
   const subject = isStart
     ? `[Genesis] 🏭 Fábrica iniciou um projeto — ${e.title}`
-    : `[Genesis] ⚠️ Projeto bloqueado (${e.status}) — ${e.title}`;
+    : isDone
+      ? `[Genesis] ✅ Projeto produzido (${e.status}) — ${e.title}`
+      : `[Genesis] ⚠️ Projeto bloqueado (${e.status}) — ${e.title}`;
   const title = isStart
     ? "Fábrica iniciou um novo projeto"
-    : "Projeto bloqueado / falhou na Fábrica";
+    : isDone
+      ? "Projeto produzido — 100%"
+      : "Projeto bloqueado / falhou na Fábrica";
   const lead = isStart
     ? "Um novo projeto entrou em fabricação no Genesis. Detalhes abaixo."
-    : "Um projeto entrou em estado de bloqueio/falha na Fábrica. Detalhes abaixo.";
+    : isDone
+      ? "Um projeto foi produzido de ponta a ponta pela Fábrica. Resumo abaixo."
+      : "Um projeto entrou em estado de bloqueio/falha na Fábrica. Detalhes abaixo.";
 
   const rows: Array<[string, string]> = [
     ["PROJETO", esc(e.title)],
@@ -107,6 +187,14 @@ function renderEmail(kind: "start" | "block", e: ProjectEnrichment, meta: { orig
   ];
   if (isStart) {
     rows.push(["QUEM INICIOU", `${whoFull} · ${esc(originLabel(meta.origin))}`]);
+  } else if (isDone) {
+    rows.push(["STATUS", esc(e.status)]);
+    rows.push(["DONO", whoFull]);
+    const st = meta.stats;
+    if (st) {
+      rows.push(["TAREFAS", `${st.tasks_done}/${st.tasks_total} concluídas`]);
+      rows.push(["DURAÇÃO", fmtDuration(st.duration_sec)]);
+    }
   } else {
     rows.push(["STATUS", esc(e.status)]);
     rows.push(["DONO", whoFull]);
@@ -160,7 +248,7 @@ async function claimAndSend(
   pool: Pool,
   projectId: string,
   kind: string,
-  build: (e: ProjectEnrichment) => { subject: string; html: string; text: string },
+  build: (e: ProjectEnrichment) => { subject: string; html: string; text: string } | Promise<{ subject: string; html: string; text: string }>,
 ): Promise<boolean> {
   const to = recipient();
   if (!isSesConfigured() || !to) return false; // gate barato, antes de tocar o DB
@@ -180,7 +268,7 @@ async function claimAndSend(
       console.warn(`[opsNotify] projeto ausente no enrich projectId=${projectId} kind=${kind}`);
       return false;
     }
-    const email = build(e);
+    const email = await build(e);
     const res = await sendEmail({ to, subject: email.subject, html: email.html, text: email.text });
     console.info(`[opsNotify] projectId=${projectId} kind=${kind} delivered=${res.delivered}`);
     return res.delivered;
@@ -207,7 +295,19 @@ export async function notifyFactoryBlocked(
   status: string,
   opts: { reason?: string } = {},
 ): Promise<void> {
-  await claimAndSend(pool, projectId, `block:${status}`, (e) => renderEmail("block", e, { reason: opts.reason }));
+  await claimAndSend(pool, projectId, `block:${status}`, async (e) => {
+    // Sem motivo explícito? Puxa o último passo humano-legível (cyborg/system) como motivo.
+    const reason = opts.reason ?? (await latestBlockReason(pool, projectId)) ?? undefined;
+    return renderEmail("block", e, { reason });
+  });
+}
+
+/** DONE — e-mail de "projeto produzido 100%" (aceito/concluído), idempotente por projeto. */
+export async function notifyFactoryDone(pool: Pool, projectId: string): Promise<void> {
+  await claimAndSend(pool, projectId, "factory_done", async (e) => {
+    const stats = await doneStats(pool, projectId);
+    return renderEmail("done", e, { stats });
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -231,4 +331,20 @@ export function maybeNotifyBlock(pool: Pool, projectId: string, status: string, 
   setImmediate(() => {
     notifyFactoryBlocked(pool, projectId, status, opts).catch(() => {});
   });
+}
+
+/** Agenda o e-mail de DONE sem bloquear — via `maybeNotifyDone` (filtra por `isDoneStatus`). */
+export function scheduleFactoryDone(pool: Pool, projectId: string): void {
+  setImmediate(() => {
+    notifyFactoryDone(pool, projectId).catch(() => {});
+  });
+}
+
+/**
+ * Agenda o e-mail de fechamento (produzido 100%) sem bloquear — só se `status` for
+ * de conclusão real (`accepted`/`completed`/`delivered`). Ponto de entrada dos hooks.
+ */
+export function maybeNotifyDone(pool: Pool, projectId: string, status: string): void {
+  if (!isDoneStatus(status)) return;
+  scheduleFactoryDone(pool, projectId);
 }

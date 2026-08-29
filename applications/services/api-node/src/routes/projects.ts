@@ -20,7 +20,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
-import { scheduleFactoryStart, maybeNotifyBlock } from "../services/opsNotify.js";
+import { scheduleFactoryStart, maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 
@@ -364,6 +364,8 @@ export async function projectRoutes(app: FastifyInstance) {
           maybeNotifyBlock(pool, id, status, {
             reason: typeof blockedReason === "string" ? blockedReason : undefined,
           });
+          // …e "produzido 100%" quando o runner reporta accepted/completed via este PATCH.
+          maybeNotifyDone(pool, id, status);
         }
 
         // Disparar gatilhos se status mudou para completed
@@ -654,6 +656,8 @@ export async function projectRoutes(app: FastifyInstance) {
          WHERE id = $3`,
         ["accepted", JSON.stringify({ accepted_by: acceptedBy, ...(evidence ? { accepted_evidence: evidence } : {}) }), id]
       );
+      // Notificação ops (fire-and-forget): projeto produzido 100% (aceite explícito).
+      scheduleFactoryDone(pool, id);
       const updated = await client.query(
         "SELECT id, status, updated_at, product_id, title FROM projects WHERE id = $1",
         [id]

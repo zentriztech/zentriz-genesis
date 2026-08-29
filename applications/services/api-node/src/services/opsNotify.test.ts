@@ -14,7 +14,9 @@ vi.mock("./emailSender.js", () => ({
 import {
   notifyFactoryStart,
   notifyFactoryBlocked,
+  notifyFactoryDone,
   isBlockStatus,
+  isDoneStatus,
 } from "./opsNotify.js";
 
 /**
@@ -41,6 +43,12 @@ function makeFakePool() {
     }
     if (sql.includes("FROM projects p")) {
       return { rowCount: 1, rows: [enrichRow] };
+    }
+    if (sql.includes("tasks_total")) {
+      return { rowCount: 1, rows: [{ tasks_total: 15, tasks_done: 15, duration_sec: 4200 }] };
+    }
+    if (sql.includes("from_agent IN")) {
+      return { rowCount: 1, rows: [{ summary_human: "deploy S3 bloqueado: tenant sem GitHub App" }] };
     }
     return { rowCount: 0, rows: [] };
   });
@@ -98,6 +106,47 @@ describe("notifyFactoryBlocked — idempotência por status", () => {
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
     await notifyFactoryBlocked(pool, "proj-1", "blocked_structural_gate");
     expect(sendEmailMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("isDoneStatus", () => {
+  it("reconhece accepted/completed/delivered", () => {
+    expect(isDoneStatus("accepted")).toBe(true);
+    expect(isDoneStatus("completed")).toBe(true);
+    expect(isDoneStatus("delivered")).toBe(true);
+  });
+  it("ignora estados não-finais", () => {
+    expect(isDoneStatus("running")).toBe(false);
+    expect(isDoneStatus("blocked_cyborg")).toBe(false);
+    expect(isDoneStatus("failed")).toBe(false);
+  });
+});
+
+describe("notifyFactoryDone — produzido 100%", () => {
+  it("envia UM e-mail no fechamento e nada no segundo (idempotente)", async () => {
+    const { pool } = makeFakePool();
+    await notifyFactoryDone(pool, "proj-1");
+    await notifyFactoryDone(pool, "proj-1");
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("o corpo traz tarefas concluídas, duração e o tenant", async () => {
+    const { pool } = makeFakePool();
+    await notifyFactoryDone(pool, "proj-1");
+    const arg = sendEmailMock.mock.calls[0][0];
+    expect(arg.subject).toContain("produzido");
+    expect(arg.html).toContain("15/15");
+    expect(arg.html).toContain("1h10m"); // 4200s
+    expect(arg.html).toContain("CABRAL");
+  });
+});
+
+describe("notifyFactoryBlocked — motivo automático", () => {
+  it("sem reason explícito, puxa o último passo humano-legível como MOTIVO", async () => {
+    const { pool } = makeFakePool();
+    await notifyFactoryBlocked(pool, "proj-1", "blocked_cyborg");
+    const arg = sendEmailMock.mock.calls[0][0];
+    expect(arg.html).toContain("tenant sem GitHub App");
   });
 });
 
