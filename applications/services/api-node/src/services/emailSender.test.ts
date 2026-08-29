@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { isSesConfigured, sendEmail, renderVerificationEmail, SES_SENDER } from "./emailSender.js";
+import { isSesConfigured, sendEmail, renderVerificationEmail, SES_SENDER, buildRawMime } from "./emailSender.js";
 
 describe("emailSender — modo teste (SES OFF) e template", () => {
   it("isSesConfigured é false em NODE_ENV=test (nunca envia em teste)", () => {
@@ -25,6 +25,65 @@ describe("emailSender — modo teste (SES OFF) e template", () => {
     expect(subject).toContain("Zentriz Genesis");
     expect(html).toContain("123456");
     expect(text).toContain("123456");
+  });
+});
+
+describe("buildRawMime — MIME cru com anexo", () => {
+  const pdf = Buffer.from("%PDF-1.7\n...bytes...", "utf8");
+  const mime = buildRawMime({
+    from: "no-reply@zentriz.com.br",
+    to: "cliente@exemplo.com",
+    cc: ["copia@exemplo.com"],
+    subject: "Configurações da sua conta — açaí, ção, 🚀",
+    html: "<b>olá — configuração</b>",
+    text: "olá",
+    attachments: [{ filename: "guia.pdf", content: pdf, contentType: "application/pdf" }],
+  }).toString("utf8");
+
+  it("tem multipart/mixed e multipart/alternative com boundaries", () => {
+    expect(mime).toContain("Content-Type: multipart/mixed; boundary=");
+    expect(mime).toContain("Content-Type: multipart/alternative; boundary=");
+  });
+
+  it("codifica o Subject não-ASCII como encoded-word RFC 2047 (=?UTF-8?B?)", () => {
+    const line = mime.split("\r\n").find((l) => l.startsWith("Subject:")) ?? "";
+    expect(line).toContain("=?UTF-8?B?");
+    // O assunto cru (com acento/emoji) NÃO aparece em claro.
+    expect(mime).not.toContain("Configurações da sua conta — açaí");
+  });
+
+  it("preserva From/To/Cc e a disposição do anexo", () => {
+    expect(mime).toContain("From: no-reply@zentriz.com.br");
+    expect(mime).toContain("To: cliente@exemplo.com");
+    expect(mime).toContain("Cc: copia@exemplo.com");
+    expect(mime).toContain("Content-Type: application/pdf; name=\"guia.pdf\"");
+    expect(mime).toContain("Content-Disposition: attachment; filename=\"guia.pdf\"");
+  });
+
+  it("remove CR/LF de To/Cc (anti header-injection)", () => {
+    const injected = buildRawMime({
+      from: "no-reply@zentriz.com.br",
+      to: "vitima@x.com\r\nBcc: atacante@evil.com",
+      cc: ["c@x.com\r\nX-Evil: 1"],
+      subject: "oi",
+      html: "<b>x</b>",
+      attachments: [{ filename: "g.pdf", content: Buffer.from("%PDF"), contentType: "application/pdf" }],
+    }).toString("utf8");
+    // O CR/LF injetado é removido → o payload malicioso NÃO vira uma nova linha de cabeçalho.
+    expect(injected).not.toContain("\r\nBcc: atacante@evil.com");
+    expect(injected).not.toContain("\r\nX-Evil: 1");
+    expect(injected).toContain("To: vitima@x.comBcc: atacante@evil.com");
+  });
+
+  it("o HTML e o PDF vão em base64 e decodificam de volta ao original", () => {
+    // Extrai o bloco base64 logo após o cabeçalho do anexo PDF.
+    const idx = mime.indexOf("Content-Disposition: attachment");
+    const after = mime.slice(idx);
+    const b64 = after.split("\r\n\r\n")[1].split("\r\n--")[0].replace(/\r\n/g, "");
+    expect(Buffer.from(b64, "base64").toString("utf8")).toContain("%PDF-1.7");
+    // HTML com acento: base64 evita corromper UTF-8.
+    const htmlB64 = Buffer.from("<b>olá — configuração</b>", "utf8").toString("base64");
+    expect(mime).toContain(htmlB64);
   });
 });
 

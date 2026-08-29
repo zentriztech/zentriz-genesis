@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<style>
+  @page {
+    size: A4;
+    margin: 20mm 18mm 18mm 18mm;
+    @bottom-center {
+      content: "Zentriz Genesis — Guia de Configurações  ·  página " counter(page) " de " counter(pages);
+      font-family: "DejaVu Sans", sans-serif; font-size: 8pt; color: #7a869a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; color: #1c2733; font-size: 10.5pt; line-height: 1.5; margin: 0; }
+  h1 { font-size: 21pt; margin: 0 0 2mm 0; color: #0f1b2d; }
+  h2 { font-size: 13.5pt; margin: 7mm 0 2mm 0; color: #0f1b2d; padding-bottom: 1.5mm; border-bottom: 2px solid #17b3a3; }
+  h3 { font-size: 11.5pt; margin: 4mm 0 1mm 0; color: #12324f; }
+  p { margin: 0 0 2.5mm 0; }
+  ul { margin: 0 0 2.5mm 0; padding-left: 5mm; }
+  li { margin: 0 0 1mm 0; }
+  code, .path { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; background: #eef3f7; padding: 0.5mm 1.2mm; border-radius: 2px; color: #0b3d5c; }
+  .cover { background: #0f1b2d; color: #eaf2f8; padding: 14mm 12mm; border-radius: 3mm; margin-bottom: 8mm; }
+  .cover .brand { font-size: 10pt; letter-spacing: 3px; color: #17b3a3; text-transform: uppercase; margin-bottom: 3mm; }
+  .cover h1 { color: #ffffff; font-size: 26pt; }
+  .cover .sub { color: #aebfce; font-size: 11pt; margin-top: 2mm; }
+  .lead { font-size: 11pt; color: #37475a; }
+  .essential { border-left: 4px solid #17b3a3; background: #f3faf9; padding: 4mm 5mm; margin: 3mm 0 5mm 0; border-radius: 0 2mm 2mm 0; page-break-inside: avoid; }
+  .essential h2 { border: none; margin-top: 0; color: #0b6b60; }
+  .tag { display: inline-block; font-size: 7.5pt; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; padding: 0.8mm 2mm; border-radius: 2px; vertical-align: middle; }
+  .tag-ess { background: #17b3a3; color: #ffffff; }
+  .warn { background: #fff4e5; border: 1px solid #f0c27b; border-radius: 2mm; padding: 3mm 4mm; margin: 2mm 0 3mm 0; font-size: 9.5pt; color: #7a4b00; page-break-inside: avoid; }
+  .warn b { color: #a33a00; }
+  table { width: 100%; border-collapse: collapse; margin: 2mm 0 3mm 0; font-size: 9pt; }
+  th, td { text-align: left; padding: 1.6mm 2.5mm; border-bottom: 1px solid #dbe3ec; vertical-align: top; }
+  th { background: #12324f; color: #ffffff; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:nth-child(even) td { background: #f6f9fc; }
+  .step { background: #eef3f7; border-radius: 2mm; padding: 3mm 4mm; margin: 2mm 0; font-size: 9.5pt; }
+  .muted { color: #6b7a8d; font-size: 9pt; }
+  .section-intro { color: #37475a; margin-bottom: 3mm; }
+  .avoid { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="brand">Zentriz Genesis</div>
+  <h1>Guia de Configurações</h1>
+  <div class="sub">Como preparar sua conta para gerar, publicar e operar aplicações com autonomia total.</div>
+</div>
+
+<p class="lead">O Genesis constrói o seu produto de ponta a ponta — da especificação ao código, testes, publicação e monitoramento. Para que a fábrica trabalhe <b>com as suas próprias credenciais</b> (seu provedor de IA, sua nuvem, seus repositórios), há um conjunto de <b>Configurações</b> na plataforma. Este guia explica cada uma: o que é, para que serve e como configurar.</p>
+
+<p>Todas ficam no menu lateral, dentro do grupo <b>Configuração</b> (ícone de engrenagem). As três primeiras são <b>essenciais</b> para um bom uso da plataforma — comece por elas, nesta ordem.</p>
+
+<h2>As três configurações essenciais</h2>
+<p class="section-intro">Sem elas o Genesis ainda funciona com os recursos de cortesia da Zentriz, mas você não terá autonomia completa — e a publicação automática do seu produto pode não acontecer.</p>
+
+<div class="essential avoid">
+  <h2>1. LLM / IA <span class="tag tag-ess">Essencial</span></h2>
+  <p><b>O que é:</b> define qual provedor e modelos de Inteligência Artificial o Genesis usa para raciocinar e gerar o seu código.</p>
+  <p><b>Para que serve:</b> dá a você controle e previsibilidade de custo e capacidade — a fábrica passa a consumir a <b>sua</b> conta de IA, com o modelo que você escolher. Você define 1 provedor <b>Padrão</b> e até 3 <b>Contingências</b> (usadas automaticamente se o principal falhar).</p>
+  <p><b>Provedores suportados e credenciais:</b></p>
+  <table>
+    <tr><th>Provedor</th><th>Credenciais necessárias</th></tr>
+    <tr><td><b>AWS Bedrock</b></td><td>Access Key ID, Secret Access Key, Região</td></tr>
+    <tr><td><b>OpenAI (GPT)</b></td><td>API Key</td></tr>
+    <tr><td><b>Anthropic (API direta)</b></td><td>API Key (<code>sk-ant-…</code>)</td></tr>
+    <tr><td><b>Azure OpenAI</b></td><td>API Key, Endpoint, Deployment name, API version</td></tr>
+  </table>
+  <p><b>Como configurar:</b></p>
+  <div class="step">Menu <span class="path">Configuração › LLM / IA</span> → <b>Adicionar</b> → escolha o provedor → informe as credenciais → escolha o <b>Modelo principal</b> (e, opcionalmente, um modelo de <i>fallback</i> para retrabalho/QA e um modelo dedicado ao Cyborg, a etapa final de lapidação e entrega) → salvar. Nos limites globais você pode definir projetos simultâneos e cota diária de tokens.</p>
+  <div class="warn"><b>Se não configurar:</b> o Genesis usa o provedor padrão da Zentriz (pool de cortesia) e consome os seus <b>créditos de cortesia</b>. O build não quebra, mas você não controla modelo nem custo.</div>
+</div>
+
+<div class="essential avoid">
+  <h2>2. Cloud Deploy <span class="tag tag-ess">Essencial</span></h2>
+  <p><b>O que é:</b> as credenciais da sua nuvem, para o Genesis <b>publicar o produto automaticamente</b> após a geração do código.</p>
+  <p><b>Para que serve:</b> ao aceitar um projeto, o Genesis injeta essas credenciais como <i>secrets</i> no repositório e gera o fluxo de deploy (<span class="path">deploy.yml</span>) — o seu app sobe sozinho. Suporta 1 conexão Principal + fallbacks. As credenciais são criptografadas (AES‑256‑GCM).</p>
+  <p><b>Provedores suportados e credenciais:</b></p>
+  <table>
+    <tr><th>Provedor</th><th>Credenciais necessárias (obrigatórias)</th></tr>
+    <tr><td><b>AWS</b> (ECS Fargate / ECR)</td><td>Access Key ID, Secret Access Key, Região — (opc.: ECR Registry, ECS Cluster)</td></tr>
+    <tr><td><b>Azure</b> (Container Apps / ACR)</td><td>Client ID, Client Secret, Subscription ID, Tenant ID — (opc.: Resource Group, Container App)</td></tr>
+    <tr><td><b>GCP</b> (Cloud Run / GCR)</td><td>Service Account Key (JSON), Project ID — (opc.: Região, Service name)</td></tr>
+  </table>
+  <p class="muted">GCP: a Service Account precisa dos papéis Cloud Run Admin, Storage Admin e Artifact Registry Writer.</p>
+  <p><b>Como configurar:</b></p>
+  <div class="step">Menu <span class="path">Configuração › Cloud Deploy</span> → <b>Conectar Cloud</b> → escolha o provedor → preencha as credenciais → use <b>Testar</b> para validar antes de salvar.</div>
+  <div class="warn"><b>Se não configurar:</b> o repositório é criado e o código é enviado, mas <b>não há deploy automático</b> — nenhum secret é injetado e o fluxo de publicação não é gerado. Você teria que publicar manualmente.</div>
+</div>
+
+<div class="essential avoid">
+  <h2>3. GitHub <span class="tag tag-ess">Essencial</span></h2>
+  <p><b>O que é:</b> a conexão com o <b>GitHub App da Zentriz</b> instalado na sua organização, para o Genesis (e o Auto Care) criarem repositórios, fazerem commits e abrirem PRs no seu GitHub.</p>
+  <p><b>Para que serve:</b> é o que permite entregar o código no <b>seu</b> repositório. Sem ela, o produto é gerado mas não chega ao GitHub.</p>
+  <p><b>Campos necessários:</b></p>
+  <ul>
+    <li><b>Installation ID</b> — obtido em <span class="path">github.com/organizations/&lt;sua-org&gt;/settings/installations</span>.</li>
+    <li><b>App ID</b> — identificador do App.</li>
+    <li><b>Chave Privada</b> — o conteúdo do arquivo <span class="path">.pem</span> do App (criptografado no servidor antes de gravar).</li>
+  </ul>
+  <p><b>Como configurar:</b></p>
+  <div class="step">Menu <span class="path">Configuração › GitHub</span> → <b>Conectar GitHub App</b> → informe Installation ID, App ID e a Chave Privada → salvar. A tela passa a mostrar a organização, os repositórios autorizados e a data de instalação.</div>
+  <div class="warn"><b>Atenção — permissão de criação de repositório:</b> o GitHub App precisa da permissão <b>“Administration: Read &amp; write”</b> na sua organização. Sem ela, a criação do repositório falha com erro <b>HTTP 403 “Resource not accessible by integration”</b> e o produto — mesmo 100% pronto e com build verde — <b>não é publicado</b>. Se isso acontecer, o administrador da organização deve conceder essa permissão ao App (e reprocessar o projeto). Sem o App instalado, o Genesis nem cria o repositório e avisa no histórico do projeto.</div>
+</div>
+
+<h2>As demais configurações</h2>
+<p class="section-intro">Opcionais ou específicas — configure conforme a necessidade do seu produto e da sua operação.</p>
+
+<h3>Deployments</h3>
+<p>Lista e gerencia as publicações: <b>Preview S3</b> (estáticos efêmeros, com expiração — excluíveis aqui) e <b>Backend durável</b> (runtime monitorado pelo Auto Care, apenas visualização). <span class="path">Configuração › Deployments</span></p>
+
+<h3>Skill Store</h3>
+<p>Curadoria do conhecimento dos agentes — os fragmentos que compõem o comportamento de cada papel (Dev, QA, PM, DevOps, Engenheiro, Cyborg). Administradores podem promover, depreciar ou restaurar habilidades. <span class="path">Configuração › Skill Store</span></p>
+
+<h3>Ferramentas UI/UX (Figma / Canva)</h3>
+<p>Conecta suas contas de design para o Genesis extrair definições visuais ao especificar telas. <b>Figma:</b> Access Token (<code>figd_…</code>) e Team ID. <b>Canva:</b> token OAuth ou conexão em 1 clique. Até 6 conexões, criptografadas. <span class="path">Configuração › Ferramentas UI/UX</span></p>
+
+<h3>Telegram</h3>
+<p>Vincula sua conta ao bot <code>@zgenezis_bot</code> para receber notificações e controlar pipelines pelo celular. A vinculação é por usuário, via um código temporário. <span class="path">Configuração › Telegram</span></p>
+
+<h3>Runtime Config <span class="muted">(administradores)</span></h3>
+<p>Ajustes finos de execução por tenant: timeouts por agente, limites de iteração e limites de tokens. Cada parâmetro pode sobrescrever o padrão global; “restaurar” volta ao padrão. <span class="path">Configuração › Runtime Config</span></p>
+
+<h3>Usuários</h3>
+<p>Gestão dos membros da sua organização e seus papéis (<code>user</code>, <code>tenant_admin</code>). Convide, edite papéis e remova acessos. <span class="path">Configuração › Usuários</span></p>
+
+<h3>Plano e uso</h3>
+<p>Mostra o plano atual, projetos ativos versus limite e o saldo do <b>crédito de cortesia</b>. Informativo. <span class="path">Configuração › Plano e uso</span></p>
+
+<h2>Ordem recomendada</h2>
+<div class="step avoid">
+  <b>1.</b> <b>GitHub</b> — conecte o App (com permissão de criação de repositório) para o código ser entregue.<br>
+  <b>2.</b> <b>Cloud Deploy</b> — conecte sua nuvem para o produto subir sozinho.<br>
+  <b>3.</b> <b>LLM / IA</b> — aponte seu provedor de IA para controlar modelo e custo.<br>
+  <b>4.</b> Ajuste o restante (UI/UX, Telegram, Usuários) conforme a necessidade.
+</div>
+
+<p class="muted" style="margin-top:6mm;">Dúvidas ou ajuda para configurar? Fale com a Zentriz — jean@zentriz.com.br. Este guia acompanha a sua ativação na plataforma e reflete as telas atuais do portal.</p>
+
+</body>
+</html>

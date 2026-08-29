@@ -4,6 +4,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { validateEmail } from "../auth.js";
 import { isValidCnpj, normalizeCnpjAlnum } from "../services/cnpjLookup.js";
 import { bustTenantStatus } from "../services/tenantStatusCache.js";
+import { maybeNotifyTenantActivated } from "../services/tenantNotify.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -220,6 +221,8 @@ export async function tenantRoutes(app: FastifyInstance) {
         vals
       );
       const row = result.rows[0];
+      // Onboarding: tenant nascido ativo recebe o guia de Configurações (fire-and-forget, idempotente).
+      maybeNotifyTenantActivated(pool, row.id as string, finalStatus);
       return reply.status(201).send({
         id: row.id,
         name: row.name,
@@ -289,6 +292,9 @@ export async function tenantRoutes(app: FastifyInstance) {
     // F2/H3: mudança manual de status pelo master precisa refletir de imediato no
     // gate de suspensão (senão o cache de status seguraria o valor antigo por ~30s).
     if (status !== undefined) bustTenantStatus(request.params.id);
+    // Onboarding: ativação deliberada (status=active no body) dispara o guia de
+    // Configurações ao responsável (fire-and-forget, idempotente por tenant).
+    maybeNotifyTenantActivated(pool, request.params.id, status);
     return reply.send({
       id: row.id,
       name: row.name,

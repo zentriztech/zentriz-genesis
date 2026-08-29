@@ -15,6 +15,7 @@
  * apenas loga e devolve delivered=false; NÃO lança. Em modo ON, um erro do SES é
  * propagado ao chamador (que decide se vira 502 ao usuário).
  */
+import { randomUUID } from "crypto";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
 
 const REGION = () => (process.env.AWS_SES_REGION ?? "us-east-1").trim();
@@ -55,11 +56,24 @@ export function isSesConfigured(): boolean {
   return true;
 }
 
+/** Anexo de e-mail. `content` são os bytes crus; `contentType` é o MIME (ex.: application/pdf). */
+export type EmailAttachment = {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+};
+
 export type SendEmailInput = {
   to: string;
   subject: string;
   html: string;
   text?: string;
+  /** Cópias visíveis (Cc). */
+  cc?: string[];
+  /** Cópias ocultas (Bcc) — não aparecem no cabeçalho da mensagem. */
+  bcc?: string[];
+  /** Anexos. Se presente(s), a mensagem é enviada como MIME cru (SES Content.Raw). */
+  attachments?: EmailAttachment[];
 };
 
 export type SendEmailResult = {
@@ -67,6 +81,92 @@ export type SendEmailResult = {
   skipped?: boolean;
   messageId?: string;
 };
+
+/** Quebra base64 em linhas de 76 colunas (RFC 2045), separadas por CRLF. */
+function wrapBase64(buf: Buffer): string {
+  const b64 = buf.toString("base64");
+  const lines: string[] = [];
+  for (let i = 0; i < b64.length; i += 76) lines.push(b64.slice(i, i + 76));
+  return lines.join("\r\n");
+}
+
+/**
+ * Cabeçalho RFC 2047: se `s` for ASCII imprimível, devolve como está; senão codifica em
+ * encoded-words base64 (=?UTF-8?B?...?=), dobrando em pedaços < 75 chars e respeitando os
+ * limites de code point (itera por caractere Unicode, nunca corta um multibyte no meio).
+ */
+function encodeHeaderWord(s: string): string {
+  if (/^[\x20-\x7E]*$/.test(s)) return s;
+  const words: string[] = [];
+  let chunk = Buffer.alloc(0);
+  for (const ch of s) {
+    const cb = Buffer.from(ch, "utf8");
+    // 45 bytes de payload -> ~60 chars base64 -> encoded-word < 75 (limite RFC 2047).
+    if (chunk.length > 0 && chunk.length + cb.length > 45) {
+      words.push(`=?UTF-8?B?${chunk.toString("base64")}?=`);
+      chunk = Buffer.alloc(0);
+    }
+    chunk = Buffer.concat([chunk, cb]);
+  }
+  if (chunk.length > 0) words.push(`=?UTF-8?B?${chunk.toString("base64")}?=`);
+  return words.join("\r\n ");
+}
+
+/**
+ * Monta uma mensagem MIME crua (multipart/mixed → alternative[text,html] + anexos).
+ * text/html vão em base64 (Content-Transfer-Encoding: base64), o que evita qualquer
+ * problema com acentos/UTF-8. Exportada para teste unitário do formato.
+ */
+export function buildRawMime(args: {
+  from: string;
+  to: string;
+  cc?: string[];
+  subject: string;
+  html: string;
+  text?: string;
+  attachments: EmailAttachment[];
+}): Buffer {
+  const mixed = `mixed_${randomUUID().replace(/-/g, "")}`;
+  const alt = `alt_${randomUUID().replace(/-/g, "")}`;
+  // Defesa em profundidade: remove CR/LF de valores de cabeçalho (anti header-injection),
+  // mesmo os endereços já vindo validados por validateEmail na escrita.
+  const hdr = (s: string) => s.replace(/[\r\n]/g, "");
+  const L: string[] = [];
+  L.push(`From: ${hdr(args.from)}`);
+  L.push(`To: ${hdr(args.to)}`);
+  if (args.cc && args.cc.length) L.push(`Cc: ${args.cc.map(hdr).join(", ")}`);
+  L.push(`Subject: ${encodeHeaderWord(args.subject)}`);
+  L.push("MIME-Version: 1.0");
+  L.push(`Content-Type: multipart/mixed; boundary="${mixed}"`);
+  L.push("");
+  L.push(`--${mixed}`);
+  L.push(`Content-Type: multipart/alternative; boundary="${alt}"`);
+  L.push("");
+  L.push(`--${alt}`);
+  L.push("Content-Type: text/plain; charset=UTF-8");
+  L.push("Content-Transfer-Encoding: base64");
+  L.push("");
+  L.push(wrapBase64(Buffer.from(args.text ?? "", "utf8")));
+  L.push(`--${alt}`);
+  L.push("Content-Type: text/html; charset=UTF-8");
+  L.push("Content-Transfer-Encoding: base64");
+  L.push("");
+  L.push(wrapBase64(Buffer.from(args.html, "utf8")));
+  L.push(`--${alt}--`);
+  for (const a of args.attachments) {
+    // filename saneado (sem aspas/CR/LF) para não quebrar o cabeçalho.
+    const fn = a.filename.replace(/["\r\n]/g, "_");
+    L.push(`--${mixed}`);
+    L.push(`Content-Type: ${a.contentType}; name="${fn}"`);
+    L.push("Content-Transfer-Encoding: base64");
+    L.push(`Content-Disposition: attachment; filename="${fn}"`);
+    L.push("");
+    L.push(wrapBase64(a.content));
+  }
+  L.push(`--${mixed}--`);
+  L.push("");
+  return Buffer.from(L.join("\r\n"), "utf8");
+}
 
 /**
  * Envia um e-mail. Em modo OFF (teste/SES_ENABLED=false) apenas loga e retorna
@@ -82,10 +182,40 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     return { delivered: false, skipped: true };
   }
 
+  const cc = (input.cc ?? []).map((s) => s.trim()).filter(Boolean);
+  const bcc = (input.bcc ?? []).map((s) => s.trim()).filter(Boolean);
+  const destination = {
+    ToAddresses: [to],
+    ...(cc.length ? { CcAddresses: cc } : {}),
+    ...(bcc.length ? { BccAddresses: bcc } : {}),
+  };
+
+  // Com anexo(s): MIME cru (Content.Raw). SES usa o Destination como envelope de entrega,
+  // então o Bcc não vaza no cabeçalho (não o incluímos no MIME).
+  if (input.attachments && input.attachments.length > 0) {
+    const raw = buildRawMime({
+      from: SES_SENDER(),
+      to,
+      cc,
+      subject: input.subject,
+      html: input.html,
+      text: input.text,
+      attachments: input.attachments,
+    });
+    const out = await sesClient().send(
+      new SendEmailCommand({
+        FromEmailAddress: SES_SENDER(),
+        Destination: destination,
+        Content: { Raw: { Data: raw } },
+      }),
+    );
+    return { delivered: true, messageId: out.MessageId };
+  }
+
   const out = await sesClient().send(
     new SendEmailCommand({
       FromEmailAddress: SES_SENDER(),
-      Destination: { ToAddresses: [to] },
+      Destination: destination,
       Content: {
         Simple: {
           Subject: { Data: input.subject, Charset: "UTF-8" },

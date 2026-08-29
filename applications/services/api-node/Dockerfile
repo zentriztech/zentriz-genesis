@@ -22,6 +22,8 @@ COPY --from=builder /app/src/db/migrations ./dist/db/migrations
 # T-16: policies.json (gerado do YAML via prebuild) precisa estar no runtime para
 # /api/internal/policies/list + skill-store bundle_hash + reports/type-compliance.
 COPY --from=builder /app/src/generated ./dist/generated
+# Assets estáticos (ex.: guia de Configurações em PDF) usados por tenantNotify no runtime.
+COPY --from=builder /app/src/assets ./dist/assets
 
 ENV NODE_ENV=production
 ENV PORT=3000
