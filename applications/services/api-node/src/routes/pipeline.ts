@@ -6,6 +6,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { signToken } from "../auth.js";
 import { claimSlotOrQueue, revertSlotClaim, getTenantLlmConfig } from "../services/tenantLlmConfig.js";
 import { checkDependencyGate } from "../services/dependencyGate.js";
+import { checkSpecContentReady } from "../services/specContentGate.js";
 import { graduateFromInbox, demoteToInbox } from "../services/inbox.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
@@ -141,6 +142,25 @@ export async function pipelineRoutes(app: FastifyInstance) {
           message: "Adicione uma spec em Markdown ao projeto para iniciar o pipeline.",
         });
       }
+      // Gate de CONTEÚDO (incidente Cabral 2026-08-29): barra spec-template/placeholder ANTES de
+      // reservar slot e chamar o runner — custo ZERO de LLM. Mensagem acionável ao usuário.
+      try {
+        const { readFileSync } = await import("fs");
+        const specText = readFileSync(specFilePath).toString("utf8");
+        const contentGate = checkSpecContentReady(specText);
+        if (!contentGate.ok) {
+          request.log.warn(
+            { projectId, signals: contentGate.block.signals },
+            "[Pipeline] Bloqueado pelo gate de conteúdo (spec ainda é template/placeholder)"
+          );
+          return reply.status(422).send(contentGate.block);
+        }
+      } catch (err) {
+        // Falha ao ler o arquivo não bloqueia aqui — a checagem de existência acima já cobre
+        // ausência de spec; o validador de intake do runner cobre o restante.
+        request.log.warn({ projectId, err: String(err) }, "[Pipeline] Gate de conteúdo: falha ao ler spec (ignorado)");
+      }
+
       request.log.info({ projectId, specPath: specFilePath.slice(0, 120) }, "[Pipeline] Spec encontrada, disparando runner");
 
       // G38: Resolve LLM config do tenant (usa conta própria se configurada)

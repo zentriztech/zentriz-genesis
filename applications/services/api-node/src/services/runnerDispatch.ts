@@ -10,6 +10,7 @@
  */
 import type { Pool } from "pg";
 import { checkDependencyGate } from "./dependencyGate.js";
+import { checkSpecContentReady } from "./specContentGate.js";
 import { claimSlotOrQueue, revertSlotClaim } from "./tenantLlmConfig.js";
 
 const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed"]);
@@ -47,6 +48,21 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   );
   const specPath = specRes.rows[0]?.file_path as string | undefined;
   if (!specPath) return { projectId, dispatched: false, reason: "spec não encontrada" };
+
+  // Gate de CONTEÚDO (incidente Cabral 2026-08-29): barra spec-template/placeholder ANTES de
+  // reservar slot e chamar o runner — custo ZERO de LLM. Sem isto, um template em branco roda a
+  // fábrica inteira e termina em `blocked_backlog_empty_with_frs` sem tarefas.
+  try {
+    const { readFileSync } = await import("fs");
+    const specText = readFileSync(specPath).toString("utf8");
+    const contentGate = checkSpecContentReady(specText);
+    if (!contentGate.ok) {
+      return { projectId, dispatched: false, reason: `${contentGate.block.code}: ${contentGate.block.signals.join(",")}` };
+    }
+  } catch {
+    // Falha ao ler o arquivo não bloqueia aqui — ausência de spec já é tratada acima e o
+    // validador de intake do runner cobre o resto.
+  }
 
   // RFC-0003 (C2): claim ATÔMICO de slot de concorrência antes de disparar (fecha o TOCTOU
   // do fan-out — promover N raízes de um produto de uma vez). Sem tenant (projeto solto),
