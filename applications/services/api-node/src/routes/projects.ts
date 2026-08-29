@@ -20,6 +20,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
+import { scheduleFactoryStart, maybeNotifyBlock } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 
@@ -354,6 +355,17 @@ export async function projectRoutes(app: FastifyInstance) {
           values
         );
 
+        // Notificação ops (fire-and-forget): projeto bloqueou/falhou. O runner reporta os
+        // blocks via este PATCH (blocked_backlog_empty_with_frs, blocked_structural_gate,
+        // spec_validation_failed, failed…). O `blocked_reason` é enviado pelo runner mas NÃO
+        // faz parte do body tipado — lido direto. `maybeNotifyBlock` filtra o que é erro real.
+        if (status !== undefined) {
+          const blockedReason = (request.body as { blocked_reason?: unknown } | undefined)?.blocked_reason;
+          maybeNotifyBlock(pool, id, status, {
+            reason: typeof blockedReason === "string" ? blockedReason : undefined,
+          });
+        }
+
         // Disparar gatilhos se status mudou para completed
         if (status === "completed") {
           setImmediate(async () => {
@@ -372,6 +384,7 @@ export async function projectRoutes(app: FastifyInstance) {
                   const python = process.env.PYTHON_BIN ?? "python3";
                   spawn(python, [runnerPath, String(t.project_id)], { detached: true, stdio: "ignore" }).unref();
                   await pool.query("UPDATE projects SET status='running', updated_at=NOW() WHERE id=$1", [t.project_id]);
+                  scheduleFactoryStart(pool, String(t.project_id), { origin: "trigger" });
                   console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho completed ${id}`);
                 }
               }
@@ -844,6 +857,8 @@ export async function projectRoutes(app: FastifyInstance) {
         );
         // A2: projeto travado por Cyborg → produto vai a stalled_waiting_human (onda travada).
         await recomputeProductLifecycle(client, productId);
+        // Notificação ops (fire-and-forget): escrita direta no DB (não passa pelo PATCH).
+        maybeNotifyBlock(pool, id, "blocked_cyborg", { reason });
         return reply.send({ ok: true, status: "blocked_cyborg", cyborgAttempts: newAttempts, retrying: false });
       }
       void projectType;
@@ -864,6 +879,8 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       // A2: rejeição humana → produto vai a failed (falha dura de uma onda).
       await recomputeProductLifecycle(client, productId);
+      // Notificação ops (fire-and-forget): escrita direta no DB (não passa pelo PATCH).
+      maybeNotifyBlock(pool, id, "failed", { reason });
       // Notificação push Telegram — fire-and-forget
       setImmediate(async () => {
         try {
@@ -2887,6 +2904,7 @@ export async function projectRoutes(app: FastifyInstance) {
           const child = spawn(python, [runnerPath, id], { detached: true, stdio: "ignore" });
           child.unref();
           await client.query("UPDATE projects SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
+          scheduleFactoryStart(pool, id, { origin: "interactive" });
         }
         return reply.send({ ok: true, projectId: id });
       } finally {

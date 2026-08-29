@@ -12,6 +12,7 @@ import type { Pool } from "pg";
 import { checkDependencyGate } from "./dependencyGate.js";
 import { checkSpecContentReady } from "./specContentGate.js";
 import { claimSlotOrQueue, revertSlotClaim } from "./tenantLlmConfig.js";
+import { scheduleFactoryStart } from "./opsNotify.js";
 
 const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed"]);
 
@@ -105,6 +106,7 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
       signal: AbortSignal.timeout(15000),
     });
     if (res.ok || res.status === 409) {
+      scheduleFactoryStart(pool, projectId, { origin: "cascade" });
       return { projectId, dispatched: true };
     }
     const txt = await res.text().catch(() => "");

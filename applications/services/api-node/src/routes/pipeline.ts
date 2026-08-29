@@ -8,6 +8,7 @@ import { claimSlotOrQueue, revertSlotClaim, getTenantLlmConfig } from "../servic
 import { checkDependencyGate } from "../services/dependencyGate.js";
 import { checkSpecContentReady } from "../services/specContentGate.js";
 import { graduateFromInbox, demoteToInbox } from "../services/inbox.js";
+import { scheduleFactoryStart } from "../services/opsNotify.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -260,6 +261,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
           "UPDATE projects SET status = $1, started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $2",
           ["running", projectId]
         );
+        scheduleFactoryStart(pool, projectId, { origin: "interactive" });
         return reply.status(202).send({
           ok: true,
           message: "Pipeline iniciado. O diálogo será atualizado em breve.",
@@ -295,6 +297,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
               "UPDATE projects SET status = $1, started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $2",
               ["running", projectId]
             );
+            scheduleFactoryStart(pool, projectId, { origin: "interactive" });
             request.log.info({ projectId }, "[Pipeline] Runner iniciado com sucesso (202)");
             return reply.status(202).send({
               ok: true,

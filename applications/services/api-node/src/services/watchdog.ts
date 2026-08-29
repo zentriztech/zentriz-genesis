@@ -13,6 +13,7 @@
 
 import { pool } from "../db/client.js";
 import { signToken } from "../auth.js";
+import { maybeNotifyBlock } from "./opsNotify.js";
 
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.WATCHDOG_INTERVAL_MS ?? "60000", 10);
 const MAX_RESTART_ATTEMPTS  = parseInt(process.env.WATCHDOG_MAX_RESTARTS ?? "5", 10);
@@ -151,6 +152,13 @@ async function markProject(
         [status, id],
       );
     }
+    // Notificação ops (fire-and-forget): o watchdog marca `failed` por escrita DIRETA no DB
+    // (timeout/gave-up/max-restart), sem passar pelo PATCH — sem este hook, TODA falha
+    // auto-detectada passaria silenciosa. `maybeNotifyBlock` filtra o que é bloqueio/falha real.
+    const reason = opts?.extra
+      ? Object.keys(opts.extra).filter((k) => opts.extra![k] === true).join(", ") || undefined
+      : undefined;
+    maybeNotifyBlock(pool, id, status, { reason: reason ? `watchdog: ${reason}` : undefined });
   } finally {
     client.release();
   }
