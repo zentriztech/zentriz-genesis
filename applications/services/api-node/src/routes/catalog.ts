@@ -44,6 +44,28 @@ export async function catalogRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/catalog/:slug — item completo INCLUINDO o template_markdown, para o preview
+  // "Ver/Ler" na Bancada. A listagem (GET /api/catalog) omite o markdown por volume; aqui
+  // servimos o conteúdo integral de UM template para renderização (read-only, entre tenants).
+  // Registrado ANTES de :slug/use e depois de /categories (rota estática vence a dinâmica).
+  app.get<{ Params: { slug: string } }>("/api/catalog/:slug", async (request, reply) => {
+    const slug = (request.params.slug ?? "").trim();
+    const client = await pool.connect();
+    try {
+      const row = (await client.query(
+        `SELECT slug, title, category, description, tags, template_markdown
+           FROM spec_catalog WHERE slug = $1`,
+        [slug],
+      )).rows[0];
+      if (!row) {
+        return reply.status(404).send({ code: "NOT_FOUND", message: "Template não encontrado no catálogo" });
+      }
+      return reply.send(row);
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/catalog/categories — categorias distintas com contagem
   app.get("/api/catalog/categories", async (_request, reply) => {
     const client = await pool.connect();

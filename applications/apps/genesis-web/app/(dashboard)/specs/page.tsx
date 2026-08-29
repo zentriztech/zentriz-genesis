@@ -13,6 +13,7 @@
 import { observer } from "mobx-react-lite";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -48,6 +49,9 @@ import SearchIcon from "@mui/icons-material/Search";
 import SearchOffIcon from "@mui/icons-material/SearchOff";
 import ViewListIcon from "@mui/icons-material/ViewList";
 import ViewKanbanIcon from "@mui/icons-material/ViewKanban";
+import MenuBookOutlinedIcon from "@mui/icons-material/MenuBookOutlined";
+import CloseIcon from "@mui/icons-material/Close";
+import IconButton from "@mui/material/IconButton";
 import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
@@ -80,6 +84,24 @@ interface CatalogItem {
   description: string;
   tags: string[];
 }
+// Detalhe do catálogo (GET /api/catalog/:slug) — inclui o markdown para o preview "Ver/Ler".
+interface CatalogDetail extends CatalogItem {
+  template_markdown: string;
+}
+
+// react-markdown + GFM carregados sob demanda (mesmo padrão do DocViewerModal): só quando o
+// usuário abre o preview de um template, sem pesar o bundle da Bancada.
+const CatalogMarkdown = dynamic(
+  () => Promise.all([import("react-markdown"), import("remark-gfm")])
+    .then(([md, gfm]) => {
+      const Comp = ({ children }: { children: string }) =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (md.default as any)({ remarkPlugins: [gfm.default], children });
+      Comp.displayName = "CatalogMarkdownGFM";
+      return { default: Comp };
+    }),
+  { ssr: false },
+);
 interface ProductOption { id: string; name: string; is_inbox?: boolean }
 
 function formatDate(s: string): string {
@@ -593,6 +615,10 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
   const [category, setCategory] = useState<string>("");
   const [query, setQuery] = useState("");
   const [usingSlug, setUsingSlug] = useState<string | null>(null);
+  // Preview "Ver/Ler": guarda o slug aberto, o detalhe carregado e o estado de carga.
+  const [previewSlug, setPreviewSlug] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<CatalogDetail | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   // Conta de gestão só navega o catálogo (visualização); "Usar" é autoria (403 no backend).
   const isMaster = authStore.isZentrizAdmin;
 
@@ -636,6 +662,23 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
       return haystack.includes(q);
     });
   }, [items, category, query]);
+
+  // Abre o preview do template e busca o markdown completo (GET /api/catalog/:slug).
+  // Disponível a TODOS (inclusive gestão) — é leitura, não autoria.
+  const openPreview = async (slug: string) => {
+    setPreviewSlug(slug);
+    setPreviewData(null);
+    setPreviewLoading(true);
+    try {
+      const d = await apiGet<CatalogDetail>(`/api/catalog/${slug}`);
+      setPreviewData(d);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao carregar o modelo");
+      setPreviewSlug(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
   const use = async (slug: string) => {
     setUsingSlug(slug);
@@ -760,20 +803,86 @@ function Catalog({ router }: { router: ReturnType<typeof useRouter> }) {
                     </Stack>
                   )}
                 </CardContent>
-                {!isMaster && (
-                  <Box sx={{ px: 2, pb: 2, pt: 0.5 }}>
-                    <Button size="small" variant="contained" fullWidth
+                <Box sx={{ px: 2, pb: 2, pt: 0.5, display: "flex", gap: 1 }}>
+                  {/* Ver/Ler: preview do conteúdo do template — disponível a TODOS (leitura) */}
+                  <Button size="small" variant="outlined"
+                    sx={{ flex: isMaster ? 1 : "0 0 auto", minWidth: 0 }}
+                    startIcon={<MenuBookOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                    onClick={() => openPreview(it.slug)}>
+                    Ver/Ler
+                  </Button>
+                  {!isMaster && (
+                    <Button size="small" variant="contained" sx={{ flex: 1 }}
                       startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
                       disabled={!!usingSlug} onClick={() => use(it.slug)}>
                       {busy ? "Criando…" : "Usar este modelo"}
                     </Button>
-                  </Box>
-                )}
+                  )}
+                </Box>
               </Card>
             );
           })}
         </Box>
       )}
+
+      {/* Preview "Ver/Ler" — renderiza o template_markdown completo (read-only). */}
+      <Dialog open={!!previewSlug} onClose={() => setPreviewSlug(null)} maxWidth="md" fullWidth
+        scroll="paper" PaperProps={{ sx: { maxHeight: "88vh" } }}>
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1, pr: 6 }}>
+          <MenuBookOutlinedIcon color="primary" />
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+            <Typography variant="subtitle1" fontWeight={700} noWrap>
+              {previewData?.title ?? "Carregando modelo…"}
+            </Typography>
+            {previewData && (
+              <Typography variant="caption" color="text.secondary">
+                {previewData.category} · modelo do catálogo (somente leitura)
+              </Typography>
+            )}
+          </Box>
+          <IconButton onClick={() => setPreviewSlug(null)} size="small"
+            sx={{ position: "absolute", right: 8, top: 8 }}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {previewLoading || !previewData ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}><CircularProgress size={26} /></Box>
+          ) : (
+            <Box
+              sx={{
+                fontSize: 14,
+                lineHeight: 1.65,
+                "& h1": { fontSize: "1.3rem", fontWeight: 700, mt: 2, mb: 1 },
+                "& h2": { fontSize: "1.12rem", fontWeight: 700, mt: 2, mb: 1 },
+                "& h3": { fontSize: "1rem", fontWeight: 700, mt: 1.5, mb: 0.75 },
+                "& p": { my: 1 },
+                "& ul, & ol": { pl: 3, my: 1 },
+                "& li": { mb: 0.5 },
+                "& code": { bgcolor: "action.hover", px: 0.5, borderRadius: 0.5, fontSize: "0.85em" },
+                "& pre": { bgcolor: "action.hover", p: 1.5, borderRadius: 1, overflowX: "auto" },
+                "& pre code": { bgcolor: "transparent", p: 0 },
+                "& table": { borderCollapse: "collapse", width: "100%", my: 1 },
+                "& th, & td": { border: "1px solid", borderColor: "divider", px: 1, py: 0.5, textAlign: "left" },
+                "& blockquote": { borderLeft: "3px solid", borderColor: "divider", pl: 1.5, ml: 0, color: "text.secondary" },
+              }}
+            >
+              <CatalogMarkdown>{previewData.template_markdown ?? ""}</CatalogMarkdown>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 1.5 }}>
+          <Button onClick={() => setPreviewSlug(null)}>Fechar</Button>
+          {!isMaster && previewData && (
+            <Button variant="contained"
+              startIcon={<AddCircleOutlineIcon sx={{ fontSize: "0.9rem" }} />}
+              disabled={!!usingSlug}
+              onClick={() => { const s = previewData.slug; setPreviewSlug(null); use(s); }}>
+              Usar este modelo
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
