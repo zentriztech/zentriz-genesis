@@ -15,6 +15,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
 import { InboxError } from "../services/inbox.js";
+import { checkSpecContentReady } from "../services/specContentGate.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -112,6 +113,19 @@ export async function catalogRoutes(app: FastifyInstance) {
         const title = (body.title ?? "").trim() || (tpl.title as string);
         const markdown = tpl.template_markdown as string;
         const filename = `${slug}.md`;
+
+        // MED-4 (adversarial): mesmo criando um DRAFT, não deixamos um template AINDA em
+        // branco (placeholders `[título]`, `DADO [...]`, produto TBD) virar spec — seria
+        // barrado só lá na frente, no /run (specContentGate). Barramos custo-ZERO na porta.
+        // Templates curados reais passam; só o esqueleto não preenchido é recusado.
+        const contentReady = checkSpecContentReady(markdown);
+        if (!contentReady.ok) {
+          request.log.warn(
+            { slug, signals: contentReady.block.signals },
+            "[catalog] uso de template barrado: conteúdo ainda é placeholder/rascunho",
+          );
+          return reply.status(422).send(contentReady.block);
+        }
 
         // Nasce como SPEC (rascunho) — aparece na seção SPECs, o usuário inicia quando quiser.
         const result = await createProjectFromSpec(client, {

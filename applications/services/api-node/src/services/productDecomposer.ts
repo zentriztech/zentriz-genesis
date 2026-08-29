@@ -13,6 +13,7 @@
 import type { Pool } from "pg";
 import { buildProductSketch, parseManifest, computeProductHash, ManifestError, type ProductSketch } from "./productManifest.js";
 import { createProjectFromSpec } from "./projectCreation.js";
+import { checkSpecContentReady } from "./specContentGate.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import type { ProductZipContents } from "../routes/specs.js";
 
@@ -124,6 +125,27 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
   );
   if (existing.rows[0]) {
     return buildReuseResult(pool, existing.rows[0].id as string, existing.rows[0].name as string, sketch, params.originProjectId ?? null);
+  }
+
+  // MED-4 (adversarial): a ingestão de produto criava N projetos SEM passar por nenhum
+  // gate de conteúdo — um manifesto com specs ainda em branco (esqueleto/GUIA-TEMPLATE)
+  // viraria N projetos que, ao rodar, terminariam em blocked_backlog_empty (incidente
+  // Cabral). Validamos AQUI (após o no-op idempotente, antes de criar qualquer projeto),
+  // custo ZERO de LLM. Specs reais geradas pelo Splitter passam; só o esqueleto não
+  // preenchido é recusado, apontando o projeto ofensor. Colchete-prefixo real ("[Fase 1]
+  // Cadastro") NÃO é falso-positivo — o gate exige o colchete ocupando o título/cláusula
+  // inteira. Fica DEPOIS da idempotência para não transformar re-ingestão em 4xx.
+  for (const p of sketch.projects) {
+    const specContent = zip.files.get(p.spec.replace(/^\.\//, ""));
+    const ready = checkSpecContentReady(specContent);
+    if (!ready.ok) {
+      throw new ManifestError(
+        "MANIFEST_SPEC_PLACEHOLDER",
+        `A spec do projeto "${p.id}" (${p.spec}) ainda é um rascunho/modelo em branco — ` +
+          `preencha os requisitos reais antes de ingerir o produto. (${ready.block.signals.join(", ")})`,
+        { project: p.id, spec: p.spec, signals: ready.block.signals },
+      );
+    }
   }
 
   const client = await pool.connect();

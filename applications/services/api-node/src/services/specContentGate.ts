@@ -39,11 +39,22 @@ const GUIDE_SENTINELS: RegExp[] = [
   /Nenhum\s+requisito\s+foi\s+preenchido/i,
 ];
 
-/** Cabeçalho de FR cujo TÍTULO ainda é placeholder: "### FR-01 — [título do requisito]". */
-const PLACEHOLDER_FR_HEADING = /(?:^|\n)\s{0,3}#{1,4}\s*FR-\d+\s*[—:\-]?\s*\[[^\]\n]*\]/gi;
+/**
+ * Cabeçalho de FR cujo TÍTULO ainda é placeholder: "### FR-01 — [título do requisito]".
+ * O colchete precisa ser o título INTEIRO (só espaço/pontuação até o fim da linha) — assim
+ * um título REAL com prefixo entre colchetes, como "### FR-01 — [Fase 1] Cadastro de
+ * usuário" ou "[MVP] Login", NÃO é falso-positivo (achado adversarial MED). O template em
+ * branco continua barrado (bracket ocupa a linha toda).
+ */
+const PLACEHOLDER_FR_HEADING = /(?:^|\n)\s{0,3}#{1,4}\s*FR-\d+\s*[—:\-]?\s*\[[^\]\n]*\][\t ,.;:]*(?=\n|$)/gi;
 
-/** Cláusula Gherkin cujo corpo ainda é placeholder: "DADO [pré-condição]", "QUANDO [ação]". */
-const PLACEHOLDER_GHERKIN = /(?:^|\n)\s*(?:DADO|QUANDO|ENT[ÃA]O|GIVEN|WHEN|THEN)\b\s*\[[^\]\n]*\]/gi;
+/**
+ * Cláusula Gherkin cujo CORPO ainda é placeholder: "DADO [pré-condição]," / "QUANDO [ação]".
+ * Idem: o colchete precisa ser o corpo inteiro da cláusula (só espaço/pontuação até o fim da
+ * linha), permitindo a vírgula do template ("DADO [pré-condição],") mas NÃO uma cláusula real
+ * como "DADO [tag] o usuário está logado".
+ */
+const PLACEHOLDER_GHERKIN = /(?:^|\n)\s*(?:DADO|QUANDO|ENT[ÃA]O|GIVEN|WHEN|THEN)\b\s*\[[^\]\n]*\][\t ,.;:]*(?=\n|$)/gi;
 
 /** Nome do produto ainda não informado: "**Produto:** [..." ou "UNKNOWN"/"TBD". */
 const PRODUCT_PLACEHOLDER = /\*\*\s*Produto\s*:?\s*\*\*\s*(?:\[|UNKNOWN\b|TBD\b|a\s+definir\b)/i;

@@ -918,11 +918,14 @@ export async function specRoutes(app: FastifyInstance) {
         tenantId,
         createdBy: user.id,
         approverEmail: user.email ?? null,
-        title,
+        // Usa os valores JÁ validados/aparados pelo intake gate (título trimado, tipo
+        // reconhecido pelo policies.json) em vez dos brutos do payload — mantém coerência
+        // com o que foi de fato aprovado. (Aliases de tipo são resolvidos adiante, no Python.)
+        title: intake.title,
         files,
         productId,
         parentProjectId,
-        projectType,
+        projectType: intake.projectType,
         freeDescription,
         deliveryFields,
         specApproved,

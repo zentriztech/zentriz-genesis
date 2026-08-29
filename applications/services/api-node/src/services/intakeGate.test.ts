@@ -74,6 +74,19 @@ describe("validateIntake — título", () => {
       expect(r.ok, `título "${t}" deveria ser rejeitado`).toBe(false);
     }
   });
+  it("LOW-6: rejeita placeholder com pontuação ou letras espaçadas", () => {
+    for (const t of ["spec.", "spec!!!", "s p e c", "sem-título", "s.e.m. t.i.t.u.l.o", "( untitled )"]) {
+      const r = validateIntake({ title: t, projectType: "backend_api", freeDescription: LONG_TEXT, attachmentCount: 1 });
+      expect(r.ok, `título "${t}" deveria ser rejeitado`).toBe(false);
+      if (!r.ok) expect(r.block.fields).toContain("title");
+    }
+  });
+  it("LOW-6: NÃO rejeita títulos reais que contêm pontuação", () => {
+    for (const t of ["App de Gestão v2.0", "Sistema E-commerce", "Portal B2B (interno)"]) {
+      const r = validateIntake({ title: t, projectType: "backend_api", freeDescription: LONG_TEXT, attachmentCount: 1 });
+      expect(r.ok, `título "${t}" deveria ser aceito`).toBe(true);
+    }
+  });
 });
 
 describe("validateIntake — tipo de projeto", () => {

@@ -59,15 +59,34 @@ const TITLE_PLACEHOLDERS = new Set<string>([
   "draft",
 ]);
 
-/** Remove acentos e colapsa espaços — para comparar títulos placeholder de forma robusta. */
+/**
+ * Remove acentos, pontuação e colapsa espaços — para comparar títulos placeholder de
+ * forma robusta. Pontuação vira espaço (então "spec." e "spec!!!" ⇒ "spec"), e espaços
+ * são colapsados.
+ */
 function normalizeForCompare(s: string): string {
   return s
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
 }
+
+/**
+ * Forma COMPACTA — remove TODO espaço e pontuação, deixando só letras/dígitos. Pega
+ * placeholders com letras espaçadas ("s p e c", "s.e.m. t.i.t.u.l.o") que escapariam
+ * da comparação por palavra (LOW-6 do adversarial).
+ */
+function compactForCompare(s: string): string {
+  return normalizeForCompare(s).replace(/\s+/g, "");
+}
+
+/** Placeholders na forma compacta (sem espaços/pontuação) — derivados do Set canônico. */
+const TITLE_PLACEHOLDERS_COMPACT = new Set<string>(
+  [...TITLE_PLACEHOLDERS].map((p) => p.replace(/\s+/g, "")),
+);
 
 /** Conta caracteres de LETRA (Unicode), ignorando espaços/pontuação/dígitos. */
 function letterCount(s: string): number {
@@ -81,6 +100,8 @@ function isRealTitle(rawTitle: string | null | undefined): boolean {
   // Precisa conter ao menos 2 letras — barra "----", "123", "??".
   if (letterCount(title) < 2) return false;
   if (TITLE_PLACEHOLDERS.has(normalizeForCompare(title))) return false;
+  // Forma compacta: pega "spec.", "s p e c", "sem-título" etc. (LOW-6).
+  if (TITLE_PLACEHOLDERS_COMPACT.has(compactForCompare(title))) return false;
   return true;
 }
 

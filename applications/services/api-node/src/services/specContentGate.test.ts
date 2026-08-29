@@ -94,6 +94,27 @@ describe("checkSpecContentReady", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("MED-adversarial: NÃO falso-positiva FR/Gherkin reais com prefixo entre colchetes", () => {
+    const bracketPrefixSpec = `# PRODUCT_SPEC — Sistema de Pedidos
+## 0. Metadados
+- **Produto:** Sistema de gestão de pedidos para restaurantes
+- **project_type:** fullstack
+
+## 3. Requisitos Funcionais (FR)
+
+### FR-01 — [Fase 1] Cadastro de clientes
+DADO [contexto] um cliente autenticado no sistema,
+QUANDO ele confirma um pedido com itens válidos,
+ENTÃO [P0] o pedido é persistido e uma confirmação é enviada.
+
+### FR-02 — [MVP] Histórico de pedidos
+DADO [tag] um cliente com pedidos anteriores,
+QUANDO ele abre a tela de histórico,
+ENTÃO vê a lista ordenada por data.
+`;
+    expect(checkSpecContentReady(bracketPrefixSpec).ok).toBe(true);
+  });
+
   it("não confunde nós Mermaid [Label] com placeholders de FR/Gherkin", () => {
     const mermaidOnly = `# PRODUCT_SPEC — App real
 ## 0. Metadados
