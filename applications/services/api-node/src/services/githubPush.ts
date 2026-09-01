@@ -202,6 +202,24 @@ export interface GitLinkResult {
 }
 
 /**
+ * Preflight — o binário `git` existe no runtime desta API? O Ponto 3 (gitLinkProjectFolder)
+ * depende dele; se ausente (ex.: imagem base sem `apk add git`), validamos ANTES de tentar
+ * qualquer subcomando git e retornamos um erro claro/acionável, em vez de um ENOENT cru
+ * repetido a cada passo. Cacheado por processo — a disponibilidade não muda em runtime.
+ */
+let _gitAvailable: boolean | null = null;
+export async function isGitAvailable(): Promise<boolean> {
+  if (_gitAvailable !== null) return _gitAvailable;
+  try {
+    await execFileAsync("git", ["--version"], { timeout: 5_000 });
+    _gitAvailable = true;
+  } catch {
+    _gitAvailable = false;
+  }
+  return _gitAvailable;
+}
+
+/**
  * Ponto 3 (Jean) — git-linka a pasta LOCAL do projeto ao repositório recém-criado, para que
  * o Deadpool a use como working tree (`repo_dir`) nas manutenções/melhorias/evolução SEM
  * clone de rede (o executor do Deadpool usa `repo_dir` local quando
@@ -226,8 +244,19 @@ export async function gitLinkProjectFolder(opts: {
   remoteUrl?: string;
 }): Promise<GitLinkResult> {
   const localPath = join(PROJECT_FILES_ROOT, opts.projectId, "apps");
+  // Preflight 1: binário git disponível? (evita ENOENT cru a cada subcomando).
+  if (!(await isGitAvailable())) {
+    return {
+      ok: false,
+      localPath,
+      error:
+        "binário `git` ausente no runtime da API — instale-o na imagem (Dockerfile: `apk add --no-cache git`). " +
+        "Sem git-link, o repo/push seguem OK (via API do GitHub), mas o Deadpool não recebe a pasta local e cai em clone/dry-run.",
+    };
+  }
+  // Preflight 2: pasta de código existe? (sem apps/, nada a linkar).
   try {
-    await access(localPath); // pasta de código existe? (sem apps/, nada a linkar)
+    await access(localPath);
   } catch {
     return { ok: false, error: `pasta local ausente: ${localPath}` };
   }

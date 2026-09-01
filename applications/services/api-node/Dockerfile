@@ -13,6 +13,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# git é necessário em RUNTIME: gitLinkProjectFolder (services/githubPush.ts) transforma a
+# pasta local do projeto (PROJECT_FILES_ROOT/<id>/apps) numa working tree git-linkada ao
+# repo remoto (dev), que o Deadpool usa como repo_dir para manutenção/evolução SEM clone de
+# rede. Sem o binário, o passo falha com ENOENT (non-fatal) e o Deadpool cai em clone/dry-run.
+RUN apk add --no-cache git
+
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
