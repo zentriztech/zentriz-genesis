@@ -115,9 +115,35 @@ export async function runProvisionChain(dep: BackendDeploymentRow): Promise<void
     const msg = err instanceof Error ? err.message : String(err);
     // Compensação saga: desfaz na ordem REVERSA os passos executados.
     await compensate(ctx, executed.reverse(), msg);
-    await setStatus(dep.id, "failed", `provision falhou: ${msg}`.slice(0, 900));
+    // P3: erros de credencial do SDK viriam como stack cru pouco acionável. Prefixa com a
+    // pré-condição real (credencial AWS da conta Zentriz) quando o erro é dessa classe; para
+    // qualquer outro erro mantém a mensagem histórica exata (`provision falhou: ...`).
+    const hint = awsCredentialHint(msg);
+    const reason = hint ? `${hint} — detalhe: ${msg}` : `provision falhou: ${msg}`;
+    await setStatus(dep.id, "failed", reason.slice(0, 900));
     throw err;
   }
+}
+
+/**
+ * Detecta erros de credencial/identidade da cadeia AWS SDK e devolve uma mensagem acionável
+ * (a pré-condição, não o stack). `resolveAwsCredentials` nunca lança (cai na cadeia default do
+ * SDK), então uma credencial ausente/ inválida só se manifesta aqui, no primeiro driver.
+ */
+function awsCredentialHint(msg: string): string | null {
+  const m = msg.toLowerCase();
+  if (
+    m.includes("could not load credentials") ||
+    m.includes("credentialsprovidererror") ||
+    m.includes("unrecognizedclientexception") ||
+    m.includes("invalidclienttokenid") ||
+    m.includes("the security token included in the request is invalid") ||
+    m.includes("expiredtoken") ||
+    m.includes("signaturedoesnotmatch")
+  ) {
+    return "credencial AWS da conta Zentriz ausente/inválida — verifique GENESIS_PROVISION_ACCESS_KEY_ID/SECRET ou o instance role do host";
+  }
+  return null;
 }
 
 /**

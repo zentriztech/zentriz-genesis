@@ -20,7 +20,7 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { notifyTelegramTenant } from "./telegram.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
-import { scheduleFactoryStart, maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
+import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 
@@ -381,13 +381,17 @@ export async function projectRoutes(app: FastifyInstance) {
                 const target = await pool.query("SELECT id, status FROM projects WHERE id=$1", [t.project_id]);
                 const tp = target.rows[0] as Record<string, unknown>;
                 if (tp && ["draft","spec_submitted","stopped","failed"].includes(tp.status as string)) {
-                  const { spawn } = await import("child_process");
-                  const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
-                  const python = process.env.PYTHON_BIN ?? "python3";
-                  spawn(python, [runnerPath, String(t.project_id)], { detached: true, stdio: "ignore" }).unref();
-                  await pool.query("UPDATE projects SET status='running', updated_at=NOW() WHERE id=$1", [t.project_id]);
-                  scheduleFactoryStart(pool, String(t.project_id), { origin: "trigger" });
-                  console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho completed ${id}`);
+                  // Dispara via runner_service (NÃO spawn local): o container da API não tem
+                  // python/runner.py, e o spawn antigo emitia ENOENT assíncrono sem listener
+                  // 'error' → uncaughtException → crash da API (não há handler global).
+                  // dispatchProjectRun faz preflight de RUNNER_SERVICE_URL, aplica os gates
+                  // (dependência/conteúdo/slot), faz o slot-claim e NUNCA lança.
+                  const disp = await dispatchProjectRun(pool, String(t.project_id));
+                  if (disp.dispatched) {
+                    console.info(`[TRIGGER] Projeto ${t.project_id} iniciado por gatilho completed ${id}`);
+                  } else {
+                    console.warn(`[TRIGGER] Projeto ${t.project_id} NÃO disparado por gatilho ${id}: ${disp.reason}`);
+                  }
                 }
               }
             } catch (e) { console.error("[TRIGGER] Falha ao disparar gatilhos:", e); }
@@ -2901,14 +2905,17 @@ export async function projectRoutes(app: FastifyInstance) {
           await client.query("UPDATE projects SET title = $1, updated_at = NOW() WHERE id = $2", [title.trim(), id]);
         }
         if (startNow) {
-          // Dispara runner via spawn (fire-and-forget) — mesmo padrão do POST /run
-          const { spawn } = await import("child_process");
-          const runnerPath = process.env.RUNNER_PATH ?? "/app/runner/runner.py";
-          const python = process.env.PYTHON_BIN ?? "python3";
-          const child = spawn(python, [runnerPath, id], { detached: true, stdio: "ignore" });
-          child.unref();
-          await client.query("UPDATE projects SET status = 'running', updated_at = NOW() WHERE id = $1", [id]);
-          scheduleFactoryStart(pool, id, { origin: "interactive" });
+          // Dispara o runner via runner_service (RUNNER_SERVICE_URL), NÃO por spawn local: o
+          // container da API não tem python/runner.py e o spawn antigo emitia ENOENT assíncrono
+          // sem listener 'error' → uncaughtException → crash da API (não há handler global).
+          // dispatchProjectRun faz preflight de RUNNER_SERVICE_URL, aplica os gates
+          // (dependência/conteúdo/slot) e NUNCA lança. Fire-and-forget: não bloqueia a resposta
+          // na chamada HTTP ao runner (ele reporta 'running' via callback).
+          setImmediate(() => {
+            dispatchProjectRun(pool, id)
+              .then((r) => { if (!r.dispatched) console.warn(`[startNow] runner não disparado (${id}): ${r.reason}`); })
+              .catch((e) => console.error(`[startNow] erro ao disparar runner (${id}):`, e));
+          });
         }
         return reply.send({ ok: true, projectId: id });
       } finally {

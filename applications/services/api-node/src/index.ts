@@ -45,6 +45,20 @@ if (process.env.NODE_ENV === "production") {
   }
 }
 
+// Preflight NÃO-fatal do .pem do GitHub App: se GITHUB_APP_PRIVATE_KEY_FILE aponta para um
+// arquivo ilegível, o push/criação de repo falha só no primeiro /accept (erro mascarado pelo
+// try/catch dos callers → nenhum repo criado, causa não-óbvia). Surfacing cedo no boot, sem
+// abortar (setups com App inline ou PAT legitimamente não têm arquivo).
+try {
+  const { checkGlobalAppKeyReadable } = await import("./services/github.js");
+  const pem = checkGlobalAppKeyReadable();
+  if (!pem.ok) {
+    console.warn(`[boot] AVISO: GitHub App private key em '${pem.path}' ilegível (${pem.error}). Criação/push de repo falhará até corrigir; o restante da API sobe normalmente.`);
+  }
+} catch (e) {
+  console.warn("[boot] AVISO: preflight do .pem do GitHub App falhou:", e instanceof Error ? e.message : String(e));
+}
+
 try {
   await initDb();
   await seedIfEmpty();

@@ -256,6 +256,15 @@ export async function pipelineRoutes(app: FastifyInstance) {
           stdio: "ignore",
           cwd: process.env.REPO_ROOT ?? process.cwd(),
         });
+        // spawn de binário inexistente emite 'error' (ENOENT) de forma ASSÍNCRONA; sem este
+        // listener o evento viraria uncaughtException (não há handler global) → crash da API.
+        // Como já respondemos 202 abaixo, aqui só logamos, marcamos o projeto como failed e
+        // liberamos o slot reservado no claim atômico.
+        child.on("error", (err) => {
+          console.error(`[Pipeline] Falha ao iniciar runner local '${executable}':`, err);
+          pool.query("UPDATE projects SET status='failed', updated_at=now() WHERE id=$1", [projectId]).catch(() => {});
+          revertSlotClaim(projectId, slotPreviousStatus).catch(() => {});
+        });
         child.unref();
         await client.query(
           "UPDATE projects SET status = $1, started_at = now(), updated_at = now(), stopped_by = NULL WHERE id = $2",

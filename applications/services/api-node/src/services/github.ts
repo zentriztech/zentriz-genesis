@@ -148,6 +148,26 @@ function isGlobalAppConfigured(): boolean {
 }
 
 /**
+ * Preflight de boot (não-fatal): se o App global está configurado por ARQUIVO
+ * (`GITHUB_APP_PRIVATE_KEY_FILE`), confirma que o `.pem` é legível AGORA — em vez de a falha
+ * só aparecer no primeiro /accept como erro cru mascarado pelo try/catch dos callers (repo
+ * nunca criado, causa não-óbvia). `isGlobalAppConfigured()` valida só a presença da env var,
+ * não a existência/legibilidade do arquivo — este é o gap que o preflight fecha.
+ * Sem `GITHUB_APP_PRIVATE_KEY_FILE` (App inline ou PAT): nada a checar → {ok:true}.
+ */
+export function checkGlobalAppKeyReadable(): { ok: boolean; path?: string; error?: string } {
+  const filePath = process.env.GITHUB_APP_PRIVATE_KEY_FILE?.trim();
+  if (!filePath) return { ok: true };
+  try {
+    const key = readFileSync(filePath, "utf-8").trim();
+    if (!key) return { ok: false, path: filePath, error: "arquivo .pem vazio" };
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, path: filePath, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * FT-12: Returns an authenticated Octokit for an installation.
  * Priority: (1) tenant app_id + private_key from DB, (2) global env App, (3) PAT fallback.
  */
