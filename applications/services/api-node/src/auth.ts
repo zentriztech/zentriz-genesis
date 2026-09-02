@@ -39,6 +39,15 @@ export type TokenPayload = {
    * Um usuário jamais consegue cunhar este claim (não possui o JWT_SECRET).
    */
   svc?: string;
+  /**
+   * T1 (backlog pós-auditoria): binding de PROJETO no token de máquina. Cunhado junto
+   * com `svc:"runner"` no dispatch (pipeline/runnerDispatch/watchdog), amarra o token a
+   * UM projeto. O endpoint interno `GET /api/internal/project-llm-config/:id` recusa
+   * (403) quando `projectId` presente ≠ o pedido — assim um token de run, mesmo se
+   * vazar, só lê a config/`api_key` do PRÓPRIO projeto (não de qualquer tenant).
+   * Ausente = token amplo (login humano / admin) — comportamento legado inalterado.
+   */
+  projectId?: string;
 };
 
 export function signToken(payload: TokenPayload, expiresIn: string = "7d"): string {

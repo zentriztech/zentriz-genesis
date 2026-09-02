@@ -379,7 +379,9 @@ def _resolve_llm_api_key(message: dict) -> dict:
     # Resolver via API interna: GET /api/internal/project-llm-config/:projectId
     project_id = message.get("project_id") or (message.get("inputs") or {}).get("project_id") or ""
     api_base = os.environ.get("GENESIS_API_URL", "http://api:3000").rstrip("/")
-    internal_token = os.environ.get("GENESIS_API_TOKEN", "")
+    # T1: preferir o token ESCOPADO propagado no envelope (client_http injeta o token do run,
+    # amarrado ao projeto). Só cai no estático do env se o envelope não trouxe um (legado).
+    internal_token = (message.get("internal_token") or os.environ.get("GENESIS_API_TOKEN", "")).strip()
     if not (project_id and internal_token):
         return message
     try:

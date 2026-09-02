@@ -26,9 +26,13 @@ function authenticateInternal(request: FastifyRequest): { ok: true; payload: Tok
     return { ok: true, payload: null };
   }
   // JWT válido assinado com o MESMO JWT_SECRET de auth.ts (o runner usa fresh JWT).
+  // Aceita: admin (zentriz_admin/tenant_admin) OU token de MÁQUINA do run (svc:"runner"),
+  // que é cunhado só no servidor (inforjável sem JWT_SECRET) e carrega `role` do dono do
+  // projeto (pode ser "user"). T1: o svc:"runner" traz o claim `projectId` que amarra o
+  // acesso ao endpoint de llm-config ao próprio projeto (checado na rota).
   if (provided) {
     const payload = verifyToken(provided);
-    if (payload && (payload.role === "zentriz_admin" || payload.role === "tenant_admin")) {
+    if (payload && (payload.role === "zentriz_admin" || payload.role === "tenant_admin" || payload.svc === "runner")) {
       return { ok: true, payload };
     }
   }
@@ -52,6 +56,23 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
       }
       const { projectId } = request.params;
       if (!projectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "projectId obrigatório" });
+
+      // T1 — binding de PROJETO: um token de run (svc:"runner") carrega o claim `projectId`.
+      // Ele só pode ler a config do PRÓPRIO projeto; usado p/ ler outro → 403. Assim, mesmo
+      // que o token de um run vaze, o raio de explosão é UMA chave LLM (não todas as dos tenants).
+      if (auth.payload && auth.payload.projectId && auth.payload.projectId !== projectId) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Token escopado a outro projeto" });
+      }
+
+      // T1 — sinal: token estático onipotente (payload null, sem escopo de projeto) lendo
+      // llm-config. Após esta onda nenhum caller legítimo faz isso (runner/agents passam o
+      // token escopado do run). Se aparecer no log de prod, há um caller não migrado a corrigir.
+      if (!auth.payload) {
+        request.log.warn(
+          { projectId },
+          "[internal-llm] leitura de llm-config com token ESTÁTICO não-escopado (server-to-server amplo)",
+        );
+      }
 
       // Guarda IDOR: um tenant_admin só pode ler config de projeto do PRÓPRIO tenant.
       // zentriz_admin e o token interno estático (payload null) têm acesso amplo (server-to-server).

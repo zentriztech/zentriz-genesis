@@ -84,6 +84,13 @@ def run_agent_http(agent_key: str, message: dict) -> dict:
     agent_name = AGENT_LABELS.get(agent_key, agent_key)
     url = f"{base}{path}"
     body = message if "input" in message else {"request_id": message.get("request_id", "http"), "input": message}
+    # T1: propaga o token interno ESCOPADO deste run (GENESIS_API_TOKEN do env do subprocesso,
+    # que o runner_server preenche com o token do run = escopado ao projeto). O agents/server usa
+    # esse token — em vez do estático dele — para resolver a api_key só do PRÓPRIO projeto.
+    # setdefault: não sobrescreve se o envelope já trouxe um; ausência = agents cai no estático (legado).
+    _itok = os.environ.get("GENESIS_API_TOKEN", "").strip()
+    if _itok and isinstance(body, dict):
+        body.setdefault("internal_token", _itok)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(

@@ -276,7 +276,8 @@ async function relaunchPipeline(project: OrphanProject): Promise<boolean> {
 
   const token = signToken(
     // Token de máquina (svc:"runner"): isenta os callbacks do runner do gate H3 (RFC H1).
-    { sub: userInfo.userId, email: userInfo.email, role: userInfo.role, tenantId: userInfo.tenantId, svc: "runner" },
+    // T1: `projectId` amarra o token a este projeto (endpoint interno de llm-config recusa cross-project).
+    { sub: userInfo.userId, email: userInfo.email, role: userInfo.role, tenantId: userInfo.tenantId, svc: "runner", projectId: project.id },
     "24h",
   );
 

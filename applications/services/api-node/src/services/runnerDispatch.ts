@@ -101,7 +101,8 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   if (!u) return { projectId, dispatched: false, reason: "usuário dono não encontrado" };
   const token = signToken(
     // Token de máquina (svc:"runner"): isenta os callbacks do runner do gate H3 (RFC H1).
-    { sub: u.id as string, email: u.email as string, role: u.role as string, tenantId: tp.tenant_id as string | null, svc: "runner" },
+    // T1: `projectId` amarra o token a este projeto (endpoint interno de llm-config recusa cross-project).
+    { sub: u.id as string, email: u.email as string, role: u.role as string, tenantId: tp.tenant_id as string | null, svc: "runner", projectId },
     "24h",
   );
 

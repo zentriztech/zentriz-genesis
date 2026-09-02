@@ -244,6 +244,9 @@ export async function pipelineRoutes(app: FastifyInstance) {
           tenantId: user.tenantId,
           // Token de máquina: isenta os callbacks do runner do gate de suspensão H3 (RFC H1).
           svc: "runner",
+          // T1: amarra o token a ESTE projeto — o endpoint interno de llm-config recusa
+          // se o token for usado para ler a chave de outro projeto (defesa em profundidade).
+          projectId,
         },
         "24h"
       );

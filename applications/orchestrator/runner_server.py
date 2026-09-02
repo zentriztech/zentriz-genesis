@@ -370,10 +370,12 @@ def run(body: RunBody):
         }
 
         # FT-13: Resolver credenciais LLM pela autoridade do projeto (zentriz_admin vs tenant)
-        # Usa GENESIS_API_TOKEN do env (token interno do runner, aceito pelo endpoint)
+        # T1: PREFERIR o token do run (body.token) — escopado a ESTE projeto (claim projectId) —
+        # em vez do GENESIS_API_TOKEN estático do container (onipotente, lê qualquer tenant).
+        # Fallback para o estático do env se o run não trouxe token (retrocompatível).
         try:
             import urllib.request as _urlreq
-            _internal_token = os.environ.get("GENESIS_API_TOKEN", "").strip() or body.token
+            _internal_token = (body.token or "").strip() or os.environ.get("GENESIS_API_TOKEN", "").strip()
             _llm_url = f"{body.apiBaseUrl.rstrip('/')}/api/internal/project-llm-config/{body.projectId}"
             _req = _urlreq.Request(_llm_url, headers={"X-Internal-Token": _internal_token})
             with _urlreq.urlopen(_req, timeout=5) as _resp:
