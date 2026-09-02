@@ -219,6 +219,93 @@ def _run_cmd(cmd: str, cwd: str | None = None, timeout: int = 60) -> tuple[int, 
         return -1, "", str(e)
 
 
+# ── Guardrail de segurança: sanitiza o docker-compose.yml GERADO (não confiável) ──
+# O cyborg roda `docker compose up --build` sobre um compose produzido pela pipeline
+# autônoma (LLM). O daemon Docker é o do HOST (socket montado no container cyborg),
+# então um compose com `privileged`, `pid: host`, ou bind-mount de path do host
+# (ex.: /var/run/docker.sock, /:/host) daria escape para root no host. Fail-closed:
+# se detectar QUALQUER primitivo perigoso, o cyborg NÃO sobe o stack e registra FAIL.
+def _compose_source_is_host_bind(source: str) -> bool:
+    """True se o 'source' de um volume aponta para path do HOST (bind), não volume nomeado.
+    Volumes nomeados ('dados') e binds relativos internos ('./x') são permitidos;
+    paths absolutos ('/...', '~') e relativos que escapam ('../') são host-bind."""
+    s = (source or "").strip()
+    if not s:
+        return False
+    if s.startswith("/") or s.startswith("~"):
+        return True
+    if s == ".." or s.startswith("../") or "/../" in s:
+        return True
+    return False
+
+
+def _scan_generated_compose(compose_path: Path) -> list[str]:
+    """Escaneia o compose gerado e retorna lista de violações de segurança.
+    Lista vazia = seguro para subir. Fail-closed: compose ilegível/não parseável
+    conta como violação (não verificável ⇒ não sobe)."""
+    try:
+        text = compose_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return [f"não foi possível ler {compose_path.name}: {e}"]
+    try:
+        import yaml  # PyYAML — já usado no runner/pipeline_context
+        data = yaml.safe_load(text)
+    except Exception as e:
+        return [f"compose não parseável (não verificável): {e}"]
+    if not isinstance(data, dict):
+        return ["compose sem estrutura de mapa (não verificável)"]
+
+    violations: list[str] = []
+    services = data.get("services")
+    if isinstance(services, dict):
+        for name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            if svc.get("privileged") is True:
+                violations.append(f"serviço '{name}': privileged=true")
+            caps = svc.get("cap_add")
+            if caps:
+                violations.append(f"serviço '{name}': cap_add={caps}")
+            for key in ("pid", "ipc", "userns_mode", "uts"):
+                val = svc.get(key)
+                if isinstance(val, str) and ("host" in val or val.startswith("container:")):
+                    violations.append(f"serviço '{name}': {key}={val}")
+            nm = svc.get("network_mode")
+            if isinstance(nm, str) and (nm == "host" or nm.startswith("container:")):
+                violations.append(f"serviço '{name}': network_mode={nm}")
+            if svc.get("devices"):
+                violations.append(f"serviço '{name}': devices={svc.get('devices')}")
+            secopt = svc.get("security_opt") or []
+            if isinstance(secopt, list):
+                for so in secopt:
+                    sos = str(so).replace(" ", "").lower()
+                    if "unconfined" in sos or sos == "no-new-privileges:false":
+                        violations.append(f"serviço '{name}': security_opt={so}")
+            vols = svc.get("volumes") or []
+            if isinstance(vols, list):
+                for v in vols:
+                    src: str | None = None
+                    if isinstance(v, str):
+                        src = v.split(":", 1)[0] if ":" in v else None
+                    elif isinstance(v, dict):
+                        if str(v.get("type", "")).lower() == "bind":
+                            src = v.get("source")
+                    if src is not None and _compose_source_is_host_bind(src):
+                        violations.append(f"serviço '{name}': bind-mount de host '{src}'")
+    # volumes nomeados com driver_opts fazendo bind ao host (escape disfarçado)
+    top_vols = data.get("volumes")
+    if isinstance(top_vols, dict):
+        for vname, vconf in top_vols.items():
+            if isinstance(vconf, dict):
+                dopts = vconf.get("driver_opts") or {}
+                if isinstance(dopts, dict):
+                    dev = str(dopts.get("device", ""))
+                    o = str(dopts.get("o", "")).lower()
+                    if dev.startswith("/") and "bind" in o:
+                        violations.append(f"volume nomeado '{vname}': bind ao host device '{dev}'")
+    return violations
+
+
 def _detect_project_type(project_id: str, prod_id: str | None) -> str:
     """Detecta tipo do projeto pelo charter_summary ou pelo conteúdo do apps/."""
     data, _ = _api("GET", f"/api/projects/{project_id}")
@@ -542,19 +629,34 @@ def _run_playbook(project_id: str, prod_id: str | None, cyborg_ctx: dict) -> Pla
     elif apps_dir and (Path(apps_dir) / "docker-compose.yml").exists():
         _compose_dir = apps_dir
     if _compose_dir:
-        rc, out, err = _run_cmd(
-            "docker compose up -d --build 2>&1 | tail -30",
-            cwd=_compose_dir, timeout=PLAYBOOK_TIMEOUT,
-        )
-        if rc == 0:
-            # Aguardar healthcheck
-            time.sleep(15)
-            rc2, out2, _ = _run_cmd("docker compose ps", cwd=_compose_dir, timeout=30)
-            all_healthy = "unhealthy" not in out2.lower() and "exited" not in out2.lower()
-            result.record("docker compose up", rc == 0, out[-300:] if rc != 0 else "OK")
-            result.record("Containers saudáveis", all_healthy, out2[-300:] if not all_healthy else "OK")
+        # GATE fail-closed: nunca subir um compose gerado com diretiva insegura
+        # (privileged/host-mount/pid:host/devices…) — o daemon é o do HOST.
+        _unsafe = _scan_generated_compose(Path(_compose_dir) / "docker-compose.yml")
+        if _unsafe:
+            logger.error(
+                "[Cyborg] docker-compose gerado BLOQUEADO (fail-closed) — diretivas inseguras: %s",
+                _unsafe,
+            )
+            result.record(
+                "docker-compose sem diretiva insegura",
+                False,
+                "BLOQUEADO (fail-closed): " + "; ".join(_unsafe[:8]),
+            )
         else:
-            result.record("docker compose up", False, f"exit={rc}\n{err[-500:]}")
+            result.record("docker-compose sem diretiva insegura", True, "OK")
+            rc, out, err = _run_cmd(
+                "docker compose up -d --build 2>&1 | tail -30",
+                cwd=_compose_dir, timeout=PLAYBOOK_TIMEOUT,
+            )
+            if rc == 0:
+                # Aguardar healthcheck
+                time.sleep(15)
+                rc2, out2, _ = _run_cmd("docker compose ps", cwd=_compose_dir, timeout=30)
+                all_healthy = "unhealthy" not in out2.lower() and "exited" not in out2.lower()
+                result.record("docker compose up", rc == 0, out[-300:] if rc != 0 else "OK")
+                result.record("Containers saudáveis", all_healthy, out2[-300:] if not all_healthy else "OK")
+            else:
+                result.record("docker compose up", False, f"exit={rc}\n{err[-500:]}")
     elif apps_dir:
         # Projeto sem docker — verificar se tem start.sh
         start_sh = Path(apps_dir).parent / "project" / "start.sh"
