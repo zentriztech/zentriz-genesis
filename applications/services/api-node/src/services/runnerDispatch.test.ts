@@ -20,6 +20,16 @@ vi.mock("./tenantLlmConfig.js", () => ({
 
 vi.mock("../auth.js", () => ({ signToken: () => "fake.jwt.token" }));
 
+// Cost cap por tenant (migration 068): controlável por teste; default = sem cap (ok).
+const budgetResult = {
+  current: { ok: true } as { ok: boolean; spentUsd?: number; budgetUsd?: number },
+};
+vi.mock("./tenantCostCap.js", () => ({
+  checkTenantBudget: async () => budgetResult.current,
+  budgetExceededMessage: (spent: number, budget: number) =>
+    `gasto US$ ${spent.toFixed(2)} / teto US$ ${budget.toFixed(2)}`,
+}));
+
 // pool falso: roteia por SQL.
 function makePool(target: Record<string, unknown> | undefined) {
   return {
@@ -39,6 +49,7 @@ beforeEach(async () => {
   process.env.RUNNER_UPLOAD_DIR = "/runner/uploads";
   process.env.UPLOAD_DIR = "/shared/uploads";
   gateResult.current = { ok: true };
+  budgetResult.current = { ok: true };
   claimResult.current = { outcome: "started", previousStatus: "draft" };
   revertSpy.mockClear();
   claimSpy.mockClear();
@@ -60,6 +71,26 @@ describe("dispatchProjectRun — Task 3", () => {
     expect(r.dispatched).toBe(false);
     expect(r.reason).toContain("DEPENDENCY_NOT_READY");
     expect(claimSpy).not.toHaveBeenCalled();
+  });
+
+  it("tenant acima do orçamento mensal de LLM → bloqueia sem reservar slot nem chamar runner", async () => {
+    budgetResult.current = { ok: false, spentUsd: 12.5, budgetUsd: 10 };
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const pool = makePool({ id: "p1", status: "draft", created_by: "u1", tenant_id: TENANT });
+    const r = await dispatchProjectRun(pool, "p1");
+    expect(r.dispatched).toBe(false);
+    expect(r.reason).toContain("TENANT_LLM_BUDGET_EXCEEDED");
+    expect(claimSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("projeto sem tenant não passa pelo gate de orçamento (mesmo com cap estourado)", async () => {
+    budgetResult.current = { ok: false, spentUsd: 12.5, budgetUsd: 10 };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok", { status: 200 })));
+    const pool = makePool({ id: "p1", status: "draft", created_by: "u1", tenant_id: null });
+    const r = await dispatchProjectRun(pool, "p1");
+    expect(r.dispatched).toBe(true);
   });
 
   it("sem slot (claim=queued) → não dispara e reporta enfileirado", async () => {

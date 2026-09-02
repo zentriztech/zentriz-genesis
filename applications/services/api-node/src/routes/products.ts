@@ -33,6 +33,7 @@ import { buildProductSketch, parseManifest, ManifestError, type ProductManifest 
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbox.js";
 import { isPreFactory } from "../services/projectStatus.js";
+import { emitValueEvent } from "../services/valueEvents.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -686,6 +687,14 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       if (upd.rowCount === 0) {
         return reply.status(409).send({ code: "ALREADY_PROMOTED", message: "Produto já promovido por outra requisição." });
       }
+      // Value meter MVP (spec 2026-08-20): promoção Bancada→fábrica (spec vira produto
+      // em execução). Emitido só na transição atômica draft→running (idempotente por
+      // construção — dupla promoção cai no 409 acima). Best-effort, nunca lança.
+      void emitValueEvent(pool, {
+        tenantId: (row.tenant_id as string | null) ?? null,
+        eventType: "spec_promoted",
+        metadata: { product_id: id, promoted_roots: rootIds.length },
+      });
       // Dispara as raízes (dispatch-only). Gate de dependência + claim atômico de slot
       // são aplicados por dispatchProjectRun (Task 3). Best-effort em background.
       setImmediate(async () => {

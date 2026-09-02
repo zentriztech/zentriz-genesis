@@ -2281,23 +2281,42 @@ def _api_available() -> bool:
 
 
 def _check_cost_gate(project_id: str) -> tuple[bool, float]:
-    """T18: verifica se o projeto excedeu MAX_USD_PER_PROJECT.
+    """T18 + cap por tenant (migration 068): gates de custo mid-run.
 
     Retorna (ok, current_usd). ok=False → pipeline deve BLOQUEAR imediatamente.
-    Se MAX_USD_PER_PROJECT não está setado ou é 0, sempre retorna ok=True.
-    Se o endpoint /api/projects/:id/cost não existe, retorna ok=True (não bloqueia
-    para compatibilidade — só ativa quando a API expõe o endpoint).
+    Dois tetos independentes, ambos lidos de GET /api/projects/:id/cost:
+      1. POR PROJETO (T18): total_usd >= env MAX_USD_PER_PROJECT (unset/0 = sem gate).
+      2. POR TENANT (068): tenantMonthUsd >= tenantMonthlyBudgetUsd, quando AMBOS os
+         campos vêm na resposta (campos ausentes/None ⇒ ignora — compat com API antiga
+         que não expõe orçamento por tenant, e com projeto sem tenant/sem cap).
+    Se o endpoint /api/projects/:id/cost não existe (404), não bloqueia
+    para compatibilidade — só ativa quando a API expõe o endpoint.
+    Fail-open deliberado: erro de rede/parse nunca bloqueia o pipeline.
     """
     try:
         max_usd = float(os.environ.get("MAX_USD_PER_PROJECT", "0") or 0)
-        if max_usd <= 0:
-            return True, 0.0
         # Consulta simples — se endpoint não existir (404), não bloqueia
         data, status = _api_get(f"/api/projects/{project_id}/cost")
         if status != 200 or not isinstance(data, dict):
             return True, 0.0
         current = float(data.get("total_usd", 0.0) or 0.0)
-        if current >= max_usd:
+        # Gate 2 — orçamento MENSAL do tenant (denial-of-wallet). Só aplica se a API
+        # respondeu os dois campos com valores numéricos.
+        tenant_budget = data.get("tenantMonthlyBudgetUsd")
+        tenant_spent = data.get("tenantMonthUsd")
+        if tenant_budget is not None and tenant_spent is not None:
+            try:
+                if float(tenant_spent) >= float(tenant_budget):
+                    logger.error(
+                        "[COST-GATE-TENANT] Tenant do projeto %s excedeu o orçamento mensal de LLM "
+                        "(gasto=%s USD, teto=%s USD). Bloqueando.",
+                        project_id, tenant_spent, tenant_budget,
+                    )
+                    return False, current
+            except (TypeError, ValueError):
+                pass  # campo malformado ⇒ ignora (fail-open)
+        # Gate 1 — teto por projeto (T18)
+        if max_usd > 0 and current >= max_usd:
             logger.error(
                 "[T18-COST-GATE] Projeto %s excedeu MAX_USD_PER_PROJECT=%s (atual=%s USD). Bloqueando.",
                 project_id, max_usd, current,
@@ -2658,6 +2677,11 @@ def _run_monitor_loop(
     _state_lock = threading.Lock() if monitor_parallel else None
     _api_unreachable_count = 0
     MAX_API_UNREACHABLE = 5  # encerrar após 5 falhas consecutivas de API quando devops_done
+    # Cost gate mid-run (T18 + cap mensal por tenant, migration 068): _check_cost_gate
+    # existia desde o T18 mas NUNCA era chamada — este é o ponto de enforcement.
+    # Throttle: consulta GET /cost no máximo a cada COST_GATE_INTERVAL segundos.
+    _last_cost_gate_check = 0.0
+    COST_GATE_INTERVAL = float(os.environ.get("COST_GATE_INTERVAL_SEC", "60") or 60)
 
     while True:
         if _shutdown_requested:
@@ -2675,6 +2699,28 @@ def _run_monitor_loop(
                 break
         else:
             _api_unreachable_count = 0
+
+        # ── Cost gate mid-run (T18 por projeto + orçamento mensal por tenant) ──────
+        # Bloqueia o pipeline no MEIO da execução se o teto foi atingido: para de
+        # gastar LLM imediatamente. Fail-open por construção (_check_cost_gate nunca
+        # lança e ignora campos ausentes); status 'stopped' permite retomar via /run
+        # após ajuste do teto (é status elegível para run).
+        if status is not None and (time.time() - _last_cost_gate_check) >= COST_GATE_INTERVAL:
+            _last_cost_gate_check = time.time()
+            _cg_ok, _cg_usd = _check_cost_gate(project_id)
+            if not _cg_ok:
+                _post_step(
+                    f"🛑 Pipeline interrompido pelo gate de custo de LLM "
+                    f"(gasto atual do projeto: US$ {_cg_usd:.2f}). O teto por projeto "
+                    f"(MAX_USD_PER_PROJECT) ou o orçamento mensal do tenant foi atingido. "
+                    f"Ajuste o teto e reinicie o pipeline pelo portal.",
+                    request_id,
+                )
+                _patch_project({
+                    "status": "stopped",
+                    "blocked_reason": "cost_gate: teto de custo de LLM atingido (projeto ou tenant)",
+                })
+                break
 
         tasks = _get_tasks(project_id)
         try:

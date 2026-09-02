@@ -10,6 +10,7 @@ import { checkDependencyGate } from "../services/dependencyGate.js";
 import { checkSpecContentReady } from "../services/specContentGate.js";
 import { graduateFromInbox, demoteToInbox } from "../services/inbox.js";
 import { scheduleFactoryStart } from "../services/opsNotify.js";
+import { checkTenantBudget, budgetExceededMessage } from "../services/tenantCostCap.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -104,6 +105,25 @@ export async function pipelineRoutes(app: FastifyInstance) {
           code: "RATE_LIMITED",
           message: `Muitas tentativas de iniciar pipeline. Aguarde ${Math.ceil(rl.retryAfterMs / 1000)}s antes de tentar novamente.`,
         });
+      }
+
+      // ── Cost cap mensal de LLM por TENANT (migration 068, anti denial-of-wallet) ──
+      // Após o rate-limit e ANTES do claim de slot: barra o run de graça (custo zero de
+      // LLM) quando o tenant já estourou o orçamento do mês. Fail-safe: sem cap
+      // configurado (tenant/plano/env) ⇒ comportamento atual; erro de infra ⇒ fail-open
+      // (checkTenantBudget nunca lança — ver racional em services/tenantCostCap.ts).
+      if (user.tenantId) {
+        const budget = await checkTenantBudget(client, user.tenantId);
+        if (!budget.ok) {
+          request.log.warn(
+            { projectId, tenantId: user.tenantId, spentUsd: budget.spentUsd, budgetUsd: budget.budgetUsd },
+            "[Pipeline] Bloqueado pelo cap mensal de LLM do tenant"
+          );
+          return reply.status(402).send({
+            code: "TENANT_LLM_BUDGET_EXCEEDED",
+            message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd),
+          });
+        }
       }
 
       const projectRow = await client.query(

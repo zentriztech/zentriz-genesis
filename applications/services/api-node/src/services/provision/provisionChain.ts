@@ -18,6 +18,8 @@ import {
   setStatus, patchDeployment, listLiveResources, markResourceDeleted,
   type BackendDeploymentRow, type BackendStatus,
 } from "./backendState.js";
+import { pool } from "../../db/client.js";
+import { emitValueEvent } from "../valueEvents.js";
 
 /** Contexto passado a cada driver — tudo que ele precisa para agir e registrar no ledger. */
 export interface ProvisionContext {
@@ -111,6 +113,14 @@ export async function runProvisionChain(dep: BackendDeploymentRow): Promise<void
     }
     // Cadeia completa → running. app_url/health_url são gravados pelos drivers alb/route53.
     await setStatus(dep.id, "running");
+    // Value meter MVP (spec 2026-08-20): deploy backend-cloud publicado com sucesso.
+    // Best-effort — emitValueEvent nunca lança e não altera a máquina de estados.
+    void emitValueEvent(pool, {
+      tenantId: dep.tenant_id,
+      projectId: dep.project_id,
+      eventType: "deploy_completed",
+      metadata: { provider: "backend-cloud", deployment_id: dep.id, runtime_target: dep.runtime_target },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Compensação saga: desfaz na ordem REVERSA os passos executados.

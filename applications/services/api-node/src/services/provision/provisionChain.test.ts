@@ -18,6 +18,12 @@ vi.mock("./backendState.js", () => ({
 vi.mock("./awsCredentials.js", () => ({
   resolveAwsCredentials: async () => ({ region: "us-east-1", credentials: undefined }),
 }));
+// Value meter (migration 068): a emissão de deploy_completed é best-effort e mockada
+// aqui para o teste não tocar o pool real de Postgres.
+const emitValueEventSpy = vi.fn(async (..._a: unknown[]) => {});
+vi.mock("../valueEvents.js", () => ({
+  emitValueEvent: (...a: unknown[]) => emitValueEventSpy(...a),
+}));
 
 import {
   registerDriver, orderedDrivers, getDriver, runProvisionChain, CHAIN_ORDER,

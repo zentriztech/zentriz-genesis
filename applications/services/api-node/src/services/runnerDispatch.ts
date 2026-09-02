@@ -13,6 +13,7 @@ import { checkDependencyGate } from "./dependencyGate.js";
 import { checkSpecContentReady } from "./specContentGate.js";
 import { claimSlotOrQueue, revertSlotClaim } from "./tenantLlmConfig.js";
 import { scheduleFactoryStart } from "./opsNotify.js";
+import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 
 const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed"]);
 
@@ -41,6 +42,22 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   const gate = await checkDependencyGate(pool, projectId);
   if (!gate.ok) {
     return { projectId, dispatched: false, reason: `${gate.block.code}: ${gate.block.message.slice(0, 160)}` };
+  }
+
+  // Cost cap mensal de LLM por TENANT (migration 068): a cascata/promoção passa pelo
+  // MESMO gate do /run interativo — sem isto um tenant sobre o teto ainda gastava LLM
+  // via gatilhos de accept/promote. Fail-safe: sem cap ⇒ segue; erro de infra ⇒
+  // fail-open (checkTenantBudget nunca lança — ver services/tenantCostCap.ts).
+  const budgetTenantId = (tp.tenant_id as string | null) ?? null;
+  if (budgetTenantId) {
+    const budget = await checkTenantBudget(pool, budgetTenantId);
+    if (!budget.ok) {
+      return {
+        projectId,
+        dispatched: false,
+        reason: `TENANT_LLM_BUDGET_EXCEEDED: ${budgetExceededMessage(budget.spentUsd, budget.budgetUsd)}`,
+      };
+    }
   }
 
   const specRes = await pool.query(

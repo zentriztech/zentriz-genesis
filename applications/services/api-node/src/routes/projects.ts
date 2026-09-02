@@ -24,6 +24,8 @@ import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../servi
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
+import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
+import { emitValueEvent } from "../services/valueEvents.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -368,6 +370,16 @@ export async function projectRoutes(app: FastifyInstance) {
 
         // Disparar gatilhos se status mudou para completed
         if (status === "completed") {
+          // Value meter MVP: run da fábrica concluído ponta-a-ponta. O runner emite o
+          // evento de diálogo "product_ready" e reporta o fim via ESTE PATCH com
+          // status=completed ("product_ready" NÃO é status válido de projects — a
+          // transição concreta correspondente é completed). Best-effort, nunca lança.
+          void emitValueEvent(pool, {
+            tenantId: (project.tenant_id as string | null) ?? null,
+            projectId: id,
+            eventType: "pipeline_run_completed",
+            metadata: { source: "runner_patch" },
+          });
           setImmediate(async () => {
             try {
               const triggers = await pool.query(
@@ -661,7 +673,7 @@ export async function projectRoutes(app: FastifyInstance) {
       // Notificação ops (fire-and-forget): projeto produzido 100% (aceite explícito).
       scheduleFactoryDone(pool, id);
       const updated = await client.query(
-        "SELECT id, status, updated_at, product_id, title FROM projects WHERE id = $1",
+        "SELECT id, status, updated_at, product_id, title, tenant_id FROM projects WHERE id = $1",
         [id]
       );
       const u = updated.rows[0] as Record<string, unknown>;
@@ -669,6 +681,15 @@ export async function projectRoutes(app: FastifyInstance) {
       // A2: recomputa o ciclo de vida agregado do produto (se o projeto pertence a um).
       // Não-crítico (função engole erros); usa o mesmo client para refletir o status já gravado.
       await recomputeProductLifecycle(client, u.product_id as string | null);
+
+      // Value meter MVP (spec 2026-08-20): 1 projeto ACEITO = unidade primária de valor
+      // do Genesis ("sistema entregue"). Best-effort — emitValueEvent nunca lança.
+      void emitValueEvent(pool, {
+        tenantId: (u.tenant_id as string | null) ?? null,
+        projectId: id,
+        eventType: "project_delivered",
+        metadata: { accepted_by: acceptedBy, product_id: (u.product_id as string | null) ?? null },
+      });
 
       // Fechar TSK-FULL-TEST quando projeto é aceito — inclui QA_FAIL (Cyborg corrigiu e validou)
       await client.query(
@@ -1635,6 +1656,48 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   });
 
+  // GET /api/projects/:id/cost — custo LLM do projeto + orçamento mensal do TENANT.
+  // Consumido pelo runner (_check_cost_gate, runner.py) para o gate mid-run: T18
+  // (MAX_USD_PER_PROJECT, campo total_usd) + cap mensal por tenant (migration 068,
+  // campos tenantMonthUsd/tenantMonthlyBudgetUsd — null quando sem cap/sem tenant).
+  // NOTA: este endpoint NÃO existia (o runner fail-openava no 404 desde o T18);
+  // criá-lo ATIVA o gate por projeto já embarcado no runner, além do gate por tenant.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/cost", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const proj = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
+      const row = proj.rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (!canAccessProjectRow(user, row)) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+      const tenantId = (row.tenant_id as string | null) ?? null;
+      const totalUsd = await getProjectSpendUsd(client, id);
+      // Campos por tenant são best-effort: erro aqui não pode derrubar o endpoint —
+      // campos ausentes/null fazem o runner ignorar o gate por tenant (compat).
+      let tenantMonthUsd: number | null = null;
+      let tenantMonthlyBudgetUsd: number | null = null;
+      if (tenantId) {
+        try {
+          tenantMonthUsd = parseFloat((await getTenantMonthSpendUsd(client, tenantId)).toFixed(4));
+          tenantMonthlyBudgetUsd = await resolveTenantMonthlyBudgetUsd(client, tenantId);
+        } catch (err) {
+          request.log.warn({ projectId: id, err: String(err) }, "[cost] falha ao computar gasto do tenant (fail-open)");
+        }
+      }
+      return reply.send({
+        project_id: id,
+        total_usd: parseFloat(totalUsd.toFixed(4)),
+        tenantMonthUsd,
+        tenantMonthlyBudgetUsd,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // GET /api/projects/:id/task-metrics — custo, tokens e tempo por task
   app.get<{ Params: { id: string } }>("/api/projects/:id/task-metrics", async (request, reply) => {
     const user = getUser(request);
@@ -2205,6 +2268,18 @@ export async function projectRoutes(app: FastifyInstance) {
           );
           // Telegram: notifica só na PRIMEIRA transição para running (evita spam em re-report de health)
           const wasRunning = dep.status === "running" || dep.status === "running_degraded";
+          // Value meter MVP: deploy S3 estático publicado com sucesso — só na PRIMEIRA
+          // transição para running (mesmo guard do Telegram). Best-effort, nunca lança.
+          if (!wasRunning) {
+            pool.query("SELECT tenant_id FROM projects WHERE id = $1", [id])
+              .then((r) => emitValueEvent(pool, {
+                tenantId: (r.rows[0]?.tenant_id as string | null) ?? null,
+                projectId: id,
+                eventType: "deploy_completed",
+                metadata: { provider: "s3-static", deployment_id: deploymentId, status: body.status },
+              }))
+              .catch(() => { /* medição de valor é best-effort */ });
+          }
           if (!wasRunning && body.app_url) {
             setImmediate(async () => {
               try {

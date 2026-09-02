@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { resolveScopedTenantId } from "../lib/tenantScope.js";
+import { getValueReport } from "../services/valueEvents.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -71,6 +73,41 @@ export async function reportsRoutes(app: FastifyInstance) {
     }
   });
 
+
+  /**
+   * Value meter MVP interno (spec docs/06-recommendations/2026-08-20-value-meter-spec.md):
+   * GET /api/reports/value?month=YYYY-MM[&tenantId=<uuid>]
+   * Contagens de value_events por event_type no mês + custo LLM do tenant no mês
+   * (mesma fonte dual do cost cap) + cost_per_delivery. Tenant vem do JWT;
+   * zentriz_admin pode escopar via ?tenantId= (resolveScopedTenantId — anti-escalonamento).
+   * SEM UI de portal nesta onda — consumo interno/curl.
+   */
+  app.get<{
+    Querystring: { month?: string; tenantId?: string };
+  }>("/api/reports/value", async (request, reply) => {
+    const user = getUser(request);
+    if (!user) return reply.status(401).send({ code: "UNAUTHORIZED" });
+
+    const tenantId = resolveScopedTenantId(user, request.query);
+    if (!tenantId) {
+      return reply.status(400).send({
+        code: "TENANT_REQUIRED",
+        message: "Informe ?tenantId=<uuid> (zentriz_admin) ou autentique-se com um usuário de tenant.",
+      });
+    }
+    const month = request.query.month;
+    if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return reply.status(400).send({ code: "BAD_MONTH", message: "Parâmetro month deve estar no formato YYYY-MM." });
+    }
+
+    const report = await getValueReport(pool, tenantId, month);
+    return reply.send({
+      generated_at: new Date().toISOString(),
+      ...report,
+      // Alias snake_case para consumo por scripts (espelha o naming da spec).
+      cost_per_delivery: report.costPerDelivery,
+    });
+  });
 
   app.get<{
     Querystring: { product_id?: string; tenant_id?: string; limit?: string };

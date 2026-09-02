@@ -97,3 +97,26 @@ describe("RFC-0003 — invariantes de CHECK preservados na última reconstruçã
     }
   });
 });
+
+// 068: cost cap por tenant + value meter MVP interno. Garante que a migration existe,
+// é idempotente (IF NOT EXISTS) e cria as colunas/tabela que os serviços consomem
+// (tenantCostCap.ts e valueEvents.ts) — um rename silencioso aqui quebraria o gate.
+describe("068 — tenant_llm_budget + value_events", () => {
+  const file = files.find((f) => f.startsWith("068_"));
+
+  it("068_tenant_llm_budget.sql existe", () => {
+    expect(file).toBe("068_tenant_llm_budget.sql");
+  });
+
+  it("colunas de orçamento em tenants e plans + tabela value_events (idempotentes)", () => {
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file!), "utf-8");
+    expect(sql).toContain("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS monthly_llm_budget_usd");
+    expect(sql).toContain("ALTER TABLE plans ADD COLUMN IF NOT EXISTS monthly_llm_budget_usd");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS value_events");
+    for (const col of ["tenant_id", "project_id", "event_type", "source", "quantity", "unit", "metadata", "created_at"]) {
+      expect(sql, `value_events perdeu a coluna ${col}`).toContain(col);
+    }
+    expect(sql).toContain("idx_value_events_tenant_created");
+    expect(sql).toContain("idx_value_events_type_created");
+  });
+});
