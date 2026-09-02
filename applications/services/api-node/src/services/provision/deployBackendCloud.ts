@@ -15,6 +15,7 @@ import { pool } from "../../db/client.js";
 import { getInstallationTokenForClone } from "../github.js";
 import { signDeployCallbackToken } from "../../auth.js";
 import { resolveAwsCredentials } from "./awsCredentials.js";
+import { resolveDeployCredentials } from "./deployCredentials.js";
 import { validateDeployMatrix } from "./deployMatrix.js";
 import { createOrGetActiveDeployment, setStatus, patchDeployment } from "./backendState.js";
 
@@ -85,6 +86,14 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
   const creds = await resolveAwsCredentials({ tenantId: req.tenantId, deploymentId: null });
   const repoName = ecrRepoName(req.projectId);
 
+  // 3b. BYOC — decide a ORIGEM da credencial de push (conta do tenant / whitelist / bloqueio).
+  //     Fail-closed: com a flag GENESIS_BYOC_ENFORCED ligada e sem conta configurada (nem
+  //     whitelist), NÃO empurra para ECR nenhum. Antes de criar a row (nada pendente ao bloquear).
+  const deployCreds = await resolveDeployCredentials(req.tenantId);
+  if (deployCreds.source === "blocked") {
+    return { ok: false, code: "CLOUD_NOT_CONFIGURED", message: deployCreds.reason };
+  }
+
   // 4. Row write-ahead PROVISIONING (idempotente por projeto ativo).
   const { row, reused } = await createOrGetActiveDeployment({
     projectId: req.projectId,
@@ -127,23 +136,30 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
     // G1-T19: token ESCOPADO ao deployment (não o GENESIS_API_TOKEN admin). Se vazar,
     // só permite reportar progresso deste deployment. 2h cobre build+push longo.
     genesis_token: signDeployCallbackToken(row.id, req.projectId, "2h"),
-    // Credenciais AWS da conta Zentriz para o runner do host. Ordem de preferência:
-    //   1. GENESIS_PROVISION_* (dedicadas de provisão, se definidas)
-    //   2. AWS_ACCESS_KEY_ID/SECRET (identidade AWS principal da Zentriz — a mesma do Bedrock)
-    //   3. AWS_S3_DEPLOY_* (último recurso; normalmente só permite S3)
-    // Se NENHUMA chave explícita existir, enviamos vazio: o runner então usa a CADEIA
-    // DEFAULT do host (AWS_PROFILE / ~/.aws / instance role) — "as AWS Secrets da Zentriz".
+    // Credenciais AWS para o runner do host. Origem decidida por resolveDeployCredentials:
+    //   • source "tenant"      → chaves da CONTA DO TENANT (BYOC — empurra na conta dele).
+    //   • demais (fallback/whitelist) → conta da Zentriz, na ordem de preferência legada:
+    //       1. GENESIS_PROVISION_* (dedicadas de provisão) 2. AWS_* (identidade Zentriz/Bedrock)
+    //       3. AWS_S3_DEPLOY_*. Vazio ⇒ runner usa a CADEIA DEFAULT do host (profile/instance role).
     aws_access_key_id:
-      process.env.GENESIS_PROVISION_ACCESS_KEY_ID ??
-      process.env.AWS_ACCESS_KEY_ID ??
-      process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
+      deployCreds.source === "tenant"
+        ? deployCreds.accessKeyId
+        : (process.env.GENESIS_PROVISION_ACCESS_KEY_ID ??
+           process.env.AWS_ACCESS_KEY_ID ??
+           process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? ""),
     aws_secret_access_key:
-      process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ??
-      process.env.AWS_SECRET_ACCESS_KEY ??
-      process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
-    aws_region: creds.region,
-    // Repassa o profile p/ o runner usar a cadeia default quando não há chave explícita.
-    aws_profile: process.env.GENESIS_PROVISION_PROFILE ?? process.env.AWS_PROFILE ?? "",
+      deployCreds.source === "tenant"
+        ? deployCreds.secretAccessKey
+        : (process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ??
+           process.env.AWS_SECRET_ACCESS_KEY ??
+           process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? ""),
+    aws_region: deployCreds.source === "tenant" ? (deployCreds.region ?? creds.region) : creds.region,
+    // Com credencial explícita do tenant, NÃO passar profile (chaves explícitas vencem e
+    // impedem o runner de cair na cadeia default do host = conta da Zentriz).
+    aws_profile:
+      deployCreds.source === "tenant"
+        ? ""
+        : (process.env.GENESIS_PROVISION_PROFILE ?? process.env.AWS_PROFILE ?? ""),
   };
 
   try {

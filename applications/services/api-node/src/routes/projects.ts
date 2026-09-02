@@ -2082,6 +2082,7 @@ export async function projectRoutes(app: FastifyInstance) {
                 outcome.code === "REPO_REQUIRED" ? 400 :
                 outcome.code === "GITHUB_INSTALLATION_MISSING" ? 400 :
                 outcome.code === "INVALID_RUNTIME_TARGET" ? 400 :
+                outcome.code === "CLOUD_NOT_CONFIGURED" ? 400 :
                 outcome.code === "GITHUB_TOKEN_ERROR" ? 502 :
                 outcome.code === "LAUNCH_FAILED" ? 502 :
                 500;
@@ -2173,6 +2174,7 @@ export async function projectRoutes(app: FastifyInstance) {
               outcome.code === "DEPLOYMENT_IN_PROGRESS" ? 409 :
               outcome.code.startsWith("BUILD_INCOMPATIBLE") ? 409 :
               outcome.code === "S3_NOT_CONFIGURED" ? 503 :
+              outcome.code === "CLOUD_NOT_CONFIGURED" ? 400 :
               outcome.code === "LAUNCH_FAILED" ? 502 :
               500;
             return reply.status(httpStatus).send({

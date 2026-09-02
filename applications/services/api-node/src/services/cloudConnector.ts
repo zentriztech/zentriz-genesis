@@ -333,6 +333,65 @@ export async function getAwsMonitoringCredentials(
   }
 }
 
+/** Credencial AWS DECIFRADA do tenant para o pipeline de deploy empurrar artefato na CONTA DELE.
+ *  region/roleArn saem sempre que a conexão existe; accessKeyId/secretAccessKey só quando há
+ *  chaves estáticas de fato (conexão só-role deixa as chaves vazias — a política decide o que
+ *  fazer). Retorna null quando o tenant NÃO tem conexão AWS ativa. NUNCA lança por erro de
+ *  decrypt: loga e devolve null (degradação → a política trata como "sem conta configurada"). */
+export interface AwsDeployCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  region: string | null;
+  roleArn: string | null;
+}
+
+export async function getAwsDeployCredentials(
+  tenantId: string,
+  connectionId?: string,
+): Promise<AwsDeployCredentials | null> {
+  const client = await pool.connect();
+  try {
+    const res = connectionId
+      ? await client.query(
+          `SELECT id, region, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE id = $1 AND tenant_id = $2 AND provider = 'aws' AND status = 'active' LIMIT 1`,
+          [connectionId, tenantId],
+        )
+      : await client.query(
+          `SELECT id, region, encrypted_credentials, encryption_iv, encryption_tag
+           FROM tenant_cloud_connections
+           WHERE tenant_id = $1 AND provider = 'aws' AND status = 'active'
+           ORDER BY slot_index ASC LIMIT 1`,
+          [tenantId],
+        );
+    const row = res.rows[0];
+    if (!row) return null;
+
+    const columnRegion = (row.region as string | null) ?? null;
+    try {
+      const creds = JSON.parse(
+        decryptCredentials({
+          encrypted: row.encrypted_credentials as string,
+          iv: row.encryption_iv as string,
+          tag: row.encryption_tag as string,
+        }),
+      ) as AWSCredentials;
+      return {
+        accessKeyId: (creds.accessKeyId ?? "").trim(),
+        secretAccessKey: (creds.secretAccessKey ?? "").trim(),
+        region: creds.region ?? columnRegion,
+        roleArn: creds.roleArn ?? null,
+      };
+    } catch (err) {
+      console.warn(`[CloudConnector] falha ao decifrar conexão AWS ${row.id} p/ deploy (tratado como sem-conta):`, err);
+      return null;
+    }
+  } finally {
+    client.release();
+  }
+}
+
 /** Lista TODAS as conexões ativas do tenant (p/ o select de deploy). Sem credenciais. */
 export async function listCloudConnections(tenantId: string): Promise<CloudConnection[]> {
   const client = await pool.connect();

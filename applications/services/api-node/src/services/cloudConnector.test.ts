@@ -27,7 +27,7 @@ vi.mock("../db/client.js", () => ({
   },
 }));
 
-import { getAwsMonitoringCredentials } from "./cloudConnector.js";
+import { getAwsMonitoringCredentials, getAwsDeployCredentials } from "./cloudConnector.js";
 import { encryptCredentials } from "./crypto.js";
 
 /** Cifra um objeto de credencial e o mapeia para as colunas de tenant_cloud_connections. */
@@ -115,6 +115,74 @@ describe("getAwsMonitoringCredentials (fork B)", () => {
   it("connectionId específico é passado no WHERE (scoped ao tenant)", async () => {
     currentRow = rowFromCreds({ accessKeyId: "AKIA", secretAccessKey: "sk", region: "sa-east-1" }, "sa-east-1");
     await getAwsMonitoringCredentials("t1", "conn-xyz");
+    const [sql, params] = queryMock.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain("id = $1");
+    expect(params).toEqual(["conn-xyz", "t1"]);
+  });
+});
+
+describe("getAwsDeployCredentials (BYOC — credencial DECIFRADA p/ push)", () => {
+  const saved = { key: process.env.CREDENTIALS_ENCRYPTION_KEY, prev: process.env.CREDENTIALS_ENCRYPTION_KEY_PREV };
+  beforeEach(() => {
+    process.env.CREDENTIALS_ENCRYPTION_KEY = HEX_KEY;
+    delete process.env.CREDENTIALS_ENCRYPTION_KEY_PREV;
+    currentRow = undefined;
+    queryMock.mockClear();
+  });
+  afterEach(() => {
+    if (saved.key) process.env.CREDENTIALS_ENCRYPTION_KEY = saved.key; else delete process.env.CREDENTIALS_ENCRYPTION_KEY;
+    if (saved.prev) process.env.CREDENTIALS_ENCRYPTION_KEY_PREV = saved.prev; else delete process.env.CREDENTIALS_ENCRYPTION_KEY_PREV;
+  });
+
+  it("chaves estáticas → devolve accessKeyId/secret DECIFRADOS + região", async () => {
+    currentRow = rowFromCreds(
+      { accessKeyId: "AKIATENANT", secretAccessKey: "s3cr3t", region: "eu-west-1" },
+      "eu-west-1",
+    );
+    const out = await getAwsDeployCredentials("t1");
+    expect(out).toEqual({
+      accessKeyId: "AKIATENANT",
+      secretAccessKey: "s3cr3t",
+      region: "eu-west-1",
+      roleArn: null,
+    });
+  });
+
+  it("conexão só-role → chaves vazias + roleArn setado (a política bloqueia)", async () => {
+    currentRow = rowFromCreds(
+      { roleArn: "arn:aws:iam::999:role/x", region: "eu-central-1" },
+      "eu-central-1",
+    );
+    const out = await getAwsDeployCredentials("t1");
+    expect(out).toEqual({
+      accessKeyId: "",
+      secretAccessKey: "",
+      region: "eu-central-1",
+      roleArn: "arn:aws:iam::999:role/x",
+    });
+  });
+
+  it("região da credencial vence a coluna", async () => {
+    currentRow = rowFromCreds({ accessKeyId: "AKIA", secretAccessKey: "sk", region: "us-west-2" }, "sa-east-1");
+    const out = await getAwsDeployCredentials("t1");
+    expect(out!.region).toBe("us-west-2");
+  });
+
+  it("sem conexão AWS ativa → null", async () => {
+    currentRow = undefined;
+    expect(await getAwsDeployCredentials("t1")).toBeNull();
+  });
+
+  it("decrypt falha → null (tratado como sem-conta; não lança)", async () => {
+    currentRow = rowFromCreds({ accessKeyId: "AKIA", secretAccessKey: "sk" }, "sa-east-1");
+    process.env.CREDENTIALS_ENCRYPTION_KEY = "c".repeat(64); // chave que não decifra
+    delete process.env.CREDENTIALS_ENCRYPTION_KEY_PREV;
+    expect(await getAwsDeployCredentials("t1")).toBeNull();
+  });
+
+  it("connectionId específico → WHERE scoped ao tenant", async () => {
+    currentRow = rowFromCreds({ accessKeyId: "AKIA", secretAccessKey: "sk", region: "sa-east-1" }, "sa-east-1");
+    await getAwsDeployCredentials("t1", "conn-xyz");
     const [sql, params] = queryMock.mock.calls[0] as unknown as [string, unknown[]];
     expect(sql).toContain("id = $1");
     expect(params).toEqual(["conn-xyz", "t1"]);

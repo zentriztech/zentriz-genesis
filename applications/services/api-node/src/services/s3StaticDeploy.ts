@@ -11,6 +11,7 @@ import { pool } from "../db/client.js";
 import { detectStaticProject, type DetectionResult } from "./staticDetector.js";
 import { generateBucketName, isS3Configured } from "./s3.js";
 import { getInstallationTokenForClone } from "./github.js";
+import { resolveDeployCredentials } from "./provision/deployCredentials.js";
 import { join } from "node:path";
 
 export interface S3StaticDeployResult {
@@ -102,6 +103,14 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
       message:
         "Tenant não possui GitHub App instalado — não é possível autenticar o clone. Configure GitHub App do tenant.",
     };
+  }
+
+  // BYOC — mesma política do backend: fail-closed quando a flag GENESIS_BYOC_ENFORCED está
+  // ligada e o tenant não tem conta própria (nem whitelist). Antes de criar a row (nada
+  // pendente ao bloquear). Flag OFF ⇒ decisão "zentriz-fallback" = comportamento legado.
+  const deployCreds = await resolveDeployCredentials(req.tenantId);
+  if (deployCreds.source === "blocked") {
+    return { ok: false, code: "CLOUD_NOT_CONFIGURED", message: deployCreds.reason };
   }
 
   // Detectar tipo do projeto — usa o snapshot local /project-files/<pid>/apps
@@ -245,9 +254,16 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
       process.env.CALLBACK_BASE_URL ??
       "http://host.docker.internal:3000",
     genesis_token: process.env.GENESIS_API_TOKEN ?? "",
-    aws_s3_access_key_id: process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
-    aws_s3_secret_access_key: process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
-    aws_s3_region: process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1",
+    // Origem decidida por resolveDeployCredentials: "tenant" → conta do tenant (BYOC);
+    // fallback/whitelist → chave dedicada de deploy S3 da Zentriz (comportamento legado).
+    aws_s3_access_key_id:
+      deployCreds.source === "tenant" ? deployCreds.accessKeyId : (process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? ""),
+    aws_s3_secret_access_key:
+      deployCreds.source === "tenant" ? deployCreds.secretAccessKey : (process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? ""),
+    aws_s3_region:
+      deployCreds.source === "tenant"
+        ? (deployCreds.region ?? process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1")
+        : (process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1"),
   };
 
   try {
