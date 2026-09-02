@@ -121,11 +121,12 @@ def _http(method: str, url: str, body: dict | None = None, timeout: int = 60) ->
     import urllib.request
     import urllib.error
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN
-        else {"Content-Type": "application/json"},
-    )
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
+    if os.environ.get("FTS_AUTH_TOKEN"):
+        headers["X-FTS-Token"] = os.environ["FTS_AUTH_TOKEN"]
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")

@@ -3564,7 +3564,8 @@ Execute agora sem pedir confirmação.
                             _ft_req = _ur.Request(
                                 f"{_ft_server_url}/run-full-test",
                                 data=_ft_payload,
-                                headers={"Content-Type": "application/json"},
+                                headers={"Content-Type": "application/json",
+                                         "X-FTS-Token": os.environ.get("FTS_AUTH_TOKEN", "")},
                                 method="POST",
                             )
                             with _ur.urlopen(_ft_req, timeout=660) as _resp:

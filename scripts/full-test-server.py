@@ -10,7 +10,7 @@ Endpoints:
   POST /launch-cyborg   — Cyborg externo: valida, corrige e aceita/rejeita projeto
   GET  /health          — healthcheck
 """
-import http.server, json, subprocess, os, logging, threading, time, uuid
+import http.server, json, subprocess, os, logging, threading, time, uuid, hmac
 from pathlib import Path
 from socketserver import ThreadingMixIn
 
@@ -36,6 +36,10 @@ HEAVY_SEM = threading.BoundedSemaphore(HEAVY_JOBS_MAX)
 # com Cyborg/S3 (e vice-versa). Limita só a concorrência de builds backend entre si
 # (docker build é I/O+CPU pesado). Ajustar via env BACKEND_BUILD_MAX.
 BACKEND_BUILD_MAX = int(os.environ.get("BACKEND_BUILD_MAX", "2"))
+# Auditoria 2026-09-02 (fix 2.2): este servidor executa claude --dangerously-skip-permissions
+# no HOST e ficava em 0.0.0.0:7878 SEM auth — RCE para qualquer container co-locado. Token
+# compartilhado obrigatório (fail-closed): sem env, TODA requisição POST é recusada.
+FTS_AUTH_TOKEN = os.environ.get("FTS_AUTH_TOKEN", "").strip()
 BACKEND_SEM = threading.BoundedSemaphore(BACKEND_BUILD_MAX)
 
 
@@ -179,6 +183,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not FTS_AUTH_TOKEN:
+            self._json(503, {"error": "FTS_AUTH_TOKEN nao configurado no servidor - requisicoes recusadas (fail-closed)"}); return
+        if not hmac.compare_digest(self.headers.get("X-FTS-Token", ""), FTS_AUTH_TOKEN):
+            self._json(401, {"error": "unauthorized"}); return
         if self.path == "/run-full-test":
             self._handle_run_full_test()
         elif self.path == "/launch-cyborg":

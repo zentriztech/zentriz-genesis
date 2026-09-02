@@ -10,7 +10,7 @@ services:
       context: ./applications/services/api-node
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file:
       - .env
     environment:
@@ -41,6 +41,7 @@ services:
       - TELEGRAM_WEBHOOK_PATH=${TELEGRAM_WEBHOOK_PATH:-wh/change-me}
       # FT-17: API precisa chamar full-test-server no host (:7878) para deploy S3
       - FULL_TEST_SERVER_URL=${FULL_TEST_SERVER_URL:-http://host.docker.internal:7878}
+      - FTS_AUTH_TOKEN=${FTS_AUTH_TOKEN:-}
       # #74/#60/#61: integração com o Deadpool co-locado (rede interna do compose).
       # Vazio = integração OFF (painel /deadpool degrada limpo, available:false). Prod seta no .env.
       - DEADPOOL_BASE_URL=${DEADPOOL_BASE_URL:-}
@@ -74,7 +75,7 @@ services:
       POSTGRES_PASSWORD: genesis_dev
       POSTGRES_DB: zentriz_genesis
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - zentriz-genesis_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -87,7 +88,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - zentriz-genesis_redis:/data
     healthcheck:
@@ -102,7 +103,7 @@ services:
       context: .
       dockerfile: applications/orchestrator/agents/Dockerfile
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
@@ -147,7 +148,7 @@ services:
       context: .
       dockerfile: applications/orchestrator/Dockerfile.runner
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     env_file:
       - .env
     environment:
@@ -188,6 +189,7 @@ services:
       - CLAUDE_BIN=${CLAUDE_BIN:-/host-claude/claude}
       # TASK-FULL-TEST: URL do full-test-server.py rodando no host
       - FULL_TEST_SERVER_URL=http://host.docker.internal:7878
+      - FTS_AUTH_TOKEN=${FTS_AUTH_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -223,6 +225,7 @@ services:
       - CYBORG_MAX_FIX_CYCLES=${CYBORG_MAX_FIX_CYCLES:-2}
       - CYBORG_PLAYBOOK_TIMEOUT=${CYBORG_PLAYBOOK_TIMEOUT:-300}
       - CYBORG_PRODUCT_ID=${CYBORG_PRODUCT_ID:-}
+      - FTS_AUTH_TOKEN=${FTS_AUTH_TOKEN:-}
     volumes:
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
       - zentriz-genesis_uploads:/shared/uploads
@@ -316,7 +319,7 @@ services:
       context: ./applications/apps/genesis-web
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     environment:
       - NODE_ENV=production
       # Server-side proxy: Next.js encaminha /api/* → api:3000 (nome do serviço no Docker network).

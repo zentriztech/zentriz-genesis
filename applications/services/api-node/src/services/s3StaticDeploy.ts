@@ -256,7 +256,7 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
     const t = setTimeout(() => ctrl.abort(), 10_000);
     const resp = await fetch(`${FTS_URL()}/launch-s3-deploy`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-FTS-Token": process.env.FTS_AUTH_TOKEN ?? "" },
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     }).finally(() => clearTimeout(t));

@@ -137,6 +137,8 @@ def _http(method: str, url: str, body: dict | None = None, timeout: int = 60) ->
     headers = {"Content-Type": "application/json"}
     if API_TOKEN:
         headers["Authorization"] = f"Bearer {API_TOKEN}"
+    if os.environ.get("FTS_AUTH_TOKEN"):
+        headers["X-FTS-Token"] = os.environ["FTS_AUTH_TOKEN"]
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
