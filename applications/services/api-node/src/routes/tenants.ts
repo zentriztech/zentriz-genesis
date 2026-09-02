@@ -28,6 +28,8 @@ type TenantExtraBody = {
   addressDistrict?: string | null;
   addressCity?: string | null;
   addressState?: string | null;
+  /** Whitelist BYOC: autoriza o tenant a usar a infra de deploy da Zentriz pelo host. */
+  byocExempt?: boolean;
 };
 
 type CreateTenantBody = { name?: string; planId?: string; status?: string } & TenantExtraBody;
@@ -52,12 +54,14 @@ const TENANT_TEXT_FIELDS: { key: keyof TenantExtraBody; col: string; transform: 
 /** Colunas extras para os SELECTs (prefixadas com o alias t). */
 const TENANT_EXTRA_SELECT =
   "t.email, t.email_confirmed, t.cnpj, t.responsible_name, t.responsible_email, t.responsible_phone, " +
-  "t.address_cep, t.address_street, t.address_number, t.address_complement, t.address_district, t.address_city, t.address_state";
+  "t.address_cep, t.address_street, t.address_number, t.address_complement, t.address_district, t.address_city, t.address_state, " +
+  "t.byoc_exempt";
 
 /** Colunas extras para RETURNING (sem alias). */
 const TENANT_EXTRA_RETURNING =
   "email, email_confirmed, cnpj, responsible_name, responsible_email, responsible_phone, " +
-  "address_cep, address_street, address_number, address_complement, address_district, address_city, address_state";
+  "address_cep, address_street, address_number, address_complement, address_district, address_city, address_state, " +
+  "byoc_exempt";
 
 /** Mapeia colunas extras de uma linha para o shape camelCase da API. */
 function mapTenantExtra(row: Record<string, unknown>) {
@@ -75,6 +79,7 @@ function mapTenantExtra(row: Record<string, unknown>) {
     addressDistrict: (row.address_district as string) ?? null,
     addressCity: (row.address_city as string) ?? null,
     addressState: (row.address_state as string) ?? null,
+    byocExempt: !!row.byoc_exempt,
   };
 }
 
@@ -108,6 +113,10 @@ function collectTenantExtra(body: TenantExtraBody): { cols: string[]; vals: unkn
   if (body.emailConfirmed !== undefined) {
     cols.push("email_confirmed");
     vals.push(!!body.emailConfirmed);
+  }
+  if (body.byocExempt !== undefined) {
+    cols.push("byoc_exempt");
+    vals.push(!!body.byocExempt);
   }
   return { cols, vals };
 }

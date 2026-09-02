@@ -136,30 +136,18 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
     // G1-T19: token ESCOPADO ao deployment (não o GENESIS_API_TOKEN admin). Se vazar,
     // só permite reportar progresso deste deployment. 2h cobre build+push longo.
     genesis_token: signDeployCallbackToken(row.id, req.projectId, "2h"),
-    // Credenciais AWS para o runner do host. Origem decidida por resolveDeployCredentials:
-    //   • source "tenant"      → chaves da CONTA DO TENANT (BYOC — empurra na conta dele).
-    //   • demais (fallback/whitelist) → conta da Zentriz, na ordem de preferência legada:
-    //       1. GENESIS_PROVISION_* (dedicadas de provisão) 2. AWS_* (identidade Zentriz/Bedrock)
-    //       3. AWS_S3_DEPLOY_*. Vazio ⇒ runner usa a CADEIA DEFAULT do host (profile/instance role).
+    // Credenciais AWS para o runner do host — SEMPRE a conta da Zentriz (o host nunca publica em
+    // conta de terceiro; o cloud do cliente é servido por GitHub Actions). Ordem de preferência:
+    //   1. GENESIS_PROVISION_* (chaves dedicadas de provisão, conta Zentriz 820)
+    //   2. AWS_S3_DEPLOY_*. Vazio ⇒ runner usa a CADEIA DEFAULT do host (instance role 820).
     aws_access_key_id:
-      deployCreds.source === "tenant"
-        ? deployCreds.accessKeyId
-        : (process.env.GENESIS_PROVISION_ACCESS_KEY_ID ??
-           process.env.AWS_ACCESS_KEY_ID ??
-           process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? ""),
+      process.env.GENESIS_PROVISION_ACCESS_KEY_ID ??
+      process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
     aws_secret_access_key:
-      deployCreds.source === "tenant"
-        ? deployCreds.secretAccessKey
-        : (process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ??
-           process.env.AWS_SECRET_ACCESS_KEY ??
-           process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? ""),
-    aws_region: deployCreds.source === "tenant" ? (deployCreds.region ?? creds.region) : creds.region,
-    // Com credencial explícita do tenant, NÃO passar profile (chaves explícitas vencem e
-    // impedem o runner de cair na cadeia default do host = conta da Zentriz).
-    aws_profile:
-      deployCreds.source === "tenant"
-        ? ""
-        : (process.env.GENESIS_PROVISION_PROFILE ?? process.env.AWS_PROFILE ?? ""),
+      process.env.GENESIS_PROVISION_SECRET_ACCESS_KEY ??
+      process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
+    aws_region: creds.region,
+    aws_profile: process.env.GENESIS_PROVISION_PROFILE ?? process.env.AWS_PROFILE ?? "",
   };
 
   try {

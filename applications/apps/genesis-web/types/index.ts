@@ -36,6 +36,12 @@ export interface Tenant extends TenantContact {
   plan: Plan;
   status: TenantStatus;
   createdAt: string;
+  /**
+   * Whitelist BYOC: autoriza este tenant a usar a infraestrutura de deploy da Zentriz
+   * (conta 820) pelo pipeline do host. Fora da whitelist, o deploy no cloud próprio do
+   * cliente é servido por GitHub Actions. Gerenciável só por zentriz_admin.
+   */
+  byocExempt: boolean;
   /** Contadores de uso (só na listagem do master GET /api/tenants). */
   usersCount?: number;
   projectsCount?: number;

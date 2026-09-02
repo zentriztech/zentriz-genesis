@@ -97,6 +97,7 @@ function TenantDialog({
   const [addressDistrict, setAddressDistrict] = useState(editing?.addressDistrict ?? "");
   const [addressCity, setAddressCity] = useState(editing?.addressCity ?? "");
   const [addressState, setAddressState] = useState(normalizeUf(editing?.addressState ?? ""));
+  const [byocExempt, setByocExempt] = useState(editing?.byocExempt ?? false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cnpjBusy, setCnpjBusy] = useState(false);
@@ -163,6 +164,7 @@ function TenantDialog({
       }
     }
     if (emailConfirmed !== (editing?.emailConfirmed ?? false)) p.emailConfirmed = emailConfirmed;
+    if (byocExempt !== (editing?.byocExempt ?? false)) p.byocExempt = byocExempt;
     return p;
   }
 
@@ -343,6 +345,19 @@ function TenantDialog({
             ))}
           </TextField>
         </Stack>
+
+        <Divider textAlign="left">
+          <Typography variant="overline" color="text.secondary">Deploy</Typography>
+        </Divider>
+        <FormControlLabel
+          control={<Switch checked={byocExempt} onChange={(e) => setByocExempt(e.target.checked)} />}
+          label="Whitelist de deploy na conta Zentriz (via host)"
+        />
+        <Typography variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+          Ligado: este tenant pode publicar (Demo/Prod) pela infraestrutura da Zentriz através do
+          host. Desligado: o deploy no cloud próprio do cliente (AWS/Azure/GCP) é servido por GitHub
+          Actions. Só tem efeito com a flag <code>GENESIS_BYOC_ENFORCED</code> ligada.
+        </Typography>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={saving}>

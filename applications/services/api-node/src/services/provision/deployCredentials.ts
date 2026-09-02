@@ -1,45 +1,50 @@
 /**
- * deployCredentials.ts — Política BYOC (bring-your-own-cloud) para o pipeline autônomo.
+ * deployCredentials.ts — Política de origem da credencial para o pipeline autônomo (host/FTS).
  *
- * Decide a ORIGEM da credencial AWS que o pipeline usa para empurrar artefatos (ECR / S3):
- * a conta do PRÓPRIO tenant (BYOC), a conta da Zentriz (exceção whitelisted / legado), ou
- * BLOQUEAR quando não há conta configurada. É o ponto único que os dois caminhos de deploy
- * (deployBackendCloud e s3StaticDeploy) consultam antes de disparar o full-test-server.
+ * Modelo (Jean, 2026-09-02): "nada dos produtos Zentriz deve viver em outras contas — tudo na
+ * conta Zentriz. Quando o cliente configura o cloud dele (AWS/Azure/GCP), a conta que ele
+ * configura recebe o Deploy (Demo/Prod) VIA GITHUB ACTIONS. Atualmente, na conta da Zentriz,
+ * apenas quem está na whitelist."
  *
- * Requisito (Jean, 2026-09-02): "o pipeline autônomo NÃO deve empurrar produtos para ECR
- * nenhum, exceto quando o tenant tem a própria conta Cloud configurada — cada um usa a sua.
- * Cabral Org e Salif Org são exceção (representantes EU testando o Genesis para a Zentriz):
- * as contas-tenant deles podem empurrar usando a conta designada da Zentriz."
+ * Consequência para o PIPELINE DO HOST (full-test-server → S3 estático / build ECR):
+ *   • O host SEMPRE publica na conta da Zentriz (via instance role da EC2 / chaves dedicadas 820).
+ *   • Só os tenants da WHITELIST podem usar essa infra da Zentriz pelo host.
+ *   • Qualquer outro tenant é BLOQUEADO neste caminho — o deploy no cloud PRÓPRIO dele acontece
+ *     por GitHub Actions (com os secrets sincronizados), NÃO pelo push do host.
+ *
+ * Não existe mais "empurrar na conta do tenant pelo host" (o antigo source "tenant") nem
+ * AssumeRole cross-account no runner (o antigo GATE 2): cross-account é responsabilidade do
+ * GitHub Actions, não do host.
  *
  * ── "Virar a chave" (feature flag) ────────────────────────────────────────────────────────
  * GENESIS_BYOC_ENFORCED (default OFF). Enquanto OFF, o comportamento é BYTE-IDÊNTICO ao legado
- * (todos os tenants empurram na conta da Zentriz via credencial de ambiente) — zero regressão.
- * Quando ligada (ON), a política BYOC passa a valer e o fail-closed entra em ação. O rollback é
- * simplesmente desligar a flag. GENESIS_BYOC_EXEMPT_TENANTS = lista de tenant UUIDs (CSV) que
- * podem usar a conta da Zentriz (Cabral/Salif) mesmo sem conta própria.
+ * (todos empurram na conta da Zentriz via credencial de ambiente) — zero regressão. Quando ON,
+ * a whitelist passa a ser o único portão do host para a conta da Zentriz e o fail-closed vale.
+ * Rollback = desligar a flag.
  */
 
-import { getAwsDeployCredentials, type AwsDeployCredentials } from "../cloudConnector.js";
+import { pool } from "../../db/client.js";
 
 export type DeployCredsDecision =
-  /** Tenant tem conta AWS própria usável → empurra na conta DELE (BYOC). */
-  | { source: "tenant"; accessKeyId: string; secretAccessKey: string; region: string | null; roleArn: string | null }
-  /** Tenant na whitelist (Cabral/Salif) sem conta própria → usa a conta designada da Zentriz. */
+  /** Tenant na whitelist → o host publica na conta designada da Zentriz. */
   | { source: "zentriz-whitelist" }
   /** Flag OFF → comportamento legado (conta Zentriz para todos). */
   | { source: "zentriz-fallback" }
-  /** Fail-closed: não empurra para lugar nenhum (razão exibível ao usuário). */
+  /** Fail-closed: o host não publica (o cloud do cliente é servido por GitHub Actions). */
   | { source: "blocked"; reason: string };
 
 const TRUTHY = /^(1|true|yes|on)$/i;
 
-/** A "chave": quando ligada, a política BYOC passa a valer (fail-closed). Default OFF. */
+/** A "chave": quando ligada, a política de whitelist passa a valer (fail-closed). Default OFF. */
 export function isByocEnforced(): boolean {
   return TRUTHY.test((process.env.GENESIS_BYOC_ENFORCED ?? "").trim());
 }
 
-/** Tenants autorizados a usar a conta da Zentriz sem conta própria (Cabral/Salif). CSV de UUIDs. */
-export function isTenantExempt(tenantId: string): boolean {
+/**
+ * Whitelist via env var (CSV de UUIDs) — mantida como fallback/retrocompat. Síncrona.
+ * A fonte primária passou a ser a coluna `tenants.byoc_exempt` (gerenciável pelo Portal).
+ */
+export function isTenantExemptEnv(tenantId: string): boolean {
   const raw = (process.env.GENESIS_BYOC_EXEMPT_TENANTS ?? "").trim();
   if (!raw) return false;
   const exempt = new Set(
@@ -49,45 +54,43 @@ export function isTenantExempt(tenantId: string): boolean {
 }
 
 /**
- * Resolve a origem da credencial de push para um tenant. Só consulta o banco quando a flag
- * está ligada (o caminho legado não faz query nova — preserva latência/comportamento atuais).
+ * Tenant autorizado a usar a conta da Zentriz pelo host. Verdadeiro se estiver na coluna
+ * `tenants.byoc_exempt` (gerenciável no Portal por zentriz_admin) OU na env CSV (fallback).
+ * A env é checada primeiro (barata, sem tocar o banco); erro no banco degrada para "não isento".
+ */
+export async function isTenantExempt(tenantId: string): Promise<boolean> {
+  if (isTenantExemptEnv(tenantId)) return true;
+  try {
+    const { rows } = await pool.query<{ byoc_exempt: boolean }>(
+      `SELECT byoc_exempt FROM tenants WHERE id = $1`,
+      [tenantId],
+    );
+    return rows[0]?.byoc_exempt === true;
+  } catch {
+    // Fail-closed: não elevar para isento por causa de erro de banco.
+    return false;
+  }
+}
+
+/**
+ * Resolve a origem da credencial de push para um tenant no pipeline do HOST. Só consulta a
+ * whitelist quando a flag está ligada (o caminho legado não faz query nova — preserva a
+ * latência/comportamento atuais).
  */
 export async function resolveDeployCredentials(tenantId: string): Promise<DeployCredsDecision> {
   // "Antes de virar a chave": flag OFF ⇒ legado byte-idêntico (conta Zentriz para todos).
   if (!isByocEnforced()) return { source: "zentriz-fallback" };
 
-  // Flag ON — BYOC obrigatório. Tenant com credencial própria usável → empurra na conta dele.
-  const tenantCreds: AwsDeployCredentials | null = await getAwsDeployCredentials(tenantId);
-  if (tenantCreds && tenantCreds.accessKeyId && tenantCreds.secretAccessKey) {
-    return {
-      source: "tenant",
-      accessKeyId: tenantCreds.accessKeyId,
-      secretAccessKey: tenantCreds.secretAccessKey,
-      region: tenantCreds.region,
-      roleArn: tenantCreds.roleArn,
-    };
-  }
+  // Flag ON — só a whitelist usa a infra da Zentriz pelo host.
+  if (await isTenantExempt(tenantId)) return { source: "zentriz-whitelist" };
 
-  // Conexão só-role (cross-account): o runner do host ainda NÃO faz AssumeRole (GATE 2 pendente).
-  // Fail-closed — nunca cair silenciosamente na conta da Zentriz por causa de chaves vazias.
-  if (tenantCreds && tenantCreds.roleArn) {
-    return {
-      source: "blocked",
-      reason:
-        "A conexão AWS deste tenant é cross-account (role) e o pipeline ainda não assume role " +
-        "(GATE 2 pendente). Cadastre chaves de acesso na conexão de Cloud para publicar.",
-    };
-  }
-
-  // Sem conta própria: a whitelist (Cabral/Salif — representantes EU testando p/ a Zentriz)
-  // pode usar a conta designada da Zentriz.
-  if (isTenantExempt(tenantId)) return { source: "zentriz-whitelist" };
-
-  // Caso contrário: não empurra para ECR/S3 nenhum.
+  // Qualquer outro tenant: o host NÃO publica. O cloud próprio do cliente recebe o deploy
+  // (Demo/Prod) por GitHub Actions.
   return {
     source: "blocked",
     reason:
-      "Nenhuma conta Cloud configurada para este tenant. Configure sua conta em " +
-      "Configurações → Cloud para publicar o produto na sua própria conta.",
+      "O deploy pela infraestrutura da Zentriz é restrito à whitelist. O cloud próprio do seu " +
+      "tenant (AWS/Azure/GCP) recebe o deploy (Demo/Prod) via GitHub Actions — configure-o em " +
+      "Configurações → Cloud.",
   };
 }

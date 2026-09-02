@@ -254,16 +254,12 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
       process.env.CALLBACK_BASE_URL ??
       "http://host.docker.internal:3000",
     genesis_token: process.env.GENESIS_API_TOKEN ?? "",
-    // Origem decidida por resolveDeployCredentials: "tenant" → conta do tenant (BYOC);
-    // fallback/whitelist → chave dedicada de deploy S3 da Zentriz (comportamento legado).
-    aws_s3_access_key_id:
-      deployCreds.source === "tenant" ? deployCreds.accessKeyId : (process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? ""),
-    aws_s3_secret_access_key:
-      deployCreds.source === "tenant" ? deployCreds.secretAccessKey : (process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? ""),
-    aws_s3_region:
-      deployCreds.source === "tenant"
-        ? (deployCreds.region ?? process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1")
-        : (process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1"),
+    // O host SEMPRE publica na conta da Zentriz (whitelist/fallback) via a chave dedicada de
+    // deploy S3 (820). Vazio ⇒ runner usa a cadeia default do host (instance role 820). O cloud
+    // próprio do cliente é servido por GitHub Actions, não por este push.
+    aws_s3_access_key_id: process.env.AWS_S3_DEPLOY_ACCESS_KEY_ID ?? "",
+    aws_s3_secret_access_key: process.env.AWS_S3_DEPLOY_SECRET_ACCESS_KEY ?? "",
+    aws_s3_region: process.env.AWS_S3_DEPLOY_REGION ?? "us-east-1",
   };
 
   try {

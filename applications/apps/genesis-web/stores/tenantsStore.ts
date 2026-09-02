@@ -19,6 +19,8 @@ export type TenantContactPayload = {
   addressDistrict?: string | null;
   addressCity?: string | null;
   addressState?: string | null;
+  /** Whitelist BYOC (só zentriz_admin) — autoriza deploy pela infra da Zentriz via host. */
+  byocExempt?: boolean;
 };
 
 export type CreateTenantPayload = {
