@@ -274,6 +274,9 @@ services:
       # .env.deadpool-aws) — setar só no .env seria no-op silencioso.
       - DEADPOOL_ALLOW_CONNECT_VERSIONED=${DEADPOOL_ALLOW_CONNECT_VERSIONED:-false}
       - CONNECT_VERSION_PIN=${CONNECT_VERSION_PIN:-1.1.0}
+      # A matriz do consumidor é embarcada na imagem em /app/compatibility (Dockerfile);
+      # dentro do container o pacote instalado não a encontraria sozinho.
+      - DEADPOOL_COMPAT_MATRIX_FILE=/app/compatibility/connect-compatibility.json
       # Auth: em prod, token-only (basic desligado). Local herda defaults (não-protegido → validação leve).
       # DEADPOOL_API_ENABLE_AUTH=false só é permitido fora de prod (config.py) — usado no local p/ o gateway alcançar sem token.
       - DEADPOOL_API_ENABLE_AUTH=${DEADPOOL_API_ENABLE_AUTH:-true}
