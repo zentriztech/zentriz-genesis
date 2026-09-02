@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { canAccessProjectRow } from "../lib/projectAccess.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -86,10 +87,7 @@ async function checkProjectAccess(
   const result = await client.query("SELECT tenant_id, created_by FROM projects WHERE id = $1", [projectId]);
   const row = result.rows[0];
   if (!row) return false;
-  if (user.role === "zentriz_admin") return true;
-  if (user.tenantId && row.tenant_id === user.tenantId) return true;
-  if (row.created_by === user.id) return true;
-  return false;
+  return canAccessProjectRow(user, row);
 }
 
 export async function dialogueRoutes(app: FastifyInstance) {

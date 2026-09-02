@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
-import { type AuthUser } from "../middleware/auth.js";
+import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -35,11 +35,15 @@ function getUser(request: FastifyRequest): AuthUser {
  * Auth: qualquer usuário autenticado; admin vê todos os tenants.
  */
 export async function reportsRoutes(app: FastifyInstance) {
+  // Auditoria 2026-09-02: o plugin era registrado SEM auth — policies/list ficava público
+  // na borda (CORS não é autenticação) e type-compliance ficava MORTA (request.user nunca
+  // populado → 401 até para admin). O hook fecha a primeira e conserta a segunda.
+  app.addHook("preHandler", authMiddleware);
 
   /**
    * T-16: GET /api/internal/policies/list
-   * Expõe policies.json ao portal (útil para o hook useProjectTypes).
-   * Endpoint público (auth apenas via origem CORS) — dados não sensíveis.
+   * Expõe policies.json (útil para o hook useProjectTypes). Exige JWT; nota: após o bloqueio
+   * de /api/internal/* na borda (nginx), só é alcançável da rede interna.
    */
   app.get("/api/internal/policies/list", async (_request, reply) => {
     try {

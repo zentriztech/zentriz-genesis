@@ -90,8 +90,25 @@ describe("rateLimit — janela fixa por chave (enableInTest)", () => {
     }
   });
 
-  it("clientIp prioriza o primeiro hop de X-Forwarded-For", () => {
-    expect(clientIp(reqWithIp("10.0.0.1", { "x-forwarded-for": "203.0.113.7, 10.0.0.1" }))).toBe("203.0.113.7");
+  it("clientIp usa o ÚLTIMO hop de X-Forwarded-For (o que o nosso proxy anexou — fix 1.1)", () => {
+    // Primeiro hop é forjável pelo cliente sob append; o último é o peer real do nginx.
+    expect(clientIp(reqWithIp("10.0.0.1", { "x-forwarded-for": "6.6.6.6, 203.0.113.7" }))).toBe("203.0.113.7");
+    expect(clientIp(reqWithIp("10.0.0.1", { "x-forwarded-for": "203.0.113.7" }))).toBe("203.0.113.7");
     expect(clientIp(reqWithIp("10.0.0.1"))).toBe("10.0.0.1");
+  });
+
+  it("createFailureTracker só bloqueia após max FALHAS e destrava ao expirar a janela", async () => {
+    const { createFailureTracker } = await import("./rateLimit.js");
+    const t = createFailureTracker({ windowMs: 50, max: 3 });
+    expect(t.isBlocked("a@b.c")).toBe(false);
+    t.recordFailure("a@b.c");
+    t.recordFailure("a@b.c");
+    expect(t.isBlocked("a@b.c")).toBe(false); // 2 < 3
+    t.recordFailure("a@b.c");
+    expect(t.isBlocked("a@b.c")).toBe(true); // 3 >= 3
+    expect(t.isBlocked("outro@b.c")).toBe(false); // isolado por chave
+    expect(t.retryAfterMs("a@b.c")).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(t.isBlocked("a@b.c")).toBe(false); // janela expirou
   });
 });

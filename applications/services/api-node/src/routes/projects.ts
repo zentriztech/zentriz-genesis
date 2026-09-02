@@ -23,6 +23,7 @@ import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../services/opsNotify.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
+import { canAccessProjectRow } from "../lib/projectAccess.js";
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -60,10 +61,7 @@ async function checkProjectAccess(
   const result = await client.query("SELECT tenant_id, created_by FROM projects WHERE id = $1", [projectId]);
   const row = result.rows[0];
   if (!row) return false;
-  if (user.role === "zentriz_admin") return true;
-  if (user.tenantId && (row.tenant_id as string) === user.tenantId) return true;
-  if (row.created_by === user.id) return true;
-  return false;
+  return canAccessProjectRow(user, row);
 }
 
 export async function projectRoutes(app: FastifyInstance) {
@@ -252,7 +250,7 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const row = result.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
       return reply.send({
@@ -921,7 +919,7 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const row = result.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
@@ -958,7 +956,7 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const row = (await client.query("SELECT id, tenant_id, created_by, parent_project_id FROM projects WHERE id=$1", [id])).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
@@ -1057,7 +1055,7 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
       const repoRow = (await client.query(
@@ -1098,7 +1096,7 @@ export async function projectRoutes(app: FastifyInstance) {
         [id],
       )).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
       if (row.status !== "accepted") {
@@ -1363,7 +1361,7 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const row = result.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
@@ -1440,7 +1438,7 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       const row = result.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
@@ -1519,7 +1517,7 @@ export async function projectRoutes(app: FastifyInstance) {
       const proj = row.rows[0];
       if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       // Accept from runner (via GENESIS_API_TOKEN) or admin/owner
-      if (user.role !== "zentriz_admin" && proj.tenant_id !== user.tenantId && proj.created_by !== user.id) {
+      if (!canAccessProjectRow(user, proj)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
       await client.query(
@@ -1553,7 +1551,7 @@ export async function projectRoutes(app: FastifyInstance) {
       const proj = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
       const row = proj.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN" });
       }
       const res = await client.query(
@@ -1580,7 +1578,7 @@ export async function projectRoutes(app: FastifyInstance) {
       const proj = await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id]);
       const row = proj.rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
@@ -1645,7 +1643,7 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN" });
       }
       // Buscar linhas individuais para calcular custo por modelo corretamente
@@ -1723,7 +1721,7 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+      if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN" });
       }
       const res = await client.query(
@@ -1838,7 +1836,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const root = process.env.PROJECT_FILES_ROOT?.trim();
@@ -1877,7 +1875,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const root = process.env.PROJECT_FILES_ROOT?.trim();
@@ -1938,7 +1936,7 @@ export async function projectRoutes(app: FastifyInstance) {
           [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         if (!["completed", "accepted"].includes(row.status as string)) {
@@ -2342,7 +2340,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
       } finally {
@@ -2363,7 +2361,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         // FT-17 fix (2026-07-03): incluir 'failed' recente (últimas 24h) para o usuário ver o motivo.
@@ -2421,7 +2419,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         // Ativo (qualquer fase de provisionamento) tem prioridade; senão último failed 24h.
@@ -2475,7 +2473,7 @@ export async function projectRoutes(app: FastifyInstance) {
       try {
         const row = (await client.query("SELECT tenant_id, created_by FROM projects WHERE id=$1", [id])).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const dep = (await client.query(
@@ -2651,7 +2649,7 @@ export async function projectRoutes(app: FastifyInstance) {
         );
         const row = proj.rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         if (guarded && body.confirmId !== id) {
@@ -2824,7 +2822,7 @@ export async function projectRoutes(app: FastifyInstance) {
           [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const specRow = (await client.query(
@@ -2859,7 +2857,7 @@ export async function projectRoutes(app: FastifyInstance) {
           "SELECT tenant_id, created_by FROM projects WHERE id = $1", [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const rows = (await client.query(
@@ -2890,7 +2888,7 @@ export async function projectRoutes(app: FastifyInstance) {
           [id]
         )).rows[0];
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId && row.created_by !== user.id) {
+        if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const specRow = (await client.query(

@@ -25,6 +25,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile } from "node:fs/promises";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { extractProductZip, httpPost, httpGet, type ProductZipContents } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
@@ -488,8 +489,8 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             WHERE p.id = $1`, [id],
         )).rows[0];
         if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada" });
-        // Ownership: não-master só decompõe spec do próprio tenant (ou que criou).
-        if (proj.tenant_id !== user.tenantId && proj.created_by !== user.id) {
+        // Ownership: não-master só decompõe spec do próprio tenant (regra única em projectAccess).
+        if (!canAccessProjectRow(user, proj)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão sobre esta spec" });
         }
         // §4.7 (migration 064): pós-064 toda spec tem product_id (ao menos o INBOX). Só barra

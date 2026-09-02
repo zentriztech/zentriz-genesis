@@ -28,12 +28,21 @@ export type RateLimitOptions = {
   enableInTest?: boolean;
 };
 
-/** IP do cliente respeitando X-Forwarded-For (primeiro hop) quando presente. */
+/**
+ * IP do cliente respeitando X-Forwarded-For quando presente — usando o ÚLTIMO hop.
+ *
+ * Auditoria 2026-09-02 (fix 1.1): o primeiro hop do XFF é CONTROLADO PELO CLIENTE quando o
+ * proxy usa append (`$proxy_add_x_forwarded_for`) — permitia bypass do limite trocando o
+ * header a cada request e "incriminar" IP de terceiro. O último hop é o que o NOSSO nginx
+ * anexou (o peer real dele); com proxy que sobrescreve, primeiro==último. Sem proxy (dev),
+ * não há XFF e cai em request.ip.
+ */
 export function clientIp(request: FastifyRequest): string {
   const xff = request.headers["x-forwarded-for"];
   if (typeof xff === "string" && xff.length > 0) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const parts = xff.split(",");
+    const last = parts[parts.length - 1]?.trim();
+    if (last) return last;
   }
   return request.ip || "unknown";
 }
@@ -77,5 +86,47 @@ export function createRateLimiter(opts: RateLimitOptions) {
         retryAfterMs,
       });
     }
+  };
+}
+
+/**
+ * Rastreador de FALHAS por chave (fix 1.1 — lockout do login por e-mail).
+ *
+ * Diferente do createRateLimiter (que conta toda request), aqui só falhas contam —
+ * senão qualquer anônimo trancaria o login da vítima spammando o e-mail dela com
+ * requisições que nem tentam senha. Janela fixa, em memória, mesmo trade-off
+ * single-instance do limitador acima.
+ */
+export function createFailureTracker(opts: { windowMs: number; max: number }) {
+  const buckets = new Map<string, Bucket>();
+
+  function bucketFor(key: string, now: number): Bucket {
+    let b = buckets.get(key);
+    if (!b || b.resetAt <= now) {
+      if (buckets.size > MAX_KEYS) {
+        for (const [k, old] of buckets) if (old.resetAt <= now) buckets.delete(k);
+      }
+      b = { count: 0, resetAt: now + opts.windowMs };
+      buckets.set(key, b);
+    }
+    return b;
+  }
+
+  return {
+    /** true se a chave estourou o teto de falhas na janela corrente. */
+    isBlocked(key: string): boolean {
+      const now = Date.now();
+      const b = buckets.get(key);
+      if (!b || b.resetAt <= now) return false;
+      return b.count >= opts.max;
+    },
+    recordFailure(key: string): void {
+      const now = Date.now();
+      bucketFor(key, now).count += 1;
+    },
+    retryAfterMs(key: string): number {
+      const b = buckets.get(key);
+      return b ? Math.max(0, b.resetAt - Date.now()) : 0;
+    },
   };
 }

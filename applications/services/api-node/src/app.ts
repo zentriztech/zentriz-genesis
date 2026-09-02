@@ -1,7 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyMultipart from "@fastify/multipart";
-import { voucherRoutes } from "./routes/vouchers.js";
 import { authRoutes } from "./routes/auth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { specRoutes } from "./routes/specs.js";
@@ -78,7 +77,6 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
     return reply.send({ status: "ok", version: APP_VERSION, timestamp: new Date().toISOString() });
   });
 
-  await app.register(voucherRoutes);
   await app.register(authRoutes);
   await app.register(signupRoutes);
   await app.register(cnpjRoutes);
