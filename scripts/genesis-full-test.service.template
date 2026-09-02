@@ -1,0 +1,40 @@
+# genesis-full-test.service — unit systemd do Full-Test-Server (FTS), o "host agent"
+# do Cyborg. Roda em PROD (EC2 3.220.66.113) como processo de host (fora do Docker)
+# porque precisa do buildx/daemon do host para build+push de imagens e do binário
+# `claude` (Bedrock) para as etapas de engenharia autônoma.
+#
+# ⚠️ TEMPLATE VERSIONADO — NÃO contém segredos. O arquivo real vive em
+#    /etc/systemd/system/genesis-full-test.service no host de prod.
+#    TODO segredo (tokens, credenciais AWS) fica em /etc/systemd/genesis-fts.env
+#    (chmod 600, fora do git). Ver genesis-fts.env.template para as chaves.
+#
+# 🔴 DÍVIDA DE SEGURANÇA CONHECIDA (auditoria 2026-09-02, item 5.4/2.3):
+#    O unit REAL em prod ainda carrega AWS_ACCESS_KEY_ID/SECRET estáticos (AKIA…)
+#    embutidos como `Environment=`. Recomendação: (1) mover tudo para o
+#    EnvironmentFile abaixo e (2) trocar as chaves estáticas pela INSTANCE ROLE da
+#    EC2 (o host já tem role). Enquanto o FTS executa código gerado não-confiável
+#    com `claude --dangerously-skip-permissions`, credencial estática = risco de
+#    comprometer a conta AWS. Rota B (host descartável dedicado) elimina isso.
+
+[Unit]
+Description=Genesis full-test-server (Cyborg host agent)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+# Todos os segredos e parâmetros vêm deste arquivo (chmod 600, fora do git):
+#   FTS_AUTH_TOKEN, GENESIS_API_TOKEN, AWS_*, FULL_TEST_PORT, CLAUDE_BIN,
+#   CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_DEFAULT_SONNET_MODEL, HEAVY_JOBS_MAX,
+#   CYBORG_HOST_API_URL, AWS_REGION/AWS_DEFAULT_REGION.
+EnvironmentFile=/etc/systemd/genesis-fts.env
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/zentriz-genesis
+ExecStart=/usr/bin/python3 scripts/full-test-server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
