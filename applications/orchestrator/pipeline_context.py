@@ -144,7 +144,7 @@ class PipelineContext:
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self.connect_version = "1.0.0"
+        self.connect_version = "1.1.0"
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -427,7 +427,7 @@ class PipelineContext:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         ctx = cls(project_id)
-        ctx.connect_version = data.get("connect_version", "1.0.0")
+        ctx.connect_version = data.get("connect_version", "1.1.0")
         ctx.spec_raw = data.get("spec_raw", "")
         ctx.product_spec = data.get("product_spec", "")
         ctx.product_spec_template = data.get("product_spec_template", "")

@@ -268,6 +268,12 @@ services:
       # contexto Connect (serviceManifest/ownershipManifest/integrationReadyContract) responde 400.
       # Habilita a validação Connect e o perfil de suporte (tier1-connect-ready) no gateway.
       - DEADPOOL_CONNECT_ROOT=/zentriz-connect
+      # ADR-013 (auditoria 2026-09-02, Onda 3.3): consumo VERSIONADO fail-closed do Connect —
+      # valida contra o snapshot congelado .snapshots/v<pin>, nunca a pasta live de dev.
+      # Estas envs PRECISAM estar aqui: o container não carrega o .env (env_file é só o
+      # .env.deadpool-aws) — setar só no .env seria no-op silencioso.
+      - DEADPOOL_ALLOW_CONNECT_VERSIONED=${DEADPOOL_ALLOW_CONNECT_VERSIONED:-false}
+      - CONNECT_VERSION_PIN=${CONNECT_VERSION_PIN:-1.1.0}
       # Auth: em prod, token-only (basic desligado). Local herda defaults (não-protegido → validação leve).
       # DEADPOOL_API_ENABLE_AUTH=false só é permitido fora de prod (config.py) — usado no local p/ o gateway alcançar sem token.
       - DEADPOOL_API_ENABLE_AUTH=${DEADPOOL_API_ENABLE_AUTH:-true}

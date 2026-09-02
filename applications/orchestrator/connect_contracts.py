@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-CONNECT_SCHEMA_VERSION = "1.0.0"
+CONNECT_SCHEMA_VERSION = "1.1.0"
 CONNECT_VERSION_DIR = f"v{CONNECT_SCHEMA_VERSION}"
 CONNECT_PROJECT_DIR = f"connect/{CONNECT_VERSION_DIR}"
 
