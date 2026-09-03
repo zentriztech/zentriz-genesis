@@ -9,8 +9,9 @@
  *     um reaper/deadline concorrente nunca é sobrescrito por um poll atrasado (TOCTOU).
  *   • reapOrphanProposals (boot) marca 'pending'/'running' órfão como 'interrupted'.
  *   • expireOverdueProposals (watchdog) aplica deadline_at + purga payload antigo (>7d).
- *   • revertOrphanOrigins devolve à Bancada a spec presa em pending_conversion cuja única
- *     proposta terminou sem consumo (senão a spec ficava fora da lista para sempre).
+ *   • revertTerminatedOrigins devolve à Bancada a spec presa em pending_conversion cuja
+ *     proposta acabou de terminar sem consumo (escopada à origem afetada — nunca varre
+ *     pending_conversion de outro fluxo).
  *
  * Assunção (documentada): 1 instância da API. O reaper de boot mata TODA proposta em voo
  * sem guarda de idade — se houvesse N instâncias, mataria jobs vivos de outra instância.
@@ -31,22 +32,33 @@ export const PROPOSAL_DEADLINE_MIN = 15;
 
 type AgentsResult = { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[] };
 
+/** Coleta origin_project_id não-nulos de um resultado de UPDATE ... RETURNING. */
+function originsOf(rows: unknown[]): string[] {
+  return (rows ?? [])
+    .map((r) => (r as { origin_project_id?: string | null }).origin_project_id)
+    .filter((id): id is string => !!id);
+}
+
 async function failProposal(pool: Pool, jobId: string, error: string): Promise<void> {
-  await pool
+  const r = await pool
     .query(
-      "UPDATE product_proposals SET status='error', error=$2, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status IN ('pending','running')",
+      "UPDATE product_proposals SET status='error', error=$2, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING origin_project_id",
       [jobId, String(error).slice(0, 500)],
     )
-    .catch((e) => console.error(`[Propose] failProposal ${jobId}:`, e));
+    .catch((e) => { console.error(`[Propose] failProposal ${jobId}:`, e); return null; });
+  // MEDIUM-2: a origem presa em pending_conversion precisa voltar à Bancada AGORA — sem isto
+  // uma proposta que erra em voo (agents fora) deixava a spec presa até o próximo boot.
+  if (r) await revertTerminatedOrigins(pool, originsOf(r.rows));
 }
 
 async function interruptProposal(pool: Pool, jobId: string, error: string): Promise<void> {
-  await pool
+  const r = await pool
     .query(
-      "UPDATE product_proposals SET status='interrupted', error=$2, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status IN ('pending','running')",
+      "UPDATE product_proposals SET status='interrupted', error=$2, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING origin_project_id",
       [jobId, String(error).slice(0, 500)],
     )
-    .catch((e) => console.error(`[Propose] interruptProposal ${jobId}:`, e));
+    .catch((e) => { console.error(`[Propose] interruptProposal ${jobId}:`, e); return null; });
+  if (r) await revertTerminatedOrigins(pool, originsOf(r.rows));
 }
 
 async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): Promise<void> {
@@ -156,10 +168,10 @@ export function runProposeJob(
  */
 export async function reapOrphanProposals(pool: Pool): Promise<number> {
   const r = await pool.query(
-    "UPDATE product_proposals SET status='interrupted', error=COALESCE(error,'Interrompido por reinício da API'), deadline_at=NULL, updated_at=now() WHERE status IN ('pending','running')",
+    "UPDATE product_proposals SET status='interrupted', error=COALESCE(error,'Interrompido por reinício da API'), deadline_at=NULL, updated_at=now() WHERE status IN ('pending','running') RETURNING origin_project_id",
   );
   if (r.rowCount) console.log(`[Propose][reaper] ${r.rowCount} proposta(s) órfã(s) marcada(s) interrupted`);
-  await revertOrphanOrigins(pool);
+  await revertTerminatedOrigins(pool, originsOf(r.rows));
   return r.rowCount ?? 0;
 }
 
@@ -169,32 +181,40 @@ export async function reapOrphanProposals(pool: Pool): Promise<number> {
  */
 export async function expireOverdueProposals(pool: Pool): Promise<number> {
   const overdue = await pool.query(
-    "UPDATE product_proposals SET status='interrupted', error=COALESCE(error,'Deadline excedido'), deadline_at=NULL, updated_at=now() WHERE status IN ('pending','running') AND deadline_at IS NOT NULL AND deadline_at < now()",
+    "UPDATE product_proposals SET status='interrupted', error=COALESCE(error,'Deadline excedido'), deadline_at=NULL, updated_at=now() WHERE status IN ('pending','running') AND deadline_at IS NOT NULL AND deadline_at < now() RETURNING origin_project_id",
   );
   await pool
     .query("UPDATE product_proposals SET payload=NULL, updated_at=now() WHERE payload IS NOT NULL AND created_at < now() - interval '7 days'")
     .catch((e) => console.error("[Propose] purge payload:", e));
-  if (overdue.rowCount) await revertOrphanOrigins(pool);
+  await revertTerminatedOrigins(pool, originsOf(overdue.rows));
   return overdue.rowCount ?? 0;
 }
 
 /**
- * Devolve à Bancada (spec_submitted) a spec presa em pending_conversion cuja ÚNICA proposta
- * terminou sem consumo. Só reverte se NÃO houver proposta viva NEM consumida para a origem
- * (uma origem cujo produto nasceu de fato tem consumed_at e fica protegida) e apenas se ela
- * teve alguma proposta (não mexe em pending_conversion vindo de outro fluxo).
+ * Devolve à Bancada (spec_submitted) as origens ESPECÍFICAS cuja proposta acabou de terminar
+ * sem consumo nesta operação (fail/interrupt/reap/deadline). Escopada por `originIds` de
+ * propósito: uma varredura cega por `EXISTS (qualquer proposta)` (versão anterior) rebaixava
+ * indevidamente specs em pending_conversion do fluxo CLÁSSICO (projectCreation.ts:247 — anexos
+ * não-.md aguardando conversão) sempre que a spec tivesse tido, em algum momento passado, uma
+ * proposta terminal não-consumida. Aqui só tocamos origens cuja proposta transicionou AGORA.
+ *
+ * Guardas mantidas: só reverte se a origem AINDA está pending_conversion e NÃO há proposta viva
+ * nem consumida para ela (uma origem cujo produto nasceu tem consumed_at e fica protegida).
  */
-export async function revertOrphanOrigins(pool: Pool): Promise<void> {
+export async function revertTerminatedOrigins(pool: Pool, originIds: string[]): Promise<void> {
+  const ids = [...new Set(originIds)].filter(Boolean);
+  if (ids.length === 0) return;
   await pool
     .query(
       `UPDATE projects p SET status='spec_submitted', updated_at=now()
-         WHERE p.status='pending_conversion'
-           AND EXISTS (SELECT 1 FROM product_proposals pp WHERE pp.origin_project_id = p.id)
+         WHERE p.id = ANY($1::uuid[])
+           AND p.status='pending_conversion'
            AND NOT EXISTS (
              SELECT 1 FROM product_proposals pp2
                WHERE pp2.origin_project_id = p.id
                  AND (pp2.status IN ('pending','running') OR pp2.consumed_at IS NOT NULL)
            )`,
+      [ids],
     )
-    .catch((e) => console.error("[Propose] revertOrphanOrigins:", e));
+    .catch((e) => console.error("[Propose] revertTerminatedOrigins:", e));
 }
