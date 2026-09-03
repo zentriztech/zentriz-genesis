@@ -32,7 +32,7 @@ import { decomposeProduct } from "../services/productDecomposer.js";
 import { ManifestError, type ProductManifest } from "../services/productManifest.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbox.js";
-import { isPreFactory } from "../services/projectStatus.js";
+import { isPreFactory, SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 import { runProposeJob, PROPOSAL_DEADLINE_MIN } from "../services/productProposals.js";
 
@@ -631,6 +631,94 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         [id]
       );
       return reply.send({ ...prod.rows[0], projects: projects.rows });
+    } finally { client.release(); }
+  });
+
+  // ── GET /api/products/:id/spec-tree — redesign Bancada Onda 2 ─────────────────
+  // Árvore de SPECS AGREGADA por produto: une os `project_spec_files` de TODOS os
+  // projetos do produto (metadados apenas — SEM leitura de disco). Alimenta o editor
+  // de "pasta do produto" (estilo VSCode) da Bancada, análogo à aba "Código" da fábrica
+  // mas cobrindo o produto inteiro. O CONTEÚDO de cada arquivo é carregado sob demanda
+  // pelo endpoint por-projeto já existente (GET /api/projects/:pid/spec-file), que
+  // carrega as guardas de acesso/If-Match/traversal — aqui só devolvemos o índice.
+  app.get<{ Params: { id: string } }>("/api/products/:id/spec-tree", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const client = await pool.connect();
+    try {
+      // Mesmo escopo de tenant do GET /api/products/:id: o master abre qualquer produto;
+      // não-master só o do próprio tenant. 404 (não 403) para não vazar existência.
+      const prod = await client.query(
+        "SELECT id, name, tenant_id, is_inbox FROM products WHERE id = $1", [id],
+      );
+      const prow = prod.rows[0];
+      if (!prow) return reply.status(404).send({ code: "NOT_FOUND" });
+      if (user.role !== "zentriz_admin" && prow.tenant_id !== user.tenantId) {
+        return reply.status(404).send({ code: "NOT_FOUND" });
+      }
+      const MAX_FILES = 2000;
+      // Defesa-em-profundidade: além de filtrar por product_id, reconfirma o tenant de
+      // CADA projeto (= tenant do produto). O caminho de criação já garante consistência,
+      // mas isto impede vazamento de metadados (nomes/rel_dir/shas) caso algum projeto de
+      // outro tenant fosse indevidamente vinculado. Os endpoints de conteúdo já re-checam.
+      const rows = (await client.query(
+        `SELECT psf.project_id, p.title AS project_title, p.status AS project_status,
+                psf.filename, psf.rel_dir, psf.is_primary, psf.content_sha256, psf.created_at
+           FROM project_spec_files psf
+           JOIN projects p ON p.id = psf.project_id
+          WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2
+          ORDER BY p.created_at ASC, psf.rel_dir, psf.filename
+          LIMIT $3`,
+        [id, prow.tenant_id, MAX_FILES + 1],
+      )).rows as Array<Record<string, unknown>>;
+      const truncated = rows.length > MAX_FILES;
+      const capped = truncated ? rows.slice(0, MAX_FILES) : rows;
+      // Total REAL só quando truncado (senão é o próprio comprimento) — evita "N de N".
+      let totalFiles = capped.length;
+      if (truncated) {
+        const cnt = (await client.query(
+          `SELECT count(*)::int AS n FROM project_spec_files psf
+             JOIN projects p ON p.id = psf.project_id
+            WHERE p.product_id = $1 AND p.tenant_id IS NOT DISTINCT FROM $2`,
+          [id, prow.tenant_id],
+        )).rows[0] as { n: number };
+        totalFiles = cnt.n;
+      }
+      // Agrupa por projeto preservando a ordem do SELECT (created_at → cada projeto vira
+      // uma "pasta" de topo na árvore do produto).
+      const byProject = new Map<string, {
+        projectId: string; title: string; status: string; editable: boolean;
+        files: Array<{ path: string; ext: string; isPrimary: boolean; contentSha256: string | null; createdAt: string | null }>;
+      }>();
+      for (const r of capped) {
+        const pid = String(r.project_id);
+        let g = byProject.get(pid);
+        if (!g) {
+          const status = String(r.project_status);
+          g = { projectId: pid, title: String(r.project_title ?? "Projeto"), status, editable: SPEC_EDITABLE_STATUSES.has(status), files: [] };
+          byProject.set(pid, g);
+        }
+        const relDir = String(r.rel_dir ?? "");
+        const filename = String(r.filename);
+        const dot = filename.lastIndexOf(".");
+        g.files.push({
+          path: relDir ? `${relDir}/${filename}` : filename,
+          ext: dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "",
+          isPrimary: !!r.is_primary,
+          contentSha256: (r.content_sha256 as string | null) ?? null,
+          createdAt: (r.created_at as Date)?.toISOString?.() ?? null,
+        });
+      }
+      return reply.send({
+        productId: prow.id,
+        productName: prow.is_inbox ? "Rascunhos (inbox)" : (prow.name ?? "Produto"),
+        isInbox: !!prow.is_inbox,
+        projects: Array.from(byProject.values()),
+        totalFiles,
+        loadedFiles: capped.length,
+        truncated,
+      });
     } finally { client.release(); }
   });
 

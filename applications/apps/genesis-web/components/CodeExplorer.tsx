@@ -26,9 +26,11 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { apiGet } from "@/lib/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface CodeFile { path: string; sizeBytes: number; ext: string }
+// `sizeBytes` é opcional: a aba "Código" da fábrica traz o tamanho do disco, mas a
+// árvore de specs por-produto (ProductSpecExplorer) só tem metadados — sem tamanho.
+export interface CodeFile { path: string; sizeBytes?: number; ext: string }
 
-interface TreeNode {
+export interface TreeNode {
   name: string;
   fullPath: string;
   type: "file" | "dir";
@@ -38,7 +40,7 @@ interface TreeNode {
 }
 
 // ── Extension colours & icons ─────────────────────────────────────────────────
-const EXT_COLOR: Record<string, string> = {
+export const EXT_COLOR: Record<string, string> = {
   tsx: "#61DAFB", ts: "#3178C6", js: "#F7DF1E", jsx: "#61DAFB",
   css: "#1572B6", scss: "#CC6699", json: "#F59E0B",
   md: "#8B949E", sh: "#10B981", py: "#3776AB", yml: "#10B981", yaml: "#10B981",
@@ -46,7 +48,7 @@ const EXT_COLOR: Record<string, string> = {
 };
 
 // ── Build tree from flat file list ────────────────────────────────────────────
-function buildTree(files: CodeFile[]): TreeNode[] {
+export function buildTree(files: CodeFile[]): TreeNode[] {
   const root: TreeNode[] = [];
   const dirMap = new Map<string, TreeNode>();
 
@@ -82,7 +84,7 @@ function buildTree(files: CodeFile[]): TreeNode[] {
 }
 
 // ── CodeMirror language resolver (dynamic import) ────────────────────────────
-async function getLanguageExtension(ext: string) {
+export async function getLanguageExtension(ext: string) {
   switch (ext) {
     case "ts": case "tsx": case "js": case "jsx": case "mjs": case "cjs": {
       const { javascript } = await import("@codemirror/lang-javascript");
@@ -114,7 +116,7 @@ async function getLanguageExtension(ext: string) {
 }
 
 // ── Tree node component ───────────────────────────────────────────────────────
-function TreeItem({
+export function TreeItem({
   node, depth, selected, onSelect, filterActive = false,
 }: {
   node: TreeNode; depth: number; selected: string | null; onSelect: (path: string) => void;

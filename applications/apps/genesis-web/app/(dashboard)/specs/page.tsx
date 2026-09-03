@@ -18,6 +18,7 @@ import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
+import CardActionArea from "@mui/material/CardActionArea";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
@@ -44,6 +45,7 @@ import LinkIcon from "@mui/icons-material/Link";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
 import HandymanIcon from "@mui/icons-material/Handyman";
 import Inventory2OutlinedIcon from "@mui/icons-material/Inventory2Outlined";
+import FolderOpenOutlinedIcon from "@mui/icons-material/FolderOpenOutlined";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
 import SearchIcon from "@mui/icons-material/Search";
 import SearchOffIcon from "@mui/icons-material/SearchOff";
@@ -447,40 +449,66 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             </Stack>
           ) : (
         <Stack spacing={3}>
-          {groups.map((g) => {
-            // Badge de higiene do inbox: quantos rascunhos estão "esquecidos" (§5.4).
-            const staleCount = g.isInbox ? g.specs.filter((s) => isStale(s.updated_at)).length : 0;
+          {/* Produtos reais → CARDS de hierarquia navegáveis. Clicar abre a PASTA do produto
+              (editor estilo VSCode, produto inteiro — /products/:id/spec). As ações por-arquivo
+              (editar/validar/chat) vivem lá dentro; "Promover produto inteiro" fica no card. */}
+          {groups.some((g) => !g.isInbox) && (
+            <Box>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                <Inventory2OutlinedIcon sx={{ fontSize: "1rem", color: "#8B5CF6" }} />
+                <Typography variant="subtitle2" fontWeight={700} sx={{ color: "#8B5CF6" }}>Produtos</Typography>
+              </Stack>
+              <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr", md: "1fr 1fr 1fr" }, gap: 1.5 }}>
+                {groups.filter((g) => !g.isInbox).map((g) => (
+                  <Card key={g.productId} variant="outlined"
+                    sx={{ display: "flex", flexDirection: "column", borderTop: "3px solid #8B5CF6",
+                      transition: "box-shadow 0.15s, transform 0.15s", "&:hover": { boxShadow: 3, transform: "translateY(-2px)" } }}>
+                    <CardActionArea onClick={() => router.push(`/products/${g.productId}/spec`)} sx={{ flexGrow: 1 }}>
+                      <CardContent sx={{ pb: 1 }}>
+                        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+                          <FolderOpenOutlinedIcon sx={{ fontSize: "1.1rem", color: "#8B5CF6" }} />
+                          <Typography variant="subtitle2" fontWeight={700} noWrap sx={{ flexGrow: 1 }}>{g.name}</Typography>
+                        </Stack>
+                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                          <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                          <Typography variant="caption" color="text.secondary">Abrir pasta do produto</Typography>
+                        </Stack>
+                      </CardContent>
+                    </CardActionArea>
+                    {/* Promover produto inteiro — operação; master também pode (C6). */}
+                    <Box sx={{ px: 2, pb: 1.5, pt: 0.25 }}>
+                      <Button fullWidth size="small" variant="contained" color="success"
+                        startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+                        disabled={busyId === `prod:${g.productId}`}
+                        onClick={(e) => { e.stopPropagation(); promoteProduct(g.productId); }}>
+                        Promover produto inteiro
+                      </Button>
+                    </Box>
+                  </Card>
+                ))}
+              </Box>
+            </Box>
+          )}
+
+          {/* INBOX "Rascunhos" — permanece como linhas de spec com ações (Editar/Vincular/Decompor/Promover);
+              cada rascunho ainda não pertence a um produto, então não há "pasta de produto" para abrir. */}
+          {groups.filter((g) => g.isInbox).map((g) => {
+            const staleCount = g.specs.filter((s) => isStale(s.updated_at)).length;
             return (
             <Box key={g.productId}>
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: "wrap", gap: 1 }}>
-                {g.isInbox
-                  ? <HandymanIcon sx={{ fontSize: "1rem", color: "#F59E0B" }} />
-                  : <Inventory2OutlinedIcon sx={{ fontSize: "1rem", color: "#8B5CF6" }} />}
-                <Typography variant="subtitle2" fontWeight={700} sx={{ color: g.isInbox ? "#F59E0B" : "#8B5CF6" }}>
-                  {g.name}
-                </Typography>
+                <HandymanIcon sx={{ fontSize: "1rem", color: "#F59E0B" }} />
+                <Typography variant="subtitle2" fontWeight={700} sx={{ color: "#F59E0B" }}>{g.name}</Typography>
                 <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
                 {staleCount > 0 && (
                   <Chip label={`${staleCount} parada(s) há +${STALE_DAYS}d`} size="small" color="warning" variant="outlined"
                     sx={{ fontSize: "0.6rem", height: 18 }} />
                 )}
-                {/* Promover produto inteiro — operação; master também pode (C6). Só para PRODUTO real:
-                    o INBOX não é um produto promovível (§5.4) — cada rascunho promove por si. */}
-                {!g.isInbox && (
-                  <Button size="small" variant="contained" color="success"
-                    startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
-                    disabled={busyId === `prod:${g.productId}`}
-                    onClick={() => promoteProduct(g.productId)}>
-                    Promover produto inteiro
-                  </Button>
-                )}
               </Stack>
-              {g.isInbox && (
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, ml: 0.25 }}>
-                  Caixa de entrada pré-fábrica: rascunhos ainda não organizados. Decomponha, vincule a um produto
-                  ou promova cada um. Ao promover, um rascunho solo vira produto próprio.
-                </Typography>
-              )}
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, ml: 0.25 }}>
+                Caixa de entrada pré-fábrica: rascunhos ainda não organizados. Decomponha, vincule a um produto
+                ou promova cada um. Ao promover, um rascunho solo vira produto próprio.
+              </Typography>
               <Stack spacing={1.5}>
                 {g.specs.map(renderSpec)}
               </Stack>
