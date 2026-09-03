@@ -1,15 +1,22 @@
-anthropic>=0.39.0
-python-dotenv>=1.0.0
+# Dependências diretas — PINADAS (==). A imagem É o artefato de deploy: upgrade vira ato
+# deliberado, não efeito colateral de rebuild. Transitivas travadas por constraints.txt
+# (pip install -r requirements.txt -c constraints.txt). Ver constraints.txt p/ a causa-raiz
+# (anthropic 1.3.0 removeu `temperature` e quebrou call_bedrock_direct em prod).
+anthropic==1.3.0
+python-dotenv==1.2.3
 # HTTP client para Zentriz Cyborg (FT-14)
-requests>=2.31.0
+requests==2.34.2
 # FastAPI (para serviço HTTP)
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
 # Conversor de spec para Markdown (orchestrator/spec_converter)
-python-docx>=1.0.0
-pymupdf>=1.24.0
+python-docx==1.2.0
+pymupdf==1.28.2
 # AWS Bedrock provider
-boto3>=1.34.0
+boto3==1.43.87
 # PostgreSQL driver — necessário para o F4 (memória/aprendizado): persistir e
 # recuperar lições em lessons_corpus a partir do runner/agents/cyborg (achado #23).
-psycopg2-binary>=2.9.0
+psycopg2-binary==2.9.12
+# YAML — usado DIRETO (runner.py, zentriz_cyborg.py, pipeline_context.py); antes só
+# entrava como carona do extra uvicorn[standard] (frágil). Declarado explicitamente.
+PyYAML==6.0.3

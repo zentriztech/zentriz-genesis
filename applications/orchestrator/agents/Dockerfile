@@ -16,7 +16,7 @@ COPY applications/agents/ agents/
 COPY applications/contracts/ contracts/
 COPY applications/orchestrator/ orchestrator/
 
-RUN pip install --no-cache-dir -r orchestrator/agents/requirements.txt
+RUN pip install --no-cache-dir -r orchestrator/agents/requirements.txt -c orchestrator/agents/constraints.txt
 
 ENV PYTHONPATH=/app
 
