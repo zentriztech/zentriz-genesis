@@ -2,7 +2,8 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled } from "./specValidation.js";
+import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled } from "./specValidation.js";
+import type { Pool } from "pg";
 
 function file(filename: string, content: string, relDir = "") {
   return { filename, file_path: `/x/${filename}`, rel_dir: relDir, content };
@@ -85,4 +86,48 @@ describe("checkSpecValidationGate — regras (com db fake)", () => {
   // Nota: os caminhos com arquivos reais exigem disco (computeCurrentSpecHash lê bytes) —
   // cobertos pela bateria E2E viva da onda. Aqui validamos a matriz de decisão da run
   // via os casos alcançáveis com o fake.
+});
+
+describe("autoValidateDirtySpecs — tick env-gated (RFC-0004 Onda 3, D1)", () => {
+  afterEach(() => { delete process.env.SPEC_VALIDATION_AUTO; });
+
+  // fake pool que grava as queries; SELECT de projetos sujos devolve `dirtyRows`,
+  // FROM project_spec_files devolve [] (→ startValidation para em SPEC_FILES_MISSING).
+  function db(dirtyRows: Array<{ id: string; tenant_id: string | null }>) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("FROM projects") && sql.includes("spec_dirty_at IS NOT NULL")) return { rows: dirtyRows };
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+
+  it("flag off (default) → no-op, não consulta o banco", async () => {
+    delete process.env.SPEC_VALIDATION_AUTO;
+    expect(specValidationAutoEnabled()).toBe(false);
+    const { pool, queries } = db([{ id: "p1", tenant_id: null }]);
+    await autoValidateDirtySpecs(pool);
+    expect(queries).toHaveLength(0);
+  });
+
+  it("flag on → limpa spec_dirty_at ANTES de disparar (não vira loop por ciclo)", async () => {
+    process.env.SPEC_VALIDATION_AUTO = "on";
+    expect(specValidationAutoEnabled()).toBe(true);
+    const { pool, queries } = db([{ id: "proj-dirty-1", tenant_id: null }]);
+    await autoValidateDirtySpecs(pool);
+    // 1ª query: SELECT dos sujos; 2ª: UPDATE ... spec_dirty_at = NULL para o projeto.
+    expect(queries[0].sql).toContain("spec_dirty_at IS NOT NULL");
+    const clear = queries.find((q) => q.sql.includes("spec_dirty_at = NULL") && (q.params as unknown[])[0] === "proj-dirty-1");
+    expect(clear).toBeTruthy();
+  });
+
+  it("flag on + nenhum sujo → só o SELECT, sem UPDATE de limpeza", async () => {
+    process.env.SPEC_VALIDATION_AUTO = "on";
+    const { pool, queries } = db([]);
+    await autoValidateDirtySpecs(pool);
+    expect(queries.some((q) => q.sql.includes("spec_dirty_at = NULL"))).toBe(false);
+  });
 });
