@@ -959,6 +959,14 @@ def run_agent(
 
     last_thinking: str = ""
 
+    # Cascata de modelo indisponível na CONTA (ex.: Bedrock sem acesso ao opus-4-8):
+    # se o modelo principal for negado (PermissionDenied/AccessDenied), cai UMA vez para
+    # CLAUDE_MODEL_FALLBACK — documentado no .env, mas até aqui era config morta neste caminho.
+    # Preserva a escolha do modelo principal (volta a ser usado quando o acesso retornar) e
+    # só ativa em prod-bedrock (no Foundry a var fica vazia → nenhuma mudança de comportamento).
+    _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
+    _model_downgraded = False
+
     for repair_attempt in range(MAX_REPAIRS + 1):
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
         budget = calculate_token_budget(system_content, user_content, model)
@@ -1030,6 +1038,24 @@ def run_agent(
             except Exception as e:
                 last_error = e
                 err_lower = str(e).lower()
+                # Modelo indisponível na conta → troca UMA vez para o fallback e refaz a
+                # tentativa (não é falha de rede: não conta retry nem abre o circuit breaker).
+                _ename = type(e).__name__.lower()
+                _model_unavailable = (
+                    "permissiondenied" in _ename
+                    or "accessdenied" in err_lower
+                    or "not available for this account" in err_lower
+                    or "don't have access to the model" in err_lower
+                )
+                if (_model_unavailable and _fallback_model and not _model_downgraded
+                        and _fallback_model != model and attempt < CLAUDE_RETRY_ATTEMPTS - 1):
+                    logger.error(
+                        "[%s] Modelo '%s' indisponível na conta — caindo para CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s",
+                        agent_name, model, _fallback_model, str(e)[:200],
+                    )
+                    model = _fallback_model
+                    _model_downgraded = True
+                    continue
                 is_retryable = (
                     getattr(e, "status_code", None) in (429, 500, 502, 503)
                     or "timeout" in err_lower
@@ -1311,9 +1337,33 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             _create_kw["temperature"] = temperature
     except Exception:
         pass
-    resp = client.messages.create(**_create_kw)
+    # Cascata de modelo indisponível na conta (ex.: Bedrock sem acesso ao opus-4-8): cai UMA
+    # vez para CLAUDE_MODEL_FALLBACK. Cobre splitter/spec_validator/lesson_extractor, que
+    # passam model_id derivado de CLAUDE_MODEL e não tinham fallback próprio (o /invoke/raw
+    # do Cyborg já traz fallback_id explícito).
+    _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
+    _used_model = model_id
+    try:
+        resp = client.messages.create(**_create_kw)
+    except Exception as e:
+        _ename = type(e).__name__.lower()
+        _el = str(e).lower()
+        _model_unavailable = (
+            "permissiondenied" in _ename
+            or "accessdenied" in _el
+            or "not available for this account" in _el
+            or "don't have access to the model" in _el
+        )
+        if _model_unavailable and _fallback_model and _fallback_model != model_id:
+            logger.error("[call_bedrock_direct] Modelo '%s' indisponível na conta — caindo para "
+                         "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", model_id, _fallback_model, str(e)[:200])
+            _create_kw["model"] = _fallback_model
+            _used_model = _fallback_model
+            resp = client.messages.create(**_create_kw)
+        else:
+            raise
     _u = getattr(resp, "usage", None)
-    _report_direct_usage(usage_project_id, usage_agent, model_id,
+    _report_direct_usage(usage_project_id, usage_agent, _used_model,
                          getattr(_u, "input_tokens", 0) or 0,
                          getattr(_u, "output_tokens", 0) or 0,
                          int((time.time() - _t0) * 1000))
