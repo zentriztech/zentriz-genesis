@@ -8,7 +8,7 @@
  * Criar/excluir arquivo via família /spec-file (guardas no servidor: status, runner,
  * traversal, tetos). O arquivo PRIMÁRIO é rotulado e não pode ser removido.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Chip from "@mui/material/Chip";
@@ -32,10 +32,14 @@ interface TreeFile { path: string; ext: string; isPrimary: boolean; contentSha25
 interface TreeResponse { files: TreeFile[]; editable: boolean; status: string; totalFiles: number }
 interface FileResponse { path: string; content: string; contentSha256: string; isPrimary: boolean; editable: boolean }
 
-export default function SpecTreePanel({ projectId, onFileSelected }: {
+export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange, reloadSignal }: {
   projectId: string;
   /** Notifica o pai (chat usa o arquivo selecionado como contexto). */
   onFileSelected?: (f: { path: string; content: string; baseSha: string } | null) => void;
+  /** T4.3: notifica o pai quando há edições não salvas (bloqueia o apply da IA). */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** T4.3: bump externo (o pai aplicou uma revisão) → recarrega árvore e reabre o arquivo. */
+  reloadSignal?: number;
 }) {
   const [tree, setTree] = useState<TreeResponse | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -56,6 +60,16 @@ export default function SpecTreePanel({ projectId, onFileSelected }: {
 
   useEffect(() => { void loadTree(); }, [loadTree]);
 
+  // T4.3 — notifica o pai sobre edições não salvas (o pai bloqueia o apply da IA se sujo).
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+
+  // T4.3 — refs para o efeito de reload consultar o estado atual sem re-disparar por mudança deles.
+  const selectedRef = useRef<string | null>(null);
+  const dirtyRef = useRef(false);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  const lastReload = useRef(reloadSignal);
+
   const openFile = useCallback(async (p: string) => {
     setBusy("load"); setError(null); setConflict(false);
     try {
@@ -66,6 +80,18 @@ export default function SpecTreePanel({ projectId, onFileSelected }: {
       setError(e instanceof Error ? e.message : "Falha ao abrir arquivo");
     } finally { setBusy(null); }
   }, [projectId, onFileSelected]);
+
+  // T4.3 — o pai aplicou uma revisão (bump do reloadSignal): recarrega a árvore e reabre o
+  // arquivo selecionado para pegar o novo conteúdo/sha. Só age quando o sinal REALMENTE muda
+  // (guarda por ref) e nunca por cima de edições locais não salvas.
+  useEffect(() => {
+    if (reloadSignal === lastReload.current) return;
+    lastReload.current = reloadSignal;
+    void (async () => {
+      await loadTree();
+      if (selectedRef.current && !dirtyRef.current) await openFile(selectedRef.current);
+    })();
+  }, [reloadSignal, loadTree, openFile]);
 
   const save = useCallback(async () => {
     if (!selected) return;

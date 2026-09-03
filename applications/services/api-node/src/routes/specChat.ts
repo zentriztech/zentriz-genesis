@@ -21,11 +21,21 @@ import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
+import { parseSpecPath } from "./specFiles.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
 }
+
+// UUID canônico — user.id vem do JWT já como UUID, mas normalizamos para não gravar lixo.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// C1 (revisão adversarial): runtime.py trunca spec_raw em [:30000] e o artefato do CTO tem
+// teto ~20k. Em modo por-arquivo, mandar um arquivo grande faria o CTO revisar uma versão
+// TRUNCADA → o apply sobrescreveria o arquivo real com a versão cortada (perda de dados).
+// Bloqueamos o chat por-arquivo acima deste teto (o chat da spec inteira continua liberado).
+const MAX_FILE_CHAT_CHARS = 20_000;
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -42,6 +52,10 @@ interface ChatJob {
   createdAt: number;
   /** RFC-0004 Onda 0 (S3): dono do job — o poll só devolve ao usuário que o criou. */
   ownerUserId: string;
+  projectId?: string | null;
+  /** T4.3: modo por-arquivo — capturados NO ENVIO para o apply ser consistente. */
+  sentFilePath?: string | null;
+  sentBaseSha?: string | null;
 }
 const _chatJobs = new Map<string, ChatJob>();
 
@@ -52,7 +66,11 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
-function buildChatMessage(specMarkdown: string, messages: ChatMessage[]): Record<string, unknown> {
+function buildChatMessage(
+  specMarkdown: string,
+  messages: ChatMessage[],
+  filePath?: string | null,
+): Record<string, unknown> {
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
@@ -60,7 +78,36 @@ function buildChatMessage(specMarkdown: string, messages: ChatMessage[]): Record
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "CTO"}: ${m.content}`)
     .join("\n\n");
 
-  const task = `
+  // T4.3: em modo por-arquivo, o "documento" é UM arquivo da spec (não a spec inteira).
+  // C2 (revisão adversarial): o enforcer de spec_intake_and_normalize exige um artefato no
+  // caminho canônico (docs/spec/PRODUCT_SPEC.md) — então NÃO trocamos o modo nem o caminho
+  // do artefato; apenas instruímos o CTO a devolver como conteúdo APENAS o arquivo revisado
+  // (o apply grava esse conteúdo no arquivo real que o usuário edita). Assim respeitamos o
+  // enforcer e não vazamos a spec inteira por cima de um arquivo específico.
+  const task = filePath
+    ? `
+Você é um CTO sênior refinando UM ARQUIVO de uma especificação de produto EM CONJUNTO com o
+usuário, num chat iterativo. O arquivo em edição é: ${filePath}
+
+Você recebe o CONTEÚDO ATUAL desse arquivo (em Markdown), o HISTÓRICO da conversa e a ÚLTIMA
+MENSAGEM do usuário.
+
+OBJETIVO: aplicar SOMENTE as mudanças pedidas na última mensagem NESTE arquivo, devolvendo o
+CONTEÚDO COMPLETO e revisado DESTE arquivo (e nada além dele), e uma resposta curta do que mudou.
+
+REGRAS:
+1. PRESERVE tudo o que o usuário não pediu para alterar — não regenere o arquivo do zero.
+2. Aplique de forma cirúrgica o que foi pedido (adicionar/remover/ajustar) SOMENTE neste arquivo.
+3. NÃO inclua outros arquivos, nem a spec inteira — devolva APENAS o conteúdo revisado de ${filePath}.
+4. Devolva o CONTEÚDO INTEIRO revisado deste arquivo como o artefato Markdown principal.
+5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, do que mudou.
+
+ÚLTIMA MENSAGEM DO USUÁRIO: "${lastUser.replace(/"/g, '\\"')}"
+
+HISTÓRICO DO CHAT:
+${transcript}
+`.trim()
+    : `
 Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário,
 num chat iterativo. Você recebe a SPEC ATUAL (em Markdown), o HISTÓRICO da conversa e a
 ÚLTIMA MENSAGEM do usuário.
@@ -142,7 +189,21 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
 
             if (pollData.status === "done" && pollData.result) {
               clearInterval(timer);
-              j.specMarkdown = extractSpecMarkdown(pollData.result);
+              // H4 (revisão adversarial): agents devolve status="done" mesmo quando o CTO
+              // BLOQUEOU/FALHOU a revisão (envelope.status BLOCKED/FAIL) — antes gravávamos
+              // uma spec vazia/parcial e o usuário podia APLICAR isso por cima da spec real.
+              // Agora: só é sucesso com envelope OK e markdown não-trivial; senão é erro claro.
+              const agentStatus = String((pollData.result as { status?: string }).status ?? "").toUpperCase();
+              const md = extractSpecMarkdown(pollData.result);
+              if (agentStatus === "BLOCKED" || agentStatus === "FAIL" || !md || md.trim().length < 20) {
+                j.status = "error";
+                j.error = (agentStatus === "BLOCKED" || agentStatus === "FAIL")
+                  ? `O CTO não conseguiu revisar (${agentStatus}). Reformule o pedido e tente de novo.`
+                  : "O CTO não retornou uma spec revisada válida. Reformule o pedido e tente de novo.";
+                console.warn(`[SpecChat] job=${jobId} rejeitado — agentStatus=${agentStatus} mdLen=${md?.length ?? 0}`);
+                return;
+              }
+              j.specMarkdown = md;
               j.reply = (pollData.result.summary as string | undefined)?.trim()
                 || "Spec atualizada conforme solicitado.";
               j.status = "done";
@@ -168,16 +229,27 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
 }
 
 /** Grava uma mensagem do chat (best-effort — nunca derruba a rota). */
-async function persistMessage(projectId: string, role: "user" | "assistant", content: string): Promise<void> {
+async function persistMessage(
+  projectId: string,
+  role: "user" | "assistant",
+  content: string,
+  opts?: { filePath?: string | null; userId?: string | null },
+): Promise<void> {
   const client = await pool.connect();
   try {
     const proj = (await client.query(
       "SELECT tenant_id FROM projects WHERE id = $1", [projectId],
     )).rows[0];
     if (!proj) return;
+    // T4.3 (migração 077): file_path escopa o histórico por arquivo; user_id (UUID validado)
+    // dá autoria. Colunas são ADD COLUMN IF NOT EXISTS → INSERT tolera schema antigo? Não:
+    // se a migração não rodou, este INSERT falha e cai no catch (best-effort) — aceitável.
+    const filePath = opts?.filePath ?? null;
+    const userId = opts?.userId && UUID_RE.test(opts.userId) ? opts.userId : null;
     await client.query(
-      `INSERT INTO spec_chat_messages (project_id, tenant_id, role, content) VALUES ($1, $2, $3, $4)`,
-      [projectId, proj.tenant_id ?? null, role, content],
+      `INSERT INTO spec_chat_messages (project_id, tenant_id, role, content, file_path, user_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+      [projectId, proj.tenant_id ?? null, role, content, filePath, userId],
     );
   } catch (e) {
     console.warn(`[SpecChat] persistMessage falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
@@ -190,7 +262,7 @@ export async function specChatRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
 
   // POST /api/spec-chat — enfileira job de refinamento e devolve jobId
-  app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string } }>(
+  app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string; filePath?: string; baseSha?: string } }>(
     "/api/spec-chat",
     async (request, reply) => {
       const user = getUser(request);
@@ -204,9 +276,34 @@ export async function specChatRoutes(app: FastifyInstance) {
       const specMarkdown = (body.specMarkdown ?? "").trim();
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const projectId = body.projectId?.trim() || null;
+      // T4.3: modo por-arquivo (opcional). filePath validado por parseSpecPath (M2), baseSha
+      // é o sha que o usuário viu — capturado aqui para o apply detectar edição concorrente.
+      const rawFilePath = body.filePath?.trim() || null;
+      const baseSha = body.baseSha?.trim() || null;
+      let filePath: string | null = null;
+      if (rawFilePath) {
+        const parsed = parseSpecPath(rawFilePath);
+        if (!parsed) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "filePath inválido" });
+        }
+        // caminho normalizado (relDir/filename) — o mesmo formato que a árvore/PUT usam.
+        filePath = parsed.relDir ? `${parsed.relDir}/${parsed.filename}` : parsed.filename;
+        // Editar UM arquivo exige um projeto (é onde a árvore/arquivos vivem).
+        if (!projectId) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "filePath exige projectId" });
+        }
+      }
 
       if (!specMarkdown) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "specMarkdown obrigatório" });
+      }
+      // C1: em modo por-arquivo, bloqueia conteúdo acima do teto (evita revisão truncada → apply
+      // sobrescrevendo o arquivo real com versão cortada). O chat da spec inteira não tem esse apply.
+      if (filePath && specMarkdown.length > MAX_FILE_CHAT_CHARS) {
+        return reply.status(413).send({
+          code: "FILE_TOO_LARGE",
+          message: `Arquivo grande demais para o chat por-arquivo (${specMarkdown.length} > ${MAX_FILE_CHAT_CHARS} caracteres). Edite manualmente ou divida o arquivo.`,
+        });
       }
       const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content?.trim();
       if (!lastUser) {
@@ -236,17 +333,18 @@ export async function specChatRoutes(app: FastifyInstance) {
       }
 
       // Persiste a mensagem do usuário (se houver projeto associado) — best-effort.
-      if (projectId) void persistMessage(projectId, "user", lastUser);
+      if (projectId) void persistMessage(projectId, "user", lastUser, { filePath, userId: user.id });
 
       const jobId = randomUUID(); // S3: id não-adivinhável (o antigo scj-<ts>-<5 base36> era fraco)
-      const job: ChatJob & { projectId?: string | null } = {
+      const job: ChatJob = {
         id: jobId, status: "pending", createdAt: Date.now(), projectId, ownerUserId: user.id,
+        sentFilePath: filePath, sentBaseSha: baseSha,
       };
       _chatJobs.set(jobId, job);
 
-      runChatJob(jobId, buildChatMessage(specMarkdown, messages), agentsUrl);
+      runChatJob(jobId, buildChatMessage(specMarkdown, messages, filePath), agentsUrl);
 
-      return reply.status(202).send({ jobId, status: "pending" });
+      return reply.status(202).send({ jobId, status: "pending", filePath, baseSha });
     },
   );
 
@@ -255,7 +353,7 @@ export async function specChatRoutes(app: FastifyInstance) {
     "/api/spec-chat/:jobId",
     async (request, reply) => {
       const { jobId } = request.params;
-      const job = _chatJobs.get(jobId) as (ChatJob & { projectId?: string | null }) | undefined;
+      const job = _chatJobs.get(jobId);
       // S3: binding de dono — sem isso, qualquer autenticado com o jobId lia a spec revisada
       // de outro tenant (mesma classe do binding de token da rota B). 404 (não 403) para não
       // vazar a existência do job.
@@ -267,9 +365,14 @@ export async function specChatRoutes(app: FastifyInstance) {
         const marker = job as unknown as { _persisted?: boolean };
         if (job.projectId && job.reply && !marker._persisted) {
           marker._persisted = true;
-          void persistMessage(job.projectId, "assistant", job.reply);
+          void persistMessage(job.projectId, "assistant", job.reply, { filePath: job.sentFilePath });
         }
-        return reply.send({ jobId, status: "done", specMarkdown: job.specMarkdown, reply: job.reply });
+        // T4.3: devolve filePath/baseSha capturados NO ENVIO → o apply grava no arquivo certo
+        // e detecta edição concorrente (o baseSha é o que o usuário via quando pediu a revisão).
+        return reply.send({
+          jobId, status: "done", specMarkdown: job.specMarkdown, reply: job.reply,
+          filePath: job.sentFilePath ?? null, baseSha: job.sentBaseSha ?? null,
+        });
       }
       if (job.status === "error") {
         return reply.send({ jobId, status: "error", error: job.error });

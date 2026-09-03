@@ -43,7 +43,7 @@ const SEV_COLOR: Record<Finding["severity"], "error" | "warning" | "info"> = {
   blocker: "error", warning: "warning", info: "info",
 };
 
-export default function SpecValidationPanel({ projectId, isAdmin }: { projectId: string; isAdmin?: boolean }) {
+export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal }: { projectId: string; isAdmin?: boolean; reloadSignal?: number }) {
   const [state, setState] = useState<ValidationState | null>(null);
   const [busy, setBusy] = useState<"validate" | "ack" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +61,15 @@ export default function SpecValidationPanel({ projectId, isAdmin }: { projectId:
     void load();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [load]);
+
+  // T4.3 (M3): o pai aplicou uma revisão de arquivo → recarrega o estado de validação
+  // (a validação anterior pode ter sido invalidada pela mudança).
+  const lastReload = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === lastReload.current) return;
+    lastReload.current = reloadSignal;
+    void load();
+  }, [reloadSignal, load]);
 
   // poll enquanto valida (o job é do servidor — o poll é só exibição)
   useEffect(() => {

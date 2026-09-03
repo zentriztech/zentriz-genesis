@@ -41,7 +41,7 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import SendIcon from "@mui/icons-material/Send";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { apiGet, apiPatch, apiPost, apiPostMultipart } from "@/lib/api";
+import { apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import SpecTreePanel from "@/components/SpecTreePanel";
@@ -554,7 +554,9 @@ type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
 // Feature #63 — chat de edição de spec
 type ChatMessage = { role: "user" | "assistant"; content: string };
-type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number };
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null };
+// T4.3: uma revisão de UM arquivo, produzida pela IA, aguardando confirmação de aplicação.
+type PendingApply = { path: string; content: string; baseSha: string | null };
 
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
@@ -734,6 +736,9 @@ function SpecEditor({
 // a IA devolve a spec revisada (aplicada no editor/preview) + uma resposta curta.
 function SpecChatPanel({
   messages, input, onInput, onSend, sending, error,
+  activeFilePath = null, treeDirty = false,
+  pending = null, applying = false, applyError = null, conflict = false,
+  onApply, onDiscard, onOverwrite,
 }: {
   messages: ChatMessage[];
   input: string;
@@ -741,11 +746,23 @@ function SpecChatPanel({
   onSend: () => void;
   sending: boolean;
   error: string | null;
+  // T4.3 — contexto por-arquivo + fluxo de aplicação com confirmação (opcionais:
+  // quando ausentes, o painel opera no modo clássico de spec inteira).
+  activeFilePath?: string | null;
+  treeDirty?: boolean;
+  pending?: PendingApply | null;
+  applying?: boolean;
+  applyError?: string | null;
+  conflict?: boolean;
+  onApply?: () => void;
+  onDiscard?: () => void;
+  onOverwrite?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, sending]);
+  }, [messages, sending, pending]);
+  const fileMode = Boolean(activeFilePath);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", bgcolor: "background.paper" }}>
@@ -755,12 +772,33 @@ function SpecChatPanel({
         <Typography variant="subtitle2" fontWeight={600} sx={{ fontSize: "0.8rem" }}>Melhorar com IA</Typography>
       </Stack>
 
+      {/* T4.3 — indicador de escopo: arquivo selecionado na árvore vs. spec inteira. */}
+      <Box sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0, bgcolor: "action.hover" }}>
+        {fileMode ? (
+          <Tooltip title={activeFilePath as string}>
+            <Chip size="small" variant="outlined" color="primary"
+              icon={<InsertDriveFileOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+              label={(activeFilePath as string).split("/").pop()}
+              sx={{ maxWidth: "100%", "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.7rem" } }} />
+          </Tooltip>
+        ) : (
+          <Typography variant="caption" color="text.secondary">Editando a spec inteira</Typography>
+        )}
+      </Box>
+
       <Box ref={scrollRef} sx={{ flexGrow: 1, overflowY: "auto", p: 1.5 }}>
-        {messages.length === 0 && (
+        {messages.length === 0 && !fileMode && (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.6 }}>
             Peça ajustes em linguagem natural — ex.: &quot;adicione autenticação por Google&quot;,
             &quot;detalhe melhor o modelo de dados&quot;, &quot;remova o módulo de relatórios&quot;.
             A spec é revisada no preview a cada resposta.
+          </Typography>
+        )}
+        {messages.length === 0 && fileMode && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.6 }}>
+            Peça ajustes SÓ neste arquivo — ex.: &quot;adicione um campo email&quot;, &quot;detalhe os
+            critérios de aceite&quot;. A revisão da IA é mostrada aqui e só grava no arquivo após você
+            clicar em <strong>Aplicar</strong>.
           </Typography>
         )}
         <Stack spacing={1.25}>
@@ -793,6 +831,46 @@ function SpecChatPanel({
       </Box>
 
       {error && <Alert severity="error" sx={{ mx: 1, mb: 1, fontSize: "0.72rem" }}>{error}</Alert>}
+
+      {/* T4.3 — árvore com edições não salvas: pedir revisão por IA agora clobraria o baseSha. */}
+      {fileMode && treeDirty && !pending && (
+        <Alert severity="warning" sx={{ mx: 1, mb: 1, fontSize: "0.72rem" }}>
+          Há edições não salvas neste arquivo na árvore. Salve ou descarte antes de pedir uma revisão por IA.
+        </Alert>
+      )}
+
+      {/* T4.3 — revisão pronta aguardando confirmação de aplicação (só modo por-arquivo). */}
+      {fileMode && pending && (
+        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: conflict ? "warning.main" : "primary.main", borderRadius: 1.5, bgcolor: "background.paper" }}>
+          <Typography variant="caption" sx={{ display: "block", fontWeight: 700, mb: 0.5 }}>
+            Revisão pronta para <code style={{ fontSize: "0.72rem" }}>{pending.path.split("/").pop()}</code>
+            {" "}({pending.content.length} caracteres)
+          </Typography>
+          {applyError && !conflict && (
+            <Alert severity="error" sx={{ mb: 1, fontSize: "0.72rem" }}>{applyError}</Alert>
+          )}
+          {conflict ? (
+            <>
+              <Alert severity="warning" sx={{ mb: 1, fontSize: "0.72rem" }}>
+                O arquivo mudou desde que a IA o revisou. Sobrescreva (perde a outra edição) ou descarte esta revisão e recomece.
+              </Alert>
+              <Stack direction="row" spacing={1}>
+                <Button size="small" color="warning" variant="contained" disabled={applying}
+                  startIcon={applying ? <CircularProgress size={14} color="inherit" /> : undefined}
+                  onClick={onOverwrite}>Sobrescrever</Button>
+                <Button size="small" color="inherit" disabled={applying} onClick={onDiscard}>Descartar</Button>
+              </Stack>
+            </>
+          ) : (
+            <Stack direction="row" spacing={1}>
+              <Button size="small" variant="contained" disabled={applying}
+                startIcon={applying ? <CircularProgress size={14} color="inherit" /> : <CheckCircleIcon sx={{ fontSize: "1rem" }} />}
+                onClick={onApply}>Aplicar ao arquivo</Button>
+              <Button size="small" color="inherit" disabled={applying} onClick={onDiscard}>Descartar</Button>
+            </Stack>
+          )}
+        </Box>
+      )}
 
       <Box sx={{ p: 1, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}>
         <Stack direction="row" spacing={0.75} alignItems="flex-end">
@@ -940,6 +1018,21 @@ export default function SpecPage() {
   const [chatSending, setChatSending]   = useState(false);
   const [chatError, setChatError]       = useState<string | null>(null);
   const chatPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // T4.3 — sequência monotônica: invalida jobs em voo quando o usuário troca de arquivo
+  // ou dispara outro turno (evita aplicar a revisão de um arquivo no arquivo errado).
+  const chatSeqRef = useRef(0);
+
+  // T4.3 — chat por-arquivo: arquivo ativo (vindo da árvore), estado "sujo" da árvore,
+  // revisão da IA aguardando aplicação, e sinal para recarregar a árvore após aplicar.
+  const [activeFile, setActiveFile] = useState<{ path: string; content: string; baseSha: string } | null>(null);
+  const [treeDirty, setTreeDirty] = useState(false);
+  const [pendingApply, setPendingApply] = useState<PendingApply | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applyConflict, setApplyConflict] = useState(false);
+  const [treeReloadSignal, setTreeReloadSignal] = useState(0);
+  const [validationReloadSignal, setValidationReloadSignal] = useState(0);
+  const [staleValidation, setStaleValidation] = useState(false);
   // No mobile o chat não cabe ao lado do editor → abre em tela cheia via FAB.
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   // Ao cruzar para o desktop (≥md), o chat volta a ser inline → fecha o dialog fullScreen
@@ -1085,22 +1178,64 @@ export default function SpecPage() {
   }, []);
   useEffect(() => () => stopChatPolling(), [stopChatPolling]);
 
+  // T4.3 — árvore notifica o arquivo selecionado. Trocar de arquivo zera a conversa (H3),
+  // a revisão pendente e invalida qualquer job em voo (chatSeqRef). Salvar o mesmo arquivo
+  // (mesmo path, novo sha) apenas atualiza o baseSha, preservando a conversa.
+  const handleFileSelected = useCallback((f: { path: string; content: string; baseSha: string } | null) => {
+    setActiveFile((prev) => {
+      const changed = (prev?.path ?? null) !== (f?.path ?? null);
+      if (changed) {
+        chatSeqRef.current += 1;
+        stopChatPolling();
+        setChatMessages([]);
+        setChatInput("");
+        setChatSending(false);
+        setChatError(null);
+        setPendingApply(null);
+        setApplyError(null);
+        setApplyConflict(false);
+      }
+      return f;
+    });
+  }, [stopChatPolling]);
+
   const handleChatSend = useCallback(async () => {
     const text = chatInput.trim();
-    if (!text || !specMarkdown || chatSending) return;
+    if (!text || chatSending) return;
+    const fileMode = activeFile !== null;
+    // Conteúdo-alvo: em modo por-arquivo é o arquivo ativo; senão a spec inteira.
+    const contentToSend = fileMode ? activeFile!.content : specMarkdown;
+    if (!contentToSend) return;
+    // C1 (cliente): espelha o teto do servidor — arquivo grande seria revisado truncado.
+    if (fileMode && contentToSend.length > 20_000) {
+      setChatError(`Arquivo grande demais para o chat por-arquivo (${contentToSend.length} > 20000 caracteres). Edite manualmente ou divida o arquivo.`);
+      return;
+    }
+    // Edições não salvas na árvore tornam o baseSha ambíguo → bloqueia até salvar/descartar.
+    if (fileMode && treeDirty) {
+      setChatError("Há edições não salvas neste arquivo. Salve ou descarte antes de pedir uma revisão por IA.");
+      return;
+    }
+    const seq = (chatSeqRef.current += 1);
+    const sentFilePath = fileMode ? activeFile!.path : null;
+    const sentBaseSha = fileMode ? activeFile!.baseSha : null;
     const nextMessages: ChatMessage[] = [...chatMessages, { role: "user", content: text }];
     setChatMessages(nextMessages);
     setChatInput("");
     setChatSending(true);
     setChatError(null);
+    setPendingApply(null);
+    setApplyError(null);
+    setApplyConflict(false);
     stopChatPolling();
 
     let jobId: string;
     try {
       const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
-        specMarkdown,
+        specMarkdown: contentToSend,
         messages: nextMessages,
         projectId: editProjectId ?? undefined,
+        ...(fileMode ? { filePath: sentFilePath, baseSha: sentBaseSha ?? undefined } : {}),
       });
       jobId = res.jobId;
     } catch (e) {
@@ -1108,9 +1243,12 @@ export default function SpecPage() {
       setChatSending(false);
       return;
     }
+    // O usuário trocou de arquivo enquanto o POST voltava → descarta este turno.
+    if (seq !== chatSeqRef.current) { setChatSending(false); return; }
 
     const startTs = Date.now();
     chatPollRef.current = setInterval(async () => {
+      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
       if (Date.now() - startTs > 11 * 60_000) {
         stopChatPolling();
         setChatError("Tempo esgotado. Tente novamente.");
@@ -1119,10 +1257,23 @@ export default function SpecPage() {
       }
       try {
         const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
+        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
         if (poll.status === "done") {
           stopChatPolling();
-          if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
-          setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Spec atualizada." }]);
+          if (fileMode) {
+            // NÃO grava no arquivo — deixa a revisão pendente de confirmação (apply).
+            if (poll.specMarkdown) {
+              setPendingApply({
+                path: sentFilePath!,
+                content: poll.specMarkdown,
+                baseSha: poll.baseSha ?? sentBaseSha,
+              });
+            }
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão pronta. Confira e clique em Aplicar." }]);
+          } else {
+            if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Spec atualizada." }]);
+          }
           setChatSending(false);
         } else if (poll.status === "error") {
           stopChatPolling();
@@ -1133,7 +1284,54 @@ export default function SpecPage() {
         console.warn("[SpecChat] poll error:", e instanceof Error ? e.message : e);
       }
     }, 8000);
-  }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, stopChatPolling]);
+  }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, activeFile, treeDirty, stopChatPolling]);
+
+  // T4.3 — aplica a revisão pendente ao arquivo real (PUT com baseSha → If-Match).
+  const applyRevision = useCallback(async (baseShaOverride?: string | null) => {
+    if (!editProjectId || !pendingApply) return;
+    setApplying(true); setApplyError(null);
+    try {
+      const r = await apiPut<{ ok: boolean; contentSha256: string }>(
+        `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(pendingApply.path)}`,
+        { content: pendingApply.content, baseSha: baseShaOverride ?? pendingApply.baseSha ?? undefined },
+      );
+      // Aplicado: atualiza o arquivo ativo, limpa a revisão, recarrega a árvore (H2) e
+      // marca a validação como possivelmente desatualizada + refetch (M3).
+      const appliedPath = pendingApply.path;
+      const appliedContent = pendingApply.content;
+      setActiveFile((prev) => (prev && prev.path === appliedPath
+        ? { ...prev, content: appliedContent, baseSha: r.contentSha256 } : prev));
+      setPendingApply(null);
+      setApplyConflict(false);
+      setTreeReloadSignal((n) => n + 1);
+      setValidationReloadSignal((n) => n + 1);
+      setStaleValidation(true);
+      setChatMessages((prev) => [...prev, { role: "assistant", content: `✓ Revisão aplicada a ${appliedPath}.` }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("mudou desde") || msg.toUpperCase().includes("CONFLICT")) setApplyConflict(true);
+      else setApplyError(msg);
+    } finally { setApplying(false); }
+  }, [editProjectId, pendingApply]);
+
+  const handleApplyFile = useCallback(() => { void applyRevision(); }, [applyRevision]);
+  const handleDiscardApply = useCallback(() => {
+    setPendingApply(null); setApplyError(null); setApplyConflict(false);
+  }, []);
+  // M1 — sobrescrever: lê o sha atual do arquivo e reaplica por cima (a outra edição é perdida, avisado na UI).
+  const handleOverwriteApply = useCallback(async () => {
+    if (!editProjectId || !pendingApply) return;
+    setApplying(true); setApplyError(null);
+    try {
+      const cur = await apiGet<{ contentSha256: string }>(
+        `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(pendingApply.path)}`,
+      );
+      await applyRevision(cur.contentSha256);
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : String(e));
+      setApplying(false);
+    }
+  }, [editProjectId, pendingApply, applyRevision]);
 
   // ── Save spec (draft or start) ──────────────────────────────────────────────
   const handleSaveSpec = useCallback(async (startNow: boolean) => {
@@ -1323,6 +1521,9 @@ export default function SpecPage() {
             <SpecChatPanel
               messages={chatMessages} input={chatInput} onInput={setChatInput}
               onSend={handleChatSend} sending={chatSending} error={chatError}
+              activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
+              onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
             />
           </Box>
         </Box>
@@ -1357,6 +1558,9 @@ export default function SpecPage() {
           <SpecChatPanel
             messages={chatMessages} input={chatInput} onInput={setChatInput}
             onSend={handleChatSend} sending={chatSending} error={chatError}
+              activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
+              onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
           />
         </DialogContent>
       </Dialog>
@@ -1395,8 +1599,13 @@ export default function SpecPage() {
             no modo edição; a árvore só quando a spec tem 2+ arquivos — D8). */}
         {!editLoading && specMarkdown !== null && editProjectId && (
           <Box sx={{ mb: 2 }}>
-            <SpecValidationPanel projectId={editProjectId} isAdmin={authStore.isZentrizAdmin} />
-            <SpecTreePanel projectId={editProjectId} />
+            {staleValidation && (
+              <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
+                Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide antes de iniciar a fábrica.
+              </Alert>
+            )}
+            <SpecValidationPanel projectId={editProjectId} isAdmin={authStore.isZentrizAdmin} reloadSignal={validationReloadSignal} />
+            <SpecTreePanel projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} />
           </Box>
         )}
 
@@ -1446,6 +1655,9 @@ export default function SpecPage() {
                   <SpecChatPanel
                     messages={chatMessages} input={chatInput} onInput={setChatInput}
                     onSend={handleChatSend} sending={chatSending} error={chatError}
+              activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
+              onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
                   />
                 </Box>
               </Box>
@@ -1619,6 +1831,9 @@ export default function SpecPage() {
                         <SpecChatPanel
                           messages={chatMessages} input={chatInput} onInput={setChatInput}
                           onSend={handleChatSend} sending={chatSending} error={chatError}
+              activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
+              onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
                         />
                       </Box>
                     </Box>
