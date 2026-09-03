@@ -183,3 +183,38 @@
 4. Deploy por onda: build local 3-composes → ECR → prod pull/retag/recreate (api primeiro) → **digest verificado** → smoke público. Rollback tags antes de cada recreate.
 5. Features de risco nascem atrás de env-gate OFF (gate de validação: `SPEC_VALIDATION_GATE`), padrão H3/rota B.
 6. Memória persistida ao fim de cada onda (LEI 0).
+
+---
+
+## Pós-execução — status, achados e diferimentos (2026-09-03)
+
+### Achado P0 na Validação PÓS ao vivo do T4.3 (corrigido em prod)
+A revisão adversarial ao vivo do chat por-arquivo expôs perda de dados: o modo por-arquivo
+roteava pelo CTO em `spec_intake_and_normalize`, que é um **normalizador** — regenerava um
+`PRODUCT_SPEC` completo (Metadados/Visão/FRs/DoD…) e **descartava o conteúdo original do
+arquivo**; aplicar a revisão sobrescreveria o arquivo real com um scaffold TBD.
+
+**Correção (em prod):** o modo por-arquivo passou a usar `/invoke/raw` (síncrono, prompt
+controlado) com um prompt de **editor cirúrgico** que devolve o conteúdo FINAL COMPLETO do
+arquivo preservando tudo o que não foi pedido. O chat da **spec inteira** mantém o
+normalizador (correto lá). Resposta vazia = erro (nunca aplica lixo); cerca de código externa
+é removida (`stripOuterFence`). Provado ao vivo: original de 106 chars preservado 100% + linha
+pedida anexada. A UI de **aplicar sob confirmação** (char count antes de aplicar) permanece
+como rede de segurança. Rollback: `rollback-api:pre-t43-rawfix`.
+
+### Item 6 — catálogo de arquétipos → Connect: **DIFERIDO**
+Hoje o catálogo (`archetype-catalog`) vive no Genesis e serve à validação de spec. Promovê-lo a
+contrato versionado no Connect só se justifica quando **houver um 2º consumidor** (ex.: Deadpool
+validando arquétipos na remediação). Gatilho de retomada: surgimento do 2º consumidor. Até lá,
+mover para o Connect seria acoplamento especulativo sem valor (ADR-001/consumo-por-versão).
+
+### Item 7 — materialização do dashboard summary: **DIFERIDO** (D5)
+`GET /api/dashboard/summary` é query-on-read por decisão D5. Materializar (tabela/rollup) só se
+o **p95 medido** da query estourar o alvo de **300ms** com dados de prod. Gatilho de retomada:
+medição de p95 > 300ms (EXPLAIN + amostra real), conforme a PRÉ do T5.2. Materializar antes seria
+otimização prematura.
+
+### Item 5 — auto-validação (tick env-gated): coberto por regressão durável
+Em vez de teste de stack ao vivo (flag `SPEC_VALIDATION_AUTO` **OFF em prod** = zero risco),
+a Validação PÓS virou regressão durável em `specValidation.test.ts`: flag off = no-op sem tocar
+o banco; flag on = limpa `spec_dirty_at` **antes** de disparar (não vira loop por ciclo).
