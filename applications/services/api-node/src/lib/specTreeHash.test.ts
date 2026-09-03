@@ -47,6 +47,16 @@ const EXPECTED: Record<string, { files: Array<{ relDir: string; filename: string
     ],
     hash: "2bf26cbafc6282dcdbf25ca8dc6bb285b910c9c20a5e87cb64900a2b468373df",
   },
+  f8_astral: {
+    // F4 (adversarial): emoji (plano astral, surrogates em UTF-16) × BMP alto — o sort
+    // por code unit do JS divergia do codepoint do Python; agora ambos ordenam por UTF-8.
+    files: [
+      { relDir: "", filename: "\u{1F600}-spec.md", buffer: buf("astral") },
+      { relDir: "", filename: "�-spec.md", buffer: buf("bmp-alto") },
+      { relDir: "", filename: "a.md", buffer: buf("x") },
+    ],
+    hash: "9ff35509c3f9ec8e1a8bbd6ee50077182669af4ee1c13c2d1e0f43904e499a0d",
+  },
   f6_case_sort: {
     // Z.md < a.md em codepoint (o localeCompare legado inverteria) — pega regressão de sort.
     files: [

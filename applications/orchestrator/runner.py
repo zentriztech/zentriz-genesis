@@ -312,7 +312,13 @@ def _compute_spec_files_hash(project_id: str) -> str:
     Retorna "" se não for possível computar (nunca crasha o pipeline).
     """
     try:
-        from spec_tree_hash import hash_spec_tree_from_files
+        # F1 (adversarial Onda 1): em PROD o runner sobe como `python -m orchestrator.runner`
+        # com cwd=/app — import bare NÃO resolve e o except abaixo engolia o erro → gate
+        # fail-open silencioso. Dual-import (mesmo padrão do executor_bridge no cyborg_v3).
+        try:
+            from orchestrator.spec_tree_hash import hash_spec_tree_from_files
+        except ImportError:
+            from spec_tree_hash import hash_spec_tree_from_files
         data, status = _api_get(f"/api/projects/{project_id}/spec-files")
         if status != 200 or not isinstance(data, list) or not data:
             return ""

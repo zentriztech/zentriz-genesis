@@ -204,6 +204,9 @@ export async function createProjectFromSpec(
       approved_by: approverEmail ?? createdBy,
       approved_at: new Date().toISOString(),
       spec_hash: specHash,
+      // F2 (adversarial Onda 1): hash já nasce na fórmula NOVA — a flag evita que o
+      // backfill de boot re-escaneie esta linha para sempre e a rotule como "editada".
+      spec_hash_v2: "true",
     } : {}),
   });
 

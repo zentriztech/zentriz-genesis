@@ -32,7 +32,12 @@ def compute_spec_tree_hash(entries: list[tuple[str, str, str]]) -> str:
     """
     if len(entries) > SPEC_TREE_MAX_FILES:
         raise ValueError(f"spec excede {SPEC_TREE_MAX_FILES} arquivos ({len(entries)})")
-    lines = sorted(f"{rel_dir}\0{filename}\0{sha}\n" for rel_dir, filename, sha in entries)
+    # F4: sort por BYTES UTF-8 (== ordem de codepoint) — explícito para paridade com o TS,
+    # que usa Buffer.compare (o `<` de str do JS compara UTF-16 e diverge no plano astral).
+    lines = sorted(
+        (f"{rel_dir}\0{filename}\0{sha}\n" for rel_dir, filename, sha in entries),
+        key=lambda line: line.encode("utf-8"),
+    )
     return sha256_hex("".join(lines).encode("utf-8"))
 
 

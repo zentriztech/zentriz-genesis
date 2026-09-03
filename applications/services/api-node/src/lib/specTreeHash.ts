@@ -38,9 +38,15 @@ export function sha256Hex(data: Buffer | string): string {
   return crypto.createHash("sha256").update(data).digest("hex");
 }
 
-/** Comparação binária por code unit (equivale a codepoint p/ os charsets sanitizados). */
+/**
+ * Comparação por BYTES UTF-8 — F4 (adversarial Onda 1): `a < b` em JS compara UTF-16
+ * code units, que divergem da ordem de codepoint quando um nome mistura plano astral
+ * (ex.: emoji U+1F600, surrogates 0xD83D…) com BMP alto (ex.: U+FFFD) — o Python ordena
+ * por codepoint e os hashes divergiam. UTF-8 preserva a ordem de codepoint → os dois
+ * lados ordenam por bytes UTF-8 (no Python é o sort default de str; aqui, Buffer.compare).
+ */
 function byteCompare(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
+  return Buffer.compare(Buffer.from(a, "utf-8"), Buffer.from(b, "utf-8"));
 }
 
 export class SpecTreeLimitError extends Error {

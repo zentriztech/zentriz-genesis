@@ -32,6 +32,11 @@ EXPECTED = {
         [("", "empty.md", b""), ("", "a.md", b"x")],
         "2bf26cbafc6282dcdbf25ca8dc6bb285b910c9c20a5e87cb64900a2b468373df",
     ),
+    "f8_astral": (
+        # F4: emoji (astral) × BMP alto — pega divergência UTF-16 code-unit × codepoint.
+        [("", "\U0001F600-spec.md", b"astral"), ("", "�-spec.md", b"bmp-alto"), ("", "a.md", b"x")],
+        "9ff35509c3f9ec8e1a8bbd6ee50077182669af4ee1c13c2d1e0f43904e499a0d",
+    ),
     "f6_case_sort": (
         # Z.md < a.md em codepoint — pega regressão para sort locale-aware.
         [("", "Z.md", "z\n".encode()), ("", "a.md", "a\n".encode()), ("", "README.md", "r\n".encode())],
