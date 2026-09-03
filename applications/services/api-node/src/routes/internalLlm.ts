@@ -127,6 +127,23 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
       if (!auth.ok) {
         return reply.status(401).send({ code: "UNAUTHORIZED", message: "Token interno inválido" });
       }
+      // Lei 8 (rota B) — P0: só o CHAMADOR CONFIÁVEL cunha tokens de projeto.
+      // O único caller legítimo é o FTS co-locado, que usa o GENESIS_API_TOKEN estático
+      // (→ auth.payload === null). O executor NÃO-CONFIÁVEL recebe um token svc:"runner"
+      // no env do `claude`; se ele pudesse cunhar, chamaria {projectId:<qualquer>} e viraria
+      // tenant_admin de OUTRO tenant (escalada cross-tenant) além de renovar o próprio token
+      // indefinidamente (bypass do TTL 6h). Portanto: aceita SÓ token estático (payload null)
+      // ou zentriz_admin; rejeita svc:"runner"/tenant_admin com 403.
+      if (auth.payload && auth.payload.role !== "zentriz_admin") {
+        request.log.warn(
+          { svc: auth.payload.svc, role: auth.payload.role, projectId: auth.payload.projectId },
+          "[internal-llm] tentativa de cunhar cyborg-token por caller não-confiável (negado)",
+        );
+        return reply.status(403).send({
+          code: "FORBIDDEN",
+          message: "Apenas o control plane confiável pode cunhar tokens de projeto.",
+        });
+      }
       const projectId = (request.body?.projectId ?? "").trim();
       if (!projectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "projectId obrigatório" });
 

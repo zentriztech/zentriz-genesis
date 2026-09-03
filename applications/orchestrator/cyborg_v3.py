@@ -36,6 +36,13 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+# Fase 3 (rota B): roteamento do executor não-confiável. Import resiliente aos dois modos
+# de carga (pacote `orchestrator.*` ou dir flat no sys.path).
+try:
+    from orchestrator import executor_bridge
+except ImportError:  # pragma: no cover
+    import executor_bridge
+
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -344,9 +351,12 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     # (npm ci + build/type-check no diretório apps/) para o a3_build_runtime ter dados reais.
     _build_done = False
     try:
-        status, text = _http("POST", f"{FTS_URL}/cyborg-build",
-                             {"project_id": project_id, "prod_id": prod_id or "", "timeout": 300},
-                             timeout=360)
+        # Fase 3 (rota B): executor NÃO-CONFIÁVEL. Co-locado = idêntico ao legado; remoto
+        # (Host B) = embarca arquivos + injeta token escopado. dispatch() cobre ambos.
+        status, text = executor_bridge.dispatch(
+            "/cyborg-build",
+            {"project_id": project_id, "prod_id": prod_id or "", "timeout": 300},
+            project_id, prod_id, proj_dir, timeout=360)
         if status == 200:
             bd = json.loads(text)
             ctx["build_output"] = bd.get("build_output", "")[-4000:]
@@ -775,7 +785,11 @@ Comece analisando o audit (via `zentriz-audit {project_id}`) e o estado atual do
         "cwd_hint": "apps",  # trabalhar dentro de apps/
     }
 
-    status, text = _http("POST", f"{FTS_URL}/cyborg-engineer", payload, timeout=V3_TIMEOUT + 60)
+    # Fase 3 (rota B): sessão longa do `claude` = código não-confiável → roteia p/ executor.
+    status, text = executor_bridge.dispatch(
+        "/cyborg-engineer", payload,
+        project_id, prod_id, _resolve_proj_dir(project_id, prod_id),
+        timeout=V3_TIMEOUT + 60)
     if status != 200:
         return {"ok": False, "error": f"FTS retornou {status}: {text[:500]}"}
     try:

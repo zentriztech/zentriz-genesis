@@ -43,11 +43,20 @@ if [ -z "$PROJ_DIR" ]; then
   exit 1
 fi
 
-# Gerar token GitHub via API interna do agents container ou via subprocess Node
+# Gerar token GitHub via API interna (escopado ao repo do projeto).
+# Fase 3 (rota B): o executor pode rodar num Host B isolado, SEM acesso ao daemon
+# docker do control plane. Por isso NÃO usamos mais `docker exec zentriz-genesis-api-1`.
+# Em vez disso, a própria API cunha um installation token escopado a ESTE repo
+# (permissions.contents=write) via GET /api/projects/:id/github-clone-token, autenticado
+# com o token de PROJETO escopado (GENESIS_API_TOKEN=svc:runner+projectId no sandbox).
 if [ -z "${GITHUB_TOKEN:-}" ]; then
-  # Fallback: chamar container api
-  if [ -n "${INSTALLATION_ID:-}" ]; then
-    GITHUB_TOKEN=$(docker exec zentriz-genesis-api-1 sh -c "cd /app && node -e \"import('./dist/services/github.js').then(m => m.getInstallationTokenForClone($INSTALLATION_ID)).then(t => process.stdout.write(t)).catch(e => { process.stderr.write(e.message); process.exit(1); })\"" 2>/dev/null)
+  API_URL="${API_BASE_URL:-http://api:3000}"
+  TOKEN="${GENESIS_API_TOKEN:?GENESIS_API_TOKEN env var não definido}"
+  CT=$(curl -sS -H "Authorization: Bearer $TOKEN" "$API_URL/api/projects/$PROJECT_ID/github-clone-token" 2>/dev/null || echo '{}')
+  GITHUB_TOKEN=$(echo "$CT" | jq -r '.token // empty')
+  # Se o endpoint também devolveu a cloneUrl e ainda não temos uma, aproveita.
+  if [ -z "$GITHUB_REPO_URL" ]; then
+    GITHUB_REPO_URL=$(echo "$CT" | jq -r '.cloneUrl // empty')
   fi
 fi
 

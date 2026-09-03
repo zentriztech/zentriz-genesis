@@ -40,6 +40,13 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+# Fase 3 (rota B): roteamento do executor não-confiável. Import resiliente aos dois modos
+# de carga (pacote `orchestrator.*` ou dir flat no sys.path).
+try:
+    from orchestrator import executor_bridge
+except ImportError:  # pragma: no cover
+    import executor_bridge
+
 logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -303,7 +310,9 @@ def _collect_context(project_id: str, prod_id: str | None) -> dict:
     # Se o build passa/falha, A3 tem contexto real. Se demora demais (timeout), degrada mas não bloqueia.
     try:
         build_payload = {"project_id": project_id, "prod_id": prod_id, "timeout": 300}
-        status, text = _http("POST", f"{FTS_URL}/cyborg-build", build_payload, timeout=360)
+        # Fase 3 (rota B): co-locado = idêntico ao legado; remoto embarca arquivos + token.
+        status, text = executor_bridge.dispatch(
+            "/cyborg-build", build_payload, project_id, prod_id, proj_dir, timeout=360)
         if status == 200:
             bd = json.loads(text)
             ctx["build_output"] = bd.get("build_output", "")[-5000:]
@@ -543,7 +552,15 @@ def _spawn_claude_code(project_id: str, prod_id: str | None, action: Action, mod
         "timeout": FIX_TIMEOUT,
         "verify_command": action.verify_command,
     }
-    status, text = _http("POST", f"{FTS_URL}/cyborg-claude-code", payload, timeout=FIX_TIMEOUT + 60)
+    # Fase 3 (rota B): Claude Code CLI = código não-confiável → roteia p/ executor.
+    try:
+        from orchestrator.cyborg_v3 import _resolve_proj_dir as _rpd
+    except ImportError:  # pragma: no cover
+        from cyborg_v3 import _resolve_proj_dir as _rpd
+    status, text = executor_bridge.dispatch(
+        "/cyborg-claude-code", payload,
+        project_id, prod_id, _rpd(project_id, prod_id),
+        timeout=FIX_TIMEOUT + 60)
     if status != 200:
         return {"status": "FAILED", "error": f"FTS returned {status}: {text[:500]}"}
     try:

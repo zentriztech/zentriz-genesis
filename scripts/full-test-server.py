@@ -11,6 +11,7 @@ Endpoints:
   GET  /health          — healthcheck
 """
 import http.server, json, subprocess, os, logging, threading, time, uuid, hmac
+import base64, io, tarfile, re as _re
 import urllib.request, urllib.error
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -42,6 +43,18 @@ BACKEND_BUILD_MAX = int(os.environ.get("BACKEND_BUILD_MAX", "2"))
 # compartilhado obrigatório (fail-closed): sem env, TODA requisição POST é recusada.
 FTS_AUTH_TOKEN = os.environ.get("FTS_AUTH_TOKEN", "").strip()
 BACKEND_SEM = threading.BoundedSemaphore(BACKEND_BUILD_MAX)
+
+# Lei 8 (rota B / Fase 3): quando este FTS roda no HOST B ISOLADO (só executor não-confiável),
+# FTS_UNTRUSTED_ONLY=1 RECUSA os endpoints CONFIÁVEIS de deploy (/launch-s3-deploy,
+# /launch-backend-deploy) — que carregam credenciais de nuvem/GitHub do cliente no payload e
+# JAMAIS podem ser servidos no host não-confiável. No control plane o flag fica OFF (default) →
+# comportamento legado byte-idêntico. Defense-in-depth: mesmo que o orquestrador aponte errado,
+# o Host B se recusa a rodar deploy.
+FTS_UNTRUSTED_ONLY = os.environ.get("FTS_UNTRUSTED_ONLY", "").strip() in ("1", "true", "True", "yes")
+# Raiz dos arquivos de projeto no host (mesma em control plane e Host B: bind /opt/genesis-files).
+GENESIS_FILES_ROOT = os.environ.get("GENESIS_FILES_ROOT", "/opt/genesis-files")
+# Teto de bytes descomprimidos aceitos por /ingest-project (anti zip-bomb). Default 300MB.
+INGEST_MAX_BYTES = int(os.environ.get("INGEST_MAX_BYTES", str(300 * 1024 * 1024)))
 
 
 def acquire_heavy_slot(kind: str, job_id: str) -> None:
@@ -195,7 +208,9 @@ def _build_cyborg_sandbox_env(project_id: str, prod_id: str, model_id: str,
     """Env do subprocesso Cyborg: base saneada + PATH dos wrappers + SÓ o token
     de projeto escopado (nunca o admin). Os wrappers leem GENESIS_API_TOKEN/API_BASE_URL."""
     env = _sanitized_base_env()
-    wrapper_dir = "/opt/zentriz-genesis/scripts/cyborg-wrappers"
+    # Diretório dos wrappers zentriz-* no PATH. Env-driven p/ Host B (rota B / Fase 3),
+    # onde os wrappers vivem em /opt/hostb/wrappers (não há repo /opt/zentriz-genesis lá).
+    wrapper_dir = os.environ.get("CYBORG_WRAPPER_DIR", "/opt/zentriz-genesis/scripts/cyborg-wrappers")
     env["PATH"] = f"{wrapper_dir}:{env.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
     env["PROJECT_ID"] = project_id
     env["PROD_ID"] = prod_id or ""
@@ -323,8 +338,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(503, {"error": "FTS_AUTH_TOKEN nao configurado no servidor - requisicoes recusadas (fail-closed)"}); return
         if not hmac.compare_digest(self.headers.get("X-FTS-Token", ""), FTS_AUTH_TOKEN):
             self._json(401, {"error": "unauthorized"}); return
+        # Lei 8 (Fase 3): no Host B isolado, os endpoints de deploy (com credenciais de
+        # nuvem/GitHub no payload) são RECUSADOS. Só o executor não-confiável roda aqui.
+        if FTS_UNTRUSTED_ONLY and self.path in ("/launch-s3-deploy", "/launch-backend-deploy"):
+            self._json(403, {"error": "deploy indisponível neste host (FTS_UNTRUSTED_ONLY) — orquestração de deploy é servida só pelo control plane"}); return
         if self.path == "/run-full-test":
             self._handle_run_full_test()
+        elif self.path == "/ingest-project":
+            self._handle_ingest_project()
         elif self.path == "/launch-cyborg":
             self._handle_launch_cyborg()
         elif self.path == "/launch-s3-deploy":
@@ -341,6 +362,93 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_cyborg_engineer()
         else:
             self._json(404, {"error": "not found"})
+
+    # ── /ingest-project — embarca os arquivos do projeto (rota B / Fase 3) ──────
+    def _handle_ingest_project(self):
+        """Recebe UM projeto por-job como tar.gz (base64) e o extrai em
+        GENESIS_FILES_ROOT/<prod_id>/<project_id>. Usado quando o executor roda no Host B
+        isolado (sem volume compartilhado com o control plane). O control plane confiável
+        embarca só os arquivos do job corrente → o não-confiável enxerga UM projeto.
+
+        Segurança (P2-6): valida cada membro do tar contra path traversal (`..`, absolutos),
+        REJEITA symlinks/hardlinks/devices, aplica teto de bytes descomprimidos (anti bomba),
+        e nunca escreve fora do diretório-alvo. Extração idempotente (sobrescreve arquivos,
+        preserva node_modules já instalado — o tar os exclui na origem)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+
+        # IDs sanitizados: só chars seguros de path (UUID/slug). Barra tentativa de traversal no ID.
+        def _safe_id(v: str) -> str:
+            v = (v or "").strip()
+            # Rejeita tokens de ponto puro: "." resolveria o alvo para a própria raiz e ".."
+            # para o diretório-pai. O regex já barra "/" e "\", mas não os pontos isolados.
+            if v in (".", ".."):
+                return ""
+            return v if _re.fullmatch(r"[A-Za-z0-9._-]{1,128}", v) else ""
+
+        project_id = _safe_id(payload.get("project_id", ""))
+        prod_id    = _safe_id(payload.get("prod_id", "")) if payload.get("prod_id") else ""
+        b64        = payload.get("tar_gz_b64", "")
+        if not project_id:
+            self._json(400, {"error": "project_id inválido/ausente"}); return
+        if not b64:
+            self._json(400, {"error": "tar_gz_b64 ausente"}); return
+
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except Exception as e:
+            self._json(400, {"error": f"base64 inválido: {e}"}); return
+
+        root = Path(GENESIS_FILES_ROOT).resolve()
+        target = (root / prod_id / project_id) if prod_id else (root / project_id)
+        target = target.resolve()
+        # Confina o alvo dentro da raiz (defense-in-depth; os IDs já foram sanitizados).
+        if root not in target.parents and target != root:
+            self._json(400, {"error": "target fora da raiz"}); return
+
+        extracted = 0
+        total = 0
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                for m in tf.getmembers():
+                    # Rejeita qualquer coisa que não seja arquivo/diretório regular.
+                    if m.issym() or m.islnk() or m.ischr() or m.isblk() or m.isfifo() or m.isdev():
+                        self._json(400, {"error": f"membro não-regular rejeitado: {m.name}"}); return
+                    name = m.name
+                    if name.startswith("/") or ".." in Path(name).parts:
+                        self._json(400, {"error": f"path traversal rejeitado: {name}"}); return
+                    dest = (target / name).resolve()
+                    if target not in dest.parents and dest != target:
+                        self._json(400, {"error": f"escape do alvo rejeitado: {name}"}); return
+                    total += max(m.size, 0)
+                    if total > INGEST_MAX_BYTES:
+                        self._json(413, {"error": f"payload excede teto {INGEST_MAX_BYTES} bytes"}); return
+                    if m.isdir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    src = tf.extractfile(m)
+                    if src is None:
+                        continue
+                    with open(dest, "wb") as out:
+                        while True:
+                            chunk = src.read(1024 * 256)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                    extracted += 1
+        except tarfile.TarError as e:
+            self._json(400, {"error": f"tar inválido: {e}"}); return
+        except Exception as e:
+            self._json(500, {"error": f"falha ao extrair: {e}"}); return
+
+        log.info(f"[ingest] {project_id[:8]}: {extracted} arquivos em {target} ({total} bytes)")
+        self._json(200, {"ok": True, "project_id": project_id, "prod_id": prod_id,
+                         "files": extracted, "bytes": total, "target": str(target)})
 
     # ── /cyborg-build — roda pnpm install + build + tsc no cwd do projeto ─────
     def _handle_cyborg_build(self):
@@ -360,8 +468,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # os arquivos reais.
         candidates = []
         if prod_id:
-            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
-        candidates.append(f"/opt/genesis-files/{project_id}")
+            candidates.append(f"{GENESIS_FILES_ROOT}/{prod_id}/{project_id}")
+        candidates.append(f"{GENESIS_FILES_ROOT}/{project_id}")
         proj_dir = next(
             (c for c in candidates if Path(c).exists() and (Path(c) / "apps" / "package.json").exists()),
             None,
@@ -493,8 +601,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Achar projeto com canário apps/package.json
         candidates = []
         if prod_id:
-            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
-        candidates.append(f"/opt/genesis-files/{project_id}")
+            candidates.append(f"{GENESIS_FILES_ROOT}/{prod_id}/{project_id}")
+        candidates.append(f"{GENESIS_FILES_ROOT}/{project_id}")
         proj_dir = next(
             (c for c in candidates if Path(c).exists() and (Path(c) / "apps" / "package.json").exists()),
             None,
@@ -583,8 +691,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Localizar cwd (com/sem prod_id)
         candidates = []
         if prod_id:
-            candidates.append(f"/opt/genesis-files/{prod_id}/{project_id}")
-        candidates.append(f"/opt/genesis-files/{project_id}")
+            candidates.append(f"{GENESIS_FILES_ROOT}/{prod_id}/{project_id}")
+        candidates.append(f"{GENESIS_FILES_ROOT}/{project_id}")
         cwd = next((c for c in candidates if Path(c).exists()), None)
         if not cwd:
             self._json(404, {"error": f"projeto não encontrado: {candidates}"}); return
@@ -1155,7 +1263,33 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         self.wfile.write(body)
 
 
+def _assert_untrusted_host_has_no_secrets() -> None:
+    """Lei 8 (rota B / Fase 3) — trava fail-closed de boot no Host B isolado.
+
+    Quando FTS_UNTRUSTED_ONLY=1, este processo hospeda `claude --dangerously-skip-permissions`
+    (código arbitrário do cliente) e NÃO pode possuir nenhuma credencial de control plane no
+    env do processo: nem o token admin do Genesis (GENESIS_API_TOKEN/GENESIS_INTERNAL_TOKEN →
+    zentriz_admin em todos os tenants), nem chaves AWS estáticas (AKIA…; Bedrock resolve via
+    instance role/IMDS). Se alguma vazou para o unit por engano, RECUSAMOS subir — melhor um
+    Host B morto do que um Host B com a Jóia da Coroa ao alcance do executor não-confiável."""
+    if not FTS_UNTRUSTED_ONLY:
+        return
+    offenders = [k for k in (
+        "GENESIS_API_TOKEN", "GENESIS_INTERNAL_TOKEN",
+        "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+        "JWT_SECRET", "FOUNDRY_API_KEY", "DATABASE_URL",
+    ) if (os.environ.get(k) or "").strip()]
+    if offenders:
+        raise SystemExit(
+            "FTS_UNTRUSTED_ONLY=1 mas segredos de control plane presentes no env: "
+            f"{', '.join(offenders)}. Host B nao-confiavel NAO pode possui-los "
+            "(token de projeto chega escopado via payload; Bedrock via instance role). "
+            "Remova-os do systemd unit e reinicie (fail-closed)."
+        )
+
+
 if __name__ == "__main__":
+    _assert_untrusted_host_has_no_secrets()
     server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
     log.info("full-test-server ouvindo em http://0.0.0.0:%d", PORT)
     log.info("Claude CLI: %s", CLAUDE_BIN)

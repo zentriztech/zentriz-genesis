@@ -3593,29 +3593,34 @@ Execute agora sem pedir confirmação.
                     )
                     if _proj_host_dir:
                         try:
-                            import urllib.request as _ur
                             import json as _json
+                            # Fase 3 (rota B, Lei 8): o /run-full-test roda `claude` (código
+                            # NÃO-CONFIÁVEL). executor_bridge roteia p/ o executor: co-locado =
+                            # idêntico ao legado; remoto (Host B) = embarca arquivos, reescreve
+                            # project_path/prompt_path p/ o layout remoto, injeta token escopado
+                            # e omite api_key/token admin.
+                            try:
+                                from orchestrator import executor_bridge as _eb
+                            except ImportError:
+                                import executor_bridge as _eb
                             _host_prompt_path = str(
                                 Path(_host_root) / project_id / "project" / "full-test-prompt.md"
                             ) if _host_root else ""
                             # FT-13: incluir api_key do projeto para que o full-test-server use a chave correta
-                            _ft_payload = _json.dumps({
+                            _ft_payload = {
                                 "project_id":   project_id or "",
                                 "project_path": str(_proj_host_dir),
                                 "prompt_path":  _host_prompt_path,
                                 "api_key":      os.environ.get("CLAUDE_API_KEY", ""),
-                            }).encode()
+                            }
                             _post_step("🤖 TASK-FULL-TEST: Claude Code Agent iniciado via full-test-server.", request_id)
                             _update_task(project_id, "TSK-FULL-TEST", status="IN_PROGRESS")
-                            _ft_req = _ur.Request(
-                                f"{_ft_server_url}/run-full-test",
-                                data=_ft_payload,
-                                headers={"Content-Type": "application/json",
-                                         "X-FTS-Token": os.environ.get("FTS_AUTH_TOKEN", "")},
-                                method="POST",
-                            )
-                            with _ur.urlopen(_ft_req, timeout=660) as _resp:
-                                _ft_resp = _json.loads(_resp.read().decode())
+                            _ft_status, _ft_text = _eb.dispatch_full_test(
+                                _ft_payload, project_id or "", None, _proj_container_dir,
+                                "project/full-test-prompt.md", timeout=660)
+                            if _ft_status != 200:
+                                raise RuntimeError(f"/run-full-test retornou {_ft_status}: {_ft_text[:300]}")
+                            _ft_resp = _json.loads(_ft_text)
                             _ft_result_text = _ft_resp.get("output", "")
                             _ft_executed = True
                             logger.info("[TASK-FULL-TEST] Server respondeu: status=%s approved=%s",

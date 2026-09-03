@@ -222,6 +222,13 @@ export interface CloneTokenScope {
   repositoryNames?: string[];
   /** Permissões a reduzir, ex.: `{ contents: "read" }` (clone) ou `{ contents: "write" }` (push). */
   permissions?: Record<string, string>;
+  /**
+   * C3 (rota B) — quando `true`, RECUSA o fallback PAT (que é amplo e não-escopável).
+   * Use nos endpoints que entregam o token ao host de build não-confiável (Host B): lá o
+   * token só pode ser um installation token escopado ao repo do projeto; jamais um PAT
+   * onipotente. Fail-closed: sem App configurado, lança em vez de degradar para o PAT.
+   */
+  requireScoped?: boolean;
 }
 
 export async function getInstallationTokenForClone(
@@ -255,6 +262,12 @@ export async function getInstallationTokenForClone(
     });
     const { token } = await auth(scope as Parameters<typeof auth>[0]);
     return token;
+  }
+  if (opts.requireScoped) {
+    // Host de build não-confiável: só token escopado por App. Sem App → fail-closed.
+    throw new Error(
+      "Scoped clone token required but no GitHub App configured (PAT fallback refused).",
+    );
   }
   const pat = process.env.GITHUB_TOKEN;
   if (!pat) throw new Error("No GitHub credentials for clone token.");

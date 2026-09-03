@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
 import { pushProjectToGitHub } from "../services/githubPush.js";
+import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
 import { isS3Configured } from "../services/s3.js";
@@ -1099,6 +1100,66 @@ export async function projectRoutes(app: FastifyInstance) {
           shaDev: repoRow.sha_dev,
         },
       });
+    } finally {
+      client.release();
+    }
+  });
+
+  // GET /api/projects/:id/github-clone-token — token GitHub CURTO e ESCOPADO a ESTE repo,
+  // com permissão de escrita (contents:write) para o wrapper `zentriz-github-push`.
+  //
+  // Lei 8 (rota B / Fase 3 / P1-5): o executor NÃO-CONFIÁVEL roda em Host B isolado, sem
+  // acesso ao socket Docker do control plane (o antigo fallback `docker exec ... api ...` do
+  // wrapper não funciona lá e, quando funcionava, devolvia token AMPLO — todos os repos da
+  // instalação). Aqui o control plane cunha o token server-side, escopado a UM repositório
+  // (repositoryNames + permissions:{contents:write}), e o entrega já pronto ao wrapper. Assim
+  // um vazamento contém-se a UM repo do próprio cliente, nunca à organização inteira.
+  // Auth: `authMiddleware` + `canAccessProjectRow` (o token svc:"runner" do run é amarrado ao
+  // próprio projeto pelo binding em auth.ts) → só o run do próprio projeto obtém o token.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/github-clone-token", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const client = await pool.connect();
+    try {
+      const row = (await client.query<{ tenant_id: string | null; created_by: string | null }>(
+        "SELECT id, tenant_id, created_by FROM projects WHERE id = $1", [id],
+      )).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (!canAccessProjectRow(user, row)) {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+      }
+      const repoRow = (await client.query<{
+        clone_url: string | null; repo_full_name: string | null; installation_id: number | null;
+      }>(
+        `SELECT r.clone_url, r.repo_full_name, gi.installation_id
+           FROM project_github_repos r
+           JOIN projects p ON p.id = r.project_id
+           LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+          WHERE r.project_id = $1`,
+        [id],
+      )).rows[0];
+      if (!repoRow || !repoRow.clone_url || !repoRow.repo_full_name) {
+        return reply.status(404).send({ code: "REPO_NOT_CONFIGURED", message: "Repositório GitHub não configurado para este projeto" });
+      }
+      if (!repoRow.installation_id) {
+        return reply.status(409).send({ code: "NO_INSTALLATION", message: "Instalação do GitHub App não encontrada para o tenant" });
+      }
+      let token: string;
+      try {
+        token = await getInstallationTokenForClone(repoRow.installation_id, {
+          repositoryNames: [repoShortName(repoRow.repo_full_name)],
+          permissions: { contents: "write" },
+          // C3 (rota B): este token viaja ao host de build não-confiável (Host B). Recusa o
+          // fallback PAT (amplo/não-escopável) — só installation token escopado ao repo.
+          requireScoped: true,
+        });
+      } catch (err) {
+        return reply.status(502).send({
+          code: "GITHUB_TOKEN_ERROR",
+          message: `Falha ao gerar token GitHub: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+      return reply.send({ token, cloneUrl: repoRow.clone_url, fullName: repoRow.repo_full_name });
     } finally {
       client.release();
     }

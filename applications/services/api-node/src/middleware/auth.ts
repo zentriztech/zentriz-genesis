@@ -7,6 +7,10 @@ export type AuthUser = {
   email: string;
   role: string;
   tenantId: string | null;
+  /** Identidade de serviço do token (ex.: "runner" p/ token de máquina do pipeline). */
+  svc?: string;
+  /** Claim de PROJETO do token escopado (svc:"runner" cunhado por /cyborg-token). */
+  projectId?: string;
 };
 
 // H3 (RFC-0002 Parte B / F2): kill-switch de emergência do recheck de suspensão.
@@ -42,8 +46,39 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
     email: payload.email,
     role: payload.role,
     tenantId: payload.tenantId ?? null,
+    svc: payload.svc,
+    projectId: payload.projectId,
   };
   (request as FastifyRequest & { user: AuthUser }).user = user;
+
+  // Lei 8 (rota B / Fase 3) — BINDING DE PROJETO no token do executor não-confiável.
+  // O token svc:"runner" cunhado por /api/internal/cyborg-token carrega o claim `projectId`
+  // e é injetado no env do `claude --dangerously-skip-permissions` (código do cliente). Sem
+  // esta guarda, o claim é decorativo: `canAccessProjectRow` decide só por tenant, então o
+  // token vale para QUALQUER projeto do mesmo tenant (auditoria adversarial P1-2). Aqui o
+  // amarramos ao próprio projeto: um token de run só opera rotas `/api/projects/<seu-id>/*`.
+  // Só age quando há projectId no token — não afeta login, tokens de usuário real, nem o
+  // token de run ESCOPADO NO TENANT (svc:runner SEM projectId) que o orquestrador usa nos
+  // callbacks (/run,/tasks,/accept,/deploy,…).
+  //
+  // MUST-MATCH (não só anti-mismatch): a superfície legítima do token de projeto é
+  // exclusivamente `/api/projects/:id/*` (github-repo, github-clone-token, accept, dialogue,
+  // deploy/ephemeral). Exigir um id de projeto na rota que BATA com o claim fecha, de uma vez,
+  // qualquer rota sem `:id`/`:projectId` (sub-recursos como /api/deployments/:deploymentId,
+  // /api/deadpool/approvals/:approvalId, learning/plans/reports) — que o executor não-confiável
+  // poderia alcançar de outra forma. Nenhuma chamada legítima do runner fica sem `:id`.
+  if (payload.svc === "runner" && payload.projectId) {
+    const params = (request.params ?? {}) as Record<string, unknown>;
+    const routeProjectId = (typeof params.id === "string" && params.id)
+      || (typeof params.projectId === "string" && params.projectId)
+      || "";
+    if (routeProjectId !== payload.projectId) {
+      return reply.status(403).send({
+        code: "PROJECT_SCOPE_MISMATCH",
+        message: "Token de projeto só opera rotas do próprio projeto.",
+      });
+    }
+  }
 
   // H3 (F2): recheck de suspensão no meio da sessão. O login já barra tenants
   // não-ativos na entrada; aqui fechamos a janela de um token ainda válido cujo

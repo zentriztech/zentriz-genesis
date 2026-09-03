@@ -122,7 +122,7 @@ describe("GET /api/internal/project-llm-config/:projectId — binding por projet
 });
 
 describe("POST /api/internal/cyborg-token — Lei 8 (token de projeto p/ o sandbox do FTS)", () => {
-  function mint(body: unknown, token = STATIC_TOKEN) {
+  function mint(body: Record<string, unknown>, token = STATIC_TOKEN) {
     return app.inject({
       method: "POST", url: "/api/internal/cyborg-token",
       headers: { "x-internal-token": token, "content-type": "application/json" },
@@ -168,5 +168,28 @@ describe("POST /api/internal/cyborg-token — Lei 8 (token de projeto p/ o sandb
       headers: { "content-type": "application/json" }, payload: { projectId: PROJECT },
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("P0 (rota B): caller svc:runner NÃO cunha token de projeto → 403 (anti-escalada cross-tenant)", async () => {
+    // Um token de run (o que o executor não-confiável tem) tenta cunhar token p/ OUTRO
+    // projeto. Se pudesse, viraria tenant_admin de outro tenant + renovaria o próprio TTL.
+    const runnerTok = signToken(
+      { sub: "u1", email: "u@x", role: "user", tenantId: TENANT, svc: "runner", projectId: PROJECT }, "1h",
+    );
+    const res = await mint({ projectId: OTHER_PROJECT }, runnerTok);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().code).toBe("FORBIDDEN");
+  });
+
+  it("P0 (rota B): caller tenant_admin (não estático) NÃO cunha token de projeto → 403", async () => {
+    const adminTok = signToken({ sub: "a1", email: "a@x", role: "tenant_admin", tenantId: TENANT }, "1h");
+    const res = await mint({ projectId: PROJECT }, adminTok);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("zentriz_admin (não estático) PODE cunhar token de projeto → 200", async () => {
+    const zTok = signToken({ sub: "z1", email: "z@x", role: "zentriz_admin", tenantId: null }, "1h");
+    const res = await mint({ projectId: PROJECT }, zTok);
+    expect(res.statusCode).toBe(200);
   });
 });

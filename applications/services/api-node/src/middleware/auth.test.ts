@@ -116,3 +116,61 @@ describe("authMiddleware — H3 recheck de suspensão", () => {
     expect(sent.code).toBe(401);
   });
 });
+
+describe("authMiddleware — binding de projeto do token de run (Lei 8 / rota B)", () => {
+  const PROJ = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  beforeEach(() => {
+    statusToReturn = "active"; // isola do estado deixado pelo bloco H3 acima
+    getTenantStatus.mockClear();
+  });
+
+  function reqReplyWithParams(token: string, params: Record<string, unknown>) {
+    const req = { headers: { authorization: `Bearer ${token}` }, params } as Record<string, unknown>;
+    const sent: Sent = {};
+    const reply = {
+      status(c: number) { sent.code = c; return { send(b: { code?: string }) { sent.body = b; return reply; } }; },
+    };
+    return { req, reply: reply as never, sent };
+  }
+
+  function runnerToken(projectId: string) {
+    return signToken({ sub: "u1", email: "u@x", role: "user", tenantId: "t1", svc: "runner", projectId });
+  }
+
+  it("token de projeto na rota do PRÓPRIO projeto (:id bate) → passa", async () => {
+    const { req, reply, sent } = reqReplyWithParams(runnerToken(PROJ), { id: PROJ });
+    await authMiddleware(req as never, reply);
+    expect(sent.code).toBeUndefined();
+  });
+
+  it("token de projeto em rota de OUTRO projeto (:id diverge) → 403 PROJECT_SCOPE_MISMATCH", async () => {
+    const { req, reply, sent } = reqReplyWithParams(runnerToken(PROJ), { id: OTHER });
+    await authMiddleware(req as never, reply);
+    expect(sent.code).toBe(403);
+    expect(sent.body?.code).toBe("PROJECT_SCOPE_MISMATCH");
+  });
+
+  it("token de projeto em rota SEM :id de projeto (sub-recurso/global) → 403 (must-match)", async () => {
+    // Ex.: /api/deployments/:deploymentId — nenhum id/projectId de projeto na rota.
+    const { req, reply, sent } = reqReplyWithParams(runnerToken(PROJ), { deploymentId: "dep-1" });
+    await authMiddleware(req as never, reply);
+    expect(sent.code).toBe(403);
+    expect(sent.body?.code).toBe("PROJECT_SCOPE_MISMATCH");
+  });
+
+  it("token de run ESCOPADO NO TENANT (svc:runner SEM projectId) → binding NÃO se aplica (callbacks do orquestrador)", async () => {
+    const token = signToken({ sub: "u1", email: "u@x", role: "user", tenantId: "t1", svc: "runner" });
+    const { req, reply, sent } = reqReplyWithParams(token, { deploymentId: "dep-1" });
+    await authMiddleware(req as never, reply);
+    expect(sent.code).toBeUndefined();
+  });
+
+  it("usuário real (sem svc/projectId) em rota de projeto → binding NÃO se aplica", async () => {
+    const token = signToken({ sub: "u1", email: "u@x", role: "tenant_admin", tenantId: "t1" });
+    const { req, reply, sent } = reqReplyWithParams(token, { id: OTHER });
+    await authMiddleware(req as never, reply);
+    expect(sent.code).toBeUndefined();
+  });
+});
