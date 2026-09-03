@@ -105,6 +105,9 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
+      # RFC-0004 F6/T2.1: dentro do Docker o agents fala com a api pelo nome do serviço —
+      # sem isto, o .env (localhost:3000) vazava e o report de usage do splitter falhava.
+      - API_BASE_URL=http://api:3000
       - CLAUDE_API_KEY=${CLAUDE_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-claude-sonnet-4-6}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

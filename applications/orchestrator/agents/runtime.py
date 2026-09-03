@@ -1168,9 +1168,11 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
     """
     if not project_id:
         return
-    base = (os.environ.get("API_BASE_URL") or "").strip()
+    # Default = nome do serviço no Docker (mesmo default do cyborg_v3/executor_bridge) —
+    # em prod o agents não define API_BASE_URL no compose.
+    base = (os.environ.get("API_BASE_URL") or "http://api:3000").strip()
     token = (os.environ.get("GENESIS_API_TOKEN") or "").strip()
-    if not base or not token:
+    if not token:
         return
 
     def _post() -> None:
@@ -1188,8 +1190,10 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             )
             _rq.urlopen(req, timeout=10).read()
+            logger.info("[direct-usage] %s: %s in=%d out=%d (%s)",
+                        agent, project_id[:8], input_tokens, output_tokens, model_id)
         except Exception as exc:  # nunca derruba a chamada principal
-            logger.debug("[direct-usage] falha ao reportar métricas (best-effort): %s", exc)
+            logger.warning("[direct-usage] falha ao reportar métricas (best-effort): %s", exc)
 
     threading.Thread(target=_post, daemon=True).start()
 
