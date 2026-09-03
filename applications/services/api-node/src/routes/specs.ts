@@ -619,6 +619,11 @@ export async function specRoutes(app: FastifyInstance) {
     const user = getUser(request);
     // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria/envia spec.
     if (denyCreationForManagement(user, reply)) return;
+    // RFC-0004 Onda 0 (S6): spec é autoria HUMANA — o token de máquina do pipeline
+    // (svc:"runner", carregado pelo executor não-confiável) não cria specs.
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não cria spec (autoria humana)." });
+    }
     if (!user.tenantId) {
       return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório para enviar spec" });
     }

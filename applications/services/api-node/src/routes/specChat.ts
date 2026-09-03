@@ -14,10 +14,12 @@
  * mensagens (a do usuário + a resposta da IA) são gravadas em spec_chat_messages (migração
  * 041). Sem projectId (spec ainda sem projeto), o histórico fica só no cliente.
  */
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
+import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 
 interface ChatMessage {
@@ -38,6 +40,8 @@ interface ChatJob {
   reply?: string;
   error?: string;
   createdAt: number;
+  /** RFC-0004 Onda 0 (S3): dono do job — o poll só devolve ao usuário que o criou. */
+  ownerUserId: string;
 }
 const _chatJobs = new Map<string, ChatJob>();
 
@@ -189,8 +193,13 @@ export async function specChatRoutes(app: FastifyInstance) {
   app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string } }>(
     "/api/spec-chat",
     async (request, reply) => {
+      const user = getUser(request);
       // RFC-0002 A.1: conta de gestão (zentriz_admin) não refina spec (autoria + LLM).
-      if (denyCreationForManagement(getUser(request), reply)) return;
+      if (denyCreationForManagement(user, reply)) return;
+      // RFC-0004 Onda 0 (S6): spec é autoria HUMANA — token de máquina não conversa com o CTO.
+      if (user.svc === "runner") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não usa o chat de spec." });
+      }
       const body = request.body ?? {};
       const specMarkdown = (body.specMarkdown ?? "").trim();
       const messages = Array.isArray(body.messages) ? body.messages : [];
@@ -204,6 +213,23 @@ export async function specChatRoutes(app: FastifyInstance) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie ao menos uma mensagem do usuário" });
       }
 
+      // RFC-0004 Onda 0 (S2): projectId do body era aceito SEM checagem de acesso — tenant A
+      // gravava mensagens no histórico de spec do tenant B (prompt injection armazenada
+      // cross-tenant quando o histórico virar contexto). Agora: acesso verificado ANTES.
+      if (projectId) {
+        const client = await pool.connect();
+        try {
+          const proj = (await client.query(
+            "SELECT tenant_id, created_by FROM projects WHERE id = $1", [projectId],
+          )).rows[0];
+          if (!proj || !canAccessProjectRow(user, proj)) {
+            return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+          }
+        } finally {
+          client.release();
+        }
+      }
+
       const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
       if (!agentsUrl) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes não configurado" });
@@ -212,8 +238,10 @@ export async function specChatRoutes(app: FastifyInstance) {
       // Persiste a mensagem do usuário (se houver projeto associado) — best-effort.
       if (projectId) void persistMessage(projectId, "user", lastUser);
 
-      const jobId = `scj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const job: ChatJob & { projectId?: string | null } = { id: jobId, status: "pending", createdAt: Date.now(), projectId };
+      const jobId = randomUUID(); // S3: id não-adivinhável (o antigo scj-<ts>-<5 base36> era fraco)
+      const job: ChatJob & { projectId?: string | null } = {
+        id: jobId, status: "pending", createdAt: Date.now(), projectId, ownerUserId: user.id,
+      };
       _chatJobs.set(jobId, job);
 
       runChatJob(jobId, buildChatMessage(specMarkdown, messages), agentsUrl);
@@ -228,7 +256,10 @@ export async function specChatRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { jobId } = request.params;
       const job = _chatJobs.get(jobId) as (ChatJob & { projectId?: string | null }) | undefined;
-      if (!job) {
+      // S3: binding de dono — sem isso, qualquer autenticado com o jobId lia a spec revisada
+      // de outro tenant (mesma classe do binding de token da rota B). 404 (não 403) para não
+      // vazar a existência do job.
+      if (!job || job.ownerUserId !== getUser(request).id) {
         return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
       }
       if (job.status === "done") {

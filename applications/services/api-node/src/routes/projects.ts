@@ -313,6 +313,17 @@ export async function projectRoutes(app: FastifyInstance) {
         const values: unknown[] = [];
         let i = 1;
         if (status !== undefined) {
+          // RFC-0004 Onda 0 (S4): `status` é a máquina de estados da FÁBRICA. Sem esta guarda,
+          // qualquer usuário do tenant setava 'completed' (dispara a cascata de dependentes
+          // logo abaixo) ou re-tornava o projeto RUNNABLE — bypass de todos os gates. Escrita
+          // de status é do pipeline (svc:"runner", cunhado só no servidor) e do master.
+          // Humanos usam as rotas dedicadas (/stop, /accept, /reject) que têm as suas guardas.
+          if (user.svc !== "runner" && user.role !== "zentriz_admin") {
+            return reply.status(403).send({
+              code: "FORBIDDEN",
+              message: "Alteração direta de status é restrita ao pipeline. Use as ações do projeto (parar/aceitar).",
+            });
+          }
           if (!VALID_PROJECT_STATUS.has(status)) {
             return reply.status(400).send({ code: "BAD_REQUEST", message: `Status inválido: ${status}` });
           }
@@ -1602,6 +1613,13 @@ export async function projectRoutes(app: FastifyInstance) {
       if (!canAccessProjectRow(user, proj)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
+      // RFC-0004 Onda 0 (S5): sem clamp, tokens NEGATIVOS zeravam o SUM mensal do tenant e
+      // anulavam o cost-cap (migration 068) — denial-of-wallet via token de projeto do
+      // executor não-confiável. Clamp [0, 10M] por chamada (10M tokens >> qualquer chamada real).
+      const clampTokens = (v: unknown): number => {
+        const n = Number(v ?? 0);
+        return Number.isFinite(n) ? Math.max(0, Math.min(Math.trunc(n), 10_000_000)) : 0;
+      };
       await client.query(
         `INSERT INTO project_agent_metrics
            (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status)
@@ -1611,10 +1629,10 @@ export async function projectRoutes(app: FastifyInstance) {
           String(body.agent ?? "unknown"),
           body.taskId ? String(body.taskId) : null,
           Number(body.round ?? 1),
-          Number(body.inputTokens ?? 0),
-          Number(body.outputTokens ?? 0),
+          clampTokens(body.inputTokens),
+          clampTokens(body.outputTokens),
           body.model ? String(body.model) : null,
-          body.durationMs ? Number(body.durationMs) : null,
+          body.durationMs ? Math.max(0, Number(body.durationMs) || 0) : null,
           body.status ? String(body.status) : null,
         ]
       );
@@ -3030,6 +3048,27 @@ export async function projectRoutes(app: FastifyInstance) {
         if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
         if (!canAccessProjectRow(user, row)) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        // RFC-0004 Onda 0 (S6): spec é AUTORIA HUMANA pré-fábrica. O token de máquina do
+        // executor não-confiável (svc:"runner", injetado no env do claude no Host B) passa
+        // no MUST-MATCH para o PRÓPRIO projeto — sem esta guarda, código de cliente
+        // reescreve a própria spec e re-dispara a fábrica (startNow) em loop.
+        if (user.svc === "runner") {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não edita spec (autoria humana)." });
+        }
+        // RFC-0004 Onda 0 (S1): editar a spec de um projeto EM FÁBRICA muta o arquivo que o
+        // runner está lendo e invalida silenciosamente a aprovação/hash. Só estados
+        // pré-fábrica ou parados/bloqueados (onde editar é a remediação) são editáveis.
+        const SPEC_EDITABLE_STATUSES = new Set([
+          "draft", "spec_submitted", "pending_conversion", "stopped", "failed",
+          "spec_validation_failed", "blocked_cyborg", "blocked_structural_gate",
+          "blocked_backlog_empty_with_frs", "blocked_awaiting_expo_confirm",
+        ]);
+        if (!SPEC_EDITABLE_STATUSES.has(String(row.status))) {
+          return reply.status(409).send({
+            code: "SPEC_LOCKED",
+            message: `Spec bloqueada para edição: projeto em '${row.status}'. Pare o projeto ou use Evoluir.`,
+          });
         }
         const specRow = (await client.query(
           "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",

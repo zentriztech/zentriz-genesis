@@ -448,6 +448,35 @@ async function autoRescueFailedProjects(activeIds: Set<string>): Promise<void> {
 
 // ── Ciclo principal do Watchdog ────────────────────────────────────────────
 
+/**
+ * RFC-0004 Onda 0 (T0.6): fecha runs de pipeline abertas cujo projeto já saiu dos estados
+ * de fábrica (runner morreu sem o POST /runs action:stop). `duration_sec` congela no
+ * momento do fechamento; `stop_reason='interrupted'` (único valor do CHECK que descreve
+ * término sem stop ordenado). Estados de fábrica ativos ficam de fora — run legítima aberta.
+ */
+async function closeOrphanPipelineRuns(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(
+      `UPDATE pipeline_runs pr
+       SET finished_at = now(),
+           duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (now() - pr.started_at)))::int,
+           stop_reason = 'interrupted'
+       FROM projects p
+       WHERE pr.project_id = p.id
+         AND pr.finished_at IS NULL
+         AND pr.started_at < now() - interval '10 minutes'
+         AND p.status NOT IN ('running', 'queued', 'cto_charter', 'pm_backlog', 'dev_qa', 'devops', 'pending_cyborg')
+       RETURNING pr.project_id`,
+    );
+    if (res.rowCount && res.rowCount > 0) {
+      console.log(`[Watchdog] ${res.rowCount} pipeline_run(s) órfã(s) fechada(s) (interrupted): ${res.rows.map((r) => String(r.project_id).slice(0, 8)).join(", ")}`);
+    }
+  } finally {
+    client.release();
+  }
+}
+
 async function runWatchdogCycle(): Promise<void> {
   if (_isRunning) return; // evitar sobreposição
   _isRunning = true;
@@ -460,6 +489,13 @@ async function runWatchdogCycle(): Promise<void> {
 
     // 0b. Destruir deployments efêmeros expirados
     await checkExpiredDeployments().catch((e) => console.error("[Watchdog] Erro em checkExpiredDeployments:", e));
+
+    // 0c. RFC-0004 Onda 0 (T0.6): fechar pipeline_runs ÓRFÃS. O stop só acontece via
+    // POST /runs action:stop; runner morto (OOM/deploy) deixa a run aberta para sempre —
+    // "tempo decorrido" vira cronômetro infinito no dashboard. Fecha runs abertas cujo
+    // projeto NÃO está mais em estado de fábrica, com grace de 10min (evita corrida na
+    // borda da transição de status). stop_reason='interrupted' (valor já no CHECK da 012).
+    await closeOrphanPipelineRuns().catch((e) => console.error("[Watchdog] Erro em closeOrphanPipelineRuns:", e));
 
     // 1. Buscar status do runner
     const runnerStatus = await getRunnerStatus();
