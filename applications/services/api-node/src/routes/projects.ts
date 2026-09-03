@@ -3056,11 +3056,7 @@ export async function projectRoutes(app: FastifyInstance) {
         // RFC-0004 Onda 0 (S1): editar a spec de um projeto EM FÁBRICA muta o arquivo que o
         // runner está lendo e invalida silenciosamente a aprovação/hash. Só estados
         // pré-fábrica ou parados/bloqueados (onde editar é a remediação) são editáveis.
-        const SPEC_EDITABLE_STATUSES = new Set([
-          "draft", "spec_submitted", "pending_conversion", "stopped", "failed",
-          "spec_validation_failed", "blocked_cyborg", "blocked_structural_gate",
-          "blocked_backlog_empty_with_frs", "blocked_awaiting_expo_confirm",
-        ]);
+        const { SPEC_EDITABLE_STATUSES } = await import("../services/projectStatus.js");
         if (!SPEC_EDITABLE_STATUSES.has(String(row.status))) {
           return reply.status(409).send({
             code: "SPEC_LOCKED",

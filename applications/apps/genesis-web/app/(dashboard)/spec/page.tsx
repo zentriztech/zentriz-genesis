@@ -44,6 +44,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { apiGet, apiPatch, apiPost, apiPostMultipart } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
+import SpecTreePanel from "@/components/SpecTreePanel";
+import SpecValidationPanel from "@/components/SpecValidationPanel";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
 const ReactMarkdown = dynamic(
@@ -1386,6 +1388,15 @@ export default function SpecPage() {
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, py: 6, justifyContent: "center" }}>
             <CircularProgress size={24} />
             <Typography variant="body2" color="text.secondary">Carregando spec…</Typography>
+          </Box>
+        )}
+
+        {/* RFC-0004 Onda 4: validação adversarial + árvore multi-arquivo (aparecem só
+            no modo edição; a árvore só quando a spec tem 2+ arquivos — D8). */}
+        {!editLoading && specMarkdown !== null && editProjectId && (
+          <Box sx={{ mb: 2 }}>
+            <SpecValidationPanel projectId={editProjectId} isAdmin={authStore.isZentrizAdmin} />
+            <SpecTreePanel projectId={editProjectId} />
           </Box>
         )}
 

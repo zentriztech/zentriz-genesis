@@ -23,6 +23,18 @@ export const PRE_FACTORY_STATUSES = [
   "spec_validation_failed",
 ] as const;
 
+/**
+ * RFC-0004 (S1/Onda 4): estados em que a SPEC é EDITÁVEL — pré-fábrica ou parados/
+ * bloqueados (onde editar é a remediação). Fora daqui, escrever spec muta o arquivo que
+ * o runner está lendo → 409 SPEC_LOCKED. Fonte única p/ PATCH spec-content e endpoints
+ * de árvore (spec-file).
+ */
+export const SPEC_EDITABLE_STATUSES = new Set([
+  "draft", "spec_submitted", "pending_conversion", "stopped", "failed",
+  "spec_validation_failed", "blocked_cyborg", "blocked_structural_gate",
+  "blocked_backlog_empty_with_frs", "blocked_awaiting_expo_confirm",
+]);
+
 /** Fábrica-ativa / terminal — produção, NUNCA rascunho de inbox. */
 export const FACTORY_OR_TERMINAL_STATUSES = [
   "running",
