@@ -7,11 +7,10 @@
  *   3. tenantCostCap.ts MODEL_PRICE_CASE_SQL — idem
  *   4. projects.ts stop de POST /runs — assumia SEMPRE Sonnet (subestimava Opus)
  *
- * Preços vigentes (Bedrock/Anthropic, 2026): Haiku 4.5 = 1/5 · Sonnet = 3/15 ·
- * Opus (≥4.5, inclui 4.8) = 5/25. NOTA: a tabela anterior cobrava Opus a 15/75 (preço da
- * geração antiga) e QUALQUER-não-opus a 3/15 (Haiku 3× mais caro que o real) — a troca
- * altera valores exibidos/limites: Opus fica ~3× mais barato e Haiku 3× mais barato que
- * antes, aproximando o medidor da fatura real.
+ * Preços vigentes (Bedrock/Anthropic, 2026): Haiku 4.5 = 1/5 · Sonnet 4.x = 3/15 ·
+ * Sonnet 5 = 2/10 · Opus (≥4.5, inclui 4.8/5) = 5/25 · Fable 5/5.1 = 10/50 (Claude 5).
+ * NOTA: a tabela anterior cobrava Opus a 15/75 (preço da geração antiga) e QUALQUER-não-opus
+ * a 3/15 (Haiku 3× mais caro que o real) — a troca aproxima o medidor da fatura real.
  *
  * O match é por substring do model id (ex.: "us.anthropic.claude-sonnet-4-6"). Modelo
  * desconhecido → preço de Sonnet (default conservador do stack).
@@ -25,11 +24,13 @@ export interface ModelPrice {
 export const MODEL_PRICES: Array<{ match: string; price: ModelPrice }> = [
   { match: "haiku", price: { inputPerMTok: 1, outputPerMTok: 5 } },
   { match: "opus", price: { inputPerMTok: 5, outputPerMTok: 25 } },
+  // Sonnet 5 (Claude 5) = 2/10 — preço OFICIAL Anthropic (mais barato que Sonnet 4.x). DEVE
+  // vir antes do "sonnet" genérico (3/15), senão o substring cairia no ramo antigo.
+  { match: "sonnet-5", price: { inputPerMTok: 2, outputPerMTok: 10 } },
   { match: "sonnet", price: { inputPerMTok: 3, outputPerMTok: 15 } },
-  // Fable 5 (família Claude 5): sem substring própria caía no DEFAULT (Sonnet 3/15). Faixa
-  // definida como Opus (5/25) por decisão do Jean (2026-09-03) — revisar quando sair o preço
-  // público oficial da Anthropic para a família Fable.
-  { match: "fable", price: { inputPerMTok: 5, outputPerMTok: 25 } },
+  // Fable 5 / 5.1 (Claude 5) = 10/50 — preço OFICIAL Anthropic (confirmado 2026-09-03 na
+  // página de pricing; é o DOBRO do Opus). Antes assumíamos faixa Opus (5/25) — corrigido.
+  { match: "fable", price: { inputPerMTok: 10, outputPerMTok: 50 } },
 ];
 
 export const DEFAULT_PRICE: ModelPrice = { inputPerMTok: 3, outputPerMTok: 15 };

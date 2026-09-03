@@ -14,9 +14,13 @@ describe("modelPricing — fonte única", () => {
     expect(priceForModel("modelo-misterioso").outputPerMTok).toBe(15);
     expect(priceForModel(null).inputPerMTok).toBe(3);
   });
-  it("fable 5/25 (faixa Opus por decisão; antes caía no default Sonnet 3/15)", () => {
-    expect(priceForModel("us.anthropic.claude-fable-5")).toEqual({ inputPerMTok: 5, outputPerMTok: 25 });
-    expect(priceForModel("us.anthropic.claude-fable-5-1").outputPerMTok).toBe(25);
+  it("fable 10/50 (preço OFICIAL Anthropic; é o dobro do Opus)", () => {
+    expect(priceForModel("us.anthropic.claude-fable-5")).toEqual({ inputPerMTok: 10, outputPerMTok: 50 });
+    expect(priceForModel("us.anthropic.claude-fable-5-1").outputPerMTok).toBe(50);
+  });
+  it("sonnet-5 2/10 (Claude 5, mais barato que Sonnet 4.x) — ramo antes do sonnet genérico", () => {
+    expect(priceForModel("us.anthropic.claude-sonnet-5")).toEqual({ inputPerMTok: 2, outputPerMTok: 10 });
+    expect(priceForModel("us.anthropic.claude-sonnet-4-6").inputPerMTok).toBe(3);
   });
   it("costUsd calcula por MTok", () => {
     expect(costUsd("sonnet", 1_000_000, 1_000_000)).toBe(18);
@@ -27,10 +31,12 @@ describe("modelPricing — fonte única", () => {
     const sql = priceCaseSql("m.");
     expect(sql).toContain("m.model ILIKE '%haiku%'");
     expect(sql).toContain("m.model ILIKE '%opus%'");
+    expect(sql).toContain("m.model ILIKE '%sonnet-5%'");
     expect(sql).toContain("m.model ILIKE '%sonnet%'");
     expect(sql).toContain("m.model ILIKE '%fable%'");
     expect(sql).toContain("ELSE");
     expect(sql).toContain("* 25");
+    expect(sql).toContain("* 50"); // Fable output oficial 10/50
     expect(sql).not.toContain("* 75"); // preço antigo do Opus não pode voltar
   });
 });
