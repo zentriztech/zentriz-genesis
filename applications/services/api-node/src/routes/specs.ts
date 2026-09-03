@@ -956,4 +956,133 @@ export async function specRoutes(app: FastifyInstance) {
       message: "Spec(s) recebida(s). O fluxo será iniciado em seguida.",
     });
   });
+
+  // ── RFC-0004 Onda 3 (F4): operação Validar ─────────────────────────────────
+
+  /** sub do JWT pode não ser UUID (token estático admin usa "runner-service") — colunas
+   *  UUID recebem NULL nesses casos; a identidade crua vai no snapshot da auditoria. */
+  function uuidOrNull(v: string | undefined | null): string | null {
+    return v && UUID_RE.test(v) ? v : null;
+  }
+
+  /** Acesso ao projeto da spec (mesma regra única de projectAccess). 404 se não. */
+  async function loadAccessibleProject(projectId: string, user: AuthUser) {
+    const row = (await pool.query(
+      "SELECT id, tenant_id, created_by FROM projects WHERE id = $1",
+      [projectId],
+    )).rows[0] as { id: string; tenant_id: string | null; created_by: string | null } | undefined;
+    if (!row) return null;
+    const { canAccessProjectRow } = await import("../lib/projectAccess.js");
+    return canAccessProjectRow(user, row) ? row : null;
+  }
+
+  // POST /api/specs/:id/validate — enfileira validação (budget → rate → dedupe → run)
+  app.post<{ Params: { id: string } }>("/api/specs/:id/validate", async (request, reply) => {
+    const user = getUser(request);
+    // token de máquina não valida spec (autoria/curadoria humana — S6)
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não dispara validação." });
+    }
+    const { id } = request.params;
+    const proj = await loadAccessibleProject(id, user);
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+    const { startValidation } = await import("../services/specValidation.js");
+    const r = await startValidation(pool, { projectId: id, tenantId: proj.tenant_id, requestedBy: user.id });
+    if (!r.ok) return reply.status(r.status).send({ code: r.code, message: r.message });
+    // auditoria do disparo (barato; ajuda a reconstruir quem validou o quê)
+    void pool.query(
+      `INSERT INTO governance_audit (actor_user_id, actor_role, action, project_id, snapshot)
+       VALUES ($1, $2, 'validate_trigger', $3, $4::jsonb)`,
+      [uuidOrNull(user.id), user.role, id, JSON.stringify({ runId: r.runId, reused: r.reused, actorSub: user.id })],
+    ).catch(() => {});
+    return reply.status(r.reused ? 200 : 202).send({ runId: r.runId, reused: r.reused });
+  });
+
+  // GET /api/specs/:id/validation — estado DERIVADO + última run p/ o hash atual
+  app.get<{ Params: { id: string } }>("/api/specs/:id/validation", async (request, reply) => {
+    const user = getUser(request);
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem caso de uso p/ token de serviço." });
+    }
+    const { id } = request.params;
+    const proj = await loadAccessibleProject(id, user);
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+    const { computeCurrentSpecHash } = await import("../services/specValidation.js");
+    const current = await computeCurrentSpecHash(pool, id);
+    const latest = (await pool.query(
+      `SELECT id, spec_hash, catalog_version, status, findings, acked_by, acked_role, acked_at,
+              started_at, finished_at, created_at
+         FROM spec_validation_runs
+        WHERE project_id = $1
+        ORDER BY created_at DESC LIMIT 1`,
+      [id],
+    )).rows[0] as Record<string, unknown> | undefined;
+
+    // estado derivado: verde SÓ se a última run passed cobre o hash ATUAL
+    let derived = "never_validated";
+    if (latest) {
+      const covers = current && latest.spec_hash === current.specHash;
+      const st = String(latest.status);
+      if (st === "running" || st === "pending") derived = "validating";
+      else if (!covers) derived = "stale";
+      else if (st === "passed") derived = "validated";
+      else if (st === "failed") derived = "failed";
+      else derived = st; // superseded/interrupted/error
+    }
+    return reply.send({
+      projectId: id,
+      currentSpecHash: current?.specHash ?? null,
+      derivedStatus: derived,
+      latestRun: latest ?? null,
+    });
+  });
+
+  // POST /api/specs/:id/validation/:runId/ack — acknowledgment HASH-BOUND (na própria run).
+  // Corpo é IGNORADO (forjável) — vale o JWT. Tenant só acka run SEM blocker; zentriz_admin
+  // acka qualquer (force, auditado) — D3.
+  app.post<{ Params: { id: string; runId: string } }>(
+    "/api/specs/:id/validation/:runId/ack",
+    async (request, reply) => {
+      const user = getUser(request);
+      if (user.svc === "runner") {
+        return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não faz acknowledgment." });
+      }
+      const { id, runId } = request.params;
+      const proj = await loadAccessibleProject(id, user);
+      if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+      const run = (await pool.query(
+        `SELECT id, status, findings, spec_hash FROM spec_validation_runs
+          WHERE id = $1 AND project_id = $2`,
+        [runId, id],
+      )).rows[0] as Record<string, unknown> | undefined;
+      if (!run) return reply.status(404).send({ code: "NOT_FOUND", message: "Run de validação não encontrada" });
+      if (run.status !== "passed" && run.status !== "failed") {
+        return reply.status(409).send({ code: "RUN_NOT_FINAL", message: `Run em '${run.status}' — só runs concluídas recebem ack.` });
+      }
+      const findings = (run.findings ?? []) as Array<{ severity?: string }>;
+      const hasBlocker = findings.some((f) => f.severity === "blocker");
+      if (hasBlocker && user.role !== "zentriz_admin") {
+        return reply.status(403).send({
+          code: "BLOCKER_REQUIRES_ADMIN",
+          message: "Findings blocker só podem ser forçados por zentriz_admin (auditado).",
+        });
+      }
+      await pool.query(
+        `UPDATE spec_validation_runs
+            SET acked_by = $1, acked_role = $2, acked_at = now(), ack_findings_snapshot = findings
+          WHERE id = $3`,
+        [uuidOrNull(user.id), user.role, runId],
+      );
+      await pool.query(
+        `INSERT INTO governance_audit (actor_user_id, actor_role, action, project_id, spec_hash, snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [uuidOrNull(user.id), user.role, hasBlocker ? "force_promote" : "ack_findings", id, run.spec_hash,
+         JSON.stringify({ runId, findingsCount: findings.length, hasBlocker, actorSub: user.id })],
+      );
+      return reply.send({ ok: true, runId, forced: hasBlocker });
+    },
+  );
 }

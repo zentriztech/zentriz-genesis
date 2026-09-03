@@ -20,6 +20,9 @@ services:
       # A API envia esse valor ao runner; se for localhost, o runner não consegue gravar diálogo.
       # Colocado APÓS env_file para garantir que sobrescreve o valor do .env.
       - API_BASE_URL=http://api:3000
+      # RFC-0004 F4: gate de validação de spec no choke-point — OFF por padrão
+      # (byte-idêntico ao legado); ligar = SPEC_VALIDATION_GATE=on (padrão H3/rota B).
+      - SPEC_VALIDATION_GATE=${SPEC_VALIDATION_GATE:-off}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem

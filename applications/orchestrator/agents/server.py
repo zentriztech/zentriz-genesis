@@ -595,6 +595,55 @@ def get_product_architect_status(job_id: str):
     return {"jobId": job_id, "status": "running", "elapsed": elapsed}
 
 
+# ── Spec Validator (RFC-0004 F4, estágio B) — refutação adversarial SEM ferramentas ──
+
+def _run_spec_validator_async(job_id: str, body: dict) -> None:
+    """Roda a refutação adversarial numa thread. Estado em _async_jobs (o lado API trata
+    404 do poll como 'interrupted' e persiste o resultado na tabela spec_validation_runs)."""
+    try:
+        spec_text = (body.get("spec_text") or "").strip()
+        if not spec_text:
+            raise ValueError("spec_text é obrigatório")
+        from orchestrator.spec_validator import validate_spec
+        result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None))
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "done"
+                _async_jobs[job_id]["result"] = result
+    except Exception as e:
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "error"
+                _async_jobs[job_id]["error"] = str(e)[:500]
+
+
+@app.post("/invoke/spec_validator/async")
+def invoke_spec_validator_async(body: dict):
+    """Inicia a validação adversarial em background. Retorna jobId imediatamente.
+    Validadores SEM ferramentas (texto→JSON); spec fenced anti-injection."""
+    _cleanup_old_jobs()
+    job_id = f"sv-{uuid.uuid4().hex[:12]}"
+    with _jobs_lock:
+        _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
+    thread = threading.Thread(target=_run_spec_validator_async, args=(job_id, body), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+
+@app.get("/invoke/spec_validator/status/{job_id}")
+def get_spec_validator_status(job_id: str):
+    with _jobs_lock:
+        job = _async_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    elapsed = int(time.time() - job.get("created_at", time.time()))
+    if job["status"] == "done":
+        return {"jobId": job_id, "status": "done", "result": job.get("result"), "elapsed": elapsed}
+    if job["status"] == "error":
+        return {"jobId": job_id, "status": "error", "error": job.get("error"), "elapsed": elapsed}
+    return {"jobId": job_id, "status": "running", "elapsed": elapsed}
+
+
 @app.post("/invoke/engineer")
 def invoke_engineer(body: dict):
     return _invoke_agent(body, ENGINEER_SYSTEM_PROMPT_PATH, "ENGINEER")

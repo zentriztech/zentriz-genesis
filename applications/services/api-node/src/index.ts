@@ -68,6 +68,10 @@ try {
     const { backfillSpecApprovedHashes } = await import("./services/specHashBackfill.js");
     const { pool } = await import("./db/client.js");
     await backfillSpecApprovedHashes(pool);
+    // RFC-0004 Onda 3: runs de validação órfãs de um deploy/restart → 'interrupted'
+    // (a fila é a tabela; sem reaper, ficariam 'running' para sempre).
+    const { reapOrphanValidationRuns } = await import("./services/specValidation.js");
+    await reapOrphanValidationRuns(pool);
   }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);

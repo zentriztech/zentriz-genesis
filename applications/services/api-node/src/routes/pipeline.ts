@@ -153,6 +153,18 @@ export async function pipelineRoutes(app: FastifyInstance) {
         return reply.status(409).send(gate.block);
       }
 
+      // RFC-0004 Onda 3 (F4): gate de VALIDAÇÃO — o /run inline NÃO passa pelo
+      // dispatchProjectRun (fluxo próprio), então chama a MESMA função compartilhada
+      // (mesmo padrão do checkDependencyGate acima). Env-flag OFF por padrão.
+      {
+        const { checkSpecValidationGate } = await import("../services/specValidation.js");
+        const vGate = await checkSpecValidationGate(client, projectId);
+        if (!vGate.ok) {
+          request.log.warn({ projectId, code: vGate.code }, "[Pipeline] Bloqueado pelo gate de validação de spec");
+          return reply.status(409).send({ code: vGate.code, message: vGate.message });
+        }
+      }
+
       const specFilePath = await getProjectSpecFilePath(client, projectId);
       if (!specFilePath) {
         request.log.warn({ projectId }, "[Pipeline] Sem arquivo .md no projeto (project_spec_files vazio ou sem .md)");

@@ -3081,6 +3081,12 @@ export async function projectRoutes(app: FastifyInstance) {
           "UPDATE project_spec_files SET content_sha256 = $1 WHERE project_id = $2 AND file_path = $3",
           [sha256Hex(Buffer.from(specMarkdown, "utf-8")), id, specRow.file_path],
         );
+        // RFC-0004 Onda 3 (D1): marca a spec como "suja" — insumo do debounce POR DADO do
+        // Validar automático (desligado por ora; o tick do watchdog o consumirá ao ligar).
+        await client.query(
+          "UPDATE projects SET spec_dirty_at = now() WHERE id = $1",
+          [id],
+        );
         if (title?.trim()) {
           await client.query("UPDATE projects SET title = $1, updated_at = NOW() WHERE id = $2", [title.trim(), id]);
         }

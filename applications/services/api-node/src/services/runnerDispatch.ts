@@ -60,6 +60,18 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
     }
   }
 
+  // RFC-0004 Onda 3 (F4): gate de VALIDAÇÃO no choke-point — cobre promote/cascata/
+  // ingest/trigger/watchdog num único ponto (a auditoria contou 8 caminhos de promoção;
+  // gate só no promote deixaria 7 abertos). Env-flag OFF por padrão (SPEC_VALIDATION_GATE)
+  // — byte-idêntico ao legado até ligar. O /run inline do pipeline.ts chama a mesma função.
+  {
+    const { checkSpecValidationGate } = await import("./specValidation.js");
+    const vGate = await checkSpecValidationGate(pool, projectId);
+    if (!vGate.ok) {
+      return { projectId, dispatched: false, reason: `${vGate.code}: ${vGate.message.slice(0, 160)}` };
+    }
+  }
+
   const specRes = await pool.query(
     `SELECT file_path FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1`,
     [projectId],

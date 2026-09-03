@@ -262,6 +262,18 @@ async function getProjectUser(projectId: string): Promise<{ userId: string; emai
 async function relaunchPipeline(project: OrphanProject): Promise<boolean> {
   if (!RUNNER_SERVICE_URL) return false;
 
+  // RFC-0004 Onda 3 (F4): este restart chama o runner DIRETO (bypassa dispatchProjectRun)
+  // — era o 8º caminho de promoção da auditoria. Spec editada durante um blocked_* +
+  // autoRescue rodaria conteúdo nunca validado. Mesma função compartilhada do choke-point.
+  {
+    const { checkSpecValidationGate } = await import("./specValidation.js");
+    const vGate = await checkSpecValidationGate(pool, project.id);
+    if (!vGate.ok) {
+      console.warn(`[Watchdog] Relaunch de ${project.id} bloqueado pelo gate de validação: ${vGate.code}`);
+      return false;
+    }
+  }
+
   const specFilePath = await getSpecFilePath(project.id);
   if (!specFilePath) {
     console.warn(`[Watchdog] Spec não encontrada para projeto ${project.id} — não é possível relangar`);
@@ -496,6 +508,13 @@ async function runWatchdogCycle(): Promise<void> {
     // projeto NÃO está mais em estado de fábrica, com grace de 10min (evita corrida na
     // borda da transição de status). stop_reason='interrupted' (valor já no CHECK da 012).
     await closeOrphanPipelineRuns().catch((e) => console.error("[Watchdog] Erro em closeOrphanPipelineRuns:", e));
+
+    // 0d. RFC-0004 Onda 3: runs de validação além do deadline → 'error' (deadline_at
+    // persistido — não depende de timer em memória).
+    {
+      const { expireOverdueValidationRuns } = await import("./specValidation.js");
+      await expireOverdueValidationRuns(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueValidationRuns:", e));
+    }
 
     // 1. Buscar status do runner
     const runnerStatus = await getRunnerStatus();
