@@ -170,3 +170,80 @@ describe("POST /api/spec-chat — guardas do modo por-arquivo", () => {
     expect(JSON.parse(res.body).filePath).toBeNull();
   });
 });
+
+// ── Onda 1: contexto (relatório de validação) + Resolver GAPs ──────────────────
+describe("POST /api/spec-chat — Onda 1: Resolver GAPs + contexto de validação", () => {
+  const FINDINGS = [
+    { file: "backend/01-api.md", line: 12, severity: "blocker", title: "Falta autenticação", rationale: "Endpoints sem authz", source: "stage_b" },
+    { file: "README.md", line: null, severity: "warning", title: "Sem critérios de aceite", rationale: "FR1 vago", source: "stage_b" },
+  ];
+  // queryHandler que também responde a última run de validação com FINDINGS.
+  const withFindings = (sql: string) => {
+    if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+    if (sql.includes("spec_validation_runs")) return { rows: [{ status: "failed", findings: FINDINGS }] };
+    return { rows: [] };
+  };
+
+  it("resolveGaps sem projectId → 400", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain("projectId");
+  });
+
+  it("resolveGaps em modo por-arquivo → 400", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain("por-arquivo");
+  });
+
+  it("resolveGaps sem GAPs em aberto → 409 NO_GAPS", async () => {
+    // queryHandler padrão do beforeEach devolve [] para spec_validation_runs → sem findings.
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", projectId: PROJ, resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("NO_GAPS");
+  });
+
+  it("resolveGaps com GAPs → 202, roteia por cto/async com relatório de validação + resolve_gaps", async () => {
+    queryHandler = withFindings;
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", projectId: PROJ, resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(202);
+    // runChatJob dispara httpPost(cto/async) sincronamente antes do 202 — inspecionável já.
+    const ctoCall = httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"));
+    expect(ctoCall).toBeTruthy();
+    const body = JSON.parse(ctoCall!.body);
+    expect(body.task).toContain("RELATÓRIO DE VALIDAÇÃO");
+    expect(body.task).toContain("Falta autenticação");
+    expect(body.inputs.resolve_gaps).toBe(true);
+    expect(body.inputs.validation_report).toContain("BLOCKER");
+    // NÃO roteou pelo /invoke/raw (não é modo por-arquivo)
+    expect(httpPostCalls.some((c) => c.url.includes("/invoke/raw"))).toBe(false);
+  });
+
+  it("chat de spec inteira injeta o relatório de validação no task (contexto p/ o CTO)", async () => {
+    queryHandler = withFindings;
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", messages: msg("detalhe o modelo de dados"), projectId: PROJ },
+    });
+    expect(res.statusCode).toBe(202);
+    const ctoCall = httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"));
+    expect(ctoCall).toBeTruthy();
+    const body = JSON.parse(ctoCall!.body);
+    // mesmo sem resolveGaps, o CTO recebe o relatório como contexto só-leitura
+    expect(body.task).toContain("RELATÓRIO DE VALIDAÇÃO");
+    expect(body.inputs.resolve_gaps).toBeUndefined();
+    expect(body.inputs.validation_report).toContain("Sem critérios de aceite");
+  });
+});

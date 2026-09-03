@@ -739,6 +739,7 @@ function SpecChatPanel({
   activeFilePath = null, treeDirty = false,
   pending = null, applying = false, applyError = null, conflict = false,
   onApply, onDiscard, onOverwrite,
+  gapCount = null, onResolveGaps,
 }: {
   messages: ChatMessage[];
   input: string;
@@ -746,6 +747,9 @@ function SpecChatPanel({
   onSend: () => void;
   sending: boolean;
   error: string | null;
+  // Onda 1 — botão "Resolver GAPs" (spec inteira): dispara a resolução adversarial dos findings.
+  gapCount?: number | null;
+  onResolveGaps?: () => void;
   // T4.3 — contexto por-arquivo + fluxo de aplicação com confirmação (opcionais:
   // quando ausentes, o painel opera no modo clássico de spec inteira).
   activeFilePath?: string | null;
@@ -873,6 +877,23 @@ function SpecChatPanel({
       )}
 
       <Box sx={{ p: 1, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+        {/* Onda 1 — Resolver GAPs (só na spec inteira): manda o CTO corrigir os findings da
+            validação adversarial, com o relatório + arquivos irmãos como contexto. */}
+        {!fileMode && onResolveGaps && (
+          <Tooltip title={(gapCount ?? 0) > 0
+            ? "Enviar os GAPs da validação para o CTO resolver de forma adversarial"
+            : "Nenhum GAP em aberto — rode Validar para (re)avaliar a spec"}>
+            <span>
+              <Button fullWidth size="small" variant="outlined" color="warning"
+                startIcon={<AutoFixHighIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={sending || (gapCount ?? 0) === 0}
+                onClick={onResolveGaps}
+                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
+                {(gapCount ?? 0) > 0 ? `Resolver GAPs (${gapCount})` : "Sem GAPs em aberto"}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         <Stack direction="row" spacing={0.75} alignItems="flex-end">
           <TextField
             fullWidth multiline maxRows={4} size="small" value={input}
@@ -1033,6 +1054,8 @@ export default function SpecPage() {
   const [treeReloadSignal, setTreeReloadSignal] = useState(0);
   const [validationReloadSignal, setValidationReloadSignal] = useState(0);
   const [staleValidation, setStaleValidation] = useState(false);
+  // Onda 1 — nº de GAPs (findings da última validação) para o badge e o botão "Resolver GAPs".
+  const [gapCount, setGapCount] = useState<number | null>(null);
   // No mobile o chat não cabe ao lado do editor → abre em tela cheia via FAB.
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   // Ao cruzar para o desktop (≥md), o chat volta a ser inline → fecha o dialog fullScreen
@@ -1073,6 +1096,17 @@ export default function SpecPage() {
       .catch((e) => setEditLoadError(e instanceof Error ? e.message : "Erro ao carregar spec"))
       .finally(() => setEditLoading(false));
   }, [editProjectId]);
+
+  // Onda 1 — busca a contagem de GAPs da última validação (badge + botão "Resolver GAPs").
+  // Recarrega quando a validação muda (validationReloadSignal) ou o projeto troca.
+  useEffect(() => {
+    if (!editProjectId) return;
+    let alive = true;
+    apiGet<{ latestRun: { findings?: unknown[] } | null }>(`/api/specs/${editProjectId}/validation`)
+      .then((r) => { if (alive) setGapCount(Array.isArray(r?.latestRun?.findings) ? r.latestRun!.findings!.length : 0); })
+      .catch(() => { if (alive) setGapCount(null); });
+    return () => { alive = false; };
+  }, [editProjectId, validationReloadSignal]);
 
   // Load products + projects for linking (§5.3: ?includeInbox=1 traz o INBOX p/ o select)
   useEffect(() => {
@@ -1285,6 +1319,58 @@ export default function SpecPage() {
       }
     }, 8000);
   }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, activeFile, treeDirty, stopChatPolling]);
+
+  // Onda 1 — "Resolver GAPs": turno de chat (spec inteira) que manda o CTO corrigir os findings
+  // da validação adversarial. O servidor injeta o relatório + irmãos e sintetiza a instrução;
+  // aqui só logamos a solicitação/resposta no chat e aplicamos a spec revisada.
+  const handleResolveGaps = useCallback(async () => {
+    if (chatSending || !editProjectId || !specMarkdown) return;
+    const seq = (chatSeqRef.current += 1);
+    const label = (gapCount ?? 0) > 0 ? `🛠️ Resolver GAPs (${gapCount})` : "🛠️ Resolver GAPs";
+    setChatMessages((prev) => [...prev, { role: "user", content: label }]);
+    setChatSending(true);
+    setChatError(null);
+    setPendingApply(null); setApplyError(null); setApplyConflict(false);
+    stopChatPolling();
+
+    let jobId: string;
+    try {
+      const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
+        specMarkdown, messages: chatMessages, projectId: editProjectId, resolveGaps: true,
+      });
+      jobId = res.jobId;
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "Erro ao resolver GAPs.");
+      setChatSending(false);
+      return;
+    }
+    if (seq !== chatSeqRef.current) { setChatSending(false); return; }
+
+    const startTs = Date.now();
+    chatPollRef.current = setInterval(async () => {
+      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+      if (Date.now() - startTs > 11 * 60_000) {
+        stopChatPolling(); setChatError("Tempo esgotado. Tente novamente."); setChatSending(false); return;
+      }
+      try {
+        const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
+        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+        if (poll.status === "done") {
+          stopChatPolling();
+          if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
+          setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "GAPs tratados — revise, salve e revalide antes de promover à fábrica." }]);
+          setStaleValidation(true); // a spec mudou → validação anterior ficou desatualizada
+          setChatSending(false);
+        } else if (poll.status === "error") {
+          stopChatPolling();
+          setChatError(poll.error ?? "Erro ao resolver GAPs.");
+          setChatSending(false);
+        }
+      } catch (e) {
+        console.warn("[SpecChat] resolveGaps poll error:", e instanceof Error ? e.message : e);
+      }
+    }, 8000);
+  }, [chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling]);
 
   // T4.3 — aplica a revisão pendente ao arquivo real (PUT com baseSha → If-Match).
   const applyRevision = useCallback(async (baseShaOverride?: string | null) => {
@@ -1524,6 +1610,7 @@ export default function SpecPage() {
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
+              gapCount={gapCount} onResolveGaps={handleResolveGaps}
             />
           </Box>
         </Box>
@@ -1561,6 +1648,7 @@ export default function SpecPage() {
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
+              gapCount={gapCount} onResolveGaps={handleResolveGaps}
           />
         </DialogContent>
       </Dialog>
@@ -1658,6 +1746,7 @@ export default function SpecPage() {
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
+              gapCount={gapCount} onResolveGaps={handleResolveGaps}
                   />
                 </Box>
               </Box>
@@ -1834,6 +1923,7 @@ export default function SpecPage() {
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
+              gapCount={gapCount} onResolveGaps={handleResolveGaps}
                         />
                       </Box>
                     </Box>

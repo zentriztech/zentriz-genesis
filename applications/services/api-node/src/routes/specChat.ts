@@ -22,6 +22,7 @@ import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
+import type { ValidationFinding } from "../services/specValidation.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -66,23 +67,116 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
+// ── Onda 1: contexto do CHAT (spec inteira + arquivos IRMÃOS + relatório de validação) ──
+// O CTO precisava CONHECER a spec atual, os arquivos irmãos (Produto>Projeto>Spec) e os GAPs
+// da validação adversarial para agir sobre o arquivo em questão. Antes o /invoke/cto/async só
+// recebia o `specMarkdown` (arquivo primário) → o CTO respondia "não tenho acesso à spec atual
+// nem ao relatório de validação". Montamos um bloco SÓ-LEITURA com ORÇAMENTO de caracteres —
+// o runtime trunca `spec_raw` em ~30k, então o contexto extra vai no `task`/`inputs`, NUNCA
+// inflando o spec_raw (que continua sendo só a spec a revisar).
+const SIBLINGS_BUDGET = 14_000;
+const FINDINGS_BUDGET = 6_000;
+
+interface ChatContext {
+  siblingsBlock: string; // "" quando não há irmãos além do arquivo primário
+  findingsBlock: string; // "" quando nunca validado / sem findings
+  findings: ValidationFinding[];
+  derivedStatus: string;
+}
+const EMPTY_CTX: ChatContext = { siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated" };
+
+function fmtFinding(f: ValidationFinding): string {
+  const loc = f.line ? `${f.file}:${f.line}` : f.file;
+  const sev = (f.severity || "info").toUpperCase();
+  return `- [${sev}] ${loc} — ${f.title}${f.rationale ? `: ${f.rationale}` : ""}`;
+}
+
+/**
+ * Carrega o contexto SÓ-LEITURA do chat de spec inteira: (a) conteúdo de TODOS os arquivos
+ * irmãos do produto (menos o primário, já enviado como spec_raw), cortado por orçamento; e
+ * (b) os findings da última run de validação (GAPs conhecidos). Best-effort: qualquer falha
+ * devolve contexto vazio — jamais derruba a rota do chat.
+ */
+async function loadChatContext(projectId: string, primaryContent: string): Promise<ChatContext> {
+  try {
+    const { computeCurrentSpecHash } = await import("../services/specValidation.js");
+    const current = await computeCurrentSpecHash(pool, projectId);
+
+    let siblingsBlock = "";
+    if (current && current.files.length > 1) {
+      const primaryTrim = primaryContent.trim();
+      const parts: string[] = [];
+      let used = 0;
+      for (const f of current.files) {
+        const body = f.content ?? "";
+        // Não duplica o arquivo primário (idêntico ao spec_raw enviado).
+        if (body.trim() === primaryTrim) continue;
+        const remaining = SIBLINGS_BUDGET - used;
+        if (remaining <= 0) { parts.push("\n### (demais arquivos omitidos por limite de contexto)"); break; }
+        const path = f.rel_dir ? `${f.rel_dir}/${f.filename}` : f.filename;
+        const clipped = body.length > remaining ? body.slice(0, remaining) + "\n…(truncado)…" : body;
+        parts.push(`\n### ARQUIVO: ${path}\n${clipped}`);
+        used += clipped.length;
+      }
+      if (parts.length) siblingsBlock = parts.join("\n");
+    }
+
+    // Findings da última run (qualquer status) — expõe os GAPs conhecidos ao CTO.
+    const latest = (await pool.query(
+      "SELECT status, findings FROM spec_validation_runs WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [projectId],
+    )).rows[0] as { status?: string; findings?: ValidationFinding[] } | undefined;
+    let findingsBlock = "";
+    let findings: ValidationFinding[] = [];
+    if (Array.isArray(latest?.findings) && latest!.findings.length) {
+      findings = latest!.findings;
+      let block = findings.map(fmtFinding).join("\n");
+      if (block.length > FINDINGS_BUDGET) block = block.slice(0, FINDINGS_BUDGET) + "\n…(demais findings omitidos)…";
+      findingsBlock = block;
+    }
+    return { siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated" };
+  } catch (e) {
+    console.warn(`[SpecChat] loadChatContext falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+    return EMPTY_CTX;
+  }
+}
+
 // Modo SPEC INTEIRA (sem filePath): refina a PRODUCT_SPEC via CTO normalizador (cto/async).
 // O modo por-arquivo NÃO passa por aqui — ver buildRawFileRequest (usa /invoke/raw cirúrgico).
 function buildChatMessage(
   specMarkdown: string,
   messages: ChatMessage[],
+  ctx: ChatContext = EMPTY_CTX,
+  resolveGaps = false,
 ): Record<string, unknown> {
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
-  const lastUser = [...history].reverse().find((m) => m.role === "user")?.content ?? "";
+  // Em "Resolver GAPs" a instrução é sintetizada aqui (o cliente pode não enviar mensagem).
+  const lastUser = resolveGaps
+    ? "Resolva de forma ADVERSARIAL e cirúrgica TODOS os GAPs listados no RELATÓRIO DE VALIDAÇÃO, ajustando a spec para eliminá-los sem introduzir novos problemas nem remover conteúdo válido."
+    : ([...history].reverse().find((m) => m.role === "user")?.content ?? "");
   const transcript = history
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "CTO"}: ${m.content}`)
     .join("\n\n");
 
+  const contextSections = [
+    ctx.siblingsBlock
+      ? `\n\n─── ARQUIVOS IRMÃOS DO PRODUTO (SÓ LEITURA — contexto do Produto>Projeto>Spec) ───\n${ctx.siblingsBlock}`
+      : "",
+    ctx.findingsBlock
+      ? `\n\n─── RELATÓRIO DE VALIDAÇÃO / GAPs A RESOLVER (adversarial) ───\n${ctx.findingsBlock}`
+      : "",
+  ].join("");
+
+  const gapRule = resolveGaps
+    ? "\n6. Este turno é RESOLVER GAPS: trate CADA item do relatório de validação, priorizando blockers > warnings > info; resuma no summary quais GAPs foram resolvidos e como."
+    : "";
+
   const task = `
 Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário,
-num chat iterativo. Você recebe a SPEC ATUAL (em Markdown), o HISTÓRICO da conversa e a
-ÚLTIMA MENSAGEM do usuário.
+num chat iterativo. Você recebe a SPEC ATUAL (em Markdown), o HISTÓRICO da conversa, a
+ÚLTIMA MENSAGEM do usuário e — quando houver — os ARQUIVOS IRMÃOS do produto e o RELATÓRIO
+DE VALIDAÇÃO adversarial. Você TEM acesso a tudo isso abaixo; use-o para agir com precisão.
 
 OBJETIVO: aplicar SOMENTE as mudanças que o usuário pediu na última mensagem, devolvendo a
 spec COMPLETA e revisada, e uma resposta curta explicando o que mudou.
@@ -92,12 +186,15 @@ REGRAS:
 2. Aplique de forma cirúrgica o que foi pedido na última mensagem (adicionar/remover/ajustar).
 3. Mantenha a spec consistente e implementável (FRs com critérios de aceite, modelo de dados, stack).
 4. Devolva a SPEC INTEIRA revisada como o artefato Markdown principal (não só o trecho alterado).
-5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou.
+5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou.${gapRule}
+
+Os ARQUIVOS IRMÃOS são contexto SÓ-LEITURA (não os reescreva) — servem para você entender o
+produto inteiro. O RELATÓRIO DE VALIDAÇÃO lista GAPs já detectados na spec.
 
 ÚLTIMA MENSAGEM DO USUÁRIO: "${lastUser.replace(/"/g, '\\"')}"
 
 HISTÓRICO DO CHAT:
-${transcript}
+${transcript}${contextSections}
 `.trim();
 
   return {
@@ -113,6 +210,9 @@ ${transcript}
       product_spec: specMarkdown,
       chat_transcript: transcript,
       user_message: lastUser,
+      sibling_files_context: ctx.siblingsBlock || undefined,
+      validation_report: ctx.findingsBlock || undefined,
+      resolve_gaps: resolveGaps || undefined,
       input_type: "spec_refinement",
       constraints: [
         "preserve-unrequested-content",
@@ -318,7 +418,7 @@ export async function specChatRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
 
   // POST /api/spec-chat — enfileira job de refinamento e devolve jobId
-  app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string; filePath?: string; baseSha?: string } }>(
+  app.post<{ Body: { specMarkdown?: string; messages?: ChatMessage[]; projectId?: string; filePath?: string; baseSha?: string; resolveGaps?: boolean } }>(
     "/api/spec-chat",
     async (request, reply) => {
       const user = getUser(request);
@@ -332,6 +432,9 @@ export async function specChatRoutes(app: FastifyInstance) {
       const specMarkdown = (body.specMarkdown ?? "").trim();
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const projectId = body.projectId?.trim() || null;
+      // Onda 1: "Resolver GAPs" — turno especial (spec inteira) que manda o CTO resolver os
+      // findings da validação adversarial. A instrução é sintetizada no servidor.
+      const resolveGaps = body.resolveGaps === true;
       // T4.3: modo por-arquivo (opcional). filePath validado por parseSpecPath (M2), baseSha
       // é o sha que o usuário viu — capturado aqui para o apply detectar edição concorrente.
       const rawFilePath = body.filePath?.trim() || null;
@@ -353,6 +456,11 @@ export async function specChatRoutes(app: FastifyInstance) {
       if (!specMarkdown) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "specMarkdown obrigatório" });
       }
+      // Resolver GAPs é sempre no escopo da SPEC INTEIRA de um projeto (nunca por-arquivo).
+      if (resolveGaps) {
+        if (!projectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolver GAPs exige projectId" });
+        if (filePath) return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolver GAPs não opera em modo por-arquivo" });
+      }
       // C1: em modo por-arquivo, bloqueia conteúdo acima do teto (evita revisão truncada → apply
       // sobrescrevendo o arquivo real com versão cortada). O chat da spec inteira não tem esse apply.
       if (filePath && specMarkdown.length > MAX_FILE_CHAT_CHARS) {
@@ -362,7 +470,8 @@ export async function specChatRoutes(app: FastifyInstance) {
         });
       }
       const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content?.trim();
-      if (!lastUser) {
+      // Em Resolver GAPs a mensagem é sintetizada no servidor — não exige mensagem do cliente.
+      if (!resolveGaps && !lastUser) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie ao menos uma mensagem do usuário" });
       }
 
@@ -388,8 +497,25 @@ export async function specChatRoutes(app: FastifyInstance) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes não configurado" });
       }
 
+      // Onda 1: no modo SPEC INTEIRA com projeto, carrega contexto SÓ-LEITURA (irmãos + GAPs)
+      // para o CTO agir com precisão. Best-effort (falha → contexto vazio, sem derrubar a rota).
+      const ctx = projectId && !filePath ? await loadChatContext(projectId, specMarkdown) : EMPTY_CTX;
+
+      // Resolver GAPs sem findings em aberto = nada a fazer → erro claro (não gera turno vazio).
+      if (resolveGaps && ctx.findings.length === 0) {
+        return reply.status(409).send({
+          code: "NO_GAPS",
+          message: "Nenhum GAP em aberto na última validação. Rode Validar para (re)avaliar a spec.",
+        });
+      }
+
+      // Mensagem do usuário a persistir/logar: sintetizada em Resolver GAPs.
+      const persistedUserMsg = resolveGaps
+        ? `🛠️ Resolver GAPs — pedi ao CTO para corrigir os ${ctx.findings.length} GAP(s) da validação adversarial.`
+        : (lastUser ?? "");
+
       // Persiste a mensagem do usuário (se houver projeto associado) — best-effort.
-      if (projectId) void persistMessage(projectId, "user", lastUser, { filePath, userId: user.id });
+      if (projectId && persistedUserMsg) void persistMessage(projectId, "user", persistedUserMsg, { filePath, userId: user.id });
 
       const jobId = randomUUID(); // S3: id não-adivinhável (o antigo scj-<ts>-<5 base36> era fraco)
       const job: ChatJob = {
@@ -402,8 +528,9 @@ export async function specChatRoutes(app: FastifyInstance) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
         runFileChatJob(jobId, buildRawFileRequest(specMarkdown, messages, filePath), agentsUrl);
       } else {
-        // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui).
-        runChatJob(jobId, buildChatMessage(specMarkdown, messages), agentsUrl);
+        // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
+        // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).
+        runChatJob(jobId, buildChatMessage(specMarkdown, messages, ctx, resolveGaps), agentsUrl);
       }
 
       return reply.status(202).send({ jobId, status: "pending", filePath, baseSha });
