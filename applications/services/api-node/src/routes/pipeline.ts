@@ -73,7 +73,7 @@ async function getProjectSpecFilePath(
   const result = await client.query(
     `SELECT file_path FROM project_spec_files
      WHERE project_id = $1 AND LOWER(filename) LIKE '%.md'
-     ORDER BY created_at ASC LIMIT 1`,
+     ORDER BY is_primary DESC, created_at ASC LIMIT 1`,
     [projectId]
   );
   const row = result.rows[0];

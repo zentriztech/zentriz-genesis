@@ -25,6 +25,7 @@ import { maybeNotifyBlock, maybeNotifyDone, scheduleFactoryDone } from "../servi
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
+import { sha256Hex } from "../lib/specTreeHash.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 
@@ -2984,7 +2985,7 @@ export async function projectRoutes(app: FastifyInstance) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const specRow = (await client.query(
-          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1",
           [id]
         )).rows[0];
         if (!specRow?.file_path) {
@@ -3019,7 +3020,7 @@ export async function projectRoutes(app: FastifyInstance) {
           return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
         }
         const rows = (await client.query(
-          "SELECT id, filename, file_path AS \"filePath\", mime_type AS \"mimeType\", created_at AS \"createdAt\" FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC",
+          "SELECT id, filename, file_path AS \"filePath\", mime_type AS \"mimeType\", rel_dir AS \"relDir\", is_primary AS \"isPrimary\", content_sha256 AS \"contentSha256\", created_at AS \"createdAt\" FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC",
           [id]
         )).rows;
         return reply.send(rows);
@@ -3071,7 +3072,7 @@ export async function projectRoutes(app: FastifyInstance) {
           });
         }
         const specRow = (await client.query(
-          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+          "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1",
           [id]
         )).rows[0];
         if (!specRow?.file_path) {
@@ -3184,7 +3185,7 @@ export async function projectRoutes(app: FastifyInstance) {
 
       // Copiar spec original do pai como ponto de partida do filho
       const parentSpecRow = (await client.query(
-        "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC LIMIT 1",
+        "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at ASC LIMIT 1",
         [parentId]
       )).rows[0] as Record<string, unknown> | undefined;
 
@@ -3204,10 +3205,11 @@ export async function projectRoutes(app: FastifyInstance) {
             mkdirSync(childSpecDir, { recursive: true });
             const childSpecPath   = join(childSpecDir, `spec-evolution-v${nextVersion}.md`);
             writeFileSync(childSpecPath, evolvedContent, "utf-8");
+            // RFC-0004 T1.3: primeiro (e único) arquivo da spec filha = canônico; sha p/ If-Match/hash.
             await client.query(
-              `INSERT INTO project_spec_files (project_id, filename, file_path)
-               VALUES ($1, $2, $3)`,
-              [childId, `spec-evolution-v${nextVersion}.md`, childSpecPath]
+              `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
+               VALUES ($1, $2, $3, 'text/markdown', '', true, $4)`,
+              [childId, `spec-evolution-v${nextVersion}.md`, childSpecPath, sha256Hex(Buffer.from(evolvedContent, "utf-8"))]
             );
             await client.query(
               "UPDATE projects SET status = 'spec_submitted', updated_at = now() WHERE id = $1",

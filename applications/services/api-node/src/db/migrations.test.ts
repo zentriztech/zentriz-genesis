@@ -47,6 +47,25 @@ describe("migrations sanity (split-by-semicolon runner)", () => {
       }
     });
   }
+
+  // RFC-0004 (auditoria adversarial, T1.1): o runner NÃO suporta blocos dollar-quoted
+  // ($$ ... $$ de DO/CREATE FUNCTION) — o split por ';' parte o corpo no meio e a api entra
+  // em crash-loop no boot. O guard de aspas acima NÃO pega esse caso (aspas ficam pares).
+  // A migration 037 documenta a limitação; aqui viramos o aviso em teste: `$$` só é tolerado
+  // em linha de comentário `--` (o runner as remove antes do split).
+  for (const file of files) {
+    it(`${file}: sem blocos $$ fora de comentário (runner não suporta DO/CREATE FUNCTION)`, () => {
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+      const nonComment = sql
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("--"))
+        .join("\n");
+      expect(
+        nonComment.includes("$$"),
+        `Bloco dollar-quoted ($$) fora de comentário em ${file} — o runner de migrations (split por ';') não o suporta e a api entraria em crash-loop. Faça a lógica em código TS.`,
+      ).toBe(false);
+    });
+  }
 });
 
 // RFC-0003 / Task 2: invariantes de CHECK que já foram quebrados por reconstrução silenciosa.

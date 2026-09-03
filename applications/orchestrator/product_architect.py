@@ -85,10 +85,14 @@ def build_prompt(master_md: str, present_specs: list[str]) -> str:
         "Formato EXATO (responda somente o JSON, sem cercas de código):\n"
         '{"schemaVersion":"1.1.0","product":{"name":"...","systemId":"...",'
         '"specApproved":false,"deliveryDefault":"source_only"},'
-        '"projects":[{"id":"...","spec":"specs/....md","type":"<um tipo válido>","dependsOn":[]}]}\n'
+        '"projects":[{"id":"...","spec":"specs/....md","type":"<um tipo válido>","dependsOn":[],'
+        '"stack":["nodejs"],"deployTarget":"none"}]}\n'
         "Regras: cada `spec` DEVE estar na lista de specs presentes; `dependsOn` referencia "
         "apenas `id`s deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts "
-        "(type lib_ts) são predecessores dos consumidores."
+        "(type lib_ts) são predecessores dos consumidores. Campos `stack` (tecnologias "
+        "principais, ex.: nodejs, nextjs, mysql) e `deployTarget` (aws-ecs | aws-lambda | "
+        "s3-cloudfront | none) são OPCIONAIS — quando souber, preencha; `id` em kebab-case "
+        "minúsculo ([a-z0-9-])."
     )
 
 
@@ -136,6 +140,16 @@ def validate_proposal(manifest: dict, present_specs: list[str]) -> None:
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:
         raise ManifestProposalError("PROPOSAL_DUPLICATE_ID", f"IDs duplicados: {', '.join(sorted(dupes))}")
+    # RFC-0004 T1.6 (auditoria finding 9): ids viram nome de pasta/arquivo (spec_root,
+    # <id>.md) — charset restrito fecha traversal/nome inválido ANTES de tocar disco.
+    # Espelho TS: parseManifest (productManifest.ts). Retry do splitter cobre a rejeição.
+    _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
+    bad_ids = [i for i in ids if not _ID_RE.fullmatch(i)]
+    if bad_ids:
+        raise ManifestProposalError(
+            "PROPOSAL_INVALID_ID",
+            f"IDs fora do padrão [a-z0-9][a-z0-9_-]{{0,40}}: {', '.join(sorted(bad_ids))}",
+        )
     id_set = set(ids)
 
     for p in projects:

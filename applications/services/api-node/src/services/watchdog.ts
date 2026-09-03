@@ -233,7 +233,7 @@ async function getSpecFilePath(projectId: string): Promise<string | null> {
   const client = await pool.connect();
   try {
     const res = await client.query(
-      `SELECT file_path FROM project_spec_files WHERE project_id = $1 AND LOWER(filename) LIKE '%.md' ORDER BY created_at ASC LIMIT 1`,
+      `SELECT file_path FROM project_spec_files WHERE project_id = $1 AND LOWER(filename) LIKE '%.md' ORDER BY is_primary DESC, created_at ASC LIMIT 1`,
       [projectId],
     );
     return (res.rows[0]?.file_path as string | undefined) ?? null;

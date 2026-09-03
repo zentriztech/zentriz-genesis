@@ -661,9 +661,12 @@ export async function specRoutes(app: FastifyInstance) {
       toBuffer(): Promise<Buffer>;
       fields?: Record<string, { value?: unknown } | { value?: unknown }[]>;
     };
-    const req = request as unknown as { file: () => Promise<Part | undefined> };
-    let part: Part | undefined;
-    while ((part = await req.file()) !== undefined) {
+    // RFC-0004 T1.3 (F1): `req.file()` devolve SÓ a primeira parte de arquivo — upload
+    // multi-arquivo descartava os demais em silêncio (por isso toda spec real era
+    // single-file e o multi-arquivo só "funcionava" via ZIP, que concatena). O iterador
+    // `files()` consome TODAS as partes de arquivo; os campos continuam em part.fields.
+    const req = request as unknown as { files: () => AsyncIterableIterator<Part> };
+    for await (const part of req.files()) {
       if (part.fields?.title !== undefined) {
         const titleField = part.fields.title;
         const v = Array.isArray(titleField) ? titleField[0] : titleField;

@@ -61,7 +61,7 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   }
 
   const specRes = await pool.query(
-    `SELECT file_path FROM project_spec_files WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    `SELECT file_path FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at DESC LIMIT 1`,
     [projectId],
   );
   const specPath = specRes.rows[0]?.file_path as string | undefined;

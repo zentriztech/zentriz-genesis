@@ -1,0 +1,78 @@
+{
+  "catalogVersion": "1.0.0",
+  "comment": "RFC-0004 F2 — catálogo FECHADO de arquétipos de projeto. Fonte única da taxonomia visível (archetype) e do mapa p/ os tipos que a FÁBRICA roteia (factoryType ∈ VALID_TYPES de productManifest.ts — igualdade garantida por teste). Nasce no Genesis (D2); migra ao Connect na 2ª iteração. NUNCA vira seed SQL (runner de migrations não suporta ';' em literais).",
+  "archetypes": [
+    {
+      "id": "backend-service",
+      "factoryType": "backend_api",
+      "description": "Serviço backend HTTP/REST (API de domínio).",
+      "validStacks": ["nodejs", "nestjs", "python", "fastify", "express", "fastapi"],
+      "deployTargets": ["aws-ecs", "aws-lambda", "none"],
+      "checklist": ["define endpoints e contratos", "define modelo de dados", "define autenticação/autorização"]
+    },
+    {
+      "id": "backend-worker",
+      "factoryType": "backend_worker",
+      "description": "Processador assíncrono (filas, jobs, agendamentos).",
+      "validStacks": ["nodejs", "python", "rabbitmq", "sqs"],
+      "deployTargets": ["aws-ecs", "aws-lambda", "none"],
+      "checklist": ["define filas/eventos consumidos", "define idempotência e retry/DLQ"]
+    },
+    {
+      "id": "backend-graphql",
+      "factoryType": "backend_graphql",
+      "description": "API GraphQL (gateway ou domínio).",
+      "validStacks": ["nodejs", "apollo", "nestjs"],
+      "deployTargets": ["aws-ecs", "none"],
+      "checklist": ["define schema e resolvers", "define autenticação/autorização"]
+    },
+    {
+      "id": "web-frontend",
+      "factoryType": "frontend_dashboard",
+      "description": "Aplicação web autenticada (painel/dashboard/app).",
+      "validStacks": ["nextjs", "react", "vite", "mui", "tailwind"],
+      "deployTargets": ["s3-cloudfront", "aws-ecs", "none"],
+      "checklist": ["define rotas/páginas", "define integração com backend", "define autenticação"]
+    },
+    {
+      "id": "web-landing",
+      "factoryType": "frontend_landing",
+      "description": "Site público/landing (marketing, institucional).",
+      "validStacks": ["nextjs", "react", "vite", "tailwind"],
+      "deployTargets": ["s3-cloudfront", "none"],
+      "checklist": ["define seções/conteúdo", "define SEO básico"]
+    },
+    {
+      "id": "mobile-app",
+      "factoryType": "mobile_expo",
+      "description": "Aplicativo móvel (Expo/React Native).",
+      "validStacks": ["expo", "react-native"],
+      "deployTargets": ["none"],
+      "checklist": ["define telas e navegação", "define integração com backend"]
+    },
+    {
+      "id": "fullstack-app",
+      "factoryType": "fullstack_saas",
+      "description": "Aplicação fullstack única (backend + frontend acoplados).",
+      "validStacks": ["nextjs", "nodejs", "postgres", "mysql"],
+      "deployTargets": ["aws-ecs", "none"],
+      "checklist": ["define domínio e telas", "define modelo de dados"]
+    },
+    {
+      "id": "shared-lib",
+      "factoryType": "lib_ts",
+      "description": "Biblioteca/contratos compartilhados (sem deploy próprio).",
+      "validStacks": ["typescript"],
+      "deployTargets": ["none"],
+      "checklist": ["define API pública da lib", "define consumidores"]
+    },
+    {
+      "id": "infra-devops",
+      "factoryType": "other",
+      "description": "Infraestrutura/DevOps (IaC, pipelines, observabilidade).",
+      "validStacks": ["terraform", "cloudformation", "docker", "github-actions"],
+      "deployTargets": ["none"],
+      "checklist": ["define recursos de infra", "define ambientes (dev/prod)"]
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import fs from "fs/promises";
 import crypto from "crypto";
 import { DEPLOY_FORMATS, type DeployFormat } from "./provision/deployTargets.js";
 import { normalizeProductId, resolveInboxProductId, assertProductOwnership } from "./inbox.js";
+import { computeSpecTreeHash, sha256Hex } from "../lib/specTreeHash.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -129,17 +130,31 @@ export async function createProjectFromSpec(
     versionNumber = parseInt(countRes.rows[0].count as string, 10) + 1;
   }
 
-  // spec_hash: SHA-256 de (specs ordenadas por filename ASC, unidas por "\n").
-  // ADR-018/A3: deve ser calculado sobre EXATAMENTE o conteúdo que será gravado em
-  // disco (o runner recomputa do disco). Como gravamos `f.buffer` verbatim, casar aqui.
+  // RFC-0004 T1.2/T1.3: nomes PREPARADOS antes de tudo — basename (neutraliza '/'
+  // e traversal também no valor persistido, não só no disco) + dedupe determinístico
+  // intra-upload (a UNIQUE (project_id, rel_dir, filename) da migration 071 rejeitaria
+  // o segundo INSERT; e o disco sem o prefixo de timestamp sobrescreveria o primeiro).
+  const usedNames = new Set<string>();
+  const prepared = files.map((f) => {
+    let base = path.basename(f.filename);
+    if (usedNames.has(base)) {
+      const ext = path.extname(base);
+      const stem = base.slice(0, base.length - ext.length);
+      let n = 2;
+      while (usedNames.has(`${stem}-${n}${ext}`)) n++;
+      base = `${stem}-${n}${ext}`;
+    }
+    usedNames.add(base);
+    return { filename: base, buffer: f.buffer, mimeType: f.mimeType, contentSha256: sha256Hex(f.buffer) };
+  });
+
+  // spec_hash: hash canônico da ÁRVORE (RFC-0004 — specTreeHash.ts; espelho Python em
+  // orchestrator/spec_tree_hash.py, teste de paridade nos dois lados). Substitui a fórmula
+  // legada (concat ordenada por localeCompare + join "\n"), que mentia ao mover
+  // arquivo/linha e divergia do runner (codepoint sort). O runner recomputa do disco com a
+  // MESMA fórmula. Na criação todos os arquivos nascem na raiz (rel_dir = '').
   const specHash = specApproved
-    ? crypto.createHash("sha256")
-        .update(
-          [...files].sort((a, b) => a.filename.localeCompare(b.filename))
-            .map((f) => f.buffer.toString("utf-8")).join("\n"),
-          "utf-8",
-        )
-        .digest("hex")
+    ? computeSpecTreeHash(prepared.map((f) => ({ relDir: "", filename: f.filename, contentSha256: f.contentSha256 })))
     : null;
 
   // REUSO SILENCIOSO (Feature #65, parte 2) — INTRA-TENANT apenas, invisível ao usuário.
@@ -200,21 +215,26 @@ export async function createProjectFromSpec(
   );
   const projectId = projectResult.rows[0].id as string;
 
-  // gravar arquivos em disco + registrar
+  // gravar arquivos em disco + registrar. RFC-0004 T1.3: nome REAL (deduped basename) em
+  // vez do prefixo Date.now() — dois README.md no mesmo ms colidiam e o segundo
+  // sobrescrevia o primeiro em silêncio; a dedupe acima + UNIQUE da 071 protegem agora.
+  // filename persistido = nome do disco (o legado divergia: banco cru × disco basename).
   const projectDir = path.join(UPLOAD_DIR, projectId);
   await fs.mkdir(projectDir, { recursive: true });
-  const saved: { filename: string; filePath: string; mimeType: string }[] = [];
-  for (const f of files) {
-    const safeName = `${Date.now()}-${path.basename(f.filename)}`;
-    const filePath = path.join(projectDir, safeName);
+  const saved: { filename: string; filePath: string; mimeType: string; contentSha256: string }[] = [];
+  for (const f of prepared) {
+    const filePath = path.join(projectDir, f.filename);
     await fs.writeFile(filePath, f.buffer);
-    saved.push({ filename: f.filename, filePath, mimeType: f.mimeType });
+    saved.push({ filename: f.filename, filePath, mimeType: f.mimeType, contentSha256: f.contentSha256 });
   }
+  let isFirstFile = true;
   for (const f of saved) {
     await client.query(
-      `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type) VALUES ($1, $2, $3, $4)`,
-      [projectId, f.filename, f.filePath, f.mimeType],
+      `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
+       VALUES ($1, $2, $3, $4, '', $5, $6)`,
+      [projectId, f.filename, f.filePath, f.mimeType, isFirstFile, f.contentSha256],
     );
+    isFirstFile = false;
   }
 
   const hasNonMd = saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md");

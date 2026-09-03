@@ -15,6 +15,7 @@ import { buildProductSketch, parseManifest, computeProductHash, ManifestError, t
 import { createProjectFromSpec } from "./projectCreation.js";
 import { checkSpecContentReady } from "./specContentGate.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
+import { getArchetype, archetypeForFactoryType, renderProjectReadme } from "./archetypeCatalog.js";
 import type { ProductZipContents } from "../routes/specs.js";
 
 export interface DecomposeParams {
@@ -158,10 +159,27 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
     const systemId = (sketch.product.systemId ?? "").trim() || null;
     // B4: vínculo de origem (spec da Bancada que gerou o produto). null quando avulso.
     const originProjectId = params.originProjectId ?? null;
+    // RFC-0004 D6/D7: manifesto do PRODUTO (kind: product) — DETERMINÍSTICO, gravado em
+    // products.manifest_md (migration 072). NÃO entra no product_hash (idempotência é
+    // sobre o payload da proposta, nunca sobre artefatos gerados — auditoria finding 10).
+    const productManifestMd = [
+      "---",
+      "kind: product",
+      `projects: [${sketch.projects.map((p) => p.id).join(", ")}]`,
+      "---",
+      "",
+      `# ${sketch.product.name}`,
+      "",
+      sketch.product.description ?? "",
+      "",
+      "## Projetos (ondas de dependência)",
+      ...sketch.waves.map((w, i) => `- Onda ${i}: ${w.join(", ")}`),
+      "",
+    ].join("\n");
     const prodRes = await client.query(
-      `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id, origin_project_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name`,
-      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash, systemId, originProjectId],
+      `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id, origin_project_id, manifest_md)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, name`,
+      [tenantId, createdBy, sketch.product.name, sketch.product.description ?? null, productHash, systemId, originProjectId, productManifestMd],
     );
     const productId = prodRes.rows[0].id as string;
 
@@ -174,12 +192,34 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
         // já validado em buildProductSketch, mas defensivo
         throw new ManifestError("MANIFEST_SPEC_MISSING", `spec "${p.spec}" ausente ao criar projeto "${p.id}".`);
       }
+      // RFC-0004 D7: árvore v1 DETERMINÍSTICA por projeto — 01-spec.md (corpo, arquivo
+      // CANÔNICO/primary: primeiro da lista) + README.md (manifesto autoral gerado do
+      // catálogo + campos opcionais do splitter; NUNCA carrega estado/hash). O gate de
+      // conteúdo continua rodando sobre specContent (acima) — o README-template com
+      // checklist não passa pelo gate (auditoria finding 7).
+      const arch = getArchetype(p.archetype ?? "") ?? archetypeForFactoryType(p.type);
+      const projectFiles: Array<{ filename: string; buffer: Buffer; mimeType: string }> = [
+        { filename: "01-spec.md", buffer: Buffer.from(specContent, "utf-8"), mimeType: "text/markdown" },
+      ];
+      if (arch) {
+        projectFiles.push({
+          filename: "README.md",
+          buffer: Buffer.from(renderProjectReadme({
+            title: p.id,
+            archetype: arch,
+            stack: p.stack,
+            dependsOn: p.dependsOn,
+            deployTarget: p.deployTarget,
+          }), "utf-8"),
+          mimeType: "text/markdown",
+        });
+      }
       const created = await createProjectFromSpec(client, {
         tenantId,
         createdBy,
         approverEmail,
         title: p.id,
-        files: [{ filename: `${p.id}.md`, buffer: Buffer.from(specContent, "utf-8"), mimeType: "text/markdown" }],
+        files: projectFiles,
         productId,
         projectType: p.type,
         deliveryFields: deliveryFieldsFor(p.delivery ?? sketch.product.deliveryDefault),

@@ -250,12 +250,27 @@ def load_spec(spec_path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_yaml_frontmatter(content: str) -> str:
+    """RFC-0004 T1.4: remove o frontmatter YAML de MANIFESTOS (README de projeto/produto)
+    antes de concatenar a spec para os agentes — sem isso o YAML (archetype/stack/deps)
+    entraria como PROSA no prompt do PM/CTO. Só remove blocos delimitados por '---' na
+    PRIMEIRA linha; conteúdo sem frontmatter passa intacto."""
+    if not content.startswith("---\n"):
+        return content
+    end = content.find("\n---", 4)
+    if end == -1:
+        return content
+    return content[end + 4:].lstrip("\n")
+
+
 def load_spec_all(project_id: str) -> str:
     """Carrega todos os project_spec_files de um projeto e os concatena.
 
     Retorna string única com separador entre arquivos. Usado quando o projeto
     foi criado com múltiplos arquivos ou via ZIP. Se não encontrar nenhum
     arquivo via API, retorna string vazia (caller faz fallback para load_spec).
+    RFC-0004: com árvore (rel_dir), o cabeçalho inclui o caminho relativo, e o
+    frontmatter YAML dos manifestos é removido (vira prosa no prompt senão).
     """
     try:
         data, status = _api_get(f"/api/projects/{project_id}/spec-files")
@@ -264,17 +279,19 @@ def load_spec_all(project_id: str) -> str:
         if len(data) == 1:
             fpath = Path(data[0].get("filePath") or data[0].get("file_path", ""))
             if fpath.exists():
-                return fpath.read_text(encoding="utf-8")
+                return _strip_yaml_frontmatter(fpath.read_text(encoding="utf-8"))
             return ""
         parts: list[str] = []
         for entry in data:
             fpath = Path(entry.get("filePath") or entry.get("file_path", ""))
             fname = entry.get("filename", fpath.name)
+            rel_dir = str(entry.get("relDir") or entry.get("rel_dir") or "")
+            label = f"{rel_dir}/{fname}" if rel_dir else str(fname)
             if not fpath.exists():
                 logger.warning("[load_spec_all] Arquivo não encontrado: %s", fpath)
                 continue
-            content = fpath.read_text(encoding="utf-8")
-            parts.append(f"---\n# [{fname}]\n\n{content}")
+            content = _strip_yaml_frontmatter(fpath.read_text(encoding="utf-8"))
+            parts.append(f"---\n# [{label}]\n\n{content}")
         return "\n\n".join(parts)
     except Exception as exc:
         logger.warning("[load_spec_all] Falha ao carregar spec files: %s", exc)
@@ -282,30 +299,31 @@ def load_spec_all(project_id: str) -> str:
 
 
 def _compute_spec_files_hash(project_id: str) -> str:
-    """SHA-256 sobre o conteúdo bruto dos project_spec_files (SPEC-APPROVED).
+    """Hash canônico da ÁRVORE de spec (SPEC-APPROVED) — RFC-0004 T1.2.
 
-    Deve casar com o hash calculado pela API na ingestão (specs.ts). Usado para
-    impedir "aprovo v1, subo/edito v2" — se a spec mudou após a aprovação, o hash diverge.
+    Deve casar com o hash calculado pela API (lib/specTreeHash.ts) — fórmula ÚNICA nos
+    dois lados (espelho: spec_tree_hash.py; teste de paridade com fixtures idênticos).
+    Usado para impedir "aprovo v1, subo/edito v2": spec mudou → hash diverge.
 
-    FASE-4/CORR-P2: ordem DETERMINÍSTICA por filename (idêntica ao lado da API), não por
-    created_at (sem tiebreak, pode reordenar). Concatena o texto UTF-8 de cada arquivo
-    ordenado por filename ASC, unido por "\\n".
+    A fórmula legada (concat ordenada por filename, join "\\n") foi substituída: mentia ao
+    mover arquivo entre pastas/linha entre arquivos, e o sort divergia da API
+    (localeCompare × codepoint). Deploy da API + runner na MESMA janela, com backfill dos
+    extra.spec_hash aprovados no boot da API.
     Retorna "" se não for possível computar (nunca crasha o pipeline).
     """
-    import hashlib
     try:
+        from spec_tree_hash import hash_spec_tree_from_files
         data, status = _api_get(f"/api/projects/{project_id}/spec-files")
         if status != 200 or not isinstance(data, list) or not data:
             return ""
-        # Ordena por filename (mesma chave da API) para hash determinístico.
-        entries = sorted(data, key=lambda e: str(e.get("filename") or ""))
-        parts: list[str] = []
-        for entry in entries:
+        files: list[tuple[str, str, bytes]] = []
+        for entry in data:
             fpath = Path(entry.get("filePath") or entry.get("file_path", ""))
             if not fpath.exists():
                 return ""
-            parts.append(fpath.read_text(encoding="utf-8"))
-        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+            rel_dir = str(entry.get("relDir") or entry.get("rel_dir") or "")
+            files.append((rel_dir, str(entry.get("filename") or ""), fpath.read_bytes()))
+        return hash_spec_tree_from_files(files)
     except Exception as exc:
         logger.warning("[SPEC-APPROVED] Falha ao computar hash da spec: %s", exc)
         return ""

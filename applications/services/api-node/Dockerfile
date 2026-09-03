@@ -30,6 +30,8 @@ COPY --from=builder /app/src/db/migrations ./dist/db/migrations
 COPY --from=builder /app/src/generated ./dist/generated
 # Assets estáticos (ex.: guia de Configurações em PDF) usados por tenantNotify no runtime.
 COPY --from=builder /app/src/assets ./dist/assets
+# RFC-0004 F2: catálogo de arquétipos (fonte única da taxonomia) lido em runtime de dist/config
+COPY --from=builder /app/src/config ./dist/config
 
 ENV NODE_ENV=production
 ENV PORT=3000

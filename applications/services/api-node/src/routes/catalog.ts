@@ -24,6 +24,14 @@ function getUser(request: FastifyRequest): AuthUser {
 export async function catalogRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
 
+  // GET /api/catalog/archetypes — RFC-0004 F2: catálogo FECHADO de arquétipos (fonte única
+  // da taxonomia; arquivo versionado no repo, nunca banco). Rota estática tem precedência
+  // sobre /api/catalog/:slug no router do Fastify.
+  app.get("/api/catalog/archetypes", async (_request, reply) => {
+    const { loadArchetypeCatalog } = await import("../services/archetypeCatalog.js");
+    return reply.send(loadArchetypeCatalog());
+  });
+
   // GET /api/catalog?category=... — lista itens do catálogo (público entre tenants: é template)
   app.get<{ Querystring: { category?: string } }>("/api/catalog", async (request, reply) => {
     const category = (request.query?.category ?? "").trim();

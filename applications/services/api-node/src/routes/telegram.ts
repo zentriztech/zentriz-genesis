@@ -1,4 +1,5 @@
 // Telegram Bot integration — webhook, vinculação e notificações push
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
@@ -1054,10 +1055,11 @@ async function saveProjectSpec(
   const filePath = pathModule.join(projectDir, specRef);
   await fsModule.writeFile(filePath, params.specMd, "utf8");
 
+  // RFC-0004 T1.3: arquivo único da spec via Telegram = canônico; sha p/ If-Match/hash.
   await client.query(
-    `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type)
-     VALUES ($1, $2, $3, 'text/markdown')`,
-    [projectId, specRef, filePath]
+    `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
+     VALUES ($1, $2, $3, 'text/markdown', '', true, $4)`,
+    [projectId, specRef, filePath, createHash("sha256").update(params.specMd, "utf-8").digest("hex")]
   );
 
   return projectId;

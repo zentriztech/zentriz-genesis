@@ -62,6 +62,13 @@ try {
 try {
   await initDb();
   await seedIfEmpty();
+  // RFC-0004 T1.2: traduz extra.spec_hash aprovados p/ o hash canônico da árvore
+  // (best-effort, idempotente; specs editadas pós-aprovação NÃO são lavadas).
+  {
+    const { backfillSpecApprovedHashes } = await import("./services/specHashBackfill.js");
+    const { pool } = await import("./db/client.js");
+    await backfillSpecApprovedHashes(pool);
+  }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);
 
