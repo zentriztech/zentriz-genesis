@@ -14,6 +14,10 @@ describe("modelPricing — fonte única", () => {
     expect(priceForModel("modelo-misterioso").outputPerMTok).toBe(15);
     expect(priceForModel(null).inputPerMTok).toBe(3);
   });
+  it("fable 5/25 (faixa Opus por decisão; antes caía no default Sonnet 3/15)", () => {
+    expect(priceForModel("us.anthropic.claude-fable-5")).toEqual({ inputPerMTok: 5, outputPerMTok: 25 });
+    expect(priceForModel("us.anthropic.claude-fable-5-1").outputPerMTok).toBe(25);
+  });
   it("costUsd calcula por MTok", () => {
     expect(costUsd("sonnet", 1_000_000, 1_000_000)).toBe(18);
     expect(costUsd("haiku", 2_000_000, 0)).toBe(2);
@@ -24,6 +28,7 @@ describe("modelPricing — fonte única", () => {
     expect(sql).toContain("m.model ILIKE '%haiku%'");
     expect(sql).toContain("m.model ILIKE '%opus%'");
     expect(sql).toContain("m.model ILIKE '%sonnet%'");
+    expect(sql).toContain("m.model ILIKE '%fable%'");
     expect(sql).toContain("ELSE");
     expect(sql).toContain("* 25");
     expect(sql).not.toContain("* 75"); // preço antigo do Opus não pode voltar

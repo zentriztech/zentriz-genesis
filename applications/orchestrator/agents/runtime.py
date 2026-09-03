@@ -101,6 +101,17 @@ MODEL_LIMITS: dict[str, dict[str, int]] = {
     "us.anthropic.claude-opus-4-8": {"context": 200_000, "max_output": 64_000},
     "us.anthropic.claude-opus-4-7": {"context": 200_000, "max_output": 64_000},
     "us.anthropic.claude-opus-4-8[1m]": {"context": 1_000_000, "max_output": 64_000},
+    # Família Claude 5 (validada por Converse 2026-09-03). Formas curta (Foundry/Anthropic
+    # direta) e Bedrock inference-profile. Sem estas entradas caíam em _DEFAULT_LIMITS (16k)
+    # e truncavam specs/charters grandes.
+    "claude-opus-5": {"context": 200_000, "max_output": 64_000},
+    "claude-sonnet-5": {"context": 200_000, "max_output": 64_000},
+    "claude-fable-5": {"context": 200_000, "max_output": 32_000},
+    "us.anthropic.claude-opus-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-sonnet-5": {"context": 200_000, "max_output": 64_000},
+    "us.anthropic.claude-fable-5": {"context": 200_000, "max_output": 32_000},
+    "us.anthropic.claude-fable-5-1": {"context": 200_000, "max_output": 32_000},
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": {"context": 200_000, "max_output": 8_192},
 }
 _DEFAULT_LIMITS = {"context": 200_000, "max_output": 16_000}
 

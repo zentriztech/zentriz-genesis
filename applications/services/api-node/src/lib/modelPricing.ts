@@ -26,6 +26,10 @@ export const MODEL_PRICES: Array<{ match: string; price: ModelPrice }> = [
   { match: "haiku", price: { inputPerMTok: 1, outputPerMTok: 5 } },
   { match: "opus", price: { inputPerMTok: 5, outputPerMTok: 25 } },
   { match: "sonnet", price: { inputPerMTok: 3, outputPerMTok: 15 } },
+  // Fable 5 (família Claude 5): sem substring própria caía no DEFAULT (Sonnet 3/15). Faixa
+  // definida como Opus (5/25) por decisão do Jean (2026-09-03) — revisar quando sair o preço
+  // público oficial da Anthropic para a família Fable.
+  { match: "fable", price: { inputPerMTok: 5, outputPerMTok: 25 } },
 ];
 
 export const DEFAULT_PRICE: ModelPrice = { inputPerMTok: 3, outputPerMTok: 15 };

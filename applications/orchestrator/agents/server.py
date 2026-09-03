@@ -533,7 +533,7 @@ def _run_splitter(document: str, model_id: str, usage_project_id: str | None = N
     def _llm(system: str, user: str, mid: str) -> str:
         # temperature: modelos extended-thinking exigem 1.0; senão 0.2 (determinístico).
         ml = (mid or "").lower()
-        temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")) else 0.2
+        temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-4", "sonnet-5", "fable-5")) else 0.2
         # RFC-0004 F6/T2.1: usage debitado no projeto de ORIGEM quando o propose vem do
         # "Decompor" de uma spec (originProjectId). Propose de texto avulso (sem projeto)
         # não tem onde debitar — segue invisível até existir linha de projeto.
@@ -704,7 +704,7 @@ def invoke_raw(body: dict):
     # Detecta e força 1.0 pra evitar erro Bedrock 400.
     def _temp_for(model: str) -> float:
         ml = (model or "").lower()
-        if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")):
+        if any(m in ml for m in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-4", "sonnet-5", "fable-5")):
             return 1.0
         return float(body.get("temperature", 0.2))
 

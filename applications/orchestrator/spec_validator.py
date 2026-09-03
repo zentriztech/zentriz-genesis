@@ -94,7 +94,7 @@ def validate_spec(
 
         def llm_fn(system: str, user: str, model_id: str, **kw) -> str:  # type: ignore[misc]
             ml = (model_id or "").lower()
-            temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")) else 0.2
+            temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-4", "sonnet-5", "fable-5")) else 0.2
             return call_bedrock_direct(system=system, user=user, model_id=model_id,
                                        max_tokens=kw.get("max_tokens", 4000), temperature=temp,
                                        usage_project_id=usage_project_id,

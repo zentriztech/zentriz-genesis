@@ -76,14 +76,23 @@ const PROVIDER_META: Record<Provider, {
   fields: { key: string; label: string; placeholder: string; secret?: boolean }[];
 }> = {
   bedrock: {
-    // Modelos Bedrock validados via /invoke/raw em 2026-07-02 e opus-4-8 validado em 2026-07-03
-    // no tenant Zentriz. Modelos que retornam "model identifier invalid" ou "not authorized"
-    // foram removidos. Se novos modelos forem liberados, adicionar após teste real.
+    // Modelos Bedrock validados por invocação real (Converse). Família Claude 5 (Opus 5,
+    // Sonnet 5, Fable 5/5.1) + Haiku 4.5 validados em 2026-09-03. Modelos que retornam
+    // "model identifier invalid" ou "not authorized" foram removidos.
+    // ⚠️ ENTITLEMENT: a família Claude 5 está liberada na conta de build (896328489567) mas
+    // ainda NEGADA no Bedrock Model Access da conta de PROD (820198199720) — selecionáveis já,
+    // mas em prod caem na cascata CLAUDE_MODEL_FALLBACK até o grant ser concedido. Haiku 4.5 e
+    // Sonnet 4.6 funcionam em prod hoje. Se novos modelos forem liberados, adicionar após teste real.
     label: "AWS Bedrock", icon: "☁️",
     models: [
+      "us.anthropic.claude-opus-5",
+      "us.anthropic.claude-sonnet-5",
+      "us.anthropic.claude-fable-5",
+      "us.anthropic.claude-fable-5-1",
       "us.anthropic.claude-opus-4-8",
       "us.anthropic.claude-opus-4-7",
       "us.anthropic.claude-sonnet-4-6",
+      "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     ],
     fields: [
       { key: "aws_access_key_id",     label: "AWS Access Key ID",     placeholder: "AKIA...",     secret: false },
@@ -100,7 +109,7 @@ const PROVIDER_META: Record<Provider, {
   },
   anthropic: {
     label: "Anthropic (API Direta)", icon: "🧠",
-    models: ["claude-opus-4-7","claude-sonnet-4-6","claude-haiku-4-5-20251001","claude-3-5-sonnet-20241022","claude-3-opus-20240229"],
+    models: ["claude-opus-5","claude-sonnet-5","claude-fable-5","claude-opus-4-7","claude-sonnet-4-6","claude-haiku-4-5-20251001","claude-3-5-sonnet-20241022","claude-3-opus-20240229"],
     fields: [
       { key: "api_key", label: "API Key (sk-ant-...)", placeholder: "sk-ant-...", secret: true },
     ],
@@ -120,9 +129,17 @@ const PROVIDER_META: Record<Provider, {
 const PROVIDERS = Object.keys(PROVIDER_META) as Provider[];
 
 const MODEL_PROVIDER_MAP: Record<string, Provider> = {
+  "us.anthropic.claude-opus-5":               "bedrock",
+  "us.anthropic.claude-sonnet-5":             "bedrock",
+  "us.anthropic.claude-fable-5":              "bedrock",
+  "us.anthropic.claude-fable-5-1":            "bedrock",
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0": "bedrock",
   "us.anthropic.claude-sonnet-4-6":           "bedrock",
   "us.anthropic.claude-opus-4-7":             "bedrock",
   "us.anthropic.claude-opus-4-8":             "bedrock",
+  "claude-opus-5":                            "anthropic",
+  "claude-sonnet-5":                          "anthropic",
+  "claude-fable-5":                           "anthropic",
   "claude-opus-4-7":                          "anthropic",
   "claude-sonnet-4-6":                        "anthropic",
   "claude-haiku-4-5-20251001":                "anthropic",
