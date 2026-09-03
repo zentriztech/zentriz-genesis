@@ -111,9 +111,14 @@ def validate_spec(
         except Exception:
             triage = None  # triagem é acessória — falha não bloqueia a refutação
 
-    model = (os.environ.get("SPEC_VALIDATOR_MODEL")
-             or os.environ.get("CLAUDE_MODEL")
-             or "us.anthropic.claude-sonnet-4-6").strip()
+    # Modelo do refutador: Sonnet por DESIGN (custo ~US$0,30-0,60/validação; Opus só por
+    # escolha explícita via SPEC_VALIDATOR_MODEL). Herdar CLAUDE_MODEL do pipeline seria
+    # herdar Opus — 5x o custo E, em prod, um id indisponível nesta rota (403 provado).
+    # No Foundry (local), CLAUDE_MODEL é o único id válido do resource → usa-o.
+    provider = (os.environ.get("GENESIS_LLM_PROVIDER") or "").strip().lower()
+    default_model = (os.environ.get("CLAUDE_MODEL") if provider == "foundry" else None) \
+        or "us.anthropic.claude-sonnet-4-6"
+    model = (os.environ.get("SPEC_VALIDATOR_MODEL") or default_model).strip()
     raw = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=4000, usage_agent="spec_validator")
     data = _extract_json(raw)
     findings = data.get("findings")
