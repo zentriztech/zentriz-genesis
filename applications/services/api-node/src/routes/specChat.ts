@@ -66,10 +66,11 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
+// Modo SPEC INTEIRA (sem filePath): refina a PRODUCT_SPEC via CTO normalizador (cto/async).
+// O modo por-arquivo NÃO passa por aqui — ver buildRawFileRequest (usa /invoke/raw cirúrgico).
 function buildChatMessage(
   specMarkdown: string,
   messages: ChatMessage[],
-  filePath?: string | null,
 ): Record<string, unknown> {
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
@@ -78,36 +79,7 @@ function buildChatMessage(
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "CTO"}: ${m.content}`)
     .join("\n\n");
 
-  // T4.3: em modo por-arquivo, o "documento" é UM arquivo da spec (não a spec inteira).
-  // C2 (revisão adversarial): o enforcer de spec_intake_and_normalize exige um artefato no
-  // caminho canônico (docs/spec/PRODUCT_SPEC.md) — então NÃO trocamos o modo nem o caminho
-  // do artefato; apenas instruímos o CTO a devolver como conteúdo APENAS o arquivo revisado
-  // (o apply grava esse conteúdo no arquivo real que o usuário edita). Assim respeitamos o
-  // enforcer e não vazamos a spec inteira por cima de um arquivo específico.
-  const task = filePath
-    ? `
-Você é um CTO sênior refinando UM ARQUIVO de uma especificação de produto EM CONJUNTO com o
-usuário, num chat iterativo. O arquivo em edição é: ${filePath}
-
-Você recebe o CONTEÚDO ATUAL desse arquivo (em Markdown), o HISTÓRICO da conversa e a ÚLTIMA
-MENSAGEM do usuário.
-
-OBJETIVO: aplicar SOMENTE as mudanças pedidas na última mensagem NESTE arquivo, devolvendo o
-CONTEÚDO COMPLETO e revisado DESTE arquivo (e nada além dele), e uma resposta curta do que mudou.
-
-REGRAS:
-1. PRESERVE tudo o que o usuário não pediu para alterar — não regenere o arquivo do zero.
-2. Aplique de forma cirúrgica o que foi pedido (adicionar/remover/ajustar) SOMENTE neste arquivo.
-3. NÃO inclua outros arquivos, nem a spec inteira — devolva APENAS o conteúdo revisado de ${filePath}.
-4. Devolva o CONTEÚDO INTEIRO revisado deste arquivo como o artefato Markdown principal.
-5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, do que mudou.
-
-ÚLTIMA MENSAGEM DO USUÁRIO: "${lastUser.replace(/"/g, '\\"')}"
-
-HISTÓRICO DO CHAT:
-${transcript}
-`.trim()
-    : `
+  const task = `
 Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário,
 num chat iterativo. Você recebe a SPEC ATUAL (em Markdown), o HISTÓRICO da conversa e a
 ÚLTIMA MENSAGEM do usuário.
@@ -151,6 +123,90 @@ ${transcript}
     existing_artifacts: [],
     limits: { max_rounds: 1, timeout_sec: 120 },
   };
+}
+
+// ── Modo POR-ARQUIVO (T4.3): edição CIRÚRGICA via /invoke/raw ─────────────────
+// A revisão adversarial ao VIVO (Validação PÓS) provou que o modo spec_intake_and_normalize
+// do CTO é um NORMALIZADOR: ele REGENERA um PRODUCT_SPEC completo (Metadados/Visão/FRs/DoD…)
+// e DESCARTA o conteúdo original do arquivo → aplicar = perda de dados. Para editar UM arquivo
+// usamos /invoke/raw (síncrono, prompt controlado): instruímos o modelo a devolver o CONTEÚDO
+// FINAL COMPLETO do arquivo preservando tudo o que não foi pedido. NÃO passa pelo enforcer/normalizador.
+const RAW_FILE_SYSTEM = [
+  "Você é um editor de texto técnico. Recebe o CONTEÚDO ATUAL de UM arquivo (Markdown) e um PEDIDO.",
+  "Aplique EXATAMENTE o pedido PRESERVANDO todo o resto do arquivo.",
+  "NÃO reescreva, NÃO normalize, NÃO adicione seções não pedidas, NÃO gere um novo documento/spec.",
+  "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código, sem comentários, sem preâmbulo.",
+].join(" ");
+
+function buildRawFileRequest(
+  content: string,
+  messages: ChatMessage[],
+  filePath: string,
+): Record<string, unknown> {
+  const history = messages.slice(-12);
+  const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
+  // Histórico só para dar contexto iterativo — o modelo edita o CONTEÚDO ATUAL, não o transcript.
+  const transcript = history
+    .map((m) => `${m.role === "user" ? "USUÁRIO" : "EDITOR"}: ${m.content}`)
+    .join("\n");
+  const userMessage = [
+    `ARQUIVO: ${filePath}`,
+    "",
+    "--- CONTEÚDO ATUAL ---",
+    content,
+    "--- FIM ---",
+    "",
+    transcript ? `HISTÓRICO DA CONVERSA:\n${transcript}\n` : "",
+    `PEDIDO: ${lastUser}`,
+    "",
+    "Devolva agora o conteúdo final completo do arquivo (apenas o texto do arquivo).",
+  ].join("\n");
+  return {
+    prompt_override: RAW_FILE_SYSTEM,
+    user_message: userMessage,
+    max_tokens: 8000,
+  };
+}
+
+// Remove cerca de código envolvente (```md … ```) SE o modelo tiver desobedecido e cercado
+// o arquivo inteiro. Não toca em cercas internas legítimas (só o par externo que abraça tudo).
+function stripOuterFence(s: string): string {
+  const t = s.replace(/\r\n/g, "\n").trim();
+  const m = t.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  return m ? m[1].trim() : t;
+}
+
+function runFileChatJob(jobId: string, raw: Record<string, unknown>, agentsUrl: string): void {
+  const job = _chatJobs.get(jobId);
+  if (!job) return;
+  job.status = "running";
+  const base = agentsUrl.replace(/\/$/, "");
+
+  // Síncrono: /invoke/raw responde no próprio request (não há fila/poll no lado dos agentes).
+  httpPost(`${base}/invoke/raw`, JSON.stringify(raw), 180_000)
+    .then((text) => {
+      const j = _chatJobs.get(jobId);
+      if (!j) return;
+      const data = JSON.parse(text) as { response?: string; model_used?: string };
+      const md = stripOuterFence(data.response ?? "");
+      // Sanidade: resposta vazia/trivial = falha (o /invoke/raw já escala fallback internamente,
+      // então vazio aqui significa que nem o fallback produziu conteúdo). NÃO aplicamos lixo.
+      if (!md || md.trim().length < 2) {
+        j.status = "error";
+        j.error = "A IA não retornou conteúdo para o arquivo. Reformule o pedido e tente de novo.";
+        console.warn(`[SpecChat] job=${jobId} raw vazio — model=${data.model_used ?? "?"}`);
+        return;
+      }
+      j.specMarkdown = md;
+      // /invoke/raw devolve SÓ o conteúdo do arquivo — a "resposta" ao usuário é sintetizada aqui.
+      j.reply = "Revisão pronta — confira e clique em “Aplicar ao arquivo”.";
+      j.status = "done";
+      console.log(`[SpecChat] ✓ job=${jobId} DONE (raw) — ${md.length} chars, model=${data.model_used ?? "?"}`);
+    })
+    .catch((err) => {
+      const j = _chatJobs.get(jobId);
+      if (j) { j.status = "error"; j.error = err instanceof Error ? err.message.slice(0, 300) : String(err); }
+    });
 }
 
 function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): void {
@@ -342,7 +398,13 @@ export async function specChatRoutes(app: FastifyInstance) {
       };
       _chatJobs.set(jobId, job);
 
-      runChatJob(jobId, buildChatMessage(specMarkdown, messages, filePath), agentsUrl);
+      if (filePath) {
+        // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
+        runFileChatJob(jobId, buildRawFileRequest(specMarkdown, messages, filePath), agentsUrl);
+      } else {
+        // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui).
+        runChatJob(jobId, buildChatMessage(specMarkdown, messages), agentsUrl);
+      }
 
       return reply.status(202).send({ jobId, status: "pending", filePath, baseSha });
     },

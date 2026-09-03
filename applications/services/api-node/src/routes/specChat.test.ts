@@ -34,9 +34,15 @@ vi.mock("../db/client.js", () => ({
   },
 }));
 
-// specs.js: httpPost/httpGet nunca são exercidos (job assíncrono após o 202); extractSpecMarkdown idem.
+// specs.js: no modo por-arquivo o job chama /invoke/raw (síncrono). Capturamos a URL e o payload
+// para provar o roteamento cirúrgico e devolvemos uma resposta controlada.
+let httpPostCalls: { url: string; body: string }[] = [];
+let rawResponse = "{}";
 vi.mock("./specs.js", () => ({
-  httpPost: async () => "{}",
+  httpPost: async (url: string, body: string) => {
+    httpPostCalls.push({ url, body });
+    return url.includes("/invoke/raw") ? rawResponse : "{}";
+  },
   httpGet: async () => "{}",
   extractSpecMarkdown: () => "",
 }));
@@ -50,6 +56,8 @@ beforeEach(async () => {
   process.env.API_AGENTS_URL = "http://agents.local";
   currentUser = { id: USER_ID, role: "user", tenantId: TENANT };
   queryHandler = (sql) => (sql.includes("FROM projects") ? { rows: [{ tenant_id: TENANT, created_by: USER_ID }] } : { rows: [] });
+  httpPostCalls = [];
+  rawResponse = "{}";
 });
 
 const msg = (content: string) => [{ role: "user", content }];
@@ -103,6 +111,54 @@ describe("POST /api/spec-chat — guardas do modo por-arquivo", () => {
     expect(body.filePath).toBe("backend/01-api.md");
     expect(body.baseSha).toBe("abc123");
     expect(typeof body.jobId).toBe("string");
+  });
+
+  it("modo por-arquivo roteia por /invoke/raw e preserva o conteúdo (não normaliza)", async () => {
+    const original = "# API\n\nEndpoint GET /health → { status: ok }.";
+    const revised = `${original}\n\n## Nota\nCampo email adicionado.`;
+    rawResponse = JSON.stringify({ response: revised, model_used: "us.anthropic.claude-opus-4-8" });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: original, messages: msg("adicione uma nota"), projectId: PROJ, filePath: "backend/01-api.md", baseSha: "sha-1" },
+    });
+    expect(res.statusCode).toBe(202);
+    const { jobId } = JSON.parse(res.body);
+
+    // o job é síncrono (uma chamada /invoke/raw) — poll curto até done
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("done");
+    // conteúdo original PRESERVADO na íntegra (o bug do normalizador o descartava)
+    expect(done?.specMarkdown).toContain("Endpoint GET /health");
+    expect(done?.specMarkdown).toContain("## Nota");
+    // roteou por /invoke/raw — NÃO pelo normalizador cto/async
+    const rawCall = httpPostCalls.find((c) => c.url.includes("/invoke/raw"));
+    expect(rawCall).toBeTruthy();
+    expect(httpPostCalls.some((c) => c.url.includes("/invoke/cto/async"))).toBe(false);
+    expect(JSON.parse(rawCall!.body).prompt_override).toContain("PRESERVANDO");
+  });
+
+  it("modo por-arquivo: cerca de código externa é removida do conteúdo aplicado", async () => {
+    rawResponse = JSON.stringify({ response: "```md\n# Doc\n\ntexto\n```" });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# Doc\n\ntexto", messages: msg("ajuste"), projectId: PROJ, filePath: "backend/01-api.md" },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("done");
+    expect(done?.specMarkdown).toBe("# Doc\n\ntexto");
   });
 
   it("spec inteira (sem filePath) → 202 com filePath null", async () => {
