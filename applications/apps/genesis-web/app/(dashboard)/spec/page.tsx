@@ -33,11 +33,12 @@ import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CloseIcon from "@mui/icons-material/Close";
 import EditIcon from "@mui/icons-material/Edit";
+import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import PreviewIcon from "@mui/icons-material/Preview";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import SendIcon from "@mui/icons-material/Send";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
@@ -46,6 +47,7 @@ import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import SpecTreePanel from "@/components/SpecTreePanel";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
+import SpecCodeEditor from "@/components/SpecCodeEditor";
 import ProductFolderNav from "@/components/ProductFolderNav";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
@@ -605,19 +607,37 @@ function MarkdownPreview({ content }: { content: string }) {
 // ── Editor + Preview side by side ─────────────────────────────────────────────
 function SpecEditor({
   value, onChange, fullscreen, onToggleFullscreen,
-  onSave, onSaveAndStart, approving, onRegen, regenDisabled,
+  onSave, approving, onRegen, regenDisabled,
+  projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
+  onPromote, fileExt = "md", onValidationChange,
 }: {
   value: string;
   onChange: (v: string) => void;
   fullscreen: boolean;
   onToggleFullscreen: () => void;
   onSave: () => void;
-  onSaveAndStart: () => void;
   approving: "save" | "start" | null;
   onRegen?: () => void;
   regenDisabled: boolean;
+  // Onda 3 (a): quando há projeto (modo edição), a validação/GAPs vira uma ABA do editor
+  // — [Editar | Lado a lado | Preview | GAPs (X)] — em vez de um card separado acima.
+  projectId?: string | null;
+  isAdmin?: boolean;
+  validationReloadSignal?: number;
+  gapCount?: number | null;
+  // Onda 3 (b): "Promover à Fábrica" (substitui "Salvar e iniciar"). Só aparece quando provido
+  // (modo edição). A confirmação com digitação (quando há GAPs) é tratada pelo pai.
+  onPromote?: () => void;
+  // Onda 3 (d): extensão do arquivo em edição → realce de sintaxe por tipo (default markdown).
+  fileExt?: string;
+  // Onda 3 — a validação (dentro da aba GAPs) reporta o nº de GAPs ao pai p/ manter o badge
+  // e o gate de promoção sincronizados após validar sem sair do editor.
+  onValidationChange?: (count: number | null) => void;
 }) {
-  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split">("split");
+  const hasGapsTab = !!projectId;
+  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps">("split");
+  // Badge dos GAPs: >99 vira "99+"; 0 não mostra número (aba fica só "GAPs").
+  const gapBadge = gapCount == null ? null : gapCount > 99 ? "99+" : String(gapCount);
 
   const toolbar = (
     <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap
@@ -627,6 +647,22 @@ function SpecEditor({
           <Tab value="edit"    icon={<EditIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Editar"    sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           <Tab value="split"   icon={<PreviewIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Lado a lado" sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           <Tab value="preview" icon={<PreviewIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Preview"  sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
+          {hasGapsTab && (
+            <Tab value="gaps" icon={<FactCheckOutlinedIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start"
+              label={
+                <Stack direction="row" spacing={0.5} alignItems="center" component="span">
+                  <span>GAPs</span>
+                  {gapBadge && (
+                    <Box component="span" sx={{
+                      px: 0.6, minWidth: 16, height: 16, borderRadius: "8px", display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      fontSize: "0.6rem", fontWeight: 700, lineHeight: 1,
+                      bgcolor: (gapCount ?? 0) > 0 ? "error.main" : "success.main", color: "#fff",
+                    }}>{gapBadge}</Box>
+                  )}
+                </Stack>
+              }
+              sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
+          )}
         </Tabs>
         <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.65rem", height: 18, ml: 1 }} />
       </Stack>
@@ -641,21 +677,29 @@ function SpecEditor({
             </span>
           </Tooltip>
         )}
-        <Tooltip title="Guardar a ideia — iniciar quando quiser">
+        {/* Onda 3 (b): a spec APENAS salva aqui — nunca "salva e inicia". A ida à fábrica é
+            exclusiva do botão "Promover à Fábrica" (abaixo, só no modo edição). */}
+        <Tooltip title="Guardar a spec — promova à fábrica quando estiver pronta">
           <span>
-            <Button size="small" variant="outlined"
-              startIcon={approving === "save" ? <CircularProgress size={12} /> : <span style={{ fontSize: "0.9rem" }}>💾</span>}
+            <Button size="small" variant="contained"
+              startIcon={approving === "save" ? <CircularProgress size={12} color="inherit" /> : <span style={{ fontSize: "0.9rem" }}>💾</span>}
               disabled={approving !== null || !value.trim()} onClick={onSave}
               sx={{ fontSize: "0.72rem", py: 0.35 }}>
               {approving === "save" ? "Salvando…" : "Salvar rascunho"}
             </Button>
           </span>
         </Tooltip>
-        <Button size="small" variant="contained" color="success"
-          startIcon={approving === "start" ? <CircularProgress size={12} /> : <CheckCircleIcon sx={{ fontSize: "0.85rem !important" }} />}
-          disabled={approving !== null || !value.trim()} onClick={onSaveAndStart} sx={{ fontSize: "0.75rem", py: 0.4 }}>
-          {approving === "start" ? "Iniciando…" : "Salvar e iniciar pipeline"}
-        </Button>
+        {onPromote && (
+          <Tooltip title="Enviar à fábrica — inicia o pipeline">
+            <span>
+              <Button size="small" variant="contained" color="success"
+                startIcon={approving === "start" ? <CircularProgress size={12} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.85rem !important" }} />}
+                disabled={approving !== null || !value.trim()} onClick={onPromote} sx={{ fontSize: "0.75rem", py: 0.4 }}>
+                {approving === "start" ? "Promovendo…" : "Promover à Fábrica"}
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         <Tooltip title={fullscreen ? "Sair de tela cheia" : "Tela cheia"}>
           <IconButton size="small" onClick={onToggleFullscreen}>
             {fullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
@@ -665,50 +709,25 @@ function SpecEditor({
     </Stack>
   );
 
-  // Highlighted editor: transparent textarea over syntax-highlighted pre
+  // Onda 3 (d): editor com REALCE DE SINTAXE por tipo de arquivo (CodeMirror + tema vscodeDark),
+  // no lugar do antigo <textarea> de cor única. `fileExt` decide a linguagem (default markdown).
   const editorArea = (h: string) => (
-    <Box sx={{ position: "relative", height: h, overflow: "hidden", display: "flex", bgcolor: "#0D0F14" }}>
-      {/* Line numbers */}
-      <Box
-        component="pre"
-        sx={{
-          flexShrink: 0, userSelect: "none", textAlign: "right",
-          px: 1.5, py: 2, m: 0,
-          color: "#484F58", fontSize: "0.73rem", fontFamily: "'JetBrains Mono','Fira Code',monospace",
-          lineHeight: 1.7, borderRight: "1px solid #21262D", bgcolor: "#0D1117",
-          overflow: "hidden", pointerEvents: "none",
-          whiteSpace: "pre",
-        }}
-      >
-        {value.split("\n").map((_, i) => i + 1).join("\n")}
-      </Box>
-      {/* Transparent textarea for input */}
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        spellCheck={false}
-        style={{
-          position: "absolute", left: 44, top: 0,
-          width: "calc(100% - 44px)", height: "100%",
-          resize: "none", border: "none", outline: "none",
-          background: "transparent",
-          color: "#E6EDF3",
-          fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',monospace",
-          fontSize: "0.75rem", lineHeight: 1.7,
-          padding: "16px 16px 16px 12px",
-          boxSizing: "border-box",
-          overflowY: "auto",
-          caretColor: "#6366F1",
-          tabSize: 2,
-          zIndex: 2,
-        }}
-      />
-    </Box>
+    <SpecCodeEditor value={value} onChange={onChange} ext={fileExt} height={h} />
   );
 
   const content = (areaH: string) => {
     if (editorTab === "edit") return editorArea(areaH);
     if (editorTab === "preview") return <MarkdownPreview content={value} />;
+    // Onda 3 (a): aba GAPs — a validação da spec vive aqui dentro (antes era um card à parte).
+    if (editorTab === "gaps") {
+      return (
+        <Box sx={{ height: areaH, overflow: "auto", p: 1.5, bgcolor: "background.default" }}>
+          {projectId
+            ? <SpecValidationPanel projectId={projectId} isAdmin={isAdmin} reloadSignal={validationReloadSignal} onFindingsChange={onValidationChange} />
+            : null}
+        </Box>
+      );
+    }
     // split
     return (
       <Box sx={{ display: "flex", height: areaH, overflow: "hidden" }}>
@@ -1057,6 +1076,9 @@ export default function SpecPage() {
   const [staleValidation, setStaleValidation] = useState(false);
   // Onda 1 — nº de GAPs (findings da última validação) para o badge e o botão "Resolver GAPs".
   const [gapCount, setGapCount] = useState<number | null>(null);
+  // Onda 3 (b) — diálogo de "Promover à Fábrica" com confirmação por digitação quando há GAPs.
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [promoteConfirmText, setPromoteConfirmText] = useState("");
   // Pivô Bancada (Opção 1): produto dono da spec em edição (vem da URL ?productId=…).
   // Habilita a árvore "Pasta do produto" ao lado do editor, que navega entre os
   // projetos do produto sem abrir a tela redundante /products/:id/spec.
@@ -1108,10 +1130,13 @@ export default function SpecPage() {
   // Onda 1 — busca a contagem de GAPs da última validação (badge + botão "Resolver GAPs").
   // Recarrega quando a validação muda (validationReloadSignal) ou o projeto troca.
   useEffect(() => {
-    if (!editProjectId) return;
+    if (!editProjectId) { setGapCount(null); return; }
     let alive = true;
+    // Zera ao trocar de projeto → sem flash da contagem do projeto anterior enquanto o fetch corre.
+    setGapCount(null);
     apiGet<{ latestRun: { findings?: unknown[] } | null }>(`/api/specs/${editProjectId}/validation`)
-      .then((r) => { if (alive) setGapCount(Array.isArray(r?.latestRun?.findings) ? r.latestRun!.findings!.length : 0); })
+      // null = nunca validada (aba GAPs sem número); 0 = validada e limpa; N = N findings.
+      .then((r) => { if (alive) setGapCount(r?.latestRun ? (Array.isArray(r.latestRun.findings) ? r.latestRun.findings.length : 0) : null); })
       .catch(() => { if (alive) setGapCount(null); });
     return () => { alive = false; };
   }, [editProjectId, validationReloadSignal]);
@@ -1544,6 +1569,23 @@ export default function SpecPage() {
   }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
       projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router]);
 
+  // Onda 3 (b) — "Promover à Fábrica" = enviar a spec ao pipeline (handleSaveSpec(true)).
+  // Sem GAPs → promove direto; com GAPs → exige confirmação por digitação (qualquer papel).
+  const PROMOTE_CONFIRM_WORD = "PROMOVER";
+  const handlePromote = useCallback(() => {
+    if ((gapCount ?? 0) > 0) {
+      setPromoteConfirmText("");
+      setPromoteOpen(true);
+      return;
+    }
+    void handleSaveSpec(true);
+  }, [gapCount, handleSaveSpec]);
+
+  const confirmPromote = useCallback(() => {
+    setPromoteOpen(false);
+    void handleSaveSpec(true);
+  }, [handleSaveSpec]);
+
   // ── Pivô Bancada (Opção 1): árvore "Pasta do produto" dirige o editor ───────
   // Clicar num arquivo da árvore navega o editor para o projeto dono. O editor,
   // o chat "Melhorar com IA" e a Validação/GAPs já são por-projeto; então trocar
@@ -1638,9 +1680,13 @@ export default function SpecPage() {
             <SpecEditor
               value={specMarkdown} onChange={setSpecMarkdown}
               fullscreen={true} onToggleFullscreen={() => setEditorFullscreen(false)}
-              onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+              onSave={() => handleSaveSpec(false)} approving={approving}
               onRegen={editProjectId ? undefined : () => { setEditorFullscreen(false); setSpecMarkdown(null); }}
               regenDisabled={editProjectId ? true : generating}
+              projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
+              validationReloadSignal={validationReloadSignal} gapCount={gapCount}
+              onPromote={editProjectId ? handlePromote : undefined}
+              onValidationChange={setGapCount}
             />
           </Box>
           {/* Feature #63 — chat "Melhorar com IA" TAMBÉM em tela cheia: painel à direita no desktop;
@@ -1701,6 +1747,42 @@ export default function SpecPage() {
     </>
   );
 
+  // ── Onda 3 (b): diálogo de confirmação por digitação para promover COM GAPs em aberto ──
+  // Promover uma spec com GAPs vai para a fábrica mesmo assim (decisão do usuário — qualquer
+  // papel pode), mas exige digitar a palavra de confirmação para evitar promoção acidental.
+  const promoteDialog = (
+    <Dialog open={promoteOpen} onClose={() => setPromoteOpen(false)} maxWidth="xs" fullWidth>
+      <DialogContent sx={{ p: 3 }}>
+        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
+          <RocketLaunchIcon sx={{ color: "warning.main" }} />
+          <Typography variant="h6" fontWeight={700}>Promover com GAPs em aberto?</Typography>
+        </Stack>
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Esta spec ainda tem <strong>{gapCount} GAP(s)</strong> apontados pela validação. Você pode
+          promovê-la assim mesmo, mas a fábrica trabalhará com lacunas conhecidas — o resultado pode
+          exigir retrabalho. Recomendado resolver os GAPs na aba <strong>GAPs</strong> antes.
+        </Alert>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Para confirmar, digite <strong>{PROMOTE_CONFIRM_WORD}</strong> abaixo.
+        </Typography>
+        <TextField
+          fullWidth size="small" autoFocus value={promoteConfirmText}
+          onChange={(e) => setPromoteConfirmText(e.target.value)}
+          placeholder={PROMOTE_CONFIRM_WORD}
+          onKeyDown={(e) => { if (e.key === "Enter" && promoteConfirmText.trim().toUpperCase() === PROMOTE_CONFIRM_WORD) confirmPromote(); }}
+        />
+        <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 2.5 }}>
+          <Button size="small" color="inherit" onClick={() => setPromoteOpen(false)}>Cancelar</Button>
+          <Button size="small" variant="contained" color="success" startIcon={<RocketLaunchIcon />}
+            disabled={promoteConfirmText.trim().toUpperCase() !== PROMOTE_CONFIRM_WORD}
+            onClick={confirmPromote}>
+            Promover à Fábrica
+          </Button>
+        </Stack>
+      </DialogContent>
+    </Dialog>
+  );
+
   // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
   if (editProjectId) {
     return (
@@ -1743,16 +1825,16 @@ export default function SpecPage() {
           </Box>
         )}
 
-        {/* RFC-0004 Onda 4: validação adversarial + árvore multi-arquivo (aparecem só
-            no modo edição; a árvore só quando a spec tem 2+ arquivos — D8). */}
+        {/* RFC-0004 Onda 4: árvore multi-arquivo (só no modo edição; a árvore só quando a spec
+            tem 2+ arquivos — D8). Onda 3 (a): a validação/GAPs NÃO fica mais aqui — virou a aba
+            "GAPs" dentro do editor. Aqui sobra só o aviso de validação obsoleta + a árvore. */}
         {!editLoading && specMarkdown !== null && editProjectId && (
           <Box sx={{ mb: 2 }}>
             {staleValidation && (
               <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
-                Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide antes de iniciar a fábrica.
+                Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
               </Alert>
             )}
-            <SpecValidationPanel projectId={editProjectId} isAdmin={authStore.isZentrizAdmin} reloadSignal={validationReloadSignal} />
             {/* key={editProjectId}: ao navegar entre projetos pela árvore da pasta, remonta
                 o painel para zerar seu `selected` interno (senão destacaria o arquivo do
                 projeto anterior e não re-emitiria onFileSelected). */}
@@ -1782,12 +1864,14 @@ export default function SpecPage() {
                   <Button size="small" variant="outlined" disabled={!!approving}
                     startIcon={approving === "save" ? <CircularProgress size={14} color="inherit" /> : undefined}
                     onClick={() => handleSaveSpec(false)}>
-                    {approving === "save" ? "Salvando…" : "Salvar"}
+                    {approving === "save" ? "Salvando…" : "Salvar rascunho"}
                   </Button>
-                  <Button size="small" variant="contained" disabled={!!approving}
-                    startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon />}
-                    onClick={() => handleSaveSpec(true)}>
-                    {approving === "start" ? "Iniciando…" : "Salvar e Iniciar"}
+                  {/* Onda 3 (b): "Salvar e Iniciar" → "Promover à Fábrica". A spec só vai ao
+                      pipeline por aqui; com GAPs em aberto exige confirmação por digitação. */}
+                  <Button size="small" variant="contained" color="success" disabled={!!approving}
+                    startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon />}
+                    onClick={handlePromote}>
+                    {approving === "start" ? "Promovendo…" : "Promover à Fábrica"}
                   </Button>
                 </Stack>
               </Stack>
@@ -1796,9 +1880,12 @@ export default function SpecPage() {
                   <SpecEditor
                     value={specMarkdown} onChange={setSpecMarkdown}
                     fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                    onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+                    onSave={() => handleSaveSpec(false)} approving={approving}
                     onRegen={undefined}
                     regenDisabled={true}
+                    projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
+                    validationReloadSignal={validationReloadSignal} gapCount={gapCount}
+                    onValidationChange={setGapCount}
                   />
                 </Box>
                 {/* Feature #63 — painel de chat à direita do editor/preview (oculto no mobile: editor ocupa a tela; usar tela cheia p/ chat) */}
@@ -1820,6 +1907,7 @@ export default function SpecPage() {
         </Box>
 
         {editorDialog}
+        {promoteDialog}
         {specMarkdown !== null && !editLoading && mobileChat}
       </Box>
     );
@@ -1976,7 +2064,7 @@ export default function SpecPage() {
                         <SpecEditor
                           value={specMarkdown} onChange={setSpecMarkdown}
                           fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                          onSave={() => handleSaveSpec(false)} onSaveAndStart={() => handleSaveSpec(true)} approving={approving}
+                          onSave={() => handleSaveSpec(false)} approving={approving}
                           onRegen={() => setSpecMarkdown(null)}
                           regenDisabled={generating}
                         />
@@ -2089,23 +2177,20 @@ export default function SpecPage() {
                   {uploadError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setUploadError(null)}>{uploadError}</Alert>}
 
                   <Divider sx={{ my: 2 }} />
+                  {/* Onda 3 (b): o upload APENAS salva a spec como rascunho. A ida à fábrica passou a
+                      ser exclusiva do botão "Promover à Fábrica" na edição da spec — não há mais
+                      "Salvar e iniciar pipeline" aqui. */}
                   <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
-                    <Tooltip title="Guardar a ideia — iniciar quando quiser">
+                    <Tooltip title="Guardar a spec como rascunho — promova à fábrica na edição quando estiver pronta">
                       <span>
-                        <Button variant="outlined" size="large"
-                          startIcon={submitting ? <CircularProgress size={16} color="inherit" /> : <span style={{ fontSize: "1rem" }}>💾</span>}
+                        <Button type="submit" variant="contained" size="large"
+                          startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <span style={{ fontSize: "1rem" }}>💾</span>}
                           disabled={submitting || !files.length}
-                          onClick={(e) => handleUploadSubmit(e as unknown as React.FormEvent, false)}>
+                          onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent, false); }}>
                           {submitting ? "Salvando…" : "Salvar rascunho"}
                         </Button>
                       </span>
                     </Tooltip>
-                    <Button type="submit" variant="contained" size="large"
-                      startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <SendIcon />}
-                      disabled={submitting || !files.length}
-                      onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent, true); }}>
-                      {submitting ? "Enviando…" : "Salvar e iniciar pipeline"}
-                    </Button>
                   </Stack>
                 </form>
               )}

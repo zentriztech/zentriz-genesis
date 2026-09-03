@@ -40,6 +40,7 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { alpha } from "@mui/material/styles";
 import EditIcon from "@mui/icons-material/Edit";
+import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import LinkIcon from "@mui/icons-material/Link";
 import CallSplitIcon from "@mui/icons-material/CallSplit";
@@ -78,6 +79,8 @@ interface SpecItem {
   // antigos ou falha de enriquecimento degradam para specs sem esses campos.
   readiness?: Readiness | null;
   estimate?: Estimate | null;
+  // Onda 3 (c) — nº de GAPs da última validação (null = nunca validada). >0 → aviso no card.
+  gapCount?: number | null;
 }
 interface CatalogItem {
   slug: string;
@@ -109,6 +112,21 @@ interface ProductOption { id: string; name: string; is_inbox?: boolean }
 function formatDate(s: string): string {
   try { return new Date(s).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }); }
   catch { return s; }
+}
+
+// Onda 3 (c) — aviso visual de GAPs (findings da validação) no card. Só renderiza quando
+// há GAPs (>0); nunca validada (null) ou zero GAPs não mostram nada. >99 vira "99+".
+function GapWarningChip({ count, label }: { count: number; label?: string }) {
+  if (count <= 0) return null;
+  const badge = count > 99 ? "99+" : String(count);
+  return (
+    <Chip
+      icon={<WarningAmberRoundedIcon sx={{ fontSize: "0.85rem !important" }} />}
+      label={label ?? `${badge} GAP${count === 1 ? "" : "s"}`}
+      size="small" color="warning" variant="filled"
+      sx={{ fontSize: "0.62rem", height: 18, fontWeight: 700, "& .MuiChip-icon": { ml: 0.5 } }}
+    />
+  );
 }
 
 // §5.4: rascunho "esquecido" no inbox = sem atualização há mais de STALE_DAYS dias.
@@ -307,6 +325,8 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
               <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
               {s.readiness && <ReadinessBadge readiness={s.readiness} />}
+              {/* Onda 3 (c): aviso de GAPs em aberto na validação da spec. */}
+              <GapWarningChip count={s.gapCount ?? 0} />
             </Stack>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
               <Typography variant="caption" color="text.secondary">
@@ -480,6 +500,12 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         </Stack>
                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                           <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                          {/* Onda 3 (c): soma dos GAPs das specs do produto — aviso agregado no card. */}
+                          {(() => {
+                            const totalGaps = g.specs.reduce((acc, s) => acc + (s.gapCount ?? 0), 0);
+                            const specsWithGaps = g.specs.filter((s) => (s.gapCount ?? 0) > 0).length;
+                            return <GapWarningChip count={totalGaps} label={`${totalGaps > 99 ? "99+" : totalGaps} GAP${totalGaps === 1 ? "" : "s"} · ${specsWithGaps} spec(s)`} />;
+                          })()}
                           <Typography variant="caption" color="text.secondary">Abrir pasta do produto</Typography>
                         </Stack>
                       </CardContent>

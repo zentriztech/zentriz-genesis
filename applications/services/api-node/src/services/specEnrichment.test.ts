@@ -4,6 +4,7 @@ import {
   computeReadiness,
   enrichSpecs,
   fetchDepSignals,
+  fetchGapCounts,
   type HistoryBucket,
   type SpecForEnrichment,
   type Queryable,
@@ -145,7 +146,42 @@ describe("enrichSpecs (orquestrador)", () => {
     };
     const out = await enrichSpecs(fake, []);
     expect(out).toHaveLength(0);
-    // só o histórico roda (deps é curto-circuitado por specIds.length === 0)
+    // só o histórico roda (deps E gaps são curto-circuitados por specIds.length === 0)
     expect(calls).toBe(1);
+  });
+
+  // ── Onda 3 (c): gapCount = nº de findings da última validação ──
+  it("anexa gapCount da última validação (findings.length); sem run → null", async () => {
+    const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const fake: Queryable = {
+      query: async (sql: string) => {
+        if (sql.includes("spec_validation_runs")) {
+          return { rows: [{ id: A, findings: [{ severity: "high" }, { severity: "low" }] }] };
+        }
+        if (sql.includes("pipeline_runs")) return { rows: [] };
+        return { rows: [] };
+      },
+    };
+    const out = await enrichSpecs(fake, [spec({ id: A }), spec({ id: B })]);
+    expect(out[0].gapCount).toBe(2); // A tem 2 findings
+    expect(out[1].gapCount).toBeNull(); // B nunca validada
+  });
+
+  it("fetchGapCounts degrada para mapa vazio quando o SQL falha", async () => {
+    const fake: Queryable = {
+      query: async () => { throw new Error("relation spec_validation_runs does not exist"); },
+    };
+    const map = await fetchGapCounts(fake, ["11111111-1111-1111-1111-111111111111"]);
+    expect(map.size).toBe(0);
+  });
+
+  it("fetchGapCounts trata findings não-array como 0 GAPs", async () => {
+    const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const fake: Queryable = {
+      query: async () => ({ rows: [{ id: A, findings: null }] }),
+    };
+    const map = await fetchGapCounts(fake, [A]);
+    expect(map.get(A)).toBe(0);
   });
 });

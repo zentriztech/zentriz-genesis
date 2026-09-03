@@ -177,6 +177,32 @@ export async function fetchDepSignals(client: Queryable, specIds: string[]): Pro
   return out;
 }
 
+// Onda 3 (c) — nº de GAPs por spec = tamanho de findings da ÚLTIMA validação (mesma
+// semântica do badge no editor: latestRun.findings.length). Best-effort: qualquer falha
+// devolve mapa vazio → o card simplesmente não mostra o aviso de GAPs (degrada limpo).
+export async function fetchGapCounts(client: Queryable, specIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (specIds.length === 0) return out;
+  try {
+    const rows = (
+      await client.query(
+        // DISTINCT ON (project_id) + ORDER created_at DESC → 1 linha (a última run) por projeto.
+        `SELECT DISTINCT ON (project_id) project_id AS id, findings
+           FROM spec_validation_runs
+          WHERE project_id = ANY($1)
+          ORDER BY project_id, created_at DESC`,
+        [specIds],
+      )
+    ).rows as Array<{ id: string; findings: unknown }>;
+    for (const r of rows) {
+      out.set(r.id, Array.isArray(r.findings) ? r.findings.length : 0);
+    }
+  } catch {
+    return new Map();
+  }
+  return out;
+}
+
 // Busca o histórico de execuções bem-sucedidas agregado por complexidade (E3).
 // Global (todos os tenants) para maximizar amostra — custo/tempo por complexidade é
 // razoavelmente independente de tenant (mesmo pipeline). Só runs concluídas contam.
@@ -207,14 +233,20 @@ export async function fetchHistoryBuckets(client: Queryable): Promise<HistoryBuc
 export async function enrichSpecs<T extends SpecForEnrichment>(
   client: Queryable,
   specs: T[],
-): Promise<Array<T & { readiness: Readiness; estimate: Estimate }>> {
+): Promise<Array<T & { readiness: Readiness; estimate: Estimate; gapCount: number | null }>> {
   const ids = specs.map((s) => s.id);
-  const [deps, buckets] = await Promise.all([fetchDepSignals(client, ids), fetchHistoryBuckets(client)]);
+  const [deps, buckets, gaps] = await Promise.all([
+    fetchDepSignals(client, ids),
+    fetchHistoryBuckets(client),
+    fetchGapCounts(client, ids),
+  ]);
   const estimator = buildEstimator(buckets);
   return specs.map((s) => {
     const estimate = estimator(s.complexity_hint);
     const dep = deps.get(s.id) ?? { total: 0, accepted: 0 };
     const readiness = computeReadiness(s, dep, estimate);
-    return { ...s, readiness, estimate };
+    // gapCount: nº de findings da última validação; null = spec nunca validada (sem aviso no card).
+    const gapCount = gaps.has(s.id) ? gaps.get(s.id)! : null;
+    return { ...s, readiness, estimate, gapCount };
   });
 }

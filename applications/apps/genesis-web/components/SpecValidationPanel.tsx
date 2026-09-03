@@ -43,16 +43,28 @@ const SEV_COLOR: Record<Finding["severity"], "error" | "warning" | "info"> = {
   blocker: "error", warning: "warning", info: "info",
 };
 
-export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal }: { projectId: string; isAdmin?: boolean; reloadSignal?: number }) {
+export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, onFindingsChange }: {
+  projectId: string; isAdmin?: boolean; reloadSignal?: number;
+  // Onda 3 — avisa o pai do nº de GAPs (findings da última validação) sempre que o estado
+  // recarrega (load/validar/ack/poll). null = nunca validada. Mantém o badge da aba GAPs e o
+  // gate "Promover à Fábrica" SINCRONIZADOS quando a validação roda DENTRO da aba.
+  onFindingsChange?: (count: number | null) => void;
+}) {
   const [state, setState] = useState<ValidationState | null>(null);
   const [busy, setBusy] = useState<"validate" | "ack" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Callback via ref → não entra nas deps de `load` (evita recriar o loader a cada render do pai).
+  const onFindingsChangeRef = useRef(onFindingsChange);
+  onFindingsChangeRef.current = onFindingsChange;
 
   const load = useCallback(async () => {
     try {
       const s = await apiGet<ValidationState>(`/api/specs/${projectId}/validation`);
       setState(s);
+      // GAPs = findings da última run; sem run → null (nunca validada).
+      const count = s?.latestRun ? (Array.isArray(s.latestRun.findings) ? s.latestRun.findings.length : 0) : null;
+      onFindingsChangeRef.current?.(count);
       return s;
     } catch { return null; }
   }, [projectId]);
