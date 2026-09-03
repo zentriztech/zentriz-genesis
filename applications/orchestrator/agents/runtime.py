@@ -1002,11 +1002,14 @@ def run_agent(
                     "messages": [{"role": "user", "content": user_content}],
                     "timeout": timeout,
                 }
-                # LEI 1 (AGENT_LLM_COMMUNICATION_ANALYSIS §12.2): temperature quando definida
+                # LEI 1 (AGENT_LLM_COMMUNICATION_ANALYSIS §12.2): temperature quando definida.
+                # SDK >=1.x removeu o kwarg — só passa se a assinatura aceitar (senão TypeError).
                 try:
                     t = float(os.environ.get("AGENT_TEMPERATURE", "").strip())
                     if 0 <= t <= 1:
-                        create_kw["temperature"] = t
+                        import inspect as _insp
+                        if "temperature" in _insp.signature(client.messages.create).parameters:
+                            create_kw["temperature"] = t
                 except (ValueError, TypeError):
                     pass
                 # STREAMING p/ Foundry com max_tokens alto: evita o erro "Streaming is required
@@ -1295,13 +1298,20 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             kwargs["aws_session_token"] = _token
 
     client = AnthropicBedrock(**kwargs)
-    resp = client.messages.create(
-        model=model_id,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    # SDK anthropic >=1.x (era Claude 5) REMOVEU `temperature` de Messages.create —
+    # passar sempre quebrava splitter/spec_validator em prod (TypeError) após um rebuild
+    # puxar 1.3.0 (dep não-pinada). Passa só quando a assinatura aceita.
+    _create_kw: dict = {
+        "model": model_id, "max_tokens": max_tokens,
+        "system": system, "messages": [{"role": "user", "content": user}],
+    }
+    try:
+        import inspect as _inspect
+        if "temperature" in _inspect.signature(client.messages.create).parameters:
+            _create_kw["temperature"] = temperature
+    except Exception:
+        pass
+    resp = client.messages.create(**_create_kw)
     _u = getattr(resp, "usage", None)
     _report_direct_usage(usage_project_id, usage_agent, model_id,
                          getattr(_u, "input_tokens", 0) or 0,
