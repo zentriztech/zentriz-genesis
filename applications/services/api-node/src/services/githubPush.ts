@@ -23,6 +23,7 @@ import {
   ensureThreeBranches,
   pushProjectFiles,
   getInstallationTokenForClone,
+  repoShortName,
 } from "./github.js";
 
 const execFileAsync = promisify(execFile);
@@ -263,7 +264,11 @@ export async function gitLinkProjectFolder(opts: {
   const git = (args: string[]) =>
     execFileAsync("git", ["-C", localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
   try {
-    const token = await getInstallationTokenForClone(opts.installationId);
+    // C3 (rota B): token escopado a ESTE repo, contents:write (push do código gerado).
+    const token = await getInstallationTokenForClone(opts.installationId, {
+      repositoryNames: [repoShortName(opts.fullName)],
+      permissions: { contents: "write" },
+    });
     const plainUrl = opts.remoteUrl ?? `https://github.com/${opts.fullName}.git`;
     // Auth via header (Basic x-access-token:token) só no fetch — não fica em nenhum config.
     const authHeader = `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;

@@ -16,7 +16,11 @@
 import { pool } from "../../db/client.js";
 import { setStatus, patchDeployment, type BackendStatus } from "./backendState.js";
 import { runProvisionChain } from "./provisionChain.js";
+import { ecrRepoName } from "./deployBackendCloud.js";
 import "./drivers.js"; // registra os drivers da cadeia (side-effect)
+
+/** Registry host válido do ECR: <acct 12 díg>.dkr.ecr.<region>.amazonaws.com */
+const ECR_HOST_RE = /^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$/;
 
 export interface BackendCallbackBody {
   progress?: "installing" | "building" | "pushing" | "pushed";
@@ -61,9 +65,32 @@ export async function handleBackendCallback(
 
   // Progresso terminal do runner = 'pushed' → grava artefato + dispara cadeia SDK.
   if (body.progress === "pushed") {
+    // C2 (rota B): NÃO confiar no ecr_repo_uri/image_tag reportados pelo host. Código
+    // não-confiável poderia forjá-los para fazer a cadeia SDK deployar uma imagem
+    // arbitrária. A API reconstrói ambos da própria verdade: repo = genesis/<projectId>
+    // (server-side) e tag = deploymentId[:8] (o mesmo que deployBackendCloud injetou no
+    // payload). Do corpo aproveitamos SÓ o registry host (conta/região), validado por
+    // regex e — se GENESIS_ECR_ACCOUNT_ID estiver setado — preso à conta da Zentriz.
+    const expectedRepo = ecrRepoName(projectId); // genesis/<projectId>
+    const expectedTag = deploymentId.slice(0, 8);
+    const reported = (body.ecr_repo_uri ?? "").trim();
+    const host = reported.split("/")[0];
+    const pinnedAcct = (process.env.GENESIS_ECR_ACCOUNT_ID ?? "").trim();
+    const hostOk = ECR_HOST_RE.test(host);
+    const acctOk = !pinnedAcct || host.startsWith(pinnedAcct + ".");
+    const repoPathOk = reported === `${host}/${expectedRepo}`;
+    if (!hostOk || !acctOk || !repoPathOk) {
+      await setStatus(
+        deploymentId,
+        "failed",
+        `callback 'pushed' rejeitado: referência de imagem não confiável (esperado */${expectedRepo}:${expectedTag}).`.slice(0, 2000),
+      );
+      return { http: 400, body: { code: "UNTRUSTED_IMAGE_REF" } };
+    }
+    // Grava SEMPRE a referência reconstruída pelo servidor (host validado + repo/tag server-side).
     await patchDeployment(deploymentId, {
-      ecr_repo_uri: body.ecr_repo_uri ?? null,
-      image_tag: body.image_tag ?? null,
+      ecr_repo_uri: `${host}/${expectedRepo}`,
+      image_tag: expectedTag,
     });
     // Só dispara a cadeia se ainda não avançou além de 'pushing' (idempotência).
     const advanced = ["migrating", "creating_service", "waiting_cert_dns", "running", "running_degraded"];

@@ -208,8 +208,33 @@ async function getOctokitForInstallation(installationId: number): Promise<Octoki
  * `git clone https://x-access-token:<TOKEN>@github.com/...`.
  * Priority mirrors getOctokitForInstallation: tenant App → global App → PAT.
  * Token lifetime ~1h — safe for one clone operation.
+ *
+ * SEGURANÇA (C3, rota B — least privilege): por padrão o token de instalação
+ * enxerga TODOS os repos da instalação. Quando `opts.repositoryNames` é passado,
+ * o token é escopado APENAS àqueles repositórios; `opts.permissions` reduz ainda
+ * mais (ex.: `{ contents: "read" }` para clone-só-leitura). Esse token viaja para
+ * o host de build (código não-confiável) — escopá-lo contém o raio de explosão de
+ * um vazamento a UM repositório do cliente, nunca à organização inteira. O fallback
+ * PAT (dev/local) não é escopável e permanece amplo — não é usado em produção.
  */
-export async function getInstallationTokenForClone(installationId: number): Promise<string> {
+export interface CloneTokenScope {
+  /** Nomes CURTOS dos repos (sem `owner/`), ex.: `["meu-produto"]`. */
+  repositoryNames?: string[];
+  /** Permissões a reduzir, ex.: `{ contents: "read" }` (clone) ou `{ contents: "write" }` (push). */
+  permissions?: Record<string, string>;
+}
+
+export async function getInstallationTokenForClone(
+  installationId: number,
+  opts: CloneTokenScope = {},
+): Promise<string> {
+  const scope: Record<string, unknown> = { type: "installation", installationId };
+  if (opts.repositoryNames && opts.repositoryNames.length > 0) {
+    scope.repositoryNames = opts.repositoryNames;
+  }
+  if (opts.permissions && Object.keys(opts.permissions).length > 0) {
+    scope.permissions = opts.permissions;
+  }
   const tenantCfg = await _getTenantAppConfig(installationId);
   if (tenantCfg?.appId && tenantCfg?.privateKey) {
     const auth = createAppAuth({
@@ -218,7 +243,7 @@ export async function getInstallationTokenForClone(installationId: number): Prom
       clientId:     tenantCfg.clientId || undefined,
       clientSecret: tenantCfg.clientSecret || undefined,
     });
-    const { token } = await auth({ type: "installation", installationId });
+    const { token } = await auth(scope as Parameters<typeof auth>[0]);
     return token;
   }
   if (isGlobalAppConfigured()) {
@@ -228,12 +253,18 @@ export async function getInstallationTokenForClone(installationId: number): Prom
       clientId:     GITHUB_APP_CLIENT_ID || undefined,
       clientSecret: GITHUB_APP_CLIENT_SECRET || undefined,
     });
-    const { token } = await auth({ type: "installation", installationId });
+    const { token } = await auth(scope as Parameters<typeof auth>[0]);
     return token;
   }
   const pat = process.env.GITHUB_TOKEN;
   if (!pat) throw new Error("No GitHub credentials for clone token.");
   return pat;
+}
+
+/** Extrai o nome curto do repo a partir de `owner/repo` (ou devolve como veio). */
+export function repoShortName(fullName: string): string {
+  const parts = (fullName || "").split("/");
+  return parts.length > 1 ? parts[parts.length - 1] : fullName;
 }
 
 /**

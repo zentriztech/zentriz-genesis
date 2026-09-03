@@ -10,7 +10,7 @@
 import { pool } from "../db/client.js";
 import { detectStaticProject, type DetectionResult } from "./staticDetector.js";
 import { generateBucketName, isS3Configured } from "./s3.js";
-import { getInstallationTokenForClone } from "./github.js";
+import { getInstallationTokenForClone, repoShortName } from "./github.js";
 import { resolveDeployCredentials } from "./provision/deployCredentials.js";
 import { join } from "node:path";
 
@@ -217,7 +217,11 @@ export async function deployS3Static(req: DeployRequest): Promise<S3StaticDeploy
   // FT-17: gerar installation token curto (~1h) para o runner clonar via HTTPS.
   let installationToken: string;
   try {
-    installationToken = await getInstallationTokenForClone(repoRow.installation_id);
+    // C3 (rota B): token escopado a ESTE repo, contents:read (o runner só clona).
+    installationToken = await getInstallationTokenForClone(repoRow.installation_id, {
+      repositoryNames: [repoShortName(repoRow.repo_full_name)],
+      permissions: { contents: "read" },
+    });
   } catch (err) {
     await pool.query(
       `UPDATE ephemeral_deployments SET status='failed', error_msg=$1, updated_at=now() WHERE id=$2`,

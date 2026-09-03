@@ -9,7 +9,10 @@ vi.mock("../../db/client.js", () => ({
   pool: { query: async () => ({ rows: [{ clone_url: "https://github.com/x/y", default_branch: "main",
     repo_full_name: "x/y", installation_id: 42 }] }) },
 }));
-vi.mock("../github.js", () => ({ getInstallationTokenForClone: async () => "tok" }));
+vi.mock("../github.js", () => ({
+  getInstallationTokenForClone: async () => "tok",
+  repoShortName: (f: string) => (f.split("/").pop() ?? f),
+}));
 vi.mock("../../auth.js", () => ({ signDeployCallbackToken: () => "cbtok" }));
 vi.mock("./awsCredentials.js", () => ({ resolveAwsCredentials: async () => ({ region: "us-east-1", credentials: undefined }) }));
 

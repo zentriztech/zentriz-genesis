@@ -12,7 +12,7 @@
  */
 
 import { pool } from "../../db/client.js";
-import { getInstallationTokenForClone } from "../github.js";
+import { getInstallationTokenForClone, repoShortName } from "../github.js";
 import { signDeployCallbackToken } from "../../auth.js";
 import { resolveAwsCredentials } from "./awsCredentials.js";
 import { resolveDeployCredentials } from "./deployCredentials.js";
@@ -113,7 +113,11 @@ export async function deployBackendCloud(req: BackendDeployRequest): Promise<Bac
   // 5. Installation token curto p/ o runner clonar (branch dev).
   let installationToken: string;
   try {
-    installationToken = await getInstallationTokenForClone(repoRow.installation_id);
+    // C3 (rota B): token escopado a ESTE repo, contents:read (o runner só clona).
+    installationToken = await getInstallationTokenForClone(repoRow.installation_id, {
+      repositoryNames: [repoShortName(repoRow.repo_full_name)],
+      permissions: { contents: "read" },
+    });
   } catch (err) {
     await setStatus(row.id, "failed", `installation token error: ${err instanceof Error ? err.message : String(err)}`);
     return { ok: false, code: "GITHUB_TOKEN_ERROR",

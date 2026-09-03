@@ -2336,10 +2336,12 @@ export async function projectRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id, deploymentId } = request.params;
       const cb = (request as unknown as { deployCallback?: { scope: string; deploymentId: string; projectId: string } }).deployCallback;
-      const user = getUser(request);
-      // Aceita: token escopado casando com o deployment/projeto, OU zentriz_admin (fallback interno).
+      // C2b (rota B): ÚNICO caller legítimo é o runner, sempre com token de callback
+      // ESCOPADO por deployment (signDeployCallbackToken). Fallback zentriz_admin REMOVIDO:
+      // o executor não-confiável carrega GENESIS_API_TOKEN (= zentriz_admin) no env e forjaria
+      // callback de qualquer deployment. Só o token por-deployment passa; nada mais.
       const scopedOk = cb && cb.scope === "deploy-callback" && cb.deploymentId === deploymentId && cb.projectId === id;
-      if (!scopedOk && user.role !== "zentriz_admin") {
+      if (!scopedOk) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Token de callback inválido para este deployment" });
       }
       const result = await handleBackendCallback(id, deploymentId, request.body ?? {});

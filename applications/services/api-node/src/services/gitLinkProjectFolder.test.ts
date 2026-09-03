@@ -18,7 +18,10 @@ import { tmpdir } from "node:os";
 const execFileAsync = promisify(execFile);
 
 // getInstallationTokenForClone é o único símbolo de ./github.js que o helper usa.
-vi.mock("./github.js", () => ({ getInstallationTokenForClone: async () => "fake-token" }));
+vi.mock("./github.js", () => ({
+  getInstallationTokenForClone: async () => "fake-token",
+  repoShortName: (f: string) => (f.split("/").pop() ?? f),
+}));
 
 let ROOT: string; // PROJECT_FILES_ROOT de teste
 let REMOTE_URL: string; // file://<bare>

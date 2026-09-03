@@ -54,19 +54,44 @@ describe("handleBackendCallback", () => {
     expect(runProvisionChain).not.toHaveBeenCalled();
   });
 
-  it("progress 'pushed' → grava artefato e dispara a cadeia SDK", async () => {
+  // C2 (rota B): URI ECR válida = host <acct>.dkr.ecr.<region>...  + repo server-side genesis/<projectId>.
+  const OK_URI = "123456789012.dkr.ecr.us-east-1.amazonaws.com/genesis/proj-1";
+
+  it("progress 'pushed' → reconstrói ref server-side (ignora image_tag do corpo) e dispara a cadeia", async () => {
     const r = await handleBackendCallback("proj-1", "dep-1", {
-      progress: "pushed", ecr_repo_uri: "acct/repo", image_tag: "abc123",
+      progress: "pushed", ecr_repo_uri: OK_URI, image_tag: "forjado-pelo-host",
     });
     expect(r.http).toBe(200);
-    expect(patchDeployment).toHaveBeenCalledWith("dep-1", expect.objectContaining({ ecr_repo_uri: "acct/repo" }));
+    // ecr_repo_uri = host validado + repo server-side; image_tag = deploymentId[:8] ("dep-1"), NÃO o do corpo.
+    expect(patchDeployment).toHaveBeenCalledWith("dep-1",
+      expect.objectContaining({ ecr_repo_uri: OK_URI, image_tag: "dep-1" }));
     await new Promise((res) => setImmediate(res)); // deixa o setImmediate rodar
     expect(runProvisionChain).toHaveBeenCalledTimes(1);
   });
 
+  it("pushed com repo FORJADO (control plane) → 400 UNTRUSTED_IMAGE_REF, não dispara", async () => {
+    const r = await handleBackendCallback("proj-1", "dep-1", {
+      progress: "pushed",
+      ecr_repo_uri: "123456789012.dkr.ecr.us-east-1.amazonaws.com/zentriz-genesis/api",
+    });
+    expect(r.http).toBe(400);
+    expect(r.body).toEqual(expect.objectContaining({ code: "UNTRUSTED_IMAGE_REF" }));
+    expect(patchDeployment).not.toHaveBeenCalled();
+    await new Promise((res) => setImmediate(res));
+    expect(runProvisionChain).not.toHaveBeenCalled();
+  });
+
+  it("pushed com host de registry inválido → 400 UNTRUSTED_IMAGE_REF", async () => {
+    const r = await handleBackendCallback("proj-1", "dep-1", {
+      progress: "pushed", ecr_repo_uri: "evil.example.com/genesis/proj-1",
+    });
+    expect(r.http).toBe(400);
+    expect(patchDeployment).not.toHaveBeenCalled();
+  });
+
   it("pushed idempotente: se já em 'running', NÃO redispara a cadeia", async () => {
     depRow = { id: "dep-1", project_id: "proj-1", status: "running" };
-    await handleBackendCallback("proj-1", "dep-1", { progress: "pushed", ecr_repo_uri: "acct/repo" });
+    await handleBackendCallback("proj-1", "dep-1", { progress: "pushed", ecr_repo_uri: OK_URI });
     await new Promise((res) => setImmediate(res));
     expect(runProvisionChain).not.toHaveBeenCalled();
   });
