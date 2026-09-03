@@ -138,11 +138,26 @@ export async function cloudRoutes(app: FastifyInstance) {
 
       const { encrypted, iv, tag } = encryptCredentials(JSON.stringify(sanitized));
 
+      // UPSERT (não INSERT puro): o soft-delete (DELETE → status='revoked') MANTÉM o slot_index,
+      // mas a UNIQUE (tenant_id, slot_index) ignora status. Como `nextSlot` é calculado só sobre
+      // linhas ATIVAS, uma linha revogada no slot 0 fazia o INSERT colidir (duplicate key) mesmo
+      // com a lista aparecendo vazia. O ON CONFLICT REATIVA aquele slot com as novas credenciais
+      // (mesmo comportamento do alias legado singular). Preserva id/created_at/tenant_id.
       const ins = await pool.query(
         `INSERT INTO tenant_cloud_connections
            (tenant_id, provider, label, region, service_type, slot_index,
             encrypted_credentials, encryption_iv, encryption_tag, status)
          VALUES ($1,$2,$3,$4,'container',$5,$6,$7,$8,'active')
+         ON CONFLICT (tenant_id, slot_index) DO UPDATE
+           SET provider = EXCLUDED.provider,
+               label = EXCLUDED.label,
+               region = EXCLUDED.region,
+               service_type = EXCLUDED.service_type,
+               encrypted_credentials = EXCLUDED.encrypted_credentials,
+               encryption_iv = EXCLUDED.encryption_iv,
+               encryption_tag = EXCLUDED.encryption_tag,
+               status = 'active',
+               updated_at = now()
          RETURNING id, slot_index`,
         [tenantId, provider, label ?? null, region ?? sanitized.region ?? null,
          nextSlot, encrypted, iv, tag]

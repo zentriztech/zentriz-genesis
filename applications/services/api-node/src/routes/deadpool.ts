@@ -130,6 +130,72 @@ function parseMonitoringConfig(
   return cfg;
 }
 
+/**
+ * SEGURANÇA — isolamento multi-tenant do painel Auto Care (Deadpool).
+ *
+ * O registry do Deadpool é GLOBAL: `/projects` e `/incidents` retornam itens de TODOS os
+ * tenants. Um `tenant_admin` só pode ver o que é do SEU tenant (intenção documentada no
+ * cabeçalho deste arquivo, mas nunca aplicada nas leituras de lista → vazamento cross-tenant).
+ *
+ * Fonte de verdade da POSSE = Genesis DB, não os slugs do registry:
+ *   - `tenant_github_installations` → installation_id do GitHub App do tenant. TODO registro do
+ *     registry do Deadpool carrega installation_id (o Genesis o envia SEMPRE, tanto no registro de
+ *     aceite #60 quanto no Ativar Monitoramento). É o discriminador de tenant CORRETO e COMPLETO:
+ *     cada tenant tem a instalação do App na PRÓPRIA conta GitHub → installation_id distinto.
+ *     (Os slugs system_id/service_id NÃO servem: só são únicos POR tenant, colidem entre tenants,
+ *     e um registro de aceite não tem linha em project_deadpool_monitoring — filtrar por eles
+ *     esconderia projetos legítimos do próprio tenant.)
+ *   - `project_deadpool_monitoring ⋈ projects` → slugs das specs monitoradas do tenant, usados só
+ *     para casar `incident.service_name` (o resumo de incidente não traz installation).
+ * `zentriz_admin` → `null` (visão operacional global, sem filtro). FAIL-CLOSED: item não
+ * atribuível ao tenant é OMITIDO.
+ *
+ * Incidentes: o resumo do Deadpool só expõe `service_name` (sem system_id/installation) — casamos
+ * contra os slugs (system_id|service_id) monitorados do tenant. Isso remove o vazamento da lista
+ * global; um atributo de tenant/installation no resumo do Deadpool (follow-up) tornaria a
+ * atribuição de incidentes também COMPLETA (hoje é fail-closed/best-effort).
+ */
+interface TenantMonitoringScope {
+  installationIds: Set<string>; // installation_id do tenant (string — casa number|string do registry)
+  serviceNames: Set<string>;    // system_id e service_id monitorados do tenant — p/ incident.service_name
+}
+
+async function loadTenantMonitoringScope(user: AuthUser): Promise<TenantMonitoringScope | null> {
+  if (user.role === "zentriz_admin") return null; // visão global
+  const [monRes, instRes] = await Promise.all([
+    pool.query(
+      `SELECT m.system_id, m.service_id
+         FROM project_deadpool_monitoring m
+         JOIN projects p ON p.id = m.project_id
+        WHERE p.tenant_id = $1`,
+      [user.tenantId],
+    ),
+    pool.query(
+      `SELECT installation_id FROM tenant_github_installations
+        WHERE tenant_id = $1 AND revoked_at IS NULL`,
+      [user.tenantId],
+    ),
+  ]);
+  const serviceNames = new Set<string>();
+  for (const r of monRes.rows) {
+    if (r.system_id) serviceNames.add(r.system_id as string);
+    if (r.service_id) serviceNames.add(r.service_id as string);
+  }
+  const installationIds = new Set<string>(instRes.rows.map((r) => String(r.installation_id)));
+  return { installationIds, serviceNames };
+}
+
+/** Projeto do registry global pertence ao tenant? (installation_id do registro casa a do tenant.) */
+function projectBelongsToTenant(p: Record<string, unknown>, scope: TenantMonitoringScope): boolean {
+  const inst = p.installation_id == null ? "" : String(p.installation_id);
+  return inst !== "" && scope.installationIds.has(inst);
+}
+
+/** Incidente (resumo) pertence ao tenant? (service_name casa um slug system_id|service_id do tenant.) */
+function incidentBelongsToTenant(i: Record<string, unknown>, scope: TenantMonitoringScope): boolean {
+  return typeof i.service_name === "string" && scope.serviceNames.has(i.service_name);
+}
+
 export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
 
@@ -168,7 +234,11 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
     if (!requireAdmin(request, reply)) return;
     try {
       const data = await deadpoolGet<{ projects?: unknown[] }>("/projects");
-      return reply.send({ available: true, projects: data?.projects ?? [] });
+      let projects = (data?.projects ?? []) as Record<string, unknown>[];
+      // Isolamento multi-tenant: tenant_admin só vê os projetos do próprio tenant (fail-closed).
+      const scope = await loadTenantMonitoringScope(getUser(request));
+      if (scope) projects = projects.filter((p) => projectBelongsToTenant(p, scope));
+      return reply.send({ available: true, projects });
     } catch (err) {
       app.log.warn({ route: "deadpool/projects", reason: degradeReason(err) }, "Deadpool projects indisponível (degradado)");
       return reply.send({ available: false, projects: [] });
@@ -180,7 +250,11 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
     if (!requireAdmin(request, reply)) return;
     try {
       const data = await deadpoolGet<{ incidents?: unknown[] }>("/incidents?view=summary");
-      return reply.send({ available: true, incidents: data?.incidents ?? [] });
+      let incidents = (data?.incidents ?? []) as Record<string, unknown>[];
+      // Isolamento multi-tenant: tenant_admin só vê incidentes de serviços do próprio tenant (fail-closed).
+      const scope = await loadTenantMonitoringScope(getUser(request));
+      if (scope) incidents = incidents.filter((i) => incidentBelongsToTenant(i, scope));
+      return reply.send({ available: true, incidents });
     } catch (err) {
       app.log.warn({ route: "deadpool/incidents", reason: degradeReason(err) }, "Deadpool incidents indisponível (degradado)");
       return reply.send({ available: false, incidents: [] });
@@ -192,6 +266,19 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
     if (!requireAdmin(request, reply)) return;
     const id = encodeURIComponent(request.params.id);
     try {
+      // Isolamento multi-tenant: um tenant_admin só abre detalhes de incidentes que ele já
+      // veria na LISTA (mesmo escopo). Sem isso, iterar ids vazaria incidentes de outros
+      // tenants. Fail-closed: id fora do conjunto do tenant → 404 (idêntico a não existir).
+      const scope = await loadTenantMonitoringScope(getUser(request));
+      if (scope) {
+        const summary = await deadpoolGet<{ incidents?: unknown[] }>("/incidents?view=summary");
+        const allowed = ((summary?.incidents ?? []) as Record<string, unknown>[])
+          .filter((i) => incidentBelongsToTenant(i, scope))
+          .map((i) => String(i.incident_id));
+        if (!allowed.includes(request.params.id)) {
+          return reply.status(404).send({ available: false, incident: null });
+        }
+      }
       const data = await deadpoolGet(`/incidents/${id}`);
       return reply.send(data);
     } catch (err) {
