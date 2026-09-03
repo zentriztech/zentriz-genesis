@@ -46,6 +46,7 @@ import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import SpecTreePanel from "@/components/SpecTreePanel";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
+import ProductFolderNav from "@/components/ProductFolderNav";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
 const ReactMarkdown = dynamic(
@@ -1056,6 +1057,10 @@ export default function SpecPage() {
   const [staleValidation, setStaleValidation] = useState(false);
   // Onda 1 — nº de GAPs (findings da última validação) para o badge e o botão "Resolver GAPs".
   const [gapCount, setGapCount] = useState<number | null>(null);
+  // Pivô Bancada (Opção 1): produto dono da spec em edição (vem da URL ?productId=…).
+  // Habilita a árvore "Pasta do produto" ao lado do editor, que navega entre os
+  // projetos do produto sem abrir a tela redundante /products/:id/spec.
+  const [treeProductId, setTreeProductId] = useState<string>("");
   // No mobile o chat não cabe ao lado do editor → abre em tela cheia via FAB.
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   // Ao cruzar para o desktop (≥md), o chat volta a ser inline → fecha o dialog fullScreen
@@ -1078,9 +1083,12 @@ export default function SpecPage() {
     const pp = searchParams?.get("parentProjectId");
     const pt = searchParams?.get("parentTitle");
     const ep = searchParams?.get("editProjectId");
+    const prod = searchParams?.get("productId");
     if (pp) setParentProjectId(pp);
     if (pt) setParentTitle(decodeURIComponent(pt));
     if (ep) setEditProjectId(ep);
+    // Só a árvore de navegação usa este productId; não confunde com o do fluxo de criação.
+    setTreeProductId(prod ?? "");
   }, [searchParams]);
 
   // Quando editProjectId estiver presente, carrega a spec existente do servidor
@@ -1232,6 +1240,30 @@ export default function SpecPage() {
       return f;
     });
   }, [stopChatPolling]);
+
+  // Pivô Bancada (Opção 1): a árvore "Pasta do produto" NAVEGA o editor trocando
+  // editProjectId na MESMA rota (/spec) — a página NÃO desmonta. Sem este reset, o
+  // estado transitório do projeto anterior vazaria para o novo: o chat continuaria
+  // exibindo (e reenviando ao CTO) a conversa do projeto A, e um "Aplicar" pendente
+  // gravaria o conteúdo revisado de A no projeto B (arquivo/sha errados → 404 ou,
+  // pior, sobrescrita silenciosa). Ao trocar de projeto, zeramos tudo que é por-projeto:
+  // conversa/entrada de chat, arquivo ativo + revisão pendente, dirty/stale e erros.
+  // (specMarkdown/título/gapCount são recarregados pelos seus próprios efeitos.)
+  useEffect(() => {
+    chatSeqRef.current += 1;      // invalida qualquer job de chat em voo do projeto anterior
+    stopChatPolling();
+    setChatMessages([]);
+    setChatInput("");
+    setChatSending(false);
+    setChatError(null);
+    setActiveFile(null);
+    setTreeDirty(false);
+    setPendingApply(null);
+    setApplyError(null);
+    setApplyConflict(false);
+    setStaleValidation(false);
+    setApproveError(null);
+  }, [editProjectId, stopChatPolling]);
 
   const handleChatSend = useCallback(async () => {
     const text = chatInput.trim();
@@ -1512,6 +1544,20 @@ export default function SpecPage() {
   }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
       projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router]);
 
+  // ── Pivô Bancada (Opção 1): árvore "Pasta do produto" dirige o editor ───────
+  // Clicar num arquivo da árvore navega o editor para o projeto dono. O editor,
+  // o chat "Melhorar com IA" e a Validação/GAPs já são por-projeto; então trocar
+  // de arquivo = trocar de editProjectId (mesma página /spec). Mesmo projeto já
+  // aberto → no-op (em prod cada projeto tem 1 arquivo; a spec dele já está no editor).
+  const openProductFile = useCallback((projId: string) => {
+    if (projId === editProjectId) return;
+    const q = new URLSearchParams({ editProjectId: projId });
+    if (treeProductId) q.set("productId", treeProductId);
+    // replace (não push): navegar entre arquivos da pasta é troca de contexto, não
+    // um passo de histórico — senão "Voltar" percorreria cada arquivo já aberto.
+    router.replace(`/spec?${q.toString()}`);
+  }, [editProjectId, treeProductId, router]);
+
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.length) { setFiles((p) => [...p, ...Array.from(e.target.files!)]); setUploadError(null); }
@@ -1664,7 +1710,9 @@ export default function SpecPage() {
           <Box sx={{ flexGrow: 1 }}>
             <Typography variant="h5" fontWeight={700}>Editar Spec</Typography>
             <Typography variant="body2" color="text.secondary">
-              Edite a spec antes de iniciar o pipeline.
+              {treeProductId
+                ? "Edite a spec do produto — navegue pelos arquivos na árvore da pasta, à esquerda."
+                : "Edite a spec antes de iniciar o pipeline."}
             </Typography>
           </Box>
           <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
@@ -1676,6 +1724,18 @@ export default function SpecPage() {
           <Alert severity="error" sx={{ mb: 2 }} onClose={() => setEditLoadError(null)}>{editLoadError}</Alert>
         )}
 
+        {/* Pivô Bancada (Opção 1): quando aberto de um produto (?productId=…), a árvore da
+            PASTA DO PRODUTO fica num rail ESTÁVEL à esquerda de TODO o corpo de edição —
+            fora do gate de carregamento — para não desmontar/re-buscar (nem piscar) a cada
+            troca de projeto pela navegação. Só ≥lg (no md a árvore roubaria largura do editor;
+            no mobile o editor ocupa a tela). Reusa a árvore da aba "Código" da fábrica. */}
+        <Box sx={{ display: "flex", gap: 2, alignItems: "flex-start" }}>
+          {treeProductId && (
+            <Box sx={{ width: 240, flexShrink: 0, display: { xs: "none", lg: "block" }, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden", position: "sticky", top: 16, height: { lg: 640 } }}>
+              <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
+            </Box>
+          )}
+          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
         {editLoading && (
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, py: 6, justifyContent: "center" }}>
             <CircularProgress size={24} />
@@ -1693,7 +1753,10 @@ export default function SpecPage() {
               </Alert>
             )}
             <SpecValidationPanel projectId={editProjectId} isAdmin={authStore.isZentrizAdmin} reloadSignal={validationReloadSignal} />
-            <SpecTreePanel projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} />
+            {/* key={editProjectId}: ao navegar entre projetos pela árvore da pasta, remonta
+                o painel para zerar seu `selected` interno (senão destacaria o arquivo do
+                projeto anterior e não re-emitiria onFileSelected). */}
+            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} />
           </Box>
         )}
 
@@ -1753,6 +1816,8 @@ export default function SpecPage() {
             </CardContent>
           </Card>
         )}
+          </Box>
+        </Box>
 
         {editorDialog}
         {specMarkdown !== null && !editLoading && mobileChat}

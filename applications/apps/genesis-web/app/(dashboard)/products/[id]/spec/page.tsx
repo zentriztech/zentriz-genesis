@@ -1,25 +1,21 @@
 "use client";
 
-// Editor da PASTA do produto (redesign Bancada Onda 2). Aberto ao clicar num card de
-// produto na Bancada (/specs). Mostra os arquivos de spec de TODOS os projetos do produto
-// numa árvore estilo VSCode (como a aba "Código" da fábrica, mas por-produto e editável).
-// Fonte: GET /api/products/:id/spec-tree (índice); conteúdo por-arquivo via /spec-file.
+// Pivô Bancada (Opção 1): a tela dedicada /products/:id/spec virou REDUNDANTE — o editor
+// da pasta do produto agora vive no próprio /spec (árvore "Pasta do produto" ao lado do
+// editor + chat de IA + Validação/GAPs, dirigida pela árvore). Esta rota apenas RESOLVE o
+// projeto representativo do produto e REDIRECIONA para /spec?editProjectId=…&productId=…
+// (mantém links/bookmarks antigos vivos). Fonte: GET /api/products/:id/spec-tree.
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
-import Inventory2OutlinedIcon from "@mui/icons-material/Inventory2Outlined";
-import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
 import { apiGet } from "@/lib/api";
-import { authStore } from "@/stores/authStore";
-import { ProductSpecExplorer, type ProductSpecProject } from "@/components/ProductSpecExplorer";
+import type { ProductSpecProject } from "@/components/ProductSpecExplorer";
 
 interface ProductSpecTree {
   productId: string;
@@ -30,76 +26,58 @@ interface ProductSpecTree {
   truncated: boolean;
 }
 
-export default function ProductSpecPage() {
+// Projeto representativo do produto p/ abrir o editor: o que tem o arquivo primário;
+// senão o primeiro projeto. (Em prod cada projeto tem 1 arquivo, então basta o 1º.)
+function pickPrimaryProjectId(projects: ProductSpecProject[]): string | null {
+  const withPrimaryFile = projects.find((p) => p.files.some((f) => f.isPrimary));
+  return (withPrimaryFile ?? projects[0])?.projectId ?? null;
+}
+
+export default function ProductSpecRedirectPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const productId = params?.id;
-  const [data, setData] = useState<ProductSpecTree | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [empty, setEmpty] = useState(false);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
     if (!productId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      setData(await apiGet<ProductSpecTree>(`/api/products/${productId}/spec-tree`));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Falha ao carregar a pasta do produto");
-    } finally {
-      setLoading(false);
-    }
-  }, [productId]);
+    let alive = true;
+    apiGet<ProductSpecTree>(`/api/products/${productId}/spec-tree`)
+      .then((tree) => {
+        if (!alive) return;
+        const proj = pickPrimaryProjectId(tree.projects ?? []);
+        if (proj) router.replace(`/spec?editProjectId=${proj}&productId=${productId}`);
+        else setEmpty(true);
+      })
+      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : "Falha ao abrir a pasta do produto"); });
+    return () => { alive = false; };
+  }, [productId, router]);
 
-  useEffect(() => { load(); }, [load]);
+  if (error) {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
+        <Button variant="outlined" onClick={() => router.push("/specs")}>Voltar à Bancada</Button>
+      </Box>
+    );
+  }
 
-  const projectCount = data?.projects.length ?? 0;
+  if (empty) {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Este produto ainda não tem specs. Crie ou envie uma SPEC na Bancada e vincule-a a este produto.
+        </Alert>
+        <Button variant="outlined" onClick={() => router.push("/specs")}>Voltar à Bancada</Button>
+      </Box>
+    );
+  }
 
   return (
-    <Box>
-      <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 2, flexWrap: "wrap", rowGap: 1 }}>
-        <Button size="small" variant="text" startIcon={<ArrowBackIcon />} onClick={() => router.push("/specs")}
-          sx={{ textTransform: "none" }}>
-          Bancada
-        </Button>
-        <Inventory2OutlinedIcon sx={{ color: "#8B5CF6" }} />
-        <Box sx={{ flexGrow: 1, minWidth: 200 }}>
-          <Typography variant="h6" fontWeight={700}>
-            {data?.productName ?? "Pasta do produto"}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Edite os arquivos de spec do produto inteiro — cada projeto é uma pasta. Salvamento por
-            arquivo com verificação de concorrência; projetos já em fábrica ficam somente leitura.
-          </Typography>
-        </Box>
-        {data && (
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-            <Chip size="small" variant="outlined" label={`${projectCount} projeto(s)`} sx={{ fontSize: "0.65rem", height: 20 }} />
-            <Chip size="small" variant="outlined" label={`${data.totalFiles} arquivo(s)`} sx={{ fontSize: "0.65rem", height: 20 }} />
-            <Button size="small" variant="outlined" startIcon={<AccountTreeOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
-              onClick={() => router.push(`/projects?product=${productId}`)} sx={{ textTransform: "none" }}>
-              Ver na fábrica
-            </Button>
-          </Stack>
-        )}
-      </Stack>
-
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
-
-      {loading ? (
-        <Box sx={{ display: "flex", justifyContent: "center", py: 8 }}><CircularProgress size={28} /></Box>
-      ) : data && data.totalFiles === 0 ? (
-        <Alert severity="info">
-          Este produto ainda não tem arquivos de spec. Crie ou envie uma SPEC na Bancada e vincule-a a este produto.
-        </Alert>
-      ) : data ? (
-        <ProductSpecExplorer
-          projects={data.projects}
-          truncated={data.truncated}
-          totalFiles={data.totalFiles}
-          readOnly={authStore.isZentrizAdmin}
-        />
-      ) : null}
-    </Box>
+    <Stack alignItems="center" justifyContent="center" spacing={2} sx={{ py: 10 }}>
+      <CircularProgress size={28} />
+      <Typography variant="body2" color="text.secondary">Abrindo a pasta do produto…</Typography>
+    </Stack>
   );
 }

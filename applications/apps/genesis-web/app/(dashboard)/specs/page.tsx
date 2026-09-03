@@ -450,8 +450,8 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
           ) : (
         <Stack spacing={3}>
           {/* Produtos reais → CARDS de hierarquia navegáveis. Clicar abre a PASTA do produto
-              (editor estilo VSCode, produto inteiro — /products/:id/spec). As ações por-arquivo
-              (editar/validar/chat) vivem lá dentro; "Promover produto inteiro" fica no card. */}
+              no próprio /spec (árvore "Pasta do produto" dirige UM editor + IA + Validação/GAPs).
+              As ações por-arquivo vivem lá dentro; "Promover produto inteiro" fica no card. */}
           {groups.some((g) => !g.isInbox) && (
             <Box>
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -463,7 +463,16 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                   <Card key={g.productId} variant="outlined"
                     sx={{ display: "flex", flexDirection: "column", borderTop: "3px solid #8B5CF6",
                       transition: "box-shadow 0.15s, transform 0.15s", "&:hover": { boxShadow: 3, transform: "translateY(-2px)" } }}>
-                    <CardActionArea onClick={() => router.push(`/products/${g.productId}/spec`)} sx={{ flexGrow: 1 }}>
+                    <CardActionArea
+                      disabled={!g.specs[0]?.id}
+                      onClick={() => {
+                        // Pivô Bancada (Opção 1): abre o editor /spec direto no 1º projeto do
+                        // produto, levando ?productId= p/ montar a árvore "Pasta do produto"
+                        // (navega entre os projetos). Sem tela redundante /products/:id/spec.
+                        const first = g.specs[0]?.id;
+                        if (first) router.push(`/spec?editProjectId=${first}&productId=${g.productId}`);
+                      }}
+                      sx={{ flexGrow: 1 }}>
                       <CardContent sx={{ pb: 1 }}>
                         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
                           <FolderOpenOutlinedIcon sx={{ fontSize: "1.1rem", color: "#8B5CF6" }} />
