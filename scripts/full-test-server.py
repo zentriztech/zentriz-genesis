@@ -11,6 +11,7 @@ Endpoints:
   GET  /health          — healthcheck
 """
 import http.server, json, subprocess, os, logging, threading, time, uuid, hmac
+import urllib.request, urllib.error
 from pathlib import Path
 from socketserver import ThreadingMixIn
 
@@ -77,6 +78,141 @@ def release_heavy_slot(kind: str, job_id: str) -> None:
         log.info(f"[SEM] released kind={kind} job={job_id}")
     except ValueError:
         log.error(f"[SEM] release without acquire kind={kind} job={job_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lei 8 (Fase 2) — SANDBOX POR-JOB do executor NÃO-CONFIÁVEL
+#
+# O subprocesso `claude --dangerously-skip-permissions` (e os builds do cliente)
+# rodam CÓDIGO ARBITRÁRIO. Antes eles herdavam `os.environ.copy()` — ou seja, TODO
+# o env do FTS, que carrega segredos do control plane da Zentriz: o token admin
+# (GENESIS_API_TOKEN → zentriz_admin em TODOS os tenants), chaves AWS estáticas
+# (AKIA…), FTS_AUTH_TOKEN, JWT_SECRET, credenciais de DB, chave Foundry. Isso é
+# intrusão na Jóia da Coroa (Genesis/Deadpool/Connect/DB multi-tenant/conta AWS).
+#
+# Agora construímos um env MÍNIMO por allowlist (default-deny p/ segredos) e
+# injetamos SÓ um token de PROJETO curto (svc:"runner"+projectId), cunhado pela API.
+# Bedrock continua funcionando via instance role (IMDS) — NÃO precisa de chave AKIA
+# no env; por isso as chaves estáticas podem (e devem) ser removidas do subprocesso.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Chaves que PODEM cruzar para o subprocesso não-confiável. NENHUMA é segredo de
+# control plane. Modelos/região do Bedrock são necessários p/ o claude achar o
+# modelo e a região (as CREDENCIAIS vêm do IMDS/instance role, sem env).
+_SANDBOX_ENV_ALLOW = {
+    # básicos de shell/OS
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "TMPDIR", "TZ", "PWD",
+    # claude CLI + Bedrock (sem credencial — IMDS resolve)
+    "CLAUDE_BIN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "AWS_REGION", "AWS_DEFAULT_REGION",
+    "ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    # toolchain node/pnpm (build do cliente) — não-segredos
+    "NODE_ENV", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS", "PNPM_HOME",
+    "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+    # proxy corporativo (se houver) — não-segredo
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+}
+# Prefixos de vars de cache/config de ferramentas (nunca segredos).
+_SANDBOX_ENV_ALLOW_PREFIXES = ("XDG_",)
+
+
+def _sanitized_base_env() -> dict:
+    """Env MÍNIMO por allowlist — SEM nenhum segredo de control plane.
+    Default-deny: só passa o que está explicitamente na allowlist."""
+    out = {}
+    for k, v in os.environ.items():
+        if k in _SANDBOX_ENV_ALLOW or k.startswith(_SANDBOX_ENV_ALLOW_PREFIXES):
+            out[k] = v
+    # Bedrock via instance role (IMDS): garante região + flag mesmo se ausentes.
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+    out.setdefault("AWS_REGION", region)
+    out.setdefault("AWS_DEFAULT_REGION", region)
+    out.setdefault("CLAUDE_CODE_USE_BEDROCK", os.environ.get("CLAUDE_CODE_USE_BEDROCK", "1"))
+    out.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    out.setdefault("HOME", os.environ.get("HOME", "/home/ubuntu"))
+    return out
+
+
+def _fts_admin_token() -> str:
+    """Token admin do FTS (vive SÓ no processo FTS confiável). Usado apenas para
+    CUNHAR o token de projeto na API — NUNCA injetado no env do claude."""
+    tok = (os.environ.get("GENESIS_API_TOKEN") or os.environ.get("GENESIS_INTERNAL_TOKEN") or "").strip()
+    if tok:
+        return tok
+    # Fallback: lê do .env de prod (mesmo padrão já usado antes no handler).
+    try:
+        with open("/opt/zentriz-genesis/.env") as f:
+            for line in f:
+                if line.startswith("GENESIS_API_TOKEN="):
+                    return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _mint_scoped_token(project_id: str, timeout: float = 15.0) -> str:
+    """Cunha um token de PROJETO (svc:"runner"+projectId) via POST /api/internal/cyborg-token,
+    autenticando com o token admin do FTS. Retorna "" em falha (o caller decide fail-closed).
+    O token admin é usado SÓ nesta chamada server-to-server; jamais vai para o subprocesso."""
+    admin = _fts_admin_token()
+    if not admin:
+        log.error("[sandbox] sem GENESIS_API_TOKEN no FTS — não é possível cunhar token de projeto")
+        return ""
+    base = os.environ.get("CYBORG_HOST_API_URL", "http://localhost:3000").rstrip("/")
+    url = f"{base}/api/internal/cyborg-token"
+    data = json.dumps({"projectId": project_id}).encode()
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "Content-Type": "application/json",
+        "X-Internal-Token": admin,
+        "Authorization": f"Bearer {admin}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read().decode())
+            tok = (resp.get("token") or "").strip()
+            if not tok:
+                log.error(f"[sandbox] resposta sem token p/ {project_id[:8]}: {resp}")
+            return tok
+    except Exception as e:
+        log.error(f"[sandbox] falha ao cunhar token escopado p/ {project_id[:8]}: {e}")
+        return ""
+
+
+def _resolve_scoped_token(payload: dict, project_id: str) -> str:
+    """Token de projeto para o job: prioriza o do payload (caller confiável já cunhou —
+    caminho Fase 3, quando o FTS remoto NÃO tem token admin), senão cunha via API
+    (caminho Fase 2, FTS co-locado com token admin). "" ⇒ fail-closed no caller."""
+    tok = (payload.get("genesis_token") or payload.get("scoped_token") or "").strip()
+    if tok:
+        return tok
+    return _mint_scoped_token(project_id)
+
+
+def _build_cyborg_sandbox_env(project_id: str, prod_id: str, model_id: str,
+                              scoped_token: str, api_key: str = "") -> dict:
+    """Env do subprocesso Cyborg: base saneada + PATH dos wrappers + SÓ o token
+    de projeto escopado (nunca o admin). Os wrappers leem GENESIS_API_TOKEN/API_BASE_URL."""
+    env = _sanitized_base_env()
+    wrapper_dir = "/opt/zentriz-genesis/scripts/cyborg-wrappers"
+    env["PATH"] = f"{wrapper_dir}:{env.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+    env["PROJECT_ID"] = project_id
+    env["PROD_ID"] = prod_id or ""
+    # Cyborg roda no HOST → precisa da URL pública da API (não a URL de container).
+    host_api = os.environ.get("CYBORG_HOST_API_URL", "http://localhost:3000")
+    env["API_BASE_URL"] = host_api
+    env["CYBORG_HOST_API_URL"] = host_api
+    # Token de PROJETO escopado (svc:runner+projectId) — substitui o admin onipotente.
+    env["GENESIS_API_TOKEN"] = scoped_token
+    env["GENESIS_TOKEN"] = scoped_token
+    if model_id:
+        env["CLAUDE_MODEL"] = model_id
+        env["ANTHROPIC_MODEL"] = model_id
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
+        env["CLAUDE_API_KEY"] = api_key
+    return env
 
 # Mapeamento group → RUNBOOK file (derivado do prefixo do project_type)
 RUNBOOK_MAP = {
@@ -243,6 +379,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
             return
 
+        # Lei 8 (Fase 2): SANDBOX — o build roda scripts do cliente (postinstall/build),
+        # que são código não-confiável. Env mínimo, SEM segredos do FTS (token admin,
+        # chaves AWS, JWT_SECRET, Foundry). Um postinstall malicioso não acha nada nosso.
+        build_env = _sanitized_base_env()
+
         # 1. pnpm install (leve — usa lockfile se existir)
         log.info(f"[cyborg-build] {project_id[:8]}: pnpm install em {apps_dir}")
         install_rc = -1; install_out = ""
@@ -250,6 +391,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             r = subprocess.run(
                 "pnpm install --prefer-offline --no-frozen-lockfile 2>&1 | tail -50",
                 cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=180,
+                env=build_env,
             )
             install_rc = r.returncode
             install_out = (r.stdout or "")[-1500:]
@@ -263,6 +405,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             r = subprocess.run(
                 "pnpm build 2>&1 | tail -80",
                 cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=timeout,
+                env=build_env,
             )
             build_rc = r.returncode
             build_out = (r.stdout or "")[-3500:]
@@ -275,6 +418,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             r = subprocess.run(
                 "npx --no-install tsc --noEmit 2>&1 | tail -30",
                 cwd=str(apps_dir), shell=True, capture_output=True, text=True, timeout=60,
+                env=build_env,
             )
             tc_rc = r.returncode
             tc_out = (r.stdout or "")[-2000:]
@@ -372,31 +516,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _claude_bin = candidate
                     break
 
-        # Preparar env: injetar PATH dos wrappers do Cyborg + tokens/URLs
-        wrapper_dir = "/opt/zentriz-genesis/scripts/cyborg-wrappers"
-        env = os.environ.copy()
-        env["PATH"] = f"{wrapper_dir}:{env.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
-        env["PROJECT_ID"] = project_id
-        env["PROD_ID"] = prod_id or ""
-        # API_BASE_URL do FTS aponta pra container api — Cyborg V3 (que roda no HOST) precisa da URL pública
-        env["API_BASE_URL"] = env.get("CYBORG_HOST_API_URL", "http://localhost:3000")
-        # GENESIS_API_TOKEN já deve estar no env do FTS (setado via systemd)
-        if not env.get("GENESIS_API_TOKEN"):
-            # tentar ler do .env
-            try:
-                with open("/opt/zentriz-genesis/.env") as f:
-                    for line in f:
-                        if line.startswith("GENESIS_API_TOKEN="):
-                            env["GENESIS_API_TOKEN"] = line.split("=", 1)[1].strip()
-                            break
-            except Exception:
-                pass
-        if model_id:
-            env["CLAUDE_MODEL"] = model_id
-            env["ANTHROPIC_MODEL"] = model_id
-        # CLAUDE_CODE_USE_BEDROCK já deve estar setado — Cyborg V3 usa Bedrock
+        # Lei 8 (Fase 2): SANDBOX por-job. O env do subprocesso é MÍNIMO e NÃO herda
+        # segredos do FTS. O acesso à API é via token de PROJETO escopado (svc:runner+
+        # projectId), não o admin onipotente. Fail-closed: sem token escopado, NÃO roda
+        # (jamais entregar admin — nem rodar sem credencial — ao executor não-confiável).
+        scoped_token = _resolve_scoped_token(payload, project_id)
+        if not scoped_token:
+            self._json(502, {"ok": False, "error": "sandbox: falha ao obter token de projeto escopado (fail-closed)"})
+            return
+        env = _build_cyborg_sandbox_env(project_id, prod_id, model_id, scoped_token)
 
-        log.info(f"[cyborg-engineer] {project_id[:8]}: sessão longa iniciada. cwd={cwd} model={model_id} timeout={timeout}s")
+        log.info(f"[cyborg-engineer] {project_id[:8]}: sessão longa iniciada (env sandbox). cwd={cwd} model={model_id} timeout={timeout}s")
 
         # Executar Claude Code com system prompt + user prompt via stdin
         cmd = [_claude_bin, "--dangerously-skip-permissions", "-p"]
@@ -463,11 +593,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         prompt_file = Path(f"/tmp/cyborg-{project_id[:8]}-{action_id}.md")
         prompt_file.write_text(prompt, encoding="utf-8")
 
-        # Executa Claude Code CLI com model_id override
-        env = os.environ.copy()
-        if model_id:
-            env["CLAUDE_MODEL"] = model_id
-            env["ANTHROPIC_MODEL"] = model_id
+        # Lei 8 (Fase 2): SANDBOX por-job — env mínimo + token de projeto escopado
+        # (svc:runner+projectId), nunca o admin do FTS. Fail-closed sem token escopado.
+        scoped_token = _resolve_scoped_token(payload, project_id)
+        if not scoped_token:
+            self._json(502, {"action_id": action_id, "status": "FAILED",
+                             "error": "sandbox: falha ao obter token de projeto escopado (fail-closed)"})
+            return
+        env = _build_cyborg_sandbox_env(project_id, prod_id, model_id, scoped_token)
         # FT-18 fix (2026-07-02): CLAUDE_BIN precisa apontar para binário real.
         # Default do módulo era ~/.local/bin/claude (root não tem); host usa /usr/bin/claude.
         _claude_bin = CLAUDE_BIN
@@ -534,7 +667,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if verify_cmd:
             try:
                 vr = subprocess.run(verify_cmd, cwd=cwd, shell=True, capture_output=True,
-                                    text=True, timeout=60)
+                                    text=True, timeout=60, env=env)
                 verify_output = ((vr.stdout or "") + "\n" + (vr.stderr or ""))[-2000:]
                 verify_rc = vr.returncode
             except Exception as e:
@@ -837,7 +970,9 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         log.info("TASK-FULL-TEST iniciada: project=%s", project_id)
         wrapper_prompt = f"Você está em: {apps_path}\nDiretório de projeto: {project_path}\n\n{prompt}"
 
-        subprocess_env = os.environ.copy()
+        # Lei 8 (Fase 2): SANDBOX por-job — env mínimo, SEM segredos do FTS. Este path
+        # (full-test interno) não usa wrappers/token Genesis; usa a api_key do payload.
+        subprocess_env = _sanitized_base_env()
         if api_key:
             subprocess_env["ANTHROPIC_API_KEY"] = api_key
             subprocess_env["CLAUDE_API_KEY"]     = api_key
@@ -940,7 +1075,10 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
 
         post_log(f"Cyborg iniciado — tentativa {attempt}/5. Tipo: {project_type}. Lendo RUNBOOK...")
 
-        subprocess_env = os.environ.copy()
+        # Lei 8 (Fase 2): SANDBOX — env mínimo, SEM segredos do FTS. (Este handler é
+        # LEGACY/dead code: /launch-cyborg devolve 410 antes daqui. Sanitizado mesmo
+        # assim p/ defense-in-depth: se um dia for reativado, não vaza a Jóia da Coroa.)
+        subprocess_env = _sanitized_base_env()
         if api_key:
             subprocess_env["ANTHROPIC_API_KEY"] = api_key
             subprocess_env["CLAUDE_API_KEY"]     = api_key
@@ -949,7 +1087,7 @@ print(json.dumps({{"results": results, "console_errors": console_errors[-30:]}})
         subprocess_env["PROJECT_DIR"]      = project_dir
         subprocess_env["PROJECT_TYPE"]     = project_type
         subprocess_env["GENESIS_API_URL"]  = genesis_api_url
-        subprocess_env["GENESIS_TOKEN"]    = genesis_token
+        subprocess_env["GENESIS_TOKEN"]    = genesis_token   # token do payload (já escopado pelo caller)
         subprocess_env["ATTEMPT"]          = str(attempt)
 
         # Heartbeat: posta a cada 90s enquanto claude roda

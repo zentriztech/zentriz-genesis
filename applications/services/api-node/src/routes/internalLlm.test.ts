@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { signToken } from "../auth.js";
+import { signToken, verifyToken } from "../auth.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const OTHER_TENANT = "22222222-2222-4222-8222-222222222222";
@@ -16,11 +16,21 @@ const PROJECT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER_PROJECT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const STATIC_TOKEN = "static-internal-secret";
 
-// pool.query só é exercido no caminho IDOR do tenant_admin (SELECT tenant_id FROM projects).
+// pool.query serve dois caminhos: (a) IDOR do tenant_admin no llm-config
+// (SELECT tenant_id FROM projects) e (b) o endpoint cyborg-token (JOIN com users).
 let projectOwnerTenant: string | null = TENANT;
+// Linha controlável do cyborg-token; null ⇒ projeto inexistente (404).
+let cyborgProjectRow: Record<string, unknown> | null = {
+  tenant_id: TENANT, created_by: "owner-1", owner_email: "owner@x", owner_role: "user",
+};
 vi.mock("../db/client.js", () => ({
   pool: {
-    query: async (_sql: string, _params: unknown[]) => ({ rows: [{ tenant_id: projectOwnerTenant }] }),
+    query: async (sql: string, _params: unknown[]) => {
+      if (/created_by, u\.email/.test(sql)) {
+        return { rows: cyborgProjectRow ? [cyborgProjectRow] : [] };
+      }
+      return { rows: [{ tenant_id: projectOwnerTenant }] };
+    },
   },
 }));
 
@@ -54,6 +64,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   projectOwnerTenant = TENANT;
+  cyborgProjectRow = { tenant_id: TENANT, created_by: "owner-1", owner_email: "owner@x", owner_role: "user" };
 });
 
 function get(projectId: string, token: string, header: "x-internal-token" | "authorization" = "x-internal-token") {
@@ -107,5 +118,55 @@ describe("GET /api/internal/project-llm-config/:projectId — binding por projet
     const token = signToken({ sub: "u1", email: "u@x", role: "user", tenantId: TENANT, svc: "runner", projectId: PROJECT }, "1h");
     const res = await get(PROJECT, token, "authorization");
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("POST /api/internal/cyborg-token — Lei 8 (token de projeto p/ o sandbox do FTS)", () => {
+  function mint(body: unknown, token = STATIC_TOKEN) {
+    return app.inject({
+      method: "POST", url: "/api/internal/cyborg-token",
+      headers: { "x-internal-token": token, "content-type": "application/json" },
+      payload: body,
+    });
+  }
+
+  it("token admin estático → cunha token svc:runner ESCOPADO por projeto (sub=created_by, tenant do projeto)", async () => {
+    const res = await mint({ projectId: PROJECT });
+    expect(res.statusCode).toBe(200);
+    const { token } = res.json() as { token: string };
+    const decoded = verifyToken(token)!;
+    expect(decoded.svc).toBe("runner");
+    expect(decoded.projectId).toBe(PROJECT);
+    expect(decoded.tenantId).toBe(TENANT);
+    expect(decoded.sub).toBe("owner-1");   // sub = created_by → cobre projeto "solto"
+    expect(decoded.role).toBe("user");
+  });
+
+  it("dono zentriz_admin → REBAIXA role para tenant_admin (nunca entrega poder global ao executor)", async () => {
+    cyborgProjectRow = { tenant_id: TENANT, created_by: "adm", owner_email: "a@x", owner_role: "zentriz_admin" };
+    const res = await mint({ projectId: PROJECT });
+    expect(res.statusCode).toBe(200);
+    const decoded = verifyToken((res.json() as { token: string }).token)!;
+    expect(decoded.role).toBe("tenant_admin");
+    expect(decoded.role).not.toBe("zentriz_admin");
+  });
+
+  it("projeto inexistente → 404", async () => {
+    cyborgProjectRow = null;
+    const res = await mint({ projectId: PROJECT });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("projectId ausente → 400", async () => {
+    const res = await mint({});
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("sem token → 401 fail-closed em produção", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/internal/cyborg-token",
+      headers: { "content-type": "application/json" }, payload: { projectId: PROJECT },
+    });
+    expect(res.statusCode).toBe(401);
   });
 });

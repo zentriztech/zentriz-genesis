@@ -1,7 +1,7 @@
 // Endpoint interno — resolvido pelo runner_server (não exposto ao portal)
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { resolveProjectLlmConfig } from "../services/tenantLlmConfig.js";
-import { verifyToken, type TokenPayload } from "../auth.js";
+import { verifyToken, signTokenWithExpiry, type TokenPayload } from "../auth.js";
 import { pool } from "../db/client.js";
 
 /**
@@ -96,6 +96,67 @@ export async function internalLlmRoutes(app: FastifyInstance): Promise<void> {
         // Nunca retornar api_key completa — runner_server injeta via env, não via response body
         // Mas aqui sim retornamos tudo pois é chamada interna server-to-server (não browser)
         return reply.send({ ok: true, ...cfg });
+      } catch (err) {
+        return reply.status(500).send({ code: "INTERNAL_ERROR", message: String(err) });
+      }
+    }
+  );
+
+  // Lei 8 (Fase 2 — sandbox por-job do FTS): POST /api/internal/cyborg-token
+  //
+  // O executor NÃO-CONFIÁVEL (`claude --dangerously-skip-permissions` no host/FTS)
+  // NUNCA pode receber o token onipotente `GENESIS_API_TOKEN` (autentica como
+  // zentriz_admin → acesso a TODOS os tenants/projetos = intrusão na Jóia da Coroa).
+  // Este endpoint cunha um token de PROJETO curto (svc:"runner" + `projectId`), a
+  // partir do dono/tenant do projeto, para o FTS injetar SÓ ele no env do subprocesso.
+  //
+  // - `sub = created_by` + `tenantId = project.tenant_id` cobrem os DOIS caminhos de
+  //   `canAccessProjectRow`: match por tenant (projeto de tenant) OU por dono (projeto
+  //   "solto", tenant_id null). Assim o Cyborg mantém acesso às rotas do PRÓPRIO projeto
+  //   (dialogue/accept/reject/cyborg-log/deploy-ephemeral/github-repo — todas por
+  //   checkProjectAccess), sem jamais receber poder de admin global.
+  // - role zentriz_admin é REBAIXADA para "tenant_admin": o acesso do Cyborg não depende
+  //   de role===zentriz_admin (usa match tenant/dono), então rebaixar não quebra nada e
+  //   garante que um token vazado não abra rotas admin-only.
+  // - Auth: mesmo `authenticateInternal` (o FTS chama com seu GENESIS_API_TOKEN, que
+  //   vive SÓ no processo FTS confiável — nunca no env do claude).
+  app.post<{ Body: { projectId?: string } }>(
+    "/api/internal/cyborg-token",
+    async (request, reply) => {
+      const auth = authenticateInternal(request);
+      if (!auth.ok) {
+        return reply.status(401).send({ code: "UNAUTHORIZED", message: "Token interno inválido" });
+      }
+      const projectId = (request.body?.projectId ?? "").trim();
+      if (!projectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "projectId obrigatório" });
+
+      try {
+        const r = await pool.query<{
+          tenant_id: string | null; created_by: string | null;
+          owner_email: string | null; owner_role: string | null;
+        }>(
+          `SELECT p.tenant_id, p.created_by, u.email AS owner_email, u.role AS owner_role
+             FROM projects p LEFT JOIN users u ON u.id = p.created_by
+            WHERE p.id = $1`,
+          [projectId],
+        );
+        const proj = r.rows[0];
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+
+        // Rebaixa admin → tenant_admin (o Cyborg nunca precisa de poder global).
+        const rawRole = (proj.owner_role ?? "tenant_admin").trim() || "tenant_admin";
+        const role = rawRole === "zentriz_admin" ? "tenant_admin" : rawRole;
+        const scoped: TokenPayload = {
+          sub: proj.created_by ?? `cyborg:${projectId}`,
+          email: proj.owner_email ?? "cyborg@genesis.local",
+          role,
+          tenantId: proj.tenant_id,
+          svc: "runner",
+          projectId,
+        };
+        // 6h: cobre uma sessão longa do Cyborg (até 60min) + reworks/retries do job.
+        const token = signTokenWithExpiry(scoped, "6h");
+        return reply.send({ ok: true, token, projectId, tenantId: proj.tenant_id, role });
       } catch (err) {
         return reply.status(500).send({ code: "INTERNAL_ERROR", message: String(err) });
       }
