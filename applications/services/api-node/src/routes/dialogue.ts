@@ -232,10 +232,17 @@ export async function dialogueRoutes(app: FastifyInstance) {
       const allowed = await checkProjectAccess(client, projectId, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
 
+      // RFC-0004 Onda 5 (F5): severidade classificada NA EMISSÃO (heurística determinística
+      // da migration 075 — o summary aplica a mesma como fallback p/ INSERTs diretos legados).
+      const severity =
+        event_type === "error" || event_type === "escalation" ? "critical"
+        : event_type === "product_ready" ? "notice"
+        : from_agent === "cyborg" ? "warning"
+        : "info";
       await client.query(
-        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human, request_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [projectId, from_agent, to_agent, event_type ?? null, summary_human, request_id ?? null]
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human, request_id, severity)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [projectId, from_agent, to_agent, event_type ?? null, summary_human, request_id ?? null, severity]
       );
       return reply.status(201).send({ ok: true });
     } finally {

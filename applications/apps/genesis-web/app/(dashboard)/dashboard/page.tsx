@@ -26,6 +26,7 @@ import SendIcon from "@mui/icons-material/Send";
 import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import { apiGet } from "@/lib/api";
+import DashboardLiveOps from "@/components/DashboardLiveOps";
 import type { Project, Product } from "@/types";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
@@ -288,6 +289,9 @@ function DashboardPageInner() {
           {authStore.tenant ? `${authStore.tenant.name} · Plano ${authStore.tenant.plan.name}` : "Painel de controle Genesis"}
         </Typography>
       </MotionBox>
+
+      {/* RFC-0004 Onda 5: KPIs vivos (fábrica agora + faixa gerencial admin) */}
+      <DashboardLiveOps />
 
       {/* ── Aviso da migração 064 (§5.7) — primeira visita, dispensável ── */}
       {showMigrationNotice && (
