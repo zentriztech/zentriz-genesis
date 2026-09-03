@@ -9,15 +9,13 @@
  * > env TENANT_MONTHLY_LLM_BUDGET_USD_DEFAULT (unset/0/inválido = sem cap).
  * NULL em tenant E plano + env ausente ⇒ SEM CAP (fail-safe: comportamento atual).
  *
- * Fontes de gasto (dual-source, MAX entre as duas — nunca soma, para não dupla-contar):
- *  - pipeline_cost_ledger (migration 027): fonte canônica de usd_cost por chamada,
- *    porém HOJE nenhum código a alimenta (constatado em 2026-09-02).
- *  - project_agent_metrics (migration 003): o que o runner REALMENTE alimenta via
- *    POST /agent-metrics; custo estimado com a MESMA tabela de preços por modelo do
- *    GET /api/projects/:id/metrics (Opus 15/75, demais 3/15 USD por MTok).
- * Usar MAX faz o cap funcionar desde já e continuar correto quando o ledger 027
- * passar a ser alimentado.
+ * Fonte de gasto (RFC-0004 D4 — fonte ÚNICA): project_agent_metrics (migration 003),
+ * alimentada via POST /agent-metrics; custo estimado com a tabela única de preços por
+ * modelo (lib/modelPricing.ts). A antiga pipeline_cost_ledger (027) era dead table
+ * (zero INSERTs desde sempre) e foi dropada na migration 073.
  */
+
+import { priceCaseSql } from "../lib/modelPricing.js";
 
 /** Interface mínima de acesso ao banco (aceita Pool ou PoolClient; facilita mock em teste). */
 export interface Queryable {
@@ -37,11 +35,8 @@ function monthStartDate(month?: string): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
 }
 
-/** Preço por modelo — espelha o CASE do GET /api/projects/:id/metrics (projects.ts). */
-const MODEL_PRICE_CASE_SQL = `CASE WHEN m.model ILIKE '%opus%'
-       THEN (m.input_tokens / 1000000.0) * 15 + (m.output_tokens / 1000000.0) * 75
-       ELSE (m.input_tokens / 1000000.0) * 3  + (m.output_tokens / 1000000.0) * 15
-  END`;
+/** Preço por modelo — FONTE ÚNICA em lib/modelPricing.ts (RFC-0004 F6/T2.2). */
+const MODEL_PRICE_CASE_SQL = priceCaseSql("m.");
 
 /**
  * Gasto de LLM (USD) do TENANT no mês (`month` em YYYY-MM; default mês corrente).
@@ -54,16 +49,6 @@ export async function getTenantMonthSpendUsd(
   month?: string,
 ): Promise<number> {
   const start = monthStartDate(month);
-  const params = [tenantId, start];
-  const ledger = await db.query(
-    `SELECT COALESCE(SUM(l.usd_cost), 0) AS usd
-       FROM pipeline_cost_ledger l
-       JOIN projects p ON p.id = l.project_id
-      WHERE p.tenant_id = $1
-        AND l.ts >= $2::date
-        AND l.ts <  ($2::date + interval '1 month')`,
-    params,
-  );
   const metrics = await db.query(
     `SELECT COALESCE(SUM(${MODEL_PRICE_CASE_SQL}), 0) AS usd
        FROM project_agent_metrics m
@@ -71,33 +56,23 @@ export async function getTenantMonthSpendUsd(
       WHERE p.tenant_id = $1
         AND m.created_at >= $2::date
         AND m.created_at <  ($2::date + interval '1 month')`,
-    params,
+    [tenantId, start],
   );
-  const ledgerUsd = Number(ledger.rows[0]?.usd ?? 0) || 0;
-  const metricsUsd = Number(metrics.rows[0]?.usd ?? 0) || 0;
-  return Math.max(ledgerUsd, metricsUsd);
+  return Number(metrics.rows[0]?.usd ?? 0) || 0;
 }
 
 /**
  * Gasto de LLM (USD) de UM projeto (todo o histórico — o gate T18 é por projeto, não por mês).
- * Mesma estratégia dual-source do gasto por tenant.
+ * Fonte única: project_agent_metrics (D4).
  */
 export async function getProjectSpendUsd(db: Queryable, projectId: string): Promise<number> {
-  const ledger = await db.query(
-    `SELECT COALESCE(SUM(l.usd_cost), 0) AS usd
-       FROM pipeline_cost_ledger l
-      WHERE l.project_id = $1`,
-    [projectId],
-  );
   const metrics = await db.query(
     `SELECT COALESCE(SUM(${MODEL_PRICE_CASE_SQL}), 0) AS usd
        FROM project_agent_metrics m
       WHERE m.project_id = $1`,
     [projectId],
   );
-  const ledgerUsd = Number(ledger.rows[0]?.usd ?? 0) || 0;
-  const metricsUsd = Number(metrics.rows[0]?.usd ?? 0) || 0;
-  return Math.max(ledgerUsd, metricsUsd);
+  return Number(metrics.rows[0]?.usd ?? 0) || 0;
 }
 
 /**

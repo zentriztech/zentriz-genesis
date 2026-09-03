@@ -72,15 +72,16 @@ describe("resolveTenantMonthlyBudgetUsd — precedência tenant > plano > env", 
   });
 });
 
-describe("getTenantMonthSpendUsd — dual-source MAX(ledger, metrics)", () => {
-  it("usa a estimativa de project_agent_metrics quando o ledger está vazio", async () => {
-    const spend = await getTenantMonthSpendUsd(makeDb({ ledgerUsd: "0", metricsUsd: "12.5" }), TENANT);
+describe("getTenantMonthSpendUsd — fonte única project_agent_metrics (RFC-0004 D4)", () => {
+  it("usa a estimativa de project_agent_metrics", async () => {
+    const spend = await getTenantMonthSpendUsd(makeDb({ metricsUsd: "12.5" }), TENANT);
     expect(spend).toBe(12.5);
   });
 
-  it("usa o ledger quando ele é maior (sem somar — evita dupla contagem)", async () => {
+  it("ledger dropado (073): valor do antigo ledger é irrelevante", async () => {
+    // makeDb ainda responde à query do ledger por compat do fake, mas a função não a emite.
     const spend = await getTenantMonthSpendUsd(makeDb({ ledgerUsd: "20", metricsUsd: "12.5" }), TENANT);
-    expect(spend).toBe(20);
+    expect(spend).toBe(12.5);
   });
 });
 

@@ -26,6 +26,7 @@ import { recomputeProductLifecycle } from "../services/productLifecycle.js";
 import { resolveInboxProductId } from "../services/inbox.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
+import { costUsd, priceCaseSql } from "../lib/modelPricing.js";
 import { getProjectSpendUsd, getTenantMonthSpendUsd, resolveTenantMonthlyBudgetUsd } from "../services/tenantCostCap.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 
@@ -1700,17 +1701,14 @@ export async function projectRoutes(app: FastifyInstance) {
       // Custo estimado: preço POR MODELO (Opus vs Sonnet). Antes assumia Sonnet
       // para tudo e subestimava — agora bate com a soma das tasks (task-metrics),
       // que é mais realista pois o pipeline roda majoritariamente em Opus.
-      // PRICE_INPUT_SONNET=3, OUTPUT=15; PRICE_INPUT_OPUS=15, OUTPUT=75 (USD/MTok).
+      // Preço por modelo: tabela única em lib/modelPricing.ts (RFC-0004 F6).
       const grand = await client.query(
         `SELECT
            COUNT(*)::int AS total_calls,
            SUM(input_tokens)::int AS total_input,
            SUM(output_tokens)::int AS total_output,
            SUM(
-             CASE WHEN model ILIKE '%opus%'
-                  THEN (input_tokens / 1000000.0) * 15 + (output_tokens / 1000000.0) * 75
-                  ELSE (input_tokens / 1000000.0) * 3  + (output_tokens / 1000000.0) * 15
-             END
+             ${priceCaseSql("")}
            ) AS total_cost
          FROM project_agent_metrics
          WHERE project_id = $1`,
@@ -1804,20 +1802,14 @@ export async function projectRoutes(app: FastifyInstance) {
          ORDER BY created_at`,
         [id]
       );
-      const PRICE_INPUT_SONNET  = 3;    // USD/MTok Sonnet 4.6
-      const PRICE_OUTPUT_SONNET = 15;
-      const PRICE_INPUT_OPUS    = 15;   // USD/MTok Opus 4.7
-      const PRICE_OUTPUT_OPUS   = 75;
+      // RFC-0004 F6/T2.2: preço por modelo — FONTE ÚNICA em lib/modelPricing.ts.
       // Agregar por task_id
       const byTask = new Map<string, { calls: number; inputTokens: number; outputTokens: number; durationMs: number; costUsd: number; agents: Set<string>; models: Set<string>; lastCallAt: Date | null }>();
       for (const r of res.rows) {
         const tid = r.task_id as string;
         const inp = Number(r.input_tokens ?? 0);
         const out = Number(r.output_tokens ?? 0);
-        const isOpus = String(r.model ?? "").includes("opus");
-        const pi = isOpus ? PRICE_INPUT_OPUS : PRICE_INPUT_SONNET;
-        const po = isOpus ? PRICE_OUTPUT_OPUS : PRICE_OUTPUT_SONNET;
-        const cost = (inp / 1_000_000) * pi + (out / 1_000_000) * po;
+        const cost = costUsd(r.model as string | null, inp, out);
         const existing = byTask.get(tid);
         if (existing) {
           existing.calls++;
@@ -1885,17 +1877,11 @@ export async function projectRoutes(app: FastifyInstance) {
          ORDER BY created_at`,
         [id]
       );
-      const PRICE_INPUT  = 3;   // USD/MTok Sonnet 4.6
-      const PRICE_OUTPUT = 15;  // USD/MTok
-      const PRICE_INPUT_OPUS  = 15;  // USD/MTok Opus 4.7
-      const PRICE_OUTPUT_OPUS = 75;  // USD/MTok
+      // RFC-0004 F6/T2.2: preço por modelo — FONTE ÚNICA em lib/modelPricing.ts.
       const rows = res.rows.map((r) => {
         const inp = Number(r.input_tokens ?? 0);
         const out = Number(r.output_tokens ?? 0);
-        const isOpus = String(r.model ?? "").includes("opus");
-        const pi = isOpus ? PRICE_INPUT_OPUS  : PRICE_INPUT;
-        const po = isOpus ? PRICE_OUTPUT_OPUS : PRICE_OUTPUT;
-        const cost = (inp / 1_000_000) * pi + (out / 1_000_000) * po;
+        const cost = costUsd(r.model as string | null, inp, out);
         return {
           id:               r.id as string,
           agent:            r.agent as string,
@@ -1905,7 +1891,7 @@ export async function projectRoutes(app: FastifyInstance) {
           outputTokens:     out,
           totalTokens:      inp + out,
           model:            r.model as string | null,
-          isOpus:           isOpus,
+          isOpus:           String(r.model ?? "").includes("opus"),
           durationMs:       Number(r.duration_ms ?? 0),
           durationSec:      Math.round(Number(r.duration_ms ?? 0) / 1000),
           status:           r.status as string | null,
@@ -2711,9 +2697,19 @@ export async function projectRoutes(app: FastifyInstance) {
           inputTokens  = metricsRow.rows[0]?.total_input  ?? 0;
           outputTokens = metricsRow.rows[0]?.total_output ?? 0;
         }
-        const costUsd = body.estimated_cost_usd != null
-          ? Number(body.estimated_cost_usd)
-          : parseFloat(((inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15).toFixed(6));
+        // RFC-0004 F6 (auditoria F10): o fallback assumia SEMPRE Sonnet (Opus subestimado
+        // ~5x). Sem modelo por-run na tabela, agrega por modelo real das métricas do projeto.
+        let costUsdVal: number;
+        if (body.estimated_cost_usd != null) {
+          costUsdVal = Number(body.estimated_cost_usd);
+        } else {
+          const perModel = await client.query(
+            `SELECT COALESCE(SUM(${priceCaseSql("")}), 0) AS cost
+               FROM project_agent_metrics WHERE project_id = $1`,
+            [id],
+          );
+          costUsdVal = parseFloat(Number(perModel.rows[0]?.cost ?? 0).toFixed(6));
+        }
 
         await client.query(
           `UPDATE pipeline_runs
@@ -2724,7 +2720,7 @@ export async function projectRoutes(app: FastifyInstance) {
                output_tokens = $4,
                estimated_cost_usd = $5
            WHERE project_id = $6 AND run_id = $7`,
-          [body.stop_reason ?? "completed", body.duration_sec ?? null, inputTokens, outputTokens, costUsd, id, String(body.run_id)]
+          [body.stop_reason ?? "completed", body.duration_sec ?? null, inputTokens, outputTokens, costUsdVal, id, String(body.run_id)]
         );
         // Acumula duração total e marca finished_at no projeto
         await client.query(
@@ -3079,6 +3075,12 @@ export async function projectRoutes(app: FastifyInstance) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
         }
         await writeFile(specRow.file_path, specMarkdown, "utf-8");
+        // F3 (adversarial Onda 1): sem isto o content_sha256 fica STALE após a edição —
+        // quebra o If-Match do editor (Onda 4) e o GET /spec-files expõe sha errado.
+        await client.query(
+          "UPDATE project_spec_files SET content_sha256 = $1 WHERE project_id = $2 AND file_path = $3",
+          [sha256Hex(Buffer.from(specMarkdown, "utf-8")), id, specRow.file_path],
+        );
         if (title?.trim()) {
           await client.query("UPDATE projects SET title = $1, updated_at = NOW() WHERE id = $2", [title.trim(), id]);
         }

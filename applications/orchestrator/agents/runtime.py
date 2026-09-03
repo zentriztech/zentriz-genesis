@@ -9,6 +9,7 @@ from pathlib import Path
 import os
 import json
 import logging
+import threading
 import time
 import traceback as _tb
 
@@ -1157,8 +1158,46 @@ def run_agent(
 
 # FT-18 (Cyborg V2): chamada Bedrock direta sem toda a pipeline de agentes.
 # Usada pelo Cyborg V2 para as 5 análises paralelas e consolidação.
+def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
+                         input_tokens: int, output_tokens: int, duration_ms: int) -> None:
+    """RFC-0004 F6/T2.1: reporta o usage das chamadas DIRETAS ao medidor de custo.
+
+    Antes, call_bedrock_direct descartava o usage → splitter/cyborg V2/validações eram
+    GASTO INVISÍVEL ao cost-cap mensal do tenant (migration 068). Fire-and-forget em
+    thread; nunca lança; sem project_id não há onde debitar (skip logado em debug).
+    """
+    if not project_id:
+        return
+    base = (os.environ.get("API_BASE_URL") or "").strip()
+    token = (os.environ.get("GENESIS_API_TOKEN") or "").strip()
+    if not base or not token:
+        return
+
+    def _post() -> None:
+        try:
+            import json as _json
+            import urllib.request as _rq
+            body = _json.dumps({
+                "agent": agent, "model": model_id,
+                "inputTokens": int(input_tokens), "outputTokens": int(output_tokens),
+                "durationMs": int(duration_ms), "status": "direct",
+            }).encode()
+            req = _rq.Request(
+                f"{base.rstrip('/')}/api/projects/{project_id}/agent-metrics",
+                data=body, method="POST",
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            )
+            _rq.urlopen(req, timeout=10).read()
+        except Exception as exc:  # nunca derruba a chamada principal
+            logger.debug("[direct-usage] falha ao reportar métricas (best-effort): %s", exc)
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
-                        max_tokens: int = 8000, temperature: float = 0.2) -> str:
+                        max_tokens: int = 8000, temperature: float = 0.2,
+                        usage_project_id: str | None = None,
+                        usage_agent: str = "direct") -> str:
     """Chama Bedrock com system + user; retorna string bruta da resposta.
 
     Reusa o mesmo cliente AnthropicBedrock configurado para o resto do pipeline.
@@ -1166,7 +1205,11 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
 
     Se GENESIS_LLM_PROVIDER=foundry, roteia para Azure AI Foundry (mesmo SDK anthropic,
     base_url do resource) — alternativa ao Bedrock quando a cota diária deste esgota.
+
+    RFC-0004 F6/T2.1: quando `usage_project_id` é informado, o usage (tokens) é reportado
+    ao POST /agent-metrics (fire-and-forget) — sem isso a chamada é invisível ao cost-cap.
     """
+    _t0 = time.time()
     if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
         client = _build_foundry_client()
         # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
@@ -1197,12 +1240,26 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             ) as _stream:
                 for _txt in _stream.text_stream:
                     parts.append(_txt)
+                try:
+                    _final = _stream.get_final_message()
+                    _u = getattr(_final, "usage", None)
+                    _report_direct_usage(usage_project_id, usage_agent, model_id,
+                                         getattr(_u, "input_tokens", 0) or 0,
+                                         getattr(_u, "output_tokens", 0) or 0,
+                                         int((time.time() - _t0) * 1000))
+                except Exception:
+                    pass
             return "".join(parts)
         resp = client.messages.create(
             model=model_id, max_tokens=max_tokens,
             system=system, messages=[{"role": "user", "content": user}],
             **_extra,
         )
+        _u = getattr(resp, "usage", None)
+        _report_direct_usage(usage_project_id, usage_agent, model_id,
+                             getattr(_u, "input_tokens", 0) or 0,
+                             getattr(_u, "output_tokens", 0) or 0,
+                             int((time.time() - _t0) * 1000))
         parts = []
         for block in getattr(resp, "content", []) or []:
             t = getattr(block, "text", None)
@@ -1241,6 +1298,11 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
+    _u = getattr(resp, "usage", None)
+    _report_direct_usage(usage_project_id, usage_agent, model_id,
+                         getattr(_u, "input_tokens", 0) or 0,
+                         getattr(_u, "output_tokens", 0) or 0,
+                         int((time.time() - _t0) * 1000))
     # AnthropicBedrock retorna Message com .content = [TextBlock, ...]
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:

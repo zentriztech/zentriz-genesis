@@ -523,7 +523,7 @@ def get_cto_job_status(job_id: str):
 # potencialmente longo → não segurar a conexão HTTP. PROPÕE, nunca executa (ADR-018):
 # a resposta é uma proposta (manifest + specs) que exige aprovação humana antes de ingerir.
 
-def _run_splitter(document: str, model_id: str) -> dict:
+def _run_splitter(document: str, model_id: str, usage_project_id: str | None = None) -> dict:
     """Chama o splitter (split_document) com call_bedrock_direct como llm_fn."""
     from orchestrator.product_architect import split_document
     from orchestrator.agents.runtime import call_bedrock_direct
@@ -534,8 +534,13 @@ def _run_splitter(document: str, model_id: str) -> dict:
         # temperature: modelos extended-thinking exigem 1.0; senão 0.2 (determinístico).
         ml = (mid or "").lower()
         temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "sonnet-4", "fable-5")) else 0.2
+        # RFC-0004 F6/T2.1: usage debitado no projeto de ORIGEM quando o propose vem do
+        # "Decompor" de uma spec (originProjectId). Propose de texto avulso (sem projeto)
+        # não tem onde debitar — segue invisível até existir linha de projeto.
         return call_bedrock_direct(system=system, user=user, model_id=mid,
-                                   max_tokens=max_tokens, temperature=temp)
+                                   max_tokens=max_tokens, temperature=temp,
+                                   usage_project_id=usage_project_id,
+                                   usage_agent="splitter")
 
     return split_document(document, llm_fn=_llm, model_id=model_id)
 
@@ -547,7 +552,8 @@ def _run_splitter_async(job_id: str, body: dict) -> None:
         if not document:
             raise ValueError("document (o texto do produto) é obrigatório")
         model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
-        result = _run_splitter(document, model_id)
+        result = _run_splitter(document, model_id,
+                               usage_project_id=(body.get("originProjectId") or None))
         with _jobs_lock:
             if job_id in _async_jobs:
                 _async_jobs[job_id]["status"] = "done"

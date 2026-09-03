@@ -99,7 +99,7 @@ setInterval(() => {
  * (job async + poll), e ao concluir valida o grafo no lado TS (buildProductSketch reusa os
  * MESMOS gates: DAG/tipos/spec presente) e computa as ondas. Não persiste nada — só a proposta.
  */
-function runProposeJob(jobId: string, document: string, modelId: string | undefined, agentsUrl: string): void {
+function runProposeJob(jobId: string, document: string, modelId: string | undefined, agentsUrl: string, originProjectId?: string | null): void {
   const job = _proposeJobs.get(jobId);
   if (!job) return;
   job.status = "running";
@@ -107,7 +107,9 @@ function runProposeJob(jobId: string, document: string, modelId: string | undefi
   const startedAt = Date.now();
   const MAX_MS = 660_000; // 11 min
 
-  const payload = JSON.stringify({ document, ...(modelId ? { model_id: modelId } : {}) });
+  // RFC-0004 F6/T2.1: originProjectId permite ao agents debitar o usage do splitter
+  // no projeto de origem (decompose de spec). Propose de texto avulso segue sem débito.
+  const payload = JSON.stringify({ document, ...(modelId ? { model_id: modelId } : {}), ...(originProjectId ? { originProjectId } : {}) });
   httpPost(`${base}/invoke/product_architect/async`, payload, 30_000)
     .then((startText) => {
       const agentsJobId = (JSON.parse(startText) as { jobId?: string }).jobId;
@@ -532,7 +534,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         );
         const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now(), originProjectId: id });
-        runProposeJob(jobId, document, request.body?.modelId, agentsUrl);
+        runProposeJob(jobId, document, request.body?.modelId, agentsUrl, id);
         return reply.status(202).send({ jobId, status: "pending", originProjectId: id });
       } finally { client.release(); }
     },
