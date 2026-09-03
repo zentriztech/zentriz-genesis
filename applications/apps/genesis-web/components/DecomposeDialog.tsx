@@ -198,6 +198,9 @@ export function DecomposeDialog({
     setError(null);
     try {
       await apiPost("/api/products/ingest-proposal", {
+        // T1.6b: proposalId (= jobId da linha persistida) faz o servidor usar o manifest/specs
+        // AUTORITATIVOS que ele gravou — o body abaixo vira apenas fallback (compat).
+        proposalId: poll.jobId,
         manifest: poll.manifest,
         specs: poll.specs,
         specApproved: true,

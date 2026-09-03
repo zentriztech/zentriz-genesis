@@ -512,8 +512,18 @@ async function runWatchdogCycle(): Promise<void> {
     // 0d. RFC-0004 Onda 3: runs de validação além do deadline → 'error' (deadline_at
     // persistido — não depende de timer em memória).
     {
-      const { expireOverdueValidationRuns } = await import("./specValidation.js");
+      const { expireOverdueValidationRuns, autoValidateDirtySpecs } = await import("./specValidation.js");
       await expireOverdueValidationRuns(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueValidationRuns:", e));
+      // 0e. RFC-0004 Onda 3 (D1) — auto-validação opt-in (SPEC_VALIDATION_AUTO): dispara a
+      // validação quando a spec ESTABILIZOU (spec_dirty_at além do quiet). No-op se OFF.
+      await autoValidateDirtySpecs(pool).catch((e) => console.error("[Watchdog] Erro em autoValidateDirtySpecs:", e));
+    }
+
+    // 0f. RFC-0004 T1.6b: propostas do Splitter além do deadline → 'interrupted' + purga
+    // payload antigo (>7d). deadline_at persistido cobre o caso de o processo do job morrer.
+    {
+      const { expireOverdueProposals } = await import("./productProposals.js");
+      await expireOverdueProposals(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueProposals:", e));
     }
 
     // 1. Buscar status do runner

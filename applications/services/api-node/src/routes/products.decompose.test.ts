@@ -36,6 +36,13 @@ vi.mock("./specs.js", () => ({
   httpGet: async () => JSON.stringify({ status: "running" }),
 }));
 
+// T1.6b: o runner do job (persistido) vive em productProposals.js — stub aqui (a rota só
+// cria a linha e chama runProposeJob; a orquestração de fundo é testada à parte).
+vi.mock("../services/productProposals.js", () => ({
+  runProposeJob: () => {},
+  PROPOSAL_DEADLINE_MIN: 15,
+}));
+
 const readFileSpy = vi.fn(async (_p: string) => "Documento de spec com conteúdo suficiente para passar do mínimo de quarenta caracteres exigidos.");
 vi.mock("node:fs/promises", () => ({ readFile: (p: string) => readFileSpy(p) }));
 
@@ -51,6 +58,10 @@ function defaultHandler(over: { tenant?: string; createdBy?: string; status?: st
     }
     if (sql.includes("FROM project_spec_files")) {
       return { rows: Array.from({ length: mdFiles }, (_v, i) => ({ filename: `spec${i}.md`, file_path: `/uploads/${SPEC_ID}/spec${i}.md` })) };
+    }
+    // T1.6b: INSERT da proposta persistida (one-flight) devolve o id (= jobId).
+    if (sql.includes("INSERT INTO product_proposals")) {
+      return { rows: [{ id: "44444444-4444-4444-8444-444444444444" }] };
     }
     return { rows: [] };
   };

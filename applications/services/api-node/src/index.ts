@@ -72,6 +72,10 @@ try {
     // (a fila é a tabela; sem reaper, ficariam 'running' para sempre).
     const { reapOrphanValidationRuns } = await import("./services/specValidation.js");
     await reapOrphanValidationRuns(pool);
+    // RFC-0004 T1.6b: propostas do Splitter órfãs de um deploy/restart → 'interrupted'
+    // (mesma classe de furo — o job do propose deixou de viver num Map em memória).
+    const { reapOrphanProposals } = await import("./services/productProposals.js");
+    await reapOrphanProposals(pool).catch((e) => console.error("[boot] reapOrphanProposals:", e));
   }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);

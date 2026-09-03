@@ -27,13 +27,14 @@ import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
-import { extractProductZip, httpPost, httpGet, type ProductZipContents } from "./specs.js";
+import { extractProductZip, type ProductZipContents } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
-import { buildProductSketch, parseManifest, ManifestError, type ProductManifest } from "../services/productManifest.js";
+import { ManifestError, type ProductManifest } from "../services/productManifest.js";
 import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbox.js";
 import { isPreFactory } from "../services/projectStatus.js";
 import { emitValueEvent } from "../services/valueEvents.js";
+import { runProposeJob, PROPOSAL_DEADLINE_MIN } from "../services/productProposals.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -71,103 +72,9 @@ const RELATION_LABELS: Record<RelationType, string> = {
   part_of:      "Componente de",
 };
 
-// ── D-1: in-memory job store para /api/products/propose (transiente, sem DB) ────
-type ProposeStatus = "pending" | "running" | "done" | "error";
-interface ProposeJob {
-  id: string;
-  status: ProposeStatus;
-  manifest?: ProductManifest;
-  specs?: Record<string, string>;
-  waves?: string[][];
-  projects?: Array<{ id: string; type: string; wave: number; dependsOn: string[] }>;
-  warnings?: string[];
-  error?: string;
-  createdAt: number;
-  /** B4: spec da Bancada de origem (quando o job veio de /api/projects/:id/decompose). */
-  originProjectId?: string | null;
-}
-const _proposeJobs = new Map<string, ProposeJob>();
-
-// Limpa jobs com mais de 30 minutos.
-setInterval(() => {
-  const cutoff = Date.now() - 30 * 60_000;
-  for (const [id, job] of _proposeJobs) if (job.createdAt < cutoff) _proposeJobs.delete(id);
-}, 5 * 60_000);
-
-/**
- * Roda a proposta do splitter em background: chama o Product Architect no serviço agents
- * (job async + poll), e ao concluir valida o grafo no lado TS (buildProductSketch reusa os
- * MESMOS gates: DAG/tipos/spec presente) e computa as ondas. Não persiste nada — só a proposta.
- */
-function runProposeJob(jobId: string, document: string, modelId: string | undefined, agentsUrl: string, originProjectId?: string | null): void {
-  const job = _proposeJobs.get(jobId);
-  if (!job) return;
-  job.status = "running";
-  const base = agentsUrl.replace(/\/$/, "");
-  const startedAt = Date.now();
-  const MAX_MS = 660_000; // 11 min
-
-  // RFC-0004 F6/T2.1: originProjectId permite ao agents debitar o usage do splitter
-  // no projeto de origem (decompose de spec). Propose de texto avulso segue sem débito.
-  const payload = JSON.stringify({ document, ...(modelId ? { model_id: modelId } : {}), ...(originProjectId ? { originProjectId } : {}) });
-  httpPost(`${base}/invoke/product_architect/async`, payload, 30_000)
-    .then((startText) => {
-      const agentsJobId = (JSON.parse(startText) as { jobId?: string }).jobId;
-      if (!agentsJobId) throw new Error("agents /invoke/product_architect/async não retornou jobId");
-      console.log(`[Propose] job=${jobId} agents_job=${agentsJobId} started`);
-
-      const timer = setInterval(() => {
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        if (elapsed > MAX_MS / 1000) {
-          clearInterval(timer);
-          const j = _proposeJobs.get(jobId);
-          if (j) { j.status = "error"; j.error = "Timeout: Product Architect demorou mais de 11 minutos."; }
-          return;
-        }
-        httpGet(`${base}/invoke/product_architect/status/${agentsJobId}`, 60_000)
-          .then((pollText) => {
-            const poll = JSON.parse(pollText) as {
-              status: string;
-              result?: { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[] };
-              error?: string;
-            };
-            const j = _proposeJobs.get(jobId);
-            if (!j) { clearInterval(timer); return; }
-            if (poll.status === "done" && poll.result?.manifest && poll.result?.specs) {
-              clearInterval(timer);
-              try {
-                const manifest = poll.result.manifest;
-                const specs = poll.result.specs;
-                // Valida o grafo no lado TS e computa as ondas (double-check dos gates).
-                const parsed = parseManifest(JSON.stringify(manifest));
-                const sketch = buildProductSketch(parsed, Object.keys(specs));
-                j.manifest = manifest;
-                j.specs = specs;
-                j.waves = sketch.waves;
-                j.projects = sketch.projects.map((p) => ({ id: p.id, type: p.type, wave: p.wave, dependsOn: p.dependsOn }));
-                j.warnings = poll.result.warnings ?? [];
-                j.status = "done";
-                console.log(`[Propose] ✓ job=${jobId} DONE — ${sketch.projects.length} projetos, ${sketch.waves.length} ondas`);
-              } catch (e) {
-                j.status = "error";
-                j.error = e instanceof ManifestError ? `[${e.code}] ${e.message}` : (e instanceof Error ? e.message : String(e));
-              }
-            } else if (poll.status === "error") {
-              clearInterval(timer);
-              j.status = "error";
-              j.error = poll.error ?? "Product Architect falhou";
-            }
-          })
-          .catch((pollErr) => {
-            console.warn(`[Propose] poll error job=${jobId}: ${pollErr instanceof Error ? pollErr.message : String(pollErr)}`);
-          });
-      }, 8_000);
-    })
-    .catch((err) => {
-      const j = _proposeJobs.get(jobId);
-      if (j) { j.status = "error"; j.error = err instanceof Error ? err.message.slice(0, 300) : String(err); }
-    });
-}
+// RFC-0004 T1.6b: a proposta do Splitter (doc→N) NASCE persistida em `product_proposals`
+// (migration 076). O runner do job, o reaper de boot e o tick de deadline vivem em
+// services/productProposals.ts — aqui só criamos a linha e fazemos poll/ingest sobre ela.
 
 export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
@@ -346,8 +253,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { document?: string; modelId?: string } }>(
     "/api/products/propose",
     async (request, reply) => {
+      const user = getUser(request);
       // RFC-0002 A.1: conta de gestão (zentriz_admin) não propõe/decompõe produto.
-      if (denyCreationForManagement(getUser(request), reply)) return;
+      if (denyCreationForManagement(user, reply)) return;
+      // T1.6b: a proposta é do TENANT (linha em product_proposals.tenant_id) — sem tenant
+      // não há dono para gravar/consultar (nem GET binding). Master não propõe (denyCreation).
+      const tenantId = user.tenantId;
+      if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
       const body = request.body ?? {};
       const document = (body.document ?? "").trim();
       if (document.length < 40) {
@@ -357,30 +269,65 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       if (!agentsUrl) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes (Product Architect) não configurado." });
       }
-      const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now() });
-      runProposeJob(jobId, document, body.modelId, agentsUrl);
+      // Modo IDEIA não tem one-flight (não há origem) → rate-limit por tenant: 4 propostas/h.
+      const recent = await pool.query(
+        "SELECT count(*)::int AS n FROM product_proposals WHERE tenant_id=$1 AND origin_project_id IS NULL AND created_at > now() - interval '1 hour'",
+        [tenantId],
+      );
+      if ((recent.rows[0]?.n ?? 0) >= 4) {
+        return reply.status(429).send({ code: "RATE_LIMITED", message: "Muitas decomposições de ideia na última hora. Tente novamente mais tarde." });
+      }
+      const ins = await pool.query(
+        "INSERT INTO product_proposals (tenant_id, created_by, document, model_id, status, deadline_at) VALUES ($1,$2,$3,$4,'pending', now() + ($5 || ' minutes')::interval) RETURNING id",
+        [tenantId, UUID_RE.test(user.id ?? "") ? user.id : null, document, body.modelId ?? null, String(PROPOSAL_DEADLINE_MIN)],
+      );
+      const jobId = ins.rows[0].id as string;
+      runProposeJob(pool, jobId, document, body.modelId, agentsUrl, null);
       return reply.status(202).send({ jobId, status: "pending" });
     }
   );
 
-  // ── GET /api/products/propose/:jobId — poll da proposta ────────────────────────
+  // ── GET /api/products/propose/:jobId — poll da proposta (persistida) ───────────
   app.get<{ Params: { jobId: string } }>(
     "/api/products/propose/:jobId",
     async (request, reply) => {
-      const job = _proposeJobs.get(request.params.jobId);
-      if (!job) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
-      if (job.status === "done") {
+      const user = getUser(request);
+      const { jobId } = request.params;
+      // jobId agora é o id (UUID) da linha. Formato legado paj-... (jobs em memória de um
+      // deploy anterior) → 404: aquele job morreu no restart, o portal deve refazer.
+      if (!UUID_RE.test(jobId)) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
+      const row = (await pool.query(
+        "SELECT id, tenant_id, status, payload, warnings, error, origin_project_id, created_at FROM product_proposals WHERE id=$1",
+        [jobId],
+      )).rows[0];
+      if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
+      // Binding de tenant: master vê qualquer; não-master só o do próprio tenant → 404 (não
+      // 403: não vaza a existência de um job de outro tenant). Fecha o IDOR do poll antigo.
+      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+        return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
+      }
+      if (row.status === "done") {
+        const p = (row.payload ?? {}) as { manifest?: unknown; specs?: unknown; waves?: unknown; projects?: unknown };
+        // Payload purgado (>7d) numa linha ainda 'done' → trata como expirado (o portal refaz).
+        if (!p.manifest || !p.specs) {
+          return reply.send({ jobId: row.id, status: "error", interrupted: true, error: "Proposta expirada. Refaça a decomposição." });
+        }
         return reply.send({
-          jobId: job.id, status: "done", needsHuman: true,
-          manifest: job.manifest, specs: job.specs, waves: job.waves, projects: job.projects, warnings: job.warnings,
+          jobId: row.id, status: "done", needsHuman: true,
+          manifest: p.manifest, specs: p.specs, waves: p.waves, projects: p.projects,
+          warnings: row.warnings ?? [],
           // B4: eco da origem — o cliente devolve isto em /ingest-proposal para gravar o vínculo.
-          originProjectId: job.originProjectId ?? null,
+          originProjectId: row.origin_project_id ?? null,
         });
       }
-      if (job.status === "error") return reply.send({ jobId: job.id, status: "error", error: job.error });
-      const elapsed = Math.round((Date.now() - job.createdAt) / 1000);
-      return reply.send({ jobId: job.id, status: job.status, elapsed });
+      // 'interrupted' não existe no contrato do frontend (status desconhecido → poll infinito)
+      // → mapeia para 'error' + flag interrupted:true (o portal encerra e oferece refazer).
+      if (row.status === "interrupted") {
+        return reply.send({ jobId: row.id, status: "error", interrupted: true, error: row.error || "A decomposição foi interrompida (reinício do serviço). Tente novamente." });
+      }
+      if (row.status === "error") return reply.send({ jobId: row.id, status: "error", error: row.error });
+      const elapsed = Math.round((Date.now() - new Date(row.created_at).getTime()) / 1000);
+      return reply.send({ jobId: row.id, status: row.status, elapsed });
     }
   );
 
@@ -388,7 +335,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // Recebe {manifest, specs, specApproved} JSON (o que /propose devolveu, após revisão
   // humana) e reusa o executor determinístico (decomposeProduct) SEM exigir um ZIP:
   // monta o ProductZipContents em memória. Depois dispara a onda 0 (igual /ingest).
-  app.post<{ Body: { manifest?: ProductManifest; specs?: Record<string, string>; specApproved?: boolean; dispatch?: boolean; originProjectId?: string } }>(
+  app.post<{ Body: { manifest?: ProductManifest; specs?: Record<string, string>; specApproved?: boolean; dispatch?: boolean; originProjectId?: string; proposalId?: string } }>(
     "/api/products/ingest-proposal",
     async (request, reply) => {
       const user = getUser(request);
@@ -398,7 +345,37 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       const tenantId = user.tenantId;
       if (!tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
 
-      const { manifest, specs, specApproved, dispatch, originProjectId } = request.body ?? {};
+      const body = request.body ?? {};
+      let { manifest, specs } = body;
+      const { specApproved, dispatch, originProjectId, proposalId } = body;
+
+      // T1.6b: caminho AUTORITATIVO — se veio proposalId, o manifest/specs vêm da linha
+      // persistida (o cliente não pode injetar um manifest divergente do que foi proposto),
+      // e a origem é a que o servidor gravou. O payload do body é ignorado nesse caso.
+      let authoritativeOrigin: string | null | undefined;
+      if (proposalId) {
+        if (!UUID_RE.test(proposalId)) {
+          return reply.status(400).send({ code: "BAD_REQUEST", message: "proposalId inválido." });
+        }
+        const pp = (await pool.query(
+          "SELECT tenant_id, status, payload, origin_project_id, consumed_product_id FROM product_proposals WHERE id=$1",
+          [proposalId],
+        )).rows[0];
+        if (!pp || (user.role !== "zentriz_admin" && pp.tenant_id !== tenantId)) {
+          return reply.status(404).send({ code: "NOT_FOUND", message: "Proposta não encontrada." });
+        }
+        // Já consumida (double-submit/retry): idempotente — aponta o produto já criado (o
+        // payload foi purgado no consumo, então não dá para redecompor, nem é preciso).
+        if (pp.consumed_product_id) {
+          return reply.status(200).send({ productId: pp.consumed_product_id, idempotentReuse: true });
+        }
+        if (pp.status !== "done" || !pp.payload?.manifest || !pp.payload?.specs) {
+          return reply.status(409).send({ code: "PROPOSAL_NOT_READY", message: "A proposta não está pronta para ingestão (ou expirou)." });
+        }
+        manifest = pp.payload.manifest as ProductManifest;
+        specs = pp.payload.specs as Record<string, string>;
+        authoritativeOrigin = pp.origin_project_id ?? null;
+      }
       if (!manifest || typeof manifest !== "object" || !specs || typeof specs !== "object") {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "manifest + specs (mapa caminho→conteúdo) são obrigatórios." });
       }
@@ -408,7 +385,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       // cross-tenant (vazamento de integridade). Origem inválida/alheia → simplesmente null
       // (produto avulso), nunca 4xx: a origem é um enriquecimento, não um requisito.
       let origin: string | null = null;
-      if (originProjectId && UUID_RE.test(originProjectId)) {
+      // Com proposalId, a origem é a que o servidor gravou (já ligada ao tenant da proposta):
+      // é autoritativa, não precisa (nem deve) ser sobrescrita pelo body.
+      if (authoritativeOrigin !== undefined) {
+        origin = authoritativeOrigin;
+      } else if (originProjectId && UUID_RE.test(originProjectId)) {
         const owned = await pool.query(
           "SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2 LIMIT 1",
           [originProjectId, tenantId],
@@ -437,6 +418,15 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           dispatch: dispatch === true,
           originProjectId: origin,
         });
+        // T1.6b: marca a proposta consumida (audit) e purga o payload (idempotente por
+        // COALESCE — reingerir a mesma proposta não reescreve consumed_at). Best-effort:
+        // a idempotência do produto já vem do systemId em decomposeProduct.
+        if (proposalId && UUID_RE.test(proposalId)) {
+          await pool.query(
+            "UPDATE product_proposals SET consumed_at=COALESCE(consumed_at, now()), consumed_product_id=$2, payload=NULL, updated_at=now() WHERE id=$1",
+            [proposalId, result.productId],
+          ).catch((e) => request.log.warn({ proposalId, err: e }, "[products/ingest-proposal] falha ao marcar proposta consumida"));
+        }
         if (result.idempotentReuse) {
           request.log.info({ productId: result.productId }, "[products/ingest-proposal] no-op idempotente");
           return reply.status(200).send(result);
@@ -525,6 +515,30 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         if (document.length < 40) {
           return reply.status(422).send({ code: "SPEC_TOO_SHORT", message: "Conteúdo da spec insuficiente para decompor (mín. 40 caracteres legíveis)." });
         }
+        // T1.6b: cria a proposta persistida. one-flight por origem (índice parcial único
+        // pp_one_flight_origin): 2 cliques em "Decompor" na mesma spec = 1 job vivo → o 2º
+        // colide (23505) e reusa o job em voo em vez de disparar outra decomposição.
+        let jobId: string;
+        try {
+          const ins = await client.query(
+            "INSERT INTO product_proposals (tenant_id, created_by, origin_project_id, document, model_id, status, deadline_at) VALUES ($1,$2,$3,$4,$5,'pending', now() + ($6 || ' minutes')::interval) RETURNING id",
+            [proj.tenant_id, UUID_RE.test(user.id ?? "") ? user.id : null, id, document, request.body?.modelId ?? null, String(PROPOSAL_DEADLINE_MIN)],
+          );
+          jobId = ins.rows[0].id as string;
+        } catch (e) {
+          if ((e as { code?: string }).code === "23505") {
+            // já há proposta viva para esta spec → reusa (a origem já ficou pending_conversion
+            // no clique anterior; não redisparamos nada).
+            const existing = (await client.query(
+              "SELECT id FROM product_proposals WHERE origin_project_id=$1 AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1",
+              [id],
+            )).rows[0];
+            if (existing) {
+              return reply.status(202).send({ jobId: existing.id, status: "running", originProjectId: id, reused: true });
+            }
+          }
+          throw e;
+        }
         // §4.7 (migration 064): fecha a janela entre o dispatch e o consumo — marca a origem
         // como pending_conversion (ainda pré-fábrica, ainda no INBOX). O decomposer consome a
         // spec (status='archived') dentro da transação, com guarda de status contra /run concorrente.
@@ -532,9 +546,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           "UPDATE projects SET status='pending_conversion', updated_at=NOW() WHERE id=$1 AND status IN ('draft','spec_submitted')",
           [id],
         );
-        const jobId = `paj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        _proposeJobs.set(jobId, { id: jobId, status: "pending", createdAt: Date.now(), originProjectId: id });
-        runProposeJob(jobId, document, request.body?.modelId, agentsUrl, id);
+        runProposeJob(pool, jobId, document, request.body?.modelId, agentsUrl, id);
         return reply.status(202).send({ jobId, status: "pending", originProjectId: id });
       } finally { client.release(); }
     },

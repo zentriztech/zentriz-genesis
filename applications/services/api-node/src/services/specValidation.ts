@@ -24,6 +24,7 @@ import type { Pool } from "pg";
 import { computeSpecTreeHash, sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES, SPEC_TREE_MAX_TOTAL_BYTES } from "../lib/specTreeHash.js";
 import { loadArchetypeCatalog, getArchetype } from "./archetypeCatalog.js";
 import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
+import { UUID_RE } from "../lib/tenantScope.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -283,7 +284,10 @@ export async function startValidation(pool: Pool, opts: {
       `INSERT INTO spec_validation_runs (project_id, spec_hash, catalog_version, status, requested_by, started_at, deadline_at)
        VALUES ($1, $2, $3, 'running', $4, now(), now() + ($5 || ' minutes')::interval)
        RETURNING id`,
-      [projectId, current.specHash, catalogVersion, requestedBy, String(VALIDATION_DEADLINE_MIN)],
+      // requested_by e UUID: sub nao-UUID (token estatico admin "runner-service",
+      // ou o marcador "auto-validate" do tick) vira NULL — mesma licao do acked_by da Onda 3
+      // (22P02 estouraria o INSERT e o .catch do tick engoliria = run nunca criada).
+      [projectId, current.specHash, catalogVersion, UUID_RE.test(requestedBy) ? requestedBy : null, String(VALIDATION_DEADLINE_MIN)],
     );
     runId = ins.rows[0].id as string;
   } catch (e) {
@@ -355,6 +359,43 @@ export async function reapOrphanValidationRuns(pool: Pool): Promise<void> {
     if (r.rowCount) console.log(`[spec-validation] reaper: ${r.rowCount} run(s) órfã(s) → interrupted.`);
   } catch (e) {
     console.warn("[spec-validation] reaper falhou (best-effort):", e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * RFC-0004 D1 (Validar AUTOMÁTICO) — debounce POR DADO, nunca por timer:
+ * `spec_dirty_at` é marcado em toda edição (PATCH/PUT/POST/DELETE de spec); este tick
+ * (chamado pelo ciclo do watchdog) dispara a validação quando a spec ESTABILIZOU
+ * (>N min sem edição), só em status pré-fábrica/editável. 10 saves = 1 job; idempotente
+ * a restart (o estado é a coluna, não um setTimeout). `startValidation` já aplica
+ * budget do tenant, rate-limit 4/h, dedupe por hash e one-flight — o tick herda tudo.
+ * Env-gated: SPEC_VALIDATION_AUTO=on liga (default off — decisão D1: manual primeiro).
+ * Após disparar, spec_dirty_at é LIMPO (senão o tick revalidaria a cada ciclo).
+ */
+export function specValidationAutoEnabled(): boolean {
+  return (process.env.SPEC_VALIDATION_AUTO ?? "off").trim().toLowerCase() === "on";
+}
+
+const AUTO_VALIDATE_QUIET_MIN = parseInt(process.env.SPEC_VALIDATION_AUTO_QUIET_MIN ?? "2", 10);
+
+export async function autoValidateDirtySpecs(pool: Pool): Promise<void> {
+  if (!specValidationAutoEnabled()) return;
+  const rows = (await pool.query(
+    `SELECT id, tenant_id FROM projects
+      WHERE spec_dirty_at IS NOT NULL
+        AND spec_dirty_at < now() - ($1 || ' minutes')::interval
+        AND status IN ('draft','spec_submitted','pending_conversion','stopped','failed','spec_validation_failed')
+      ORDER BY spec_dirty_at ASC
+      LIMIT 5`,
+    [String(AUTO_VALIDATE_QUIET_MIN)],
+  )).rows as Array<{ id: string; tenant_id: string | null }>;
+  for (const p of rows) {
+    // Limpa ANTES de disparar: falha de disparo não pode virar loop de retry por ciclo —
+    // a próxima EDIÇÃO re-marca dirty (semântica correta: valida-se o que mudou).
+    await pool.query("UPDATE projects SET spec_dirty_at = NULL WHERE id = $1", [p.id]);
+    const r = await startValidation(pool, { projectId: p.id, tenantId: p.tenant_id, requestedBy: "auto-validate" })
+      .catch((e) => ({ ok: false as const, code: "ERROR", message: String(e), status: 500 }));
+    console.log(`[spec-validation][auto] ${p.id.slice(0, 8)}: ${r.ok ? `run ${"runId" in r ? r.runId.slice(0, 8) : ""}${"reused" in r && r.reused ? " (dedupe)" : ""}` : `${r.code}`}`);
   }
 }
 

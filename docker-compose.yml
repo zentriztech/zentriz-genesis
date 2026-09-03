@@ -23,6 +23,10 @@ services:
       # RFC-0004 F4: gate de validação de spec no choke-point — OFF por padrão
       # (byte-idêntico ao legado); ligar = SPEC_VALIDATION_GATE=on (padrão H3/rota B).
       - SPEC_VALIDATION_GATE=${SPEC_VALIDATION_GATE:-off}
+      # RFC-0004 D1: auto-validação (watchdog dispara quando a spec estabiliza) — OFF por
+      # padrão (manual primeiro); ligar = SPEC_VALIDATION_AUTO=on. Quiet configurável.
+      - SPEC_VALIDATION_AUTO=${SPEC_VALIDATION_AUTO:-off}
+      - SPEC_VALIDATION_AUTO_QUIET_MIN=${SPEC_VALIDATION_AUTO_QUIET_MIN:-2}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
