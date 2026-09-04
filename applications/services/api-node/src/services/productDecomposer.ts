@@ -14,6 +14,7 @@ import type { Pool } from "pg";
 import { buildProductSketch, parseManifest, computeProductHash, ManifestError, type ProductSketch } from "./productManifest.js";
 import { createProjectFromSpec } from "./projectCreation.js";
 import { checkSpecContentReady } from "./specContentGate.js";
+import { productManifestWarnings } from "./connectSchema.js";
 import { PRE_FACTORY_STATUSES } from "./projectStatus.js";
 import { getArchetype, archetypeForFactoryType, renderProjectReadme } from "./archetypeCatalog.js";
 import type { ProductZipContents } from "../routes/specs.js";
@@ -52,6 +53,12 @@ export interface DecomposeResult {
   dispatched: string[]; // projectIds da onda 0 marcados para /run
   /** true quando a ingestão foi no-op idempotente (produto com mesmo hash já existia). */
   idempotentReuse?: boolean;
+  /**
+   * R4 PR5 / D4: valor EFETIVO de specApproved aplicado aos projetos criados — override do chamador
+   * OU `product.specApproved` do manifesto. As rotas auditam por este campo (o manifesto sozinho
+   * aprovava N projetos sem trilha — adversarial PR5 #A).
+   */
+  specApprovedEffective?: boolean;
   /**
    * §4.7 (migration 064): true quando a spec de origem NÃO foi consumida porque já havia
    * graduado (via /run concorrente) — o App vivo NÃO é desvinculado; a decomposição segue.
@@ -103,6 +110,7 @@ async function buildReuseResult(
   return {
     productId, productName, projects, waves: sketch.waves,
     triggersCreated: 0, dispatched: [], idempotentReuse: true, originAlreadyPromoted,
+    specApprovedEffective: false, // no-op: nada foi aprovado nesta chamada
   };
 }
 
@@ -113,6 +121,8 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
 
   // 1. parse + validação determinística (fora da transação — não toca o banco)
   const manifest = parseManifest(zip.manifestText);
+  // R4 PR5: schema Connect vendorizado em modo warning (log) — o gate continua sendo parseManifest.
+  for (const w of productManifestWarnings(manifest)) console.warn("[decompose]", w);
   const presentFiles = [...zip.files.keys()];
   const sketch: ProductSketch = buildProductSketch(manifest, presentFiles);
   const specApproved = params.specApprovedOverride ?? !!manifest.product.specApproved;
@@ -317,6 +327,9 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       triggersCreated,
       dispatched,
       originAlreadyPromoted,
+      // Só conta como aprovação quando de fato aplicada aos projetos (modo express); na Bancada
+      // (isDraft) o flag é ignorado na criação e não há o que auditar aqui.
+      specApprovedEffective: dispatch ? specApproved : false,
     };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});

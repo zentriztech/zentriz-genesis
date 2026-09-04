@@ -35,6 +35,7 @@ import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbo
 import { isPreFactory, SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { emitValueEvent } from "../services/valueEvents.js";
 import { runProposeJob, PROPOSAL_DEADLINE_MIN } from "../services/productProposals.js";
+import { recordSelfApproval } from "../services/governanceAudit.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -218,6 +219,16 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         specApprovedOverride,
         dispatch: dispatchZip,
       });
+      // R4 PR5 / D4: auto-aprovação via ZIP (campo multipart OU product.specApproved do PRODUCT.json)
+      // — auditada pelo valor EFETIVO aplicado, não bloqueada.
+      if (result.specApprovedEffective && !result.idempotentReuse) {
+        void recordSelfApproval(pool, {
+          actorUserId: user.id, actorEmail: user.email ?? null, actorRole: user.role,
+          productId: result.productId, source: "products_ingest_zip",
+          rawValue: specApprovedOverride === true ? "multipart:specApproved" : "manifest:product.specApproved",
+          extra: { projects: result.projects.map((p) => p.projectId) },
+        });
+      }
       // Reingestão idempotente (mesmo produto já existe): no-op, 200, sem disparar nada.
       if (result.idempotentReuse) {
         request.log.info({ productId: result.productId }, "[products/ingest] no-op idempotente (produto já ingerido)");
@@ -418,6 +429,16 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           dispatch: dispatch === true,
           originProjectId: origin,
         });
+        // R4 PR5 / D4: auto-aprovação ao ingerir proposta (body OU product.specApproved do manifesto
+        // persistido) — auditada pelo valor EFETIVO aplicado, não bloqueada.
+        if (result.specApprovedEffective && !result.idempotentReuse) {
+          void recordSelfApproval(pool, {
+            actorUserId: user.id, actorEmail: user.email ?? null, actorRole: user.role,
+            productId: result.productId, source: "products_ingest_proposal",
+            rawValue: specApproved === true ? "body:specApproved" : "manifest:product.specApproved",
+            extra: { proposalId: proposalId ?? null, projects: result.projects.map((p) => p.projectId) },
+          });
+        }
         // T1.6b: marca a proposta consumida (audit) e purga o payload (idempotente por
         // COALESCE — reingerir a mesma proposta não reescreve consumed_at). Best-effort:
         // a idempotência do produto já vem do systemId em decomposeProduct.

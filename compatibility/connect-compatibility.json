@@ -6,10 +6,13 @@
   },
   "validatedAgainst": [
     "1.0.0",
-    "1.1.0"
+    "1.1.0",
+    "1.2.0",
+    "1.3.0"
   ],
   "notes": [
-    "Genesis emits core Connect artifacts via deterministic assembler.",
+    "Genesis emits core Connect artifacts via deterministic assembler (spec-first from connect.yaml since 1.3.0; canonical systemId; IntegrationReadyContract emitted).",
+    "Genesis produces ProductManifest and SpecConnectDeclaration (Connect 1.3.0, ADR-013 Connect-local) in the Bancada and consumes them in the factory.",
     "Cross-repo smoke and local tests validate the current v1 integration."
   ]
 }

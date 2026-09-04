@@ -25,6 +25,7 @@ import {
   ManifestError,
   type ProductManifest,
 } from "./productManifest.js";
+import { productManifestWarnings } from "./connectSchema.js";
 
 // Deadline de restart-survival: o timer em processo cobre o caso normal (11 min); este é o
 // backstop no DB para quando o processo morre (o watchdog expira a linha).
@@ -70,6 +71,9 @@ async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): 
     // Valida o grafo no lado TS e computa as ondas (double-check dos MESMOS gates do splitter).
     const parsed = parseManifest(JSON.stringify(manifest));
     const sketch = buildProductSketch(parsed, Object.keys(specs));
+    // R4 PR5: validação contra o schema Connect VENDORIZADO (modo warning — vira aviso visível no
+    // DecomposeDialog, nunca falha a proposta nesta release).
+    const schemaWarnings = productManifestWarnings(manifest);
     const projects = sketch.projects.map((p) => ({
       id: p.id, type: p.type, wave: p.wave, dependsOn: p.dependsOn,
       // R4 PR3: racional/arquivos visíveis ao humano no DecomposeDialog antes de aprovar.
@@ -84,7 +88,7 @@ async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): 
       await failProposal(pool, jobId, "Proposta grande demais (>2MB) para persistir. Reduza a spec.");
       return;
     }
-    const warningsJson = JSON.stringify(result.warnings ?? []);
+    const warningsJson = JSON.stringify([...(result.warnings ?? []), ...schemaWarnings]);
     const r = await pool.query(
       "UPDATE product_proposals SET status='done', payload=$2::jsonb, warnings=$3::jsonb, error=NULL, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status='running'",
       [jobId, payloadJson, warningsJson],

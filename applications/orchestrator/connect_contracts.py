@@ -10,7 +10,9 @@ from typing import Any
 
 # Constante ÚNICA da versão dos manifests Connect emitidos pelo Genesis (R4 PR1).
 # pipeline_context.PipelineContext.connect_version importa daqui — não duplicar o literal.
-CONNECT_SCHEMA_VERSION = os.environ.get("CONNECT_SCHEMA_VERSION", "1.1.0").strip() or "1.1.0"
+# R4 PR5: default 1.1.0 → 1.3.0 (Connect 1.3.0 = ADR-013 Connect-local; manifests de runtime são
+# idênticos aos 1.1.0 — mudança aditiva). Artefatos passam a ser gravados em project/connect/v1.3.0/.
+CONNECT_SCHEMA_VERSION = os.environ.get("CONNECT_SCHEMA_VERSION", "1.3.0").strip() or "1.3.0"
 CONNECT_VERSION_DIR = f"v{CONNECT_SCHEMA_VERSION}"
 CONNECT_PROJECT_DIR = f"connect/{CONNECT_VERSION_DIR}"
 

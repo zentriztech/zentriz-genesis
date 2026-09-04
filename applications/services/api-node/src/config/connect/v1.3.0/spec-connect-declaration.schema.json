@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zentriz.local/schemas/products/spec-connect-declaration.schema.json",
+  "title": "SpecConnectDeclaration",
+  "description": "Declaração Connect de um PROJETO (serviço) feita na fase de especificação, ANTES de existir código (arquivo `connect.yaml` por projeto na Bancada do Genesis). É a INTENÇÃO de interoperabilidade que a fábrica usa para gerar SystemPassport/ServiceManifest/OwnershipManifest de forma determinística (em vez de inferir por heurística sobre o código). Não declara fatos de runtime (entrypoints reais, contractRef concreto, safe actions, dashboards) — esses continuam sendo emitidos pela fábrica a partir do que foi gerado (ver ADR-013 Connect-local). Enums espelham os manifests de runtime (service-manifest, runtime-passport, system-passport).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "systemId", "serviceName", "responsibility", "interfaces"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Versão do schema do Connect consumida (SemVer, ex.: 1.3.0)."
+    },
+    "systemId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Identificador canônico do SISTEMA (produto). Deve ser igual a `product.systemId` do ProductManifest e ao systemId registrado no Deadpool. Nunca derivado do título da spec."
+    },
+    "serviceId": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "description": "Identificador do serviço dentro do sistema (= `projects[].id` do ProductManifest). `null` para App solo (sistema mono-serviço: o serviço É o sistema)."
+    },
+    "serviceName": { "type": "string", "minLength": 1 },
+    "responsibility": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Bounded context em 1-3 frases: o que este serviço é responsável por fazer (e não fazer)."
+    },
+    "interfaces": {
+      "type": "array",
+      "description": "Interfaces que o serviço DEVE expor. `contractRef` é opcional aqui (design-first: pode apontar para um OpenAPI/AsyncAPI mínimo em `contratos.md`); o contractRef concreto é preenchido pela fábrica.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["http", "event", "queue", "stream", "cron", "internal", "other"] },
+          "contractRef": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Serviços de que este depende: ids de projetos irmãos do mesmo ProductManifest (ex.: `<slug>-infra`) ou nomes de sistemas externos.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "publishes": { "type": "array", "items": { "type": "string" } },
+        "subscribes": { "type": "array", "items": { "type": "string" } },
+        "valueEvents": {
+          "type": "array",
+          "description": "ValueEvents (contrato value/) que este serviço deve emitir.",
+          "items": { "type": "string", "enum": ["project_delivered", "deploy_completed", "pipeline_run_completed", "spec_promoted"] }
+        }
+      }
+    },
+    "runtimeType": {
+      "type": "string",
+      "enum": ["serverless", "container", "vm", "hybrid", "other"],
+      "description": "Distribuição declarada na spec (ex.: docker-compose single-host → container; Terraform/gerenciado → conforme alvo)."
+    },
+    "queues": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Filas/tópicos consumidos ou produzidos (workers/consumers)."
+    },
+    "healthModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hasHealthEndpoint": { "type": "boolean" },
+        "signals": { "type": "array", "items": { "type": "string" }, "description": "Sinais DESEJADOS; os defaults por tipo de projeto vêm da policy da fábrica." },
+        "sloCritical": { "type": "boolean" }
+      }
+    },
+    "environments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["dev", "test", "staging", "prod", "sandbox", "other"] },
+          "region": { "type": "string" },
+          "criticality": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+        }
+      }
+    },
+    "owners": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Owners REAIS do tenant (pessoas/papéis), não sintéticos. Mesma forma dos manifests de runtime.",
+      "properties": {
+        "technicalOwner": { "$ref": "#/$defs/owner" },
+        "productOwner": { "$ref": "#/$defs/owner" },
+        "escalationPath": { "type": "array", "items": { "$ref": "#/$defs/owner" } }
+      }
+    },
+    "integrationTierTarget": {
+      "type": "string",
+      "enum": ["tier0-generic", "tier1-integration-ready", "tier2-deadpool-ready", "tier3-genesis-deadpool-native"],
+      "description": "Tier ALVO (informativo). O tier efetivo é derivado pelo consumidor (Deadpool) pela presença dos contratos entregues — nunca por esta declaração."
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string" }
+      }
+    }
+  }
+}

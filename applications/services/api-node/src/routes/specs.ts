@@ -13,6 +13,7 @@ import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
+import { recordSelfApproval } from "../services/governanceAudit.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -636,6 +637,7 @@ export async function specRoutes(app: FastifyInstance) {
     // SPEC-APPROVED: "Especificações aprovadas por humanos". Quando true, o runner roda o CTO
     // em Sub-modo C (validar, não regenerar) — sem pular Engineer/charter/PM.
     let specApproved = false;
+    let specApprovedRaw: string | null = null; // valor cru (checkbox "on" × reviewMode "validate-only") p/ auditoria
     // RASCUNHO: "Salvar Rascunho" (startNow=false no portal) envia draft=true. Quando true, o
     // projeto nasce com status 'draft' (aguardando início manual), NÃO 'spec_submitted'. Isso
     // corrige o bug em que um rascunho aparecia como "Em execução" sem botão de iniciar
@@ -720,7 +722,7 @@ export async function specRoutes(app: FastifyInstance) {
         const raw = v && typeof (v as { value?: string }).value === "string"
           ? (v as { value: string }).value.trim().toLowerCase()
           : "";
-        if (["true", "1", "on", "yes", "validate-only"].includes(raw)) specApproved = true;
+        if (["true", "1", "on", "yes", "validate-only"].includes(raw)) { specApproved = true; specApprovedRaw = raw; }
       }
       // INTAKE-GATE: modo de intake ("free_text" | "attachments").
       if (part.fields?.intakeMode !== undefined) {
@@ -950,12 +952,69 @@ export async function specRoutes(app: FastifyInstance) {
       client.release();
     }
 
+    // R4 PR5 / D4: auto-aprovação (specApproved) é aceita, mas AUDITADA — aprovador = submissor.
+    // O product_id EFETIVO vem do projeto criado (sem productId no multipart o INBOX é resolvido
+    // dentro de createProjectFromSpec — adversarial PR5 #B).
+    if (specApproved) {
+      const createdProjectId = result.projectId;
+      void (async () => {
+        let effectiveProductId: string | null = productId ?? null;
+        try {
+          const r = await pool.query("SELECT product_id FROM projects WHERE id = $1", [createdProjectId]);
+          effectiveProductId = (r.rows[0]?.product_id as string | null) ?? effectiveProductId;
+        } catch { /* best-effort */ }
+        await recordSelfApproval(pool, {
+          actorUserId: user.id, actorEmail: user.email ?? null, actorRole: user.role,
+          projectId: createdProjectId, productId: effectiveProductId, source: "specs_upload",
+          rawValue: specApprovedRaw,
+        });
+      })();
+    }
+
     return reply.send({
       projectId: result.projectId,
       status: result.status,
       message: "Spec(s) recebida(s). O fluxo será iniciado em seguida.",
     });
   });
+
+  // ── R4 PR5 / D4: leitura da trilha de governança (sem leitura, "só logar" seria write-only) ──
+  // GET /api/governance-audit?projectId=&productId=&action=&limit=  — tenant-scoped via
+  // projects/products do chamador; zentriz_admin vê tudo.
+  app.get<{ Querystring: { projectId?: string; productId?: string; action?: string; limit?: string } }>(
+    "/api/governance-audit",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { projectId, productId, action } = request.query;
+      const limit = Math.min(Math.max(parseInt(request.query.limit ?? "50", 10) || 50, 1), 200);
+      if (projectId && !UUID_RE.test(projectId)) return reply.status(400).send({ code: "BAD_REQUEST", message: "projectId inválido" });
+      if (productId && !UUID_RE.test(productId)) return reply.status(400).send({ code: "BAD_REQUEST", message: "productId inválido" });
+      const params: unknown[] = [];
+      const where: string[] = [];
+      if (user.role !== "zentriz_admin") {
+        if (!user.tenantId) return reply.status(403).send({ code: "FORBIDDEN", message: "Tenant obrigatório" });
+        params.push(user.tenantId);
+        // fail-closed: só linhas cujo projeto OU produto pertence ao tenant do chamador
+        where.push(`(ga.project_id IN (SELECT id FROM projects WHERE tenant_id = $${params.length})
+                     OR ga.product_id IN (SELECT id FROM products WHERE tenant_id = $${params.length}))`);
+      }
+      if (projectId) { params.push(projectId); where.push(`ga.project_id = $${params.length}`); }
+      if (productId) { params.push(productId); where.push(`ga.product_id = $${params.length}`); }
+      if (action) { params.push(action); where.push(`ga.action = $${params.length}`); }
+      params.push(limit);
+      const rows = (await pool.query(
+        `SELECT ga.id, ga.actor_user_id AS "actorUserId", ga.actor_role AS "actorRole", ga.action,
+                ga.project_id AS "projectId", ga.product_id AS "productId", ga.spec_hash AS "specHash",
+                ga.snapshot, ga.created_at AS "createdAt"
+           FROM governance_audit ga
+          ${where.length ? "WHERE " + where.join(" AND ") : ""}
+          ORDER BY ga.created_at DESC
+          LIMIT $${params.length}`,
+        params,
+      )).rows;
+      return reply.send(rows);
+    },
+  );
 
   // ── RFC-0004 Onda 3 (F4): operação Validar ─────────────────────────────────
 

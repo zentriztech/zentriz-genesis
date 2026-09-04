@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zentriz.local/schemas/products/product-manifest.schema.json",
+  "title": "ProductManifest",
+  "description": "Manifesto de produto lido pelo Genesis (Product Architect) para decompor um ZIP de documentação em um produto com N projetos interdependentes. Ver ADR-018 (ecossistema) e ADR-013 Connect-local (v1.3.0: campos opcionais do splitter — archetype/stack/deployTarget/rationale/files/connectDeclaration — e bloco `connect` do produto).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "product", "projects"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Versão do schema do Connect consumida (ex.: 1.1.0)."
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "systemId": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "description": { "type": "string" },
+        "specApproved": {
+          "type": "boolean",
+          "description": "Ativa o Sub-modo C do CTO (validar, não regenerar) em todos os projetos."
+        },
+        "deliveryDefault": {
+          "type": "string",
+          "enum": ["source_only", "demo", "production"],
+          "description": "Modo de entrega default dos projetos backend."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "v1.3.0 — Por que o produto foi decomposto assim (sinais de fronteira, critérios aplicados). Auditável pelo humano antes de aprovar."
+        },
+        "connect": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "v1.3.0 — Declaração Connect no nível do PRODUTO (sistema). Owners reais do tenant e ambientes-alvo; o tier é ALVO (informativo).",
+          "properties": {
+            "owners": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "name"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "email": { "type": "string", "format": "email" },
+                  "role": { "type": "string" }
+                }
+              }
+            },
+            "environments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "type"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "type": { "type": "string", "enum": ["dev", "test", "staging", "prod", "sandbox", "other"] },
+                  "region": { "type": "string" },
+                  "criticality": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+                }
+              }
+            },
+            "integrationTierTarget": {
+              "type": "string",
+              "enum": ["tier0-generic", "tier1-integration-ready", "tier2-deadpool-ready", "tier3-genesis-deadpool-native"]
+            }
+          }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "spec", "type"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Identificador único do projeto dentro do manifesto (usado nas arestas dependsOn)."
+          },
+          "spec": {
+            "type": "string",
+            "description": "Caminho relativo do arquivo .md de spec dentro do ZIP."
+          },
+          "type": {
+            "type": "string",
+            "description": "Tipo canônico Genesis do projeto.",
+            "enum": [
+              "lib_ts",
+              "backend_api_nestjs",
+              "backend_api",
+              "backend_api_node",
+              "backend_api_python",
+              "backend_graphql",
+              "backend_worker",
+              "frontend_dashboard",
+              "frontend_landing",
+              "fullstack_saas",
+              "mobile_expo",
+              "mobile_crossplatform",
+              "other"
+            ]
+          },
+          "dependsOn": {
+            "type": "array",
+            "description": "IDs de projetos predecessores (arestas do grafo → project_triggers). Deve formar um DAG.",
+            "items": { "type": "string" },
+            "default": []
+          },
+          "wave": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Onda de execução (redundante ao topo-sort; explícito para auditoria)."
+          },
+          "delivery": {
+            "type": "string",
+            "enum": ["source_only", "demo", "production", "preview_build", "store_submit"],
+            "description": "Override do modo de entrega deste projeto (backend: source_only/demo/production; mobile: source_only/preview_build/store_submit)."
+          },
+          "archetype": {
+            "type": "string",
+            "description": "v1.3.0 — Arquétipo do projeto escolhido pelo splitter (catálogo do Genesis; default derivado de `type` quando ausente)."
+          },
+          "stack": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "v1.3.0 — Stack declarada (ex.: [\"Node 20\", \"NestJS 11\", \"PostgreSQL 16\"]); default da policy do tipo quando ausente."
+          },
+          "deployTarget": {
+            "type": "string",
+            "description": "v1.3.0 — Alvo de deploy/distribuição declarado (ex.: docker-compose-single-host, aws-ecs, vercel)."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "v1.3.0 — Por que este projeto é um deployable separado (critério de corte: bounded context, taxa de mudança, escala, segurança…) e por que não foi fundido a um vizinho."
+          },
+          "files": {
+            "type": "array",
+            "description": "v1.3.0 — Arquivos de especificação deste projeto além de `spec` (spec fatiada por tema). Caminhos relativos ao pacote.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "kind"],
+              "properties": {
+                "path": { "type": "string" },
+                "kind": {
+                  "type": "string",
+                  "enum": ["readme", "domain-model", "requirements", "contracts", "infra-deploy", "decisions", "connect-declaration", "other"]
+                },
+                "title": { "type": "string" }
+              }
+            }
+          },
+          "connectDeclaration": {
+            "type": "string",
+            "description": "v1.3.0 — Caminho relativo do arquivo `connect.yaml` deste projeto (conteúdo validado por products/spec-connect-declaration.schema.json)."
+          }
+        }
+      }
+    }
+  }
+}
