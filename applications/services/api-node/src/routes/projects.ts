@@ -3224,7 +3224,8 @@ export async function projectRoutes(app: FastifyInstance) {
       }
 
       const nextVersion = ((parentRow.version_number as number) ?? 1) + 1;
-      const childTitle  = `${parentRow.title} — Evolução v${nextVersion}`;
+      // E2E 2026-09-04: v3 de v2 encadeava "… — Evolução v2 — Evolução v3" → sufixo anterior removido.
+      const childTitle  = `${String(parentRow.title ?? "").replace(/ — Evolução v\d+$/i, "")} — Evolução v${nextVersion}`;
       const lineageRoot = await resolveLineageRoot(client, parentId);
       const rootId = lineageRoot?.id ?? parentId;
 
@@ -3283,6 +3284,9 @@ export async function projectRoutes(app: FastifyInstance) {
       )).rows as Array<{ file_path: string; filename: string; mime_type: string | null; rel_dir: string | null; is_primary: boolean }>;
 
       let inherited = 0;
+      // E2E 2026-09-04: registrar {path, sha} dos herdados NÃO-primários — o gate de RFC ignora RFCs herdados
+      // sem alteração (são história da versão anterior, não o delta desta evolução).
+      const inheritedSpec: Array<{ path: string; sha: string }> = [];
       if (parentSpecRows.length > 0) {
         try {
           const { readFileSync, existsSync, mkdirSync, writeFileSync } = await import("fs");
@@ -3309,6 +3313,7 @@ export async function projectRoutes(app: FastifyInstance) {
                VALUES ($1, $2, $3, $4, $5, $6, $7)`,
               [childId, filename, childPath, r.mime_type ?? "text/markdown", isPrimary ? "" : relDir, isPrimary, sha256Hex(content)]
             );
+            if (!isPrimary) inheritedSpec.push({ path: relDir ? `${relDir}/${filename}` : filename, sha: sha256Hex(content) });
             inherited++;
           }
           if (inherited > 0) {
@@ -3382,7 +3387,7 @@ export async function projectRoutes(app: FastifyInstance) {
       }
       await client.query(
         `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
-        [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited })],
+        [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited, evolution_inherited_spec: inheritedSpec })],
       );
       // RFC-0005 (D-G3): a spec é herdada → as triagens de GAPs vivas do pai imediato também são.
       try {

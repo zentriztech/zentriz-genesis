@@ -134,15 +134,27 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   return { path: pathOrName, number: num ? parseInt(num, 10) : null, title, summary, hasGherkin, gherkinScenarios, mustCount, filesAllowed, compat, breaking, hasNonGoals, problems };
 }
 
-export async function collectEvolutionRfcs(db: Db, projectId: string): Promise<ParsedRfc[]> {
+/**
+ * RFCs desta evolução. E2E 2026-09-04: a v3 herda os RFCs da v2 (`/evolve` copia docs/rfc) — um RFC herdado e
+ * NÃO alterado é história da versão anterior, não o delta desta; se contasse, o gate passaria sem RFC novo e o
+ * CTO reimplementaria o RFC antigo. Herdados vêm em `extra.evolution_inherited_spec` [{path, sha}]; só são
+ * ignorados enquanto o sha for idêntico (editar/ampliar um RFC herdado o torna RFC desta versão).
+ */
+export async function collectEvolutionRfcs(db: Db, projectId: string, extra?: Record<string, unknown> | null): Promise<ParsedRfc[]> {
   const rows = (await db.query(
-    "SELECT filename, file_path, rel_dir FROM project_spec_files WHERE project_id = $1 ORDER BY filename ASC",
+    "SELECT filename, file_path, rel_dir, content_sha256 FROM project_spec_files WHERE project_id = $1 ORDER BY filename ASC",
     [projectId],
-  )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null }>;
+  )).rows as Array<{ filename: string; file_path: string; rel_dir: string | null; content_sha256: string | null }>;
+  const inherited = new Map<string, string>();
+  for (const it of (extra?.evolution_inherited_spec as Array<{ path?: string; sha?: string }> | undefined) ?? []) {
+    if (it?.path && it?.sha) inherited.set(String(it.path).toLowerCase(), String(it.sha));
+  }
   const out: ParsedRfc[] = [];
   for (const r of rows) {
     const rel = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
     if (rel.toLowerCase() !== RFC_DIR || !RFC_FILENAME_RE.test(r.filename)) continue;
+    const inheritedSha = inherited.get(`${rel}/${r.filename}`.toLowerCase());
+    if (inheritedSha && r.content_sha256 && inheritedSha === r.content_sha256) continue; // herdado sem alteração
     let content = "";
     try { content = await readFile(r.file_path, "utf-8"); } catch { continue; }
     out.push(parseRfcMarkdown(`${rel}/${r.filename}`, content));
@@ -165,7 +177,7 @@ function compatMax(list: Array<RfcCompat | null>): RfcCompat | null {
 /** Aplica o gate à promoção de um projeto. Não-evolução → passthrough. Evolução válida → grava metadados. */
 export async function evaluateEvolutionGate(db: Db, projectId: string, extra: Record<string, unknown> | null | undefined): Promise<EvolutionGateResult> {
   if (!extra || extra.evolution !== true) return { ok: true, applied: false };
-  const rfcs = await collectEvolutionRfcs(db, projectId);
+  const rfcs = await collectEvolutionRfcs(db, projectId, extra);
   if (rfcs.length === 0) {
     return {
       ok: false, code: "EVOLUTION_RFC_REQUIRED",

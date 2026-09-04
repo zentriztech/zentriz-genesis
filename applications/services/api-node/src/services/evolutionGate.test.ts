@@ -137,4 +137,17 @@ describe("evolutionGate (Evoluir E3)", () => {
     expect(patch.evolution_request_original).toBe("quero pdf");
     expect((await collectEvolutionRfcs(db as never, "p")).length).toBe(1);
   });
+
+  it("E2E 2026-09-04: RFC HERDADO da versão anterior e não alterado (mesmo sha) não conta; alterado conta", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rfc-"));
+    const good = path.join(dir, "RFC-0001-exportar-pdf.md");
+    await fs.writeFile(good, GOOD);
+    const rows = [{ filename: "RFC-0001-exportar-pdf.md", file_path: good, rel_dir: "docs/rfc", content_sha256: "sha-herdado" }];
+    const db = { query: vi.fn(async (sql: string) => /project_spec_files/.test(sql) ? { rows } : { rows: [] }) };
+    const inheritedSame = { evolution: true, evolution_inherited_spec: [{ path: "docs/rfc/RFC-0001-exportar-pdf.md", sha: "sha-herdado" }] };
+    expect((await collectEvolutionRfcs(db as never, "p", inheritedSame)).length).toBe(0);
+    expect(await evaluateEvolutionGate(db as never, "p", inheritedSame)).toMatchObject({ ok: false, code: "EVOLUTION_RFC_REQUIRED" });
+    const inheritedEdited = { evolution: true, evolution_inherited_spec: [{ path: "docs/rfc/RFC-0001-exportar-pdf.md", sha: "outro-sha" }] };
+    expect((await collectEvolutionRfcs(db as never, "p", inheritedEdited)).length).toBe(1);
+  });
 });
