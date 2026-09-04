@@ -150,22 +150,30 @@ describe("enrichSpecs (orquestrador)", () => {
     expect(calls).toBe(1);
   });
 
-  // ── Onda 3 (c): gapCount = nº de findings da última validação ──
-  it("anexa gapCount da última validação (findings.length); sem run → null", async () => {
+  // ── Onda 3 (c) + RFC-0005: gapCount = findings ATIVOS da última validação; ignorados à parte ──
+  it("anexa gapCount (ativos) e gapCountIgnored da última validação; sem run → null", async () => {
     const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const { findingFingerprint } = await import("./findingTriage.js");
+    const fA1 = { file: "spec.md", line: null, severity: "warning", title: "Falta X", rationale: "", source: "stage_b", category: "missing_nfr", anchor: "x" } as const;
+    const fA2 = { file: "spec.md", line: null, severity: "warning", title: "Falta Y", rationale: "", source: "stage_b", category: "missing_nfr", anchor: "y" } as const;
     const fake: Queryable = {
       query: async (sql: string) => {
         if (sql.includes("spec_validation_runs")) {
-          return { rows: [{ id: A, findings: [{ severity: "high" }, { severity: "low" }] }] };
+          return { rows: [{ id: A, findings: [fA1, fA2] }] };
+        }
+        if (sql.includes("spec_finding_triage")) {
+          return { rows: [{ id: "t1", project_id: A, fingerprint: findingFingerprint(fA1), state: "ignored", reason_code: "accepted_risk", reason: "", severity_at: "warning", finding_snapshot: {}, spec_hash_at: "", actor_user_id: null, actor_role: "user", expires_at: null, inherited_from: null, recurrence_count: 0, created_at: "2026-09-04" }] };
         }
         if (sql.includes("pipeline_runs")) return { rows: [] };
         return { rows: [] };
       },
     };
     const out = await enrichSpecs(fake, [spec({ id: A }), spec({ id: B })]);
-    expect(out[0].gapCount).toBe(2); // A tem 2 findings
-    expect(out[1].gapCount).toBeNull(); // B nunca validada
+    expect(out[0].gapCount).toBe(1);          // A tem 2 findings, 1 ignorado → 1 ativo
+    expect(out[0].gapCountIgnored).toBe(1);
+    expect(out[1].gapCount).toBeNull();       // B nunca validada
+    expect(out[1].gapCountIgnored).toBe(0);
   });
 
   it("fetchGapCounts degrada para mapa vazio quando o SQL falha", async () => {
@@ -182,6 +190,6 @@ describe("enrichSpecs (orquestrador)", () => {
       query: async () => ({ rows: [{ id: A, findings: null }] }),
     };
     const map = await fetchGapCounts(fake, [A]);
-    expect(map.get(A)).toBe(0);
+    expect(map.get(A)).toEqual({ active: 0, ignored: 0, refuted: 0 });
   });
 });

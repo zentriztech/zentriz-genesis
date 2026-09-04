@@ -3366,6 +3366,14 @@ export async function projectRoutes(app: FastifyInstance) {
         `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
         [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited })],
       );
+      // RFC-0005 (D-G3): a spec é herdada → as triagens de GAPs vivas do pai imediato também são.
+      try {
+        const { inheritTriages } = await import("../services/findingTriage.js");
+        const n = await inheritTriages(client, parentId, childId);
+        if (n > 0) request.log.info({ childId, n }, "[evolve] triagens de GAPs herdadas do pai");
+      } catch (err) {
+        request.log.warn({ err, childId }, "[evolve] herança de triagens falhou (não crítico)");
+      }
 
       // Postar no diálogo do filho
       await client.query(

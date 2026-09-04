@@ -5,6 +5,7 @@ import crypto from "crypto";
 import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
+import type { ValidationFinding } from "../services/specValidation.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { createProjectFromSpec } from "../services/projectCreation.js";
 import { InboxError } from "../services/inbox.js";
@@ -1090,13 +1091,122 @@ export async function specRoutes(app: FastifyInstance) {
       else if (st === "failed") derived = "failed";
       else derived = st; // superseded/interrupted/error
     }
+    // RFC-0005: findings da última run enriquecidos com fingerprint/triagem + resolvidos derivados + contagens.
+    // Só quando a última run é a que a UI mostra (passed/failed); durante 'running' devolve o cru.
+    let triage: import("../services/findingTriage.js").ProjectFindingsState | null = null;
+    if (latest && ["passed", "failed"].includes(String(latest.status))) {
+      const { projectFindingsState } = await import("../services/findingTriage.js");
+      triage = await projectFindingsState(pool, id, { currentFiles: current?.files.map((f) => (f.rel_dir ? `${f.rel_dir}/` : "") + f.filename) ?? null }).catch(() => null);
+      if (triage && triage.latestRunId === latest.id) latest.findings = triage.findings;
+    }
     return reply.send({
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
       derivedStatus: derived,
       latestRun: latest ?? null,
+      resolved: triage?.resolved ?? [],
+      counts: triage?.counts ?? null,
     });
   });
+
+  // ── RFC-0005: triagem por finding ─────────────────────────────────────────────
+  // POST   /api/specs/:id/findings/:fingerprint/triage { state, reason_code, reason?, expiresAt? }
+  // DELETE /api/specs/:id/findings/:fingerprint/triage   (reativar)
+  // POST   /api/specs/:id/findings/triage-bulk { fingerprints[], state, reason_code, reason?, expiresAt? }
+  {
+    const { applyTriage, revokeTriage, findingFingerprint, enrichRunFindings } = await import("../services/findingTriage.js");
+    type TriageBody = { state?: string; reason_code?: string; reason?: string; expiresAt?: string | null; fingerprints?: string[] };
+
+    async function latestRunFindings(projectId: string) {
+      const run = (await pool.query(
+        `SELECT id, spec_hash, findings FROM spec_validation_runs WHERE project_id = $1 AND status IN ('passed','failed') ORDER BY created_at DESC LIMIT 1`,
+        [projectId],
+      )).rows[0] as { id: string; spec_hash: string; findings: ValidationFinding[] } | undefined;
+      return run ?? null;
+    }
+    async function auditBlockerTriage(user: AuthUser, projectId: string, specHash: string, action: string, f: ValidationFinding, body: Record<string, unknown>) {
+      await pool.query(
+        `INSERT INTO governance_audit (actor_user_id, actor_role, action, project_id, spec_hash, snapshot)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [uuidOrNull(user.id), user.role, action, projectId, specHash,
+         JSON.stringify({ ...body, finding: { file: f.file, title: f.title, severity: f.severity, category: f.category ?? null, anchor: f.anchor ?? null }, actorSub: user.id })],
+      ).catch(() => {});
+    }
+    async function notifyBlocker(projectId: string, text: string) {
+      try {
+        const t = (await pool.query("SELECT tenant_id, title FROM projects WHERE id = $1", [projectId])).rows[0] as { tenant_id: string | null; title: string } | undefined;
+        if (t?.tenant_id) {
+          const { notifyTelegramTenant } = await import("./telegram.js");
+          await notifyTelegramTenant(t.tenant_id, `⚠️ *${t.title}* — ${text}`);
+        }
+      } catch { /* best-effort */ }
+    }
+    const doTriage = async (user: AuthUser, projectId: string, fingerprints: string[], body: TriageBody, reply: { status: (c: number) => { send: (b: unknown) => unknown } }) => {
+      const state = body.state === "ignored" || body.state === "refuted" ? body.state : null;
+      if (!state) return reply.status(400).send({ code: "BAD_STATE", message: "state deve ser 'ignored' ou 'refuted'." });
+      const reasonCode = String(body.reason_code ?? "") as import("../services/findingTriage.js").ReasonCode;
+      const run = await latestRunFindings(projectId);
+      if (!run) return reply.status(409).send({ code: "NO_VALIDATION", message: "Valide a spec antes de triar findings." });
+      const enriched = await enrichRunFindings(pool, projectId, run.findings ?? []);
+      const results: Array<{ fingerprint: string; ok: boolean; code?: string; message?: string; state?: string }> = [];
+      for (const fp of fingerprints) {
+        const f = enriched.find((x) => x.fingerprint === fp);
+        if (!f) { results.push({ fingerprint: fp, ok: false, code: "NOT_FOUND", message: "finding não está na última validação" }); continue; }
+        const r = await applyTriage(pool, {
+          projectId, finding: f, actor: { id: user.id, role: user.role, svc: user.svc ?? null },
+          state, reasonCode, reason: String(body.reason ?? ""), expiresAt: body.expiresAt ?? null, specHash: run.spec_hash,
+        });
+        if (!r.ok) { results.push({ fingerprint: fp, ok: false, code: r.code, message: r.message }); continue; }
+        results.push({ fingerprint: fp, ok: true, state });
+        if (f.severity === "blocker" && r.created) {
+          const action = state === "ignored" ? "gap_ignored_blocker" : "gap_refuted_blocker";
+          await auditBlockerTriage(user, projectId, run.spec_hash, action, f, { fingerprint: fp, reason_code: reasonCode, reason: String(body.reason ?? "").slice(0, 500), expiresAt: body.expiresAt ?? null });
+          void notifyBlocker(projectId, `blocker "${f.title}" ${state === "ignored" ? "IGNORADO" : "REFUTADO"} por ${user.role} (${reasonCode}).`);
+        }
+      }
+      const okCount = results.filter((r) => r.ok).length;
+      const status = fingerprints.length === 1 ? (results[0].ok ? 200 : ({ FORBIDDEN: 403, MANAGEMENT_ACCOUNT: 403, BLOCKER_REQUIRES_TENANT_ADMIN: 403, FINDING_NOT_TRIAGEABLE: 409, NOT_FOUND: 404 } as Record<string, number>)[results[0].code ?? ""] ?? 400) : 200;
+      return reply.status(status).send(fingerprints.length === 1 ? results[0] : { ok: okCount > 0, applied: okCount, results });
+    };
+
+    app.post<{ Params: { id: string; fingerprint: string }; Body: TriageBody }>(
+      "/api/specs/:id/findings/:fingerprint/triage",
+      async (request, reply) => {
+        const user = getUser(request);
+        const proj = await loadAccessibleProject(request.params.id, user);
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        return doTriage(user, proj.id, [request.params.fingerprint], request.body ?? {}, reply);
+      },
+    );
+    app.post<{ Params: { id: string }; Body: TriageBody }>(
+      "/api/specs/:id/findings/triage-bulk",
+      async (request, reply) => {
+        const user = getUser(request);
+        const proj = await loadAccessibleProject(request.params.id, user);
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        const fps = Array.isArray(request.body?.fingerprints) ? request.body!.fingerprints!.filter((x) => typeof x === "string").slice(0, 200) : [];
+        if (!fps.length) return reply.status(400).send({ code: "BAD_REQUEST", message: "fingerprints[] obrigatório" });
+        return doTriage(user, proj.id, fps, request.body ?? {}, reply);
+      },
+    );
+    app.delete<{ Params: { id: string; fingerprint: string } }>(
+      "/api/specs/:id/findings/:fingerprint/triage",
+      async (request, reply) => {
+        const user = getUser(request);
+        const proj = await loadAccessibleProject(request.params.id, user);
+        if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (user.svc === "runner" || user.role === "zentriz_admin") return reply.status(403).send({ code: "FORBIDDEN", message: "Só usuários do tenant reativam findings." });
+        const row = await revokeTriage(pool, { projectId: proj.id, fingerprint: request.params.fingerprint, actor: { id: user.id, role: user.role, svc: user.svc ?? null } });
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Nenhuma triagem viva para este finding." });
+        if (row.severity_at === "blocker") {
+          const snap = (row.finding_snapshot ?? {}) as Partial<ValidationFinding>;
+          await auditBlockerTriage(user, proj.id, row.spec_hash_at, "gap_reactivated", { file: snap.file ?? "", title: snap.title ?? "", severity: "blocker", source: (snap.source as ValidationFinding["source"]) ?? "stage_b", line: null, rationale: "", category: snap.category ?? null, anchor: snap.anchor ?? null }, { fingerprint: request.params.fingerprint, previous_state: row.state });
+        }
+        return reply.send({ ok: true, fingerprint: request.params.fingerprint, reactivated: true, previousState: row.state });
+      },
+    );
+    void findingFingerprint; // exposto para futuros usos (evita import não usado)
+  }
 
   // POST /api/specs/:id/validation/:runId/ack — acknowledgment HASH-BOUND (na própria run).
   // Corpo é IGNORADO (forjável) — vale o JWT. Tenant só acka run SEM blocker; zentriz_admin

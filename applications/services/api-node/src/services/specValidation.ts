@@ -26,6 +26,7 @@ import { loadArchetypeCatalog, getArchetype } from "./archetypeCatalog.js";
 import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 import { UUID_RE } from "../lib/tenantScope.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
+import { normalizeCategory, enrichRunFindings, registerRecurrences } from "./findingTriage.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -51,6 +52,32 @@ export interface ValidationFinding {
   title: string;
   rationale: string;
   source: "stage_a" | "stage_b";
+  /** RFC-0005: taxonomia fechada (lentes do validador; Stage A = `structural`) — parte do fingerprint. */
+  category?: string | null;
+  /** RFC-0005: o que o finding aponta (FR-NN, heading, entidade; Stage A = id da regra) — parte do fingerprint. */
+  anchor?: string | null;
+}
+
+/** RFC-0005: Stage A é determinístico → categoria/anchor por REGRA (título estável → id). */
+function annotateStageA(f: ValidationFinding): ValidationFinding {
+  const t = f.title;
+  const rule =
+    /excede o teto de arquivos/i.test(t) ? "too_many_files" :
+    /acima do teto/i.test(t) || /excede o teto$/i.test(t) || /agregada excede/i.test(t) ? "file_too_large" :
+    /sem manifesto/i.test(t) ? "no_readme" :
+    /sem frontmatter/i.test(t) ? "readme_no_frontmatter" :
+    /Arquétipo desconhecido/i.test(t) ? "archetype_unknown" :
+    /Campos de ESTADO/i.test(t) ? "state_in_frontmatter" :
+    /RFC fora do padrão/i.test(t) ? "rfc_bad_name" :
+    /RFC sem critérios/i.test(t) ? "rfc_no_gherkin" :
+    /files_allowed irrestrito/i.test(t) ? "rfc_unrestricted_scope" :
+    /sem `## Impacto`/i.test(t) ? "rfc_no_files_allowed" :
+    /só de testes\/docs/i.test(t) ? "rfc_tests_only_scope" :
+    /sem Não-objetivos/i.test(t) ? "rfc_no_non_goals" :
+    /sem `## Compatibilidade`/i.test(t) ? "rfc_no_compat" :
+    /sem conteúdo substantivo/i.test(t) ? "empty_spec" : "stage_a_other";
+  const category = /^rfc_/.test(rule) ? (/gherkin|non_goals/.test(rule) ? "no_acceptance_criteria" : "structural") : "structural";
+  return { ...f, category: f.category ?? category, anchor: f.anchor ?? rule };
 }
 
 export interface ValidationRun {
@@ -216,7 +243,7 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
     findings.push({ file: "", line: null, severity: "blocker", title: "Spec sem conteúdo substantivo",
       rationale: "Menos de 200 caracteres úteis no agregado — nada para a fábrica construir.", source: "stage_a" });
   }
-  return findings;
+  return findings.map(annotateStageA);
 }
 
 // ── Estágio B — adversarial LLM (via agents; SEM ferramentas) ────────────────
@@ -250,6 +277,9 @@ export function parseStageBFindings(raw: unknown): ValidationFinding[] {
       title: String(o.title ?? "").slice(0, 200) || "(sem título)",
       rationale: String(o.rationale ?? "").slice(0, 1200),
       source: "stage_b",
+      // RFC-0005: identidade estável vem de category (taxonomia fechada) + anchor (FR/seção/entidade).
+      category: normalizeCategory(o.category),
+      anchor: String(o.anchor ?? "").trim().slice(0, 160) || null,
     });
   }
   return out;
@@ -392,6 +422,12 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       WHERE id = $3 AND status = 'running'`,
     [finalStatus, JSON.stringify(findings), runId],
   );
+  // RFC-0005 (G2): supressão é PÓS-PROCESSAMENTO — findings que reincidem sobre um Refutado vivo
+  // contam reincidência (a leitura já os mostra como Refutados; a run continua snapshot imutável).
+  if (finalStatus === "passed" || finalStatus === "failed") {
+    await registerRecurrences(pool, projectId, findings).catch((e) =>
+      console.warn(`[spec-validation] run ${runId}: registerRecurrences falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`));
+  }
   if (stageBError) {
     console.warn(`[spec-validation] run ${runId}: estágio B falhou (${stageBError}) — run marcada 'error'.`);
   }
@@ -490,7 +526,10 @@ export async function checkSpecValidationGate(
     return { ok: false, code: "SPEC_NOT_VALIDATED",
       message: "Spec não validada (ou editada após a última validação). Rode Validar e tente de novo." };
   }
-  const findings = (run.findings ?? []) as ValidationFinding[];
+  const rawFindings = (run.findings ?? []) as ValidationFinding[];
+  // RFC-0005: só findings ATIVOS contam — ignorados/refutados (triagem viva, auditada) não bloqueiam.
+  const enriched = await enrichRunFindings(db, projectId, rawFindings).catch(() => null);
+  const findings = enriched ? enriched.filter((f) => !f.triage) : rawFindings;
   // Sinal de ack = acked_role/acked_at — acked_by pode ser NULL legitimamente (token
   // estático admin tem sub não-UUID; a identidade crua vive no snapshot da auditoria).
   const acked = !!run.acked_role;
@@ -498,8 +537,13 @@ export async function checkSpecValidationGate(
 
   if (run.status === "failed") {
     if (forcedByAdmin) return { ok: true };
-    return { ok: false, code: "SPEC_VALIDATION_BLOCKED",
-      message: "Validação reprovou com findings blocker. Corrija a spec (ou um zentriz_admin pode forçar, auditado)." };
+    const activeBlockers = findings.filter((f) => f.severity === "blocker").length;
+    if (enriched && activeBlockers === 0) {
+      // todos os blockers foram triados (ignorados/refutados por tenant_admin, auditado) → segue
+    } else {
+      return { ok: false, code: "SPEC_VALIDATION_BLOCKED",
+        message: `Validação reprovou com ${activeBlockers || "findings"} blocker(s) ativo(s). Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.` };
+    }
   }
   const hasWarnings = findings.some((f) => f.severity === "warning");
   if (hasWarnings && !acked) {

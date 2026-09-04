@@ -129,9 +129,19 @@ async function loadChatContext(projectId: string, primaryContent: string): Promi
     let findingsBlock = "";
     let findings: ValidationFinding[] = [];
     if (Array.isArray(latest?.findings) && latest!.findings.length) {
-      findings = latest!.findings;
-      let block = findings.map(fmtFinding).join("\n");
+      // RFC-0005: só GAPs ATIVOS vão como trabalho; Refutados vão como "não tratar / não reintroduzir";
+      // Ignorados (risco aceito pelo humano) não vão.
+      const { enrichRunFindings } = await import("../services/findingTriage.js");
+      const enriched = await enrichRunFindings(pool, projectId, latest!.findings).catch(() => null);
+      const active = enriched ? enriched.filter((f) => !f.triage) : latest!.findings;
+      const refuted = enriched ? enriched.filter((f) => f.triage?.state === "refuted") : [];
+      findings = active;
+      let block = active.map(fmtFinding).join("\n");
       if (block.length > FINDINGS_BUDGET) block = block.slice(0, FINDINGS_BUDGET) + "\n…(demais findings omitidos)…";
+      if (refuted.length) {
+        block += `\n\nREFUTADOS PELO HUMANO (falsos positivos — NÃO tratar, NÃO reintroduzir texto para "resolvê-los"):\n` +
+          refuted.slice(0, 20).map((f) => `- ${f.file || "(spec)"} — ${f.title}`).join("\n");
+      }
       findingsBlock = block;
     }
     return { siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated" };
@@ -578,7 +588,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       if (resolveGaps && ctx.findings.length === 0) {
         return reply.status(409).send({
           code: "NO_GAPS",
-          message: "Nenhum GAP em aberto na última validação. Rode Validar para (re)avaliar a spec.",
+          message: "Nenhum GAP ATIVO na última validação (ignorados/refutados não são tratados). Rode Validar para (re)avaliar a spec.",
         });
       }
 

@@ -180,8 +180,17 @@ export async function fetchDepSignals(client: Queryable, specIds: string[]): Pro
 // Onda 3 (c) — nº de GAPs por spec = tamanho de findings da ÚLTIMA validação (mesma
 // semântica do badge no editor: latestRun.findings.length). Best-effort: qualquer falha
 // devolve mapa vazio → o card simplesmente não mostra o aviso de GAPs (degrada limpo).
-export async function fetchGapCounts(client: Queryable, specIds: string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
+import { enrichFindings, countFindings, type TriageRow } from "./findingTriage.js";
+import type { ValidationFinding } from "./specValidation.js";
+
+export interface GapCount { active: number; ignored: number; refuted: number }
+
+/**
+ * RFC-0005: contagens por projeto da última run — `active` (sem triagem viva), `ignored`, `refuted`.
+ * Fonte única com o gate/GET (mesma função de enriquecimento). Degrada para mapa vazio em erro.
+ */
+export async function fetchGapCounts(client: Queryable, specIds: string[]): Promise<Map<string, GapCount>> {
+  const out = new Map<string, GapCount>();
   if (specIds.length === 0) return out;
   try {
     const rows = (
@@ -194,8 +203,22 @@ export async function fetchGapCounts(client: Queryable, specIds: string[]): Prom
         [specIds],
       )
     ).rows as Array<{ id: string; findings: unknown }>;
+    const withFindings = rows.filter((r) => Array.isArray(r.findings) && (r.findings as unknown[]).length > 0);
+    let triagesByProject = new Map<string, TriageRow[]>();
+    if (withFindings.length) {
+      const tr = (await client.query(
+        `SELECT id, project_id, fingerprint, state, reason_code, reason, severity_at, finding_snapshot, spec_hash_at,
+                actor_user_id, actor_role, expires_at, inherited_from, recurrence_count, created_at
+           FROM spec_finding_triage WHERE project_id = ANY($1) AND revoked_at IS NULL`,
+        [withFindings.map((r) => r.id)],
+      ).catch(() => ({ rows: [] as unknown[] }))).rows as unknown as TriageRow[];
+      triagesByProject = tr.reduce((m, t) => { (m.get(t.project_id) ?? m.set(t.project_id, []).get(t.project_id)!).push(t); return m; }, new Map<string, TriageRow[]>());
+    }
     for (const r of rows) {
-      out.set(r.id, Array.isArray(r.findings) ? r.findings.length : 0);
+      const findings = Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [];
+      const enriched = enrichFindings(findings, triagesByProject.get(r.id) ?? []);
+      const c = countFindings(enriched, []);
+      out.set(r.id, { active: c.active, ignored: c.ignored, refuted: c.refuted });
     }
   } catch {
     return new Map();
@@ -233,7 +256,7 @@ export async function fetchHistoryBuckets(client: Queryable): Promise<HistoryBuc
 export async function enrichSpecs<T extends SpecForEnrichment>(
   client: Queryable,
   specs: T[],
-): Promise<Array<T & { readiness: Readiness; estimate: Estimate; gapCount: number | null }>> {
+): Promise<Array<T & { readiness: Readiness; estimate: Estimate; gapCount: number | null; gapCountIgnored: number; gapCountRefuted: number }>> {
   const ids = specs.map((s) => s.id);
   const [deps, buckets, gaps] = await Promise.all([
     fetchDepSignals(client, ids),
@@ -245,8 +268,10 @@ export async function enrichSpecs<T extends SpecForEnrichment>(
     const estimate = estimator(s.complexity_hint);
     const dep = deps.get(s.id) ?? { total: 0, accepted: 0 };
     const readiness = computeReadiness(s, dep, estimate);
-    // gapCount: nº de findings da última validação; null = spec nunca validada (sem aviso no card).
-    const gapCount = gaps.has(s.id) ? gaps.get(s.id)! : null;
-    return { ...s, readiness, estimate, gapCount };
+    // RFC-0005: gapCount = findings ATIVOS da última validação (ignorados/refutados à parte);
+    // null = spec nunca validada (sem aviso no card).
+    const g = gaps.get(s.id);
+    const gapCount = g ? g.active : null;
+    return { ...s, readiness, estimate, gapCount, gapCountIgnored: g?.ignored ?? 0, gapCountRefuted: g?.refuted ?? 0 };
   });
 }
