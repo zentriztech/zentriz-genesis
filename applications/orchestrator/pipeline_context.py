@@ -169,6 +169,10 @@ class PipelineContext:
         self.evolution_touched_files: list[str] = []
         # Bloco 3 F3b: baseline da suíte legada (antes do Dev) e último resultado — {passed, failed, tests[]...}
         self.evolution_baseline: dict | None = None
+        # Bloco 3 F1: conteúdo dos package.json do clone (rel → texto) para diff de dependências por chave.
+        self.evolution_manifest_baseline: dict[str, str] = {}
+        # Bloco 3 F2: projeto pai (baseline da reconciliação Connect = reconciliation.json do pai).
+        self.evolution_parent_id: str | None = None
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -473,6 +477,8 @@ class PipelineContext:
             "evolution_violation_rounds": self.evolution_violation_rounds,
             "evolution_touched_files": self.evolution_touched_files,
             "evolution_baseline": self.evolution_baseline,
+            "evolution_manifest_baseline": self.evolution_manifest_baseline,
+            "evolution_parent_id": self.evolution_parent_id,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -529,6 +535,9 @@ class PipelineContext:
         ctx.evolution_touched_files = [str(p) for p in (data.get("evolution_touched_files") or []) if p][:500]
         _bl = data.get("evolution_baseline")
         ctx.evolution_baseline = _bl if isinstance(_bl, dict) else None
+        _mb = data.get("evolution_manifest_baseline")
+        ctx.evolution_manifest_baseline = {str(k): str(v) for k, v in _mb.items()} if isinstance(_mb, dict) else {}
+        ctx.evolution_parent_id = data.get("evolution_parent_id") or None
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

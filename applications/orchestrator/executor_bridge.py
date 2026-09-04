@@ -196,6 +196,22 @@ def dispatch(path: str, payload: dict, project_id: str, prod_id: str | None,
     return _post(f"{executor_url()}{path}", body, timeout)
 
 
+def dispatch_run_tests(base_payload: dict, project_id: str, prod_id: str | None,
+                       proj_dir: Path, timeout: int) -> tuple[int, str]:
+    """Bloco 3 F3a — despacha /run-tests (execução determinística da suíte) ao executor não-confiável.
+    Mesmo contrato do /run-full-test: remoto = embarca o projeto e usa o `target` como `project_path`;
+    co-locado = payload como está (project_path do host). Sem segredos no payload."""
+    if not executor_is_remote():
+        return _post(f"{executor_url()}/run-tests", base_payload, timeout)
+    target = ship_project(project_id, prod_id, proj_dir)
+    if not target:
+        raise RuntimeError("/ingest-project não devolveu `target` p/ /run-tests remoto (fail-closed)")
+    body = dict(base_payload)
+    body["project_path"] = target
+    body.pop("api_key", None)
+    return _post(f"{executor_url()}/run-tests", body, timeout)
+
+
 def dispatch_full_test(base_payload: dict, project_id: str, prod_id: str | None,
                        proj_dir: Path, prompt_rel: str, timeout: int) -> tuple[int, str]:
     """Despacha /run-full-test ao executor não-confiável.

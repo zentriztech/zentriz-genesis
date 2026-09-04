@@ -730,17 +730,90 @@ _MISSING_ONLY_SHAPES = {"event", "stream"}
 _CODE_EXTS = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".java", ".kt", ".rb", ".cs", ".rs", ".php")
 
 
-def _code_corpus(ctx: Any) -> str:
-    """Só código-fonte gerado sob apps/ (nunca README/docs/compose) — reduz falsos positivos."""
-    parts = []
+_CORPUS_SKIP_DIRS = ("node_modules", ".git", "dist", "build", ".next", "coverage", "__pycache__", ".venv", "venv", "fixtures", "__mocks__", "mocks")
+_CORPUS_MAX_FILE = 200_000
+_CORPUS_MAX_TOTAL = 2_000_000
+
+
+def _is_test_path(p: str) -> bool:
+    low = p.lower()
+    return ("/tests/" in f"/{low}" or "/test/" in f"/{low}" or "/__tests__/" in f"/{low}"
+            or ".test." in low or ".spec." in low or low.startswith("tests/") or low.startswith("test/"))
+
+
+def _code_corpus_files(ctx: Any) -> dict[str, str]:
+    """Bloco 3 F2 — corpus = código FINAL do serviço: artefatos gerados nesta run (ctx.artifacts) + o `apps/` em
+    DISCO (código herdado do pai em evolução; antes a reconciliação só via o que os agentes geraram → falso
+    `declared_but_missing` para tudo que já existia). Só código sob apps/, sem testes/fixtures/minificados;
+    caps por arquivo e total. Devolve {path_relativo: conteúdo} — evidência por arquivo no report."""
+    files: dict[str, str] = {}
     for path, content in (ctx.artifacts or {}).items():
         p = str(path)
-        if not (p.startswith("apps/") or "/apps/" in p):
+        if not (p.startswith("apps/") or "/apps/" in p) or not p.lower().endswith(_CODE_EXTS) or _is_test_path(p):
             continue
-        if not p.lower().endswith(_CODE_EXTS):
+        files[p] = str(content)
+    if os.environ.get("EVOLUTION_RECONCILE_DISK", "on").lower() == "off":
+        return files
+    root = os.environ.get("PROJECT_FILES_ROOT", "/project-files")
+    pid = str(getattr(ctx, "project_id", "") or "")
+    prod = str(getattr(ctx, "product_id", "") or "")
+    if not pid:
+        return files
+    cands = [os.path.join(root, prod, pid, "apps")] if prod else []
+    cands.append(os.path.join(root, pid, "apps"))
+    apps_dir = next((c for c in cands if os.path.isdir(c)), None)
+    if not apps_dir:
+        return files
+    total = sum(len(v) for v in files.values())
+    for dirpath, dirnames, filenames in os.walk(apps_dir):
+        dirnames[:] = [d for d in dirnames if d not in _CORPUS_SKIP_DIRS]
+        for fn in sorted(filenames):
+            if not fn.lower().endswith(_CODE_EXTS) or fn.lower().endswith((".min.js", ".min.mjs")):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = "apps/" + os.path.relpath(full, apps_dir).replace(os.sep, "/")
+            if rel in files or _is_test_path(rel):
+                continue
+            try:
+                if os.path.getsize(full) > _CORPUS_MAX_FILE:
+                    continue
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    txt = fh.read()
+            except OSError:
+                continue
+            if total + len(txt) > _CORPUS_MAX_TOTAL:
+                break
+            files[rel] = txt
+            total += len(txt)
+    return files
+
+
+def _code_corpus(ctx: Any) -> str:
+    """Compat: corpus concatenado (ver _code_corpus_files)."""
+    return "\n".join(_code_corpus_files(ctx).values())
+
+
+def _parent_reconciliation(ctx: Any) -> dict[str, Any] | None:
+    """Bloco 3 F2 — baseline em evolução: reconciliation.json do PAI (project/connect/v*/). None se não houver."""
+    parent = str(getattr(ctx, "evolution_parent_id", "") or "")
+    if not parent:
+        return None
+    root = os.environ.get("PROJECT_FILES_ROOT", "/project-files")
+    prod = str(getattr(ctx, "product_id", "") or "")
+    for base in ([os.path.join(root, prod, parent)] if prod else []) + [os.path.join(root, parent)]:
+        cdir = os.path.join(base, "project", "connect")
+        if not os.path.isdir(cdir):
             continue
-        parts.append(str(content))
-    return "\n".join(parts)
+        for ver in sorted(os.listdir(cdir), reverse=True):
+            f = os.path.join(cdir, ver, "reconciliation.json")
+            if os.path.isfile(f):
+                try:
+                    with open(f, "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    return data if isinstance(data, dict) else None
+                except Exception:
+                    return None
+    return None
 
 
 def build_reconciliation_report(ctx: Any) -> dict[str, Any]:
@@ -754,27 +827,45 @@ def build_reconciliation_report(ctx: Any) -> dict[str, Any]:
         return {"schemaVersion": CONNECT_SCHEMA_VERSION, "systemId": system_name, "serviceId": service_id,
                 "status": "not-applicable", "declaredButMissing": [], "foundButUndeclared": [],
                 "notes": ["Projeto sem connect.yaml (legado): manifests emitidos por heurística."]}
-    code = _code_corpus(ctx)
+    files = _code_corpus_files(ctx)
+    code = "\n".join(files.values())
+    def _evidence(shape: str) -> list[str]:
+        """Arquivos (apps/…) com token do shape — evidência por arquivo, não só booleano (case-sensitive: tokens de framework)."""
+        hints = _CODE_HINTS.get(shape, ())
+        return sorted(p for p, txt in files.items() if any(h in txt for h in hints))[:20]
     def _found(shape: str) -> bool:
-        return any(h in code for h in _CODE_HINTS.get(shape, ()))  # case-sensitive: tokens de framework
+        return bool(_evidence(shape))
     declared_shapes = {i["type"] for i in decl_ifaces if i["type"] in _CODE_HINTS}
-    missing = [{"interface": i["name"], "type": i["type"], "reason": "nenhuma evidência no código gerado (apps/)"}
+    missing = [{"interface": i["name"], "type": i["type"], "reason": "nenhuma evidência no código (apps/ gerado + em disco)"}
                for i in decl_ifaces if i["type"] in _CODE_HINTS and code and not _found(i["type"])]
-    undeclared = [{"type": shape, "reason": "evidência de framework no código sem interface declarada"}
+    undeclared = [{"type": shape, "reason": "evidência de framework no código sem interface declarada", "evidence": _evidence(shape)}
                   for shape in ("http", "queue", "cron")
                   if code and shape not in declared_shapes and shape not in _MISSING_ONLY_SHAPES and _found(shape)]
     status = "clean" if not missing and not undeclared else "divergent"
     if not code:
         status = "pending"  # ainda sem artefatos (estágio anterior ao Dev)
-    return {
+    notes = ["Heurística por tokens no código (apps/ gerado nesta run + código em disco) — evidência, não prova. Divergência vira finding de QA."]
+    report: dict[str, Any] = {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
         "serviceId": service_id,
         "status": status,
         "declaredButMissing": missing,
         "foundButUndeclared": undeclared,
-        "notes": ["Heurística por tokens no código gerado — evidência, não prova. Divergência vira finding de QA."],
+        "corpus": {"files": len(files), "bytes": len(code)},
+        "notes": notes,
     }
+    # Bloco 3 F2 — evolução: baseline = reconciliation.json do PAI; só divergências NOVAS são finding.
+    parent = _parent_reconciliation(ctx)
+    if parent is not None:
+        pm = {(m.get("interface"), m.get("type")) for m in (parent.get("declaredButMissing") or []) if isinstance(m, dict)}
+        pu = {u.get("type") for u in (parent.get("foundButUndeclared") or []) if isinstance(u, dict)}
+        report["baseline"] = {"source": "parent-reconciliation", "parentStatus": parent.get("status")}
+        report["newDeclaredButMissing"] = [m for m in missing if (m["interface"], m["type"]) not in pm]
+        report["newFoundButUndeclared"] = [u for u in undeclared if u["type"] not in pu]
+        report["status"] = "clean" if not report["newDeclaredButMissing"] and not report["newFoundButUndeclared"] else ("divergent" if code else "pending")
+        notes.append("Evolução: status considera só divergências NOVAS em relação à versão anterior (baseline = pai).")
+    return report
 
 
 def build_integration_ready_contract(ctx: Any) -> dict[str, Any]:

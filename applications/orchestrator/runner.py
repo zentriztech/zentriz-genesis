@@ -539,6 +539,101 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
 
 _EVO_MAX_VIOLATION_MSGS = 20
 
+# Bloco 3 F1 — DevOps condicional em evolução: convenção EXPLÍCITA de caminhos de infraestrutura (pesquisa:
+# nenhuma ferramenta tem lista embutida; lockfiles e manifests de raiz invalidam tudo — Nx/Turbo).
+_EVO_INFRA_PATTERNS = (
+    "Dockerfile", "docker-compose", ".github/workflows/", "infra/", "terraform/", "k8s/", "kubernetes/", "helm/",
+    "serverless.yml", "serverless.yaml", ".tf", "Procfile", "fly.toml", "render.yaml", "vercel.json", "netlify.toml",
+    "nginx", ".env.example", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "Pipfile.lock",
+    "requirements.txt", "requirements/", "go.sum", "go.mod", "pyproject.toml", "Cargo.lock", "Gemfile.lock",
+    "start.sh", "entrypoint",
+)
+_EVO_MANIFEST_DEP_KEYS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies", "engines")
+
+
+def _evo_run_tests(project_id: str, proj_container_dir: Path, timeout: int = 900) -> dict | None:
+    """Bloco 3 F3a/F3b — roda a suíte do projeto no executor (rota B/Lei 8) via `/run-tests` determinístico
+    e devolve o JSON normalizado {stack, cmd, exit_code, passed, failed, skipped, total, no_tests, tests[], status}.
+    None = executor indisponível (não bloqueia nada)."""
+    try:
+        try:
+            from orchestrator import executor_bridge as _eb
+        except ImportError:
+            import executor_bridge as _eb  # type: ignore[no-redef]
+        host_root = os.environ.get("HOST_PROJECT_FILES_ROOT", os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
+        payload = {"project_id": project_id, "project_path": str(Path(host_root) / project_id), "timeout": timeout}
+        status, text = _eb.dispatch_run_tests(payload, project_id, None, proj_container_dir, timeout=timeout + 60)
+        if status != 200:
+            return {"status": "error", "error": f"/run-tests {status}: {text[:200]}", "no_tests": False, "passed": 0, "failed": 0, "tests": []}
+        import json as _json
+        data = _json.loads(text)
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        logger.warning("[F3] /run-tests indisponível: %s", e)
+        return None
+
+
+def _evo_regressions(baseline: dict | None, final: dict | None) -> list[str]:
+    """PASS_TO_PASS (SWE-bench): teste que passava na baseline e NÃO passa no final (falhou OU sumiu do log)
+    = regressão. Sem ids → fallback por contagem (passed final < passed baseline → 1 regressão sintética)."""
+    if not baseline or not final or baseline.get("no_tests") or baseline.get("status") == "error" or final.get("status") == "error":
+        return []
+    b_ids = {t.get("id") for t in (baseline.get("tests") or []) if isinstance(t, dict) and t.get("status") == "passed" and t.get("id")}
+    if b_ids:
+        f_passed = {t.get("id") for t in (final.get("tests") or []) if isinstance(t, dict) and t.get("status") == "passed"}
+        return sorted(str(i) for i in b_ids if i not in f_passed)
+    bp, fp = int(baseline.get("passed") or 0), int(final.get("passed") or 0)
+    return [f"contagem: {fp} passando agora < {bp} na baseline"] if fp < bp else []
+
+
+def _evo_path_is_infra(rel_path: str) -> bool:
+    p = rel_path.replace("\\", "/").lstrip("./")
+    if p.startswith("apps/"):
+        p = p[5:]
+    base = p.rsplit("/", 1)[-1]
+    for pat in _EVO_INFRA_PATTERNS:
+        if pat.endswith("/") and (p.startswith(pat) or f"/{pat}" in f"/{p}"):
+            return True
+        if pat.startswith(".") and base.endswith(pat):
+            return True
+        if base.startswith(pat) or base == pat or pat in base:
+            return True
+    return False
+
+
+def _evo_package_json_deps_changed(before: str, after: str) -> bool:
+    """package.json: só mudança nas CHAVES de dependência/engines é infra (script/formatação não é)."""
+    import json as _json
+    try:
+        a, b = _json.loads(before or "{}"), _json.loads(after or "{}")
+    except Exception:
+        return True  # ilegível → conservador
+    return any((a.get(k) or {}) != (b.get(k) or {}) for k in _EVO_MANIFEST_DEP_KEYS)
+
+
+def _evo_infra_changed(pipeline_ctx, apps_root: Path) -> tuple[bool, list[str]]:
+    """Algum arquivo TOCADO pelo Dev nesta evolução é infraestrutura? Fonte determinística =
+    `pipeline_ctx.evolution_touched_files` (acumulado no gate). package.json: diff por chave contra o
+    conteúdo em `pipeline_ctx.evolution_manifest_baseline` (capturado no FT-10), senão conservador."""
+    touched = list(getattr(pipeline_ctx, "evolution_touched_files", []) or []) if pipeline_ctx is not None else []
+    hits: list[str] = []
+    baseline_manifests = getattr(pipeline_ctx, "evolution_manifest_baseline", None) or {}
+    for p in touched:
+        rel = p[5:] if p.startswith("apps/") else p
+        base = rel.rsplit("/", 1)[-1]
+        if base == "package.json":
+            before = baseline_manifests.get(rel)
+            try:
+                after = (apps_root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                after = ""
+            if before is None or _evo_package_json_deps_changed(before, after):
+                hits.append(p)
+            continue
+        if _evo_path_is_infra(rel):
+            hits.append(p)
+    return (len(hits) > 0, hits)
+
 
 def _evo_register_violation(pipeline_ctx, task_id: str, violations: list[str]) -> int:
     """Registra UMA rodada com violação para a task (1 resposta do Dev = 1 rodada, independentemente de
@@ -3893,12 +3988,33 @@ def _run_monitor_loop(
                                 _devops_product_id = _pd.get("productId") or _pd.get("product_id")
                         except Exception:
                             pass
-                    devops_response = call_devops(
-                        spec_ref, charter_summary, backlog_summary, request_id,
-                        dev_artifacts=_combined_artifacts,
-                        project_id=project_id,
-                        product_id=_devops_product_id,
-                    )
+                    # Bloco 3 F1 — DevOps CONDICIONAL em evolução: se nenhum arquivo tocado é infraestrutura
+                    # (convenção explícita + diff de dependências do package.json), reaproveita a infra da
+                    # versão anterior (Dockerfile/compose/start.sh já vêm no clone) e NÃO chama o DevOps (LLM).
+                    # Pula SÓ a chamada: artefatos Connect do estágio devops, RUNBOOK, TSK-FULL-TEST e
+                    # pending_cyborg seguem normalmente (adversarial bloco 3 — D).
+                    _devops_skipped_evo = False
+                    if (pipeline_ctx is not None and getattr(pipeline_ctx, "evolution_scope", None)
+                            and os.environ.get("EVOLUTION_DEVOPS_CONDITIONAL", "on").lower() != "off"):
+                        _infra_changed, _infra_hits = _evo_infra_changed(
+                            pipeline_ctx, Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps")
+                        if not _infra_changed:
+                            _devops_skipped_evo = True
+                            _post_step("Evolução: nenhum arquivo de infraestrutura foi tocado — DevOps reaproveitado da versão anterior (sem nova geração).", request_id)
+                            _update_task(project_id, "TSK-DEVOPS-001", status="DONE",
+                                         evidence="inherited-infra: nenhum arquivo de infra tocado nesta evolução (Dockerfile/compose/start.sh do clone mantidos)")
+                        else:
+                            _post_step(f"Evolução: infraestrutura tocada ({', '.join(_infra_hits[:5])}{'…' if len(_infra_hits) > 5 else ''}) — DevOps será executado.", request_id)
+                    if _devops_skipped_evo:
+                        devops_response = {"status": "OK", "artifacts": [],
+                                           "summary": "DevOps reaproveitado da versão anterior: nenhum arquivo de infraestrutura tocado nesta evolução; Dockerfile/compose/start.sh do clone permanecem válidos."}
+                    else:
+                        devops_response = call_devops(
+                            spec_ref, charter_summary, backlog_summary, request_id,
+                            dev_artifacts=_combined_artifacts,
+                            project_id=project_id,
+                            product_id=_devops_product_id,
+                        )
                     _audit_log("devops", request_id, devops_response)
                     devops_summary = devops_response.get("summary", "")
                     _post_dialogue(
@@ -4223,7 +4339,26 @@ Execute agora sem pedir confirmação.
                                 _ft_report.write_text(f"# TASK-FULL-TEST — Relatório Claude Code Agent\n\n{_ft_result_text}", encoding="utf-8")
                             except Exception: pass
                         _approved = any(w in _ft_result_text.upper() for w in ["APROVADO", "PASSED", "QA_PASS", "ALL CHECKS"])
-                        _ft_final_status = "DONE" if _approved else "QA_FAIL"
+                        # Bloco 3 F3b — PASS_TO_PASS determinístico em evolução: roda a suíte de novo e compara
+                        # com a baseline (teste que passava e agora falha/sumiu = regressão → QA_FAIL).
+                        _p2p_regressions: list[str] = []
+                        try:
+                            _bl0 = getattr(pipeline_ctx, "evolution_baseline", None) if pipeline_ctx is not None else None
+                            if (_bl0 and not _bl0.get("no_tests") and _bl0.get("status") != "error"
+                                    and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and _proj_container_dir):
+                                _final = _evo_run_tests(project_id or "", _proj_container_dir, timeout=int(os.environ.get("EVOLUTION_P2P_TIMEOUT", "900")))
+                                if _final is not None:
+                                    _p2p_regressions = _evo_regressions(_bl0, _final)
+                                    _bl0["final"] = {"passed": _final.get("passed"), "failed": _final.get("failed"), "status": _final.get("status"),
+                                                     "regressions": _p2p_regressions[:50], "measured_at": datetime.now(timezone.utc).isoformat()}
+                                    pipeline_ctx.save_checkpoint(STATE_DIR)
+                                    if _p2p_regressions:
+                                        _post_step(f"⛔ Não-regressão: {len(_p2p_regressions)} teste(s) da versão anterior deixaram de passar — " + "; ".join(_p2p_regressions[:5]), request_id)
+                                    else:
+                                        _post_step(f"✅ Não-regressão: suíte legada continua verde ({_final.get('passed', 0)} passando).", request_id)
+                        except Exception as _e_p2p:
+                            logger.warning("[F3b] comparação PASS_TO_PASS falhou (não crítico): %s", _e_p2p)
+                        _ft_final_status = "DONE" if (_approved and not _p2p_regressions) else "QA_FAIL"
                         _update_task(project_id, "TSK-FULL-TEST", status=_ft_final_status)
                         # Persistir TSK-FULL-TEST no TaskState para sobreviver a restarts do runner
                         if _task_state:
@@ -4716,6 +4851,38 @@ def main() -> int:
         # Armazenar artefatos no pipeline_ctx para uso pelos agentes (Evoluir E1: agora LIDOS por
         # call_cto/call_engineer/call_pm via _evolution_existing_artifacts).
         pipeline_ctx.evolution_artifacts = _evo_artifacts  # type: ignore[attr-defined]
+        pipeline_ctx.evolution_parent_id = _parent_project_id_evo  # F2: baseline da reconciliação = pai
+
+        # Bloco 3 F1 — baseline dos package.json do clone (diff de dependências por chave no DevOps condicional).
+        try:
+            _mb: dict[str, str] = {}
+            if _child_has_code:
+                for _pj in sorted(_child_apps_dir.rglob("package.json")):
+                    if any(seg in _pj.parts for seg in ("node_modules", ".git", "dist", ".next")):
+                        continue
+                    if len(_mb) >= 20:
+                        break
+                    _mb[str(_pj.relative_to(_child_apps_dir))] = _pj.read_text(encoding="utf-8", errors="replace")[:200_000]
+            pipeline_ctx.evolution_manifest_baseline = _mb
+        except Exception as _e_mb:
+            logger.debug("[F1] baseline de package.json falhou (não crítico): %s", _e_mb)
+
+        # Bloco 3 F3b — BASELINE da suíte legada (antes de qualquer mudança do Dev), via executor isolado
+        # (rota B). Só quando há código e EVOLUTION_P2P_MODE != off; falha → sem baseline (nunca bloqueia).
+        if _child_has_code and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and not pipeline_ctx.evolution_baseline:
+            try:
+                _bl = _evo_run_tests(project_id, Path(_files_root_evo) / project_id, timeout=int(os.environ.get("EVOLUTION_P2P_TIMEOUT", "900")))
+                if _bl is not None:
+                    pipeline_ctx.evolution_baseline = {**_bl, "kind": "baseline"}
+                    if _bl.get("no_tests"):
+                        _post_step("Evolução: a versão anterior não tem suíte de testes executável — sem baseline de não-regressão.", request_id)
+                    elif _bl.get("status") == "error":
+                        _post_step(f"Evolução: baseline da suíte não pôde ser medida ({str(_bl.get('error') or '')[:120]}) — não-regressão desativada nesta run.", request_id)
+                    else:
+                        _post_step(f"Evolução: baseline da suíte legada — {_bl.get('passed', 0)} passando, {_bl.get('failed', 0)} falhando ({_bl.get('stack', '?')}).", request_id)
+                    pipeline_ctx.save_checkpoint(STATE_DIR)
+            except Exception as _e_bl:
+                logger.warning("[F3b] baseline da suíte falhou (não crítico): %s", _e_bl)
 
         # workMode=branch legado: só inicializa git se o /evolve NÃO clonou (apps/ sem .git).
         if _evolution_work_mode == "branch":

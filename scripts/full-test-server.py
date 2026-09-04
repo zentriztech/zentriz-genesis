@@ -346,6 +346,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_run_full_test()
         elif self.path == "/ingest-project":
             self._handle_ingest_project()
+        elif self.path == "/run-tests":
+            self._handle_run_tests()
         elif self.path == "/launch-cyborg":
             self._handle_launch_cyborg()
         elif self.path == "/launch-s3-deploy":
@@ -364,6 +366,171 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     # ── /ingest-project — embarca os arquivos do projeto (rota B / Fase 3) ──────
+    # ── Evoluir bloco 3 F3a — /run-tests: execução DETERMINÍSTICA da suíte (sem agente/LLM) ─────────
+    # Body: {project_id, project_path, timeout?, install?}. Detecta a stack, roda o runner com reporter
+    # legível por máquina e devolve {stack, cmd, exit_code, passed, failed, skipped, total, no_tests,
+    # tests[{id,status}], status, duration_ms, error}. Regras (pesquisa SWE-bench/reporters):
+    #  • exit code é gravado e devolvido junto com o parse (anti-spoof); teste ausente do log não é sucesso;
+    #  • "0 testes" é explícito (pytest exit 5, jest numTotalTests=0, go skip sem Test) → no_tests=true;
+    #  • timeout/crash de infra = status "error" (nem pass nem fail).
+    def _handle_run_tests(self):
+        import shutil, subprocess, tempfile, time, xml.etree.ElementTree as ET
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length).decode())
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"}); return
+        project_path = str(body.get("project_path") or "").strip()
+        timeout = max(60, min(int(body.get("timeout") or 900), 3600))
+        do_install = bool(body.get("install", True))
+        if not project_path or not os.path.isdir(project_path):
+            self._json(400, {"error": f"project_path not found: {project_path}"}); return
+        root = Path(GENESIS_FILES_ROOT).resolve()
+        target = Path(project_path).resolve()
+        if root not in target.parents and target != root:
+            self._json(400, {"error": "project_path fora da raiz"}); return
+        # O código vive em <projeto>/apps (layout Genesis); aceita também a raiz se já for o app.
+        app_dir = target / "apps" if (target / "apps").is_dir() else target
+        env = _sanitized_base_env()
+        env["CI"] = "1"
+        t0 = time.time()
+        result: dict = {"stack": None, "cmd": None, "exit_code": None, "passed": 0, "failed": 0, "skipped": 0, "total": 0,
+                        "no_tests": False, "tests": [], "status": "unknown", "error": None}
+
+        def _run(cmd: list, cwd: Path, tmo: int) -> tuple[int | None, str]:
+            try:
+                p = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=tmo)
+                return p.returncode, (p.stdout or "") + "\n" + (p.stderr or "")
+            except subprocess.TimeoutExpired:
+                return None, "timeout"
+            except FileNotFoundError as e:
+                return -1, f"binário ausente: {e}"
+
+        try:
+            pkg = app_dir / "package.json"
+            if pkg.is_file():
+                try:
+                    pj = json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
+                except Exception:
+                    pj = {}
+                deps = {**(pj.get("dependencies") or {}), **(pj.get("devDependencies") or {})}
+                scripts = pj.get("scripts") or {}
+                if do_install and not (app_dir / "node_modules").is_dir():
+                    lock_ci = (app_dir / "package-lock.json").is_file()
+                    rc, _out = _run(["npm", "ci", "--no-audit", "--no-fund"] if lock_ci else ["npm", "install", "--no-audit", "--no-fund"], app_dir, min(timeout, 900))
+                    if rc != 0:
+                        result.update({"stack": "node", "status": "error", "error": f"npm install falhou (rc={rc}): {_out[-400:]}"}); raise StopIteration
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=str(app_dir)) as tf:
+                    out_file = tf.name
+                if "vitest" in deps:
+                    cmd = ["npx", "vitest", "run", "--reporter=json", f"--outputFile={out_file}", "--passWithNoTests"]
+                    result["stack"] = "node/vitest"
+                elif "jest" in deps or "jest" in str(scripts.get("test", "")):
+                    cmd = ["npx", "jest", "--ci", "--json", f"--outputFile={out_file}", "--passWithNoTests"]
+                    result["stack"] = "node/jest"
+                elif scripts.get("test") and "no test specified" not in str(scripts.get("test")):
+                    cmd = ["npm", "test", "--silent"]
+                    result["stack"] = "node/npm-test"
+                else:
+                    result.update({"stack": "node", "no_tests": True, "status": "no_tests", "cmd": None}); raise StopIteration
+                result["cmd"] = " ".join(cmd)
+                rc, out = _run(cmd, app_dir, timeout)
+                result["exit_code"] = rc
+                if rc is None:
+                    result.update({"status": "error", "error": "timeout"}); raise StopIteration
+                parsed = None
+                try:
+                    parsed = json.loads(Path(out_file).read_text(encoding="utf-8"))
+                except Exception:
+                    parsed = None
+                finally:
+                    try: os.unlink(out_file)
+                    except OSError: pass
+                if isinstance(parsed, dict) and "numTotalTests" in parsed:
+                    result["total"] = int(parsed.get("numTotalTests") or 0)
+                    result["passed"] = int(parsed.get("numPassedTests") or 0)
+                    result["failed"] = int(parsed.get("numFailedTests") or 0)
+                    result["skipped"] = int(parsed.get("numPendingTests") or 0) + int(parsed.get("numTodoTests") or 0)
+                    for fr in parsed.get("testResults") or []:
+                        fpath = str(fr.get("name") or fr.get("testFilePath") or "")
+                        try: fpath = str(Path(fpath).relative_to(app_dir))
+                        except Exception: pass
+                        for ar in fr.get("assertionResults") or []:
+                            st = str(ar.get("status") or "")
+                            result["tests"].append({"id": f"{fpath}::{ar.get('fullName') or ar.get('title')}", "status": "passed" if st == "passed" else ("skipped" if st in ("pending", "todo", "skipped") else "failed")})
+                    result["no_tests"] = result["total"] == 0
+                    result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
+                else:
+                    # npm test sem reporter: só exit code (sem ids) — honesto sobre a limitação
+                    result["status"] = "passed" if rc == 0 else "failed"
+                    result["error"] = None if rc == 0 else out[-600:]
+                raise StopIteration
+            # Python
+            if any((app_dir / f).is_file() for f in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt")) or (app_dir / "tests").is_dir():
+                py = shutil.which("python3") or shutil.which("python") or "python3"
+                if do_install and (app_dir / "requirements.txt").is_file():
+                    rc, _out = _run([py, "-m", "pip", "install", "-q", "-r", "requirements.txt"], app_dir, min(timeout, 900))
+                    if rc not in (0, None):
+                        result.update({"stack": "python", "status": "error", "error": f"pip install falhou (rc={rc}): {_out[-400:]}"}); raise StopIteration
+                with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, dir=str(app_dir)) as tf:
+                    junit = tf.name
+                cmd = [py, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={junit}"]
+                result.update({"stack": "python/pytest", "cmd": " ".join(cmd)})
+                rc, out = _run(cmd, app_dir, timeout)
+                result["exit_code"] = rc
+                if rc is None:
+                    result.update({"status": "error", "error": "timeout"}); raise StopIteration
+                if rc == 5:
+                    result.update({"no_tests": True, "status": "no_tests"}); raise StopIteration
+                try:
+                    tree = ET.parse(junit)
+                    for tc in tree.iter("testcase"):
+                        tid = f"{tc.get('classname') or tc.get('file') or ''}::{tc.get('name') or ''}"
+                        if tc.find("skipped") is not None: st = "skipped"; result["skipped"] += 1
+                        elif tc.find("failure") is not None or tc.find("error") is not None: st = "failed"; result["failed"] += 1
+                        else: st = "passed"; result["passed"] += 1
+                        result["tests"].append({"id": tid, "status": st})
+                    result["total"] = len(result["tests"])
+                    result["status"] = "passed" if result["failed"] == 0 and rc == 0 else "failed"
+                except Exception as e:
+                    result.update({"status": "error", "error": f"junit ilegível: {e}; rc={rc}; {out[-300:]}"})
+                finally:
+                    try: os.unlink(junit)
+                    except OSError: pass
+                raise StopIteration
+            # Go
+            if (app_dir / "go.mod").is_file():
+                cmd = ["go", "test", "./...", "-json"]
+                result.update({"stack": "go", "cmd": " ".join(cmd)})
+                rc, out = _run(cmd, app_dir, timeout)
+                result["exit_code"] = rc
+                if rc is None:
+                    result.update({"status": "error", "error": "timeout"}); raise StopIteration
+                seen: dict = {}
+                for line in out.splitlines():
+                    try: ev = json.loads(line)
+                    except Exception: continue
+                    if not isinstance(ev, dict) or not ev.get("Test"): continue
+                    act = ev.get("Action")
+                    if act in ("pass", "fail", "skip"):
+                        seen[f"{ev.get('Package')}::{ev.get('Test')}"] = "passed" if act == "pass" else ("failed" if act == "fail" else "skipped")
+                result["tests"] = [{"id": k, "status": v} for k, v in seen.items()]
+                result["passed"] = sum(1 for v in seen.values() if v == "passed")
+                result["failed"] = sum(1 for v in seen.values() if v == "failed")
+                result["skipped"] = sum(1 for v in seen.values() if v == "skipped")
+                result["total"] = len(seen)
+                result["no_tests"] = result["total"] == 0
+                result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
+                raise StopIteration
+            result.update({"stack": None, "no_tests": True, "status": "no_tests"})
+        except StopIteration:
+            pass
+        except Exception as e:
+            result.update({"status": "error", "error": str(e)[:400]})
+        result["duration_ms"] = int((time.time() - t0) * 1000)
+        result["tests"] = result["tests"][:2000]
+        self._json(200, result)
+
     def _handle_ingest_project(self):
         """Recebe UM projeto por-job como tar.gz (base64) e o extrai em
         GENESIS_FILES_ROOT/<prod_id>/<project_id>. Usado quando o executor roda no Host B
