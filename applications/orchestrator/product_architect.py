@@ -239,7 +239,13 @@ def build_split_prompt(master_md: str) -> str:
         '"dependsOn":[],"specContent":"# ...spec markdown completa..."}]}\n'
         "Regras: `id`s únicos; `spec` = `specs/<id>.md`; `dependsOn` referencia apenas `id`s "
         "deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts (type lib_ts) são "
-        "predecessores dos consumidores; `specContent` é a spec inteira, não um resumo."
+        "predecessores dos consumidores; `specContent` é a spec inteira, não um resumo.\n"
+        "CIENTE DE INFRA: se o produto usa infra compartilhada (banco/cache/fila/worker) ou tem "
+        "≥2 componentes, modele a infra como projeto dedicado `<slug>-infra` (type `other`, onda 0, "
+        "com esquema/env/portas e a ESTRATÉGIA DE DISTRIBUIÇÃO — docker-compose single-host OU "
+        "Terraform/gerenciado) OU embuta uma seção `## Infraestrutura, Dependências e Distribuição` "
+        "no backend; se a distribuição for ambígua, assuma docker-compose single-host, marque "
+        "`Premissa:` e registre a pergunta em `## Decisões em Aberto`. NUNCA deixe infra implícita."
     )
 
 

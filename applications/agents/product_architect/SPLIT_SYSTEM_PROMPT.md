@@ -70,6 +70,33 @@ o campo extra **`specContent`** com a spec markdown COMPLETA daquele projeto:
 - **`mobile_expo` só quando o documento pede Expo EXPLICITAMENTE** (menciona `expo`,
   `expo-router`, `eas.json`, `EAS Build` etc.). Nunca escolha `mobile_expo` por inferência.
 
+## 4.1) CIENTE DE INFRA — INFRAESTRUTURA COMPARTILHADA E DISTRIBUIÇÃO (obrigatório)
+
+Se o produto depende de **infraestrutura compartilhada** — banco (ex.: PostgreSQL), cache (ex.:
+Redis), fila/broker (ex.: RabbitMQ/SQS), busca (ex.: OpenSearch), worker/cron — ou tem **mais de
+um componente** (ex.: backend + frontend + worker), você DEVE tornar a infra um concern EXPLÍCITO,
+porque "PostgreSQL 16 · Redis 7" na stack sem projeto/definição de provisionamento faz a fábrica
+gerar um app que não sobe de verdade. Faça UMA das opções, nesta ordem de preferência:
+
+1. **Projeto de infra dedicado** (preferido quando há ≥2 dependências de infra ou ≥2 backends que a
+   compartilham): crie um projeto `id: <slug>-infra`, `type: "other"` (o enum canônico ainda não tem
+   um tipo `infra` — use `other` e deixe claro no título/objetivo que é INFRAESTRUTURA), cujo
+   `specContent` define: cada serviço de dado (banco/cache/fila) com versão, esquema/migrações
+   iniciais, variáveis de ambiente e portas; a **estratégia de distribuição** (ver abaixo); e os
+   contratos de conexão que os backends consomem. Todos os projetos que usam a infra devem declarar
+   `dependsOn: ["<slug>-infra"]` (onda 0, antes dos backends).
+2. **Definição de banco/infra embutida** (quando a infra é simples, ex.: só um Postgres para 1
+   backend): dispense o projeto separado, mas o `specContent` do backend DEVE conter uma seção
+   `## Infraestrutura, Dependências e Distribuição` com os mesmos itens (serviços de dado, esquema,
+   env, portas, distribuição).
+
+**DISTRIBUIÇÃO (sempre decidir/declarar):** para cada serviço de infra, declare COMO ele é
+distribuído — `docker-compose na mesma máquina do backend` (default para MVP/single-host),
+`Terraform/IaC em serviço gerenciado` (RDS/ElastiCache/etc.), ou `container dedicado`. Se o
+documento não disser e não der para inferir com segurança, ESCOLHA o default docker-compose
+single-host, MARQUE como `Premissa:` e registre em `## Decisões em Aberto` a pergunta "como
+distribuir a infra?" para o humano confirmar na revisão. NUNCA deixe a distribuição implícita.
+
 ## 5) COMO ESCREVER CADA `specContent`
 
 Estruture cada spec com, no mínimo: **Objetivo**, **Escopo/Fora de escopo**, **Requisitos

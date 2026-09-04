@@ -69,3 +69,51 @@ def test_get_summary_human_uses_template_when_no_llm_url():
 def test_post_dialogue_returns_false_when_project_id_unset():
     from orchestrator.dialogue import post_dialogue
     assert post_dialogue("", "cto", "engineer", "Resumo.", event_type="cto.engineer.request", request_id="x") is False
+
+
+# ── Onda D (épico spec-rica): seletor de variante DevOps (docker default; IaC só com flag) ──
+def test_select_devops_variant_defaults_docker_without_flag(tmp_path, monkeypatch):
+    from orchestrator.runner import _select_devops_variant
+    monkeypatch.delenv("GENESIS_IAC_DEVOPS", raising=False)
+    spec = tmp_path / "s.md"
+    spec.write_text("distribuição: terraform em AWS RDS", encoding="utf-8")
+    # flag desligado → docker, mesmo com terraform+provider declarados (no-op byte-a-byte em prod)
+    assert _select_devops_variant(str(spec)) == ("docker", "docker")
+
+
+def test_select_devops_variant_picks_provider_with_flag(tmp_path, monkeypatch):
+    from orchestrator.runner import _select_devops_variant
+    monkeypatch.setenv("GENESIS_IAC_DEVOPS", "true")
+    spec = tmp_path / "s.md"
+    spec.write_text("Distribuição: Terraform no Azure (AKS)", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("azure", "azure")
+    spec.write_text("terraform, google cloud GKE", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("gcp", "gcp")
+    spec.write_text("provisionar via terraform em AWS ECS/Fargate", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("aws", "aws")
+
+
+def test_select_devops_variant_conservative_when_ambiguous(tmp_path, monkeypatch):
+    from orchestrator.runner import _select_devops_variant
+    monkeypatch.setenv("GENESIS_IAC_DEVOPS", "true")
+    spec = tmp_path / "s.md"
+    # sem 'terraform' → docker; com terraform mas sem provider claro → docker (não adivinha)
+    spec.write_text("docker-compose single-host, postgres 16 e redis 7", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("docker", "docker")
+    spec.write_text("provisionar via terraform, provider a definir", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("docker", "docker")
+    # path inexistente → docker
+    assert _select_devops_variant(str(tmp_path / "nope.md")) == ("docker", "docker")
+
+
+def test_select_devops_variant_word_boundary_no_substring_misfire(tmp_path, monkeypatch):
+    # Achado adversarial: "flaws"/"weeks" contêm "aws"/"eks" como SUBSTRING — não podem casar provider.
+    from orchestrator.runner import _select_devops_variant
+    monkeypatch.setenv("GENESIS_IAC_DEVOPS", "true")
+    spec = tmp_path / "s.md"
+    # terraform + prosa com "flaws"/"weeks", provider real = azure → deve resolver azure, não aws
+    spec.write_text("terraform no Azure; corrigimos flaws em poucas weeks", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("azure", "azure")
+    # terraform + só prosa ambígua (flaws/weeks), sem provider real → docker (não aws)
+    spec.write_text("terraform; sem flaws, entrega em weeks", encoding="utf-8")
+    assert _select_devops_variant(str(spec)) == ("docker", "docker")

@@ -3,7 +3,13 @@ import json
 
 import pytest
 
-from spec_validator import validate_spec, REFUTER_SYSTEM, _FENCE_OPEN, _FENCE_CLOSE
+from spec_validator import (
+    validate_spec,
+    REFUTER_SYSTEM,
+    CONSOLIDATE_SYSTEM,
+    _FENCE_OPEN,
+    _FENCE_CLOSE,
+)
 
 
 def make_llm(response: str, calls: list):
@@ -77,3 +83,54 @@ def test_triage_failure_does_not_block(monkeypatch):
     out = validate_spec("spec", llm_fn=llm)
     assert out["triage"] is None
     assert out["findings"] == []
+
+
+# ── Onda B (épico spec-rica): estabilização por multi-voto ────────────────────
+def test_lenses_and_connect_in_refuter_system():
+    # As lentes de especialista + Connect-compliance são parte do contrato do refutador.
+    assert "LENTES" in REFUTER_SYSTEM
+    assert "CONNECT-COMPLIANCE" in REFUTER_SYSTEM
+    assert "systemId" in REFUTER_SYSTEM
+
+
+def test_multivote_runs_n_refuters_then_consolidates(monkeypatch):
+    monkeypatch.setenv("SPEC_VALIDATOR_VOTES", "3")
+    calls = {"refuter": 0, "consolidate": 0}
+
+    def llm(system, user, model_id, **kw):
+        if system == CONSOLIDATE_SYSTEM:
+            calls["consolidate"] += 1
+            # a temperatura da consolidação é forçada baixa (clustering estável)
+            assert kw.get("temperature") == 0.2
+            payload = json.loads(user)
+            assert payload["runs"] == 3 and payload["threshold"] == 2
+            assert len(payload["analyses"]) == 3
+            return json.dumps({"findings": [
+                {"file": "", "line": None, "severity": "blocker", "title": "núcleo", "rationale": "r", "votes": 3},
+            ]})
+        calls["refuter"] += 1
+        return json.dumps({"findings": [
+            {"file": "", "line": None, "severity": "blocker", "title": "núcleo", "rationale": "r"},
+        ]})
+
+    out = validate_spec("spec substantiva", llm_fn=llm)
+    assert calls["refuter"] == 3  # N refutações independentes
+    assert calls["consolidate"] == 1  # 1 consolidação por maioria
+    assert len(out["findings"]) == 1 and out["findings"][0]["title"] == "núcleo"
+
+
+def test_multivote_fallback_when_consolidation_fails(monkeypatch):
+    monkeypatch.setenv("SPEC_VALIDATOR_VOTES", "3")
+
+    def llm(system, user, model_id, **kw):
+        if system == CONSOLIDATE_SYSTEM:
+            return "prosa sem json"  # consolidação quebra → fallback
+        # análise mais completa deve vencer o fallback (max por len)
+        return json.dumps({"findings": [
+            {"file": "", "line": None, "severity": "warning", "title": "a", "rationale": "r"},
+            {"file": "", "line": None, "severity": "info", "title": "b", "rationale": "r"},
+        ]})
+
+    out = validate_spec("spec", llm_fn=llm)
+    # fallback não esconde problemas: devolve a análise mais completa
+    assert len(out["findings"]) == 2

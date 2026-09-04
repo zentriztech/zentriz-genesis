@@ -194,6 +194,17 @@ def test_build_split_prompt_inclui_doc_e_contrato():
     assert "DAG" in p
 
 
+def test_build_split_prompt_ciente_de_infra():
+    # Onda C (épico spec-rica): o splitter deve tratar infra compartilhada e distribuição como
+    # concern explícito — senão a fábrica gera app que não sobe. Ver
+    # [[genesis-spec-rica-connect-compliant-epic-2026-09-04]].
+    p = build_split_prompt(LONG)
+    assert "CIENTE DE INFRA" in p
+    assert "-infra" in p and "other" in p
+    assert "DISTRIBUIÇÃO" in p or "Distribuição" in p
+    assert "docker-compose" in p and "Terraform" in p
+
+
 def test_split_happy_path_separa_manifest_e_specs():
     out = split_document(LONG, llm_fn=_stub(_split_proposal()))
     assert out["needs_human"] is True

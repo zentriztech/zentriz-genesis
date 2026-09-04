@@ -1608,6 +1608,38 @@ def _notify_genesis_bug(project_id: str, task_id: str, bug_report: dict) -> None
         logger.warning("[FT-11] Falha ao notificar bug Zentriz: %s", _e)
 
 
+def _select_devops_variant(spec_ref: str) -> tuple[str, str]:
+    """Onda D (épico spec-rica): escolhe a variante do agente DevOps.
+
+    Retorna (variant, stack_key). DEFAULT = ("docker", "docker") — comportamento IDÊNTICO ao
+    histórico. Só desvia para IaC/Terraform (aws|azure|gcp) quando o flag GENESIS_IAC_DEVOPS está
+    LIGADO **e** a spec DECLARA explicitamente distribuição Terraform/gerenciada com um provider
+    detectável. Sem o flag (prod default), é um no-op byte-a-byte. Ver
+    [[genesis-spec-rica-connect-compliant-epic-2026-09-04]].
+    """
+    if os.environ.get("GENESIS_IAC_DEVOPS", "false").strip().lower() not in ("1", "true", "yes"):
+        return ("docker", "docker")
+    try:
+        p = Path(spec_ref)
+        text = p.read_text(encoding="utf-8", errors="replace").lower() if p.exists() else ""
+    except (OSError, ValueError, TypeError):
+        text = ""
+    if not text or not re.search(r"\bterraform\b", text):
+        return ("docker", "docker")  # sem declaração IaC explícita → docker (seguro)
+    # Provider explícito na declaração de distribuição (primeiro match vence, ordem estável).
+    # WORD-BOUNDARY (\b): tokens curtos como "aws"/"eks"/"aks" NÃO podem casar dentro de "flaws"/
+    # "weeks" (achado adversarial). "google cloud" é frase; os demais são palavras inteiras.
+    def _has(*tokens: str) -> bool:
+        return any(re.search(rf"\b{re.escape(t)}\b", text) for t in tokens)
+    if _has("azure", "aks", "azurerm"):
+        return ("azure", "azure")
+    if "google cloud" in text or _has("gcp", "gke", "gcloud"):
+        return ("gcp", "gcp")
+    if _has("aws", "rds", "elasticache", "ecs", "fargate", "eks"):
+        return ("aws", "aws")
+    return ("docker", "docker")  # terraform sem provider claro → não adivinha, mantém docker
+
+
 def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, request_id: str,
                 dev_artifacts: list | None = None, project_id: str | None = None,
                 product_id: str | None = None) -> dict:
@@ -1672,18 +1704,34 @@ def call_devops(spec_ref: str, charter_summary: str, backlog_summary: str, reque
         content = a.get("content", "")
         entry["content"] = content[:2000] if isinstance(content, str) else str(content)[:2000]
         trimmed_artifacts.append(entry)
+    # Onda D: variante do DevOps (docker por default; IaC/Terraform só com flag + spec declarada).
+    # Injeta skill_path no context — é o que o agents/server (rota HTTP de prod) lê para escolher o
+    # prompt (mesmo mecanismo do dev, runner.py:1207-1208/1340-1341). Sem isto, prod ignoraria a variante.
+    _devops_variant, _devops_stack_key = _select_devops_variant(spec_ref)
+    if _devops_variant != "docker":
+        inputs["context"] = inputs.get("context") or {}
+        inputs["context"]["skill_path"] = f"devops/{_devops_variant}"
+        logger.info("[Onda D] DevOps em modo IaC '%s' (GENESIS_IAC_DEVOPS on + spec declara Terraform)", _devops_variant)
+    # Task coerente com a variante: docker → executar localmente; IaC/cloud → provisionar via Terraform.
+    # (achado adversarial: task fixa "localmente" contradiz o prompt Terraform do agente cloud).
+    _devops_task = (
+        "Analisar artefatos gerados pelo Dev e produzir start.sh + RUNBOOK.md para executar o produto localmente."
+        if _devops_variant == "docker"
+        else (f"Analisar artefatos gerados pelo Dev e produzir a Infraestrutura como Código (Terraform) para "
+              f"provisionar o produto na nuvem {_devops_variant.upper()}, além de RUNBOOK.md com os passos de deploy.")
+    )
     message = _build_message_envelope(
-        request_id, "DevOps", "docker", "provision_artifacts",
-        task_id=None, task="Analisar artefatos gerados pelo Dev e produzir start.sh + RUNBOOK.md para executar o produto localmente.",
+        request_id, "DevOps", _devops_variant, "provision_artifacts",
+        task_id=None, task=_devops_task,
         inputs=inputs, existing_artifacts=trimmed_artifacts, limits={"timeout_sec": int(os.environ.get("AGENT_TIMEOUT_DEVOPS", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("devops", message)
     from orchestrator.agents.runtime import run_agent, load_system_prompt_with_skills
-    devops_prompt = _agents_root() / "devops" / "docker" / "SYSTEM_PROMPT.md"
+    devops_prompt = _agents_root() / "devops" / _devops_variant / "SYSTEM_PROMPT.md"
     _devops_system_prompt, _ = load_system_prompt_with_skills(
-        devops_prompt, role="devops", stack_key="docker",
+        devops_prompt, role="devops", stack_key=_devops_stack_key,
         project_id=os.environ.get("PROJECT_ID"),
     )
     return run_agent(system_prompt_path=devops_prompt, message=message, role="DEVOPS",

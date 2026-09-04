@@ -168,27 +168,82 @@ function buildChatMessage(
       : "",
   ].join("");
 
-  const gapRule = resolveGaps
-    ? "\n6. Este turno é RESOLVER GAPS: trate CADA item do relatório de validação, priorizando blockers > warnings > info; resuma no summary quais GAPs foram resolvidos e como."
+  // Onda A (épico spec-rica): no modo RESOLVER GAPS o CTO deixa de ser normalizador passivo e
+  // atua como ARQUITETO DE PRODUTO — questiona dimensão, propõe features de mercado, resolve GAPs
+  // com profundidade de especialista — e a spec passa a DECLARAR o contrato Connect · Auto Care
+  // (senão a fábrica adivinha por heurística e gera produto genérico). Ver
+  // [[genesis-spec-rica-connect-compliant-epic-2026-09-04]].
+  const connectContract = [
+    'D) CONTRATO DE INTEROPERABILIDADE (Genesis · Connect · Auto Care) — OBRIGATÓRIO: inclua na spec uma',
+    '   seção "## Contrato de Interoperabilidade (Connect)" declarando EXPLICITAMENTE (não deixe a fábrica adivinhar):',
+    "   - systemId (slug ^[a-z][a-z0-9-]*$) e integrationTier alvo (tier0-generic | tier1-integration-ready |",
+    "     tier2-deadpool-ready | tier3-genesis-deadpool-native);",
+    "   - SERVIÇOS do produto e, para cada um: responsabilidade, dependências e INTERFACES no formato",
+    "     {nome, tipo: http|event|queue|stream|cron|internal, contractRef (rota/OpenAPI/tópico)};",
+    "   - EVENTOS publicados/consumidos (nome + payload) e, havendo entrega de valor, os ValueEvent aplicáveis",
+    "     (project_delivered | deploy_completed | pipeline_run_completed | spec_promoted);",
+    "   - healthModel (endpoint de health + sinais + se é SLO-crítico) e baseline de OBSERVABILIDADE",
+    "     (sinais/dashboards/alertas mínimos) para o plano de sustentação Auto Care (Deadpool);",
+    "   - owners (técnico e de produto) e ações seguras conhecidas (safe actions) quando aplicável.",
+  ].join("\n");
+
+  const resolveGapsBlock = resolveGaps
+    ? `
+
+ESTE TURNO É "RESOLVER GAPS" — AJA COMO ARQUITETO DE PRODUTO, NÃO COMO NORMALIZADOR PASSIVO:
+A) Trate CADA item do RELATÓRIO DE VALIDAÇÃO de forma ADVERSARIAL e PROFUNDA, com skills de
+   ESPECIALISTA do tema (segurança, modelo de dados, contratos de API, infraestrutura, regras de
+   negócio), priorizando blockers > warnings > info. NÃO introduza contradições novas ao corrigir
+   (ex.: citar blocklist de JWT sem declarar o \`jti\`; citar campo que não existe no modelo de dados).
+B) ENRIQUEÇA a spec para representar o PRODUTO REAL e FUNCIONAL que a fábrica vai gerar, dimensionando
+   o TAMANHO da aplicação. Onde o usuário (muitas vezes leigo) deixou lacunas de dimensionamento, ASSUMA
+   um padrão sensato e seguro e MARQUE no texto como "Premissa:"; e, no summary, faça 2-5 PERGUNTAS
+   objetivas de dimensionamento (escala/nº de usuários, multi-tenant?, papéis/permissões, integrações
+   externas, compliance/LGPD, SLA/disponibilidade, distribuição de infra) para o usuário confirmar ou
+   corrigir na PRÓXIMA rodada do chat.
+C) PROPONHA features ancoradas em como produtos reais do domínio funcionam (pesquisa de mercado): liste-as
+   no summary e incorpore as ESSENCIAIS como FRs na spec (marcadas "Proposto:"), sem inflar escopo além do
+   núcleo de valor.
+${connectContract}
+E) DIMENSÃO ARQUITETURAL E INFRA (ciente de decomposição): se o produto for MULTI-COMPONENTE (ex.: backend +
+   frontend + worker) ou depender de INFRA COMPARTILHADA (banco/cache/fila/busca — ex.: "PostgreSQL 16 · Redis 7"),
+   NÃO deixe isso implícito: (1) declare na spec uma seção "## Infraestrutura, Dependências e Distribuição" com
+   cada serviço de dado (versão, esquema/migrações iniciais, env, portas) e a ESTRATÉGIA DE DISTRIBUIÇÃO
+   (docker-compose na mesma máquina do backend — default MVP — OU Terraform/serviço gerenciado); marque escolhas
+   incertas como "Premissa:" e faça a pergunta de distribuição no summary; e (2) RECOMENDE explicitamente no summary
+   DECOMPOR o produto em N projetos (backend, frontend, infra/database) via a ação "Decompor produto" da Bancada,
+   pois a fábrica gera um projeto por vez — um único documento monolítico vira um app que não sobe de verdade.
+No summary (pode ser mais longo NESTE turno): liste GAPs resolvidos (e como), premissas assumidas,
+perguntas de dimensionamento e features propostas.`
     : "";
 
-  const task = `
-Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário,
-num chat iterativo. Você recebe a SPEC ATUAL (em Markdown), o HISTÓRICO da conversa, a
-ÚLTIMA MENSAGEM do usuário e — quando houver — os ARQUIVOS IRMÃOS do produto e o RELATÓRIO
-DE VALIDAÇÃO adversarial. Você TEM acesso a tudo isso abaixo; use-o para agir com precisão.
+  const persona = resolveGaps
+    ? "Você é um CTO sênior E estrategista de produto, com profundidade de ESPECIALISTA nos temas da spec"
+    : "Você é um CTO sênior refinando uma especificação de produto EM CONJUNTO com o usuário";
 
-OBJETIVO: aplicar SOMENTE as mudanças que o usuário pediu na última mensagem, devolvendo a
-spec COMPLETA e revisada, e uma resposta curta explicando o que mudou.
+  const task = `
+${persona}, num chat iterativo cuja conversa é PERSISTIDA. Você recebe a SPEC ATUAL (em Markdown),
+o HISTÓRICO da conversa, a ÚLTIMA MENSAGEM do usuário e — quando houver — os ARQUIVOS IRMÃOS do
+produto e o RELATÓRIO DE VALIDAÇÃO adversarial. Você TEM acesso a tudo isso abaixo; use-o com precisão.
+
+OBJETIVO: ${resolveGaps
+      ? "resolver os GAPs e ENRIQUECER a spec para um produto real, funcional e Connect-compliant, devolvendo a spec COMPLETA revisada e um summary com perguntas/premissas/features."
+      : "aplicar SOMENTE as mudanças que o usuário pediu na última mensagem, devolvendo a spec COMPLETA e revisada, e uma resposta curta explicando o que mudou."}
 
 REGRAS:
-1. PRESERVE tudo o que o usuário não pediu para alterar — não regenere a spec do zero.
-2. Aplique de forma cirúrgica o que foi pedido na última mensagem (adicionar/remover/ajustar).
-3. Mantenha a spec consistente e implementável (FRs com critérios de aceite, modelo de dados, stack).
+1. ${resolveGaps
+      ? "PRESERVE o conteúdo válido existente; você PODE adicionar/expandir seções para enriquecer, mas nunca descarte requisitos válidos."
+      : "PRESERVE tudo o que o usuário não pediu para alterar — não regenere a spec do zero."}
+2. ${resolveGaps
+      ? "Trate os GAPs com profundidade de especialista e sem criar novas inconsistências."
+      : "Aplique de forma cirúrgica o que foi pedido na última mensagem (adicionar/remover/ajustar)."}
+3. Mantenha a spec consistente e implementável (FRs com critérios de aceite DADO/QUANDO/ENTÃO, modelo de dados, stack).
 4. Devolva a SPEC INTEIRA revisada como o artefato Markdown principal (não só o trecho alterado).
    IMPORTANTE: o artefato principal DEVE ter o caminho EXATO "docs/spec/PRODUCT_SPEC.md"
    (esse é o único path aceito — usar outro caminho REPROVA a revisão e força um retrabalho lento).
-5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou.${gapRule}
+5. No campo summary, ${resolveGaps
+      ? "responda em português listando GAPs resolvidos, premissas assumidas, perguntas de dimensionamento (2-5) e features propostas."
+      : "escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou."}${resolveGapsBlock}
 
 Os ARQUIVOS IRMÃOS são contexto SÓ-LEITURA (não os reescreva) — servem para você entender o
 produto inteiro. O RELATÓRIO DE VALIDAÇÃO lista GAPs já detectados na spec.
@@ -216,11 +271,19 @@ ${transcript}${contextSections}
       validation_report: ctx.findingsBlock || undefined,
       resolve_gaps: resolveGaps || undefined,
       input_type: "spec_refinement",
-      constraints: [
-        "preserve-unrequested-content",
-        "apply-only-requested-changes",
-        "return-full-revised-spec",
-      ],
+      constraints: resolveGaps
+        ? [
+            "resolve-validation-gaps",
+            "enrich-to-real-functional-product",
+            "connect-compliant-contract",
+            "return-full-revised-spec",
+            "no-new-contradictions",
+          ]
+        : [
+            "preserve-unrequested-content",
+            "apply-only-requested-changes",
+            "return-full-revised-spec",
+          ],
     },
     existing_artifacts: [],
     // NOTA: hoje `limits` é INERTE nesta rota — o wrapper /invoke/cto/async (server.py) embrulha
