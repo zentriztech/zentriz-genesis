@@ -158,6 +158,68 @@ def _fence(spec_text: str) -> str:
     return f"{_FENCE_OPEN}\n{spec_text}\n{_FENCE_CLOSE}"
 
 
+def _refuter_max_tokens(model: str) -> int:
+    """Orçamento de saída do refutador por família de modelo.
+
+    Achado em prod 2026-09-04 (Fable 5.1 via config do tenant): a saída bateu EXATAMENTE nos 4000
+    tokens históricos → JSON truncado → "resposta do validador não contém JSON" → run 'error'.
+    Os modelos Claude 5 (opus-5/sonnet-5/fable-5) usam raciocínio adaptativo que CONTA contra
+    max_tokens (achado #51), então 4000 não basta. `SPEC_VALIDATOR_MAX_TOKENS` (env) sobrepõe tudo.
+    """
+    env = (os.environ.get("SPEC_VALIDATOR_MAX_TOKENS") or "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    ml = (model or "").lower()
+    if any(m in ml for m in ("opus-5", "sonnet-5", "fable-5")):
+        return 16000
+    return 4000
+
+
+def _salvage_findings(raw: str) -> list:
+    """Último recurso para JSON TRUNCADO: recupera os objetos de finding COMPLETOS dentro de
+    `"findings": [ ... ` (cada `{...}` que fecha e parseia). Perde só o item cortado no fim."""
+    i = raw.find('"findings"')
+    if i < 0:
+        return []
+    j = raw.find("[", i)
+    if j < 0:
+        return []
+    out: list = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for k in range(j + 1, len(raw)):
+        ch = raw[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = k
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    obj = json.loads(raw[start:k + 1])
+                    if isinstance(obj, dict) and obj.get("title"):
+                        out.append(obj)
+                except Exception:
+                    pass
+                start = -1
+        elif ch == "]" and depth == 0:
+            break
+    return out
+
+
 def _extract_json(raw: str) -> dict:
     """Extrai o primeiro objeto JSON da resposta (tolerante a cercas/prosa acidental)."""
     raw = raw.strip()
@@ -225,8 +287,23 @@ def validate_spec(
     model = (os.environ.get("SPEC_VALIDATOR_MODEL") or (model_id or "").strip() or default_model).strip()
 
     def _run_refuter() -> list:
-        raw = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=4000, usage_agent="spec_validator")
-        f = _extract_json(raw).get("findings")
+        budget = _refuter_max_tokens(model)
+        raw = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=budget, usage_agent="spec_validator")
+        try:
+            data = _extract_json(raw)
+        except ValueError:
+            # Provável TRUNCAMENTO (saída bateu no teto): 1 retry com o dobro do orçamento (teto 32k);
+            # se ainda vier cortado, salva os findings completos em vez de derrubar a validação.
+            retry_budget = min(budget * 2, 32000)
+            raw2 = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=retry_budget, usage_agent="spec_validator")
+            try:
+                data = _extract_json(raw2)
+            except ValueError:
+                salvaged = _salvage_findings(raw2) or _salvage_findings(raw)
+                if not salvaged:
+                    raise
+                return salvaged
+        f = data.get("findings")
         if not isinstance(f, list):
             raise ValueError("contrato inválido: campo findings ausente/não-lista")
         return f

@@ -106,3 +106,42 @@ def test_validate_spec_precedencia_do_modelo(monkeypatch):
     monkeypatch.setenv("SPEC_VALIDATOR_MODEL", "us.anthropic.claude-haiku-4-5")
     spec_validator.validate_spec("# Spec\n\nFR-01 algo", llm_fn=llm_fn, model_id="us.anthropic.claude-opus-4-8")
     assert seen and seen[0] == "us.anthropic.claude-haiku-4-5"         # env é override explícito
+
+
+# ── Validador: orçamento por família + retry/salvage em JSON truncado (achado prod 2026-09-04) ──
+
+def test_refuter_max_tokens_por_familia(monkeypatch):
+    monkeypatch.delenv("SPEC_VALIDATOR_MAX_TOKENS", raising=False)
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-sonnet-4-6") == 4000
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-fable-5-1") == 16000
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-opus-5") == 16000
+    monkeypatch.setenv("SPEC_VALIDATOR_MAX_TOKENS", "9000")
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-fable-5-1") == 9000
+
+
+def test_refuter_truncado_retry_com_dobro_e_salvage(monkeypatch):
+    monkeypatch.delenv("SPEC_VALIDATOR_MODEL", raising=False)
+    monkeypatch.delenv("SPEC_VALIDATOR_TRIAGE_MODEL", raising=False)
+    monkeypatch.delenv("SPEC_VALIDATOR_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("SPEC_VALIDATOR_VOTES", "1")
+    good = '{"findings":[{"file":"a.md","severity":"warning","category":"contrato","anchor":"FR-01","title":"ok","rationale":"r"}]}'
+    truncated = '{"findings":[{"file":"a.md","severity":"blocker","category":"seguranca","anchor":"FR-02","title":"salvo","rationale":"r"},{"file":"a.md","severity":"warn'
+    calls: list[int] = []
+
+    def llm_first_truncated(system, user, model_id, **kw):
+        calls.append(kw["max_tokens"])
+        return truncated if len(calls) == 1 else good
+
+    out = spec_validator.validate_spec("spec", llm_fn=llm_first_truncated, model_id="us.anthropic.claude-fable-5-1")
+    assert calls == [16000, 32000]                       # retry com o dobro (teto 32k)
+    assert [f["title"] for f in out["findings"]] == ["ok"]
+
+    calls.clear()
+    def llm_always_truncated(system, user, model_id, **kw):
+        calls.append(kw["max_tokens"]); return truncated
+    out2 = spec_validator.validate_spec("spec", llm_fn=llm_always_truncated, model_id="us.anthropic.claude-fable-5-1")
+    assert [f["title"] for f in out2["findings"]] == ["salvo"]   # salvage recupera o item completo
+    assert len(calls) == 2
+
+    with pytest.raises(ValueError):                       # nada salvável → erro como antes
+        spec_validator.validate_spec("spec", llm_fn=lambda *a, **k: "prosa sem json")
