@@ -79,8 +79,10 @@ interface SpecItem {
   // antigos ou falha de enriquecimento degradam para specs sem esses campos.
   readiness?: Readiness | null;
   estimate?: Estimate | null;
-  // Onda 3 (c) — nº de GAPs da última validação (null = nunca validada). >0 → aviso no card.
+  // Onda 3 (c) / RFC-0005 — nº de GAPs ATIVOS da última validação (null = nunca validada). >0 → aviso no card.
   gapCount?: number | null;
+  gapCountIgnored?: number;
+  gapCountRefuted?: number;
 }
 interface CatalogItem {
   slug: string;
@@ -116,13 +118,19 @@ function formatDate(s: string): string {
 
 // Onda 3 (c) — aviso visual de GAPs (findings da validação) no card. Só renderiza quando
 // há GAPs (>0); nunca validada (null) ou zero GAPs não mostram nada. >99 vira "99+".
-function GapWarningChip({ count, label }: { count: number; label?: string }) {
-  if (count <= 0) return null;
+// RFC-0005: `count` = GAPs ATIVOS; `ignored` (triados como risco aceito) aparece à parte, sem alarme.
+function GapWarningChip({ count, label, ignored = 0 }: { count: number; label?: string; ignored?: number }) {
+  if (count <= 0) {
+    if (ignored > 0) {
+      return <Chip label={`${ignored} ignorado${ignored === 1 ? "" : "s"}`} size="small" variant="outlined" sx={{ fontSize: "0.62rem", height: 18 }} />;
+    }
+    return null;
+  }
   const badge = count > 99 ? "99+" : String(count);
   return (
     <Chip
       icon={<WarningAmberRoundedIcon sx={{ fontSize: "0.85rem !important" }} />}
-      label={label ?? `${badge} GAP${count === 1 ? "" : "s"}`}
+      label={(label ?? `${badge} GAP${count === 1 ? "" : "s"}`) + (ignored > 0 ? ` · ${ignored} ign.` : "")}
       size="small" color="warning" variant="filled"
       sx={{ fontSize: "0.62rem", height: 18, fontWeight: 700, "& .MuiChip-icon": { ml: 0.5 } }}
     />
@@ -326,7 +334,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
               {s.readiness && <ReadinessBadge readiness={s.readiness} />}
               {/* Onda 3 (c): aviso de GAPs em aberto na validação da spec. */}
-              <GapWarningChip count={s.gapCount ?? 0} />
+              <GapWarningChip count={s.gapCount ?? 0} ignored={s.gapCountIgnored ?? 0} />
             </Stack>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
               <Typography variant="caption" color="text.secondary">
@@ -504,7 +512,8 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                           {(() => {
                             const totalGaps = g.specs.reduce((acc, s) => acc + (s.gapCount ?? 0), 0);
                             const specsWithGaps = g.specs.filter((s) => (s.gapCount ?? 0) > 0).length;
-                            return <GapWarningChip count={totalGaps} label={`${totalGaps > 99 ? "99+" : totalGaps} GAP${totalGaps === 1 ? "" : "s"} · ${specsWithGaps} spec(s)`} />;
+                            const totalIgnored = g.specs.reduce((acc, s) => acc + (s.gapCountIgnored ?? 0), 0);
+                            return <GapWarningChip count={totalGaps} ignored={totalIgnored} label={`${totalGaps > 99 ? "99+" : totalGaps} GAP${totalGaps === 1 ? "" : "s"} · ${specsWithGaps} spec(s)`} />;
                           })()}
                           <Typography variant="caption" color="text.secondary">Abrir pasta do produto</Typography>
                         </Stack>

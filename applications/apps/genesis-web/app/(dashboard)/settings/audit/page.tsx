@@ -43,11 +43,18 @@ const ACTION_LABEL: Record<string, string> = {
   spec_promoted: "Spec promovida à fábrica",
   product_promoted: "Produto promovido",
   evolution_promoted: "Evolução promovida",
+  ack_findings: "Avisos reconhecidos (ack por run)",
+  force_promote: "Promoção forçada com blockers (admin)",
+  // RFC-0005 — triagem de GAPs blocker (só tenant_admin, com motivo)
+  gap_ignored_blocker: "GAP blocker IGNORADO",
+  gap_refuted_blocker: "GAP blocker REFUTADO",
+  gap_reactivated: "GAP blocker reativado",
 };
 
 function actionChip(action: string) {
   const self = action === "spec_self_approved";
-  return <Chip size="small" color={self ? "warning" : "default"} variant={self ? "filled" : "outlined"} label={ACTION_LABEL[action] ?? action} sx={{ fontSize: "0.7rem" }} />;
+  const gapBlocker = action.startsWith("gap_") || action === "force_promote";
+  return <Chip size="small" color={self || gapBlocker ? "warning" : "default"} variant={self || gapBlocker ? "filled" : "outlined"} label={ACTION_LABEL[action] ?? action} sx={{ fontSize: "0.7rem" }} />;
 }
 
 export default function GovernanceAuditPage() {

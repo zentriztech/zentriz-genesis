@@ -1267,9 +1267,14 @@ export default function SpecPage() {
     let alive = true;
     // Zera ao trocar de projeto → sem flash da contagem do projeto anterior enquanto o fetch corre.
     setGapCount(null);
-    apiGet<{ latestRun: { findings?: unknown[] } | null }>(`/api/specs/${editProjectId}/validation`)
-      // null = nunca validada (aba GAPs sem número); 0 = validada e limpa; N = N findings.
-      .then((r) => { if (alive) setGapCount(r?.latestRun ? (Array.isArray(r.latestRun.findings) ? r.latestRun.findings.length : 0) : null); })
+    apiGet<{ latestRun: { findings?: Array<{ triage?: unknown }> } | null; counts?: { active: number } | null }>(`/api/specs/${editProjectId}/validation`)
+      // RFC-0005: null = nunca validada (aba GAPs sem número); N = GAPs ATIVOS (ignorados/refutados não contam).
+      .then((r) => {
+        if (!alive) return;
+        if (!r?.latestRun) { setGapCount(null); return; }
+        if (r.counts) { setGapCount(r.counts.active); return; }
+        setGapCount(Array.isArray(r.latestRun.findings) ? r.latestRun.findings.filter((f) => !f?.triage).length : 0);
+      })
       .catch(() => { if (alive) setGapCount(null); });
     return () => { alive = false; };
   }, [editProjectId, validationReloadSignal]);
