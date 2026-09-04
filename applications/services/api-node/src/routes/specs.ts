@@ -15,6 +15,18 @@ import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
+import {
+  ZIP_TEXT_EXTS,
+  ZIP_CODE_EXTS,
+  ZIP_BINARY_SKIP,
+  ZipExtractError,
+  assertZipUncompressedCap,
+  sniffKind,
+  buildGateContent,
+  extractZip,
+  type ExtractedFile,
+} from "../services/specTextExtract.js";
+import { createRateLimiter, clientIp } from "../services/rateLimit.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
@@ -25,13 +37,10 @@ const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 const SPEC_LISTING_STATUSES = ["draft", "spec_submitted", "pending_conversion"];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Extensões legíveis extraídas de ZIPs — código é incluído como EXEMPLO DE REFERÊNCIA
-const ZIP_TEXT_EXTS  = new Set([".md", ".txt", ".yaml", ".yml", ".json"]);
-const ZIP_CODE_EXTS  = new Set([".ts", ".js", ".tsx", ".jsx", ".py", ".sql", ".sh"]);
-// Palavras no nome/path do arquivo que indicam "é referência/exemplo, não spec"
-const REFERENCE_HINTS = ["example", "sample", "reference", "schema", "structure", "template", "demo"];
-const ZIP_BINARY_SKIP = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
-                                  ".zip", ".tar", ".gz", ".exe", ".bin", ".lock"]);
+// Nota (Onda 4): os extratores de texto (extractDocxText, extractPdfTextBestEffort,
+// buildGateContent, extractZip) e as constantes de allowlist de ZIP foram movidos para
+// services/specTextExtract.ts para reuso pelo decompose multi-formato (products.ts).
+// Aqui só ficam extractProductZip (ADR-018, cenário A) e o pipeline de upload de spec.
 
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
@@ -42,181 +51,20 @@ function isAllowed(filename: string): boolean {
   return ALLOWED_EXT.has(ext) || ext === ".zip";
 }
 
-type ExtractedFile = { filename: string; buffer: Buffer; mimeType: string };
-
-/** Extensões cujo conteúdo é texto legível direto — alimentam o gate semântico. */
-const GATE_TEXT_EXT = new Set([".md", ".txt", ".yaml", ".yml", ".json", ".csv", ".xml", ".html"]);
-
-/** Decodifica as entidades XML básicas de um texto extraído de docx. */
-function decodeXmlEntities(s: string): string {
-  return s
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
-    .replace(/&amp;/g, "&");
-}
-
 /**
- * Extrai texto de um .docx (que é um zip OOXML): lê word/document.xml e derivados,
- * insere quebras onde há <w:p>/<w:br>, remove as tags e decodifica entidades.
- * Retorna "" se não parecer um docx válido.
+ * Limitador por USUÁRIO no upload de spec (POST /api/specs) — 10/min. Uploads passam por
+ * gate semântico + LLM: sem teto, um autenticado poderia inundar a fábrica. Chaveado pelo
+ * user.id (não IP), então NAT compartilhado não penaliza terceiros.
  */
-function extractDocxText(buffer: Buffer): string {
-  try {
-    const zip = new AdmZip(buffer);
-    const entries = zip.getEntries().filter(
-      (e) => !e.isDirectory && /^word\/(document|header\d*|footer\d*)\.xml$/.test(e.entryName),
-    );
-    if (entries.length === 0) return "";
-    let out = "";
-    for (const e of entries) {
-      const xml = e.getData().toString("utf-8");
-      out += " " + xml
-        .replace(/<w:(p|br|tab)\b[^>]*\/?>/g, " ")
-        .replace(/<\/w:p>/g, "\n")
-        .replace(/<[^>]+>/g, "");
-    }
-    return decodeXmlEntities(out).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Extração BEST-EFFORT de texto de PDF sem dependência nova: pega tokens de texto
- * mostrados por operadores Tj/TJ (strings entre parênteses) em streams NÃO comprimidos.
- * PDFs de texto simples rendem conteúdo; PDFs em branco/lixo/comprimidos rendem ~nada
- * (e então o gate trata como "sem conteúdo legível"). Não pretende ser um parser completo.
- */
-function extractPdfTextBestEffort(buffer: Buffer): string {
-  try {
-    const raw = buffer.toString("latin1");
-    const chunks: string[] = [];
-    // strings de texto entre parênteses (operadores Tj/TJ). Escapes \( \) \\ tolerados.
-    const re = /\(((?:\\.|[^()\\])*)\)\s*T[jJ]/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(raw)) !== null) {
-      const s = m[1]
-        .replace(/\\([()\\])/g, "$1")
-        .replace(/\\n/g, "\n").replace(/\\r/g, "").replace(/\\t/g, " ");
-      if (s.trim()) chunks.push(s);
-    }
-    return chunks.join(" ").replace(/[ \t]+/g, " ").trim();
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Monta o texto a ser julgado pelo gate semântico. Prefere a descrição em texto livre
- * (o que o usuário realmente digitou); na ausência dela (modo anexos), extrai o texto
- * dos arquivos: .md/.txt/.yaml/… direto, .docx via OOXML, .pdf best-effort. Binários
- * ilegíveis (imagens, PDF só-imagem, docx corrompido) rendem "" para aquele arquivo.
- */
-function buildGateContent(
-  freeDescription: string | null,
-  files: { filename: string; buffer: Buffer }[],
-): string {
-  const fd = (freeDescription ?? "").trim();
-  if (fd.length > 0) return fd;
-  const parts: string[] = [];
-  for (const f of files) {
-    const ext = path.extname(f.filename).toLowerCase();
-    try {
-      if (GATE_TEXT_EXT.has(ext)) {
-        parts.push(f.buffer.toString("utf-8"));
-      } else if (ext === ".docx" || ext === ".doc") {
-        const t = extractDocxText(f.buffer);
-        if (t) parts.push(t);
-      } else if (ext === ".pdf") {
-        const t = extractPdfTextBestEffort(f.buffer);
-        if (t) parts.push(t);
-      }
-    } catch {
-      /* ignora arquivo ilegível */
-    }
-  }
-  return parts.join("\n\n").trim();
-}
-
-/**
- * Extrai um ZIP e produz UM ÚNICO arquivo spec.md concatenando todo o conteúdo.
- * - Arquivos de spec/docs/contrato (.md, .txt, .yaml, .json): incluídos diretamente.
- * - Arquivos de código (.ts, .js, .py, .sql, etc.): incluídos com cabeçalho
- *   "EXEMPLO DE REFERÊNCIA — não copiar literalmente".
- * - Binários e arquivos ocultos: ignorados.
- * - Não depende de paths ou estrutura de diretórios do ZIP.
- */
-function extractZip(zipBuffer: Buffer, originalName: string): ExtractedFile[] {
-  const zip     = new AdmZip(zipBuffer);
-  const entries = zip.getEntries().filter((e) => {
-    if (e.isDirectory) return false;
-    const name = e.entryName;
-    // Ignorar ocultos e MACOSX
-    if (path.basename(name).startsWith(".")) return false;
-    if (name.includes("__MACOSX") || name.includes(".DS_Store")) return false;
-    const ext = path.extname(name).toLowerCase();
-    // Ignorar binários explícitos
-    if (ZIP_BINARY_SKIP.has(ext)) return false;
-    // Aceitar texto + código
-    return ZIP_TEXT_EXTS.has(ext) || ZIP_CODE_EXTS.has(ext);
-  });
-
-  if (entries.length === 0) {
-    throw new Error(
-      `O ZIP "${originalName}" não contém arquivos de texto legíveis (.md, .yaml, .ts, etc.). ` +
-      "Verifique o conteúdo e tente novamente."
-    );
-  }
-
-  // Ordenar: docs primeiro (md/txt/yaml/json), código depois
-  entries.sort((a, b) => {
-    const extA = path.extname(a.entryName).toLowerCase();
-    const extB = path.extname(b.entryName).toLowerCase();
-    const isCodeA = ZIP_CODE_EXTS.has(extA) ? 1 : 0;
-    const isCodeB = ZIP_CODE_EXTS.has(extB) ? 1 : 0;
-    if (isCodeA !== isCodeB) return isCodeA - isCodeB;
-    return a.entryName.localeCompare(b.entryName);
-  });
-
-  // Concatenar tudo em um único spec.md
-  const sections: string[] = [];
-  for (const entry of entries) {
-    const basename    = path.basename(entry.entryName);
-    const ext         = path.extname(basename).toLowerCase();
-    const entryLower  = entry.entryName.toLowerCase();
-    const isCode      = ZIP_CODE_EXTS.has(ext) ||
-                        REFERENCE_HINTS.some((h) => entryLower.includes(h));
-
-    let text: string;
-    try {
-      text = entry.getData().toString("utf-8").trim();
-    } catch {
-      continue; // pular arquivos que não decodificam como UTF-8
-    }
-    if (!text) continue;
-
-    if (isCode) {
-      // Código/infra é contexto/exemplo — nunca instrução literal
-      const lang = ext.replace(".", "") || "text";
-      sections.push(
-        `---\n## [EXEMPLO DE REFERÊNCIA: ${entry.entryName}]\n` +
-        `> ATENÇÃO: Este arquivo é apenas uma referência de estrutura. ` +
-        `NÃO copiar literalmente. Adaptar à arquitetura definida nas specs deste produto.\n\n` +
-        `\`\`\`${lang}\n${text}\n\`\`\``
-      );
-    } else {
-      sections.push(`---\n## [${entry.entryName}]\n\n${text}`);
-    }
-  }
-
-  const combined = sections.join("\n\n");
-  const zipBase  = path.basename(originalName, ".zip");
-  return [{
-    filename: `${zipBase}-spec.md`,
-    buffer:   Buffer.from(combined, "utf-8"),
-    mimeType: "text/markdown",
-  }];
-}
+const specUploadLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: Number(process.env.SPEC_UPLOADS_PER_MINUTE ?? 10),
+  name: "spec-upload",
+  keyFn: (req) => {
+    const u = (req as unknown as { user?: AuthUser }).user;
+    return u?.id ? `u:${u.id}` : clientIp(req);
+  },
+});
 
 /** Nome do manifesto de produto na raiz do ZIP (ADR-018). JSON nativo (sem dep de YAML). */
 export const PRODUCT_MANIFEST_NAME = "PRODUCT.json";
@@ -235,6 +83,7 @@ export interface ProductZipContents {
  */
 export function extractProductZip(zipBuffer: Buffer): ProductZipContents | null {
   const zip = new AdmZip(zipBuffer);
+  assertZipUncompressedCap(zip); // teto de descompressão (zip bomb) antes de qualquer getData()
   const files = new Map<string, string>();
   let manifestText: string | null = null;
 
@@ -617,7 +466,7 @@ export async function specRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/api/specs", async (request, reply) => {
+  app.post("/api/specs", { preHandler: specUploadLimiter }, async (request, reply) => {
     const user = getUser(request);
     // RFC-0002 A.1: conta de gestão (zentriz_admin) não cria/envia spec.
     if (denyCreationForManagement(user, reply)) return;
@@ -784,12 +633,22 @@ export async function specRoutes(app: FastifyInstance) {
           });
         }
         const buffer = await part.toBuffer();
+        // Endurecimento (OWASP File Upload): confere a ASSINATURA (magic bytes) contra a
+        // extensão ANTES de processar — allowlist por extensão sozinha é falsificável.
+        const sniff = sniffKind(part.filename, buffer);
+        if (!sniff.ok) {
+          return reply.status(400).send({ code: sniff.code, message: sniff.message });
+        }
         const ext = path.extname(part.filename).toLowerCase();
         if (ext === ".zip") {
           let extracted: ExtractedFile[];
           try {
             extracted = extractZip(buffer, part.filename);
           } catch (e) {
+            // Teto de descompressão estourado (zip bomb) → 409; demais erros de ZIP → 400.
+            if (e instanceof ZipExtractError && e.code === "ZIP_TOO_LARGE") {
+              return reply.status(409).send({ code: "ZIP_TOO_LARGE", message: e.message });
+            }
             return reply.status(400).send({
               code: "BAD_REQUEST",
               message: e instanceof Error ? e.message : "Erro ao extrair ZIP.",

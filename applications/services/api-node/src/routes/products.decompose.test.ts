@@ -46,6 +46,15 @@ vi.mock("../services/productProposals.js", () => ({
 const readFileSpy = vi.fn(async (_p: string) => "Documento de spec com conteúdo suficiente para passar do mínimo de quarenta caracteres exigidos.");
 vi.mock("node:fs/promises", () => ({ readFile: (p: string) => readFileSpy(p) }));
 
+// Onda 4 (PR-1): a rota extrai .docx/.pdf via specTextExtract. Stub das extrações para
+// controlar o texto sem precisar de binários reais; mantém GATE_TEXT_EXT (Set real).
+const docxSpy = vi.fn((_buf: unknown) => "Texto extraído do DOCX com conteúdo suficiente para passar do mínimo exigido.");
+const pdfSpy = vi.fn((_buf: unknown) => "Texto extraído do PDF com conteúdo suficiente para passar do mínimo exigido.");
+vi.mock("../services/specTextExtract.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, extractDocxText: (b: unknown) => docxSpy(b), extractPdfTextBestEffort: (b: unknown) => pdfSpy(b) };
+});
+
 let app: FastifyInstance;
 
 // Roteador default: spec pré-fábrica do próprio tenant, sem produto, com 1 arquivo .md.
@@ -77,7 +86,29 @@ beforeEach(async () => {
   queryHandler = defaultHandler();
   readFileSpy.mockClear();
   readFileSpy.mockResolvedValue("Documento de spec com conteúdo suficiente para passar do mínimo de quarenta caracteres exigidos.");
+  docxSpy.mockClear();
+  docxSpy.mockReturnValue("Texto extraído do DOCX com conteúdo suficiente para passar do mínimo exigido.");
+  pdfSpy.mockClear();
+  pdfSpy.mockReturnValue("Texto extraído do PDF com conteúdo suficiente para passar do mínimo exigido.");
 });
+
+// Handler que serve arquivos com filenames arbitrários (extensões variadas) e captura o INSERT.
+function filesHandler(filenames: string[], captured: { source?: string; warnings?: string }) {
+  return (sql: string, params: unknown[] = []) => {
+    if (sql.includes("FROM projects") && sql.includes("product_is_inbox")) {
+      return { rows: [{ id: SPEC_ID, tenant_id: TENANT, created_by: "u1", title: "Minha Spec", status: "spec_submitted", product_id: null, product_is_inbox: null }] };
+    }
+    if (sql.includes("FROM project_spec_files")) {
+      return { rows: filenames.map((fn, i) => ({ filename: fn, file_path: `/uploads/${SPEC_ID}/${fn}` })) };
+    }
+    if (sql.includes("INSERT INTO product_proposals")) {
+      captured.source = params[5] as string;   // ...,source,warnings,... → índice 5 = source
+      captured.warnings = params[6] as string;  // índice 6 = warnings json
+      return { rows: [{ id: "44444444-4444-4444-8444-444444444444" }] };
+    }
+    return { rows: [] };
+  };
+}
 
 describe("POST /api/projects/:id/decompose — B4", () => {
   it("spec da Bancada do próprio tenant → 202 com jobId e originProjectId", async () => {
@@ -151,5 +182,51 @@ describe("POST /api/projects/:id/decompose — B4", () => {
     const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: {} });
     expect(res.statusCode).toBe(422);
     expect(JSON.parse(res.body).code).toBe("SPEC_TOO_SHORT");
+  });
+});
+
+describe("POST /api/projects/:id/decompose — Onda 4 (PR-1): multi-formato + source", () => {
+  it(".docx é extraído via extractDocxText e entra no documento", async () => {
+    const cap: { source?: string } = {};
+    queryHandler = filesHandler(["spec.docx"], cap);
+    const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: {} });
+    expect(res.statusCode).toBe(202);
+    expect(docxSpy).toHaveBeenCalledTimes(1);
+    expect(cap.source).toBe("spec");
+  });
+
+  it("PDF sem texto selecionável (só imagem) → 422 com mensagem acionável", async () => {
+    pdfSpy.mockReturnValue("");   // PDF sem texto
+    const cap: { source?: string } = {};
+    queryHandler = filesHandler(["scan.pdf"], cap);
+    const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: {} });
+    expect(res.statusCode).toBe(422);
+    const b = JSON.parse(res.body);
+    expect(b.code).toBe("SPEC_TOO_SHORT");
+    expect(b.message).toContain("PDF sem texto selecionável");
+  });
+
+  it(".doc (formato antigo) → ignorado com aviso; se sobra texto de outro arquivo, 202", async () => {
+    const cap: { source?: string; warnings?: string } = {};
+    queryHandler = filesHandler(["antigo.doc", "spec.md"], cap);
+    const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: {} });
+    expect(res.statusCode).toBe(202);
+    expect(cap.warnings).toContain(".doc");
+  });
+
+  it("source:'upload' no body é persistido (fluxo upload→decompose da Bancada)", async () => {
+    const cap: { source?: string } = {};
+    queryHandler = filesHandler(["spec.md"], cap);
+    const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: { source: "upload" } });
+    expect(res.statusCode).toBe(202);
+    expect(cap.source).toBe("upload");
+  });
+
+  it("source inválido no body cai no default 'spec' (allow-list)", async () => {
+    const cap: { source?: string } = {};
+    queryHandler = filesHandler(["spec.md"], cap);
+    const res = await app.inject({ method: "POST", url: `/api/projects/${SPEC_ID}/decompose`, payload: { source: "hacker" } });
+    expect(res.statusCode).toBe(202);
+    expect(cap.source).toBe("spec");
   });
 });

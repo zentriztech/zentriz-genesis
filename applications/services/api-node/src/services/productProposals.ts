@@ -33,7 +33,10 @@ import { productManifestWarnings } from "./connectSchema.js";
 // 8+ projetos chegavam ao teto de 11 min. Alinhado ao Resolver GAPs (18 min) + folga no backstop.
 export const PROPOSAL_DEADLINE_MIN = 22;
 
-type AgentsResult = { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[] };
+// Onda 4 (PR-2): o Product Architect passa a reportar o consumo de tokens agregado da
+// decomposição (soma de todas as chamadas ao LLM, inclusive as paralelas do PASSO 2).
+type ProposalUsage = { input_tokens?: number; output_tokens?: number; model?: string; calls?: number };
+type AgentsResult = { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[]; usage?: ProposalUsage };
 
 /** Coleta origin_project_id não-nulos de um resultado de UPDATE ... RETURNING. */
 function originsOf(rows: unknown[]): string[] {
@@ -64,6 +67,25 @@ async function interruptProposal(pool: Pool, jobId: string, error: string): Prom
   if (r) await revertTerminatedOrigins(pool, originsOf(r.rows));
 }
 
+/**
+ * Onda 4 (PR-3): cancelamento EXPLÍCITO de uma proposta em voo pelo usuário. Marca a linha
+ * como 'interrupted' (o contrato do poll já mapeia isso para error+interrupted:true no portal),
+ * registra QUEM cancelou em `cancelled_by` e devolve a origem à Bancada. A transição é guardada
+ * por status (só 'pending'/'running') → cancelar uma proposta já terminal é no-op idempotente
+ * (rowCount 0). NÃO aborta o job no serviço agents (fora do nosso controle); o poll em voo vê a
+ * linha já terminal e para de escrever (todas as transições dele são guardadas por status).
+ */
+export async function cancelProposal(pool: Pool, jobId: string, cancelledBy: string | null): Promise<number> {
+  const by = cancelledBy && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cancelledBy)
+    ? cancelledBy : null;
+  const r = await pool.query(
+    "UPDATE product_proposals SET status='interrupted', error='Cancelado pelo usuário', cancelled_by=$2, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING origin_project_id",
+    [jobId, by],
+  );
+  if (r.rowCount) await revertTerminatedOrigins(pool, originsOf(r.rows));
+  return r.rowCount ?? 0;
+}
+
 async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): Promise<void> {
   try {
     const manifest = result.manifest!;
@@ -89,9 +111,17 @@ async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): 
       return;
     }
     const warningsJson = JSON.stringify([...(result.warnings ?? []), ...schemaWarnings]);
+    // Onda 4 (PR-2): telemetria de custo — grava tokens/modelo agregados da decomposição.
+    // Sanitiza para inteiros >= 0 (o serviço agents é confiável, mas defende contra NaN/negativo).
+    const u = result.usage ?? {};
+    const inTok = Math.max(0, Math.trunc(Number(u.input_tokens ?? 0)) || 0);
+    const outTok = Math.max(0, Math.trunc(Number(u.output_tokens ?? 0)) || 0);
+    const modelUsed = typeof u.model === "string" && u.model.trim() ? u.model.trim().slice(0, 200) : null;
+    // Onda 4 (PR-1): PRESERVA os avisos gravados na criação (ex.: decompose marcou .doc/PDF
+    // sem texto como ignorados) — concatena com os do resultado em vez de sobrescrever.
     const r = await pool.query(
-      "UPDATE product_proposals SET status='done', payload=$2::jsonb, warnings=$3::jsonb, error=NULL, deadline_at=NULL, updated_at=now() WHERE id=$1 AND status='running'",
-      [jobId, payloadJson, warningsJson],
+      "UPDATE product_proposals SET status='done', payload=$2::jsonb, warnings=COALESCE(warnings, '[]'::jsonb) || $3::jsonb, error=NULL, deadline_at=NULL, input_tokens=$4, output_tokens=$5, model_used=COALESCE($6, model_used), updated_at=now() WHERE id=$1 AND status='running'",
+      [jobId, payloadJson, warningsJson, inTok, outTok, modelUsed],
     );
     if (r.rowCount) console.log(`[Propose] ✓ job=${jobId} DONE — ${projects.length} projetos, ${sketch.waves.length} ondas`);
   } catch (e) {

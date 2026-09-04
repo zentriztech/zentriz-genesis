@@ -23,6 +23,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -34,12 +35,37 @@ import { dispatchProjectRun } from "../services/runnerDispatch.js";
 import { resolveInboxProductId, cleanupEmptySoloProduct } from "../services/inbox.js";
 import { isPreFactory, SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { emitValueEvent } from "../services/valueEvents.js";
-import { runProposeJob, PROPOSAL_DEADLINE_MIN } from "../services/productProposals.js";
+import { runProposeJob, PROPOSAL_DEADLINE_MIN, cancelProposal } from "../services/productProposals.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
+import { createRateLimiter } from "../services/rateLimit.js";
+import { checkTenantBudget, budgetExceededMessage } from "../services/tenantCostCap.js";
+import { costUsd } from "../lib/modelPricing.js";
+import { GATE_TEXT_EXT, extractDocxText, extractPdfTextBestEffort } from "../services/specTextExtract.js";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
 }
+
+// ── Onda 4 (PR-1): guardas de custo/abuso das propostas ────────────────────────
+// Teto de tamanho do documento de ideia (≈ 55 k tokens) → 413 DOCUMENT_TOO_LARGE.
+const PROPOSAL_MAX_CHARS = Number(process.env.PROPOSAL_MAX_CHARS ?? 200_000);
+// Rate-limit SQL por tenant (fonte de verdade, sobrevive a restart) — nº de ideias/hora.
+const IDEA_PROPOSALS_PER_HOUR = Number(process.env.IDEA_PROPOSALS_PER_HOUR ?? 4);
+// Gate de orçamento nas propostas (OFF por padrão; ligar após provar em dev).
+function proposalBudgetGateOn(): boolean {
+  return (process.env.PROPOSAL_BUDGET_GATE ?? "off").toLowerCase() === "on";
+}
+// Anti-rajada POR USUÁRIO no propose (complementa o teto SQL/hora por tenant). keyFn usa o
+// user.id (o authMiddleware roda antes deste preHandler no pipeline do Fastify).
+const proposeBurstLimiter = createRateLimiter({
+  windowMs: 60_000,
+  max: Number(process.env.PROPOSE_BURST_PER_MINUTE ?? 6),
+  name: "propose-burst",
+  keyFn: (req) => {
+    const u = (req as unknown as { user?: AuthUser }).user;
+    return u?.id ? `u:${u.id}` : (req.ip || "unknown");
+  },
+});
 
 /**
  * "rascunhos" (case/acento/trim-insensível) é o nome RESERVADO do INBOX do sistema
@@ -263,6 +289,9 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // Job-based (igual spec-preview): a decomposição é um LLM call longo → não segura a conexão.
   app.post<{ Body: { document?: string; modelId?: string } }>(
     "/api/products/propose",
+    // Onda 4 (PR-1): anti-rajada por usuário + bodyLimit explícito de 1 MiB (o documento tem
+    // teto de 200k chars; 1 MiB acomoda multibyte sem permitir upload gigante via JSON).
+    { preHandler: proposeBurstLimiter, bodyLimit: 1024 * 1024 },
     async (request, reply) => {
       const user = getUser(request);
       // RFC-0002 A.1: conta de gestão (zentriz_admin) não propõe/decompõe produto.
@@ -276,20 +305,35 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       if (document.length < 40) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Envie o documento do produto com pelo menos 40 caracteres." });
       }
+      // Onda 4 (PR-1, G2): teto de tamanho — evita spec de 200k+ chars inflar o custo do split.
+      if (document.length > PROPOSAL_MAX_CHARS) {
+        return reply.status(413).send({
+          code: "DOCUMENT_TOO_LARGE",
+          message: `O documento excede o limite de ${PROPOSAL_MAX_CHARS.toLocaleString("pt-BR")} caracteres. Reduza o conteúdo.`,
+        });
+      }
       const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
       if (!agentsUrl) {
         return reply.status(503).send({ code: "SERVICE_UNAVAILABLE", message: "Serviço de agentes (Product Architect) não configurado." });
       }
-      // Modo IDEIA não tem one-flight (não há origem) → rate-limit por tenant: 4 propostas/h.
+      // Onda 4 (PR-1, G2): gate de orçamento (flag OFF por padrão). Fail-open interno do
+      // checkTenantBudget — erro de infra nunca bloqueia; só o teto configurado bloqueia.
+      if (proposalBudgetGateOn()) {
+        const budget = await checkTenantBudget(pool, tenantId);
+        if (!budget.ok) {
+          return reply.status(429).send({ code: "BUDGET_EXCEEDED", message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd) });
+        }
+      }
+      // Modo IDEIA não tem one-flight (não há origem) → rate-limit por tenant (SQL, fonte de verdade).
       const recent = await pool.query(
         "SELECT count(*)::int AS n FROM product_proposals WHERE tenant_id=$1 AND origin_project_id IS NULL AND created_at > now() - interval '1 hour'",
         [tenantId],
       );
-      if ((recent.rows[0]?.n ?? 0) >= 4) {
+      if ((recent.rows[0]?.n ?? 0) >= IDEA_PROPOSALS_PER_HOUR) {
         return reply.status(429).send({ code: "RATE_LIMITED", message: "Muitas decomposições de ideia na última hora. Tente novamente mais tarde." });
       }
       const ins = await pool.query(
-        "INSERT INTO product_proposals (tenant_id, created_by, document, model_id, status, deadline_at) VALUES ($1,$2,$3,$4,'pending', now() + ($5 || ' minutes')::interval) RETURNING id",
+        "INSERT INTO product_proposals (tenant_id, created_by, document, model_id, status, source, deadline_at) VALUES ($1,$2,$3,$4,'pending','idea', now() + ($5 || ' minutes')::interval) RETURNING id",
         [tenantId, UUID_RE.test(user.id ?? "") ? user.id : null, document, body.modelId ?? null, String(PROPOSAL_DEADLINE_MIN)],
       );
       const jobId = ins.rows[0].id as string;
@@ -308,7 +352,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       // deploy anterior) → 404: aquele job morreu no restart, o portal deve refazer.
       if (!UUID_RE.test(jobId)) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
       const row = (await pool.query(
-        "SELECT id, tenant_id, status, payload, warnings, error, origin_project_id, created_at FROM product_proposals WHERE id=$1",
+        "SELECT id, tenant_id, status, payload, warnings, error, origin_project_id, created_at, input_tokens, output_tokens, model_used, model_id, source FROM product_proposals WHERE id=$1",
         [jobId],
       )).rows[0];
       if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Job não encontrado ou expirado" });
@@ -323,12 +367,21 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         if (!p.manifest || !p.specs) {
           return reply.send({ jobId: row.id, status: "error", interrupted: true, error: "Proposta expirada. Refaça a decomposição." });
         }
+        // Onda 4 (PR-2): eco do custo REAL da decomposição. costUsd deriva do preço único
+        // (modelPricing.ts) — nunca guardamos o custo como coluna (F6). Modelo efetivo do
+        // usage; se ausente (proposta antiga), cai no model_id pedido.
+        const inTok = Number(row.input_tokens ?? 0);
+        const outTok = Number(row.output_tokens ?? 0);
+        const modelEff = (row.model_used ?? row.model_id ?? null) as string | null;
         return reply.send({
           jobId: row.id, status: "done", needsHuman: true,
           manifest: p.manifest, specs: p.specs, waves: p.waves, projects: p.projects,
           warnings: row.warnings ?? [],
           // B4: eco da origem — o cliente devolve isto em /ingest-proposal para gravar o vínculo.
           originProjectId: row.origin_project_id ?? null,
+          source: row.source ?? "idea",
+          usage: { input_tokens: inTok, output_tokens: outTok, model_used: modelEff },
+          costUsd: costUsd(modelEff, inTok, outTok),
         });
       }
       // 'interrupted' não existe no contrato do frontend (status desconhecido → poll infinito)
@@ -364,12 +417,14 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       // persistida (o cliente não pode injetar um manifest divergente do que foi proposto),
       // e a origem é a que o servidor gravou. O payload do body é ignorado nesse caso.
       let authoritativeOrigin: string | null | undefined;
+      // Onda 4 (PR-2): usage da proposta (para lançar em project_agent_metrics no modo ideia).
+      let proposalUsage: { input: number; output: number; model: string | null } | null = null;
       if (proposalId) {
         if (!UUID_RE.test(proposalId)) {
           return reply.status(400).send({ code: "BAD_REQUEST", message: "proposalId inválido." });
         }
         const pp = (await pool.query(
-          "SELECT tenant_id, status, payload, origin_project_id, consumed_product_id FROM product_proposals WHERE id=$1",
+          "SELECT tenant_id, status, payload, origin_project_id, consumed_product_id, input_tokens, output_tokens, model_used, model_id FROM product_proposals WHERE id=$1",
           [proposalId],
         )).rows[0];
         if (!pp || (user.role !== "zentriz_admin" && pp.tenant_id !== tenantId)) {
@@ -386,6 +441,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         manifest = pp.payload.manifest as ProductManifest;
         specs = pp.payload.specs as Record<string, string>;
         authoritativeOrigin = pp.origin_project_id ?? null;
+        proposalUsage = {
+          input: Math.max(0, Number(pp.input_tokens ?? 0) || 0),
+          output: Math.max(0, Number(pp.output_tokens ?? 0) || 0),
+          model: (pp.model_used ?? pp.model_id ?? null) as string | null,
+        };
       }
       if (!manifest || typeof manifest !== "object" || !specs || typeof specs !== "object") {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "manifest + specs (mapa caminho→conteúdo) são obrigatórios." });
@@ -448,6 +508,25 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             [proposalId, result.productId],
           ).catch((e) => request.log.warn({ proposalId, err: e }, "[products/ingest-proposal] falha ao marcar proposta consumida"));
         }
+        // Onda 4 (PR-2, G4): custo da decomposição de uma proposta SEM origem (modo ideia) é
+        // invisível hoje — a origem (modo spec) já debita ao vivo na fábrica. Lança 1 linha em
+        // project_agent_metrics (agent='splitter') no PRIMEIRO projeto criado, para o custo
+        // entrar no MTD do tenant. task_id='proposal:<id>' + guarda NOT EXISTS torna idempotente
+        // (o re-ingest é 200 idempotente; nunca conta duas vezes). Só no fluxo real (não idempotentReuse).
+        if (!result.idempotentReuse && origin === null && proposalUsage
+            && (proposalUsage.input > 0 || proposalUsage.output > 0)
+            && result.projects.length > 0) {
+          const firstPid = result.projects[0].projectId;
+          const taskId = `proposal:${proposalId ?? "idea"}`;
+          await pool.query(
+            `INSERT INTO project_agent_metrics (project_id, agent, task_id, round, input_tokens, output_tokens, model, status)
+               SELECT $1, 'splitter', $2, 1, $3, $4, $5, 'OK'
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM project_agent_metrics WHERE project_id=$1 AND agent='splitter' AND task_id=$2
+               )`,
+            [firstPid, taskId, proposalUsage.input, proposalUsage.output, proposalUsage.model],
+          ).catch((e) => request.log.warn({ proposalId, err: e }, "[products/ingest-proposal] falha ao lançar custo do splitter"));
+        }
         if (result.idempotentReuse) {
           request.log.info({ productId: result.productId }, "[products/ingest-proposal] no-op idempotente");
           return reply.status(200).send(result);
@@ -481,7 +560,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
   // (2) multi-md — concatena TODOS os .md da spec; (3) vínculo de origem — o job carrega
   // originProjectId, gravado em products.origin_project_id no /ingest-proposal (evita
   // produto órfão, gap U#4/C7).
-  app.post<{ Params: { id: string }; Body: { modelId?: string } }>(
+  app.post<{ Params: { id: string }; Body: { modelId?: string; source?: string } }>(
     "/api/projects/:id/decompose",
     async (request, reply) => {
       const user = getUser(request);
@@ -516,34 +595,75 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         if (!SPEC_DECOMPOSABLE_STATUSES.has(proj.status)) {
           return reply.status(409).send({ code: "NOT_A_SPEC", message: `Só specs na Bancada podem ser decompostas (estado atual: ${proj.status}).` });
         }
-        // multi-md: concatena TODOS os .md da spec (ordem de criação), tolerando arquivo sumido.
+        // Onda 4 (PR-1, G2): gate de orçamento (flag OFF por padrão) — a spec da Bancada debita
+        // ao vivo, mas o custo da DECOMPOSIÇÃO em si não passava por teto. tenant conhecido = proj.tenant_id.
+        if (proposalBudgetGateOn() && proj.tenant_id) {
+          const budget = await checkTenantBudget(pool, proj.tenant_id);
+          if (!budget.ok) {
+            return reply.status(429).send({ code: "BUDGET_EXCEEDED", message: budgetExceededMessage(budget.spentUsd, budget.budgetUsd) });
+          }
+        }
+        // Onda 4 (PR-1): decompõe a partir de TODOS os anexos da spec (não só .md). Extrator
+        // compartilhado (specTextExtract.ts): .md/.txt/.yaml/… texto puro; .docx via OOXML;
+        // .pdf best-effort; .doc/binário → aviso na proposta (ignorado). Ordem = criação.
         const files = (await client.query(
-          "SELECT filename, file_path FROM project_spec_files WHERE project_id = $1 AND LOWER(filename) LIKE '%.md' ORDER BY created_at ASC", [id],
+          "SELECT filename, file_path FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC", [id],
         )).rows as Array<{ filename: string; file_path: string }>;
         if (files.length === 0) {
-          return reply.status(422).send({ code: "NO_SPEC_FILES", message: "Spec sem arquivos markdown para decompor." });
+          return reply.status(422).send({ code: "NO_SPEC_FILES", message: "Spec sem arquivos para decompor." });
         }
         const parts: string[] = [];
+        const fileWarnings: string[] = [];
+        let sawPdf = false;
+        let sawPdfWithText = false;
         for (const f of files) {
+          const ext = path.extname(f.filename).toLowerCase();
+          let text = "";
           try {
-            const content = await readFile(f.file_path, "utf-8");
-            if (content.trim()) parts.push(files.length > 1 ? `# ${f.filename}\n\n${content}` : content);
+            if (GATE_TEXT_EXT.has(ext)) {
+              text = (await readFile(f.file_path, "utf-8")).trim();
+            } else if (ext === ".docx") {
+              text = extractDocxText(await readFile(f.file_path)).trim();
+              if (!text) fileWarnings.push(`Arquivo "${f.filename}": não foi possível extrair texto do .docx (ignorado).`);
+            } else if (ext === ".pdf") {
+              sawPdf = true;
+              text = extractPdfTextBestEffort(await readFile(f.file_path)).trim();
+              if (text) sawPdfWithText = true;
+              else fileWarnings.push(`Arquivo "${f.filename}": PDF sem texto selecionável (ignorado). Envie .md/.docx ou cole o texto.`);
+            } else if (ext === ".doc") {
+              fileWarnings.push(`Arquivo "${f.filename}": formato .doc não suportado para extração (ignorado). Envie .docx ou .md.`);
+              continue;
+            } else {
+              continue; // extensão fora do conjunto legível → ignora silenciosamente
+            }
           } catch {
             request.log.warn({ file: f.file_path }, "[projects/decompose] arquivo de spec ausente no disco — ignorado");
+            continue;
           }
+          if (text) parts.push(files.length > 1 ? `# ${f.filename}\n\n${text}` : text);
         }
         const document = parts.join("\n\n---\n\n").trim();
         if (document.length < 40) {
+          // PDF-só-imagem (todo o conteúdo era PDF sem texto): mensagem específica e acionável.
+          if (sawPdf && !sawPdfWithText && parts.length === 0) {
+            return reply.status(422).send({
+              code: "SPEC_TOO_SHORT",
+              message: "PDF sem texto selecionável — envie .md/.docx ou cole o texto na descrição.",
+            });
+          }
           return reply.status(422).send({ code: "SPEC_TOO_SHORT", message: "Conteúdo da spec insuficiente para decompor (mín. 40 caracteres legíveis)." });
         }
+        // source: o cliente do /spec (fluxo upload→decompose) manda source:'upload'; default 'spec'.
+        const source = request.body?.source === "upload" ? "upload" : "spec";
+        const warningsJson = JSON.stringify(fileWarnings);
         // T1.6b: cria a proposta persistida. one-flight por origem (índice parcial único
         // pp_one_flight_origin): 2 cliques em "Decompor" na mesma spec = 1 job vivo → o 2º
         // colide (23505) e reusa o job em voo em vez de disparar outra decomposição.
         let jobId: string;
         try {
           const ins = await client.query(
-            "INSERT INTO product_proposals (tenant_id, created_by, origin_project_id, document, model_id, status, deadline_at) VALUES ($1,$2,$3,$4,$5,'pending', now() + ($6 || ' minutes')::interval) RETURNING id",
-            [proj.tenant_id, UUID_RE.test(user.id ?? "") ? user.id : null, id, document, request.body?.modelId ?? null, String(PROPOSAL_DEADLINE_MIN)],
+            "INSERT INTO product_proposals (tenant_id, created_by, origin_project_id, document, model_id, status, source, warnings, deadline_at) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7::jsonb, now() + ($8 || ' minutes')::interval) RETURNING id",
+            [proj.tenant_id, UUID_RE.test(user.id ?? "") ? user.id : null, id, document, request.body?.modelId ?? null, source, warningsJson, String(PROPOSAL_DEADLINE_MIN)],
           );
           jobId = ins.rows[0].id as string;
         } catch (e) {
@@ -570,6 +690,102 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         runProposeJob(pool, jobId, document, request.body?.modelId, agentsUrl, id);
         return reply.status(202).send({ jobId, status: "pending", originProjectId: id });
       } finally { client.release(); }
+    },
+  );
+
+  // ── GET /api/products/proposals — Onda 4 (PR-3): visibilidade das propostas ────
+  // Lista as propostas do tenant (a ideia deixa de existir só enquanto o diálogo está aberto —
+  // G10). Tenant-scoped fail-closed; master escopa via ?tenantId (como as demais rotas). Devolve
+  // `etaSeconds` (mediana das últimas 20 `done`) para o indicador de progresso do diálogo (NN/g).
+  app.get<{ Querystring: { status?: string; limit?: string; tenantId?: string } }>(
+    "/api/products/proposals",
+    async (request, reply) => {
+      const user = getUser(request);
+      // Token de máquina do runner não tem caso de uso aqui (mesma política do /kpis).
+      if (user.svc === "runner") return reply.status(403).send({ code: "FORBIDDEN", message: "Sem caso de uso p/ token de serviço." });
+      const q = request.query ?? {};
+      // Escopo: não-master usa SEMPRE o próprio tenant (query ignorada — G1); master pode escopar.
+      const scopeTenantId =
+        user.role === "zentriz_admin" && q.tenantId && UUID_RE.test(q.tenantId)
+          ? q.tenantId
+          : user.tenantId;
+      const features = { specUploadDecompose: (process.env.SPEC_UPLOAD_DECOMPOSE ?? "off").toLowerCase() === "on" };
+      if (!scopeTenantId) return reply.send({ items: [], etaSeconds: null, features });
+      const ALLOWED_STATUS = new Set(["pending", "running", "done", "error", "interrupted"]);
+      const statuses = (q.status ?? "").split(",").map((s) => s.trim()).filter((s) => ALLOWED_STATUS.has(s));
+      const limit = Math.min(Math.max(Number(q.limit ?? 20) || 20, 1), 100);
+      const params: unknown[] = [scopeTenantId];
+      let where = "tenant_id = $1";
+      if (statuses.length > 0) { params.push(statuses); where += ` AND status = ANY($${params.length})`; }
+      params.push(limit);
+      const rows = (await pool.query(
+        `SELECT id, status, source, created_at, updated_at, origin_project_id, consumed_at,
+                consumed_product_id, input_tokens, output_tokens, model_used, model_id, error,
+                (SELECT p.title FROM projects p WHERE p.id = product_proposals.origin_project_id) AS origin_title
+           FROM product_proposals
+          WHERE ${where}
+          ORDER BY updated_at DESC
+          LIMIT $${params.length}`,
+        params,
+      )).rows;
+      // eta: mediana (segundos) das últimas 20 propostas `done` do tenant (progresso estimado).
+      const etaRow = (await pool.query(
+        `SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (updated_at - created_at))) AS eta
+           FROM (SELECT created_at, updated_at FROM product_proposals
+                  WHERE tenant_id = $1 AND status = 'done'
+                  ORDER BY updated_at DESC LIMIT 20) t`,
+        [scopeTenantId],
+      )).rows[0];
+      const etaSeconds = etaRow?.eta != null ? Math.round(Number(etaRow.eta)) : null;
+      const items = rows.map((r) => {
+        const inTok = Number(r.input_tokens ?? 0);
+        const outTok = Number(r.output_tokens ?? 0);
+        const modelEff = (r.model_used ?? r.model_id ?? null) as string | null;
+        return {
+          jobId: r.id,
+          status: r.status,
+          source: r.source ?? "idea",
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          originProjectId: r.origin_project_id ?? null,
+          originTitle: r.origin_title ?? null,
+          // "pronta para revisão" = terminou e ainda não foi ingerida.
+          reviewReady: r.status === "done" && r.consumed_at == null,
+          consumed: r.consumed_at != null,
+          consumedProductId: r.consumed_product_id ?? null,
+          error: r.error ?? null,
+          usage: { input_tokens: inTok, output_tokens: outTok, model_used: modelEff },
+          costUsd: costUsd(modelEff, inTok, outTok),
+        };
+      });
+      return reply.send({ items, etaSeconds, features });
+    },
+  );
+
+  // ── POST /api/products/propose/:jobId/cancel — Onda 4 (PR-3): cancelar em voo ──
+  // Marca a proposta 'interrupted' e devolve a origem à Bancada. Tenant binding fail-closed
+  // (404, nunca 403 — não vaza a existência de job de outro tenant); proposta já terminal → 409.
+  app.post<{ Params: { jobId: string } }>(
+    "/api/products/propose/:jobId/cancel",
+    async (request, reply) => {
+      const user = getUser(request);
+      if (user.svc === "runner") return reply.status(403).send({ code: "FORBIDDEN", message: "Sem caso de uso p/ token de serviço." });
+      const { jobId } = request.params;
+      if (!UUID_RE.test(jobId)) return reply.status(404).send({ code: "NOT_FOUND", message: "Proposta não encontrada." });
+      const row = (await pool.query(
+        "SELECT tenant_id, status, consumed_at FROM product_proposals WHERE id=$1",
+        [jobId],
+      )).rows[0];
+      if (!row || (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId)) {
+        return reply.status(404).send({ code: "NOT_FOUND", message: "Proposta não encontrada." });
+      }
+      if (!["pending", "running"].includes(row.status) || row.consumed_at != null) {
+        return reply.status(409).send({ code: "ALREADY_TERMINAL", message: "A proposta já terminou e não pode ser cancelada." });
+      }
+      const n = await cancelProposal(pool, jobId, user.id ?? null);
+      // rowCount 0 = corrida (virou terminal entre o SELECT e o UPDATE) → 409, não 200 falso.
+      if (!n) return reply.status(409).send({ code: "ALREADY_TERMINAL", message: "A proposta já terminou e não pode ser cancelada." });
+      return reply.status(200).send({ jobId, status: "interrupted" });
     },
   );
 
