@@ -25,11 +25,13 @@ import FormControl from "@mui/material/FormControl";
 import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
+import Switch from "@mui/material/Switch";
 import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import AddIcon from "@mui/icons-material/Add";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CloseIcon from "@mui/icons-material/Close";
 import EditIcon from "@mui/icons-material/Edit";
@@ -42,9 +44,10 @@ import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import SendIcon from "@mui/icons-material/Send";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
+import { ApiError, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
+import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
 import SpecTreePanel from "@/components/SpecTreePanel";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
@@ -86,6 +89,16 @@ function MermaidBlock({ code }: { code: string }) {
 }
 
 const ACCEPT = ".md,.txt,.doc,.docx,.pdf,.zip";
+// Teto do plugin multipart da API (app.ts: fileSize 10 MiB, files 10) — checado no cliente
+// para uma mensagem clara em vez de um 413 opaco.
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_UPLOAD_FILES = 10;
+// Onda 4 — preferência "Decompor em produto após salvar" lembrada por navegador.
+const DECOMPOSE_ON_UPLOAD_KEY = "genesis.spec.decomposeOnUpload";
+// Flags de UI vêm da API (G13/D-4.3: NUNCA NEXT_PUBLIC_* — a mesma imagem serve dev e prod).
+// Ausente → false (fail-closed).
+type UiFeatures = { specUploadDecompose: boolean; dashboardKpis: boolean };
+const NO_FEATURES: UiFeatures = { specUploadDecompose: false, dashboardKpis: false };
 
 // INTAKE-GATE: mínimo de caracteres da descrição em texto livre (espelha o backend intakeGate.ts).
 const MIN_FREE_TEXT_CHARS = 500;
@@ -566,6 +579,35 @@ function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Onda 4 — mapa PT-BR dos erros do upload (POST /api/specs) por código/status. A mensagem do
+// servidor vence quando é específica; aqui damos a ação corretiva. Sem status (rede) → texto do erro.
+function describeUploadError(e: unknown): string {
+  if (e instanceof ApiError) {
+    const msg = e.message?.trim();
+    switch (e.code) {
+      case "SPEC_INTAKE_INCOMPLETE": return msg || "Spec incompleta: informe título, tipo e pelo menos um anexo legível.";
+      case "SPEC_ATTACHMENT_UNREADABLE": return msg || "Não foi possível extrair texto do anexo (PDF só-imagem ou .doc antigo). Envie .md/.docx/.txt ou cole o texto.";
+      case "FILE_SIGNATURE_MISMATCH": return "O conteúdo do arquivo não corresponde à extensão (arquivo disfarçado). Envie o arquivo original.";
+      case "ZIP_TOO_LARGE": return "O ZIP descompactado excede o limite. Envie menos arquivos ou divida em partes.";
+      case "RATE_LIMITED": return msg || "Muitos envios em pouco tempo. Aguarde um minuto e tente de novo.";
+      case "BUDGET_EXCEEDED": return msg || "Orçamento mensal de IA do tenant atingido.";
+      case "PROJECT_LIMIT_REACHED": return msg || "Limite de projetos do plano atingido.";
+      default: break;
+    }
+    switch (e.status) {
+      case 400: return msg || "Formato de arquivo não aceito. Use .md, .txt, .doc, .docx, .pdf ou .zip.";
+      case 403: return msg || "Sem permissão para enviar specs neste tenant.";
+      case 409: return msg || "Conflito ao criar a spec. Recarregue e tente novamente.";
+      case 413: return `Arquivo grande demais — o limite é ${formatFileSize(MAX_UPLOAD_BYTES)} por arquivo (até ${MAX_UPLOAD_FILES} arquivos).`;
+      case 422: return msg || "A spec não passou no gate de entrada — falta conteúdo legível.";
+      case 429: return msg || "Limite de uso atingido. Tente mais tarde.";
+      case 503: return "Serviço temporariamente indisponível. Tente novamente em instantes.";
+      default: return msg || "Falha ao enviar spec.";
+    }
+  }
+  return e instanceof Error && e.message ? e.message : "Falha ao enviar spec.";
 }
 
 // ── Markdown Preview ──────────────────────────────────────────────────────────
@@ -1211,6 +1253,39 @@ export default function SpecPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [result, setResult]       = useState<SubmitResponse | null>(null);
 
+  // Onda 4 — "Decompor em produto após salvar" (aba Upload). Flag vem da API (features no
+  // /api/dashboard/summary); ausente/erro → oculto. Preferência do switch lembrada no navegador.
+  const [features, setFeatures] = useState<UiFeatures>(NO_FEATURES);
+  const [decomposeOnUpload, setDecomposeOnUpload] = useState(false);
+  // Spec recém-salva que vai ser decomposta (abre o DecomposeDialog em modo spec, source upload).
+  const [decomposeTarget, setDecomposeTarget] = useState<DecomposeSpecRef | null>(null);
+  // true entre onSaved() e o onClose() que o diálogo dispara logo depois (evita push duplo).
+  const decomposeSavedRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    apiGet<{ features?: Partial<UiFeatures> | null }>("/api/dashboard/summary")
+      .then((r) => {
+        if (!alive) return;
+        setFeatures({
+          specUploadDecompose: r?.features?.specUploadDecompose === true,
+          dashboardKpis: r?.features?.dashboardKpis === true,
+        });
+      })
+      .catch(() => { if (alive) setFeatures(NO_FEATURES); });
+    try { setDecomposeOnUpload(localStorage.getItem(DECOMPOSE_ON_UPLOAD_KEY) === "1"); } catch { /* sem storage */ }
+    return () => { alive = false; };
+  }, []);
+  const toggleDecomposeOnUpload = useCallback((on: boolean) => {
+    setDecomposeOnUpload(on);
+    try { localStorage.setItem(DECOMPOSE_ON_UPLOAD_KEY, on ? "1" : "0"); } catch { /* sem storage */ }
+  }, []);
+  // Master (zentriz_admin) não decompõe (denyCreationForManagement → 403): esconde o switch.
+  const canDecomposeOnUpload = features.specUploadDecompose && !authStore.isZentrizAdmin;
+  // Prévia local: bytes dos anexos ≈ caracteres (exato para .md/.txt; .docx/.pdf/.zip são
+  // aproximações grosseiras — por isso "≈" e faixa ±30 %).
+  const uploadBytes = files.reduce((acc, f) => acc + f.size, 0);
+  const uploadEstimate = uploadBytes > 0 ? estimateProposal(uploadBytes) : null;
+
   useEffect(() => {
     const pp = searchParams?.get("parentProjectId");
     const pt = searchParams?.get("parentTitle");
@@ -1854,6 +1929,10 @@ export default function SpecPage() {
     if (!projectTitle.trim()) { setUploadError("Informe o Título do projeto."); return; }
     if (!projectType) { setUploadError("Selecione o Tipo do projeto."); return; }
     if (!files.length) { setUploadError("Selecione pelo menos um arquivo."); return; }
+    // Tetos do multipart da API checados aqui (mensagem clara em vez de 413 opaco).
+    if (files.length > MAX_UPLOAD_FILES) { setUploadError(`Envie no máximo ${MAX_UPLOAD_FILES} arquivos por vez.`); return; }
+    const tooBig = files.find((f) => f.size > MAX_UPLOAD_BYTES);
+    if (tooBig) { setUploadError(`“${tooBig.name}” excede ${formatFileSize(MAX_UPLOAD_BYTES)}.`); return; }
     setSubmitting(true); setUploadError(null); setResult(null);
     try {
       const fd = new FormData();
@@ -1897,8 +1976,15 @@ export default function SpecPage() {
       if (data.projectId && startNow) {
         try { await apiPost(`/api/projects/${data.projectId}/run`, {}); } catch { /* ok */ }
       }
+      // Onda 4: com o switch ligado, a spec fica salva como rascunho e o DecomposeDialog abre
+      // por cima (modo spec, source 'upload') em vez de navegar. Fechar sem salvar → /projects/:id
+      // (a spec segue no INBOX com "Decompor" disponível na Bancada); salvar → /products/:id.
+      if (data.projectId && !startNow && canDecomposeOnUpload && decomposeOnUpload) {
+        setDecomposeTarget({ id: data.projectId, title: projectTitle.trim() || "Spec enviada" });
+        return;
+      }
       if (data.projectId) setTimeout(() => router.push(`/projects/${data.projectId}`), 800);
-    } catch (err) { setUploadError(err instanceof Error ? err.message : "Falha ao enviar spec."); }
+    } catch (err) { setUploadError(describeUploadError(err)); }
     finally { setSubmitting(false); }
   };
 
@@ -2449,6 +2535,38 @@ export default function SpecPage() {
                     ))}
                   </AnimatePresence>
 
+                  {/* Onda 4 — "Decompor em produto após salvar": só com a flag da API ligada e
+                      para contas de autoria. A spec fica salva como rascunho e o Product Architect
+                      propõe N specs para revisão (nada é executado). */}
+                  {canDecomposeOnUpload && (
+                    <Box sx={{ mb: 2, p: 1.5, border: "1px solid", borderColor: decomposeOnUpload ? "secondary.main" : "divider", borderRadius: 1,
+                      bgcolor: decomposeOnUpload ? "secondary.main" + "0D" : "transparent", transition: "all .15s" }}>
+                      <FormControlLabel
+                        control={<Switch checked={decomposeOnUpload} onChange={(e) => toggleDecomposeOnUpload(e.target.checked)} size="small" color="secondary"
+                          inputProps={{ "aria-label": "Decompor em produto após salvar" }} />}
+                        label={
+                          <Box>
+                            <Stack direction="row" spacing={0.75} alignItems="center">
+                              <CallSplitIcon sx={{ fontSize: "1rem", color: "secondary.main" }} />
+                              <Typography variant="body2" fontWeight={600}>Decompor em produto após salvar</Typography>
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
+                              A spec fica salva como <strong>rascunho</strong>; o Product Architect propõe a divisão em
+                              vários projetos (specs) para a sua revisão — nada é executado.
+                            </Typography>
+                            {decomposeOnUpload && uploadEstimate && (
+                              <Typography variant="caption" sx={{ display: "block", mt: 0.5, color: "text.secondary" }}>
+                                Prévia: <strong>{describeEstimate(uploadEstimate)}</strong> no modelo padrão — estimativa local (±30 %),
+                                calculada pelo tamanho dos anexos; o custo real aparece ao fim.
+                              </Typography>
+                            )}
+                          </Box>
+                        }
+                        sx={{ alignItems: "flex-start", m: 0, gap: 0.5 }}
+                      />
+                    </Box>
+                  )}
+
                   {uploadError && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setUploadError(null)}>{uploadError}</Alert>}
 
                   <Divider sx={{ my: 2 }} />
@@ -2456,13 +2574,17 @@ export default function SpecPage() {
                       ser exclusiva do botão "Promover à Fábrica" na edição da spec — não há mais
                       "Salvar e iniciar pipeline" aqui. */}
                   <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
-                    <Tooltip title="Guardar a spec como rascunho — promova à fábrica na edição quando estiver pronta">
+                    <Tooltip title={canDecomposeOnUpload && decomposeOnUpload
+                      ? "Salva a spec como rascunho e abre a proposta de decomposição em produto para revisão"
+                      : "Guardar a spec como rascunho — promova à fábrica na edição quando estiver pronta"}>
                       <span>
                         <Button type="submit" variant="contained" size="large"
-                          startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <span style={{ fontSize: "1rem" }}>💾</span>}
+                          color={canDecomposeOnUpload && decomposeOnUpload ? "secondary" : "primary"}
+                          startIcon={submitting ? <CircularProgress size={18} color="inherit" />
+                            : canDecomposeOnUpload && decomposeOnUpload ? <CallSplitIcon /> : <span style={{ fontSize: "1rem" }}>💾</span>}
                           disabled={submitting || !files.length}
                           onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent, false); }}>
-                          {submitting ? "Salvando…" : "Salvar rascunho"}
+                          {submitting ? "Salvando…" : canDecomposeOnUpload && decomposeOnUpload ? "Salvar e decompor" : "Salvar rascunho"}
                         </Button>
                       </span>
                     </Tooltip>
@@ -2476,6 +2598,29 @@ export default function SpecPage() {
 
       {editorDialog}
       {tab === 0 && specMarkdown !== null && mobileChat}
+
+      {/* Onda 4 — decomposição da spec recém-enviada (aba Upload, switch ligado). Fechar sem
+          salvar → cockpit da spec (segue rascunho no INBOX; "Decompor" da Bancada cobre a
+          retomada). Salvar → pasta do produto criado. */}
+      <DecomposeDialog
+        open={!!decomposeTarget}
+        spec={decomposeTarget}
+        source="upload"
+        onClose={() => {
+          // O diálogo chama onSaved() e DEPOIS onClose(): se já navegamos ao produto, não
+          // sobrescrever com o cockpit da spec (ref evita a corrida entre os dois pushes).
+          const id = decomposeTarget?.id;
+          setDecomposeTarget(null);
+          if (decomposeSavedRef.current) { decomposeSavedRef.current = false; return; }
+          if (id) router.push(`/projects/${id}`);
+        }}
+        onSaved={({ productId }) => {
+          const id = decomposeTarget?.id;
+          decomposeSavedRef.current = true;
+          projectsStore.loadProjects();
+          router.push(productId ? `/products/${productId}` : id ? `/projects/${id}` : "/specs");
+        }}
+      />
     </Box>
   );
 }

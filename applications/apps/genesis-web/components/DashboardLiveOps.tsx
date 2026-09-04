@@ -19,7 +19,8 @@ import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import BoltIcon from "@mui/icons-material/Bolt";
 import { useRouter } from "next/navigation";
-import { apiGet } from "@/lib/api";
+import { apiGet, withQuery } from "@/lib/api";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
 
 interface ImportantMsg { summary_human: string; from_agent: string; severity: string; created_at: string }
 interface SummaryProject {
@@ -48,8 +49,13 @@ export default function DashboardLiveOps() {
   const [data, setData] = useState<Summary | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // PR-0 (Ondas 4/5): master com tenant selecionado no topo vê SÓ aquele tenant — antes a
+  // chamada ia sem `tenantId` e o summary voltava global. Para tenant_admin/user o backend
+  // ignora o parâmetro (escopa pelo próprio tenant); `withQuery` omite null/"" sozinho.
   const load = useCallback(async () => {
-    try { setData(await apiGet<Summary>("/api/dashboard/summary")); } catch { /* silencioso */ }
+    try {
+      setData(await apiGet<Summary>(withQuery("/api/dashboard/summary", { tenantId: tenantScopeStore.effectiveTenantId })));
+    } catch { /* silencioso */ }
   }, []);
 
   useEffect(() => {

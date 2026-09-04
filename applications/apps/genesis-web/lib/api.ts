@@ -9,6 +9,39 @@ function getAuthHeaders(): Record<string, string> {
   return {};
 }
 
+/**
+ * Erro HTTP da API com `status` e `code` preservados (Onda 4 — mapa de erros no cliente).
+ * Continua sendo um `Error` comum (`instanceof Error` e `.message` inalterados), então todo
+ * chamador existente segue funcionando; quem precisar decidir por status/código usa `ApiError`.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** Extrai o `code` do corpo de erro JSON da API, se houver. */
+function getErrorCode(text: string): string | undefined {
+  try {
+    const obj = JSON.parse(text) as { code?: string };
+    return typeof obj?.code === "string" ? obj.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Monta o `ApiError` a partir da resposta (mensagem amigável + status + code). */
+async function toApiError(res: Response): Promise<ApiError> {
+  const text = await res.clone().text().catch(() => "");
+  const message = await getErrorMessage(res);
+  return new ApiError(message, res.status, getErrorCode(text));
+}
+
 /** Extrai mensagem amigável do corpo de erro da API (ex.: { code, message }) */
 async function getErrorMessage(res: Response): Promise<string> {
   const text = await res.text().catch(() => res.statusText);
@@ -50,7 +83,7 @@ export async function apiGet<T>(path: string): Promise<T> {
     credentials: "include",
     headers: getAuthHeaders(),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }
 
@@ -61,7 +94,7 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     credentials: "include",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }
 
@@ -76,7 +109,7 @@ export async function apiPostMultipart<T>(
     credentials: "include",
     body: formData,
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }
 
@@ -87,7 +120,7 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
     credentials: "include",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }
 
@@ -98,7 +131,7 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
     credentials: "include",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }
 
@@ -108,7 +141,7 @@ export async function apiDelete(path: string): Promise<void> {
     credentials: "include",
     headers: getAuthHeaders(),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
 }
 
 // DELETE que envia body JSON (ex.: confirmação de exclusão) e devolve a resposta parseada.
@@ -119,6 +152,6 @@ export async function apiDeleteJson<T>(path: string, body?: unknown): Promise<T>
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  if (!res.ok) throw new Error(await getErrorMessage(res));
+  if (!res.ok) throw await toApiError(res);
   return res.json() as Promise<T>;
 }

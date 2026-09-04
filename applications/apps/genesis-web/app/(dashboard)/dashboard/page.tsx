@@ -1,7 +1,7 @@
 "use client";
 
 import { observer } from "mobx-react-lite";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import Alert from "@mui/material/Alert";
@@ -27,6 +27,9 @@ import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import { apiGet } from "@/lib/api";
 import DashboardLiveOps from "@/components/DashboardLiveOps";
+import DashboardKpis from "@/components/DashboardKpis";
+import type { KpisAvailability } from "@/components/DashboardKpis";
+import { KpiCard } from "@/components/KpiCard";
 import type { Project, Product } from "@/types";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
@@ -187,30 +190,7 @@ function ProductCard({ product, projects, delay, onFilter }: {
   );
 }
 
-// ── Stat card ─────────────────────────────────────────────────────────────────
-function StatCard({ label, value, icon, gradient, delay = 0 }: {
-  label: string; value: string | number; icon: React.ReactNode; gradient: string; delay?: number;
-}) {
-  return (
-    <MotionCard {...fadeUp(delay)} whileHover={{ y: -2, transition: { duration: 0.15 } }} sx={{ overflow: "hidden" }}>
-      <Box sx={{ height: 3, background: gradient }} />
-      <CardContent sx={{ pt: 2 }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-          <Box>
-            <Typography variant="caption" color="text.secondary" sx={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              {label}
-            </Typography>
-            <Typography variant="h4" fontWeight={700} sx={{ mt: 0.5, lineHeight: 1 }}>{value}</Typography>
-          </Box>
-          <Box sx={{ width: 40, height: 40, borderRadius: "10px", background: gradient + "22",
-            display: "flex", alignItems: "center", justifyContent: "center", "& svg": { fontSize: "1.25rem" } }}>
-            {icon}
-          </Box>
-        </Stack>
-      </CardContent>
-    </MotionCard>
-  );
-}
+// Stat card: extraído para `components/KpiCard.tsx` (Onda 5 §4.4) — mesmo visual, exportado.
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
@@ -224,6 +204,13 @@ function DashboardPageInner() {
   // Conta da lista BRUTA (os rascunhos foram filtrados de `projects` acima).
   const inboxCount = projectsStore.list.filter((p) => p.productIsInbox === true).length;
   const [products, setProducts] = useState<Product[]>([]);
+
+  // Onda 5: KPIs server-side (GET /api/dashboard/kpis). A disponibilidade vem da RESPOSTA
+  // (flag `enabled`, 403/500, payload vazio) — nunca de env pública (G13). Enquanto
+  // "loading" o DashboardKpis mostra Skeleton; "disabled" → mantemos os 4 cards contados
+  // no cliente abaixo (degradação limpa). O componente fica montado para seguir tentando.
+  const [kpisAvailability, setKpisAvailability] = useState<KpisAvailability>("loading");
+  const handleKpisAvailability = useCallback((s: KpisAvailability) => setKpisAvailability(s), []);
 
   // §5.7: aviso único (primeira visita) da migração 064. Persiste o "dispensar" no localStorage.
   // Guardado em useEffect p/ não quebrar a hidratação do Next (localStorage só existe no client).
@@ -316,29 +303,34 @@ function DashboardPageInner() {
         </Alert>
       )}
 
-      {/* ── Stat cards ── */}
-      <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid size={{ xs: 6, sm: 3 }}>
-          <StatCard label="Total de projetos" value={total} delay={1}
-            icon={<FolderIcon sx={{ color: "#6366F1" }} />}
-            gradient="linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)" />
+      {/* ── KPIs server-side (Onda 5) — substituem os 4 cards contados no cliente quando `enabled` ── */}
+      <DashboardKpis onAvailability={handleKpisAvailability} />
+
+      {/* ── Stat cards legados (só quando a API de KPIs está desligada/indisponível) ── */}
+      {kpisAvailability === "disabled" && (
+        <Grid container spacing={2} sx={{ mb: 3 }}>
+          <Grid size={{ xs: 6, sm: 3 }}>
+            <KpiCard label="Total de projetos" value={total} delay={1}
+              icon={<FolderIcon sx={{ color: "#6366F1" }} />}
+              gradient="linear-gradient(135deg, #6366F1 0%, #4F46E5 100%)" />
+          </Grid>
+          <Grid size={{ xs: 6, sm: 3 }}>
+            <KpiCard label="Em execução" value={active} delay={2}
+              icon={<PlayArrowIcon sx={{ color: "#10B981" }} />}
+              gradient="linear-gradient(135deg, #10B981 0%, #059669 100%)" />
+          </Grid>
+          <Grid size={{ xs: 6, sm: 3 }}>
+            <KpiCard label="Concluídos" value={completed} delay={3}
+              icon={<CheckCircleIcon sx={{ color: "#F59E0B" }} />}
+              gradient="linear-gradient(135deg, #F59E0B 0%, #D97706 100%)" />
+          </Grid>
+          <Grid size={{ xs: 6, sm: 3 }}>
+            <KpiCard label="Com falha" value={failed} delay={4}
+              icon={<ErrorIcon sx={{ color: "#EF4444" }} />}
+              gradient="linear-gradient(135deg, #EF4444 0%, #DC2626 100%)" />
+          </Grid>
         </Grid>
-        <Grid size={{ xs: 6, sm: 3 }}>
-          <StatCard label="Em execução" value={active} delay={2}
-            icon={<PlayArrowIcon sx={{ color: "#10B981" }} />}
-            gradient="linear-gradient(135deg, #10B981 0%, #059669 100%)" />
-        </Grid>
-        <Grid size={{ xs: 6, sm: 3 }}>
-          <StatCard label="Concluídos" value={completed} delay={3}
-            icon={<CheckCircleIcon sx={{ color: "#F59E0B" }} />}
-            gradient="linear-gradient(135deg, #F59E0B 0%, #D97706 100%)" />
-        </Grid>
-        <Grid size={{ xs: 6, sm: 3 }}>
-          <StatCard label="Com falha" value={failed} delay={4}
-            icon={<ErrorIcon sx={{ color: "#EF4444" }} />}
-            gradient="linear-gradient(135deg, #EF4444 0%, #DC2626 100%)" />
-        </Grid>
-      </Grid>
+      )}
 
       {/* ── Layout principal ── */}
       <Grid container spacing={2}>

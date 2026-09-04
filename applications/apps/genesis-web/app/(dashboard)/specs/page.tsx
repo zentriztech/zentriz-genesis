@@ -11,7 +11,7 @@
 // - Aba "Catálogo": SPECs pré-prontas (GET /api/catalog); "Usar" cria uma SPEC do template.
 
 import { observer } from "mobx-react-lite";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import Alert from "@mui/material/Alert";
@@ -54,12 +54,16 @@ import ViewListIcon from "@mui/icons-material/ViewList";
 import ViewKanbanIcon from "@mui/icons-material/ViewKanban";
 import MenuBookOutlinedIcon from "@mui/icons-material/MenuBookOutlined";
 import CloseIcon from "@mui/icons-material/Close";
+import HourglassTopRoundedIcon from "@mui/icons-material/HourglassTopRounded";
+import TaskAltRoundedIcon from "@mui/icons-material/TaskAltRounded";
+import StopCircleOutlinedIcon from "@mui/icons-material/StopCircleOutlined";
+import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
 import IconButton from "@mui/material/IconButton";
-import { apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
+import { ApiError, apiGet, apiPatch, apiPost, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
-import { DecomposeDialog, type DecomposeSpecRef } from "@/components/DecomposeDialog";
+import { DecomposeDialog, fmtUsd, type DecomposeSpecRef, type ProposalSource } from "@/components/DecomposeDialog";
 import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
@@ -84,6 +88,37 @@ interface SpecItem {
   gapCountIgnored?: number;
   gapCountRefuted?: number;
 }
+// Onda 4 — GET /api/products/proposals (tenant-scoped). Uma proposta é o job do Product
+// Architect: em análise (pending/running), pronta para revisão (done sem consumo), salva
+// (done consumida → virou produto) ou interrompida/erro. `etaSeconds` = mediana histórica.
+interface ProposalItem {
+  id: string;
+  status: "pending" | "running" | "done" | "error" | "interrupted";
+  source: ProposalSource;
+  originProjectId: string | null;
+  originTitle: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  consumedProductId: string | null;
+  projectsCount: number | null;
+  costUsd: number | null;
+}
+/** Item cru como a API devolve em `GET /api/products/proposals` (snake→camel já feito no servidor). */
+interface ProposalApiItem {
+  jobId: string;
+  status: ProposalItem["status"];
+  source?: ProposalSource | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  originProjectId?: string | null;
+  originTitle?: string | null;
+  consumedProductId?: string | null;
+  projectsCount?: number | null;
+  costUsd?: number | null;
+}
+interface ProposalsResponse { items: ProposalApiItem[]; etaSeconds: number | null }
+// Enquanto houver proposta em voo, a lista se atualiza neste intervalo.
+const PROPOSALS_POLL_MS = 15_000;
 interface CatalogItem {
   slug: string;
   title: string;
@@ -114,6 +149,20 @@ interface ProductOption { id: string; name: string; is_inbox?: boolean }
 function formatDate(s: string): string {
   try { return new Date(s).toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }); }
   catch { return s; }
+}
+// "há 3min" / "há 2h" — decorrido desde um ISO (propostas em análise).
+function fmtSince(iso: string, now: number): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const sec = Math.max(0, Math.round((now - t) / 1000));
+  if (sec < 60) return `há ${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `há ${min}min`;
+  const h = Math.floor(min / 60);
+  return `há ${h}h${String(min % 60).padStart(2, "0")}`;
+}
+function proposalSourceLabel(s: ProposalSource): string {
+  return s === "upload" ? "upload" : s === "spec" ? "spec da Bancada" : "ideia";
 }
 
 // Onda 3 (c) — aviso visual de GAPs (findings da validação) no card. Só renderiza quando
@@ -214,6 +263,14 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   const [view, setView] = useState<"list" | "triage">("list");
   // E3: confirmação de promoção mostra estimativa + pré-flight antes de queimar fábrica.
   const [promoteTarget, setPromoteTarget] = useState<SpecItem | null>(null);
+  // Onda 4 — "Propostas de produto": lista tenant-scoped; `available=false` quando a rota não
+  // existe (API anterior ao PR-3 → 404) → a seção some sem erro. resumeJob reabre o diálogo.
+  const [proposals, setProposals] = useState<ProposalItem[]>([]);
+  const [proposalsEta, setProposalsEta] = useState<number | null>(null);
+  const [proposalsAvailable, setProposalsAvailable] = useState(true);
+  const [resumeJob, setResumeJob] = useState<{ jobId: string; originProjectId: string | null; originTitle: string | null } | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   // Master: escopa a listagem pelo tenant selecionado no topo (null = todos).
   const scopeTenantId = tenantScopeStore.selectedTenantId;
@@ -234,13 +291,99 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     }
   }, [scopeTenantId]);
 
+  // Propostas: silencioso em falha (seção auxiliar). 404 = rota ausente → esconde de vez.
+  const loadProposals = useCallback(async () => {
+    try {
+      const r = await apiGet<ProposalsResponse>(withQuery("/api/products/proposals", { tenantId: scopeTenantId }));
+      // Contrato real da API: `{ items:[{ jobId, status, source, createdAt, updatedAt, originProjectId,
+      // originTitle?, consumedProductId, costUsd, … }], etaSeconds }` → normalizado para ProposalItem.
+      const items = Array.isArray(r?.items) ? r.items : [];
+      setProposals(items.map((it) => ({
+        id: String(it.jobId),
+        status: it.status,
+        source: (it.source ?? "idea") as ProposalSource,
+        originProjectId: it.originProjectId ?? null,
+        originTitle: it.originTitle ?? null,
+        createdAt: it.createdAt,
+        finishedAt: it.status === "pending" || it.status === "running" ? null : (it.updatedAt ?? null),
+        consumedProductId: it.consumedProductId ?? null,
+        projectsCount: typeof it.projectsCount === "number" ? it.projectsCount : null,
+        costUsd: typeof it.costUsd === "number" ? it.costUsd : null,
+      })));
+      setProposalsEta(typeof r?.etaSeconds === "number" && r.etaSeconds > 0 ? r.etaSeconds : null);
+      setProposalsAvailable(true);
+      setNow(Date.now());
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) setProposalsAvailable(false);
+    }
+  }, [scopeTenantId]);
+
   useEffect(() => {
     load();
+    loadProposals();
     // includeInbox=1: o diálogo "Vincular" precisa oferecer o INBOX como destino (devolver à caixa).
     apiGet<ProductOption[]>(withQuery("/api/products", { tenantId: scopeTenantId, includeInbox: "1" })).then(setProducts).catch(() => {});
     // Projetos já promovidos alimentam a coluna "Promovido" do board de triagem (E1).
     projectsStore.loadProjects();
-  }, [load, scopeTenantId]);
+  }, [load, loadProposals, scopeTenantId]);
+
+  // Enquanto houver proposta em voo, repõe a lista a cada 15 s (e quando terminar, a spec de
+  // origem muda de estado → recarrega specs também). Sem voo → nenhum timer (poll que PARA).
+  const anyInFlight = proposals.some((p) => p.status === "pending" || p.status === "running");
+  useEffect(() => {
+    if (!proposalsAvailable || !anyInFlight) return;
+    const t = setInterval(() => { void loadProposals(); }, PROPOSALS_POLL_MS);
+    return () => clearInterval(t);
+  }, [proposalsAvailable, anyInFlight, loadProposals]);
+  // Ao sair de "em voo" (terminou/cancelou) a origem pode ter mudado → refaz a lista de specs.
+  const wasInFlight = useRef(false);
+  useEffect(() => {
+    if (wasInFlight.current && !anyInFlight) void load();
+    wasInFlight.current = anyInFlight;
+  }, [anyInFlight, load]);
+
+  // Cancelar proposta em voo direto da lista (POST /cancel). 409 = já terminou → só recarrega.
+  const cancelProposal = async (id: string) => {
+    setCancellingId(id);
+    try {
+      await apiPost(`/api/products/propose/${id}/cancel`, {});
+      setNotice("Proposta cancelada. A spec de origem (se houver) voltou ao INBOX.");
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 409)) {
+        setError(e instanceof Error ? e.message : "Falha ao cancelar a proposta");
+      }
+    } finally {
+      setCancellingId(null);
+      await loadProposals();
+      await load();
+    }
+  };
+
+  // Refazer uma proposta interrompida/erro: com origem → decompõe a spec de novo; sem origem
+  // (ideia) → abre o modo ideia (o documento não é ecoado pela API; o usuário cola de novo).
+  const redoProposal = (p: ProposalItem) => {
+    if (p.originProjectId) setDecomposeSpec({ id: p.originProjectId, title: p.originTitle ?? "Spec" });
+    else setIdeaOpen(true);
+  };
+
+  // Propostas visíveis (consumidas ficam de fora — já viraram produto) por grupo.
+  const proposalGroups = useMemo(() => {
+    const inFlight: ProposalItem[] = [];
+    const ready: ProposalItem[] = [];
+    const stopped: ProposalItem[] = [];
+    for (const p of proposals) {
+      if (p.status === "pending" || p.status === "running") inFlight.push(p);
+      else if (p.status === "done" && !p.consumedProductId) ready.push(p);
+      else if (p.status === "error" || p.status === "interrupted") stopped.push(p);
+    }
+    return { inFlight, ready, stopped, total: inFlight.length + ready.length + stopped.length };
+  }, [proposals]);
+  // Spec de origem → proposta PRONTA (chip "proposta pronta" no card da spec).
+  const readyByOrigin = useMemo(() => {
+    const m = new Map<string, ProposalItem>();
+    for (const p of proposalGroups.ready) if (p.originProjectId) m.set(p.originProjectId, p);
+    return m;
+  }, [proposalGroups.ready]);
 
   // Promover à FÁBRICA (spec individual). POST /run — o backend barra dependência não-pronta.
   const promoteToFactory = async (id: string) => {
@@ -335,6 +478,18 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               {s.readiness && <ReadinessBadge readiness={s.readiness} />}
               {/* Onda 3 (c): aviso de GAPs em aberto na validação da spec. */}
               <GapWarningChip count={s.gapCount ?? 0} ignored={s.gapCountIgnored ?? 0} />
+              {/* Onda 4: há uma proposta de decomposição PRONTA desta spec → clique reabre a revisão. */}
+              {readyByOrigin.has(s.id) && (
+                <Chip
+                  icon={<TaskAltRoundedIcon sx={{ fontSize: "0.85rem !important" }} />}
+                  label="proposta pronta" size="small" color="success" variant="outlined"
+                  sx={{ fontSize: "0.62rem", height: 18, fontWeight: 700 }}
+                  onClick={isMaster ? undefined : () => {
+                    const p = readyByOrigin.get(s.id)!;
+                    setResumeJob({ jobId: p.id, originProjectId: p.originProjectId, originTitle: p.originTitle ?? s.title });
+                  }}
+                />
+              )}
             </Stack>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
               <Typography variant="caption" color="text.secondary">
@@ -429,6 +584,85 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             Decompor uma ideia
           </Button>
         </Stack>
+      )}
+
+      {/* Onda 4 — "Propostas de produto": a ideia/spec em decomposição vira uma LINHA visível
+          (Linear/JPD: ideia é um estado, nunca se perde) — em análise, pronta para revisão,
+          interrompida. Só aparece se a rota existir e houver algo a mostrar. */}
+      {proposalsAvailable && proposalGroups.total > 0 && (
+        <Box sx={{ mb: 3, p: 1.5, border: "1px solid", borderColor: alpha("#6366F1", 0.35), borderRadius: 2, bgcolor: alpha("#6366F1", 0.04) }}>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: "wrap", gap: 1 }}>
+            <CallSplitIcon sx={{ fontSize: "1rem", color: "#6366F1" }} />
+            <Typography variant="subtitle2" fontWeight={700} sx={{ color: "#6366F1" }}>Propostas de produto</Typography>
+            {proposalGroups.inFlight.length > 0 && <Chip size="small" color="info" label={`${proposalGroups.inFlight.length} em análise`} sx={{ fontSize: "0.6rem", height: 18 }} />}
+            {proposalGroups.ready.length > 0 && <Chip size="small" color="success" label={`${proposalGroups.ready.length} pronta(s) para revisão`} sx={{ fontSize: "0.6rem", height: 18 }} />}
+            {proposalGroups.stopped.length > 0 && <Chip size="small" color="warning" variant="outlined" label={`${proposalGroups.stopped.length} interrompida(s)`} sx={{ fontSize: "0.6rem", height: 18 }} />}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
+            Decomposições pelo Product Architect. Uma proposta pronta vira rascunhos na Bancada só depois da sua revisão — nada é executado.
+            {proposalsEta ? ` Tempo típico: ≈ ${Math.max(1, Math.round(proposalsEta / 60))} min.` : ""}
+          </Typography>
+          <Stack spacing={1}>
+            {[...proposalGroups.inFlight, ...proposalGroups.ready, ...proposalGroups.stopped].map((p) => {
+              const inFlight = p.status === "pending" || p.status === "running";
+              const ready = p.status === "done" && !p.consumedProductId;
+              const title = p.originTitle ?? (p.source === "idea" ? "Ideia em texto livre" : "Spec");
+              return (
+                <Card key={p.id} variant="outlined" sx={{ p: 0 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, p: 1.5, flexWrap: "wrap" }}>
+                    {inFlight
+                      ? <CircularProgress size={16} sx={{ flexShrink: 0 }} aria-label="Em análise" />
+                      : ready
+                        ? <TaskAltRoundedIcon sx={{ fontSize: "1.1rem", color: "success.main", flexShrink: 0 }} />
+                        : <StopCircleOutlinedIcon sx={{ fontSize: "1.1rem", color: "warning.main", flexShrink: 0 }} />}
+                    <Box sx={{ flexGrow: 1, minWidth: 200 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography variant="subtitle2" fontWeight={600}>{title}</Typography>
+                        <Chip size="small" variant="outlined" label={proposalSourceLabel(p.source)} sx={{ fontSize: "0.6rem", height: 18 }} />
+                        {inFlight && <Chip size="small" color="info" icon={<HourglassTopRoundedIcon sx={{ fontSize: "0.8rem !important" }} />} label={p.status === "pending" ? "na fila" : "em análise"} sx={{ fontSize: "0.6rem", height: 18 }} />}
+                        {ready && <Chip size="small" color="success" label="pronta para revisão" sx={{ fontSize: "0.6rem", height: 18, fontWeight: 700 }} />}
+                        {!inFlight && !ready && <Chip size="small" color="warning" variant="outlined" label={p.status === "interrupted" ? "interrompida" : "erro"} sx={{ fontSize: "0.6rem", height: 18 }} />}
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+                        {inFlight ? `Iniciada ${fmtSince(p.createdAt, now)}` : `Criada em ${formatDate(p.createdAt)}`}
+                        {ready && p.projectsCount != null ? ` · ${p.projectsCount} projeto(s) proposto(s)` : ""}
+                        {typeof p.costUsd === "number" ? ` · custo ${fmtUsd(p.costUsd)}` : ""}
+                      </Typography>
+                    </Box>
+                    {!isMaster && (
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        {inFlight && (
+                          <>
+                            <Button size="small" variant="outlined" onClick={() => setResumeJob({ jobId: p.id, originProjectId: p.originProjectId, originTitle: p.originTitle })}>
+                              Acompanhar
+                            </Button>
+                            <Button size="small" variant="outlined" color="warning"
+                              startIcon={cancellingId === p.id ? <CircularProgress size={14} color="inherit" /> : <StopCircleOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                              disabled={cancellingId === p.id} onClick={() => cancelProposal(p.id)}>
+                              Cancelar
+                            </Button>
+                          </>
+                        )}
+                        {ready && (
+                          <Button size="small" variant="contained" color="success" startIcon={<TaskAltRoundedIcon sx={{ fontSize: "0.9rem" }} />}
+                            onClick={() => setResumeJob({ jobId: p.id, originProjectId: p.originProjectId, originTitle: p.originTitle })}>
+                            Revisar proposta
+                          </Button>
+                        )}
+                        {!inFlight && !ready && (
+                          <Button size="small" variant="outlined" color="secondary" startIcon={<ReplayRoundedIcon sx={{ fontSize: "0.9rem" }} />}
+                            onClick={() => redoProposal(p)}>
+                            Refazer
+                          </Button>
+                        )}
+                      </Stack>
+                    )}
+                  </Box>
+                </Card>
+              );
+            })}
+          </Stack>
+        </Box>
       )}
 
       {specs.length === 0 ? (
@@ -564,19 +798,34 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
         </>
       )}
 
-      {/* Diálogo de decomposição — modo SPEC (a partir de uma spec salva) */}
+      {/* Diálogo de decomposição — modo SPEC (a partir de uma spec salva). Fechar recarrega
+          propostas: o job segue vivo na API e aparece em "Propostas de produto". */}
       <DecomposeDialog
         open={!!decomposeSpec}
         spec={decomposeSpec}
-        onClose={() => setDecomposeSpec(null)}
-        onSaved={() => { setNotice("Projetos salvos na Bancada como rascunhos. Promova quando quiser."); load(); }}
+        source="spec"
+        etaSeconds={proposalsEta}
+        onClose={() => { setDecomposeSpec(null); void loadProposals(); void load(); }}
+        onSaved={() => { setNotice("Projetos salvos na Bancada como rascunhos. Promova quando quiser."); load(); loadProposals(); }}
       />
       {/* Diálogo de decomposição — modo IDEIA (texto cru) */}
       <DecomposeDialog
         open={ideaOpen}
         spec={null}
-        onClose={() => setIdeaOpen(false)}
-        onSaved={() => { setNotice("Ideia decomposta e salva na Bancada como rascunhos."); load(); }}
+        source="idea"
+        etaSeconds={proposalsEta}
+        onClose={() => { setIdeaOpen(false); void loadProposals(); }}
+        onSaved={() => { setNotice("Ideia decomposta e salva na Bancada como rascunhos."); load(); loadProposals(); }}
+      />
+      {/* Onda 4 — REABRIR proposta existente (pronta → revisão; em voo → acompanhar). Nada é
+          disparado; `spec` aqui só dá o título e o fallback de origem para o ingest. */}
+      <DecomposeDialog
+        open={!!resumeJob}
+        resumeJobId={resumeJob?.jobId ?? null}
+        spec={resumeJob?.originProjectId ? { id: resumeJob.originProjectId, title: resumeJob.originTitle ?? "Spec" } : null}
+        etaSeconds={proposalsEta}
+        onClose={() => { setResumeJob(null); void loadProposals(); void load(); }}
+        onSaved={() => { setNotice("Proposta salva na Bancada como rascunhos. Promova quando quiser."); load(); loadProposals(); }}
       />
 
       {/* Dialog: vincular a produto */}
