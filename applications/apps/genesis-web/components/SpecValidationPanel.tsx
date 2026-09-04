@@ -62,9 +62,14 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
     try {
       const s = await apiGet<ValidationState>(`/api/specs/${projectId}/validation`);
       setState(s);
-      // GAPs = findings da última run; sem run → null (nunca validada).
-      const count = s?.latestRun ? (Array.isArray(s.latestRun.findings) ? s.latestRun.findings.length : 0) : null;
-      onFindingsChangeRef.current?.(count);
+      // GAPs = findings da última run; sem run → null (nunca validada). ENQUANTO valida, a run
+      // corrente tem findings=[] (0) — NÃO reportar isso ao pai, senão o badge pisca "0" no meio
+      // da revalidação e volta ao número real quando termina. Mantém a contagem anterior até haver
+      // um resultado terminal.
+      if (s?.derivedStatus !== "validating") {
+        const count = s?.latestRun ? (Array.isArray(s.latestRun.findings) ? s.latestRun.findings.length : 0) : null;
+        onFindingsChangeRef.current?.(count);
+      }
       return s;
     } catch { return null; }
   }, [projectId]);

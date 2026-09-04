@@ -604,12 +604,68 @@ function MarkdownPreview({ content }: { content: string }) {
   );
 }
 
+// ── Divisória arrastável (resize horizontal entre painéis) ───────────────────
+// Barra fina de 6px com cursor col-resize. Emite o deslocamento (deltaX) do ponteiro
+// enquanto arrastado; o pai converte em largura/proporção. Usa Pointer Events (mouse+touch)
+// e listeners em window para não perder o arraste ao sair da barra. Só ≥md (no mobile os
+// painéis empilham). `onDoubleClick` reseta ao default.
+function ResizeHandle({ onResize, onReset, ariaLabel }: {
+  onResize: (deltaX: number) => void;
+  onReset?: () => void;
+  ariaLabel?: string;
+}) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+  const onResizeRef = useRef(onResize);
+  onResizeRef.current = onResize;
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      if (!dragging.current) return;
+      onResizeRef.current(e.clientX - lastX.current);
+      lastX.current = e.clientX;
+    };
+    const up = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+  }, []);
+  return (
+    <Box
+      role="separator" aria-orientation="vertical" aria-label={ariaLabel || "Redimensionar painel"}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        lastX.current = e.clientX;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      onDoubleClick={() => onReset?.()}
+      sx={{
+        flexShrink: 0, width: "6px", cursor: "col-resize", alignSelf: "stretch",
+        display: { xs: "none", md: "block" }, position: "relative", zIndex: 1,
+        bgcolor: "divider", transition: "background-color .15s",
+        "&:hover": { bgcolor: "primary.main" },
+        // alvo de clique maior sem alargar o layout
+        "&::after": { content: '""', position: "absolute", inset: "0 -4px", cursor: "col-resize" },
+      }}
+    />
+  );
+}
+
+// Limita a largura do painel de chat entre 300 e 640px (mantém o editor legível).
+const clampChatWidth = (w: number) => Math.max(300, Math.min(640, w));
+const clampTreeWidth = (w: number) => Math.max(180, Math.min(420, w));
+
 // ── Editor + Preview side by side ─────────────────────────────────────────────
 function SpecEditor({
   value, onChange, fullscreen, onToggleFullscreen,
   onSave, approving, onRegen, regenDisabled,
   projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
-  onPromote, fileExt = "md", onValidationChange,
+  onPromote, fileExt = "md", onValidationChange, openGapsSignal,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -633,11 +689,25 @@ function SpecEditor({
   // Onda 3 — a validação (dentro da aba GAPs) reporta o nº de GAPs ao pai p/ manter o badge
   // e o gate de promoção sincronizados após validar sem sair do editor.
   onValidationChange?: (count: number | null) => void;
+  // Após "Salvar rascunho" (que persiste a spec e revalida), o pai bump-a este sinal para
+  // trazer o usuário à aba GAPs — onde o SpecValidationPanel mostra a revalidação ao vivo e a
+  // lista já sem os GAPs resolvidos.
+  openGapsSignal?: number;
 }) {
   const hasGapsTab = !!projectId;
   const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps">("split");
+  // Abre a aba GAPs quando o pai sinaliza (pós-salvar). Ignora o mount inicial (só reage a bumps).
+  const lastOpenGaps = useRef(openGapsSignal);
+  useEffect(() => {
+    if (openGapsSignal === lastOpenGaps.current) return;
+    lastOpenGaps.current = openGapsSignal;
+    if (hasGapsTab) setEditorTab("gaps");
+  }, [openGapsSignal, hasGapsTab]);
   // Badge dos GAPs: >99 vira "99+"; 0 não mostra número (aba fica só "GAPs").
   const gapBadge = gapCount == null ? null : gapCount > 99 ? "99+" : String(gapCount);
+  // "Lado a lado": proporção do editor (%) arrastável entre 20% e 80%; duplo-clique reseta a 50%.
+  const [splitPct, setSplitPct] = useState(50);
+  const splitRef = useRef<HTMLDivElement | null>(null);
 
   const toolbar = (
     <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap
@@ -721,20 +791,28 @@ function SpecEditor({
     // Onda 3 (a): aba GAPs — a validação da spec vive aqui dentro (antes era um card à parte).
     if (editorTab === "gaps") {
       return (
-        <Box sx={{ height: areaH, overflow: "auto", p: 1.5, bgcolor: "background.default" }}>
+        <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", p: 1.5, bgcolor: "background.default", overflowWrap: "anywhere", wordBreak: "break-word" }}>
           {projectId
             ? <SpecValidationPanel projectId={projectId} isAdmin={isAdmin} reloadSignal={validationReloadSignal} onFindingsChange={onValidationChange} />
             : null}
         </Box>
       );
     }
-    // split
+    // split — editor | divisória arrastável | preview
     return (
-      <Box sx={{ display: "flex", height: areaH, overflow: "hidden" }}>
-        <Box sx={{ flex: 1, borderRight: "1px solid", borderColor: "divider", overflow: "hidden" }}>
+      <Box ref={splitRef} sx={{ display: "flex", height: areaH, overflow: "hidden" }}>
+        <Box sx={{ flex: { xs: 1, md: `0 0 ${splitPct}%` }, minWidth: 0, overflow: "hidden" }}>
           {editorArea("100%")}
         </Box>
-        <Box sx={{ flex: 1, overflow: "hidden" }}>
+        <ResizeHandle
+          ariaLabel="Redimensionar editor e preview"
+          onReset={() => setSplitPct(50)}
+          onResize={(dx) => {
+            const w = splitRef.current?.clientWidth || 1;
+            setSplitPct((p) => Math.max(20, Math.min(80, p + (dx / w) * 100)));
+          }}
+        />
+        <Box sx={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
           <MarkdownPreview content={value} />
         </Box>
       </Box>
@@ -742,9 +820,13 @@ function SpecEditor({
   };
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    // flex:1 + minWidth:0 + width:100% → preenche E limita a coluna quando o pai é flex-row
+    // (dialog em tela cheia: editor à esquerda, chat 380px à direita). Sem isto, o SpecEditor
+    // dimensionava pelo conteúdo e a aba GAPs (findings longos) vazava horizontalmente por baixo
+    // do painel de chat. No layout inline (pai bloco) width:100% já bastava.
+    <Box sx={{ display: "flex", flexDirection: "column", height: "100%", flex: 1, minWidth: 0, width: "100%", overflow: "hidden" }}>
       {toolbar}
-      <Box sx={{ flexGrow: 1, overflow: "hidden", bgcolor: "background.default" }}>
+      <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden", bgcolor: "background.default" }}>
         {content("100%")}
       </Box>
     </Box>
@@ -1073,6 +1155,14 @@ export default function SpecPage() {
   const [applyConflict, setApplyConflict] = useState(false);
   const [treeReloadSignal, setTreeReloadSignal] = useState(0);
   const [validationReloadSignal, setValidationReloadSignal] = useState(0);
+  // Bump para trazer o editor à aba GAPs (pós-salvar rascunho → revalidação ao vivo).
+  const [openGapsSignal, setOpenGapsSignal] = useState(0);
+  // Largura (px) do painel de chat "Melhorar com IA" — arrastável pela divisória (300–640).
+  const [chatWidth, setChatWidth] = useState(380);
+  const shrinkChat = useCallback((dx: number) => setChatWidth((w) => clampChatWidth(w - dx)), []);
+  // Largura (px) do rail da árvore da pasta (modo edição, ≥lg) — arrastável pela divisória (180–420).
+  const [treeWidth, setTreeWidth] = useState(240);
+  const growTree = useCallback((dx: number) => setTreeWidth((w) => clampTreeWidth(w + dx)), []);
   const [staleValidation, setStaleValidation] = useState(false);
   // Onda 1 — nº de GAPs (findings da última validação) para o badge e o botão "Resolver GAPs".
   const [gapCount, setGapCount] = useState<number | null>(null);
@@ -1418,7 +1508,10 @@ export default function SpecPage() {
         if (poll.status === "done") {
           stopChatPolling();
           if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
-          setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "GAPs tratados — revise, salve e revalide antes de promover à fábrica." }]);
+          // A revisão está no EDITOR mas ainda NÃO no disco → a validação (que lê do disco) só
+          // reflete os GAPs resolvidos depois de "Salvar rascunho" (que persiste e revalida).
+          const applied = poll.reply || "GAPs tratados na spec.";
+          setChatMessages((prev) => [...prev, { role: "assistant", content: `${applied}\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar. A validação adversarial recalcula a lista de GAPs: os resolvidos somem, mas a análise **pode apontar novos pontos** a tratar — não confie no relato acima antes de revalidar.` }]);
           setStaleValidation(true); // a spec mudou → validação anterior ficou desatualizada
           setChatSending(false);
         } else if (poll.status === "error") {
@@ -1500,7 +1593,20 @@ export default function SpecPage() {
           startNow,
         });
         projectsStore.loadProjects();
-        setTimeout(() => router.push(`/projects/${editProjectId}`), 300);
+        // "Promover à Fábrica" (startNow) → vai para a fábrica. "Salvar rascunho" (!startNow) →
+        // FICA na tela do editor: a spec foi persistida no disco, então revalidamos para que a
+        // lista de GAPs reflita a spec nova (os GAPs resolvidos SOMEM; a run antiga fica como
+        // histórico em spec_validation_runs). Trazemos o usuário à aba GAPs para acompanhar.
+        if (startNow) {
+          setTimeout(() => router.push(`/projects/${editProjectId}`), 300);
+          return;
+        }
+        setApproving(null);
+        setStaleValidation(false);
+        setChatMessages((prev) => [...prev, { role: "assistant", content: "💾 Rascunho salvo. Revalidando os GAPs na spec nova…" }]);
+        setOpenGapsSignal((n) => n + 1);            // mostra a aba GAPs (monta o painel de validação)
+        try { await apiPost(`/api/specs/${editProjectId}/validate`, {}); } catch { /* dedupe/rate-limit → o reload abaixo mostra o estado */ }
+        setValidationReloadSignal((n) => n + 1);    // painel recarrega → vê "validando" → poll ao vivo → atualiza badge/lista
         return;
       }
 
@@ -1678,6 +1784,20 @@ export default function SpecPage() {
             variant={fsPane === "chat" ? "contained" : "outlined"} onClick={() => setFsPane("chat")}>Melhorar com IA</Button>
         </Stack>
         <Box sx={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
+          {/* Rail da árvore da PASTA DO PRODUTO também em tela cheia (≥md; no mobile o toggle
+              editor↔chat já ocupa a tela). Traz o próprio cabeçalho "PASTA DO PRODUTO · N
+              ARQUIVO(S)" e navega o editProjectId. Só quando aberto de um produto (?productId). */}
+          {treeProductId && (
+            <>
+              <Box sx={{ width: `${treeWidth}px`, flexShrink: 0, display: { xs: "none", md: "flex" }, flexDirection: "column", borderRight: "1px solid", borderColor: "divider", overflow: "hidden" }}>
+                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
+              </Box>
+              {/* Divisória arrastável árvore↔editor (duplo-clique reseta a 240px). */}
+              <Box sx={{ display: { xs: "none", md: "block" }, alignSelf: "stretch" }}>
+                <ResizeHandle ariaLabel="Redimensionar árvore e editor" onResize={growTree} onReset={() => setTreeWidth(240)} />
+              </Box>
+            </>
+          )}
           {/* Editor: sempre visível no desktop; no mobile só quando o painel selecionado é 'editor'. */}
           <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden", display: { xs: fsPane === "editor" ? "flex" : "none", md: "flex" } }}>
             <SpecEditor
@@ -1689,14 +1809,15 @@ export default function SpecPage() {
               projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
               validationReloadSignal={validationReloadSignal} gapCount={gapCount}
               onPromote={editProjectId ? handlePromote : undefined}
-              onValidationChange={setGapCount}
+              onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
             />
           </Box>
+          {/* Divisória arrastável editor↔chat (tela cheia). Só ≥md — no mobile os painéis alternam. */}
+          <ResizeHandle ariaLabel="Redimensionar editor e chat" onResize={shrinkChat} onReset={() => setChatWidth(380)} />
           {/* Feature #63 — chat "Melhorar com IA" TAMBÉM em tela cheia: painel à direita no desktop;
               no mobile ocupa a tela quando selecionado. Antes o dialog só mostrava o editor (bug). */}
           <Box sx={{
-            width: { xs: "100%", md: 380 }, flexShrink: 0, minWidth: 0, overflow: "hidden",
-            borderLeft: { md: "1px solid" }, borderColor: { md: "divider" },
+            width: { xs: "100%", md: `${chatWidth}px` }, flexShrink: 0, minWidth: 0, overflow: "hidden",
             display: { xs: fsPane === "chat" ? "flex" : "none", md: "flex" },
           }}>
             <SpecChatPanel
@@ -1814,13 +1935,19 @@ export default function SpecPage() {
             fora do gate de carregamento — para não desmontar/re-buscar (nem piscar) a cada
             troca de projeto pela navegação. Só ≥lg (no md a árvore roubaria largura do editor;
             no mobile o editor ocupa a tela). Reusa a árvore da aba "Código" da fábrica. */}
-        <Box sx={{ display: "flex", gap: 2, alignItems: "flex-start" }}>
+        <Box sx={{ display: "flex", gap: 0, alignItems: { xs: "flex-start", lg: "stretch" }, height: { lg: "calc(100vh - 168px)" }, minHeight: { lg: 560 } }}>
           {treeProductId && (
-            <Box sx={{ width: 240, flexShrink: 0, display: { xs: "none", lg: "block" }, border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden", position: "sticky", top: 16, height: { lg: 640 } }}>
-              <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
-            </Box>
+            <>
+              <Box sx={{ width: `${treeWidth}px`, flexShrink: 0, display: { xs: "none", lg: "flex" }, flexDirection: "column", border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
+                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
+              </Box>
+              {/* Divisória arrastável árvore↔editor (só ≥lg; duplo-clique reseta a 240px). */}
+              <Box sx={{ display: { xs: "none", lg: "block" }, alignSelf: "stretch" }}>
+                <ResizeHandle ariaLabel="Redimensionar árvore e editor" onResize={growTree} onReset={() => setTreeWidth(240)} />
+              </Box>
+            </>
           )}
-          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+          <Box sx={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, pl: treeProductId ? { lg: 1.5 } : 0 }}>
         {editLoading && (
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, py: 6, justifyContent: "center" }}>
             <CircularProgress size={24} />
@@ -1832,7 +1959,7 @@ export default function SpecPage() {
             tem 2+ arquivos — D8). Onda 3 (a): a validação/GAPs NÃO fica mais aqui — virou a aba
             "GAPs" dentro do editor. Aqui sobra só o aviso de validação obsoleta + a árvore. */}
         {!editLoading && specMarkdown !== null && editProjectId && (
-          <Box sx={{ mb: 2 }}>
+          <Box sx={{ mb: 2, "&:empty": { display: "none", mb: 0 } }}>
             {staleValidation && (
               <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
                 Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
@@ -1846,8 +1973,8 @@ export default function SpecPage() {
         )}
 
         {!editLoading && specMarkdown !== null && (
-          <Card>
-            <CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
+          <Card sx={{ flexGrow: { lg: 1 }, minHeight: { lg: 0 }, display: "flex", flexDirection: "column" }}>
+            <CardContent sx={{ p: 0, "&:last-child": { pb: 0 }, flexGrow: { lg: 1 }, minHeight: { lg: 0 }, display: "flex", flexDirection: "column" }}>
               {approveError && <Alert severity="error" sx={{ m: 2 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
               <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" useFlexGap sx={{ px: 2, py: 1.5, rowGap: 1, borderBottom: "1px solid", borderColor: "divider" }}>
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ flexGrow: 1, minWidth: 0 }}>
@@ -1878,7 +2005,10 @@ export default function SpecPage() {
                   </Button>
                 </Stack>
               </Stack>
-              <Box sx={{ height: { xs: 520, sm: 600 }, overflow: "hidden", display: "flex" }}>
+              {/* Altura preenche a viewport (plataforma profissional): em ≥lg o corpo cresce
+                  (flexGrow) até o fundo do container de altura fixa — topos/fundos alinhados com o
+                  rail da árvore por construção. Abaixo de lg cai no calc/altura fixa. */}
+              <Box sx={{ flexGrow: { lg: 1 }, minHeight: { lg: 0 }, height: { xs: 520, md: "calc(100vh - 240px)", lg: "auto" }, overflow: "hidden", display: "flex" }}>
                 <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
                   <SpecEditor
                     value={specMarkdown} onChange={setSpecMarkdown}
@@ -1888,11 +2018,13 @@ export default function SpecPage() {
                     regenDisabled={true}
                     projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
                     validationReloadSignal={validationReloadSignal} gapCount={gapCount}
-                    onValidationChange={setGapCount}
+                    onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
                   />
                 </Box>
+                {/* Divisória arrastável editor↔chat (duplo-clique reseta a 380px). */}
+                <ResizeHandle ariaLabel="Redimensionar editor e chat" onResize={shrinkChat} onReset={() => setChatWidth(380)} />
                 {/* Feature #63 — painel de chat à direita do editor/preview (oculto no mobile: editor ocupa a tela; usar tela cheia p/ chat) */}
-                <Box sx={{ width: { xs: 300, md: 380 }, flexShrink: 0, borderLeft: "1px solid", borderColor: "divider", display: { xs: "none", md: "block" } }}>
+                <Box sx={{ width: { xs: 300, md: `${chatWidth}px` }, flexShrink: 0, display: { xs: "none", md: "block" } }}>
                   <SpecChatPanel
                     messages={chatMessages} input={chatInput} onInput={setChatInput}
                     onSend={handleChatSend} sending={chatSending} error={chatError}
