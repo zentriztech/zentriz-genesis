@@ -39,6 +39,14 @@ export async function dispatchProjectRun(pool: Pool, projectId: string): Promise
   // RFC-0003 (G3/C3): a cascata/promoção passa pelo MESMO gate de dependência+contrato do
   // /run interativo — antes só o /run validava, e a onda-1+ podia começar sem o contrato do
   // predecessor em disco.
+  // Evoluir E3: evolução só entra na fábrica com RFC válido (mesmo gate do /run — aqui cobre a
+  // cascata, o /answer da D3 e o /promote do produto).
+  {
+    const extraRow = (await pool.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0];
+    const { evaluateEvolutionGate } = await import("./evolutionGate.js");
+    const eGate = await evaluateEvolutionGate(pool, projectId, (extraRow?.extra as Record<string, unknown> | null) ?? null);
+    if (!eGate.ok) return { projectId, dispatched: false, reason: `${eGate.code}: ${eGate.message}` };
+  }
   const gate = await checkDependencyGate(pool, projectId);
   if (!gate.ok) {
     return { projectId, dispatched: false, reason: `${gate.block.code}: ${gate.block.message.slice(0, 160)}` };

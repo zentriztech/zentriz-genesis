@@ -36,6 +36,23 @@ describe("estágio A (determinístico)", () => {
     const f = runStageA([file("spec.md", "# oi")]);
     expect(f.find((x) => x.title.includes("sem conteúdo substantivo"))?.severity).toBe("blocker");
   });
+
+  it("Evoluir E3: RFC vago em docs/rfc/ → blocker SÓ em evolução (produto novo: warning); nome fora do padrão idem", () => {
+    const vague = file("RFC-0001-vago.md", "# RFC\n\n## Sumário\nFazer melhor.\n", "docs/rfc");
+    const badName = file("rfc-1.md", "# RFC\n", "docs/rfc");
+    const evo = runStageA([file("spec.md", RICH), vague, badName], { evolution: true });
+    const rfcFindings = evo.filter((x) => x.file.startsWith("docs/rfc/"));
+    expect(rfcFindings.length).toBeGreaterThanOrEqual(3);
+    expect(rfcFindings.every((x) => x.severity === "blocker" || x.severity === "warning")).toBe(true);
+    expect(rfcFindings.filter((x) => x.severity === "blocker").map((x) => x.title)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/Gherkin/), expect.stringMatching(/files_allowed/), expect.stringMatching(/padrão de nome/),
+    ]));
+    const fresh = runStageA([file("spec.md", RICH), vague, badName]);
+    expect(fresh.filter((x) => x.file.startsWith("docs/rfc/")).every((x) => x.severity === "warning")).toBe(true);
+    // RFC completo em evolução → sem blocker de RFC
+    const good = file("RFC-0002-ok.md", "# RFC\n\n## Critérios de aceite\n- Dado x\n- Quando y\n- Então z\n\n## Impacto\n- `apps/api/src/a.ts`\n\n## Compatibilidade\nMINOR\n\n**Não-objetivos:** nada.\n", "docs/rfc");
+    expect(runStageA([file("spec.md", RICH), good], { evolution: true }).filter((x) => x.file.startsWith("docs/rfc/") && x.severity === "blocker")).toEqual([]);
+  });
 });
 
 describe("parseStageBFindings (schema fechado — saída de LLM nunca entra crua)", () => {

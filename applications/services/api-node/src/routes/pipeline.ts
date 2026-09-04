@@ -84,6 +84,15 @@ async function getProjectSpecFilePath(
 export async function pipelineRoutes(app: FastifyInstance) {
   app.addHook("preHandler", authMiddleware);
 
+  // Evoluir E3 (adversarial F): o tenant precisa do MODELO de RFC para escrever `docs/rfc/RFC-NNNN-<slug>.md`
+  // na Bancada — o caminho do repositório não serve ao cliente. Vendorizado em src/assets (vai na imagem).
+  app.get("/api/spec-templates/rfc", async (_request, reply) => {
+    const { loadRfcTemplate, RFC_DIR } = await import("../services/evolutionGate.js");
+    const content = loadRfcTemplate();
+    if (!content) return reply.code(404).send({ error: "TEMPLATE_UNAVAILABLE", message: "Modelo de RFC não encontrado nesta instalação." });
+    return reply.send({ kind: "rfc", dir: RFC_DIR, suggested_filename: "RFC-0001-<slug>.md", content });
+  });
+
   app.post<{ Params: { id: string } }>("/api/projects/:id/run", async (request, reply) => {
     const user = getUser(request);
     const { id: projectId } = request.params;
@@ -162,6 +171,21 @@ export async function pipelineRoutes(app: FastifyInstance) {
         if (!vGate.ok) {
           request.log.warn({ projectId, code: vGate.code }, "[Pipeline] Bloqueado pelo gate de validação de spec");
           return reply.status(409).send({ code: vGate.code, message: vGate.message });
+        }
+      }
+
+      // Evoluir E3: promoção de EVOLUÇÃO exige RFC válido na Bancada (Gherkin + files_allowed) e grava
+      // evolution_rfcs/evolution_scope/evolution_request sintetizado — o escopo é o gate do E4.
+      {
+        const extraRow = (await client.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0];
+        const { evaluateEvolutionGate } = await import("../services/evolutionGate.js");
+        const eGate = await evaluateEvolutionGate(client, projectId, (extraRow?.extra as Record<string, unknown> | null) ?? null);
+        if (!eGate.ok) {
+          request.log.warn({ projectId, code: eGate.code }, "[Pipeline] Bloqueado pelo gate de evolução (RFC)");
+          return reply.status(409).send({ code: eGate.code, message: eGate.message, details: eGate.details });
+        }
+        if (eGate.applied) {
+          request.log.info({ projectId, rfcs: eGate.rfcs, scope: eGate.scope.length, compat: eGate.compat }, "[Pipeline] Evolução: RFC(s) validados, escopo gravado");
         }
       }
 

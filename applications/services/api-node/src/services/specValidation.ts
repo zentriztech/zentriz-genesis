@@ -25,6 +25,7 @@ import { computeSpecTreeHash, sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE
 import { loadArchetypeCatalog, getArchetype } from "./archetypeCatalog.js";
 import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 import { UUID_RE } from "../lib/tenantScope.js";
+import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -116,8 +117,11 @@ function parseFrontmatter(content: string): Record<string, string> | null {
   return out;
 }
 
-export function runStageA(files: Array<SpecFileRow & { content: string }>): ValidationFinding[] {
+export function runStageA(files: Array<SpecFileRow & { content: string }>, opts: { evolution?: boolean } = {}): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
+  // Evoluir E3: em EVOLUÇÃO os RFCs são exigência dura (mesmo critério do gate de promoção →
+  // blocker); em produto novo com RFCs "de design" só avisam (a regra existe para evolução).
+  const rfcSev: ValidationFinding["severity"] = opts.evolution ? "blocker" : "warning";
   const catalog = loadArchetypeCatalog();
 
   // Tetos (anti-abuso — mesmos do hash)
@@ -161,6 +165,43 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>): Vali
         findings.push({ file: "README.md", line: 1, severity: "warning", title: "Campos de ESTADO no frontmatter",
           rationale: "spec_hash/status_spec vivem só no banco; no arquivo são ignorados e não devem existir.", source: "stage_a" });
       }
+    }
+  }
+
+  // Evoluir E3: RFCs de evolução (docs/rfc/RFC-NNNN-*.md) precisam ser IMPLEMENTÁVEIS/TESTÁVEIS —
+  // Gherkin nos critérios de aceite (FAIL_TO_PASS do QA) e `## Impacto`/files_allowed (escopo do gate).
+  for (const f of files) {
+    const rel = (f.rel_dir ?? "").replace(/^\/+|\/+$/g, "").toLowerCase();
+    if (rel !== RFC_DIR) continue;
+    const label = `${RFC_DIR}/${f.filename}`;
+    if (!RFC_FILENAME_RE.test(f.filename)) {
+      // Mesmo critério do gate: arquivo fora do padrão em docs/rfc/ é IGNORADO pela promoção
+      // (cairia em EVOLUTION_RFC_REQUIRED) — por isso é blocker em evolução, não aviso.
+      findings.push({ file: label, line: null, severity: rfcSev, title: "RFC fora do padrão de nome (será ignorado pela fábrica)",
+        rationale: "Use `RFC-NNNN-<slug>.md` (numeração sequencial por produto). Só arquivos nesse padrão contam como RFC na promoção.", source: "stage_a" });
+      continue;
+    }
+    const rfc = parseRfcMarkdown(label, f.content);
+    if (!rfc.hasGherkin) {
+      findings.push({ file: label, line: null, severity: rfcSev, title: "RFC sem critérios de aceite em Gherkin",
+        rationale: "Seção `## Critérios de aceite` com ≥1 cenário em bullets Dado/Quando/Então (início da linha) e resultado observável — é o que o QA testa (FAIL_TO_PASS).", source: "stage_a" });
+    }
+    const unrestricted = rfc.problems.find((p) => p.startsWith("escopo irrestrito"));
+    if (unrestricted) {
+      findings.push({ file: label, line: null, severity: rfcSev, title: "RFC com files_allowed irrestrito",
+        rationale: `${unrestricted}.`, source: "stage_a" });
+    }
+    if (rfc.filesAllowed.length === 0) {
+      findings.push({ file: label, line: null, severity: rfcSev, title: "RFC sem `## Impacto` / files_allowed",
+        rationale: "Liste os globs de arquivos que a fábrica PODE tocar; é o escopo do gate determinístico (a fábrica não expande sozinha).", source: "stage_a" });
+    }
+    if (!rfc.hasNonGoals) {
+      findings.push({ file: label, line: null, severity: "warning", title: "RFC sem Não-objetivos",
+        rationale: "Declare o que está fora de escopo — evita que a fábrica 'complete' além do pedido.", source: "stage_a" });
+    }
+    if (!rfc.compat) {
+      findings.push({ file: label, line: null, severity: "warning", title: "RFC sem `## Compatibilidade` (SemVer)",
+        rationale: "Classifique PATCH/MINOR/MAJOR e `breaking`; define o fechamento do CHANGELOG no aceite.", source: "stage_a" });
     }
   }
 
@@ -314,7 +355,9 @@ export async function startValidation(pool: Pool, opts: {
 async function processValidationRun(pool: Pool, runId: string, projectId: string, startHash: string): Promise<void> {
   const current = await computeCurrentSpecHash(pool, projectId);
   const files = current?.files ?? [];
-  const findings: ValidationFinding[] = runStageA(files);
+  const extraRow = (await pool.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0] as { extra?: Record<string, unknown> | null } | undefined;
+  const isEvolution = extraRow?.extra?.evolution === true;
+  const findings: ValidationFinding[] = runStageA(files, { evolution: isEvolution });
 
   // Estágio B só quando o A não achou blocker estrutural (economiza LLM em spec quebrada)
   const hasStageABlocker = findings.some((f) => f.severity === "blocker");
