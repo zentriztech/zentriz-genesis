@@ -5,6 +5,7 @@ import { authRoutes } from "./routes/auth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { specRoutes } from "./routes/specs.js";
 import { specChatRoutes } from "./routes/specChat.js";
+import { specQuestionRoutes } from "./routes/specQuestions.js";
 import { specFileRoutes } from "./routes/specFiles.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { catalogRoutes } from "./routes/catalog.js";
@@ -85,6 +86,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(projectRoutes);
   await app.register(specRoutes);
   await app.register(specChatRoutes);
+  await app.register(specQuestionRoutes); // D3: perguntas da fábrica ↔ respostas humanas
   await app.register(specFileRoutes);
   await app.register(dashboardRoutes);
   await app.register(catalogRoutes);

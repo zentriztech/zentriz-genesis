@@ -296,6 +296,78 @@ def load_connect_declaration(project_id: str) -> tuple[dict | None, list[str]]:
         return None, [f"falha ao carregar connect.yaml: {exc}"]
 
 
+SPEC_QUESTION_MAX_ROUNDS = max(1, int(os.environ.get("SPEC_QUESTION_MAX_ROUNDS", "2") or 2))
+
+
+def _extract_questions(response: dict | None) -> list[str]:
+    """Perguntas de um NEEDS_INFO (envelope: `next_actions.questions`, strings ou {question}). [] se não há."""
+    if not isinstance(response, dict):
+        return []
+    if str(response.get("status") or "").upper() != "NEEDS_INFO":
+        return []
+    na = response.get("next_actions")
+    raw = na.get("questions") if isinstance(na, dict) else None
+    out: list[str] = []
+    for q in raw or []:
+        if isinstance(q, str) and q.strip():
+            out.append(q.strip())
+        elif isinstance(q, dict):
+            text = q.get("question") or q.get("text") or q.get("q")
+            if isinstance(text, str) and text.strip():
+                out.append(text.strip())
+    return out[:12]
+
+
+def _human_answers_block(proj_data: dict | None) -> str:
+    """D3: respostas HUMANAS já dadas (projects.extra.spec_answers) → bloco p/ `extra_instruction` do CTO.
+    Cada item: {round, stage, questions[], answer, answered_at}. Vazio → ''."""
+    extra = (proj_data or {}).get("extra") if isinstance(proj_data, dict) else None
+    answers = extra.get("spec_answers") if isinstance(extra, dict) else None
+    if not isinstance(answers, list) or not answers:
+        return ""
+    lines = ["## RESPOSTAS DO HUMANO às perguntas anteriores da fábrica (autoritativas — NÃO repergunte; use como fato)"]
+    for a in answers[-SPEC_QUESTION_MAX_ROUNDS * 2:]:
+        if not isinstance(a, dict):
+            continue
+        qs = a.get("questions") or []
+        lines.append(f"- Rodada {a.get('round', '?')} ({a.get('stage', 'spec_review')}):")
+        for q in qs if isinstance(qs, list) else []:
+            lines.append(f"  - Pergunta: {q}")
+        lines.append(f"  - Resposta: {str(a.get('answer') or '').strip()}")
+    lines.append("Se a resposta for insuficiente, assuma um padrão seguro e marque `Premissa:` — só use NEEDS_INFO para uma dúvida NOVA e bloqueante.")
+    return "\n".join(lines)
+
+
+def _raise_spec_questions(project_id: str | None, stage: str, questions: list[str], request_id: str) -> str:
+    """D3: PARA a fábrica com perguntas ao humano.
+
+    POST /api/projects/{id}/questions (a API grava project_questions, seta `needs_spec_input`, notifica o
+    tenant in-app + e-mail e aplica o teto de rodadas). Retorna 'asked' | 'capped' | 'unavailable'.
+    - capped: teto SPEC_QUESTION_MAX_ROUNDS atingido → chamador bloqueia com razão explícita.
+    - unavailable: API não aceitou (rota ausente/erro) → chamador segue o comportamento antigo.
+    """
+    if not project_id or not questions:
+        return "unavailable"
+    data, status = _api_post(f"/api/projects/{project_id}/questions", {
+        "stage": stage, "questions": questions, "askedBy": "cto", "requestId": request_id,
+    })
+    if status == 409 and isinstance(data, dict) and data.get("code") == "QUESTION_ROUNDS_EXCEEDED":
+        return "capped"
+    if status == 409 and isinstance(data, dict) and data.get("code") == "QUESTION_ALREADY_OPEN":
+        return "asked"  # idempotente: já há pergunta aberta (retry) — o projeto JÁ está em needs_spec_input
+    if status not in (200, 201, 202) or not isinstance(data, dict):
+        logger.warning("[D3] API não aceitou as perguntas (status=%s) — seguindo sem parar.", status)
+        return "unavailable"
+    _post_step(
+        "A fábrica tem PERGUNTAS para você antes de continuar (" + str(len(questions)) + "). "
+        "Responda na Bancada (Meus apps → projeto → Perguntas da fábrica) e o pipeline retoma do ponto onde parou.",
+        request_id,
+    )
+    for q in questions:
+        _post_step(f"❓ {q}", request_id)
+    return "asked"
+
+
 class ConnectDeclarationGateError(RuntimeError):
     """connect.yaml inválido com CONNECT_DECLARATION_GATE=hard — deve interromper o run."""
 
@@ -3941,6 +4013,7 @@ def main() -> int:
     charter_summary = ""
     engineer_summary = ""
     backlog_summary = ""
+    _human_answers = ""  # D3: respostas humanas a perguntas anteriores (projects.extra.spec_answers)
     if pipeline_ctx:
         spec_understood = pipeline_ctx.product_spec or spec_content
         charter_summary = pipeline_ctx.charter or ""
@@ -3968,6 +4041,10 @@ def main() -> int:
                     _prod_id = _proj_data.get("productId") or ""
                     if _prod_id and not pipeline_ctx.product_id:
                         pipeline_ctx.product_id = str(_prod_id)
+                    # D3: respostas humanas já dadas → bloco autoritativo para o CTO (extra_instruction).
+                    _human_answers = _human_answers_block(_proj_data)
+                    if _human_answers:
+                        logger.info("[D3] Respostas humanas encontradas em projects.extra.spec_answers — injetando no CTO.")
                 # R4 PR4 — SpecConnectDeclaration (connect.yaml da Bancada): fonte spec-first dos
                 # manifests Connect. Sempre relê do disco (a declaração é INPUT humano — uma edição na
                 # Bancada vence o checkpoint). Gate CONNECT_DECLARATION_GATE=warn|hard: a exceção do
@@ -4520,8 +4597,32 @@ def main() -> int:
                 spec_content=spec_content, spec_template=spec_template_content,
                 pipeline_ctx=pipeline_ctx,
                 spec_approved=_spec_approved,  # SPEC-APPROVED: aciona Sub-modo C do CTO (validar)
+                extra_instruction=_human_answers,  # D3: respostas humanas anteriores (se houver)
             )
             _audit_log("cto", request_id, cto_spec_response)
+            # D3 — o CTO PERGUNTOU (NEEDS_INFO com next_actions.questions): PARA e devolve ao humano.
+            # Antes, o status era IGNORADO aqui (o texto das perguntas virava "spec revisada") —
+            # adversarial R3. Teto de rodadas → bloqueio explícito; API indisponível → segue como antes.
+            _q_spec = _extract_questions(cto_spec_response)
+            if _q_spec:
+                _asked = _raise_spec_questions(project_id, "spec_review", _q_spec, request_id)
+                if _asked == "asked":
+                    if _run_log:
+                        try: _run_log.stop_run(reason="needs_spec_input")
+                        except Exception: pass
+                    return
+                if _asked == "capped":
+                    _reason_q = ("Teto de rodadas de perguntas ao humano atingido "
+                                 f"({SPEC_QUESTION_MAX_ROUNDS}); o CTO ainda tem dúvidas bloqueantes: "
+                                 + " | ".join(_q_spec)[:600])
+                    _post_step("BLOCKED — a fábrica esgotou as rodadas de perguntas e a spec ainda é ambígua. "
+                               "Revise a spec na Bancada e reenvie.", request_id)
+                    _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason_q})
+                    if _run_log:
+                        try: _run_log.stop_run(reason="blocked_structural_gate")
+                        except Exception: pass
+                    return
+                logger.warning("[D3] Perguntas do CTO não puderam ser registradas — seguindo (comportamento anterior).")
             spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
             for art in cto_spec_response.get("artifacts", []):
                 if isinstance(art, dict) and art.get("content"):
@@ -4556,13 +4657,25 @@ def main() -> int:
                     f"Rodada {round_num}/{max_cto_engineer_rounds}: CTO envia spec ao Engineer para proposta técnica (squads e skills).",
                     request_id,
                 )
-                _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
-                logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
-                engineer_response = call_engineer(
-                    spec_ref, spec_understood, request_id,
-                    cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None),
-                    pipeline_ctx=pipeline_ctx,
+                # D3 (adversarial #A): na RETOMADA após resposta humana o checkpoint já traz a proposta do
+                # Engineer — não refazer a rodada 1 (minutos + custo); ir direto ao CTO com as respostas.
+                _resume_with_proposal = (
+                    round_num == 1 and bool(_human_answers) and pipeline_ctx is not None
+                    and bool((pipeline_ctx.engineer_proposal or "").strip())
                 )
+                if _resume_with_proposal:
+                    logger.info("[D3] Retomada: reaproveitando engineer_proposal do checkpoint (%d chars); pulando Engineer da rodada 1.",
+                                len(pipeline_ctx.engineer_proposal))
+                    _post_step("Retomando após a sua resposta: reaproveitando a proposta técnica já existente e indo direto ao CTO.", request_id)
+                    engineer_response = {"status": "OK", "summary": pipeline_ctx.engineer_proposal, "artifacts": []}
+                else:
+                    _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
+                    logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
+                    engineer_response = call_engineer(
+                        spec_ref, spec_understood, request_id,
+                        cto_questionamentos=None if round_num == 1 else (cto_response.get("summary", "") if cto_response else None),
+                        pipeline_ctx=pipeline_ctx,
+                    )
                 _audit_log("engineer", request_id, engineer_response)
                 engineer_summary = engineer_response.get("summary", "")
                 engineer_status = engineer_response.get("status", "?")
@@ -4631,6 +4744,7 @@ def main() -> int:
                 cto_response = call_cto(
                     spec_ref, request_id, engineer_proposal=engineer_summary, spec_content=spec_understood,
                     pipeline_ctx=pipeline_ctx,
+                    extra_instruction=_human_answers,  # D3
                 )
                 _audit_log("cto", request_id, cto_response)
                 if project_id and storage and storage.is_enabled():
@@ -4646,6 +4760,29 @@ def main() -> int:
                 charter_artifacts = cto_response.get("artifacts", [])
                 cto_status = cto_response.get("status", "?")
                 logger.info("[Pipeline] CTO respondeu (status: %s)", cto_status)
+                # D3 — NEEDS_INFO no charter: a pergunta é para o HUMANO, não para o Engineer.
+                # (Antes: "nova rodada" e, no teto, "usando última versão do Charter" — outro LLM
+                # respondia e o pipeline seguia.) REVISION/FAIL continuam sendo rodada CTO↔Engineer.
+                _q_charter = _extract_questions(cto_response)
+                if _q_charter:
+                    _asked_c = _raise_spec_questions(project_id, "charter", _q_charter, request_id)
+                    if _asked_c == "asked":
+                        if pipeline_ctx:
+                            pipeline_ctx.save_checkpoint(STATE_DIR)  # retoma neste passo após a resposta
+                        if _run_log:
+                            try: _run_log.stop_run(reason="needs_spec_input")
+                            except Exception: pass
+                        return
+                    if _asked_c == "capped":
+                        _reason_qc = ("Teto de rodadas de perguntas ao humano atingido "
+                                      f"({SPEC_QUESTION_MAX_ROUNDS}) durante o Charter: " + " | ".join(_q_charter)[:600])
+                        _post_step("BLOCKED — a fábrica esgotou as rodadas de perguntas no Charter. "
+                                   "Revise a spec na Bancada e reenvie.", request_id)
+                        _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason_qc})
+                        if _run_log:
+                            try: _run_log.stop_run(reason="blocked_structural_gate")
+                            except Exception: pass
+                        return
                 if cto_status and str(cto_status).upper() == "OK":
                     _post_step("O CTO aprovou a proposta e finalizou o Charter. Seguindo para o PM.", request_id)
                     break

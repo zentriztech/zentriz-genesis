@@ -56,6 +56,9 @@ const VALID_PROJECT_STATUS = new Set([
   "blocked_structural_gate",        // #37: gate estrutural determinístico
   "blocked_backlog_empty_with_frs", // #39: backlog vazio apesar de FRs presentes
   "blocked_awaiting_expo_confirm",  // #44: Expo detectado, aguarda confirmação humana
+  // D3 (2026-09-04): a fábrica tem PERGUNTAS para o humano (NEEDS_INFO do CTO). Espera humana,
+  // não erro. Reabre SÓ via POST /api/projects/:id/answer (nunca por /run genérico).
+  "needs_spec_input",
 ]);
 
 async function checkProjectAccess(

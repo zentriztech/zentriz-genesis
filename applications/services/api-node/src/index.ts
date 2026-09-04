@@ -7,6 +7,7 @@ import { startS3ReconciliationWorker, stopS3ReconciliationWorker } from "./servi
 import { startBackendResumeWorker, stopBackendResumeWorker } from "./services/provision/backendResumeWorker.js";
 import { startBackendCleanupWorker, stopBackendCleanupWorker } from "./services/provision/backendCleanupWorker.js";
 import { startFinanceBillingWorker, stopFinanceBillingWorker } from "./services/financeBillingWorker.js";
+import { startSpecQuestionsWorker, stopSpecQuestionsWorker } from "./services/specQuestionsWorker.js";
 import { startCreditReconciliationWorker, stopCreditReconciliationWorker } from "./services/creditReconciliationWorker.js";
 import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
 import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
@@ -82,6 +83,8 @@ try {
 
   // Iniciar Watchdog de auto-recovery após a API estar pronta
   startWatchdog();
+  // D3: escalada (TTL 72h) de perguntas da fábrica sem resposta do tenant.
+  startSpecQuestionsWorker();
   // FT-17: cleanup TTL + watchdog órfãos de S3 static deploys
   startS3CleanupWorker();
   startS3ReconciliationWorker();

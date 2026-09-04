@@ -42,7 +42,9 @@ export function deriveProductLifecycle(projectStatuses: string[]): ProductLifecy
   if (projectStatuses.every((s) => s === "draft")) return "draft";
 
   const hasFailed  = projectStatuses.some((s) => s === "failed");
-  const hasBlocked = projectStatuses.some((s) => s === "blocked_cyborg");
+  // D3: `needs_spec_input` (fábrica pausada aguardando resposta humana) é EXATAMENTE
+  // "travado por humano" — sem isto o produto aparecia "running" enquanto esperava (adversarial D3 #B).
+  const hasBlocked = projectStatuses.some((s) => s === "blocked_cyborg" || s === "needs_spec_input");
   const accepted   = projectStatuses.filter((s) => s === "accepted").length;
   const inProgress = projectStatuses.some((s) => IN_PROGRESS.has(s));
 

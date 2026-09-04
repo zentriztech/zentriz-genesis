@@ -42,6 +42,9 @@ function originLabel(origin?: string): string {
  */
 export function isBlockStatus(status: string): boolean {
   if (status === "blocked_awaiting_expo_confirm") return false;
+  // D3: perguntas da fábrica ao humano = espera, não erro (o tenant é notificado por outro canal;
+  // a Zentriz só é acionada pela escalada de 72h — specQuestions.escalateStaleQuestions).
+  if (status === "needs_spec_input") return false;
   return status.startsWith("blocked") || status === "failed" || status === "spec_validation_failed";
 }
 

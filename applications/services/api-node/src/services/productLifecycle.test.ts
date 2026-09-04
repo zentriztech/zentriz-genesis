@@ -36,6 +36,12 @@ describe("deriveProductLifecycle", () => {
     expect(deriveProductLifecycle(["accepted", "accepted", "accepted"])).toBe("accepted");
   });
 
+  it("D3: needs_spec_input (fábrica aguardando resposta humana) → stalled_waiting_human, não running", () => {
+    expect(deriveProductLifecycle(["needs_spec_input"])).toBe("stalled_waiting_human");
+    expect(deriveProductLifecycle(["running", "needs_spec_input", "accepted"])).toBe("stalled_waiting_human");
+    expect(deriveProductLifecycle(["failed", "needs_spec_input"])).toBe("failed");
+  });
+
   it("A2: qualquer projeto blocked_cyborg → stalled_waiting_human (onda travada)", () => {
     expect(deriveProductLifecycle(["accepted", "blocked_cyborg"])).toBe("stalled_waiting_human");
     expect(deriveProductLifecycle(["running", "blocked_cyborg", "accepted"])).toBe("stalled_waiting_human");

@@ -22,6 +22,7 @@ import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import CampaignIcon from "@mui/icons-material/Campaign";
 import NotificationsNoneIcon from "@mui/icons-material/NotificationsNone";
+import QuestionAnswerIcon from "@mui/icons-material/QuestionAnswer";
 import type { Notification } from "@/types";
 import { notificationsStore } from "@/stores/notificationsStore";
 
@@ -33,6 +34,8 @@ const TYPE_META: Record<NotifType, { label: string; color: string; icon: React.R
   provisioning_done: { label: "Provisionado", color: "#0EA5E9", icon: <RocketLaunchIcon /> },
   blocked:           { label: "Bloqueio",     color: "#F59E0B", icon: <WarningAmberIcon /> },
   alert:             { label: "Alerta",       color: "#EF4444", icon: <CampaignIcon /> },
+  // D3: a fábrica parou com perguntas para o humano (needs_spec_input) — responder no projeto.
+  spec_question:     { label: "Pergunta da fábrica", color: "#8B5CF6", icon: <QuestionAnswerIcon /> },
 };
 
 const FALLBACK_META = { label: "Notificação", color: "#6366F1", icon: <NotificationsNoneIcon /> };

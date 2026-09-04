@@ -68,6 +68,7 @@ import { LiveDialogue } from "@/components/LiveDialogue";
 import { CodeExplorer } from "@/components/CodeExplorer";
 import { DocViewerModal } from "@/components/DocViewerModal";
 import DeadpoolMonitorCard from "@/components/DeadpoolMonitorCard";
+import SpecQuestionsPanel from "@/components/SpecQuestionsPanel";
 import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "@/lib/api";
@@ -1056,6 +1057,12 @@ function ProjectDetailPageInner() {
             <CircularProgress size={12} color="primary" />
             <Typography variant="caption" color="primary.main" fontWeight={500} noWrap>{workingMessage.slice(0, 80)}</Typography>
           </Stack>
+        )}
+        {/* D3: a fábrica PAROU com perguntas ao humano (needs_spec_input) — responder aqui retoma do checkpoint. */}
+        {project && (
+          <Box sx={{ px: 2, pt: 1.5, flexShrink: 0 }}>
+            <SpecQuestionsPanel projectId={id} status={project.status} />
+          </Box>
         )}
         <LiveDialogue projectId={id} pollIntervalMs={isRunning ? 4000 : 15000} onEntriesLoaded={handleDialogueLoaded} />
       </Box>

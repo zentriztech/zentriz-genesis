@@ -33,6 +33,8 @@ export const SPEC_EDITABLE_STATUSES = new Set([
   "draft", "spec_submitted", "pending_conversion", "stopped", "failed",
   "spec_validation_failed", "blocked_cyborg", "blocked_structural_gate",
   "blocked_backlog_empty_with_frs", "blocked_awaiting_expo_confirm",
+  // D3: enquanto a fábrica espera resposta, editar a spec é uma remediação legítima.
+  "needs_spec_input",
 ]);
 
 /** Fábrica-ativa / terminal — produção, NUNCA rascunho de inbox. */
@@ -49,6 +51,8 @@ export const FACTORY_OR_TERMINAL_STATUSES = [
   "completed",
   "stopped",
   "failed",
+  // D3: espera humana no MEIO da fábrica (nunca rascunho de inbox).
+  "needs_spec_input",
 ] as const;
 
 export type PreFactoryStatus = (typeof PRE_FACTORY_STATUSES)[number];

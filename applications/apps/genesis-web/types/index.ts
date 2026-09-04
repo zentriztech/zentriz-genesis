@@ -177,7 +177,7 @@ export interface ProjectLink {
 export interface Notification {
   id: string;
   userId: string;
-  type: "project_finished" | "provisioning_done" | "blocked" | "alert";
+  type: "project_finished" | "provisioning_done" | "blocked" | "alert" | "spec_question";
   title: string;
   body: string;
   read: boolean;
