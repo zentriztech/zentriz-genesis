@@ -197,6 +197,15 @@ function ProjectCard({ project, delay = 0, onDelete }: { project: Project; delay
             <Typography variant="subtitle2" fontWeight={600} sx={{ lineHeight: 1.4 }} noWrap>
               {project.title ?? "Spec sem título"}
             </Typography>
+            {/* Evoluir H1 — supersessão visível: nunca esconder a versão anterior; rotular e linkar. */}
+            {project.supersededBy && (
+              <Chip label="substituído por evolução" size="small" color="warning" variant="filled"
+                sx={{ fontSize: "0.6rem", height: 18, fontWeight: 600 }} />
+            )}
+            {project.supersedes && !project.supersededBy && (
+              <Chip label={`corrente${project.evolutionVersion ? ` · ${project.evolutionVersion}` : ""}`} size="small" color="success" variant="outlined"
+                sx={{ fontSize: "0.6rem", height: 18, fontWeight: 600 }} />
+            )}
           </Stack>
           <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
             <NewVersionButton project={project} />
@@ -438,7 +447,8 @@ function ProjectsPageInner() {
   // F2/§5.6: exclui rascunhos pré-fábrica (Bancada), arquivados (ocultos via Excluir) e qualquer
   // App ainda no INBOX (defesa robusta e independente do set de status — o inbox só vive na Bancada).
   const allProjects = projectsStore.list.filter(
-    (p) => !PRE_FACTORY_STATUSES.has(p.status) && p.status !== "archived" && p.productIsInbox !== true
+    // Evoluir H1: arquivado POR EVOLUÇÃO (supersededBy) continua visível como "Substituído por vN".
+    (p) => !PRE_FACTORY_STATUSES.has(p.status) && (p.status !== "archived" || !!p.supersededBy) && p.productIsInbox !== true
   );
   // Mapa final de nomes de produto: prioriza o nome que veio no próprio projeto
   // (GET /api/projects já faz JOIN em products sob o escopo de tenant correto),

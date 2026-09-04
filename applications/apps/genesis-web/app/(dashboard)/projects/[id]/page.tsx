@@ -120,8 +120,9 @@ type ArtifactsResp    = { docs: Array<{ filename: string; creator?: string; titl
 type CodeFilesResp    = { files: Array<{ path: string; sizeBytes: number; ext: string }>; appsRoot: string | null; totalFiles: number; truncated?: boolean };
 type RunInfoResp      = { runCommand: string | null; appUrl: string | null; startShPath: string | null; projectType?: string; dockerComposeExists?: boolean; setupSteps?: string[] | null };
 type GithubRepoResp   = { repo: { name: string; fullName: string; url: string; cloneUrl: string; branchUrls: { dev: string; staging: string; main: string }; pushedAt: string | null; shaDev: string | null } | null };
-type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean };
-type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string };
+type VersionEntry     = { id: string; title: string; status: string; versionNumber: number; createdAt: string; completedAt: string | null; isCurrent: boolean;
+                          isServiceCurrent?: boolean; supersededBy?: string | null; supersedes?: string | null; evolutionVersion?: string | null; isEvolution?: boolean };
+type VersionsResp     = { versions: VersionEntry[]; rootId: string; currentId: string; currentVersionId?: string | null };
 type EphemeralDeplResp = { deployment: { id: string; provider: string; appUrl: string | null; bucketName: string | null; status: string; expiresAt: string | null; ttlMinutes: number; errorMsg?: string | null } | null };
 type EphemeralResult   = { deploymentId: string; provider: string; appUrl?: string; expiresAt: string | null; ttlMinutes?: number; ttlDays?: number | null; status?: string; bucketName?: string; errorMsg?: string | null };
 // GATE 1: status do provisionamento backend (ECS Fargate/RDS). Distinto do ephemeral (S3).
@@ -1174,6 +1175,37 @@ function ProjectDetailPageInner() {
           {project.title ?? "Spec sem título"}
         </Typography>
         <StatusChip status={project.status} model={currentModel} activeStep={activeStep} />
+
+        {/* Evoluir H1 — supersessão VISÍVEL e bidirecional: o pai arquivado por evolução não "some";
+            aponta para a versão que o substituiu, e o filho aponta para a que substituiu. */}
+        {(() => {
+          const ex = (project as unknown as { extra?: Record<string, unknown> | null }).extra ?? {};
+          const supBy = ex.superseded_by as string | undefined;
+          const sup = ex.supersedes as string | undefined;
+          const ver = ex.evolution_version as string | undefined;
+          const supVer = versions.find((v) => v.id === supBy);
+          const prevVer = versions.find((v) => v.id === sup);
+          if (supBy) {
+            return (
+              <Tooltip title="Esta versão foi substituída por uma evolução aceita. Continua consultável; a versão corrente do serviço é a nova.">
+                <Chip size="small" color="warning" variant="filled" onClick={() => router.push(`/projects/${supBy}`)}
+                  label={`Substituído por v${supVer?.versionNumber ?? "?"}${supVer?.evolutionVersion ? ` (${supVer.evolutionVersion})` : ""}`} sx={{ fontWeight: 600, cursor: "pointer" }} />
+              </Tooltip>
+            );
+          }
+          if (sup) {
+            return (
+              <Tooltip title="Evolução aceita: esta é a versão corrente do serviço (mesma identidade Connect/Auto Care). Clique para ver a versão anterior.">
+                <Chip size="small" color="success" variant="outlined" onClick={() => router.push(`/projects/${sup}`)}
+                  label={`Substitui v${prevVer?.versionNumber ?? "?"}${ver ? ` · agora ${ver}` : ""}`} sx={{ fontWeight: 600, cursor: "pointer" }} />
+              </Tooltip>
+            );
+          }
+          if (ex.evolution_push_pending === true) {
+            return <Chip size="small" color="error" variant="outlined" label="Publicação pendente" sx={{ fontWeight: 600 }} />;
+          }
+          return null;
+        })()}
 
         {/* Conta Master de Gestão: read-only. Vê o cockpit do tenant, mas sem CTAs de escrita. */}
         {isMaster && (
@@ -2317,7 +2349,8 @@ function ProjectDetailPageInner() {
                         </Typography>
                         <Typography variant="caption" noWrap sx={{ flexGrow: 1, fontSize: "0.7rem",
                           color: v.isCurrent ? "text.primary" : "text.secondary" }}>
-                          {v.isCurrent ? "atual" : new Date(v.createdAt).toLocaleDateString("pt-BR", { day:"2-digit", month:"short" })}
+                          {v.isCurrent ? "aberta" : new Date(v.createdAt).toLocaleDateString("pt-BR", { day:"2-digit", month:"short" })}
+                          {v.isServiceCurrent ? " · corrente" : v.supersededBy ? " · substituída" : ""}
                         </Typography>
                         <Chip size="small" label={v.status}
                           color={v.status === "accepted" || v.status === "completed" ? "success" : v.status === "running" ? "info" : "default"}

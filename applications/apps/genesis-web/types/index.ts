@@ -114,6 +114,12 @@ export interface Project {
   parentProjectId?: string | null;
   /** Número da versão dentro da linhagem (1 = original, 2 = v2, etc.). */
   versionNumber?: number;
+  /** Evoluir H1 — supersessão visível (link bidirecional): pai arquivado por evolução aponta o filho e vice-versa. */
+  supersededBy?: string | null;
+  supersedes?: string | null;
+  /** Versão SemVer fechada no aceite da evolução (ex.: "1.1.0"). */
+  evolutionVersion?: string | null;
+  isEvolution?: boolean;
   /** Texto livre original digitado pelo usuário antes do CTO gerar a spec. */
   freeDescription?: string | null;
   /** Tipo do projeto selecionado na submissão da spec (e.g. "backend_api", "landing_page"). */

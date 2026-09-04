@@ -142,7 +142,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND p.status <> 'archived'
+           WHERE ($1::uuid IS NULL OR p.tenant_id = $1) AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -172,7 +172,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE p.tenant_id = $1 AND p.status <> 'archived'
+           WHERE p.tenant_id = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -202,7 +202,7 @@ export async function projectRoutes(app: FastifyInstance) {
              WHERE b.project_id = p.id AND b.status IN ('running','running_degraded')
              ORDER BY b.created_at DESC LIMIT 1
            ) bdep ON true
-           WHERE p.created_by = $1 AND p.status <> 'archived'
+           WHERE p.created_by = $1 AND (p.status <> 'archived' OR COALESCE(p.extra->>'superseded_by','') <> '')
            ORDER BY
              CASE WHEN p.product_id IS NULL THEN 0 ELSE 1 END ASC,
              p.product_id NULLS FIRST,
@@ -226,6 +226,12 @@ export async function projectRoutes(app: FastifyInstance) {
         completedAt: (row.completed_at as Date)?.toISOString() ?? undefined,
         parentProjectId: (row.parent_project_id as string | null) ?? null,
         versionNumber: (row.version_number as number | null) ?? 1,
+        // Evoluir H1 — supersessão VISÍVEL (link bidirecional): o pai arquivado por evolução continua
+        // listado como "Substituído por vN"; o filho aponta "Substitui vN".
+        supersededBy:   ((row.extra as Record<string, unknown> | null)?.superseded_by as string | undefined) ?? null,
+        supersedes:     ((row.extra as Record<string, unknown> | null)?.supersedes as string | undefined) ?? null,
+        evolutionVersion: ((row.extra as Record<string, unknown> | null)?.evolution_version as string | undefined) ?? null,
+        isEvolution:    ((row.extra as Record<string, unknown> | null)?.evolution === true),
         freeDescription: ((row.extra as Record<string, unknown> | null)?.free_description as string | undefined) ?? null,
         projectType:    ((row.extra as Record<string, unknown> | null)?.project_type    as string | undefined) ?? null,
         productId:       (row.product_id as string | null) ?? null,
@@ -1032,27 +1038,33 @@ export async function projectRoutes(app: FastifyInstance) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
 
-      // Find root of this lineage
-      let rootId = id;
-      if (row.parent_project_id) {
-        const parentRow = (await client.query("SELECT id, parent_project_id FROM projects WHERE id=$1", [row.parent_project_id])).rows[0];
-        rootId = parentRow?.parent_project_id ? (parentRow.parent_project_id as string) : (row.parent_project_id as string);
-      }
+      // Evoluir H1 (adversarial B): raiz REAL da linhagem (CTE ascendente, qualquer profundidade) —
+      // antes resolvia só 2 saltos (avô ?? pai) e v3 sobre v2 sobre v1 mostrava cadeia parcial.
+      const root = await resolveLineageRoot(client, id);
+      const rootId = root?.id ?? id;
 
       // Get all versions: root + all descendants
       const versionsRes = await client.query(
         `WITH RECURSIVE lineage AS (
-           SELECT id, title, status, version_number, parent_project_id, created_at, updated_at, started_at, completed_at
+           SELECT id, title, status, version_number, parent_project_id, created_at, updated_at, started_at, completed_at, extra, 0 AS depth
            FROM projects WHERE id = $1
            UNION ALL
-           SELECT p.id, p.title, p.status, p.version_number, p.parent_project_id, p.created_at, p.updated_at, p.started_at, p.completed_at
+           SELECT p.id, p.title, p.status, p.version_number, p.parent_project_id, p.created_at, p.updated_at, p.started_at, p.completed_at, p.extra, l.depth + 1
            FROM projects p JOIN lineage l ON p.parent_project_id = l.id
+           WHERE l.depth < 64
          )
-         SELECT * FROM lineage ORDER BY version_number ASC`,
+         SELECT * FROM lineage ORDER BY version_number ASC, created_at ASC`,
         [rootId],
       );
 
-      const versions = versionsRes.rows.map((v) => ({
+      // Versão CORRENTE do serviço = a aceita e não supersedida (se houver); senão, a mais nova aceita.
+      const rows = versionsRes.rows as Array<Record<string, unknown>>;
+      const ex = (v: Record<string, unknown>) => (v.extra as Record<string, unknown> | null) ?? {};
+      const liveAccepted = rows.filter((v) => v.status === "accepted" && !ex(v).superseded_by);
+      const currentVersionId = (liveAccepted[liveAccepted.length - 1]?.id as string | undefined)
+        ?? (rows.filter((v) => v.status === "accepted").slice(-1)[0]?.id as string | undefined) ?? null;
+
+      const versions = rows.map((v) => ({
         id: v.id,
         title: v.title,
         status: v.status,
@@ -1062,10 +1074,16 @@ export async function projectRoutes(app: FastifyInstance) {
         updatedAt: (v.updated_at as Date).toISOString(),
         startedAt: (v.started_at as Date)?.toISOString() ?? null,
         completedAt: (v.completed_at as Date)?.toISOString() ?? null,
+        // isCurrent = o projeto ABERTO (compat com a UI); isServiceCurrent = versão corrente do serviço.
         isCurrent: v.id === id,
+        isServiceCurrent: v.id === currentVersionId,
+        supersededBy: (ex(v).superseded_by as string | undefined) ?? null,
+        supersedes: (ex(v).supersedes as string | undefined) ?? null,
+        evolutionVersion: (ex(v).evolution_version as string | undefined) ?? null,
+        isEvolution: ex(v).evolution === true,
       }));
 
-      return reply.send({ versions, rootId, currentId: id });
+      return reply.send({ versions, rootId, currentId: id, currentVersionId });
     } finally {
       client.release();
     }
