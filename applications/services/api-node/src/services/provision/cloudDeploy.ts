@@ -17,9 +17,10 @@
 
 import { pool } from "../../db/client.js";
 import {
-  commitAndPush, dispatchWorkflow, listRecentWorkflowRuns, getWorkflowRunStatus,
+  commitAndPush, dispatchWorkflow, listRecentWorkflowRuns, getWorkflowRunStatus, getBranchSha,
   type WorkflowRunInfo,
 } from "../github.js";
+import { resolveLineageRoot } from "../lineage.js";
 import { getCloudConnection, syncSecretsToGitHub, removeSyncedSecrets } from "../cloudConnector.js";
 import {
   getCloudDeployWorkflow, getCloudTeardownWorkflow, deployWorkflowFileName, deployWorkflowPath,
@@ -28,6 +29,8 @@ import {
 } from "./deployTargets.js";
 
 export const MAX_DEPLOY_ATTEMPTS = 4;
+
+export type DeployTriggerKind = "manual" | "evolution_merge" | "rollback";
 
 export interface StartCloudDeployParams {
   projectId: string;
@@ -38,6 +41,15 @@ export interface StartCloudDeployParams {
   /** null = permanente (produção). Date = demo com teardown automático. */
   expiresAt: Date | null;
   consentedTeardown: boolean;
+  // Bloco 4 (M5): encadeamento por linhagem / redeploy pós-merge / rollback por SHA.
+  /** Sobrescreve a branch de deploy (hook de redeploy pós-merge usa "dev"). Default = decidido por estado. */
+  branch?: string;
+  /** SHA exato a deployar (redeploy pós-merge = merge_sha; rollback = SHA do deploy alvo). Default: HEAD da branch no dispatch. */
+  gitSha?: string | null;
+  /** Origem do deploy — grava trigger_kind (default 'manual'). */
+  triggerKind?: DeployTriggerKind;
+  /** Deploy anterior da linhagem que este substitui (marca o reverso superseded_by_deployment_id). */
+  supersedesId?: string | null;
 }
 
 export type StartCloudDeployResult =
@@ -56,7 +68,7 @@ interface RepoCtx {
 async function loadRepoCtx(projectId: string): Promise<RepoCtx | null> {
   const res = await pool.query(
     `SELECT r.repo_name, r.repo_full_name, r.default_branch,
-            gi.installation_id, gi.github_login
+            gi.installation_id, gi.github_login, p.extra
        FROM project_github_repos r
        JOIN projects p ON p.id = r.project_id
        LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
@@ -65,12 +77,20 @@ async function loadRepoCtx(projectId: string): Promise<RepoCtx | null> {
   );
   const row = res.rows[0];
   if (!row || !row.installation_id || !row.github_login) return null;
+  // Bloco 4 (M5) — branch de deploy por ESTADO: uma evolução ANTES do merge deploya a própria
+  // branch evolution/vN (pré-visualização in-place — a UI avisa que substitui a versão corrente
+  // na nuvem pela vN ainda não mergeada). Depois do merge (ou projeto normal) → 'dev'.
+  const extra = (row.extra as Record<string, unknown> | null) ?? {};
+  const isUnmergedEvolution = extra.evolution === true && !extra.evolution_merged_at;
+  const deployBranch = isUnmergedEvolution
+    ? ((extra.evolution_branch as string | undefined) ?? "dev")
+    : "dev";
   return {
     owner: row.github_login as string,
     repo: row.repo_name as string,
     repoFullName: (row.repo_full_name as string) ?? `${row.github_login}/${row.repo_name}`,
     defaultBranch: (row.default_branch as string) ?? "main",
-    deployBranch: "dev", // código gerado é empurrado p/ dev (githubPush.ts)
+    deployBranch, // código gerado é empurrado p/ dev (githubPush.ts); evolução não-mergeada = evolution/vN
     installationId: Number(row.installation_id),
   };
 }
@@ -102,16 +122,33 @@ export async function startCloudDeploy(p: StartCloudDeployParams): Promise<Start
       message: `Formato '${p.format}' não é viável para projeto '${projectType ?? "?"}' em ${conn.provider.toUpperCase()}.` };
   }
 
+  // Bloco 4 (M5): identidade da linhagem (recursos nomeados pela raiz) + encadeamento/rastreio.
+  const branch = p.branch ?? repo.deployBranch;
+  const triggerKind: DeployTriggerKind = p.triggerKind ?? "manual";
+  const lineageRoot = await resolveLineageRoot(pool, p.projectId).catch(() => null);
+  const lineageRootId = lineageRoot?.id ?? p.projectId;
+
   const ins = await pool.query(
     `INSERT INTO cloud_deployments
        (project_id, tenant_id, connection_id, provider, deploy_format, branch, repo_full_name,
-        workflow_file, status, expires_at, consented_teardown, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,$11)
+        workflow_file, status, expires_at, consented_teardown, created_by,
+        git_sha, lineage_root_id, trigger_kind, supersedes_deployment_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,$11,$12,$13,$14,$15)
      RETURNING id`,
-    [p.projectId, p.tenantId, p.connectionId, conn.provider, p.format, repo.deployBranch,
-     repo.repoFullName, deployWorkflowFileName(), p.expiresAt, p.consentedTeardown, p.userId],
+    [p.projectId, p.tenantId, p.connectionId, conn.provider, p.format, branch,
+     repo.repoFullName, deployWorkflowFileName(), p.expiresAt, p.consentedTeardown, p.userId,
+     p.gitSha ?? null, lineageRootId, triggerKind, p.supersedesId ?? null],
   );
   const deploymentId = ins.rows[0].id as string;
+
+  // Encadeamento: marca o deploy anterior como substituído por este (reverso de supersedes).
+  // teardownExpired passa a ignorar os substituídos — os recursos agora pertencem a esta versão.
+  if (p.supersedesId) {
+    await pool.query(
+      "UPDATE cloud_deployments SET superseded_by_deployment_id=$2, updated_at=now() WHERE id=$1",
+      [p.supersedesId, deploymentId],
+    ).catch((e) => console.warn(`[CloudDeploy] mark superseded ${p.supersedesId} failed:`, e));
+  }
 
   // 1ª tentativa fora do caminho da request (não bloqueia o 202). Falha → worker cura.
   setImmediate(() => {
@@ -120,7 +157,7 @@ export async function startCloudDeploy(p: StartCloudDeployParams): Promise<Start
     });
   });
 
-  return { ok: true, deploymentId, provider: conn.provider, format: p.format, branch: repo.deployBranch };
+  return { ok: true, deploymentId, provider: conn.provider, format: p.format, branch };
 }
 
 /**
@@ -185,13 +222,29 @@ export async function runDeployAttempt(deploymentId: string): Promise<void> {
       });
     }
 
+    // Bloco 4 (M5): resolve o SHA exato a deployar. Já gravado (redeploy pós-merge = merge_sha,
+    // rollback = SHA alvo) → usa; senão resolve o HEAD da branch de deploy AGORA e persiste
+    // (rastreabilidade + rollback futuro por SHA). Se não resolver, o workflow cai no github.ref.
+    let gitSha = (row.git_sha as string | null) ?? null;
+    if (!gitSha) {
+      gitSha = await getBranchSha(installationId, { owner, repo: repoName, branch: deployBranch });
+      if (gitSha) {
+        await pool.query(
+          "UPDATE cloud_deployments SET git_sha=$2, updated_at=now() WHERE id=$1",
+          [deploymentId, gitSha],
+        );
+      }
+    }
+
     // (c) floor de correlação (maior run_id ANTES do dispatch) + dispatch. Guardar o floor faz a
     // correlação ignorar o run antigo que falhou — sem depender de relógio. (workflow já existe
     // na branch default — garantido acima.)
     const floor = await maxRunId(installationId, owner, repoName, deployBranch);
+    const inputs: Record<string, string> = { genesis_deploy_id: deploymentId };
+    if (gitSha) inputs.genesis_git_sha = gitSha;
     await dispatchWorkflow(installationId, {
       owner, repo: repoName, workflowFile: deployWorkflowFileName(), ref: deployBranch,
-      inputs: { genesis_deploy_id: deploymentId },
+      inputs,
     });
     await pool.query(
       "UPDATE cloud_deployments SET run_id_floor=$2, updated_at=now() WHERE id=$1",
@@ -505,7 +558,10 @@ export async function reconcileCloudDeployments(): Promise<void> {
       console.warn(`[CloudDeploy] reconcile teardown-poll ${r.id} failed:`, e));
   }
 
-  // (3) demos vencidas com consentimento → teardown
+  // (3) demos vencidas com consentimento → teardown.
+  // Bloco 4 (M5): ignora deploys SUBSTITUÍDOS por uma versão mais nova (superseded_by_deployment_id
+  // preenchido) — os recursos agora pertencem ao novo deploy, que herdou o mesmo expires_at e fará
+  // o próprio teardown ao vencer. Derrubá-los aqui apagaria a versão corrente no ar.
   const expired = (await pool.query(
     `SELECT d.*, r.repo_name, r.default_branch, gi.installation_id, gi.github_login
        FROM cloud_deployments d
@@ -513,6 +569,7 @@ export async function reconcileCloudDeployments(): Promise<void> {
        LEFT JOIN tenant_github_installations gi ON gi.tenant_id = d.tenant_id
       WHERE d.status='deployed' AND d.expires_at IS NOT NULL AND d.expires_at < now()
         AND d.consented_teardown = true AND gi.installation_id IS NOT NULL
+        AND d.superseded_by_deployment_id IS NULL
       ORDER BY d.expires_at ASC LIMIT 10`,
   )).rows;
   for (const r of expired) {

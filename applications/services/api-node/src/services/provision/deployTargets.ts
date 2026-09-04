@@ -156,7 +156,14 @@ on:
         description: "Genesis deploy id (correlação)"
         required: false
         default: ""
+      genesis_git_sha:
+        description: "SHA/ref a fazer checkout (vazio = ref do dispatch — Bloco 4 M5: deploy/rollback por SHA)"
+        required: false
+        default: ""
 `;
+// Bloco 4 (M5): checkout do código no SHA exato do deploy (redeploy pós-merge / rollback por SHA).
+// Fallback para o ref do dispatch quando `genesis_git_sha` vem vazio (deploy manual comum) —
+// preserva o comportamento anterior. Aplicado a TODOS os checkouts dos templates abaixo.
 
 /**
  * `repoName` é interpolado em blocos `run:` (shell) e em nomes de recurso dos templates.
@@ -226,6 +233,8 @@ const DEPLOY_TEMPLATES: Record<string, TemplateBuilder> = {
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AWS}
       - uses: aws-actions/amazon-ecr-login@v2
       - name: Build and push image
@@ -253,6 +262,8 @@ ${AUTH_AWS}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AWS}
       - uses: actions/setup-node@v4
         with:
@@ -285,6 +296,8 @@ ${AUTH_AWS}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AWS}
       - uses: actions/setup-node@v4
         with:
@@ -319,6 +332,8 @@ ${AUTH_AWS}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AWS}
       - name: Resolve target instance
         id: ec2
@@ -345,6 +360,8 @@ ${AUTH_AWS}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AZURE}
       - name: Build and push to ACR
         run: |
@@ -364,6 +381,8 @@ ${AUTH_AZURE}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AZURE}
       - uses: actions/setup-node@v4
         with:
@@ -393,6 +412,8 @@ ${AUTH_AZURE}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AZURE}
       - uses: actions/setup-node@v4
         with:
@@ -416,6 +437,8 @@ ${AUTH_AZURE}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AZURE}
       - name: Deploy via VM run-command
         run: |
@@ -439,6 +462,8 @@ ${AUTH_AZURE}
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_GCP}
       - name: Build and push image
         run: |
@@ -461,6 +486,8 @@ ${AUTH_GCP}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_GCP}
       - uses: actions/setup-node@v4
         with:
@@ -489,6 +516,8 @@ ${AUTH_GCP}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_GCP}
       - name: Deploy Cloud Function (gen2)
         run: |
@@ -508,6 +537,8 @@ ${AUTH_GCP}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_GCP}
       - name: Deploy via gcloud compute ssh
         run: |
@@ -529,6 +560,8 @@ const TEARDOWN_TEMPLATES: Record<string, TemplateBuilder> = {
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: \${{ github.event.inputs.genesis_git_sha || github.ref }}
 ${AUTH_AWS}
       - name: Scale service to zero
         run: |

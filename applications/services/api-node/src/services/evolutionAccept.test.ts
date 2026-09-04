@@ -9,6 +9,9 @@ process.env.PROJECT_FILES_ROOT = path.join(tmpRoot, "files");
 
 const pushMock = vi.fn();
 vi.mock("./githubPush.js", () => ({ pushEvolutionToGitHub: (...args: unknown[]) => pushMock(...args) }));
+// Bloco 4 M1: o aceite dispara tryAutoMergeEvolution (best-effort) — mockado para não tocar a rede.
+const mergeMock = vi.fn(async (..._args: unknown[]) => ({ state: "skipped_flag" as const }));
+vi.mock("./evolutionMerge.js", () => ({ tryAutoMergeEvolution: (...args: unknown[]) => mergeMock(...args) }));
 
 const { bumpSemver, lastReleasedVersion, releaseChangelog, finalizeEvolutionChangelog, supersedeParent, evolutionBranchName, buildPullRequestBody, runEvolutionAcceptFlow } = await import("./evolutionAccept.js");
 
@@ -122,6 +125,8 @@ describe("evolutionAccept (Evoluir E5)", () => {
     const arch = c.calls.find((x) => /SET status = 'archived'/.test(x.sql))!;
     expect(arch.params[0]).toBe("parent");
     expect(JSON.parse(arch.params[1] as string)).toMatchObject({ superseded_by: "child", superseded_version: "2.0.0" });
+    // Bloco 4 M1: após push ok + supersessão, o aceite tenta o merge automático (best-effort).
+    expect(mergeMock).toHaveBeenCalledWith(c.db, "child");
     // sem GitHub App (skipped) também supersede — o tenant não publica de forma alguma
     pushMock.mockResolvedValueOnce({ ok: false, mode: "skipped", error: "sem GitHub App" });
     const d = mkDb({ evolution: true, evolution_parent_id: "parent" });

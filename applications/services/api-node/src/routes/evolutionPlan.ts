@@ -79,26 +79,8 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
       const ex = proj.extra ?? {};
       if (ex.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução." });
-      const filesRoot = (process.env.PROJECT_FILES_ROOT ?? "").trim();
-      let checkpoint: Record<string, unknown> | null = null;
-      if (filesRoot) {
-        try {
-          const { readFile } = await import("node:fs/promises");
-          const { join } = await import("node:path");
-          const p = join(filesRoot, ".runner-state", proj.id, "checkpoint.json");
-          let raw = await readFile(p, "utf-8");
-          try { checkpoint = JSON.parse(raw) as Record<string, unknown>; }
-          catch {
-            // runner pode estar gravando (JSON parcial): 1 releitura curta antes de desistir
-            await new Promise((r) => setTimeout(r, 150));
-            raw = await readFile(p, "utf-8");
-            checkpoint = JSON.parse(raw) as Record<string, unknown>;
-          }
-        } catch (e) {
-          if ((e as { code?: string }).code !== "ENOENT") request.log.warn({ err: e, projectId: proj.id }, "[evolution-state] checkpoint ilegível");
-          checkpoint = null;
-        }
-      }
+      const { readEvolutionCheckpoint } = await import("../services/evolutionState.js");
+      const checkpoint = await readEvolutionCheckpoint(proj.id);
       const pick = <T,>(k: string, fallback: T): T => (checkpoint && k in checkpoint ? (checkpoint[k] as T) : fallback);
       const violations = pick<Record<string, string[]>>("evolution_violations", {});
       return reply.send({
@@ -107,6 +89,8 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         checkpointSavedAt: pick<string | null>("saved_at", null),
         scope: (ex.evolution_scope as string[] | undefined) ?? pick<string[]>("evolution_scope", []),
         compat: (ex.evolution_compat as string | undefined) ?? pick<string | null>("evolution_compat", null),
+        // Bloco 4 GAP 7: o painel distingue compat declarado × default silencioso "minor".
+        compatExplicit: ex.evolution_compat_explicit === true,
         rfcs: (ex.evolution_rfcs as string[] | undefined) ?? [],
         plan: (ex.evolution_plan as Record<string, unknown> | undefined) ?? null,
         request: (ex.evolution_request_original as string | undefined) ?? (ex.evolution_request as string | undefined) ?? null,
@@ -125,7 +109,21 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
           version: (ex.evolution_version as string | undefined) ?? null,
           supersedes: (ex.supersedes as string | undefined) ?? null,
           acceptedAt: (ex.evolution_accepted_at as string | undefined) ?? null,
+          prNumber: (ex.evolution_pr_number as number | undefined) ?? null,
         },
+        // Bloco 4 M1: estado do merge automático do PR evolution/vN → dev (degrada p/ null se ausente).
+        merge: {
+          state: (ex.evolution_merge_state as string | undefined) ?? null,
+          sha: (ex.evolution_merge_sha as string | undefined) ?? null,
+          at: (ex.evolution_merged_at as string | undefined) ?? null,
+          method: (ex.evolution_merge_method as string | undefined) ?? null,
+          actor: (ex.evolution_merge_actor as string | undefined) ?? null,
+          detail: (ex.evolution_merge_detail as string | undefined) ?? null,
+          prNumber: (ex.evolution_pr_number as number | undefined) ?? null,
+          acceptedPermissions: (ex.evolution_merge_accepted_permissions as string | undefined) ?? null,
+        },
+        // Bloco 4 M7 (Python): métricas de reescrita do Dev em evolução (do checkpoint); null se ausente.
+        rewriteStats: pick<Record<string, unknown> | null>("evolution_dev_rewrite_stats", null),
       });
     },
   );
@@ -189,6 +187,50 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         ok: !pending, pending,
         message: pending ? "A publicação falhou de novo — veja o histórico do projeto para o motivo." : "Evolução publicada; versão anterior supersedida.",
         version: after?.extra?.evolution_version ?? null,
+      });
+    },
+  );
+
+  // Bloco 4 (M1) — merge manual do PR evolution/vN → dev (o botão "Mergear agora" do painel).
+  // `force:true` contorna só as travas de POLÍTICA (flag, compat, regressões, sem-testes); jamais as
+  // travas de realidade do GitHub (conflito/proteção/permissão/head movido) nem o fail-closed sem
+  // evidência. `confirm:"MERGE"` é OBRIGATÓRIO quando a mudança é MAJOR ou quando a trava seria
+  // `blocked_regressions`/`blocked_no_tests` — o humano assume o risco explicitamente.
+  app.post<{ Params: { id: string }; Body: { confirm?: string } }>(
+    "/api/projects/:id/evolution/merge",
+    { bodyLimit: 4 * 1024 },
+    async (request, reply) => {
+      const user = getUser(request);
+      if (user.svc === "runner") return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não mergeia." });
+      if (user.role === "zentriz_admin") return reply.status(403).send({ code: "MANAGEMENT_ACCOUNT", message: "Conta de gestão não mergeia código do tenant." });
+      const proj = await loadProject(request.params.id);
+      if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      if (user.role !== "tenant_admin" && !isProjectOwner(user, proj)) return reply.status(403).send({ code: "FORBIDDEN", message: "Só o administrador do tenant ou o dono do projeto mergeia." });
+      if (proj.extra?.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução." });
+      if (proj.status !== "accepted") return reply.status(409).send({ code: "NOT_ACCEPTED", message: "Só evoluções aceitas podem ser mergeadas." });
+      const ex = proj.extra ?? {};
+      if (typeof ex.evolution_pr_number !== "number" || ex.evolution_push_pending === true) {
+        return reply.status(409).send({ code: "NO_PR", message: "Não há PR publicado para esta evolução (verifique a publicação)." });
+      }
+      // Confirmação explícita para os casos de risco (MAJOR / sem-testes / regressões).
+      const compat = String(ex.evolution_compat ?? "minor").toLowerCase();
+      const priorState = String(ex.evolution_merge_state ?? "");
+      const needsConfirm = compat === "major" || priorState === "blocked_regressions" || priorState === "blocked_no_tests";
+      if (needsConfirm && (request.body?.confirm ?? "") !== "MERGE") {
+        return reply.status(400).send({
+          code: "CONFIRM_REQUIRED",
+          message: "Esta evolução exige confirmação (mudança MAJOR ou sem evidência limpa de testes). Reenvie com { confirm: \"MERGE\" }.",
+        });
+      }
+      const { tryAutoMergeEvolution } = await import("../services/evolutionMerge.js");
+      const result = await tryAutoMergeEvolution(pool, proj.id, { force: true, actorUserId: user.id });
+      const merged = result.state === "merged";
+      return reply.status(merged ? 200 : 409).send({
+        ok: merged,
+        state: result.state,
+        sha: result.sha ?? null,
+        detail: result.detail ?? null,
+        acceptedPermissions: result.acceptedPermissions ?? null,
       });
     },
   );

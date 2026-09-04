@@ -263,6 +263,8 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
           evolution_branch: push.branch ?? null, evolution_repo: push.fullName ?? null,
           evolution_pr_url: push.prUrl ?? null, evolution_compare_url: push.compareUrl ?? null,
           evolution_pushed_files: push.fileCount ?? null, evolution_deleted_files: push.deleted ?? 0,
+          // Bloco 4 (M0): número do PR + SHA do head empurrado — insumos do merge automático (M1).
+          evolution_pr_number: push.prNumber ?? null, evolution_head_sha: push.headSha ?? null,
         })],
       ).catch(() => {});
     }
@@ -293,6 +295,19 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
       : `ℹ️ Versão anterior não alterada (já arquivada/superseded ou inexistente). Esta é v${version}.`);
   } catch (e) {
     await log(`⚠️ Supersessão do pai falhou: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Bloco 4 (M1) — passo ADICIONAL e opcional: merge automático do PR evolution/vN → dev.
+  // Best-effort e atrás de flag (EVOLUTION_AUTO_MERGE, default OFF): nunca derruba o aceite, que já
+  // concluiu (push + supersessão). Sem flag → `skipped_flag` (nada muda; comportamento atual).
+  try {
+    const { tryAutoMergeEvolution } = await import("./evolutionMerge.js");
+    const merge = await tryAutoMergeEvolution(db, childId);
+    if (merge.state !== "skipped_flag" && merge.state !== "skipped_no_pr") {
+      await log(`🔀 Merge automático: ${merge.state}${merge.detail ? ` — ${merge.detail}` : ""}.`);
+    }
+  } catch (e) {
+    await log(`⚠️ Tentativa de merge automático falhou (aceite preservado): ${e instanceof Error ? e.message : String(e)}`);
   }
   return true;
 }

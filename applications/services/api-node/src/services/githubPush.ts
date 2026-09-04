@@ -67,6 +67,12 @@ export interface DeadpoolRegisterArgs {
   // manutenção/evolução SEM clone de rede (allow_network_clone=OFF por padrão). Opcional →
   // retrocompatível: ausente = Deadpool cai no fluxo antigo (clone quando habilitado).
   localPath?: string | null;
+  // Bloco 4 M3 (Auto Care pós-merge): branch da working tree local que o Deadpool deve seguir. O
+  // handoff pós-merge reenvia `branch:"dev"` (a evolução foi mergeada em `dev`) para que os PLANOS
+  // de correção do Deadpool nasçam contra `dev` e não `main`. Opcional → retrocompatível: ausente =
+  // Deadpool mantém o comportamento atual (base `main` default). Só tem efeito com a flag do lado
+  // Deadpool `DEADPOOL_REGISTRY_BRANCH_ENFORCE=on` (M4).
+  branch?: string | null;
   // Runtime (opcional): enviado quando o monitoramento é ativado para um projeto deployado.
   appUrl?: string | null;
   healthUrl?: string | null;
@@ -158,6 +164,7 @@ export async function registerProjectWithDeadpool(
     // Campos runtime/monitoring só entram no payload quando fornecidos → retrocompatível
     // com o registro #60 (que manda apenas systemId/serviceId/repoUrl/installationId).
     if (args.localPath != null) body.localPath = args.localPath;
+    if (args.branch != null) body.branch = args.branch; // M3: branch que o Deadpool segue (base dos PRs).
     if (args.appUrl != null) body.appUrl = args.appUrl;
     if (args.healthUrl != null) body.healthUrl = args.healthUrl;
     if (args.environment != null) body.environment = args.environment;
@@ -264,6 +271,39 @@ export async function checkoutNewBranch(projectId: string, branch: string): Prom
   }
 }
 
+/**
+ * Alinha uma working tree LOCAL já git-linkada (com remote `origin` configurado) ao tip de
+ * `origin/<branch>`, autenticando o fetch por header (token só em memória, NUNCA persistido em
+ * config/URL). Extraído de `gitLinkProjectFolder` para ser reutilizado pelo realinhamento pós-merge
+ * (Bloco 4 M3): após o squash da evolução em `dev`, `evolution/vN` local não é ancestral de `dev`,
+ * então usamos `checkout -B <branch>` (sem start-point, não toca a árvore: mesmo commit) seguido de
+ * `reset --hard origin/<branch>` (move branch + árvore ao tip; sobrescreve colisões de não-rastreados
+ * — o caso do git-link, onde os arquivos chegam como untracked). Devolve o HEAD resultante.
+ * NUNCA lança — best-effort. Pressupõe `origin` já adicionado e `git` disponível (checado pelo caller).
+ */
+export async function fetchAndResetBranch(opts: {
+  localPath: string;
+  branch: string;
+  token: string;
+}): Promise<{ ok: boolean; head?: string; error?: string }> {
+  const git = (args: string[]) =>
+    execFileAsync("git", ["-C", opts.localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+  try {
+    // Auth via header (Basic x-access-token:token) só nesta invocação — não fica em nenhum config.
+    const authHeader = `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${opts.token}`).toString("base64")}`;
+    await git(["-c", authHeader, "fetch", "--depth=1", "-q", "origin", opts.branch]);
+    // Cria/troca para o branch local <branch> no HEAD atual (não toca a árvore) e então força ao tip.
+    await git(["checkout", "-q", "-B", opts.branch]);
+    await git(["reset", "--hard", "-q", `origin/${opts.branch}`]);
+    // Rastreio upstream = origin/<branch> (o reset não seta upstream sozinho).
+    await git(["branch", `--set-upstream-to=origin/${opts.branch}`, opts.branch]).catch(() => {});
+    const { stdout } = await git(["rev-parse", "HEAD"]);
+    return { ok: true, head: stdout.trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function gitLinkProjectFolder(opts: {
   projectId: string;
   fullName: string;
@@ -298,8 +338,6 @@ export async function gitLinkProjectFolder(opts: {
       permissions: { contents: "write" },
     });
     const plainUrl = opts.remoteUrl ?? `https://github.com/${opts.fullName}.git`;
-    // Auth via header (Basic x-access-token:token) só no fetch — não fica em nenhum config.
-    const authHeader = `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
 
     // `-b <branch>`: o branch inicial já nasce com o nome alvo (idempotente em repo existente).
     await git(["init", "-q", "-b", opts.branch]);
@@ -309,15 +347,11 @@ export async function gitLinkProjectFolder(opts: {
     // Remote LIMPO (sem token), idempotente entre re-execuções.
     await git(["remote", "remove", "origin"]).catch(() => {});
     await git(["remote", "add", "origin", plainUrl]);
-    // Fetch autenticado pontual do branch alvo (token só no header desta invocação).
-    await git(["-c", authHeader, "fetch", "--depth=1", "-q", "origin", opts.branch]);
-    // Alinha a árvore local ao tip remoto (histórico comum p/ PRs limpos do Deadpool).
-    // reset --hard (e não checkout) porque a pasta JÁ contém os arquivos enviados como
-    // NÃO-rastreados: o checkout recusaria ("untracked would be overwritten"); o reset
-    // sobrescreve as colisões e faz o branch nascer apontando ao tip remoto.
-    await git(["reset", "--hard", "-q", `origin/${opts.branch}`]);
-    // Rastreio upstream = origin/<branch> (o reset não seta upstream sozinho).
-    await git(["branch", `--set-upstream-to=origin/${opts.branch}`, opts.branch]).catch(() => {});
+    // Fetch autenticado + alinhamento da árvore ao tip remoto (histórico comum p/ PRs limpos do
+    // Deadpool). O helper usa reset --hard porque a pasta JÁ contém os arquivos enviados como
+    // NÃO-rastreados: o checkout recusaria ("untracked would be overwritten").
+    const aligned = await fetchAndResetBranch({ localPath, branch: opts.branch, token });
+    if (!aligned.ok) return { ok: false, localPath, error: aligned.error };
     return { ok: true, localPath };
   } catch (err) {
     return { ok: false, localPath, error: err instanceof Error ? err.message : String(err) };
@@ -560,6 +594,10 @@ export interface EvolutionPushResult {
   fileCount?: number;
   deleted?: number;
   error?: string;
+  // Bloco 4 (M0): número do PR aberto (para o merge automático) e SHA do head empurrado (para o
+  // `sha` do merge — proteção contra push humano entre o push e o merge, GAP 2). Só em mode="evolution".
+  prNumber?: number;
+  headSha?: string;
 }
 
 /**
@@ -667,7 +705,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     if (row.tenant_id) {
       notifyTelegramTenant(row.tenant_id as string, `🔄 Evolução v${opts.versionLabel} de *${row.title}*: ${pr.ok ? pr.url : `https://github.com/${lineageRepo.repo_full_name}/tree/${branch}`}`).catch(() => {});
     }
-    return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, deleted, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl };
+    return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, deleted, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl, prNumber: pr.ok ? pr.number : undefined, headSha: sha };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[GitHubPush] Evolution push failed for ${projectId}:`, err);

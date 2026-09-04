@@ -47,6 +47,8 @@ vi.mock("../services/evolutionPlanner.js", () => planner);
 vi.mock("../services/evolutionGate.js", () => ({ loadRfcTemplate: () => "# RFC-NNNN — <título>\n\n## Sumário\n", RFC_DIR: "docs/rfc" }));
 const accept = { runEvolutionAcceptFlow: vi.fn(async () => { project = { ...project, extra: { ...(project.extra as object), evolution_push_pending: false } }; return true; }) };
 vi.mock("../services/evolutionAccept.js", () => accept);
+const merge = { tryAutoMergeEvolution: vi.fn(async (): Promise<{ state: string; sha?: string; detail?: string }> => ({ state: "merged", sha: "MERGESHA" })) };
+vi.mock("../services/evolutionMerge.js", () => merge);
 
 let app: FastifyInstance;
 let filesRoot: string;
@@ -62,6 +64,7 @@ beforeEach(async () => {
   project = { id: PROJ, tenant_id: TENANT, created_by: USER_ID, status: "spec_submitted", extra: { evolution: true, evolution_request: "quero pdf" } };
   queries = [];
   planner.createPlanJob.mockClear(); planner.runEvolutionPlan.mockClear(); planner.upsertSpecFile.mockClear(); accept.runEvolutionAcceptFlow.mockClear();
+  merge.tryAutoMergeEvolution.mockClear(); merge.tryAutoMergeEvolution.mockResolvedValue({ state: "merged", sha: "MERGESHA" });
 });
 
 describe("POST /api/projects/:id/evolution-plan", () => {
@@ -122,6 +125,60 @@ describe("POST /api/projects/:id/evolution/republish (H2)", () => {
     expect(r.statusCode).toBe(200);
     expect(accept.runEvolutionAcceptFlow).toHaveBeenCalledWith(expect.anything(), PROJ, { republish: true });
     expect(JSON.parse(r.body)).toMatchObject({ ok: true, pending: false, version: "1.1.0" });
+  });
+});
+
+describe("POST /api/projects/:id/evolution/merge (M1)", () => {
+  it("guardas: runner → 403; gestão → 403; não-dono → 403; não-evolução → 409; não-aceito → 409; sem PR → 409 NO_PR", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5 } };
+    currentUser = { ...currentUser, svc: "runner" };
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(403);
+    currentUser = { id: "z", role: "zentriz_admin", tenantId: null };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(403); expect(JSON.parse(r.body).code).toBe("MANAGEMENT_ACCOUNT");
+    currentUser = { id: OTHER, role: "user", tenantId: TENANT };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(403);
+    currentUser = { id: USER_ID, role: "user", tenantId: TENANT };
+    project = { ...project, extra: { evolution: false } };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(409); expect(JSON.parse(r.body).code).toBe("NOT_EVOLUTION");
+    project = { ...project, status: "running", extra: { evolution: true, evolution_pr_number: 5 } };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(409); expect(JSON.parse(r.body).code).toBe("NOT_ACCEPTED");
+    project = { ...project, status: "accepted", extra: { evolution: true } };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(409); expect(JSON.parse(r.body).code).toBe("NO_PR");
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalled();
+  });
+
+  it("MAJOR sem confirm → 400 CONFIRM_REQUIRED; com confirm → chama force:true + actorUserId e devolve 200", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "major" } };
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(400); expect(JSON.parse(r.body).code).toBe("CONFIRM_REQUIRED");
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalled();
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+    expect(r.statusCode).toBe(200);
+    expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { force: true, actorUserId: USER_ID });
+    expect(JSON.parse(r.body)).toMatchObject({ ok: true, state: "merged", sha: "MERGESHA" });
+  });
+
+  it("estado de risco (blocked_regressions) sem confirm → 400; minor limpo → 200 sem confirm", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor", evolution_merge_state: "blocked_regressions" } };
+    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(400); expect(JSON.parse(r.body).code).toBe("CONFIRM_REQUIRED");
+    project = { ...project, extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(200);
+  });
+
+  it("estado não-merged → 409 com o estado", async () => {
+    merge.tryAutoMergeEvolution.mockResolvedValueOnce({ state: "blocked_conflict", detail: "conflito com 'dev'" });
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(409);
+    expect(JSON.parse(r.body)).toMatchObject({ ok: false, state: "blocked_conflict", detail: "conflito com 'dev'" });
   });
 });
 

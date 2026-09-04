@@ -25,7 +25,9 @@ import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import Link from "@mui/material/Link";
 import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
+import CallSplitIcon from "@mui/icons-material/CallSplit";
 import { apiGet, apiPost } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
 
@@ -47,6 +49,11 @@ type MonitoringState = {
   azureMessageColumn: string | null;
   gcpProjectId: string | null;
   gcpLogFilter: string | null;
+  // Bloco 4 M3 (Auto Care pós-merge): handoff de monitoramento entre versões da linhagem.
+  // migratedToProjectId != null → este projeto (pai arquivado) cedeu o monitoramento à nova versão.
+  // migratedFromProjectId != null → este projeto herdou o monitoramento da versão anterior.
+  migratedToProjectId: string | null;
+  migratedFromProjectId: string | null;
 };
 
 const PROVIDER_LABELS: Record<MonitorProvider, string> = {
@@ -150,6 +157,23 @@ export default function DeadpoolMonitorCard({
   if (!isAdmin || loading) return null;
   if (!state || !state.entitled) return null;
 
+  // Bloco 4 M3: pai arquivado cujo monitoramento migrou para a nova versão → card informativo, sem toggle.
+  if (state.migratedToProjectId) {
+    return (
+      <Alert severity="info" icon={<CallSplitIcon />} sx={{ mb: 2 }}>
+        <Typography variant="body2" fontWeight={600} sx={{ mb: 0.5 }}>
+          Monitoramento Auto Care migrado
+        </Typography>
+        <Typography variant="caption" color="text.secondary" component="div">
+          O monitoramento desta versão foi transferido para a nova versão após o merge da evolução em
+          {" "}
+          <Link href={`/projects/${state.migratedToProjectId}`} underline="hover">a versão atual</Link>.
+          O histórico de incidentes e aprendizados do Auto Care é preservado.
+        </Typography>
+      </Alert>
+    );
+  }
+
   const active = state.active;
   // Client-side guard: Azure exige tabela, GCP exige filtro (o servidor também valida com 400).
   const canActivate =
@@ -174,6 +198,11 @@ export default function DeadpoolMonitorCard({
           sx={{ height: 20, fontSize: "0.68rem" }}
         />
       </Stack>
+      {state.migratedFromProjectId && (
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 0.5, fontStyle: "italic" }}>
+          Monitoramento herdado da versão anterior (Auto Care segue esta versão em &apos;dev&apos;).
+        </Typography>
+      )}
       <Typography variant="caption" color="text.secondary" component="div">
         {active
           ? `O Auto Care monitora os logs deste projeto (${PROVIDER_LABELS[state.monitorProvider ?? "cloudwatch"]}) e recebe chamados de erro em tempo real, atuando em correções no repositório.`

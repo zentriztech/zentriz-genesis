@@ -434,7 +434,8 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         `SELECT active, system_id, service_id, activated_at, deactivated_at,
                 last_registered_at, last_error,
                 monitor_provider, azure_workspace_id, azure_table, azure_message_column,
-                gcp_project_id, gcp_log_filter
+                gcp_project_id, gcp_log_filter,
+                migrated_to_project_id, migrated_from_project_id
            FROM project_deadpool_monitoring WHERE project_id = $1`,
         [id],
       );
@@ -455,6 +456,9 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         azureMessageColumn: m?.azure_message_column ?? null,
         gcpProjectId: m?.gcp_project_id ?? null,
         gcpLogFilter: m?.gcp_log_filter ?? null,
+        // Bloco 4 M3 (Auto Care pós-merge): handoff de monitoramento entre versões da linhagem.
+        migratedToProjectId: m?.migrated_to_project_id ?? null,
+        migratedFromProjectId: m?.migrated_from_project_id ?? null,
       });
     },
   );

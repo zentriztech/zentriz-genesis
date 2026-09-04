@@ -200,6 +200,10 @@ export async function evaluateEvolutionGate(db: Db, projectId: string, extra: Re
     evolution_rfcs: rfcs.map((r) => r.path),
     evolution_scope: scope,
     evolution_compat: compat,
+    // Bloco 4 GAP 7: `compat` pode ser `null` (nenhuma seção "Compatibilidade" casou) e o aceite
+    // normaliza `null → "minor"` silenciosamente — um breaking change entraria como minor. O merge
+    // automático exige compat EXPLÍCITO; só é explícito se ao menos um RFC declarou a compatibilidade.
+    evolution_compat_explicit: rfcs.some((r) => r.compat !== null),
     evolution_request: `Implementar os RFCs abaixo (fonte autoritativa do delta — ver docs/rfc/):\n${synthesized}`,
   };
   if (typeof extra.evolution_request === "string" && extra.evolution_request && !extra.evolution_request_original) {

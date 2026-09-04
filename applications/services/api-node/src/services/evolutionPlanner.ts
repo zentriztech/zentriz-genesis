@@ -201,6 +201,8 @@ export interface PlanDoc { slug: string; title: string; content: string }
 export interface EvolutionPlan {
   summary: string;
   compat: Compat;
+  /** Bloco 4 GAP 7: true quando o LLM devolveu o campo `compat` (não foi o default silencioso "minor"). */
+  compatExplicit: boolean;
   questions: string[];
   rfcs: PlanDoc[];
   adrs: PlanDoc[];
@@ -250,6 +252,8 @@ export function parseEvolutionPlan(text: string): EvolutionPlan {
   const j = extractJson(text) as Record<string, unknown>;
   const compatRaw = String(j.compat ?? "minor").toLowerCase();
   const compat: Compat = compatRaw === "major" || compatRaw === "patch" ? compatRaw : "minor";
+  // GAP 7: só é explícito se o LLM devolveu um valor SemVer reconhecível (não o default "minor").
+  const compatExplicit = typeof j.compat === "string" && ["major", "minor", "patch"].includes(j.compat.trim().toLowerCase());
   const changelog = Object.fromEntries(CHANGELOG_KEYS.map((k) => {
     const v = (j.changelog as Record<string, unknown> | undefined)?.[k];
     return [k, Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim()).map((x) => String(x).trim().slice(0, 300)).slice(0, 20) : []];
@@ -261,6 +265,7 @@ export function parseEvolutionPlan(text: string): EvolutionPlan {
   return {
     summary: typeof j.summary === "string" ? j.summary.trim().slice(0, 1200) : "",
     compat,
+    compatExplicit,
     questions: Array.isArray(j.questions) ? j.questions.filter((q) => typeof q === "string" && q.trim()).map((q) => String(q).trim().slice(0, 400)).slice(0, 8) : [],
     rfcs,
     adrs: docList(j.adrs, MAX_ADRS),
@@ -444,6 +449,8 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
         questions: plan.questions,
       },
       evolution_compat: plan.compat,
+      // GAP 7: explícito só quando o arquiteto (LLM) declarou a compatibilidade (não o default "minor").
+      evolution_compat_explicit: plan.compatExplicit,
     })],
   );
   return { written, rfcProblems, warnings, compat: plan.compat, summary: plan.summary, questions: plan.questions };

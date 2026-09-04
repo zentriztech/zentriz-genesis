@@ -168,10 +168,30 @@ export function checkGlobalAppKeyReadable(): { ok: boolean; path?: string; error
 }
 
 /**
+ * Seam de teste: injeta a factory de Octokit para unit tests (evita rede/credenciais reais).
+ * `null` restaura o comportamento de produção. Padrão espelhado em outros serviços com `vi.mock`.
+ */
+type OctokitFactory = (installationId: number, opts?: { requireApp?: boolean }) => Promise<Octokit>;
+let _octokitFactoryForTests: OctokitFactory | null = null;
+export function __setOctokitFactoryForTests(f: OctokitFactory | null): void {
+  _octokitFactoryForTests = f;
+}
+
+/**
  * FT-12: Returns an authenticated Octokit for an installation.
  * Priority: (1) tenant app_id + private_key from DB, (2) global env App, (3) PAT fallback.
+ *
+ * SEGURANÇA (GAP 4, bloco 4): `opts.requireApp=true` RECUSA o fallback PAT global. O PAT
+ * (`GITHUB_TOKEN`) é amplo e único para toda a Zentriz — usá-lo para mergear/observar PR de um
+ * repo de tenant cruzaria fronteiras entre tenants. Operações que agem sobre o repo do tenant
+ * (merge, observador) passam `requireApp:true` → sem App configurada, falham fechado (o PR fica
+ * aberto), em vez de agir com credencial da casa.
  */
-async function getOctokitForInstallation(installationId: number): Promise<Octokit> {
+export async function getOctokitForInstallation(
+  installationId: number,
+  opts: { requireApp?: boolean } = {},
+): Promise<Octokit> {
+  if (_octokitFactoryForTests) return _octokitFactoryForTests(installationId, opts);
   // 1. Try tenant-specific GitHub App
   const tenantCfg = await _getTenantAppConfig(installationId);
   if (tenantCfg?.appId && tenantCfg?.privateKey) {
@@ -198,6 +218,10 @@ async function getOctokitForInstallation(installationId: number): Promise<Octoki
   }
 
   // 3. PAT fallback (dev/local without App configured)
+  if (opts.requireApp) {
+    // GAP 4: operação sobre repo de tenant não pode usar o PAT global (cross-tenant). Fail-closed.
+    throw new Error("GitHub App required for this operation (global PAT fallback refused to avoid cross-tenant credential use).");
+  }
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("No GitHub credentials. Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY, ENCRYPTION_KEY, or GITHUB_TOKEN.");
   return new Octokit({ auth: token });
@@ -699,6 +723,99 @@ export async function openPullRequest(
   }
 }
 
+// ── Bloco 4 (Evoluir pós-merge) — primitivas de merge de PR (mesmo padrão de openPullRequest:
+//    nunca lançam; requireApp:true recusa o PAT global — GAP 4). ─────────────────────────────
+
+export interface PullRequestInfo {
+  ok: true;
+  state: string;
+  merged: boolean;
+  /** `null` = GitHub ainda computando mergeability (re-consultar). */
+  mergeable: boolean | null;
+  mergeableState: string;
+  headSha: string;
+  baseRef: string;
+  mergeCommitSha: string | null;
+}
+export type GetPullRequestResult = PullRequestInfo | { ok: false; status?: number; error: string };
+
+/** Lê o estado de um PR (state/merged/mergeable/mergeable_state/head.sha/base.ref). Nunca lança. */
+export async function getPullRequest(
+  installationId: number,
+  opts: { owner: string; repo: string; number: number },
+): Promise<GetPullRequestResult> {
+  try {
+    const octokit = await getOctokitForInstallation(installationId, { requireApp: true });
+    const { data } = await octokit.pulls.get({ owner: opts.owner, repo: opts.repo, pull_number: opts.number });
+    return {
+      ok: true,
+      state: String(data.state),
+      merged: Boolean(data.merged),
+      mergeable: data.mergeable === null || data.mergeable === undefined ? null : Boolean(data.mergeable),
+      mergeableState: String((data as { mergeable_state?: string }).mergeable_state ?? "unknown"),
+      headSha: String(data.head?.sha ?? ""),
+      baseRef: String(data.base?.ref ?? ""),
+      mergeCommitSha: (data.merge_commit_sha as string | null) ?? null,
+    };
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    return { ok: false, status, error: (err instanceof Error ? err.message : String(err)).slice(0, 400) };
+  }
+}
+
+export type MergePullRequestResult =
+  | { ok: true; sha: string; merged: true }
+  | { ok: false; status: number; error: string; acceptedPermissions?: string };
+
+/**
+ * Mergeia um PR. `sha` = head que o Genesis empurrou → o GitHub recusa (409) se alguém empurrou
+ * no head entre o push e o merge (GAP 2). 403 traz `X-Accepted-GitHub-Permissions` (o que falta na
+ * App). Nunca lança; devolve o status para o chamador mapear em estado legível.
+ */
+export async function mergePullRequest(
+  installationId: number,
+  opts: { owner: string; repo: string; number: number; method?: "merge" | "squash" | "rebase"; sha?: string; commitTitle?: string; commitMessage?: string },
+): Promise<MergePullRequestResult> {
+  try {
+    const octokit = await getOctokitForInstallation(installationId, { requireApp: true });
+    const { data } = await octokit.pulls.merge({
+      owner: opts.owner, repo: opts.repo, pull_number: opts.number,
+      merge_method: opts.method ?? "squash",
+      sha: opts.sha,
+      commit_title: opts.commitTitle ? opts.commitTitle.slice(0, 250) : undefined,
+      commit_message: opts.commitMessage ? opts.commitMessage.slice(0, 4000) : undefined,
+    });
+    return { ok: true, sha: String(data.sha ?? ""), merged: true };
+  } catch (err) {
+    const e = err as { status?: number; response?: { headers?: Record<string, string> } };
+    const status = e.status ?? 0;
+    const accepted = e.response?.headers?.["x-accepted-github-permissions"];
+    return {
+      ok: false, status,
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 400),
+      ...(accepted ? { acceptedPermissions: String(accepted) } : {}),
+    };
+  }
+}
+
+/** Única ação corretiva automática (estado `behind`): atualiza o head do PR com a base. Nunca lança. */
+export async function updatePullRequestBranch(
+  installationId: number,
+  opts: { owner: string; repo: string; number: number; expectedHeadSha?: string },
+): Promise<{ ok: boolean; status?: number; error?: string }> {
+  try {
+    const octokit = await getOctokitForInstallation(installationId, { requireApp: true });
+    await octokit.pulls.updateBranch({
+      owner: opts.owner, repo: opts.repo, pull_number: opts.number,
+      expected_head_sha: opts.expectedHeadSha,
+    });
+    return { ok: true };
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    return { ok: false, status, error: (err instanceof Error ? err.message : String(err)).slice(0, 400) };
+  }
+}
+
 export async function ensureThreeBranches(
   installationId: number,
   owner: string,
@@ -814,6 +931,26 @@ export async function dispatchWorkflow(
     ref: opts.ref,
     inputs: opts.inputs,
   });
+}
+
+/**
+ * SHA atual (HEAD) de um branch. Bloco 4 (M5): resolvido no momento do dispatch para carimbar
+ * `git_sha` no deploy (rastreabilidade + rollback por SHA). Devolve null se o branch não existe
+ * ou a chamada falha — o deploy segue sem SHA (fallback do workflow: github.ref).
+ */
+export async function getBranchSha(
+  installationId: number,
+  opts: { owner: string; repo: string; branch: string },
+): Promise<string | null> {
+  try {
+    const octokit = await getOctokitForInstallation(installationId);
+    const { data } = await octokit.git.getRef({
+      owner: opts.owner, repo: opts.repo, ref: `heads/${opts.branch}`,
+    });
+    return data.object?.sha ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export interface WorkflowRunInfo {

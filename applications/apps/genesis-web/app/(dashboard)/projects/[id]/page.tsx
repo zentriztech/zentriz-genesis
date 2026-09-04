@@ -154,6 +154,14 @@ type CloudDeploymentRow = {
   run_url: string | null; attempts: number; last_error: string | null;
   expires_at: string | null; consented_teardown: boolean;
   created_at: string; updated_at: string;
+  // Bloco 4 (M5/M6): rastreio de linhagem + rollback por SHA.
+  git_sha?: string | null;
+  trigger_kind?: string | null;
+  supersedes_deployment_id?: string | null;
+  superseded_by_deployment_id?: string | null;
+};
+const TRIGGER_LABEL: Record<string, string> = {
+  manual: "Manual", evolution_merge: "Pós-merge", rollback: "Rollback",
 };
 type MetricsResp      = { by_agent: Array<{ agent: string; calls: number; input_tokens: number; output_tokens: number }>; totals: { calls: number; input_tokens: number; output_tokens: number; estimated_cost_usd: number } };
 
@@ -518,6 +526,7 @@ function ProjectDetailPageInner() {
     if (deployOptions.deploy_ttl_days) setCloudTtlDays((prev) => (prev === 7 ? deployOptions.deploy_ttl_days! : prev));
   }, [deployOptions]);
   const [cloudDeployments, setCloudDeployments] = useState<CloudDeploymentRow[]>([]);
+  const [rollbackId, setRollbackId] = useState<string | null>(null); // Bloco 4 (M6): rollback por SHA em andamento
   const [retryTeardownLoading, setRetryTeardownLoading] = useState(false); // BUGFIX P2
   const [countdown, setCountdown]   = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen]     = useState(false);
@@ -2037,8 +2046,11 @@ function ProjectDetailPageInner() {
                 Deploys na nuvem
               </Typography>
               <Stack spacing={0.75} sx={{ mt: 0.75 }}>
-                {cloudDeployments.map((d) => {
+                {cloudDeployments.map((d, idx) => {
                   const meta = STATUS_META[d.status] ?? { label: d.status, color: "default" as const };
+                  // Rollback por SHA (M6): só faz sentido reverter para um deploy ANTERIOR (idx>0) que
+                  // tenha SHA gravado e ainda não tenha sido substituído. O topo da lista é o corrente.
+                  const canRollback = idx > 0 && !!d.git_sha && !d.superseded_by_deployment_id;
                   return (
                     <Box key={d.id} sx={{ p: 1, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
                       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -2046,6 +2058,21 @@ function ProjectDetailPageInner() {
                         <Typography variant="caption" fontWeight={600}>
                           {PROVIDER_LABEL[d.provider] ?? d.provider} · {d.deploy_format}
                         </Typography>
+                        {d.trigger_kind && d.trigger_kind !== "manual" && (
+                          <Chip size="small" variant="outlined" color="info"
+                            label={TRIGGER_LABEL[d.trigger_kind] ?? d.trigger_kind}
+                            sx={{ height: 20, fontSize: "0.62rem" }} />
+                        )}
+                        {d.git_sha && (
+                          <Tooltip title={d.git_sha}>
+                            <Chip size="small" variant="outlined" label={`SHA ${d.git_sha.slice(0, 8)}`}
+                              sx={{ height: 20, fontSize: "0.62rem", fontFamily: "monospace" }} />
+                          </Tooltip>
+                        )}
+                        {d.superseded_by_deployment_id && (
+                          <Chip size="small" variant="outlined" label="substituído"
+                            sx={{ height: 20, fontSize: "0.62rem", opacity: 0.7 }} />
+                        )}
                         {d.expires_at ? (
                           <Chip size="small" variant="outlined" label={`expira ${fmtTime(d.expires_at)}`} sx={{ height: 20, fontSize: "0.62rem" }} />
                         ) : (
@@ -2057,6 +2084,28 @@ function ProjectDetailPageInner() {
                           </Tooltip>
                         )}
                         <Box sx={{ flexGrow: 1 }} />
+                        {canRollback && (
+                          <Button size="small" color="warning" variant="outlined"
+                            disabled={rollbackId !== null}
+                            startIcon={rollbackId === d.id ? <CircularProgress size={12} color="inherit" /> : undefined}
+                            onClick={async () => {
+                              setRollbackId(d.id); setDeployError(null);
+                              try {
+                                await apiPost(`/api/projects/${id}/deploy/cloud/rollback`, { deploymentId: d.id });
+                                const r = await apiGet<{ deployments: CloudDeploymentRow[] }>(`/api/projects/${id}/deploy/cloud`).catch(() => null);
+                                if (r) setCloudDeployments(Array.isArray(r.deployments) ? r.deployments : []);
+                              } catch (e) {
+                                const msg = e instanceof Error ? e.message : "Falha no rollback";
+                                try {
+                                  const parsed = JSON.parse(msg) as DeployError;
+                                  setDeployError(parsed && typeof parsed === "object" && "code" in parsed ? parsed : msg);
+                                } catch { setDeployError(msg); }
+                              } finally { setRollbackId(null); }
+                            }}
+                            sx={{ fontSize: "0.68rem", py: 0.2 }}>
+                            {rollbackId === d.id ? "Revertendo…" : "Reverter para este"}
+                          </Button>
+                        )}
                         {d.run_url && (
                           <Button size="small" endIcon={<OpenInNewIcon sx={{ fontSize: "0.9rem !important" }} />}
                             href={d.run_url} target="_blank" rel="noopener noreferrer" component="a"

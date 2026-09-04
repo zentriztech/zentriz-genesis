@@ -11,6 +11,7 @@ import { startSpecQuestionsWorker, stopSpecQuestionsWorker } from "./services/sp
 import { startCreditReconciliationWorker, stopCreditReconciliationWorker } from "./services/creditReconciliationWorker.js";
 import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
 import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
+import { startEvolutionMergeWorker, stopEvolutionMergeWorker } from "./services/evolutionMergeWorker.js";
 
 const app = await buildApp();
 
@@ -103,11 +104,13 @@ try {
   startTenantStatusListener();
   // Item 2 (corrigido): monitor + auto-cura dos deploys na nuvem do tenant via GitHub.
   startCloudDeployWorker();
+  // Bloco 4 M2 (D-M2): observador do merge das evoluções (flag EVOLUTION_MERGE_WATCH, default OFF).
+  startEvolutionMergeWorker();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); process.exit(0); });

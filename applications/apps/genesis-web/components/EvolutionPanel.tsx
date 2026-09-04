@@ -18,21 +18,48 @@ import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import Divider from "@mui/material/Divider";
 import Stack from "@mui/material/Stack";
+import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost, ApiError } from "@/lib/api";
 
 interface EvolutionState {
   checkpoint: boolean; checkpointSavedAt: string | null;
-  scope: string[]; compat: string | null; rfcs: string[]; request: string | null; parentId: string | null;
+  scope: string[]; compat: string | null; compatExplicit?: boolean; rfcs: string[]; request: string | null; parentId: string | null;
   plan: { summary?: string; compat?: string; rfcs?: string[]; adrs?: string[]; questions?: string[] } | null;
   touchedFiles: string[]; violations: Record<string, string[]>; violationRounds: Record<string, number>;
   completedTasks: string[];
   baseline: { status?: string; passed?: number; failed?: number; total?: number; no_tests?: boolean; final?: { passed?: number; failed?: number; regressions?: string[] } } | null;
-  publish: { pending: boolean; branch: string | null; repo: string | null; prUrl: string | null; compareUrl: string | null; version: string | null; supersedes: string | null; acceptedAt: string | null };
+  publish: { pending: boolean; branch: string | null; repo: string | null; prUrl: string | null; compareUrl: string | null; version: string | null; supersedes: string | null; acceptedAt: string | null; prNumber?: number | null };
+  // Bloco 4 M1: estado do merge do PR evolution/vN → dev (degrada p/ null se a API não enviar).
+  merge?: { state: string | null; sha: string | null; at: string | null; method: string | null; actor: string | null; detail: string | null; prNumber: number | null; acceptedPermissions?: string | null } | null;
+  // Bloco 4 M7 (Python): métricas de reescrita do Dev (do checkpoint); null se ausente.
+  rewriteStats?: { files_rewritten?: number; lines_added?: number; lines_removed?: number; symbols_preserved?: number } | Record<string, unknown> | null;
 }
 interface TreeFile { path: string; isPrimary: boolean }
 interface VersionEntry { id: string; versionNumber: number; status: string; isCurrent: boolean; isServiceCurrent?: boolean; supersededBy?: string | null; evolutionVersion?: string | null }
+
+// Bloco 4 M1 — leitura humana de cada estado terminal do merge (rótulo + cor MUI). Estados que exigem
+// confirmação explícita no botão (o back-end também exige `confirm:"MERGE"`) estão em MERGE_CONFIRM_STATES.
+type ChipColor = "success" | "warning" | "error" | "info" | "default";
+const MERGE_STATE_INFO: Record<string, { label: string; color: ChipColor }> = {
+  merged: { label: "Mergeado em dev", color: "success" },
+  merging: { label: "Mergeando…", color: "info" },
+  blocked_permission: { label: "Sem permissão (GitHub App)", color: "error" },
+  blocked_conflict: { label: "Conflito com dev", color: "error" },
+  blocked_protection: { label: "Proteção de branch", color: "warning" },
+  blocked_checks: { label: "Checks pendentes", color: "warning" },
+  blocked_major: { label: "MAJOR — exige confirmação", color: "warning" },
+  blocked_compat_implicit: { label: "Compatibilidade não declarada", color: "warning" },
+  blocked_regressions: { label: "Regressões nos testes", color: "error" },
+  blocked_no_tests: { label: "Sem testes (base)", color: "warning" },
+  blocked_no_evidence: { label: "Sem evidência de testes", color: "error" },
+  blocked_head_moved: { label: "Head do PR mudou", color: "warning" },
+  blocked_base_mismatch: { label: "Base do PR não é dev", color: "error" },
+  failed: { label: "Falhou", color: "error" },
+};
+// Estados de risco em que o botão "Mergear agora" pede o texto de confirmação (o humano assume o risco).
+const MERGE_CONFIRM_STATES = new Set(["blocked_regressions", "blocked_no_tests"]);
 
 function Section({ title, children, hint }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -50,6 +77,10 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Bloco 4 M1 — ação manual "Mergear agora".
+  const [merging, setMerging] = useState(false);
+  const [mergeMsg, setMergeMsg] = useState<{ severity: "success" | "warning" | "error"; text: string } | null>(null);
+  const [confirmText, setConfirmText] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -65,6 +96,28 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
     } finally { setLoading(false); }
   }, [projectId]);
   useEffect(() => { void load(); }, [load]);
+
+  const handleMerge = useCallback(async (confirm?: string) => {
+    setMerging(true); setMergeMsg(null);
+    try {
+      const res = await apiPost<{ ok: boolean; state: string; detail: string | null }>(
+        `/api/projects/${projectId}/evolution/merge`,
+        confirm ? { confirm } : {},
+      );
+      if (res.ok) {
+        setMergeMsg({ severity: "success", text: "Evolução mergeada em 'dev'." });
+        setConfirmText("");
+      } else {
+        const info = MERGE_STATE_INFO[res.state];
+        setMergeMsg({ severity: "warning", text: `Não mergeado (${info?.label ?? res.state})${res.detail ? `: ${res.detail}` : ""}.` });
+      }
+      await load();
+    } catch (e) {
+      // 400 CONFIRM_REQUIRED chega aqui como ApiError — orienta o usuário a confirmar.
+      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Falha ao mergear";
+      setMergeMsg({ severity: "error", text: msg });
+    } finally { setMerging(false); }
+  }, [projectId, load]);
 
   const docs = useMemo(() => {
     const p = tree.map((f) => f.path);
@@ -93,6 +146,69 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   const violationTasks = Object.keys(state.violations ?? {});
   const totalViolations = violationTasks.reduce((n, k) => n + (state.violations[k]?.length ?? 0), 0);
   const bancadaHref = `/spec?editProjectId=${encodeURIComponent(projectId)}${productId ? `&productId=${encodeURIComponent(productId)}` : ""}`;
+
+  // Bloco 4 M1 — bloco de merge do PR evolution/vN → dev. Só aparece quando há PR publicado.
+  const merge = state.merge ?? null;
+  const mergeState = merge?.state ?? null;
+  const hasPr = typeof state.publish.prNumber === "number" || (merge?.prNumber ?? null) !== null;
+  const isMerged = mergeState === "merged";
+  const commitHref = merge?.sha && state.publish.repo ? `https://github.com/${state.publish.repo}/commit/${merge.sha}` : null;
+  // Confirmação exigida: MAJOR ou estados de risco (o back-end também exige — dupla-trava).
+  const needsConfirm = (state.compat ?? "").toLowerCase() === "major" || (mergeState ? MERGE_CONFIRM_STATES.has(mergeState) : false);
+  const rs = state.rewriteStats as { files_rewritten?: number; lines_added?: number; lines_removed?: number; symbols_preserved?: number } | null;
+  const showMerge = hasPr && !state.publish.pending;
+
+  const mergeBlock = !showMerge ? null : (
+    <>
+      <Divider sx={{ my: 1 }} />
+      <Section title="Merge em dev"
+        hint="O PR evolution/vN → dev. O merge automático (quando ligado) só ocorre com compatibilidade declarada e testes sem regressão; o botão abaixo mergeia manualmente.">
+        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
+          {mergeState ? (
+            <Chip size="small" color={MERGE_STATE_INFO[mergeState]?.color ?? "default"} variant={isMerged ? "filled" : "outlined"}
+              label={MERGE_STATE_INFO[mergeState]?.label ?? mergeState} sx={{ fontSize: "0.62rem", height: 20 }} />
+          ) : (
+            <Chip size="small" variant="outlined" color="default" label="Ainda não mergeado" sx={{ fontSize: "0.62rem", height: 20 }} />
+          )}
+          {merge?.method && isMerged && <Chip size="small" variant="outlined" label={merge.method} sx={{ fontSize: "0.6rem", height: 18 }} />}
+          {merge?.actor && isMerged && <Typography variant="caption" color="text.secondary">por {merge.actor}</Typography>}
+          {commitHref && <a href={commitHref} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "monospace", fontSize: "0.68rem" }}>{merge!.sha!.slice(0, 8)}</a>}
+        </Stack>
+        {merge?.detail && !isMerged && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>{merge.detail}</Typography>}
+        {merge?.acceptedPermissions && mergeState === "blocked_permission" && (
+          <Typography variant="caption" color="error.main" sx={{ display: "block", mb: 0.5 }}>Permissões que faltam: <code>{merge.acceptedPermissions}</code></Typography>
+        )}
+        {mergeMsg && <Alert severity={mergeMsg.severity} sx={{ py: 0, mb: 0.75, fontSize: "0.72rem" }}>{mergeMsg.text}</Alert>}
+        {!isMerged && (
+          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+            {needsConfirm && (
+              <TextField size="small" placeholder="Digite MERGE" value={confirmText} onChange={(e) => setConfirmText(e.target.value)}
+                disabled={merging} sx={{ width: 140, "& input": { fontSize: "0.72rem", py: 0.5 } }} />
+            )}
+            <Button size="small" variant="contained" color={needsConfirm ? "warning" : "primary"}
+              disabled={merging || (needsConfirm && confirmText !== "MERGE")}
+              onClick={() => void handleMerge(needsConfirm ? confirmText : undefined)}
+              startIcon={merging ? <CircularProgress size={12} /> : undefined}
+              sx={{ fontSize: "0.68rem", textTransform: "none" }}>
+              Mergear agora
+            </Button>
+            {needsConfirm && <Typography variant="caption" color="warning.main">Mudança de risco — confirme digitando MERGE.</Typography>}
+          </Stack>
+        )}
+      </Section>
+
+      {rs && (Object.keys(rs).length > 0) && (
+        <Section title="Reescrita do Dev (evolução)" hint="Métricas da reescrita in-place feita pelo Dev nesta evolução (do checkpoint do runner).">
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {typeof rs.files_rewritten === "number" && <Chip size="small" variant="outlined" label={`${rs.files_rewritten} arquivo(s)`} sx={{ fontSize: "0.62rem", height: 18 }} />}
+            {typeof rs.lines_added === "number" && <Chip size="small" variant="outlined" color="success" label={`+${rs.lines_added}`} sx={{ fontSize: "0.62rem", height: 18 }} />}
+            {typeof rs.lines_removed === "number" && <Chip size="small" variant="outlined" color="error" label={`-${rs.lines_removed}`} sx={{ fontSize: "0.62rem", height: 18 }} />}
+            {typeof rs.symbols_preserved === "number" && <Chip size="small" variant="outlined" label={`${rs.symbols_preserved} símbolo(s) preservado(s)`} sx={{ fontSize: "0.62rem", height: 18 }} />}
+          </Stack>
+        </Section>
+      )}
+    </>
+  );
 
   return (
     <Box sx={{ p: 1.5, overflowY: "auto", height: "100%" }}>
@@ -188,6 +304,8 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
         )}
         {!state.publish.branch && !state.publish.pending && <Typography variant="caption" color="text.secondary">Ainda não aceita/publicada.</Typography>}
       </Section>
+
+      {mergeBlock}
     </Box>
   );
 }

@@ -1408,11 +1408,96 @@ export async function projectRoutes(app: FastifyInstance) {
     }
     const rows = (await pool.query(
       `SELECT id, provider, deploy_format, status, run_url, attempts, last_error,
-              expires_at, consented_teardown, created_at, updated_at
+              expires_at, consented_teardown, created_at, updated_at,
+              git_sha, trigger_kind, supersedes_deployment_id, superseded_by_deployment_id
          FROM cloud_deployments WHERE project_id=$1 ORDER BY created_at DESC LIMIT 20`,
       [id],
     )).rows;
     return reply.send({ deployments: rows });
+  });
+
+  // POST /api/projects/:id/deploy/cloud/rollback — reverte para um deploy anterior da linhagem,
+  // redeployando o SHA exato daquele deploy (Bloco 4 M6, D-B2: rollback por SHA, in-place). Reusa a
+  // MESMA conexão e formato do deploy alvo; carimba trigger_kind='rollback' e supersedes o alvo.
+  // Ação de ESCRITA na conta paga do tenant → master só visualiza; exige pertencer ao tenant.
+  app.post<{
+    Params: { id: string };
+    Body: { deploymentId?: string };
+  }>("/api/projects/:id/deploy/cloud/rollback", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    const body = (request.body ?? {}) as { deploymentId?: string };
+
+    if (user.role === "zentriz_admin") {
+      return reply.status(403).send({ code: "FORBIDDEN_MASTER", message: "Conta de gestão não executa rollback — apenas visualiza." });
+    }
+    const proj = (await pool.query(
+      "SELECT id, tenant_id, status FROM projects WHERE id=$1", [id],
+    )).rows[0];
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    if (proj.tenant_id !== user.tenantId) {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+    }
+
+    const deploymentId = (body.deploymentId ?? "").trim();
+    if (!deploymentId) {
+      return reply.status(400).send({ code: "DEPLOYMENT_REQUIRED", message: "Informe o deploy alvo do rollback." });
+    }
+    // O deploy alvo precisa ser DESTE projeto (o tenant só reverte o que é seu) e ter SHA gravado —
+    // sem SHA não há como reproduzir aquele estado (deploys antigos anteriores ao M5 não têm git_sha).
+    const target = (await pool.query(
+      `SELECT id, connection_id, deploy_format, git_sha, expires_at, consented_teardown
+         FROM cloud_deployments WHERE id=$1 AND project_id=$2`,
+      [deploymentId, id],
+    )).rows[0];
+    if (!target) {
+      return reply.status(404).send({ code: "DEPLOYMENT_NOT_FOUND", message: "Deploy alvo não encontrado neste projeto." });
+    }
+    if (!target.git_sha) {
+      return reply.status(409).send({ code: "NO_SHA",
+        message: "Este deploy não tem SHA registrado — rollback por SHA indisponível para deploys anteriores ao rastreio de linhagem." });
+    }
+    if (!target.connection_id) {
+      return reply.status(409).send({ code: "NO_CONNECTION",
+        message: "O deploy alvo não tem conexão de nuvem associada." });
+    }
+    // Guarda de concorrência (adversarial de integração): 2 cliques em "Reverter" não podem abrir
+    // 2 deploys de rollback — enquanto houver deploy deste projeto em voo, 409.
+    const inFlight = await pool.query(
+      `SELECT id FROM cloud_deployments
+        WHERE project_id = $1 AND status IN ('pending','dispatching','running','tearing_down') LIMIT 1`,
+      [id],
+    );
+    if (inFlight.rows[0]) {
+      return reply.status(409).send({ code: "DEPLOY_IN_FLIGHT",
+        message: "Já existe um deploy em andamento neste projeto. Aguarde terminar antes de reverter." });
+    }
+
+    const result = await startCloudDeploy({
+      projectId: id, tenantId: proj.tenant_id as string, userId: user.id,
+      connectionId: target.connection_id as string,
+      format: target.deploy_format as DeployFormat,
+      expiresAt: target.expires_at ? new Date(target.expires_at as string) : null,
+      consentedTeardown: target.consented_teardown === true,
+      branch: "dev",
+      gitSha: target.git_sha as string,
+      triggerKind: "rollback",
+      supersedesId: target.id as string,
+    });
+    if (!result.ok) {
+      const status = result.code === "REPO_REQUIRED" ? 409 :
+        result.code === "CONNECTION_NOT_FOUND" ? 404 :
+        result.code === "INVALID_FORMAT" ? 400 : 500;
+      return reply.status(status).send({ code: result.code, message: result.message });
+    }
+    return reply.status(202).send({
+      code: "CLOUD_ROLLBACK_STARTED",
+      message: "Rollback iniciado — redeployando o SHA do deploy alvo com a mesma identidade.",
+      deployment_id: result.deploymentId,
+      provider: result.provider,
+      format: result.format,
+      git_sha: target.git_sha,
+    });
   });
 
   // PUT /api/projects/:id/deploy/prefs — troca as PREFERÊNCIAS de deploy do projeto:
@@ -3247,6 +3332,14 @@ export async function projectRoutes(app: FastifyInstance) {
         childProductId = await resolveInboxProductId(client, tenantId, user.id);
       }
 
+      // Bloco 4 (M5): herdar as PREFERÊNCIAS de deploy do pai — a nova versão deploya com a MESMA
+      // identidade/nuvem (recursos nomeados pela raiz da linhagem). Só copia chaves presentes; o
+      // redeploy pós-merge tem fallback adicional pela última linha 'deployed' da linhagem.
+      const inheritedDeployPrefs: Record<string, unknown> = {};
+      for (const k of ["delivery_mode", "deploy_connection_id", "deploy_format", "deploy_ttl_days", "project_type", "runtime_target", "api_url"]) {
+        if (parentExtra[k] !== undefined && parentExtra[k] !== null) inheritedDeployPrefs[k] = parentExtra[k];
+      }
+
       // Criar projeto filho
       const childRes = await client.query(
         `INSERT INTO projects
@@ -3262,6 +3355,7 @@ export async function projectRoutes(app: FastifyInstance) {
           parentId,
           nextVersion,
           JSON.stringify({
+            ...inheritedDeployPrefs,
             evolution: true,
             evolution_request: evolutionRequest,
             evolution_work_mode: workMode,
