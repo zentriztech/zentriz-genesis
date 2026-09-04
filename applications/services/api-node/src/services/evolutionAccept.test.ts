@@ -80,7 +80,11 @@ describe("evolutionAccept (Evoluir E5)", () => {
     expect(JSON.parse(childUpd.params[1] as string)).toMatchObject({ supersedes: "parent", evolution_version: "1.1.0" });
     const parentUpd = calls.find((c) => /SET status = 'archived'/.test(c.sql))!;
     expect(parentUpd.sql).toMatch(/AND status = 'accepted' AND coalesce\(extra->>'superseded_by',''\) = ''/);
-    expect(JSON.parse(parentUpd.params[2] as string)).toMatchObject({ superseded_by: "child", superseded_version: "1.1.0" });
+    // E2E 2026-09-04: nº de parâmetros deve casar com os placeholders ($1, $2) — antes eram 3 params e o UPDATE falhava
+    const placeholders = new Set((parentUpd.sql.match(/\$\d+/g) ?? []));
+    expect(placeholders.size).toBe(parentUpd.params.length);
+    expect(parentUpd.params[0]).toBe("parent");
+    expect(JSON.parse(parentUpd.params[1] as string)).toMatchObject({ superseded_by: "child", superseded_version: "1.1.0" });
     expect(await supersedeParent(db as never, "child", null, "1.1.0")).toBe(false);
   });
 
@@ -117,7 +121,7 @@ describe("evolutionAccept (Evoluir E5)", () => {
     expect(await runEvolutionAcceptFlow(c.db as never, "child")).toBe(true);
     const arch = c.calls.find((x) => /SET status = 'archived'/.test(x.sql))!;
     expect(arch.params[0]).toBe("parent");
-    expect(JSON.parse(arch.params[2] as string)).toMatchObject({ superseded_by: "child", superseded_version: "2.0.0" });
+    expect(JSON.parse(arch.params[1] as string)).toMatchObject({ superseded_by: "child", superseded_version: "2.0.0" });
     // sem GitHub App (skipped) também supersede — o tenant não publica de forma alguma
     pushMock.mockResolvedValueOnce({ ok: false, mode: "skipped", error: "sem GitHub App" });
     const d = mkDb({ evolution: true, evolution_parent_id: "parent" });

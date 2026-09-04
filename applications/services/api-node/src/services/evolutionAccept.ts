@@ -126,10 +126,12 @@ export async function supersedeParent(db: Db, childId: string, parentId: string 
   );
   if (!parentId) return false;
   // Só supersede um pai ACEITO (versão corrente); pai já arquivado/superseded → no-op.
+  // E2E 2026-09-04: a versão anterior passava 3 parâmetros e usava só $1/$3 → Postgres rejeitava ("could not
+  // determine data type of parameter $2") e o .catch engolia → pai nunca era supersedido. Sem catch silencioso.
   const r = await db.query(
-    "UPDATE projects SET status = 'archived', extra = COALESCE(extra,'{}'::jsonb) || $3::jsonb, updated_at = now() WHERE id = $1 AND status = 'accepted' AND coalesce(extra->>'superseded_by','') = '' RETURNING id",
-    [parentId, childId, JSON.stringify({ superseded_by: childId, superseded_at: now, superseded_version: version })],
-  ).catch(() => ({ rows: [] as unknown[] }));
+    "UPDATE projects SET status = 'archived', extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1 AND status = 'accepted' AND coalesce(extra->>'superseded_by','') = '' RETURNING id",
+    [parentId, JSON.stringify({ superseded_by: childId, superseded_at: now, superseded_version: version })],
+  );
   return (r.rows as unknown[]).length > 0;
 }
 
