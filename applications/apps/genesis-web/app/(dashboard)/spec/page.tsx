@@ -842,7 +842,12 @@ function SpecChatPanel({
   pending = null, applying = false, applyError = null, conflict = false,
   onApply, onDiscard, onOverwrite,
   gapCount = null, onResolveGaps,
+  isEvolution = false, onEvolvePlan,
 }: {
+  // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
+  // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
+  isEvolution?: boolean;
+  onEvolvePlan?: () => void;
   messages: ChatMessage[];
   input: string;
   onInput: (v: string) => void;
@@ -979,6 +984,20 @@ function SpecChatPanel({
       )}
 
       <Box sx={{ p: 1, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+        {/* Evoluir E2 — gera RFC/ADR/CHANGELOG/connect.yaml na árvore da spec a partir do pedido
+            de evolução (ou do texto digitado abaixo, se houver). Nada é promovido aqui. */}
+        {isEvolution && onEvolvePlan && (
+          <Tooltip title="O arquiteto da Bancada analisa o pedido de evolução e escreve RFC (Gherkin + escopo de arquivos), ADR se houver decisão, CHANGELOG e connect.yaml evoluído. Se houver texto no campo abaixo, ele é usado como pedido.">
+            <span>
+              <Button fullWidth size="small" variant="contained" color="secondary"
+                disabled={sending}
+                onClick={onEvolvePlan}
+                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
+                🧭 Gerar RFC / CHANGELOG da evolução
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         {/* Onda 1 — Resolver GAPs (só na spec inteira): manda o CTO corrigir os findings da
             validação adversarial, com o relatório + arquivos irmãos como contexto. */}
         {!fileMode && onResolveGaps && (
@@ -1202,6 +1221,29 @@ export default function SpecPage() {
     // Só a árvore de navegação usa este productId; não confunde com o do fluxo de criação.
     setTreeProductId(prod ?? "");
   }, [searchParams]);
+
+  // Evoluir E2/E6 — é um projeto de EVOLUÇÃO? (extra.evolution) → habilita "Gerar RFC / CHANGELOG"
+  // e orienta o humano no chat (uma vez por projeto).
+  const [isEvolution, setIsEvolution] = useState(false);
+  useEffect(() => {
+    setIsEvolution(false);
+    if (!editProjectId) return;
+    let cancelled = false;
+    apiGet<{ extra?: { evolution?: boolean; evolution_plan?: unknown } | null }>(`/api/projects/${editProjectId}`)
+      .then((p) => {
+        if (cancelled) return;
+        const evo = p?.extra?.evolution === true;
+        setIsEvolution(evo);
+        if (evo && !p?.extra?.evolution_plan) {
+          setChatMessages((prev) => prev.length ? prev : [{
+            role: "assistant",
+            content: "🔄 **Esta é uma evolução.** Clique em **\"Gerar RFC / CHANGELOG da evolução\"** para o arquiteto transformar o pedido em RFC (critérios Gherkin + escopo de arquivos), ADR se houver decisão, CHANGELOG e `connect.yaml` evoluído — direto na árvore da spec. Revise os arquivos (o RFC define o que a fábrica PODE tocar) e só então promova à fábrica.",
+          }]);
+        }
+      })
+      .catch(() => { /* sem meta → sem botão */ });
+    return () => { cancelled = true; };
+  }, [editProjectId]);
 
   // Quando editProjectId estiver presente, carrega a spec existente do servidor
   useEffect(() => {
@@ -1525,6 +1567,75 @@ export default function SpecPage() {
     }, 8000);
   }, [chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling]);
 
+  // Evoluir E2 — pede ao arquiteto da Bancada os artefatos da evolução. Job assíncrono no
+  // servidor (/invoke/raw); ao terminar, a árvore é recarregada e o resumo/pendências vão ao chat.
+  const handleEvolvePlan = useCallback(async () => {
+    if (chatSending || !editProjectId) return;
+    const seq = (chatSeqRef.current += 1);
+    const override = chatInput.trim();
+    setChatMessages((prev) => [...prev, { role: "user", content: override ? `🧭 Gerar RFC / CHANGELOG — pedido: ${override}` : "🧭 Gerar RFC / CHANGELOG da evolução (pedido original)" }]);
+    setChatInput("");
+    setChatSending(true);
+    setChatError(null);
+    stopChatPolling();
+
+    let jobId: string;
+    try {
+      const res = await apiPost<{ jobId: string }>(`/api/projects/${editProjectId}/evolution-plan`, override ? { request: override } : {});
+      jobId = res.jobId;
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "Erro ao iniciar o planejamento da evolução.");
+      setChatSending(false);
+      return;
+    }
+    if (seq !== chatSeqRef.current) { setChatSending(false); return; }
+
+    type PlanPoll = {
+      status: "pending" | "running" | "done" | "error";
+      error?: string | null;
+      result?: {
+        summary: string; compat: string; questions: string[]; warnings: string[];
+        written: Array<{ path: string; action: string }>;
+        rfcProblems: Array<{ path: string; problems: string[] }>;
+      } | null;
+    };
+    const startTs = Date.now();
+    chatPollRef.current = setInterval(async () => {
+      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+      if (Date.now() - startTs > 8 * 60_000) {
+        stopChatPolling(); setChatError("Tempo esgotado ao planejar a evolução. Tente novamente."); setChatSending(false); return;
+      }
+      try {
+        const poll = await apiGet<PlanPoll>(`/api/projects/${editProjectId}/evolution-plan/${jobId}`);
+        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+        if (poll.status === "done" && poll.result) {
+          stopChatPolling();
+          const r = poll.result;
+          const files = r.written.map((w) => `- \`${w.path}\` (${w.action === "created" ? "criado" : w.action === "updated" ? "atualizado" : "já existia — mantido"})`).join("\n");
+          const problems = r.rfcProblems.length
+            ? `\n\n⚠️ **Pendências para o gate de promoção:**\n${r.rfcProblems.map((p) => `- \`${p.path}\`: ${p.problems.join("; ")}`).join("\n")}`
+            : "";
+          const warns = r.warnings.length ? `\n\n${r.warnings.map((w) => `- ${w}`).join("\n")}` : "";
+          const qs = r.questions.length ? `\n\n❓ **Perguntas do arquiteto** (responda editando o RFC ou pelo chat do arquivo):\n${r.questions.map((q) => `- ${q}`).join("\n")}` : "";
+          setChatMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `${r.summary || "Artefatos de evolução gerados."}\n\n**Compatibilidade:** ${r.compat.toUpperCase()}\n\n**Arquivos:**\n${files}${problems}${warns}${qs}\n\n➡️ Revise os arquivos na árvore (o \`## Impacto\` do RFC define o que a fábrica PODE tocar). Quando estiver satisfeito, **Validar** e **Promover à Fábrica**.`,
+          }]);
+          setTreeReloadSignal((n) => n + 1);
+          setValidationReloadSignal((n) => n + 1);
+          setStaleValidation(true);
+          setChatSending(false);
+        } else if (poll.status === "error") {
+          stopChatPolling();
+          setChatError(poll.error ?? "Erro ao planejar a evolução.");
+          setChatSending(false);
+        }
+      } catch (e) {
+        console.warn("[EvolvePlan] poll error:", e instanceof Error ? e.message : e);
+      }
+    }, 5000);
+  }, [chatSending, editProjectId, chatInput, stopChatPolling]);
+
   // T4.3 — aplica a revisão pendente ao arquivo real (PUT com baseSha → If-Match).
   const applyRevision = useCallback(async (baseShaOverride?: string | null) => {
     if (!editProjectId || !pendingApply) return;
@@ -1827,6 +1938,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
             />
           </Box>
         </Box>
@@ -1865,6 +1977,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
           />
         </DialogContent>
       </Dialog>
@@ -2032,6 +2145,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
                   />
                 </Box>
               </Box>
@@ -2212,6 +2326,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
                         />
                       </Box>
                     </Box>

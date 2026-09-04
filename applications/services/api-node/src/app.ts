@@ -15,6 +15,7 @@ import { signupRoutes } from "./routes/signup.js";
 import { cnpjRoutes } from "./routes/cnpj.js";
 import { dialogueRoutes } from "./routes/dialogue.js";
 import { pipelineRoutes } from "./routes/pipeline.js";
+import { evolutionPlanRoutes } from "./routes/evolutionPlan.js";
 import { notificationRoutes } from "./routes/notifications.js";
 import { planRoutes } from "./routes/plans.js";
 import { githubRoutes } from "./routes/github.js";
@@ -94,6 +95,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(userRoutes);
   await app.register(dialogueRoutes);
   await app.register(pipelineRoutes);
+  await app.register(evolutionPlanRoutes);
   await app.register(notificationRoutes);
   await app.register(planRoutes);
   await app.register(githubRoutes);

@@ -946,10 +946,12 @@ function ProjectDetailPageInner() {
       });
       setEvolveOpen(false);
       setEvolveRequest("");
-      // Navegar para o projeto filho
+      // Evoluir E2/E6: a evolução passa pela BANCADA — o filho abre no editor de spec, onde o
+      // arquiteto gera RFC/ADR/CHANGELOG/connect.yaml e o humano revisa antes de promover.
       const childId = (result as Record<string, unknown>)?.childProjectId;
       if (childId && typeof childId === "string") {
-        window.location.href = `/projects/${childId}`;
+        const prod = project?.productId ? `&productId=${encodeURIComponent(project.productId)}` : "";
+        window.location.href = `/spec?editProjectId=${encodeURIComponent(childId)}${prod}&evolve=1`;
       }
     } catch (e) {
       setRunError(e instanceof Error ? e.message : "Falha ao criar evolução");
@@ -1498,7 +1500,7 @@ function ProjectDetailPageInner() {
         <DialogTitle>🔄 Evoluir projeto</DialogTitle>
         <DialogContent>
           <Alert severity="info" sx={{ mb: 2 }}>
-            Uma evolução cria um projeto filho a partir deste. O CTO analisa o pedido, identifica o delta e gera apenas as tasks necessárias. Nada é removido sem instrução explícita.
+            Uma evolução cria uma <strong>nova versão deste mesmo serviço</strong> (mesma identidade, mesmo repositório em <code>evolution/vN</code>). Você será levado à <strong>Bancada</strong>: o arquiteto transforma o pedido em <strong>RFC</strong> (critérios Gherkin + escopo de arquivos), <strong>ADR</strong> se houver decisão, <strong>CHANGELOG</strong> e <code>connect.yaml</code> evoluído. Depois de revisar, você promove à fábrica — que gera <strong>só as tasks adicionais</strong>, dentro do escopo do RFC.
           </Alert>
           <Typography variant="subtitle2" gutterBottom>O que você quer evoluir?</Typography>
           <textarea
