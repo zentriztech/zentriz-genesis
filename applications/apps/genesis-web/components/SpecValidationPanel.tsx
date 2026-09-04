@@ -174,7 +174,8 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
     setBusy("triage"); setError(null);
     try {
       const body: Record<string, unknown> = { state: draft.state, reason_code: reasonCode, reason: reason.trim() };
-      if (draft.state === "ignored" && expiresAt) body.expiresAt = new Date(expiresAt).toISOString();
+      // Fim do DIA LOCAL escolhido (não meia-noite UTC — "hoje" viraria passado e daria 400 por fuso).
+      if (draft.state === "ignored" && expiresAt) body.expiresAt = new Date(`${expiresAt}T23:59:59`).toISOString();
       if (draft.fingerprints.length === 1) {
         await apiPost(`/api/specs/${projectId}/findings/${draft.fingerprints[0]}/triage`, body);
       } else {
@@ -190,7 +191,10 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
 
   const reactivate = useCallback(async (f: Finding) => {
     if (!f.fingerprint) return;
-    setBusy("triage"); setError(null); setMenu(null);
+    setMenu(null);
+    // Reativar um BLOCKER volta a travar o gate de promoção — evitar clique acidental.
+    if (f.severity === "blocker" && typeof window !== "undefined" && !window.confirm(`Reativar o blocker "${f.title}"? O gate de promoção volta a bloquear até ele ser corrigido ou triado de novo.`)) return;
+    setBusy("triage"); setError(null);
     try { await apiDelete(`/api/specs/${projectId}/findings/${f.fingerprint}/triage`); await load(); }
     catch (e) { setError(e instanceof Error ? e.message : "Falha ao reativar"); }
     finally { setBusy(null); }
@@ -318,7 +322,8 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", py: 1 }}>Nenhum GAP resolvido ainda (um GAP conta como resolvido quando some em duas validações seguidas).</Typography>
             ) : (
               <Stack spacing={0.5}>
-                {resolved.map((r) => (
+                {resolved.length > 50 && <Typography variant="caption" color="text.secondary">Mostrando 50 de {resolved.length} resolvidos (mais recentes primeiro).</Typography>}
+                {resolved.slice(0, 50).map((r) => (
                   <Alert key={r.fingerprint} severity="success" icon={false} sx={{ py: 0.25, "& .MuiAlert-message": { py: 0.5 } }}>
                     <Typography variant="body2" sx={{ fontWeight: 600, textDecoration: "line-through", opacity: 0.8 }}>
                       {r.title}{r.file ? <Typography component="span" variant="caption" sx={{ fontFamily: "monospace", ml: 1 }}>({r.file})</Typography> : null}
@@ -362,7 +367,9 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
           </TextField>
           <TextField fullWidth size="small" multiline minRows={2} label={draft?.hasBlocker ? "Justificativa (mín. 20 caracteres)" : "Justificativa (opcional)"} value={reason} onChange={(e) => setReason(e.target.value)} sx={{ mb: 1.5 }} />
           {draft?.state === "ignored" && (
-            <TextField fullWidth size="small" type="date" label="Válido até (opcional)" InputLabelProps={{ shrink: true }} value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} helperText="Ao vencer, o GAP volta a Ativo automaticamente." />
+            <TextField fullWidth size="small" type="date" label="Válido até (opcional)" InputLabelProps={{ shrink: true }} value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)}
+              inputProps={{ min: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10) }}
+              helperText="Ao vencer (fim do dia), o GAP volta a Ativo automaticamente." />
           )}
         </DialogContent>
         <DialogActions>
