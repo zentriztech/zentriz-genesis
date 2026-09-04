@@ -154,6 +154,10 @@ class PipelineContext:
         self.system_id: str = ""
         self.service_id: "str | None" = None
         self.product_name: str = ""
+        # R4 PR4 — SpecConnectDeclaration do projeto (connect.yaml gerado na Bancada, Connect 1.3.0),
+        # carregada pelo runner de project_spec_files. É a fonte SPEC-FIRST dos manifests Connect
+        # (connect_contracts renderiza a partir dela; heurística só como fallback). None = legado.
+        self.connect_declaration: "dict[str, Any] | None" = None
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -244,6 +248,9 @@ class PipelineContext:
             inputs["previous_project_type"] = self.previous_project_type
         if self.linked_projects_context:
             inputs["linked_projects_context"] = self.linked_projects_context
+        # R4 PR4: contrato Connect declarado na Bancada (connect.yaml) — o Charter deve refleti-lo.
+        if self.connect_declaration:
+            inputs["connect_declaration"] = self.connect_declaration
         if self.engineer_proposal:
             inputs["engineer_stack_proposal"] = self.engineer_proposal
         if backlog_summary:
@@ -264,6 +271,10 @@ class PipelineContext:
         inputs["type_policy"] = _build_type_policy_input(self.project_type)
         if cto_questionamentos:
             inputs["cto_questionamentos"] = cto_questionamentos
+        # R4 PR4: contrato Connect DECLARADO na spec — o Engineer deve respeitar interfaces/eventos/
+        # dependências declarados (é o que a fábrica emitirá como ServiceManifest).
+        if self.connect_declaration:
+            inputs["connect_declaration"] = self.connect_declaration
         return inputs
 
     def build_inputs_for_pm(self, cto_questionamentos: str | None = None) -> dict:
@@ -285,6 +296,8 @@ class PipelineContext:
         # Contexto de projetos linkados — PM precisa para decomposição correta de tasks de integração
         if self.linked_projects_context:
             inputs["linked_projects_context"] = self.linked_projects_context
+        if self.connect_declaration:
+            inputs["connect_declaration"] = self.connect_declaration
         return inputs
 
     def build_inputs_for_dev(
@@ -422,6 +435,7 @@ class PipelineContext:
             "system_id": self.system_id,
             "service_id": self.service_id,
             "product_name": self.product_name,
+            "connect_declaration": self.connect_declaration,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -467,6 +481,8 @@ class PipelineContext:
         _sid = data.get("service_id")
         ctx.service_id = _sid if isinstance(_sid, str) and _sid else None
         ctx.product_name = data.get("product_name") or ""
+        _decl = data.get("connect_declaration")
+        ctx.connect_declaration = _decl if isinstance(_decl, dict) and _decl else None
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

@@ -263,6 +263,69 @@ def _strip_yaml_frontmatter(content: str) -> str:
     return content[end + 4:].lstrip("\n")
 
 
+def load_connect_declaration(project_id: str) -> tuple[dict | None, list[str]]:
+    """R4 PR4: carrega o `connect.yaml` (SpecConnectDeclaration, Connect 1.3.0) do projeto a partir
+    de project_spec_files. Retorna (declaração ou None, erros de validação). Nunca lança: ausência
+    = (None, []) (legado/Sub-modo C → heurística); YAML inválido = (None, [erro]); schema
+    indisponível (container sem repo irmão) = (decl, [aviso explícito])."""
+    try:
+        data, status = _api_get(f"/api/projects/{project_id}/spec-files")
+        if status != 200 or not isinstance(data, list):
+            return None, []
+        entry = next(
+            (e for e in data if isinstance(e, dict) and (
+                str(e.get("filename") or "").lower() == "connect.yaml"
+                or str(e.get("mimeType") or e.get("mime_type") or "").lower() == "application/yaml"
+            )),
+            None,
+        )
+        if not entry:
+            return None, []
+        fpath = Path(entry.get("filePath") or entry.get("file_path", ""))
+        if not fpath.exists():
+            return None, [f"connect.yaml registrado mas ausente no disco: {fpath}"]
+        import yaml  # PyYAML (requirements)
+        decl = yaml.safe_load(fpath.read_text(encoding="utf-8"))
+        if not isinstance(decl, dict) or not decl:
+            return None, ["connect.yaml vazio ou não é um mapeamento YAML"]
+        from orchestrator.connect_contracts import _schema_for, validate_connect_artifact
+        if not _schema_for("SpecConnectDeclaration"):
+            return decl, ["declaração NÃO validada: schema Connect indisponível neste ambiente (ZENTRIZ_CONNECT_ROOT)"]
+        return decl, validate_connect_artifact("SpecConnectDeclaration", decl)
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"falha ao carregar connect.yaml: {exc}"]
+
+
+class ConnectDeclarationGateError(RuntimeError):
+    """connect.yaml inválido com CONNECT_DECLARATION_GATE=hard — deve interromper o run."""
+
+
+def _apply_connect_declaration(pipeline_ctx: "PipelineContext", project_id: str) -> None:
+    """R4 PR4: carrega o connect.yaml do disco e aplica ao contexto.
+
+    - Disco tem declaração: SOBRESCREVE a do checkpoint (se diferente → log: a Bancada venceu).
+    - Disco não tem: mantém a do checkpoint (se houver) e loga.
+    - Erros: warn (default) → log; hard → ConnectDeclarationGateError (o chamador NÃO pode engolir).
+    """
+    decl, errors = load_connect_declaration(project_id)
+    if decl is not None:
+        previous = pipeline_ctx.connect_declaration
+        if previous is not None and previous != decl:
+            logger.info("[Pipeline][Connect] connect.yaml do disco difere do checkpoint — a versão da Bancada vence.")
+        pipeline_ctx.connect_declaration = decl
+        logger.info("[Pipeline][Connect] connect.yaml carregado (serviceId=%s, %d interface(s))",
+                    decl.get("serviceId"), len(decl.get("interfaces") or []))
+    elif pipeline_ctx.connect_declaration is not None:
+        logger.info("[Pipeline][Connect] connect.yaml ausente no disco; mantendo a declaração do checkpoint.")
+    if errors:
+        gate = os.environ.get("CONNECT_DECLARATION_GATE", "warn").strip().lower()
+        logger.warning("[Pipeline][Connect] connect.yaml com %d problema(s) [gate=%s]: %s",
+                       len(errors), gate, "; ".join(errors)[:800])
+        if gate == "hard":
+            raise ConnectDeclarationGateError(
+                "connect.yaml inválido (CONNECT_DECLARATION_GATE=hard): " + "; ".join(errors)[:500])
+
+
 def load_spec_all(project_id: str) -> str:
     """Carrega todos os project_spec_files de um projeto e os concatena.
 
@@ -3905,6 +3968,11 @@ def main() -> int:
                     _prod_id = _proj_data.get("productId") or ""
                     if _prod_id and not pipeline_ctx.product_id:
                         pipeline_ctx.product_id = str(_prod_id)
+                # R4 PR4 — SpecConnectDeclaration (connect.yaml da Bancada): fonte spec-first dos
+                # manifests Connect. Sempre relê do disco (a declaração é INPUT humano — uma edição na
+                # Bancada vence o checkpoint). Gate CONNECT_DECLARATION_GATE=warn|hard: a exceção do
+                # gate é re-lançada pelo `except` deste bloco (não pode ser engolida — adversarial PR4 #A).
+                _apply_connect_declaration(pipeline_ctx, project_id)
 
                 # G-opt3: carregar projetos linkados — contexto rico com artefatos do disco
                 if not pipeline_ctx.linked_projects_context:
@@ -4079,6 +4147,8 @@ def main() -> int:
                         pipeline_ctx.linked_projects_context = _existing + "\n" + "\n".join(_pred_lines)
                         logger.info("[Pipeline] Contexto de %d predecessor(es) carregado (%d chars).", len(_triggers_data), _pred_chars)
 
+            except ConnectDeclarationGateError:
+                raise  # gate hard do connect.yaml NUNCA é engolido (adversarial PR4 #A)
             except Exception as _e:
                 logger.debug("[Pipeline] Não foi possível carregar project_type/links: %s", _e)
 

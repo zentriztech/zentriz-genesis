@@ -321,27 +321,174 @@ def _services_for(ctx: Any, system_id: str) -> list[str]:
     )
 
 
+# ── R4 PR4 — SPEC-FIRST: renderers leem a SpecConnectDeclaration (connect.yaml) ────────────────
+# Regra de precedência (ADR-013 Connect-local): a DECLARAÇÃO define o contrato (SystemPassport,
+# ServiceManifest, Ownership); o CÓDIGO define o runtime (entrypoints reais); POLICY (project_types.yaml)
+# preenche defaults (health, sinais, categorias de safe actions). Heurística por regex fica só
+# como fallback para projetos legados sem connect.yaml.
+
+_INTERFACE_TYPES = {"http", "event", "queue", "stream", "cron", "internal", "other"}
+_ENTRYPOINT_TYPES = {"http", "queue", "cron", "stream", "webhook", "cli", "other"}
+_RUNTIME_TYPES = {"serverless", "container", "vm", "hybrid", "other"}
+_TIERS = {"tier0-generic", "tier1-integration-ready", "tier2-deadpool-ready", "tier3-genesis-deadpool-native"}
+
+# Sinais default por "forma" do serviço (POLICY — independem do domínio do cliente).
+_SIGNALS_HTTP = ["http_request_rate", "http_5xx_rate", "latency_p95"]
+_SIGNALS_QUEUE = ["queue_lag", "consumer_error_rate", "processing_latency_p95"]
+_SIGNALS_CRON = ["job_success_rate", "job_duration_p95", "job_last_run_age"]
+_SIGNALS_GENERIC = ["process_up", "error_rate"]
+
+
+def _decl(ctx: Any) -> dict[str, Any]:
+    d = getattr(ctx, "connect_declaration", None)
+    return d if isinstance(d, dict) and d else {}
+
+
+def _decl_interfaces(ctx: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i in _decl(ctx).get("interfaces") or []:
+        if not isinstance(i, dict) or not i.get("name"):
+            continue
+        itype = str(i.get("type") or "other")
+        out.append({"name": str(i["name"]), "type": itype if itype in _INTERFACE_TYPES else "other",
+                    **({"contractRef": str(i["contractRef"])} if i.get("contractRef") else {})})
+    return out
+
+
+def _policy_for(ctx: Any) -> dict[str, Any]:
+    """Policy do tipo do projeto (project_types.yaml) — import tardio: pipeline_context importa este módulo."""
+    try:
+        from orchestrator.pipeline_context import _resolve_type
+        _, pol = _resolve_type(getattr(ctx, "project_type", "") or "")
+        return pol if isinstance(pol, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _policy_has_health_route(ctx: Any) -> bool:
+    routes = (_policy_for(ctx).get("required_routes") or {})
+    all_routes = [str(r) for r in (routes.get("strict") or []) + (routes.get("expected") or [])]
+    return any("/health" in r for r in all_routes)
+
+
+def _service_shape(ctx: Any, interfaces: list[dict[str, Any]]) -> set[str]:
+    """Forma do serviço a partir das interfaces declaradas (fallback: módulo/tipo)."""
+    shapes = {i["type"] for i in interfaces}
+    if not shapes:
+        ptype = (getattr(ctx, "project_type", "") or "")
+        module = getattr(ctx, "current_module", None) or ""
+        # Tipos sem superfície HTTP própria (adversarial PR4 #F): infra/`other`, libs e mobile não
+        # ganham `http` por inferência de módulo — senão o Auto Care alertaria sobre /health inexistente.
+        if ptype in ("other", "lib_ts") or ptype.startswith("mobile"):
+            return shapes
+        if "worker" in ptype:
+            shapes.add("queue")
+        elif module in ("backend", "web", "fullstack") or ptype.startswith(("backend", "frontend", "fullstack")):
+            shapes.add("http")
+    return shapes
+
+
+def _default_signals_for(shapes: set[str], declared: list[str]) -> list[str]:
+    signals: list[str] = [str(s) for s in declared if s]
+    if "http" in shapes or "webhook" in shapes:
+        signals += _SIGNALS_HTTP
+    if "queue" in shapes or "event" in shapes or "stream" in shapes:
+        signals += _SIGNALS_QUEUE
+    if "cron" in shapes:
+        signals += _SIGNALS_CRON
+    if not signals:
+        signals += _SIGNALS_GENERIC
+    return _dedupe(signals)
+
+
+def _owner_obj(o: Any) -> dict[str, Any] | None:
+    if not isinstance(o, dict) or not o.get("id") or not o.get("name"):
+        return None
+    out = {"id": str(o["id"]), "name": str(o["name"])}
+    if o.get("email"):
+        out["email"] = str(o["email"])
+    if o.get("role"):
+        out["role"] = str(o["role"])
+    return out
+
+
+def _owners(ctx: Any, system_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """(owners do passport, owners do OwnershipManifest, declarados?). Declarados = owners REAIS do tenant
+    vindos do connect.yaml; senão sintéticos (marcados nas notas do IRC)."""
+    decl_owners = _decl(ctx).get("owners")
+    if isinstance(decl_owners, dict):
+        tech = _owner_obj(decl_owners.get("technicalOwner"))
+        prod = _owner_obj(decl_owners.get("productOwner"))
+        esc = [o for o in (_owner_obj(x) for x in (decl_owners.get("escalationPath") or [])) if o]
+        # Owners parciais (adversarial PR4 #B): só productOwner declarado → ele responde também como
+        # technicalOwner (schema exige technicalOwner) em vez de descartar o owner REAL pelo sintético.
+        if not tech and prod:
+            tech = dict(prod)
+        if not tech and esc:
+            tech = dict(esc[0])
+        if tech:
+            passport = _dedupe_owners([tech] + ([prod] if prod else []) + esc)
+            ownership: dict[str, Any] = {"scope": _canonical_service_id(ctx, system_id), "technicalOwner": tech}
+            if prod:
+                ownership["productOwner"] = prod
+            if esc:
+                ownership["escalationPath"] = esc
+            return passport, [ownership], True
+    passport, ownership_list = _default_owners(system_id)
+    return passport, ownership_list, False
+
+
+def _dedupe_owners(owners: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for o in owners:
+        if o["id"] not in seen:
+            seen.add(o["id"])
+            out.append(o)
+    return out
+
+
+def _environments(ctx: Any) -> list[dict[str, Any]]:
+    envs = []
+    for e in _decl(ctx).get("environments") or []:
+        if isinstance(e, dict) and e.get("name") and e.get("type"):
+            item = {"name": str(e["name"]), "type": str(e["type"])}
+            for k in ("region", "criticality"):
+                if e.get(k):
+                    item[k] = str(e[k])
+            envs.append(item)
+    return envs or _infer_environments(ctx.spec_raw, ctx.charter, ctx.backlog)
+
+
 def build_system_passport(ctx: Any) -> dict[str, Any]:
     system_name, display_name = _system_identity(ctx)
-    service_candidates = _services_for(ctx, system_name)
-    owners, _ = _default_owners(system_name)
+    decl = _decl(ctx)
+    # Spec-first: com declaração, os serviços do sistema são o canônico + dependências irmãs declaradas
+    # (o regex sobre prosa fica só para legado).
+    if decl:
+        canonical = _canonical_service_id(ctx, system_name)
+        service_candidates = _dedupe([canonical] + [_slug(str(d)) for d in (decl.get("dependencies") or []) if d])
+    else:
+        service_candidates = _services_for(ctx, system_name)
+    owners, _, _ = _owners(ctx, system_name)
     artifact_paths = sorted((ctx.artifacts or {}).keys())
+    description = (str(decl.get("responsibility") or "") or ctx.charter or ctx.product_spec or ctx.spec_raw or display_name)[:220]
     payload = {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
         "systemName": system_name,
         "displayName": display_name,
-        "description": (ctx.charter or ctx.product_spec or ctx.spec_raw or display_name)[:220],
+        "description": description,
         "integrationTier": CONNECT_DECLARED_TIER,
         "owners": owners,
         "repos": [
             {
-                "name": "zentriz-genesis",
+                "name": _slug(system_name),
                 "branchStrategy": "polyrepo-federated",
             }
         ],
         "services": service_candidates,
-        "environments": _infer_environments(ctx.spec_raw, ctx.charter, ctx.backlog),
+        "environments": _environments(ctx),
         "capabilityProfile": {
             # Coerente com o tier DECLARADO (não afirmar deadpoolReady enquanto declaramos tier1).
             "deadpoolReady": CONNECT_DECLARED_TIER in ("tier2-deadpool-ready", "tier3-genesis-deadpool-native"),
@@ -350,15 +497,16 @@ def build_system_passport(ctx: Any) -> dict[str, Any]:
             "supportsRemediationPRFlow": True,
         },
         "operationalHints": artifact_paths[:5] or [f"module:{ctx.current_module}"],
-        "observabilityHints": ["correlate by projectId", "emit structured logs per task"],
-        "policyReferences": ["policy://genesis/spec-driven", "policy://deadpool-ready/connect-v1"],
+        "observabilityHints": ["correlate by request_id/correlation_id", "structured logs with tenant_id and service_id"],
+        "policyReferences": ["policy://genesis/spec-driven", "policy://deadpool-ready/connect-v1"]
+        + ([f"tier-target://{decl['integrationTierTarget']}"] if decl.get("integrationTierTarget") in _TIERS else []),
     }
     return payload
 
 
 def build_ownership_manifest(ctx: Any) -> dict[str, Any]:
     system_name, _ = _system_identity(ctx)
-    _, owners = _default_owners(system_name)
+    _, owners, _ = _owners(ctx, system_name)
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
@@ -366,8 +514,43 @@ def build_ownership_manifest(ctx: Any) -> dict[str, Any]:
     }
 
 
+def _service_manifest_from_declaration(ctx: Any, system_name: str) -> dict[str, Any]:
+    """ServiceManifest SPEC-FIRST: renderizado do connect.yaml (+ POLICY para health/sinais)."""
+    decl = _decl(ctx)
+    canonical = _canonical_service_id(ctx, system_name)
+    service_id = _slug(str(decl.get("serviceId") or "")) if decl.get("serviceId") else canonical
+    interfaces = _decl_interfaces(ctx)
+    shapes = _service_shape(ctx, interfaces)
+    health = decl.get("healthModel") if isinstance(decl.get("healthModel"), dict) else {}
+    has_health = health.get("hasHealthEndpoint")
+    if not isinstance(has_health, bool):
+        has_health = _policy_has_health_route(ctx) or ("http" in shapes)
+    signals = _default_signals_for(shapes, [str(s) for s in (health.get("signals") or [])])
+    deps = _dedupe([str(d) for d in (decl.get("dependencies") or []) if d])
+    return {
+        "schemaVersion": CONNECT_SCHEMA_VERSION,
+        "serviceId": service_id,
+        "serviceName": str(decl.get("serviceName") or service_id.replace("-", " ").title()),
+        "systemId": system_name,
+        "responsibility": str(decl.get("responsibility") or f"Responsabilidades do serviço {service_id}."),
+        "dependencies": deps,
+        # Honesto: sem interfaces declaradas → [] (schema não exige; placeholder inventado é falsa precisão).
+        "interfaces": interfaces,
+        "deploymentUnit": service_id,
+        "healthModel": {
+            "hasHealthEndpoint": bool(has_health),
+            "signals": signals,
+            "sloCritical": bool(health.get("sloCritical", False)),
+        },
+        "observabilitySignalsExpected": signals,
+    }
+
+
 def build_service_manifests(ctx: Any) -> list[dict[str, Any]]:
     system_name, _ = _system_identity(ctx)
+    if _decl(ctx):
+        # Spec-first: este projeto É um serviço; o manifesto vem da declaração (1 por projeto).
+        return [_service_manifest_from_declaration(ctx, system_name)]
     service_candidates = _services_for(ctx, system_name)
     canonical = _canonical_service_id(ctx, system_name)
     manifests = []
@@ -407,53 +590,188 @@ def build_service_manifests(ctx: Any) -> list[dict[str, Any]]:
     return manifests
 
 
+def _shapes_for_ctx(ctx: Any, system_name: str) -> set[str]:
+    """Forma(s) do serviço: da declaração quando existe; senão inferida dos candidatos por regex (legado)."""
+    if _decl(ctx):
+        return _service_shape(ctx, _decl_interfaces(ctx))
+    services = _services_for(ctx, system_name)
+    shapes: set[str] = set()
+    for s in services:
+        if "api" in s or "web" in s or "portal" in s or "frontend" in s or "backend" in s:
+            shapes.add("http")
+        if "worker" in s or "consumer" in s:
+            shapes.add("queue")
+        if "webhook" in s:
+            shapes.add("webhook")
+    return shapes or _service_shape(ctx, [])
+
+
 def build_observability_baseline_manifest(ctx: Any) -> dict[str, Any]:
+    """Baseline de observabilidade do PRODUTO (não do pipeline do Genesis — R4: os sinais antigos
+    `task_success_rate`/`pipeline-overview` descreviam a fábrica, e o Auto Care alertaria sobre
+    métricas inexistentes no sistema do cliente)."""
     system_name, _ = _system_identity(ctx)
+    decl = _decl(ctx)
+    shapes = _shapes_for_ctx(ctx, system_name)
+    health = decl.get("healthModel") if isinstance(decl.get("healthModel"), dict) else {}
+    signals = _default_signals_for(shapes, [str(s) for s in (health.get("signals") or [])])
+    service_id = _canonical_service_id(ctx, system_name)
+    alerts: list[str] = []
+    if "http" in shapes or "webhook" in shapes:
+        alerts += ["http_5xx_rate_high", "latency_p95_breach", "health_endpoint_down"]
+    if "queue" in shapes or "event" in shapes or "stream" in shapes:
+        alerts += ["queue_lag_high", "consumer_error_rate_high", "dlq_not_empty"]
+    if "cron" in shapes:
+        alerts += ["job_failed", "job_missed_schedule"]
+    if not alerts:
+        alerts = ["process_down", "error_rate_high"]
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
-        "requiredSignals": ["task_success_rate", "task_failure_rate", "latency_p95", "artifact_write_errors"],
-        "requiredDashboards": ["pipeline-overview", "task-health", "artifact-generation"],
-        "requiredAlerts": ["task_failures_spike", "artifact_write_error", "pipeline_stalled"],
-        "traceabilityExpectation": "Cada artefato Connect deve rastrear project_id, request_id e task_id quando houver.",
-        "logCorrelationStrategy": "Logs estruturados por request_id, project_id, task_id e stage.",
+        "requiredSignals": signals,
+        "requiredDashboards": [f"{service_id}-overview", "runtime-health"],
+        "requiredAlerts": _dedupe(alerts),
+        "traceabilityExpectation": "Toda requisição/mensagem carrega request_id (ou correlation_id) e tenant_id, propagados a logs, métricas e eventos.",
+        "logCorrelationStrategy": "Logs estruturados (JSON) com request_id, tenant_id, service_id e, quando houver, event_id.",
     }
 
 
 def build_runtime_passport(ctx: Any) -> dict[str, Any]:
+    """RuntimePassport: o CÓDIGO define o runtime (entrypoints reais dos artefatos); a declaração
+    contribui runtimeType (distribuição declarada), filas e entrypoints ESPERADOS das interfaces."""
     system_name, _ = _system_identity(ctx)
+    decl = _decl(ctx)
     artifact_paths = sorted((ctx.artifacts or {}).keys())
-    services = _services_for(ctx, system_name)
-    runtime_type = _infer_runtime_type(ctx.spec_raw, ctx.charter, ctx.backlog, "\n".join(artifact_paths))
+    services = _services_for(ctx, system_name) if not decl else [_canonical_service_id(ctx, system_name)]
+    declared_rt = str(decl.get("runtimeType") or "")
+    runtime_type = declared_rt if declared_rt in _RUNTIME_TYPES else _infer_runtime_type(
+        ctx.spec_raw, ctx.charter, ctx.backlog, "\n".join(artifact_paths))
+    entrypoints = _extract_path_targets(artifact_paths, services) if not decl else (
+        [{"name": "docker-runtime", "type": "other", "pathOrTarget": "Dockerfile", "critical": True}]
+        if any(p.endswith("Dockerfile") for p in artifact_paths) else []
+    )
+    for i in _decl_interfaces(ctx):
+        etype = i["type"] if i["type"] in _ENTRYPOINT_TYPES else ("other" if i["type"] in ("event", "internal") else "other")
+        entrypoints.append({"name": i["name"], "type": etype,
+                            "pathOrTarget": i.get("contractRef") or i["name"], "critical": etype in ("http", "queue")})
+    queues = _dedupe([str(q) for q in (decl.get("queues") or []) if q]) if decl else \
+        [s for s in services if any(t in s for t in ("worker", "consumer"))]
+    jobs = [i["name"] for i in _decl_interfaces(ctx) if i["type"] == "cron"]
+    critical = _dedupe([str(d) for d in (decl.get("dependencies") or []) if d])
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
         "runtimeType": runtime_type,
-        "entrypoints": _extract_path_targets(artifact_paths, services),
-        "queues": [service for service in services if any(token in service for token in ("worker", "consumer"))],
-        "jobs": ["monitor-loop", "qa-rework-check"],
-        "criticalServices": ["project-storage", "agent-runtime"],
-        "restartRecoveryHints": ["Restaurar checkpoint antes de reexecutar pipeline."],
-        "blastRadiusHints": ["Falha no DevOps não deve invalidar artefatos já persistidos.", "Falha no QA não deve corromper artifacts existentes."],
+        "entrypoints": _dedupe_entrypoints(entrypoints)[:12],
+        "queues": queues,
+        "jobs": jobs,
+        "criticalServices": critical,
+        "restartRecoveryHints": ["Reiniciar o serviço só após confirmar dependências (banco/fila) saudáveis.", "Validar GET /health antes de liberar tráfego."],
+        "blastRadiusHints": ["Reinício do serviço não deve afetar outros serviços do sistema.", "Reprocessamento de fila deve ser idempotente."],
     }
 
 
 def build_known_safe_actions_pack(ctx: Any) -> dict[str, Any]:
+    """Ações seguras derivadas da FORMA do serviço (POLICY) — nunca ações do pipeline do Genesis
+    (o antigo `replay-monitor-loop` virava candidata de remediação no Deadpool). Todas exigem aprovação."""
     system_name, _ = _system_identity(ctx)
+    service_id = _canonical_service_id(ctx, system_name)
+    shapes = _shapes_for_ctx(ctx, system_name)
+    actions: list[dict[str, Any]] = [{
+        "actionId": f"{service_id}-restart",
+        "name": f"Reiniciar {service_id}",
+        "category": "restart",
+        "description": "Reinicia o serviço (container/processo) preservando dados; usar quando health falha sem erro de dependência.",
+        "preconditions": ["dependências (banco/fila) saudáveis", "sem deploy em andamento"],
+        "rollbackHint": "Se o reinício não restaurar o health em 2 tentativas, escalar ao owner técnico.",
+        "requiresApproval": True,
+    }]
+    if "queue" in shapes or "event" in shapes or "stream" in shapes:
+        actions.append({
+            "actionId": f"{service_id}-requeue-dlq",
+            "name": "Reprocessar DLQ",
+            "category": "requeue",
+            "description": "Move mensagens da DLQ de volta para a fila principal após correção da causa.",
+            "preconditions": ["causa-raiz corrigida", "consumidor idempotente"],
+            "rollbackHint": "Pausar o consumidor e devolver as mensagens à DLQ.",
+            "requiresApproval": True,
+        })
+    if "http" in shapes or "webhook" in shapes:
+        actions.append({
+            "actionId": f"{service_id}-invalidate-cache",
+            "name": "Invalidar cache",
+            "category": "invalidate-cache",
+            "description": "Invalida caches de leitura do serviço quando há dados inconsistentes após deploy/migração.",
+            "preconditions": ["fonte de verdade (banco) íntegra"],
+            "rollbackHint": "Sem rollback (cache é reconstruído sob demanda).",
+            "requiresApproval": True,
+        })
+    return {"schemaVersion": CONNECT_SCHEMA_VERSION, "systemId": system_name, "actions": actions}
+
+
+# Tokens (heurísticos, ESPECÍFICOS) que evidenciam cada forma de interface no CÓDIGO gerado —
+# usados só pela RECONCILIAÇÃO declarado × gerado (nunca para inventar contrato). Adversarial PR4 #C:
+# a versão anterior casava prosa de README ("cron", "sse"⊂"assess", "Readable", "emit(") → 3/3
+# falsos positivos. Agora: só arquivos de código sob apps/, tokens de framework, e `event`/`stream`
+# só como AUSÊNCIA (declared-but-missing), nunca como "não declarado".
+_CODE_HINTS = {
+    "http": ("app.get(", "app.post(", "app.use(", "router.get(", "router.post(", "@Get(", "@Post(", "@Controller(",
+             "fastify(", "express()", "FastAPI(", "@app.get(", "@app.post(", "http.createServer(", "new Hono(", "gin.Default("),
+    "queue": ("amqplib", "amqp.connect(", "@golevelup/nestjs-rabbitmq", "@RabbitSubscribe(", "SQSClient", "ReceiveMessageCommand",
+              "KafkaJS", "kafkajs", "new Kafka(", "bullmq", "new Queue(", "new Worker(", "channel.consume(", "pika.BlockingConnection", "boto3.client('sqs'"),
+    "event": ("publishEvent(", "eventBus.publish(", "domainEvents", "OutboxEvent", "outbox_events", "EventPublisher", "@EventPattern("),
+    "cron": ("node-cron", "cron.schedule(", "@Cron(", "CronJob(", "APScheduler", "BackgroundScheduler(", "@nestjs/schedule", "cron.ScheduleJob("),
+    "stream": ("KinesisClient", "socket.io", "new WebSocketServer(", "text/event-stream", "grpc.Server(", "@grpc/grpc-js"),
+}
+# Formas que só podem ser reportadas como AUSENTES (tokens de "encontrado" são ambíguos demais).
+_MISSING_ONLY_SHAPES = {"event", "stream"}
+_CODE_EXTS = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".py", ".go", ".java", ".kt", ".rb", ".cs", ".rs", ".php")
+
+
+def _code_corpus(ctx: Any) -> str:
+    """Só código-fonte gerado sob apps/ (nunca README/docs/compose) — reduz falsos positivos."""
+    parts = []
+    for path, content in (ctx.artifacts or {}).items():
+        p = str(path)
+        if not (p.startswith("apps/") or "/apps/" in p):
+            continue
+        if not p.lower().endswith(_CODE_EXTS):
+            continue
+        parts.append(str(content))
+    return "\n".join(parts)
+
+
+def build_reconciliation_report(ctx: Any) -> dict[str, Any]:
+    """Reconciliação DECLARADO × GERADO (R4 §3 / ADR-013 Connect-local). Só faz sentido com
+    connect.yaml; sem declaração devolve status `not-applicable`. Divergência é FINDING (QA), não
+    silêncio — e enquanto houver `declared_but_missing`, o sistema não deve ser anunciado como tier2."""
+    system_name, _ = _system_identity(ctx)
+    service_id = _canonical_service_id(ctx, system_name)
+    decl_ifaces = _decl_interfaces(ctx)
+    if not _decl(ctx):
+        return {"schemaVersion": CONNECT_SCHEMA_VERSION, "systemId": system_name, "serviceId": service_id,
+                "status": "not-applicable", "declaredButMissing": [], "foundButUndeclared": [],
+                "notes": ["Projeto sem connect.yaml (legado): manifests emitidos por heurística."]}
+    code = _code_corpus(ctx)
+    def _found(shape: str) -> bool:
+        return any(h in code for h in _CODE_HINTS.get(shape, ()))  # case-sensitive: tokens de framework
+    declared_shapes = {i["type"] for i in decl_ifaces if i["type"] in _CODE_HINTS}
+    missing = [{"interface": i["name"], "type": i["type"], "reason": "nenhuma evidência no código gerado (apps/)"}
+               for i in decl_ifaces if i["type"] in _CODE_HINTS and code and not _found(i["type"])]
+    undeclared = [{"type": shape, "reason": "evidência de framework no código sem interface declarada"}
+                  for shape in ("http", "queue", "cron")
+                  if code and shape not in declared_shapes and shape not in _MISSING_ONLY_SHAPES and _found(shape)]
+    status = "clean" if not missing and not undeclared else "divergent"
+    if not code:
+        status = "pending"  # ainda sem artefatos (estágio anterior ao Dev)
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
-        "actions": [
-            {
-                "actionId": "replay-monitor-loop",
-                "name": "Replay Monitor Loop",
-                "category": "retry",
-                "description": "Reexecuta o Monitor Loop após correção de bloqueio operacional sem descartar checkpoints.",
-                "preconditions": ["checkpoint íntegro", "task status revisado"],
-                "rollbackHint": "Restaurar checkpoint anterior se o replay degradar o estado.",
-                "requiresApproval": True,
-            }
-        ],
+        "serviceId": service_id,
+        "status": status,
+        "declaredButMissing": missing,
+        "foundButUndeclared": undeclared,
+        "notes": ["Heurística por tokens no código gerado — evidência, não prova. Divergência vira finding de QA."],
     }
 
 
@@ -466,10 +784,15 @@ def build_integration_ready_contract(ctx: Any) -> dict[str, Any]:
     owners do passport (sintéticos até a spec Connect-ready — PR4 — nota explícita no payload).
     """
     system_name, _ = _system_identity(ctx)
-    passport_owners, _ = _default_owners(system_name)
+    passport_owners, _, declared = _owners(ctx, system_name)
     contact_points = [
-        {"id": o["id"], "name": o["name"], "role": o["role"]} for o in passport_owners
+        {k: v for k, v in o.items() if k in ("id", "name", "email", "role")} for o in passport_owners
     ] or [{"id": f"{system_name}-owner", "name": "Owner", "role": "owner"}]
+    notes = ["Emitido pelo Genesis a partir do contexto do pipeline (estágio devops)."]
+    if declared:
+        notes.append("contactPoints = owners declarados na spec (connect.yaml) — spec Connect-ready.")
+    else:
+        notes.append("contactPoints/owners SINTÉTICOS (projeto sem connect.yaml) — não usar para escalonamento real.")
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
@@ -480,10 +803,7 @@ def build_integration_ready_contract(ctx: Any) -> dict[str, Any]:
         "supportsSafeActionConstraints": True,
         "supportsObservabilityBaseline": True,
         "contactPoints": contact_points,
-        "notes": [
-            "Emitido pelo Genesis a partir do contexto do pipeline (estágio devops).",
-            "contactPoints/owners sintéticos até a spec declarar owners reais do tenant (spec Connect-ready).",
-        ],
+        "notes": notes,
     }
 
 
@@ -517,6 +837,8 @@ def build_connect_artifacts_for_stage(ctx: Any, stage: str) -> list[ConnectArtif
                 ConnectArtifact("RuntimePassport", "runtime-passport.json", build_runtime_passport(ctx)),
                 ConnectArtifact("KnownSafeActionsPack", "known-safe-actions-pack.json", build_known_safe_actions_pack(ctx)),
                 ConnectArtifact("IntegrationReadyContract", "integration-ready-contract.json", build_integration_ready_contract(ctx)),
+                # R4 PR4: reconciliação declarado × gerado (sem schema Connect — validação é pulada).
+                ConnectArtifact("ReconciliationReport", "reconciliation.json", build_reconciliation_report(ctx)),
             ]
         )
     else:
@@ -530,6 +852,12 @@ def build_connect_artifacts_for_stage(ctx: Any, stage: str) -> list[ConnectArtif
     import logging as _logging
     _log = _logging.getLogger(__name__)
     for artifact in artifacts:
+        if artifact.contract == "ReconciliationReport":
+            if artifact.payload.get("status") == "divergent":
+                _log.warning("[Connect] RECONCILIAÇÃO divergente (declarado × gerado): faltando=%s não-declarado=%s",
+                             [m.get("interface") for m in artifact.payload.get("declaredButMissing", [])],
+                             [u.get("type") for u in artifact.payload.get("foundButUndeclared", [])])
+            continue
         try:
             errors = validate_connect_artifact(artifact.contract, artifact.payload)
             if errors:

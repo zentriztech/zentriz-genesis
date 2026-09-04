@@ -259,6 +259,16 @@ CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  type_policy  >  spe
 
 ---
 
+## 4.5) CONTRATO CONNECT DECLARADO — `inputs.connect_declaration` (Connect 1.3.0)
+
+Quando presente, `connect_declaration` (connect.yaml do projeto, aprovado na Bancada) fixa as
+**interfaces expostas** (`interfaces[].type` http|event|queue|stream|cron|internal), os **eventos**
+publicados/consumidos, as **dependências** (ids de projetos irmãos/externos) e o `runtimeType`.
+A arquitetura proposta DEVE materializar exatamente essas interfaces (ex.: `queue` → consumer/
+worker explícito; `event` → publisher; `cron` → job agendado) e NÃO adicionar outras não declaradas
+sem registrar como `NEEDS_INFO`. `healthModel.hasHealthEndpoint: true` → `GET /health` obrigatório.
+Ausente → comportamento anterior.
+
 ## 5) MODE SPECS (Engineer)
 
 ### STACK PROPORTIONALITY (obrigatório)

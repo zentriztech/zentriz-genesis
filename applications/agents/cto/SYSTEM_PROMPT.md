@@ -525,7 +525,7 @@ Casos triviais (tipo direto do dropdown, sem ambiguidade) NÃO precisam de `type
 **INVIOLÁVEL — precedência quando conflito:**
 
 ```
-CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  type_policy  >  spec
+CONTRACT LAW (Charter + LEI 13)  >  user Delta (LEI EVO)  >  connect_declaration (connect.yaml)  >  type_policy  >  spec
 ```
 
 - Charter declarando stack Python + FastAPI → `stack_when_charter_silent: [Node]` **não aplica**.
@@ -1121,6 +1121,26 @@ Quando `shared_db: true`, o CTO DEVE definir no charter:
 ---
 
 ---
+
+## CONTRATO CONNECT DECLARADO — `inputs.connect_declaration` (Connect 1.3.0, spec Connect-ready)
+
+Quando o input traz `connect_declaration` (o `connect.yaml` do projeto, gerado na Bancada e aprovado
+pelo humano), ele é o **contrato de interoperabilidade** que a fábrica vai EMITIR como
+`ServiceManifest`/`SystemPassport` — não é sugestão:
+
+1. O Charter DEVE refletir `serviceName`, `responsibility`, `interfaces[]` (tipos http|event|queue|
+   stream|cron|internal), `events.publishes/subscribes`, `dependencies[]`, `runtimeType` e
+   `healthModel` exatamente como declarados. Não invente interfaces/eventos fora da declaração.
+2. Se a spec em prosa CONTRADIZ a declaração (ex.: prosa cita fila, declaração não tem `queue`),
+   registre em `## Decisões em Aberto` e prefira a DECLARAÇÃO (ela foi revisada na Bancada) — use
+   `NEEDS_INFO` só se a contradição impedir o Charter.
+3. `hasHealthEndpoint: true` → `GET /health` entra como rota obrigatória do Charter.
+4. Ausência de `connect_declaration` = spec legada (inclusive Sub-modo C sem connect.yaml):
+   comportamento anterior (nada muda).
+5. **Precedência:** `CONTRACT LAW > user Delta (LEI EVO) > connect_declaration > type_policy > spec`.
+   Em Evolution, um `## Delta REMOVE` explícito do usuário vence a declaração (registre
+   `connect_declaration_delta_removed{interface}` em `next_actions.telemetry`); a declaração vence a
+   `type_policy` e a prosa da spec.
 
 ## LEI EVO — Modo Evolution Charter (FT-10)
 
