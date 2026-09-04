@@ -1,6 +1,30 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { verifyToken, decodeDeployCallbackToken, type DeployCallbackPayload } from "../auth.js";
 import { getTenantStatus } from "../services/tenantStatusCache.js";
+import { pool } from "../db/client.js";
+
+/**
+ * Evoluir (E2E 2026-09-04): o token de run do FILHO precisa LER o PAI/ancestrais da linhagem (tasks já
+ * entregues → herança H6, charter/proposta → contexto do CTO/PM). O MUST-MATCH devolvia 403 e a herança
+ * falhava em silêncio. Só ANCESTRAIS (CTE ascendente, profundidade ≤ 64) e só para GET — nunca escrita.
+ */
+export async function isAncestorProject(candidateId: string, childId: string): Promise<boolean> {
+  if (!candidateId || !childId || candidateId === childId) return false;
+  try {
+    const r = await pool.query(
+      `WITH RECURSIVE up AS (
+         SELECT id, parent_project_id, 0 AS depth FROM projects WHERE id = $1
+         UNION ALL
+         SELECT p.id, p.parent_project_id, up.depth + 1 FROM projects p JOIN up ON p.id = up.parent_project_id WHERE up.depth < 64
+       )
+       SELECT 1 FROM up WHERE id = $2 AND depth > 0 LIMIT 1`,
+      [childId, candidateId],
+    );
+    return r.rows.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 export type AuthUser = {
   id: string;
@@ -73,10 +97,15 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
       || (typeof params.projectId === "string" && params.projectId)
       || "";
     if (routeProjectId !== payload.projectId) {
-      return reply.status(403).send({
-        code: "PROJECT_SCOPE_MISMATCH",
-        message: "Token de projeto só opera rotas do próprio projeto.",
-      });
+      // Exceção ÚNICA e somente-leitura: GET em ANCESTRAL da linhagem (evolução lê o pai). Escrita → 403 sempre.
+      const method = String((request as { method?: string }).method ?? "").toUpperCase();
+      const ancestorRead = method === "GET" && await isAncestorProject(routeProjectId, payload.projectId);
+      if (!ancestorRead) {
+        return reply.status(403).send({
+          code: "PROJECT_SCOPE_MISMATCH",
+          message: "Token de projeto só opera rotas do próprio projeto (leitura de ancestrais da linhagem é a única exceção).",
+        });
+      }
     }
   }
 

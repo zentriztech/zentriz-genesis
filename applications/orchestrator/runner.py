@@ -382,7 +382,8 @@ def _pick_project_root(files_root: str, project_id: str, product_id: str | None)
     return standalone
 
 
-_EVO_ALWAYS_ALLOWED = ("tests/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "docs/**")
+_EVO_ALWAYS_ALLOWED = ("tests/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "docs/**",
+                       "CHANGELOG.md")  # E2E 2026-09-04: registrar a mudança no CHANGELOG é sempre legítimo (Keep a Changelog)
 _EVO_MAX_VIOLATIONS_PER_TASK = max(1, int(os.environ.get("EVOLUTION_MAX_SCOPE_VIOLATIONS", "2") or 2))
 
 
@@ -3109,6 +3110,9 @@ def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
     da API por (project_id, task_id)). Devolve o nº de tasks enviadas."""
     data, status = _api_get(f"/api/projects/{parent_id}/tasks")
     if status != 200:
+        # E2E 2026-09-04: o token do run é ESCOPADO ao filho (MUST-MATCH em auth.ts) → 403 ao ler o pai; sem este
+        # log a herança falhava em silêncio. A API passou a permitir GET em ANCESTRAIS da linhagem.
+        logger.warning("[H6] não foi possível ler as tasks do pai %s (HTTP %s) — herança de tasks pulada", parent_id[:8], status)
         return 0
     rows = data if isinstance(data, list) else (data.get("tasks") if isinstance(data, dict) else None) or []
     inherited: list[dict] = []
@@ -3128,8 +3132,11 @@ def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
         })
     if not inherited:
         return 0
-    _, post_status = _api_post(f"/api/projects/{project_id}/tasks", {"tasks": inherited})
-    return len(inherited) if 200 <= post_status < 300 else 0
+    _pd, post_status = _api_post(f"/api/projects/{project_id}/tasks", {"tasks": inherited})
+    if not (200 <= post_status < 300):
+        logger.warning("[H6] POST das tasks herdadas falhou (HTTP %s): %s", post_status, str(_pd)[:200])
+        return 0
+    return len(inherited)
 
 
 def _inherited_task_ids(project_id: str) -> list[str]:
@@ -4831,6 +4838,8 @@ def main() -> int:
             _pt_rows = _pt_data if isinstance(_pt_data, list) else ((_pt_data or {}).get("tasks") if isinstance(_pt_data, dict) else None) or []
             _pt_done = [t for t in _pt_rows if isinstance(t, dict) and str(t.get("status") or "").upper() in ("DONE", "QA_PASS")
                         and str(t.get("taskId") or t.get("task_id") or "") not in _INHERIT_SKIP_TASKS]
+            if _pt_status != 200:
+                logger.warning("[H6] tasks do pai indisponíveis para o contexto do CTO/PM (HTTP %s) — token escopado? ver auth.ts (ancestrais)", _pt_status)
             if _pt_status == 200 and _pt_done:
                 _lines = [f"- {str(t.get('taskId') or t.get('task_id'))} — {str(t.get('requirements') or '')[:140]}" for t in _pt_done[:40]]
                 _parent_done_block = ("### TASKS JÁ ENTREGUES NA VERSÃO ANTERIOR (não repita — só o DELTA do pedido)\n"

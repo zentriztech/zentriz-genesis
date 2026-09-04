@@ -16,6 +16,10 @@ vi.mock("../services/tenantStatusCache.js", () => ({
   getTenantStatus: (id: string) => getTenantStatus(id),
 }));
 
+// Evoluir: leitura de ANCESTRAIS pelo token de run escopado — a CTE de linhagem é mockada aqui.
+let ancestorRows: unknown[] = [];
+vi.mock("../db/client.js", () => ({ pool: { query: async () => ({ rows: ancestorRows }) } }));
+
 import { authMiddleware, type AuthUser } from "./auth.js";
 import { signToken, signDeployCallbackToken } from "../auth.js";
 
@@ -172,5 +176,37 @@ describe("authMiddleware — binding de projeto do token de run (Lei 8 / rota B)
     const { req, reply, sent } = reqReplyWithParams(token, { id: OTHER });
     await authMiddleware(req as never, reply);
     expect(sent.code).toBeUndefined();
+  });
+});
+
+describe("authMiddleware — token de run escopado (MUST-MATCH) e leitura de ancestrais (Evoluir)", () => {
+  const CHILD = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const PARENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const OTHER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  function scopedReq(routeId: string, method: string) {
+    const token = signToken({ sub: "u1", email: "r@x", role: "user", tenantId: "t1", svc: "runner", projectId: CHILD } as never);
+    const { req, reply, sent } = fakeReqReply(token);
+    (req as Record<string, unknown>).params = { id: routeId };
+    (req as Record<string, unknown>).method = method;
+    return { req, reply, sent };
+  }
+  it("GET no PAI (ancestral na linhagem) → passa; POST no pai → 403; GET em projeto sem parentesco → 403", async () => {
+    ancestorRows = [{ "?column?": 1 }];
+    let r = scopedReq(PARENT, "GET");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBeUndefined();
+    r = scopedReq(PARENT, "POST");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBe(403); expect(r.sent.body?.code).toBe("PROJECT_SCOPE_MISMATCH");
+    ancestorRows = [];
+    r = scopedReq(OTHER, "GET");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBe(403);
+  });
+  it("próprio projeto → passa em qualquer método", async () => {
+    ancestorRows = [];
+    const r = scopedReq(CHILD, "POST");
+    await authMiddleware(r.req as never, r.reply);
+    expect(r.sent.code).toBeUndefined();
   });
 });

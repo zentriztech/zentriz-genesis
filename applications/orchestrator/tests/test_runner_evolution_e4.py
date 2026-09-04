@@ -19,6 +19,8 @@ def test_glob_matching_com_duas_estrelas_e_prefixo_apps():
     assert runner._evo_path_allowed("api/src/reports.spec.ts", scope)
     assert runner._evo_path_allowed("docs/decisoes.md", scope)
     assert runner._evo_path_allowed("web/__tests__/x.tsx", scope)
+    assert runner._evo_path_allowed("CHANGELOG.md", scope)          # E2E: registrar no CHANGELOG é sempre permitido
+    assert not runner._evo_path_allowed("package.json", scope)      # dependências exigem escopo no RFC
 
 
 def test_exported_symbols_ts_py_go():
