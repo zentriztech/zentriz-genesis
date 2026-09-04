@@ -526,6 +526,15 @@ async function runWatchdogCycle(): Promise<void> {
       await expireOverdueProposals(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueProposals:", e));
     }
 
+    // 0g. Escalada de projetos TRAVADOS (furo 2026-08-31: alerta de bloqueio era tiro único;
+    // projeto preso em blocked_cyborg por 2 dias sem ninguém perceber). Re-alerta o ops por
+    // e-mail enquanto o projeto seguir parado (6h, depois a cada 24h, máx. 3). Estado em
+    // extra.stall_escalation; STALL_ESCALATION=off desliga.
+    {
+      const { escalateStalledProjects } = await import("./stallEscalation.js");
+      await escalateStalledProjects(pool).catch((e) => console.error("[Watchdog] Erro em escalateStalledProjects:", e));
+    }
+
     // 1. Buscar status do runner
     const runnerStatus = await getRunnerStatus();
     const activeIds = new Set(runnerStatus ? Object.keys(runnerStatus.projects) : []);

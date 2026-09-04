@@ -15,6 +15,7 @@ import {
   notifyFactoryStart,
   notifyFactoryBlocked,
   notifyFactoryDone,
+  notifyFactoryStalled,
   isBlockStatus,
   isDoneStatus,
 } from "./opsNotify.js";
@@ -173,6 +174,35 @@ describe("robustez — nunca lança", () => {
       return { rowCount: 0, rows: [] }; // enrich vazio
     });
     await notifyFactoryStart({ query } as never, "proj-ghost");
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("notifyFactoryStalled — escalada de projeto travado (stallEscalation)", () => {
+  it("assunto/corpo trazem TRAVADO, horas, escalada n/máx e o último passo; idempotente pelo kind", async () => {
+    const { pool } = makeFakePool();
+    const ok = await notifyFactoryStalled(pool, "proj-1", "stall:blocked_cyborg:1", { hoursStalled: 50, count: 1, max: 3, isLast: false });
+    expect(ok).toBe(true);
+    const arg = sendEmailMock.mock.calls[0][0];
+    expect(arg.subject).toContain("TRAVADO há 2 dias");
+    expect(arg.subject).not.toContain("ÚLTIMA ESCALADA");
+    expect(arg.html).toContain("Escalada 1 de 3");
+    expect(arg.html).toContain("deploy S3 bloqueado: tenant sem GitHub App");
+    expect(arg.html).toContain("#f59e0b");
+    // mesmo kind de novo → não reenvia; kind da escalada 2 → envia e marca como última quando isLast
+    await notifyFactoryStalled(pool, "proj-1", "stall:blocked_cyborg:1", { hoursStalled: 51, count: 1, max: 3, isLast: false });
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+    await notifyFactoryStalled(pool, "proj-1", "stall:blocked_cyborg:3", { hoursStalled: 7, count: 3, max: 3, isLast: true });
+    expect(sendEmailMock).toHaveBeenCalledTimes(2);
+    expect(sendEmailMock.mock.calls[1][0].subject).toContain("há 7h");
+    expect(sendEmailMock.mock.calls[1][0].subject).toContain("ÚLTIMA ESCALADA");
+    expect(sendEmailMock.mock.calls[1][0].html).toContain("deixa de re-alertar");
+  });
+  it("SES desligado → não toca o banco nem envia", async () => {
+    sesConfigured = false;
+    const { pool, query } = makeFakePool();
+    expect(await notifyFactoryStalled(pool, "proj-1", "stall:failed:1", { hoursStalled: 9, count: 1, max: 3, isLast: false })).toBe(false);
+    expect(query).not.toHaveBeenCalled();
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 });

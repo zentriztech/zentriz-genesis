@@ -138,30 +138,29 @@ export async function cloudRoutes(app: FastifyInstance) {
 
       const { encrypted, iv, tag } = encryptCredentials(JSON.stringify(sanitized));
 
-      // UPSERT (não INSERT puro): o soft-delete (DELETE → status='revoked') MANTÉM o slot_index,
-      // mas a UNIQUE (tenant_id, slot_index) ignora status. Como `nextSlot` é calculado só sobre
-      // linhas ATIVAS, uma linha revogada no slot 0 fazia o INSERT colidir (duplicate key) mesmo
-      // com a lista aparecendo vazia. O ON CONFLICT REATIVA aquele slot com as novas credenciais
-      // (mesmo comportamento do alias legado singular). Preserva id/created_at/tenant_id.
-      const ins = await pool.query(
-        `INSERT INTO tenant_cloud_connections
-           (tenant_id, provider, label, region, service_type, slot_index,
-            encrypted_credentials, encryption_iv, encryption_tag, status)
-         VALUES ($1,$2,$3,$4,'container',$5,$6,$7,$8,'active')
-         ON CONFLICT (tenant_id, slot_index) DO UPDATE
-           SET provider = EXCLUDED.provider,
-               label = EXCLUDED.label,
-               region = EXCLUDED.region,
-               service_type = EXCLUDED.service_type,
-               encrypted_credentials = EXCLUDED.encrypted_credentials,
-               encryption_iv = EXCLUDED.encryption_iv,
-               encryption_tag = EXCLUDED.encryption_tag,
-               status = 'active',
-               updated_at = now()
-         RETURNING id, slot_index`,
-        [tenantId, provider, label ?? null, region ?? sanitized.region ?? null,
-         nextSlot, encrypted, iv, tag]
-      );
+      // Migration 084: unicidade (tenant_id, slot_index) agora é PARCIAL (só status='active').
+      // Linhas revogadas pelo soft-delete ficam como histórico e NÃO colidem mais — nem no
+      // INSERT (antes exigia UPSERT de reativação) nem no recompact do DELETE (antes: deletar um
+      // slot não-último com múltiplos slots colidia com a revogada → 500). INSERT puro; a única
+      // colisão possível é a corrida de dois adds simultâneos no mesmo nextSlot → 409 (não
+      // sobrescrever silenciosamente as credenciais do outro, como o UPSERT antigo faria).
+      let ins;
+      try {
+        ins = await pool.query(
+          `INSERT INTO tenant_cloud_connections
+             (tenant_id, provider, label, region, service_type, slot_index,
+              encrypted_credentials, encryption_iv, encryption_tag, status)
+           VALUES ($1,$2,$3,$4,'container',$5,$6,$7,$8,'active')
+           RETURNING id, slot_index`,
+          [tenantId, provider, label ?? null, region ?? sanitized.region ?? null,
+           nextSlot, encrypted, iv, tag]
+        );
+      } catch (err) {
+        if ((err as { code?: string })?.code === "23505") {
+          return reply.status(409).send({ code: "SLOT_RACE", message: "Outro slot foi adicionado ao mesmo tempo. Tente novamente." });
+        }
+        throw err;
+      }
       return reply.status(201).send({
         ok: true, id: ins.rows[0].id, slotIndex: ins.rows[0].slot_index,
         message: "Credenciais salvas com segurança"

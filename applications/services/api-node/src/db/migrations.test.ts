@@ -139,3 +139,20 @@ describe("068 — tenant_llm_budget + value_events", () => {
     expect(sql).toContain("idx_value_events_type_created");
   });
 });
+
+describe("084 — ordem dos statements (achado ao vivo: renumerar antes de derrubar a UNIQUE total colidia com linha revogada)", () => {
+  it("DROP CONSTRAINT vem ANTES do UPDATE de renumeração, que vem ANTES do CREATE UNIQUE INDEX parcial", () => {
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, "084_cloud_slots_partial_unique.sql"), "utf8");
+    const stmts = sql
+      .split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
+      .split(";").map((s) => s.trim()).filter(Boolean);
+    const idx = (re: RegExp) => stmts.findIndex((s) => re.test(s));
+    const drop = idx(/DROP CONSTRAINT IF EXISTS tenant_cloud_connections_tenant_slot_key/);
+    const renumber = idx(/^UPDATE tenant_cloud_connections/);
+    const partial = idx(/CREATE UNIQUE INDEX IF NOT EXISTS uq_cloud_connections_tenant_slot_active/);
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(renumber).toBeGreaterThan(drop);
+    expect(partial).toBeGreaterThan(renumber);
+    expect(stmts[partial]).toMatch(/WHERE status = 'active'/);
+  });
+});

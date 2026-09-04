@@ -151,10 +151,18 @@ function fmtDuration(sec: number | null): string {
 }
 
 /** Molde HTML branded escuro (contraste: fundo #0b1220, texto claro). */
+/** Metadados da escalada de projeto TRAVADO (stallEscalation.ts). */
+export interface StallMeta {
+  hoursStalled: number;
+  count: number;
+  max: number;
+  isLast: boolean;
+}
+
 function renderEmail(
-  kind: "start" | "block" | "done",
+  kind: "start" | "block" | "done" | "stall",
   e: ProjectEnrichment,
-  meta: { origin?: string; reason?: string; stats?: DoneStats },
+  meta: { origin?: string; reason?: string; stats?: DoneStats; stall?: StallMeta },
 ): {
   subject: string;
   html: string;
@@ -162,26 +170,35 @@ function renderEmail(
 } {
   const isStart = kind === "start";
   const isDone = kind === "done";
-  const accent = isStart ? "#3b82f6" : isDone ? "#22c55e" : "#ef4444";
+  const isStall = kind === "stall";
+  const accent = isStart ? "#3b82f6" : isDone ? "#22c55e" : isStall ? "#f59e0b" : "#ef4444";
   const who = e.user_name || e.user_email || "desconhecido";
   const whoFull = e.user_email && e.user_name ? `${e.user_name} &lt;${esc(e.user_email)}&gt;` : esc(who);
   const tenant = e.tenant_name || "(sem tenant)";
   const product = e.product_name || "(sem produto)";
+  const st = meta.stall;
+  const stallHours = st ? (st.hoursStalled >= 48 ? `${Math.floor(st.hoursStalled / 24)} dias` : `${Math.floor(st.hoursStalled)}h`) : "";
   const subject = isStart
     ? `[Genesis] 🏭 Fábrica iniciou um projeto — ${e.title}`
     : isDone
       ? `[Genesis] ✅ Projeto produzido (${e.status}) — ${e.title}`
-      : `[Genesis] ⚠️ Projeto bloqueado (${e.status}) — ${e.title}`;
+      : isStall
+        ? `[Genesis] ⏳ Projeto TRAVADO há ${stallHours} (${e.status}) — ${e.title}${st?.isLast ? " · ÚLTIMA ESCALADA" : ""}`
+        : `[Genesis] ⚠️ Projeto bloqueado (${e.status}) — ${e.title}`;
   const title = isStart
     ? "Fábrica iniciou um novo projeto"
     : isDone
       ? "Projeto produzido — 100%"
-      : "Projeto bloqueado / falhou na Fábrica";
+      : isStall
+        ? `Projeto travado há ${stallHours} — ninguém agiu`
+        : "Projeto bloqueado / falhou na Fábrica";
   const lead = isStart
     ? "Um novo projeto entrou em fabricação no Genesis. Detalhes abaixo."
     : isDone
       ? "Um projeto foi produzido de ponta a ponta pela Fábrica. Resumo abaixo."
-      : "Um projeto entrou em estado de bloqueio/falha na Fábrica. Detalhes abaixo.";
+      : isStall
+        ? `Este projeto continua parado no mesmo estado desde o alerta de bloqueio e ninguém o destravou. Escalada ${st?.count ?? 1} de ${st?.max ?? 1}${st?.isLast ? " — depois desta o Genesis deixa de re-alertar" : ""}. Ação esperada: destravar (rerun/PATCH/aceite) ou arquivar.`
+        : "Um projeto entrou em estado de bloqueio/falha na Fábrica. Detalhes abaixo.";
 
   const rows: Array<[string, string]> = [
     ["PROJETO", esc(e.title)],
@@ -190,6 +207,12 @@ function renderEmail(
   ];
   if (isStart) {
     rows.push(["QUEM INICIOU", `${whoFull} · ${esc(originLabel(meta.origin))}`]);
+  } else if (isStall) {
+    rows.push(["STATUS", esc(e.status)]);
+    rows.push(["PARADO HÁ", esc(stallHours)]);
+    rows.push(["ESCALADA", `${st?.count ?? 1}/${st?.max ?? 1}`]);
+    rows.push(["DONO", whoFull]);
+    if (meta.reason) rows.push(["ÚLTIMO PASSO", esc(meta.reason)]);
   } else if (isDone) {
     rows.push(["STATUS", esc(e.status)]);
     rows.push(["DONO", whoFull]);
@@ -302,6 +325,22 @@ export async function notifyFactoryBlocked(
     // Sem motivo explícito? Puxa o último passo humano-legível (cyborg/system) como motivo.
     const reason = opts.reason ?? (await latestBlockReason(pool, projectId)) ?? undefined;
     return renderEmail("block", e, { reason });
+  });
+}
+
+/**
+ * STALL — e-mail de "projeto TRAVADO há X horas, ninguém agiu" (watchdog stallEscalation).
+ * Idempotente pelo `kind` recebido (`stall:<status>:<n>`), que já codifica status e nº da escalada.
+ */
+export async function notifyFactoryStalled(
+  pool: Pool,
+  projectId: string,
+  kind: string,
+  stall: StallMeta,
+): Promise<boolean> {
+  return claimAndSend(pool, projectId, kind, async (e) => {
+    const reason = (await latestBlockReason(pool, projectId)) ?? undefined;
+    return renderEmail("stall", e, { reason, stall });
   });
 }
 
