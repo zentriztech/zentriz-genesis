@@ -186,6 +186,8 @@ REGRAS:
 2. Aplique de forma cirúrgica o que foi pedido na última mensagem (adicionar/remover/ajustar).
 3. Mantenha a spec consistente e implementável (FRs com critérios de aceite, modelo de dados, stack).
 4. Devolva a SPEC INTEIRA revisada como o artefato Markdown principal (não só o trecho alterado).
+   IMPORTANTE: o artefato principal DEVE ter o caminho EXATO "docs/spec/PRODUCT_SPEC.md"
+   (esse é o único path aceito — usar outro caminho REPROVA a revisão e força um retrabalho lento).
 5. No campo summary, escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou.${gapRule}
 
 Os ARQUIVOS IRMÃOS são contexto SÓ-LEITURA (não os reescreva) — servem para você entender o
@@ -221,7 +223,13 @@ ${transcript}${contextSections}
       ],
     },
     existing_artifacts: [],
-    limits: { max_rounds: 1, timeout_sec: 120 },
+    // NOTA: hoje `limits` é INERTE nesta rota — o wrapper /invoke/cto/async (server.py) embrulha
+    // o corpo inteiro sob `input` (não há `input` de topo aqui), e runtime.py lê message.get("limits")
+    // no topo → sempre {} → cai no default REQUEST_TIMEOUT/900 (por isso o antigo 120 nunca matou a
+    // geração de 7-8 min). Mantemos 900 (= o default real) por clareza, caso o wrapper passe a
+    // preservar `limits`. O teto EFETIVO do job é o MAX_MS do runChatJob (18 min, cobre 1 gen +
+    // eventual repair). Ver [[genesis-resolver-gaps-timeout-fix]].
+    limits: { max_rounds: 1, timeout_sec: 900 },
   };
 }
 
@@ -316,7 +324,9 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
 
   const base = agentsUrl.replace(/\/$/, "");
   const startedAt = Date.now();
-  const MAX_MS = 660_000; // 11 min
+  // 18 min: uma revisão de spec inteira (regenera o PRODUCT_SPEC) leva ~7-8 min; esse teto dá
+  // folga inclusive p/ um eventual repair único do envelope. O frontend usa o MESMO teto (18 min).
+  const MAX_MS = 1_080_000; // 18 min
 
   httpPost(`${base}/invoke/cto/async`, JSON.stringify(message), 30_000)
     .then((startText) => {
@@ -331,7 +341,7 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
         if (elapsed > MAX_MS / 1000) {
           clearInterval(timer);
           const j = _chatJobs.get(jobId);
-          if (j) { j.status = "error"; j.error = "Timeout: CTO demorou mais de 11 minutos."; }
+          if (j) { j.status = "error"; j.error = "Timeout: CTO demorou mais de 18 minutos."; }
           return;
         }
 

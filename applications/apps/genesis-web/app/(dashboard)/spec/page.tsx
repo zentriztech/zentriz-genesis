@@ -1340,7 +1340,9 @@ export default function SpecPage() {
     const startTs = Date.now();
     chatPollRef.current = setInterval(async () => {
       if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-      if (Date.now() - startTs > 11 * 60_000) {
+      // 18 min: casa com o MAX_MS do runChatJob (backend). Uma revisão de spec inteira via CTO
+      // pode levar ~7-8 min; teto menor cortava o polling antes de o job terminar.
+      if (Date.now() - startTs > 18 * 60_000) {
         stopChatPolling();
         setChatError("Tempo esgotado. Tente novamente.");
         setChatSending(false);
@@ -1406,7 +1408,8 @@ export default function SpecPage() {
     const startTs = Date.now();
     chatPollRef.current = setInterval(async () => {
       if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-      if (Date.now() - startTs > 11 * 60_000) {
+      // 18 min — mesmo teto do runChatJob/backend (resolver GAPs regenera a spec inteira).
+      if (Date.now() - startTs > 18 * 60_000) {
         stopChatPolling(); setChatError("Tempo esgotado. Tente novamente."); setChatSending(false); return;
       }
       try {
