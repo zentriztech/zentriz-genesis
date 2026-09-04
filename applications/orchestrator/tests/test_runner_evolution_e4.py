@@ -109,3 +109,64 @@ def test_scope_check_sem_escopo_e_passthrough_e_inputs_do_dev(tmp_path: Path):
     assert r.evolution_scope == ["apps/api/**"] and r.evolution_compat == "minor" and r.evolution_violations == ctx.evolution_violations
     assert r.evolution_violation_rounds == ctx.evolution_violation_rounds
     assert r.build_inputs_for_pm()["evolution_scope"] == ["apps/api/**"]
+
+
+# ── Bloco 2 H5: exports completos + re-export opaco; H6: herança de tasks ─────────────────────
+
+def test_exported_symbols_h5_formas_adicionais():
+    ts = (
+        "export { a, b as c, d }\n"
+        "export default function () {}\n"
+        "export type { T } from './t'\n"
+        "export abstract class Base {}\n"
+    )
+    assert runner._exported_symbols(ts) == {"a", "c", "d", "default", "Base"}
+    cjs = "module.exports = { alpha, beta: fn, 'gamma': g }\nexports.delta = 1\nmodule.exports.eps = 2\n"
+    assert runner._exported_symbols(cjs) == {"alpha", "beta", "gamma", "delta", "eps"}
+    py_all = "__all__ = [\n  'publico',\n  \"outro\",\n]\ndef publico(): ...\ndef _privado(): ...\ndef nao_listado(): ...\n"
+    assert runner._exported_symbols(py_all) == {"publico", "outro"}          # __all__ literal sobrepõe
+    py = "def publico(): ...\ndef _privado(): ...\nclass Repo: ...\n"
+    assert runner._exported_symbols(py) == {"publico", "Repo"}               # sem __all__: sem `_` inicial
+    go = "type Order struct{}\nvar Version = \"1\"\nconst maxN = 3\nfunc (o Order) Total() int { return 0 }\nfunc helper() {}\n"
+    assert runner._exported_symbols(go) == {"Order", "Version", "Total"}
+
+
+def test_exports_opaque_pula_checagem_de_simbolos(tmp_path: Path):
+    assert runner._exports_opaque("export * from './x'\n")
+    assert runner._exports_opaque("export * as ns from './x'\n")
+    assert runner._exports_opaque("module.exports = require('./impl')\n")
+    assert runner._exports_opaque("__all__ = []\n__all__ += other.__all__\n")
+    assert not runner._exports_opaque("export { a } from './x'\nexport const b = 1\n")
+    apps = tmp_path / "apps"; (apps / "api" / "src").mkdir(parents=True)
+    (apps / "api" / "src" / "index.ts").write_text("export * from './a'\nexport function keep() {}\n")
+    ctx = PipelineContext("p"); ctx.evolution_scope = ["apps/api/**"]
+    # reescreve o barrel SEM `keep` — opaco → não acusa (falso-negativo aceitável)
+    allowed, violations = runner._evolution_scope_check(ctx, [{"path": "apps/api/src/index.ts", "content": "export * from './a'\nexport * from './b'\n"}], apps)
+    assert violations == [] and len(allowed) == 1
+
+
+def test_inherit_parent_tasks_mapeia_done_como_tsk_inh(monkeypatch):
+    parent_tasks = [
+        {"taskId": "TSK-BE-001", "status": "DONE", "module": "backend", "ownerRole": "DEV_BACKEND", "requirements": "Criar CRUD"},
+        {"taskId": "TSK-WEB-002", "status": "QA_PASS", "module": "web", "ownerRole": "DEV_WEB", "requirements": "Tela X"},
+        {"taskId": "TSK-BE-003", "status": "QA_FAIL", "module": "backend", "ownerRole": "DEV_BACKEND"},   # não terminal → fora
+        {"taskId": "TSK-DEVOPS-001", "status": "DONE", "module": "backend", "ownerRole": "DEVOPS"},         # devops → fora
+        {"taskId": "TSK-FULL-TEST", "status": "DONE", "module": "backend", "ownerRole": "QA"},              # full-test → fora
+        {"taskId": "TSK-INH-BE-000", "status": "DONE", "module": "backend", "ownerRole": "DEV"},            # já herdada → fora
+    ]
+    posted: list = []
+    monkeypatch.setattr(runner, "_api_get", lambda path: (parent_tasks, 200))
+    monkeypatch.setattr(runner, "_api_post", lambda path, body: (posted.append((path, body)) or ({}, 200)))
+    n = runner._inherit_parent_tasks("child", "parent")
+    assert n == 2
+    path, body = posted[0]
+    assert path == "/api/projects/child/tasks"
+    ids = [t["task_id"] for t in body["tasks"]]
+    assert ids == ["TSK-INH-BE-001", "TSK-INH-WEB-002"]
+    assert all(t["status"] == "DONE" for t in body["tasks"])
+    assert body["tasks"][0]["requirements"].startswith("[HERDADA da versão anterior — TSK-BE-001]")
+    assert body["tasks"][1]["owner_role"] == "DEV_WEB" and body["tasks"][1]["module"] == "web"
+    # pai sem tasks / API falhou → 0, sem POST
+    posted.clear()
+    monkeypatch.setattr(runner, "_api_get", lambda path: (None, 500))
+    assert runner._inherit_parent_tasks("child", "parent") == 0 and posted == []

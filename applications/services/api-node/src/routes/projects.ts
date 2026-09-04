@@ -109,9 +109,9 @@ export async function projectRoutes(app: FastifyInstance) {
         depths AS (SELECT id, MAX(depth) AS depth FROM topo GROUP BY id),
         task_counts AS (
           SELECT project_id,
-                 COUNT(*) FILTER (WHERE task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST'))            AS total,
+                 COUNT(*) FILTER (WHERE task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST') AND task_id NOT LIKE 'TSK-INH-%')            AS total,
                  COUNT(*) FILTER (WHERE status IN ('DONE','QA_PASS')
-                                    AND task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST'))             AS done
+                                    AND task_id NOT IN ('TSK-DEVOPS-001','TSK-FULL-TEST') AND task_id NOT LIKE 'TSK-INH-%')             AS done
           FROM project_tasks GROUP BY project_id
         )`;
 

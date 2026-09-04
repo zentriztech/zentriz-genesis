@@ -440,6 +440,19 @@ export async function commitAndPush(
  *
  * Returns the SHA of the final commit.
  */
+/** Caminhos que o Genesis gera fora de `apps/` ou que NUNCA devem ser apagados por sincronização (bloco 2 H4). */
+export const SYNC_DELETE_PROTECTED = /^(\.github\/workflows\/|Dockerfile$|docker-entrypoint\.sh$|\.dockerignore$|CHANGELOG\.md$|README\.md$|LICENSE$)/;
+
+/**
+ * H4 — deleções a propagar: presentes no remoto, ausentes no disco local, e que EXISTIAM no clone local
+ * (`git ls-files` — nunca apagar o que só existe no remoto: o Deadpool commita direto no branch).
+ * Puro e testável. `tracked` null → sem lista de rastreados → NÃO deleta nada (fail-safe).
+ */
+export function computeDeletions(remotePaths: string[], localPaths: Set<string>, tracked: Set<string> | null, protectedRe: RegExp = SYNC_DELETE_PROTECTED): string[] {
+  if (!tracked) return [];
+  return remotePaths.filter((p) => !localPaths.has(p) && tracked.has(p) && !protectedRe.test(p)).sort();
+}
+
 export async function pushProjectFiles(
   installationId: number,
   owner: string,
@@ -447,7 +460,8 @@ export async function pushProjectFiles(
   branch: string,
   projectFilesRoot: string,
   projectId: string,
-): Promise<{ sha: string; fileCount: number }> {
+  opts: { syncDeletes?: boolean } = {},
+): Promise<{ sha: string; fileCount: number; deleted?: number; deletionsSkipped?: string }> {
   const { readdir, stat, readFile } = await import("fs/promises");
   const pathMod = await import("path");
 
@@ -558,7 +572,51 @@ export async function pushProjectFiles(
     currentSha = newCommit.sha;
   }
 
-  return { sha: currentSha, fileCount: allFiles.length };
+  // ── H4 — deleções em UM batch final (Git Data API: entrada com sha:null + base_tree remove o blob) ──
+  // Fail-safe em cascata: sem `git ls-files` local → nada; árvore remota truncada → nada; protegidos nunca.
+  let deleted = 0;
+  let deletionsSkipped: string | undefined;
+  if (opts.syncDeletes) {
+    try {
+      const appsDir = pathMod.join(projectFilesRoot, projectId, "apps");
+      let tracked: Set<string> | null = null;
+      try {
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const { stdout } = await promisify(execFile)("git", ["-C", appsDir, "ls-files", "-z"], { maxBuffer: 16 * 1024 * 1024 });
+        tracked = new Set(stdout.split("\0").map((s) => s.trim()).filter(Boolean));
+      } catch {
+        deletionsSkipped = "sem git ls-files local (apps/ não é clone) — deleções não sincronizadas";
+      }
+      if (tracked) {
+        const { data: headCommit } = await octokit.git.getCommit({ owner, repo, commit_sha: currentSha });
+        const { data: remoteTree } = await octokit.git.getTree({ owner, repo, tree_sha: headCommit.tree.sha, recursive: "1" });
+        if (remoteTree.truncated) {
+          deletionsSkipped = "árvore remota truncada (>100k entradas) — deleções não sincronizadas";
+        } else {
+          const remotePaths = (remoteTree.tree ?? []).filter((t) => t.type === "blob" && t.path).map((t) => t.path as string);
+          const localPaths = new Set(allFiles.map((f) => f.relativePath));
+          const toDelete = computeDeletions(remotePaths, localPaths, tracked);
+          if (toDelete.length > 0) {
+            const { data: tree } = await octokit.git.createTree({
+              owner, repo, base_tree: headCommit.tree.sha,
+              tree: toDelete.map((p) => ({ path: p, mode: "100644" as const, type: "blob" as const, sha: null })),
+            });
+            const { data: delCommit } = await octokit.git.createCommit({
+              owner, repo, message: `chore: Genesis — remove ${toDelete.length} arquivo(s) ausentes na evolução`, tree: tree.sha, parents: [currentSha],
+            });
+            await octokit.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: delCommit.sha });
+            currentSha = delCommit.sha;
+            deleted = toDelete.length;
+          }
+        }
+      }
+    } catch (e) {
+      deletionsSkipped = `falha ao sincronizar deleções: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200);
+    }
+  }
+
+  return { sha: currentSha, fileCount: allFiles.length, deleted, deletionsSkipped };
 }
 
 export async function createBranchIfNotExists(

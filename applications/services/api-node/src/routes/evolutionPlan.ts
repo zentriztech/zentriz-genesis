@@ -11,7 +11,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
-import { canAccessProjectRow } from "../lib/projectAccess.js";
+import { canAccessProjectRow, isProjectOwner } from "../lib/projectAccess.js";
 import { SPEC_EDITABLE_STATUSES } from "../services/projectStatus.js";
 import { httpPost } from "./specs.js";
 import { createPlanJob, getPlanJob, runEvolutionPlan } from "../services/evolutionPlanner.js";
@@ -114,8 +114,7 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (user.role === "zentriz_admin") return reply.status(403).send({ code: "MANAGEMENT_ACCOUNT", message: "Conta de gestão não publica código do tenant." });
       const proj = await loadProject(request.params.id);
       if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-      const isOwner = String(proj.created_by ?? "") === String(user.id);
-      if (user.role !== "tenant_admin" && !isOwner) return reply.status(403).send({ code: "FORBIDDEN", message: "Só o administrador do tenant ou o dono do projeto republica." });
+      if (user.role !== "tenant_admin" && !isProjectOwner(user, proj)) return reply.status(403).send({ code: "FORBIDDEN", message: "Só o administrador do tenant ou o dono do projeto republica." });
       if (proj.extra?.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução." });
       if (proj.status !== "accepted") return reply.status(409).send({ code: "NOT_ACCEPTED", message: "Só evoluções aceitas podem ser republicadas." });
       if (proj.extra?.evolution_push_pending !== true) return reply.status(409).send({ code: "NOTHING_PENDING", message: "Não há publicação pendente para esta evolução." });

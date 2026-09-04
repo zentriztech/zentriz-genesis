@@ -19,6 +19,11 @@ export interface ProjectAccessRow {
   created_by?: unknown;
 }
 
+/** Dono do projeto (autor). Regra ÚNICA — nunca comparar `created_by` inline nas rotas (grep-guard). */
+export function isProjectOwner(user: AuthUser, row: { created_by: string | null }): boolean {
+  return !!row.created_by && String(row.created_by) === String(user.id);
+}
+
 export function canAccessProjectRow(user: AuthUser, row: ProjectAccessRow): boolean {
   if (user.role === "zentriz_admin") return true;
   const rowTenant = (row.tenant_id ?? null) as string | null;

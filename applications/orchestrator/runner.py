@@ -426,18 +426,65 @@ def _evo_path_allowed(rel_path: str, scope: list[str]) -> bool:
     return False
 
 
+def _exports_opaque(code: str) -> bool:
+    """Bloco 2 H5 — re-exportação OPACA (não dá para saber os nomes sem resolver o alvo): `export * from`,
+    `module.exports = require(...)`, `__all__` construído dinamicamente. Nesses arquivos NÃO se acusa remoção
+    (falso-negativo aceitável; falso-positivo, não — pesquisa: es-module-lexer/cjs-module-lexer "best-effort")."""
+    import re as _re
+    if _re.search(r"^\s*export\s+\*\s+(?:as\s+\w+\s+)?from\b", code, _re.M):
+        return True
+    if _re.search(r"^\s*module\.exports\s*=\s*require\s*\(", code, _re.M):
+        return True
+    if _re.search(r"^__all__\s*(?:\+=|\.extend|\.append)", code, _re.M):
+        return True
+    return False
+
+
 def _exported_symbols(code: str) -> set[str]:
-    """Símbolos públicos de 1º nível (TS/JS `export …`, Python `def/class` na coluna 0, Go `func X`)."""
+    """Símbolos públicos de 1º nível, sem compilar (zero falso-positivo; falso-negativo aceitável):
+    TS/JS: `export (default) function|class|interface|type|enum|const|let|var X`, `export default function()`
+    anônimo → `default`, `export { a, b as c }` → a, c, CommonJS `module.exports = { a, b: x }` / `exports.a =`.
+    Python: `__all__ = [...]` literal SOBREPÕE; senão `def/class` na coluna 0 sem `_` inicial.
+    Go: `func X`, `func (r) X`, `type|var|const X` com inicial maiúscula."""
     import re as _re
     syms: set[str] = set()
+    # Python: __all__ literal (uma ou várias linhas) vence tudo.
+    m_all = _re.search(r"^__all__\s*=\s*[\[\(]([^\]\)]*)[\]\)]", code, _re.M | _re.S)
+    if m_all:
+        return {s for s in _re.findall(r"""["']([A-Za-z_]\w*)["']""", m_all.group(1))}
     for line in code.splitlines():
-        m = _re.match(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)", line)
+        m = _re.match(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|class|abstract\s+class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)", line)
         if m:
             syms.add(m.group(1)); continue
-        m = _re.match(r"^(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)", line)
+        if _re.match(r"^export\s+default\s+(?:async\s+)?(?:function\*?\s*\(|class\s*[{\s]|\(|[A-Za-z_$][\w$]*\s*;?\s*$)", line):
+            syms.add("default"); continue
+        m = _re.match(r"^export\s*\{([^}]*)\}", line)
+        if m and "from" not in line.split("}")[-1]:
+            for part in m.group(1).split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                name = part.split(" as ")[-1].strip() if " as " in part else part
+                if _re.match(r"^[A-Za-z_$][\w$]*$", name):
+                    syms.add(name)
+            continue
+        m = _re.match(r"^module\.exports\s*=\s*\{([^}]*)\}", line)
+        if m:
+            for part in m.group(1).split(","):
+                key = part.split(":")[0].strip().strip("'\"")
+                if _re.match(r"^[A-Za-z_$][\w$]*$", key):
+                    syms.add(key)
+            continue
+        m = _re.match(r"^(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=", line)
+        if m:
+            syms.add(m.group(1)); continue
+        m = _re.match(r"^(?:async\s+)?(?:def|class)\s+([A-Za-z]\w*)", line)
         if m:
             syms.add(m.group(1)); continue
         m = _re.match(r"^func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)", line)
+        if m:
+            syms.add(m.group(1)); continue
+        m = _re.match(r"^(?:type|var|const)\s+([A-Z]\w*)", line)
         if m:
             syms.add(m.group(1))
     return syms
@@ -472,7 +519,12 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
         original = apps_root / rel
         if original.exists() and original.is_file() and original.suffix.lower() in _EVO_CODE_EXTS:
             try:
-                before = _exported_symbols(original.read_text(encoding="utf-8", errors="replace"))
+                before_code = original.read_text(encoding="utf-8", errors="replace")
+                # H5: re-export OPACO (export * / module.exports = require()) no original ou no novo → não dá para
+                # afirmar remoção; pular a checagem deste arquivo (falso-negativo aceitável, falso-positivo não).
+                if _exports_opaque(before_code) or _exports_opaque(str(art.get("content") or "")):
+                    allowed.append(art); continue
+                before = _exported_symbols(before_code)
                 missing = sorted(before - delivered_symbols)
                 if missing:
                     violations.append(f"SÍMBOLOS REMOVIDOS em apps/{rel}: {', '.join(missing[:8])}{'…' if len(missing) > 8 else ''} — entregue o arquivo completo preservando os exports (ou amplie o RFC).")
@@ -2948,6 +3000,43 @@ def _parse_tasks_from_backlog(project_id: str, pm_module: str = "web") -> list[d
         pm_module,
     )
     return []
+
+
+_INHERIT_SKIP_TASKS = ("TSK-DEVOPS-001", "TSK-FULL-TEST")
+
+
+def _inherit_parent_tasks(project_id: str, parent_id: str) -> int:
+    """Bloco 2 H6 — copia as tasks DONE/QA_PASS do PAI como `TSK-INH-<id>` com status DONE (herdadas).
+    Excluídas: DevOps/full-test (o filho gera as suas) e tasks já herdadas (TSK-INH-*). Idempotente (upsert
+    da API por (project_id, task_id)). Devolve o nº de tasks enviadas."""
+    data, status = _api_get(f"/api/projects/{parent_id}/tasks")
+    if status != 200:
+        return 0
+    rows = data if isinstance(data, list) else (data.get("tasks") if isinstance(data, dict) else None) or []
+    inherited: list[dict] = []
+    for t in rows:
+        if not isinstance(t, dict):
+            continue
+        tid = str(t.get("taskId") or t.get("task_id") or "").strip()
+        st = str(t.get("status") or "").upper()
+        if not tid or st not in ("DONE", "QA_PASS") or tid in _INHERIT_SKIP_TASKS or tid.startswith("TSK-INH-"):
+            continue
+        inherited.append({
+            "task_id": f"TSK-INH-{tid.removeprefix('TSK-')}",
+            "module": str(t.get("module") or "backend"),
+            "owner_role": str(t.get("ownerRole") or t.get("owner_role") or "DEV"),
+            "requirements": f"[HERDADA da versão anterior — {tid}] " + str(t.get("requirements") or "")[:1500],
+            "status": "DONE",
+        })
+    if not inherited:
+        return 0
+    _, post_status = _api_post(f"/api/projects/{project_id}/tasks", {"tasks": inherited})
+    return len(inherited) if 200 <= post_status < 300 else 0
+
+
+def _inherited_task_ids(project_id: str) -> list[str]:
+    return [str(t.get("taskId") or t.get("task_id") or "") for t in (_get_tasks(project_id) or [])
+            if isinstance(t, dict) and str(t.get("taskId") or t.get("task_id") or "").startswith("TSK-INH-")]
 
 
 def _seed_tasks(project_id: str, pm_module: str = "web") -> bool:
@@ -5558,6 +5647,19 @@ def main() -> int:
                 request_id,
             )
             seed_ok = _seed_tasks(project_id, pm_module=pm_module)
+            # Evoluir bloco 2 H6: tasks DONE do pai entram como HERDADAS (TSK-INH-*, status DONE) — visíveis no
+            # portal como "já entregues na versão anterior", fora do contador de progresso e do Dev/QA.
+            if seed_ok and _is_evolution and _parent_project_id_evo:
+                try:
+                    _n_inh = _inherit_parent_tasks(project_id, _parent_project_id_evo)
+                    if _n_inh:
+                        _post_step(f"Evolução: {_n_inh} task(s) da versão anterior herdadas como concluídas (TSK-INH-*).", request_id)
+                        if pipeline_ctx is not None:
+                            for _tid in _inherited_task_ids(project_id):
+                                if _tid not in pipeline_ctx.completed_tasks:
+                                    pipeline_ctx.completed_tasks.append(_tid)
+                except Exception as _e_inh:
+                    logger.warning("[H6] herança de tasks do pai falhou (não crítico): %s", _e_inh)
             if not seed_ok:
                 # Verificar se as tasks foram criadas mesmo com erro (upsert parcial)
                 # Isso acontece quando ON CONFLICT DO UPDATE falha em alguma task mas outras são inseridas.

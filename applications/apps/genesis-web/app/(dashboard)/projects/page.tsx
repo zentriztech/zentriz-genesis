@@ -59,12 +59,19 @@ function buildLineageGroups(projects: Project[]): ProjectGroup[] {
   const groups: ProjectGroup[] = [];
   const handled = new Set<string>();
 
+  // Evoluir H1 (adversarial A): raiz REAL subindo a cadeia toda (v3, v4… entram no mesmo grupo);
+  // antes só 2 saltos → v4 virava "orphan" com card separado.
+  const rootOf = (c: Project): string => {
+    let cur: Project | undefined = c; const seen = new Set<string>();
+    while (cur?.parentProjectId && byId.has(cur.parentProjectId) && !seen.has(cur.id)) { seen.add(cur.id); cur = byId.get(cur.parentProjectId); }
+    return cur?.id ?? c.id;
+  };
   for (const p of projects) {
     if (handled.has(p.id)) continue;
     if (!p.parentProjectId) {
-      // root — find all children
+      // root — find all descendants (qualquer profundidade)
       const children = projects
-        .filter((c) => c.parentProjectId === p.id || (byId.get(c.parentProjectId ?? "")?.parentProjectId === p.id))
+        .filter((c) => c.id !== p.id && rootOf(c) === p.id)
         .sort((a, b) => (a.versionNumber ?? 1) - (b.versionNumber ?? 1));
       children.forEach((c) => handled.add(c.id));
       handled.add(p.id);

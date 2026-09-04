@@ -602,7 +602,11 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     }
 
     await createBranchIfNotExists(installationId, owner, repoName, branch, "dev");
-    const { sha, fileCount } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId);
+    // H4: só no push de EVOLUÇÃO sincronizamos deleções (arquivo removido no filho sai do branch);
+    // guardado por lista protegida + `git ls-files` local + `truncated` (github.ts). Flag para desligar.
+    const syncDeletes = (process.env.EVOLUTION_SYNC_DELETES ?? "on").toLowerCase() !== "off";
+    const { sha, fileCount, deleted, deletionsSkipped } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId, { syncDeletes });
+    if (deletionsSkipped) console.warn(`[GitHubPush] evolução ${projectId}: ${deletionsSkipped}`);
 
     await client.query(
       `INSERT INTO project_github_repos (project_id, repo_name, repo_full_name, repo_url, clone_url, default_branch, pushed_at, sha_dev)
@@ -638,7 +642,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     const prMsg = pr.ok ? `PR aberto: ${pr.url}` : `PR não aberto automaticamente (${pr.error}) — abra em ${pr.compareUrl}`;
     await client.query(
       `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
-      [projectId, `🔄 Evolução v${opts.versionLabel} publicada em ${lineageRepo.repo_full_name}@${branch} (${fileCount} arquivos). ${prMsg}. Deadpool segue a mesma chave ${systemId}/${serviceId}.`],
+      [projectId, `🔄 Evolução v${opts.versionLabel} publicada em ${lineageRepo.repo_full_name}@${branch} (${fileCount} arquivos${deleted ? `, ${deleted} removido(s)` : ""}${deletionsSkipped ? `; ${deletionsSkipped}` : ""}). ${prMsg}. Deadpool segue a mesma chave ${systemId}/${serviceId}.`],
     );
     if (row.tenant_id) {
       notifyTelegramTenant(row.tenant_id as string, `🔄 Evolução v${opts.versionLabel} de *${row.title}*: ${pr.ok ? pr.url : `https://github.com/${lineageRepo.repo_full_name}/tree/${branch}`}`).catch(() => {});

@@ -75,7 +75,7 @@ async function firstExistingDir(cands: string[]): Promise<string | null> {
 export interface FinalizeResult { version: string; changelogPath: string | null; appsCopy: string | null }
 
 /** Passo 1 — versiona o CHANGELOG do filho (spec-file) e copia para apps/CHANGELOG.md. */
-export async function finalizeEvolutionChangelog(db: Db, childId: string, opts: { compat: Compat; title: string; productId: string | null; date?: string }): Promise<FinalizeResult> {
+export async function finalizeEvolutionChangelog(db: Db, childId: string, opts: { compat: Compat; title: string; productId: string | null; date?: string; forceVersion?: string }): Promise<FinalizeResult> {
   const row = (await db.query(
     "SELECT file_path FROM project_spec_files WHERE project_id = $1 AND lower(filename) = 'changelog.md' AND coalesce(rel_dir,'') = ''",
     [childId],
@@ -83,7 +83,7 @@ export async function finalizeEvolutionChangelog(db: Db, childId: string, opts: 
   let existing: string | null = null;
   if (row) { try { existing = await fsp.readFile(row.file_path, "utf-8"); } catch { existing = null; } }
   const base = (existing && lastReleasedVersion(existing)) ?? "1.0.0";
-  const version = bumpSemver(base, opts.compat);
+  const version = opts.forceVersion ?? bumpSemver(base, opts.compat);
   const date = opts.date ?? new Date().toISOString().slice(0, 10);
   const released = releaseChangelog(existing, version, date, `Evolução aceita — ${opts.title}`);
   let changelogPath: string | null = null;
@@ -225,9 +225,14 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
   // nunca dobra a versão (1.1.0 → 1.2.0) nem reescreve o CHANGELOG.
   let version = "?";
   const priorVersion = typeof extra.evolution_version === "string" ? extra.evolution_version : null;
-  const reuse = !!priorVersion && (opts.republish || await changelogHasVersion(db, childId, priorVersion));
-  if (reuse && priorVersion) {
+  // Versão já fechada → SEMPRE reusar (o CHANGELOG é só cópia; se o humano o apagou, `patch` regeraria
+  // 1.0.1 ≠ evolution_version). Se o arquivo não tiver mais a seção, recria a seção com a MESMA versão.
+  if (priorVersion) {
     version = priorVersion;
+    const has = await changelogHasVersion(db, childId, priorVersion);
+    if (!has) {
+      try { await finalizeEvolutionChangelog(db, childId, { compat, title, productId: row.product_id, forceVersion: priorVersion }); } catch { /* best-effort */ }
+    }
     await log(`📦 CHANGELOG já fechado como v${version} — versão reusada (${opts.republish ? "republicação" : "reprocessamento"}).`);
   } else {
     try {

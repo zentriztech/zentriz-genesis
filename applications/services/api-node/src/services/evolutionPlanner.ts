@@ -488,11 +488,25 @@ export async function createPlanJob(db: Db, projectId: string, ownerUserId: stri
   } catch (e) {
     if ((e as { code?: string }).code === "23505") {
       const live = await activePlanJobFor(db, projectId);
-      if (live) return { ok: false, code: "PLAN_IN_PROGRESS", job: live };
+      if (live) {
+        // Stale (pg-boss `expireIn`): job vivo há mais de PLAN_JOB_STALE_MS sem terminar (processo não caiu,
+        // mas o /invoke/raw travou) → marca 'interrupted' e tenta de novo UMA vez; senão bloquearia 5 min.
+        if (Date.now() - new Date(live.createdAt).getTime() > PLAN_JOB_STALE_MS) {
+          await db.query("UPDATE evolution_plan_jobs SET status='interrupted', error=$2, finished_at=now(), updated_at=now() WHERE id=$1 AND status IN ('pending','running')",
+            [live.id, "Planejamento expirado (sem resposta do arquiteto) — substituído por um novo pedido."]);
+          const r2 = (await db.query(
+            "INSERT INTO evolution_plan_jobs (project_id, owner_user_id, request) VALUES ($1, $2, $3) RETURNING *",
+            [projectId, ownerUserId, request],
+          )).rows[0] as Record<string, unknown>;
+          return { ok: true, job: rowToJob(r2) };
+        }
+        return { ok: false, code: "PLAN_IN_PROGRESS", job: live };
+      }
     }
     throw e;
   }
 }
+const PLAN_JOB_STALE_MS = Number(process.env.EVOLUTION_PLAN_JOB_STALE_MS ?? 10 * 60_000);
 export async function getPlanJob(db: Db, id: string): Promise<PlanJob | null> {
   const r = (await db.query("SELECT * FROM evolution_plan_jobs WHERE id = $1", [id])).rows[0] as Record<string, unknown> | undefined;
   return r ? rowToJob(r) : null;
