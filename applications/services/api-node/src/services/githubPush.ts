@@ -363,7 +363,10 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
 
     const installationId = row.installation_id as number;
     const owner = row.github_login as string;
-    const repoName = toRepoName((row.title as string) ?? "genesis-project");
+    // Evoluir E1/E5: nome do repo pela RAIZ da linhagem (título do filho é "X — Evolução vN" e
+    // geraria `x-evolucao-vn` — o bug apontado no plano R2 §2). Projeto sem pai → o próprio título.
+    const lineage = await identityInputsFor(client, projectId, row.title as string | null);
+    const repoName = toRepoName((lineage.title as string | null) ?? (row.title as string) ?? "genesis-project");
 
     console.log(`[GitHubPush] Creating repo ${owner}/${repoName} for project ${projectId}`);
 
@@ -469,8 +472,8 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     // senão slug do nome do produto; para projeto standalone, slug do título.
     // serviceId = slug do título do projeto (dentro do produto). Casam com o
     // systemId/serviceId do envelope Connect que o Deadpool consome.
-    // Evoluir E1: identidade pela RAIZ da linhagem (mesmo serviceId em todas as versões).
-    const lineage = await identityInputsFor(client, projectId, row.title as string | null);
+    // Evoluir E1: identidade pela RAIZ da linhagem (mesmo serviceId em todas as versões) —
+    // `lineage` já resolvida acima (também nomeia o repo).
     const { systemId, serviceId } = deriveSystemService({
       productSystemId: row.product_system_id as string | null,
       productName: row.product_name as string | null,
@@ -553,7 +556,7 @@ export interface EvolutionPushResult {
  * repo) e re-registra no Deadpool com a MESMA chave (identidade pela raiz) apontando o `local_path`
  * do filho. Best-effort: nunca lança; tudo vai a `project_dialogue`.
  */
-export async function pushEvolutionToGitHub(projectId: string, opts: { versionLabel: string; prBody: string }): Promise<EvolutionPushResult> {
+export async function pushEvolutionToGitHub(projectId: string, opts: { versionLabel: string; prBody: string; title?: string }): Promise<EvolutionPushResult> {
   const client = await pool.connect();
   try {
     const projRes = await client.query(
@@ -587,6 +590,17 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     const branch = evolutionBranchName(row.version_number as number | null);
     const { createBranchIfNotExists, pushProjectFiles, openPullRequest } = await import("./github.js");
 
+    // apps/ vazio (E1 sem clone e sem cópia com conteúdo) → nada a publicar; não abrir PR sem diff.
+    const { readdir: _readdir } = await import("node:fs/promises");
+    const appsEntries = await _readdir(join(PROJECT_FILES_ROOT, projectId, "apps")).catch(() => [] as string[]);
+    if (appsEntries.filter((e) => e !== ".git").length === 0) {
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, "⚠️ Evolução aceita, mas apps/ está vazio — nada foi publicado no GitHub (verifique o clone/cópia do código do pai)."],
+      );
+      return { ok: false, mode: "evolution", error: "apps/ vazio" };
+    }
+
     await createBranchIfNotExists(installationId, owner, repoName, branch, "dev");
     const { sha, fileCount } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId);
 
@@ -599,7 +613,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
 
     const pr = await openPullRequest(installationId, {
       owner, repo: repoName, head: branch, base: "dev",
-      title: `Evolução v${opts.versionLabel} — ${(row.title as string) ?? projectId}`.replace(/ — Evolução v\d+ —/, " —"),
+      title: `Evolução v${opts.versionLabel} — ${(opts.title ?? (row.title as string) ?? projectId).replace(/ — Evolução v\d+$/i, "")}`,
       body: opts.prBody,
     });
 

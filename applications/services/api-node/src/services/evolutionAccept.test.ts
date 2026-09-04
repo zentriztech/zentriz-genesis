@@ -7,7 +7,10 @@ const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "evo-accept-"));
 process.env.UPLOAD_DIR = path.join(tmpRoot, "uploads");
 process.env.PROJECT_FILES_ROOT = path.join(tmpRoot, "files");
 
-const { bumpSemver, lastReleasedVersion, releaseChangelog, finalizeEvolutionChangelog, supersedeParent, evolutionBranchName, buildPullRequestBody } = await import("./evolutionAccept.js");
+const pushMock = vi.fn();
+vi.mock("./githubPush.js", () => ({ pushEvolutionToGitHub: (...args: unknown[]) => pushMock(...args) }));
+
+const { bumpSemver, lastReleasedVersion, releaseChangelog, finalizeEvolutionChangelog, supersedeParent, evolutionBranchName, buildPullRequestBody, runEvolutionAcceptFlow } = await import("./evolutionAccept.js");
 
 describe("evolutionAccept (Evoluir E5)", () => {
   it("bumpSemver / lastReleasedVersion / branch name", () => {
@@ -79,6 +82,47 @@ describe("evolutionAccept (Evoluir E5)", () => {
     expect(parentUpd.sql).toMatch(/AND status = 'accepted' AND coalesce\(extra->>'superseded_by',''\) = ''/);
     expect(JSON.parse(parentUpd.params[2] as string)).toMatchObject({ superseded_by: "child", superseded_version: "1.1.0" });
     expect(await supersedeParent(db as never, "child", null, "1.1.0")).toBe(false);
+  });
+
+  it("runEvolutionAcceptFlow: não-evolução → false; push falho → supersessão ADIADA (flag); push ok → pai supersedido", async () => {
+    const mkDb = (extra: Record<string, unknown> | null) => {
+      const calls: Array<{ sql: string; params: unknown[] }> = [];
+      const db = { query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (/SELECT id, title, product_id, parent_project_id, version_number, extra FROM projects/.test(sql)) {
+          return { rows: [{ id: "child", title: "Extrato — Evolução v2", product_id: null, parent_project_id: "parent", version_number: 2, extra }] };
+        }
+        if (/SET status = 'archived'/.test(sql)) return { rows: [{ id: "parent" }] };
+        return { rows: [] };
+      }) };
+      return { db, calls };
+    };
+    // não-evolução
+    const a = mkDb({ foo: 1 });
+    expect(await runEvolutionAcceptFlow(a.db as never, "child")).toBe(false);
+    expect(pushMock).not.toHaveBeenCalled();
+
+    // push falho → sem archived, flag evolution_push_pending
+    pushMock.mockResolvedValueOnce({ ok: false, mode: "evolution", error: "403" });
+    const b = mkDb({ evolution: true, evolution_parent_id: "parent", evolution_compat: "minor" });
+    expect(await runEvolutionAcceptFlow(b.db as never, "child")).toBe(true);
+    expect(b.calls.some((c) => /SET status = 'archived'/.test(c.sql))).toBe(false);
+    const pend = b.calls.find((c) => /evolution_push_pending/.test(String(c.params[1] ?? "")))!;
+    expect(JSON.parse(pend.params[1] as string)).toMatchObject({ evolution_push_pending: true, evolution_version: "1.1.0" });
+    expect(pushMock).toHaveBeenLastCalledWith("child", expect.objectContaining({ versionLabel: "1.1.0", title: "Extrato" }));
+
+    // push ok → pai archived + superseded_by
+    pushMock.mockResolvedValueOnce({ ok: true, mode: "evolution", prUrl: "https://github.com/x/y/pull/1" });
+    const c = mkDb({ evolution: true, evolution_parent_id: "parent", evolution_compat: "major" });
+    expect(await runEvolutionAcceptFlow(c.db as never, "child")).toBe(true);
+    const arch = c.calls.find((x) => /SET status = 'archived'/.test(x.sql))!;
+    expect(arch.params[0]).toBe("parent");
+    expect(JSON.parse(arch.params[2] as string)).toMatchObject({ superseded_by: "child", superseded_version: "2.0.0" });
+    // sem GitHub App (skipped) também supersede — o tenant não publica de forma alguma
+    pushMock.mockResolvedValueOnce({ ok: false, mode: "skipped", error: "sem GitHub App" });
+    const d = mkDb({ evolution: true, evolution_parent_id: "parent" });
+    await runEvolutionAcceptFlow(d.db as never, "child");
+    expect(d.calls.some((x) => /SET status = 'archived'/.test(x.sql))).toBe(true);
   });
 
   it("buildPullRequestBody: resumo + RFCs + seção do CHANGELOG da versão", async () => {

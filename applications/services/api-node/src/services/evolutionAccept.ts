@@ -214,12 +214,26 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string): Promise<b
     await log(`⚠️ Não foi possível versionar o CHANGELOG: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // Push do código. A supersessão do pai SÓ acontece se o código foi publicado (ou se o tenant não
+  // publica de forma alguma — sem GitHub App): pai arquivado sem código publicado = "sumiu meu
+  // projeto" com a versão corrente invisível no repo. Falha real → supersessão ADIADA (flag).
+  let pushOk = false;
   try {
     const { pushEvolutionToGitHub } = await import("./githubPush.js");
     const body = await buildPullRequestBody(db, childId, version, { ...extra, evolution_compat: compat });
-    await pushEvolutionToGitHub(childId, { versionLabel: version, prBody: body });
+    const push = await pushEvolutionToGitHub(childId, { versionLabel: version, prBody: body, title });
+    pushOk = push.ok || push.mode === "skipped" || push.mode === "fallback_new_repo";
+    if (!pushOk) await log(`⚠️ Publicação da evolução não concluída (${push.error ?? "erro"}). Supersessão da versão anterior ADIADA até o push ser reprocessado.`);
   } catch (e) {
-    await log(`⚠️ Publicação da evolução falhou: ${e instanceof Error ? e.message : String(e)}`);
+    await log(`⚠️ Publicação da evolução falhou: ${e instanceof Error ? e.message : String(e)}. Supersessão da versão anterior ADIADA.`);
+  }
+
+  if (!pushOk) {
+    await db.query(
+      "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+      [childId, JSON.stringify({ evolution_push_pending: true, evolution_version: version })],
+    ).catch(() => {});
+    return true;
   }
 
   try {
