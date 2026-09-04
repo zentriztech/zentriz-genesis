@@ -73,6 +73,7 @@ import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals"
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
+import EvolutionPanel from "@/components/EvolutionPanel";
 import type { DialogueEntry } from "@/components/LiveDialogue";
 import dynamic from "next/dynamic";
 
@@ -417,13 +418,14 @@ function ProjectDetailPageInner() {
   // Doc viewer modal
   const [docModal, setDocModal]     = useState<{ filename: string; title: string } | null>(null);
 
+  // Bloco 3 F4: aba 4 "Evolução" só existe em projeto de evolução (extra.evolution) — entra nos defaults via efeito.
   const TAB_LABELS = [
-    "Diálogo ao vivo", "Grafo", "Documentos", "Código",
+    "Diálogo ao vivo", "Grafo", "Documentos", "Código", "Evolução",
   ] as const;
   const TAB_ICONS = [
     <ForumIcon key={0} sx={{ fontSize: "0.9rem" }} />,
     <AccountTreeIcon key={1} sx={{ fontSize: "0.9rem" }} />,
-    null, null,
+    null, null, null,
   ];
 
   const moveTabToRight = (tabId: number) => {
@@ -777,6 +779,12 @@ function ProjectDetailPageInner() {
   // NÃO são bloqueadas por papel — então o read-only do master é garantido AQUI (front):
   // guarda nos handlers + ocultação das CTAs de escrita. O watchdog usa seu próprio token.
   const isMaster = authStore.isZentrizAdmin;
+  // Bloco 3 F4: em projeto de evolução, a aba "Evolução" (4) entra nos defaults uma vez (layout persistido respeitado).
+  const isEvolutionProject = (project as unknown as { extra?: Record<string, unknown> | null } | null)?.extra?.evolution === true;
+  useEffect(() => {
+    if (!isEvolutionProject) return;
+    setCenterTabs((prev) => (prev.includes(4) || rightTabs.includes(4) ? prev : [...prev, 4]));
+  }, [isEvolutionProject, rightTabs]);
 
   const handleRun = async (fromTaskId?: string) => {
     if (isMaster) return;
@@ -1054,6 +1062,11 @@ function ProjectDetailPageInner() {
 
   // Shared tab content renderer — used by both center and right panels
   const renderTabContent = (tabId: number) => {
+    if (tabId === 4) return (
+      <Box key="evo" sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <EvolutionPanel projectId={id} productId={project?.productId ?? null} />
+      </Box>
+    );
     if (tabId === 0) return (
       <Box key="dial" sx={{ flexGrow: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {isRunning && workingMessage && (
@@ -2781,7 +2794,7 @@ function ProjectDetailPageInner() {
               <Box sx={{ flexGrow: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 1 }}>
                 <Typography variant="body2" color="text.secondary">Todas as abas foram movidas para o painel direito.</Typography>
                 <Tooltip title="Mover tudo de volta">
-                  <Chip label="Restaurar todas" size="small" onClick={() => { setCenterTabs([0,1,2,3]); setRightTabs([]); }} sx={{ cursor: "pointer" }} />
+                  <Chip label="Restaurar todas" size="small" onClick={() => { setCenterTabs(isEvolutionProject ? [0,1,2,3,4] : [0,1,2,3]); setRightTabs([]); }} sx={{ cursor: "pointer" }} />
                 </Tooltip>
               </Box>
             ) : (

@@ -164,6 +164,11 @@ class PipelineContext:
         self.evolution_compat: "str | None" = None
         self.evolution_violations: dict[str, list[str]] = {}
         self.evolution_violation_rounds: dict[str, int] = {}  # rodadas (respostas do Dev) com violação, por task
+        # Bloco 3 F4/F1: arquivos apps/ efetivamente gravados pelo Dev nesta evolução (fonte determinística
+        # de "tocados" — alimenta o painel do portal e o DevOps condicional). Cap 500.
+        self.evolution_touched_files: list[str] = []
+        # Bloco 3 F3b: baseline da suíte legada (antes do Dev) e último resultado — {passed, failed, tests[]...}
+        self.evolution_baseline: dict | None = None
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -466,6 +471,8 @@ class PipelineContext:
             "evolution_compat": self.evolution_compat,
             "evolution_violations": self.evolution_violations,
             "evolution_violation_rounds": self.evolution_violation_rounds,
+            "evolution_touched_files": self.evolution_touched_files,
+            "evolution_baseline": self.evolution_baseline,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -519,6 +526,9 @@ class PipelineContext:
         ctx.evolution_violations = _viol if isinstance(_viol, dict) else {}
         _vr = data.get("evolution_violation_rounds")
         ctx.evolution_violation_rounds = {str(k): int(v) for k, v in _vr.items()} if isinstance(_vr, dict) else {}
+        ctx.evolution_touched_files = [str(p) for p in (data.get("evolution_touched_files") or []) if p][:500]
+        _bl = data.get("evolution_baseline")
+        ctx.evolution_baseline = _bl if isinstance(_bl, dict) else None
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

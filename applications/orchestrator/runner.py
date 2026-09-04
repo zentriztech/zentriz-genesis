@@ -3707,6 +3707,14 @@ def _run_monitor_loop(
                         # reincidência → blocked_structural_gate. Sem evolution_scope → passthrough.
                         _evo_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                         dev_artifacts, _evo_viol = _evolution_scope_check(pipeline_ctx, dev_artifacts, _evo_apps_root)
+                        # Bloco 3 F4/F1: registrar os arquivos apps/ ACEITOS pelo gate (fonte determinística de "tocados").
+                        if pipeline_ctx is not None and getattr(pipeline_ctx, "evolution_scope", None):
+                            _touched = getattr(pipeline_ctx, "evolution_touched_files", None)
+                            if isinstance(_touched, list):
+                                for _a in dev_artifacts:
+                                    _p = (_a.get("path") or "").strip() if isinstance(_a, dict) else ""
+                                    if _p.startswith("apps/") and _p not in _touched and len(_touched) < 500:
+                                        _touched.append(_p)
                         if _evo_viol:
                             # 1 resposta do Dev = 1 rodada (não contar por arquivo — senão 3 arquivos fora
                             # do escopo numa resposta bloqueariam na 1ª tentativa, sem rework).

@@ -546,6 +546,7 @@ export interface EvolutionPushResult {
   prUrl?: string;
   compareUrl?: string;
   fileCount?: number;
+  deleted?: number;
   error?: string;
 }
 
@@ -647,7 +648,7 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     if (row.tenant_id) {
       notifyTelegramTenant(row.tenant_id as string, `🔄 Evolução v${opts.versionLabel} de *${row.title}*: ${pr.ok ? pr.url : `https://github.com/${lineageRepo.repo_full_name}/tree/${branch}`}`).catch(() => {});
     }
-    return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl };
+    return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, deleted, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[GitHubPush] Evolution push failed for ${projectId}:`, err);

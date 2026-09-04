@@ -253,6 +253,17 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { re
     const body = await buildPullRequestBody(db, childId, version, { ...extra, evolution_compat: compat });
     const push = await pushEvolutionToGitHub(childId, { versionLabel: version, prBody: body, title });
     pushOk = push.ok || push.mode === "skipped" || push.mode === "fallback_new_repo";
+    // Bloco 3 F4: o portal mostra branch/PR — persistir o resultado do push no extra (só o que existe).
+    if (push.ok && push.mode === "evolution") {
+      await db.query(
+        "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+        [childId, JSON.stringify({
+          evolution_branch: push.branch ?? null, evolution_repo: push.fullName ?? null,
+          evolution_pr_url: push.prUrl ?? null, evolution_compare_url: push.compareUrl ?? null,
+          evolution_pushed_files: push.fileCount ?? null, evolution_deleted_files: push.deleted ?? 0,
+        })],
+      ).catch(() => {});
+    }
     if (!pushOk) await log(`⚠️ Publicação da evolução não concluída (${push.error ?? "erro"}). Supersessão da versão anterior ADIADA até o push ser reprocessado.`);
   } catch (e) {
     await log(`⚠️ Publicação da evolução falhou: ${e instanceof Error ? e.message : String(e)}. Supersessão da versão anterior ADIADA.`);

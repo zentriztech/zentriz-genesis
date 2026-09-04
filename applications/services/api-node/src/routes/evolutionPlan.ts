@@ -68,6 +68,58 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
     },
   );
 
+  // Bloco 3 F4 — estado da evolução para o painel do portal. Lê o checkpoint do runner (volume compartilhado
+  // `.runner-state`, read-only; só campos projetados — nunca `artifacts`) + o que o aceite gravou em `extra`.
+  // Sem checkpoint (runner ainda não rodou / volume ausente) → devolve só o `extra`, com `checkpoint: false`.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/evolution-state",
+    async (request, reply) => {
+      const user = getUser(request);
+      const proj = await loadProject(request.params.id);
+      if (!proj || !canAccessProjectRow(user, proj)) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const ex = proj.extra ?? {};
+      if (ex.evolution !== true) return reply.status(409).send({ code: "NOT_EVOLUTION", message: "Este projeto não é uma evolução." });
+      const filesRoot = (process.env.PROJECT_FILES_ROOT ?? "").trim();
+      let checkpoint: Record<string, unknown> | null = null;
+      if (filesRoot) {
+        try {
+          const { readFile } = await import("node:fs/promises");
+          const { join } = await import("node:path");
+          const raw = await readFile(join(filesRoot, ".runner-state", proj.id, "checkpoint.json"), "utf-8");
+          checkpoint = JSON.parse(raw) as Record<string, unknown>;
+        } catch { checkpoint = null; }
+      }
+      const pick = <T,>(k: string, fallback: T): T => (checkpoint && k in checkpoint ? (checkpoint[k] as T) : fallback);
+      const violations = pick<Record<string, string[]>>("evolution_violations", {});
+      return reply.send({
+        projectId: proj.id,
+        checkpoint: !!checkpoint,
+        checkpointSavedAt: pick<string | null>("saved_at", null),
+        scope: (ex.evolution_scope as string[] | undefined) ?? pick<string[]>("evolution_scope", []),
+        compat: (ex.evolution_compat as string | undefined) ?? pick<string | null>("evolution_compat", null),
+        rfcs: (ex.evolution_rfcs as string[] | undefined) ?? [],
+        plan: (ex.evolution_plan as Record<string, unknown> | undefined) ?? null,
+        request: (ex.evolution_request_original as string | undefined) ?? (ex.evolution_request as string | undefined) ?? null,
+        parentId: (ex.evolution_parent_id as string | undefined) ?? null,
+        touchedFiles: pick<string[]>("evolution_touched_files", []).slice(0, 500),
+        violations: Object.fromEntries(Object.entries(violations).map(([k, v]) => [k, (Array.isArray(v) ? v : []).slice(-20)])),
+        violationRounds: pick<Record<string, number>>("evolution_violation_rounds", {}),
+        completedTasks: pick<string[]>("completed_tasks", []),
+        baseline: pick<Record<string, unknown> | null>("evolution_baseline", null),
+        publish: {
+          pending: ex.evolution_push_pending === true,
+          branch: (ex.evolution_branch as string | undefined) ?? null,
+          repo: (ex.evolution_repo as string | undefined) ?? null,
+          prUrl: (ex.evolution_pr_url as string | undefined) ?? null,
+          compareUrl: (ex.evolution_compare_url as string | undefined) ?? null,
+          version: (ex.evolution_version as string | undefined) ?? null,
+          supersedes: (ex.supersedes as string | undefined) ?? null,
+          acceptedAt: (ex.evolution_accepted_at as string | undefined) ?? null,
+        },
+      });
+    },
+  );
+
   // H7 — "Novo RFC a partir do modelo": cria docs/rfc/RFC-NNNN-<slug>.md numerado (por produto) com o template.
   app.post<{ Params: { id: string }; Body: { slug?: string; title?: string } }>(
     "/api/projects/:id/rfc-from-template",
