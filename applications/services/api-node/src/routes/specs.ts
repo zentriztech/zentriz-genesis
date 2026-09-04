@@ -1099,6 +1099,12 @@ export async function specRoutes(app: FastifyInstance) {
       triage = await projectFindingsState(pool, id, { currentFiles: current?.files.map((f) => (f.rel_dir ? `${f.rel_dir}/` : "") + f.filename) ?? null }).catch(() => null);
       if (triage && triage.latestRunId === latest.id) latest.findings = triage.findings;
     }
+    // RFC-0005: run `failed` com TODOS os blockers triados passa no gate — a UI não pode mostrar
+    // vermelho contradizendo o botão Promover. `gate.wouldPass` espelha checkSpecValidationGate
+    // (sem o ack de warnings, que a UI já trata).
+    const covers = !!(latest && current && latest.spec_hash === current.specHash);
+    const wouldPass = covers && !!triage && triage.counts.blockersActive === 0 && (derived === "validated" || derived === "failed");
+    if (derived === "failed" && wouldPass) derived = "failed_triaged";
     return reply.send({
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
@@ -1106,6 +1112,7 @@ export async function specRoutes(app: FastifyInstance) {
       latestRun: latest ?? null,
       resolved: triage?.resolved ?? [],
       counts: triage?.counts ?? null,
+      gate: { wouldPass, blockersActive: triage?.counts.blockersActive ?? null, warningsActive: triage ? triage.findings.filter((f) => !f.triage && f.severity === "warning").length : null },
     });
   });
 
@@ -1195,9 +1202,9 @@ export async function specRoutes(app: FastifyInstance) {
         const user = getUser(request);
         const proj = await loadAccessibleProject(request.params.id, user);
         if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
-        if (user.svc === "runner" || user.role === "zentriz_admin") return reply.status(403).send({ code: "FORBIDDEN", message: "Só usuários do tenant reativam findings." });
-        const row = await revokeTriage(pool, { projectId: proj.id, fingerprint: request.params.fingerprint, actor: { id: user.id, role: user.role, svc: user.svc ?? null } });
-        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Nenhuma triagem viva para este finding." });
+        const rev = await revokeTriage(pool, { projectId: proj.id, fingerprint: request.params.fingerprint, actor: { id: user.id, role: user.role, svc: user.svc ?? null } });
+        if (!rev.ok) return reply.status(rev.status).send({ code: rev.code, message: rev.message });
+        const row = rev.row;
         if (row.severity_at === "blocker") {
           const snap = (row.finding_snapshot ?? {}) as Partial<ValidationFinding>;
           await auditBlockerTriage(user, proj.id, row.spec_hash_at, "gap_reactivated", { file: snap.file ?? "", title: snap.title ?? "", severity: "blocker", source: (snap.source as ValidationFinding["source"]) ?? "stage_b", line: null, rationale: "", category: snap.category ?? null, anchor: snap.anchor ?? null }, { fingerprint: request.params.fingerprint, previous_state: row.state });

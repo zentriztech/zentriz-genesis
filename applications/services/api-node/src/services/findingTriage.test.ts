@@ -22,6 +22,9 @@ describe("findingTriage — identidade (RFC-0005 §3)", () => {
     const a = F({ title: "Falta modelo de dados para Usuário", category: "missing_data_model", anchor: "FR-03", line: 10, severity: "warning" });
     const b = F({ title: "Modelo de dados de Usuário ausente", category: "missing_data_model", anchor: "fr-03", line: 42, severity: "blocker", rationale: "outro" });
     expect(findingFingerprint(a)).toBe(findingFingerprint(b));       // churn de título com mesmo category|anchor casa
+    // adversarial G1-A: dígitos do anchor PRESERVADOS — FR-03 ≠ FR-04; "## 3. Modelo" ≠ "## 5. Modelo"
+    expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, anchor: "FR-04" })));
+    expect(findingFingerprint(F({ ...a, anchor: "## 3. Modelo" }))).not.toBe(findingFingerprint(F({ ...a, anchor: "## 5. Modelo" })));
     expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, file: "contratos.md" })));
     expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, category: "security_gap" })));
     // sem anchor → cai no título normalizado
@@ -142,6 +145,29 @@ describe("findingTriage — política e transação (§5/§7)", () => {
     expect(live?.expires_at).toBeNull();
     const r4 = await applyTriage(db as never, { projectId: "p", finding: f, actor: user, state: "refuted", reasonCode: "false_positive", reason: "", expiresAt: "2030-01-01" });
     expect(r4.ok).toBe(false); expect(!r4.ok && r4.code).toBe("REFUTED_NO_EXPIRY");
+    // expiresAt inválido / no passado → 400
+    const r5 = await applyTriage(db as never, { projectId: "p", finding: F({ anchor: "q" }), actor: user, state: "ignored", reasonCode: "accepted_risk", reason: "", expiresAt: "amanhã" });
+    expect(!r5.ok && r5.code).toBe("BAD_EXPIRES_AT");
+    const r6 = await applyTriage(db as never, { projectId: "p", finding: F({ anchor: "q" }), actor: user, state: "ignored", reasonCode: "accepted_risk", reason: "", expiresAt: "2020-01-01T00:00:00Z" });
+    expect(!r6.ok && r6.code).toBe("BAD_EXPIRES_AT");
+  });
+
+  it("revokeTriage: blocker só por tenant_admin; sem triagem viva → 404; gestão/runner → 403", async () => {
+    const { revokeTriage } = await import("./findingTriage.js");
+    const mk = (sev: string | null) => ({ query: vi.fn(async (sql: string) => {
+      if (/SELECT severity_at/.test(sql)) return { rows: sev ? [{ severity_at: sev }] : [] };
+      if (/UPDATE spec_finding_triage SET revoked_at/.test(sql)) return { rows: [{ id: "t1", severity_at: sev, state: "ignored" }] };
+      return { rows: [] };
+    }) });
+    expect((await revokeTriage(mk("blocker") as never, { projectId: "p", fingerprint: "x", actor: user })).ok).toBe(false);
+    const r = await revokeTriage(mk("blocker") as never, { projectId: "p", fingerprint: "x", actor: user });
+    expect(!r.ok && r.code).toBe("BLOCKER_REQUIRES_TENANT_ADMIN");
+    expect((await revokeTriage(mk("blocker") as never, { projectId: "p", fingerprint: "x", actor: admin })).ok).toBe(true);
+    expect((await revokeTriage(mk("warning") as never, { projectId: "p", fingerprint: "x", actor: user })).ok).toBe(true);
+    const nf = await revokeTriage(mk(null) as never, { projectId: "p", fingerprint: "x", actor: user });
+    expect(!nf.ok && nf.status).toBe(404);
+    const adm = await revokeTriage(mk("warning") as never, { projectId: "p", fingerprint: "x", actor: { id: "z", role: "zentriz_admin" } });
+    expect(!adm.ok && adm.status).toBe(403);
   });
 
   it("registerRecurrences: reincidência sobre refutado vivo conta (só triáveis); casa por título reformulado", async () => {

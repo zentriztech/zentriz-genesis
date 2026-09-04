@@ -34,9 +34,16 @@ const JACCARD_MIN = 0.8;
 
 // ── Identidade ───────────────────────────────────────────────────────────────
 
+/** Título: minúsculas, sem acento/pontuação/DÍGITOS (títulos variam em números irrelevantes). */
 export function normalizeText(s: string): string {
   return (s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
+}
+/** Anchor: igual, mas PRESERVA dígitos — `FR-03` ≠ `FR-04`, `## 3. Modelo` ≠ `## 5. Modelo` (adversarial G1-A).
+ *  Espelha `_norm_anchor` do spec_validator.py. */
+export function normalizeAnchor(s: string): string {
+  return (s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 export function normalizeCategory(raw: unknown): FindingCategory {
@@ -49,7 +56,7 @@ function sha(s: string): string { return createHash("sha256").update(s, "utf8").
 /** Fingerprint primário. Sem `anchor` → cai no título normalizado (findings antigos / LLM sem anchor). */
 export function findingFingerprint(f: Pick<ValidationFinding, "file" | "source" | "title"> & { category?: string | null; anchor?: string | null }): string {
   const cat = normalizeCategory(f.category);
-  const anchor = normalizeText(f.anchor ?? "");
+  const anchor = normalizeAnchor(f.anchor ?? "");
   const key = anchor
     ? `${(f.file ?? "").toLowerCase()}|${f.source}|${cat}|${anchor}`
     : `${(f.file ?? "").toLowerCase()}|${f.source}|${cat}|t:${normalizeText(f.title)}`;
@@ -243,6 +250,12 @@ export async function applyTriage(db: Db, args: {
   const policy = checkTriagePolicy(args.finding, args.actor, { state: args.state, reasonCode: args.reasonCode, reason: args.reason });
   if (policy) return policy;
   if (args.state === "refuted" && args.expiresAt) return { ok: false, status: 400, code: "REFUTED_NO_EXPIRY", message: "Refutação não expira (falso positivo é permanente até o trecho mudar)." };
+  if (args.expiresAt) {
+    const t = Date.parse(args.expiresAt);
+    if (!Number.isFinite(t)) return { ok: false, status: 400, code: "BAD_EXPIRES_AT", message: "expiresAt deve ser uma data ISO-8601 válida." };
+    if (t <= Date.now()) return { ok: false, status: 400, code: "BAD_EXPIRES_AT", message: "expiresAt deve estar no futuro." };
+    args = { ...args, expiresAt: new Date(t).toISOString() };
+  }
   const fp = findingFingerprint(args.finding);
   const snapshot = {
     file: args.finding.file, source: args.finding.source, title: args.finding.title, category: normalizeCategory(args.finding.category),
@@ -275,13 +288,24 @@ export async function applyTriage(db: Db, args: {
   }
 }
 
-export async function revokeTriage(db: Db, args: { projectId: string; fingerprint: string; actor: TriageActor }): Promise<TriageRow | null> {
-  if (args.actor.svc === "runner" || args.actor.role === "zentriz_admin") return null;
+export type RevokeResult = { ok: true; row: TriageRow } | { ok: false; status: number; code: string; message: string };
+
+/** Reativar = operação inversa da triagem: blocker só volta pela mão de quem pode triá-lo (tenant_admin). */
+export async function revokeTriage(db: Db, args: { projectId: string; fingerprint: string; actor: TriageActor }): Promise<RevokeResult> {
+  if (args.actor.svc === "runner" || args.actor.role === "zentriz_admin") return { ok: false, status: 403, code: "FORBIDDEN", message: "Só usuários do tenant reativam findings." };
+  const live = (await db.query(
+    "SELECT severity_at FROM spec_finding_triage WHERE project_id = $1 AND fingerprint = $2 AND revoked_at IS NULL",
+    [args.projectId, args.fingerprint],
+  )).rows[0] as { severity_at?: string } | undefined;
+  if (!live) return { ok: false, status: 404, code: "NOT_FOUND", message: "Nenhuma triagem viva para este finding." };
+  if (live.severity_at === "blocker" && args.actor.role !== "tenant_admin") {
+    return { ok: false, status: 403, code: "BLOCKER_REQUIRES_TENANT_ADMIN", message: "Reativar um blocker triado exige o administrador do tenant." };
+  }
   const r = (await db.query(
     "UPDATE spec_finding_triage SET revoked_at = now(), revoked_by = $3 WHERE project_id = $1 AND fingerprint = $2 AND revoked_at IS NULL RETURNING *",
     [args.projectId, args.fingerprint, uuidOrNull(args.actor.id)],
   )).rows[0] as unknown as TriageRow | undefined;
-  return r ?? null;
+  return r ? { ok: true, row: r } : { ok: false, status: 404, code: "NOT_FOUND", message: "Nenhuma triagem viva para este finding." };
 }
 
 /** Evolução (D-G3): copia as triagens VIVAS do pai imediato; não sobrescreve decisões do filho (inclusive revogadas). */
@@ -303,6 +327,8 @@ export async function inheritTriages(db: Db, parentId: string, childId: string):
 /**
  * G2 — supressão pós-processamento: findings da run nova que casam uma triagem `refuted` viva (triáveis)
  * contam reincidência. Não altera a run (snapshot imutável) — a leitura já os mostra como Refutados.
+ * Semântica de `recurrence_count` (documentada): nº de runs válidas em que o validador REEMITIU o achado
+ * após a refutação (inclui re-Validar sem mudança de spec) — é a métrica de "o validador insiste"; ≥ 3 alerta.
  */
 export async function registerRecurrences(db: Db, projectId: string, findings: ValidationFinding[]): Promise<number> {
   const triages = await loadLiveTriages(db, projectId);
