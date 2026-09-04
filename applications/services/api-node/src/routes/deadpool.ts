@@ -29,6 +29,7 @@ import { deadpoolGet, deadpoolPost, isDeadpoolConfigured } from "../services/dea
 import { pool } from "../db/client.js";
 import { hasEntitlement, setEntitlement } from "../services/entitlements.js";
 import { registerProjectWithDeadpool, deriveSystemService } from "../services/githubPush.js";
+import { loadConnectManifestsFromDisk } from "../services/connectManifestsDisk.js";
 import { getAwsMonitoringCredentials } from "../services/cloudConnector.js";
 
 /** UUID v1–v5 (formato canônico do Postgres) — valida params de tenantId antes de bater no banco. */
@@ -478,7 +479,7 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
 
       // Carrega projeto + produto + repo + installation numa query (espelha githubPush).
       const res = await pool.query(
-        `SELECT p.id, p.title, p.tenant_id, p.status,
+        `SELECT p.id, p.title, p.tenant_id, p.status, p.product_id,
                 pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app,
                 gr.repo_url,
                 gi.installation_id
@@ -572,6 +573,15 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         awsRoleArn: isCloudwatch ? (awsCreds?.roleArn ?? null) : null,
         awsExternalId: isCloudwatch ? (awsCreds?.externalId ?? null) : null,
         awsCredentialsEnc: isCloudwatch ? (awsCreds?.credentialsEnc ?? null) : null,
+        // R4 PR6: manifests Connect do build (project/connect/v*/) → registry do Deadpool. É o que tira o
+        // sistema de tier0-observed. Best-effort: sem arquivos → null (comportamento anterior). Reativar
+        // o monitoramento = backfill para projetos construídos antes deste PR.
+        ...(await (async () => {
+          const disk = await loadConnectManifestsFromDisk({
+            projectId: id, productId: (row.product_id as string | null) ?? null, serviceId, systemId,
+          });
+          return disk ? { connectManifests: disk.manifests, connectVersion: disk.connectVersion } : {};
+        })()),
       });
 
       if (result.skipped) {

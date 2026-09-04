@@ -88,6 +88,11 @@ export interface DeadpoolRegisterArgs {
   awsRoleArn?: string | null;
   awsExternalId?: string | null;
   awsCredentialsEnc?: { encrypted: string; iv: string; tag: string; keyVersion?: number } | null;
+  // R4 PR6 (plumbing build→Deadpool): manifests Connect emitidos pela fábrica (serviceManifest,
+  // ownershipManifest, integrationReadyContract, runtimePassport, observabilityBaselineManifest —
+  // NUNCA knownSafeActionsPack) + versão do Connect. Opcionais → retrocompatível.
+  connectManifests?: Record<string, Record<string, unknown>> | null;
+  connectVersion?: string | null;
 }
 
 /** Resultado do registro. Nunca lança — best-effort — mas informa sucesso/falha ao chamador. */
@@ -169,6 +174,11 @@ export async function registerProjectWithDeadpool(
     if (args.awsRoleArn != null) body.awsRoleArn = args.awsRoleArn;
     if (args.awsExternalId != null) body.awsExternalId = args.awsExternalId;
     if (args.awsCredentialsEnc != null) body.awsCredentialsEnc = args.awsCredentialsEnc;
+    // R4 PR6: contratos Connect do build → registry do Deadpool (só quando lidos do disco).
+    if (args.connectManifests != null && Object.keys(args.connectManifests).length > 0) {
+      body.connectManifests = args.connectManifests;
+      if (args.connectVersion) body.connectVersion = args.connectVersion;
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
