@@ -1572,9 +1572,11 @@ export default function SpecPage() {
   const handleEvolvePlan = useCallback(async () => {
     if (chatSending || !editProjectId) return;
     const seq = (chatSeqRef.current += 1);
-    const override = chatInput.trim();
+    // O texto do chat só vira pedido de evolução na spec INTEIRA — em modo por-arquivo o campo
+    // é uma instrução ao editor do arquivo, não um pedido (evita mandar texto acidental).
+    const override = activeFile ? "" : chatInput.trim();
     setChatMessages((prev) => [...prev, { role: "user", content: override ? `🧭 Gerar RFC / CHANGELOG — pedido: ${override}` : "🧭 Gerar RFC / CHANGELOG da evolução (pedido original)" }]);
-    setChatInput("");
+    if (override) setChatInput("");
     setChatSending(true);
     setChatError(null);
     stopChatPolling();
@@ -1600,6 +1602,7 @@ export default function SpecPage() {
       } | null;
     };
     const startTs = Date.now();
+    let pollErrors = 0;
     chatPollRef.current = setInterval(async () => {
       if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
       if (Date.now() - startTs > 8 * 60_000) {
@@ -1607,6 +1610,7 @@ export default function SpecPage() {
       }
       try {
         const poll = await apiGet<PlanPoll>(`/api/projects/${editProjectId}/evolution-plan/${jobId}`);
+        pollErrors = 0;
         if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
         if (poll.status === "done" && poll.result) {
           stopChatPolling();
@@ -1631,10 +1635,21 @@ export default function SpecPage() {
           setChatSending(false);
         }
       } catch (e) {
-        console.warn("[EvolvePlan] poll error:", e instanceof Error ? e.message : e);
+        const msg = e instanceof Error ? e.message : String(e);
+        pollErrors += 1;
+        // Job em memória: reinício da API → 404 "expirado". Não ficar 8 min em silêncio.
+        if (/NOT_FOUND|404|expirado/i.test(msg) || pollErrors >= 5) {
+          stopChatPolling();
+          setChatError(/NOT_FOUND|404|expirado/i.test(msg)
+            ? "O planejamento foi perdido (reinício do servidor). Clique de novo em \"Gerar RFC / CHANGELOG\"."
+            : `Falha ao consultar o planejamento: ${msg}`);
+          setChatSending(false);
+          return;
+        }
+        console.warn("[EvolvePlan] poll error:", msg);
       }
     }, 5000);
-  }, [chatSending, editProjectId, chatInput, stopChatPolling]);
+  }, [chatSending, editProjectId, chatInput, activeFile, stopChatPolling]);
 
   // T4.3 — aplica a revisão pendente ao arquivo real (PUT com baseSha → If-Match).
   const applyRevision = useCallback(async (baseShaOverride?: string | null) => {

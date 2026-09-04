@@ -82,6 +82,11 @@ describe("evolutionPlanner (Evoluir E2)", () => {
     expect(noUnreleased.indexOf("## [Unreleased]")).toBeLessThan(noUnreleased.indexOf("## [1.0.0]"));
     // sem itens novos → inalterado
     expect(mergeChangelog(existing, { added: [], changed: [], deprecated: [], removed: [], fixed: [], security: [] }, "X")).toBe(existing);
+    // dedupe: re-executar com os mesmos itens não duplica
+    const twice = mergeChangelog(merged, items, "Extrato");
+    expect((twice.match(/- PDF/g) ?? []).length).toBe(1);
+    expect((twice.match(/- Bug X/g) ?? []).length).toBe(1);
+    expect(mergeChangelog(merged, { ...items, added: ["pdf", "PDF "] }, "X")).toBe(merged);
   });
 
   it("contexto + apply: numera por produto (atômico), grava RFC/CHANGELOG no filho, reporta pendências do gate e atualiza extra", async () => {
@@ -95,7 +100,8 @@ describe("evolutionPlanner (Evoluir E2)", () => {
     const specDir = path.join(process.env.UPLOAD_DIR!, childId);
     await fs.mkdir(specDir, { recursive: true });
     const primary = path.join(specDir, "spec-evolution-v2.md");
-    await fs.writeFile(primary, "# EVOLUTION REQUEST — v2\n> quero pdf\n\n# Spec do Extrato\nFR-01 …");
+    // Formato REAL gravado pelo /evolve (E1): título, linha em branco, blockquote, linha em branco, ---, spec.
+    await fs.writeFile(primary, "# EVOLUTION REQUEST — v2\n\n> quero pdf\n\n---\n\n# Spec do Extrato\nFR-01 …");
 
     const files: Array<Record<string, unknown>> = [
       { filename: "spec-evolution-v2.md", file_path: primary, rel_dir: "", is_primary: true },

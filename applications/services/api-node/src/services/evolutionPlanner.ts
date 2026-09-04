@@ -125,7 +125,8 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
   let specMarkdown = primary ? await readCapped(primary.file_path, SPEC_CAP) : "";
   // O primário do filho é a spec do pai com o header "# EVOLUTION REQUEST" — removemos o header
   // (o pedido vai em campo próprio) para o arquiteto ver a spec VIGENTE limpa.
-  specMarkdown = specMarkdown.replace(/^# EVOLUTION REQUEST[^\n]*\n(?:>[^\n]*\n)*\n?/m, "").trim();
+  // Formato real gravado pelo /evolve (E1): `# EVOLUTION REQUEST — vN\n\n> pedido\n\n---\n\n<spec>`.
+  specMarkdown = specMarkdown.replace(/^# EVOLUTION REQUEST[^\n]*\n(?:[ \t]*\n|>[^\n]*\n)*(?:---[ \t]*\n)?\s*/m, "").trim();
   const connectRow = files.find((f) => f.filename === "connect.yaml" && norm(f.rel_dir) === "");
   const connectYaml = connectRow ? (await readCapped(connectRow.file_path, 16_000) || null) : null;
   const changelogRow = files.find((f) => f.filename.toLowerCase() === "changelog.md" && norm(f.rel_dir) === "");
@@ -189,7 +190,7 @@ export function buildEvolutionPlanRequest(ctx: EvolutionPlanContext): Record<str
   return {
     prompt_override: loadEvolvePlanPrompt(),
     user_message: parts.join("\n"),
-    max_tokens: 14_000,
+    max_tokens: 20_000,
   };
 }
 
@@ -309,6 +310,14 @@ async function upsertSpecFile(db: Db, projectId: string, relPath: string, conten
 
 /** Insere itens em `## [Unreleased]` (Keep a Changelog 1.1); cria o arquivo se não existir. */
 export function mergeChangelog(existing: string | null, items: EvolutionPlan["changelog"], title: string): string {
+  // Dedupe: re-executar o planner não pode duplicar itens já presentes (texto normalizado).
+  const norm = (s: string) => s.replace(/^[-*]\s*/, "").trim().toLowerCase().replace(/\s+/g, " ");
+  const present = new Set((existing ?? "").split("\n").filter((l) => /^\s*[-*]\s+/.test(l)).map(norm));
+  const deduped = Object.fromEntries(CHANGELOG_KEYS.map((k) => {
+    const seen = new Set<string>();
+    return [k, items[k].filter((i) => { const n = norm(i); if (present.has(n) || seen.has(n)) return false; seen.add(n); return true; })];
+  })) as EvolutionPlan["changelog"];
+  items = deduped;
   const sections = CHANGELOG_KEYS.filter((k) => items[k].length > 0);
   const block = sections.map((k) => `### ${k[0].toUpperCase()}${k.slice(1)}\n${items[k].map((i) => `- ${i}`).join("\n")}`).join("\n\n");
   if (!existing || !existing.trim()) {
@@ -460,7 +469,14 @@ export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: st
     const data = JSON.parse(raw) as { response?: string; model_used?: string };
     const text = String(data.response ?? "");
     if (text.trim().length < 50) throw new Error("EMPTY_RESPONSE");
-    const plan = parseEvolutionPlan(text);
+    let plan: EvolutionPlan;
+    try {
+      plan = parseEvolutionPlan(text);
+    } catch (pe) {
+      // Diagnóstico (JSON truncado por max_tokens é a causa mais comum): tamanho + modelo no log.
+      console.warn(`[EvolvePlan] job=${job.id} parse falhou: ${pe instanceof Error ? pe.message : String(pe)} — len=${text.length} model=${data.model_used ?? "?"} tail=${JSON.stringify(text.slice(-80))}`);
+      throw pe;
+    }
     job.result = await applyEvolutionPlan(db, ctx, plan);
     job.status = "done";
   } catch (e) {
