@@ -28,7 +28,9 @@ import {
 
 // Deadline de restart-survival: o timer em processo cobre o caso normal (11 min); este é o
 // backstop no DB para quando o processo morre (o watchdog expira a linha).
-export const PROPOSAL_DEADLINE_MIN = 15;
+// R4 PR3: o splitter passou a 2 passos (manifesto + 1 chamada por projeto em paralelo) — produtos de
+// 8+ projetos chegavam ao teto de 11 min. Alinhado ao Resolver GAPs (18 min) + folga no backstop.
+export const PROPOSAL_DEADLINE_MIN = 22;
 
 type AgentsResult = { manifest?: ProductManifest; specs?: Record<string, string>; warnings?: string[] };
 
@@ -68,7 +70,13 @@ async function finishProposal(pool: Pool, jobId: string, result: AgentsResult): 
     // Valida o grafo no lado TS e computa as ondas (double-check dos MESMOS gates do splitter).
     const parsed = parseManifest(JSON.stringify(manifest));
     const sketch = buildProductSketch(parsed, Object.keys(specs));
-    const projects = sketch.projects.map((p) => ({ id: p.id, type: p.type, wave: p.wave, dependsOn: p.dependsOn }));
+    const projects = sketch.projects.map((p) => ({
+      id: p.id, type: p.type, wave: p.wave, dependsOn: p.dependsOn,
+      // R4 PR3: racional/arquivos visíveis ao humano no DecomposeDialog antes de aprovar.
+      rationale: p.rationale ?? null,
+      files: (p.files ?? []).map((f) => f.path),
+      connectDeclaration: p.connectDeclaration ?? null,
+    }));
     const payload = { manifest, specs, waves: sketch.waves, projects };
     const payloadJson = JSON.stringify(payload);
     // Teto de 2MB: uma proposta gigante não deve estourar a linha (nem a memória no poll).
@@ -102,7 +110,7 @@ export function runProposeJob(
 ): void {
   const base = agentsUrl.replace(/\/$/, "");
   const startedAt = Date.now();
-  const MAX_MS = 660_000; // 11 min (teto duro em processo; deadline_at cobre o restart)
+  const MAX_MS = 1_080_000; // 18 min (R4 PR3: split em 2 passos; deadline_at cobre o restart)
 
   // pending -> running (guardado: só transiciona se ainda estiver pending)
   void pool

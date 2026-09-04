@@ -240,7 +240,14 @@ export async function createProjectFromSpec(
     isFirstFile = false;
   }
 
-  const hasNonMd = saved.some((f) => path.extname(f.filename).toLowerCase() !== ".md");
+  // R4 PR3: `connect.yaml` (SpecConnectDeclaration) é machine-readable por design — NÃO é um
+  // documento a converter (docx/pdf) e não deve empurrar o projeto para `pending_conversion`.
+  const hasNonMd = saved.some((f) => {
+    const ext = path.extname(f.filename).toLowerCase();
+    if (ext === ".md") return false;
+    if (f.filename.toLowerCase() === "connect.yaml" || f.mimeType === "application/yaml") return false;
+    return true;
+  });
   let status: CreateProjectResult["status"] = isDraft ? "draft" : "spec_submitted";
   if (hasNonMd && !isDraft) {
     await client.query("UPDATE projects SET status = $1, updated_at = now() WHERE id = $2",

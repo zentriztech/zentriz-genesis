@@ -321,6 +321,8 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   let stageBError: string | undefined;
   if (!hasStageABlocker && files.length > 0) {
     const specText = files
+      // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
+      .filter((f) => !/\.ya?ml$/i.test(f.filename))
       .map((f) => `===== ${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename} =====\n${f.content}`)
       .join("\n\n");
     const b = await runStageB(projectId, specText);

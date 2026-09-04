@@ -34,6 +34,27 @@ describe("productManifest", () => {
     expect(() => parseManifest("{ not json")).toThrow(ManifestError);
   });
 
+  // R4 PR3 (Connect 1.3.0): files[] e connectDeclaration declarados DEVEM existir no pacote.
+  it("aceita files[]/connectDeclaration presentes e rejeita ausentes", () => {
+    const m = baseManifest() as any;
+    m.projects[1].files = [{ path: "specs/id/contratos.md", kind: "contracts" }];
+    m.projects[1].connectDeclaration = "specs/id/connect.yaml";
+    m.projects[1].rationale = "Corte: security · Integrador: none";
+    const files = [...FILES, "specs/id/contratos.md", "specs/id/connect.yaml"];
+    const sketch = buildProductSketch(m, files);
+    expect(sketch.projects.find((p) => p.id === "id")?.connectDeclaration).toBe("specs/id/connect.yaml");
+    expect(() => buildProductSketch(m, FILES)).toThrow(/files\[\]|connectDeclaration/);
+    m.projects[1].files = [];
+    expect(() => buildProductSketch(m, FILES)).toThrow(/connectDeclaration/);
+  });
+
+  it("aceita id com até 61 chars (R4 PR1 adversarial #5)", () => {
+    const m = baseManifest() as any;
+    m.projects[0].id = "controle-financeiro-command-service-do-modulo-de-lancamentos";
+    expect(m.projects[0].id.length).toBeLessThanOrEqual(61);
+    expect(() => parseManifest(JSON.stringify(m))).not.toThrow();
+  });
+
   it("constrói sketch com ondas topológicas corretas (caso feliz)", () => {
     const sketch = buildProductSketch(baseManifest() as any, FILES);
     const w = Object.fromEntries(sketch.projects.map((p) => [p.id, p.wave]));

@@ -276,6 +276,16 @@ def load_spec_all(project_id: str) -> str:
         data, status = _api_get(f"/api/projects/{project_id}/spec-files")
         if status != 200 or not isinstance(data, list) or len(data) == 0:
             return ""
+        # R4 PR3: `connect.yaml` (SpecConnectDeclaration) é machine-readable e NÃO entra no prompt do
+        # CTO como prosa — senão o normalizador pode reescrevê-lo dentro do PRODUCT_SPEC (família do
+        # T4.3 P0). O runner lê a declaração por canal próprio (connect_contracts, PR 4).
+        def _is_machine_readable(entry: dict) -> bool:
+            name = str(entry.get("filename") or "").lower()
+            mime = str(entry.get("mimeType") or entry.get("mime_type") or "").lower()
+            return name.endswith((".yaml", ".yml")) or mime == "application/yaml"
+        data = [e for e in data if isinstance(e, dict) and not _is_machine_readable(e)]
+        if not data:
+            return ""
         if len(data) == 1:
             fpath = Path(data[0].get("filePath") or data[0].get("file_path", ""))
             if fpath.exists():

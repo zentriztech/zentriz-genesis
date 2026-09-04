@@ -54,6 +54,9 @@ def _schema_for(contract: str) -> dict[str, Any]:
         "RuntimePassport": "manifests/runtime-passport.schema.json",
         "KnownSafeActionsPack": "manifests/known-safe-actions-pack.schema.json",
         "IntegrationReadyContract": "integration/integration-ready-contract.schema.json",
+        # R4 PR3 — contratos da BANCADA (Connect 1.3.0, ADR-013 Connect-local)
+        "ProductManifest": "products/product-manifest.schema.json",
+        "SpecConnectDeclaration": "products/spec-connect-declaration.schema.json",
     }
     relative = mapping.get(contract)
     if not relative:
@@ -80,15 +83,56 @@ def _validate_type(value: Any, schema_type: str) -> bool:
     }.get(schema_type, True)
 
 
-def _validate_payload_against_schema(payload: Any, schema: dict[str, Any], prefix: str = "$") -> list[str]:
+def _resolve_ref(ref: str, root: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Resolve `$ref` local (`#/$defs/x` ou `#/definitions/x`). Refs externos não são suportados."""
+    if not root or not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    node: Any = root
+    for part in ref[2:].split("/"):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node if isinstance(node, dict) else None
+
+
+def _validate_payload_against_schema(payload: Any, schema: dict[str, Any], prefix: str = "$",
+                                     root: dict[str, Any] | None = None) -> list[str]:
+    """Validador mínimo (sem dependência externa): type (string OU lista de tipos), enum, required,
+    additionalProperties:false, properties, items/minItems, `$ref` local (R4 PR3 — o schema
+    SpecConnectDeclaration usa `"type": ["string","null"]` e `$ref: #/$defs/owner`; antes disso
+    uma lista em `type` levantava TypeError e o soft-fail engolia a validação inteira)."""
+    root = root if root is not None else schema
+    if "$ref" in schema:
+        target = _resolve_ref(schema["$ref"], root)
+        if target is None:
+            return []  # ref não resolvível → não validar este nó (nunca falso-positivo)
+        merged = {k: v for k, v in schema.items() if k != "$ref"}
+        merged.update(target)
+        schema = merged
+
     errors: list[str] = []
     schema_type = schema.get("type")
-    if schema_type and not _validate_type(payload, schema_type):
+    if isinstance(schema_type, list):
+        if payload is None and "null" in schema_type:
+            return errors
+        if not any(_validate_type(payload, t) for t in schema_type if isinstance(t, str) and t != "null"):
+            errors.append(f"{prefix}: esperado {'|'.join(map(str, schema_type))}, recebido {type(payload).__name__}")
+            return errors
+        # segue com o tipo efetivo do payload para as regras estruturais
+        schema_type = next((t for t in schema_type if isinstance(t, str) and t != "null" and _validate_type(payload, t)), None)
+    elif schema_type and not _validate_type(payload, schema_type):
         errors.append(f"{prefix}: esperado {schema_type}, recebido {type(payload).__name__}")
         return errors
 
     if "enum" in schema and payload not in schema["enum"]:
         errors.append(f"{prefix}: valor {payload!r} fora do enum {schema['enum']}")
+
+    if "pattern" in schema and isinstance(payload, str):
+        try:
+            if not re.search(schema["pattern"], payload):
+                errors.append(f"{prefix}: valor {payload!r} não casa com o padrão {schema['pattern']}")
+        except re.error:
+            pass
 
     if schema_type == "object":
         required = schema.get("required", [])
@@ -103,7 +147,7 @@ def _validate_payload_against_schema(payload: Any, schema: dict[str, Any], prefi
         if isinstance(payload, dict):
             for key, value in payload.items():
                 if key in properties:
-                    errors.extend(_validate_payload_against_schema(value, properties[key], f"{prefix}.{key}"))
+                    errors.extend(_validate_payload_against_schema(value, properties[key], f"{prefix}.{key}", root))
 
     if schema_type == "array" and isinstance(payload, list):
         min_items = schema.get("minItems")
@@ -112,7 +156,7 @@ def _validate_payload_against_schema(payload: Any, schema: dict[str, Any], prefi
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for idx, item in enumerate(payload):
-                errors.extend(_validate_payload_against_schema(item, item_schema, f"{prefix}[{idx}]"))
+                errors.extend(_validate_payload_against_schema(item, item_schema, f"{prefix}[{idx}]", root))
 
     return errors
 

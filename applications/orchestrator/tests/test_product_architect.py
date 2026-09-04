@@ -252,3 +252,189 @@ def test_split_needs_human_e_spec_approved_false():
     out = split_document(LONG, llm_fn=_stub(m))
     assert out["needs_human"] is True
     assert out["manifest"]["product"]["specApproved"] is False
+
+
+# ── R4 PR3: SPLITTER em 2 PASSOS (manifesto → arquivos por projeto, fan-out) ──────────────
+import json as _json
+from orchestrator.product_architect import (
+    PRODUCT_MANIFEST_SCHEMA_VERSION, CUT_REASONS, MERGE_BLOCKERS, build_project_files_prompt,
+)
+
+
+def _pass1_manifest():
+    """Passo 1: manifesto SEM specContent, com racional de corte (enums) e summary."""
+    return {
+        "schemaVersion": "1.3.0",
+        "product": {"name": "Controle Financeiro", "systemId": "controle-financeiro", "specApproved": False,
+                    "deliveryDefault": "source_only", "rationale": "Corte por bounded context; infra compartilhada.",
+                    "connect": {"environments": [{"name": "prod", "type": "prod", "criticality": "high"}],
+                                "integrationTierTarget": "tier1-integration-ready"}},
+        "projects": [
+            {"id": "cf-infra", "spec": "specs/cf-infra.md", "type": "other", "dependsOn": [],
+             "summary": "Postgres + Redis compartilhados, docker-compose single-host.",
+             "cutReason": "shared-infra", "mergeBlocker": "none", "ishScore": 6, "relationships": []},
+            {"id": "cf-backend", "spec": "specs/cf-backend.md", "type": "backend_api_node", "dependsOn": ["cf-infra"],
+             "archetype": "rest-api", "stack": ["Node 20"], "deployTarget": "docker-compose-single-host",
+             "summary": "API REST de lançamentos e contas.",
+             "cutReason": "service-scope", "mergeBlocker": "none", "ishScore": 8,
+             "relationships": [{"dependsOn": "cf-infra", "type": "customer-supplier"}]},
+        ],
+    }
+
+
+def _pass2_for(pid: str) -> dict:
+    return {
+        "spec": f"# {pid}\n\n## Objetivo\nSpec principal completa do projeto {pid} com requisitos funcionais e critérios de aceite.",
+        "files": {
+            "contratos.md": "# Contratos\n\n```yaml\nopenapi: 3.1.0\ninfo: {title: cf, version: 1.0.0}\npaths: {}\n```\nContratos design-first do projeto.",
+            "README.md": "# não deve entrar (reservado)  ................................................................",
+            "Arquivo Inválido.md": "x" * 100,
+        },
+        "connect": {
+            "serviceName": f"Serviço {pid}", "responsibility": "Responsabilidade clara do bounded context deste serviço.",
+            "interfaces": [{"name": "http", "type": "http", "contractRef": "contratos.md#openapi"}],
+            "dependencies": ["cf-infra"] if pid != "cf-infra" else [],
+            "events": {"publishes": ["lancamento.registrado"], "subscribes": []},
+            "runtimeType": "container", "healthModel": {"hasHealthEndpoint": True, "signals": ["latency_p95"]},
+            "systemId": "TENTATIVA-DE-SOBRESCREVER", "owners": {"technicalOwner": {"id": "x", "name": "y"}},
+            "campoDesconhecido": 1,
+        },
+    }
+
+
+def _two_pass_stub(manifest: dict, calls: list[str] | None = None):
+    """1ª chamada → manifesto (passo 1); chamadas seguintes → passo 2 do projeto citado no prompt."""
+    def fn(system: str, user: str, model_id: str) -> str:
+        if calls is not None:
+            calls.append(user)
+        if "PROJETO ALVO" not in user:
+            return _json.dumps(manifest, ensure_ascii=False)
+        # o bloco de irmãos também contém `"id": ...` — o alvo é o que vem DEPOIS de "PROJETO ALVO"
+        target_block = user.split("PROJETO ALVO", 1)[1]
+        for p in manifest["projects"]:
+            if f'"id": "{p["id"]}"' in target_block:
+                return _json.dumps(_pass2_for(p["id"]), ensure_ascii=False)
+        raise AssertionError("projeto alvo não identificado no prompt do passo 2")
+    return fn
+
+
+def test_build_split_prompt_passo1_contrato_novo():
+    p = build_split_prompt(LONG)
+    assert PRODUCT_MANIFEST_SCHEMA_VERSION in p
+    assert "cutReason" in p and "mergeBlocker" in p and "ishScore" in p
+    assert "NÃO devolva `specContent`" in p
+    for enum in sorted(CUT_REASONS) + sorted(MERGE_BLOCKERS):
+        assert enum in p
+
+
+def test_split_dois_passos_fanout_gera_specs_arquivos_e_connect_yaml():
+    calls: list[str] = []
+    out = split_document(LONG, llm_fn=_two_pass_stub(_pass1_manifest(), calls))
+    # 1 chamada de manifesto + 1 por projeto
+    assert len(calls) == 3
+    m = out["manifest"]
+    assert m["schemaVersion"] == PRODUCT_MANIFEST_SCHEMA_VERSION
+    ids = [p["id"] for p in m["projects"]]
+    assert ids == ["cf-infra", "cf-backend"]
+    specs = out["specs"]
+    # spec principal + contratos.md + connect.yaml por projeto; README/inválido descartados
+    for pid in ids:
+        assert specs[f"specs/{pid}.md"].startswith(f"# {pid}")
+        assert f"specs/{pid}/contratos.md" in specs
+        assert f"specs/{pid}/connect.yaml" in specs
+        assert f"specs/{pid}/README.md" not in specs
+    # manifesto: files[] + connectDeclaration + campos crus removidos + rationale dobrado
+    be = next(p for p in m["projects"] if p["id"] == "cf-backend")
+    assert be["connectDeclaration"] == "specs/cf-backend/connect.yaml"
+    kinds = {f["kind"] for f in be["files"]}
+    assert {"contracts", "connect-declaration"} <= kinds
+    for raw in ("summary", "cutReason", "mergeBlocker", "ishScore", "relationships"):
+        assert raw not in be
+    assert be["rationale"].startswith("Corte: service-scope · Integrador: none · ISH 8/10 · Relações: cf-infra=customer-supplier")
+    assert be["archetype"] == "rest-api" and be["stack"] == ["Node 20"]
+    # avisos visíveis: arquivos descartados + chaves Connect desconhecidas
+    joined = "\n".join(out["warnings"])
+    assert "README.md" in joined and "Arquivo Inválido.md" in joined and "campoDesconhecido" in joined
+
+
+def test_split_connect_yaml_identidade_vem_do_manifesto_e_valida_no_schema():
+    import yaml
+    from orchestrator.connect_contracts import validate_connect_artifact
+    out = split_document(LONG, llm_fn=_two_pass_stub(_pass1_manifest()))
+    decl = yaml.safe_load(out["specs"]["specs/cf-backend/connect.yaml"])
+    assert decl["schemaVersion"] == PRODUCT_MANIFEST_SCHEMA_VERSION
+    assert decl["systemId"] == "controle-financeiro"          # não "TENTATIVA-DE-SOBRESCREVER"
+    assert decl["serviceId"] == "cf-backend"
+    assert "owners" not in decl                                # owners vêm do tenant, não do LLM
+    assert decl["interfaces"][0]["type"] == "http"
+    assert validate_connect_artifact("SpecConnectDeclaration", decl) == []
+
+
+def test_split_enums_fora_do_padrao_viram_fallback_com_warning():
+    m = _pass1_manifest()
+    m["projects"][1]["cutReason"] = "porque-sim"
+    m["projects"][1]["mergeBlocker"] = "talvez"
+    m["projects"][1]["ishScore"] = 3
+    m["projects"][1]["relationships"] = [{"dependsOn": "cf-infra", "type": "amizade"}]
+    out = split_document(LONG, llm_fn=_two_pass_stub(m))
+    be = next(p for p in out["manifest"]["projects"] if p["id"] == "cf-backend")
+    assert be["rationale"].startswith("Corte: service-scope · Integrador: none · ISH 3/10 · Relações: cf-infra=none")
+    joined = "\n".join(out["warnings"])
+    assert "porque-sim" in joined and "talvez" in joined and "amizade" in joined
+    assert "ISH 3/10 < 5" in joined
+
+
+def test_split_passo1_invalido_nao_gasta_passo2():
+    calls: list[str] = []
+    m = _pass1_manifest()
+    m["projects"][0]["dependsOn"] = ["cf-backend"]  # ciclo
+    with pytest.raises(ManifestProposalError) as e:
+        split_document(LONG, llm_fn=_two_pass_stub(m, calls))
+    assert e.value.code == "PROPOSAL_CYCLE"
+    assert len(calls) == 1  # só o manifesto foi chamado
+
+
+def test_split_legado_com_campos_crus_normaliza_rationale():
+    # proposta antiga (specContent) que TAMBÉM traz racional cru → dobra em rationale e remove crus
+    m = _split_proposal()
+    m["projects"][1].update({"summary": "API do produto.", "cutReason": "service-scope", "mergeBlocker": "none", "ishScore": 7})
+    out = split_document(LONG, llm_fn=_stub(m))
+    api = next(p for p in out["manifest"]["projects"] if p["id"] == "api")
+    assert api["rationale"].startswith("Corte: service-scope · Integrador: none · ISH 7/10 — API do produto.")
+    assert "summary" not in api and "cutReason" not in api
+    assert out["manifest"]["schemaVersion"] == PRODUCT_MANIFEST_SCHEMA_VERSION
+
+
+def test_split_connect_dependencia_declarada_fora_do_grafo_gera_aviso():
+    m = _pass1_manifest()
+    m["projects"][1]["dependsOn"] = []  # backend declara depender de cf-infra no connect, mas o grafo não tem a aresta
+    out = split_document(LONG, llm_fn=_two_pass_stub(m))
+    assert any("aresta faltante no grafo" in w and "cf-infra" in w for w in out["warnings"])
+
+
+def test_split_passo2_repete_uma_vez_e_falha_honesto(monkeypatch):
+    import orchestrator.product_architect as pa
+    monkeypatch.setattr(pa, "SPLITTER_RETRY_BACKOFF_S", 0)  # sem sleep no teste
+    m = _pass1_manifest()
+    attempts: dict[str, int] = {}
+
+    def fn(system: str, user: str, model_id: str) -> str:
+        if "PROJETO ALVO" not in user:
+            return _json.dumps(m)
+        pid = "cf-infra" if '"id": "cf-infra"' in user.split("PROJETO ALVO", 1)[1] else "cf-backend"
+        attempts[pid] = attempts.get(pid, 0) + 1
+        if pid == "cf-backend":
+            return "isto não é json"
+        return _json.dumps(_pass2_for(pid))
+
+    with pytest.raises(ManifestProposalError) as e:
+        split_document(LONG, llm_fn=fn)
+    assert e.value.code == "PROPOSAL_INVALID_JSON"
+    assert attempts["cf-backend"] == 2  # 1 retry
+
+
+def test_build_project_files_prompt_inclui_alvo_e_irmaos():
+    m = _pass1_manifest()
+    p = build_project_files_prompt(LONG, m, m["projects"][1])
+    assert "PROJETO ALVO" in p and '"id": "cf-backend"' in p
+    assert "cf-infra" in p and "NÃO redecomponha" in p

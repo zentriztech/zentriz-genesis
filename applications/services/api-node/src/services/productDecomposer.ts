@@ -175,6 +175,16 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
       "## Projetos (ondas de dependência)",
       ...sketch.waves.map((w, i) => `- Onda ${i}: ${w.join(", ")}`),
       "",
+      // R4 PR3 (Connect 1.3.0): racional da decomposição — auditável pelo humano; fora do schema
+      // JSON (additionalProperties:false), vive aqui no manifesto markdown (R2 adversarial #2).
+      ...(sketch.product.rationale || sketch.projects.some((p) => p.rationale)
+        ? [
+            "## Racional da decomposição",
+            ...(sketch.product.rationale ? [sketch.product.rationale, ""] : []),
+            ...sketch.projects.filter((p) => p.rationale).map((p) => `- **${p.id}** — ${p.rationale}`),
+            "",
+          ]
+        : []),
     ].join("\n");
     const prodRes = await client.query(
       `INSERT INTO products (tenant_id, created_by, name, description, product_hash, system_id, origin_project_id, manifest_md)
@@ -213,6 +223,28 @@ export async function decomposeProduct(pool: Pool, params: DecomposeParams): Pro
           }), "utf-8"),
           mimeType: "text/markdown",
         });
+      }
+      // R4 PR3 (Connect 1.3.0): arquivos temáticos do splitter (dominio-modelo/contratos/
+      // infra-deploy/decisoes…) + connect.yaml (SpecConnectDeclaration). Presença já validada em
+      // buildProductSketch. Nome no disco = basename (a árvore por projeto é plana; UNIQUE da 071
+      // + dedupe em createProjectFromSpec protegem colisões). connect.yaml é o ÚNICO caminho que
+      // não passa pelo LLM normalizador nem pelo strip de front-matter — é o que o runner lê.
+      const usedNames = new Set(projectFiles.map((f) => f.filename.toLowerCase()));
+      for (const f of p.files ?? []) {
+        const fp = f.path.replace(/^\.\//, "");
+        if (fp === p.connectDeclaration?.replace(/^\.\//, "")) continue; // tratado abaixo
+        const content = zip.files.get(fp);
+        if (content === undefined) continue;
+        const filename = fp.split("/").pop() ?? fp;
+        if (usedNames.has(filename.toLowerCase())) continue; // nunca sobrescrever 01-spec.md/README.md
+        usedNames.add(filename.toLowerCase());
+        projectFiles.push({ filename, buffer: Buffer.from(content, "utf-8"), mimeType: "text/markdown" });
+      }
+      if (p.connectDeclaration) {
+        const content = zip.files.get(p.connectDeclaration.replace(/^\.\//, ""));
+        if (content !== undefined && !usedNames.has("connect.yaml")) {
+          projectFiles.push({ filename: "connect.yaml", buffer: Buffer.from(content, "utf-8"), mimeType: "application/yaml" });
+        }
       }
       const created = await createProjectFromSpec(client, {
         tenantId,

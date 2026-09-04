@@ -18,6 +18,8 @@ import json
 import re
 from pathlib import Path
 from typing import Callable, Optional
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 # Tipos canônicos aceitos no manifesto (espelha VALID_TYPES do productManifest.ts).
 VALID_TYPES = {
@@ -29,9 +31,52 @@ VALID_TYPES = {
 
 SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "agents" / "product_architect" / "SYSTEM_PROMPT.md"
 SPLIT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "agents" / "product_architect" / "SPLIT_SYSTEM_PROMPT.md"
+SPLIT_PROJECT_FILES_PROMPT_PATH = Path(__file__).resolve().parents[1] / "agents" / "product_architect" / "SPLIT_PROJECT_FILES_PROMPT.md"
+
+# Versão do contrato Connect `ProductManifest`/`SpecConnectDeclaration` emitido pelo splitter
+# (R4 PR3). 1.3.0 = campos opcionais archetype/stack/deployTarget/rationale/files/connectDeclaration
+# + schema novo spec-connect-declaration (ADR-013 Connect-local).
+PRODUCT_MANIFEST_SCHEMA_VERSION = "1.3.0"
 
 # Conteúdo mínimo aceitável para a spec de um projeto (evita specs vazias/triviais do LLM).
 MIN_SPEC_CONTENT_CHARS = 80
+
+# ── R4 PR3: enums do racional de corte (validados pós-parse; fora do enum → fallback + warning) ──
+# Desintegradores/integradores (Ford & Richards, "Software Architecture: The Hard Parts", cap. 7);
+# relações entre contexts (Context Mapper / Evans-Vernon). Ver SPLIT_SYSTEM_PROMPT.md §0.1/§4.2.
+CUT_REASONS = {"service-scope", "code-volatility", "scalability-throughput", "fault-tolerance",
+               "security", "extensibility", "shared-infra"}
+MERGE_BLOCKERS = {"none", "database-transaction", "workflow-chattiness", "shared-code", "data-relationships"}
+RELATIONSHIP_TYPES = {"shared-kernel", "partnership", "customer-supplier", "conformist",
+                      "anticorruption-layer", "open-host-service", "published-language", "none"}
+# Campos de racional que o LLM emite no passo 1 e que NÃO existem no schema Connect (são
+# dobrados em `rationale` e removidos do manifesto antes de devolver).
+_RATIONALE_RAW_FIELDS = ("summary", "cutReason", "mergeBlocker", "ishScore", "relationships")
+
+# Arquivos temáticos do passo 2 → `kind` do ProductManifest.files[] (1.3.0).
+FILE_KIND_BY_NAME = {
+    "dominio-modelo.md": "domain-model",
+    "requisitos.md": "requirements",
+    "contratos.md": "contracts",
+    "infra-deploy.md": "infra-deploy",
+    "decisoes.md": "decisions",
+}
+_FILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,60}\.md$")
+# Nomes reservados: a fábrica gera README.md (manifesto autoral) e 01-spec.md (spec principal).
+_RESERVED_FILE_NAMES = {"readme.md", "01-spec.md", "connect.yaml"}
+# Fan-out do passo 2 (1 chamada LLM por projeto, em paralelo). RPM do Bedrock (Sonnet 4.6 = 10/min)
+# → teto conservador; env SPLITTER_FANOUT permite ajustar por ambiente (inválido → default 4).
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+SPLITTER_FANOUT = _env_int("SPLITTER_FANOUT", 4)
+# Backoff do retry do passo 2 (segundos). Sob throttling (RPM), repetir no mesmo segundo falha de novo
+# (adversarial PR3 #2). Env SPLITTER_RETRY_BACKOFF_S; 0 nos testes.
+SPLITTER_RETRY_BACKOFF_S = _env_int("SPLITTER_RETRY_BACKOFF_S", 8, minimum=0)
 
 
 class ManifestProposalError(Exception):
@@ -53,6 +98,20 @@ def _load_split_system_prompt() -> str:
             "produto em N projetos interdependentes. Para cada projeto emita id, spec (specs/<id>.md), "
             "type, dependsOn e specContent (a spec markdown COMPLETA daquele projeto). Use APENAS tipos "
             "válidos. O grafo dependsOn deve ser um DAG (sem ciclo). specApproved=false. Responda só o JSON."
+        )
+
+
+def _load_project_files_prompt() -> str:
+    try:
+        return SPLIT_PROJECT_FILES_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "Você é o Product Architect (passo 2 do splitter). Para o projeto indicado, escreva a spec "
+            "markdown COMPLETA (`spec`), arquivos temáticos opcionais (`files`: dominio-modelo.md, "
+            "requisitos.md, contratos.md, infra-deploy.md, decisoes.md — só os que fizerem sentido; nunca "
+            "README.md) e a declaração Connect (`connect`: serviceName, responsibility, interfaces[], "
+            "dependencies[], events, runtimeType, queues[], healthModel, environments[], "
+            "integrationTierTarget). Responda só o JSON {spec, files, connect}."
         )
 
 
@@ -83,10 +142,10 @@ def build_prompt(master_md: str, present_specs: list[str]) -> str:
         "# Sua tarefa\n\n"
         "Proponha um PRODUCT.json decompondo o produto em projetos interdependentes. "
         "Formato EXATO (responda somente o JSON, sem cercas de código):\n"
-        '{"schemaVersion":"1.1.0","product":{"name":"...","systemId":"...",'
-        '"specApproved":false,"deliveryDefault":"source_only"},'
-        '"projects":[{"id":"...","spec":"specs/....md","type":"<um tipo válido>","dependsOn":[],'
-        '"stack":["nodejs"],"deployTarget":"none"}]}\n'
+        f'{{"schemaVersion":"{PRODUCT_MANIFEST_SCHEMA_VERSION}","product":{{"name":"...","systemId":"...",'
+        '"specApproved":false,"deliveryDefault":"source_only"}},'
+        '"projects":[{{"id":"...","spec":"specs/....md","type":"<um tipo válido>","dependsOn":[],'
+        '"stack":["nodejs"],"deployTarget":"none"}}]}}\n'
         "Regras: cada `spec` DEVE estar na lista de specs presentes; `dependsOn` referencia "
         "apenas `id`s deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts "
         "(type lib_ts) são predecessores dos consumidores. Campos `stack` (tecnologias "
@@ -143,12 +202,13 @@ def validate_proposal(manifest: dict, present_specs: list[str]) -> None:
     # RFC-0004 T1.6 (auditoria finding 9): ids viram nome de pasta/arquivo (spec_root,
     # <id>.md) — charset restrito fecha traversal/nome inválido ANTES de tocar disco.
     # Espelho TS: parseManifest (productManifest.ts). Retry do splitter cobre a rejeição.
-    _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
+    # R4 PR1 adversarial #5: 41→61 chars (nomes semânticos tipo `controle-financeiro-command-service`).
+    _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,60}$")
     bad_ids = [i for i in ids if not _ID_RE.fullmatch(i)]
     if bad_ids:
         raise ManifestProposalError(
             "PROPOSAL_INVALID_ID",
-            f"IDs fora do padrão [a-z0-9][a-z0-9_-]{{0,40}}: {', '.join(sorted(bad_ids))}",
+            f"IDs fora do padrão [a-z0-9][a-z0-9_-]{{0,60}}: {', '.join(sorted(bad_ids))}",
         )
     id_set = set(ids)
 
@@ -229,17 +289,24 @@ def build_split_prompt(master_md: str) -> str:
         f"{master_md.strip()}\n\n"
         "# Tipos de projeto válidos\n\n"
         f"{types_block}\n\n"
-        "# Sua tarefa\n\n"
-        "Decomponha ESTE produto em projetos interdependentes. Para CADA projeto gere também a "
-        "spec markdown COMPLETA no campo `specContent`. Formato EXATO (responda somente o JSON, "
-        "sem cercas de código):\n"
-        '{"schemaVersion":"1.1.0","product":{"name":"...","systemId":"...",'
-        '"specApproved":false,"deliveryDefault":"source_only"},'
-        '"projects":[{"id":"...","spec":"specs/<id>.md","type":"<um tipo válido>",'
-        '"dependsOn":[],"specContent":"# ...spec markdown completa..."}]}\n'
-        "Regras: `id`s únicos; `spec` = `specs/<id>.md`; `dependsOn` referencia apenas `id`s "
-        "deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts (type lib_ts) são "
-        "predecessores dos consumidores; `specContent` é a spec inteira, não um resumo.\n"
+        "# Sua tarefa (PASSO 1 — manifesto; a spec completa de cada projeto é o PASSO 2)\n\n"
+        "Decomponha ESTE produto em projetos interdependentes seguindo o MÉTODO do system prompt "
+        "(enumerar candidatos → desintegradores × integradores → ISH → coarse-first). Para CADA "
+        "projeto devolva `summary` (3-6 frases) + racional de corte (`cutReason`, `mergeBlocker`, "
+        "`ishScore`, `relationships`). NÃO devolva `specContent`. Formato EXATO (responda somente o "
+        "JSON, sem cercas de código):\n"
+        f'{{"schemaVersion":"{PRODUCT_MANIFEST_SCHEMA_VERSION}","product":{{"name":"...","systemId":"...",'
+        '"specApproved":false,"deliveryDefault":"source_only","rationale":"...",'
+        '"connect":{"environments":[{"name":"prod","type":"prod","criticality":"high"}],'
+        '"integrationTierTarget":"tier1-integration-ready"}},'
+        '"projects":[{"id":"...","spec":"specs/<id>.md","type":"<um tipo válido>","dependsOn":[],'
+        '"archetype":"...","stack":["..."],"deployTarget":"...","summary":"...",'
+        '"cutReason":"<' + "|".join(sorted(CUT_REASONS)) + '>",'
+        '"mergeBlocker":"<' + "|".join(sorted(MERGE_BLOCKERS)) + '>","ishScore":0,'
+        '"relationships":[{"dependsOn":"<id>","type":"<' + "|".join(sorted(RELATIONSHIP_TYPES)) + '>"}]}]}\n'
+        "Regras: `id`s únicos em kebab-case; `spec` = `specs/<id>.md`; `dependsOn` referencia apenas "
+        "`id`s deste manifesto; o grafo deve ser um DAG (sem ciclo); libs/contracts (type lib_ts) são "
+        "predecessores dos consumidores; `systemId` em kebab-case derivado do NOME do produto.\n"
         "CIENTE DE INFRA: se o produto usa infra compartilhada (banco/cache/fila/worker) ou tem "
         "≥2 componentes, modele a infra como projeto dedicado `<slug>-infra` (type `other`, onda 0, "
         "com esquema/env/portas e a ESTRATÉGIA DE DISTRIBUIÇÃO — docker-compose single-host OU "
@@ -247,6 +314,213 @@ def build_split_prompt(master_md: str) -> str:
         "no backend; se a distribuição for ambígua, assuma docker-compose single-host, marque "
         "`Premissa:` e registre a pergunta em `## Decisões em Aberto`. NUNCA deixe infra implícita."
     )
+
+
+def build_project_files_prompt(master_md: str, manifest: dict, project: dict) -> str:
+    """Mensagem de usuário do PASSO 2: documento original + manifesto (contexto) + o projeto alvo."""
+    product = manifest.get("product") or {}
+    siblings = [
+        {k: p.get(k) for k in ("id", "type", "dependsOn", "summary") if p.get(k) is not None}
+        for p in (manifest.get("projects") or [])
+    ]
+    target = {k: v for k, v in project.items() if k not in ("relationships",)}
+    return (
+        "# Documento original do produto (prosa)\n\n"
+        f"{master_md.strip()}\n\n"
+        "# Manifesto já decidido no PASSO 1 (contexto — NÃO redecomponha)\n\n"
+        f"Produto: {json.dumps({k: product.get(k) for k in ('name', 'systemId', 'rationale') if product.get(k)}, ensure_ascii=False)}\n"
+        f"Projetos (irmãos): {json.dumps(siblings, ensure_ascii=False)}\n\n"
+        "# PROJETO ALVO — escreva a spec completa, os arquivos temáticos e a declaração Connect DESTE projeto\n\n"
+        f"{json.dumps(target, ensure_ascii=False, indent=2)}\n\n"
+        "Responda SOMENTE o JSON {spec, files, connect} no formato do system prompt (sem cercas)."
+    )
+
+
+def _normalize_rationale(project: dict, warnings: list[str]) -> None:
+    """Valida os enums do racional (pós-parse, determinístico) e dobra tudo em `rationale`.
+
+    Campos crus (`summary`, `cutReason`, `mergeBlocker`, `ishScore`, `relationships`) NÃO existem
+    no schema Connect (additionalProperties:false) → são removidos do projeto após a dobra.
+    Fora do enum → fallback + warning visível ao humano (nunca erro fatal — a chamada é cara).
+    """
+    pid = str(project.get("id") or "?")
+    cut = str(project.get("cutReason") or "").strip()
+    if cut and cut not in CUT_REASONS:
+        warnings.append(f'Projeto "{pid}": cutReason "{cut}" fora do enum → "service-scope".')
+        cut = "service-scope"
+    blocker = str(project.get("mergeBlocker") or "none").strip()
+    if blocker not in MERGE_BLOCKERS:
+        warnings.append(f'Projeto "{pid}": mergeBlocker "{blocker}" fora do enum → "none".')
+        blocker = "none"
+    ish_raw = project.get("ishScore")
+    try:
+        ish = int(ish_raw) if ish_raw is not None else None
+        if ish is not None and not (0 <= ish <= 10):
+            raise ValueError
+    except (TypeError, ValueError):
+        warnings.append(f'Projeto "{pid}": ishScore "{ish_raw}" inválido (0-10) → ignorado.')
+        ish = None
+    if ish is not None and ish < 5:
+        warnings.append(f'Projeto "{pid}": ISH {ish}/10 < 5 — candidato a fusão com um vizinho; revise antes de aprovar.')
+    if blocker != "none":
+        warnings.append(f'Projeto "{pid}": integrador "{blocker}" presente — corte exige justificativa explícita.')
+    rels: list[str] = []
+    for r in project.get("relationships") or []:
+        if not isinstance(r, dict):
+            continue
+        dep = str(r.get("dependsOn") or "").strip()
+        rtype = str(r.get("type") or "none").strip()
+        if rtype not in RELATIONSHIP_TYPES:
+            warnings.append(f'Projeto "{pid}": relationship "{rtype}" fora do enum → "none".')
+            rtype = "none"
+        if dep:
+            rels.append(f"{dep}={rtype}")
+    parts = []
+    if cut:
+        parts.append(f"Corte: {cut}")
+    parts.append(f"Integrador: {blocker}")
+    if ish is not None:
+        parts.append(f"ISH {ish}/10")
+    if rels:
+        parts.append("Relações: " + ", ".join(rels))
+    summary = str(project.get("summary") or "").strip()
+    existing = str(project.get("rationale") or "").strip()
+    rationale = " · ".join(parts)
+    tail = existing or summary
+    project["rationale"] = f"{rationale} — {tail}" if tail else rationale
+    for k in _RATIONALE_RAW_FIELDS:
+        project.pop(k, None)
+
+
+def _file_kind(name: str) -> str:
+    return FILE_KIND_BY_NAME.get(name.lower(), "other")
+
+
+def _validate_connect_declaration(decl: dict) -> list[str]:
+    """Valida contra products/spec-connect-declaration.schema.json quando o schema está acessível
+    (host/dev). Em container sem o repo irmão (até o snapshot ser vendorizado — PR 5) NÃO há
+    validação: devolve 1 aviso EXPLÍCITO em vez de silêncio (adversarial PR3 #6)."""
+    try:
+        from orchestrator.connect_contracts import _schema_for, validate_connect_artifact
+        if not _schema_for("SpecConnectDeclaration"):
+            return ["declaração NÃO validada: schema Connect indisponível neste ambiente (ZENTRIZ_CONNECT_ROOT)."]
+        return validate_connect_artifact("SpecConnectDeclaration", decl)
+    except Exception as e:  # noqa: BLE001
+        return [f"declaração NÃO validada: erro no validador ({type(e).__name__})."]
+
+
+def _build_connect_declaration(product: dict, project: dict, connect: dict | None, warnings: list[str],
+                               sibling_ids: set[str] | None = None) -> dict:
+    """Monta a SpecConnectDeclaration do projeto: identidade vem do MANIFESTO (não do LLM)."""
+    sibling_ids = sibling_ids or set()
+    pid = str(project.get("id") or "").strip()
+    system_id = str((product or {}).get("systemId") or "").strip()
+    if not system_id:
+        # Mesmo fallback do deriveSystemService (api-node): slug do nome do produto.
+        system_id = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", str(product.get("name") or "produto").lower())).strip("-")
+        warnings.append(f"product.systemId ausente — derivado do nome: {system_id}.")
+    src = dict(connect or {})
+    for k in ("schemaVersion", "systemId", "serviceId", "owners"):
+        src.pop(k, None)  # identidade/owners vêm do manifesto/tenant, nunca do LLM (falsa precisão)
+    decl: dict = {
+        "schemaVersion": PRODUCT_MANIFEST_SCHEMA_VERSION,
+        "systemId": system_id,
+        "serviceId": pid,
+        "serviceName": str(src.pop("serviceName", "") or pid.replace("-", " ").title()),
+        "responsibility": str(src.pop("responsibility", "") or project.get("rationale") or f"Responsabilidades do projeto {pid}."),
+        "interfaces": [i for i in (src.pop("interfaces", None) or []) if isinstance(i, dict) and i.get("name") and i.get("type")],
+    }
+    for k in ("dependencies", "events", "runtimeType", "queues", "healthModel", "environments", "integrationTierTarget", "notes"):
+        if k in src and src[k] not in (None, "", [], {}):
+            decl[k] = src[k]
+    if src:
+        warnings.append(f'Projeto "{pid}": chaves Connect desconhecidas ignoradas: {", ".join(sorted(src))}.')
+    # Coerência grafo × declaração: dependência declarada que é um irmão do manifesto mas NÃO está
+    # em dependsOn indica aresta faltante no grafo (aviso; o humano decide na Bancada).
+    deps = set(project.get("dependsOn") or [])
+    for d in decl.get("dependencies") or []:
+        if d in sibling_ids and d not in deps:
+            warnings.append(f'Projeto "{pid}": connect.dependencies inclui "{d}" mas dependsOn não — aresta faltante no grafo?')
+    errors = _validate_connect_declaration(decl)
+    for e in errors:
+        warnings.append(f'Projeto "{pid}": connect.yaml — {e}')
+    return decl
+
+
+def _sleep_backoff() -> None:
+    if SPLITTER_RETRY_BACKOFF_S > 0:
+        import time
+        time.sleep(SPLITTER_RETRY_BACKOFF_S)
+
+
+def _to_yaml(obj: dict) -> str:
+    import yaml  # PyYAML (agents/requirements.txt)
+    return yaml.safe_dump(obj, sort_keys=False, allow_unicode=True, default_flow_style=False)
+
+
+def _generate_project_files(
+    master_md: str,
+    manifest: dict,
+    project: dict,
+    llm_fn: Callable[[str, str, str], str],
+    model_id: str,
+    warnings: list[str],
+) -> tuple[dict[str, str], list[dict], str]:
+    """PASSO 2 para UM projeto → (specs {path: content}, files[] do manifesto, connectDeclaration path).
+
+    1 retry em falha de parse/conteúdo (chamada cara; a 2ª tentativa costuma corrigir JSON quebrado).
+    """
+    pid = str(project.get("id") or "").strip()
+    system = _load_project_files_prompt()
+    user = build_project_files_prompt(master_md, manifest, project)
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = llm_fn(system, user, model_id)
+            out = _extract_json(raw)
+            spec = out.get("spec")
+            if not isinstance(spec, str) or len(spec.strip()) < MIN_SPEC_CONTENT_CHARS:
+                raise ManifestProposalError("PROPOSAL_EMPTY_SPEC",
+                                            f'Projeto "{pid}": spec ausente ou trivial (mínimo {MIN_SPEC_CONTENT_CHARS} caracteres).')
+            specs: dict[str, str] = {str(project.get("spec") or f"specs/{pid}.md").replace("./", ""): spec}
+            files_meta: list[dict] = []
+            files = out.get("files") or {}
+            if isinstance(files, dict):
+                for name, content in files.items():
+                    fname = str(name).strip()
+                    if fname.lower() in _RESERVED_FILE_NAMES or not _FILE_NAME_RE.fullmatch(fname):
+                        warnings.append(f'Projeto "{pid}": arquivo "{fname}" ignorado (nome reservado/inválido).')
+                        continue
+                    if not isinstance(content, str) or len(content.strip()) < MIN_SPEC_CONTENT_CHARS:
+                        warnings.append(f'Projeto "{pid}": arquivo "{fname}" ignorado (conteúdo trivial).')
+                        continue
+                    path = f"specs/{pid}/{fname}"
+                    specs[path] = content
+                    files_meta.append({"path": path, "kind": _file_kind(fname)})
+            decl = _build_connect_declaration(
+                manifest.get("product") or {}, project,
+                out.get("connect") if isinstance(out.get("connect"), dict) else None, warnings,
+                sibling_ids={str(p.get("id")) for p in (manifest.get("projects") or []) if isinstance(p, dict)},
+            )
+            decl_path = f"specs/{pid}/connect.yaml"
+            specs[decl_path] = _to_yaml(decl)
+            files_meta.append({"path": decl_path, "kind": "connect-declaration"})
+            return specs, files_meta, decl_path
+        except ManifestProposalError as e:
+            last_err = e
+            if attempt == 0:
+                warnings.append(f'Projeto "{pid}": passo 2 falhou ({e.code}) — repetindo 1x.')
+                _sleep_backoff()
+                continue
+            raise
+        except Exception as e:  # noqa: BLE001 — falha de rede/SDK/throttling
+            last_err = e
+            if attempt == 0:
+                warnings.append(f'Projeto "{pid}": passo 2 falhou ({type(e).__name__}) — repetindo 1x após backoff.')
+                _sleep_backoff()
+                continue
+            raise ManifestProposalError("PROPOSAL_PROJECT_FILES_FAILED", f'Projeto "{pid}": passo 2 falhou: {e}') from e
+    raise ManifestProposalError("PROPOSAL_PROJECT_FILES_FAILED", f'Projeto "{pid}": {last_err}')
 
 
 def _split_manifest_and_specs(proposal: dict) -> tuple[dict, dict]:
@@ -313,12 +587,51 @@ def split_document(
     raw = llm_fn(system, user, model_id)
 
     proposal = _extract_json(raw)
-    manifest, specs = _split_manifest_and_specs(proposal)
-
-    # Gates determinísticos reusados: as specs geradas são as "specs presentes".
-    validate_proposal(manifest, list(specs.keys()))
-
     warnings: list[str] = []
+    projects_raw = proposal.get("projects") if isinstance(proposal.get("projects"), list) else []
+    legacy = any(isinstance(p, dict) and "specContent" in p for p in projects_raw)
+
+    if legacy:
+        # Caminho LEGADO (1 chamada com specContent): preservado para modelos/prompts antigos e testes.
+        manifest, specs = _split_manifest_and_specs(proposal)
+        validate_proposal(manifest, list(specs.keys()))
+        for p in manifest.get("projects") or []:
+            if any(k in p for k in _RATIONALE_RAW_FIELDS):
+                _normalize_rationale(p, warnings)
+    else:
+        # R4 PR3 — PASSO 1 (manifesto) validado ANTES de gastar N chamadas no PASSO 2.
+        manifest = {k: v for k, v in proposal.items()}
+        projects = [p for p in projects_raw if isinstance(p, dict)]
+        for p in projects:
+            pid = str(p.get("id") or "").strip()
+            p["spec"] = str(p.get("spec") or (f"specs/{pid}.md" if pid else "")).replace("./", "")
+        manifest["projects"] = projects
+        validate_proposal(manifest, [p["spec"] for p in projects])
+        for p in projects:
+            _normalize_rationale(p, warnings)
+
+        # PASSO 2 — 1 chamada por projeto, em paralelo (cabe no cap de saída; sem truncar JSON).
+        specs = {}
+        results: dict[str, tuple[dict[str, str], list[dict], str]] = {}
+        proj_warnings: dict[str, list[str]] = {str(p["id"]): [] for p in projects}
+
+        def _one(p: dict) -> tuple[str, tuple[dict[str, str], list[dict], str]]:
+            pid = str(p["id"])
+            return pid, _generate_project_files(master_md, manifest, p, llm_fn, model_id, proj_warnings[pid])
+
+        with ThreadPoolExecutor(max_workers=min(SPLITTER_FANOUT, max(1, len(projects)))) as pool:
+            for pid, res in pool.map(_one, projects):
+                results[pid] = res
+        for p in projects:
+            pid = str(p["id"])
+            p_specs, files_meta, decl_path = results[pid]
+            specs.update(p_specs)
+            if files_meta:
+                p["files"] = files_meta
+            p["connectDeclaration"] = decl_path
+            warnings.extend(proj_warnings[pid])
+
+    manifest["schemaVersion"] = PRODUCT_MANIFEST_SCHEMA_VERSION
     product = manifest.get("product", {})
     if product.get("specApproved") is True:
         product["specApproved"] = False

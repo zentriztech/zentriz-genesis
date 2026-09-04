@@ -32,7 +32,11 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import { apiGet, apiPost } from "@/lib/api";
 
 // contratos com a API (espelham products.ts / splitter)
-type ProposeProject = { id: string; type: string; wave: number; dependsOn: string[] };
+type ProposeProject = {
+  id: string; type: string; wave: number; dependsOn: string[];
+  // R4 PR3 (Connect 1.3.0): racional do corte + arquivos gerados + connect.yaml
+  rationale?: string | null; files?: string[]; connectDeclaration?: string | null;
+};
 type ProductManifest = {
   schemaVersion?: string;
   product?: { name?: string; systemId?: string; specApproved?: boolean; deliveryDefault?: string };
@@ -307,6 +311,14 @@ export function DecomposeDialog({
                     {p.dependsOn.length > 0 && (
                       <Typography variant="caption" color="text.disabled">
                         ← depende de {p.dependsOn.join(", ")}
+                      </Typography>
+                    )}
+                    {(p.files?.length ?? 0) > 0 && (
+                      <Chip size="small" variant="outlined" label={`${p.files!.length} arquivo(s)${p.connectDeclaration ? " · connect.yaml" : ""}`} sx={{ height: 18, fontSize: "0.6rem" }} />
+                    )}
+                    {p.rationale && (
+                      <Typography variant="caption" color="text.secondary" sx={{ flexBasis: "100%", pl: 1, borderLeft: "2px solid", borderColor: "divider" }}>
+                        {p.rationale}
                       </Typography>
                     )}
                   </Box>
