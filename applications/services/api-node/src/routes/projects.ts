@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
-import { pushProjectToGitHub, deriveSystemService } from "../services/githubPush.js";
+import { pushProjectToGitHub, deriveSystemService, gitLinkProjectFolder, checkoutNewBranch } from "../services/githubPush.js";
+import { identityInputsFor, resolveLineageRoot } from "../services/lineage.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
@@ -269,11 +270,14 @@ export async function projectRoutes(app: FastifyInstance) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
       const r = row as Record<string, unknown>;
+      // Evoluir E1: identidade pela RAIZ da linhagem — uma evolução é nova VERSÃO do MESMO serviço
+      // (o título "… — Evolução vN" gerava serviceId/repo/registro novos).
+      const lineage = await identityInputsFor(client, String(row.id), (row.title as string | null) ?? null);
       const connectIds = deriveSystemService({
         productSystemId: (r.product_system_id as string | null) ?? undefined,
         productName: (r.product_name as string | null) ?? undefined,
-        title: (row.title as string | null) ?? undefined,
-        projectId: String(row.id),
+        title: lineage.title ?? undefined,
+        projectId: lineage.projectId,
         soloApp: (r.product_solo_app as boolean | null) ?? false,
       });
       return reply.send({
@@ -301,6 +305,7 @@ export async function projectRoutes(app: FastifyInstance) {
         productName:    (r.product_name as string | null) ?? null,
         systemId:       connectIds.systemId,
         serviceId:      connectIds.serviceId,
+        lineageRootId:  lineage.rootId,
       });
     } finally {
       client.release();
@@ -3163,8 +3168,37 @@ export async function projectRoutes(app: FastifyInstance) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "Campo 'request' é obrigatório (descreva o que evoluir)." });
       }
 
+      // Evoluir E1 — guard de concorrência: 1 evolução em voo por serviço (2 filhos com o mesmo
+      // version_number e 2 branches evolution/vN eram possíveis). Fail-closed com 409.
+      const inFlight = (await client.query(
+        `SELECT id, status, version_number FROM projects
+          WHERE parent_project_id = $1 AND status NOT IN ('accepted', 'archived', 'failed')
+          ORDER BY created_at DESC LIMIT 1`,
+        [parentId],
+      )).rows[0] as { id: string; status: string; version_number: number } | undefined;
+      if (inFlight) {
+        return reply.status(409).send({
+          code: "EVOLUTION_IN_FLIGHT",
+          message: `Já existe uma evolução em andamento deste projeto (v${inFlight.version_number}, status ${inFlight.status}). Conclua-a, ou descarte-a com DELETE /api/projects/${inFlight.id} (Meus apps → Excluir) antes de abrir outra.`,
+          childProjectId: inFlight.id,
+          hint: `DELETE /api/projects/${inFlight.id}`,
+        });
+      }
+      // Evoluir E1 — a versão corrente do serviço é a raiz da linhagem OU o último aceito; evoluir um
+      // projeto que já foi superado (extra.superseded_by) cria versão a partir de código antigo.
+      const parentExtra = ((await client.query("SELECT extra FROM projects WHERE id = $1", [parentId])).rows[0]?.extra ?? {}) as Record<string, unknown>;
+      if (parentExtra && typeof parentExtra === "object" && parentExtra.superseded_by) {
+        return reply.status(409).send({
+          code: "PARENT_SUPERSEDED",
+          message: "Este projeto já foi superado por uma versão mais nova — evolua a versão corrente.",
+          currentProjectId: parentExtra.superseded_by,
+        });
+      }
+
       const nextVersion = ((parentRow.version_number as number) ?? 1) + 1;
       const childTitle  = `${parentRow.title} — Evolução v${nextVersion}`;
+      const lineageRoot = await resolveLineageRoot(client, parentId);
+      const rootId = lineageRoot?.id ?? parentId;
 
       // Produto da nova versão (§4.6, migration 064): herdar o produto do pai; mas se o
       // produto-pai estiver arquivado OU for o INBOX (ou tiver sumido), cair no INBOX
@@ -3203,65 +3237,145 @@ export async function projectRoutes(app: FastifyInstance) {
             evolution_request: evolutionRequest,
             evolution_work_mode: workMode,
             evolution_parent_id: parentId,
+            // Evoluir E1: raiz da linhagem (identidade Connect/repo/Deadpool) + branch de trabalho.
+            evolution_root_id: rootId,
+            evolution_branch: `evolution/v${nextVersion}`,
           }),
           parentRow.complexity_hint ?? null,
         ]
       );
       const childId = childRes.rows[0]?.id as string;
 
-      // Copiar spec original do pai como ponto de partida do filho
-      const parentSpecRow = (await client.query(
-        "SELECT file_path, filename FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at ASC LIMIT 1",
+      // ── Evoluir E1: herdar TODOS os arquivos da Bancada do pai (antes: só o 1º — perdia connect.yaml,
+      // contratos.md, decisoes.md, infra-deploy.md do split). O arquivo primário do filho é a spec do pai
+      // prefixada com o EVOLUTION REQUEST; os demais preservam rel_dir/filename/mime.
+      const parentSpecRows = (await client.query(
+        "SELECT file_path, filename, mime_type, rel_dir, is_primary FROM project_spec_files WHERE project_id = $1 ORDER BY is_primary DESC, created_at ASC",
         [parentId]
-      )).rows[0] as Record<string, unknown> | undefined;
+      )).rows as Array<{ file_path: string; filename: string; mime_type: string | null; rel_dir: string | null; is_primary: boolean }>;
 
-      if (parentSpecRow?.file_path) {
+      let inherited = 0;
+      if (parentSpecRows.length > 0) {
         try {
-          const { readFileSync, existsSync } = await import("fs");
-          const { join, dirname } = await import("path");
-          const { mkdirSync, writeFileSync } = await import("fs");
+          const { readFileSync, existsSync, mkdirSync, writeFileSync } = await import("fs");
+          const { join } = await import("path");
           const uploadDir  = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
-          const parentSpec = String(parentSpecRow.file_path);
-          if (existsSync(parentSpec)) {
-            const originalContent = readFileSync(parentSpec, "utf-8");
-            // Prefixar spec com instrução de evolução
-            const evolutionHeader = `# EVOLUTION REQUEST — v${nextVersion}\n\n> ${evolutionRequest}\n\n---\n\n`;
-            const evolvedContent  = evolutionHeader + originalContent;
-            const childSpecDir    = join(uploadDir, childId);
-            mkdirSync(childSpecDir, { recursive: true });
-            const childSpecPath   = join(childSpecDir, `spec-evolution-v${nextVersion}.md`);
-            writeFileSync(childSpecPath, evolvedContent, "utf-8");
-            // RFC-0004 T1.3: primeiro (e único) arquivo da spec filha = canônico; sha p/ If-Match/hash.
+          const childSpecDir = join(uploadDir, childId);
+          mkdirSync(childSpecDir, { recursive: true });
+          const primary = parentSpecRows.find((r) => r.is_primary) ?? parentSpecRows[0];
+          for (const r of parentSpecRows) {
+            if (!r.file_path || !existsSync(r.file_path)) continue;
+            const isPrimary = r === primary;
+            const relDir = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+            const original = readFileSync(r.file_path);
+            const filename = isPrimary ? `spec-evolution-v${nextVersion}.md` : r.filename;
+            const content = isPrimary
+              ? Buffer.from(`# EVOLUTION REQUEST — v${nextVersion}\n\n> ${evolutionRequest}\n\n---\n\n` + original.toString("utf-8"), "utf-8")
+              : original;
+            const dir = relDir ? join(childSpecDir, relDir) : childSpecDir;
+            mkdirSync(dir, { recursive: true });
+            const childPath = join(dir, filename);
+            writeFileSync(childPath, content);
             await client.query(
               `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
-               VALUES ($1, $2, $3, 'text/markdown', '', true, $4)`,
-              [childId, `spec-evolution-v${nextVersion}.md`, childSpecPath, sha256Hex(Buffer.from(evolvedContent, "utf-8"))]
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [childId, filename, childPath, r.mime_type ?? "text/markdown", isPrimary ? "" : relDir, isPrimary, sha256Hex(content)]
             );
-            await client.query(
-              "UPDATE projects SET status = 'spec_submitted', updated_at = now() WHERE id = $1",
-              [childId]
-            );
+            inherited++;
+          }
+          if (inherited > 0) {
+            await client.query("UPDATE projects SET status = 'spec_submitted', updated_at = now() WHERE id = $1", [childId]);
           }
         } catch (err) {
-          request.log.warn({ err, childId }, "[evolve] Falha ao copiar spec do pai — filho permanece em draft");
+          request.log.warn({ err, childId }, "[evolve] Falha ao herdar arquivos do pai — filho permanece em draft");
         }
       }
+
+      // ── Evoluir E1: código do filho = clone do repo `dev` da RAIZ (fonte de verdade), em branch
+      // evolution/vN. Fallback: cópia do apps/ do pai no disco (com aviso — o Deadpool pode ter alterado).
+      // Antes disto o apps/ do filho nascia VAZIO e o Dev regenerava o produto do zero.
+      let evolutionSource: "git-clone" | "disk-copy" | "none" = "none";
+      let evolutionSourceError: string | null = null;
+      try {
+        const { existsSync, mkdirSync, cpSync } = await import("fs");
+        const { join } = await import("path");
+        const filesRoot = (process.env.PROJECT_FILES_ROOT ?? "").trim();
+        if (filesRoot) {
+          const childApps = join(filesRoot, childId, "apps");
+          mkdirSync(childApps, { recursive: true });
+          const repoRow = (await client.query(
+            `SELECT gr.repo_url, gi.installation_id
+               FROM project_github_repos gr
+               JOIN projects p ON p.id = gr.project_id
+               LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+              WHERE gr.project_id = ANY($1::uuid[])
+              ORDER BY (gr.project_id = $2) DESC LIMIT 1`,
+            [[rootId, parentId], rootId],
+          )).rows[0] as { repo_url: string; installation_id: number | null } | undefined;
+          const fullName = repoRow?.repo_url ? repoRow.repo_url.replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "") : null;
+          if (fullName && repoRow?.installation_id) {
+            const link = await gitLinkProjectFolder({ projectId: childId, fullName, installationId: Number(repoRow.installation_id), branch: "dev" });
+            if (link.ok) {
+              const br = await checkoutNewBranch(childId, `evolution/v${nextVersion}`);
+              evolutionSource = "git-clone";
+              if (!br.ok) evolutionSourceError = `branch local não criado: ${br.error}`;
+            } else {
+              evolutionSourceError = link.error ?? "git-link falhou";
+            }
+          }
+          if (evolutionSource !== "git-clone") {
+            // Fallback: apps/ do pai — o candidato COM conteúdo (o runner grava no layout standalone;
+            // o aninhado <root>/<prod>/<pai>/apps costuma existir VAZIO — adversarial E1 #A).
+            const { readdirSync } = await import("fs");
+            const hasContent = (dir: string) => {
+              try { return readdirSync(dir).some((n) => ![".git", "node_modules", ".next", "dist"].includes(n)); } catch { return false; }
+            };
+            const candidates = [
+              join(filesRoot, parentId, "apps"),
+              ...(parentProductId ? [join(filesRoot, parentProductId, parentId, "apps")] : []),
+            ];
+            const src = candidates.find((c) => existsSync(c) && hasContent(c));
+            if (src) {
+              cpSync(src, childApps, { recursive: true, filter: (s) => !/(^|\/)(node_modules|\.next|dist|__pycache__|\.venv|venv)(\/|$)/.test(s) });
+              evolutionSource = "disk-copy";
+              // O apps/ do pai pode ser git-linkado ao `dev` — o filho precisa do SEU branch de trabalho.
+              if (existsSync(join(childApps, ".git"))) {
+                const br = await checkoutNewBranch(childId, `evolution/v${nextVersion}`);
+                if (!br.ok) evolutionSourceError = `branch local não criado (disk-copy): ${br.error}`;
+              } else {
+                evolutionSourceError = (evolutionSourceError ? evolutionSourceError + "; " : "") + "cópia sem .git — sem branch evolution/vN";
+              }
+            }
+          }
+        }
+      } catch (err) {
+        evolutionSourceError = err instanceof Error ? err.message : String(err);
+        request.log.warn({ err, childId }, "[evolve] Falha ao preparar o código do filho");
+      }
+      await client.query(
+        `UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1`,
+        [childId, JSON.stringify({ evolution_source: evolutionSource, evolution_source_error: evolutionSourceError, evolution_inherited_files: inherited })],
+      );
 
       // Postar no diálogo do filho
       await client.query(
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human)
          VALUES ($1, 'system', 'system', 'step', $2)`,
-        [childId, `🔄 Evolução v${nextVersion} criada a partir de "${parentRow.title}". Modo: ${workMode}. Pedido: "${evolutionRequest}"`]
+        [childId, `🔄 Evolução v${nextVersion} criada a partir de "${parentRow.title}". Código-base: ${evolutionSource === "git-clone" ? `clone do repo (dev) em evolution/v${nextVersion}` : evolutionSource === "disk-copy" ? "cópia do apps/ do pai (sem repo GitHub — Deadpool pode ter alterado)" : "NENHUM (apps/ vazio — verifique PROJECT_FILES_ROOT/repo)"}. Arquivos herdados: ${inherited}. Pedido: "${evolutionRequest}"`]
       );
 
-      request.log.info({ parentId, childId, version: nextVersion, workMode }, "[evolve] Projeto filho criado");
+      request.log.info({ parentId, childId, version: nextVersion, workMode, evolutionSource, inherited }, "[evolve] Projeto filho criado");
 
       return reply.status(201).send({
         ok: true,
         childProjectId: childId,
         parentProjectId: parentId,
+        lineageRootId: rootId,
         versionNumber: nextVersion,
         workMode,
+        evolutionSource,
+        evolutionSourceError,
+        inheritedFiles: inherited,
         title: childTitle,
         message: "Projeto de evolução criado. Envie ao pipeline via POST /run quando estiver pronto.",
       });

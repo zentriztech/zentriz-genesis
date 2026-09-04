@@ -298,6 +298,95 @@ def load_connect_declaration(project_id: str) -> tuple[dict | None, list[str]]:
 
 SPEC_QUESTION_MAX_ROUNDS = max(1, int(os.environ.get("SPEC_QUESTION_MAX_ROUNDS", "2") or 2))
 
+# ── Evoluir E1: repo map + docs do pai ───────────────────────────────────────────────────────────
+_EVO_SKIP_DIRS = {"node_modules", ".next", "dist", ".git", "__pycache__", ".venv", "venv", "build", "coverage"}
+_EVO_CODE_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".go", ".java", ".kt", ".rb", ".cs", ".rs", ".php",
+                  ".prisma", ".sql", ".graphql", ".proto"}
+_EVO_META_FILES = {"package.json", "pyproject.toml", "requirements.txt", "docker-compose.yml", "Dockerfile", ".env.example", "README.md"}
+EVOLUTION_REPO_MAP_CHARS = max(4000, int(os.environ.get("EVOLUTION_REPO_MAP_CHARS", "20000") or 20000))
+
+
+def _build_evolution_repo_map(apps_dir: Path, pipeline_ctx=None, budget: int = EVOLUTION_REPO_MAP_CHARS) -> list[dict]:
+    """Repo map da versão corrente (Aider-like): 1 entrada por arquivo de código com APENAS assinaturas/
+    exports/imports (`PipelineContext._extract_interfaces`) + metadados (package.json etc.) integrais
+    curtos. Cabe no cap dos agentes (AGENT_INPUT_CHARS 40k) e é o que CTO/Engineer/PM precisam para
+    decidir o DELTA sem regenerar. Ordem determinística; orçamento total em chars."""
+    if not apps_dir or not apps_dir.exists():
+        return []
+    extractor = getattr(pipeline_ctx, "_extract_interfaces", None)
+    out: list[dict] = []
+    used = 0
+    files = sorted(p for p in apps_dir.rglob("*") if p.is_file() and not any(s in p.parts for s in _EVO_SKIP_DIRS))
+    # 1) índice da árvore (barato, sempre entra)
+    tree = "\n".join(str(p.relative_to(apps_dir)) for p in files[:400])
+    tree_entry = {"path": "apps/_TREE.txt", "content": f"# {len(files)} arquivo(s) em apps/\n{tree}", "format": "txt"}
+    out.append(tree_entry); used += len(tree_entry["content"])
+    # 2) metadados integrais (curtos) e 3) código resumido
+    for p in files:
+        if used >= budget:
+            break
+        try:
+            if p.name in _EVO_META_FILES and p.stat().st_size <= 6000:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            elif p.suffix.lower() in _EVO_CODE_EXTS:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+                content = extractor(raw) if callable(extractor) else raw[:1500]
+            else:
+                continue
+        except OSError:
+            continue
+        avail = budget - used
+        if len(content) > avail:
+            content = content[:avail] + "\n...[truncado pelo orçamento do repo map]"
+        out.append({"path": f"apps/{p.relative_to(apps_dir)}", "content": content, "format": p.suffix.lstrip(".") or "txt"})
+        used += len(content)
+    return out
+
+
+def _load_parent_evolution_docs(parent_root: Path, cap: int = 6000) -> dict[str, str]:
+    """Charter (docs/cto_charter.md) e proposta técnica (docs/engineer_proposal.md) do PAI, truncados."""
+    docs: dict[str, str] = {}
+    for key, name in (("charter", "cto_charter.md"), ("engineer", "engineer_proposal.md")):
+        p = parent_root / "docs" / name
+        try:
+            if p.exists():
+                txt = p.read_text(encoding="utf-8", errors="replace")
+                docs[key] = txt[:cap] + ("\n...[truncado]" if len(txt) > cap else "")
+        except OSError:
+            pass
+    return docs
+
+
+def _dir_has_content(path: Path) -> bool:
+    """Diretório com pelo menos 1 arquivo FORA de .git/node_modules/dist… (um clone falho só com .git não conta)."""
+    try:
+        if not path or not path.exists():
+            return False
+        for p in path.rglob("*"):
+            if p.is_file() and not any(s in p.parts for s in _EVO_SKIP_DIRS):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _pick_project_root(files_root: str, project_id: str, product_id: str | None) -> Path:
+    """Raiz do projeto no disco preferindo o layout que TEM conteúdo. O runner grava código/docs no layout
+    STANDALONE (`get_apps_dir/get_docs_dir` sem product_id) mas `ensure_project_dirs` cria o aninhado
+    VAZIO — procurar no aninhado primeiro achava um diretório existente e vazio (adversarial E1 #A)."""
+    standalone = Path(files_root) / project_id
+    nested = Path(files_root) / str(product_id) / project_id if product_id else None
+    for cand in (standalone, nested):
+        if cand and (_dir_has_content(cand / "apps") or _dir_has_content(cand / "docs")):
+            return cand
+    return standalone
+
+
+def _evolution_existing_artifacts(pipeline_ctx) -> list:
+    """existing_artifacts para CTO/Engineer/PM: o repo map da evolução (vazio fora de evolução)."""
+    arts = getattr(pipeline_ctx, "evolution_artifacts", None) if pipeline_ctx is not None else None
+    return list(arts) if isinstance(arts, list) else []
+
 
 def _extract_questions(response: dict | None) -> list[str]:
     """Perguntas de um NEEDS_INFO (envelope: `next_actions.questions`, strings ou {question}). [] se não há."""
@@ -573,7 +662,7 @@ def call_engineer(
     message = _build_message_envelope(
         request_id, "Engineer", "generic", "generate_engineering_docs",
         task_id=None, task="Gerar proposta técnica (stacks, squads, dependências).",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_ENGINEER", "600"))},
+        inputs=inputs, existing_artifacts=_evolution_existing_artifacts(pipeline_ctx), limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_ENGINEER", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -648,7 +737,7 @@ def call_cto(
         inputs["extra_instruction"] = extra_instruction
     message = _build_message_envelope(
         request_id, "CTO", "generic", mode, task_id=None, task="",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_CTO", "600"))},
+        inputs=inputs, existing_artifacts=_evolution_existing_artifacts(pipeline_ctx), limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_CTO", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -1354,7 +1443,7 @@ def call_pm(
     message = _build_message_envelope(
         request_id, "PM", module, "generate_backlog",
         task_id=None, task=f"Gerar backlog da squad {module}.",
-        inputs=inputs, existing_artifacts=[], limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_PM", "600"))},
+        inputs=inputs, existing_artifacts=_evolution_existing_artifacts(pipeline_ctx), limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_PM", "600"))},
     )
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
@@ -4281,12 +4370,12 @@ def main() -> int:
         _files_root_evo = os.environ.get("PROJECT_FILES_ROOT", "/project-files").rstrip("/")
         _parent_apps_dir = Path(_files_root_evo) / _parent_project_id_evo / "apps"
 
-        # Determinar product_id do pai para path novo
+        # Determinar a raiz do pai no disco: layout COM conteúdo (standalone é onde o runner grava;
+        # o aninhado <root>/<prod>/<pai>/ costuma existir VAZIO — adversarial E1 #A).
         try:
             _par_data, _ = _api_get(f"/api/projects/{_parent_project_id_evo}")
             _par_prod = (_par_data or {}).get("productId")
-            if _par_prod:
-                _parent_apps_dir = Path(_files_root_evo) / _par_prod / _parent_project_id_evo / "apps"
+            _parent_apps_dir = _pick_project_root(_files_root_evo, _parent_project_id_evo, _par_prod) / "apps"
             # T-03f: propagar previous_project_type para Gate T-TYPE-COMPLIANCE-EVO no CTO
             _par_type = (_par_data or {}).get("projectType") or (_par_data or {}).get("project_type")
             if _par_type and pipeline_ctx and not getattr(pipeline_ctx, "previous_project_type", ""):
@@ -4295,42 +4384,33 @@ def main() -> int:
         except Exception:
             pass
 
-        _evo_artifacts: list[dict] = []
-        try:
-            _MAX_EVO_CHARS = 80_000
-            _evo_chars = 0
-            # Coletar todos os arquivos de código do pai (excluindo node_modules/.next/dist)
-            _skip_dirs = {"node_modules", ".next", "dist", ".git", "__pycache__", ".venv", "venv"}
-            for _ap in sorted(_parent_apps_dir.rglob("*")):
-                if _evo_chars >= _MAX_EVO_CHARS:
-                    break
-                if not _ap.is_file():
-                    continue
-                if any(s in _ap.parts for s in _skip_dirs):
-                    continue
-                _ext = _ap.suffix.lower()
-                if _ext not in {".ts", ".tsx", ".js", ".jsx", ".py", ".json", ".md", ".toml", ".yaml", ".yml", ".env.example", ".sh", ".sql"}:
-                    continue
-                try:
-                    _content = _ap.read_text(encoding="utf-8", errors="replace")
-                    _avail = _MAX_EVO_CHARS - _evo_chars
-                    if len(_content) > _avail:
-                        _content = _content[:_avail] + "\n...[truncado]"
-                    _rel_path = str(_ap.relative_to(_parent_apps_dir.parent))
-                    _evo_artifacts.append({"path": _rel_path, "content": _content, "format": _ext.lstrip(".")})
-                    _evo_chars += len(_content)
-                except OSError:
-                    pass
-            logger.info("[FT-10] %d artefatos do projeto pai carregados (%d chars)", len(_evo_artifacts), _evo_chars)
-        except Exception as _ea:
-            logger.warning("[FT-10] Falha ao carregar apps/ do pai: %s", _ea)
+        # Evoluir E1: o código-base da evolução é o apps/ do FILHO (clone do repo dev / cópia do pai,
+        # preparado pelo /evolve). Antes: lia o apps/ do pai (cap 80k chars, truncando mudo) para uma
+        # lista que NENHUM agente recebia. Agora: "repo map" (árvore + assinaturas/exports por arquivo,
+        # ~20k) vai como existing_artifacts REAIS para CTO/Engineer/PM; o Dev recebe o conteúdo integral
+        # só dos arquivos da task (get_relevant_artifacts_for_task) — LEI 7 (contexto mínimo).
+        _child_apps_dir = Path(_files_root_evo) / project_id / "apps"
+        _child_has_code = _dir_has_content(_child_apps_dir)  # .git sozinho (clone falho) não conta
+        _repo_map_src = _child_apps_dir if _child_has_code else _parent_apps_dir
+        _evo_artifacts = _build_evolution_repo_map(_repo_map_src, pipeline_ctx)
+        logger.info("[FT-10] repo map da evolução: %d arquivo(s) de %s (%d chars)",
+                    len(_evo_artifacts), _repo_map_src, sum(len(a.get("content", "")) for a in _evo_artifacts))
+        if not _child_has_code:
+            logger.warning("[FT-10] apps/ do FILHO está VAZIO — o /evolve não preparou o código (sem repo/PROJECT_FILES_ROOT?). "
+                           "O Dev pode regenerar do zero. Verifique extra.evolution_source.")
 
+        # Evoluir E1: charter e proposta técnica do PAI entram no contexto (LEI EVO manda referenciar o
+        # parent_charter, mas ele nunca era injetado).
+        _parent_docs = _load_parent_evolution_docs(_parent_apps_dir.parent)
         # Enriquecer pipeline_ctx com o contexto de evolução
         _evo_ctx = (
             f"\n## CONTEXTO DE EVOLUÇÃO — projeto pai: {_parent_project_id_evo[:8]}\n"
-            f"Este projeto É UMA EVOLUÇÃO. O codebase existente está em existing_artifacts.\n"
+            f"Este projeto É UMA EVOLUÇÃO. O codebase existente (árvore + assinaturas) está em existing_artifacts; "
+            f"o código integral vive em apps/ do projeto (clone da versão corrente).\n"
             f"PEDIDO DE EVOLUÇÃO: {_evolution_request}\n\n"
-            f"### REGRAS ABSOLUTAS DE EVOLUÇÃO\n"
+            + (f"### CHARTER DO PAI (parent_charter — referencie, não reescreva)\n{_parent_docs.get('charter', '')}\n\n" if _parent_docs.get("charter") else "")
+            + (f"### PROPOSTA TÉCNICA DO PAI (stack/arquitetura vigentes)\n{_parent_docs.get('engineer', '')}\n\n" if _parent_docs.get("engineer") else "")
+            + f"### REGRAS ABSOLUTAS DE EVOLUÇÃO\n"
             f"1. NUNCA remova recurso existente a menos que a instrução seja EXPLICITAMENTE 'remover X'\n"
             f"2. Adicione SOMENTE o que o pedido pede — nada além\n"
             f"3. Edite arquivos existentes com patch cirúrgico — não reescreva do zero\n"
@@ -4341,11 +4421,11 @@ def main() -> int:
         _existing_linked = pipeline_ctx.linked_projects_context or ""
         pipeline_ctx.linked_projects_context = _existing_linked + _evo_ctx
 
-        # Armazenar artefatos no pipeline_ctx para uso pelos agentes
-        if not hasattr(pipeline_ctx, "evolution_artifacts"):
-            pipeline_ctx.evolution_artifacts = _evo_artifacts  # type: ignore[attr-defined]
+        # Armazenar artefatos no pipeline_ctx para uso pelos agentes (Evoluir E1: agora LIDOS por
+        # call_cto/call_engineer/call_pm via _evolution_existing_artifacts).
+        pipeline_ctx.evolution_artifacts = _evo_artifacts  # type: ignore[attr-defined]
 
-        # Injetar work_mode no spec_content como instrução adicional
+        # workMode=branch legado: só inicializa git se o /evolve NÃO clonou (apps/ sem .git).
         if _evolution_work_mode == "branch":
             # Inicializar git no projeto filho se necessário
             _child_apps = Path(_files_root_evo) / project_id / "apps"

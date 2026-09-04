@@ -17,6 +17,7 @@ import { promisify } from "node:util";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { pool } from "../db/client.js";
+import { identityInputsFor } from "./lineage.js";
 import { syncSecretsToGitHub, getCloudConnection } from "./cloudConnector.js";
 import {
   createRepository,
@@ -246,6 +247,23 @@ export async function isGitAvailable(): Promise<boolean> {
  * Deadpool nascem limpos (sem "unrelated histories"). Idempotente e não-fatal: NUNCA derruba
  * o push (roda depois do repo já criado e salvo).
  */
+/**
+ * Evoluir E1: cria (ou reaproveita) o branch local de trabalho da evolução (`evolution/vN`) a partir
+ * do estado atual do working tree (pós-`gitLinkProjectFolder` = tip de `origin/dev`). Idempotente e
+ * não-fatal — quem chama registra o resultado no `extra` do projeto.
+ */
+export async function checkoutNewBranch(projectId: string, branch: string): Promise<{ ok: boolean; error?: string }> {
+  const localPath = join(PROJECT_FILES_ROOT, projectId, "apps");
+  const git = (args: string[]) =>
+    execFileAsync("git", ["-C", localPath, ...args], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+  try {
+    await git(["checkout", "-q", "-B", branch]);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function gitLinkProjectFolder(opts: {
   projectId: string;
   fullName: string;
@@ -451,11 +469,13 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
     // senão slug do nome do produto; para projeto standalone, slug do título.
     // serviceId = slug do título do projeto (dentro do produto). Casam com o
     // systemId/serviceId do envelope Connect que o Deadpool consome.
+    // Evoluir E1: identidade pela RAIZ da linhagem (mesmo serviceId em todas as versões).
+    const lineage = await identityInputsFor(client, projectId, row.title as string | null);
     const { systemId, serviceId } = deriveSystemService({
       productSystemId: row.product_system_id as string | null,
       productName: row.product_name as string | null,
-      title: row.title as string | null,
-      projectId,
+      title: lineage.title,
+      projectId: lineage.projectId,
       soloApp: (row.product_solo_app as boolean | null) ?? false,
     });
     // #60: registro base no push (sem runtime/monitoring). O monitoramento ativo é

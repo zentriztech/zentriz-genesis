@@ -30,6 +30,7 @@ import { pool } from "../db/client.js";
 import { hasEntitlement, setEntitlement } from "../services/entitlements.js";
 import { registerProjectWithDeadpool, deriveSystemService } from "../services/githubPush.js";
 import { loadConnectManifestsFromDisk } from "../services/connectManifestsDisk.js";
+import { identityInputsFor } from "../services/lineage.js";
 import { getAwsMonitoringCredentials } from "../services/cloudConnector.js";
 
 /** UUID v1–v5 (formato canônico do Postgres) — valida params de tenantId antes de bater no banco. */
@@ -537,11 +538,13 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
       const envRegion = (process.env.AWS_REGION ?? process.env.DEADPOOL_AWS_REGION ?? "").trim() || null;
       const awsRegion = awsCreds?.region ?? envRegion;
 
+      // Evoluir E1: identidade pela RAIZ da linhagem (mesmo serviceId em todas as versões).
+      const lineage = await identityInputsFor(pool, id, row.title as string | null);
       const { systemId, serviceId } = deriveSystemService({
         productSystemId: row.product_system_id as string | null,
         productName: row.product_name as string | null,
-        title: row.title as string | null,
-        projectId: id,
+        title: lineage.title,
+        projectId: lineage.projectId,
         soloApp: (row.product_solo_app as boolean | null) ?? false,
       });
 
@@ -694,11 +697,13 @@ export async function deadpoolRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(403).send({ code: "FORBIDDEN" });
       }
 
+      // Evoluir E1: identidade pela RAIZ da linhagem (mesmo serviceId em todas as versões).
+      const lineage = await identityInputsFor(pool, id, row.title as string | null);
       const { systemId, serviceId } = deriveSystemService({
         productSystemId: row.product_system_id as string | null,
         productName: row.product_name as string | null,
-        title: row.title as string | null,
-        projectId: id,
+        title: lineage.title,
+        projectId: lineage.projectId,
         soloApp: (row.product_solo_app as boolean | null) ?? false,
       });
 
