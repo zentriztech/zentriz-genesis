@@ -12,6 +12,8 @@ import logging
 import threading
 import time
 import traceback as _tb
+import contextlib
+import contextvars
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,31 @@ _SPEC_TEMPLATE_PATHS = [
 ]
 
 
+def _evo_path_in_scope(path: str, scope: list) -> bool:
+    """Bloco 4 M8 — heurística tolerante: o artefato existente `path` está dentro do `evolution_scope`?
+
+    Normaliza o path para a forma relativa a `apps/` (o disco entrega `<id>/apps/...`) e casa contra os
+    globs do RFC. Over-match só ELEVA o cap de contexto do Dev (nunca reprova nada) → fail-open seguro.
+    """
+    if not path or not isinstance(scope, list) or not scope:
+        return False
+    import fnmatch
+    p = path
+    _i = p.find("/apps/")
+    if _i >= 0:
+        p = p[_i + 1:]            # → "apps/..."
+    elif not p.startswith("apps/"):
+        p = "apps/" + p
+    for pat in scope:
+        if not isinstance(pat, str) or not pat:
+            continue
+        pat2 = pat.rstrip("/")
+        if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(p, pat2) or fnmatch.fnmatch(p, pat2 + "/*") \
+                or p == pat2 or p.startswith(pat2 + "/"):
+            return True
+    return False
+
+
 def build_user_message(message: dict, role: str = "") -> str:
     """
     Monta a mensagem do usuário com TODO o contexto necessário (AGENT_LLM_COMMUNICATION_ANALYSIS).
@@ -199,11 +226,29 @@ def build_user_message(message: dict, role: str = "") -> str:
             "MONITOR":    8_000,
         }
         _max_artifact = _artifact_limits.get(_role_upper, 8_000)
+        # Bloco 4 M8 (gated EVOLUTION_DEV_EDIT_FORMAT=edits) — para o Dev editar via search/replace ele
+        # precisa VER o arquivo inteiro. Só em evolução e só para arquivos DENTRO do escopo, eleva o cap
+        # para 50 KB por arquivo, limitado por um orçamento total (EVOLUTION_DEV_SCOPE_FULL_CHARS, 120k).
+        # Fora do escopo / flag off → cap histórico intacto (byte-idêntico).
+        _evo_scope = envelope.get("evolution_scope") or []
+        _edits_on = os.environ.get("EVOLUTION_DEV_EDIT_FORMAT", "whole") == "edits"
+        _scope_budget = 0
+        if _role_upper == "DEV" and _edits_on and _evo_scope:
+            try:
+                _scope_budget = int(os.environ.get("EVOLUTION_DEV_SCOPE_FULL_CHARS", "120000"))
+            except ValueError:
+                _scope_budget = 120_000
+        _scope_spent = 0
         for art in message["existing_artifacts"]:
             path = art.get("path", "")
             content = art.get("content", "[não disponível]")
-            if isinstance(content, str) and len(content) > _max_artifact:
-                content = content[:_max_artifact] + "\n... [truncado]"
+            _limit = _max_artifact
+            if _scope_budget and _scope_spent < _scope_budget and _evo_path_in_scope(path, _evo_scope):
+                _limit = max(_max_artifact, min(50_000, _scope_budget - _scope_spent))
+                if isinstance(content, str):
+                    _scope_spent += min(len(content), _limit)
+            if isinstance(content, str) and len(content) > _limit:
+                content = content[:_limit] + "\n... [truncado]"
             parts.append(f"### {path}\n```\n{content}\n```")
 
     # Retry com feedback do QA (Dev rework)
@@ -226,6 +271,26 @@ def build_user_message(message: dict, role: str = "") -> str:
 
     if envelope.get("retry_feedback"):
         parts.append(f"## ⚠️ Correção necessária\n{envelope['retry_feedback']}")
+
+    # Bloco 4 M8 (gated EVOLUTION_DEV_EDIT_FORMAT=edits) — seção do formato `edits` injetada SÓ para o
+    # Dev, em evolução, com a flag ON. Sem a flag → nada é injetado (prompt byte-idêntico ao histórico).
+    if (role or "").upper() == "DEV" and (envelope.get("evolution_scope")) and \
+            os.environ.get("EVOLUTION_DEV_EDIT_FORMAT", "whole") == "edits":
+        parts.append(
+            "## Formato de edição incremental (opcional, recomendado para arquivos grandes)\n"
+            "Para arquivos EXISTENTES que você vê por INTEIRO acima, em vez de reenviar o arquivo completo, "
+            "você pode entregar apenas as mudanças:\n"
+            "```json\n"
+            '{\"path\": \"apps/api/src/x.ts\", \"format\": \"edits\", '
+            '\"edits\": [{\"search\": \"<trecho exato do arquivo, 3+ linhas de contexto>\", '
+            '\"replace\": \"<novo trecho>\"}]}\n'
+            "```\n"
+            "Regras (semântica str_replace): o `search` deve casar EXATA e UNICAMENTE no arquivo — copie o "
+            "trecho exato, incluindo indentação, e inclua 3+ linhas de contexto para torná-lo único. "
+            "`replace` vazio remove o trecho. Vários edits por arquivo são aplicados em ordem. "
+            "USE `content` completo (não `edits`) quando: o arquivo é NOVO, não aparece por inteiro acima, "
+            "ou o edit já falhou 2× nesta task. Fora de arquivos que você viu inteiros, entregue `content`."
+        )
 
     instruction = (
         "Responda primeiro com seu raciocínio dentro de tags <thinking>...</thinking>, "
@@ -1196,6 +1261,72 @@ def run_agent(
         return _normalize_response_envelope(out, request_id, raw_text)
 
 
+# Onda 4 (PR-2): coletor de usage agregado por operação (ex.: uma decomposição do splitter,
+# que faz N chamadas ao LLM — a chamada do manifesto no PASSO 1 + 1 por projeto no PASSO 2,
+# estas em ThreadPoolExecutor). O sink é instalado por chamada de `collect_usage(...)` e cada
+# call_bedrock_direct que rodar SOB esse contexto soma seus tokens aqui.
+#
+# GOTCHA (por que ContextVar POR CHAMADA, e não um único install ao redor de split_document):
+# split_document dispara as chamadas do PASSO 2 em ThreadPoolExecutor. contextvars NÃO
+# propagam automaticamente para threads-worker de um Executor (só herdam no ponto de criação
+# da thread pelo runtime, não em pools que reusam threads). Por isso `_run_splitter` embrulha
+# a PRÓPRIA função `_llm` (que roda dentro de cada worker) com `with collect_usage(collector)`,
+# e o collector é thread-safe (lock) — cada worker instala o sink no seu contexto e soma no
+# mesmo coletor compartilhado.
+class _UsageCollector:
+    """Acumulador thread-safe de tokens de uma operação multi-chamada."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.calls = 0
+        self.model: str | None = None
+
+    def add(self, input_tokens: int, output_tokens: int, model: str | None) -> None:
+        with self._lock:
+            self.input_tokens += max(0, int(input_tokens or 0))
+            self.output_tokens += max(0, int(output_tokens or 0))
+            self.calls += 1
+            # Guarda o último modelo visto (as chamadas de uma decomposição usam o mesmo).
+            if model:
+                self.model = model
+
+    def totals(self) -> dict:
+        with self._lock:
+            return {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "calls": self.calls,
+                "model": self.model,
+            }
+
+
+_usage_sink: "contextvars.ContextVar[_UsageCollector | None]" = contextvars.ContextVar(
+    "genesis_usage_sink", default=None,
+)
+
+
+@contextlib.contextmanager
+def collect_usage(collector: "_UsageCollector"):
+    """Instala `collector` como sink de usage no contexto atual (restaura ao sair)."""
+    token = _usage_sink.set(collector)
+    try:
+        yield collector
+    finally:
+        _usage_sink.reset(token)
+
+
+def _sink_usage(input_tokens: int, output_tokens: int, model: str | None) -> None:
+    """Soma o usage no coletor ativo (se houver). Nunca lança."""
+    try:
+        sink = _usage_sink.get()
+        if sink is not None:
+            sink.add(input_tokens, output_tokens, model)
+    except Exception:
+        pass
+
+
 # FT-18 (Cyborg V2): chamada Bedrock direta sem toda a pipeline de agentes.
 # Usada pelo Cyborg V2 para as 5 análises paralelas e consolidação.
 def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
@@ -1291,6 +1422,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                                          getattr(_u, "input_tokens", 0) or 0,
                                          getattr(_u, "output_tokens", 0) or 0,
                                          int((time.time() - _t0) * 1000))
+                    _sink_usage(getattr(_u, "input_tokens", 0) or 0,
+                                getattr(_u, "output_tokens", 0) or 0, model_id)
                 except Exception:
                     pass
             return "".join(parts)
@@ -1304,6 +1437,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                              getattr(_u, "input_tokens", 0) or 0,
                              getattr(_u, "output_tokens", 0) or 0,
                              int((time.time() - _t0) * 1000))
+        _sink_usage(getattr(_u, "input_tokens", 0) or 0,
+                    getattr(_u, "output_tokens", 0) or 0, model_id)
         parts = []
         for block in getattr(resp, "content", []) or []:
             t = getattr(block, "text", None)
@@ -1378,6 +1513,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                          getattr(_u, "input_tokens", 0) or 0,
                          getattr(_u, "output_tokens", 0) or 0,
                          int((time.time() - _t0) * 1000))
+    _sink_usage(getattr(_u, "input_tokens", 0) or 0,
+                getattr(_u, "output_tokens", 0) or 0, _used_model)
     # AnthropicBedrock retorna Message com .content = [TextBlock, ...]
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:

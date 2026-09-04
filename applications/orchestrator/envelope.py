@@ -85,7 +85,19 @@ def validate_response_envelope(
             norm = sanitize_artifact_path(path, None)
             if norm is None:
                 errors.append(f"artifacts[{i}].path inválido ou bloqueado: {path!r}")
-        if "content" not in art and require_artifacts:
+        # Bloco 4 M8 (Fase 1, gated EVOLUTION_DEV_EDIT_FORMAT=edits) — contrato ADITIVO: um artefato
+        # pode entregar `format:"edits"` com `edits:[{search,replace}]` no lugar de `content` completo.
+        # `content` continua obrigatório para arquivo novo/grande (validado na materialização do runner).
+        if art.get("format") == "edits":
+            _edits = art.get("edits")
+            if not isinstance(_edits, list) or len(_edits) < 1:
+                errors.append(f"artifacts[{i}] com format='edits' exige 'edits' não vazio (lista)")
+            else:
+                for _j, _e in enumerate(_edits):
+                    if not isinstance(_e, dict) or not isinstance(_e.get("search"), str) or _e.get("search") == "":
+                        errors.append(f"artifacts[{i}].edits[{_j}] exige 'search' string não vazia")
+                        break
+        elif "content" not in art and require_artifacts:
             errors.append(f"artifacts[{i}] deve ter 'content' quando geração é obrigatória")
 
     if status == "OK" and require_evidence_when_ok:

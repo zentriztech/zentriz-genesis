@@ -332,6 +332,10 @@ def _persist_artifacts_for_role(message: dict, response: dict, role_dir: str) ->
     for i, art in enumerate(artifacts):
         if not isinstance(art, dict) or not art.get("content"):
             continue
+        # Bloco 4 M8 — artefatos no formato `edits` (search/replace) só são materializados no runner
+        # (que tem o arquivo em disco). Aqui nunca gravamos `edits` como arquivo bruto.
+        if art.get("format") == "edits":
+            continue
         content = art.get("content", "")
         if isinstance(content, bytes):
             content = content.decode("utf-8", errors="replace")
@@ -524,11 +528,17 @@ def get_cto_job_status(job_id: str):
 # a resposta é uma proposta (manifest + specs) que exige aprovação humana antes de ingerir.
 
 def _run_splitter(document: str, model_id: str, usage_project_id: str | None = None) -> dict:
-    """Chama o splitter (split_document) com call_bedrock_direct como llm_fn."""
+    """Chama o splitter (split_document) com call_bedrock_direct como llm_fn.
+
+    Onda 4 (PR-2): agrega o consumo de tokens de TODAS as chamadas ao LLM da decomposição
+    (o manifesto no PASSO 1 + 1 por projeto no PASSO 2, estas em ThreadPoolExecutor) e anexa
+    a soma em result["usage"] — a API persiste isso em product_proposals p/ telemetria de custo.
+    """
     from orchestrator.product_architect import split_document
-    from orchestrator.agents.runtime import call_bedrock_direct
+    from orchestrator.agents.runtime import call_bedrock_direct, _UsageCollector, collect_usage
 
     max_tokens = int(os.environ.get("SPLITTER_MAX_TOKENS", "32000"))
+    collector = _UsageCollector()
 
     def _llm(system: str, user: str, mid: str) -> str:
         # temperature: modelos extended-thinking exigem 1.0; senão 0.2 (determinístico).
@@ -537,12 +547,19 @@ def _run_splitter(document: str, model_id: str, usage_project_id: str | None = N
         # RFC-0004 F6/T2.1: usage debitado no projeto de ORIGEM quando o propose vem do
         # "Decompor" de uma spec (originProjectId). Propose de texto avulso (sem projeto)
         # não tem onde debitar — segue invisível até existir linha de projeto.
-        return call_bedrock_direct(system=system, user=user, model_id=mid,
-                                   max_tokens=max_tokens, temperature=temp,
-                                   usage_project_id=usage_project_id,
-                                   usage_agent="splitter")
+        # Onda 4 (PR-2): o sink é instalado AQUI (dentro de cada worker do ThreadPoolExecutor
+        # do PASSO 2) porque contextvars não propagam para threads de um Executor. O coletor
+        # é thread-safe → cada worker soma no mesmo agregado.
+        with collect_usage(collector):
+            return call_bedrock_direct(system=system, user=user, model_id=mid,
+                                       max_tokens=max_tokens, temperature=temp,
+                                       usage_project_id=usage_project_id,
+                                       usage_agent="splitter")
 
-    return split_document(document, llm_fn=_llm, model_id=model_id)
+    result = split_document(document, llm_fn=_llm, model_id=model_id)
+    if isinstance(result, dict):
+        result["usage"] = collector.totals()
+    return result
 
 
 def _run_splitter_async(job_id: str, body: dict) -> None:

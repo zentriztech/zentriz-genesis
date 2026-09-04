@@ -538,6 +538,80 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
     return allowed, violations
 
 
+# Bloco 4 M7 — teto de bytes por arquivo comparado na Fase 0 (custo O(n) do difflib; alinhado ao
+# corte de 50 KB que o runner usa ao carregar apps/ como existing_artifacts) e o corte de 8000 chars
+# que o prompt do Dev aplica a cada artefato existente (runtime.py) — acima dele o Dev só viu truncado.
+_EVO_REWRITE_METRICS_MAX_BYTES = 50_000
+_EVO_DEV_TRUNCATE_CHARS = 8_000
+
+
+def _accumulate_dev_rewrite_metrics(pipeline_ctx, dev_artifacts: list, apps_root: Path) -> None:
+    """Bloco 4 M7 (Fase 0, gated por EVOLUTION_DEV_EDIT_METRICS) — mede quanto do que o Dev devolveu
+    já era IDÊNTICO ao arquivo em disco, ANTES da gravação (o disco ainda tem a versão do pai/rodada
+    anterior). Acumula em `pipeline_ctx.evolution_dev_rewrite_stats` (formato documentado no
+    PipelineContext) e persiste no checkpoint. Só roda em EVOLUÇÃO (evolution_scope presente) e com a
+    flag ON — caso contrário é no-op (byte-idêntico ao histórico). NUNCA levanta: métrica é advisory."""
+    if os.environ.get("EVOLUTION_DEV_EDIT_METRICS", "off") != "on":
+        return
+    if pipeline_ctx is None or not getattr(pipeline_ctx, "evolution_scope", None):
+        return
+    import difflib
+    prev = pipeline_ctx.evolution_dev_rewrite_stats if isinstance(pipeline_ctx.evolution_dev_rewrite_stats, dict) else {}
+    files = int(prev.get("files", 0) or 0)
+    files_new = int(prev.get("files_new", 0) or 0)
+    bytes_out = int(prev.get("bytes_out", 0) or 0)
+    bytes_unchanged = int(prev.get("bytes_unchanged", 0) or 0)
+    files_over_8k = int(prev.get("files_over_8k_seen_truncated", 0) or 0)
+    changed = False
+    for art in dev_artifacts:
+        if not isinstance(art, dict):
+            continue
+        content = art.get("content")
+        path_val = (art.get("path") or "").strip()
+        if not path_val.startswith("apps/") or not isinstance(content, str):
+            continue
+        rel = path_val[5:].lstrip("/")
+        after = content
+        if len(after.encode("utf-8", errors="replace")) > _EVO_REWRITE_METRICS_MAX_BYTES:
+            # Arquivo grande: contamos como entregue (bytes_out) mas não medimos o casamento (custo).
+            files += 1
+            bytes_out += len(after)
+            changed = True
+            continue
+        original = apps_root / rel
+        before = ""
+        if original.exists() and original.is_file():
+            try:
+                before = original.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                before = ""
+        files += 1
+        bytes_out += len(after)
+        if not before:
+            files_new += 1
+        else:
+            matched = sum(b.size for b in difflib.SequenceMatcher(None, before, after, autojunk=False).get_matching_blocks())
+            bytes_unchanged += min(matched, len(after))
+            if len(before) > _EVO_DEV_TRUNCATE_CHARS:
+                files_over_8k += 1
+        changed = True
+    if not changed:
+        return
+    pipeline_ctx.evolution_dev_rewrite_stats = {
+        "files": files,
+        "files_new": files_new,
+        "bytes_out": bytes_out,
+        "bytes_unchanged": bytes_unchanged,
+        "ratio_unchanged": round(bytes_unchanged / bytes_out, 4) if bytes_out else 0.0,
+        "files_over_8k_seen_truncated": files_over_8k,
+        "measured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        pipeline_ctx.save_checkpoint(STATE_DIR)
+    except Exception as _e_rw:
+        logger.debug("[M7] save_checkpoint pós-métricas de reescrita falhou (não crítico): %s", _e_rw)
+
+
 _EVO_MAX_VIOLATION_MSGS = 20
 
 # Bloco 3 F1 — DevOps condicional em evolução: convenção EXPLÍCITA de caminhos de infraestrutura (pesquisa:
@@ -3809,6 +3883,41 @@ def _run_monitor_loop(
                         # escopo NÃO é gravado; 1ª violação → task volta ao Dev (QA_FAIL) com a lista;
                         # reincidência → blocked_structural_gate. Sem evolution_scope → passthrough.
                         _evo_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                        # Bloco 4 M8 (Fase 1, gated EVOLUTION_DEV_EDIT_FORMAT=edits) — MATERIALIZAR artefatos
+                        # `format:"edits"` lendo o arquivo do disco e aplicando search/replace ANTES do gate.
+                        # Assim escopo/símbolos/QA/gravação seguem vendo `content` completo. Falha → repair + QA_FAIL.
+                        if os.environ.get("EVOLUTION_DEV_EDIT_FORMAT", "whole") == "edits":
+                            _edit_errors: list[str] = []
+                            for _art in dev_artifacts:
+                                if not isinstance(_art, dict) or _art.get("format") != "edits":
+                                    continue
+                                _p = (_art.get("path") or "").strip()
+                                _rel = _p[5:].lstrip("/") if _p.startswith("apps/") else _p
+                                _orig_path = _evo_apps_root / _rel
+                                _orig = None
+                                if _orig_path.exists() and _orig_path.is_file():
+                                    try:
+                                        _orig = _orig_path.read_text(encoding="utf-8", errors="replace")
+                                    except OSError:
+                                        _orig = None
+                                from orchestrator.edits import apply_edits
+                                _materialized, _errs = apply_edits(_orig, _art.get("edits"))
+                                if _errs or _materialized is None:
+                                    _edit_errors.append(f"{_p}: " + " | ".join(_errs))
+                                    continue
+                                _art["content"] = _materialized
+                                _art.pop("format", None)
+                                _art.pop("edits", None)
+                            if _edit_errors:
+                                _post_step(f"⛔ Formato `edits` não aplicou em {len(_edit_errors)} arquivo(s) (task {task_id}). Reenvie o `search` com o trecho exato (3+ linhas de contexto) ou entregue `content` completo.", request_id)
+                                for _ee in _edit_errors[:6]:
+                                    _post_step(f"  · {_ee}", request_id)
+                                task_artifacts_for_qa.pop(str(task_id).strip(), None)
+                                if pipeline_ctx:
+                                    pipeline_ctx.save_checkpoint(STATE_DIR)
+                                _update_task(project_id, task_id, status="QA_FAIL")
+                                time.sleep(2)
+                                continue
                         dev_artifacts, _evo_viol = _evolution_scope_check(pipeline_ctx, dev_artifacts, _evo_apps_root)
                         # Bloco 3 F4/F1: registrar os arquivos apps/ ACEITOS pelo gate (fonte determinística de "tocados").
                         if pipeline_ctx is not None and getattr(pipeline_ctx, "evolution_scope", None):
@@ -3851,6 +3960,9 @@ def _run_monitor_loop(
                             (a.get("path") or "").strip().startswith("apps/")
                             for a in dev_artifacts if isinstance(a, dict)
                         )
+                        # Bloco 4 M7 (gated EVOLUTION_DEV_EDIT_METRICS) — medir reescrita ANTES de gravar
+                        # (o disco ainda tem a versão do pai/rodada anterior). No-op se flag OFF ou fora de evolução.
+                        _accumulate_dev_rewrite_metrics(pipeline_ctx, dev_artifacts, _evo_apps_root)
                         for i, art in enumerate(dev_artifacts):
                             if not isinstance(art, dict) or not art.get("content"):
                                 continue

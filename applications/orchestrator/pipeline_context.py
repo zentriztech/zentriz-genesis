@@ -173,6 +173,21 @@ class PipelineContext:
         self.evolution_manifest_baseline: dict[str, str] = {}
         # Bloco 3 F2: projeto pai (baseline da reconciliação Connect = reconciliation.json do pai).
         self.evolution_parent_id: str | None = None
+        # Bloco 4 M7 (Fase 0 — métricas de reescrita, gated por EVOLUTION_DEV_EDIT_METRICS): mede quanto
+        # do que o Dev devolve numa evolução é IDÊNTICO ao arquivo já em disco (custo real do formato
+        # `whole`). Acumulado por evolução e lido pelo painel (routes/evolutionPlan.ts → EvolutionPanel).
+        # Formato JSON (todos os contadores acumulam ao longo da evolução):
+        #   {
+        #     "files": int,                          # nº de artefatos apps/ com conteúdo comparados
+        #     "files_new": int,                      # subconjunto: arquivos que não existiam em disco
+        #     "bytes_out": int,                      # soma dos bytes (len de conteúdo) devolvidos pelo Dev
+        #     "bytes_unchanged": int,                # soma dos chars em blocos casados com o disco (difflib)
+        #     "ratio_unchanged": float,              # bytes_unchanged / bytes_out (0.0 se bytes_out==0)
+        #     "files_over_8k_seen_truncated": int,   # arquivos existentes com >8000 bytes (Dev só viu truncado)
+        #     "measured_at": "<iso8601 UTC>"         # instante da última atualização
+        #   }
+        # None = a Fase 0 nunca rodou (flag OFF ou não é evolução) — byte-idêntico ao histórico.
+        self.evolution_dev_rewrite_stats: dict | None = None
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -479,6 +494,7 @@ class PipelineContext:
             "evolution_baseline": self.evolution_baseline,
             "evolution_manifest_baseline": self.evolution_manifest_baseline,
             "evolution_parent_id": self.evolution_parent_id,
+            "evolution_dev_rewrite_stats": self.evolution_dev_rewrite_stats,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -538,6 +554,8 @@ class PipelineContext:
         _mb = data.get("evolution_manifest_baseline")
         ctx.evolution_manifest_baseline = {str(k): str(v) for k, v in _mb.items()} if isinstance(_mb, dict) else {}
         ctx.evolution_parent_id = data.get("evolution_parent_id") or None
+        _rw = data.get("evolution_dev_rewrite_stats")
+        ctx.evolution_dev_rewrite_stats = _rw if isinstance(_rw, dict) else None
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 
