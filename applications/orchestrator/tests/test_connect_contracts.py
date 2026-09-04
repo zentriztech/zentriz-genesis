@@ -17,6 +17,7 @@ from orchestrator.connect_contracts import (
     build_observability_baseline_manifest,
     build_runtime_passport,
     build_known_safe_actions_pack,
+    build_integration_ready_contract,
     validate_connect_artifact,
 )
 
@@ -144,3 +145,86 @@ class TestBuildConnectArtifactsForStage:
                 json_str = a.to_json()
                 parsed = json.loads(json_str)
                 assert isinstance(parsed, dict)
+
+
+class TestCanonicalIdentityR4PR1:
+    """R4 PR1 — pré-requisito zero: systemId/serviceId canônicos vencem o 1º heading da spec."""
+
+    def test_system_id_canonico_vence_heading(self):
+        ctx = _ctx(system_id="controle-financeiro", service_id="cf-backend", product_name="Controle Financeiro")
+        passport = build_system_passport(ctx)
+        assert passport["systemId"] == "controle-financeiro"          # não "api-voucher-service"
+        assert passport["displayName"] == "Controle Financeiro"
+        for builder in (build_ownership_manifest, build_observability_baseline_manifest,
+                        build_runtime_passport, build_known_safe_actions_pack, build_integration_ready_contract):
+            assert builder(ctx)["systemId"] == "controle-financeiro"
+        for m in build_service_manifests(ctx):
+            assert m["systemId"] == "controle-financeiro"
+
+    def test_fallback_product_name_depois_heading(self):
+        assert build_system_passport(_ctx(product_name="Meu Produto"))["systemId"] == "meu-produto"
+        # legado (sem produto): 1º heading
+        assert build_system_passport(_ctx())["systemId"] == "api-voucher-service"
+
+    def test_service_canonico_vem_primeiro_e_e_http(self):
+        ctx = _ctx(system_id="controle-financeiro", service_id="cf-backend")
+        manifests = build_service_manifests(ctx)
+        assert manifests[0]["serviceId"] == "cf-backend"
+        assert manifests[0]["interfaces"][0]["type"] == "http"
+        assert build_system_passport(ctx)["services"][0] == "cf-backend"
+
+    def test_solo_app_servico_e_o_sistema(self):
+        ctx = _ctx(system_id="meu-app", service_id=None)
+        assert build_service_manifests(ctx)[0]["serviceId"] == "meu-app"
+
+    def test_sem_cap_de_tres_servicos(self):
+        charter = " ".join(f"pagamentos-{i}-service" for i in range(6))
+        manifests = build_service_manifests(_ctx(charter=charter, backlog="", engineer_proposal=""))
+        assert len(manifests) >= 6
+
+    def test_tier_declarado_conservador(self):
+        passport = build_system_passport(_ctx())
+        assert passport["integrationTier"] == "tier1-integration-ready"
+        # coerência: não afirmar deadpoolReady enquanto declaramos tier1 (adversarial PR1 #3)
+        assert passport["capabilityProfile"]["deadpoolReady"] is False
+
+    def test_path_do_artefato_segue_versao_do_contexto(self):
+        # adversarial PR1 #4: path registrado == versão que o runner passa ao storage
+        artifacts = build_connect_artifacts_for_stage(_ctx(connect_version="9.9.9"), "charter")
+        assert all(a.project_relative_path.startswith("project/connect/v9.9.9/") for a in artifacts)
+
+
+class TestIntegrationReadyContractR4PR1:
+    def test_emitido_no_estagio_devops(self):
+        artifacts = build_connect_artifacts_for_stage(_ctx(), "devops")
+        contracts = {a.contract: a for a in artifacts}
+        assert "IntegrationReadyContract" in contracts
+        assert contracts["IntegrationReadyContract"].filename == "integration-ready-contract.json"
+
+    def test_valida_contra_schema_real(self):
+        payload = build_integration_ready_contract(_ctx(system_id="x-sys"))
+        errors = validate_connect_artifact("IntegrationReadyContract", payload)
+        assert errors == [], errors
+        assert payload["declaredTier"] == "tier1-integration-ready"
+        assert payload["contactPoints"] and all("id" in c and "name" in c for c in payload["contactPoints"])
+
+
+class TestPipelineContextIdentityRoundtrip:
+    def test_checkpoint_preserva_identidade_connect(self, tmp_path):
+        from orchestrator.pipeline_context import PipelineContext
+        ctx = PipelineContext("p1")
+        assert ctx.connect_version == CONNECT_SCHEMA_VERSION  # constante única
+        ctx.system_id, ctx.service_id, ctx.product_name, ctx.product_id = "sys-a", "svc-b", "Produto A", "prod-uuid"
+        ctx.save_checkpoint(tmp_path)
+        restored = PipelineContext.load_checkpoint(tmp_path, "p1")
+        assert (restored.system_id, restored.service_id, restored.product_name, restored.product_id) == ("sys-a", "svc-b", "Produto A", "prod-uuid")
+
+    def test_checkpoint_legado_sem_identidade(self, tmp_path):
+        import json
+        from orchestrator.pipeline_context import PipelineContext
+        (tmp_path / "p2").mkdir()
+        (tmp_path / "p2" / "checkpoint.json").write_text(json.dumps({"project_id": "p2", "connect_version": "0.0.1"}))
+        restored = PipelineContext.load_checkpoint(tmp_path, "p2")
+        assert restored.system_id == "" and restored.service_id is None and restored.product_name == ""
+        # connect_version NÃO é restaurada do checkpoint — sempre a constante do emissor (adversarial PR1 #4)
+        assert restored.connect_version == CONNECT_SCHEMA_VERSION

@@ -144,7 +144,16 @@ class PipelineContext:
 
     def __init__(self, project_id: str):
         self.project_id = project_id
-        self.connect_version = "1.1.0"
+        # Constante ÚNICA (R4 PR1) — vive em connect_contracts.CONNECT_SCHEMA_VERSION.
+        from orchestrator.connect_contracts import CONNECT_SCHEMA_VERSION as _CV
+        self.connect_version = _CV
+        # Identidade Connect CANÔNICA do sistema/serviço (R4 PR1 — pré-requisito zero).
+        # Preenchida pelo runner a partir de GET /api/projects/:id (systemId/serviceId derivados
+        # de products.system_id pela MESMA função usada no registro do Deadpool). Vazio = legado
+        # (connect_contracts cai no fallback por nome do produto / 1º heading).
+        self.system_id: str = ""
+        self.service_id: "str | None" = None
+        self.product_name: str = ""
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -409,6 +418,10 @@ class PipelineContext:
             "completed_tasks": self.completed_tasks,
             "current_step": self.current_step,
             "project_type": self.project_type,
+            "product_id": self.product_id,
+            "system_id": self.system_id,
+            "service_id": self.service_id,
+            "product_name": self.product_name,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -427,7 +440,12 @@ class PipelineContext:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         ctx = cls(project_id)
-        ctx.connect_version = data.get("connect_version", "1.1.0")
+        # connect_version NÃO é restaurada do checkpoint: é sempre a constante do emissor
+        # (connect_contracts.CONNECT_SCHEMA_VERSION). Restaurar a antiga faria o path
+        # registrado (versão atual) divergir do arquivo gravado (versão do checkpoint).
+        _old_cv = data.get("connect_version")
+        if _old_cv and _old_cv != ctx.connect_version:
+            logger.info("Checkpoint com connect_version=%s; emissor usa %s (constante única).", _old_cv, ctx.connect_version)
         ctx.spec_raw = data.get("spec_raw", "")
         ctx.product_spec = data.get("product_spec", "")
         ctx.product_spec_template = data.get("product_spec_template", "")
@@ -444,6 +462,11 @@ class PipelineContext:
         ctx.completed_tasks = data.get("completed_tasks") or []
         ctx.current_step = data.get("current_step", 0)
         ctx.project_type = data.get("project_type", "")
+        ctx.product_id = data.get("product_id") or ""
+        ctx.system_id = data.get("system_id") or ""
+        _sid = data.get("service_id")
+        ctx.service_id = _sid if isinstance(_sid, str) and _sid else None
+        ctx.product_name = data.get("product_name") or ""
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

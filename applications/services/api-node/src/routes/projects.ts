@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import path from "path";
-import { pushProjectToGitHub } from "../services/githubPush.js";
+import { pushProjectToGitHub, deriveSystemService } from "../services/githubPush.js";
 import { getInstallationTokenForClone, repoShortName } from "../services/github.js";
 import { destroyDeployment } from "../services/ephemeralDeploy.js";
 import { deployS3Static, type S3StaticDeployOutcome } from "../services/s3StaticDeploy.js";
@@ -249,8 +249,15 @@ export async function projectRoutes(app: FastifyInstance) {
     const { id } = request.params;
     const client = await pool.connect();
     try {
+      // R4 PR1: junta o produto para expor a identidade Connect CANÔNICA (systemId/serviceId)
+      // pela MESMA derivação usada no registro do Deadpool (deriveSystemService) — o runner
+      // passa a emitir os manifests com este id em vez do 1º heading da spec.
       const result = await client.query(
-        "SELECT * FROM projects WHERE id = $1",
+        `SELECT p.*,
+                pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app
+           FROM projects p
+           LEFT JOIN products pr ON pr.id = p.product_id
+          WHERE p.id = $1`,
         [id]
       );
       const row = result.rows[0];
@@ -258,6 +265,14 @@ export async function projectRoutes(app: FastifyInstance) {
       if (!canAccessProjectRow(user, row)) {
         return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
       }
+      const r = row as Record<string, unknown>;
+      const connectIds = deriveSystemService({
+        productSystemId: (r.product_system_id as string | null) ?? undefined,
+        productName: (r.product_name as string | null) ?? undefined,
+        title: (row.title as string | null) ?? undefined,
+        projectId: String(row.id),
+        soloApp: (r.product_solo_app as boolean | null) ?? false,
+      });
       return reply.send({
         id: row.id,
         tenantId: row.tenant_id,
@@ -279,6 +294,10 @@ export async function projectRoutes(app: FastifyInstance) {
         complexityHint: (row as Record<string, unknown>).complexity_hint as string | null ?? null,
         extra:          (row as Record<string, unknown>).extra as Record<string, unknown> | null ?? null,
         cyborg_attempts: (row as Record<string, unknown>).cyborg_attempts as number ?? 0,
+        // Identidade Connect canônica (R4 PR1). serviceId=null para App solo (sistema mono-serviço).
+        productName:    (r.product_name as string | null) ?? null,
+        systemId:       connectIds.systemId,
+        serviceId:      connectIds.serviceId,
       });
     } finally {
       client.release();

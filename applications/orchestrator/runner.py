@@ -1792,6 +1792,19 @@ def _emit_connect_contracts(
 
     emitted_paths: list[str] = []
     artifacts = build_connect_artifacts_for_stage(pipeline_ctx, stage)
+    if stage == "backlog":
+        # R4 PR1 (adversarial #1): ServiceManifests são 1 arquivo POR serviço — num rerun de projeto
+        # legado, os antigos (systemId = 1º heading da spec) conviveriam com os novos (systemId canônico)
+        # no mesmo diretório e o Deadpool veria 2 systemIds. Remover o conjunto anterior antes de gravar.
+        try:
+            _conn_dir = storage.get_project_dir(project_id)
+            if _conn_dir:
+                _ver_dir = _conn_dir / "connect" / f"v{str(pipeline_ctx.connect_version).lstrip('v')}"
+                for _old in _ver_dir.glob("service-manifest.*.json") if _ver_dir.exists() else []:
+                    _old.unlink()
+                    logger.info("[Connect] ServiceManifest anterior removido antes do rerun: %s", _old.name)
+        except Exception as _rm_err:
+            logger.warning("[Connect] Falha ao limpar ServiceManifests anteriores: %s", _rm_err)
     for artifact in artifacts:
         path = storage.write_connect_artifact(project_id, pipeline_ctx.connect_version, artifact.filename, artifact.to_json())
         if path:
@@ -3869,6 +3882,19 @@ def main() -> int:
                     if _pt and not pipeline_ctx.project_type:
                         pipeline_ctx.project_type = str(_pt)
                         logger.info("[Pipeline] project_type=%s", pipeline_ctx.project_type)
+                    # R4 PR1 — identidade Connect CANÔNICA (systemId/serviceId derivados de
+                    # products.system_id pela API, mesma função do registro no Deadpool). Antes
+                    # disso os manifests usavam o 1º heading da spec e NUNCA casavam com o registry.
+                    _sys_id = _proj_data.get("systemId") or ""
+                    if _sys_id and not pipeline_ctx.system_id:
+                        pipeline_ctx.system_id = str(_sys_id)
+                        _svc_id = _proj_data.get("serviceId")
+                        pipeline_ctx.service_id = str(_svc_id) if isinstance(_svc_id, str) and _svc_id else None
+                        pipeline_ctx.product_name = str(_proj_data.get("productName") or "")
+                        logger.info("[Pipeline][Connect] systemId=%s serviceId=%s", pipeline_ctx.system_id, pipeline_ctx.service_id)
+                    _prod_id = _proj_data.get("productId") or ""
+                    if _prod_id and not pipeline_ctx.product_id:
+                        pipeline_ctx.product_id = str(_prod_id)
 
                 # G-opt3: carregar projetos linkados — contexto rico com artefatos do disco
                 if not pipeline_ctx.linked_projects_context:

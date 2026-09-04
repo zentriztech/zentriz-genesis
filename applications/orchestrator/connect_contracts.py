@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Any
 
 
-CONNECT_SCHEMA_VERSION = "1.1.0"
+# Constante ÚNICA da versão dos manifests Connect emitidos pelo Genesis (R4 PR1).
+# pipeline_context.PipelineContext.connect_version importa daqui — não duplicar o literal.
+CONNECT_SCHEMA_VERSION = os.environ.get("CONNECT_SCHEMA_VERSION", "1.1.0").strip() or "1.1.0"
 CONNECT_VERSION_DIR = f"v{CONNECT_SCHEMA_VERSION}"
 CONNECT_PROJECT_DIR = f"connect/{CONNECT_VERSION_DIR}"
+
+# Tier DECLARADO nos contratos emitidos. Conservador por honestidade (R4 §2): os manifests
+# ainda são parcialmente heurísticos até a spec Connect-ready (PR4); o tier EFETIVO é derivado
+# pelo consumidor (Deadpool) pela presença dos contratos, nunca por esta declaração.
+CONNECT_DECLARED_TIER = "tier1-integration-ready"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # ZENTRIZ_CONNECT_ROOT env var allows overriding the path in Docker/CI
@@ -25,13 +32,17 @@ class ConnectArtifact:
     contract: str
     filename: str
     payload: dict[str, Any]
+    # Versão usada no PATH do artefato — deve ser a MESMA que o runner passa ao
+    # storage.write_connect_artifact (ctx.connect_version), senão o path registrado no
+    # contexto e o arquivo real divergem (achado adversarial PR1 #4).
+    version: str = CONNECT_SCHEMA_VERSION
 
     def to_json(self) -> str:
         return json.dumps(self.payload, ensure_ascii=False, indent=2)
 
     @property
     def project_relative_path(self) -> str:
-        return f"project/{CONNECT_PROJECT_DIR}/{self.filename}"
+        return f"project/connect/v{self.version}/{self.filename}"
 
 
 def _schema_for(contract: str) -> dict[str, Any]:
@@ -42,6 +53,7 @@ def _schema_for(contract: str) -> dict[str, Any]:
         "ObservabilityBaselineManifest": "manifests/observability-baseline-manifest.schema.json",
         "RuntimePassport": "manifests/runtime-passport.schema.json",
         "KnownSafeActionsPack": "manifests/known-safe-actions-pack.schema.json",
+        "IntegrationReadyContract": "integration/integration-ready-contract.schema.json",
     }
     relative = mapping.get(contract)
     if not relative:
@@ -133,15 +145,23 @@ def _dedupe(values: list[str]) -> list[str]:
     return out
 
 
-def _extract_service_candidates(*texts: str, current_module: str = "backend") -> list[str]:
+def _extract_service_candidates(*texts: str, current_module: str = "backend", canonical: str | None = None) -> list[str]:
+    """
+    Serviços do sistema. O serviço CANÔNICO do projeto (serviceId injetado pela API) vem
+    sempre primeiro; os demais são inferidos por regex sobre charter/backlog/proposta
+    (fallback heurístico até a spec Connect-ready — R4 PR4). Sem cap artificial (R4: o
+    antigo `[:3]` descartava serviços de produtos com 4+ projetos).
+    """
     pattern = re.compile(r"\b([a-z0-9][a-z0-9-]{1,40}(?:api|service|worker|webhook|portal|frontend|backend|mobile|consumer))\b", re.IGNORECASE)
     candidates: list[str] = []
+    if canonical:
+        candidates.append(_slug(canonical))
     for text in texts:
         for match in pattern.findall(text or ""):
             candidates.append(_slug(match))
     if not candidates:
         candidates.append(_slug(f"{current_module}-core"))
-    return _dedupe(candidates)[:3]
+    return _dedupe(candidates)
 
 
 def _infer_runtime_type(*texts: str) -> str:
@@ -213,17 +233,53 @@ def _dedupe_entrypoints(entrypoints: list[dict[str, Any]]) -> list[dict[str, Any
     return out
 
 
-def _project_name(ctx: Any) -> tuple[str, str]:
-    fallback = ctx.project_id or "genesis-project"
-    title = _first_heading(ctx.product_spec or ctx.spec_raw or "", fallback)
-    display = title
-    system_name = _slug(title)
-    return system_name, display
+def _system_identity(ctx: Any) -> tuple[str, str]:
+    """
+    Identidade canônica do SISTEMA (R4 PR1 — pré-requisito zero).
+
+    Ordem de precedência:
+      1. `ctx.system_id` — `products.system_id` injetado pela API (GET /api/projects/:id →
+         `systemId`, mesma derivação `deriveSystemService` usada no registro do Deadpool).
+         É a ÚNICA fonte que garante que os manifests emitidos casem com a chave do registry.
+      2. `ctx.product_name` — slug do nome do produto (mesmo fallback do `deriveSystemService`).
+      3. 1º heading da spec — LEGADO/TESTES. No caminho real o runner sempre preenche
+         `system_id` (deriveSystemService nunca devolve vazio: cai em slug do título), logo
+         este nível só é alcançado por contextos construídos sem a API (testes/replays antigos).
+    """
+    fallback = getattr(ctx, "project_id", None) or "genesis-project"
+    system_id = (getattr(ctx, "system_id", "") or "").strip()
+    product_name = (getattr(ctx, "product_name", "") or "").strip()
+    if system_id:
+        return _slug(system_id), (product_name or system_id)
+    if product_name:
+        return _slug(product_name), product_name
+    title = _first_heading(getattr(ctx, "product_spec", "") or getattr(ctx, "spec_raw", "") or "", fallback)
+    return _slug(title), title
+
+
+def _canonical_service_id(ctx: Any, system_id: str) -> str:
+    """
+    serviceId canônico do PROJETO: `ctx.service_id` (API) quando existe; para App solo
+    (sistema mono-serviço, serviceId=null no Deadpool) o serviço É o sistema.
+    """
+    service_id = getattr(ctx, "service_id", None)
+    if isinstance(service_id, str) and service_id.strip():
+        return _slug(service_id)
+    return system_id
+
+
+def _services_for(ctx: Any, system_id: str) -> list[str]:
+    """Serviços do sistema com o serviço canônico do projeto sempre em 1º lugar."""
+    return _extract_service_candidates(
+        ctx.charter, ctx.backlog, ctx.engineer_proposal,
+        current_module=ctx.current_module,
+        canonical=_canonical_service_id(ctx, system_id),
+    )
 
 
 def build_system_passport(ctx: Any) -> dict[str, Any]:
-    system_name, display_name = _project_name(ctx)
-    service_candidates = _extract_service_candidates(ctx.charter, ctx.backlog, ctx.engineer_proposal, current_module=ctx.current_module)
+    system_name, display_name = _system_identity(ctx)
+    service_candidates = _services_for(ctx, system_name)
     owners, _ = _default_owners(system_name)
     artifact_paths = sorted((ctx.artifacts or {}).keys())
     payload = {
@@ -232,7 +288,7 @@ def build_system_passport(ctx: Any) -> dict[str, Any]:
         "systemName": system_name,
         "displayName": display_name,
         "description": (ctx.charter or ctx.product_spec or ctx.spec_raw or display_name)[:220],
-        "integrationTier": "tier2-deadpool-ready",
+        "integrationTier": CONNECT_DECLARED_TIER,
         "owners": owners,
         "repos": [
             {
@@ -243,7 +299,8 @@ def build_system_passport(ctx: Any) -> dict[str, Any]:
         "services": service_candidates,
         "environments": _infer_environments(ctx.spec_raw, ctx.charter, ctx.backlog),
         "capabilityProfile": {
-            "deadpoolReady": True,
+            # Coerente com o tier DECLARADO (não afirmar deadpoolReady enquanto declaramos tier1).
+            "deadpoolReady": CONNECT_DECLARED_TIER in ("tier2-deadpool-ready", "tier3-genesis-deadpool-native"),
             "supportsSafeActions": bool(ctx.artifacts),
             "supportsObservabilityBaseline": True,
             "supportsRemediationPRFlow": True,
@@ -256,7 +313,7 @@ def build_system_passport(ctx: Any) -> dict[str, Any]:
 
 
 def build_ownership_manifest(ctx: Any) -> dict[str, Any]:
-    system_name, _ = _project_name(ctx)
+    system_name, _ = _system_identity(ctx)
     _, owners = _default_owners(system_name)
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
@@ -266,11 +323,15 @@ def build_ownership_manifest(ctx: Any) -> dict[str, Any]:
 
 
 def build_service_manifests(ctx: Any) -> list[dict[str, Any]]:
-    system_name, _ = _project_name(ctx)
-    service_candidates = _extract_service_candidates(ctx.charter, ctx.backlog, ctx.engineer_proposal, current_module=ctx.current_module)
+    system_name, _ = _system_identity(ctx)
+    service_candidates = _services_for(ctx, system_name)
+    canonical = _canonical_service_id(ctx, system_name)
     manifests = []
     for service in service_candidates:
         service_type = "http" if "api" in service or ctx.current_module == "web" else "other"
+        # O serviço canônico do projeto expõe a interface principal do módulo: backend/web = http.
+        if service == canonical and (ctx.current_module in ("backend", "web", "fullstack") or not ctx.current_module):
+            service_type = "http"
         if "worker" in service or "consumer" in service:
             service_type = "queue"
         if "webhook" in service:
@@ -303,7 +364,7 @@ def build_service_manifests(ctx: Any) -> list[dict[str, Any]]:
 
 
 def build_observability_baseline_manifest(ctx: Any) -> dict[str, Any]:
-    system_name, _ = _project_name(ctx)
+    system_name, _ = _system_identity(ctx)
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
@@ -316,9 +377,9 @@ def build_observability_baseline_manifest(ctx: Any) -> dict[str, Any]:
 
 
 def build_runtime_passport(ctx: Any) -> dict[str, Any]:
-    system_name, _ = _project_name(ctx)
+    system_name, _ = _system_identity(ctx)
     artifact_paths = sorted((ctx.artifacts or {}).keys())
-    services = _extract_service_candidates(ctx.charter, ctx.backlog, ctx.engineer_proposal, current_module=ctx.current_module)
+    services = _services_for(ctx, system_name)
     runtime_type = _infer_runtime_type(ctx.spec_raw, ctx.charter, ctx.backlog, "\n".join(artifact_paths))
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
@@ -334,7 +395,7 @@ def build_runtime_passport(ctx: Any) -> dict[str, Any]:
 
 
 def build_known_safe_actions_pack(ctx: Any) -> dict[str, Any]:
-    system_name, _ = _project_name(ctx)
+    system_name, _ = _system_identity(ctx)
     return {
         "schemaVersion": CONNECT_SCHEMA_VERSION,
         "systemId": system_name,
@@ -348,6 +409,36 @@ def build_known_safe_actions_pack(ctx: Any) -> dict[str, Any]:
                 "rollbackHint": "Restaurar checkpoint anterior se o replay degradar o estado.",
                 "requiresApproval": True,
             }
+        ],
+    }
+
+
+def build_integration_ready_contract(ctx: Any) -> dict[str, Any]:
+    """
+    IntegrationReadyContract — contrato REQUIRED pelo Deadpool (`build_connect_support_profile`:
+    sem ele o sistema nunca sai de `tier0-observed`, mesmo com os outros 5 manifests). Até o R4
+    PR1 o Genesis nunca o emitia. `supports*` refletem o que este emissor de fato produz;
+    `declaredTier` é conservador (ver CONNECT_DECLARED_TIER); `contactPoints` reutilizam os
+    owners do passport (sintéticos até a spec Connect-ready — PR4 — nota explícita no payload).
+    """
+    system_name, _ = _system_identity(ctx)
+    passport_owners, _ = _default_owners(system_name)
+    contact_points = [
+        {"id": o["id"], "name": o["name"], "role": o["role"]} for o in passport_owners
+    ] or [{"id": f"{system_name}-owner", "name": "Owner", "role": "owner"}]
+    return {
+        "schemaVersion": CONNECT_SCHEMA_VERSION,
+        "systemId": system_name,
+        "declaredTier": CONNECT_DECLARED_TIER,
+        "supportsIncidentEnvelope": True,
+        "supportsOwnershipManifest": True,
+        "supportsServiceManifest": True,
+        "supportsSafeActionConstraints": True,
+        "supportsObservabilityBaseline": True,
+        "contactPoints": contact_points,
+        "notes": [
+            "Emitido pelo Genesis a partir do contexto do pipeline (estágio devops).",
+            "contactPoints/owners sintéticos até a spec declarar owners reais do tenant (spec Connect-ready).",
         ],
     }
 
@@ -381,10 +472,16 @@ def build_connect_artifacts_for_stage(ctx: Any, stage: str) -> list[ConnectArtif
                 ),
                 ConnectArtifact("RuntimePassport", "runtime-passport.json", build_runtime_passport(ctx)),
                 ConnectArtifact("KnownSafeActionsPack", "known-safe-actions-pack.json", build_known_safe_actions_pack(ctx)),
+                ConnectArtifact("IntegrationReadyContract", "integration-ready-contract.json", build_integration_ready_contract(ctx)),
             ]
         )
     else:
         raise ValueError(f"Connect stage desconhecido: {stage}")
+
+    # Path do artefato segue a versão do CONTEXTO (a mesma que o runner passa ao storage).
+    _ctx_version = str(getattr(ctx, "connect_version", "") or CONNECT_SCHEMA_VERSION).lstrip("v")
+    for artifact in artifacts:
+        artifact.version = _ctx_version
 
     import logging as _logging
     _log = _logging.getLogger(__name__)
