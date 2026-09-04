@@ -337,7 +337,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         [tenantId, UUID_RE.test(user.id ?? "") ? user.id : null, document, body.modelId ?? null, String(PROPOSAL_DEADLINE_MIN)],
       );
       const jobId = ins.rows[0].id as string;
-      runProposeJob(pool, jobId, document, body.modelId, agentsUrl, null);
+      runProposeJob(pool, jobId, document, body.modelId, agentsUrl, null, tenantId);
       return reply.status(202).send({ jobId, status: "pending" });
     }
   );
@@ -687,7 +687,7 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
           "UPDATE projects SET status='pending_conversion', updated_at=NOW() WHERE id=$1 AND status IN ('draft','spec_submitted')",
           [id],
         );
-        runProposeJob(pool, jobId, document, request.body?.modelId, agentsUrl, id);
+        runProposeJob(pool, jobId, document, request.body?.modelId, agentsUrl, id, proj.tenant_id as string);
         return reply.status(202).send({ jobId, status: "pending", originProjectId: id });
       } finally { client.release(); }
     },

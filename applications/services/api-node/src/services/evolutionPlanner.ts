@@ -22,6 +22,7 @@ import { parseRfcMarkdown, RFC_DIR } from "./evolutionGate.js";
 import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { parseSpecPath } from "../routes/specFiles.js";
 import { sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES } from "../lib/specTreeHash.js";
+import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_FILE = path.resolve(__dirname, "..", "assets", "EVOLVE_PLAN_PROMPT.md");
@@ -548,7 +549,9 @@ export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: st
   try {
     const ctx = await buildEvolutionPlanContext(db, job.projectId, requestOverride);
     if (!ctx.request) throw new Error("EMPTY_REQUEST");
-    const raw = await invoke(buildEvolutionPlanRequest(ctx));
+    // Mesma config de LLM da fábrica (modelo/credenciais do tenant do projeto).
+    const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId: job.projectId }));
+    const raw = await invoke({ ...buildEvolutionPlanRequest(ctx), ...llm });
     const data = JSON.parse(raw) as { response?: string; model_used?: string };
     const text = String(data.response ?? "");
     if (text.trim().length < 50) throw new Error("EMPTY_RESPONSE");

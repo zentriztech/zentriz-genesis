@@ -91,6 +91,90 @@ export async function getTenantLlmConfigs(tenantId: string): Promise<TenantLlmCo
   }
 }
 
+/**
+ * Override de LLM para chamadas da BANCADA aos agents (spec-chat/Resolver GAPs, validador, splitter,
+ * planner de evolução) — "a Bancada usa a mesma configuração da fábrica" (Jean, 2026-09-04).
+ *
+ * A fábrica resolve a config do tenant em `runner_server.py` (GET /api/internal/project-llm-config)
+ * e injeta no env do run: CLAUDE_MODEL=model_id, CLAUDE_MODEL_REWORK=model_id_fallback, AWS_*=credenciais
+ * do tenant (se houver; senão herda a identidade do container). Antes deste helper, TODA a Bancada
+ * ignorava isso e usava o `CLAUDE_MODEL` do env dos agents com a identidade do host — em prod a conta
+ * 820 não tem opus-4-8/fable → 403 → fallback silencioso para sonnet-4-6 (achado 2026-09-04).
+ *
+ * Contrato com os agents (server.py aceita em /invoke/raw, /invoke/cto/async, /invoke/product_architect/async,
+ * /invoke/spec_validator/async): `model_id` (principal), `model_id_rework` (informativo) e `llm_config`
+ * {provider, model, aws_access_key_id?, aws_secret_access_key?, aws_region?, api_key?} — mesmo shape
+ * que o runner já manda no envelope (`runner.py` `_llm_config`). Credenciais viajam só container→container.
+ */
+export interface AgentsLlmOverride {
+  model_id?: string;
+  model_id_rework?: string;
+  llm_config: Record<string, string>;
+  /** true quando nada foi resolvido (env default) — os agents usam o próprio env. */
+  isDefault: boolean;
+}
+
+function toAgentsOverride(cfg: ResolvedLlmConfig): AgentsLlmOverride {
+  if (cfg.isDefault) return { llm_config: {}, isDefault: true };
+  const llm: Record<string, string> = { provider: cfg.provider, model: cfg.modelId };
+  if (cfg.awsAccessKeyId && cfg.awsSecretAccessKey) {
+    llm.aws_access_key_id = cfg.awsAccessKeyId;
+    llm.aws_secret_access_key = cfg.awsSecretAccessKey;
+    if (cfg.awsRegion) llm.aws_region = cfg.awsRegion;
+  }
+  if (cfg.apiKey && cfg.provider !== "bedrock") llm.api_key = cfg.apiKey;
+  return {
+    model_id: cfg.modelId,
+    ...(cfg.fallbackModelId ? { model_id_rework: cfg.fallbackModelId } : {}),
+    llm_config: llm,
+    isDefault: false,
+  };
+}
+
+/**
+ * Resolve o override para a Bancada. Prefere o PROJETO (mesma autoridade da fábrica: zentriz_admin →
+ * config global; tenant → slot por prioridade); sem projeto, usa a config Padrão do tenant. NUNCA lança
+ * (falha → default do env, igual ao comportamento anterior) e NUNCA loga credenciais.
+ */
+export async function resolveWorkbenchLlm(opts: { projectId?: string | null; tenantId?: string | null }): Promise<AgentsLlmOverride> {
+  try {
+    if (opts.projectId) return toAgentsOverride(await resolveProjectLlmConfig(opts.projectId));
+  } catch {
+    /* projeto sem config válida → tenta pelo tenant abaixo */
+  }
+  try {
+    if (opts.tenantId) {
+      const cfg = await getTenantLlmConfig(opts.tenantId);
+      if (!cfg.isDefault && typeof cfg.modelId === "string" && cfg.modelId) {
+        return toAgentsOverride({
+          provider: cfg.provider,
+          modelId: cfg.modelId,
+          fallbackModelId: cfg.modelIdFallback ?? undefined,
+          apiKey: cfg.credentials.api_key ?? "",
+          awsRegion: cfg.credentials.aws_region,
+          awsAccessKeyId: cfg.credentials.aws_access_key_id,
+          awsSecretAccessKey: cfg.credentials.aws_secret_access_key,
+          isDefault: false,
+          priority: cfg.priority,
+        });
+      }
+    }
+  } catch {
+    /* default abaixo */
+  }
+  return { llm_config: {}, isDefault: true };
+}
+
+/** Campos a espalhar no corpo enviado aos agents (omite tudo quando é o default do env). */
+export function agentsLlmFields(o: AgentsLlmOverride): Record<string, unknown> {
+  if (o.isDefault) return {};
+  return {
+    ...(o.model_id ? { model_id: o.model_id } : {}),
+    ...(o.model_id_rework ? { model_id_rework: o.model_id_rework } : {}),
+    llm_config: o.llm_config,
+  };
+}
+
 /** Mantém compatibilidade com código que usa getTenantLlmConfig (singular) — retorna a Padrão. */
 export async function getTenantLlmConfig(tenantId: string): Promise<TenantLlmConfig> {
   const configs = await getTenantLlmConfigs(tenantId);

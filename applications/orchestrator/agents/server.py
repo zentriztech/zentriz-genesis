@@ -406,11 +406,24 @@ def _resolve_llm_api_key(message: dict) -> dict:
     return message
 
 
+def _wrap_with_llm_config(body: dict) -> dict:
+    """Embrulha um corpo "plano" (sem `input`) no envelope — e LEVANTA `llm_config` para o topo.
+
+    A Bancada (spec-chat/Resolver GAPs) manda `llm_config` no corpo plano; o runtime lê
+    `message.get("llm_config")` no envelope de topo. Sem este lift, a config do tenant ficava
+    enterrada em `input` e o CTO usava o CLAUDE_MODEL do env (achado 2026-09-04)."""
+    message = {"request_id": body.get("request_id", "http"), "input": body}
+    llm_cfg = body.get("llm_config")
+    if isinstance(llm_cfg, dict) and llm_cfg:
+        message["llm_config"] = llm_cfg
+    return message
+
+
 def _invoke_agent(body: dict, system_prompt, role: str) -> dict:
     """Handler genérico para endpoints com prompt fixo."""
     agent_name = AGENT_LABELS.get(role, role)
     try:
-        message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
+        message = body if "input" in body else _wrap_with_llm_config(body)
         message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         logger.info("[%s] Recebeu solicitação. Processando...", agent_name)
         response = run_agent(system_prompt_path=system_prompt, message=message, role=role)
@@ -439,7 +452,7 @@ def _invoke_parametrized(body: dict, get_path_fn, role: str) -> dict:
     """Handler para agentes com skill_path (dev, pm, qa, monitor, devops)."""
     agent_name = AGENT_LABELS.get(role, role)
     try:
-        message = body if "input" in body else {"request_id": body.get("request_id", "http"), "input": body}
+        message = body if "input" in body else _wrap_with_llm_config(body)
         message = _resolve_llm_api_key(message)  # FT-13: resolve api_key para providers não-bedrock
         inp = message.get("input") or {}
         ctx = inp.get("context") or {}
@@ -527,7 +540,8 @@ def get_cto_job_status(job_id: str):
 # potencialmente longo → não segurar a conexão HTTP. PROPÕE, nunca executa (ADR-018):
 # a resposta é uma proposta (manifest + specs) que exige aprovação humana antes de ingerir.
 
-def _run_splitter(document: str, model_id: str, usage_project_id: str | None = None) -> dict:
+def _run_splitter(document: str, model_id: str, usage_project_id: str | None = None,
+                  llm_cfg: dict | None = None) -> dict:
     """Chama o splitter (split_document) com call_bedrock_direct como llm_fn.
 
     Onda 4 (PR-2): agrega o consumo de tokens de TODAS as chamadas ao LLM da decomposição
@@ -554,7 +568,7 @@ def _run_splitter(document: str, model_id: str, usage_project_id: str | None = N
             return call_bedrock_direct(system=system, user=user, model_id=mid,
                                        max_tokens=max_tokens, temperature=temp,
                                        usage_project_id=usage_project_id,
-                                       usage_agent="splitter")
+                                       usage_agent="splitter", llm_cfg=llm_cfg)
 
     result = split_document(document, llm_fn=_llm, model_id=model_id)
     if isinstance(result, dict):
@@ -569,8 +583,10 @@ def _run_splitter_async(job_id: str, body: dict) -> None:
         if not document:
             raise ValueError("document (o texto do produto) é obrigatório")
         model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+        llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
         result = _run_splitter(document, model_id,
-                               usage_project_id=(body.get("originProjectId") or None))
+                               usage_project_id=(body.get("originProjectId") or None),
+                               llm_cfg=llm_cfg)
         with _jobs_lock:
             if job_id in _async_jobs:
                 _async_jobs[job_id]["status"] = "done"
@@ -622,7 +638,9 @@ def _run_spec_validator_async(job_id: str, body: dict) -> None:
         if not spec_text:
             raise ValueError("spec_text é obrigatório")
         from orchestrator.spec_validator import validate_spec
-        result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None))
+        llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
+        result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None),
+                               model_id=(body.get("model_id") or None), llm_cfg=llm_cfg)
         with _jobs_lock:
             if job_id in _async_jobs:
                 _async_jobs[job_id]["status"] = "done"
@@ -708,7 +726,7 @@ def invoke_raw(body: dict):
     Estratégia: se o modelo é opus-4-7/4-8/sonnet-4-x, força temperature=1. Senão respeita input.
     """
     try:
-        from orchestrator.agents.runtime import call_bedrock_direct
+        from orchestrator.agents.runtime import call_bedrock_direct, LAST_EFFECTIVE_MODEL
     except ImportError:
         raise HTTPException(status_code=500, detail="call_bedrock_direct não disponível neste container")
 
@@ -717,6 +735,12 @@ def invoke_raw(body: dict):
     model_id      = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-opus-4-8")
     fallback_id   = body.get("model_id_fallback")
     max_tokens    = int(body.get("max_tokens", 8000))
+    # Bancada = mesma config da fábrica: credenciais do tenant (se vieram) em vez do env do container.
+    llm_cfg       = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
+
+    def _effective(requested: str) -> str:
+        # Modelo realmente usado (cascata de indisponibilidade dentro de call_bedrock_direct).
+        return LAST_EFFECTIVE_MODEL.get() or requested
     # temperature: modelos extended-thinking exigem 1.0 (deprecated aceitar outros).
     # Detecta e força 1.0 pra evitar erro Bedrock 400.
     def _temp_for(model: str) -> float:
@@ -734,9 +758,10 @@ def invoke_raw(body: dict):
     # Agora tratamos resposta vazia como falha e escalamos para o modelo de reforço também.
     try:
         resp = call_bedrock_direct(system=system_prompt, user=user_message,
-                                    model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id))
+                                    model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id),
+                                    llm_cfg=llm_cfg)
         if resp and resp.strip():
-            return {"response": resp, "model_used": model_id}
+            return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id}
         logger.warning(f"[/invoke/raw] Principal ({model_id}) retornou resposta VAZIA — escalando para fallback")
     except Exception as e:
         logger.warning(f"[/invoke/raw] Principal falhou ({model_id}): {e}")
@@ -748,13 +773,13 @@ def invoke_raw(body: dict):
         try:
             resp = call_bedrock_direct(system=system_prompt, user=user_message,
                                         model_id=fallback_id, max_tokens=max_tokens,
-                                        temperature=_temp_for(fallback_id))
-            return {"response": resp, "model_used": fallback_id, "fallback": True}
+                                        temperature=_temp_for(fallback_id), llm_cfg=llm_cfg)
+            return {"response": resp, "model_used": _effective(fallback_id), "model_requested": model_id, "fallback": True}
         except Exception as e2:
             raise HTTPException(status_code=500,
                                 detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e2}")
     # Sem fallback configurado e principal veio vazio → devolve o vazio (comportamento antigo).
-    return {"response": resp, "model_used": model_id}
+    return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id}
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { pool } from "../db/client.js";
+import { resolveWorkbenchLlm, agentsLlmFields } from "../services/tenantLlmConfig.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
@@ -607,13 +608,16 @@ export async function specChatRoutes(app: FastifyInstance) {
       };
       _chatJobs.set(jobId, job);
 
+      // A Bancada usa a MESMA config de LLM da fábrica (modelo, rework e credenciais do tenant/projeto).
+      // Sem config do tenant → campos omitidos → agents seguem no env (comportamento anterior).
+      const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId: user.tenantId }));
       if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
-        runFileChatJob(jobId, buildRawFileRequest(specMarkdown, messages, filePath), agentsUrl);
+        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath), ...llm }, agentsUrl);
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).
-        runChatJob(jobId, buildChatMessage(specMarkdown, messages, ctx, resolveGaps), agentsUrl);
+        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps), ...llm }, agentsUrl);
       }
 
       return reply.status(202).send({ jobId, status: "pending", filePath, baseSha });

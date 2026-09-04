@@ -177,11 +177,17 @@ def validate_spec(
     spec_text: str,
     llm_fn: Optional[Callable[..., str]] = None,
     usage_project_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+    llm_cfg: Optional[dict] = None,
 ) -> dict:
     """Roda a refutação adversarial. Retorna {"findings": [...], "triage": {...}|None}.
 
     `llm_fn(system, user, model_id, **kw) -> str` é injetável (testes); default =
     call_bedrock_direct com usage debitado no projeto de origem.
+
+    `model_id`/`llm_cfg` (Bancada = mesma config da fábrica, 2026-09-04): modelo e credenciais do
+    TENANT. Precedência do refutador: SPEC_VALIDATOR_MODEL (env, override explícito) > model_id
+    do tenant > default por desenho (Sonnet). `llm_cfg` vai para call_bedrock_direct (credenciais).
     """
     if llm_fn is None:
         from orchestrator.agents.runtime import call_bedrock_direct
@@ -195,7 +201,8 @@ def validate_spec(
             return call_bedrock_direct(system=system, user=user, model_id=model_id,
                                        max_tokens=kw.get("max_tokens", 4000), temperature=temp,
                                        usage_project_id=usage_project_id,
-                                       usage_agent=kw.get("usage_agent", "spec_validator"))
+                                       usage_agent=kw.get("usage_agent", "spec_validator"),
+                                       llm_cfg=llm_cfg)
 
     fenced = _fence(spec_text)
     triage: Optional[dict] = None
@@ -215,7 +222,7 @@ def validate_spec(
     provider = (os.environ.get("GENESIS_LLM_PROVIDER") or "").strip().lower()
     default_model = (os.environ.get("CLAUDE_MODEL") if provider == "foundry" else None) \
         or "us.anthropic.claude-sonnet-4-6"
-    model = (os.environ.get("SPEC_VALIDATOR_MODEL") or default_model).strip()
+    model = (os.environ.get("SPEC_VALIDATOR_MODEL") or (model_id or "").strip() or default_model).strip()
 
     def _run_refuter() -> list:
         raw = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=4000, usage_agent="spec_validator")

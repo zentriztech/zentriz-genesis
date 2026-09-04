@@ -1302,6 +1302,10 @@ class _UsageCollector:
             }
 
 
+# Modelo EFETIVO da última call_bedrock_direct neste contexto (após a cascata de indisponibilidade).
+# /invoke/raw lê para devolver `model_used` correto (antes devolvia o modelo PEDIDO — telemetria errada).
+LAST_EFFECTIVE_MODEL: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("last_effective_model", default=None)
+
 _usage_sink: "contextvars.ContextVar[_UsageCollector | None]" = contextvars.ContextVar(
     "genesis_usage_sink", default=None,
 )
@@ -1372,8 +1376,15 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
-                        usage_agent: str = "direct") -> str:
+                        usage_agent: str = "direct",
+                        llm_cfg: dict | None = None) -> str:
     """Chama Bedrock com system + user; retorna string bruta da resposta.
+
+    `llm_cfg` (opcional, mesmo shape do envelope `llm_config` da fábrica): credenciais AWS
+    (`aws_access_key_id`/`aws_secret_access_key`/`aws_region`) do TENANT têm precedência sobre o
+    env do container — a Bancada passa a usar a mesma identidade/conta que a fábrica (2026-09-04).
+    O modelo EFETIVO (após cascata de indisponibilidade) fica em `LAST_EFFECTIVE_MODEL` (ContextVar)
+    para o chamador reportar `model_used` correto.
 
     Reusa o mesmo cliente AnthropicBedrock configurado para o resto do pipeline.
     Não faz repair, não valida schema, não persiste artefatos — pura chamada.
@@ -1439,6 +1450,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                              int((time.time() - _t0) * 1000))
         _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                     getattr(_u, "output_tokens", 0) or 0, model_id)
+        LAST_EFFECTIVE_MODEL.set(model_id)
         parts = []
         for block in getattr(resp, "content", []) or []:
             t = getattr(block, "text", None)
@@ -1451,10 +1463,18 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     except ImportError:
         raise ImportError("anthropic sdk não instalado")
 
-    _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
-    _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
-    _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
-    aws_region = (os.environ.get("GENESIS_AWS_REGION")
+    _cfg = llm_cfg or {}
+    _cfg_ak = str(_cfg.get("aws_access_key_id") or "").strip()
+    _cfg_sk = str(_cfg.get("aws_secret_access_key") or "").strip()
+    if _cfg_ak and _cfg_sk:
+        # Credenciais do tenant (config de LLM) — mesma conta que a fábrica usa.
+        _ak, _sk, _token = _cfg_ak, _cfg_sk, ""
+    else:
+        _ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+        _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+        _token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+    aws_region = (str(_cfg.get("aws_region") or "").strip()
+                  or os.environ.get("GENESIS_AWS_REGION")
                   or os.environ.get("AWS_REGION")
                   or os.environ.get("AWS_DEFAULT_REGION")
                   or "us-east-1")
@@ -1508,6 +1528,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             resp = client.messages.create(**_create_kw)
         else:
             raise
+    LAST_EFFECTIVE_MODEL.set(_used_model)
     _u = getattr(resp, "usage", None)
     _report_direct_usage(usage_project_id, usage_agent, _used_model,
                          getattr(_u, "input_tokens", 0) or 0,

@@ -19,6 +19,7 @@
 
 import type { Pool } from "pg";
 import { httpPost, httpGet } from "../routes/specs.js";
+import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import {
   parseManifest,
   buildProductSketch,
@@ -141,6 +142,7 @@ export function runProposeJob(
   modelId: string | undefined,
   agentsUrl: string,
   originProjectId?: string | null,
+  tenantId?: string | null,
 ): void {
   const base = agentsUrl.replace(/\/$/, "");
   const startedAt = Date.now();
@@ -151,13 +153,19 @@ export function runProposeJob(
     .query("UPDATE product_proposals SET status='running', updated_at=now() WHERE id=$1 AND status='pending'", [jobId])
     .catch((e) => console.error(`[Propose] set running ${jobId}:`, e));
 
-  const reqBody = JSON.stringify({
-    document,
-    ...(modelId ? { model_id: modelId } : {}),
-    ...(originProjectId ? { originProjectId } : {}),
-  });
-
-  httpPost(`${base}/invoke/product_architect/async`, reqBody, 30_000)
+  // Mesma config de LLM da fábrica (modelo/credenciais do tenant); o modelo escolhido pelo
+  // usuário no diálogo (`modelId`) tem precedência sobre o modelo padrão do tenant.
+  resolveWorkbenchLlm({ projectId: originProjectId ?? null, tenantId: tenantId ?? null })
+    .then((llm) => {
+      const fields = agentsLlmFields(llm);
+      const reqBody = JSON.stringify({
+        document,
+        ...fields,
+        ...(modelId ? { model_id: modelId } : {}),
+        ...(originProjectId ? { originProjectId } : {}),
+      });
+      return httpPost(`${base}/invoke/product_architect/async`, reqBody, 30_000);
+    })
     .then(async (startText) => {
       const agentsJobId = (JSON.parse(startText) as { jobId?: string }).jobId;
       if (!agentsJobId) throw new Error("agents /invoke/product_architect/async não retornou jobId");

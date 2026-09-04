@@ -25,6 +25,7 @@ import { computeSpecTreeHash, sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE
 import { loadArchetypeCatalog, getArchetype } from "./archetypeCatalog.js";
 import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 import { UUID_RE } from "../lib/tenantScope.js";
+import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
 import { normalizeCategory, enrichRunFindings, registerRecurrences } from "./findingTriage.js";
 
@@ -289,9 +290,13 @@ async function runStageB(projectId: string, specText: string): Promise<{ finding
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
   const base = agentsUrl.replace(/\/$/, "");
+  // Mesma config de LLM da fábrica (modelo/credenciais do tenant). O refutador ainda respeita
+  // SPEC_VALIDATOR_MODEL do env como override explícito (precedência no spec_validator.py).
+  const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId }));
   const start = await httpJson(`${base}/invoke/spec_validator/async`, "POST", {
     spec_text: specText.slice(0, 200_000),
     originProjectId: projectId, // débito de usage no orçamento do tenant (F6)
+    ...llm,
   }, 30_000).catch((e) => ({ status: 0, data: { error: String(e) } as Record<string, unknown> }));
   const jobId = String(start.data.jobId ?? "");
   if (start.status !== 200 || !jobId) {

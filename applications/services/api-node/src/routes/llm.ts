@@ -97,7 +97,26 @@ async function upsertConfig(
   body: Record<string, unknown>
 ) {
   const provider         = String(body.provider ?? "bedrock") as Provider;
-  const credentials      = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
+  const incoming         = sanitizeCredentials(provider, (body.credentials as Record<string, string>) ?? {});
+  // BUG (achado 2026-09-04 19:47Z em prod): o portal reenvia o formulário SEM as credenciais (só
+  // mostra a versão mascarada) → o UPSERT gravava `credentials={}` e APAGAVA as chaves AWS do tenant
+  // ao trocar só o modelo. Agora: chave ausente ou mascarada ("****") PRESERVA o valor já gravado;
+  // valor novo substitui; troca de provider zera (credenciais de outro provider não fazem sentido).
+  let credentials: Record<string, string> = incoming;
+  try {
+    const prev = await pool.query(
+      "SELECT provider, credentials FROM tenant_llm_configs WHERE tenant_id = $1 AND priority = $2",
+      [tenantId, priority],
+    );
+    const row = prev.rows[0] as { provider?: string; credentials?: Record<string, string> } | undefined;
+    if (row && String(row.provider ?? "bedrock") === provider) {
+      const merged: Record<string, string> = { ...(row.credentials ?? {}) };
+      for (const [k, v] of Object.entries(incoming)) {
+        if (v && !v.includes("****")) merged[k] = v;
+      }
+      credentials = sanitizeCredentials(provider, merged);
+    }
+  } catch { /* sem linha anterior → usa o que veio */ }
   const model_id         = String(body.model_id ?? DEFAULT_MODELS[provider]);
   const model_id_fallback = body.model_id_fallback ? String(body.model_id_fallback) : null;
   const cyborg_model_id   = body.cyborg_model_id ? String(body.cyborg_model_id) : null;

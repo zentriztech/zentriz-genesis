@@ -106,7 +106,7 @@ def test_run_splitter_anexa_usage_no_resultado(monkeypatch):
         }
 
     def fake_call(system, user, model_id, max_tokens=8000, temperature=0.2,
-                  usage_project_id=None, usage_agent="direct"):
+                  usage_project_id=None, usage_agent="direct", llm_cfg=None):
         # emula o real: reporta usage no sink ativo (instalado por _run_splitter._llm)
         runtime._sink_usage(11, 6, model_id)
         if "PROJETO ALVO" not in user:
