@@ -278,7 +278,24 @@ function resolvePhysical(projectId: string, relDir: string, filename: string): s
   return full;
 }
 
-async function upsertSpecFile(db: Db, projectId: string, relPath: string, content: string, overwrite: boolean): Promise<"created" | "updated" | "skipped"> {
+/**
+ * H7 — reserva o PRÓXIMO número de RFC para o filho: por produto (`products.next_rfc_seq`, atômico, nunca abaixo
+ * dos RFCs já presentes no projeto); sem produto → max local + 1.
+ */
+export async function nextRfcNumber(db: Db, projectId: string): Promise<number> {
+  const row = (await db.query("SELECT product_id FROM projects WHERE id = $1", [projectId])).rows[0] as { product_id: string | null } | undefined;
+  const files = (await db.query("SELECT filename FROM project_spec_files WHERE project_id = $1 AND lower(coalesce(rel_dir,'')) = $2", [projectId, RFC_DIR])).rows as Array<{ filename: string }>;
+  let localNext = 1;
+  for (const f of files) { const n = Number(f.filename.match(/^RFC-(\d{4})/i)?.[1] ?? 0); if (n >= localNext) localNext = n + 1; }
+  if (!row?.product_id) return localNext;
+  const r = (await db.query(
+    "UPDATE products SET next_rfc_seq = GREATEST(next_rfc_seq, $2) + 1 WHERE id = $1 RETURNING next_rfc_seq",
+    [row.product_id, localNext],
+  )).rows[0] as { next_rfc_seq: number } | undefined;
+  return r ? Number(r.next_rfc_seq) - 1 : localNext;
+}
+
+export async function upsertSpecFile(db: Db, projectId: string, relPath: string, content: string, overwrite: boolean): Promise<"created" | "updated" | "skipped"> {
   const parsed = parseSpecPath(relPath);
   if (!parsed) throw new Error(`BAD_PATH:${relPath}`);
   if (Buffer.byteLength(content, "utf-8") > SPEC_TREE_MAX_FILE_BYTES) throw new Error(`FILE_TOO_LARGE:${relPath}`);
@@ -432,36 +449,81 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
   return { written, rfcProblems, warnings, compat: plan.compat, summary: plan.summary, questions: plan.questions };
 }
 
-// ── Jobs em memória (padrão do spec-chat; morre no restart — best-effort, o humano reenvia) ──
+// ── Jobs PERSISTIDOS (H3 — migration 082; padrão 076/product_proposals) ─────────────────────
+// Sobrevivem a restart: o reaper de boot marca 'pending'/'running' órfãos como 'interrupted'
+// (estado terminal com causa — nunca "retomar" um job não idempotente); 1 job vivo por projeto
+// via índice único parcial (idempotência entre réplicas, não lock em memória).
 
-export type PlanJobStatus = "pending" | "running" | "done" | "error";
+export type PlanJobStatus = "pending" | "running" | "done" | "error" | "interrupted";
 export interface PlanJob {
   id: string;
   projectId: string;
   ownerUserId: string;
   status: PlanJobStatus;
-  createdAt: number;
-  result?: ApplyResult;
-  error?: string;
+  createdAt: string;
+  finishedAt?: string | null;
+  result?: ApplyResult | null;
+  error?: string | null;
 }
-const _jobs = new Map<string, PlanJob>();
-const JOB_TTL_MS = 60 * 60 * 1000;
 
-export function createPlanJob(projectId: string, ownerUserId: string): PlanJob {
-  for (const [k, j] of _jobs) if (Date.now() - j.createdAt > JOB_TTL_MS) _jobs.delete(k);
-  const job: PlanJob = { id: `evo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, projectId, ownerUserId, status: "pending", createdAt: Date.now() };
-  _jobs.set(job.id, job);
-  return job;
+function rowToJob(r: Record<string, unknown>): PlanJob {
+  return {
+    id: String(r.id), projectId: String(r.project_id), ownerUserId: String(r.owner_user_id), status: r.status as PlanJobStatus,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    finishedAt: r.finished_at instanceof Date ? r.finished_at.toISOString() : (r.finished_at as string | null) ?? null,
+    result: (r.result as ApplyResult | null) ?? null, error: (r.error as string | null) ?? null,
+  };
 }
-export function getPlanJob(id: string): PlanJob | undefined { return _jobs.get(id); }
-/** Há job vivo (pending/running) para o projeto? Evita 2 planejamentos concorrentes no mesmo filho. */
-export function activePlanJobFor(projectId: string): PlanJob | undefined {
-  for (const j of _jobs.values()) if (j.projectId === projectId && (j.status === "pending" || j.status === "running")) return j;
-  return undefined;
+
+export type CreateJobResult = { ok: true; job: PlanJob } | { ok: false; code: "PLAN_IN_PROGRESS"; job: PlanJob };
+
+/** Cria o job (pending). Se já há um vivo para o projeto (índice único parcial) → devolve o existente. */
+export async function createPlanJob(db: Db, projectId: string, ownerUserId: string, request: string | null): Promise<CreateJobResult> {
+  try {
+    const r = (await db.query(
+      "INSERT INTO evolution_plan_jobs (project_id, owner_user_id, request) VALUES ($1, $2, $3) RETURNING *",
+      [projectId, ownerUserId, request],
+    )).rows[0] as Record<string, unknown>;
+    return { ok: true, job: rowToJob(r) };
+  } catch (e) {
+    if ((e as { code?: string }).code === "23505") {
+      const live = await activePlanJobFor(db, projectId);
+      if (live) return { ok: false, code: "PLAN_IN_PROGRESS", job: live };
+    }
+    throw e;
+  }
+}
+export async function getPlanJob(db: Db, id: string): Promise<PlanJob | null> {
+  const r = (await db.query("SELECT * FROM evolution_plan_jobs WHERE id = $1", [id])).rows[0] as Record<string, unknown> | undefined;
+  return r ? rowToJob(r) : null;
+}
+export async function activePlanJobFor(db: Db, projectId: string): Promise<PlanJob | null> {
+  const r = (await db.query(
+    "SELECT * FROM evolution_plan_jobs WHERE project_id = $1 AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1", [projectId],
+  )).rows[0] as Record<string, unknown> | undefined;
+  return r ? rowToJob(r) : null;
+}
+/** Boot reaper: job em voo quando a API caiu → 'interrupted' (o humano clica de novo; cria job NOVO). */
+export async function reapOrphanPlanJobs(db: Db): Promise<number> {
+  const r = await db.query(
+    "UPDATE evolution_plan_jobs SET status = 'interrupted', error = $1, finished_at = now(), updated_at = now() WHERE status IN ('pending','running')",
+    ["Planejamento interrompido por reinício do servidor — clique de novo em \"Gerar RFC / CHANGELOG\"."],
+  );
+  return r.rowCount ?? 0;
+}
+
+async function setJob(db: Db, id: string, patch: { status: PlanJobStatus; result?: ApplyResult | null; error?: string | null; modelUsed?: string | null; started?: boolean; finished?: boolean }): Promise<void> {
+  await db.query(
+    `UPDATE evolution_plan_jobs
+        SET status = $2, result = COALESCE($3::jsonb, result), error = COALESCE($4, error), model_used = COALESCE($5, model_used),
+            started_at = CASE WHEN $6 THEN now() ELSE started_at END, finished_at = CASE WHEN $7 THEN now() ELSE finished_at END, updated_at = now()
+      WHERE id = $1`,
+    [id, patch.status, patch.result ? JSON.stringify(patch.result) : null, patch.error ?? null, patch.modelUsed ?? null, !!patch.started, !!patch.finished],
+  );
 }
 
 export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: string | null, invoke: (body: Record<string, unknown>) => Promise<string>): Promise<void> {
-  job.status = "running";
+  await setJob(db, job.id, { status: "running", started: true });
   try {
     const ctx = await buildEvolutionPlanContext(db, job.projectId, requestOverride);
     if (!ctx.request) throw new Error("EMPTY_REQUEST");
@@ -477,14 +539,14 @@ export async function runEvolutionPlan(db: Db, job: PlanJob, requestOverride: st
       console.warn(`[EvolvePlan] job=${job.id} parse falhou: ${pe instanceof Error ? pe.message : String(pe)} — len=${text.length} model=${data.model_used ?? "?"} tail=${JSON.stringify(text.slice(-80))}`);
       throw pe;
     }
-    job.result = await applyEvolutionPlan(db, ctx, plan);
-    job.status = "done";
+    const result = await applyEvolutionPlan(db, ctx, plan);
+    await setJob(db, job.id, { status: "done", result, modelUsed: data.model_used ?? null, finished: true });
   } catch (e) {
-    job.status = "error";
     const msg = e instanceof Error ? e.message : String(e);
-    job.error = msg === "PLAN_WITHOUT_RFC" ? "O arquiteto não devolveu nenhum RFC válido. Reformule o pedido (o que muda, para quem, por quê)."
+    const friendly = msg === "PLAN_WITHOUT_RFC" ? "O arquiteto não devolveu nenhum RFC válido. Reformule o pedido (o que muda, para quem, por quê)."
       : msg === "PLAN_NOT_JSON" || /JSON/.test(msg) ? "O arquiteto não devolveu um plano em JSON válido. Tente de novo."
       : msg === "EMPTY_REQUEST" ? "Pedido de evolução vazio — descreva o que deve mudar."
       : msg.slice(0, 300);
+    await setJob(db, job.id, { status: "error", error: friendly, finished: true }).catch(() => {});
   }
 }

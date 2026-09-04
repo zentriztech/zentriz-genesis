@@ -125,6 +125,34 @@ describe("evolutionAccept (Evoluir E5)", () => {
     expect(d.calls.some((x) => /SET status = 'archived'/.test(x.sql))).toBe(true);
   });
 
+  it("H2 — republicar/reprocessar REUSA a versão (nunca dobra) e limpa evolution_push_pending quando o push passa", async () => {
+    const specDir = path.join(process.env.UPLOAD_DIR!, "child-h2");
+    await fs.mkdir(specDir, { recursive: true });
+    const clPath = path.join(specDir, "CHANGELOG.md");
+    await fs.writeFile(clPath, "# C\n\n## [Unreleased]\n\n## [1.1.0] - 2026-09-04\n\n### Added\n- PDF\n");
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const db = { query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      if (/SELECT id, title, product_id, parent_project_id, version_number, extra FROM projects/.test(sql)) {
+        return { rows: [{ id: "child-h2", title: "Extrato — Evolução v2", product_id: null, parent_project_id: "parent", version_number: 2,
+          extra: { evolution: true, evolution_parent_id: "parent", evolution_compat: "minor", evolution_version: "1.1.0", evolution_push_pending: true } }] };
+      }
+      if (/SELECT file_path FROM project_spec_files/.test(sql)) return { rows: [{ file_path: clPath }] };
+      if (/SET status = 'archived'/.test(sql)) return { rows: [{ id: "parent" }] };
+      return { rows: [] };
+    }) };
+    pushMock.mockResolvedValueOnce({ ok: true, mode: "evolution" });
+    expect(await runEvolutionAcceptFlow(db as never, "child-h2", { republish: true })).toBe(true);
+    // CHANGELOG NÃO reescrito (nenhum UPDATE de sha) e versão reusada no push
+    expect(calls.some((c) => /UPDATE project_spec_files SET content_sha256/.test(c.sql))).toBe(false);
+    expect(await fs.readFile(clPath, "utf-8")).not.toMatch(/1\.2\.0/);
+    expect(pushMock).toHaveBeenLastCalledWith("child-h2", expect.objectContaining({ versionLabel: "1.1.0" }));
+    // flag limpa após push ok + pai supersedido
+    const clear = calls.find((c) => /evolution_push_pending/.test(String(c.params[1] ?? "")) && /"evolution_push_pending":false/.test(String(c.params[1])));
+    expect(clear).toBeTruthy();
+    expect(calls.some((c) => /SET status = 'archived'/.test(c.sql))).toBe(true);
+  });
+
   it("buildPullRequestBody: resumo + RFCs + seção do CHANGELOG da versão", async () => {
     const childId = "child-11";
     const specDir = path.join(process.env.UPLOAD_DIR!, childId);

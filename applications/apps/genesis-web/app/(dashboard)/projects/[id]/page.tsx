@@ -395,6 +395,7 @@ function ProjectDetailPageInner() {
   const [evolveRequest, setEvolveRequest] = useState("");
   const [evolveWorkMode, setEvolveWorkMode] = useState<"copy" | "branch">("copy");
   const [evolveLoading, setEvolveLoading] = useState(false);
+  const [republishing, setRepublishing] = useState(false); // H2 — republicar evolução com push pendente
   const [copiedCmd, setCopiedCmd]   = useState(false);
   const [tasksOpen, setTasksOpen]   = useState(true);
   // Barra de entrega & operação (pós-aceite): qual detalhe está expandido (null = nenhum).
@@ -1202,7 +1203,27 @@ function ProjectDetailPageInner() {
             );
           }
           if (ex.evolution_push_pending === true) {
-            return <Chip size="small" color="error" variant="outlined" label="Publicação pendente" sx={{ fontWeight: 600 }} />;
+            // H2 — ação inversa visível do push falho (Vercel "Undo"/Terraform: estado terminal com causa + ação).
+            return (
+              <Stack direction="row" spacing={0.5} alignItems="center">
+                <Tooltip title="A evolução foi aceita, mas o código não foi publicado no GitHub (veja o histórico). A versão anterior só é substituída depois da publicação.">
+                  <Chip size="small" color="error" variant="outlined" label="Publicação pendente" sx={{ fontWeight: 600 }} />
+                </Tooltip>
+                {!isMaster && (
+                  <Button size="small" variant="outlined" color="error" disabled={republishing}
+                    onClick={async () => {
+                      setRepublishing(true);
+                      try {
+                        await apiPost(`/api/projects/${id}/evolution/republish`, {});
+                        window.location.reload();
+                      } catch (e) { setRunError(e instanceof Error ? e.message : "Falha ao republicar"); }
+                      finally { setRepublishing(false); }
+                    }}>
+                    {republishing ? "Publicando…" : "Republicar"}
+                  </Button>
+                )}
+              </Stack>
+            );
           }
           return null;
         })()}

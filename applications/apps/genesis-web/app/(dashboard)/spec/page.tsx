@@ -1599,7 +1599,7 @@ export default function SpecPage() {
     if (seq !== chatSeqRef.current) { setChatSending(false); return; }
 
     type PlanPoll = {
-      status: "pending" | "running" | "done" | "error";
+      status: "pending" | "running" | "done" | "error" | "interrupted";
       error?: string | null;
       result?: {
         summary: string; compat: string; questions: string[]; warnings: string[];
@@ -1635,9 +1635,10 @@ export default function SpecPage() {
           setValidationReloadSignal((n) => n + 1);
           setStaleValidation(true);
           setChatSending(false);
-        } else if (poll.status === "error") {
+        } else if (poll.status === "error" || poll.status === "interrupted") {
+          // H3: 'interrupted' = reinício do servidor (job persistido, estado terminal com causa) — recuperável: clicar de novo.
           stopChatPolling();
-          setChatError(poll.error ?? "Erro ao planejar a evolução.");
+          setChatError(poll.error ?? (poll.status === "interrupted" ? "Planejamento interrompido por reinício do servidor — clique de novo." : "Erro ao planejar a evolução."));
           setChatSending(false);
         }
       } catch (e) {
@@ -2105,7 +2106,7 @@ export default function SpecPage() {
             {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
                 que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
             <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
-            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} />
+            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
           </Box>
         )}
 

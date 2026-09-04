@@ -187,7 +187,22 @@ export function hasGitDir(appsDir: string): boolean {
  * Orquestra o aceite de uma evolução. Devolve `false` (sem efeito) se o projeto NÃO é evolução —
  * o chamador segue o fluxo normal (`pushProjectToGitHub`). Best-effort: nunca lança.
  */
-export async function runEvolutionAcceptFlow(db: Db, childId: string): Promise<boolean> {
+/** CHANGELOG da Bancada do filho já tem `## [version]`? (guarda de idempotência do republicar — adversarial A). */
+async function changelogHasVersion(db: Db, childId: string, version: string): Promise<boolean> {
+  const row = (await db.query(
+    "SELECT file_path FROM project_spec_files WHERE project_id = $1 AND lower(filename) = 'changelog.md' AND coalesce(rel_dir,'') = ''", [childId],
+  )).rows[0] as { file_path: string } | undefined;
+  if (!row) return false;
+  try { return new RegExp(`^## \\[${version.replace(/\./g, "\\.")}\\]`, "m").test(await fsp.readFile(row.file_path, "utf-8")); } catch { return false; }
+}
+
+/**
+ * Orquestra o aceite de uma evolução. Devolve `false` (sem efeito) se o projeto NÃO é evolução —
+ * o chamador segue o fluxo normal (`pushProjectToGitHub`). Best-effort: nunca lança.
+ * `opts.republish` (H2): reexecuta SÓ push + supersessão de uma evolução já aceita cujo push falhou
+ * (`extra.evolution_push_pending`); a versão do CHANGELOG é REUSADA (nunca dobra: 1.1.0 → 1.2.0).
+ */
+export async function runEvolutionAcceptFlow(db: Db, childId: string, opts: { republish?: boolean } = {}): Promise<boolean> {
   const row = (await db.query(
     "SELECT id, title, product_id, parent_project_id, version_number, extra FROM projects WHERE id = $1", [childId],
   )).rows[0] as { id: string; title: string; product_id: string | null; parent_project_id: string | null; version_number: number | null; extra: Record<string, unknown> | null } | undefined;
@@ -205,13 +220,23 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string): Promise<b
     ).catch(() => {});
   };
 
+  // Guarda de idempotência (adversarial bloco 2 — A): se esta evolução JÁ tem versão fechada
+  // (`extra.evolution_version`) e o CHANGELOG já contém `## [versão]`, REUSA — republicar/reprocessar
+  // nunca dobra a versão (1.1.0 → 1.2.0) nem reescreve o CHANGELOG.
   let version = "?";
-  try {
-    const fin = await finalizeEvolutionChangelog(db, childId, { compat, title, productId: row.product_id });
-    version = fin.version;
-    await log(`📦 CHANGELOG fechado como v${version} (${compat.toUpperCase()})${fin.appsCopy ? " e copiado para apps/CHANGELOG.md" : ""}.`);
-  } catch (e) {
-    await log(`⚠️ Não foi possível versionar o CHANGELOG: ${e instanceof Error ? e.message : String(e)}`);
+  const priorVersion = typeof extra.evolution_version === "string" ? extra.evolution_version : null;
+  const reuse = !!priorVersion && (opts.republish || await changelogHasVersion(db, childId, priorVersion));
+  if (reuse && priorVersion) {
+    version = priorVersion;
+    await log(`📦 CHANGELOG já fechado como v${version} — versão reusada (${opts.republish ? "republicação" : "reprocessamento"}).`);
+  } else {
+    try {
+      const fin = await finalizeEvolutionChangelog(db, childId, { compat, title, productId: row.product_id });
+      version = fin.version;
+      await log(`📦 CHANGELOG fechado como v${version} (${compat.toUpperCase()})${fin.appsCopy ? " e copiado para apps/CHANGELOG.md" : ""}.`);
+    } catch (e) {
+      await log(`⚠️ Não foi possível versionar o CHANGELOG: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // Push do código. A supersessão do pai SÓ acontece se o código foi publicado (ou se o tenant não
@@ -234,6 +259,13 @@ export async function runEvolutionAcceptFlow(db: Db, childId: string): Promise<b
       [childId, JSON.stringify({ evolution_push_pending: true, evolution_version: version })],
     ).catch(() => {});
     return true;
+  }
+  // Push ok → a pendência (se havia) se resolve; a ação inversa "Republicar" some da UI.
+  if (extra.evolution_push_pending === true) {
+    await db.query(
+      "UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || $2::jsonb, updated_at = now() WHERE id = $1",
+      [childId, JSON.stringify({ evolution_push_pending: false, evolution_republished_at: new Date().toISOString() })],
+    ).catch(() => {});
   }
 
   try {

@@ -32,7 +32,9 @@ interface TreeFile { path: string; ext: string; isPrimary: boolean; contentSha25
 interface TreeResponse { files: TreeFile[]; editable: boolean; status: string; totalFiles: number }
 interface FileResponse { path: string; content: string; contentSha256: string; isPrimary: boolean; editable: boolean }
 
-export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange, reloadSignal }: {
+export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange, reloadSignal, isEvolution = false }: {
+  /** Evoluir H7 — em projeto de evolução, botão "Novo RFC" (numerado por produto, a partir do modelo). */
+  isEvolution?: boolean;
   projectId: string;
   /** Notifica o pai (chat usa o arquivo selecionado como contexto). */
   onFileSelected?: (f: { path: string; content: string; baseSha: string } | null) => void;
@@ -120,6 +122,16 @@ export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange
     } catch (e) { setError(e instanceof Error ? e.message : "Falha ao criar"); }
   }, [projectId, loadTree, openFile]);
 
+  // Evoluir H7 — RFC numerado por produto, criado a partir do modelo (o gate exige Gherkin + files_allowed).
+  const createRfc = useCallback(async () => {
+    const title = window.prompt("Título da funcionalidade do RFC (ex.: Exportar extrato em PDF):");
+    if (!title) return;
+    try {
+      const r = await apiPost<{ ok: boolean; path: string; number: number }>(`/api/projects/${projectId}/rfc-from-template`, { title });
+      await loadTree(); await openFile(r.path);
+    } catch (e) { setError(e instanceof Error ? e.message : "Falha ao criar o RFC"); }
+  }, [projectId, loadTree, openFile]);
+
   const removeFile = useCallback(async (p: string) => {
     if (!window.confirm(`Remover ${p}?`)) return;
     try {
@@ -150,6 +162,9 @@ export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange
         <DescriptionOutlinedIcon sx={{ fontSize: "1rem" }} />
         <Typography variant="subtitle2" sx={{ flex: 1 }}>Árvore da especificação ({tree.totalFiles} arquivos)</Typography>
         {!editable && <Chip size="small" color="warning" label={`bloqueada (${tree.status})`} />}
+        {editable && isEvolution && (
+          <Button size="small" color="secondary" startIcon={<AddIcon />} onClick={createRfc}>Novo RFC</Button>
+        )}
         {editable && (
           <Button size="small" startIcon={<AddIcon />} onClick={createFile}>Novo arquivo</Button>
         )}
