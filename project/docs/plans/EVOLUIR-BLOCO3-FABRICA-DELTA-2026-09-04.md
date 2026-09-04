@@ -39,6 +39,19 @@
 | H (P3) | abas do portal são índices fixos com layout persistido | aba "Evolução" entra nos defaults/layout e só renderiza com `extra.evolution` |
 | I (P3) | custo/segurança F3 | código do tenant sempre no executor (Lei 8); `final` default |
 
+## Pesquisa (2026-09-04) — grounding e o que muda
+
+Fontes: SWE-bench (paper + `harness/grading.py`/`log_parsers`: `FULL` só com F2P=1.0 e P2P=1.0; **teste ausente no log = falha**; skip conta como sucesso só em P2P; timeout 1800 s = erro, sem retry de flaky; anti-spoof grava `exit_code=$?` e cruza com o log; SWE-bench Verified), reporters (Jest/Vitest `--json` `fullName`+`testFilePath`; pytest `--junitxml`/`--report-log` `nodeid`, exit 5 = sem testes; `go test -json` evento `skip` sem `Test` = sem testes; Mocha json; .NET trx), skip de deploy (Vercel `ignoreCommand` exit 1 = builda; Netlify inverso; GH Actions `paths`; Nx/Turbo: lockfile invalida tudo; **nenhuma ferramenta tem lista "infra" embutida**), drift de API (oasdiff spec×spec; Schemathesis spec×runtime detecta rota sem handler, não handler sem rota; Optic arquivado).
+
+| Lição | Aplicação |
+|---|---|
+| Grade por conjunto de IDs; ausente = falha; timeout/crash = erro (nem pass nem fail) | F3b: `regression = baseline.passed_ids − final.passed_ids` (ausente conta como regressão); `exit_code`/timeout → `status: error` sem QA_FAIL |
+| Exigir JSON/JUnit + `total>0` + exit code específico | F3a: reporter por stack; `no_tests` explícito (pytest 5, Go skip sem Test, Jest `numTotalTests=0`) |
+| ID estável = arquivo + fullName/nodeid | F3a: `tests[].id = "<file>::<fullName>"` |
+| Anti-spoof | F3a: executor grava `exit_code` do comando e devolve junto com o parse; runner cruza |
+| Convenção explícita de paths de infra; lockfile/root manifests invalidam tudo | F1: `INFRA_PATTERNS` explícita + lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `poetry.lock`, `go.sum`) sempre = infra; `package.json` diff por chave (`dependencies|devDependencies|peerDependencies|engines`) |
+| Drift por método+path-template, não substring | F2: manter `_CODE_HINTS` por substring só como sinal de "shape existe"; evidência por arquivo; baseline do pai; extração de rotas fica para v2 |
+
 ## Decisões (com recomendação)
 - **D-F1** PASS_TO_PASS por task (caro, feedback cedo) × só no final (barato): **recomendado `final` por padrão** com flag para `per-task`.
 - **D-F2** Reconciliação lendo o disco vale para todo projeto (recomendado) × só evolução.
