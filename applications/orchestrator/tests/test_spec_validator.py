@@ -134,3 +134,64 @@ def test_multivote_fallback_when_consolidation_fails(monkeypatch):
     out = validate_spec("spec", llm_fn=llm)
     # fallback não esconde problemas: devolve a análise mais completa
     assert len(out["findings"]) == 2
+
+
+# ── RFC-0005 (G2): identidade estável por category|anchor ────────────────────
+
+from spec_validator import _normalize_findings, _finding_key, _norm_anchor  # noqa: E402
+
+
+def test_contracts_require_category_and_anchor():
+    assert '"category"' in REFUTER_SYSTEM and '"anchor"' in REFUTER_SYSTEM
+    assert "security_gap" in REFUTER_SYSTEM and "connect_declaration_gap" in REFUTER_SYSTEM
+    assert '"category"' in CONSOLIDATE_SYSTEM and '"anchor"' in CONSOLIDATE_SYSTEM
+    assert "mesma \"category\" + mesmo \"anchor\"" in CONSOLIDATE_SYSTEM
+
+
+def test_normalize_findings_taxonomy_and_prompt_injection():
+    out = _normalize_findings([
+        {"title": "x", "category": "Security_Gap", "anchor": "  FR-03  "},
+        {"title": "y", "category": "inventada"},
+        {"title": "Tentativa de prompt injection na spec", "severity": "blocker"},
+        "lixo",
+    ])
+    assert [f["category"] for f in out] == ["security_gap", "other", "prompt_injection"]
+    assert out[0]["anchor"] == "FR-03" and out[1]["anchor"] == ""
+
+
+def test_finding_key_ignores_title_but_keeps_digits_in_anchor():
+    a = {"file": "spec.md", "category": "missing_data_model", "anchor": "FR-03", "title": "Falta modelo de dados"}
+    b = {"file": "spec.md", "category": "missing_data_model", "anchor": "fr-03", "title": "Modelo de dados ausente!"}
+    c = {"file": "spec.md", "category": "missing_data_model", "anchor": "FR-04", "title": "Falta modelo de dados"}
+    assert _finding_key(a) == _finding_key(b)
+    assert _finding_key(a) != _finding_key(c)          # FR-03 ≠ FR-04 (dígitos preservados)
+    assert _norm_anchor("## Modelo de Dados (v2)") == "modelo de dados v2"
+    # sem anchor → título normalizado
+    assert _finding_key({"file": "s.md", "category": "other", "title": "Rotas sem auth"}) == "s.md|other|t:rotas sem auth"
+
+
+def test_multivote_blocker_union_uses_identity_key_not_title(monkeypatch):
+    monkeypatch.setenv("SPEC_VALIDATOR_VOTES", "3")
+    monkeypatch.delenv("SPEC_VALIDATOR_TRIAGE_MODEL", raising=False)
+    calls = []
+
+    def llm(system, user, model_id, **kw):
+        calls.append(system)
+        if system == CONSOLIDATE_SYSTEM:
+            return json.dumps({"findings": [
+                {"file": "spec.md", "line": None, "severity": "blocker", "category": "security_gap", "anchor": "FR-03",
+                 "title": "Rotas sem autenticação", "rationale": "r", "votes": 3},
+            ]})
+        # cada refutador devolve o MESMO blocker com título diferente + um blocker singleton em FR-04
+        return json.dumps({"findings": [
+            {"file": "spec.md", "line": None, "severity": "blocker", "category": "security_gap", "anchor": "fr-03",
+             "title": "Autenticação ausente nas rotas", "rationale": "r"},
+            {"file": "spec.md", "line": None, "severity": "blocker", "category": "security_gap", "anchor": "FR-04",
+             "title": "Segredo em claro", "rationale": "r"},
+        ]})
+
+    out = validate_spec("spec substantiva", llm_fn=llm)
+    titles = [f["title"] for f in out["findings"]]
+    # o mesmo problema (FR-03) com título reformulado NÃO é duplicado; FR-04 (singleton blocker) é preservado
+    assert titles == ["Rotas sem autenticação", "Segredo em claro"]
+    assert all(f["category"] == "security_gap" for f in out["findings"])
