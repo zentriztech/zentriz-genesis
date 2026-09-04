@@ -533,6 +533,118 @@ export async function pushProjectToGitHub(projectId: string): Promise<void> {
   }
 }
 
+// ── Evoluir E5: push da EVOLUÇÃO no repo do serviço (branch evolution/vN + PR) ──
+
+export interface EvolutionPushResult {
+  ok: boolean;
+  mode: "evolution" | "fallback_new_repo" | "skipped";
+  fullName?: string;
+  branch?: string;
+  prUrl?: string;
+  compareUrl?: string;
+  fileCount?: number;
+  error?: string;
+}
+
+/**
+ * Evolução = nova versão do MESMO serviço → o código vai para o repo da RAIZ da linhagem, em
+ * `evolution/vN`, com PR aberto para `dev` (E-D2). Sem repo na linhagem → fallback: fluxo normal
+ * (cria repo; a identidade já é a da raiz — E1). Registra o filho em `project_github_repos` (mesmo
+ * repo) e re-registra no Deadpool com a MESMA chave (identidade pela raiz) apontando o `local_path`
+ * do filho. Best-effort: nunca lança; tudo vai a `project_dialogue`.
+ */
+export async function pushEvolutionToGitHub(projectId: string, opts: { versionLabel: string; prBody: string }): Promise<EvolutionPushResult> {
+  const client = await pool.connect();
+  try {
+    const projRes = await client.query(
+      `SELECT p.id, p.title, p.tenant_id, p.product_id, p.extra, p.parent_project_id, p.version_number,
+              pr.name AS product_name, pr.system_id AS product_system_id, pr.solo_app AS product_solo_app,
+              gi.installation_id, gi.github_login, gi.installation_type
+       FROM projects p
+       LEFT JOIN products pr ON pr.id = p.product_id
+       LEFT JOIN tenant_github_installations gi ON gi.tenant_id = p.tenant_id
+       WHERE p.id = $1`,
+      [projectId],
+    );
+    const row = projRes.rows[0];
+    if (!row) return { ok: false, mode: "skipped", error: "projeto não encontrado" };
+    if (!row.installation_id) {
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, "⚠️ Evolução aceita, mas o código não foi publicado: o tenant não tem o GitHub App instalado."],
+      );
+      return { ok: false, mode: "skipped", error: "sem GitHub App" };
+    }
+    const { findLineageRepo, evolutionBranchName } = await import("./evolutionAccept.js");
+    const lineageRepo = await findLineageRepo(client, projectId, (row.parent_project_id as string | null) ?? null);
+    if (!lineageRepo) {
+      // Pai nunca publicou (sem GitHub na época?) → cria repo pelo fluxo normal (identidade pela raiz).
+      await pushProjectToGitHub(projectId);
+      return { ok: true, mode: "fallback_new_repo" };
+    }
+    const installationId = row.installation_id as number;
+    const [owner, repoName] = lineageRepo.repo_full_name.split("/");
+    const branch = evolutionBranchName(row.version_number as number | null);
+    const { createBranchIfNotExists, pushProjectFiles, openPullRequest } = await import("./github.js");
+
+    await createBranchIfNotExists(installationId, owner, repoName, branch, "dev");
+    const { sha, fileCount } = await pushProjectFiles(installationId, owner, repoName, branch, PROJECT_FILES_ROOT, projectId);
+
+    await client.query(
+      `INSERT INTO project_github_repos (project_id, repo_name, repo_full_name, repo_url, clone_url, default_branch, pushed_at, sha_dev)
+       VALUES ($1, $2, $3, $4, $5, 'main', now(), $6)
+       ON CONFLICT (project_id) DO UPDATE SET pushed_at = now(), sha_dev = $6`,
+      [projectId, repoName, lineageRepo.repo_full_name, `https://github.com/${lineageRepo.repo_full_name}`, lineageRepo.repo_url, sha],
+    );
+
+    const pr = await openPullRequest(installationId, {
+      owner, repo: repoName, head: branch, base: "dev",
+      title: `Evolução v${opts.versionLabel} — ${(row.title as string) ?? projectId}`.replace(/ — Evolução v\d+ —/, " —"),
+      body: opts.prBody,
+    });
+
+    // Deadpool: MESMA chave (identidade pela raiz); local_path do filho (E1 git-linkou apps/ em evolution/vN).
+    const lineage = await identityInputsFor(client, projectId, row.title as string | null);
+    const { systemId, serviceId } = deriveSystemService({
+      productSystemId: row.product_system_id as string | null,
+      productName: row.product_name as string | null,
+      title: lineage.title,
+      projectId: lineage.projectId,
+      soloApp: (row.product_solo_app as boolean | null) ?? false,
+    });
+    const localApps = join(PROJECT_FILES_ROOT, projectId, "apps");
+    const { existsSync: _exists } = await import("node:fs");
+    await registerProjectWithDeadpool({
+      systemId, serviceId,
+      repoUrl: `https://github.com/${lineageRepo.repo_full_name}`,
+      installationId,
+      localPath: _exists(join(localApps, ".git")) ? localApps : null,
+    });
+
+    const prMsg = pr.ok ? `PR aberto: ${pr.url}` : `PR não aberto automaticamente (${pr.error}) — abra em ${pr.compareUrl}`;
+    await client.query(
+      `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+      [projectId, `🔄 Evolução v${opts.versionLabel} publicada em ${lineageRepo.repo_full_name}@${branch} (${fileCount} arquivos). ${prMsg}. Deadpool segue a mesma chave ${systemId}/${serviceId}.`],
+    );
+    if (row.tenant_id) {
+      notifyTelegramTenant(row.tenant_id as string, `🔄 Evolução v${opts.versionLabel} de *${row.title}*: ${pr.ok ? pr.url : `https://github.com/${lineageRepo.repo_full_name}/tree/${branch}`}`).catch(() => {});
+    }
+    return { ok: true, mode: "evolution", fullName: lineageRepo.repo_full_name, branch, fileCount, prUrl: pr.ok ? pr.url : undefined, compareUrl: pr.ok ? undefined : pr.compareUrl };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[GitHubPush] Evolution push failed for ${projectId}:`, err);
+    try {
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, `⚠️ Falha ao publicar a evolução no GitHub: ${msg.slice(0, 300)}. O aceite foi registrado; publique manualmente ou reprocesse.`],
+      );
+    } catch { /* ignore */ }
+    return { ok: false, mode: "evolution", error: msg };
+  } finally {
+    client.release();
+  }
+}
+
 // ── Mobile build CI (D-2) ──────────────────────────────────────────────────────
 
 /**

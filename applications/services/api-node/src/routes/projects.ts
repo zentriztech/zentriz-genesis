@@ -777,7 +777,17 @@ export async function projectRoutes(app: FastifyInstance) {
 
       // Fire-and-forget: push to GitHub if tenant has GitHub App installed
       // Never awaited — must not delay the accept response
-      setImmediate(() => pushProjectToGitHub(id).catch(console.error));
+      // Evoluir E5: evolução (extra.evolution) → CHANGELOG versionado + push em evolution/vN do
+      // repo da raiz + PR + supersessão do pai; projeto normal → fluxo clássico (repo novo).
+      setImmediate(async () => {
+        try {
+          const { runEvolutionAcceptFlow } = await import("../services/evolutionAccept.js");
+          const handled = await runEvolutionAcceptFlow(pool, id);
+          if (!handled) await pushProjectToGitHub(id);
+        } catch (e) {
+          console.error("[accept] side-effect GitHub/evolução falhou:", e);
+        }
+      });
 
       // Disparar gatilhos de pipeline: projetos que esperam este projeto aceito
       setImmediate(async () => {

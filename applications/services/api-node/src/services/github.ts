@@ -606,6 +606,34 @@ export async function createBranchIfNotExists(
  *   main (created by auto_init) → staging ← dev
  * Safe to call multiple times (idempotent).
  */
+/**
+ * Evoluir E5 (E-D2): abre um Pull Request `head → base` no repo do tenant. Best-effort: o GitHub App
+ * pode NÃO ter `pull_requests: write` (hoje só `contents`/`administration`) → devolve `error` com
+ * a URL de comparação para o humano abrir o PR à mão. Nunca lança.
+ */
+export async function openPullRequest(
+  installationId: number,
+  opts: { owner: string; repo: string; head: string; base: string; title: string; body: string },
+): Promise<{ ok: true; url: string; number: number } | { ok: false; error: string; compareUrl: string }> {
+  const compareUrl = `https://github.com/${opts.owner}/${opts.repo}/compare/${encodeURIComponent(opts.base)}...${encodeURIComponent(opts.head)}?expand=1`;
+  try {
+    const octokit = await getOctokitForInstallation(installationId);
+    const existing = await octokit.pulls.list({ owner: opts.owner, repo: opts.repo, head: `${opts.owner}:${opts.head}`, base: opts.base, state: "open", per_page: 1 });
+    if (existing.data.length > 0) {
+      return { ok: true, url: existing.data[0].html_url, number: existing.data[0].number };
+    }
+    const pr = await octokit.pulls.create({ owner: opts.owner, repo: opts.repo, head: opts.head, base: opts.base, title: opts.title.slice(0, 250), body: opts.body.slice(0, 60_000) });
+    return { ok: true, url: pr.data.html_url, number: pr.data.number };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = (err as { status?: number })?.status;
+    const hint = status === 403 || /not accessible by integration/i.test(msg)
+      ? " (o GitHub App precisa da permissão de repositório 'Pull requests: Read & write')"
+      : "";
+    return { ok: false, error: `${msg}${hint}`.slice(0, 400), compareUrl };
+  }
+}
+
 export async function ensureThreeBranches(
   installationId: number,
   owner: string,
