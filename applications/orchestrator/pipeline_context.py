@@ -158,6 +158,11 @@ class PipelineContext:
         # carregada pelo runner de project_spec_files. É a fonte SPEC-FIRST dos manifests Connect
         # (connect_contracts renderiza a partir dela; heurística só como fallback). None = legado.
         self.connect_declaration: "dict[str, Any] | None" = None
+        # Evoluir E4 — escopo de arquivos permitido pela(s) RFC(s) (`extra.evolution_scope`, globs) e
+        # violações registradas por task (gate determinístico pós-Dev). Vazio = não é evolução.
+        self.evolution_scope: list[str] = []
+        self.evolution_compat: "str | None" = None
+        self.evolution_violations: dict[str, list[str]] = {}
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -298,7 +303,27 @@ class PipelineContext:
             inputs["linked_projects_context"] = self.linked_projects_context
         if self.connect_declaration:
             inputs["connect_declaration"] = self.connect_declaration
+        if self.evolution_scope:
+            inputs["evolution_scope"] = list(self.evolution_scope)
         return inputs
+
+    def evolution_scope_inputs(self, task_id: str | None = None) -> dict:
+        """Evoluir E4: bloco de escopo p/ Dev/QA — globs permitidos + violações anteriores da task."""
+        if not self.evolution_scope:
+            return {}
+        out: dict = {
+            "evolution_scope": list(self.evolution_scope),
+            "evolution_scope_instruction": (
+                "ESTA É UMA EVOLUÇÃO. Só é permitido criar/alterar arquivos que casem com `evolution_scope` "
+                "(globs do RFC) ou testes (tests/**, *.test.*, *.spec.*) ou docs/**. Arquivos fora do escopo são "
+                "DESCARTADOS pelo gate determinístico e a task volta para você. Em arquivo existente, PRESERVE todos os "
+                "símbolos exportados (o gate compara exports/def/class do original × novo). Não refatore fora do escopo; "
+                "se for imprescindível, registre em `## Decisões em Aberto` — o humano amplia o RFC."
+            ),
+        }
+        if task_id and self.evolution_violations.get(task_id):
+            out["evolution_scope_violations"] = list(self.evolution_violations[task_id])[-10:]
+        return out
 
     def build_inputs_for_dev(
         self,
@@ -436,6 +461,9 @@ class PipelineContext:
             "service_id": self.service_id,
             "product_name": self.product_name,
             "connect_declaration": self.connect_declaration,
+            "evolution_scope": self.evolution_scope,
+            "evolution_compat": self.evolution_compat,
+            "evolution_violations": self.evolution_violations,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -483,6 +511,10 @@ class PipelineContext:
         ctx.product_name = data.get("product_name") or ""
         _decl = data.get("connect_declaration")
         ctx.connect_declaration = _decl if isinstance(_decl, dict) and _decl else None
+        ctx.evolution_scope = [str(g) for g in (data.get("evolution_scope") or []) if g]
+        ctx.evolution_compat = data.get("evolution_compat") or None
+        _viol = data.get("evolution_violations")
+        ctx.evolution_violations = _viol if isinstance(_viol, dict) else {}
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

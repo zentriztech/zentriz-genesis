@@ -382,6 +382,95 @@ def _pick_project_root(files_root: str, project_id: str, product_id: str | None)
     return standalone
 
 
+_EVO_ALWAYS_ALLOWED = ("tests/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "docs/**")
+_EVO_MAX_VIOLATIONS_PER_TASK = max(1, int(os.environ.get("EVOLUTION_MAX_SCOPE_VIOLATIONS", "2") or 2))
+
+
+def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Glob → regex: `**/` = zero ou mais diretórios, `**` = qualquer coisa, `*` = segmento, `?` = 1 char."""
+    import re as _re
+    p = pattern.strip().replace("\\", "/").lstrip("./")
+    out = []
+    i = 0
+    while i < len(p):
+        c = p[i]
+        if p.startswith("**/", i):
+            out.append("(?:.*/)?"); i += 3; continue
+        if p.startswith("**", i):
+            out.append(".*"); i += 2; continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(_re.escape(c))
+        i += 1
+    return _re.compile("^" + "".join(out) + "$")
+
+
+def _evo_path_allowed(rel_path: str, scope: list[str]) -> bool:
+    """`rel_path` relativo a apps/ (ex.: `api/src/x.ts`). Globs do RFC podem vir com ou sem prefixo `apps/`."""
+    rel = rel_path.replace("\\", "/").lstrip("./")
+    candidates = [rel, f"apps/{rel}"]
+    for pat in list(scope) + list(_EVO_ALWAYS_ALLOWED):
+        rx = _glob_to_regex(pat)
+        if any(rx.match(c) for c in candidates):
+            return True
+    return False
+
+
+def _exported_symbols(code: str) -> set[str]:
+    """Símbolos públicos de 1º nível (TS/JS `export …`, Python `def/class` na coluna 0, Go `func X`)."""
+    import re as _re
+    syms: set[str] = set()
+    for line in code.splitlines():
+        m = _re.match(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)", line)
+        if m:
+            syms.add(m.group(1)); continue
+        m = _re.match(r"^(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)", line)
+        if m:
+            syms.add(m.group(1)); continue
+        m = _re.match(r"^func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)", line)
+        if m:
+            syms.add(m.group(1))
+    return syms
+
+
+def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -> tuple[list, list[str]]:
+    """Evoluir E4 — gate DETERMINÍSTICO pós-Dev (v1, whole-file):
+    1) `path ⊆ evolution_scope ∪ tests/** ∪ docs/**` — fora do escopo é DESCARTADO (não gravado);
+    2) arquivo existente reescrito não pode PERDER símbolos exportados (QA EVO-03 vira código).
+    Devolve (artefatos permitidos, lista de violações legíveis). Sem escopo → passthrough."""
+    scope = list(getattr(pipeline_ctx, "evolution_scope", []) or []) if pipeline_ctx is not None else []
+    if not scope:
+        return dev_artifacts, []
+    allowed: list = []
+    violations: list[str] = []
+    for art in dev_artifacts:
+        if not isinstance(art, dict):
+            continue
+        path_val = (art.get("path") or "").strip()
+        if not path_val.startswith("apps/"):
+            allowed.append(art); continue  # docs/… seguem a policy normal
+        rel = path_val[5:].lstrip("/")
+        if not _evo_path_allowed(rel, scope):
+            violations.append(f"FORA DO ESCOPO do RFC: apps/{rel} (permitido: {', '.join(scope[:6])}{'…' if len(scope) > 6 else ''})")
+            continue
+        original = apps_root / rel
+        if original.exists() and original.is_file() and original.suffix.lower() in _EVO_CODE_EXTS:
+            try:
+                before = _exported_symbols(original.read_text(encoding="utf-8", errors="replace"))
+                after = _exported_symbols(str(art.get("content") or ""))
+                missing = sorted(before - after)
+                if missing:
+                    violations.append(f"SÍMBOLOS REMOVIDOS em apps/{rel}: {', '.join(missing[:8])}{'…' if len(missing) > 8 else ''} — entregue o arquivo completo preservando os exports (ou amplie o RFC).")
+                    continue
+            except OSError:
+                pass
+        allowed.append(art)
+    return allowed, violations
+
+
 def _evolution_existing_artifacts(pipeline_ctx) -> list:
     """existing_artifacts para CTO/Engineer/PM: o repo map da evolução (vazio fora de evolução)."""
     arts = getattr(pipeline_ctx, "evolution_artifacts", None) if pipeline_ctx is not None else None
@@ -1525,6 +1614,9 @@ def call_dev(
         inputs["dependency_code"] = dependency_code
     if pipeline_ctx:
         inputs["completed_summary"] = [{"task_id": t, "status": "done"} for t in pipeline_ctx.completed_tasks]
+        # Evoluir E4: escopo do RFC + violações anteriores desta task (o Dev sabe o que foi descartado e por quê).
+        _evo_in = pipeline_ctx.evolution_scope_inputs(task_id) if hasattr(pipeline_ctx, "evolution_scope_inputs") else {}
+        inputs.update(_evo_in)
         # Contexto enriquecido de projetos linkados (api_contract.md, curl_examples.sh, RUNBOOK.md)
         if getattr(pipeline_ctx, "linked_projects_context", ""):
             inputs["linked_projects_context"] = pipeline_ctx.linked_projects_context
@@ -1622,6 +1714,7 @@ def call_qa(
     existing_artifacts: list | None = None,
     rework_attempt: int = 0,
     task_delivered_files: list | None = None,  # SOMENTE arquivos entregues por esta task
+    evolution_scope: list | None = None,       # Evoluir E4: globs do RFC (QA valida ACs + não-regressão dentro do escopo)
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -1635,6 +1728,13 @@ def call_qa(
         inputs["code_refs"] = code_refs
     # Escopo de validação: apenas os arquivos que esta task entregou.
     # O QA deve validar SOMENTE esses arquivos — não o projeto inteiro.
+    if evolution_scope:
+        inputs["evolution_scope"] = list(evolution_scope)
+        inputs["evolution_qa_instruction"] = (
+            "EVOLUÇÃO: valide os critérios de aceite (Gherkin) dos RFCs em docs/rfc/ e a NÃO-REGRESSÃO dos "
+            "símbolos exportados existentes. Arquivos fora de `evolution_scope` já foram descartados pelo gate — "
+            "não reprove por ausência deles; reprove se a task exigir mudança fora do escopo (o RFC precisa ser ampliado)."
+        )
     # existing_artifacts serve como contexto de interfaces/tipos existentes.
     if task_delivered_files:
         inputs["task_files"] = [
@@ -3163,6 +3263,7 @@ def _run_monitor_loop(
                         task_id=tid, task=task_desc, code_refs=code_refs, existing_artifacts=_qa_artifacts,
                         rework_attempt=_qa_rework,
                         task_delivered_files=_task_files,
+                        evolution_scope=getattr(pipeline_ctx, "evolution_scope", None) if pipeline_ctx else None,
                     )
                     _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
                     _qa_summary = qa_response.get("summary", "")
@@ -3469,6 +3570,30 @@ def _run_monitor_loop(
                             dev_artifacts = filter_artifacts_by_path_policy(dev_artifacts, project_id)
                         except ImportError:
                             pass
+                        # Evoluir E4 — gate determinístico de ESCOPO (RFC) + preservação de símbolos. Fora do
+                        # escopo NÃO é gravado; 1ª violação → task volta ao Dev (QA_FAIL) com a lista;
+                        # reincidência → blocked_structural_gate. Sem evolution_scope → passthrough.
+                        _evo_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
+                        dev_artifacts, _evo_viol = _evolution_scope_check(pipeline_ctx, dev_artifacts, _evo_apps_root)
+                        if _evo_viol:
+                            _viol_map = getattr(pipeline_ctx, "evolution_violations", None)
+                            if isinstance(_viol_map, dict):
+                                _viol_map.setdefault(task_id, []).extend(_evo_viol)
+                            _n_viol_rounds = len([v for v in (_viol_map or {}).get(task_id, []) if v.startswith("FORA DO ESCOPO") or v.startswith("SÍMBOLOS")])
+                            _post_step(f"⛔ Gate de escopo da evolução (task {task_id}): {len(_evo_viol)} artefato(s) descartado(s).", request_id)
+                            for _v in _evo_viol[:6]:
+                                _post_step(f"  · {_v}", request_id)
+                            if pipeline_ctx:
+                                pipeline_ctx.save_checkpoint(STATE_DIR)
+                            if _n_viol_rounds > _EVO_MAX_VIOLATIONS_PER_TASK:
+                                _reason_evo = (f"Evolução fora do escopo do RFC após {_n_viol_rounds} tentativa(s) na task {task_id}: "
+                                               + " | ".join(_evo_viol)[:700] + ". Amplie o `## Impacto` do RFC ou ajuste o pedido.")
+                                _post_step("BLOCKED — o Dev insistiu em alterar arquivos fora do escopo do RFC. Revise o RFC na Bancada.", request_id)
+                                _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason_evo})
+                                return
+                            _update_task(project_id, task_id, status="QA_FAIL")
+                            time.sleep(1)
+                            continue
                         _has_apps_artifact = any(
                             (a.get("path") or "").strip().startswith("apps/")
                             for a in dev_artifacts if isinstance(a, dict)
@@ -4325,6 +4450,7 @@ def main() -> int:
     _evolution_request = ""
     _evolution_work_mode = "copy"
     _parent_project_id_evo: str | None = None
+    _parent_docs: dict[str, str] = {}  # Evoluir E1/E4: charter/proposta do pai (preenchido no bloco FT-10)
     # SPEC-APPROVED (Especificações aprovadas por humanos): flag lida do mesmo projects.extra.
     _spec_approved = False
     _spec_approved_by = ""
@@ -4347,6 +4473,15 @@ def main() -> int:
                 logger.info("[FT-10] Modo EVOLUTION detectado — request=%s work_mode=%s parent=%s",
                             _evolution_request[:80], _evolution_work_mode,
                             (_parent_project_id_evo or "")[:8])
+                # Evoluir E3/E4: escopo (globs dos RFCs) e compat gravados pelo gate de promoção.
+                if pipeline_ctx:
+                    _scope_raw = _extra.get("evolution_scope")
+                    pipeline_ctx.evolution_scope = [str(g) for g in _scope_raw if g] if isinstance(_scope_raw, list) else []
+                    pipeline_ctx.evolution_compat = _extra.get("evolution_compat") or None
+                    if pipeline_ctx.evolution_scope:
+                        logger.info("[E4] Escopo da evolução: %d glob(s) (compat=%s)", len(pipeline_ctx.evolution_scope), pipeline_ctx.evolution_compat)
+                    else:
+                        logger.warning("[E4] Evolução SEM evolution_scope (promoção antiga?) — gate de escopo desativado neste run.")
             # SPEC-APPROVED: precedência — Evolution vence. Evolution injeta charter Delta
             # obrigatório + patch cirúrgico, semântica incompatível com "validar spec completa".
             # Se ambos vierem marcados, ignoramos spec_approved e mantemos evolution.
@@ -4743,11 +4878,25 @@ def main() -> int:
                     round_num == 1 and bool(_human_answers) and pipeline_ctx is not None
                     and bool((pipeline_ctx.engineer_proposal or "").strip())
                 )
+                # Evoluir E4 (E-D3, regra determinística): em EVOLUÇÃO não-MAJOR com proposta técnica do PAI
+                # disponível, a stack/arquitetura vigentes são a resposta do Engineer — pular a rodada 1
+                # (o CTO pode REVISION → rodada 2 chama o Engineer normalmente). Corta ~1 chamada longa.
+                _skip_engineer_evo = (
+                    round_num == 1 and _is_evolution and pipeline_ctx is not None
+                    and bool((_parent_docs.get("engineer") or "").strip())
+                    and (getattr(pipeline_ctx, "evolution_compat", None) or "minor") != "major"
+                    and not (pipeline_ctx.engineer_proposal or "").strip()
+                )
                 if _resume_with_proposal:
                     logger.info("[D3] Retomada: reaproveitando engineer_proposal do checkpoint (%d chars); pulando Engineer da rodada 1.",
                                 len(pipeline_ctx.engineer_proposal))
                     _post_step("Retomando após a sua resposta: reaproveitando a proposta técnica já existente e indo direto ao CTO.", request_id)
                     engineer_response = {"status": "OK", "summary": pipeline_ctx.engineer_proposal, "artifacts": []}
+                elif _skip_engineer_evo:
+                    logger.info("[E4] Evolução %s: reaproveitando a proposta técnica do PAI (%d chars); Engineer pulado na rodada 1.",
+                                getattr(pipeline_ctx, "evolution_compat", None) or "minor", len(_parent_docs.get("engineer", "")))
+                    _post_step("Evolução: a stack/arquitetura vigentes do produto são mantidas (proposta técnica do pai reaproveitada). Indo direto ao CTO para o Charter Delta.", request_id)
+                    engineer_response = {"status": "OK", "summary": _parent_docs.get("engineer", ""), "artifacts": []}
                 else:
                     _post_agent_working("engineer", "O Engineer está gerando a proposta técnica (squads e dependências).", request_id)
                     logger.info("[Pipeline] Chamando agente Engineer (rodada %s)...", round_num)
