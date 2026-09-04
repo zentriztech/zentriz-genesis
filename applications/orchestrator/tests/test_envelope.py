@@ -267,6 +267,46 @@ def test_validate_response_quality_fail_placeholder():
     assert any("TODO" in e for e in errs)
 
 
+def test_validate_response_quality_ellipsis_inside_code_fence_is_legit():
+    """Regressão (prod 2026-09-04): "..." DENTRO de cerca de código é elipse legítima.
+
+    Caso real: o CTO escreveu `UPDATE refresh_tokens SET used = true WHERE ...` num bloco
+    ```sql``` da spec. A regra de truncamento não rastreava estado de cerca, reprovava a spec
+    e disparava repair de ~19min em Opus 5 — que estourava o teto do job e descartava 78KB de
+    trabalho correto.
+    """
+    from orchestrator.envelope import validate_response_quality
+    content = (
+        "# Spec\n\n"
+        "## Rotação de refresh token\n\n"
+        "A regra RN-07 invalida o token anterior conforme o exemplo abaixo.\n\n"
+        "```sql\n"
+        "UPDATE refresh_tokens SET used = true WHERE ...\n"
+        "SELECT id, user_id, expires_at FROM refresh_tokens WHERE used = false AND ...\n"
+        "```\n\n"
+        "Conteúdo real e completo da seção seguinte, sem qualquer omissão.\n"
+    ) + ("Texto substantivo de preenchimento para passar do mínimo de caracteres. " * 3)
+    r = {"status": "OK", "summary": "Done", "artifacts": [{"path": "docs/spec/PRODUCT_SPEC.md", "content": content}], "evidence": [{}]}
+    ok, errs = validate_response_quality("cto", r)
+    assert ok is True, f"elipse em SQL dentro de cerca não deve reprovar; erros: {errs}"
+    assert not any("truncamento" in e for e in errs)
+
+
+def test_validate_response_quality_truncation_outside_fence_still_detected():
+    """Guarda: o fix da cerca NÃO pode cegar a detecção de truncamento em prosa."""
+    from orchestrator.envelope import validate_response_quality
+    content = (
+        "# Spec\n\n"
+        "## Requisitos funcionais\n\n"
+        "```sql\nSELECT 1 WHERE ...\n```\n\n"
+        "O restante dos requisitos funcionais desta seção continua adiante...\n"
+    ) + ("Texto substantivo de preenchimento para passar do mínimo de caracteres. " * 3)
+    r = {"status": "OK", "summary": "Done", "artifacts": [{"path": "docs/spec/PRODUCT_SPEC.md", "content": content}], "evidence": [{}]}
+    ok, errs = validate_response_quality("cto", r)
+    assert ok is False
+    assert any("truncamento" in e for e in errs)
+
+
 def test_extract_thinking():
     from orchestrator.envelope import extract_thinking
     raw = """<thinking>

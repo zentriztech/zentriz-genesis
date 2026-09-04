@@ -570,10 +570,37 @@ function ProductLinkSection({ products, productId, onProductId, onProductsReload
 type SubmitResponse = { projectId: string; status: string; message: string };
 type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; summary?: string; error?: string; elapsed?: number };
 // Feature #63 — chat de edição de spec
-type ChatMessage = { role: "user" | "assistant"; content: string };
-type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null };
+// `seeded`: turno vindo do HISTÓRICO do servidor (migração 089). É EXIBIÇÃO apenas — nunca vai
+// no payload ao CTO. Reenviar conversas antigas mudaria o contexto do modelo e poderia ressuscitar
+// uma instrução de dias atrás ("remova o módulo X") num turno novo.
+type ChatMessage = { role: "user" | "assistant"; content: string; seeded?: boolean };
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
+// Migração 089 — job do chat que o SERVIDOR ainda tem (em voo, ou concluído e não coletado).
+// É o que permite reabrir a Bancada e reencontrar o estado em vez de redisparar outro Opus 5.
+type InFlightChatJob = {
+  jobId: string;
+  status: "pending" | "running" | "done" | "error";
+  kind: "chat" | "resolve_gaps" | "file";
+  filePath: string | null;
+  baseSha: string | null;
+  baseSpecSha: string | null;
+  error: string | null;
+  elapsed: number;
+  deadlineAt: string | null;
+  createdAt: string;
+  /** true = terminou enquanto ninguém olhava → OFERECER o resultado, nunca aplicar sozinho. */
+  recovered: boolean;
+};
 // T4.3: uma revisão de UM arquivo, produzida pela IA, aguardando confirmação de aplicação.
 type PendingApply = { path: string; content: string; baseSha: string | null };
+// Migração 089: revisão da SPEC INTEIRA recuperada de um job que terminou sem ninguém olhando.
+// Não pode ir direto ao editor: nesse intervalo o usuário pode ter editado a spec à mão, e
+// `setSpecMarkdown` cego apagaria a edição silenciosamente.
+type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps" };
+// Fallback do teto de espera quando o servidor não informa `deadlineAt` (api antiga). O valor
+// AUTORITATIVO vem do 202/do job — o 18 min hardcoded que existia aqui matava a espera ANTES de
+// revisões que o CTO concluía em 19 min, jogando fora o trabalho já pago.
+const CHAT_CLIENT_DEADLINE_MS = 40 * 60_000;
 
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
@@ -886,6 +913,7 @@ function SpecChatPanel({
   onApply, onDiscard, onOverwrite,
   gapCount = null, onResolveGaps,
   isEvolution = false, onEvolvePlan,
+  recovered = null, onApplyRecovered, onDiscardRecovered,
 }: {
   // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
   // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
@@ -911,11 +939,15 @@ function SpecChatPanel({
   onApply?: () => void;
   onDiscard?: () => void;
   onOverwrite?: () => void;
+  // Migração 089 — revisão da SPEC INTEIRA recuperada de um job que terminou fora desta tela.
+  recovered?: RecoveredSpec | null;
+  onApplyRecovered?: () => void;
+  onDiscardRecovered?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, sending, pending]);
+  }, [messages, sending, pending, recovered]);
   const fileMode = Boolean(activeFilePath);
 
   return (
@@ -976,9 +1008,11 @@ function SpecChatPanel({
             </Box>
           ))}
           {sending && (
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5, py: 0.5 }}>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5, py: 0.5 }} aria-live="polite">
               <CircularProgress size={14} />
-              <Typography variant="caption" color="text.secondary">CTO revisando a spec…</Typography>
+              <Typography variant="caption" color="text.secondary">
+                CTO revisando a spec… <Box component="span" sx={{ opacity: 0.75 }}>pode fechar esta tela — o servidor guarda o resultado.</Box>
+              </Typography>
             </Stack>
           )}
         </Stack>
@@ -991,6 +1025,29 @@ function SpecChatPanel({
         <Alert severity="warning" sx={{ mx: 1, mb: 1, fontSize: "0.72rem" }}>
           Há edições não salvas neste arquivo na árvore. Salve ou descarte antes de pedir uma revisão por IA.
         </Alert>
+      )}
+
+      {/* Migração 089 — revisão da spec INTEIRA que terminou enquanto esta tela estava fechada.
+          Nunca entra no editor sozinha: a spec pode ter sido editada à mão nesse intervalo. */}
+      {!fileMode && recovered && (
+        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
+          <Typography variant="caption" sx={{ display: "block", fontWeight: 700, mb: 0.5 }}>
+            ✓ Revisão recuperada ({recovered.content.length} caracteres)
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, lineHeight: 1.5 }}>
+            {recovered.kind === "resolve_gaps"
+              ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
+              : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
+            {" "}Aplicar substitui o conteúdo do editor — se você editou a spec desde então, essa
+            edição é perdida.
+          </Typography>
+          <Stack direction="row" spacing={1}>
+            <Button size="small" variant="contained" color="success"
+              startIcon={<CheckCircleIcon sx={{ fontSize: "1rem" }} />}
+              onClick={onApplyRecovered}>Aplicar ao editor</Button>
+            <Button size="small" color="inherit" onClick={onDiscardRecovered}>Descartar</Button>
+          </Stack>
+        </Box>
       )}
 
       {/* T4.3 — revisão pronta aguardando confirmação de aplicação (só modo por-arquivo). */}
@@ -1206,6 +1263,14 @@ export default function SpecPage() {
   // T4.3 — sequência monotônica: invalida jobs em voo quando o usuário troca de arquivo
   // ou dispara outro turno (evita aplicar a revisão de um arquivo no arquivo errado).
   const chatSeqRef = useRef(0);
+  // Migração 089 — o jobId sai do closure e passa a viver num ref: era exatamente por só existir
+  // dentro do `handleChatSend` que sair da tela perdia o rastro do trabalho em voo.
+  const chatJobIdRef = useRef<string | null>(null);
+  // Tick corrente do poll, para consultar NA HORA quando a aba volta ao foco (em vez de
+  // esperar os 8 s do intervalo — e navegadores estrangulam timers de aba oculta).
+  const chatTickRef = useRef<(() => Promise<void>) | null>(null);
+  // Revisão da spec inteira recuperada de um job que terminou sem ninguém olhando.
+  const [recoveredSpec, setRecoveredSpec] = useState<RecoveredSpec | null>(null);
 
   // T4.3 — chat por-arquivo: arquivo ativo (vindo da árvore), estado "sujo" da árvore,
   // revisão da IA aguardando aplicação, e sinal para recarregar a árvore após aplicar.
@@ -1455,8 +1520,110 @@ export default function SpecPage() {
   // ── Chat de edição de spec (Feature #63) ────────────────────────────────────
   const stopChatPolling = useCallback(() => {
     if (chatPollRef.current) { clearInterval(chatPollRef.current); chatPollRef.current = null; }
+    chatTickRef.current = null;
   }, []);
   useEffect(() => () => stopChatPolling(), [stopChatPolling]);
+
+  // ── Poll de UM job de chat (migração 089) ───────────────────────────────────
+  // Lugar ÚNICO que consulta `/api/spec-chat/:jobId` — usado por quem acabou de disparar o turno
+  // E pela rehidratação de quem voltou à tela. Antes havia três cópias divergentes deste laço e
+  // só a do Evoluir tratava 404/estado terminal: no chat de spec, um job perdido num restart
+  // deixava o painel girando "CTO revisando a spec…" para sempre, sem nunca dizer o motivo.
+  const startChatPolling = useCallback((opts: {
+    jobId: string;
+    seq: number;
+    kind: "chat" | "resolve_gaps" | "file";
+    filePath: string | null;
+    baseSha: string | null;
+    /** Instante-limite ABSOLUTO (ms). Vem do `deadlineAt` do servidor quando conhecido — o teto
+     *  fixo de 18 min do cliente descartava revisões de 19 min que o CTO havia CONCLUÍDO. */
+    deadlineMs: number;
+    /** true = job de outra sessão: OFERECE o resultado, não escreve no editor por conta própria. */
+    recovered?: boolean;
+  }) => {
+    const { jobId, seq, kind, filePath, baseSha, deadlineMs, recovered } = opts;
+    chatJobIdRef.current = jobId;
+    let pollErrors = 0;
+
+    const finish = () => { stopChatPolling(); chatJobIdRef.current = null; setChatSending(false); };
+
+    const tick = async () => {
+      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+      if (Date.now() > deadlineMs) {
+        finish();
+        setChatError("Esta revisão passou do tempo máximo. O servidor continua tentando coletar o resultado — se o CTO terminar, ele aparece ao reabrir esta tela.");
+        return;
+      }
+      try {
+        const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
+        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
+        pollErrors = 0;
+        if (poll.status === "done") {
+          finish();
+          if (kind === "file") {
+            // NÃO grava no arquivo — deixa a revisão pendente de confirmação (apply).
+            const path = poll.filePath ?? filePath;
+            if (poll.specMarkdown && path) {
+              setPendingApply({ path, content: poll.specMarkdown, baseSha: poll.baseSha ?? baseSha });
+            }
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão pronta. Confira e clique em Aplicar." }]);
+          } else if (recovered) {
+            // Terminou enquanto ninguém olhava: nesse intervalo o usuário pode ter editado a spec
+            // à mão. Um `setSpecMarkdown` cego apagaria a edição em silêncio → oferecemos.
+            if (poll.specMarkdown) setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: poll.reply ?? null, kind });
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão concluída enquanto esta tela estava fechada." }]);
+          } else if (kind === "resolve_gaps") {
+            if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
+            // A revisão está no EDITOR mas ainda NÃO no disco → a validação (que lê do disco) só
+            // reflete os GAPs resolvidos depois de "Salvar rascunho" (que persiste e revalida).
+            const applied = poll.reply || "GAPs tratados na spec.";
+            setChatMessages((prev) => [...prev, { role: "assistant", content: `${applied}\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar. A validação adversarial recalcula a lista de GAPs: os resolvidos somem, mas a análise **pode apontar novos pontos** a tratar — não confie no relato acima antes de revalidar.` }]);
+            setStaleValidation(true); // a spec mudou → validação anterior ficou desatualizada
+          } else {
+            if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Spec atualizada." }]);
+          }
+        } else if (poll.status === "error") {
+          // `interrupted`/`lost` do banco chegam aqui como error + a causa real no campo `error`.
+          finish();
+          setChatError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
+        }
+        // pending/running → segue pollando (o servidor também coleta em paralelo, sem duplicar).
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        pollErrors += 1;
+        if (/NOT_FOUND|404|expirado/i.test(msg) || pollErrors >= 5) {
+          finish();
+          setChatError(/NOT_FOUND|404|expirado/i.test(msg)
+            ? "Esta revisão não existe mais no servidor. Peça o ajuste novamente."
+            : `Falha ao consultar a revisão: ${msg}`);
+          return;
+        }
+        console.warn("[SpecChat] poll error:", msg);
+      }
+    };
+
+    chatTickRef.current = tick;
+    chatPollRef.current = setInterval(() => { void tick(); }, 8000);
+    // Primeiro tick IMEDIATO: na rehidratação o resultado pode já estar pronto no banco —
+    // esperar 8 s para descobrir isso seria latência de graça.
+    void tick();
+  }, [stopChatPolling]);
+
+  // Aba voltou ao foco → consulta na hora. Navegadores estrangulam timers de aba oculta
+  // (até ~1 tick/min), então quem volta da outra aba veria o spinner parado sem isto.
+  useEffect(() => {
+    const onWake = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (chatPollRef.current && chatTickRef.current) void chatTickRef.current();
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, []);
 
   // T4.3 — árvore notifica o arquivo selecionado. Trocar de arquivo zera a conversa (H3),
   // a revisão pendente e invalida qualquer job em voo (chatSeqRef). Salvar o mesmo arquivo
@@ -1487,9 +1654,14 @@ export default function SpecPage() {
   // pior, sobrescrita silenciosa). Ao trocar de projeto, zeramos tudo que é por-projeto:
   // conversa/entrada de chat, arquivo ativo + revisão pendente, dirty/stale e erros.
   // (specMarkdown/título/gapCount são recarregados pelos seus próprios efeitos.)
+  //
+  // Migração 089 — e é AQUI, depois de zerar, que a REHIDRATAÇÃO acontece: o servidor é a fonte
+  // da verdade sobre "há trabalho em voo neste projeto?". Sem isso, sair da tela e voltar não só
+  // perdia o estado como convidava o usuário a disparar um segundo Opus 5 em paralelo ao primeiro.
   useEffect(() => {
     chatSeqRef.current += 1;      // invalida qualquer job de chat em voo do projeto anterior
     stopChatPolling();
+    chatJobIdRef.current = null;
     setChatMessages([]);
     setChatInput("");
     setChatSending(false);
@@ -1501,7 +1673,57 @@ export default function SpecPage() {
     setApplyConflict(false);
     setStaleValidation(false);
     setApproveError(null);
-  }, [editProjectId, stopChatPolling]);
+    setRecoveredSpec(null);
+
+    if (!editProjectId) return;
+    const projectAtStart = editProjectId;
+    let cancelled = false;
+    void (async () => {
+      // 1) Histórico da conversa — o chat deixa de nascer vazio. É EXIBIÇÃO (`seeded`): não volta
+      //    ao CTO, senão um pedido de dias atrás ("remova o módulo X") reentraria num turno novo.
+      try {
+        const h = await apiGet<{ messages: Array<{ role: "user" | "assistant"; content: string }> }>(
+          `/api/spec-chat/history?projectId=${projectAtStart}&limit=40`,
+        );
+        if (cancelled) return;
+        if (Array.isArray(h?.messages) && h.messages.length) {
+          setChatMessages(h.messages.map((m) => ({ role: m.role, content: m.content, seeded: true })));
+        }
+      } catch { /* sem histórico → chat vazio, como antes */ }
+
+      // 2) Job em voo (ou concluído e não coletado) da spec INTEIRA deste projeto.
+      //    Sem `filePath`, o servidor devolve só jobs de spec inteira — jobs por-arquivo dependem
+      //    da seleção na árvore (que um reload não restaura) e não são reanexados aqui.
+      try {
+        const r = await apiGet<{ job: InFlightChatJob | null }>(`/api/spec-chat/in-flight?projectId=${projectAtStart}`);
+        if (cancelled || !r?.job) return;
+        const job = r.job;
+        if (job.kind === "file") return; // fora de escopo (ver acima)
+        // seq capturada DEPOIS do fetch: se o usuário trocou de projeto durante o await, o
+        // `cancelled` acima já barrou; capturar antes só criaria uma janela para o inverso.
+        const seq = chatSeqRef.current;
+        if (chatPollRef.current) return; // o usuário já disparou um turno novo enquanto isto voltava
+        const deadlineMs = job.deadlineAt ? Date.parse(job.deadlineAt) : Date.now() + 40 * 60_000;
+        if (job.status === "error") {
+          setChatError(job.error ?? "A revisão anterior terminou em erro.");
+          return;
+        }
+        setChatSending(true);
+        setChatError(null);
+        startChatPolling({
+          jobId: job.jobId,
+          seq,
+          kind: job.kind,
+          filePath: job.filePath,
+          baseSha: job.baseSha,
+          deadlineMs: Number.isFinite(deadlineMs) ? deadlineMs : Date.now() + 40 * 60_000,
+          // Reanexado de outra sessão → o resultado é OFERECIDO, nunca escrito no editor sozinho.
+          recovered: true,
+        });
+      } catch { /* rehidratação é best-effort: falhar aqui só devolve a tela ao estado limpo */ }
+    })();
+    return () => { cancelled = true; };
+  }, [editProjectId, stopChatPolling, startChatPolling]);
 
   const handleChatSend = useCallback(async () => {
     const text = chatInput.trim();
@@ -1534,14 +1756,18 @@ export default function SpecPage() {
     stopChatPolling();
 
     let jobId: string;
+    let deadlineMs = Date.now() + CHAT_CLIENT_DEADLINE_MS;
     try {
       const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
         specMarkdown: contentToSend,
-        messages: nextMessages,
+        // `seeded` (histórico do banco) fica fora: é contexto de exibição, não do turno.
+        messages: nextMessages.filter((m) => !m.seeded),
         projectId: editProjectId ?? undefined,
         ...(fileMode ? { filePath: sentFilePath, baseSha: sentBaseSha ?? undefined } : {}),
       });
       jobId = res.jobId;
+      const d = res.deadlineAt ? Date.parse(res.deadlineAt) : NaN;
+      if (Number.isFinite(d)) deadlineMs = d;
     } catch (e) {
       setChatError(e instanceof Error ? e.message : "Erro ao enviar mensagem.");
       setChatSending(false);
@@ -1550,47 +1776,13 @@ export default function SpecPage() {
     // O usuário trocou de arquivo enquanto o POST voltava → descarta este turno.
     if (seq !== chatSeqRef.current) { setChatSending(false); return; }
 
-    const startTs = Date.now();
-    chatPollRef.current = setInterval(async () => {
-      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-      // 18 min: casa com o MAX_MS do runChatJob (backend). Uma revisão de spec inteira via CTO
-      // pode levar ~7-8 min; teto menor cortava o polling antes de o job terminar.
-      if (Date.now() - startTs > 18 * 60_000) {
-        stopChatPolling();
-        setChatError("Tempo esgotado. Tente novamente.");
-        setChatSending(false);
-        return;
-      }
-      try {
-        const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
-        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-        if (poll.status === "done") {
-          stopChatPolling();
-          if (fileMode) {
-            // NÃO grava no arquivo — deixa a revisão pendente de confirmação (apply).
-            if (poll.specMarkdown) {
-              setPendingApply({
-                path: sentFilePath!,
-                content: poll.specMarkdown,
-                baseSha: poll.baseSha ?? sentBaseSha,
-              });
-            }
-            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão pronta. Confira e clique em Aplicar." }]);
-          } else {
-            if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
-            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Spec atualizada." }]);
-          }
-          setChatSending(false);
-        } else if (poll.status === "error") {
-          stopChatPolling();
-          setChatError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
-          setChatSending(false);
-        }
-      } catch (e) {
-        console.warn("[SpecChat] poll error:", e instanceof Error ? e.message : e);
-      }
-    }, 8000);
-  }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, activeFile, treeDirty, stopChatPolling]);
+    startChatPolling({
+      jobId, seq,
+      kind: fileMode ? "file" : "chat",
+      filePath: sentFilePath, baseSha: sentBaseSha,
+      deadlineMs,
+    });
+  }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, activeFile, treeDirty, stopChatPolling, startChatPolling]);
 
   // Onda 1 — "Resolver GAPs": turno de chat (spec inteira) que manda o CTO corrigir os findings
   // da validação adversarial. O servidor injeta o relatório + irmãos e sintetiza a instrução;
@@ -1606,11 +1798,17 @@ export default function SpecPage() {
     stopChatPolling();
 
     let jobId: string;
+    let deadlineMs = Date.now() + CHAT_CLIENT_DEADLINE_MS;
     try {
       const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
-        specMarkdown, messages: chatMessages, projectId: editProjectId, resolveGaps: true,
+        specMarkdown,
+        // `seeded` fora do payload (histórico é exibição) — ver handleChatSend.
+        messages: chatMessages.filter((m) => !m.seeded),
+        projectId: editProjectId, resolveGaps: true,
       });
       jobId = res.jobId;
+      const d = res.deadlineAt ? Date.parse(res.deadlineAt) : NaN;
+      if (Number.isFinite(d)) deadlineMs = d;
     } catch (e) {
       setChatError(e instanceof Error ? e.message : "Erro ao resolver GAPs.");
       setChatSending(false);
@@ -1618,35 +1816,8 @@ export default function SpecPage() {
     }
     if (seq !== chatSeqRef.current) { setChatSending(false); return; }
 
-    const startTs = Date.now();
-    chatPollRef.current = setInterval(async () => {
-      if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-      // 18 min — mesmo teto do runChatJob/backend (resolver GAPs regenera a spec inteira).
-      if (Date.now() - startTs > 18 * 60_000) {
-        stopChatPolling(); setChatError("Tempo esgotado. Tente novamente."); setChatSending(false); return;
-      }
-      try {
-        const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
-        if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-        if (poll.status === "done") {
-          stopChatPolling();
-          if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
-          // A revisão está no EDITOR mas ainda NÃO no disco → a validação (que lê do disco) só
-          // reflete os GAPs resolvidos depois de "Salvar rascunho" (que persiste e revalida).
-          const applied = poll.reply || "GAPs tratados na spec.";
-          setChatMessages((prev) => [...prev, { role: "assistant", content: `${applied}\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar. A validação adversarial recalcula a lista de GAPs: os resolvidos somem, mas a análise **pode apontar novos pontos** a tratar — não confie no relato acima antes de revalidar.` }]);
-          setStaleValidation(true); // a spec mudou → validação anterior ficou desatualizada
-          setChatSending(false);
-        } else if (poll.status === "error") {
-          stopChatPolling();
-          setChatError(poll.error ?? "Erro ao resolver GAPs.");
-          setChatSending(false);
-        }
-      } catch (e) {
-        console.warn("[SpecChat] resolveGaps poll error:", e instanceof Error ? e.message : e);
-      }
-    }, 8000);
-  }, [chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling]);
+    startChatPolling({ jobId, seq, kind: "resolve_gaps", filePath: null, baseSha: null, deadlineMs });
+  }, [chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling, startChatPolling]);
 
   // Evoluir E2 — pede ao arquiteto da Bancada os artefatos da evolução. Job assíncrono no
   // servidor (/invoke/raw); ao terminar, a árvore é recarregada e o resumo/pendências vão ao chat.
@@ -1779,6 +1950,18 @@ export default function SpecPage() {
       setApplying(false);
     }
   }, [editProjectId, pendingApply, applyRevision]);
+
+  // Migração 089 — revisão da spec inteira recuperada de outra sessão. Só entra no editor por
+  // clique: entre o fim do job e a volta do usuário a spec pode ter sido editada à mão, e
+  // sobrescrever isso em silêncio seria trocar uma perda de trabalho por outra.
+  const handleApplyRecovered = useCallback(() => {
+    if (!recoveredSpec) return;
+    setSpecMarkdown(recoveredSpec.content);
+    setStaleValidation(true);
+    setChatMessages((prev) => [...prev, { role: "assistant", content: `✓ Revisão recuperada aplicada ao editor (${recoveredSpec.content.length} caracteres).\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar.` }]);
+    setRecoveredSpec(null);
+  }, [recoveredSpec]);
+  const handleDiscardRecovered = useCallback(() => setRecoveredSpec(null), []);
 
   // ── Save spec (draft or start) ──────────────────────────────────────────────
   const handleSaveSpec = useCallback(async (startNow: boolean) => {
@@ -2047,6 +2230,7 @@ export default function SpecPage() {
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
+              recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
             />
           </Box>
         </Box>
@@ -2086,6 +2270,7 @@ export default function SpecPage() {
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
+              recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
           />
         </DialogContent>
       </Dialog>
@@ -2149,6 +2334,21 @@ export default function SpecPage() {
 
         {editLoadError && (
           <Alert severity="error" sx={{ mb: 2 }} onClose={() => setEditLoadError(null)}>{editLoadError}</Alert>
+        )}
+
+        {/* Migração 089 — todo o corpo de edição (e com ele o painel de chat) é gated em
+            `specMarkdown !== null`. Se o carregamento da spec falhou, o estado do job ficaria
+            INVISÍVEL e o usuário concluiria que a revisão sumiu — exatamente a percepção que esta
+            frente existe para eliminar. Este aviso vive FORA do gate. */}
+        {editProjectId && specMarkdown === null && !editLoading && (chatSending || recoveredSpec) && (
+          <Alert severity="info" sx={{ mb: 2 }} aria-live="polite"
+            action={recoveredSpec
+              ? <Button size="small" color="inherit" onClick={handleApplyRecovered}>Recuperar no editor</Button>
+              : undefined}>
+            {chatSending
+              ? "Há uma revisão do CTO em andamento no servidor para este projeto — ela não será perdida, mesmo que você feche esta tela."
+              : "Uma revisão do CTO concluída aguarda você neste projeto."}
+          </Alert>
         )}
 
         {/* Pivô Bancada (Opção 1): quando aberto de um produto (?productId=…), a árvore da
@@ -2257,6 +2457,7 @@ export default function SpecPage() {
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
+              recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
                   />
                 </Box>
               </Box>
@@ -2438,6 +2639,7 @@ export default function SpecPage() {
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
+              recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
                         />
                       </Box>
                     </Box>

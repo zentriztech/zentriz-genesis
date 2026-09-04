@@ -12,6 +12,7 @@ import { startCreditReconciliationWorker, stopCreditReconciliationWorker } from 
 import { startTenantStatusListener, stopTenantStatusListener } from "./services/tenantStatusCache.js";
 import { startCloudDeployWorker, stopCloudDeployWorker } from "./services/cloudDeployWorker.js";
 import { startEvolutionMergeWorker, stopEvolutionMergeWorker } from "./services/evolutionMergeWorker.js";
+import { startSpecChatWorker, stopSpecChatWorker } from "./services/specChatWorker.js";
 
 const app = await buildApp();
 
@@ -81,6 +82,14 @@ try {
     // Evoluir H3: jobs do planner de RFC em voo no restart → 'interrupted' (estado terminal com causa).
     const { reapOrphanPlanJobs } = await import("./services/evolutionPlanner.js");
     await reapOrphanPlanJobs(pool).catch((e) => console.error("[boot] reapOrphanPlanJobs:", e));
+    // Migração 089: reaper do chat de spec é POR `kind` — e essa distinção é o ponto.
+    // `file` usa /invoke/raw SÍNCRONO: a conexão morreu com o processo, o trabalho acabou de
+    // verdade → 'interrupted' é honesto. `chat`/`resolve_gaps` usam /invoke/cto/async e SEGUEM
+    // VIVOS nos agents (que não reiniciam junto): marcá-los 'interrupted' aqui destruiria o
+    // resultado que esta frente existe para salvar. Esses só são reprovados quando nem chegaram
+    // a ter `agents_job_id`; os demais ficam para o specChatWorker resolver por probe.
+    const { reapOrphanSpecChatJobs } = await import("./services/specChatJobs.js");
+    await reapOrphanSpecChatJobs(pool).catch((e) => console.error("[boot] reapOrphanSpecChatJobs:", e));
   }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);
@@ -106,11 +115,14 @@ try {
   startCloudDeployWorker();
   // Bloco 4 M2 (D-M2): observador do merge das evoluções (flag EVOLUTION_MERGE_WATCH, default OFF).
   startEvolutionMergeWorker();
+  // Migração 089: coletor dos jobs do chat de spec cujo poll morreu (usuário saiu da tela ou a
+  // api reiniciou). Sem ele, uma revisão de ~19 min do CTO era descartada pelo TTL dos agents.
+  startSpecChatWorker();
 } catch (err) {
   app.log.error(err);
   process.exit(1);
 }
 
 // Desligar workers graciosamente ao receber sinal de término
-process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); process.exit(0); });
-process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); process.exit(0); });
+process.on("SIGTERM", () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); process.exit(0); });
+process.on("SIGINT",  () => { stopWatchdog(); stopS3CleanupWorker(); stopS3ReconciliationWorker(); stopBackendResumeWorker(); stopBackendCleanupWorker(); stopFinanceBillingWorker(); stopCreditReconciliationWorker(); stopTenantStatusListener(); stopCloudDeployWorker(); stopEvolutionMergeWorker(); stopSpecChatWorker(); process.exit(0); });

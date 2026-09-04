@@ -179,8 +179,20 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
             # Exceto: linhas que são claramente UI strings ou código inline
             if not _truncation_found and _is_doc:
                 lines = content.split("\n")
+                _in_fence = False
                 for line in lines:
                     stripped = line.strip()
+                    # Cercas de código (```) alternam o estado. Linhas DENTRO da cerca são
+                    # código (SQL, TS, shell), onde "..." é elipse LEGÍTIMA — ex.:
+                    # "UPDATE refresh_tokens SET used = true WHERE ..." tem 7 palavras e
+                    # termina em "...", mas não é spec truncada. Sem este rastreio, uma spec
+                    # correta era reprovada e disparava repair de ~19min em Opus 5, estourando
+                    # o teto do job e descartando o trabalho inteiro.
+                    if stripped.startswith("```"):
+                        _in_fence = not _in_fence
+                        continue
+                    if _in_fence:
+                        continue
                     # Linha que termina com "..." e tem conteúdo substantivo antes
                     # mas NÃO é: bullet de lista com "...", tabela markdown, código inline
                     if (

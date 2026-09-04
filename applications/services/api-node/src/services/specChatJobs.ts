@@ -1,0 +1,459 @@
+/**
+ * specChatJobs.ts — persistência do job do chat de spec da Bancada (migration 089).
+ *
+ * PROBLEMA QUE ISTO RESOLVE (medido em prod 2026-09-04): o job do chat/"Resolver GAPs" vivia
+ * SÓ num Map em memória da api e o `jobId` só no closure do React. Sair da tela matava o poll,
+ * o job seguia vivo nos agents e o resultado nascia INALCANÇÁVEL — um job concluiu com 95.199
+ * bytes de spec revisada (Opus 5, ~19 min) e o trabalho foi jogado fora. O teto de espera de
+ * 18 min ainda descartava jobs que levavam ~19 min: o teto matava o TRABALHO, não a ESPERA.
+ *
+ * DESENHO (pós-revisão adversarial — ver project/docs/plans/BANCADA-SPEC-CHAT-JOB-DURAVEL-2026-09-04.md):
+ *  • O job nasce no Postgres na MESMA transação da mensagem do usuário (sem turno órfão).
+ *  • `agents_job_id` é gravado logo após o dispatch → o resultado é RECOLETÁVEL depois de um
+ *    restart da api (late collect). Janela real medida: o `_async_jobs` dos agents é um dict em
+ *    memória com TTL de 45 min contados de `created_at` (server.py:485-494), e a limpeza é lazy
+ *    (só no dispatch de um novo job) → `deadline_at` = created_at + 40 min para o job NUNCA
+ *    prometer mais do que o agente guarda.
+ *  • Quem coleta é o WORKER (server-side): o usuário que fechou o browser não perde mais o
+ *    resultado nem o turno no histórico. O poll em processo (do request que disparou) continua
+ *    existindo só para dar latência baixa a quem está olhando — os dois convergem no mesmo
+ *    `finishJob`, que é claim-locked por `WHERE status IN ('pending','running')` + rowCount.
+ *  • A resposta do assistente é gravada com `job_id` e índice único parcial (job_id, role) →
+ *    coleta idempotente (antes a marca `_persisted` vivia em memória e duplicava).
+ *  • Heartbeat: o poll em processo toca `updated_at` a cada tick. O worker só adota jobs sem
+ *    heartbeat recente — ou seja, órfãos de restart/deploy.
+ *
+ * Tudo aqui é BEST-EFFORT em relação à rota: uma falha de banco degrada para o comportamento
+ * antigo (job só em memória), nunca derruba o chat.
+ */
+import type { Pool } from "pg";
+
+type Db = Pick<Pool, "query" | "connect">;
+
+export type SpecChatJobKind = "chat" | "resolve_gaps" | "file";
+/** Vocabulário ÚNICO memória↔banco. `interrupted` = reinício da api; `lost` = o agente já
+ *  descartou o resultado (TTL 45 min). Ambos viram `error` no contrato da rota (com a causa). */
+export type SpecChatJobStatus = "pending" | "running" | "done" | "error" | "interrupted" | "lost";
+
+export interface SpecChatJob {
+  id: string;
+  projectId: string | null;
+  tenantId: string | null;
+  ownerUserId: string;
+  agentsJobId: string | null;
+  kind: SpecChatJobKind;
+  filePath: string | null;
+  baseSha: string | null;
+  baseSpecSha: string | null;
+  status: SpecChatJobStatus;
+  specMarkdown: string | null;
+  reply: string | null;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  collectedAt: string | null;
+  deadlineAt: string | null;
+}
+
+/** Colunas escalares: NUNCA `SELECT *` — `spec_markdown` chega a 95 KB e o in-flight é chamado
+ *  a cada mount da tela só para desenhar um banner. */
+const SCALAR_COLS =
+  "id, project_id, tenant_id, owner_user_id, agents_job_id, kind, file_path, base_sha, base_spec_sha, " +
+  "status, reply, error, created_at, finished_at, collected_at, deadline_at";
+
+function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null): SpecChatJob {
+  return {
+    id: String(r.id),
+    projectId: (r.project_id as string | null) ?? null,
+    tenantId: (r.tenant_id as string | null) ?? null,
+    ownerUserId: String(r.owner_user_id ?? ""),
+    agentsJobId: (r.agents_job_id as string | null) ?? null,
+    kind: (r.kind as SpecChatJobKind) ?? "chat",
+    filePath: (r.file_path as string | null) ?? null,
+    baseSha: (r.base_sha as string | null) ?? null,
+    baseSpecSha: (r.base_spec_sha as string | null) ?? null,
+    status: (r.status as SpecChatJobStatus) ?? "pending",
+    specMarkdown: specMarkdown ?? ((r.spec_markdown as string | null) ?? null),
+    reply: (r.reply as string | null) ?? null,
+    error: (r.error as string | null) ?? null,
+    createdAt: String(r.created_at ?? new Date().toISOString()),
+    finishedAt: (r.finished_at as string | null) ?? null,
+    collectedAt: (r.collected_at as string | null) ?? null,
+    deadlineAt: (r.deadline_at as string | null) ?? null,
+  };
+}
+
+/** Teto do job de spec inteira: 40 min (< TTL de 45 min do `_async_jobs` dos agents). */
+export const CHAT_JOB_DEADLINE_MS = 40 * 60_000;
+/** Modo por-arquivo é síncrono (`/invoke/raw`, 180 s) — teto curto, só para não ficar `running` órfão. */
+export const FILE_JOB_DEADLINE_MS = 6 * 60_000;
+/** Sem heartbeat por este tempo, o worker adota o job (o processo que o disparou morreu). */
+const HEARTBEAT_STALE_MS = 75_000;
+/** Falhas consecutivas de poll a partir das quais o job é declarado perdido. */
+const MAX_POLL_ERRORS = 5;
+
+export interface CreateJobInput {
+  id: string;
+  projectId: string | null;
+  tenantId: string | null;
+  ownerUserId: string;
+  kind: SpecChatJobKind;
+  filePath: string | null;
+  baseSha: string | null;
+  baseSpecSha: string | null;
+  /** Mensagem do usuário a gravar no histórico NA MESMA TRANSAÇÃO (sem turno órfão). */
+  userMessage: string | null;
+}
+
+/**
+ * Cria a linha do job e, se houver projeto + mensagem, o turno do usuário — atomicamente.
+ * Antes a mensagem era gravada fire-and-forget ANTES do job existir: se o job falhasse, sobrava
+ * uma pergunta órfã que a rehidratação exibiria como turno sem resposta.
+ * Devolve `false` quando o banco recusou (a rota segue com o job só em memória).
+ */
+export async function createSpecChatJob(db: Db, input: CreateJobInput): Promise<boolean> {
+  const deadlineMs = input.kind === "file" ? FILE_JOB_DEADLINE_MS : CHAT_JOB_DEADLINE_MS;
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO spec_chat_jobs
+         (id, project_id, tenant_id, owner_user_id, kind, file_path, base_sha, base_spec_sha, status, deadline_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', now() + ($9 || ' milliseconds')::interval)`,
+      [input.id, input.projectId, input.tenantId, input.ownerUserId, input.kind,
+        input.filePath, input.baseSha, input.baseSpecSha, String(deadlineMs)],
+    );
+    if (input.projectId && input.userMessage) {
+      await client.query(
+        `INSERT INTO spec_chat_messages (project_id, tenant_id, role, content, file_path, user_id, job_id)
+           VALUES ($1, $2, 'user', $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [input.projectId, input.tenantId, input.userMessage, input.filePath,
+          UUID_RE.test(input.ownerUserId) ? input.ownerUserId : null, input.id],
+      );
+    }
+    await client.query("COMMIT");
+    return true;
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch { /* conexão já inválida */ }
+    console.warn(`[SpecChatJobs] createSpecChatJob falhou (job segue só em memória): ${msg(e)}`);
+    return false;
+  } finally {
+    client.release();
+  }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Grava o id do job nos agents — é a CHAVE do late collect. Sem ele o job é irrecuperável. */
+export async function setAgentsJobId(db: Db, id: string, agentsJobId: string): Promise<void> {
+  try {
+    await db.query(
+      "UPDATE spec_chat_jobs SET agents_job_id = $2, status = 'running', started_at = COALESCE(started_at, now()), updated_at = now() WHERE id = $1",
+      [id, agentsJobId],
+    );
+  } catch (e) {
+    console.warn(`[SpecChatJobs] setAgentsJobId falhou: ${msg(e)}`);
+  }
+}
+
+/** Heartbeat do poll em processo: sinaliza ao worker que alguém já está olhando este job. */
+export async function touchSpecChatJob(db: Db, id: string): Promise<void> {
+  try {
+    await db.query("UPDATE spec_chat_jobs SET updated_at = now() WHERE id = $1 AND status IN ('pending','running')", [id]);
+  } catch { /* heartbeat é best-effort */ }
+}
+
+export interface FinishPatch {
+  status: Exclude<SpecChatJobStatus, "pending" | "running">;
+  specMarkdown?: string | null;
+  reply?: string | null;
+  error?: string | null;
+  modelUsed?: string | null;
+}
+
+/**
+ * Encerra o job. `WHERE status IN ('pending','running')` + rowCount = trava lógica de coleta
+ * única: o poll em processo e o worker podem correr juntos, só um vence. Quando vence com
+ * `done`, grava também o turno do assistente (idempotente pelo índice único (job_id, role)) —
+ * é isto que faz o histórico voltar completo mesmo se ninguém estava com a tela aberta.
+ * Devolve `true` se ESTA chamada foi a que encerrou.
+ */
+export async function finishSpecChatJob(db: Db, id: string, patch: FinishPatch): Promise<boolean> {
+  try {
+    const r = await db.query(
+      `UPDATE spec_chat_jobs
+          SET status = $2, spec_markdown = COALESCE($3, spec_markdown), reply = COALESCE($4, reply),
+              error = COALESCE($5, error), model_used = COALESCE($6, model_used),
+              finished_at = now(), updated_at = now()
+        WHERE id = $1 AND status IN ('pending','running')`,
+      [id, patch.status, patch.specMarkdown ?? null, patch.reply ?? null,
+        patch.error ? patch.error.slice(0, 500) : null, patch.modelUsed ?? null],
+    );
+    const won = (r.rowCount ?? 0) > 0;
+    if (won && patch.status === "done" && patch.reply) {
+      const job = (await db.query(
+        "SELECT project_id, tenant_id, file_path FROM spec_chat_jobs WHERE id = $1", [id],
+      )).rows[0] as { project_id?: string | null; tenant_id?: string | null; file_path?: string | null } | undefined;
+      if (job?.project_id) {
+        await db.query(
+          `INSERT INTO spec_chat_messages (project_id, tenant_id, role, content, file_path, job_id)
+             VALUES ($1, $2, 'assistant', $3, $4, $5)
+           ON CONFLICT DO NOTHING`,
+          [job.project_id, job.tenant_id ?? null, patch.reply, job.file_path ?? null, id],
+        ).catch((e) => console.warn(`[SpecChatJobs] gravar resposta no histórico falhou: ${msg(e)}`));
+      }
+    }
+    return won;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] finishSpecChatJob falhou: ${msg(e)}`);
+    return false;
+  }
+}
+
+/** Job por id, COM o markdown (usado pelo poll/coleta explícita). */
+export async function getSpecChatJob(db: Db, id: string): Promise<SpecChatJob | null> {
+  try {
+    const r = (await db.query(`SELECT ${SCALAR_COLS}, spec_markdown FROM spec_chat_jobs WHERE id = $1`, [id])).rows[0] as
+      Record<string, unknown> | undefined;
+    return r ? rowToJob(r) : null;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] getSpecChatJob falhou: ${msg(e)}`);
+    return null;
+  }
+}
+
+/**
+ * Job a rehidratar: o mais recente vivo OU concluído-e-ainda-não-coletado do escopo
+ * (projeto + arquivo + DONO). O binding de dono é o invariante S3 da RFC-0004 Onda 0 — o
+ * in-flight NÃO pode revogá-lo por omissão. `spec_markdown` fica fora de propósito.
+ */
+export async function findInFlightSpecChatJob(
+  db: Db,
+  scope: { projectId: string; filePath: string | null; ownerUserId: string },
+): Promise<SpecChatJob | null> {
+  try {
+    const r = (await db.query(
+      `SELECT ${SCALAR_COLS} FROM spec_chat_jobs
+        WHERE project_id = $1
+          AND owner_user_id = $2
+          AND ($3::text IS NULL AND file_path IS NULL OR file_path = $3)
+          AND (status IN ('pending','running') OR (status = 'done' AND collected_at IS NULL))
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [scope.projectId, scope.ownerUserId, scope.filePath],
+    )).rows[0] as Record<string, unknown> | undefined;
+    return r ? rowToJob(r) : null;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] findInFlightSpecChatJob falhou: ${msg(e)}`);
+    return null;
+  }
+}
+
+/** Marca o resultado como entregue ao cliente → o in-flight para de re-oferecê-lo para sempre. */
+export async function markSpecChatJobCollected(db: Db, id: string): Promise<void> {
+  try {
+    await db.query("UPDATE spec_chat_jobs SET collected_at = now(), updated_at = now() WHERE id = $1 AND collected_at IS NULL", [id]);
+  } catch (e) {
+    console.warn(`[SpecChatJobs] markSpecChatJobCollected falhou: ${msg(e)}`);
+  }
+}
+
+export interface HistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+  jobId: string | null;
+}
+
+/**
+ * Histórico do chat do escopo (projeto + arquivo). `spec_chat_messages` era WRITE-ONLY (zero
+ * SELECT em todo o api-node) — por isso o chat nascia vazio ao voltar à tela.
+ * NÃO filtra por usuário: a resposta do CTO era gravada sem `user_id`, então filtrar por dono
+ * apagaria justamente todas as respostas. Autoria vai para a UI, não para o filtro.
+ */
+export async function loadSpecChatHistory(
+  db: Db,
+  scope: { projectId: string; filePath: string | null; limit?: number },
+): Promise<HistoryMessage[]> {
+  const limit = Math.min(Math.max(scope.limit ?? 40, 1), 200);
+  try {
+    const rows = (await db.query(
+      `SELECT id, role, content, created_at, job_id FROM spec_chat_messages
+        WHERE project_id = $1
+          AND ($2::text IS NULL AND file_path IS NULL OR file_path = $2)
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3`,
+      [scope.projectId, scope.filePath, limit],
+    )).rows as Array<Record<string, unknown>>;
+    return rows
+      .map((r) => ({
+        id: String(r.id),
+        role: (r.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+        content: String(r.content ?? ""),
+        createdAt: String(r.created_at ?? ""),
+        jobId: (r.job_id as string | null) ?? null,
+      }))
+      .reverse();
+  } catch (e) {
+    console.warn(`[SpecChatJobs] loadSpecChatHistory falhou: ${msg(e)}`);
+    return [];
+  }
+}
+
+/**
+ * Reaper de BOOT — por `kind`, e é aqui que o v1 do desenho estava errado.
+ * `kind='file'` usa `/invoke/raw` SÍNCRONO: a conexão HTTP morre com o processo, o trabalho
+ * realmente acabou → `interrupted` é honesto (mesmo caso de `reapOrphanPlanJobs`).
+ * `kind='chat'|'resolve_gaps'` usa `/invoke/cto/async`: o job SEGUE VIVO nos agents. Marcá-lo
+ * `interrupted` no boot seria MENTIR e destruir exatamente o resultado que este trabalho existe
+ * para salvar (é o bug que `reapOrphanValidationRuns` tem hoje). Esses ficam `running` e o
+ * WORKER decide por probe. Só os que nem chegaram a ter `agents_job_id` (a api caiu entre o
+ * dispatch e o UPDATE) são declarados `lost` — irrecuperáveis por construção, com causa honesta.
+ */
+export async function reapOrphanSpecChatJobs(db: Db): Promise<{ interrupted: number; lost: number }> {
+  let interrupted = 0;
+  let lost = 0;
+  try {
+    const r1 = await db.query(
+      `UPDATE spec_chat_jobs SET status = 'interrupted', error = $1, finished_at = now(), updated_at = now()
+        WHERE kind = 'file' AND status IN ('pending','running')`,
+      ["Revisão interrompida por reinício do servidor — peça a revisão de novo."],
+    );
+    interrupted = r1.rowCount ?? 0;
+    const r2 = await db.query(
+      `UPDATE spec_chat_jobs SET status = 'lost', error = $1, finished_at = now(), updated_at = now()
+        WHERE kind IN ('chat','resolve_gaps') AND status IN ('pending','running') AND agents_job_id IS NULL`,
+      ["A chamada ao CTO foi perdida no reinício do servidor antes de ser rastreável — peça de novo."],
+    );
+    lost = r2.rowCount ?? 0;
+    if (interrupted || lost) {
+      console.info(`[SpecChatJobs] reaper de boot: ${interrupted} por-arquivo interrompido(s), ${lost} perdido(s) sem agents_job_id.`);
+    }
+  } catch (e) {
+    console.warn(`[SpecChatJobs] reapOrphanSpecChatJobs falhou: ${msg(e)}`);
+  }
+  return { interrupted, lost };
+}
+
+/** Resultado de um probe ao agents (injetado para permitir teste sem rede). */
+export interface AgentProbe {
+  (agentsJobId: string): Promise<{ status: string; result?: Record<string, unknown>; error?: string } | "not_found">;
+}
+
+/**
+ * Um tick do coletor server-side. Adota jobs async vivos SEM heartbeat recente (o processo que
+ * os disparou morreu, ou o usuário fechou o browser e o poll do request já terminou), faz o
+ * probe e fecha com o MESMO gate de qualidade do poll em processo.
+ */
+export async function collectSpecChatJobsTick(
+  db: Db,
+  probe: AgentProbe,
+  extract: (result: Record<string, unknown>) => string,
+): Promise<{ scanned: number; collected: number; lost: number; expired: number }> {
+  const out = { scanned: 0, collected: 0, lost: 0, expired: 0 };
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = (await db.query(
+      `SELECT id, agents_job_id, poll_errors, deadline_at FROM spec_chat_jobs
+        WHERE status IN ('pending','running')
+          AND kind IN ('chat','resolve_gaps')
+          AND agents_job_id IS NOT NULL
+          AND updated_at < now() - ($1 || ' milliseconds')::interval
+        ORDER BY created_at
+        LIMIT 20`,
+      [String(HEARTBEAT_STALE_MS)],
+    )).rows as Array<Record<string, unknown>>;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] worker: varredura falhou: ${msg(e)}`);
+    return out;
+  }
+  out.scanned = rows.length;
+
+  for (const row of rows) {
+    const id = String(row.id);
+    const agentsJobId = String(row.agents_job_id);
+    const deadlineAt = row.deadline_at ? new Date(String(row.deadline_at)).getTime() : 0;
+    // Teto: expira a ESPERA quando o agente já não guarda mais nada (TTL 45 min do _async_jobs).
+    if (deadlineAt && Date.now() > deadlineAt) {
+      const closed = await finishSpecChatJob(db, id, {
+        status: "error",
+        error: "O CTO passou do tempo máximo (40 min) e o resultado não estava mais disponível no agente. Peça de novo.",
+      });
+      if (closed) out.expired += 1;
+      continue;
+    }
+    let probed: Awaited<ReturnType<AgentProbe>>;
+    try {
+      probed = await probe(agentsJobId);
+    } catch (e) {
+      const errs = Number(row.poll_errors ?? 0) + 1;
+      await db.query("UPDATE spec_chat_jobs SET poll_errors = $2, updated_at = now() WHERE id = $1", [id, errs])
+        .catch(() => { /* best-effort */ });
+      if (errs >= MAX_POLL_ERRORS) {
+        const closed = await finishSpecChatJob(db, id, {
+          status: "lost",
+          error: `Não foi possível consultar o CTO ${errs} vezes seguidas (${msg(e).slice(0, 120)}). Peça a revisão de novo.`,
+        });
+        if (closed) out.lost += 1;
+      }
+      continue;
+    }
+    if (probed === "not_found") {
+      // 404 dos agents = o TTL de 45 min varreu o resultado. Estado terminal com causa REAL —
+      // sem isto o job ficava `running` para sempre e o in-flight reofertava rehidratação em loop.
+      const closed = await finishSpecChatJob(db, id, {
+        status: "lost",
+        error: "O agente já descartou o resultado desta revisão (expirou). Peça a revisão de novo — ela agora é coletada automaticamente pelo servidor.",
+      });
+      if (closed) out.lost += 1;
+      continue;
+    }
+    await db.query("UPDATE spec_chat_jobs SET poll_errors = 0, updated_at = now() WHERE id = $1", [id])
+      .catch(() => { /* best-effort */ });
+    if (probed.status === "done" && probed.result) {
+      const verdict = judgeCtoResult(probed.result, extract);
+      const closed = await finishSpecChatJob(db, id, verdict);
+      if (closed) {
+        out.collected += 1;
+        console.info(`[SpecChatJobs] worker coletou job=${id} agents=${agentsJobId} status=${verdict.status} chars=${verdict.specMarkdown?.length ?? 0}`);
+      }
+    } else if (probed.status === "error") {
+      const closed = await finishSpecChatJob(db, id, { status: "error", error: probed.error ?? "CTO job failed" });
+      if (closed) out.lost += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Gate de qualidade H4 (idêntico ao do poll em processo, `specChat.ts`): os agents devolvem
+ * `status:"done"` mesmo quando o envelope do CTO é BLOCKED/FAIL. Sem este gate, gravaríamos uma
+ * spec vazia/parcial que o usuário poderia APLICAR por cima da spec real.
+ */
+export function judgeCtoResult(
+  result: Record<string, unknown>,
+  extract: (result: Record<string, unknown>) => string,
+): FinishPatch {
+  const agentStatus = String((result as { status?: string }).status ?? "").toUpperCase();
+  const md = extract(result);
+  if (agentStatus === "BLOCKED" || agentStatus === "FAIL" || !md || md.trim().length < 20) {
+    return {
+      status: "error",
+      error: (agentStatus === "BLOCKED" || agentStatus === "FAIL")
+        ? `O CTO não conseguiu revisar (${agentStatus}). Reformule o pedido e tente de novo.`
+        : "O CTO não retornou uma spec revisada válida. Reformule o pedido e tente de novo.",
+    };
+  }
+  return {
+    status: "done",
+    specMarkdown: md,
+    reply: (result.summary as string | undefined)?.trim() || "Spec atualizada conforme solicitado.",
+    modelUsed: (result.model_used as string | undefined) ?? null,
+  };
+}

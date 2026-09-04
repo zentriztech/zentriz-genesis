@@ -111,6 +111,9 @@ describe("POST /api/spec-chat — guardas do modo por-arquivo", () => {
     expect(body.filePath).toBe("backend/01-api.md");
     expect(body.baseSha).toBe("abc123");
     expect(typeof body.jobId).toBe("string");
+    // Migração 089: o teto de espera é DITADO PELO SERVIDOR. O cliente tinha 18 min hardcoded,
+    // menor que revisões reais de ~19 min — ele descartava trabalho já concluído e pago.
+    expect(Date.parse(body.deadlineAt)).toBeGreaterThan(Date.now());
   });
 
   it("modo por-arquivo roteia por /invoke/raw e preserva o conteúdo (não normaliza)", async () => {
@@ -245,5 +248,147 @@ describe("POST /api/spec-chat — Onda 1: Resolver GAPs + contexto de validaçã
     expect(body.task).toContain("RELATÓRIO DE VALIDAÇÃO");
     expect(body.inputs.resolve_gaps).toBeUndefined();
     expect(body.inputs.validation_report).toContain("Sem critérios de aceite");
+  });
+});
+
+// ── Migração 089: rehidratação (in-flight + history) e binding de dono ─────────
+// O bug que estas rotas existem para matar: o job vivia só num Map em memória e o jobId só no
+// closure do React → sair da tela perdia o estado e um segundo Opus 5 era disparado em paralelo.
+describe("GET /api/spec-chat/in-flight — rehidratação fail-closed", () => {
+  const OTHER_TENANT = "22222222-2222-4222-8222-222222222222";
+  const JOB = "55555555-5555-4555-8555-555555555555";
+  // Linha de job em voo pertencente ao usuário corrente.
+  const withInFlight = (sql: string) => {
+    if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+    if (sql.includes("FROM spec_chat_jobs") && sql.includes("project_id = $1")) {
+      return {
+        rows: [{
+          id: JOB, project_id: PROJ, tenant_id: TENANT, owner_user_id: USER_ID, agents_job_id: "cto-abc",
+          kind: "resolve_gaps", file_path: null, base_sha: null, base_spec_sha: "sha-spec",
+          status: "done", reply: "pronto", error: null,
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          finished_at: new Date().toISOString(), collected_at: null,
+          deadline_at: new Date(Date.now() + 600_000).toISOString(),
+        }],
+      };
+    }
+    return { rows: [] };
+  };
+
+  it("projectId inválido → 400 (fail-closed antes de tocar o banco)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/spec-chat/in-flight?projectId=nao-e-uuid" });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("projeto de OUTRO tenant → 404 (não vaza a existência do job)", async () => {
+    currentUser = { id: USER_ID, role: "user", tenantId: OTHER_TENANT };
+    queryHandler = withInFlight; // o job existe, mas o projeto é do TENANT
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/in-flight?projectId=${PROJ}` });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("devolve o job recuperado com escalares e SEM a spec (95kB não trafegam a cada mount)", async () => {
+    queryHandler = withInFlight;
+    const sqls: string[] = [];
+    const inner = withInFlight;
+    queryHandler = (sql) => { sqls.push(sql); return inner(sql); };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/in-flight?projectId=${PROJ}` });
+    expect(res.statusCode).toBe(200);
+    const { job } = JSON.parse(res.body);
+    expect(job.jobId).toBe(JOB);
+    expect(job.status).toBe("done");
+    expect(job.kind).toBe("resolve_gaps");
+    // `recovered` = terminou enquanto ninguém olhava → o cliente OFERECE, não aplica sozinho.
+    expect(job.recovered).toBe(true);
+    expect(job.specMarkdown).toBeUndefined();
+    expect(job.elapsed).toBeGreaterThan(0);
+    // `createdAt` em ISO (o mapper devolve `Date.toString()`, que só o parser leniente do JS lê).
+    expect(job.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // guarda anti-`SELECT *`: a consulta de rehidratação não pode carregar a spec inteira
+    const jobSql = sqls.find((s) => s.includes("FROM spec_chat_jobs") && s.includes("project_id = $1"));
+    expect(jobSql).toBeTruthy();
+    expect(jobSql).not.toContain("spec_markdown");
+    expect(jobSql).not.toContain("SELECT *");
+    // e o binding de dono está NO PRÓPRIO SQL (não só na aplicação)
+    expect(jobSql).toContain("owner_user_id");
+  });
+
+  it("sem job em voo → { job: null } (não 404 — o projeto existe)", async () => {
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/in-flight?projectId=${PROJ}` });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).job).toBeNull();
+  });
+
+  it("GET /:jobId de job de OUTRO dono → 404 (S3: binding de dono vem do banco)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_jobs") && sql.includes("WHERE id = $1")) {
+        return { rows: [{ id: JOB, owner_user_id: "99999999-9999-4999-8999-999999999999", status: "done", spec_markdown: "SEGREDO", created_at: new Date().toISOString() }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/${JOB}` });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).not.toContain("SEGREDO");
+  });
+
+  it("GET /:jobId lê o BANCO quando o Map não tem o job (sobrevive a restart da api)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_jobs") && sql.includes("WHERE id = $1")) {
+        return { rows: [{ id: JOB, owner_user_id: USER_ID, status: "done", spec_markdown: "# Spec recuperada", reply: "ok", file_path: "backend/01-api.md", base_sha: "sha-1", base_spec_sha: "sha-spec", created_at: new Date().toISOString() }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/${JOB}` });
+    expect(res.statusCode).toBe(200);
+    const b = JSON.parse(res.body);
+    expect(b.status).toBe("done");
+    expect(b.specMarkdown).toBe("# Spec recuperada");
+    expect(b.filePath).toBe("backend/01-api.md");
+    expect(b.baseSha).toBe("sha-1");
+  });
+
+  it("estado terminal 'lost' do banco chega ao cliente como error COM causa", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_jobs") && sql.includes("WHERE id = $1")) {
+        return { rows: [{ id: JOB, owner_user_id: USER_ID, status: "lost", error: "O agente já descartou o resultado desta revisão (expirou).", created_at: new Date().toISOString() }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/${JOB}` });
+    const b = JSON.parse(res.body);
+    expect(b.status).toBe("error");
+    expect(b.error).toContain("descartou");
+  });
+});
+
+describe("GET /api/spec-chat/history — o chat deixa de nascer vazio", () => {
+  it("devolve o histórico em ordem cronológica (o SELECT vem DESC + reverse)", async () => {
+    const now = Date.now();
+    queryHandler = (sql) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_messages")) {
+        return {
+          rows: [
+            { id: "3", role: "assistant", content: "resposta 2", created_at: new Date(now).toISOString(), job_id: null },
+            { id: "2", role: "user", content: "pergunta 2", created_at: new Date(now - 1000).toISOString(), job_id: null },
+            { id: "1", role: "user", content: "pergunta 1", created_at: new Date(now - 2000).toISOString(), job_id: null },
+          ],
+        };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/history?projectId=${PROJ}` });
+    expect(res.statusCode).toBe(200);
+    const { messages } = JSON.parse(res.body);
+    expect(messages.map((m: { content: string }) => m.content)).toEqual(["pergunta 1", "pergunta 2", "resposta 2"]);
+  });
+
+  it("projeto de outro tenant → 404 (histórico é vetor de prompt injection cross-tenant)", async () => {
+    currentUser = { id: USER_ID, role: "user", tenantId: "22222222-2222-4222-8222-222222222222" };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/history?projectId=${PROJ}` });
+    expect(res.statusCode).toBe(404);
   });
 });
