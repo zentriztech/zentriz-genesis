@@ -121,6 +121,8 @@ def test_exported_symbols_h5_formas_adicionais():
         "export abstract class Base {}\n"
     )
     assert runner._exported_symbols(ts) == {"a", "c", "d", "default", "Base"}
+    # re-export NOMEADO conta (nomes explícitos); só `export *` é opaco
+    assert runner._exported_symbols("export { x, y as z } from './m'\n") == {"x", "z"}
     cjs = "module.exports = { alpha, beta: fn, 'gamma': g }\nexports.delta = 1\nmodule.exports.eps = 2\n"
     assert runner._exported_symbols(cjs) == {"alpha", "beta", "gamma", "delta", "eps"}
     py_all = "__all__ = [\n  'publico',\n  \"outro\",\n]\ndef publico(): ...\ndef _privado(): ...\ndef nao_listado(): ...\n"

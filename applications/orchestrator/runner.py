@@ -459,7 +459,9 @@ def _exported_symbols(code: str) -> set[str]:
         if _re.match(r"^export\s+default\s+(?:async\s+)?(?:function\*?\s*\(|class\s*[{\s]|\(|[A-Za-z_$][\w$]*\s*;?\s*$)", line):
             syms.add("default"); continue
         m = _re.match(r"^export\s*\{([^}]*)\}", line)
-        if m and "from" not in line.split("}")[-1]:
+        if m:
+            # `export { a, b as c }` E `export { a, b as c } from './x'` — ambos exportam a, c deste módulo
+            # (nomes explícitos = zero falso-positivo). Só `export *` é opaco (ver _exports_opaque).
             for part in m.group(1).split(","):
                 part = part.strip()
                 if not part:
@@ -3279,9 +3281,12 @@ def _run_monitor_loop(
         # SEMPRE excluídas de pipeline_tasks para não bloquear all_done nem acionar Dev/QA.
         # TSK-FULL-TEST em NEW/ASSIGNED não deve impedir o DevOps de rodar.
         _INFRA_TASKS = {"TSK-FULL-TEST", "TSK-DEVOPS-001"}
+        # Bloco 2 H6: tasks HERDADAS (TSK-INH-*, DONE) também ficam fora — senão um backlog só com herdadas
+        # daria all_done=True sem nenhuma task nova (mascarando o gate ACHADO-39 de backlog vazio).
         pipeline_tasks = [
             t for t in tasks
             if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS
+            and not str(t.get("taskId") or t.get("task_id") or "").startswith("TSK-INH-")
         ]
         waiting_review = [t for t in pipeline_tasks if t.get("status") == "WAITING_REVIEW"]
         need_qa = len(waiting_review) > 0
@@ -3308,7 +3313,8 @@ def _run_monitor_loop(
                         request_id,
                     )
                     tasks = _get_tasks(project_id)  # recarregar após fix
-                    pipeline_tasks = [t for t in tasks if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS]
+                    pipeline_tasks = [t for t in tasks if (t.get("taskId") or t.get("task_id") or "") not in _INFRA_TASKS
+                                      and not str(t.get("taskId") or t.get("task_id") or "").startswith("TSK-INH-")]
                     all_done = bool(pipeline_tasks) and all(t.get("status") in _terminal for t in pipeline_tasks)
                 elif _monitor_result.get("outcome") == "GENESIS_BUG":
                     _update_task(project_id, _bt_id, monitor_attempted=True)
@@ -4665,6 +4671,20 @@ def main() -> int:
         # Evoluir E1: charter e proposta técnica do PAI entram no contexto (LEI EVO manda referenciar o
         # parent_charter, mas ele nunca era injetado).
         _parent_docs = _load_parent_evolution_docs(_parent_apps_dir.parent)
+        # Bloco 2 H6 (adversarial C): o PM precisa saber o que a versão anterior JÁ entregou, senão TSK-EVO-*
+        # repete trabalho feito. Lista curta (id — requisito) das tasks DONE do pai, via API.
+        _parent_done_block = ""
+        try:
+            _pt_data, _pt_status = _api_get(f"/api/projects/{_parent_project_id_evo}/tasks")
+            _pt_rows = _pt_data if isinstance(_pt_data, list) else ((_pt_data or {}).get("tasks") if isinstance(_pt_data, dict) else None) or []
+            _pt_done = [t for t in _pt_rows if isinstance(t, dict) and str(t.get("status") or "").upper() in ("DONE", "QA_PASS")
+                        and str(t.get("taskId") or t.get("task_id") or "") not in _INHERIT_SKIP_TASKS]
+            if _pt_status == 200 and _pt_done:
+                _lines = [f"- {str(t.get('taskId') or t.get('task_id'))} — {str(t.get('requirements') or '')[:140]}" for t in _pt_done[:40]]
+                _parent_done_block = ("### TASKS JÁ ENTREGUES NA VERSÃO ANTERIOR (não repita — só o DELTA do pedido)\n"
+                                      + "\n".join(_lines) + (f"\n- … e mais {len(_pt_done) - 40}" if len(_pt_done) > 40 else "") + "\n\n")
+        except Exception as _e_pt:
+            logger.debug("[H6] tasks do pai indisponíveis para o contexto (não crítico): %s", _e_pt)
         # Enriquecer pipeline_ctx com o contexto de evolução
         _evo_ctx = (
             f"\n## CONTEXTO DE EVOLUÇÃO — projeto pai: {_parent_project_id_evo[:8]}\n"
@@ -4673,6 +4693,7 @@ def main() -> int:
             f"PEDIDO DE EVOLUÇÃO: {_evolution_request}\n\n"
             + (f"### CHARTER DO PAI (parent_charter — referencie, não reescreva)\n{_parent_docs.get('charter', '')}\n\n" if _parent_docs.get("charter") else "")
             + (f"### PROPOSTA TÉCNICA DO PAI (stack/arquitetura vigentes)\n{_parent_docs.get('engineer', '')}\n\n" if _parent_docs.get("engineer") else "")
+            + _parent_done_block
             + f"### REGRAS ABSOLUTAS DE EVOLUÇÃO\n"
             f"1. NUNCA remova recurso existente a menos que a instrução seja EXPLICITAMENTE 'remover X'\n"
             f"2. Adicione SOMENTE o que o pedido pede — nada além\n"
@@ -5651,8 +5672,9 @@ def main() -> int:
             # portal como "já entregues na versão anterior", fora do contador de progresso e do Dev/QA.
             if seed_ok and _is_evolution and _parent_project_id_evo:
                 try:
+                    _already_inh = bool(_inherited_task_ids(project_id))  # restart: upsert é idempotente, a mensagem não
                     _n_inh = _inherit_parent_tasks(project_id, _parent_project_id_evo)
-                    if _n_inh:
+                    if _n_inh and not _already_inh:
                         _post_step(f"Evolução: {_n_inh} task(s) da versão anterior herdadas como concluídas (TSK-INH-*).", request_id)
                         if pipeline_ctx is not None:
                             for _tid in _inherited_task_ids(project_id):

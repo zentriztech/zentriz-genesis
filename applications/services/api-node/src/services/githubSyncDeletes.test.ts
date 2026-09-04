@@ -9,6 +9,12 @@ describe("H4 — computeDeletions (deleções a propagar para evolution/vN)", ()
   it("apaga só o que existia no clone local e sumiu; nunca protegidos nem só-remotos", () => {
     expect(computeDeletions(remote, local, tracked)).toEqual(["src/old.ts"]);
   });
+  it("H4-A: path rastreado que EXISTE no disco mas ficou fora do walk (dist/, >1,5 MB) NÃO é apagado", () => {
+    const remote2 = ["src/a.ts", "dist/app.js", "assets/big.bin", "src/old.ts"];
+    const tracked2 = new Set(remote2);
+    const onDisk = new Set(["src/a.ts", "dist/app.js", "assets/big.bin"]);   // old.ts foi removido de verdade
+    expect(computeDeletions(remote2, new Set(["src/a.ts"]), tracked2, SYNC_DELETE_PROTECTED, (p) => onDisk.has(p))).toEqual(["src/old.ts"]);
+  });
   it("sem lista de rastreados (apps/ não é clone) → não apaga nada (fail-safe)", () => {
     expect(computeDeletions(remote, local, null)).toEqual([]);
   });

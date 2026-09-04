@@ -448,9 +448,12 @@ export const SYNC_DELETE_PROTECTED = /^(\.github\/workflows\/|Dockerfile$|docker
  * (`git ls-files` — nunca apagar o que só existe no remoto: o Deadpool commita direto no branch).
  * Puro e testável. `tracked` null → sem lista de rastreados → NÃO deleta nada (fail-safe).
  */
-export function computeDeletions(remotePaths: string[], localPaths: Set<string>, tracked: Set<string> | null, protectedRe: RegExp = SYNC_DELETE_PROTECTED): string[] {
+export function computeDeletions(remotePaths: string[], localPaths: Set<string>, tracked: Set<string> | null, protectedRe: RegExp = SYNC_DELETE_PROTECTED, existsLocally?: (p: string) => boolean): string[] {
   if (!tracked) return [];
-  return remotePaths.filter((p) => !localPaths.has(p) && tracked.has(p) && !protectedRe.test(p)).sort();
+  // `localPaths` (walk do push) PULA node_modules/dist/coverage e arquivos grandes — um path rastreado
+  // nesses conjuntos existe no disco mas não está no walk; sem a checagem real de existência seria apagado
+  // do branch (adversarial H4-A). Fail-safe: só apaga o que NÃO existe no disco de verdade.
+  return remotePaths.filter((p) => !localPaths.has(p) && tracked.has(p) && !protectedRe.test(p) && !(existsLocally?.(p) ?? false)).sort();
 }
 
 export async function pushProjectFiles(
@@ -594,13 +597,17 @@ export async function pushProjectFiles(
         if (remoteTree.truncated) {
           deletionsSkipped = "árvore remota truncada (>100k entradas) — deleções não sincronizadas";
         } else {
-          const remotePaths = (remoteTree.tree ?? []).filter((t) => t.type === "blob" && t.path).map((t) => t.path as string);
+          const blobs = (remoteTree.tree ?? []).filter((t) => t.type === "blob" && t.path);
+          const remotePaths = blobs.map((t) => t.path as string);
+          const modeOf = new Map(blobs.map((t) => [t.path as string, (t.mode ?? "100644") as "100644" | "100755" | "120000"]));
           const localPaths = new Set(allFiles.map((f) => f.relativePath));
-          const toDelete = computeDeletions(remotePaths, localPaths, tracked);
+          const { existsSync } = await import("node:fs");
+          const toDelete = computeDeletions(remotePaths, localPaths, tracked, SYNC_DELETE_PROTECTED, (p) => existsSync(pathMod.join(appsDir, p)));
           if (toDelete.length > 0) {
             const { data: tree } = await octokit.git.createTree({
               owner, repo, base_tree: headCommit.tree.sha,
-              tree: toDelete.map((p) => ({ path: p, mode: "100644" as const, type: "blob" as const, sha: null })),
+              // mode do próprio item remoto (100755 etc.) — a doc só exige sha:null para remover.
+              tree: toDelete.map((p) => ({ path: p, mode: modeOf.get(p) ?? ("100644" as const), type: "blob" as const, sha: null })),
             });
             const { data: delCommit } = await octokit.git.createCommit({
               owner, repo, message: `chore: Genesis — remove ${toDelete.length} arquivo(s) ausentes na evolução`, tree: tree.sha, parents: [currentSha],
