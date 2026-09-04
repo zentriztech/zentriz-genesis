@@ -1137,7 +1137,10 @@ export async function specRoutes(app: FastifyInstance) {
          VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
         [uuidOrNull(user.id), user.role, action, projectId, specHash,
          JSON.stringify({ ...body, finding: { file: f.file, title: f.title, severity: f.severity, category: f.category ?? null, anchor: f.anchor ?? null }, actorSub: user.id })],
-      ).catch(() => {});
+      ).catch((e) => {
+        // E2E 2026-09-04: um CHECK de `action` engolido aqui escondia a auditoria D4 — nunca silenciar.
+        app.log.error({ err: e, action, projectId }, "[governance_audit] falha ao gravar triagem de blocker");
+      });
     }
     async function notifyBlocker(projectId: string, text: string) {
       try {

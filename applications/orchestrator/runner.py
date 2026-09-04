@@ -3807,10 +3807,18 @@ def _run_monitor_loop(
                         if pipeline_ctx is not None and getattr(pipeline_ctx, "evolution_scope", None):
                             _touched = getattr(pipeline_ctx, "evolution_touched_files", None)
                             if isinstance(_touched, list):
+                                _added = 0
                                 for _a in dev_artifacts:
                                     _p = (_a.get("path") or "").strip() if isinstance(_a, dict) else ""
                                     if _p.startswith("apps/") and _p not in _touched and len(_touched) < 500:
-                                        _touched.append(_p)
+                                        _touched.append(_p); _added += 1
+                                # E2E 2026-09-04: o painel lê o checkpoint em disco — sem salvar aqui, "tocados"
+                                # só apareciam após uma violação (que também salva). Salvar sempre que acumular.
+                                if _added:
+                                    try:
+                                        pipeline_ctx.save_checkpoint(STATE_DIR)
+                                    except Exception as _e_ck:
+                                        logger.debug("[F4] save_checkpoint pós-touched falhou (não crítico): %s", _e_ck)
                         if _evo_viol:
                             # 1 resposta do Dev = 1 rodada (não contar por arquivo — senão 3 arquivos fora
                             # do escopo numa resposta bloqueariam na 1ª tentativa, sem rework).
@@ -5053,6 +5061,11 @@ def main() -> int:
     if _spec_approved and _type_allows_trivial:
         _type_allows_trivial = False
         logger.info("[SPEC-APPROVED] Pré-classificador trivial VETADO — spec aprovada segue CTO/Engineer/PM.")
+    # E2E 2026-09-04: EVOLUÇÃO nunca é trivial — a spec primária é a do pai (+ header) e o delta vive nos RFCs;
+    # o atalho trivial pularia o Charter Delta do CTO e as TSK-EVO do PM (o coração do Evoluir).
+    if _is_evolution and _type_allows_trivial:
+        _type_allows_trivial = False
+        logger.info("[FT-10] Pré-classificador trivial VETADO — evolução segue CTO (Charter Delta) → PM (TSK-EVO).")
     if _type_allows_trivial and (not pipeline_ctx or pipeline_ctx.current_step < 1) and spec_content:
         _spec_lower = spec_content.lower()
         _trivial_signals = [

@@ -101,9 +101,9 @@ export async function loadLiveTriages(db: Db, projectId: string): Promise<Triage
 type Snap = { file?: string; source?: string; title?: string; category?: string; anchor?: string; title_fingerprint?: string };
 
 /** Cascata de matching: exato → fingerprint de título → Jaccard no mesmo file+category. */
-export function matchTriage(f: ValidationFinding, triages: TriageRow[]): TriageRow | null {
+export function matchTriage(f: ValidationFinding, triages: TriageRow[], effectiveFp?: string): TriageRow | null {
   if (!triages.length) return null;
-  const fp = findingFingerprint(f);
+  const fp = effectiveFp ?? findingFingerprint(f);
   const exact = triages.find((t) => t.fingerprint === fp);
   if (exact) return exact;
   const tfp = findingTitleFingerprint(f);
@@ -140,15 +140,28 @@ export interface ProjectFindingsState {
   counts: FindingsCounts;
 }
 
+/**
+ * Fingerprint EFETIVO dentro de uma run: quando dois findings distintos colidem (mesmo file|source|category|anchor —
+ * ex.: dois problemas sob o mesmo heading; E2E 2026-09-04), desambigua pelo título normalizado só para os que
+ * colidem (determinístico; a cascata de matching já tenta o fingerprint de título). Únicos mantêm o primário.
+ */
+export function effectiveFingerprints(findings: ValidationFinding[]): string[] {
+  const primary = findings.map((f) => findingFingerprint(f));
+  const count = new Map<string, number>();
+  for (const fp of primary) count.set(fp, (count.get(fp) ?? 0) + 1);
+  return findings.map((f, i) => ((count.get(primary[i]) ?? 0) > 1 ? findingTitleFingerprint(f) : primary[i]));
+}
+
 export function enrichFindings(findings: ValidationFinding[], triages: TriageRow[]): EnrichedFinding[] {
   const now = Date.now();
-  return findings.map((f) => {
-    const t = matchTriage(f, triages);
+  const fps = effectiveFingerprints(findings);
+  return findings.map((f, i) => {
+    const t = matchTriage(f, triages, fps[i]);
     const expired = t?.state === "ignored" && t.expires_at && new Date(t.expires_at).getTime() < now;
     return {
       ...f,
       category: normalizeCategory(f.category),
-      fingerprint: findingFingerprint(f),
+      fingerprint: fps[i],
       triageable: isTriageable(f),
       triage: t && !expired ? {
         id: t.id, state: t.state, reasonCode: t.reason_code, reason: t.reason, actorRole: t.actor_role, createdAt: t.created_at,
@@ -182,10 +195,11 @@ export function deriveResolved(
   const present = new Map<string, number>(); // fingerprint → índice da run mais recente onde aparece
   const meta = new Map<string, { f: ValidationFinding; runId: string; at: string }>();
   runs.forEach((r, idx) => {
-    for (const f of r.findings ?? []) {
-      const fp = findingFingerprint(f);
+    const fps = effectiveFingerprints(r.findings ?? []);
+    (r.findings ?? []).forEach((f, j) => {
+      const fp = fps[j];
       if (!present.has(fp)) { present.set(fp, idx); meta.set(fp, { f, runId: r.id, at: r.created_at }); }
-    }
+    });
   });
   const out: ResolvedFinding[] = [];
   for (const [fp, idx] of present) {
@@ -249,6 +263,8 @@ export async function applyTriage(db: Db, args: {
 }): Promise<TriageResult> {
   const policy = checkTriagePolicy(args.finding, args.actor, { state: args.state, reasonCode: args.reasonCode, reason: args.reason });
   if (policy) return policy;
+  // fingerprint efetivo (colisão dentro da run → título) vem do chamador via `finding.fingerprint` enriquecido.
+  const fpOverride = (args.finding as { fingerprint?: string }).fingerprint;
   if (args.state === "refuted" && args.expiresAt) return { ok: false, status: 400, code: "REFUTED_NO_EXPIRY", message: "Refutação não expira (falso positivo é permanente até o trecho mudar)." };
   if (args.expiresAt) {
     const t = Date.parse(args.expiresAt);
@@ -256,7 +272,7 @@ export async function applyTriage(db: Db, args: {
     if (t <= Date.now()) return { ok: false, status: 400, code: "BAD_EXPIRES_AT", message: "expiresAt deve estar no futuro." };
     args = { ...args, expiresAt: new Date(t).toISOString() };
   }
-  const fp = findingFingerprint(args.finding);
+  const fp = fpOverride || findingFingerprint(args.finding);
   const snapshot = {
     file: args.finding.file, source: args.finding.source, title: args.finding.title, category: normalizeCategory(args.finding.category),
     anchor: args.finding.anchor ?? null, rationale: (args.finding.rationale ?? "").slice(0, 600), severity: args.finding.severity,

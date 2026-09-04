@@ -49,6 +49,21 @@ describe("findingTriage — identidade (RFC-0005 §3)", () => {
     expect(matchTriage(F({ title: "Autenticação de usuário sem rotas", category: "security_gap", file: "outro.md" }), [jac])).toBeNull();
   });
 
+  it("colisão dentro da run (mesmo file|category|anchor, problemas distintos) → fingerprint efetivo por título; únicos mantêm o primário (E2E 2026-09-04)", async () => {
+    const { effectiveFingerprints } = await import("./findingTriage.js");
+    const a = F({ title: "Ausência de rate limiting e volumetria", category: "missing_nfr", anchor: "## 6. Não funcionais" });
+    const b = F({ title: "LGPD/PII não endereçada", category: "missing_nfr", anchor: "## 6. Não funcionais" });
+    const c = F({ title: "Único", category: "security_gap", anchor: "FR-01" });
+    const fps = effectiveFingerprints([a, b, c]);
+    expect(fps[0]).not.toBe(fps[1]);
+    expect(fps[0]).toBe(findingTitleFingerprint(a));
+    expect(fps[2]).toBe(findingFingerprint(c));
+    // enrichFindings expõe o efetivo e casa a triagem gravada com ele
+    const tr = T({ fingerprint: fps[1], state: "ignored" });
+    const e = enrichFindings([a, b, c], [tr]);
+    expect(e[0].triage).toBeNull(); expect(e[1].triage?.state).toBe("ignored"); expect(e[1].fingerprint).toBe(fps[1]);
+  });
+
   it("não triáveis: blocker do Stage A e prompt_injection", () => {
     expect(isTriageable(F({ source: "stage_a", severity: "blocker" }))).toBe(false);
     expect(isTriageable(F({ source: "stage_a", severity: "warning" }))).toBe(true);

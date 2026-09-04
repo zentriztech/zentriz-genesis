@@ -324,9 +324,21 @@ export async function gitLinkProjectFolder(opts: {
   }
 }
 
+/** Kill-switch para ambientes de dev/E2E: `GENESIS_GITHUB_PUSH=off` → nenhum push/repo/PR externo (registra no diálogo). */
+export function githubPushDisabled(): boolean {
+  return (process.env.GENESIS_GITHUB_PUSH ?? "on").trim().toLowerCase() === "off";
+}
+
 export async function pushProjectToGitHub(projectId: string): Promise<void> {
   const client = await pool.connect();
   try {
+    if (githubPushDisabled()) {
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, "ℹ️ Publicação no GitHub DESLIGADA neste ambiente (GENESIS_GITHUB_PUSH=off) — nenhum repositório criado."],
+      );
+      return;
+    }
     // ── 1. Load project + tenant ──────────────────────────────────────────────
     const projRes = await client.query(
       `SELECT p.id, p.title, p.tenant_id, p.created_by, p.product_id, p.extra,
@@ -572,6 +584,13 @@ export async function pushEvolutionToGitHub(projectId: string, opts: { versionLa
     );
     const row = projRes.rows[0];
     if (!row) return { ok: false, mode: "skipped", error: "projeto não encontrado" };
+    if (githubPushDisabled()) {
+      await client.query(
+        `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,
+        [projectId, "ℹ️ Publicação da evolução no GitHub DESLIGADA neste ambiente (GENESIS_GITHUB_PUSH=off) — branch/PR não criados; supersessão segue (tenant não publica aqui)."],
+      );
+      return { ok: false, mode: "skipped", error: "GENESIS_GITHUB_PUSH=off" };
+    }
     if (!row.installation_id) {
       await client.query(
         `INSERT INTO project_dialogue (project_id, from_agent, to_agent, event_type, summary_human) VALUES ($1, 'system', 'system', 'step', $2)`,

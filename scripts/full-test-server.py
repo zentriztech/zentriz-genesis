@@ -423,6 +423,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if do_install and not (app_dir / "node_modules").is_dir():
                     lock_ci = (app_dir / "package-lock.json").is_file()
                     rc, _out = _run(["npm", "ci", "--no-audit", "--no-fund"] if lock_ci else ["npm", "install", "--no-audit", "--no-fund"], app_dir, _left(900))
+                    if rc != 0 and rc is not None and "ERESOLVE" in _out:
+                        # E2E 2026-09-04: projetos gerados trazem conflitos de peer-deps com frequência; o objetivo aqui
+                        # é MEDIR a suíte, não policiar o lockfile → fallback explícito (registrado no cmd).
+                        rc, _out = _run(["npm", "install", "--legacy-peer-deps", "--no-audit", "--no-fund"], app_dir, _left(900))
+                        result["install"] = "npm install --legacy-peer-deps (fallback ERESOLVE)"
                     if rc != 0:
                         result.update({"stack": "node", "status": "error", "error": f"npm install falhou (rc={rc}): {_out[-400:]}"}); raise StopIteration
                 with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=tempfile.gettempdir(), prefix="genesis-tests-") as tf:

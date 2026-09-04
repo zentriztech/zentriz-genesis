@@ -101,9 +101,14 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   const num = name.match(/^RFC-(\d{4})/i)?.[1];
   const title = (content.match(/^#\s+(.+)$/m)?.[1] ?? name).trim();
   const summary = section(content, /(sum[áa]rio|resumo|summary)/i).trim().split("\n").filter(Boolean).slice(0, 4).join(" ").slice(0, 600);
-  // Gherkin SÓ na seção de critérios de aceite (sem fallback para o documento — prosa com
-  // "dado/quando/então" solta não conta) e com as palavras-chave em INÍCIO de linha/bullet.
-  const acSec = section(content, /(crit[ée]rios? de aceite|acceptance|cen[áa]rios)/i);
+  // Gherkin SÓ nas seções de critérios de aceite OU de requisitos (E2E 2026-09-04: o arquiteto aninha
+  // "- **Dado/Quando/Então**" sob cada MUST em `## Requisitos (MUST)` — válido, é o que o prompt pede),
+  // sem fallback para o documento inteiro (prosa solta não conta) e com as palavras-chave em INÍCIO de
+  // linha/bullet. Aceita "aceite"/"aceitação"/"acceptance"/"cenários".
+  const acSec = [
+    section(content, /(crit[ée]rios? de aceit(e|a[çc][ãa]o)|acceptance|cen[áa]rios)/i),
+    section(content, /(requisitos|requirements)/i),
+  ].filter(Boolean).join("\n");
   const kw = (w: RegExp) => new RegExp(`^\\s*(?:[-*+]\\s*|\\d+[.)]\\s*)?(?:\\*\\*|__)?\\s*(?:${w.source})\\b`, "im").test(acSec);
   const dado = kw(/dado|given/), quando = kw(/quando|when/), entao = kw(/ent[ãa]o|then/);
   const hasGherkin = Boolean(acSec) && dado && quando && entao;
@@ -121,7 +126,7 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   const compat: RfcCompat | null = breaking ? "major" : /\bminor\b|nova funcionalidade|feature/i.test(compatSec) ? "minor" : /\bpatch\b|correção|bugfix|fix\b/i.test(compatSec) ? "patch" : null;
   const hasNonGoals = /(n[ãa]o[- ]objetivos|non-goals|fora de escopo)/i.test(content);
   const problems: string[] = [];
-  if (!hasGherkin) problems.push(acSec ? "critérios de aceite sem Gherkin em bullets (Dado/Quando/Então no início da linha)" : "sem seção `## Critérios de aceite` com cenários Gherkin (Dado/Quando/Então)");
+  if (!hasGherkin) problems.push(acSec ? "critérios de aceite sem Gherkin em bullets (Dado/Quando/Então no início da linha, em `## Critérios de aceite` ou sob cada requisito)" : "sem seção `## Critérios de aceite`/`## Requisitos` com cenários Gherkin (Dado/Quando/Então)");
   if (unrestricted.length > 0) problems.push(`escopo irrestrito em files_allowed (${unrestricted.join(", ")}) — declare módulos/pastas específicos; "tudo" anula o gate de escopo`);
   if (filesAllowed.length === 0) problems.push("seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)");
   else if (codeGlobs.length === 0) problems.push("files_allowed só com testes/docs — declare ≥1 pasta/arquivo de CÓDIGO que a fábrica pode alterar");
