@@ -80,3 +80,13 @@ def test_f2_corpus_le_apps_em_disco_sem_testes_e_baseline_do_pai(tmp_path: Path,
     assert set(cc._code_corpus_files(Ctx())) == {"apps/src/new.ts"}
     monkeypatch.setenv("EVOLUTION_RECONCILE_DISK", "off"); monkeypatch.setenv("PROJECT_FILES_ROOT", str(root))
     assert set(cc._code_corpus_files(Ctx())) == {"apps/src/new.ts"}
+
+
+def test_f1_package_json_sem_baseline_e_conservador(tmp_path: Path):
+    apps = tmp_path / "apps"; (apps / "web").mkdir(parents=True)
+    (apps / "web" / "package.json").write_text(json.dumps({"dependencies": {"react": "19"}}))
+    ctx = PipelineContext("p"); ctx.evolution_scope = ["apps/**"]
+    ctx.evolution_manifest_baseline = {}                                  # sem baseline (clone sem package.json)
+    ctx.evolution_touched_files = ["apps/web/package.json"]
+    changed, hits = runner._evo_infra_changed(ctx, apps)
+    assert changed is True and hits == ["apps/web/package.json"]         # conservador: roda o DevOps

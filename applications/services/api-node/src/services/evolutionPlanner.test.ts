@@ -167,6 +167,44 @@ describe("evolutionPlanner (Evoluir E2)", () => {
     expect(res2.written.find((w) => w.path === "CHANGELOG.md")?.action).toBe("updated");
   });
 
+  it("nextRfcNumber: por produto (atômico, nunca abaixo dos RFCs locais) e sem produto (max local + 1)", async () => {
+    const { nextRfcNumber } = mod;
+    const mk = (productId: string | null, files: string[], seqAfter: number) => ({ query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/SELECT product_id FROM projects/.test(sql)) return { rows: [{ product_id: productId }] };
+      if (/SELECT filename FROM project_spec_files/.test(sql)) return { rows: files.map((f) => ({ filename: f })) };
+      if (/UPDATE products SET next_rfc_seq/.test(sql)) { expect(params[1]).toBe(files.length ? 4 : 1); return { rows: [{ next_rfc_seq: seqAfter }] }; }
+      return { rows: [] };
+    }) });
+    expect(await nextRfcNumber(mk("prod", ["RFC-0003-a.md"], 5) as never, "p")).toBe(4);   // GREATEST(seq, 4)+1 = 5 → devolve 4
+    expect(await nextRfcNumber(mk(null, ["RFC-0003-a.md", "RFC-0001-b.md"], 0) as never, "p")).toBe(4);
+    expect(await nextRfcNumber(mk(null, [], 0) as never, "p")).toBe(1);
+  });
+
+  it("createPlanJob: 23505 devolve o job vivo (PLAN_IN_PROGRESS); vivo STALE (>10 min) vira interrupted e um novo é criado", async () => {
+    const { createPlanJob } = mod;
+    const live = (ageMs: number) => ({ id: "live", project_id: "p", owner_user_id: "u", status: "running", created_at: new Date(Date.now() - ageMs).toISOString() });
+    const mk = (liveRow: Record<string, unknown> | null) => {
+      let first = true; const calls: string[] = [];
+      const db = { query: vi.fn(async (sql: string) => {
+        calls.push(sql.split(" ")[0]);
+        if (/INSERT INTO evolution_plan_jobs/.test(sql)) {
+          if (first) { first = false; const e = new Error("dup") as Error & { code?: string }; e.code = "23505"; throw e; }
+          return { rows: [{ id: "new", project_id: "p", owner_user_id: "u", status: "pending", created_at: new Date().toISOString() }] };
+        }
+        if (/SELECT \* FROM evolution_plan_jobs WHERE project_id/.test(sql)) return { rows: liveRow ? [liveRow] : [] };
+        return { rows: [] };
+      }) };
+      return { db, calls };
+    };
+    const fresh = mk(live(60_000));
+    const r1 = await createPlanJob(fresh.db as never, "p", "u", null);
+    expect(r1.ok).toBe(false); expect(!r1.ok && r1.code).toBe("PLAN_IN_PROGRESS");
+    const stale = mk(live(20 * 60_000));
+    const r2 = await createPlanJob(stale.db as never, "p", "u", "req");
+    expect(r2.ok).toBe(true); expect(r2.job.id).toBe("new");
+    expect(stale.calls.filter((c) => c === "UPDATE").length).toBe(1);   // stale → interrupted antes de inserir de novo
+  });
+
   it("buildRepoMap: vazio quando o diretório não existe", async () => {
     expect(await buildRepoMap(path.join(tmpRoot, "nope"))).toBe("");
   });
