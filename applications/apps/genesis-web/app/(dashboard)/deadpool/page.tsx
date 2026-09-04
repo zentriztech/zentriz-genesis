@@ -115,6 +115,7 @@ export default observer(function DeadpoolPage() {
                       <TableCell>Service ID</TableCell>
                       <TableCell>Repositório</TableCell>
                       <TableCell>Installation</TableCell>
+                      <TableCell>Connect</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -130,6 +131,22 @@ export default observer(function DeadpoolPage() {
                           ) : "—"}
                         </TableCell>
                         <TableCell>{p.installation_id ?? "—"}</TableCell>
+                        {/* Item 2: tier efetivo do Auto Care = presença dos manifests Connect no registro
+                            (sem manifests o Deadpool cai em contexto genérico — remediação mais fraca). */}
+                        <TableCell>
+                          {(() => {
+                            const names = Array.isArray(p.connect_manifests_present) ? p.connect_manifests_present : [];
+                            const n = names.length;
+                            return (
+                              <Stack direction="row" spacing={0.5}>
+                                <Chip size="small" variant={n > 0 ? "filled" : "outlined"} color={n > 0 ? "success" : "warning"}
+                                  title={n > 0 ? names.join(", ") : "Sem manifests Connect no registro — remediação em contexto genérico"}
+                                  label={n > 0 ? `manifests ${n}${p.connect_version ? ` · v${p.connect_version}` : ""}` : "sem manifests"} />
+                                {p.monitoring && <Chip size="small" variant="outlined" color="info" label="monitorado" />}
+                              </Stack>
+                            );
+                          })()}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

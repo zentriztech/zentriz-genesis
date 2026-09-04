@@ -47,6 +47,7 @@ import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import SpecTreePanel from "@/components/SpecTreePanel";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
+import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import ProductFolderNav from "@/components/ProductFolderNav";
 
@@ -2096,6 +2097,9 @@ export default function SpecPage() {
             {/* key={editProjectId}: ao navegar entre projetos pela árvore da pasta, remonta
                 o painel para zerar seu `selected` interno (senão destacaria o arquivo do
                 projeto anterior e não re-emitiria onFileSelected). */}
+            {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
+                que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
+            <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
             <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} />
           </Box>
         )}

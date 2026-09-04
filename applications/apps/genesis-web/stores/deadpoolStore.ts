@@ -17,6 +17,12 @@ export interface DeadpoolProject {
   service_id?: string;
   repo_url?: string;
   installation_id?: string | number;
+  /** R4 PR6 / item 2: o Deadpool NÃO serializa os manifests na listagem — expõe só os NOMES presentes
+   *  (`connect_manifests_present`, ex.: ["serviceManifest","ownershipManifest"]) + a versão Connect. */
+  connect_manifests_present?: string[] | null;
+  connect_version?: string | null;
+  monitoring?: boolean;
+  local_path?: string | null;
 }
 
 export interface DeadpoolIncident {

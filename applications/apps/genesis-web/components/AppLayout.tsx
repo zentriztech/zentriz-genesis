@@ -78,6 +78,8 @@ const settingsItems: NavLeaf[] = [
   { label: "Ferramentas UI/UX", href: "/settings/ui-ux",          icon: <DesignServicesIcon />, color: "#A259FF" },
   { label: "Telegram",          href: "/settings/telegram",       icon: <TelegramIcon />,       color: "#229ED9" },
   { label: "Runtime Config",    href: "/settings/runtime-config", icon: <TuneIcon />,           color: "#F97316" },
+  // Item 2 (extras de UI): trilha de auditoria de governança (D4 — quem promoveu/aprovou o quê).
+  { label: "Auditoria",         href: "/settings/audit",          icon: <SettingsIcon />,       color: "#94A3B8" },
 ];
 
 // Itens de uso geral (autoria/ciclo de vida). Ordem POR FLUXO (pedido do Jean 2026-08-26 —
@@ -93,6 +95,8 @@ const navUser: NavEntry[] = [
   { label: "Meus produtos", href: "/products",       icon: <Inventory2Icon />,        color: "#8B5CF6" },
   { label: "Meus apps",     href: "/projects",       icon: <FolderIcon />,            color: "#F59E0B" },
   { label: "Notificações",  href: "/notifications",  icon: <NotificationsIcon />,     color: "#EF4444" },
+  // Item 2 (extras de UI): fila de perguntas da fábrica (D3 needs_spec_input) — todos os projetos do tenant.
+  { label: "Perguntas da fábrica", href: "/spec-questions", icon: <PsychologyIcon />, color: "#F59E0B" },
 ];
 
 // Tenant admin: Usuários e Plano e uso ficam DENTRO de "Configuração"; Auto Care fica FORA,
