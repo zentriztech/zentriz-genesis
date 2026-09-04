@@ -324,6 +324,57 @@ def _heartbeat_thread(project_id: str, genesis_api_url: str, genesis_token: str,
             log.debug("[CYBORG] heartbeat falhou: %s", e)
 
 
+# ── Evoluir bloco 3 F3a — parsers PUROS dos reporters (testáveis com fixtures; sem I/O de processo) ─────────
+def _parse_jest_json(parsed: dict, app_dir) -> dict:
+    """Jest/Vitest `--json`: contagens + ids estáveis `<arquivo relativo>::<fullName>` (status passed|failed|skipped)."""
+    out = {"total": int(parsed.get("numTotalTests") or 0), "passed": int(parsed.get("numPassedTests") or 0),
+           "failed": int(parsed.get("numFailedTests") or 0),
+           "skipped": int(parsed.get("numPendingTests") or 0) + int(parsed.get("numTodoTests") or 0), "tests": []}
+    for fr in parsed.get("testResults") or []:
+        fpath = str(fr.get("name") or fr.get("testFilePath") or "")
+        try: fpath = str(Path(fpath).relative_to(Path(app_dir)))
+        except Exception: pass
+        for ar in fr.get("assertionResults") or []:
+            st = str(ar.get("status") or "")
+            out["tests"].append({"id": f"{fpath}::{ar.get('fullName') or ar.get('title')}",
+                                 "status": "passed" if st == "passed" else ("skipped" if st in ("pending", "todo", "skipped") else "failed")})
+    out["no_tests"] = out["total"] == 0
+    return out
+
+
+def _parse_junit(path: str) -> dict:
+    """JUnit XML (pytest --junitxml): ids `<classname>::<name>`; skipped/failure/error → status."""
+    import xml.etree.ElementTree as ET
+    out = {"passed": 0, "failed": 0, "skipped": 0, "tests": []}
+    tree = ET.parse(path)
+    for tc in tree.iter("testcase"):
+        tid = f"{tc.get('classname') or tc.get('file') or ''}::{tc.get('name') or ''}"
+        if tc.find("skipped") is not None: st = "skipped"; out["skipped"] += 1
+        elif tc.find("failure") is not None or tc.find("error") is not None: st = "failed"; out["failed"] += 1
+        else: st = "passed"; out["passed"] += 1
+        out["tests"].append({"id": tid, "status": st})
+    out["total"] = len(out["tests"])
+    out["no_tests"] = out["total"] == 0
+    return out
+
+
+def _parse_go_json(text: str) -> dict:
+    """`go test -json`: eventos pass|fail|skip por Test (eventos sem `Test` = pacote, ignorados); ids `<Package>::<Test>`."""
+    seen: dict = {}
+    for line in text.splitlines():
+        try: ev = json.loads(line)
+        except Exception: continue
+        if not isinstance(ev, dict) or not ev.get("Test"): continue
+        act = ev.get("Action")
+        if act in ("pass", "fail", "skip"):
+            seen[f"{ev.get('Package')}::{ev.get('Test')}"] = "passed" if act == "pass" else ("failed" if act == "fail" else "skipped")
+    out = {"tests": [{"id": k, "status": v} for k, v in seen.items()],
+           "passed": sum(1 for v in seen.values() if v == "passed"), "failed": sum(1 for v in seen.values() if v == "failed"),
+           "skipped": sum(1 for v in seen.values() if v == "skipped"), "total": len(seen)}
+    out["no_tests"] = out["total"] == 0
+    return out
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): log.info(fmt % args)
 
@@ -374,7 +425,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     #  • "0 testes" é explícito (pytest exit 5, jest numTotalTests=0, go skip sem Test) → no_tests=true;
     #  • timeout/crash de infra = status "error" (nem pass nem fail).
     def _handle_run_tests(self):
-        import shutil, subprocess, tempfile, time, xml.etree.ElementTree as ET
+        import shutil, subprocess, tempfile, time
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode())
@@ -456,18 +507,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     parsed = None
                 if isinstance(parsed, dict) and "numTotalTests" in parsed:
-                    result["total"] = int(parsed.get("numTotalTests") or 0)
-                    result["passed"] = int(parsed.get("numPassedTests") or 0)
-                    result["failed"] = int(parsed.get("numFailedTests") or 0)
-                    result["skipped"] = int(parsed.get("numPendingTests") or 0) + int(parsed.get("numTodoTests") or 0)
-                    for fr in parsed.get("testResults") or []:
-                        fpath = str(fr.get("name") or fr.get("testFilePath") or "")
-                        try: fpath = str(Path(fpath).relative_to(app_dir))
-                        except Exception: pass
-                        for ar in fr.get("assertionResults") or []:
-                            st = str(ar.get("status") or "")
-                            result["tests"].append({"id": f"{fpath}::{ar.get('fullName') or ar.get('title')}", "status": "passed" if st == "passed" else ("skipped" if st in ("pending", "todo", "skipped") else "failed")})
-                    result["no_tests"] = result["total"] == 0
+                    result.update(_parse_jest_json(parsed, app_dir))
                     result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
                 else:
                     # npm test sem reporter: só exit code (sem ids) — honesto sobre a limitação
@@ -506,15 +546,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if rc == 5:
                     result.update({"no_tests": True, "status": "no_tests"}); raise StopIteration
                 try:
-                    tree = ET.parse(junit)
-                    for tc in tree.iter("testcase"):
-                        tid = f"{tc.get('classname') or tc.get('file') or ''}::{tc.get('name') or ''}"
-                        if tc.find("skipped") is not None: st = "skipped"; result["skipped"] += 1
-                        elif tc.find("failure") is not None or tc.find("error") is not None: st = "failed"; result["failed"] += 1
-                        else: st = "passed"; result["passed"] += 1
-                        result["tests"].append({"id": tid, "status": st})
-                    result["total"] = len(result["tests"])
-                    result["status"] = "passed" if result["failed"] == 0 and rc == 0 else "failed"
+                    result.update(_parse_junit(junit))
+                    result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
                 except Exception as e:
                     result.update({"status": "error", "error": f"junit ilegível: {e}; rc={rc}; {out[-300:]}"})
                 raise StopIteration
@@ -526,20 +559,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result["exit_code"] = rc
                 if rc is None:
                     result.update({"status": "error", "error": "timeout"}); raise StopIteration
-                seen: dict = {}
-                for line in out.splitlines():
-                    try: ev = json.loads(line)
-                    except Exception: continue
-                    if not isinstance(ev, dict) or not ev.get("Test"): continue
-                    act = ev.get("Action")
-                    if act in ("pass", "fail", "skip"):
-                        seen[f"{ev.get('Package')}::{ev.get('Test')}"] = "passed" if act == "pass" else ("failed" if act == "fail" else "skipped")
-                result["tests"] = [{"id": k, "status": v} for k, v in seen.items()]
-                result["passed"] = sum(1 for v in seen.values() if v == "passed")
-                result["failed"] = sum(1 for v in seen.values() if v == "failed")
-                result["skipped"] = sum(1 for v in seen.values() if v == "skipped")
-                result["total"] = len(seen)
-                result["no_tests"] = result["total"] == 0
+                result.update(_parse_go_json(out))
                 result["status"] = "no_tests" if result["no_tests"] else ("passed" if result["failed"] == 0 and rc == 0 else "failed")
                 raise StopIteration
             result.update({"stack": None, "no_tests": True, "status": "no_tests"})
