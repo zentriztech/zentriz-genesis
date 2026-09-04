@@ -383,6 +383,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         project_path = str(body.get("project_path") or "").strip()
         timeout = max(60, min(int(body.get("timeout") or 900), 3600))
         do_install = bool(body.get("install", True))
+        tmp_files: list = []  # reporters fora do projeto (nunca dentro de apps/ — iria ao GitHub) — apagados no finally
+        deadline = time.time() + timeout
+
+        def _left(cap: int) -> int:
+            return max(30, min(cap, int(deadline - time.time())))
         if not project_path or not os.path.isdir(project_path):
             self._json(400, {"error": f"project_path not found: {project_path}"}); return
         root = Path(GENESIS_FILES_ROOT).resolve()
@@ -395,7 +400,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         env["CI"] = "1"
         t0 = time.time()
         result: dict = {"stack": None, "cmd": None, "exit_code": None, "passed": 0, "failed": 0, "skipped": 0, "total": 0,
-                        "no_tests": False, "tests": [], "status": "unknown", "error": None}
+                        "no_tests": False, "tests": [], "status": "unknown", "error": None, "tests_reliable": True}
 
         def _run(cmd: list, cwd: Path, tmo: int) -> tuple[int | None, str]:
             try:
@@ -417,11 +422,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 scripts = pj.get("scripts") or {}
                 if do_install and not (app_dir / "node_modules").is_dir():
                     lock_ci = (app_dir / "package-lock.json").is_file()
-                    rc, _out = _run(["npm", "ci", "--no-audit", "--no-fund"] if lock_ci else ["npm", "install", "--no-audit", "--no-fund"], app_dir, min(timeout, 900))
+                    rc, _out = _run(["npm", "ci", "--no-audit", "--no-fund"] if lock_ci else ["npm", "install", "--no-audit", "--no-fund"], app_dir, _left(900))
                     if rc != 0:
                         result.update({"stack": "node", "status": "error", "error": f"npm install falhou (rc={rc}): {_out[-400:]}"}); raise StopIteration
-                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=str(app_dir)) as tf:
+                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=tempfile.gettempdir(), prefix="genesis-tests-") as tf:
                     out_file = tf.name
+                tmp_files.append(out_file)
                 if "vitest" in deps:
                     cmd = ["npx", "vitest", "run", "--reporter=json", f"--outputFile={out_file}", "--passWithNoTests"]
                     result["stack"] = "node/vitest"
@@ -431,10 +437,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif scripts.get("test") and "no test specified" not in str(scripts.get("test")):
                     cmd = ["npm", "test", "--silent"]
                     result["stack"] = "node/npm-test"
+                    result["tests_reliable"] = False  # sem reporter: só exit code, sem ids → não-regressão por id indisponível
                 else:
                     result.update({"stack": "node", "no_tests": True, "status": "no_tests", "cmd": None}); raise StopIteration
                 result["cmd"] = " ".join(cmd)
-                rc, out = _run(cmd, app_dir, timeout)
+                rc, out = _run(cmd, app_dir, _left(timeout))
                 result["exit_code"] = rc
                 if rc is None:
                     result.update({"status": "error", "error": "timeout"}); raise StopIteration
@@ -443,9 +450,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     parsed = json.loads(Path(out_file).read_text(encoding="utf-8"))
                 except Exception:
                     parsed = None
-                finally:
-                    try: os.unlink(out_file)
-                    except OSError: pass
                 if isinstance(parsed, dict) and "numTotalTests" in parsed:
                     result["total"] = int(parsed.get("numTotalTests") or 0)
                     result["passed"] = int(parsed.get("numPassedTests") or 0)
@@ -467,16 +471,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise StopIteration
             # Python
             if any((app_dir / f).is_file() for f in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt")) or (app_dir / "tests").is_dir():
-                py = shutil.which("python3") or shutil.which("python") or "python3"
+                # venv POR PROJETO (nunca o Python do sistema do executor — dependências de um tenant não
+                # contaminam o host nem o próprio full-test-server). `.venv-genesis` fica fora do corpus/push.
+                sys_py = shutil.which("python3") or shutil.which("python") or "python3"
+                venv_dir = app_dir / ".venv-genesis"
+                py = str(venv_dir / "bin" / "python")
+                if not Path(py).is_file():
+                    rc, _out = _run([sys_py, "-m", "venv", str(venv_dir)], app_dir, _left(120))
+                    if rc != 0:
+                        result.update({"stack": "python", "status": "error", "error": f"venv falhou (rc={rc}): {_out[-300:]}"}); raise StopIteration
                 if do_install and (app_dir / "requirements.txt").is_file():
-                    rc, _out = _run([py, "-m", "pip", "install", "-q", "-r", "requirements.txt"], app_dir, min(timeout, 900))
+                    rc, _out = _run([py, "-m", "pip", "install", "-q", "-r", "requirements.txt"], app_dir, _left(900))
                     if rc not in (0, None):
                         result.update({"stack": "python", "status": "error", "error": f"pip install falhou (rc={rc}): {_out[-400:]}"}); raise StopIteration
-                with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, dir=str(app_dir)) as tf:
+                    if rc is None:
+                        result.update({"stack": "python", "status": "error", "error": "timeout no pip install"}); raise StopIteration
+                rc, _out = _run([py, "-m", "pytest", "--version"], app_dir, 60)
+                if rc != 0:
+                    rc, _out = _run([py, "-m", "pip", "install", "-q", "pytest"], app_dir, _left(300))
+                with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False, dir=tempfile.gettempdir(), prefix="genesis-tests-") as tf:
                     junit = tf.name
+                tmp_files.append(junit)
                 cmd = [py, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={junit}"]
                 result.update({"stack": "python/pytest", "cmd": " ".join(cmd)})
-                rc, out = _run(cmd, app_dir, timeout)
+                rc, out = _run(cmd, app_dir, _left(timeout))
                 result["exit_code"] = rc
                 if rc is None:
                     result.update({"status": "error", "error": "timeout"}); raise StopIteration
@@ -494,15 +512,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     result["status"] = "passed" if result["failed"] == 0 and rc == 0 else "failed"
                 except Exception as e:
                     result.update({"status": "error", "error": f"junit ilegível: {e}; rc={rc}; {out[-300:]}"})
-                finally:
-                    try: os.unlink(junit)
-                    except OSError: pass
                 raise StopIteration
             # Go
             if (app_dir / "go.mod").is_file():
                 cmd = ["go", "test", "./...", "-json"]
                 result.update({"stack": "go", "cmd": " ".join(cmd)})
-                rc, out = _run(cmd, app_dir, timeout)
+                rc, out = _run(cmd, app_dir, _left(timeout))
                 result["exit_code"] = rc
                 if rc is None:
                     result.update({"status": "error", "error": "timeout"}); raise StopIteration
@@ -527,6 +542,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pass
         except Exception as e:
             result.update({"status": "error", "error": str(e)[:400]})
+        finally:
+            for f in tmp_files:
+                try: os.unlink(f)
+                except OSError: pass
         result["duration_ms"] = int((time.time() - t0) * 1000)
         result["tests"] = result["tests"][:2000]
         self._json(200, result)

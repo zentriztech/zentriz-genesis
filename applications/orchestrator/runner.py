@@ -562,7 +562,8 @@ def _evo_run_tests(project_id: str, proj_container_dir: Path, timeout: int = 900
             import executor_bridge as _eb  # type: ignore[no-redef]
         host_root = os.environ.get("HOST_PROJECT_FILES_ROOT", os.environ.get("PROJECT_FILES_ROOT", "/project-files"))
         payload = {"project_id": project_id, "project_path": str(Path(host_root) / project_id), "timeout": timeout}
-        status, text = _eb.dispatch_run_tests(payload, project_id, None, proj_container_dir, timeout=timeout + 60)
+        # Orçamento: o executor pode gastar até `timeout` instalando E até `timeout` testando (adversarial C).
+        status, text = _eb.dispatch_run_tests(payload, project_id, None, proj_container_dir, timeout=2 * timeout + 60)
         if status != 200:
             return {"status": "error", "error": f"/run-tests {status}: {text[:200]}", "no_tests": False, "passed": 0, "failed": 0, "tests": []}
         import json as _json
@@ -4871,9 +4872,12 @@ def main() -> int:
         # (rota B). Só quando há código e EVOLUTION_P2P_MODE != off; falha → sem baseline (nunca bloqueia).
         if _child_has_code and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and not pipeline_ctx.evolution_baseline:
             try:
-                _bl = _evo_run_tests(project_id, Path(_files_root_evo) / project_id, timeout=int(os.environ.get("EVOLUTION_P2P_TIMEOUT", "900")))
+                # Baseline é síncrona antes do CTO → teto PRÓPRIO menor (adversarial D); o final usa EVOLUTION_P2P_TIMEOUT.
+                _bl = _evo_run_tests(project_id, Path(_files_root_evo) / project_id, timeout=int(os.environ.get("EVOLUTION_P2P_BASELINE_TIMEOUT", "300")))
                 if _bl is not None:
                     pipeline_ctx.evolution_baseline = {**_bl, "kind": "baseline"}
+                    if _bl.get("tests_reliable") is False:
+                        _post_step(f"Evolução: a suíte roda ({_bl.get('stack')}) mas sem reporter por teste — não-regressão só por exit code/contagem.", request_id)
                     if _bl.get("no_tests"):
                         _post_step("Evolução: a versão anterior não tem suíte de testes executável — sem baseline de não-regressão.", request_id)
                     elif _bl.get("status") == "error":

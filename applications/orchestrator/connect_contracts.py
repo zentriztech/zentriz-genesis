@@ -766,7 +766,8 @@ def _code_corpus_files(ctx: Any) -> dict[str, str]:
         return files
     total = sum(len(v) for v in files.values())
     for dirpath, dirnames, filenames in os.walk(apps_dir):
-        dirnames[:] = [d for d in dirnames if d not in _CORPUS_SKIP_DIRS]
+        # Determinístico entre runs (o cap pode cortar): diretórios ordenados; `.venv-genesis` do executor fora.
+        dirnames[:] = sorted(d for d in dirnames if d not in _CORPUS_SKIP_DIRS and not d.startswith(".venv"))
         for fn in sorted(filenames):
             if not fn.lower().endswith(_CODE_EXTS) or fn.lower().endswith((".min.js", ".min.mjs")):
                 continue
@@ -804,7 +805,10 @@ def _parent_reconciliation(ctx: Any) -> dict[str, Any] | None:
         cdir = os.path.join(base, "project", "connect")
         if not os.path.isdir(cdir):
             continue
-        for ver in sorted(os.listdir(cdir), reverse=True):
+        def _vkey(v: str) -> tuple:
+            nums = re.findall(r"\d+", v)
+            return tuple(int(n) for n in nums) if nums else (0,)
+        for ver in sorted(os.listdir(cdir), key=_vkey, reverse=True):  # semântico: v1.10.0 > v1.9.0
             f = os.path.join(cdir, ver, "reconciliation.json")
             if os.path.isfile(f):
                 try:

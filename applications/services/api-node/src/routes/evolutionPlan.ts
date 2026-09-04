@@ -85,9 +85,19 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
         try {
           const { readFile } = await import("node:fs/promises");
           const { join } = await import("node:path");
-          const raw = await readFile(join(filesRoot, ".runner-state", proj.id, "checkpoint.json"), "utf-8");
-          checkpoint = JSON.parse(raw) as Record<string, unknown>;
-        } catch { checkpoint = null; }
+          const p = join(filesRoot, ".runner-state", proj.id, "checkpoint.json");
+          let raw = await readFile(p, "utf-8");
+          try { checkpoint = JSON.parse(raw) as Record<string, unknown>; }
+          catch {
+            // runner pode estar gravando (JSON parcial): 1 releitura curta antes de desistir
+            await new Promise((r) => setTimeout(r, 150));
+            raw = await readFile(p, "utf-8");
+            checkpoint = JSON.parse(raw) as Record<string, unknown>;
+          }
+        } catch (e) {
+          if ((e as { code?: string }).code !== "ENOENT") request.log.warn({ err: e, projectId: proj.id }, "[evolution-state] checkpoint ilegível");
+          checkpoint = null;
+        }
       }
       const pick = <T,>(k: string, fallback: T): T => (checkpoint && k in checkpoint ? (checkpoint[k] as T) : fallback);
       const violations = pick<Record<string, string[]>>("evolution_violations", {});

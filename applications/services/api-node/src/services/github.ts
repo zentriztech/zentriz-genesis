@@ -468,7 +468,7 @@ export async function pushProjectFiles(
   const { readdir, stat, readFile } = await import("fs/promises");
   const pathMod = await import("path");
 
-  const SKIP_DIRS = new Set(["node_modules", ".next", "dist", ".git", "coverage", ".nyc_output"]);
+  const SKIP_DIRS = new Set(["node_modules", ".next", "dist", ".git", "coverage", ".nyc_output", ".venv-genesis"]);
   const BATCH_SIZE = 80; // stay well under GitHub's 100-blob limit
 
   // Collect all file paths
