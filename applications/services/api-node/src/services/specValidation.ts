@@ -195,6 +195,11 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
       findings.push({ file: label, line: null, severity: rfcSev, title: "RFC sem `## Impacto` / files_allowed",
         rationale: "Liste os globs de arquivos que a fábrica PODE tocar; é o escopo do gate determinístico (a fábrica não expande sozinha).", source: "stage_a" });
     }
+    const testsOnly = rfc.problems.find((p) => p.startsWith("files_allowed só com testes/docs"));
+    if (testsOnly) {
+      findings.push({ file: label, line: null, severity: rfcSev, title: "RFC com files_allowed só de testes/docs",
+        rationale: `${testsOnly}.`, source: "stage_a" });
+    }
     if (!rfc.hasNonGoals) {
       findings.push({ file: label, line: null, severity: "warning", title: "RFC sem Não-objetivos",
         rationale: "Declare o que está fora de escopo — evita que a fábrica 'complete' além do pedido.", source: "stage_a" });

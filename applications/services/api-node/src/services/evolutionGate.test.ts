@@ -83,6 +83,10 @@ describe("evolutionGate (Evoluir E3)", () => {
     // B'' — bullets numerados e sem negrito também valem
     const numbered = parseRfcMarkdown("docs/rfc/RFC-0008-x.md", GOOD.replace(/- \*\*Dado\*\*/, "1. Dado").replace(/- \*\*Quando\*\*/, "2. Quando").replace(/- \*\*Então\*\*/, "3. Então"));
     expect(numbered.hasGherkin).toBe(true);
+    // D (E4 adversarial) — só testes/docs não é escopo de código
+    const testsOnly = parseRfcMarkdown("docs/rfc/RFC-0010-x.md", GOOD.replace('"apps/api/src/reports/**"', '"docs/**"').replace('"apps/web/src/pages/reports/**"', '"apps/api/tests/**"'));
+    expect(testsOnly.filesAllowed.length).toBe(3);
+    expect(testsOnly.problems.some((p) => p.startsWith("files_allowed só com testes/docs"))).toBe(true);
     // C — lista inline
     const inline = parseRfcMarkdown("docs/rfc/RFC-0009-x.md", GOOD.replace(/files_allowed:[\s\S]*?```/, 'files_allowed: [apps/a.ts, "apps/b/**"]\n```'));
     expect(inline.filesAllowed).toEqual(["apps/a.ts", "apps/b/**"]);

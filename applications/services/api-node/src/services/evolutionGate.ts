@@ -113,6 +113,9 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   const filesAllowedRaw = extractFilesAllowed(impacto);
   const unrestricted = filesAllowedRaw.filter((g) => UNRESTRICTED_GLOBS.has(g.replace(/\/+$/, "") || "."));
   const filesAllowed = filesAllowedRaw.filter((g) => !unrestricted.includes(g));
+  // Escopo precisa de ≥1 glob de CÓDIGO: só testes/docs (que o gate já permite sempre) deixaria a fábrica
+  // sem poder tocar código → toda entrega viraria violação → bloqueio garantido no E4.
+  const codeGlobs = filesAllowed.filter((g) => !/(?:^|\/)(?:tests?|__tests__|docs)(?:\/|$)|\.(?:test|spec)\.[a-z]+$|\.md$/i.test(g));
   const compatSec = section(content, /(compatibilidade|compatibility)/i).toLowerCase();
   const breaking = /breaking\s*:\s*(true|sim)|\bmajor\b|\bbreaking change\b|\bincompat/i.test(compatSec);
   const compat: RfcCompat | null = breaking ? "major" : /\bminor\b|nova funcionalidade|feature/i.test(compatSec) ? "minor" : /\bpatch\b|correção|bugfix|fix\b/i.test(compatSec) ? "patch" : null;
@@ -121,6 +124,7 @@ export function parseRfcMarkdown(pathOrName: string, content: string): ParsedRfc
   if (!hasGherkin) problems.push(acSec ? "critérios de aceite sem Gherkin em bullets (Dado/Quando/Então no início da linha)" : "sem seção `## Critérios de aceite` com cenários Gherkin (Dado/Quando/Então)");
   if (unrestricted.length > 0) problems.push(`escopo irrestrito em files_allowed (${unrestricted.join(", ")}) — declare módulos/pastas específicos; "tudo" anula o gate de escopo`);
   if (filesAllowed.length === 0) problems.push("seção `## Impacto` sem `files_allowed` (globs dos arquivos que a fábrica pode tocar)");
+  else if (codeGlobs.length === 0) problems.push("files_allowed só com testes/docs — declare ≥1 pasta/arquivo de CÓDIGO que a fábrica pode alterar");
   if (!num) problems.push("nome fora do padrão RFC-NNNN-<slug>.md");
   return { path: pathOrName, number: num ? parseInt(num, 10) : null, title, summary, hasGherkin, gherkinScenarios, mustCount, filesAllowed, compat, breaking, hasNonGoals, problems };
 }

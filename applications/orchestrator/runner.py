@@ -387,9 +387,16 @@ _EVO_MAX_VIOLATIONS_PER_TASK = max(1, int(os.environ.get("EVOLUTION_MAX_SCOPE_VI
 
 
 def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
-    """Glob → regex: `**/` = zero ou mais diretórios, `**` = qualquer coisa, `*` = segmento, `?` = 1 char."""
+    """Glob → regex: `**/` = zero ou mais diretórios, `**` = qualquer coisa, `*` = segmento, `?` = 1 char.
+    Glob de DIRETÓRIO (sem curinga e sem extensão no último segmento, ou com `/` final) casa a árvore inteira
+    (`apps/api/src/` ≡ `apps/api/src/**`) — é como um humano escreve no RFC. `{a,b}` NÃO é suportado."""
     import re as _re
     p = pattern.strip().replace("\\", "/").lstrip("./")
+    had_trailing_slash = p.endswith("/")
+    p = p.rstrip("/")
+    last = p.rsplit("/", 1)[-1]
+    if p and (had_trailing_slash or (not any(ch in p for ch in "*?") and "." not in last)):
+        return _re.compile("^" + _re.escape(p) + "(?:/.*)?$")
     out = []
     i = 0
     while i < len(p):
@@ -446,6 +453,12 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
         return dev_artifacts, []
     allowed: list = []
     violations: list[str] = []
+    # União dos símbolos de TODOS os artefatos apps/ desta resposta: mover uma função exportada para
+    # outro arquivo dentro do escopo é refactor legítimo, não remoção (evita falso-positivo).
+    delivered_symbols: set[str] = set()
+    for art in dev_artifacts:
+        if isinstance(art, dict) and (art.get("path") or "").strip().startswith("apps/"):
+            delivered_symbols |= _exported_symbols(str(art.get("content") or ""))
     for art in dev_artifacts:
         if not isinstance(art, dict):
             continue
@@ -460,8 +473,7 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
         if original.exists() and original.is_file() and original.suffix.lower() in _EVO_CODE_EXTS:
             try:
                 before = _exported_symbols(original.read_text(encoding="utf-8", errors="replace"))
-                after = _exported_symbols(str(art.get("content") or ""))
-                missing = sorted(before - after)
+                missing = sorted(before - delivered_symbols)
                 if missing:
                     violations.append(f"SÍMBOLOS REMOVIDOS em apps/{rel}: {', '.join(missing[:8])}{'…' if len(missing) > 8 else ''} — entregue o arquivo completo preservando os exports (ou amplie o RFC).")
                     continue
@@ -469,6 +481,29 @@ def _evolution_scope_check(pipeline_ctx, dev_artifacts: list, apps_root: Path) -
                 pass
         allowed.append(art)
     return allowed, violations
+
+
+_EVO_MAX_VIOLATION_MSGS = 20
+
+
+def _evo_register_violation(pipeline_ctx, task_id: str, violations: list[str]) -> int:
+    """Registra UMA rodada com violação para a task (1 resposta do Dev = 1 rodada, independentemente de
+    quantos arquivos foram descartados) e acumula as mensagens (cap). Devolve o nº de rodadas com violação."""
+    if pipeline_ctx is None:
+        return 1
+    rounds = getattr(pipeline_ctx, "evolution_violation_rounds", None)
+    if not isinstance(rounds, dict):
+        rounds = {}
+        try:
+            pipeline_ctx.evolution_violation_rounds = rounds
+        except Exception:
+            pass
+    rounds[task_id] = int(rounds.get(task_id, 0)) + 1
+    msgs = getattr(pipeline_ctx, "evolution_violations", None)
+    if isinstance(msgs, dict):
+        cur = list(msgs.get(task_id, [])) + list(violations)
+        msgs[task_id] = cur[-_EVO_MAX_VIOLATION_MSGS:]
+    return rounds[task_id]
 
 
 def _evolution_existing_artifacts(pipeline_ctx) -> list:
@@ -1732,8 +1767,10 @@ def call_qa(
         inputs["evolution_scope"] = list(evolution_scope)
         inputs["evolution_qa_instruction"] = (
             "EVOLUÇÃO: valide os critérios de aceite (Gherkin) dos RFCs em docs/rfc/ e a NÃO-REGRESSÃO dos "
-            "símbolos exportados existentes. Arquivos fora de `evolution_scope` já foram descartados pelo gate — "
-            "não reprove por ausência deles; reprove se a task exigir mudança fora do escopo (o RFC precisa ser ampliado)."
+            "símbolos exportados existentes, sempre dentro de `task_files`. Arquivos fora de `evolution_scope` "
+            "nunca chegam a você (o gate os descarta) — não reprove por ausência deles. Única exceção: se a task "
+            "SÓ é implementável alterando arquivos fora do escopo, reprove com o motivo `SCOPE_EXPANSION_REQUIRED` "
+            "(o humano amplia o `## Impacto` do RFC)."
         )
     # existing_artifacts serve como contexto de interfaces/tipos existentes.
     if task_delivered_files:
@@ -3576,11 +3613,13 @@ def _run_monitor_loop(
                         _evo_apps_root = Path(os.environ.get("PROJECT_FILES_ROOT", "/project-files")) / project_id / "apps"
                         dev_artifacts, _evo_viol = _evolution_scope_check(pipeline_ctx, dev_artifacts, _evo_apps_root)
                         if _evo_viol:
-                            _viol_map = getattr(pipeline_ctx, "evolution_violations", None)
-                            if isinstance(_viol_map, dict):
-                                _viol_map.setdefault(task_id, []).extend(_evo_viol)
-                            _n_viol_rounds = len([v for v in (_viol_map or {}).get(task_id, []) if v.startswith("FORA DO ESCOPO") or v.startswith("SÍMBOLOS")])
-                            _post_step(f"⛔ Gate de escopo da evolução (task {task_id}): {len(_evo_viol)} artefato(s) descartado(s).", request_id)
+                            # 1 resposta do Dev = 1 rodada (não contar por arquivo — senão 3 arquivos fora
+                            # do escopo numa resposta bloqueariam na 1ª tentativa, sem rework).
+                            _n_viol_rounds = _evo_register_violation(pipeline_ctx, task_id, _evo_viol)
+                            # O rework NÃO pode receber os artefatos rejeitados como "existentes": o Dev
+                            # veria o arquivo descartado como já criado e o repetiria → 2ª violação → BLOCK.
+                            task_artifacts_for_qa.pop(str(task_id).strip(), None)
+                            _post_step(f"⛔ Gate de escopo da evolução (task {task_id}, rodada {_n_viol_rounds}/{_EVO_MAX_VIOLATIONS_PER_TASK}): {len(_evo_viol)} artefato(s) descartado(s).", request_id)
                             for _v in _evo_viol[:6]:
                                 _post_step(f"  · {_v}", request_id)
                             if pipeline_ctx:
@@ -3592,7 +3631,7 @@ def _run_monitor_loop(
                                 _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason_evo})
                                 return
                             _update_task(project_id, task_id, status="QA_FAIL")
-                            time.sleep(1)
+                            time.sleep(2)
                             continue
                         _has_apps_artifact = any(
                             (a.get("path") or "").strip().startswith("apps/")

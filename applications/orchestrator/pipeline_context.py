@@ -163,6 +163,7 @@ class PipelineContext:
         self.evolution_scope: list[str] = []
         self.evolution_compat: "str | None" = None
         self.evolution_violations: dict[str, list[str]] = {}
+        self.evolution_violation_rounds: dict[str, int] = {}  # rodadas (respostas do Dev) com violação, por task
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
@@ -464,6 +465,7 @@ class PipelineContext:
             "evolution_scope": self.evolution_scope,
             "evolution_compat": self.evolution_compat,
             "evolution_violations": self.evolution_violations,
+            "evolution_violation_rounds": self.evolution_violation_rounds,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         with path.open("w", encoding="utf-8") as f:
@@ -515,6 +517,8 @@ class PipelineContext:
         ctx.evolution_compat = data.get("evolution_compat") or None
         _viol = data.get("evolution_violations")
         ctx.evolution_violations = _viol if isinstance(_viol, dict) else {}
+        _vr = data.get("evolution_violation_rounds")
+        ctx.evolution_violation_rounds = {str(k): int(v) for k, v in _vr.items()} if isinstance(_vr, dict) else {}
         logger.info("Checkpoint restaurado (LEI 11): step=%s, tasks=%s", ctx.current_step, len(ctx.completed_tasks))
         return ctx
 

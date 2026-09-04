@@ -53,6 +53,43 @@ def test_scope_check_descarta_fora_do_escopo_e_simbolos_removidos(tmp_path: Path
     assert len(allowed2) == 1 and v2 == []
 
 
+def test_glob_de_diretorio_sem_curinga_casa_a_arvore():
+    # como um humano escreve no RFC: pasta com/sem barra final
+    assert runner._evo_path_allowed("api/src/reports/pdf.ts", ["apps/api/src/reports/"])
+    assert runner._evo_path_allowed("api/src/reports/deep/x.ts", ["apps/api/src/reports"])
+    assert not runner._evo_path_allowed("api/src/reportsX/x.ts", ["apps/api/src/reports"])
+    # arquivo exato continua exato
+    assert runner._evo_path_allowed("api/src/a.ts", ["apps/api/src/a.ts"])
+    assert not runner._evo_path_allowed("api/src/a.ts.bak", ["apps/api/src/a.ts"])
+
+
+def test_simbolo_movido_para_outro_arquivo_entregue_nao_e_violacao(tmp_path: Path):
+    apps = tmp_path / "apps"; (apps / "api" / "src" / "reports").mkdir(parents=True)
+    (apps / "api" / "src" / "reports" / "service.ts").write_text("export function listReports() {}\nexport function exportPdf() {}\n")
+    ctx = PipelineContext("p"); ctx.evolution_scope = ["apps/api/src/reports/**"]
+    arts = [
+        {"path": "apps/api/src/reports/service.ts", "content": "export function listReports() {}\n"},   # exportPdf saiu daqui…
+        {"path": "apps/api/src/reports/pdf.ts", "content": "export function exportPdf() {}\n"},         # …e foi para cá (refactor)
+    ]
+    allowed, violations = runner._evolution_scope_check(ctx, arts, apps)
+    assert violations == [] and len(allowed) == 2
+
+
+def test_registro_de_violacao_conta_rodadas_nao_arquivos():
+    ctx = PipelineContext("p"); ctx.evolution_scope = ["apps/api/**"]
+    three = ["FORA DO ESCOPO do RFC: apps/web/a.ts", "FORA DO ESCOPO do RFC: apps/web/b.ts", "FORA DO ESCOPO do RFC: apps/web/c.ts"]
+    assert runner._evo_register_violation(ctx, "T1", three) == 1          # 3 arquivos numa resposta = 1 rodada
+    assert runner._evo_register_violation(ctx, "T1", three[:1]) == 2
+    assert runner._evo_register_violation(ctx, "T2", three[:1]) == 1      # por task
+    assert ctx.evolution_violation_rounds == {"T1": 2, "T2": 1}
+    assert len(ctx.evolution_violations["T1"]) == 4
+    # cap de mensagens
+    for _ in range(10):
+        runner._evo_register_violation(ctx, "T1", three)
+    assert len(ctx.evolution_violations["T1"]) == runner._EVO_MAX_VIOLATION_MSGS
+    assert runner._evo_register_violation(None, "T9", three) == 1
+
+
 def test_scope_check_sem_escopo_e_passthrough_e_inputs_do_dev(tmp_path: Path):
     ctx = PipelineContext("p")
     arts = [{"path": "apps/qualquer.ts", "content": "x"}]
@@ -70,4 +107,5 @@ def test_scope_check_sem_escopo_e_passthrough_e_inputs_do_dev(tmp_path: Path):
     ctx.save_checkpoint(tmp_path)
     r = PipelineContext.load_checkpoint(tmp_path, "p")
     assert r.evolution_scope == ["apps/api/**"] and r.evolution_compat == "minor" and r.evolution_violations == ctx.evolution_violations
+    assert r.evolution_violation_rounds == ctx.evolution_violation_rounds
     assert r.build_inputs_for_pm()["evolution_scope"] == ["apps/api/**"]
