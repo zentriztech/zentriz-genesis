@@ -33,7 +33,13 @@ function toWire(run: AutonomyRun) {
     projectId: run.projectId,
     status: run.status,
     active: !isTerminalAutonomyStatus(run.status),
+    // PR-5: no modo `per_file` `round` conta ARQUIVOS revisados e `passes` conta os ciclos de
+    // validação (é `passes` que respeita `maxRounds`) — a UI precisa dos dois para não mentir.
+    mode: run.mode,
     round: run.round,
+    passes: run.passes,
+    currentFile: run.currentFile,
+    filesDone: run.filesDone,
     maxRounds: run.maxRounds,
     gapsInitial: run.gapsInitial,
     gapsCurrent: run.gapsCurrent,

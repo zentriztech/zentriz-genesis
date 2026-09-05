@@ -92,6 +92,76 @@ Genesis/Auto Care são **100% LLM**; código só transporta e veta corrupção.
 - **A2.6 🟡 concorrência:** índice único da migration 090 = 1 laço por projeto (mantido); a fila é
   interna ao laço.
 
+#### 🔄 REVISÃO DE ROTA DA ONDA 2 (pesquisa de 2026-09-05, ANTES de codar o PR-4)
+
+A pesquisa do código vivo **refutou o desenho acima em dois pontos** e barateou o resto. Registro com a
+evidência, porque o desenho refutado teria causado PERDA DE DADOS:
+
+1. **A2.1 e A2.2 estão MORTOS — o PR-4 não passa pelo CTO normalizador.** `specChat.ts:465-470` documenta
+   uma revisão adversarial AO VIVO: o modo `spec_intake_and_normalize` é um **normalizador** que REGENERA
+   um `PRODUCT_SPEC` completo (Metadados/Visão/FRs/DoD) e **descarta o conteúdo original do arquivo**. Foi
+   exatamente por isso que o chat por-arquivo (T4.3) já usa `/invoke/raw` com prompt controlado. Mandar
+   `tecnico/dados.md` pelo normalizador o transformaria numa spec inteira: liberar o prefixo de path no
+   `envelope.py` só faria esse desastre passar pelo gate. → **o Resolver GAPs por arquivo usa `/invoke/raw`**
+   com um system prompt de CTO-editor (resolve os GAPs preservando o resto e devolve o arquivo final).
+   Consequência: **zero mudança em `envelope.py`** e `extractSpecMarkdown` (B8) sai do escopo — `/invoke/raw`
+   devolve o texto puro, não um envelope com `artifacts[]`.
+2. **O roteador LLM de findings é MUITO menor que o previsto: o `file` já vem do validador.**
+   `ValidationFinding.file` existe (`specValidation.ts:49-60`) e o Stage B recebe a spec com marcadores
+   `===== <rel_dir>/<filename> =====` (`specValidation.ts:406-410`) — ou seja, **a decisão "este GAP é
+   deste arquivo" já é tomada por um LLM** em cada validação, de graça. → o PR-4 (a) normaliza a string
+   reportada contra os paths reais da árvore (transporte: exato → case-insensitive → basename → sufixo) e
+   (b) **só** chama um LLM para os findings que sobram sem arquivo (Stage A global com `file:""`, ou path
+   obsoleto de antes da divisão), e **só quando a árvore tem 2+ arquivos** (com 1 arquivo não há decisão
+   a tomar). O resultado é persistido na run de validação (migração **094**), então o laço do PR-5 reusa
+   sem gastar de novo.
+3. **Achado NOVO (defeito de hoje, família G5): `/invoke/raw` é gasto INVISÍVEL.** `recordCtoUsage`
+   (`specChatJobs.ts:636-638`) pula `kind='file'` alegando que `call_bedrock_direct` já reporta — mas
+   `/invoke/raw` (`agents/server.py:854`) **não passa `usage_project_id`**, e `_report_direct_usage`
+   (`runtime.py:1853`) faz `return` sem project_id. Logo **todo o chat por-arquivo nunca foi debitado** em
+   `project_agent_metrics`. O PR-4 tornaria isso o caminho PRINCIPAL. → `/invoke/raw` passa a devolver
+   `usage` + `stop_reason`; a api debita (idempotente por `task_id`, como no G5) e marca `truncated`.
+4. **Achado NOVO (família T1): o chat por-arquivo pode truncar em silêncio.** `buildRawFileRequest` fixa
+   `max_tokens: 8000` para arquivos de até 20.000 chars (≈6k tokens só para devolver o arquivo, antes de
+   qualquer acréscimo) e `call_bedrock_direct` **não expõe `stop_reason`** ao chamador. → orçamento de
+   saída dimensionado pelo tamanho do arquivo (teto 20.000 para não acionar o guard de streaming em
+   21.333) e `stop_reason` ponta a ponta.
+
+#### ✅ PR-5 COMO FOI IMPLEMENTADO (migração 095, 2026-09-05)
+
+Decisões travadas na implementação, com o porquê (as três primeiras corrigem o desenho original):
+
+1. **O modo é DERIVADO da árvore, não de flag:** `startRound` conta `project_spec_files` a cada rodada —
+   2+ arquivos → fila por arquivo; 1 arquivo → o ciclo da 090 **byte por byte** (o corpo antigo virou
+   `startWholeRound`, intocado). Se o humano dividir a spec no meio do laço, a rodada seguinte já entra
+   no modo certo; se a árvore voltar a 1 arquivo, o claim regrava `mode='whole'` e limpa `current_file`.
+2. **`round` e `passes` são contadores DIFERENTES (A2.3 fechado):** no modo por arquivo `round` conta
+   ARQUIVOS revisados (teto próprio `AUTONOMY_MAX_FILE_ROUNDS = 12`) e `passes` conta os ciclos de
+   validação — **é `passes` que respeita o `maxRounds` do Jean**. Com 2 arquivos por passe, 12 arquivos
+   caberiam em ~6 validações; o limite de 4 validações/h continua respeitado porque a validação só
+   dispara **quando a fila esvazia**, e nunca se nada foi aplicado no passe (medir a MESMA spec queimaria
+   cota). "Rodada 7/5" deixaria de fazer sentido — daí o rótulo por passe na UI e nas notas do chat.
+3. **Falha de ARQUIVO ≠ falha do LAÇO:** truncamento, encolhimento, revisão idêntica, arquivo grande
+   demais (`FILE_TOO_LARGE`, teto de 48k chars) ou CTO `BLOCKED` tiram **aquele** arquivo da fila com o
+   motivo no log e o laço segue no próximo; **duas seguidas** param (`MAX_FILE_FAILURES = 2` — aí o
+   problema é o modelo/serviço, não o arquivo). Já edição humana no arquivo, spec travada e snapshot
+   indisponível param na hora: valem para a árvore inteira.
+4. **Só 🔴/🟡 vão ao CTO-editor.** A `gapQueue` do `specGapScope` inclui arquivo que só tem `info`; o laço
+   usa fila própria (`blockers + warnings > 0`), porque `info` não sustenta rodada e mandá-lo devolveria o
+   arquivo inteiro de novo — custo sem mudar o critério de parada.
+5. **GAP importante sem arquivo definido não é adivinhado:** fila vazia com `unrouted` importante →
+   `stalled` dizendo exatamente isso (o roteador do PR-4 já teve sua chance, 1× por run de validação).
+6. **O transporte é reusado, não reimplementado:** `dispatchGapFileJob` (`routes/specChat.ts`) é o MESMO
+   caminho do botão "Resolver GAPs deste arquivo" — prompt de CTO-editor, orçamento de saída por tamanho,
+   `recordRawUsage`, recusa de `truncated`, job `kind='file'` durável (089). O laço só decide *qual*
+   arquivo e *quando*.
+7. **Escrita por arquivo com a mesma rede de segurança:** `writeSpecFile` (ex-`writePrimarySpec`) exige o
+   snapshot do conteúdo anterior **daquele** `file_path` como pré-condição (G2) — falhar aborta a escrita.
+
+Testes: `specAutonomy.perFile.test.ts` (18) provam fila por risco, escrita cirúrgica (os outros arquivos
+ficam byte a byte iguais), **uma** validação por passe, teto por passes, as 4 falhas de arquivo e as 3 de
+projeto, e que a árvore de 1 arquivo continua no caminho da 090. Suíte api-node: 1411 passed | 1 skipped.
+
 ### Onda 3 — G7 (o Genesis passa a aprender)
 - **A3.1 🔴 `RAG_ENABLED` ausente nos 4 containers:** ligar só no `.env` não basta — as envs do agents
   são declaradas no compose. → declarar `RAG_ENABLED=${RAG_ENABLED:-off}` nos serviços e ligar em prod

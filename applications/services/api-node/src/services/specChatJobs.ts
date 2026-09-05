@@ -633,12 +633,54 @@ export async function recordCtoUsage(
   job: { id: string; projectId: string | null; kind: SpecChatJobKind },
   result: Record<string, unknown>,
 ): Promise<boolean> {
-  // Sem projeto real não há onde debitar (preview de spec sem projeto). `file` usa `/invoke/raw` →
-  // `call_bedrock_direct`, que JÁ reporta pelo `_report_direct_usage`: reportar aqui duplicaria.
+  // Sem projeto real não há onde debitar (preview de spec sem projeto). `file` roda por
+  // `/invoke/raw` (síncrono, sem envelope de agente) e é debitado por `recordRawUsage` no ponto
+  // de coleta daquele caminho — ver a nota do PR-4 lá.
   if (!job.projectId || job.kind === "file") return false;
   const input = intOf(result._input_tokens_total) || intOf(result._input_tokens);
   const output = intOf(result._output_tokens_total) || intOf(result._output_tokens);
   if (!input && !output) return false;
+  const inserted = await debitWorkbenchUsage(db, {
+    projectId: job.projectId, taskId: `spec_chat:${job.id}`, input, output,
+    model: modelOf(result), durationMs: intOf(result._duration_ms) || null,
+    status: String((result as { status?: string }).status ?? "OK"),
+    label: `usage do CTO debitado: job=${job.id} calls=${intOf(result._llm_calls) || 1}`,
+  });
+  return inserted;
+}
+
+/**
+ * PR-4 (2026-09-05) — o mesmo furo do G5 existia no caminho `/invoke/raw` (chat/GAPs POR ARQUIVO).
+ *
+ * A justificativa anterior ("`call_bedrock_direct` já reporta") era FALSA: `_report_direct_usage`
+ * (runtime.py) só reporta quando recebe `usage_project_id`, e o endpoint `/invoke/raw` nunca passou
+ * esse campo — logo TODA edição por arquivo da Bancada nascia invisível ao cost cap. Com o PR-4 o
+ * endpoint devolve `usage`/`stop_reason` e o débito é feito aqui, no mesmo padrão idempotente
+ * (`task_id = 'spec_chat:<jobId>'`), com o mesmo agente (`spec_cto`) — é o mesmo papel, outro
+ * transporte. Nunca lança.
+ */
+export async function recordRawUsage(
+  db: Db,
+  job: { id: string; projectId: string | null },
+  raw: { usage?: { input_tokens?: unknown; output_tokens?: unknown } | null; model_used?: string | null; truncated?: boolean },
+): Promise<boolean> {
+  if (!job.projectId) return false;
+  const input = intOf(raw.usage?.input_tokens);
+  const output = intOf(raw.usage?.output_tokens);
+  if (!input && !output) return false;
+  return debitWorkbenchUsage(db, {
+    projectId: job.projectId, taskId: `spec_chat:${job.id}`, input, output,
+    model: raw.model_used ?? null, durationMs: null,
+    status: raw.truncated ? "TRUNCATED" : "OK",
+    label: `usage do /invoke/raw debitado: job=${job.id}`,
+  });
+}
+
+/** INSERT idempotente em `project_agent_metrics` (um por `task_id`). Nunca lança. */
+async function debitWorkbenchUsage(
+  db: Db,
+  args: { projectId: string; taskId: string; input: number; output: number; model: string | null; durationMs: number | null; status: string; label: string },
+): Promise<boolean> {
   try {
     const r = await db.query(
       `INSERT INTO project_agent_metrics
@@ -647,17 +689,16 @@ export async function recordCtoUsage(
           WHERE NOT EXISTS (
             SELECT 1 FROM project_agent_metrics WHERE project_id = $1 AND agent = $2 AND task_id = $3
           )`,
-      [job.projectId, WORKBENCH_CTO_AGENT, `spec_chat:${job.id}`, input, output,
-        modelOf(result), intOf(result._duration_ms) || null,
-        String((result as { status?: string }).status ?? "OK").toUpperCase().slice(0, 32)],
+      [args.projectId, WORKBENCH_CTO_AGENT, args.taskId, args.input, args.output,
+        args.model, args.durationMs, args.status.toUpperCase().slice(0, 32)],
     );
     const inserted = (r.rowCount ?? 0) > 0;
     if (inserted) {
-      console.info(`[SpecChatJobs] usage do CTO debitado: job=${job.id} projeto=${job.projectId.slice(0, 8)} in=${input} out=${output} calls=${intOf(result._llm_calls) || 1}`);
+      console.info(`[SpecChatJobs] ${args.label} projeto=${args.projectId.slice(0, 8)} in=${args.input} out=${args.output}`);
     }
     return inserted;
   } catch (e) {
-    console.warn(`[SpecChatJobs] recordCtoUsage falhou (best-effort): ${msg(e)}`);
+    console.warn(`[SpecChatJobs] débito de usage falhou (best-effort): ${msg(e)}`);
     return false;
   }
 }

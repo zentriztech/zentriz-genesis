@@ -998,6 +998,39 @@ export async function specRoutes(app: FastifyInstance) {
     });
   });
 
+  // ── PR-4 (F2): mapa GAPs ↔ ARQUIVOS da spec ───────────────────────────────────
+  // GET  /api/specs/:id/gap-scope  → quantos GAPs ativos cada arquivo tem (+ fila sugerida). GRÁTIS:
+  //                                  só lê o `file` que o validador (LLM) já devolveu e as rotas já
+  //                                  persistidas. Nunca chama modelo — um GET não gasta dinheiro.
+  // POST /api/specs/:id/gap-routes → roteia por AGENTE os GAPs que ficaram sem arquivo (globais do
+  //                                  Stage A / paths obsoletos pós-divisão) e persiste na run
+  //                                  (migração 094). É a ação explícita que gasta, uma vez por run.
+  app.get<{ Params: { id: string } }>("/api/specs/:id/gap-scope", async (request, reply) => {
+    const user = getUser(request);
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Sem caso de uso p/ token de serviço." });
+    }
+    const { id } = request.params;
+    const proj = await loadAccessibleProject(id, user);
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    const { gapScopeForProject, toWire } = await import("../services/specGapScope.js");
+    const scope = await gapScopeForProject(pool, id);
+    return reply.send(toWire(scope));
+  });
+
+  app.post<{ Params: { id: string } }>("/api/specs/:id/gap-routes", async (request, reply) => {
+    const user = getUser(request);
+    if (user.svc === "runner") {
+      return reply.status(403).send({ code: "FORBIDDEN", message: "Token de serviço não roteia GAPs." });
+    }
+    const { id } = request.params;
+    const proj = await loadAccessibleProject(id, user);
+    if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+    const { ensureGapScope, toWire } = await import("../services/specGapScope.js");
+    const { scope, routing } = await ensureGapScope(pool, id, { route: true });
+    return reply.send({ ...toWire(scope), routing });
+  });
+
   // ── RFC-0005: triagem por finding ─────────────────────────────────────────────
   // POST   /api/specs/:id/findings/:fingerprint/triage { state, reason_code, reason?, expiresAt? }
   // DELETE /api/specs/:id/findings/:fingerprint/triage   (reativar)

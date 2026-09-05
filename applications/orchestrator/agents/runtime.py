@@ -1815,6 +1815,30 @@ class _UsageCollector:
 # /invoke/raw lê para devolver `model_used` correto (antes devolvia o modelo PEDIDO — telemetria errada).
 LAST_EFFECTIVE_MODEL: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("last_effective_model", default=None)
 
+# PR-4 (2026-09-05) — `stop_reason` e `usage` da última call_bedrock_direct DESTE contexto.
+#
+# POR QUE: `call_bedrock_direct` devolve só a string. O `stop_reason` era apenas LOGADO, então quem
+# chama via /invoke/raw (chat por-arquivo, Resolver GAPs por arquivo, Cyborg V2) não tinha como saber
+# que a resposta foi CORTADA no teto de saída — e aplicava o arquivo mutilado por cima do bom. É a
+# mesma classe do T1/T2 do caminho da spec inteira, que já propaga `_truncated` ponta a ponta.
+# E `usage` aqui é o que permite DEBITAR o custo: `_report_direct_usage` só reporta quando recebe
+# `usage_project_id`, e /invoke/raw nunca passou um → todo o gasto do chat por-arquivo era invisível
+# ao cost cap (família do G5). Devolvendo os tokens na resposta, a api debita como já faz no CTO.
+#
+# ContextVar (não atributo global) pelo mesmo motivo do `_usage_sink`: chamadas concorrentes no
+# mesmo processo (FastAPI + ThreadPoolExecutor) não podem sobrescrever o valor uma da outra.
+LAST_STOP_REASON: "contextvars.ContextVar[str | None]" = contextvars.ContextVar("last_stop_reason", default=None)
+LAST_USAGE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar("last_usage", default=None)
+
+
+def _record_call_outcome(input_tokens: int, output_tokens: int, stop_reason: str | None) -> None:
+    """Publica `stop_reason`/`usage` da chamada atual para o chamador HTTP ler. Nunca lança."""
+    try:
+        LAST_STOP_REASON.set(str(stop_reason) if stop_reason else None)
+        LAST_USAGE.set({"input_tokens": int(input_tokens or 0), "output_tokens": int(output_tokens or 0)})
+    except Exception:
+        pass
+
 _usage_sink: "contextvars.ContextVar[_UsageCollector | None]" = contextvars.ContextVar(
     "genesis_usage_sink", default=None,
 )
@@ -1964,6 +1988,9 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     ao POST /agent-metrics (fire-and-forget) — sem isso a chamada é invisível ao cost-cap.
     """
     _t0 = time.time()
+    # Zera o resultado publicado: se ESTA chamada morrer antes de reportar, ninguém lê o
+    # stop_reason/usage da chamada ANTERIOR deste contexto como se fosse desta.
+    _record_call_outcome(0, 0, None)
     if os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower() == "foundry":
         client = _build_foundry_client()
         # temperature é depreciada nos modelos Claude 5 do Foundry — omitir.
@@ -2002,8 +2029,12 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                                          int((time.time() - _t0) * 1000))
                     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                                 getattr(_u, "output_tokens", 0) or 0, model_id)
+                    _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
+                                         getattr(_u, "output_tokens", 0) or 0,
+                                         getattr(_final, "stop_reason", None))
                 except Exception:
                     pass
+            LAST_EFFECTIVE_MODEL.set(model_id)
             return "".join(parts)
         resp = client.messages.create(
             model=model_id, max_tokens=max_tokens,
@@ -2017,6 +2048,9 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                              int((time.time() - _t0) * 1000))
         _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                     getattr(_u, "output_tokens", 0) or 0, model_id)
+        _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
+                             getattr(_u, "output_tokens", 0) or 0,
+                             getattr(resp, "stop_reason", None))
         LAST_EFFECTIVE_MODEL.set(model_id)
         parts = []
         for block in getattr(resp, "content", []) or []:
@@ -2131,6 +2165,9 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                          int((time.time() - _t0) * 1000))
     _sink_usage(getattr(_u, "input_tokens", 0) or 0,
                 getattr(_u, "output_tokens", 0) or 0, _used_model)
+    _record_call_outcome(getattr(_u, "input_tokens", 0) or 0,
+                         getattr(_u, "output_tokens", 0) or 0,
+                         getattr(resp, "stop_reason", None))
     # AnthropicBedrock retorna Message com .content = [TextBlock, ...]
     parts: list[str] = []
     for block in getattr(resp, "content", []) or []:
