@@ -36,6 +36,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CloseIcon from "@mui/icons-material/Close";
 import EditIcon from "@mui/icons-material/Edit";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
@@ -574,7 +575,9 @@ type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" |
 // no payload ao CTO. Reenviar conversas antigas mudaria o contexto do modelo e poderia ressuscitar
 // uma instrução de dias atrás ("remova o módulo X") num turno novo.
 type ChatMessage = { role: "user" | "assistant"; content: string; seeded?: boolean };
-type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
+// `specMarkdown` pode vir preenchido COM `status: "error"` — job reprovado pelo enforcer que ainda
+// guarda a revisão inteira (a api devolve para ser OFERECIDA, nunca aplicada sozinha).
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string | null; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
 // Migração 089 — job do chat que o SERVIDOR ainda tem (em voo, ou concluído e não coletado).
 // É o que permite reabrir a Bancada e reencontrar o estado em vez de redisparar outro Opus 5.
 type InFlightChatJob = {
@@ -590,17 +593,79 @@ type InFlightChatJob = {
   createdAt: string;
   /** true = terminou enquanto ninguém olhava → OFERECER o resultado, nunca aplicar sozinho. */
   recovered: boolean;
+  /** true = job REPROVADO que ainda guarda uma spec (ex.: enforcer bloqueou por metadados). O
+   *  resultado existe e vale ser oferecido — com o motivo da reprovação à vista. */
+  salvaged?: boolean;
 };
 // T4.3: uma revisão de UM arquivo, produzida pela IA, aguardando confirmação de aplicação.
 type PendingApply = { path: string; content: string; baseSha: string | null };
 // Migração 089: revisão da SPEC INTEIRA recuperada de um job que terminou sem ninguém olhando.
 // Não pode ir direto ao editor: nesse intervalo o usuário pode ter editado a spec à mão, e
 // `setSpecMarkdown` cego apagaria a edição silenciosamente.
-type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps" };
+// `rejected`: a revisão existe mas o agente a REPROVOU (enforcer/BLOCKED). Continua sendo oferecida
+// — o documento costuma estar íntegro e a reprovação ser de metadados — mas com o motivo à vista.
+type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps"; rejected?: string | null };
 // Fallback do teto de espera quando o servidor não informa `deadlineAt` (api antiga). O valor
 // AUTORITATIVO vem do 202/do job — o 18 min hardcoded que existia aqui matava a espera ANTES de
 // revisões que o CTO concluía em 19 min, jogando fora o trabalho já pago.
 const CHAT_CLIENT_DEADLINE_MS = 40 * 60_000;
+
+// ── Modo autônomo (migração 090) ─────────────────────────────────────────────
+// O laço "Resolver GAPs → Salvar rascunho → Validar" roda NO SERVIDOR (uma linha em
+// `spec_autonomy_runs` avançada pelo tick de 20 s). Esta tela só liga a opção, desenha o log das
+// rodadas e recarrega a spec quando o servidor a reescreve no disco — nada do laço depende de o
+// navegador ficar aberto.
+type AutonomyStatus =
+  | "pending" | "cto_running" | "applying" | "validating"
+  | "succeeded" | "exhausted" | "stalled" | "failed" | "stopped";
+type AutonomyRoundLog = {
+  round: number;
+  startedAt?: string;
+  finishedAt?: string;
+  gapsBefore?: number | null;
+  gapsAfter?: number | null;
+  blockers?: number | null;
+  warnings?: number | null;
+  applied?: boolean;
+  specChars?: number | null;
+  note?: string;
+};
+type AutonomyRun = {
+  id: string;
+  projectId: string;
+  status: AutonomyStatus;
+  active: boolean;
+  round: number;
+  maxRounds: number;
+  gapsInitial: number | null;
+  gapsCurrent: number | null;
+  rounds: AutonomyRoundLog[];
+  lastError: string | null;
+  deadlineAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+};
+type AutonomyState = { run: AutonomyRun | null; enabled: boolean; maxRoundsAllowed: number };
+
+/** Rótulo PT-BR do estado do laço + severidade para o Alert (o usuário precisa saber se acabou). */
+const AUTONOMY_LABEL: Record<AutonomyStatus, string> = {
+  pending: "aguardando a próxima rodada",
+  cto_running: "o CTO está resolvendo os GAPs",
+  applying: "salvando a spec revisada",
+  validating: "validação adversarial em andamento",
+  succeeded: "concluído — sem GAPs vermelhos ou amarelos em aberto",
+  exhausted: "teto de rodadas atingido com GAPs ainda em aberto",
+  stalled: "interrompido por falta de progresso (ou spec editada à mão)",
+  failed: "interrompido por erro",
+  stopped: "interrompido por você",
+};
+function autonomySeverity(s: AutonomyStatus): "info" | "success" | "warning" | "error" {
+  if (s === "succeeded") return "success";
+  if (s === "failed") return "error";
+  if (s === "exhausted" || s === "stalled" || s === "stopped") return "warning";
+  return "info";
+}
 
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
@@ -914,6 +979,8 @@ function SpecChatPanel({
   gapCount = null, onResolveGaps,
   isEvolution = false, onEvolvePlan,
   recovered = null, onApplyRecovered, onDiscardRecovered,
+  autonomyOn = false, onAutonomyToggle, autonomy = null, autonomyError = null,
+  autonomyStarting = false, onStopAutonomy,
 }: {
   // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
   // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
@@ -943,12 +1010,25 @@ function SpecChatPanel({
   recovered?: RecoveredSpec | null;
   onApplyRecovered?: () => void;
   onDiscardRecovered?: () => void;
+  // Migração 090 — modo autônomo: o checkbox só muda o DESTINO do botão "Resolver GAPs"
+  // (POST /api/spec-autonomy em vez de POST /api/spec-chat). O laço em si vive no servidor;
+  // `autonomy` é o estado lido por poll e desenhado como log de rodadas.
+  autonomyOn?: boolean;
+  onAutonomyToggle?: (on: boolean) => void;
+  autonomy?: AutonomyState | null;
+  autonomyError?: string | null;
+  autonomyStarting?: boolean;
+  onStopAutonomy?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, sending, pending, recovered]);
   const fileMode = Boolean(activeFilePath);
+  // Migração 090 — laço autônomo do servidor: enquanto ativo, o botão "Resolver GAPs" fica
+  // travado (o laço já está chamando o CTO) e o painel abaixo mostra o que ele fez em cada rodada.
+  const autonomyRun = autonomy?.run ?? null;
+  const autonomyRunning = Boolean(autonomyRun?.active);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", bgcolor: "background.paper" }}>
@@ -1030,19 +1110,29 @@ function SpecChatPanel({
       {/* Migração 089 — revisão da spec INTEIRA que terminou enquanto esta tela estava fechada.
           Nunca entra no editor sozinha: a spec pode ter sido editada à mão nesse intervalo. */}
       {!fileMode && recovered && (
-        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
+        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: recovered.rejected ? "warning.main" : "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
           <Typography variant="caption" sx={{ display: "block", fontWeight: 700, mb: 0.5 }}>
-            ✓ Revisão recuperada ({recovered.content.length} caracteres)
+            {recovered.rejected ? "⚠ Revisão recuperada de um job reprovado" : "✓ Revisão recuperada"}
+            {" "}({recovered.content.length} caracteres)
           </Typography>
+          {/* Reprovado pelo enforcer: o documento em si costuma estar íntegro (a reprovação é de
+              metadados/evidência), mas o motivo fica à vista para o Jean decidir com informação. */}
+          {recovered.rejected && (
+            <Alert severity="warning" sx={{ mb: 1, fontSize: "0.72rem" }}>
+              O agente reprovou o próprio resultado: {recovered.rejected} — revise o conteúdo antes de aplicar.
+            </Alert>
+          )}
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, lineHeight: 1.5 }}>
-            {recovered.kind === "resolve_gaps"
-              ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
-              : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
+            {recovered.rejected
+              ? "A revisão foi produzida por inteiro e ficou guardada no servidor em vez de ser descartada."
+              : recovered.kind === "resolve_gaps"
+                ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
+                : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
             {" "}Aplicar substitui o conteúdo do editor — se você editou a spec desde então, essa
             edição é perdida.
           </Typography>
           <Stack direction="row" spacing={1}>
-            <Button size="small" variant="contained" color="success"
+            <Button size="small" variant="contained" color={recovered.rejected ? "warning" : "success"}
               startIcon={<CheckCircleIcon sx={{ fontSize: "1rem" }} />}
               onClick={onApplyRecovered}>Aplicar ao editor</Button>
             <Button size="small" color="inherit" onClick={onDiscardRecovered}>Descartar</Button>
@@ -1098,22 +1188,110 @@ function SpecChatPanel({
             </span>
           </Tooltip>
         )}
-        {/* Onda 1 — Resolver GAPs (só na spec inteira): manda o CTO corrigir os findings da
-            validação adversarial, com o relatório + arquivos irmãos como contexto. */}
-        {!fileMode && onResolveGaps && (
-          <Tooltip title={(gapCount ?? 0) > 0
-            ? "Enviar os GAPs da validação para o CTO resolver de forma adversarial"
-            : "Nenhum GAP em aberto — rode Validar para (re)avaliar a spec"}>
-            <span>
-              <Button fullWidth size="small" variant="outlined" color="warning"
-                startIcon={<AutoFixHighIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={sending || (gapCount ?? 0) === 0}
-                onClick={onResolveGaps}
-                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
-                {(gapCount ?? 0) > 0 ? `Resolver GAPs (${gapCount})` : "Sem GAPs em aberto"}
+        {/* Migração 090 — painel do laço autônomo: o registro de AÇÕES que o pedido exige
+            ("entrar em modo recursivo registrando ações"). Fica visível também depois de terminar,
+            para o usuário ver por que o laço parou sem precisar abrir o histórico. */}
+        {!fileMode && autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
+          <Box
+            sx={{
+              mb: 0.75, p: 1, borderRadius: 1.5, bgcolor: "action.hover",
+              border: "1px solid", borderColor: autonomyRunning ? "primary.main" : "divider",
+            }}
+            aria-live="polite"
+          >
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.5 }}>
+              {autonomyRunning && <CircularProgress size={12} />}
+              <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.7rem" }}>
+                🤖 Modo autônomo — rodada {autonomyRun.round}/{autonomyRun.maxRounds}
+              </Typography>
+            </Stack>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
+              {AUTONOMY_LABEL[autonomyRun.status]}
+              {typeof autonomyRun.gapsInitial === "number" && typeof autonomyRun.gapsCurrent === "number"
+                ? ` · GAPs importantes: ${autonomyRun.gapsInitial} → ${autonomyRun.gapsCurrent}`
+                : ""}
+            </Typography>
+            {autonomyRun.rounds.length > 0 && (
+              <Stack spacing={0.25} sx={{ mt: 0.75 }}>
+                {autonomyRun.rounds.map((r) => (
+                  <Typography key={r.round} variant="caption" color="text.secondary"
+                    sx={{ display: "block", fontSize: "0.65rem", lineHeight: 1.5 }}>
+                    <Box component="span" sx={{ fontWeight: 700 }}>#{r.round}</Box>
+                    {" "}🔴 {r.blockers ?? 0} · 🟡 {r.warnings ?? 0}
+                    {typeof r.gapsAfter === "number" ? ` → ${r.gapsAfter} restante(s)` : ""}
+                    {r.applied === false ? " · não aplicada" : ""}
+                    {r.note ? ` · ${r.note}` : ""}
+                  </Typography>
+                ))}
+              </Stack>
+            )}
+            {autonomyRun.lastError && (
+              <Alert severity={autonomySeverity(autonomyRun.status)} sx={{ mt: 0.75, fontSize: "0.68rem", py: 0 }}>
+                {autonomyRun.lastError}
+              </Alert>
+            )}
+            {autonomyRunning && onStopAutonomy && (
+              <Button size="small" color="inherit" onClick={onStopAutonomy}
+                sx={{ mt: 0.5, fontSize: "0.68rem", textTransform: "none" }}>
+                Interromper laço
               </Button>
-            </span>
-          </Tooltip>
+            )}
+          </Box>
+        )}
+        {autonomyError && !fileMode && (
+          <Alert severity="warning" sx={{ mb: 0.75, fontSize: "0.7rem", py: 0 }}>{autonomyError}</Alert>
+        )}
+        {/* Onda 1 — Resolver GAPs (só na spec inteira): manda o CTO corrigir os findings da
+            validação adversarial, com o relatório + arquivos irmãos como contexto.
+            Migração 090: com o checkbox marcado, o mesmo botão inicia o LAÇO no servidor
+            (resolver → salvar → validar), repetido enquanto sobrar GAP 🔴/🟡, até 5 rodadas. */}
+        {!fileMode && onResolveGaps && (
+          <>
+            <Tooltip title={autonomy?.enabled === false
+              ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
+              : "O CTO resolve os GAPs, a spec é salva e revalidada automaticamente; repete enquanto sobrar GAP vermelho ou amarelo, no limite de rodadas. GAPs de baixo risco (azuis) não sustentam nova rodada."}>
+              <FormControlLabel
+                sx={{ ml: 0, mb: 0.25, alignItems: "flex-start" }}
+                control={
+                  <Checkbox
+                    size="small" checked={autonomyOn}
+                    disabled={autonomyRunning || autonomyStarting || autonomy?.enabled === false}
+                    onChange={(e) => onAutonomyToggle?.(e.target.checked)}
+                    sx={{ py: 0.25 }}
+                  />
+                }
+                label={
+                  <Typography variant="caption" sx={{ fontSize: "0.7rem", lineHeight: 1.4 }}>
+                    Ativar modo autônomo{" "}
+                    <Box component="span" sx={{ color: "text.secondary" }}>
+                      (até {autonomy?.maxRoundsAllowed ?? 5} rodadas)
+                    </Box>
+                  </Typography>
+                }
+              />
+            </Tooltip>
+            <Tooltip title={(gapCount ?? 0) > 0
+              ? (autonomyOn
+                ? "Iniciar o laço autônomo no servidor — continua rodando mesmo se você fechar esta tela"
+                : "Enviar os GAPs da validação para o CTO resolver de forma adversarial")
+              : "Nenhum GAP em aberto — rode Validar para (re)avaliar a spec"}>
+              <span>
+                <Button fullWidth size="small" variant={autonomyOn ? "contained" : "outlined"} color="warning"
+                  startIcon={autonomyStarting
+                    ? <CircularProgress size={14} color="inherit" />
+                    : <AutoFixHighIcon sx={{ fontSize: "0.9rem" }} />}
+                  disabled={sending || autonomyRunning || autonomyStarting || (gapCount ?? 0) === 0}
+                  onClick={onResolveGaps}
+                  sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
+                  {(gapCount ?? 0) > 0
+                    ? (autonomyRunning
+                      ? "Laço autônomo em andamento…"
+                      : `${autonomyOn ? "Resolver GAPs em modo autônomo" : "Resolver GAPs"} (${gapCount})`)
+                    : "Sem GAPs em aberto"}
+                </Button>
+              </span>
+            </Tooltip>
+          </>
         )}
         <Stack direction="row" spacing={0.75} alignItems="flex-end">
           <TextField
@@ -1248,9 +1426,10 @@ export default function SpecPage() {
   // Spec editor
   const [specMarkdown, setSpecMarkdown] = useState<string | null>(null);
   const [editorFullscreen, setEditorFullscreen] = useState(false);
-  // Em tela cheia, no mobile não cabem editor e chat lado a lado → alterna o painel visível.
-  // No desktop os dois aparecem juntos (o toggle fica oculto).
-  const [fsPane, setFsPane] = useState<"editor" | "chat">("editor");
+  // Em tela cheia, no mobile não cabem editor, chat e árvore lado a lado → alterna o painel
+  // visível ("files" só existe quando a spec veio de um produto). No desktop todos aparecem
+  // juntos (o toggle fica oculto).
+  const [fsPane, setFsPane] = useState<"editor" | "chat" | "files">("editor");
   const [approving, setApproving]       = useState<"save" | "start" | null>(null);
   const [approveError, setApproveError] = useState<string | null>(null);
 
@@ -1302,15 +1481,37 @@ export default function SpecPage() {
   const [treeProductId, setTreeProductId] = useState<string>("");
   // No mobile o chat não cabe ao lado do editor → abre em tela cheia via FAB.
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
-  // Ao cruzar para o desktop (≥md), o chat volta a ser inline → fecha o dialog fullScreen
-  // (senão ele ficaria aberto sobre o layout desktop após um resize/rotação).
+  // Mesma história para a ÁRVORE da pasta do produto: o rail só existe ≥lg, então no mobile/tablet
+  // o usuário simplesmente não tinha acesso aos outros arquivos do produto. FAB + dialog fullScreen,
+  // exatamente como o chat.
+  const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  // Ao cruzar para o desktop, cada painel volta a ser inline → fecha o dialog fullScreen (senão
+  // ficaria aberto sobre o layout desktop após um resize/rotação). Breakpoints diferentes: o chat
+  // é inline a partir de md (900px), a árvore só a partir de lg (1200px).
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(min-width:900px)");
-    const onChange = () => { if (mq.matches) setMobileChatOpen(false); };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    const mqChat = window.matchMedia("(min-width:900px)");
+    const mqTree = window.matchMedia("(min-width:1200px)");
+    const onChat = () => { if (mqChat.matches) setMobileChatOpen(false); };
+    const onTree = () => { if (mqTree.matches) setMobileTreeOpen(false); };
+    mqChat.addEventListener("change", onChat);
+    mqTree.addEventListener("change", onTree);
+    return () => {
+      mqChat.removeEventListener("change", onChat);
+      mqTree.removeEventListener("change", onTree);
+    };
   }, []);
+
+  // Migração 090 — modo autônomo. `autonomyOn` é só a intenção do usuário (o checkbox); o LAÇO
+  // vive no servidor, numa linha de `spec_autonomy_runs` avançada pelo tick de 20 s da api. Por
+  // isso o estado autoritativo vem sempre do GET, nunca de um timer local.
+  const [autonomyOn, setAutonomyOn] = useState(false);
+  const [autonomy, setAutonomy] = useState<AutonomyState | null>(null);
+  const [autonomyError, setAutonomyError] = useState<string | null>(null);
+  const [autonomyStarting, setAutonomyStarting] = useState(false);
+  // Última observação do laço, para detectar "a rodada virou" / "o laço terminou" — os dois
+  // momentos em que o servidor reescreveu a spec no disco e o editor precisa reler.
+  const autonomySyncRef = useRef<{ runId: string; round: number; active: boolean } | null>(null);
 
   // Upload flow
   const [files, setFiles]         = useState<File[]>([]);
@@ -1587,6 +1788,12 @@ export default function SpecPage() {
           // `interrupted`/`lost` do banco chegam aqui como error + a causa real no campo `error`.
           finish();
           setChatError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
+          // 2026-09-05 — um envelope reprovado pelo enforcer ainda carrega a spec inteira, e a api
+          // agora a devolve junto do erro. Não some com ~20 min de Opus 5: OFERECE (nunca aplica),
+          // com o motivo da reprovação no card. Modo por-arquivo não passa pelo enforcer.
+          if (kind !== "file" && poll.specMarkdown) {
+            setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: null, kind, rejected: poll.error ?? null });
+          }
         }
         // pending/running → segue pollando (o servidor também coleta em paralelo, sem duplicar).
       } catch (e) {
@@ -1704,10 +1911,13 @@ export default function SpecPage() {
         const seq = chatSeqRef.current;
         if (chatPollRef.current) return; // o usuário já disparou um turno novo enquanto isto voltava
         const deadlineMs = job.deadlineAt ? Date.parse(job.deadlineAt) : Date.now() + 40 * 60_000;
-        if (job.status === "error") {
+        if (job.status === "error" && !job.salvaged) {
           setChatError(job.error ?? "A revisão anterior terminou em erro.");
           return;
         }
+        // `salvaged` → o job foi REPROVADO mas guarda a spec inteira. Deixa o polling seguir: o
+        // GET /:jobId devolve error + specMarkdown e o ramo de erro do poll OFERECE a revisão
+        // (com o motivo da reprovação) em vez de descartar ~20 min de Opus 5.
         setChatSending(true);
         setChatError(null);
         startChatPolling({
@@ -1784,10 +1994,95 @@ export default function SpecPage() {
     });
   }, [chatInput, specMarkdown, chatMessages, chatSending, editProjectId, activeFile, treeDirty, stopChatPolling, startChatPolling]);
 
+  // ── Modo autônomo (migração 090) ────────────────────────────────────────────
+  // Três responsabilidades AQUI (o laço é do servidor): iniciar, pollar/desenhar e — o ponto
+  // sutil — RECARREGAR a spec do editor a cada rodada. O servidor reescreve o arquivo no disco;
+  // um editor com o texto velho salvaria por cima do trabalho da rodada seguinte (e a guarda de
+  // edição humana do servidor abortaria o laço, acusando edição por fora).
+  const reloadSpecFromServer = useCallback(async () => {
+    if (!editProjectId) return;
+    try {
+      const data = await apiGet<{ specMarkdown: string; title: string }>(`/api/projects/${editProjectId}/spec-content`);
+      setSpecMarkdown(data.specMarkdown);
+    } catch { /* mantém o editor como está; o próximo tick tenta de novo */ }
+  }, [editProjectId]);
+
+  const refreshAutonomy = useCallback(async () => {
+    if (!editProjectId) return;
+    let state: AutonomyState;
+    try {
+      state = await apiGet<AutonomyState>(`/api/spec-autonomy?projectId=${editProjectId}`);
+    } catch { return; } // falha de rede não some com o painel — o próximo tick reconsulta
+    setAutonomy(state);
+    const run = state.run;
+    if (!run) { autonomySyncRef.current = null; return; }
+    const prev = autonomySyncRef.current;
+    autonomySyncRef.current = { runId: run.id, round: run.round, active: run.active };
+    // Reconcilia o editor quando a rodada avançou, quando o laço terminou, ou na primeira vez que
+    // encontramos um laço ATIVO (ele pode ter escrito rodadas com esta tela fechada).
+    const advanced = prev?.runId === run.id && (run.round !== prev.round || (prev.active && !run.active));
+    if (advanced || (!prev && run.active)) {
+      await reloadSpecFromServer();
+      setValidationReloadSignal((n) => n + 1);
+      setStaleValidation(false);
+    }
+  }, [editProjectId, reloadSpecFromServer]);
+
+  useEffect(() => {
+    setAutonomy(null);
+    setAutonomyError(null);
+    autonomySyncRef.current = null;
+    if (!editProjectId) return;
+    void refreshAutonomy();
+  }, [editProjectId, refreshAutonomy]);
+
+  // Poll de 15 s só enquanto o laço está ativo (tick do servidor é 20 s). Terminado, o painel
+  // congela no último estado — sem timer pendurado.
+  useEffect(() => {
+    if (!autonomy?.run?.active) return;
+    const t = setInterval(() => { void refreshAutonomy(); }, 15_000);
+    return () => clearInterval(t);
+  }, [autonomy?.run?.active, refreshAutonomy]);
+
+  const handleStartAutonomy = useCallback(async () => {
+    if (!editProjectId || autonomyStarting || autonomy?.run?.active) return;
+    setAutonomyError(null);
+    setAutonomyStarting(true);
+    try {
+      const res = await apiPost<{ run: AutonomyRun; maxRoundsAllowed: number }>("/api/spec-autonomy", { projectId: editProjectId });
+      autonomySyncRef.current = { runId: res.run.id, round: res.run.round, active: res.run.active };
+      setAutonomy({ run: res.run, enabled: true, maxRoundsAllowed: res.maxRoundsAllowed });
+      setChatMessages((prev) => [...prev, {
+        role: "user",
+        content: `🤖 Modo autônomo iniciado — resolver GAPs, salvar e validar por até ${res.run.maxRounds} rodada(s). Só GAPs 🔴/🟡 em aberto sustentam uma nova rodada.`,
+      }]);
+    } catch (e) {
+      setAutonomyError(e instanceof Error ? e.message : "Erro ao iniciar o modo autônomo.");
+    } finally {
+      setAutonomyStarting(false);
+    }
+  }, [editProjectId, autonomyStarting, autonomy?.run?.active]);
+
+  const handleStopAutonomy = useCallback(async () => {
+    const run = autonomy?.run;
+    if (!run?.active) return;
+    setAutonomyError(null);
+    try {
+      const res = await apiPost<{ run: AutonomyRun | null; stopped: boolean }>(`/api/spec-autonomy/${run.id}/stop`, {});
+      if (res?.run) setAutonomy((prev) => (prev ? { ...prev, run: res.run } : prev));
+      await refreshAutonomy();
+    } catch (e) {
+      setAutonomyError(e instanceof Error ? e.message : "Erro ao interromper o modo autônomo.");
+    }
+  }, [autonomy?.run, refreshAutonomy]);
+
   // Onda 1 — "Resolver GAPs": turno de chat (spec inteira) que manda o CTO corrigir os findings
   // da validação adversarial. O servidor injeta o relatório + irmãos e sintetiza a instrução;
   // aqui só logamos a solicitação/resposta no chat e aplicamos a spec revisada.
+  // Migração 090: com o checkbox de modo autônomo marcado, o mesmo botão inicia o LAÇO no
+  // servidor em vez de um turno único (o laço usa exatamente este mesmo caminho por rodada).
   const handleResolveGaps = useCallback(async () => {
+    if (autonomyOn) { await handleStartAutonomy(); return; }
     if (chatSending || !editProjectId || !specMarkdown) return;
     const seq = (chatSeqRef.current += 1);
     const label = (gapCount ?? 0) > 0 ? `🛠️ Resolver GAPs (${gapCount})` : "🛠️ Resolver GAPs";
@@ -1817,7 +2112,7 @@ export default function SpecPage() {
     if (seq !== chatSeqRef.current) { setChatSending(false); return; }
 
     startChatPolling({ jobId, seq, kind: "resolve_gaps", filePath: null, baseSha: null, deadlineMs });
-  }, [chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling, startChatPolling]);
+  }, [autonomyOn, handleStartAutonomy, chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling, startChatPolling]);
 
   // Evoluir E2 — pede ao arquiteto da Bancada os artefatos da evolução. Job assíncrono no
   // servidor (/invoke/raw); ao terminar, a árvore é recarregada e o resumo/pendências vão ao chat.
@@ -2171,19 +2466,40 @@ export default function SpecPage() {
     finally { setSubmitting(false); }
   };
 
+  // Migração 090 — os mesmos props do modo autônomo nos QUATRO pontos onde o SpecChatPanel é
+  // renderizado (inline, tela cheia, mobile e modo criação). Um objeto só evita que um deles
+  // fique para trás e o checkbox "desapareça" no mobile.
+  const autonomyPanelProps = {
+    autonomyOn,
+    onAutonomyToggle: setAutonomyOn,
+    autonomy,
+    autonomyError,
+    autonomyStarting,
+    onStopAutonomy: handleStopAutonomy,
+  };
+
   // ── Editor fullscreen dialog ────────────────────────────────────────────────
   const editorDialog = specMarkdown !== null && (
     <Dialog open={editorFullscreen} onClose={() => setEditorFullscreen(false)} fullScreen
       PaperProps={{ sx: { bgcolor: "background.default", m: 0 } }}>
       <DialogContent sx={{ p: 0, height: "100vh", display: "flex", flexDirection: "column" }}>
         {approveError && <Alert severity="error" sx={{ mx: 2, mt: 1 }} onClose={() => setApproveError(null)}>{approveError}</Alert>}
-        {/* Toggle editor↔chat só no mobile (xs); no desktop os dois painéis ficam lado a lado. */}
+        {/* Toggle editor↔chat↔arquivos só no mobile (xs); no desktop os painéis ficam lado a lado.
+            "Arquivos" existe só quando a spec foi aberta de um produto (?productId=…) — aqui um FAB
+            fixo não serve (ficaria por baixo deste Dialog), então a árvore é um TERCEIRO painel. */}
         <Stack direction="row" spacing={1}
           sx={{ display: { xs: "flex", md: "none" }, p: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+          {treeProductId && (
+            <Button fullWidth size="small" startIcon={<FolderOpenIcon />}
+              variant={fsPane === "files" ? "contained" : "outlined"} onClick={() => setFsPane("files")}
+              sx={{ minWidth: 0, px: 1 }}>Arquivos</Button>
+          )}
           <Button fullWidth size="small" startIcon={<EditIcon />}
-            variant={fsPane === "editor" ? "contained" : "outlined"} onClick={() => setFsPane("editor")}>Editor</Button>
+            variant={fsPane === "editor" ? "contained" : "outlined"} onClick={() => setFsPane("editor")}
+            sx={{ minWidth: 0, px: 1 }}>Editor</Button>
           <Button fullWidth size="small" startIcon={<AutoFixHighIcon />}
-            variant={fsPane === "chat" ? "contained" : "outlined"} onClick={() => setFsPane("chat")}>Melhorar com IA</Button>
+            variant={fsPane === "chat" ? "contained" : "outlined"} onClick={() => setFsPane("chat")}
+            sx={{ minWidth: 0, px: 1 }}>IA</Button>
         </Stack>
         <Box sx={{ flexGrow: 1, minHeight: 0, display: "flex" }}>
           {/* Rail da árvore da PASTA DO PRODUTO também em tela cheia (≥md; no mobile o toggle
@@ -2191,8 +2507,15 @@ export default function SpecPage() {
               ARQUIVO(S)" e navega o editProjectId. Só quando aberto de um produto (?productId). */}
           {treeProductId && (
             <>
-              <Box sx={{ width: `${treeWidth}px`, flexShrink: 0, display: { xs: "none", md: "flex" }, flexDirection: "column", borderRight: "1px solid", borderColor: "divider", overflow: "hidden" }}>
-                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
+              <Box sx={{
+                width: { xs: "100%", md: `${treeWidth}px` }, flexShrink: 0, minWidth: 0,
+                display: { xs: fsPane === "files" ? "flex" : "none", md: "flex" },
+                flexDirection: "column", borderRight: "1px solid", borderColor: "divider", overflow: "hidden",
+              }}>
+                {/* No mobile, escolher um arquivo troca o projeto do editor → volta ao painel
+                    "Editor" (senão a navegação parece não ter efeito). */}
+                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId}
+                  onOpen={(projId) => { setFsPane("editor"); openProductFile(projId); }} height="100%" />
               </Box>
               {/* Divisória arrastável árvore↔editor (duplo-clique reseta a 240px). */}
               <Box sx={{ display: { xs: "none", md: "block" }, alignSelf: "stretch" }}>
@@ -2231,6 +2554,7 @@ export default function SpecPage() {
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
+              {...autonomyPanelProps}
             />
           </Box>
         </Box>
@@ -2271,11 +2595,52 @@ export default function SpecPage() {
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
+              {...autonomyPanelProps}
           />
         </DialogContent>
       </Dialog>
     </>
   );
+
+  // ── Árvore da pasta do produto em tela cheia no mobile (FAB) ───────────────
+  // O rail da árvore só existe ≥lg; abaixo disso o usuário não alcançava os outros arquivos do
+  // produto (era preciso voltar a /products/:id). Mesmo padrão do chat: FAB fixo + Dialog
+  // fullScreen "por cima de tudo". O FAB sobe para bottom:96 no xs para não cobrir o FAB do chat
+  // (entre md e lg o chat já é inline, então volta a bottom:24). Só quando há produto na URL.
+  const mobileTree = treeProductId ? (
+    <>
+      <Fab
+        color="default" aria-label="Abrir a pasta do produto"
+        onClick={() => setMobileTreeOpen(true)}
+        sx={{
+          display: { xs: "flex", lg: "none" }, position: "fixed",
+          bottom: { xs: 96, md: 24 }, right: 24, zIndex: (t) => t.zIndex.speedDial,
+        }}
+      >
+        <FolderOpenIcon />
+      </Fab>
+      <Dialog open={mobileTreeOpen} onClose={() => setMobileTreeOpen(false)} fullScreen
+        PaperProps={{ sx: { bgcolor: "background.default", m: 0 } }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between"
+          sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <FolderOpenIcon sx={{ color: "text.secondary", fontSize: "1.2rem" }} />
+            <Typography variant="subtitle1" fontWeight={700}>Pasta do produto</Typography>
+          </Stack>
+          <IconButton onClick={() => setMobileTreeOpen(false)} aria-label="Fechar"><CloseIcon /></IconButton>
+        </Stack>
+        <DialogContent sx={{ p: 0, display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
+          {/* Abrir um arquivo navega o editor (router.replace) → fecha o overlay, senão o usuário
+              ficaria olhando a árvore sem ver que o editor trocou de arquivo. */}
+          <ProductFolderNav
+            productId={treeProductId} currentProjectId={editProjectId}
+            onOpen={(projId) => { setMobileTreeOpen(false); openProductFile(projId); }}
+            height="100%"
+          />
+        </DialogContent>
+      </Dialog>
+    </>
+  ) : null;
 
   // ── Onda 3 (b): diálogo de confirmação por digitação para promover COM GAPs em aberto ──
   // Promover uma spec com GAPs vai para a fábrica mesmo assim (decisão do usuário — qualquer
@@ -2381,6 +2746,17 @@ export default function SpecPage() {
             "GAPs" dentro do editor. Aqui sobra só o aviso de validação obsoleta + a árvore. */}
         {!editLoading && specMarkdown !== null && editProjectId && (
           <Box sx={{ mb: 2, "&:empty": { display: "none", mb: 0 } }}>
+            {/* Migração 090 — o laço autônomo escreve na MESMA spec. Avisar é mais honesto que
+                travar o editor: a guarda do servidor não sobrescreve edição humana, mas encerra o
+                laço ("stalled") quando ela aparece no meio da rodada. */}
+            {autonomy?.run?.active && (
+              <Alert severity="info" sx={{ mb: 1 }} aria-live="polite">
+                <strong>Modo autônomo em andamento</strong> (rodada {autonomy.run.round}/{autonomy.run.maxRounds})
+                {" "}— o CTO está resolvendo os GAPs, salvando e revalidando a spec no servidor.
+                Evite editar ou salvar a spec agora: uma edição manual no meio da rodada interrompe o
+                laço (o servidor não sobrescreve o seu texto).
+              </Alert>
+            )}
             {staleValidation && (
               <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
                 Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
@@ -2458,6 +2834,7 @@ export default function SpecPage() {
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
+              {...autonomyPanelProps}
                   />
                 </Box>
               </Box>
@@ -2470,6 +2847,9 @@ export default function SpecPage() {
         {editorDialog}
         {promoteDialog}
         {specMarkdown !== null && !editLoading && mobileChat}
+        {/* Árvore da pasta do produto: acessível no mobile/tablet mesmo com a spec ainda
+            carregando (é navegação, não depende do conteúdo do editor). */}
+        {!editorFullscreen && mobileTree}
       </Box>
     );
   }
@@ -2640,6 +3020,7 @@ export default function SpecPage() {
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
+              {...autonomyPanelProps}
                         />
                       </Box>
                     </Box>

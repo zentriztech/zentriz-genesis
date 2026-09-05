@@ -27,6 +27,10 @@ import path from "node:path";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
 import { canAccessProjectRow } from "../lib/projectAccess.js";
+import {
+  computeFactoryCertificates, aggregateProductCertificate, factoryCertificateEnabled,
+  type FactoryCertificate,
+} from "../services/factoryCertificate.js";
 import { denyCreationForManagement } from "../middleware/managementGuard.js";
 import { extractProductZip, type ProductZipContents } from "./specs.js";
 import { decomposeProduct } from "../services/productDecomposer.js";
@@ -153,6 +157,34 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
                  AND (p.is_inbox = false OR $2::boolean = true)${tail}`,
               [user.tenantId, includeInbox]
             );
+      // Certificado Genesis Factory por PRODUTO (flag OFF por padrão → payload byte-idêntico).
+      // Agregado AND com `n/m` (A6). Escopo: só os projetos que ainda estão na BANCADA — o selo
+      // responde "quando promover, há maior garantia?"; projeto já fabricado não está esperando
+      // certificado. Os ids saem de uma query escopada nos produtos JÁ filtrados por tenant (A8).
+      if (factoryCertificateEnabled() && res.rows.length) {
+        try {
+          const productIds = res.rows.map((r) => r.id as string);
+          const specRows = (await client.query(
+            `SELECT id, product_id FROM projects WHERE product_id = ANY($1) AND status = ANY($2)`,
+            [productIds, [...SPEC_DECOMPOSABLE_STATUSES]],
+          )).rows as Array<{ id: string; product_id: string }>;
+          const certs = await computeFactoryCertificates(
+            client as unknown as { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+            specRows.map((r) => r.id),
+          );
+          const byProduct = new Map<string, FactoryCertificate[]>();
+          for (const r of specRows) {
+            const c = certs.get(r.id);
+            if (c) (byProduct.get(r.product_id) ?? byProduct.set(r.product_id, []).get(r.product_id)!).push(c);
+          }
+          return reply.send(res.rows.map((r) => ({
+            ...r,
+            factoryCertificate: aggregateProductCertificate(byProduct.get(r.id as string) ?? []),
+          })));
+        } catch (err) {
+          request.log.warn({ err }, "factory certificate (produto) falhou; produtos sem selo");
+        }
+      }
       return reply.send(res.rows);
     } finally { client.release(); }
   });

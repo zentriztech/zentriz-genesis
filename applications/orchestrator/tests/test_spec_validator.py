@@ -195,3 +195,41 @@ def test_multivote_blocker_union_uses_identity_key_not_title(monkeypatch):
     # o mesmo problema (FR-03) com título reformulado NÃO é duplicado; FR-04 (singleton blocker) é preservado
     assert titles == ["Rotas sem autenticação", "Segredo em claro"]
     assert all(f["category"] == "security_gap" for f in out["findings"])
+
+
+def test_retry_that_explodes_salvages_findings_of_first_response():
+    """Prod 2026-09-05 (NVX LastMile): a 1ª resposta veio TRUNCADA (bateu em max_tokens) e o retry
+    com o dobro do orçamento levantou ValueError no SDK ("Streaming is required..."). A exceção do
+    retry não pode APAGAR os findings completos que a 1ª resposta já entregou."""
+    truncated = (
+        '{"findings": ['
+        '{"file":"spec.md","line":null,"severity":"blocker","category":"security_gap","anchor":"FR-01",'
+        '"title":"Rotas sem autenticação","rationale":"r"},'
+        '{"file":"spec.md","line":null,"severity":"warning","category":"contract_gap","anchor":"FR-02",'
+        '"title":"Contrato sem versão","rationale":"r"},'
+        '{"file":"spec.md","line":null,"severity":"warning","catego'  # cortado no meio
+    )
+    calls = {"n": 0}
+
+    def llm(system, user, model_id, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return truncated
+        raise ValueError("Streaming is required for operations that may take longer than 10 minutes.")
+
+    out = validate_spec("spec substantiva", llm_fn=llm)
+    assert calls["n"] == 2  # houve retry
+    assert [f["title"] for f in out["findings"]] == ["Rotas sem autenticação", "Contrato sem versão"]
+
+
+def test_retry_failure_without_salvageable_content_still_raises():
+    def llm(system, user, model_id, **kw):
+        if "prosa" not in system:
+            pass
+        raise_it = kw.get("max_tokens", 0) > 4000
+        if raise_it:
+            raise RuntimeError("quota")
+        return "prosa sem json"
+
+    with pytest.raises(Exception):
+        validate_spec("spec", llm_fn=llm)

@@ -23,11 +23,60 @@ APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
 CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "3"))
 MAX_REPAIRS = int(os.environ.get("MAX_REPAIRS", "2"))
 CIRCUIT_BREAKER_THRESHOLD = int(os.environ.get("CIRCUIT_BREAKER_THRESHOLD", "3"))
+# 🔴 2026-09-05 — o breaker NÃO fechava sozinho: aberto, nenhuma chamada é feita (bloco abaixo
+# retorna BLOCKED antes do provedor), e o contador só zerava em SUCESSO — logo só voltava ao normal
+# reiniciando o container. Agora meia-abertura por TEMPO: passado este intervalo desde a última
+# falha, a próxima chamada é liberada (e um sucesso zera o contador de vez).
+CIRCUIT_BREAKER_RESET_SEC = int(os.environ.get("CIRCUIT_BREAKER_RESET_SEC", "600"))
 
 SHOW_TRACEBACK = os.environ.get("SHOW_TRACEBACK", "true").strip().lower() in ("1", "true", "yes")
 
-# Circuit breaker: (project_id, agent, mode) -> falhas consecutivas
-_circuit_failures: dict[tuple[str, str, str], int] = {}
+# Circuit breaker: escopo -> (falhas consecutivas, instante monotônico da última falha).
+# O escopo é (scope_id, agent, mode, task_id), onde `scope_id` é o projeto REAL — ver
+# `_circuit_scope_id`: a Bancada mandava `project_id="spec_chat"` fixo, o que tornava ESTE breaker
+# GLOBAL (3 falhas de um tenant qualquer bloqueavam a Bancada de todos, com zero LLM).
+_circuit_failures: dict[tuple[str, ...], tuple[int, float]] = {}
+_circuit_lock = threading.Lock()
+
+
+def _circuit_blocked(key: tuple[str, ...]) -> bool:
+    """True = breaker aberto E ainda dentro da janela de espera (meia-abertura por tempo)."""
+    with _circuit_lock:
+        failures, last_ts = _circuit_failures.get(key, (0, 0.0))
+        if failures < CIRCUIT_BREAKER_THRESHOLD:
+            return False
+        if CIRCUIT_BREAKER_RESET_SEC > 0 and (time.monotonic() - last_ts) >= CIRCUIT_BREAKER_RESET_SEC:
+            # Meia-abertura: libera UMA tentativa zerando o contador. Se ela falhar de novo, o
+            # incremento reabre o breaker imediatamente (a janela recomeça).
+            _circuit_failures[key] = (0, 0.0)
+            return False
+        return True
+
+
+def _circuit_note_failure(key: tuple[str, ...]) -> int:
+    with _circuit_lock:
+        failures = _circuit_failures.get(key, (0, 0.0))[0] + 1
+        _circuit_failures[key] = (failures, time.monotonic())
+        return failures
+
+
+def _circuit_reset(key: tuple[str, ...]) -> None:
+    with _circuit_lock:
+        _circuit_failures[key] = (0, 0.0)
+
+
+def _circuit_scope_id(message: dict, inp: dict) -> str:
+    """
+    Identidade do escopo do breaker. `circuit_scope` (enviado pela api quando o `project_id` do
+    envelope é um pseudo-projeto, como o `"spec_chat"` da Bancada) VENCE o `project_id`, para o
+    breaker isolar tenants/projetos sem mexer no resto do pipeline (paths de artefato, logs, RAG),
+    que continua vendo o `project_id` de sempre.
+    """
+    for candidate in (message.get("circuit_scope"), inp.get("circuit_scope"),
+                      message.get("project_id"), inp.get("project_id")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "default"
 
 AGENT_LABELS = {
     "ENGINEER": "Engineer",
@@ -169,6 +218,13 @@ _PROMPT_FIELD_FLOORS: dict[str, int] = {
     "engineer_proposal": 15_000,
     "charter": 15_000,
     "backlog": 15_000,
+    # Fase 1 do "conhecer o PRODUTO inteiro" (2026-09-05). Os pisos são EXATAMENTE os tetos que a api
+    # aplicava sozinha (`specChat.ts`: SIBLINGS_BUDGET=14.000, FINDINGS_BUDGET=6.000) — nada regride —
+    # e agora escalam com `max_output` como os demais campos. O `product_map` é o índice determinístico
+    # Produto>Projeto>arquivo (28 projetos ≈ 6–10 KB; 10.000 é folga).
+    "product_map": 10_000,
+    "sibling_files_context": 14_000,
+    "validation_report": 6_000,
 }
 _PROMPT_OUTPUT_RESERVE_TOKENS = 8_000   # <thinking> + envelope JSON + summary/evidence
 _PROMPT_SAFETY_FACTOR = 0.65            # escape JSON + PT-BR (~3,3 chars/token) + o CTO ENRIQUECE a spec
@@ -335,6 +391,38 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
             )
         else:
             parts.append(f"## Product Spec Atual\n{_take(_ps, 'product_spec')}")
+    # ── Contexto de PRODUTO (Fase 1, 2026-09-05) — fecha o defeito C ───────────────────────────────
+    # `sibling_files_context` e `validation_report` chegavam em `inputs` desde a Onda 1 e NUNCA eram
+    # emitidos aqui (nenhum `envelope.get(...)`): só apareciam no prompt porque a api TAMBÉM os colava
+    # no `task` — mesma classe do bug do envelope aninhado. Agora são campos de primeira classe, com
+    # orçamento derivado do modelo, e a api para de duplicá-los.
+    # A emissão é condicionada a `context_emit == "v2"` (marca que a api só envia com
+    # `SPEC_CONTEXT_PRODUCT_SCOPE=on`): com a flag off o prompt segue byte-idêntico e api/agents podem
+    # ser deployados em qualquer ordem sem mandar o mesmo texto duas vezes nem perder contexto.
+    if str(envelope.get("context_emit") or "") == "v2":
+        _vr = envelope.get("validation_report") or ""          # GAPs = o trabalho → gasta primeiro
+        _pm = envelope.get("product_map") or ""                # índice do produto (barato)
+        _sb = envelope.get("sibling_files_context") or ""      # corpos selecionados por relevância
+        if _vr:
+            parts.append(
+                "## Relatório de Validação / GAPs a resolver (adversarial)\n"
+                + _take(_vr, "validation_report")
+            )
+        if _pm:
+            parts.append(
+                "## Mapa do Produto (SÓ LEITURA)\n"
+                "Hierarquia Produto > Projeto > arquivo de spec. Serve para você manter os contratos "
+                "entre projetos irmãos coerentes — não é conteúdo a copiar.\n"
+                + _take(_pm, "product_map")
+            )
+        if _sb:
+            parts.append(
+                "## Arquivos de Projetos Irmãos (SÓ LEITURA — NÃO reescreva, NÃO copie)\n"
+                "Divergência de contrato com um irmão deve ser RELATADA no summary como GAP, nunca "
+                "'corrigida' dentro do documento que você está editando.\n"
+                + _take(_sb, "sibling_files_context")
+            )
+
     # O orçamento global é GASTO em ordem de prioridade (charter > backlog > engineer), mas os blocos
     # são EMITIDOS na ordem histórica (engineer, charter, backlog) — mexer na ordem do prompt seria
     # uma mudança de comportamento não pedida e quebraria a garantia de byte-identidade da flag off.
@@ -1120,8 +1208,10 @@ def run_agent(
 
     # GAP-P8: ler rework_attempt para escada de modelo/tokens (aplicado abaixo após env_max)
     _rework_attempt = int(inp.get("rework_attempt", 0))
-    # Include task_id in circuit key so each task has its own breaker
-    circuit_key = (str(project_id), str(role), str(mode), str(task_id or ""))
+    # Include task_id in circuit key so each task has its own breaker.
+    # `_circuit_scope_id` prefere `circuit_scope` ao `project_id` — sem isso, todo o chat da Bancada
+    # (que manda `project_id="spec_chat"`) compartilhava UM único breaker entre todos os tenants.
+    circuit_key = (_circuit_scope_id(message, inp), str(role), str(mode), str(task_id or ""))
 
     # Skill store: usar override quando disponível (SKILL_STORE_MODE=active)
     # system_prompt_override já tem LEI 2 aplicada por load_system_prompt_with_skills()
@@ -1130,20 +1220,33 @@ def run_agent(
     else:
         system_content = build_system_prompt(Path(system_prompt_path), role, mode)
     t0_run = time.perf_counter()
-    if _circuit_failures.get(circuit_key, 0) >= CIRCUIT_BREAKER_THRESHOLD:
-        logger.warning("[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s).", agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD)
+    if _circuit_blocked(circuit_key):
+        logger.warning(
+            "[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s; nova tentativa liberada em até %ss).",
+            agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_BREAKER_RESET_SEC,
+        )
         user_content_cb = build_user_message(message, role=role, model=model)
         budget_cb = calculate_token_budget(system_content, user_content_cb, model)
         out = _normalize_response_envelope({
             "request_id": message.get("request_id", "unknown"),
             "status": "BLOCKED",
-            "summary": f"Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} falhas consecutivas (agent={role}, mode={mode}). Escale para Monitor/CTO.",
+            "summary": (
+                f"Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} falhas consecutivas "
+                f"(agent={role}, mode={mode}). Nova tentativa é liberada automaticamente em até "
+                f"{CIRCUIT_BREAKER_RESET_SEC}s; se persistir, escale para Monitor/CTO."
+            ),
             "artifacts": [],
             "evidence": [],
             "next_actions": {"owner": "Monitor", "items": ["Intervenção humana: revisar logs e reprocessar ou ajustar prompt."], "questions": []},
         }, message.get("request_id", "unknown"), "")
         out["circuit_breaker_open"] = True
         out["validator_pass"] = False
+        # Motivo LEGÍVEL para quem exibe o erro (a api usa `validation_errors` para dizer ao usuário
+        # o que aconteceu, em vez do antigo "Reformule o pedido", que aqui seria conselho errado).
+        out["validation_errors"] = [
+            f"o agente está temporariamente bloqueado após {CIRCUIT_BREAKER_THRESHOLD} falhas seguidas "
+            f"de chamada ao provedor de IA — nova tentativa liberada em até {CIRCUIT_BREAKER_RESET_SEC}s"
+        ]
         log_agent_call(agent_name, mode, budget_cb, out, (time.perf_counter() - t0_run) * 1000, request_id=message.get("request_id", "unknown"))
         return out
 
@@ -1183,6 +1286,9 @@ def run_agent(
     # só ativa em prod-bedrock (no Foundry a var fica vazia → nenhuma mudança de comportamento).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _model_downgraded = False
+    # Rede de segurança do `thinking={"type":"disabled"}`: se a rota/modelo recusar o parâmetro,
+    # desliga a otimização para o resto desta execução em vez de derrubar o agente.
+    _thinking_rejected = False
 
     for repair_attempt in range(MAX_REPAIRS + 1):
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
@@ -1226,6 +1332,13 @@ def run_agent(
                     "system": system_content,
                     "messages": [{"role": "user", "content": user_content}],
                     "timeout": timeout,
+                    # Raciocínio adaptativo DESLIGADO (ver `_thinking_extra`): todo agente aqui emite
+                    # ResponseEnvelope JSON, onde completude > raciocínio extra — e o raciocínio segue
+                    # pedido em TEXTO (`<thinking>`), que é logado. Prova em prod: o CTO em
+                    # spec_intake_and_normalize gastava parte dos 64.000 (teto do modelo) em thinking,
+                    # truncava o envelope, perdia `evidence[]` e virava BLOCKED após 2 repairs de
+                    # ~10 min cada. `GENESIS_DISABLE_THINKING=0` reverte sem redeploy.
+                    **({} if _thinking_rejected else _thinking_extra(provider)),
                 }
                 # LEI 1 (AGENT_LLM_COMMUNICATION_ANALYSIS §12.2): temperature quando definida.
                 # SDK >=1.x removeu o kwarg — só passa se a assinatura aceitar (senão TypeError).
@@ -1255,6 +1368,14 @@ def run_agent(
             except Exception as e:
                 last_error = e
                 err_lower = str(e).lower()
+                # Parâmetro `thinking` recusado → refaz esta tentativa sem ele (não é falha de rede:
+                # não conta retry nem abre o circuit breaker).
+                if (not _thinking_rejected and _thinking_extra(provider)
+                        and _is_thinking_param_error(e) and attempt < CLAUDE_RETRY_ATTEMPTS - 1):
+                    logger.warning("[%s] Modelo '%s' recusou `thinking` — refazendo sem o parâmetro "
+                                   "(raciocínio adaptativo). Detalhe: %s", agent_name, model, str(e)[:200])
+                    _thinking_rejected = True
+                    continue
                 # Modelo indisponível na conta → troca UMA vez para o fallback e refaz a
                 # tentativa (não é falha de rede: não conta retry nem abre o circuit breaker).
                 _ename = type(e).__name__.lower()
@@ -1282,7 +1403,7 @@ def run_agent(
                 if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
                     time.sleep(2 + attempt * 2)
                 else:
-                    _circuit_failures[circuit_key] = _circuit_failures.get(circuit_key, 0) + 1
+                    _circuit_note_failure(circuit_key)
                     api_msg = _extract_api_message(e)
                     error_detail = _build_error_detail(e, api_msg)
                     raise RuntimeError(
@@ -1365,7 +1486,7 @@ def run_agent(
                 logger.warning("[%s] Validação de qualidade falhou: %s", agent_name, quality_errors[:3])
 
         if not all_errors:
-            _circuit_failures[circuit_key] = 0
+            _circuit_reset(circuit_key)
             out["validator_pass"] = True
             out["validation_errors"] = []
             out["_thinking"] = bool(last_thinking)
@@ -1380,6 +1501,18 @@ def run_agent(
         if repair_attempt < MAX_REPAIRS:
             # LEI 5: retry SEMPRE com feedback explícito; nunca reenviar prompt idêntico
             repair_block = build_repair_feedback_block(out, all_errors)
+            # TRUNCAMENTO (stop_reason=max_tokens): repetir o pedido sem mudar a economia de saída
+            # trunca de novo — foi assim que o CTO gastou 3 reemissões da spec (30,8 min) e terminou
+            # BLOCKED por `evidence[]` vazio, que era EFEITO do corte, não do conteúdo. O feedback
+            # precisa dizer onde economizar (2026-09-05).
+            if stop_reason == "max_tokens":
+                repair_block += (
+                    "\n**SUA RESPOSTA ANTERIOR FOI CORTADA NO LIMITE DE SAÍDA** — não foi rejeitada "
+                    "pelo conteúdo. Nesta tentativa economize saída, nesta ordem: (1) `<thinking>` de "
+                    "no máximo 5 linhas; (2) `summary` de no máximo 5 linhas; (3) `evidence[]` com no "
+                    "máximo 3 itens curtos; (4) NUNCA encurte, resuma ou corte `artifacts[].content` — "
+                    "o documento tem de sair COMPLETO, e é ele que precisa do orçamento.\n"
+                )
             user_content = user_content + repair_block
             logger.warning(
                 "[%s] Repair %d/%d (LEI 5: retry com feedback): %s",
@@ -1387,7 +1520,11 @@ def run_agent(
             )
             continue
 
-        _circuit_failures[circuit_key] = _circuit_failures.get(circuit_key, 0) + 1
+        # Falha de ENFORCER (conteúdo), não de transporte. Continua contando — é este contador que
+        # faz o runner desistir de uma task sem saída (`runner.py`, `circuit_breaker_open`) — mas
+        # agora com escopo por projeto REAL e com reabertura por tempo, então uma spec difícil de um
+        # tenant não deixa a Bancada de ninguém travada até reiniciar o container.
+        _circuit_note_failure(circuit_key)
         out["status"] = "BLOCKED"
         out["summary"] = (out.get("summary") or "") + "; Enforcer: " + "; ".join(all_errors[:5])
         out["validator_pass"] = False
@@ -1514,6 +1651,65 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
     threading.Thread(target=_post, daemon=True).start()
 
 
+def _nonstreaming_timeout_sec(max_tokens: int) -> int:
+    """Timeout EXPLÍCITO para `messages.create` — e é ele que desarma o guard do SDK.
+
+    `anthropic` 1.3.0: `messages.create` só chama `_calculate_nonstreaming_timeout` quando
+    `not stream and not is_given(timeout) and client.timeout == DEFAULT_TIMEOUT`. Esse cálculo
+    (`3600 * max_tokens / 128_000 > 600`) levanta ValueError CLIENT-SIDE — sem chamar a AWS —
+    para qualquer `max_tokens` acima de **21.333**:
+    "Streaming is required for operations that may take longer than 10 minutes".
+
+    Provado em prod 2026-09-05: o retry do refutador do `spec_validator` (32.000) derrubou a
+    validação do NVX LastMile antes de sair um byte pela rede. `run_agent` NUNCA sofreu disso
+    porque sempre passa `timeout` (900 s) — a fábrica roda a 32.000/64.000 no Bedrock há meses.
+    Este helper leva a MESMA disciplina ao `call_bedrock_direct` (spec_validator, splitter,
+    lesson_extractor, `/invoke/raw`), sem exigir `bedrock:InvokeModelWithResponseStream` da conta.
+
+    Nunca abaixo do timeout padrão da fábrica; acima disso, escala com o orçamento de saída
+    (mesma razão do SDK: 3600 s por 128k tokens) e é limitado em 1 h.
+    """
+    base = int(os.environ.get("REQUEST_TIMEOUT") or 900)
+    scaled = int(3600 * max(0, int(max_tokens)) / 128_000)
+    return max(60, min(3600, max(base, scaled)))
+
+
+def _thinking_extra(provider: str | None = None) -> dict:
+    """`thinking={"type":"disabled"}` para TODA chamada que emite JSON/código estruturado.
+
+    Achado #51 (2026-08-11, Foundry) + prova em PROD no BEDROCK (2026-09-05, `blocks=thinking,text`
+    no `call_bedrock_direct`): os modelos Claude 5 usam raciocínio ADAPTATIVO **ligado por padrão** e
+    os tokens de raciocínio **contam contra `max_tokens`** — a fatia é variável e invisível. Efeitos
+    medidos, todos com o modelo respondendo HTTP 200:
+      • refutador do `spec_validator` a 16.000 → `stop_reason=max_tokens` → JSON cortado → retry
+        (o dobro) → validação 'error' (dinheiro gasto duas vezes pelo mesmo resultado);
+      • CTO em `spec_intake_and_normalize` a 64.000 (teto do modelo) → envelope truncado, `evidence[]`
+        perdido → 2 repairs reemitindo a spec inteira → 30,8 min e `status=BLOCKED` com um artefato de
+        104.272 chars descartado.
+    Estas chamadas emitem ENVELOPE/JSON onde COMPLETUDE > raciocínio extra, e o raciocínio continua
+    disponível em texto (o prompt pede `<thinking>...</thinking>`, que é logado e auditável).
+
+    Kill-switch sem redeploy: `GENESIS_DISABLE_THINKING=0` restaura o comportamento adaptativo
+    (`GENESIS_FOUNDRY_DISABLE_THINKING=0` segue valendo só para o Foundry, por compatibilidade).
+    Nota: `thinking.type="enabled"` dá 400 nos modelos Claude 5 (só `adaptive`|`disabled`).
+    """
+    if (provider or "").strip().lower() == "foundry" and \
+            os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() == "0":
+        return {}
+    if os.environ.get("GENESIS_DISABLE_THINKING", "1").strip() == "0":
+        return {}
+    return {"thinking": {"type": "disabled"}}
+
+
+def _is_thinking_param_error(e: Exception) -> bool:
+    """A rota/modelo rejeitou o parâmetro `thinking` (ex.: modelo antigo, provider sem suporte)?
+
+    Rede de segurança para o `_thinking_extra`: em vez de derrubar a chamada, o chamador reenvia
+    UMA vez sem o parâmetro (pior caso = comportamento de antes desta mudança).
+    """
+    return "thinking" in str(e).lower()
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
@@ -1555,9 +1751,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         # Validado ao vivo: opus-5 passou de vazio/truncado p/ JSON completo e end_turn limpo.
         # Nota: "thinking.type.enabled" dá 400 nesses modelos (só adaptive|disabled); controle
         # fino seria via output_config.effort. Env GENESIS_FOUNDRY_DISABLE_THINKING=0 reverte.
-        _extra: dict = {}
-        if os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() != "0":
-            _extra["thinking"] = {"type": "disabled"}
+        # (2026-09-05: a decisão virou única para os dois providers — ver `_thinking_extra`.)
+        _extra: dict = _thinking_extra("foundry")
         if max_tokens > 8000:
             parts: list[str] = []
             with client.messages.stream(
@@ -1637,6 +1832,11 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     _create_kw: dict = {
         "model": model_id, "max_tokens": max_tokens,
         "system": system, "messages": [{"role": "user", "content": user}],
+        # `timeout` EXPLÍCITO é obrigatório: sem ele o SDK recusa max_tokens > 21.333
+        # (ver `_nonstreaming_timeout_sec`). Mesma convenção do `run_agent`.
+        "timeout": _nonstreaming_timeout_sec(max_tokens),
+        # Raciocínio adaptativo DESLIGADO: todo o orçamento vai para o JSON (ver `_thinking_extra`).
+        **_thinking_extra("bedrock"),
     }
     try:
         import inspect as _inspect
@@ -1650,8 +1850,21 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # do Cyborg já traz fallback_id explícito).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _used_model = model_id
+
+    def _create_with_thinking_guard() -> object:
+        """Chama o modelo; se a rota recusar o parâmetro `thinking`, reenvia UMA vez sem ele."""
+        try:
+            return client.messages.create(**_create_kw)
+        except Exception as exc:
+            if "thinking" in _create_kw and _is_thinking_param_error(exc):
+                logger.warning("[call_bedrock_direct] Modelo/rota recusou `thinking` — reenviando sem "
+                               "o parâmetro (raciocínio adaptativo). Detalhe: %s", str(exc)[:200])
+                _create_kw.pop("thinking", None)
+                return client.messages.create(**_create_kw)
+            raise
+
     try:
-        resp = client.messages.create(**_create_kw)
+        resp = _create_with_thinking_guard()
     except Exception as e:
         _ename = type(e).__name__.lower()
         _el = str(e).lower()
@@ -1666,10 +1879,20 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                          "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", model_id, _fallback_model, str(e)[:200])
             _create_kw["model"] = _fallback_model
             _used_model = _fallback_model
-            resp = client.messages.create(**_create_kw)
+            resp = _create_with_thinking_guard()
         else:
             raise
     LAST_EFFECTIVE_MODEL.set(_used_model)
+    # Observabilidade de TRUNCAMENTO e de raciocínio adaptativo: `stop_reason='max_tokens'` explica
+    # "resposta não contém JSON" sem adivinhação, e `thinking` nos blocos diria que o orçamento foi
+    # comido pelo raciocínio (achado #51, hoje comprovado só no Foundry).
+    try:
+        _blocks = [str(getattr(b, "type", "?")) for b in (getattr(resp, "content", []) or [])]
+        logger.info("[call_bedrock_direct] %s agent=%s stop_reason=%s blocks=%s max_tokens=%d",
+                    _used_model, usage_agent, getattr(resp, "stop_reason", None),
+                    ",".join(_blocks) or "-", max_tokens)
+    except Exception:
+        pass
     _u = getattr(resp, "usage", None)
     _report_direct_usage(usage_project_id, usage_agent, _used_model,
                          getattr(_u, "input_tokens", 0) or 0,

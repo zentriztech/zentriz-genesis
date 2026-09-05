@@ -40,6 +40,7 @@ import {
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
+import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -109,8 +110,25 @@ interface ChatContext {
   findingsBlock: string; // "" quando nunca validado / sem findings
   findings: ValidationFinding[];
   derivedStatus: string;
+  /**
+   * Fase 1 (escopo de PRODUTO, flag `SPEC_CONTEXT_PRODUCT_SCOPE`): índice determinístico
+   * Produto > Projeto > arquivo. "" quando a flag está off, o produto tem 1 projeto vigente
+   * (custo zero no caso mais comum) ou o mapa não pôde ser montado.
+   */
+  productMapBlock: string;
+  /** Furos do contexto (spec ilegível, escopo divergente) — logados; não silenciados (GAP-10). */
+  contextWarnings: string[];
+  /**
+   * `true` = os blocos de contexto vão como CAMPOS PRÓPRIOS para o runtime emitir
+   * (`context_emit: "v2"`) e a api PARA de colá-los no `task`. Sem isto, ligar a emissão no
+   * runtime mandaria o mesmo texto duas vezes. Só liga junto com a flag.
+   */
+  emitV2: boolean;
 }
-const EMPTY_CTX: ChatContext = { siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated" };
+const EMPTY_CTX: ChatContext = {
+  siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated",
+  productMapBlock: "", contextWarnings: [], emitV2: false,
+};
 
 function fmtFinding(f: ValidationFinding): string {
   const loc = f.line ? `${f.file}:${f.line}` : f.file;
@@ -124,7 +142,17 @@ function fmtFinding(f: ValidationFinding): string {
  * (b) os findings da última run de validação (GAPs conhecidos). Best-effort: qualquer falha
  * devolve contexto vazio — jamais derruba a rota do chat.
  */
-async function loadChatContext(projectId: string, primaryContent: string): Promise<ChatContext> {
+async function loadChatContext(
+  projectId: string,
+  primaryContent: string,
+  /** Mensagem do humano — só usada na seleção por relevância do corpo dos irmãos (P2). */
+  userMessage = "",
+  /**
+   * P4: no chat POR-ARQUIVO o modelo recebe o MAPA (para saber onde aquele arquivo vive) mas NÃO o
+   * corpo dos irmãos — é edição pontual e o `/invoke/raw` tem teto próprio.
+   */
+  opts: { siblingBodies?: boolean } = {},
+): Promise<ChatContext> {
   try {
     const { computeCurrentSpecHash } = await import("../services/specValidation.js");
     const current = await computeCurrentSpecHash(pool, projectId);
@@ -171,7 +199,40 @@ async function loadChatContext(projectId: string, primaryContent: string): Promi
       }
       findingsBlock = block;
     }
-    return { siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated" };
+
+    // ── Fase 1: escopo de PRODUTO (flag off → nada abaixo roda; contexto byte-idêntico ao antigo) ──
+    let productMapBlock = "";
+    const contextWarnings: string[] = [];
+    let emitV2 = false;
+    if (productScopeEnabled()) {
+      emitV2 = true;
+      // Falha do mapa NÃO derruba o chat (mas também não fica invisível — GAP-10).
+      const map = await buildProductMap(pool, projectId).catch((e) => {
+        contextWarnings.push(`mapa do produto falhou: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (map) {
+        productMapBlock = map.block;
+        contextWarnings.push(...map.warnings);
+        // Corpo dos irmãos por relevância (P2), SOMANDO ao bloco de irmãos do mesmo projeto (que
+        // continua existindo; em prod ele é vazio porque 58/58 projetos têm 1 arquivo).
+        const picked = opts.siblingBodies === false
+          ? { block: "", included: [] as string[], omitted: [] as string[] }
+          : selectSiblingBodies(map, { findings, userMessage });
+        if (picked.block) siblingsBlock = siblingsBlock ? `${siblingsBlock}\n${picked.block}` : picked.block;
+        console.info(
+          `[SpecChat] contexto de produto: projeto=${projectId} produto=${map.productName ?? "—"} ` +
+          `projetos=${map.projects.length} corpos=${picked.included.length} omitidos=${picked.omitted.length} ` +
+          `mapa=${productMapBlock.length}c irmãos=${siblingsBlock.length}c`,
+        );
+      }
+      for (const w of contextWarnings) console.warn(`[SpecChat] ⚠️ contexto: ${w}`);
+    }
+
+    return {
+      siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated",
+      productMapBlock, contextWarnings, emitV2,
+    };
   } catch (e) {
     console.warn(`[SpecChat] loadChatContext falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
     return EMPTY_CTX;
@@ -185,6 +246,8 @@ function buildChatMessage(
   messages: ChatMessage[],
   ctx: ChatContext = EMPTY_CTX,
   resolveGaps = false,
+  /** Projeto REAL — só para o ESCOPO do circuit breaker dos agents (ver `circuit_scope` abaixo). */
+  scopeProjectId: string | null = null,
 ): Record<string, unknown> {
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
@@ -196,7 +259,10 @@ function buildChatMessage(
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "CTO"}: ${m.content}`)
     .join("\n\n");
 
-  const contextSections = [
+  // Com `emitV2` (flag de produto ligada) os blocos viajam como CAMPOS e o runtime os emite com
+  // orçamento derivado do modelo — colá-los aqui TAMBÉM mandaria o mesmo texto duas vezes (era o
+  // que já acontecia de fato: `task` + `inputs`, sendo que os `inputs` eram inertes).
+  const contextSections = ctx.emitV2 ? "" : [
     ctx.siblingsBlock
       ? `\n\n─── ARQUIVOS IRMÃOS DO PRODUTO (SÓ LEITURA — contexto do Produto>Projeto>Spec) ───\n${ctx.siblingsBlock}`
       : "",
@@ -293,6 +359,12 @@ ${transcript}${contextSections}
 
   return {
     project_id: "spec_chat",
+    // 🔴 2026-09-05 — o `project_id` acima é um PSEUDO-projeto (mantido: paths de artefato, logs e
+    // persistência do lado dos agents dependem dele). Como o circuit breaker do runtime era chaveado
+    // por ele, TODA a Bancada compartilhava UM breaker: 3 falhas seguidas de qualquer cliente
+    // bloqueavam o chat de spec de TODOS os tenants, sem sequer chamar o modelo. `circuit_scope`
+    // isola o breaker por projeto real (o runtime prefere este campo ao `project_id`).
+    circuit_scope: scopeProjectId ? `spec_chat:${scopeProjectId}` : "spec_chat",
     agent: "CTO",
     variant: "generic",
     mode: "spec_intake_and_normalize",
@@ -306,6 +378,11 @@ ${transcript}${contextSections}
       user_message: lastUser,
       sibling_files_context: ctx.siblingsBlock || undefined,
       validation_report: ctx.findingsBlock || undefined,
+      // Fase 1 (P1/P3): índice do produto + marca que autoriza o runtime a EMITIR estes campos
+      // (`build_user_message`). Sem a marca o runtime os ignora, como sempre fez — assim api e
+      // agents podem ser deployados em qualquer ordem sem duplicar nem perder contexto.
+      product_map: ctx.productMapBlock || undefined,
+      context_emit: ctx.emitV2 ? "v2" : undefined,
       resolve_gaps: resolveGaps || undefined,
       input_type: "spec_refinement",
       constraints: resolveGaps
@@ -346,10 +423,15 @@ const RAW_FILE_SYSTEM = [
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código, sem comentários, sem preâmbulo.",
 ].join(" ");
 
+/** P4: teto do contexto extra (mapa + GAPs) no modo por-arquivo — o `/invoke/raw` tem max_tokens 8k. */
+const RAW_FILE_CONTEXT_BUDGET = 12_000;
+
 function buildRawFileRequest(
   content: string,
   messages: ChatMessage[],
   filePath: string,
+  /** Fase 1 P4: o chat por-arquivo rodava com contexto ZERO (defeito E) — era o caminho mais cego. */
+  ctx: ChatContext = EMPTY_CTX,
 ): Record<string, unknown> {
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
@@ -357,9 +439,18 @@ function buildRawFileRequest(
   const transcript = history
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "EDITOR"}: ${m.content}`)
     .join("\n");
+  // Mapa + GAPs entram como CONTEXTO SÓ-LEITURA e cabem no orçamento; a edição continua sendo de UM
+  // arquivo (o retorno é um único documento — o modelo é fisicamente incapaz de tocar num irmão).
+  const contextBlock = ctx.emitV2
+    ? [ctx.productMapBlock, ctx.findingsBlock ? `GAPs conhecidos desta spec:\n${ctx.findingsBlock}` : ""]
+        .filter(Boolean).join("\n\n").slice(0, RAW_FILE_CONTEXT_BUDGET)
+    : "";
   const userMessage = [
     `ARQUIVO: ${filePath}`,
     "",
+    contextBlock
+      ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
+      : "",
     "--- CONTEÚDO ATUAL ---",
     content,
     "--- FIM ---",
@@ -534,6 +625,44 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
  *     pollers a mesma resposta podia ser inserida duas vezes.
  */
 
+/**
+ * MODO AUTÔNOMO (2026-09-05): dispara "Resolver GAPs" pelo MESMO caminho do botão manual.
+ *
+ * Existe para o `specAutonomy` não reimplementar contexto (irmãos + findings ativos), prompt,
+ * persistência do turno do usuário nem o gate H4 — se o servidor resolvesse GAPs por um caminho
+ * paralelo, o autônomo divergiria do manual no primeiro ajuste de prompt. As checagens de
+ * autorização (dono/tenant, `svc:"runner"`, `denyCreationForManagement`) ficam na ROTA do
+ * autônomo: aqui já se assume um pedido autorizado.
+ *
+ * Devolve `NO_GAPS` quando não há finding ATIVO — para o laço isso é SUCESSO, não erro.
+ */
+export async function dispatchResolveGapsJob(opts: {
+  jobId: string;
+  projectId: string;
+  tenantId: string | null;
+  ownerUserId: string;
+  specMarkdown: string;
+  userMessage: string;
+  agentsUrl: string;
+  llm: Record<string, unknown>;
+}): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS" }> {
+  const ctx = await loadChatContext(opts.projectId, opts.specMarkdown, opts.userMessage);
+  if (ctx.findings.length === 0) return { ok: false, code: "NO_GAPS" };
+
+  _chatJobs.set(opts.jobId, {
+    id: opts.jobId, status: "pending", createdAt: Date.now(),
+    projectId: opts.projectId, ownerUserId: opts.ownerUserId,
+    sentFilePath: null, sentBaseSha: null,
+  });
+  await createSpecChatJob(pool, {
+    id: opts.jobId, projectId: opts.projectId, tenantId: opts.tenantId, ownerUserId: opts.ownerUserId,
+    kind: "resolve_gaps", filePath: null, baseSha: null, baseSpecSha: sha256(opts.specMarkdown),
+    userMessage: opts.userMessage,
+  });
+  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true, opts.projectId), ...opts.llm }, opts.agentsUrl);
+  return { ok: true, gaps: ctx.findings.length };
+}
+
 /** Traduz o estado do banco para o contrato da rota (o cliente só conhece 4 estados). */
 function wireStatus(status: SpecChatJobStatus): "pending" | "running" | "done" | "error" {
   if (status === "done") return "done";
@@ -630,7 +759,12 @@ export async function specChatRoutes(app: FastifyInstance) {
 
       // Onda 1: no modo SPEC INTEIRA com projeto, carrega contexto SÓ-LEITURA (irmãos + GAPs)
       // para o CTO agir com precisão. Best-effort (falha → contexto vazio, sem derrubar a rota).
-      const ctx = projectId && !filePath ? await loadChatContext(projectId, specMarkdown) : EMPTY_CTX;
+      // Fase 1 (P4): o modo POR-ARQUIVO deixa de rodar cego — recebe o MAPA do produto e os GAPs
+      // (sem corpo de irmãos). Com a flag off ambos os caminhos ficam como estavam.
+      const loadCtx = projectId && (!filePath || productScopeEnabled());
+      const ctx = loadCtx
+        ? await loadChatContext(projectId!, specMarkdown, lastUser ?? "", { siblingBodies: !filePath })
+        : EMPTY_CTX;
 
       // Resolver GAPs sem findings em aberto = nada a fazer → erro claro (não gera turno vazio).
       if (resolveGaps && ctx.findings.length === 0) {
@@ -668,11 +802,11 @@ export async function specChatRoutes(app: FastifyInstance) {
       const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId: user.tenantId }));
       if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
-        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath), ...llm }, agentsUrl);
+        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx), ...llm }, agentsUrl);
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).
-        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps), ...llm }, agentsUrl);
+        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps, projectId), ...llm }, agentsUrl);
       }
 
       // `deadlineAt` no 202: o teto de espera passa a ser DITADO PELO SERVIDOR. O cliente tinha um
@@ -731,6 +865,9 @@ export async function specChatRoutes(app: FastifyInstance) {
           // `true` = terminou enquanto ninguém olhava; o cliente deve OFERECER (não aplicar) o
           // resultado, porque a spec no editor pode ter sido editada à mão nesse meio-tempo.
           recovered: job.status === "done" && !job.collectedAt,
+          // `true` = job REPROVADO (enforcer/BLOCKED, interrupção, perda) que ainda assim carrega uma
+          // spec gravada. O cliente busca o resultado pelo GET /:jobId e OFERECE, avisando o motivo.
+          salvaged: job.status !== "done" && job.hasSpecMarkdown,
         },
       });
     },
@@ -807,7 +944,15 @@ export async function specChatRoutes(app: FastifyInstance) {
       }
       if (status === "error") {
         if (db) void markSpecChatJobCollected(pool, jobId);
-        return reply.send({ jobId, status: "error", error: errorText });
+        // Um envelope reprovado pelo enforcer ainda carrega a spec inteira (judgeCtoResult a
+        // preserva). Devolvemos junto do MOTIVO: o cliente OFERECE (nunca aplica sozinho) — mesmo
+        // contrato do card de revisão recuperada da migração 089. Antes ~20 min de Opus 5 iam
+        // para o lixo porque a rota só devolvia a mensagem de erro.
+        return reply.send({
+          jobId, status: "error", error: errorText,
+          specMarkdown: specMarkdown ?? null,
+          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null,
+        });
       }
       const createdMs = db ? new Date(db.createdAt).getTime() : (mem?.createdAt ?? Date.now());
       // Elapsed derivado do `created_at` do BANCO: antes vinha de um `Date.now()` por processo, e

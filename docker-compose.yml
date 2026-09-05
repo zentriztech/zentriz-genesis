@@ -27,6 +27,13 @@ services:
       # padrão (manual primeiro); ligar = SPEC_VALIDATION_AUTO=on. Quiet configurável.
       - SPEC_VALIDATION_AUTO=${SPEC_VALIDATION_AUTO:-off}
       - SPEC_VALIDATION_AUTO_QUIET_MIN=${SPEC_VALIDATION_AUTO_QUIET_MIN:-2}
+      # Contexto do produto inteiro para o CTO (Fase 1) — só a API lê esta flag; os agents
+      # reagem ao campo `context_emit: "v2"` do envelope, então api/agents podem ser
+      # deployados em qualquer ordem. OFF = prompt byte-idêntico ao legado.
+      - SPEC_CONTEXT_PRODUCT_SCOPE=${SPEC_CONTEXT_PRODUCT_SCOPE:-off}
+      # Certificado Genesis Factory — selo informativo (NUNCA gate). OFF = payload de
+      # /api/specs, /api/products e /api/specs/:id/validation idêntico ao legado.
+      - FACTORY_CERTIFICATE=${FACTORY_CERTIFICATE:-off}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
@@ -304,6 +311,16 @@ services:
       - DEADPOOL_ALLOW_LIVE_GITHUB_CALLS=${DEADPOOL_ALLOW_LIVE_GITHUB_CALLS:-false}
     volumes:
       - zentriz-genesis_deadpool_state:/data
+      # D-A1 (decisão do Jean, 2026-09-05): working trees que o Genesis git-linka. A api registra
+      # `localPath = ${PROJECT_FILES_ROOT}/<projectId>/apps` = `/project-files/<id>/apps`; sem este
+      # mount `Path(local_path).is_dir()` é FALSO dentro do container (service.py:513) e a remediação
+      # cai em clone de rede — desligado (DEADPOOL_ALLOW_NETWORK_CLONE=false) → dry-run silencioso.
+      # Mesmo path absoluto dos demais serviços (api/agents/runner montam este volume em
+      # /project-files) — é o path que viaja no payload de registro, não pode divergir.
+      # Read-WRITE de propósito: a remediação cria a branch `deadpool/<incidente>` e escreve na
+      # árvore. Efeito colateral real segue barrado por DEADPOOL_EXECUTION_MODE=plan +
+      # DEADPOOL_ALLOW_LIVE_GITHUB_CALLS=false (acima).
+      - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
       # Schemas do Connect em read-only (mesmo idioma do runner, linha ~198): em prod o default
       # ../zentriz-connect resolve para /opt/zentriz-connect (pasta irmã de /opt/zentriz-genesis);
       # em dev/local resolve para a pasta irmã do repo. Consumido por DEADPOOL_CONNECT_ROOT acima.

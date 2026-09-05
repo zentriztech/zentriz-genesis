@@ -16,6 +16,7 @@
  */
 import { pool } from "../db/client.js";
 import { collectSpecChatJobsTick } from "./specChatJobs.js";
+import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
 /** 20 s: barato (só toca jobs órfãos) e rápido o bastante para o usuário que volta à tela. */
@@ -46,6 +47,14 @@ async function tick(): Promise<void> {
   const out = await collectSpecChatJobsTick(pool, probeAgents, extractSpecMarkdown);
   if (out.collected || out.lost || out.expired) {
     console.info(`[SpecChatWorker] tick: ${out.scanned} órfão(s) varrido(s) — ${out.collected} coletado(s), ${out.lost} perdido(s), ${out.expired} expirado(s).`);
+  }
+  // MODO AUTÔNOMO (migração 090): o mesmo tick avança o laço "Resolver GAPs → Salvar → Validar".
+  // A ORDEM importa: coletar PRIMEIRO encerra o job do CTO desta rodada, e só então o laço vê
+  // `done` e aplica a spec — sem isto o autônomo esperaria um tick extra por rodada.
+  // Nunca lança (a função é defensiva por dentro) para não derrubar a coleta de jobs.
+  const auto = await advanceAutonomyRunsTick(pool);
+  if (auto.advanced) {
+    console.info(`[SpecChatWorker] modo autônomo: ${auto.advanced}/${auto.scanned} laço(s) avançado(s).`);
   }
 }
 

@@ -16,6 +16,11 @@ VALID_STATUSES = frozenset({
 ALLOWED_PATH_PREFIXES = ("docs/", "project/", "apps/")
 TRAVERSAL_PATTERN = re.compile(r"\.\.|/\.\.|\.\./|^/|^~|\\\\")
 
+# Tamanho mínimo do `summary` para ele valer como evidência quando `evidence[]` vem vazio.
+# UMA fonte para os DOIS validadores deste arquivo (`validate_response_envelope` estrito e
+# `validate_response_quality` tolerante) — eles divergiam, e a divergência reprovava specs boas.
+MIN_SUMMARY_AS_EVIDENCE = 20
+
 
 def sanitize_artifact_path(path: str, project_id: str | None) -> str | None:
     """
@@ -100,12 +105,23 @@ def validate_response_envelope(
         elif "content" not in art and require_artifacts:
             errors.append(f"artifacts[{i}] deve ter 'content' quando geração é obrigatória")
 
+    # 🔴 Corrigido em 2026-09-05 — este gate reprovava specs COMPLETAS por um campo de METADADOS.
+    # A versão anterior era: `if not evidence or not isinstance(evidence, list)` → já disparava com
+    # `evidence: []`, o que tornava o `elif` seguinte CÓDIGO MORTO e a própria mensagem
+    # "(ou summary com evidência)" FALSA. Efeito medido na Bancada: um artefato de ~70 kB perfeito
+    # virava BLOCKED ("O CTO não conseguiu revisar"), e o repair reemitia a spec inteira em Opus 5
+    # (~10 min por rodada) para preencher um array de citações. Agora vale a MESMA regra tolerante
+    # de `validate_response_quality` (abaixo): `evidence[]` OU um `summary` com substância.
     if status == "OK" and require_evidence_when_ok:
         evidence = data.get("evidence")
-        if not evidence or not isinstance(evidence, list):
-            errors.append("status=OK exige evidence não vazio (ou summary com evidência)")
-        elif len(evidence) == 0 and not (data.get("summary") or "").strip():
-            errors.append("status=OK exige evidence não vazio")
+        summary = data.get("summary") if isinstance(data.get("summary"), str) else ""
+        if evidence is not None and not isinstance(evidence, list):
+            errors.append("evidence deve ser uma lista")
+        elif not (isinstance(evidence, list) and len(evidence) > 0) and len(summary.strip()) < MIN_SUMMARY_AS_EVIDENCE:
+            errors.append(
+                "status=OK exige evidence não vazio OU um summary com evidência "
+                f"(mínimo {MIN_SUMMARY_AS_EVIDENCE} caracteres)"
+            )
 
     if status == "NEEDS_INFO":
         next_actions = data.get("next_actions")
@@ -239,7 +255,7 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
 
     if status == "OK" and not response.get("evidence"):
         summary = (response.get("summary") or "").strip()
-        if len(summary) < 20:
+        if len(summary) < MIN_SUMMARY_AS_EVIDENCE:
             errors.append("status=OK sem evidence e summary muito curto")
 
     return len(errors) == 0, errors

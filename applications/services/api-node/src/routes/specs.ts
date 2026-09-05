@@ -12,6 +12,7 @@ import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
+import { computeFactoryCertificate, computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
@@ -113,7 +114,7 @@ export function extractProductZip(zipBuffer: Buffer): ProductZipContents | null 
 }
 
 // ── Message envelope builder — spec from free description (leigo → spec completa) ──
-function buildCTOMessage(freeText: string, title?: string): Record<string, unknown> {
+function buildCTOMessage(freeText: string, title?: string, scopeUserId?: string | null): Record<string, unknown> {
   const requestId = `spec-preview-${Date.now()}`;
 
   // Enriched task instruction: explain that the input is free text from a non-technical user
@@ -141,6 +142,10 @@ Descrição do usuário: "${freeText.replace(/"/g, '\\"')}"
 
   return {
     project_id: "spec_preview",
+    // Mesmo motivo do `circuit_scope` do chat de spec (2026-09-05): `spec_preview` é pseudo-projeto
+    // (o projeto ainda não existe nesta etapa) e chaveava o circuit breaker dos agents GLOBALMENTE —
+    // 3 prévias falhas de um usuário bloqueavam a prévia de todos. Escopo aqui = usuário.
+    circuit_scope: scopeUserId ? `spec_preview:${scopeUserId}` : "spec_preview",
     agent: "CTO",
     variant: "generic",
     mode: "spec_intake_and_normalize",
@@ -363,7 +368,7 @@ export async function specRoutes(app: FastifyInstance) {
       const job: SpecJob = { id: jobId, status: "pending", createdAt: Date.now() };
       _specJobs.set(jobId, job);
 
-      const message = buildCTOMessage(freeText, body.title);
+      const message = buildCTOMessage(freeText, body.title, getUser(request)?.id ?? null);
 
       // Fire and forget — setInterval-based, no Promise to await
       runSpecJob(jobId, message, agentsUrl);
@@ -456,6 +461,14 @@ export async function specRoutes(app: FastifyInstance) {
       // antigo), degrada para as specs cruas — a listagem nunca quebra por causa disso.
       try {
         const enriched = await enrichSpecs(client, rows as unknown as SpecForEnrichment[]);
+        // Certificado Genesis Factory (flag OFF por padrão): só ANEXA um campo — com a flag
+        // desligada o payload é byte-idêntico ao legado. O escopo de tenant vem de `rows`
+        // (já filtrado acima), nunca de parâmetro do cliente (A8 / P0 de vazamento 2026-09-03).
+        if (factoryCertificateEnabled()) {
+          const certs = await computeFactoryCertificates(client as unknown as { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }, enriched.map((s) => s.id))
+            .catch((err) => { request.log.warn({ err }, "factory certificate failed; specs sem selo"); return new Map(); });
+          return reply.send(enriched.map((s) => ({ ...s, factoryCertificate: certs.get(s.id) ?? null })));
+        }
         return reply.send(enriched);
       } catch (err) {
         request.log.warn({ err }, "spec enrichment failed; returning bare specs");
@@ -964,7 +977,17 @@ export async function specRoutes(app: FastifyInstance) {
     const covers = !!(latest && current && latest.spec_hash === current.specHash);
     const wouldPass = covers && !!triage && triage.counts.blockersActive === 0 && (derived === "validated" || derived === "failed");
     if (derived === "failed" && wouldPass) derived = "failed_triaged";
+    // Certificado Genesis Factory (3º ponto de exibição — aba GAPs). Flag OFF → campo ausente,
+    // payload idêntico ao legado. Best-effort: falha no selo não pode derrubar a aba.
+    let factoryCertificate: unknown;
+    if (factoryCertificateEnabled()) {
+      factoryCertificate = await computeFactoryCertificate(pool, id).catch((err) => {
+        request.log.warn({ err, projectId: id }, "factory certificate failed; validação sem selo");
+        return null;
+      });
+    }
     return reply.send({
+      ...(factoryCertificateEnabled() ? { factoryCertificate } : {}),
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
       derivedStatus: derived,

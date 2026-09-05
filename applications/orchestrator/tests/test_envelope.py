@@ -76,6 +76,75 @@ def test_validate_response_artifacts_path_blocked():
     assert any("path" in e or "bloqueado" in e.lower() for e in errs)
 
 
+# --- gate de evidence: estrito ALINHADO ao tolerante (correção 2026-09-05) ---
+
+
+def test_evidence_vazio_com_summary_substancial_passa():
+    """A regressão que reprovava specs boas: `evidence: []` + summary real virava BLOCKED."""
+    from orchestrator.envelope import validate_response_envelope
+    data = {
+        "status": "OK",
+        "summary": "Spec revisada: resolvi os 3 blockers de autenticação e declarei o contrato Connect.",
+        "artifacts": [{"path": "docs/spec/PRODUCT_SPEC.md", "content": "# Spec\n\n" + "x" * 200}],
+        "evidence": [],
+        "next_actions": {},
+    }
+    ok, errs = validate_response_envelope(data, require_evidence_when_ok=True)
+    assert ok is True, errs
+
+
+def test_evidence_ausente_com_summary_substancial_passa():
+    from orchestrator.envelope import validate_response_envelope
+    data = {
+        "status": "OK",
+        "summary": "Resolvi os GAPs apontados e mantive todo o conteúdo válido da spec anterior.",
+        "artifacts": [], "next_actions": {},
+    }
+    ok, errs = validate_response_envelope(data, require_evidence_when_ok=True)
+    assert ok is True, errs
+
+
+def test_evidence_vazio_com_summary_curto_reprova():
+    from orchestrator.envelope import validate_response_envelope
+    data = {"status": "OK", "summary": "ok", "artifacts": [], "evidence": [], "next_actions": {}}
+    ok, errs = validate_response_envelope(data, require_evidence_when_ok=True)
+    assert ok is False
+    assert any("evidence" in e for e in errs)
+
+
+def test_evidence_tipo_invalido_reprova():
+    from orchestrator.envelope import validate_response_envelope
+    data = {
+        "status": "OK", "summary": "Summary com tamanho mais que suficiente para valer como evidência.",
+        "artifacts": [], "evidence": "docs/spec/PRODUCT_SPEC.md", "next_actions": {},
+    }
+    ok, errs = validate_response_envelope(data, require_evidence_when_ok=True)
+    assert ok is False
+    assert any("lista" in e for e in errs)
+
+
+def test_evidence_gate_desligado_ignora_tudo():
+    from orchestrator.envelope import validate_response_envelope
+    data = {"status": "OK", "summary": "ok", "artifacts": [], "evidence": [], "next_actions": {}}
+    ok, errs = validate_response_envelope(data, require_evidence_when_ok=False)
+    assert ok is True, errs
+
+
+def test_os_dois_validadores_concordam_no_mesmo_envelope():
+    """Divergência entre os gates era a causa do BLOCKED: mesmo envelope, veredictos opostos."""
+    from orchestrator.envelope import validate_response_envelope, validate_response_quality
+    data = {
+        "status": "OK",
+        "summary": "Spec completa revisada com premissas declaradas e contrato Connect explícito.",
+        "artifacts": [{"path": "docs/spec/PRODUCT_SPEC.md", "content": "# Spec\n\n" + "y" * 300}],
+        "evidence": [],
+        "next_actions": {},
+    }
+    strict_ok, _ = validate_response_envelope(data, require_evidence_when_ok=True)
+    quality_ok, _ = validate_response_quality("CTO", data)
+    assert strict_ok is quality_ok is True
+
+
 # --- _extract_double_quoted / resilient_json_parse (LEI 4) ---
 
 

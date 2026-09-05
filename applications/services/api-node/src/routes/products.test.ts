@@ -6,7 +6,7 @@
  * tenant_id = user.tenantId (null → ''). O fix honra ?tenantId no LIST (espelhando
  * /api/projects e /api/specs) e autoriza o :id por papel.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
@@ -442,5 +442,50 @@ describe("INBOX/solo — proteções estruturais (migration 064)", () => {
     const moved = captured.find((q) => q.sql.includes("UPDATE projects SET product_id"));
     expect(moved?.params[0]).toBe(INBOX_ID);
     expect(moved?.params[1]).toBe(PROJ_ID);
+  });
+});
+
+describe("GET /api/products — Certificado Genesis Factory agregado (A6)", () => {
+  const PROD_B = "44444444-4444-4444-8444-444444444444";
+  const SPEC_1 = "55555555-5555-4555-8555-555555555555";
+  const SPEC_2 = "66666666-6666-4666-8666-666666666666";
+
+  /** Lista 2 produtos; o primeiro tem 2 specs na Bancada, o segundo nenhuma. */
+  function listing() {
+    queryHandler = (sql) => {
+      if (sql.includes("FROM products")) return { rows: [{ id: PROD_ID, name: "Venuxx V2" }, { id: PROD_B, name: "Vazio" }] };
+      if (sql.includes("SELECT id, product_id FROM projects")) {
+        return { rows: [{ id: SPEC_1, product_id: PROD_ID }, { id: SPEC_2, product_id: PROD_ID }] };
+      }
+      return { rows: [] };
+    };
+  }
+
+  afterEach(() => { delete process.env.FACTORY_CERTIFICATE; });
+
+  it("flag OFF (default): payload byte-idêntico — nem o selo nem a query de specs aparecem", async () => {
+    listing();
+    const res = await app.inject({ method: "GET", url: "/api/products" });
+    const body = res.json() as Array<Record<string, unknown>>;
+    expect(body[0]).not.toHaveProperty("factoryCertificate");
+    expect(captured.some((q) => q.sql.includes("SELECT id, product_id FROM projects"))).toBe(false);
+  });
+
+  it("flag ON: agrega por produto (AND com n/m) e só olha projetos da BANCADA", async () => {
+    process.env.FACTORY_CERTIFICATE = "on";
+    listing();
+    // O serviço roda de verdade contra o pool fake (sem arquivos de spec no duplo).
+    const res = await app.inject({ method: "GET", url: "/api/products" });
+    const body = res.json() as Array<{ id: string; factoryCertificate: Record<string, unknown> }>;
+    const venuxx = body.find((p) => p.id === PROD_ID)!;
+    const vazio = body.find((p) => p.id === PROD_B)!;
+    // Sem arquivos de spec no duplo, os 2 projetos reprovam C1 → produto `blocked`, 0/2.
+    expect(venuxx.factoryCertificate).toMatchObject({ level: "blocked", certified: 0, total: 2, blocked: 2 });
+    expect(venuxx.factoryCertificate.message).toContain("0/2 projetos certificados");
+    // Produto sem projeto na Bancada não é "reprovado": é `unknown` com total 0 (a UI esconde).
+    expect(vazio.factoryCertificate).toMatchObject({ level: "unknown", total: 0 });
+    // O status filtrado é o da Bancada (pré-fábrica), não qualquer projeto do produto.
+    const specQuery = captured.find((q) => q.sql.includes("SELECT id, product_id FROM projects"));
+    expect(specQuery?.params[1]).toEqual(["draft", "spec_submitted", "pending_conversion"]);
   });
 });
