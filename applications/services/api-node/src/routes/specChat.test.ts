@@ -486,3 +486,76 @@ describe("POST /api/spec-chat — Fase 1: contexto de PRODUTO", () => {
     expect(prompt).not.toContain("CONTEXTO SÓ-LEITURA");
   });
 });
+
+// ── F1 (2026-09-05): `SPEC_CTO_EDIT_FORMAT` — o CTO entrega EDIÇÕES, não a spec inteira ────────────
+// A causa do truncamento é o CTO reemitir 98k chars a cada rodada (≈75% dos 64k tokens de saída do
+// Opus 5 só para copiar o que não mudou). A DECISÃO do formato nasce aqui, na api, porque é ela quem
+// monta a regra 4 do prompt: se a decisão morasse no agents o prompt ficaria auto-contraditório.
+// A autoria do texto continua 100% do LLM — o servidor apenas aplica o search/replace que ele escreveu.
+describe("POST /api/spec-chat — F1: formato de entrega do CTO", () => {
+  const withFindings = (sql: string) => {
+    if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+    if (sql.includes("spec_validation_runs")) {
+      return { rows: [{ status: "failed", findings: [{ file: "README.md", line: 1, severity: "blocker", title: "Falta authz", rationale: "x", source: "stage_b" }] }] };
+    }
+    return { rows: [] };
+  };
+
+  beforeEach(() => { delete process.env.SPEC_CTO_EDIT_FORMAT; });
+
+  it("default (whole): prompt e constraints byte-idênticos ao legado", async () => {
+    queryHandler = withFindings;
+    await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", projectId: PROJ, resolveGaps: true },
+    });
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.task).toContain("Devolva a SPEC INTEIRA revisada");
+    expect(body.task).toContain("devolvendo a spec COMPLETA revisada");
+    expect(body.task).not.toContain("APENAS AS EDIÇÕES");
+    expect(body.inputs.edit_format).toBeUndefined();
+    expect(body.inputs.constraints).toContain("return-full-revised-spec");
+  });
+
+  it("ON (edits): a regra 4 pede EDIÇÕES, mantém o path exigido e marca inputs.edit_format", async () => {
+    process.env.SPEC_CTO_EDIT_FORMAT = "edits";
+    queryHandler = withFindings;
+    await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", projectId: PROJ, resolveGaps: true },
+    });
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.task).toContain("APENAS AS EDIÇÕES");
+    expect(body.task).not.toContain("Devolva a SPEC INTEIRA revisada");
+    // o path continua obrigatório: o gate `_required_path_prefixes_for_mode` não mudou
+    expect(body.task).toContain("docs/spec/PRODUCT_SPEC.md");
+    expect(body.inputs.edit_format).toBe("edits");
+    expect(body.inputs.constraints).toContain("return-edits-not-full-spec");
+    expect(body.inputs.constraints).not.toContain("return-full-revised-spec");
+    // a spec-base continua viajando inteira: é contra ela que o servidor aplica os edits
+    expect(body.inputs.spec_raw).toBe("# doc");
+  });
+
+  it("ON (edits) também vale no chat conversacional (sem resolveGaps)", async () => {
+    process.env.SPEC_CTO_EDIT_FORMAT = "edits";
+    await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", messages: msg("adicione um campo email"), projectId: PROJ },
+    });
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.task).toContain("APENAS AS EDIÇÕES");
+    expect(body.inputs.edit_format).toBe("edits");
+    expect(body.inputs.constraints).toContain("return-edits-not-full-spec");
+  });
+
+  it("valor desconhecido da flag cai no legado (fail-safe)", async () => {
+    process.env.SPEC_CTO_EDIT_FORMAT = "sim";
+    await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# doc", messages: msg("ajuste"), projectId: PROJ },
+    });
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.inputs.edit_format).toBeUndefined();
+    expect(body.task).toContain("Devolva a SPEC INTEIRA revisada");
+  });
+});

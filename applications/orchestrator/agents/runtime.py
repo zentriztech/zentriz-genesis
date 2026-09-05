@@ -346,6 +346,9 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     # spec_raw > product_spec > charter > backlog > engineer.
     _budget = _prompt_budget(model) if _prompt_budget_enabled() else None
     _spent = 0
+    # F1: quem foi CORTADO. O formato `edits` só pode ser OFERECIDO para um documento que o modelo
+    # viu INTEIRO — um `search` escrito sobre um trecho é aplicado contra o documento completo.
+    _clipped_fields: set[str] = set()
 
     def _take(value: str, field: str) -> str:
         """Aplica cap do campo ∩ sobra do orçamento global, com marcador quando cortar."""
@@ -353,8 +356,12 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
         if not isinstance(value, str):
             return value
         if _budget is None:
+            if len(value) > _PROMPT_FIELD_FLOORS[field]:
+                _clipped_fields.add(field)
             return value[:_PROMPT_FIELD_FLOORS[field]]
         cap = min(_budget[field], max(0, _budget["_total"] - _spent))
+        if len(value) > cap:
+            _clipped_fields.add(field)
         out = _clip(value, cap, field, model)
         _spent += min(len(value), cap)
         return out
@@ -520,6 +527,41 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
             "USE `content` completo (não `edits`) quando: o arquivo é NOVO, não aparece por inteiro acima, "
             "ou o edit já falhou 2× nesta task. Fora de arquivos que você viu inteiros, entregue `content`."
         )
+
+    # ── F1 (2026-09-05): o CTO da Bancada pode entregar só as MUDANÇAS ────────────────────────────
+    # A decisão do formato nasce na API (flag `SPEC_CTO_EDIT_FORMAT`), que é quem monta a regra
+    # "devolva a SPEC INTEIRA" do `task` — se a decisão morasse aqui, o prompt ficaria
+    # auto-contraditório e o modelo obedeceria o hábito de reemitir tudo. Aqui só descrevemos o
+    # FORMATO quando a api pediu (`inputs.edit_format == "edits"`).
+    # Pré-condição inegociável: a spec entrou INTEIRA no prompt. Cortada, o `search` do modelo se
+    # refere a um documento que não é o que será editado → cai no `content` completo.
+    if (role or "").upper() == "CTO" and str(envelope.get("edit_format") or "").lower() == "edits":
+        if "spec_raw" in _clipped_fields:
+            logger.warning(
+                "[CTO] `edits` pedido pela api mas a spec foi CORTADA no prompt — oferecendo apenas "
+                "`content` completo (o search seria escrito sobre um documento parcial)."
+            )
+        else:
+            parts.append(
+                "## Formato de entrega: EDIÇÕES CIRÚRGICAS (obrigatório para esta spec)\n"
+                "Você viu a spec INTEIRA acima. NÃO reemita o documento completo: o custo de saída "
+                "do modelo é limitado e reescrever o que não mudou já CORTOU respostas pela metade "
+                "nesta Bancada. Entregue o artefato assim:\n"
+                "```json\n"
+                '{"path": "docs/spec/PRODUCT_SPEC.md", "format": "edits", "edits": ['
+                '{"search": "<trecho EXATO da spec atual, 3+ linhas>", "replace": "<novo trecho>"}]}\n'
+                "```\n"
+                "Regras (semântica str_replace):\n"
+                "- `search` deve casar EXATA e UNICAMENTE na spec atual — copie o trecho tal como está "
+                "(indentação inclusive) e inclua 3+ linhas de contexto para torná-lo único;\n"
+                "- `replace` vazio REMOVE o trecho; vários edits são aplicados em ordem;\n"
+                "- para ACRESCENTAR uma seção nova, use como `search` o final da seção anterior e "
+                "repita-o no `replace` seguido do texto novo;\n"
+                "- o servidor aplica os edits sobre a spec real e monta o documento final — você NÃO "
+                "precisa (nem deve) devolver o documento inteiro;\n"
+                "- se algum `search` não casar, você receberá o trecho real e poderá corrigir;\n"
+                "- só entregue `content` completo se a mudança for uma reescrita de fato do documento."
+            )
 
     instruction = (
         "Responda primeiro com seu raciocínio dentro de tags <thinking>...</thinking>, "
@@ -880,6 +922,136 @@ def _mark_truncation(out: dict, stop_reason: str | None, agent_name: str) -> Non
             "O consumidor NÃO deve aplicar este resultado sem revisão humana.",
             agent_name, out["_truncated_signal"], out.get("status"), len(out.get("artifacts") or []),
         )
+
+
+def _resolve_inputs(message: dict) -> dict:
+    """Campos de conteúdo do envelope, com o MESMO desembrulho de `build_user_message`.
+
+    A Bancada manda um corpo PLANO (`{task, mode, inputs:{spec_raw,…}}`) que o `server.py` embrulha
+    em `{"input": body}` → os campos ficam DOIS níveis abaixo. Era a causa do prompt de 322 chars
+    (2026-09-05). Qualquer leitor de `spec_raw` no runtime tem de usar este desembrulho.
+    """
+    if not isinstance(message, dict):
+        return {}
+    envelope = message.get("inputs") or message.get("input") or message
+    if not isinstance(envelope, dict):
+        return {}
+    nested = envelope.get("inputs")
+    if isinstance(nested, dict) and nested:
+        envelope = {**envelope, **nested}
+    return envelope
+
+
+def _spec_edit_base(message: dict) -> str | None:
+    """Texto-base contra o qual os `edits` do CTO são aplicados (a spec que ele recebeu)."""
+    inputs = _resolve_inputs(message)
+    for field in ("spec_raw", "product_spec"):
+        value = inputs.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def materialize_spec_edits(
+    out: dict,
+    message: dict,
+    role: str,
+    mode: str,
+    truncated: bool,
+    model: str = "",
+) -> list[str]:
+    """F1 (2026-09-05) — transforma `artifacts[].format:"edits"` do CTO em `content` completo.
+
+    POR QUE EXISTE: no modo `spec_intake_and_normalize` o CTO REEMITE a spec inteira. Com 98.045
+    chars (NVX LastMile) isso consome ~75% dos 64.000 tokens de SAÍDA do Opus 5 só para copiar o
+    que não mudou — e estoura. As guardas T1/T2 fazem o laço PARAR sem mutilar, mas ele também não
+    avança. A saída real é o CTO entregar apenas as MUDANÇAS (search/replace), no mesmo contrato
+    `edits` que o Dev já tem (`envelope.py:93`, `edits.py`), e a materialização acontecer AQUI —
+    antes dos gates — para que api, UI, `extractSpecMarkdown`, T1/T2/G2 e o modo autônomo continuem
+    vendo exatamente o que sempre viram: `artifacts[0].content` com a spec inteira.
+
+    Roda só no caminho do CTO da Bancada (role CTO + `spec_intake_and_normalize`); o Dev continua
+    sendo materializado pelo `runner.py` (que lê o arquivo do DISCO, não do envelope).
+
+    Devolve lista de erros — vazia em sucesso. Os erros entram em `all_errors` e viram repair da
+    LEI 5 (o modelo recebe o trecho que não casou), nunca uma aplicação parcial: `apply_edits` é
+    atômico e, na dúvida, este caminho REPROVA em vez de escrever.
+    """
+    if (role or "").upper() != "CTO" or (mode or "").strip().lower() != "spec_intake_and_normalize":
+        return []
+    artifacts = out.get("artifacts")
+    if not isinstance(artifacts, list):
+        return []
+    targets = [
+        a for a in artifacts
+        if isinstance(a, dict) and a.get("format") == "edits" and isinstance(a.get("edits"), list)
+    ]
+    if not targets:
+        return []
+
+    # 🔴 GUARDA B4 — resposta cortada NÃO vira edit. Se o texto acabou dentro de um `replace`, o
+    # recuperador de JSON fecha o objeto à força e teríamos um trecho MUTILADO aplicado
+    # cirurgicamente sobre a spec (pior que hoje: passaria pelas guardas de tamanho, porque o
+    # documento continua grande). Truncado → repair; esgotado o repair → BLOCKED.
+    if truncated or out.get("_json_recovered_truncated"):
+        return [
+            "a resposta foi CORTADA no limite de tokens de saída, então os `edits` podem estar "
+            "incompletos e NÃO foram aplicados. Reenvie APENAS os edits necessários, em menos "
+            "blocos e com `search` curto (3-6 linhas), para caber no limite."
+        ]
+
+    base = _spec_edit_base(message)
+    if base is None:
+        return [
+            "não há spec-base neste pedido (`spec_raw` ausente), então `format:\"edits\"` é "
+            "inaplicável: entregue o artefato com `content` completo."
+        ]
+
+    # 🔴 GUARDA B3 — só aceita edits quando o modelo VIU a spec inteira. O cap de `spec_raw` no
+    # prompt deriva do `max_output` (§ `_prompt_budget`): com modelo pequeno a spec chega CORTADA, e
+    # um `search` escrito sobre o trecho visível casaria (ou não) contra um documento diferente do
+    # que o modelo leu. Nesse caso o formato `edits` é inseguro por construção.
+    cap = _prompt_budget(model)["spec_raw"] if _prompt_budget_enabled() else _PROMPT_FIELD_FLOORS["spec_raw"]
+    if len(base) > cap:
+        logger.warning(
+            "[CTO] edits RECUSADOS: a spec-base (%d chars) não caberia inteira no prompt (cap=%d, model=%s).",
+            len(base), cap, model or "?",
+        )
+        return [
+            f"a spec entregue a você foi cortada em {cap} de {len(base)} caracteres, então "
+            "`format:\"edits\"` não pode ser aplicado com segurança. Entregue o artefato com "
+            "`content` completo."
+        ]
+
+    try:
+        from orchestrator.edits import apply_edits
+    except ImportError:  # pragma: no cover - dependência interna
+        return ["aplicador de `edits` indisponível no servidor: entregue `content` completo."]
+
+    errors: list[str] = []
+    for art in targets:
+        edits = art.get("edits") or []
+        result, edit_errors = apply_edits(base, edits)
+        if result is None:
+            errors.extend(edit_errors)
+            continue
+        # O artefato passa a ser INDISTINGUÍVEL de um `content` completo — gates, `extractSpecMarkdown`,
+        # persistência e as guardas da api seguem funcionando sem saber que houve edits.
+        art["content"] = result
+        art.pop("edits", None)
+        art.pop("format", None)
+        art["_materialized_from_edits"] = len(edits)
+        saved = max(0, len(result) - sum(len(str(e.get("replace") or "")) + len(str(e.get("search") or "")) for e in edits if isinstance(e, dict)))
+        out["_edits_applied"] = int(out.get("_edits_applied") or 0) + len(edits)
+        out["_edits_chars_saved"] = int(out.get("_edits_chars_saved") or 0) + saved
+        logger.info(
+            "[CTO] edits materializados: %d edit(s) sobre %d chars → %d chars (economia de saída ≈ %d chars).",
+            len(edits), len(base), len(result), saved,
+        )
+    if errors:
+        out["_edits_failed"] = int(out.get("_edits_failed") or 0) + len(errors)
+        logger.warning("[CTO] edits NÃO aplicados (%d erro(s)): %s", len(errors), errors[0][:200])
+    return errors
 
 
 def _mark_usage_totals(out: dict, input_total: int, output_total: int, calls: int) -> None:
@@ -1521,10 +1693,17 @@ def run_agent(
             if "next_actions" in out and isinstance(out["next_actions"], list):
                 out["next_actions"] = {}
 
+        # F1 — materialização do formato `edits` do CTO ANTES dos gates: daqui para baixo o artefato
+        # é um `content` completo como sempre foi. Falha de casamento vira erro de validação e,
+        # portanto, repair da LEI 5 com o trecho real que não casou (nunca aplicação parcial).
+        edits_errors = materialize_spec_edits(
+            out, message, role, mode, stop_reason == "max_tokens", model,
+        )
+
         gate_errors = []
         if validate_response_envelope_for_mode and out.get("status") != "FAIL":
             ok, gate_errors = validate_response_envelope_for_mode(out, role, mode, task_id)
-        all_errors = parse_errors + gate_errors
+        all_errors = parse_errors + gate_errors + edits_errors
         out["artifacts_paths"] = [a.get("path") for a in out.get("artifacts", []) if isinstance(a, dict) and a.get("path")]
 
         if not all_errors and validate_response_quality:

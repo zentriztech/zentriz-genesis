@@ -38,6 +38,11 @@ services:
       # repete SEM humano no meio. Fail-closed por desenho (G4): instalação nova nasce OFF e
       # prod liga EXPLICITAMENTE no .env (SPEC_AUTONOMY=on). O 1º clique é sempre do humano.
       - SPEC_AUTONOMY=${SPEC_AUTONOMY:-off}
+      # F1 — formato de entrega do CTO da Bancada: `whole` (default, legado) = o LLM reemite a spec
+      # inteira; `edits` = o LLM entrega search/replace e o servidor aplica. A decisão do CONTEÚDO
+      # continua 100% do LLM; muda só o TRANSPORTE (evita gastar o teto de saída copiando o que não
+      # mudou). Só a API lê esta flag — o agents reage ao campo `inputs.edit_format` do envelope.
+      - SPEC_CTO_EDIT_FORMAT=${SPEC_CTO_EDIT_FORMAT:-whole}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
