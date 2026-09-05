@@ -79,6 +79,11 @@ try {
     // (mesma classe de furo — o job do propose deixou de viver num Map em memória).
     const { reapOrphanProposals } = await import("./services/productProposals.js");
     await reapOrphanProposals(pool).catch((e) => console.error("[boot] reapOrphanProposals:", e));
+    // F2/PR-3 (migração 093): divisão de spec que morreu ANTES do despacho → 'interrupted'.
+    // Quem já tem `agents_job_id` fica de propósito: o job segue vivo nos agents e o
+    // `collectSpecSplitsTick` (no specChatWorker) recupera o resultado.
+    const { reapOrphanSplits } = await import("./services/specSplit.js");
+    await reapOrphanSplits(pool).catch((e) => console.error("[boot] reapOrphanSplits:", e));
     // Evoluir H3: jobs do planner de RFC em voo no restart → 'interrupted' (estado terminal com causa).
     const { reapOrphanPlanJobs } = await import("./services/evolutionPlanner.js");
     await reapOrphanPlanJobs(pool).catch((e) => console.error("[boot] reapOrphanPlanJobs:", e));

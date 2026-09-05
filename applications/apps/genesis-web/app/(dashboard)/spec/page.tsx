@@ -52,6 +52,7 @@ import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpec
 import SpecTreePanel from "@/components/SpecTreePanel";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
+import SpecSplitPanel from "@/components/SpecSplitPanel";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import ProductFolderNav from "@/components/ProductFolderNav";
 
@@ -2807,6 +2808,23 @@ export default function SpecPage() {
             {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
                 que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
             <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
+            {/* F2/PR-3 — dividir a spec monolítica em arquivos por tema (agentes propõem, humano
+                aplica). Fica FORA do SpecTreePanel de propósito: aquele painel só aparece com 2+
+                arquivos, e é justamente a spec de arquivo único que precisa ser dividida. Aplicar
+                troca o conteúdo do primário pelo índice → recarregar editor, árvore e validação.
+                Em evolução não aparece: lá os artefatos da árvore são RFC/CHANGELOG, não a spec base. */}
+            {!isEvolution && (
+              <SpecSplitPanel
+                key={editProjectId}
+                projectId={editProjectId}
+                onApplied={() => {
+                  void reloadSpecFromServer();
+                  setTreeReloadSignal((n) => n + 1);
+                  setValidationReloadSignal((n) => n + 1);
+                  setStaleValidation(true);
+                }}
+              />
+            )}
             <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
           </Box>
         )}
