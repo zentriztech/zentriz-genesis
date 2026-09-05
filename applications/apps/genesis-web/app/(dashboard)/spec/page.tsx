@@ -575,7 +575,9 @@ type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" |
 // no payload ao CTO. Reenviar conversas antigas mudaria o contexto do modelo e poderia ressuscitar
 // uma instrução de dias atrás ("remova o módulo X") num turno novo.
 type ChatMessage = { role: "user" | "assistant"; content: string; seeded?: boolean };
-type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
+// `specMarkdown` pode vir preenchido COM `status: "error"` — job reprovado pelo enforcer que ainda
+// guarda a revisão inteira (a api devolve para ser OFERECIDA, nunca aplicada sozinha).
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string | null; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
 // Migração 089 — job do chat que o SERVIDOR ainda tem (em voo, ou concluído e não coletado).
 // É o que permite reabrir a Bancada e reencontrar o estado em vez de redisparar outro Opus 5.
 type InFlightChatJob = {
@@ -591,13 +593,18 @@ type InFlightChatJob = {
   createdAt: string;
   /** true = terminou enquanto ninguém olhava → OFERECER o resultado, nunca aplicar sozinho. */
   recovered: boolean;
+  /** true = job REPROVADO que ainda guarda uma spec (ex.: enforcer bloqueou por metadados). O
+   *  resultado existe e vale ser oferecido — com o motivo da reprovação à vista. */
+  salvaged?: boolean;
 };
 // T4.3: uma revisão de UM arquivo, produzida pela IA, aguardando confirmação de aplicação.
 type PendingApply = { path: string; content: string; baseSha: string | null };
 // Migração 089: revisão da SPEC INTEIRA recuperada de um job que terminou sem ninguém olhando.
 // Não pode ir direto ao editor: nesse intervalo o usuário pode ter editado a spec à mão, e
 // `setSpecMarkdown` cego apagaria a edição silenciosamente.
-type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps" };
+// `rejected`: a revisão existe mas o agente a REPROVOU (enforcer/BLOCKED). Continua sendo oferecida
+// — o documento costuma estar íntegro e a reprovação ser de metadados — mas com o motivo à vista.
+type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps"; rejected?: string | null };
 // Fallback do teto de espera quando o servidor não informa `deadlineAt` (api antiga). O valor
 // AUTORITATIVO vem do 202/do job — o 18 min hardcoded que existia aqui matava a espera ANTES de
 // revisões que o CTO concluía em 19 min, jogando fora o trabalho já pago.
@@ -1103,19 +1110,29 @@ function SpecChatPanel({
       {/* Migração 089 — revisão da spec INTEIRA que terminou enquanto esta tela estava fechada.
           Nunca entra no editor sozinha: a spec pode ter sido editada à mão nesse intervalo. */}
       {!fileMode && recovered && (
-        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
+        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: recovered.rejected ? "warning.main" : "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
           <Typography variant="caption" sx={{ display: "block", fontWeight: 700, mb: 0.5 }}>
-            ✓ Revisão recuperada ({recovered.content.length} caracteres)
+            {recovered.rejected ? "⚠ Revisão recuperada de um job reprovado" : "✓ Revisão recuperada"}
+            {" "}({recovered.content.length} caracteres)
           </Typography>
+          {/* Reprovado pelo enforcer: o documento em si costuma estar íntegro (a reprovação é de
+              metadados/evidência), mas o motivo fica à vista para o Jean decidir com informação. */}
+          {recovered.rejected && (
+            <Alert severity="warning" sx={{ mb: 1, fontSize: "0.72rem" }}>
+              O agente reprovou o próprio resultado: {recovered.rejected} — revise o conteúdo antes de aplicar.
+            </Alert>
+          )}
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, lineHeight: 1.5 }}>
-            {recovered.kind === "resolve_gaps"
-              ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
-              : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
+            {recovered.rejected
+              ? "A revisão foi produzida por inteiro e ficou guardada no servidor em vez de ser descartada."
+              : recovered.kind === "resolve_gaps"
+                ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
+                : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
             {" "}Aplicar substitui o conteúdo do editor — se você editou a spec desde então, essa
             edição é perdida.
           </Typography>
           <Stack direction="row" spacing={1}>
-            <Button size="small" variant="contained" color="success"
+            <Button size="small" variant="contained" color={recovered.rejected ? "warning" : "success"}
               startIcon={<CheckCircleIcon sx={{ fontSize: "1rem" }} />}
               onClick={onApplyRecovered}>Aplicar ao editor</Button>
             <Button size="small" color="inherit" onClick={onDiscardRecovered}>Descartar</Button>
@@ -1771,6 +1788,12 @@ export default function SpecPage() {
           // `interrupted`/`lost` do banco chegam aqui como error + a causa real no campo `error`.
           finish();
           setChatError(poll.error ?? "O CTO encontrou um erro. Tente novamente.");
+          // 2026-09-05 — um envelope reprovado pelo enforcer ainda carrega a spec inteira, e a api
+          // agora a devolve junto do erro. Não some com ~20 min de Opus 5: OFERECE (nunca aplica),
+          // com o motivo da reprovação no card. Modo por-arquivo não passa pelo enforcer.
+          if (kind !== "file" && poll.specMarkdown) {
+            setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: null, kind, rejected: poll.error ?? null });
+          }
         }
         // pending/running → segue pollando (o servidor também coleta em paralelo, sem duplicar).
       } catch (e) {
@@ -1888,10 +1911,13 @@ export default function SpecPage() {
         const seq = chatSeqRef.current;
         if (chatPollRef.current) return; // o usuário já disparou um turno novo enquanto isto voltava
         const deadlineMs = job.deadlineAt ? Date.parse(job.deadlineAt) : Date.now() + 40 * 60_000;
-        if (job.status === "error") {
+        if (job.status === "error" && !job.salvaged) {
           setChatError(job.error ?? "A revisão anterior terminou em erro.");
           return;
         }
+        // `salvaged` → o job foi REPROVADO mas guarda a spec inteira. Deixa o polling seguir: o
+        // GET /:jobId devolve error + specMarkdown e o ramo de erro do poll OFERECE a revisão
+        // (com o motivo da reprovação) em vez de descartar ~20 min de Opus 5.
         setChatSending(true);
         setChatError(null);
         startChatPolling({

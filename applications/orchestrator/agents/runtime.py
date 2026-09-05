@@ -23,11 +23,60 @@ APPLICATIONS_ROOT = _r.parent if _r.name == "applications" else _r
 CLAUDE_RETRY_ATTEMPTS = int(os.environ.get("CLAUDE_RETRY_ATTEMPTS", "3"))
 MAX_REPAIRS = int(os.environ.get("MAX_REPAIRS", "2"))
 CIRCUIT_BREAKER_THRESHOLD = int(os.environ.get("CIRCUIT_BREAKER_THRESHOLD", "3"))
+# 🔴 2026-09-05 — o breaker NÃO fechava sozinho: aberto, nenhuma chamada é feita (bloco abaixo
+# retorna BLOCKED antes do provedor), e o contador só zerava em SUCESSO — logo só voltava ao normal
+# reiniciando o container. Agora meia-abertura por TEMPO: passado este intervalo desde a última
+# falha, a próxima chamada é liberada (e um sucesso zera o contador de vez).
+CIRCUIT_BREAKER_RESET_SEC = int(os.environ.get("CIRCUIT_BREAKER_RESET_SEC", "600"))
 
 SHOW_TRACEBACK = os.environ.get("SHOW_TRACEBACK", "true").strip().lower() in ("1", "true", "yes")
 
-# Circuit breaker: (project_id, agent, mode) -> falhas consecutivas
-_circuit_failures: dict[tuple[str, str, str], int] = {}
+# Circuit breaker: escopo -> (falhas consecutivas, instante monotônico da última falha).
+# O escopo é (scope_id, agent, mode, task_id), onde `scope_id` é o projeto REAL — ver
+# `_circuit_scope_id`: a Bancada mandava `project_id="spec_chat"` fixo, o que tornava ESTE breaker
+# GLOBAL (3 falhas de um tenant qualquer bloqueavam a Bancada de todos, com zero LLM).
+_circuit_failures: dict[tuple[str, ...], tuple[int, float]] = {}
+_circuit_lock = threading.Lock()
+
+
+def _circuit_blocked(key: tuple[str, ...]) -> bool:
+    """True = breaker aberto E ainda dentro da janela de espera (meia-abertura por tempo)."""
+    with _circuit_lock:
+        failures, last_ts = _circuit_failures.get(key, (0, 0.0))
+        if failures < CIRCUIT_BREAKER_THRESHOLD:
+            return False
+        if CIRCUIT_BREAKER_RESET_SEC > 0 and (time.monotonic() - last_ts) >= CIRCUIT_BREAKER_RESET_SEC:
+            # Meia-abertura: libera UMA tentativa zerando o contador. Se ela falhar de novo, o
+            # incremento reabre o breaker imediatamente (a janela recomeça).
+            _circuit_failures[key] = (0, 0.0)
+            return False
+        return True
+
+
+def _circuit_note_failure(key: tuple[str, ...]) -> int:
+    with _circuit_lock:
+        failures = _circuit_failures.get(key, (0, 0.0))[0] + 1
+        _circuit_failures[key] = (failures, time.monotonic())
+        return failures
+
+
+def _circuit_reset(key: tuple[str, ...]) -> None:
+    with _circuit_lock:
+        _circuit_failures[key] = (0, 0.0)
+
+
+def _circuit_scope_id(message: dict, inp: dict) -> str:
+    """
+    Identidade do escopo do breaker. `circuit_scope` (enviado pela api quando o `project_id` do
+    envelope é um pseudo-projeto, como o `"spec_chat"` da Bancada) VENCE o `project_id`, para o
+    breaker isolar tenants/projetos sem mexer no resto do pipeline (paths de artefato, logs, RAG),
+    que continua vendo o `project_id` de sempre.
+    """
+    for candidate in (message.get("circuit_scope"), inp.get("circuit_scope"),
+                      message.get("project_id"), inp.get("project_id")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "default"
 
 AGENT_LABELS = {
     "ENGINEER": "Engineer",
@@ -1120,8 +1169,10 @@ def run_agent(
 
     # GAP-P8: ler rework_attempt para escada de modelo/tokens (aplicado abaixo após env_max)
     _rework_attempt = int(inp.get("rework_attempt", 0))
-    # Include task_id in circuit key so each task has its own breaker
-    circuit_key = (str(project_id), str(role), str(mode), str(task_id or ""))
+    # Include task_id in circuit key so each task has its own breaker.
+    # `_circuit_scope_id` prefere `circuit_scope` ao `project_id` — sem isso, todo o chat da Bancada
+    # (que manda `project_id="spec_chat"`) compartilhava UM único breaker entre todos os tenants.
+    circuit_key = (_circuit_scope_id(message, inp), str(role), str(mode), str(task_id or ""))
 
     # Skill store: usar override quando disponível (SKILL_STORE_MODE=active)
     # system_prompt_override já tem LEI 2 aplicada por load_system_prompt_with_skills()
@@ -1130,20 +1181,33 @@ def run_agent(
     else:
         system_content = build_system_prompt(Path(system_prompt_path), role, mode)
     t0_run = time.perf_counter()
-    if _circuit_failures.get(circuit_key, 0) >= CIRCUIT_BREAKER_THRESHOLD:
-        logger.warning("[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s).", agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD)
+    if _circuit_blocked(circuit_key):
+        logger.warning(
+            "[%s] Circuit breaker aberto para %s (falhas consecutivas >= %s; nova tentativa liberada em até %ss).",
+            agent_name, circuit_key, CIRCUIT_BREAKER_THRESHOLD, CIRCUIT_BREAKER_RESET_SEC,
+        )
         user_content_cb = build_user_message(message, role=role, model=model)
         budget_cb = calculate_token_budget(system_content, user_content_cb, model)
         out = _normalize_response_envelope({
             "request_id": message.get("request_id", "unknown"),
             "status": "BLOCKED",
-            "summary": f"Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} falhas consecutivas (agent={role}, mode={mode}). Escale para Monitor/CTO.",
+            "summary": (
+                f"Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} falhas consecutivas "
+                f"(agent={role}, mode={mode}). Nova tentativa é liberada automaticamente em até "
+                f"{CIRCUIT_BREAKER_RESET_SEC}s; se persistir, escale para Monitor/CTO."
+            ),
             "artifacts": [],
             "evidence": [],
             "next_actions": {"owner": "Monitor", "items": ["Intervenção humana: revisar logs e reprocessar ou ajustar prompt."], "questions": []},
         }, message.get("request_id", "unknown"), "")
         out["circuit_breaker_open"] = True
         out["validator_pass"] = False
+        # Motivo LEGÍVEL para quem exibe o erro (a api usa `validation_errors` para dizer ao usuário
+        # o que aconteceu, em vez do antigo "Reformule o pedido", que aqui seria conselho errado).
+        out["validation_errors"] = [
+            f"o agente está temporariamente bloqueado após {CIRCUIT_BREAKER_THRESHOLD} falhas seguidas "
+            f"de chamada ao provedor de IA — nova tentativa liberada em até {CIRCUIT_BREAKER_RESET_SEC}s"
+        ]
         log_agent_call(agent_name, mode, budget_cb, out, (time.perf_counter() - t0_run) * 1000, request_id=message.get("request_id", "unknown"))
         return out
 
@@ -1300,7 +1364,7 @@ def run_agent(
                 if is_retryable and attempt < CLAUDE_RETRY_ATTEMPTS - 1:
                     time.sleep(2 + attempt * 2)
                 else:
-                    _circuit_failures[circuit_key] = _circuit_failures.get(circuit_key, 0) + 1
+                    _circuit_note_failure(circuit_key)
                     api_msg = _extract_api_message(e)
                     error_detail = _build_error_detail(e, api_msg)
                     raise RuntimeError(
@@ -1383,7 +1447,7 @@ def run_agent(
                 logger.warning("[%s] Validação de qualidade falhou: %s", agent_name, quality_errors[:3])
 
         if not all_errors:
-            _circuit_failures[circuit_key] = 0
+            _circuit_reset(circuit_key)
             out["validator_pass"] = True
             out["validation_errors"] = []
             out["_thinking"] = bool(last_thinking)
@@ -1417,7 +1481,11 @@ def run_agent(
             )
             continue
 
-        _circuit_failures[circuit_key] = _circuit_failures.get(circuit_key, 0) + 1
+        # Falha de ENFORCER (conteúdo), não de transporte. Continua contando — é este contador que
+        # faz o runner desistir de uma task sem saída (`runner.py`, `circuit_breaker_open`) — mas
+        # agora com escopo por projeto REAL e com reabertura por tempo, então uma spec difícil de um
+        # tenant não deixa a Bancada de ninguém travada até reiniciar o container.
+        _circuit_note_failure(circuit_key)
         out["status"] = "BLOCKED"
         out["summary"] = (out.get("summary") or "") + "; Enforcer: " + "; ".join(all_errors[:5])
         out["validator_pass"] = False

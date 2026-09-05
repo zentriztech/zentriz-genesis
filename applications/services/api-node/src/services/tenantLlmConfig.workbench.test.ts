@@ -11,7 +11,7 @@ const PROJECT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 let tenantRows: Record<string, unknown>[] = [];
 let projectRows: Record<string, unknown>[] = [];
 let zentrizRows: Record<string, unknown>[] = [];
-const queryMock = vi.fn(async (sql: string) => {
+const queryMock = vi.fn(async (sql: string, _params?: unknown[]) => {
   if (sql.includes("FROM tenant_llm_configs")) return { rows: tenantRows };
   if (sql.includes("FROM projects p JOIN users u")) return { rows: projectRows };
   if (sql.includes("FROM zentriz_llm_config")) return { rows: zentrizRows };

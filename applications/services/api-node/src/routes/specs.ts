@@ -113,7 +113,7 @@ export function extractProductZip(zipBuffer: Buffer): ProductZipContents | null 
 }
 
 // ── Message envelope builder — spec from free description (leigo → spec completa) ──
-function buildCTOMessage(freeText: string, title?: string): Record<string, unknown> {
+function buildCTOMessage(freeText: string, title?: string, scopeUserId?: string | null): Record<string, unknown> {
   const requestId = `spec-preview-${Date.now()}`;
 
   // Enriched task instruction: explain that the input is free text from a non-technical user
@@ -141,6 +141,10 @@ Descrição do usuário: "${freeText.replace(/"/g, '\\"')}"
 
   return {
     project_id: "spec_preview",
+    // Mesmo motivo do `circuit_scope` do chat de spec (2026-09-05): `spec_preview` é pseudo-projeto
+    // (o projeto ainda não existe nesta etapa) e chaveava o circuit breaker dos agents GLOBALMENTE —
+    // 3 prévias falhas de um usuário bloqueavam a prévia de todos. Escopo aqui = usuário.
+    circuit_scope: scopeUserId ? `spec_preview:${scopeUserId}` : "spec_preview",
     agent: "CTO",
     variant: "generic",
     mode: "spec_intake_and_normalize",
@@ -363,7 +367,7 @@ export async function specRoutes(app: FastifyInstance) {
       const job: SpecJob = { id: jobId, status: "pending", createdAt: Date.now() };
       _specJobs.set(jobId, job);
 
-      const message = buildCTOMessage(freeText, body.title);
+      const message = buildCTOMessage(freeText, body.title, getUser(request)?.id ?? null);
 
       // Fire and forget — setInterval-based, no Promise to await
       runSpecJob(jobId, message, agentsUrl);

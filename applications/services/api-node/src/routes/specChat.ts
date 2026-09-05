@@ -185,6 +185,8 @@ function buildChatMessage(
   messages: ChatMessage[],
   ctx: ChatContext = EMPTY_CTX,
   resolveGaps = false,
+  /** Projeto REAL — só para o ESCOPO do circuit breaker dos agents (ver `circuit_scope` abaixo). */
+  scopeProjectId: string | null = null,
 ): Record<string, unknown> {
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
@@ -293,6 +295,12 @@ ${transcript}${contextSections}
 
   return {
     project_id: "spec_chat",
+    // 🔴 2026-09-05 — o `project_id` acima é um PSEUDO-projeto (mantido: paths de artefato, logs e
+    // persistência do lado dos agents dependem dele). Como o circuit breaker do runtime era chaveado
+    // por ele, TODA a Bancada compartilhava UM breaker: 3 falhas seguidas de qualquer cliente
+    // bloqueavam o chat de spec de TODOS os tenants, sem sequer chamar o modelo. `circuit_scope`
+    // isola o breaker por projeto real (o runtime prefere este campo ao `project_id`).
+    circuit_scope: scopeProjectId ? `spec_chat:${scopeProjectId}` : "spec_chat",
     agent: "CTO",
     variant: "generic",
     mode: "spec_intake_and_normalize",
@@ -568,7 +576,7 @@ export async function dispatchResolveGapsJob(opts: {
     kind: "resolve_gaps", filePath: null, baseSha: null, baseSpecSha: sha256(opts.specMarkdown),
     userMessage: opts.userMessage,
   });
-  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true), ...opts.llm }, opts.agentsUrl);
+  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true, opts.projectId), ...opts.llm }, opts.agentsUrl);
   return { ok: true, gaps: ctx.findings.length };
 }
 
@@ -710,7 +718,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).
-        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps), ...llm }, agentsUrl);
+        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps, projectId), ...llm }, agentsUrl);
       }
 
       // `deadlineAt` no 202: o teto de espera passa a ser DITADO PELO SERVIDOR. O cliente tinha um
@@ -769,6 +777,9 @@ export async function specChatRoutes(app: FastifyInstance) {
           // `true` = terminou enquanto ninguém olhava; o cliente deve OFERECER (não aplicar) o
           // resultado, porque a spec no editor pode ter sido editada à mão nesse meio-tempo.
           recovered: job.status === "done" && !job.collectedAt,
+          // `true` = job REPROVADO (enforcer/BLOCKED, interrupção, perda) que ainda assim carrega uma
+          // spec gravada. O cliente busca o resultado pelo GET /:jobId e OFERECE, avisando o motivo.
+          salvaged: job.status !== "done" && job.hasSpecMarkdown,
         },
       });
     },
@@ -845,7 +856,15 @@ export async function specChatRoutes(app: FastifyInstance) {
       }
       if (status === "error") {
         if (db) void markSpecChatJobCollected(pool, jobId);
-        return reply.send({ jobId, status: "error", error: errorText });
+        // Um envelope reprovado pelo enforcer ainda carrega a spec inteira (judgeCtoResult a
+        // preserva). Devolvemos junto do MOTIVO: o cliente OFERECE (nunca aplica sozinho) — mesmo
+        // contrato do card de revisão recuperada da migração 089. Antes ~20 min de Opus 5 iam
+        // para o lixo porque a rota só devolvia a mensagem de erro.
+        return reply.send({
+          jobId, status: "error", error: errorText,
+          specMarkdown: specMarkdown ?? null,
+          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null,
+        });
       }
       const createdMs = db ? new Date(db.createdAt).getTime() : (mem?.createdAt ?? Date.now());
       // Elapsed derivado do `created_at` do BANCO: antes vinha de um `Date.now()` por processo, e

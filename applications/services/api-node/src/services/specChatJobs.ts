@@ -47,6 +47,9 @@ export interface SpecChatJob {
   baseSpecSha: string | null;
   status: SpecChatJobStatus;
   specMarkdown: string | null;
+  /** `true` = existe spec gravada no job SEM ter trazido os ~95 KB (usado pelo in-flight, que roda
+   *  a cada mount da tela). Cobre a revisão RECUPERADA de um job reprovado pelo enforcer. */
+  hasSpecMarkdown: boolean;
   reply: string | null;
   error: string | null;
   createdAt: string;
@@ -59,7 +62,8 @@ export interface SpecChatJob {
  *  a cada mount da tela só para desenhar um banner. */
 const SCALAR_COLS =
   "id, project_id, tenant_id, owner_user_id, agents_job_id, kind, file_path, base_sha, base_spec_sha, " +
-  "status, reply, error, created_at, finished_at, collected_at, deadline_at";
+  "status, reply, error, created_at, finished_at, collected_at, deadline_at, " +
+  "(spec_markdown IS NOT NULL) AS has_spec";
 
 function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null): SpecChatJob {
   return {
@@ -74,6 +78,7 @@ function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null
     baseSpecSha: (r.base_spec_sha as string | null) ?? null,
     status: (r.status as SpecChatJobStatus) ?? "pending",
     specMarkdown: specMarkdown ?? ((r.spec_markdown as string | null) ?? null),
+    hasSpecMarkdown: r.has_spec === true || (r.spec_markdown ?? null) !== null || specMarkdown !== null,
     reply: (r.reply as string | null) ?? null,
     error: (r.error as string | null) ?? null,
     createdAt: String(r.created_at ?? new Date().toISOString()),
@@ -228,9 +233,15 @@ export async function getSpecChatJob(db: Db, id: string): Promise<SpecChatJob | 
 }
 
 /**
- * Job a rehidratar: o mais recente vivo OU concluído-e-ainda-não-coletado do escopo
- * (projeto + arquivo + DONO). O binding de dono é o invariante S3 da RFC-0004 Onda 0 — o
- * in-flight NÃO pode revogá-lo por omissão. `spec_markdown` fica fora de propósito.
+ * Job a rehidratar: o mais recente vivo, concluído-e-ainda-não-coletado OU **reprovado mas com
+ * revisão recuperável** do escopo (projeto + arquivo + DONO). O binding de dono é o invariante S3
+ * da RFC-0004 Onda 0 — o in-flight NÃO pode revogá-lo por omissão. `spec_markdown` fica fora de
+ * propósito (só o booleano `has_spec`).
+ *
+ * O terceiro caso entrou em 2026-09-05: um envelope BLOCKED pelo enforcer ainda carrega a spec
+ * inteira, e ela é gravada no job. Sem incluí-lo aqui, a revisão ficava no banco e a tela nunca
+ * a oferecia. Só entram erros COM spec e ainda NÃO coletados — o GET /:jobId marca `collected_at`
+ * ao entregar, então a oferta não vira banner eterno.
  */
 export async function findInFlightSpecChatJob(
   db: Db,
@@ -242,7 +253,11 @@ export async function findInFlightSpecChatJob(
         WHERE project_id = $1
           AND owner_user_id = $2
           AND ($3::text IS NULL AND file_path IS NULL OR file_path = $3)
-          AND (status IN ('pending','running') OR (status = 'done' AND collected_at IS NULL))
+          AND (
+                status IN ('pending','running')
+             OR (status = 'done' AND collected_at IS NULL)
+             OR (status IN ('error','interrupted','lost') AND spec_markdown IS NOT NULL AND collected_at IS NULL)
+          )
         ORDER BY created_at DESC
         LIMIT 1`,
       [scope.projectId, scope.ownerUserId, scope.filePath],
@@ -431,10 +446,73 @@ export async function collectSpecChatJobsTick(
   return out;
 }
 
+/** Cauda que o enforcer anexa ao `summary` quando reprova (`agents/runtime.py`: `"; Enforcer: …"`). */
+const ENFORCER_TAIL_RE = /;\s*Enforcer:\s*([\s\S]+)$/;
 /**
- * Gate de qualidade H4 (idêntico ao do poll em processo, `specChat.ts`): os agents devolvem
- * `status:"done"` mesmo quando o envelope do CTO é BLOCKED/FAIL. Sem este gate, gravaríamos uma
- * spec vazia/parcial que o usuário poderia APLICAR por cima da spec real.
+ * Abaixo deste tamanho o artefato não é uma spec: é eco do resumo, esqueleto ou fragmento. Ofertar
+ * isso como "revisão recuperada" convidaria o usuário a sobrescrever a spec real com menos conteúdo
+ * (a guarda de encolhimento do modo autônomo existe pelo mesmo motivo).
+ */
+const SALVAGE_MIN_CHARS = 1_500;
+/** Teto do trecho de motivo embutido na mensagem (o campo `error` inteiro é cortado em 500). */
+const REASON_MAX_CHARS = 240;
+
+/**
+ * Motivo REAL da reprovação, na ordem em que o runtime o registra:
+ *   1. `validation_errors[]` — lista estruturada do enforcer (`runtime.py`, envelope reprovado);
+ *   2. cauda `"; Enforcer: …"` do `summary` — mesma informação, quando a lista não veio;
+ *   3. `error`/`reason` de topo — falha de transporte/provedor.
+ * Antes tudo isto era descartado e o usuário recebia "Reformule o pedido", que é conselho ERRADO
+ * quando a causa é corte de saída, campo de metadados vazio ou disjuntor aberto — nada do pedido dele.
+ */
+export function ctoFailureReason(result: Record<string, unknown>): string | null {
+  const errs = Array.isArray(result.validation_errors)
+    ? (result.validation_errors as unknown[]).filter((e): e is string => typeof e === "string" && e.trim().length > 0)
+    : [];
+  if (errs.length) return clip(errs.slice(0, 3).join("; "));
+  const summary = typeof result.summary === "string" ? result.summary : "";
+  const tail = ENFORCER_TAIL_RE.exec(summary);
+  if (tail) return clip(tail[1]);
+  for (const key of ["error", "reason", "blocked_reason"]) {
+    const v = result[key];
+    if (typeof v === "string" && v.trim()) return clip(v);
+  }
+  return null;
+}
+
+function clip(s: string): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > REASON_MAX_CHARS ? `${t.slice(0, REASON_MAX_CHARS)}…` : t;
+}
+
+/**
+ * Conteúdo do artefato de spec — SEM o fallback para `summary` que `extractSpecMarkdown` faz.
+ * No BLOCKED por enforcer o envelope CONTINUA carregando `artifacts[0].content` = a spec inteira
+ * (o enforcer reprova metadados, não o documento). Aqui distinguimos "existe documento" de
+ * "existe resumo", porque só o primeiro pode ser oferecido ao usuário.
+ */
+export function salvageableSpec(result: Record<string, unknown>): string | null {
+  const artifacts = Array.isArray(result.artifacts) ? (result.artifacts as Array<Record<string, unknown>>) : [];
+  for (const a of artifacts) {
+    const path = typeof a?.path === "string" ? a.path : "";
+    const content = typeof a?.content === "string" ? a.content : "";
+    if (!content || content.trim().length < SALVAGE_MIN_CHARS) continue;
+    if (path.endsWith(".md") || path.includes("PRODUCT_SPEC") || path.includes("spec")) return content;
+  }
+  return null;
+}
+
+/**
+ * Gate de qualidade H4 (usado pelo poll em processo de `specChat.ts` E por este worker — uma única
+ * implementação, para os dois caminhos não divergirem): os agents devolvem `status:"done"` mesmo
+ * quando o envelope do CTO é BLOCKED/FAIL. Sem este gate, gravaríamos uma spec vazia/parcial que o
+ * usuário poderia APLICAR por cima da spec real.
+ *
+ * Duas correções de 2026-09-05:
+ *  • a mensagem passa a dizer o MOTIVO real (`ctoFailureReason`) em vez de "Reformule o pedido";
+ *  • quando o envelope reprovado ainda carrega a spec inteira, ela é PRESERVADA no job para ser
+ *    OFERECIDA ao usuário (`status` continua `error` → nada é aplicado sozinho, nem pelo modo
+ *    autônomo, que só aplica em `done`). Antes era jogada no lixo depois de ~20 min de Opus 5.
  */
 export function judgeCtoResult(
   result: Record<string, unknown>,
@@ -442,12 +520,23 @@ export function judgeCtoResult(
 ): FinishPatch {
   const agentStatus = String((result as { status?: string }).status ?? "").toUpperCase();
   const md = extract(result);
-  if (agentStatus === "BLOCKED" || agentStatus === "FAIL" || !md || md.trim().length < 20) {
+  const rejected = agentStatus === "BLOCKED" || agentStatus === "FAIL";
+  if (rejected || !md || md.trim().length < 20) {
+    const reason = ctoFailureReason(result);
+    const head = rejected
+      ? `O CTO não conseguiu revisar (${agentStatus})`
+      : "O CTO não retornou uma spec revisada válida";
+    const salvaged = rejected ? salvageableSpec(result) : null;
+    const parts = [reason ? `${head}: ${reason}` : `${head}. Reformule o pedido e tente de novo.`];
+    if (salvaged) {
+      parts.push(`A revisão que ele produziu (${salvaged.length} caracteres) foi recuperada — confira antes de aplicar.`);
+    }
     return {
       status: "error",
-      error: (agentStatus === "BLOCKED" || agentStatus === "FAIL")
-        ? `O CTO não conseguiu revisar (${agentStatus}). Reformule o pedido e tente de novo.`
-        : "O CTO não retornou uma spec revisada válida. Reformule o pedido e tente de novo.",
+      error: parts.join(" "),
+      // COALESCE no UPDATE: `null` preserva o que já houver; string grava a spec recuperada.
+      specMarkdown: salvaged,
+      modelUsed: (result.model_used as string | undefined) ?? null,
     };
   }
   return {

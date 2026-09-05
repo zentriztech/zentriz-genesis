@@ -304,10 +304,12 @@ describe("GET /api/spec-chat/in-flight — rehidratação fail-closed", () => {
     expect(job.elapsed).toBeGreaterThan(0);
     // `createdAt` em ISO (o mapper devolve `Date.toString()`, que só o parser leniente do JS lê).
     expect(job.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    // guarda anti-`SELECT *`: a consulta de rehidratação não pode carregar a spec inteira
+    // guarda anti-`SELECT *`: a consulta de rehidratação não pode carregar a spec inteira.
+    // `spec_markdown IS NOT NULL` no WHERE/projeção booleana é PERMITIDO (não trafega o corpo) —
+    // é o que deixa o in-flight reoferecer um job reprovado que guardou a revisão.
     const jobSql = sqls.find((s) => s.includes("FROM spec_chat_jobs") && s.includes("project_id = $1"));
     expect(jobSql).toBeTruthy();
-    expect(jobSql).not.toContain("spec_markdown");
+    expect(jobSql).not.toMatch(/\bspec_markdown\b(?!\s+IS NOT NULL)/);
     expect(jobSql).not.toContain("SELECT *");
     // e o binding de dono está NO PRÓPRIO SQL (não só na aplicação)
     expect(jobSql).toContain("owner_user_id");
