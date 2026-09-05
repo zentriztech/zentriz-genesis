@@ -7,6 +7,10 @@
 > pequenos, a fábrica usa limites grandes ou não?"*
 > **Achado que motivou:** [`genesis-cto-spec-raw-truncado-30k-2026-09-04`] — spec de 39.907 chars
 > chegou cortada em 30.000 ao CTO, que devolveu um documento-aviso de 11.553 chars em vez da spec.
+>
+> ⚠️ **CORREÇÃO (2026-09-05, medida em prod):** o truncamento em 30k é real **no caminho da fábrica**,
+> mas **NÃO era a causa** do "não tenho acesso à spec atual" na Bancada. Lá a spec **nunca chegava ao
+> prompt** — nem cortada. Ver §6.
 
 ---
 
@@ -21,6 +25,7 @@
 | `PipelineContext` | **40.000** | `AGENT_INPUT_CHARS` | `pipeline_context.py:225` |
 | **Montador de prompt — vale para TODOS** | **`spec_raw[:30000]`** | **não** | `runtime.py:194` |
 | **Idem** | **`product_spec[:20000]`** | **não** | `runtime.py:205` |
+| **Bancada (chat de spec)** | **ZERO — a spec não era emitida** (§6) | — | `runtime.py:245` + `server.py:409` |
 | Idem | `engineer/charter/backlog [:15000]` | não | `runtime.py:208-214` |
 | Janela real dos modelos | **200.000 tokens** (`max_output` 64.000 no Opus 5) | — | `runtime.py:87-116` |
 
@@ -165,3 +170,63 @@ Novo parâmetro **opcional** `model`. Sem ele (testes antigos, chamadores não a
 6. **Prova ao vivo em prod**: disparar o CTO na spec de 39.907 chars do Jean e provar que ele
    **recebe o documento inteiro** (log sem `[CORTE DE CONTEXTO]`, resposta sem "aviso de fidelidade").
 7. Persistir memória + reportar.
+
+---
+
+## 6. CAUSA RAIZ de verdade: na Bancada a spec **nunca chegava ao prompt**
+
+A prova ao vivo do passo 6 não confirmou a premissa — **contradisse**. Medido **dentro do container
+`agents` de prod**, com a forma exata que a api manda:
+
+| | ANTES do fix | DEPOIS do fix |
+|---|---|---|
+| Prompt do CTO | **322 caracteres** | **40.780 caracteres** |
+| Bloco `## Spec do Projeto` | **ausente** | presente |
+| Spec inteira (39.907 chars) no prompt | **não** | **sim** |
+| Última seção (`Recomendação para a Fábrica Genesis`) | não | **sim** |
+| `[CORTE DE CONTEXTO]` | — | não (cabe folgado) |
+
+**Mecanismo.** A Bancada manda um corpo **plano**: `{project_id, agent, mode, task, inputs:{spec_raw,…}}`,
+**sem** a chave `input`. Em `server.py:409`, `_wrap_with_llm_config` embrulha isso em
+`{"request_id":…, "input": body}`. O montador resolvia
+`envelope = message["inputs"] or message["input"] or message` → caía no `input`, que é o corpo plano —
+e os campos de conteúdo estão **um nível abaixo**, em `envelope["inputs"]`. Nenhum era emitido: nem
+`spec_raw`, nem `product_spec`, nem `existing_artifacts`, nem `constraints`.
+
+**Por que a fábrica escapou.** `runner.py:2481` duplica de propósito:
+`{"inputs": inputs, "input": inputs,  # compatibilidade: runtime pode ler input ou inputs}`.
+Ali o envelope resolvia certo — a duplicação mascarou o defeito por todo esse tempo.
+
+**Por que ninguém viu.** O CTO recebia `task` (que a api monta com transcrição + irmãos + findings),
+então respondia com aparência de normalidade — e, corretamente, se recusava a reescrever um documento
+que não tinha visto, devolvendo o "documento-aviso". O sintoma "não tenho acesso à spec atual" era
+**literalmente verdadeiro**.
+
+**Fix (`runtime.py`, logo após resolver o envelope):** se o envelope resolvido tiver um `inputs`
+aninhado, faz merge — os campos de dentro aparecem, e `task`/`mode`/`limits` do nível de fora
+continuam valendo. `existing_artifacts` passa a ser lido do envelope também. 5 testes com a forma
+exata de `specChat.ts::buildChatMessage` + o embrulho de `_invoke_agent`, e um teste que prova que o
+caminho da fábrica **não muda**.
+
+**Dívida registrada (não corrigida aqui):** o certo seria `server.py`/`client_http.py:86` **não**
+aninharem duas vezes na origem. Compensar no montador é o que protege TODOS os chamadores hoje;
+desfazer o aninhamento na origem mexe no contrato de wire de todo mundo — vira decisão do Jean.
+
+---
+
+## 7. Gap aberto (Jean, 2026-09-05): o CTO precisa conhecer o **Produto inteiro**
+
+> *"em um Produto de Spec com diversos projetos e arquivos deve existir uma maneira da LLM conhecer
+> tudo para poder trabalhar de forma coesa e entregar as evoluções e correções solicitadas ou
+> detectadas."*
+
+O mecanismo **existe parcialmente** (`specChat.ts::loadChatContext`, `sibling_files_context`), e tem
+3 defeitos medidos:
+
+| # | Defeito | Evidência |
+|---|---|---|
+| **A** | **Escopo é o PROJETO, não o PRODUTO.** `computeCurrentSpecHash` faz `WHERE project_id = $1`. Num produto decomposto em backend + frontend + infra, o CTO editando a spec do backend **não vê** a do frontend → contratos divergem entre projetos irmãos. | `specValidation.ts:119` |
+| **B** | **Orçamento de 14.000 chars para TODOS os irmãos somados** — 10× menor que o cap principal (145.600) que acabamos de liberar. Corta no meio do arquivo. | `specChat.ts:104` |
+| **C** | **`sibling_files_context` e `validation_report` são INERTES em `inputs`** — o montador de prompt nunca emitiu esses campos. Só chegam ao modelo porque a api **também** os cola dentro do `task`. É a mesma classe do bug da §6. | `runtime.py` (nenhum `envelope.get("sibling_files_context")`) |
+
+Frente própria: **pesquisa → adversarial → GAPs → implementar → validar**. NÃO implementado aqui.
