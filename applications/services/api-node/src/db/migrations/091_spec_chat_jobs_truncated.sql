@@ -1,0 +1,11 @@
+-- 091 — marca a revisão do CTO que foi CORTADA no limite de saída do modelo.
+--
+-- Medido em prod 2026-09-05 (projeto NVX LastMile, spec de 98k chars): o CTO regenera a spec
+-- inteira, estoura os 64.000 tokens de saida do Opus 5 (stop_reason=max_tokens), o
+-- resilient_json_parse fecha o JSON a forca e o job termina em `done` com uma spec MUTILADA
+-- (110.922 chars terminando no meio de um CREATE UNIQUE INDEX). Nada na UI avisava, e o modo
+-- autonomo aplicava isso no disco a cada rodada -- 7 das 14 secoes foram perdidas.
+--
+-- Esta coluna e o sinal ponta a ponta: runtime.py (_truncated) -> job -> UI/modo autonomo.
+-- Default FALSE = todo job anterior a esta migracao continua lido como "nao truncado".
+ALTER TABLE spec_chat_jobs ADD COLUMN IF NOT EXISTS truncated BOOLEAN NOT NULL DEFAULT FALSE;

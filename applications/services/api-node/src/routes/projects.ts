@@ -3210,6 +3210,19 @@ export async function projectRoutes(app: FastifyInstance) {
         if (!specRow?.file_path) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
         }
+        // G2 (migração 092): guarda a versão ANTERIOR antes de sobrescrever. Best-effort aqui —
+        // este caminho é humano e o conteúdo antigo ainda está no editor de quem salvou; no
+        // caminho autônomo (specAutonomy) o snapshot é PRÉ-CONDIÇÃO da escrita.
+        {
+          const { snapshotSpecFile } = await import("../services/specSnapshots.js");
+          const previous = await readFile(specRow.file_path, "utf-8").catch(() => null);
+          if (previous !== null && previous !== specMarkdown) {
+            void snapshotSpecFile(pool, {
+              projectId: id, filePath: String(specRow.file_path), content: previous,
+              reason: "manual-patch", createdBy: user.id,
+            });
+          }
+        }
         await writeFile(specRow.file_path, specMarkdown, "utf-8");
         // F3 (adversarial Onda 1): sem isto o content_sha256 fica STALE após a edição —
         // quebra o If-Match do editor (Onda 4) e o GET /spec-files expõe sha errado.

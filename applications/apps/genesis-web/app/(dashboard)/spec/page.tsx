@@ -577,7 +577,9 @@ type SpecJobResponse = { jobId: string; status: "pending" | "running" | "done" |
 type ChatMessage = { role: "user" | "assistant"; content: string; seeded?: boolean };
 // `specMarkdown` pode vir preenchido COM `status: "error"` — job reprovado pelo enforcer que ainda
 // guarda a revisão inteira (a api devolve para ser OFERECIDA, nunca aplicada sozinha).
-type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string | null; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null };
+// `truncated` (T1): a resposta bateu no teto de saída do modelo → a spec veio CORTADA. Nunca vai
+// direto ao editor: aplicar uma spec truncada APAGA o que o modelo não chegou a reescrever.
+type SpecChatJobResponse = { jobId: string; status: "pending" | "running" | "done" | "error"; specMarkdown?: string | null; reply?: string; error?: string; elapsed?: number; filePath?: string | null; baseSha?: string | null; baseSpecSha?: string | null; deadlineAt?: string | null; truncated?: boolean };
 // Migração 089 — job do chat que o SERVIDOR ainda tem (em voo, ou concluído e não coletado).
 // É o que permite reabrir a Bancada e reencontrar o estado em vez de redisparar outro Opus 5.
 type InFlightChatJob = {
@@ -596,6 +598,8 @@ type InFlightChatJob = {
   /** true = job REPROVADO que ainda guarda uma spec (ex.: enforcer bloqueou por metadados). O
    *  resultado existe e vale ser oferecido — com o motivo da reprovação à vista. */
   salvaged?: boolean;
+  /** true = a resposta foi CORTADA no teto de saída do modelo (spec incompleta). */
+  truncated?: boolean;
 };
 // T4.3: uma revisão de UM arquivo, produzida pela IA, aguardando confirmação de aplicação.
 type PendingApply = { path: string; content: string; baseSha: string | null };
@@ -604,7 +608,10 @@ type PendingApply = { path: string; content: string; baseSha: string | null };
 // `setSpecMarkdown` cego apagaria a edição silenciosamente.
 // `rejected`: a revisão existe mas o agente a REPROVOU (enforcer/BLOCKED). Continua sendo oferecida
 // — o documento costuma estar íntegro e a reprovação ser de metadados — mas com o motivo à vista.
-type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps"; rejected?: string | null };
+// `truncated`: a revisão está INCOMPLETA (cortada no teto de saída). Ela é oferecida para o humano
+// aproveitar o que servir, mas com aviso explícito de que aplicar por cima da spec atual APAGA o
+// trecho final que o modelo não chegou a reescrever.
+type RecoveredSpec = { jobId: string; content: string; reply: string | null; kind: "chat" | "resolve_gaps"; rejected?: string | null; truncated?: boolean };
 // Fallback do teto de espera quando o servidor não informa `deadlineAt` (api antiga). O valor
 // AUTORITATIVO vem do 202/do job — o 18 min hardcoded que existia aqui matava a espera ANTES de
 // revisões que o CTO concluía em 19 min, jogando fora o trabalho já pago.
@@ -1110,31 +1117,48 @@ function SpecChatPanel({
       {/* Migração 089 — revisão da spec INTEIRA que terminou enquanto esta tela estava fechada.
           Nunca entra no editor sozinha: a spec pode ter sido editada à mão nesse intervalo. */}
       {!fileMode && recovered && (
-        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: recovered.rejected ? "warning.main" : "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
+        <Box sx={{ mx: 1, mb: 1, p: 1, border: "1px solid", borderColor: recovered.truncated ? "error.main" : recovered.rejected ? "warning.main" : "success.main", borderRadius: 1.5, bgcolor: "background.paper" }} aria-live="polite">
           <Typography variant="caption" sx={{ display: "block", fontWeight: 700, mb: 0.5 }}>
-            {recovered.rejected ? "⚠ Revisão recuperada de um job reprovado" : "✓ Revisão recuperada"}
+            {recovered.truncated
+              ? "🔴 Revisão INCOMPLETA (cortada no limite do modelo)"
+              : recovered.rejected ? "⚠ Revisão recuperada de um job reprovado" : "✓ Revisão recuperada"}
             {" "}({recovered.content.length} caracteres)
           </Typography>
+          {/* T1 — truncamento é MAIS grave que reprovação do enforcer: aqui o documento em si está
+              mutilado (o fim não foi gerado). Aplicar por cima da spec atual apaga o que falta. */}
+          {recovered.truncated && (
+            <Alert severity="error" sx={{ mb: 1, fontSize: "0.72rem" }}>
+              A resposta do CTO bateu no <b>limite de saída do modelo</b> e o documento parou no meio —
+              o fim da spec <b>não foi gerado</b>. Se você aplicar e salvar, o trecho final da spec atual
+              é <b>apagado</b>. Para specs grandes, revise <b>por arquivo</b> (spec dividida) ou trate os
+              GAPs em blocos menores.
+            </Alert>
+          )}
           {/* Reprovado pelo enforcer: o documento em si costuma estar íntegro (a reprovação é de
               metadados/evidência), mas o motivo fica à vista para o Jean decidir com informação. */}
-          {recovered.rejected && (
+          {recovered.rejected && !recovered.truncated && (
             <Alert severity="warning" sx={{ mb: 1, fontSize: "0.72rem" }}>
               O agente reprovou o próprio resultado: {recovered.rejected} — revise o conteúdo antes de aplicar.
             </Alert>
           )}
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, lineHeight: 1.5 }}>
-            {recovered.rejected
-              ? "A revisão foi produzida por inteiro e ficou guardada no servidor em vez de ser descartada."
-              : recovered.kind === "resolve_gaps"
-                ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
-                : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
+            {recovered.truncated
+              ? "O conteúdo está aqui para você aproveitar o que servir — compare antes de aplicar."
+              : recovered.rejected
+                ? "A revisão foi produzida por inteiro e ficou guardada no servidor em vez de ser descartada."
+                : recovered.kind === "resolve_gaps"
+                  ? "O CTO terminou de resolver os GAPs enquanto você estava fora desta tela."
+                  : "O CTO terminou esta revisão enquanto você estava fora desta tela."}
             {" "}Aplicar substitui o conteúdo do editor — se você editou a spec desde então, essa
             edição é perdida.
           </Typography>
           <Stack direction="row" spacing={1}>
-            <Button size="small" variant="contained" color={recovered.rejected ? "warning" : "success"}
+            <Button size="small" variant={recovered.truncated ? "outlined" : "contained"}
+              color={recovered.truncated ? "error" : recovered.rejected ? "warning" : "success"}
               startIcon={<CheckCircleIcon sx={{ fontSize: "1rem" }} />}
-              onClick={onApplyRecovered}>Aplicar ao editor</Button>
+              onClick={onApplyRecovered}>
+              {recovered.truncated ? "Aplicar mesmo assim" : "Aplicar ao editor"}
+            </Button>
             <Button size="small" color="inherit" onClick={onDiscardRecovered}>Descartar</Button>
           </Stack>
         </Box>
@@ -1771,8 +1795,17 @@ export default function SpecPage() {
           } else if (recovered) {
             // Terminou enquanto ninguém olhava: nesse intervalo o usuário pode ter editado a spec
             // à mão. Um `setSpecMarkdown` cego apagaria a edição em silêncio → oferecemos.
-            if (poll.specMarkdown) setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: poll.reply ?? null, kind });
+            if (poll.specMarkdown) setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: poll.reply ?? null, kind, truncated: poll.truncated === true });
             setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão concluída enquanto esta tela estava fechada." }]);
+          } else if (poll.truncated === true) {
+            // T1 — a resposta foi CORTADA no teto de saída do modelo: a spec está INCOMPLETA.
+            // Encher o editor com ela e o usuário salvar = apagar o trecho final que o modelo não
+            // chegou a reescrever (medido em prod 2026-09-05, spec de 98k chars). OFERECEMOS com
+            // aviso, no mesmo card das revisões recuperadas.
+            if (poll.specMarkdown) {
+              setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: poll.reply ?? null, kind: kind === "resolve_gaps" ? "resolve_gaps" : "chat", truncated: true });
+            }
+            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão concluída, porém INCOMPLETA (cortada no limite de saída do modelo)." }]);
           } else if (kind === "resolve_gaps") {
             if (poll.specMarkdown) setSpecMarkdown(poll.specMarkdown);
             // A revisão está no EDITOR mas ainda NÃO no disco → a validação (que lê do disco) só
@@ -1792,7 +1825,7 @@ export default function SpecPage() {
           // agora a devolve junto do erro. Não some com ~20 min de Opus 5: OFERECE (nunca aplica),
           // com o motivo da reprovação no card. Modo por-arquivo não passa pelo enforcer.
           if (kind !== "file" && poll.specMarkdown) {
-            setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: null, kind, rejected: poll.error ?? null });
+            setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: null, kind, rejected: poll.error ?? null, truncated: poll.truncated === true });
           }
         }
         // pending/running → segue pollando (o servidor também coleta em paralelo, sem duplicar).
@@ -2253,7 +2286,13 @@ export default function SpecPage() {
     if (!recoveredSpec) return;
     setSpecMarkdown(recoveredSpec.content);
     setStaleValidation(true);
-    setChatMessages((prev) => [...prev, { role: "assistant", content: `✓ Revisão recuperada aplicada ao editor (${recoveredSpec.content.length} caracteres).\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar.` }]);
+    setChatMessages((prev) => [...prev, {
+      role: "assistant",
+      content: recoveredSpec.truncated
+        // T1: o humano escolheu aplicar um documento INCOMPLETO — o aviso vai com ele até o Salvar.
+        ? `⚠️ Revisão **INCOMPLETA** aplicada ao editor (${recoveredSpec.content.length} caracteres) — ela foi cortada no limite de saída do modelo.\n\n🔴 **Antes de "Salvar rascunho", confira o fim do documento**: o que o modelo não chegou a reescrever será apagado da spec ao salvar.`
+        : `✓ Revisão recuperada aplicada ao editor (${recoveredSpec.content.length} caracteres).\n\n➡️ Clique em **"Salvar rascunho"** para persistir e revalidar.`,
+    }]);
     setRecoveredSpec(null);
   }, [recoveredSpec]);
   const handleDiscardRecovered = useCallback(() => setRecoveredSpec(null), []);

@@ -15,6 +15,10 @@ import {
   salvageableSpec,
   judgeCtoResult,
   findInFlightSpecChatJob,
+  isTruncatedResult,
+  recordCtoUsage,
+  TRUNCATED_WARNING,
+  WORKBENCH_CTO_AGENT,
 } from "./specChatJobs.js";
 
 /** Extrator equivalente ao da rota (`extractSpecMarkdown`): artefato .md primeiro, fallback no
@@ -122,6 +126,108 @@ describe("judgeCtoResult", () => {
     const patch = judgeCtoResult({ status: "OK", summary: "ok" }, extract);
     expect(patch.status).toBe("error");
     expect(patch.error).toContain("não retornou uma spec revisada válida");
+  });
+
+  // ── T1 (2026-09-05): o corte no teto de saída viajava INVISÍVEL até o editor ──
+  it("OK + _truncated → segue done, MAS marcado e com o aviso na reply", () => {
+    const patch = judgeCtoResult(
+      { status: "OK", summary: "Resolvi tudo.", artifacts: [{ path: "docs/spec/PRODUCT_SPEC.md", content: bigSpec }], _truncated: true, _model: "opus-5" },
+      extract,
+    );
+    // `done` de propósito: o parcial tem valor. Quem protege é a marca (UI oferece, autônomo recusa).
+    expect(patch.status).toBe("done");
+    expect(patch.truncated).toBe(true);
+    expect(patch.reply).toContain(TRUNCATED_WARNING);
+    expect(patch.specMarkdown).toBe(bigSpec);
+  });
+
+  it("sem _truncated → truncated=false e reply LIMPA (nada de aviso fantasma)", () => {
+    const patch = judgeCtoResult(
+      { status: "OK", summary: "Resolvi tudo.", artifacts: [{ path: "docs/spec/PRODUCT_SPEC.md", content: bigSpec }] },
+      extract,
+    );
+    expect(patch.truncated).toBe(false);
+    expect(patch.reply).not.toContain("CORTADA");
+  });
+
+  it("BLOCKED + _truncated → o aviso de corte acompanha o motivo da reprovação", () => {
+    const patch = judgeCtoResult(
+      { status: "BLOCKED", summary: "parcial; Enforcer: evidence vazio", artifacts: [{ path: "docs/spec/PRODUCT_SPEC.md", content: bigSpec }], _truncated: true },
+      extract,
+    );
+    expect(patch.status).toBe("error");
+    expect(patch.truncated).toBe(true);
+    expect(patch.error).toContain("CORTADA");
+  });
+
+  // G9: `model_used` ficava NULL em todo job vindo do /invoke/cto/async (o envelope usa `_model`).
+  it("modelUsed cai para `_model` quando não há `model_used` (fecha o NULL do cto/async)", () => {
+    const patch = judgeCtoResult(
+      { status: "OK", summary: "ok", artifacts: [{ path: "docs/spec/PRODUCT_SPEC.md", content: bigSpec }], _model: "us.anthropic.claude-opus-5" },
+      extract,
+    );
+    expect(patch.modelUsed).toBe("us.anthropic.claude-opus-5");
+  });
+});
+
+describe("isTruncatedResult", () => {
+  it("só `true` estrito conta (string 'true' não é sinal do runtime)", () => {
+    expect(isTruncatedResult({ _truncated: true })).toBe(true);
+    expect(isTruncatedResult({ _truncated: "true" })).toBe(false);
+    expect(isTruncatedResult({})).toBe(false);
+  });
+});
+
+// ── G5: o CTO da Bancada não era debitado em project_agent_metrics ────────────
+describe("recordCtoUsage", () => {
+  const envelope = { status: "OK", _input_tokens_total: 100_900, _output_tokens_total: 58_200, _input_tokens: 40_000, _output_tokens: 20_000, _llm_calls: 2, _model: "opus-5", _duration_ms: 96_000 };
+
+  it("debita usando os TOTAIS (repairs pagos) com task_id idempotente", async () => {
+    let sql = ""; let params: unknown[] = [];
+    const db = { query: async (q: string, p: unknown[]) => { sql = q; params = p; return { rows: [], rowCount: 1 }; } } as never;
+    const ok = await recordCtoUsage(db, { id: "job-9", projectId: "proj-1", kind: "resolve_gaps" }, envelope);
+    expect(ok).toBe(true);
+    expect(sql).toContain("INSERT INTO project_agent_metrics");
+    expect(sql).toContain("WHERE NOT EXISTS");
+    expect(params[1]).toBe(WORKBENCH_CTO_AGENT);
+    expect(params[2]).toBe("spec_chat:job-9");
+    // TOTAL, não a última chamada — senão os repairs da LEI 5 sairiam de graça.
+    expect(params[3]).toBe(100_900);
+    expect(params[4]).toBe(58_200);
+    expect(params[5]).toBe("opus-5");
+  });
+
+  it("cai para `_input_tokens` quando o envelope é antigo (agents não redeployado)", async () => {
+    let params: unknown[] = [];
+    const db = { query: async (_q: string, p: unknown[]) => { params = p; return { rows: [], rowCount: 1 }; } } as never;
+    await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" }, { status: "OK", _input_tokens: 7, _output_tokens: 9 });
+    expect(params[3]).toBe(7);
+    expect(params[4]).toBe(9);
+  });
+
+  it("NÃO debita kind='file' — /invoke/raw já reporta pelo _report_direct_usage (dupla contagem)", async () => {
+    let called = false;
+    const db = { query: async () => { called = true; return { rows: [], rowCount: 1 }; } } as never;
+    expect(await recordCtoUsage(db, { id: "j", projectId: "p", kind: "file" }, envelope)).toBe(false);
+    expect(called).toBe(false);
+  });
+
+  it("sem projeto ou sem tokens → não escreve nada", async () => {
+    let called = false;
+    const db = { query: async () => { called = true; return { rows: [], rowCount: 1 }; } } as never;
+    expect(await recordCtoUsage(db, { id: "j", projectId: null, kind: "chat" }, envelope)).toBe(false);
+    expect(await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" }, { status: "OK" })).toBe(false);
+    expect(called).toBe(false);
+  });
+
+  it("segunda coleta do MESMO job não duplica (rowCount 0 → false)", async () => {
+    const db = { query: async () => ({ rows: [], rowCount: 0 }) } as never;
+    expect(await recordCtoUsage(db, { id: "job-9", projectId: "p", kind: "chat" }, envelope)).toBe(false);
+  });
+
+  it("falha de banco NUNCA derruba a entrega da revisão", async () => {
+    const db = { query: async () => { throw new Error("db down"); } } as never;
+    expect(await recordCtoUsage(db, { id: "j", projectId: "p", kind: "chat" }, envelope)).toBe(false);
   });
 });
 

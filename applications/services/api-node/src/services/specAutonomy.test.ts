@@ -8,6 +8,14 @@
  *   • guarda de encolhimento (não aplica revisão que perdeu conteúdo);
  *   • rate-limit de 4 validações/h NÃO derruba o laço (GAP-A);
  *   • teto de 5 rodadas e parada por falta de progresso.
+ *
+ * 2026-09-05 (T2/G2/G4) — o incidente que motivou as guardas novas: a spec do NVX LastMile
+ * (98.045 chars) faz o CTO bater no teto de 64k tokens de SAÍDA. A resposta volta `status: OK`,
+ * cortada no meio, e o laço a APLICAVA: 7 das 14 seções desapareceram do disco. Agora:
+ *   • T2 — revisão truncada ou com seções a menos → `stalled`, disco INTACTO;
+ *   • G2 — o conteúdo anterior vai para `project_spec_snapshots` ANTES de qualquer escrita, e
+ *     falhar o snapshot ABORTA a escrita (rede de segurança é pré-condição, não enfeite);
+ *   • G4 — `SPEC_AUTONOMY` nasce DESLIGADO (fail-closed em instalação nova).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
@@ -27,7 +35,8 @@ vi.mock("./findingTriage.js", () => ({
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
 vi.mock("./specValidation.js", () => ({ startValidation: (...a: unknown[]) => startValidation(...(a as [])) }));
 
-let job: { status: string; specMarkdown: string | null; error: string | null } | null = null;
+// `truncated` (T1) chega do runtime via `spec_chat_jobs.truncated` — é o sinal que o laço consulta.
+let job: { status: string; specMarkdown: string | null; error: string | null; truncated?: boolean } | null = null;
 vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
@@ -42,7 +51,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
-  isTerminalAutonomyStatus, type AutonomyStatus,
+  isTerminalAutonomyStatus, assessRevisionIntegrity, type AutonomyStatus,
 } from "./specAutonomy.js";
 
 // ── banco falso: uma linha de spec_autonomy_runs em memória ───────────────────
@@ -51,12 +60,22 @@ let run: FakeRow | null = null;
 let projectStatus = "draft";
 let specPath = "";
 let insertFails23505 = false;
+// G2: `project_spec_snapshots` é a rede de segurança da spec. O log deixa provar que o conteúdo
+// ANTERIOR foi guardado ANTES da escrita, e o flag simula a rede rasgada (banco fora do ar).
+let snapshotFails = false;
+const sqlLog: Array<{ sql: string; params: unknown[] }> = [];
 
 function nowIso(): string { return new Date().toISOString(); }
 
 const db = {
   async query(sql: string, values: unknown[] = []): Promise<{ rows: FakeRow[]; rowCount: number }> {
     const s = sql.replace(/\s+/g, " ").trim();
+    sqlLog.push({ sql: s, params: values });
+
+    if (s.includes("project_spec_snapshots")) {
+      if (snapshotFails) throw new Error("snapshot indisponível");
+      return { rows: [], rowCount: 1 };
+    }
 
     if (s.startsWith("SELECT file_path FROM project_spec_files")) {
       return { rows: specPath ? [{ file_path: specPath }] : [], rowCount: specPath ? 1 : 0 };
@@ -148,12 +167,16 @@ beforeEach(() => {
   latestRunId = "run-0";
   validationStatus = "passed";
   insertFails23505 = false;
+  snapshotFails = false;
+  sqlLog.length = 0;
   findings = [{ severity: "blocker" }, { severity: "warning" }, { severity: "info" }];
   writeSpec(BASE_SPEC);
   process.env.API_AGENTS_URL = "http://agents:8000";
   startValidation.mockClear().mockResolvedValue({ ok: true as const, runId: "vr-1", reused: false });
   dispatchResolveGapsJob.mockClear().mockResolvedValue({ ok: true as const, gaps: 3 });
-  delete process.env.SPEC_AUTONOMY;
+  // G4: a flag nasce DESLIGADA no código (fail-closed). Os testes de comportamento do laço
+  // precisam ligá-la explicitamente — o default OFF tem teste próprio no fim do arquivo.
+  process.env.SPEC_AUTONOMY = "on";
 });
 
 afterEach(() => { delete process.env.SPEC_AUTONOMY; });
@@ -376,5 +399,134 @@ describe("validação dentro do laço", () => {
     validationStatus = "running";
     expect(await advanceAutonomyRun(db, r.id)).toBe(false);
     expect(run!.status).toBe("validating");
+  });
+});
+
+// ── 5. T2 — integridade da revisão medida por SEÇÃO, não por tamanho ─────────
+//
+// A guarda de encolhimento (70% dos chars) NÃO pega o corte no teto de saída: perder 3 de 14
+// seções ainda deixa ~80% dos caracteres. Foi assim que o LastMile perdeu 7 seções em prod.
+
+const SECTIONED_SPEC = [
+  "# PRODUCT SPEC", "",
+  "## 1. Contexto", "ctx ".repeat(300), "",
+  "## 2. Requisitos", "req ".repeat(300), "",
+  "## 3. Modelo de dados", "```sql", "CREATE TABLE deliveries (id uuid);", "```", "dados ".repeat(300), "",
+  "## 4. Observabilidade", "obs ".repeat(200), "",
+].join("\n");
+
+describe("assessRevisionIntegrity", () => {
+  it("aceita revisão que preserva as seções", () => {
+    const revised = SECTIONED_SPEC.replace("## 2. Requisitos", "## 2. Requisitos");
+    expect(assessRevisionIntegrity(SECTIONED_SPEC, revised, false)).toEqual({ ok: true });
+  });
+
+  it("aceita revisão que ACRESCENTA seções (o CTO pode expandir a spec)", () => {
+    const revised = `${SECTIONED_SPEC}\n## 5. Segurança\nNova seção.\n`;
+    expect(assessRevisionIntegrity(SECTIONED_SPEC, revised, false).ok).toBe(true);
+  });
+
+  it("aceita RENOMEAÇÃO de seção (a guarda conta seções, não casa nome a nome)", () => {
+    const revised = SECTIONED_SPEC.replace("## 4. Observabilidade", "## 4. Observabilidade e SLOs");
+    expect(assessRevisionIntegrity(SECTIONED_SPEC, revised, false).ok).toBe(true);
+  });
+
+  it("🔴 recusa quando o provedor disse que CORTOU (sinal mais forte que qualquer heurística)", () => {
+    const r = assessRevisionIntegrity(SECTIONED_SPEC, SECTIONED_SPEC, true);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("truncada");
+  });
+
+  it("🔴 recusa perda de seção mesmo com >80% dos caracteres (o caso do LastMile)", () => {
+    const revised = SECTIONED_SPEC.slice(0, SECTIONED_SPEC.indexOf("## 4. Observabilidade"));
+    expect(revised.length / SECTIONED_SPEC.length).toBeGreaterThan(0.7);   // a guarda antiga deixaria passar
+    const r = assessRevisionIntegrity(SECTIONED_SPEC, revised, false);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe("seções desaparecidas");
+      expect(r.detail.toLowerCase()).toContain("observabilidade");
+    }
+  });
+
+  it("🔴 recusa bloco de código aberto (cortou no meio de uma cerca)", () => {
+    const revised = `${SECTIONED_SPEC}\n## 5. Anexo\n\`\`\`sql\nCREATE INDEX ON deliveries(courier_id) WHERE`;
+    const r = assessRevisionIntegrity(SECTIONED_SPEC, revised, false);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("bloco de código aberto");
+  });
+
+  it("NÃO acusa cerca ímpar quando a BASE já era ímpar (defeito preexistente da spec)", () => {
+    const base = `${SECTIONED_SPEC}\n\`\`\`sql\nsem fechar`;
+    expect(assessRevisionIntegrity(base, `${base}\nmais texto`, false).ok).toBe(true);
+  });
+});
+
+describe("T2 + G2 dentro do laço — o disco é a última coisa a mudar", () => {
+  async function reachApplying(specOnDisk: string) {
+    writeSpec(specOnDisk);
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);                 // pending → cto_running
+    return r;
+  }
+
+  it("🔴 revisão TRUNCADA (T1 no job) → stalled, disco INTACTO e sem gastar validação", async () => {
+    const r = await reachApplying(SECTIONED_SPEC);
+    job = { status: "done", specMarkdown: `${SECTIONED_SPEC}\n## 5. Anexo\nmelhoria`, truncated: true, error: null };
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("stalled");
+    expect(readFileSync(specPath, "utf-8")).toBe(SECTIONED_SPEC);
+    expect(startValidation).not.toHaveBeenCalled();
+    expect(String(run!.last_error)).toContain("NÃO apliquei");
+  });
+
+  it("🔴 revisão que PERDEU seção (sem sinal do provedor) → stalled, disco INTACTO", async () => {
+    const r = await reachApplying(SECTIONED_SPEC);
+    job = { status: "done", specMarkdown: SECTIONED_SPEC.slice(0, SECTIONED_SPEC.indexOf("## 4. Observabilidade")), error: null };
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("stalled");
+    expect(readFileSync(specPath, "utf-8")).toBe(SECTIONED_SPEC);
+    expect(startValidation).not.toHaveBeenCalled();
+  });
+
+  it("G2: o conteúdo ANTERIOR vai para project_spec_snapshots antes da escrita", async () => {
+    const r = await reachApplying(SECTIONED_SPEC);
+    const revised = `${SECTIONED_SPEC}\n## 5. Segurança\nSeção nova com o GAP resolvido.\n`;
+    job = { status: "done", specMarkdown: revised, error: null };
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("validating");
+    expect(readFileSync(specPath, "utf-8")).toBe(revised);
+    const snap = sqlLog.find((c) => /INSERT INTO project_spec_snapshots/.test(c.sql));
+    expect(snap).toBeDefined();
+    expect(snap!.params[3]).toBe(SECTIONED_SPEC);       // o que foi SUBSTITUÍDO, não o que entrou
+    expect(String(snap!.params[6])).toContain("autonomy:round-1");
+  });
+
+  it("🔴 G2: snapshot indisponível ABORTA a escrita (rede de segurança é pré-condição)", async () => {
+    const r = await reachApplying(SECTIONED_SPEC);
+    job = { status: "done", specMarkdown: `${SECTIONED_SPEC}\n## 5. Segurança\nnova seção.\n`, error: null };
+    snapshotFails = true;
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("stalled");
+    expect(readFileSync(specPath, "utf-8")).toBe(SECTIONED_SPEC);
+    expect(String(run!.last_error).toLowerCase()).toContain("snapshot");
+    expect(startValidation).not.toHaveBeenCalled();
+  });
+});
+
+// ── 6. G4 — a flag nasce desligada ───────────────────────────────────────────
+
+describe("autonomyEnabled (G4 — fail-closed)", () => {
+  it("SEM a variável no ambiente → DESLIGADO (instalação nova não escreve spec sozinha)", async () => {
+    delete process.env.SPEC_AUTONOMY;
+    expect(autonomyEnabled()).toBe(false);
+    const res = await startAutonomyRun(db, { projectId: PROJECT, tenantId: null, ownerUserId: OWNER });
+    expect(res).toMatchObject({ ok: false, code: "AUTONOMY_DISABLED" });
+  });
+
+  it("liga só com valor explícito", () => {
+    process.env.SPEC_AUTONOMY = "on";
+    expect(autonomyEnabled()).toBe(true);
+    process.env.SPEC_AUTONOMY = "off";
+    expect(autonomyEnabled()).toBe(false);
   });
 });

@@ -855,6 +855,45 @@ def _normalize_response_envelope(out: dict, request_id: str, raw_text: str) -> d
     return out
 
 
+def _mark_truncation(out: dict, stop_reason: str | None, agent_name: str) -> None:
+    """Marca no ENVELOPE que a resposta foi cortada no limite de saída do modelo.
+
+    🔴 Corrige o GAP sistêmico medido em prod 2026-09-05 (NVX LastMile): `stop_reason=max_tokens`
+    só virava `logger.warning`. O `resilient_json_parse` fecha o JSON à força, devolve o artifact
+    PARCIAL e o envelope sai com `status: OK` — a Bancada exibia *"revisada resolvendo 100% dos
+    GAPs"* junto de uma spec que terminava no meio de um `CREATE UNIQUE INDEX`. Truncamento é
+    propriedade da ENTREGA, não do conteúdo: quem decide o que fazer com o parcial (avisar o
+    humano, recusar aplicar no modo autônomo) precisa desse sinal no envelope, não no log.
+
+    Dois sinais independentes, porque nem todo provedor preenche `stop_reason`:
+      • `stop_reason == "max_tokens"` — o teto de saída da API;
+      • `_json_recovered_truncated` — o recuperador de JSON do `envelope.py` teve de fechar o
+        objeto à força (só acontece quando o texto acaba dentro de um `content`).
+    """
+    by_stop = stop_reason == "max_tokens"
+    by_json = bool(out.pop("_json_recovered_truncated", False))
+    out["_truncated"] = bool(by_stop or by_json)
+    if out["_truncated"]:
+        out["_truncated_signal"] = "stop_reason=max_tokens" if by_stop else "json_recovered"
+        logger.warning(
+            "[%s] Envelope marcado como TRUNCADO (%s) — status=%s, artifacts=%d. "
+            "O consumidor NÃO deve aplicar este resultado sem revisão humana.",
+            agent_name, out["_truncated_signal"], out.get("status"), len(out.get("artifacts") or []),
+        )
+
+
+def _mark_usage_totals(out: dict, input_total: int, output_total: int, calls: int) -> None:
+    """Usage de TODAS as tentativas desta execução (original + repairs da LEI 5).
+
+    `_input_tokens`/`_output_tokens` continuam sendo os da ÚLTIMA tentativa (contrato antigo, que
+    o `runner.py` já reporta). Os totais existem porque o repair é pago: no incidente de
+    2026-09-05 cada rodada truncada gastou 64.000 tokens de saída em Opus 5 e até 3 tentativas.
+    """
+    out["_input_tokens_total"] = int(input_total)
+    out["_output_tokens_total"] = int(output_total)
+    out["_llm_calls"] = int(calls)
+
+
 def log_agent_call(
     agent_name: str,
     mode: str,
@@ -1289,6 +1328,12 @@ def run_agent(
     # Rede de segurança do `thinking={"type":"disabled"}`: se a rota/modelo recusar o parâmetro,
     # desliga a otimização para o resto desta execução em vez de derrubar o agente.
     _thinking_rejected = False
+    # Usage ACUMULADO de TODAS as tentativas (a chamada original + os repairs). `_input_tokens` /
+    # `_output_tokens` do envelope são da ÚLTIMA tentativa — quem paga a conta paga todas: um CTO que
+    # trunca 3× em Opus 5 gasta 3 × 64.000 tokens de saída e o medidor via apenas o último terço.
+    _acc_input_tokens = 0
+    _acc_output_tokens = 0
+    _llm_calls = 0
 
     for repair_attempt in range(MAX_REPAIRS + 1):
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
@@ -1432,6 +1477,9 @@ def run_agent(
         _usage = getattr(response, "usage", None)
         _input_tokens = getattr(_usage, "input_tokens", 0) if _usage else 0
         _output_tokens = getattr(_usage, "output_tokens", 0) if _usage else 0
+        _acc_input_tokens += int(_input_tokens or 0)
+        _acc_output_tokens += int(_output_tokens or 0)
+        _llm_calls += 1
         logger.info(
             "[%s] Resposta recebida (audit: role=%s model=%s request_id=%s tokens_in=%d tokens_out=%d).",
             agent_name, role, model, request_id, _input_tokens, _output_tokens,
@@ -1495,6 +1543,8 @@ def run_agent(
             out["_output_tokens"] = _output_tokens
             out["_duration_ms"] = int(duration_ms)
             out["_model"] = model
+            _mark_truncation(out, stop_reason, agent_name)
+            _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls)
             log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
             return _normalize_response_envelope(out, request_id, raw_text)
 
@@ -1534,6 +1584,8 @@ def run_agent(
         out["_output_tokens"] = _output_tokens
         out["_duration_ms"] = int((time.perf_counter() - t0_run) * 1000)
         out["_model"] = model
+        _mark_truncation(out, stop_reason, agent_name)
+        _mark_usage_totals(out, _acc_input_tokens, _acc_output_tokens, _llm_calls)
         duration_ms = (time.perf_counter() - t0_run) * 1000
         log_agent_call(agent_name, mode, budget, out, duration_ms, request_id=request_id)
         return _normalize_response_envelope(out, request_id, raw_text)

@@ -52,6 +52,10 @@ export interface SpecChatJob {
   hasSpecMarkdown: boolean;
   reply: string | null;
   error: string | null;
+  /** `true` = a resposta do CTO foi CORTADA no teto de saída do modelo (migração 091). O documento
+   *  existe mas está INCOMPLETO — nada pode ser aplicado a partir dele sem revisão humana, e o
+   *  modo autônomo recusa a rodada. Ver `_truncated` em `agents/runtime.py`. */
+  truncated: boolean;
   createdAt: string;
   finishedAt: string | null;
   collectedAt: string | null;
@@ -62,7 +66,7 @@ export interface SpecChatJob {
  *  a cada mount da tela só para desenhar um banner. */
 const SCALAR_COLS =
   "id, project_id, tenant_id, owner_user_id, agents_job_id, kind, file_path, base_sha, base_spec_sha, " +
-  "status, reply, error, created_at, finished_at, collected_at, deadline_at, " +
+  "status, reply, error, truncated, created_at, finished_at, collected_at, deadline_at, " +
   "(spec_markdown IS NOT NULL) AS has_spec";
 
 function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null): SpecChatJob {
@@ -81,6 +85,7 @@ function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null
     hasSpecMarkdown: r.has_spec === true || (r.spec_markdown ?? null) !== null || specMarkdown !== null,
     reply: (r.reply as string | null) ?? null,
     error: (r.error as string | null) ?? null,
+    truncated: r.truncated === true,
     createdAt: String(r.created_at ?? new Date().toISOString()),
     finishedAt: (r.finished_at as string | null) ?? null,
     collectedAt: (r.collected_at as string | null) ?? null,
@@ -179,6 +184,8 @@ export interface FinishPatch {
   reply?: string | null;
   error?: string | null;
   modelUsed?: string | null;
+  /** Migração 091: resposta cortada no teto de saída do modelo. `undefined` preserva o valor atual. */
+  truncated?: boolean | null;
 }
 
 /**
@@ -194,10 +201,12 @@ export async function finishSpecChatJob(db: Db, id: string, patch: FinishPatch):
       `UPDATE spec_chat_jobs
           SET status = $2, spec_markdown = COALESCE($3, spec_markdown), reply = COALESCE($4, reply),
               error = COALESCE($5, error), model_used = COALESCE($6, model_used),
+              truncated = COALESCE($7::boolean, truncated),
               finished_at = now(), updated_at = now()
         WHERE id = $1 AND status IN ('pending','running')`,
       [id, patch.status, patch.specMarkdown ?? null, patch.reply ?? null,
-        patch.error ? patch.error.slice(0, 500) : null, patch.modelUsed ?? null],
+        patch.error ? patch.error.slice(0, 500) : null, patch.modelUsed ?? null,
+        patch.truncated ?? null],
     );
     const won = (r.rowCount ?? 0) > 0;
     if (won && patch.status === "done" && patch.reply) {
@@ -375,7 +384,7 @@ export async function collectSpecChatJobsTick(
   let rows: Array<Record<string, unknown>>;
   try {
     rows = (await db.query(
-      `SELECT id, agents_job_id, poll_errors, deadline_at FROM spec_chat_jobs
+      `SELECT id, agents_job_id, poll_errors, deadline_at, project_id, kind FROM spec_chat_jobs
         WHERE status IN ('pending','running')
           AND kind IN ('chat','resolve_gaps')
           AND agents_job_id IS NOT NULL
@@ -433,10 +442,16 @@ export async function collectSpecChatJobsTick(
       .catch(() => { /* best-effort */ });
     if (probed.status === "done" && probed.result) {
       const verdict = judgeCtoResult(probed.result, extract);
+      // G5: o débito acontece ANTES do claim de coleta e é idempotente por `task_id` — a chamada
+      // ao Opus 5 foi paga mesmo que o outro coletor vença a corrida do `finishSpecChatJob`.
+      await recordCtoUsage(db, {
+        id, projectId: (row.project_id as string | null) ?? null,
+        kind: (row.kind as SpecChatJobKind) ?? "chat",
+      }, probed.result);
       const closed = await finishSpecChatJob(db, id, verdict);
       if (closed) {
         out.collected += 1;
-        console.info(`[SpecChatJobs] worker coletou job=${id} agents=${agentsJobId} status=${verdict.status} chars=${verdict.specMarkdown?.length ?? 0}`);
+        console.info(`[SpecChatJobs] worker coletou job=${id} agents=${agentsJobId} status=${verdict.status} chars=${verdict.specMarkdown?.length ?? 0}${verdict.truncated ? " TRUNCADO" : ""}`);
       }
     } else if (probed.status === "error") {
       const closed = await finishSpecChatJob(db, id, { status: "error", error: probed.error ?? "CTO job failed" });
@@ -456,6 +471,14 @@ const ENFORCER_TAIL_RE = /;\s*Enforcer:\s*([\s\S]+)$/;
 const SALVAGE_MIN_CHARS = 1_500;
 /** Teto do trecho de motivo embutido na mensagem (o campo `error` inteiro é cortado em 500). */
 const REASON_MAX_CHARS = 240;
+/**
+ * Aviso ÚNICO de truncamento (um só texto para chat, card de recuperação e log — o usuário não
+ * pode receber duas explicações diferentes do mesmo defeito).
+ */
+export const TRUNCATED_WARNING =
+  "⚠️ ATENÇÃO: esta resposta foi CORTADA no limite de saída do modelo — a spec está INCOMPLETA " +
+  "(o fim do documento não foi gerado). NÃO aplique: o conteúdo que falta seria apagado da spec atual. " +
+  "Peça a revisão por arquivo (spec dividida) ou trate os GAPs em blocos menores.";
 
 /**
  * Motivo REAL da reprovação, na ordem em que o runtime o registra:
@@ -514,6 +537,24 @@ export function salvageableSpec(result: Record<string, unknown>): string | null 
  *    OFERECIDA ao usuário (`status` continua `error` → nada é aplicado sozinho, nem pelo modo
  *    autônomo, que só aplica em `done`). Antes era jogada no lixo depois de ~20 min de Opus 5.
  */
+/**
+ * Modelo REAL da chamada. `model_used` é o campo do `/invoke/raw`; o caminho `cto/async`
+ * (`run_agent`) emite `_model` no envelope — por isso `spec_chat_jobs.model_used` ficava NULL em
+ * toda revisão da Bancada (GAP G9, medido em prod 2026-09-05).
+ */
+function modelOf(result: Record<string, unknown>): string | null {
+  const a = result.model_used;
+  if (typeof a === "string" && a.trim()) return a.trim();
+  const b = result._model;
+  if (typeof b === "string" && b.trim()) return b.trim();
+  return null;
+}
+
+/** `_truncated` do envelope (`agents/runtime.py`): a resposta bateu no teto de saída do modelo. */
+export function isTruncatedResult(result: Record<string, unknown>): boolean {
+  return result._truncated === true;
+}
+
 export function judgeCtoResult(
   result: Record<string, unknown>,
   extract: (result: Record<string, unknown>) => string,
@@ -521,6 +562,7 @@ export function judgeCtoResult(
   const agentStatus = String((result as { status?: string }).status ?? "").toUpperCase();
   const md = extract(result);
   const rejected = agentStatus === "BLOCKED" || agentStatus === "FAIL";
+  const truncated = isTruncatedResult(result);
   if (rejected || !md || md.trim().length < 20) {
     const reason = ctoFailureReason(result);
     const head = rejected
@@ -531,18 +573,91 @@ export function judgeCtoResult(
     if (salvaged) {
       parts.push(`A revisão que ele produziu (${salvaged.length} caracteres) foi recuperada — confira antes de aplicar.`);
     }
+    if (truncated) parts.push(TRUNCATED_WARNING);
     return {
       status: "error",
       error: parts.join(" "),
       // COALESCE no UPDATE: `null` preserva o que já houver; string grava a spec recuperada.
       specMarkdown: salvaged,
-      modelUsed: (result.model_used as string | undefined) ?? null,
+      modelUsed: modelOf(result),
+      truncated,
     };
   }
+  // 🔴 2026-09-05: `done` COM `truncated` é o caso que gerou o incidente — o envelope vem
+  // `status: OK` e o `summary` afirma ter resolvido tudo, mas o documento acaba no meio de uma
+  // frase. Mantemos `done` (o parcial tem valor e o humano pode querer olhar), porém MARCADO: a
+  // UI avisa e o modo autônomo se recusa a aplicar. O que não se pode é entregar isso em silêncio.
+  const baseReply = (result.summary as string | undefined)?.trim() || "Spec atualizada conforme solicitado.";
   return {
     status: "done",
     specMarkdown: md,
-    reply: (result.summary as string | undefined)?.trim() || "Spec atualizada conforme solicitado.",
-    modelUsed: (result.model_used as string | undefined) ?? null,
+    reply: truncated ? `${baseReply}\n\n${TRUNCATED_WARNING}` : baseReply,
+    modelUsed: modelOf(result),
+    truncated,
   };
+}
+
+/** Label do CTO da Bancada em `project_agent_metrics` (convenção snake das chamadas diretas:
+ *  `spec_validator`, `splitter`). Distinto do `CTO` da FÁBRICA, que o `runner.py` reporta. */
+export const WORKBENCH_CTO_AGENT = "spec_cto";
+
+function intOf(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}
+
+/**
+ * 🔴 G5 (medido em prod 2026-09-05) — o medidor de custo NÃO via o agente mais caro do sistema.
+ *
+ * `_report_direct_usage` (runtime.py) só roda dentro de `call_bedrock_direct`; o `run_agent` — que é
+ * o caminho do CTO da Bancada via `/invoke/cto/async` — captura os tokens APENAS PARA O LOG e nunca
+ * reporta. Medição de 30 h no projeto do LastMile: `spec_validator`+`triage` deixaram 42 linhas
+ * (≈ $13,14) e as 9 chamadas do CTO deixaram ZERO (908.160 in / 523.744 out ≈ $17,63 invisível) →
+ * o cost cap mensal por tenant (`tenantCostCap.ts`) e o gate de orçamento do dispatch enxergavam
+ * ~43% do gasto real, cegos justamente ao maior consumidor unitário (modo autônomo = 5 rodadas de
+ * Opus 5 no teto de saída). Denial-of-wallet pela própria feature.
+ *
+ * Por que reportar AQUI e não no `run_agent`: a FÁBRICA já reporta o mesmo envelope pelo
+ * `runner.py` (`_record_agent_metrics`) — reportar dentro do `run_agent` contaria cada chamada da
+ * fábrica DUAS vezes. O furo é exclusivo do caminho api→agents da Bancada, então o débito é feito
+ * no ponto de coleta do job.
+ *
+ * Idempotência (os dois coletores podem correr juntos, e o worker pode reprocessar):
+ * `task_id = 'spec_chat:<jobId>'` + `NOT EXISTS` — mesmo padrão do `splitter` em
+ * `routes/products.ts`. `jobId` é único por revisão, logo não colide com nenhuma task da fábrica.
+ * Usa os TOTAIS do envelope (`_input_tokens_total`) quando presentes: os repairs da LEI 5 são pagos.
+ * Nunca lança — cobrança é observabilidade, não pode derrubar a entrega da revisão.
+ */
+export async function recordCtoUsage(
+  db: Db,
+  job: { id: string; projectId: string | null; kind: SpecChatJobKind },
+  result: Record<string, unknown>,
+): Promise<boolean> {
+  // Sem projeto real não há onde debitar (preview de spec sem projeto). `file` usa `/invoke/raw` →
+  // `call_bedrock_direct`, que JÁ reporta pelo `_report_direct_usage`: reportar aqui duplicaria.
+  if (!job.projectId || job.kind === "file") return false;
+  const input = intOf(result._input_tokens_total) || intOf(result._input_tokens);
+  const output = intOf(result._output_tokens_total) || intOf(result._output_tokens);
+  if (!input && !output) return false;
+  try {
+    const r = await db.query(
+      `INSERT INTO project_agent_metrics
+         (project_id, agent, task_id, round, input_tokens, output_tokens, model, duration_ms, status)
+         SELECT $1, $2, $3, 1, $4, $5, $6, $7, $8
+          WHERE NOT EXISTS (
+            SELECT 1 FROM project_agent_metrics WHERE project_id = $1 AND agent = $2 AND task_id = $3
+          )`,
+      [job.projectId, WORKBENCH_CTO_AGENT, `spec_chat:${job.id}`, input, output,
+        modelOf(result), intOf(result._duration_ms) || null,
+        String((result as { status?: string }).status ?? "OK").toUpperCase().slice(0, 32)],
+    );
+    const inserted = (r.rowCount ?? 0) > 0;
+    if (inserted) {
+      console.info(`[SpecChatJobs] usage do CTO debitado: job=${job.id} projeto=${job.projectId.slice(0, 8)} in=${input} out=${output} calls=${intOf(result._llm_calls) || 1}`);
+    }
+    return inserted;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] recordCtoUsage falhou (best-effort): ${msg(e)}`);
+    return false;
+  }
 }

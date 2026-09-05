@@ -35,7 +35,8 @@ import { canAccessProjectRow } from "../lib/projectAccess.js";
 import {
   createSpecChatJob, setAgentsJobId, touchSpecChatJob, finishSpecChatJob, getSpecChatJob,
   findInFlightSpecChatJob, markSpecChatJobCollected, loadSpecChatHistory, judgeCtoResult,
-  CHAT_JOB_DEADLINE_MS, FILE_JOB_DEADLINE_MS, type SpecChatJobStatus,
+  recordCtoUsage, CHAT_JOB_DEADLINE_MS, FILE_JOB_DEADLINE_MS,
+  type SpecChatJobStatus, type SpecChatJobKind,
 } from "../services/specChatJobs.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
@@ -82,6 +83,11 @@ interface ChatJob {
   /** T4.3: modo por-arquivo — capturados NO ENVIO para o apply ser consistente. */
   sentFilePath?: string | null;
   sentBaseSha?: string | null;
+  /**
+   * T1: a resposta bateu no teto de saída do modelo (`stop_reason=max_tokens`) → a spec revisada
+   * está INCOMPLETA. Propagado do `_truncated` do runtime para a UI avisar "não aplique".
+   */
+  truncated?: boolean;
 }
 const _chatJobs = new Map<string, ChatJob>();
 
@@ -483,7 +489,7 @@ function stripOuterFence(s: string): string {
  */
 function settleJob(
   jobId: string,
-  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null },
+  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null; truncated?: boolean | null },
 ): void {
   const j = _chatJobs.get(jobId);
   if (j) {
@@ -492,6 +498,9 @@ function settleJob(
     if (patch.specMarkdown) j.specMarkdown = patch.specMarkdown;
     if (patch.reply) j.reply = patch.reply;
     if (patch.error) j.error = patch.error;
+    // T1: o cache quente também carrega o aviso — quem está com a tela aberta é justamente
+    // quem corre o risco de aplicar uma spec cortada.
+    if (patch.truncated != null) j.truncated = patch.truncated === true;
   }
   void finishSpecChatJob(pool, jobId, patch);
 }
@@ -538,7 +547,7 @@ function runFileChatJob(jobId: string, raw: Record<string, unknown>, agentsUrl: 
     });
 }
 
-function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: string): void {
+function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: string, kind: SpecChatJobKind): void {
   const job = _chatJobs.get(jobId);
   if (!job) return;
   job.status = "running";
@@ -592,8 +601,13 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
               if (verdict.status !== "done") {
                 console.warn(`[SpecChat] job=${jobId} rejeitado pelo gate H4 — ${verdict.error}`);
               } else {
-                console.log(`[SpecChat] ✓ job=${jobId} DONE — ${verdict.specMarkdown?.length} chars`);
+                console.log(`[SpecChat] ✓ job=${jobId} DONE${verdict.truncated ? " TRUNCADO" : ""} — ${verdict.specMarkdown?.length} chars`);
               }
+              // G5: o CTO da Bancada custa tokens de Opus como qualquer agente da fábrica, mas
+              // este caminho (api → /invoke/cto/async) NÃO passa pelo runner, então nada era
+              // debitado em `project_agent_metrics`. Idempotente por task_id: se o worker
+              // coletar o mesmo job, o segundo INSERT não acontece.
+              void recordCtoUsage(pool, { id: jobId, projectId: job.projectId ?? null, kind }, pollData.result);
               settleJob(jobId, verdict);
             } else if (pollData.status === "error") {
               clearInterval(timer);
@@ -659,7 +673,7 @@ export async function dispatchResolveGapsJob(opts: {
     kind: "resolve_gaps", filePath: null, baseSha: null, baseSpecSha: sha256(opts.specMarkdown),
     userMessage: opts.userMessage,
   });
-  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true, opts.projectId), ...opts.llm }, opts.agentsUrl);
+  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true, opts.projectId), ...opts.llm }, opts.agentsUrl, "resolve_gaps");
   return { ok: true, gaps: ctx.findings.length };
 }
 
@@ -806,7 +820,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).
-        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps, projectId), ...llm }, agentsUrl);
+        runChatJob(jobId, { ...buildChatMessage(specMarkdown, messages, ctx, resolveGaps, projectId), ...llm }, agentsUrl, resolveGaps ? "resolve_gaps" : "chat");
       }
 
       // `deadlineAt` no 202: o teto de espera passa a ser DITADO PELO SERVIDOR. O cliente tinha um
@@ -868,6 +882,9 @@ export async function specChatRoutes(app: FastifyInstance) {
           // `true` = job REPROVADO (enforcer/BLOCKED, interrupção, perda) que ainda assim carrega uma
           // spec gravada. O cliente busca o resultado pelo GET /:jobId e OFERECE, avisando o motivo.
           salvaged: job.status !== "done" && job.hasSpecMarkdown,
+          // T1: já aqui, para a tela poder marcar o card de oferta como "revisão INCOMPLETA"
+          // antes mesmo de baixar a spec pelo GET /:jobId.
+          truncated: job.truncated === true,
         },
       });
     },
@@ -931,6 +948,10 @@ export async function specChatRoutes(app: FastifyInstance) {
       const errorText = dbTerminal ? db!.error : (mem?.error ?? db?.error ?? null);
       const filePath = db?.filePath ?? mem?.sentFilePath ?? null;
       const baseSha = db?.baseSha ?? mem?.sentBaseSha ?? null;
+      // T1: `truncated` = a resposta bateu no teto de saída do modelo e a spec revisada está
+      // INCOMPLETA. Vai nos dois estados terminais: o cliente precisa OFERECER com aviso em vez
+      // de encher o editor (uma spec cortada aplicada apaga o que o modelo não chegou a reescrever).
+      const truncated = dbTerminal ? db!.truncated === true : (mem?.truncated === true || db?.truncated === true);
 
       if (status === "done") {
         // O cliente recebeu o resultado → para de ser reofertado pelo in-flight para sempre.
@@ -939,7 +960,7 @@ export async function specChatRoutes(app: FastifyInstance) {
         // e detecta edição concorrente (o baseSha é o que o usuário via quando pediu a revisão).
         return reply.send({
           jobId, status: "done", specMarkdown, reply: replyText,
-          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null,
+          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null, truncated,
         });
       }
       if (status === "error") {
@@ -951,7 +972,7 @@ export async function specChatRoutes(app: FastifyInstance) {
         return reply.send({
           jobId, status: "error", error: errorText,
           specMarkdown: specMarkdown ?? null,
-          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null,
+          filePath, baseSha, baseSpecSha: db?.baseSpecSha ?? null, truncated,
         });
       }
       const createdMs = db ? new Date(db.createdAt).getTime() : (mem?.createdAt ?? Date.now());
