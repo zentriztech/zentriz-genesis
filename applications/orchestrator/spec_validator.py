@@ -165,13 +165,21 @@ def _refuter_max_tokens(model: str) -> int:
     tokens históricos → JSON truncado → "resposta do validador não contém JSON" → run 'error'.
     Os modelos Claude 5 (opus-5/sonnet-5/fable-5) usam raciocínio adaptativo que CONTA contra
     max_tokens (achado #51), então 4000 não basta. `SPEC_VALIDATOR_MAX_TOKENS` (env) sobrepõe tudo.
+
+    2026-09-05 — 16.000 → **32.000** de primeira. Medido em prod na spec do NVX LastMile (98 KB):
+    a 1ª chamada batia EXATAMENTE nos 16.000 (`stop_reason=max_tokens`) → JSON truncado → retry com o
+    dobro → a boa resposta saiu com **21.387** tokens. Ou seja: os 16.000 da 1ª chamada eram dinheiro
+    JOGADO FORA em toda validação de spec grande. Token de saída é cobrado pelo que é GERADO, não pelo
+    teto — subir o teto não encarece a validação de spec pequena e elimina a chamada duplicada
+    (metade do custo e metade do tempo nas grandes). O retry (`min(budget*2, 32000)`) segue existindo
+    como rede, agora sem folga para dobrar.
     """
     env = (os.environ.get("SPEC_VALIDATOR_MAX_TOKENS") or "").strip()
     if env.isdigit() and int(env) > 0:
         return int(env)
     ml = (model or "").lower()
     if any(m in ml for m in ("opus-5", "sonnet-5", "fable-5")):
-        return 16000
+        return 32000
     return 4000
 
 
@@ -292,9 +300,11 @@ def validate_spec(
         try:
             data = _extract_json(raw)
         except ValueError:
-            # Provável TRUNCAMENTO (saída bateu no teto): 1 retry com o dobro do orçamento (teto 32k);
-            # se ainda vier cortado, salva os findings completos em vez de derrubar a validação.
-            retry_budget = min(budget * 2, 32000)
+            # Provável TRUNCAMENTO (saída bateu no teto): 1 retry com o dobro do orçamento (teto 64k =
+            # saída máxima do Opus 5); se ainda vier cortado, salva os findings completos em vez de
+            # derrubar a validação. O teto do retry TEM de ser maior que o da 1ª chamada (hoje 32.000),
+            # senão o retry repete o mesmo corte — e o `timeout` explícito do runtime já permite 64k.
+            retry_budget = min(budget * 2, 64000)
             try:
                 raw2 = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=retry_budget,
                               usage_agent="spec_validator")

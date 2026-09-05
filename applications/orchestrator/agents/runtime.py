@@ -1183,6 +1183,9 @@ def run_agent(
     # só ativa em prod-bedrock (no Foundry a var fica vazia → nenhuma mudança de comportamento).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _model_downgraded = False
+    # Rede de segurança do `thinking={"type":"disabled"}`: se a rota/modelo recusar o parâmetro,
+    # desliga a otimização para o resto desta execução em vez de derrubar o agente.
+    _thinking_rejected = False
 
     for repair_attempt in range(MAX_REPAIRS + 1):
         # LEI 3: token budget antes de cada chamada (incluindo após repair)
@@ -1226,6 +1229,13 @@ def run_agent(
                     "system": system_content,
                     "messages": [{"role": "user", "content": user_content}],
                     "timeout": timeout,
+                    # Raciocínio adaptativo DESLIGADO (ver `_thinking_extra`): todo agente aqui emite
+                    # ResponseEnvelope JSON, onde completude > raciocínio extra — e o raciocínio segue
+                    # pedido em TEXTO (`<thinking>`), que é logado. Prova em prod: o CTO em
+                    # spec_intake_and_normalize gastava parte dos 64.000 (teto do modelo) em thinking,
+                    # truncava o envelope, perdia `evidence[]` e virava BLOCKED após 2 repairs de
+                    # ~10 min cada. `GENESIS_DISABLE_THINKING=0` reverte sem redeploy.
+                    **({} if _thinking_rejected else _thinking_extra(provider)),
                 }
                 # LEI 1 (AGENT_LLM_COMMUNICATION_ANALYSIS §12.2): temperature quando definida.
                 # SDK >=1.x removeu o kwarg — só passa se a assinatura aceitar (senão TypeError).
@@ -1255,6 +1265,14 @@ def run_agent(
             except Exception as e:
                 last_error = e
                 err_lower = str(e).lower()
+                # Parâmetro `thinking` recusado → refaz esta tentativa sem ele (não é falha de rede:
+                # não conta retry nem abre o circuit breaker).
+                if (not _thinking_rejected and _thinking_extra(provider)
+                        and _is_thinking_param_error(e) and attempt < CLAUDE_RETRY_ATTEMPTS - 1):
+                    logger.warning("[%s] Modelo '%s' recusou `thinking` — refazendo sem o parâmetro "
+                                   "(raciocínio adaptativo). Detalhe: %s", agent_name, model, str(e)[:200])
+                    _thinking_rejected = True
+                    continue
                 # Modelo indisponível na conta → troca UMA vez para o fallback e refaz a
                 # tentativa (não é falha de rede: não conta retry nem abre o circuit breaker).
                 _ename = type(e).__name__.lower()
@@ -1380,6 +1398,18 @@ def run_agent(
         if repair_attempt < MAX_REPAIRS:
             # LEI 5: retry SEMPRE com feedback explícito; nunca reenviar prompt idêntico
             repair_block = build_repair_feedback_block(out, all_errors)
+            # TRUNCAMENTO (stop_reason=max_tokens): repetir o pedido sem mudar a economia de saída
+            # trunca de novo — foi assim que o CTO gastou 3 reemissões da spec (30,8 min) e terminou
+            # BLOCKED por `evidence[]` vazio, que era EFEITO do corte, não do conteúdo. O feedback
+            # precisa dizer onde economizar (2026-09-05).
+            if stop_reason == "max_tokens":
+                repair_block += (
+                    "\n**SUA RESPOSTA ANTERIOR FOI CORTADA NO LIMITE DE SAÍDA** — não foi rejeitada "
+                    "pelo conteúdo. Nesta tentativa economize saída, nesta ordem: (1) `<thinking>` de "
+                    "no máximo 5 linhas; (2) `summary` de no máximo 5 linhas; (3) `evidence[]` com no "
+                    "máximo 3 itens curtos; (4) NUNCA encurte, resuma ou corte `artifacts[].content` — "
+                    "o documento tem de sair COMPLETO, e é ele que precisa do orçamento.\n"
+                )
             user_content = user_content + repair_block
             logger.warning(
                 "[%s] Repair %d/%d (LEI 5: retry com feedback): %s",
@@ -1537,6 +1567,42 @@ def _nonstreaming_timeout_sec(max_tokens: int) -> int:
     return max(60, min(3600, max(base, scaled)))
 
 
+def _thinking_extra(provider: str | None = None) -> dict:
+    """`thinking={"type":"disabled"}` para TODA chamada que emite JSON/código estruturado.
+
+    Achado #51 (2026-08-11, Foundry) + prova em PROD no BEDROCK (2026-09-05, `blocks=thinking,text`
+    no `call_bedrock_direct`): os modelos Claude 5 usam raciocínio ADAPTATIVO **ligado por padrão** e
+    os tokens de raciocínio **contam contra `max_tokens`** — a fatia é variável e invisível. Efeitos
+    medidos, todos com o modelo respondendo HTTP 200:
+      • refutador do `spec_validator` a 16.000 → `stop_reason=max_tokens` → JSON cortado → retry
+        (o dobro) → validação 'error' (dinheiro gasto duas vezes pelo mesmo resultado);
+      • CTO em `spec_intake_and_normalize` a 64.000 (teto do modelo) → envelope truncado, `evidence[]`
+        perdido → 2 repairs reemitindo a spec inteira → 30,8 min e `status=BLOCKED` com um artefato de
+        104.272 chars descartado.
+    Estas chamadas emitem ENVELOPE/JSON onde COMPLETUDE > raciocínio extra, e o raciocínio continua
+    disponível em texto (o prompt pede `<thinking>...</thinking>`, que é logado e auditável).
+
+    Kill-switch sem redeploy: `GENESIS_DISABLE_THINKING=0` restaura o comportamento adaptativo
+    (`GENESIS_FOUNDRY_DISABLE_THINKING=0` segue valendo só para o Foundry, por compatibilidade).
+    Nota: `thinking.type="enabled"` dá 400 nos modelos Claude 5 (só `adaptive`|`disabled`).
+    """
+    if (provider or "").strip().lower() == "foundry" and \
+            os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() == "0":
+        return {}
+    if os.environ.get("GENESIS_DISABLE_THINKING", "1").strip() == "0":
+        return {}
+    return {"thinking": {"type": "disabled"}}
+
+
+def _is_thinking_param_error(e: Exception) -> bool:
+    """A rota/modelo rejeitou o parâmetro `thinking` (ex.: modelo antigo, provider sem suporte)?
+
+    Rede de segurança para o `_thinking_extra`: em vez de derrubar a chamada, o chamador reenvia
+    UMA vez sem o parâmetro (pior caso = comportamento de antes desta mudança).
+    """
+    return "thinking" in str(e).lower()
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
@@ -1578,9 +1644,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         # Validado ao vivo: opus-5 passou de vazio/truncado p/ JSON completo e end_turn limpo.
         # Nota: "thinking.type.enabled" dá 400 nesses modelos (só adaptive|disabled); controle
         # fino seria via output_config.effort. Env GENESIS_FOUNDRY_DISABLE_THINKING=0 reverte.
-        _extra: dict = {}
-        if os.environ.get("GENESIS_FOUNDRY_DISABLE_THINKING", "1").strip() != "0":
-            _extra["thinking"] = {"type": "disabled"}
+        # (2026-09-05: a decisão virou única para os dois providers — ver `_thinking_extra`.)
+        _extra: dict = _thinking_extra("foundry")
         if max_tokens > 8000:
             parts: list[str] = []
             with client.messages.stream(
@@ -1663,6 +1728,8 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         # `timeout` EXPLÍCITO é obrigatório: sem ele o SDK recusa max_tokens > 21.333
         # (ver `_nonstreaming_timeout_sec`). Mesma convenção do `run_agent`.
         "timeout": _nonstreaming_timeout_sec(max_tokens),
+        # Raciocínio adaptativo DESLIGADO: todo o orçamento vai para o JSON (ver `_thinking_extra`).
+        **_thinking_extra("bedrock"),
     }
     try:
         import inspect as _inspect
@@ -1677,8 +1744,20 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _used_model = model_id
 
+    def _create_with_thinking_guard() -> object:
+        """Chama o modelo; se a rota recusar o parâmetro `thinking`, reenvia UMA vez sem ele."""
+        try:
+            return client.messages.create(**_create_kw)
+        except Exception as exc:
+            if "thinking" in _create_kw and _is_thinking_param_error(exc):
+                logger.warning("[call_bedrock_direct] Modelo/rota recusou `thinking` — reenviando sem "
+                               "o parâmetro (raciocínio adaptativo). Detalhe: %s", str(exc)[:200])
+                _create_kw.pop("thinking", None)
+                return client.messages.create(**_create_kw)
+            raise
+
     try:
-        resp = client.messages.create(**_create_kw)
+        resp = _create_with_thinking_guard()
     except Exception as e:
         _ename = type(e).__name__.lower()
         _el = str(e).lower()
@@ -1693,7 +1772,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
                          "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", model_id, _fallback_model, str(e)[:200])
             _create_kw["model"] = _fallback_model
             _used_model = _fallback_model
-            resp = client.messages.create(**_create_kw)
+            resp = _create_with_thinking_guard()
         else:
             raise
     LAST_EFFECTIVE_MODEL.set(_used_model)

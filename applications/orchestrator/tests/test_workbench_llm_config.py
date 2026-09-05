@@ -113,8 +113,10 @@ def test_validate_spec_precedencia_do_modelo(monkeypatch):
 def test_refuter_max_tokens_por_familia(monkeypatch):
     monkeypatch.delenv("SPEC_VALIDATOR_MAX_TOKENS", raising=False)
     assert spec_validator._refuter_max_tokens("us.anthropic.claude-sonnet-4-6") == 4000
-    assert spec_validator._refuter_max_tokens("us.anthropic.claude-fable-5-1") == 16000
-    assert spec_validator._refuter_max_tokens("us.anthropic.claude-opus-5") == 16000
+    # 2026-09-05: 16.000 → 32.000 de primeira (a 1ª chamada batia no teto e o retry gastava o dobro
+    # pelo MESMO resultado; token de saída é cobrado pelo gerado, não pelo teto).
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-fable-5-1") == 32000
+    assert spec_validator._refuter_max_tokens("us.anthropic.claude-opus-5") == 32000
     monkeypatch.setenv("SPEC_VALIDATOR_MAX_TOKENS", "9000")
     assert spec_validator._refuter_max_tokens("us.anthropic.claude-fable-5-1") == 9000
 
@@ -133,7 +135,7 @@ def test_refuter_truncado_retry_com_dobro_e_salvage(monkeypatch):
         return truncated if len(calls) == 1 else good
 
     out = spec_validator.validate_spec("spec", llm_fn=llm_first_truncated, model_id="us.anthropic.claude-fable-5-1")
-    assert calls == [16000, 32000]                       # retry com o dobro (teto 32k)
+    assert calls == [32000, 64000]                       # retry com o dobro (teto 64k = saída do Opus 5)
     assert [f["title"] for f in out["findings"]] == ["ok"]
 
     calls.clear()
@@ -176,6 +178,65 @@ def test_call_bedrock_direct_passa_timeout_explicito_e_sobrevive_a_max_tokens_al
     out = runtime.call_bedrock_direct("sys", "user", "us.anthropic.claude-opus-5", max_tokens=32000)
     assert out == "PONG"
     assert captured["creates"][0]["timeout"] >= 900  # explícito → desarma o guard do SDK
+
+
+def test_call_bedrock_direct_desliga_thinking_e_cai_para_adaptativo_se_recusado(monkeypatch):
+    """2026-09-05: raciocínio adaptativo LIGADO no Bedrock (`blocks=thinking,text` medido em prod)
+    consome `max_tokens` e truncava o JSON. Desligamos por padrão — e, se a rota recusar o parâmetro,
+    a chamada NÃO pode morrer: reenvia uma vez sem ele."""
+    captured: dict = {"creates": []}
+
+    class _Messages:
+        def __init__(self, reject_thinking: bool):
+            self._reject = reject_thinking
+
+        def create(self, **kw):
+            captured["creates"].append(dict(kw))
+            if self._reject and "thinking" in kw:
+                raise ValueError("Extra inputs are not permitted: thinking")
+            return _FakeResp()
+
+    def _install(reject: bool):
+        class _FakeBedrock:
+            def __init__(self, **kw):
+                self.messages = _Messages(reject)
+        fake_mod = types.ModuleType("anthropic")
+        fake_mod.AnthropicBedrock = _FakeBedrock
+        monkeypatch.setitem(sys.modules, "anthropic", fake_mod)
+
+    monkeypatch.delenv("GENESIS_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GENESIS_DISABLE_THINKING", raising=False)
+    monkeypatch.setattr(runtime, "_report_direct_usage", lambda *a, **k: None)
+
+    _install(reject=False)
+    assert runtime.call_bedrock_direct("sys", "user", "us.anthropic.claude-opus-5", max_tokens=32000) == "PONG"
+    assert captured["creates"][-1]["thinking"] == {"type": "disabled"}
+
+    captured["creates"].clear()
+    _install(reject=True)
+    assert runtime.call_bedrock_direct("sys", "user", "us.anthropic.claude-opus-5", max_tokens=32000) == "PONG"
+    assert len(captured["creates"]) == 2                       # 1ª com thinking, 2ª sem
+    assert "thinking" not in captured["creates"][1]
+
+    captured["creates"].clear()
+    monkeypatch.setenv("GENESIS_DISABLE_THINKING", "0")        # kill-switch sem redeploy
+    _install(reject=False)
+    runtime.call_bedrock_direct("sys", "user", "us.anthropic.claude-opus-5", max_tokens=8000)
+    assert "thinking" not in captured["creates"][0]
+
+
+def test_thinking_extra_por_provider(monkeypatch):
+    monkeypatch.delenv("GENESIS_DISABLE_THINKING", raising=False)
+    monkeypatch.delenv("GENESIS_FOUNDRY_DISABLE_THINKING", raising=False)
+    assert runtime._thinking_extra("bedrock") == {"thinking": {"type": "disabled"}}
+    assert runtime._thinking_extra("foundry") == {"thinking": {"type": "disabled"}}
+    monkeypatch.setenv("GENESIS_FOUNDRY_DISABLE_THINKING", "0")
+    assert runtime._thinking_extra("foundry") == {}             # compat: só afeta o Foundry
+    assert runtime._thinking_extra("bedrock") == {"thinking": {"type": "disabled"}}
+    monkeypatch.setenv("GENESIS_DISABLE_THINKING", "0")
+    assert runtime._thinking_extra("bedrock") == {}
+    assert runtime._is_thinking_param_error(ValueError("Extra inputs: thinking")) is True
+    assert runtime._is_thinking_param_error(ValueError("throttled")) is False
 
 
 def test_nonstreaming_timeout_escala_com_max_tokens(monkeypatch):
