@@ -9,9 +9,19 @@
  * projetos do produto "Venuxx V2". As outras 30 linhas são uploads reais e seguem o formato
  * canônico do `projectCreation.ts`: `<UPLOAD_DIR>/<projectId>/<filename>`.
  *
- * O QUE ESTE SCRIPT FAZ (decisão do Jean, 2026-09-05): gera uma spec MÍNIMA e HONESTA por
- * projeto a partir do que o banco realmente sabe (título, tipo, stack, charter, backlog, status),
- * grava em `<UPLOAD_DIR>/<projectId>/<slug>.md` e corrige as três referências:
+ * ⚠️ CORREÇÃO DE PREMISSA (medida em prod 2026-09-05, DEPOIS da 1ª versão deste script): o conteúdo
+ * original NÃO está perdido. Os **28/28** projetos têm a spec semeada em
+ * `/project-files/<projectId>/docs/spec_<título>.md` (366–457 bytes, cabeçalho `<!-- Created by: spec -->`,
+ * escrita pelo runner no registro do projeto). Ela é curta, mas é o **artefato real**; e o que o banco
+ * sabe é POBRE em comparação: `charter_summary` é literalmente o "## Objetivo" desse arquivo e
+ * `backlog_summary` é um contador ("1 módulo, 2 tarefas") — usá-lo como "escopo entregue" seria ruído.
+ * `content_sha256` é NULL nas 28 linhas → não há como casar por hash (isto refuta a nota antiga de
+ * "backfill com conferência de content_sha256").
+ *
+ * O QUE ESTE SCRIPT FAZ (decisão do Jean, 2026-09-05 — materializar arquivo e corrigir o path):
+ * copia a spec semeada **verbatim** para o caminho canônico e acrescenta um apêndice que declara a
+ * procedência e as lacunas. Só quando não houver spec semeada em disco é que cai no esqueleto derivado
+ * do inventário. Grava em `<UPLOAD_DIR>/<projectId>/<slug>.md` e corrige as três referências:
  *   • `project_spec_files.file_path`  → caminho ABSOLUTO do arquivo criado
  *   • `project_spec_files.filename`   → basename real em disco (+ `content_sha256`, `mime_type`)
  *   • `projects.spec_ref`             → só o filename (é assim que o `projectCreation.ts` grava)
@@ -33,6 +43,7 @@ import path from "node:path";
 import { pool } from "./client.js";
 
 const UPLOAD_DIR = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
+const PROJECT_FILES_ROOT = (process.env.PROJECT_FILES_ROOT ?? "/project-files").trim();
 
 interface Row {
   file_id: string;
@@ -59,9 +70,67 @@ function slugify(title: string): string {
   return `${base || "spec"}.md`;
 }
 
+/** Bloco de lacunas — idêntico nos dois caminhos (spec semeada ou esqueleto do inventário). */
+const LACUNAS = `## Lacunas declaradas (o que este documento NÃO especifica)
+
+- L-01 — Requisitos funcionais detalhados e critérios de aceite.
+- L-02 — Contratos de API/evento (rotas, payloads, códigos de erro) e versionamento.
+- L-03 — Modelo de dados e regras de persistência.
+- L-04 — Requisitos não funcionais (SLO, limites, custo, retenção).
+- L-05 — Segurança: autenticação, autorização, tratamento de PII.
+- L-06 — Declaração Connect (\`connect.yaml\`) e matriz de compatibilidade.
+- L-07 — Observabilidade: métricas, logs, alertas e runbook.
+
+> Fechar L-01…L-07 exige a spec real da aplicação ou uma engenharia reversa do repositório —
+> nenhuma das duas pode ser inferida do inventário sem inventar requisito.`;
+
 /**
- * Spec mínima derivada do inventário. Declara procedência e lacunas: quem ler (humano, CTO ou
- * validador) precisa saber que isto é um ESQUELETO, não a spec de engenharia do serviço.
+ * Localiza a spec semeada em disco: `<PROJECT_FILES_ROOT>/<projectId>/docs/spec_*.md`.
+ * Preferência pelo nome que casa com o título (`spec_<slug>`); se não houver, o primeiro `spec_*.md`.
+ * Devolve `null` quando não existe nada aproveitável (aí o backfill cai no esqueleto do inventário).
+ */
+export async function findSeededSpec(
+  projectId: string,
+  title: string,
+): Promise<{ path: string; content: string } | null> {
+  const docsDir = path.join(PROJECT_FILES_ROOT, projectId, "docs");
+  let names: string[];
+  try { names = await fs.readdir(docsDir); } catch { return null; }
+  const cands = names.filter((n) => n.startsWith("spec_") && n.endsWith(".md"));
+  if (cands.length === 0) return null;
+  const preferred = `spec_${slugify(title)}`;
+  const chosen = cands.find((n) => n === preferred) ?? cands.sort()[0]!;
+  const full = path.join(docsDir, chosen);
+  const content = await fs.readFile(full, "utf-8");
+  // Arquivo vazio/whitespace não serve como spec — melhor o esqueleto declarado.
+  return content.trim().length > 0 ? { path: full, content } : null;
+}
+
+/**
+ * Caminho preferido: a spec semeada **verbatim** + apêndice de procedência e lacunas.
+ * O conteúdo original não é editado — só ganha um rodapé que diz de onde veio e o que falta.
+ */
+export function buildFromSeeded(r: Row, seeded: { path: string; content: string }): string {
+  const body = seeded.content.replace(/\s+$/, "");
+  return `${body}
+
+---
+
+> **Reparo de acervo — backfill D1 (2026-09-05).** O conteúdo acima é a spec **original** deste projeto,
+> gerada no registro dele e preservada sem alteração em \`${seeded.path}\`
+> (${seeded.content.length} bytes). A linha correspondente em \`project_spec_files\` apontava para um
+> caminho **relativo** (\`${r.file_path}\`) que nunca existiu em disco, o que fazia a validação, a
+> promoção e o contexto do CTO lerem vazio. Este arquivo é a mesma spec no caminho canônico.
+> Situação do projeto no Genesis: \`${r.status}\`.
+
+${LACUNAS}
+`;
+}
+
+/**
+ * Fallback: spec mínima derivada do inventário, usada só quando NÃO há spec semeada em disco.
+ * Declara procedência e lacunas: quem ler (humano, CTO ou validador) precisa saber que isto é um
+ * ESQUELETO, não a spec de engenharia do serviço.
  */
 export function buildMinimalSpec(r: Row): string {
   const tipo = r.project_type ?? "não classificado";
@@ -91,9 +160,9 @@ export function buildMinimalSpec(r: Row): string {
 
 ${objetivo}
 
-## 2. Escopo entregue (registrado no Genesis)
+## 2. Volume registrado no Genesis
 
-${entrega}
+${entrega} — contador do backlog, **não** é descrição de escopo.
 
 ## 3. Premissas
 
@@ -102,18 +171,7 @@ ${entrega}
 - P-03 — Contratos de entrada/saída, dados e regras de negócio vivem no código do repositório da
   aplicação, **não** neste documento.
 
-## 4. Lacunas declaradas (o que este documento NÃO especifica)
-
-- L-01 — Requisitos funcionais detalhados e critérios de aceite.
-- L-02 — Contratos de API/evento (rotas, payloads, códigos de erro) e versionamento.
-- L-03 — Modelo de dados e regras de persistência.
-- L-04 — Requisitos não funcionais (SLO, limites, custo, retenção).
-- L-05 — Segurança: autenticação, autorização, tratamento de PII.
-- L-06 — Declaração Connect (\`connect.yaml\`) e matriz de compatibilidade.
-- L-07 — Observabilidade: métricas, logs, alertas e runbook.
-
-> Fechar L-01…L-07 exige a spec real da aplicação ou uma engenharia reversa do repositório —
-> nenhuma das duas pode ser inferida do inventário sem inventar requisito.
+${LACUNAS}
 `;
 }
 
@@ -151,7 +209,10 @@ async function main(): Promise<void> {
       const filename = slugify(r.title);
       const projectDir = path.join(UPLOAD_DIR, r.project_id);
       const filePath = path.join(projectDir, filename);
-      const content = buildMinimalSpec(r);
+      // Preferência: preservar a spec semeada em disco; esqueleto do inventário só como último recurso.
+      const seeded = await findSeededSpec(r.project_id, r.title);
+      const content = seeded ? buildFromSeeded(r, seeded) : buildMinimalSpec(r);
+      const origem = seeded ? `spec semeada ${seeded.content.length}B + apêndice` : "INVENTÁRIO (sem spec em disco)";
       const sha = createHash("sha256").update(content, "utf-8").digest("hex");
 
       // Guarda: nunca sobrescrever arquivo já existente em disco (seria destruir upload real).
@@ -159,8 +220,8 @@ async function main(): Promise<void> {
       try { await fs.access(filePath); exists = true; } catch { /* não existe → ok criar */ }
 
       console.log(
-        `  • ${r.title.padEnd(34)} ${String(r.file_path).padEnd(46)} → ${filePath}` +
-        `  (${content.length} chars${exists ? ", ARQUIVO JÁ EXISTE → só corrige o banco" : ""})`,
+        `  • ${r.title.padEnd(30)} ${String(r.file_path).padEnd(42)} → ${filePath}` +
+        `  (${content.length} chars | ${origem}${exists ? " | ARQUIVO JÁ EXISTE → só corrige o banco" : ""})`,
       );
 
       if (commit) {
