@@ -1514,6 +1514,29 @@ def _report_direct_usage(project_id: str | None, agent: str, model_id: str,
     threading.Thread(target=_post, daemon=True).start()
 
 
+def _nonstreaming_timeout_sec(max_tokens: int) -> int:
+    """Timeout EXPLÍCITO para `messages.create` — e é ele que desarma o guard do SDK.
+
+    `anthropic` 1.3.0: `messages.create` só chama `_calculate_nonstreaming_timeout` quando
+    `not stream and not is_given(timeout) and client.timeout == DEFAULT_TIMEOUT`. Esse cálculo
+    (`3600 * max_tokens / 128_000 > 600`) levanta ValueError CLIENT-SIDE — sem chamar a AWS —
+    para qualquer `max_tokens` acima de **21.333**:
+    "Streaming is required for operations that may take longer than 10 minutes".
+
+    Provado em prod 2026-09-05: o retry do refutador do `spec_validator` (32.000) derrubou a
+    validação do NVX LastMile antes de sair um byte pela rede. `run_agent` NUNCA sofreu disso
+    porque sempre passa `timeout` (900 s) — a fábrica roda a 32.000/64.000 no Bedrock há meses.
+    Este helper leva a MESMA disciplina ao `call_bedrock_direct` (spec_validator, splitter,
+    lesson_extractor, `/invoke/raw`), sem exigir `bedrock:InvokeModelWithResponseStream` da conta.
+
+    Nunca abaixo do timeout padrão da fábrica; acima disso, escala com o orçamento de saída
+    (mesma razão do SDK: 3600 s por 128k tokens) e é limitado em 1 h.
+    """
+    base = int(os.environ.get("REQUEST_TIMEOUT") or 900)
+    scaled = int(3600 * max(0, int(max_tokens)) / 128_000)
+    return max(60, min(3600, max(base, scaled)))
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
@@ -1637,6 +1660,9 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     _create_kw: dict = {
         "model": model_id, "max_tokens": max_tokens,
         "system": system, "messages": [{"role": "user", "content": user}],
+        # `timeout` EXPLÍCITO é obrigatório: sem ele o SDK recusa max_tokens > 21.333
+        # (ver `_nonstreaming_timeout_sec`). Mesma convenção do `run_agent`.
+        "timeout": _nonstreaming_timeout_sec(max_tokens),
     }
     try:
         import inspect as _inspect
@@ -1650,6 +1676,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # do Cyborg já traz fallback_id explícito).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _used_model = model_id
+
     try:
         resp = client.messages.create(**_create_kw)
     except Exception as e:
@@ -1670,6 +1697,16 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         else:
             raise
     LAST_EFFECTIVE_MODEL.set(_used_model)
+    # Observabilidade de TRUNCAMENTO e de raciocínio adaptativo: `stop_reason='max_tokens'` explica
+    # "resposta não contém JSON" sem adivinhação, e `thinking` nos blocos diria que o orçamento foi
+    # comido pelo raciocínio (achado #51, hoje comprovado só no Foundry).
+    try:
+        _blocks = [str(getattr(b, "type", "?")) for b in (getattr(resp, "content", []) or [])]
+        logger.info("[call_bedrock_direct] %s agent=%s stop_reason=%s blocks=%s max_tokens=%d",
+                    _used_model, usage_agent, getattr(resp, "stop_reason", None),
+                    ",".join(_blocks) or "-", max_tokens)
+    except Exception:
+        pass
     _u = getattr(resp, "usage", None)
     _report_direct_usage(usage_project_id, usage_agent, _used_model,
                          getattr(_u, "input_tokens", 0) or 0,

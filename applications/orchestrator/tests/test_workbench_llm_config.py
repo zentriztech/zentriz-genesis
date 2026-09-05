@@ -145,3 +145,42 @@ def test_refuter_truncado_retry_com_dobro_e_salvage(monkeypatch):
 
     with pytest.raises(ValueError):                       # nada salvável → erro como antes
         spec_validator.validate_spec("spec", llm_fn=lambda *a, **k: "prosa sem json")
+
+
+def test_call_bedrock_direct_passa_timeout_explicito_e_sobrevive_a_max_tokens_alto(monkeypatch):
+    """Prod 2026-09-05 (NVX LastMile): sem `timeout` explícito o SDK anthropic recusa CLIENT-SIDE
+    qualquer max_tokens > 21.333 ("Streaming is required for operations that may take longer than
+    10 minutes") — o retry do refutador (32.000) derrubava a validação antes de chamar a AWS.
+    O fake abaixo reproduz a regra REAL do SDK (`messages.py`: `not stream and not is_given(timeout)
+    and client.timeout == DEFAULT_TIMEOUT` → `_calculate_nonstreaming_timeout`)."""
+    captured: dict = {}
+
+    class _Messages:
+        def create(self, **kw):
+            captured.setdefault("creates", []).append(dict(kw))
+            if "timeout" not in kw and 3600 * kw["max_tokens"] / 128_000 > 600:
+                raise ValueError("Streaming is required for operations that may take longer than "
+                                 "10 minutes.")
+            return _FakeResp()
+
+    class _FakeBedrock:
+        def __init__(self, **kw):
+            self.messages = _Messages()
+
+    fake_mod = types.ModuleType("anthropic")
+    fake_mod.AnthropicBedrock = _FakeBedrock
+    monkeypatch.setitem(sys.modules, "anthropic", fake_mod)
+    monkeypatch.delenv("GENESIS_LLM_PROVIDER", raising=False)
+    monkeypatch.setattr(runtime, "_report_direct_usage", lambda *a, **k: None)
+
+    out = runtime.call_bedrock_direct("sys", "user", "us.anthropic.claude-opus-5", max_tokens=32000)
+    assert out == "PONG"
+    assert captured["creates"][0]["timeout"] >= 900  # explícito → desarma o guard do SDK
+
+
+def test_nonstreaming_timeout_escala_com_max_tokens(monkeypatch):
+    monkeypatch.delenv("REQUEST_TIMEOUT", raising=False)
+    assert runtime._nonstreaming_timeout_sec(8000) == 900      # piso = timeout da fábrica
+    assert runtime._nonstreaming_timeout_sec(32000) == 900
+    assert runtime._nonstreaming_timeout_sec(64000) == 1800    # escala (3600 s por 128k tokens)
+    assert runtime._nonstreaming_timeout_sec(999_999) == 3600  # teto de 1 h

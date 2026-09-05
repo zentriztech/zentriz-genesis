@@ -295,7 +295,18 @@ def validate_spec(
             # Provável TRUNCAMENTO (saída bateu no teto): 1 retry com o dobro do orçamento (teto 32k);
             # se ainda vier cortado, salva os findings completos em vez de derrubar a validação.
             retry_budget = min(budget * 2, 32000)
-            raw2 = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=retry_budget, usage_agent="spec_validator")
+            try:
+                raw2 = llm_fn(REFUTER_SYSTEM, fenced, model, max_tokens=retry_budget,
+                              usage_agent="spec_validator")
+            except Exception:
+                # O RETRY pode falhar por si (quota, indisponibilidade, guard de streaming do SDK).
+                # Sem este resgate a exceção do retry APAGA os findings que a 1ª resposta já trouxe —
+                # foi assim que a validação do NVX LastMile virou 'error' em 2026-09-05 com 0 findings
+                # do estágio B, tendo o refutador respondido 16.000 tokens de conteúdo útil.
+                salvaged = _salvage_findings(raw)
+                if not salvaged:
+                    raise
+                return salvaged
             try:
                 data = _extract_json(raw2)
             except ValueError:
