@@ -19,6 +19,7 @@ import ListItemButton from "@mui/material/ListItemButton";
 import ListItemText from "@mui/material/ListItemText";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import AddIcon from "@mui/icons-material/Add";
@@ -32,9 +33,15 @@ interface TreeFile { path: string; ext: string; isPrimary: boolean; contentSha25
 interface TreeResponse { files: TreeFile[]; editable: boolean; status: string; totalFiles: number }
 interface FileResponse { path: string; content: string; contentSha256: string; isPrimary: boolean; editable: boolean }
 
-export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange, reloadSignal, isEvolution = false }: {
+export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange, reloadSignal, isEvolution = false, gapsByPath = null }: {
   /** Evoluir H7 — em projeto de evolução, botão "Novo RFC" (numerado por produto, a partir do modelo). */
   isEvolution?: boolean;
+  /**
+   * PR-4 (F2) — GAPs ATIVOS por arquivo (`/api/specs/:id/gap-scope`). Sem isto, numa spec dividida o
+   * usuário não tem como saber ONDE estão os problemas: a aba GAPs lista findings, mas o trabalho
+   * agora é por arquivo. `null` = ainda não carregado / spec nunca validada (nenhum badge).
+   */
+  gapsByPath?: Record<string, { active: number; blockers: number }> | null;
   projectId: string;
   /** Notifica o pai (chat usa o arquivo selecionado como contexto). */
   onFileSelected?: (f: { path: string; content: string; baseSha: string } | null) => void;
@@ -185,6 +192,13 @@ export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange
                       primary={f.path.split("/").pop()}
                       primaryTypographyProps={{ fontSize: "0.82rem", fontFamily: "monospace" }}
                     />
+                    {(gapsByPath?.[f.path]?.active ?? 0) > 0 && (
+                      <Tooltip title={`${gapsByPath![f.path].active} GAP(s) ativo(s) neste arquivo${gapsByPath![f.path].blockers ? ` — ${gapsByPath![f.path].blockers} bloqueador(es)` : ""}`}>
+                        <Chip size="small" color={gapsByPath![f.path].blockers > 0 ? "error" : "warning"}
+                          label={gapsByPath![f.path].active}
+                          sx={{ height: 18, fontSize: "0.62rem", mr: 0.5 }} />
+                      </Tooltip>
+                    )}
                     {f.isPrimary && <Chip size="small" label="principal" sx={{ height: 18, fontSize: "0.62rem" }} />}
                     {editable && !f.isPrimary && (
                       <IconButton size="small" edge="end" onClick={(e) => { e.stopPropagation(); void removeFile(f.path); }}>

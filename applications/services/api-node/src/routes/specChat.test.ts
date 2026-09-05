@@ -38,10 +38,16 @@ vi.mock("../db/client.js", () => ({
 // para provar o roteamento cirúrgico e devolvemos uma resposta controlada.
 let httpPostCalls: { url: string; body: string }[] = [];
 let rawResponse = "{}";
+// PR-4: o ROTEADOR de GAPs sem arquivo (specGapScope) também fala por /invoke/raw. Distinguimos pelo
+// corpo (só o roteador manda a "LISTA DE ARQUIVOS") para cada asserção olhar a chamada certa.
+let routerResponse = JSON.stringify({ response: '{"routes": []}', model_used: "us.anthropic.claude-haiku-4-5" });
+const isRouterCall = (c: { url: string; body: string }) => c.url.includes("/invoke/raw") && c.body.includes("LISTA DE ARQUIVOS");
+const editorCall = () => httpPostCalls.find((c) => c.url.includes("/invoke/raw") && !isRouterCall(c));
 vi.mock("./specs.js", () => ({
   httpPost: async (url: string, body: string) => {
     httpPostCalls.push({ url, body });
-    return url.includes("/invoke/raw") ? rawResponse : "{}";
+    if (!url.includes("/invoke/raw")) return "{}";
+    return body.includes("LISTA DE ARQUIVOS") ? routerResponse : rawResponse;
   },
   httpGet: async () => "{}",
   extractSpecMarkdown: () => "",
@@ -58,6 +64,7 @@ beforeEach(async () => {
   queryHandler = (sql) => (sql.includes("FROM projects") ? { rows: [{ tenant_id: TENANT, created_by: USER_ID }] } : { rows: [] });
   httpPostCalls = [];
   rawResponse = "{}";
+  routerResponse = JSON.stringify({ response: '{"routes": []}', model_used: "us.anthropic.claude-haiku-4-5" });
 });
 
 const msg = (content: string) => [{ role: "user", content }];
@@ -196,14 +203,8 @@ describe("POST /api/spec-chat — Onda 1: Resolver GAPs + contexto de validaçã
     expect(JSON.parse(res.body).message).toContain("projectId");
   });
 
-  it("resolveGaps em modo por-arquivo → 400", async () => {
-    const res = await app.inject({
-      method: "POST", url: "/api/spec-chat",
-      payload: { specMarkdown: "# doc", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
-    });
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).message).toContain("por-arquivo");
-  });
+  // NOTA (PR-4): `resolveGaps` + `filePath` era 400 ("Resolver GAPs não opera em modo por-arquivo").
+  // Passou a ser o caminho PRINCIPAL depois da divisão da spec — coberto no bloco "PR-4" no fim.
 
   it("resolveGaps sem GAPs em aberto → 409 NO_GAPS", async () => {
     // queryHandler padrão do beforeEach devolve [] para spec_validation_runs → sem findings.
@@ -557,5 +558,176 @@ describe("POST /api/spec-chat — F1: formato de entrega do CTO", () => {
     const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
     expect(body.inputs.edit_format).toBeUndefined();
     expect(body.task).toContain("Devolva a SPEC INTEIRA revisada");
+  });
+});
+
+// ── PR-4 (F2): "Resolver GAPs" POR ARQUIVO ────────────────────────────────────
+// Por que este bloco existe: depois de dividir a spec, o arquivo primário vira ÍNDICE — pedir
+// "Resolver GAPs" da spec inteira faria o CTO reemitir 98k chars e bater no teto de 64k tokens de
+// saída (truncamento silencioso). Aqui a rodada trata UM arquivo e só os GAPs dele.
+describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
+  const GAPS = [
+    { file: "backend/01-api.md", line: 12, severity: "blocker", title: "Falta authz nos endpoints", rationale: "Sem escopo por papel", source: "stage_b", category: "security_gap", anchor: "FR-03" },
+    { file: "frontend/01-web.md", line: null, severity: "warning", title: "Sem critérios de aceite", rationale: "FR1 vago", source: "stage_b", category: "no_acceptance_criteria", anchor: null },
+    { file: "", line: null, severity: "warning", title: "Global do Stage A", rationale: "", source: "stage_a", category: "structural", anchor: "regra-1" },
+  ];
+  /** Árvore de 2 arquivos + última validação com os GAPs acima. Ordem importa: `finding_routes` antes. */
+  const withTree = (findings: unknown[] = GAPS) => (sql: string) => {
+    const s = sql.replace(/\s+/g, " ");
+    if (s.includes("SELECT finding_routes")) return { rows: [{}] };
+    if (s.includes("UPDATE spec_validation_runs")) return { rows: [] };
+    if (s.includes("FROM project_spec_files")) {
+      return { rows: [
+        { filename: "00-indice.md", rel_dir: null, file_path: "/shared/uploads/p/00-indice.md", is_primary: true },
+        { filename: "01-api.md", rel_dir: "backend", file_path: "/shared/uploads/p/backend/01-api.md", is_primary: false },
+        { filename: "01-web.md", rel_dir: "frontend", file_path: "/shared/uploads/p/frontend/01-web.md", is_primary: false },
+      ] };
+    }
+    if (s.includes("FROM spec_validation_runs")) return { rows: [{ id: "run-1", created_at: new Date().toISOString(), status: "failed", findings }] };
+    if (s.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+    return { rows: [] };
+  };
+
+  beforeEach(() => { queryHandler = withTree(); });
+
+  it("resolveGaps sem projectId continua 400 (a árvore e os GAPs vêm do projeto)", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# api", filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("arquivo COM GAP ativo → 202 e /invoke/raw com o CTO-EDITOR e SÓ os GAPs deste arquivo", async () => {
+    rawResponse = JSON.stringify({ response: "# API\n\nauthz por papel", model_used: "us.anthropic.claude-opus-5", usage: { input_tokens: 100, output_tokens: 50 } });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# API\n\nEndpoints.", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true, baseSha: "sha-api" },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = JSON.parse(res.body);
+    expect(body.filePath).toBe("backend/01-api.md");
+    expect(body.baseSha).toBe("sha-api");
+
+    const raw = editorCall();
+    expect(raw).toBeTruthy();
+    // NÃO passa pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo)
+    expect(httpPostCalls.some((c) => c.url.includes("/invoke/cto/async"))).toBe(false);
+    const payload = JSON.parse(raw!.body) as { prompt_override: string; user_message: string; max_tokens: number };
+    expect(payload.prompt_override).toContain("REGRAS DE ESCOPO");
+    expect(payload.prompt_override).toContain("PRESERVE todo o conteúdo");
+    expect(payload.user_message).toContain("GAPs A RESOLVER NESTE ARQUIVO (1)");
+    expect(payload.user_message).toContain("Falta authz nos endpoints");
+    expect(payload.user_message).toContain("(em: FR-03)");
+    // GAP de OUTRO arquivo não vaza para esta rodada
+    expect(payload.user_message).not.toContain("Sem critérios de aceite");
+    // orçamento de saída derivado do tamanho (nunca os 8k fixos que truncavam)
+    expect(payload.max_tokens).toBeGreaterThanOrEqual(8_000);
+  });
+
+  it("arquivo SEM GAP ativo → 409 NO_GAPS_IN_FILE informando quantos o projeto tem", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# índice", projectId: PROJ, filePath: "00-indice.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(409);
+    const b = JSON.parse(res.body);
+    expect(b.code).toBe("NO_GAPS_IN_FILE");
+    expect(b.totalActive).toBe(3);
+    expect(b.unrouted).toBe(1);              // o global do Stage A: o roteador não escolheu arquivo
+    expect(b.message).toContain("não tem GAP ATIVO");
+    // o roteador FOI consultado (a decisão de arquivo é de LLM), mas o CTO-editor não foi acionado
+    expect(httpPostCalls.some(isRouterCall)).toBe(true);
+    expect(editorCall()).toBeUndefined();
+  });
+
+  it("projeto sem NENHUM GAP ativo → 409 NO_GAPS (não gera turno vazio nem gasta LLM)", async () => {
+    queryHandler = withTree([]);
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# api", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("NO_GAPS");
+    expect(httpPostCalls).toHaveLength(0);
+  });
+
+  it("teto por-arquivo do Resolver GAPs é 48k (o chat comum segue em 20k)", async () => {
+    const mid = "x".repeat(30_000);
+    rawResponse = JSON.stringify({ response: "# API revisada" });
+    const ok = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: mid, projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(ok.statusCode).toBe(202);
+
+    const chat = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: mid, messages: msg("ajuste"), projectId: PROJ, filePath: "backend/01-api.md" },
+    });
+    expect(chat.statusCode).toBe(413);
+
+    const tooBig = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "x".repeat(48_001), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(tooBig.statusCode).toBe(413);
+    expect(JSON.parse(tooBig.body).message).toContain("48000");
+  });
+
+  it("resposta TRUNCADA → job em erro e NADA é oferecido para aplicar (não mutila o arquivo)", async () => {
+    rawResponse = JSON.stringify({ response: "# API\n\nmetade do arqui", truncated: true, stop_reason: "max_tokens", model_used: "m" });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# API\n\nEndpoints.", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("error");
+    expect(String(done?.error)).toContain("INCOMPLETO");
+    expect(done?.specMarkdown).toBeFalsy();
+  });
+
+  it("GAP global (Stage A, sem arquivo) roteado pelo agente entra na rodada do arquivo escolhido", async () => {
+    // O roteador é LLM: aqui ele decide que o global pertence a `backend/01-api.md`. A api grava a
+    // rota na run (migração 094) e o CTO-editor recebe 2 GAPs — o do validador + o roteado.
+    let gravadas: Record<string, string> | null = null;
+    const base = withTree();
+    queryHandler = (sql, params) => {
+      const s = sql.replace(/\s+/g, " ");
+      if (s.includes("SELECT finding_routes")) return { rows: [{ finding_routes: gravadas }] };
+      if (s.includes("UPDATE spec_validation_runs")) { gravadas = JSON.parse(String(params?.[1])); return { rows: [] }; }
+      return base(sql);
+    };
+    routerResponse = JSON.stringify({ response: '{"routes":[{"id":"g1","file":"backend/01-api.md"}]}', model_used: "us.anthropic.claude-haiku-4-5" });
+    rawResponse = JSON.stringify({ response: "# API revisada" });
+
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# API", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(gravadas).toBeTruthy();
+    expect(Object.values(gravadas!)).toEqual(["backend/01-api.md"]);
+    const payload = JSON.parse(editorCall()!.body) as { user_message: string };
+    expect(payload.user_message).toContain("GAPs A RESOLVER NESTE ARQUIVO (2)");
+    expect(payload.user_message).toContain("Falta authz nos endpoints");
+    expect(payload.user_message).toContain("Global do Stage A");
+  });
+
+  it("rawMaxTokensFor: piso de 8k, cresce com o arquivo, teto de 32k (guard do SDK)", async () => {
+    const { rawMaxTokensFor } = await import("./specChat.js");
+    expect(rawMaxTokensFor(0)).toBe(8_000);
+    expect(rawMaxTokensFor(1_000)).toBe(8_000);          // piso
+    expect(rawMaxTokensFor(30_000)).toBe(Math.ceil(30_000 / 2.8) + 2_000);
+    expect(rawMaxTokensFor(48_000)).toBe(Math.ceil(48_000 / 2.8) + 2_000);
+    expect(rawMaxTokensFor(200_000)).toBe(32_000);       // teto: sem `timeout` o SDK recusa > 21.333
+    expect(rawMaxTokensFor(-5)).toBe(8_000);
   });
 });

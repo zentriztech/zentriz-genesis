@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Alert from "@mui/material/Alert";
@@ -628,6 +628,10 @@ type AutonomyStatus =
   | "succeeded" | "exhausted" | "stalled" | "failed" | "stopped";
 type AutonomyRoundLog = {
   round: number;
+  /** PR-5: arquivo tratado nesta rodada (ausente = rodada de spec inteira). */
+  filePath?: string | null;
+  /** PR-5: a que passe de validação esta rodada pertence (0-based). */
+  pass?: number;
   startedAt?: string;
   finishedAt?: string;
   gapsBefore?: number | null;
@@ -643,7 +647,16 @@ type AutonomyRun = {
   projectId: string;
   status: AutonomyStatus;
   active: boolean;
+  /** PR-5: `per_file` = spec dividida (uma rodada = um arquivo); `whole` = ciclo da 090. */
+  mode?: "whole" | "per_file";
+  /** `per_file`: ARQUIVOS revisados. `whole`: rodadas do ciclo completo. */
   round: number;
+  /** PR-5: passes de validação concluídos — é este que respeita `maxRounds`. */
+  passes?: number;
+  /** Arquivo em revisão agora (só em `per_file`). */
+  currentFile?: string | null;
+  /** Arquivos já tratados no passe corrente. */
+  filesDone?: string[];
   maxRounds: number;
   gapsInitial: number | null;
   gapsCurrent: number | null;
@@ -655,6 +668,18 @@ type AutonomyRun = {
   finishedAt: string | null;
 };
 type AutonomyState = { run: AutonomyRun | null; enabled: boolean; maxRoundsAllowed: number };
+
+/** PR-4 (F2) — GET /api/specs/:id/gap-scope: quantos GAPs ATIVOS cada arquivo da spec tem. */
+type GapScopeWire = {
+  latestRunId: string | null;
+  fileCount: number;
+  totalActive: number;
+  /** GAPs ativos que ainda não têm arquivo definido (globais do Stage A / path obsoleto). */
+  unrouted: number;
+  files: Array<{ path: string; isPrimary: boolean; active: number; blockers: number; warnings: number; routed: number }>;
+  /** Ordem sugerida de trabalho (mais blockers primeiro) — a mesma fila do laço autônomo. */
+  queue: string[];
+};
 
 /** Rótulo PT-BR do estado do laço + severidade para o Alert (o usuário precisa saber se acabou). */
 const AUTONOMY_LABEL: Record<AutonomyStatus, string> = {
@@ -985,6 +1010,7 @@ function SpecChatPanel({
   pending = null, applying = false, applyError = null, conflict = false,
   onApply, onDiscard, onOverwrite,
   gapCount = null, onResolveGaps,
+  fileGapCount = null, onResolveFileGaps,
   isEvolution = false, onEvolvePlan,
   recovered = null, onApplyRecovered, onDiscardRecovered,
   autonomyOn = false, onAutonomyToggle, autonomy = null, autonomyError = null,
@@ -1003,6 +1029,9 @@ function SpecChatPanel({
   // Onda 1 — botão "Resolver GAPs" (spec inteira): dispara a resolução adversarial dos findings.
   gapCount?: number | null;
   onResolveGaps?: () => void;
+  // PR-4 (F2) — mesmo botão, escopado no ARQUIVO aberto. null = sem validação/sem escopo carregado.
+  fileGapCount?: number | null;
+  onResolveFileGaps?: () => void;
   // T4.3 — contexto por-arquivo + fluxo de aplicação com confirmação (opcionais:
   // quando ausentes, o painel opera no modo clássico de spec inteira).
   activeFilePath?: string | null;
@@ -1216,7 +1245,9 @@ function SpecChatPanel({
         {/* Migração 090 — painel do laço autônomo: o registro de AÇÕES que o pedido exige
             ("entrar em modo recursivo registrando ações"). Fica visível também depois de terminar,
             para o usuário ver por que o laço parou sem precisar abrir o histórico. */}
-        {!fileMode && autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
+        {/* PR-5: no modo POR ARQUIVO o laço trabalha arquivo a arquivo — o painel também aparece
+            quando o usuário está com um arquivo aberto (é ali que ele vê a spec mudar sozinha). */}
+        {(!fileMode || autonomyRun?.mode === "per_file") && autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
           <Box
             sx={{
               mb: 0.75, p: 1, borderRadius: 1.5, bgcolor: "action.hover",
@@ -1227,11 +1258,14 @@ function SpecChatPanel({
             <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.5 }}>
               {autonomyRunning && <CircularProgress size={12} />}
               <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.7rem" }}>
-                🤖 Modo autônomo — rodada {autonomyRun.round}/{autonomyRun.maxRounds}
+                {autonomyRun.mode === "per_file"
+                  ? `🤖 Modo autônomo por arquivo — passe ${Math.min((autonomyRun.passes ?? 0) + (autonomyRunning ? 1 : 0), autonomyRun.maxRounds)}/${autonomyRun.maxRounds} · ${autonomyRun.round} arquivo(s) revisado(s)`
+                  : `🤖 Modo autônomo — rodada ${autonomyRun.round}/${autonomyRun.maxRounds}`}
               </Typography>
             </Stack>
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
               {AUTONOMY_LABEL[autonomyRun.status]}
+              {autonomyRun.currentFile ? ` · arquivo atual: ${autonomyRun.currentFile}` : ""}
               {typeof autonomyRun.gapsInitial === "number" && typeof autonomyRun.gapsCurrent === "number"
                 ? ` · GAPs importantes: ${autonomyRun.gapsInitial} → ${autonomyRun.gapsCurrent}`
                 : ""}
@@ -1242,6 +1276,7 @@ function SpecChatPanel({
                   <Typography key={r.round} variant="caption" color="text.secondary"
                     sx={{ display: "block", fontSize: "0.65rem", lineHeight: 1.5 }}>
                     <Box component="span" sx={{ fontWeight: 700 }}>#{r.round}</Box>
+                    {r.filePath ? <Box component="span" sx={{ fontFamily: "monospace" }}> {r.filePath}</Box> : null}
                     {" "}🔴 {r.blockers ?? 0} · 🟡 {r.warnings ?? 0}
                     {typeof r.gapsAfter === "number" ? ` → ${r.gapsAfter} restante(s)` : ""}
                     {r.applied === false ? " · não aplicada" : ""}
@@ -1317,6 +1352,23 @@ function SpecChatPanel({
               </span>
             </Tooltip>
           </>
+        )}
+        {/* PR-4 (F2) — Resolver GAPs DESTE ARQUIVO. Aparece só com um arquivo aberto: é o caminho
+            correto numa spec dividida (o botão da spec inteira reemitiria o documento todo). */}
+        {fileMode && onResolveFileGaps && fileGapCount != null && (
+          <Tooltip title={fileGapCount > 0
+            ? "O CTO resolve apenas os GAPs deste arquivo e devolve o arquivo editado para você aplicar"
+            : "Este arquivo não tem GAP em aberto na última validação"}>
+            <span>
+              <Button fullWidth size="small" variant="outlined" color="warning"
+                startIcon={<AutoFixHighIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={sending || treeDirty || fileGapCount === 0}
+                onClick={onResolveFileGaps}
+                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
+                {fileGapCount > 0 ? `Resolver GAPs deste arquivo (${fileGapCount})` : "Sem GAPs neste arquivo"}
+              </Button>
+            </span>
+          </Tooltip>
         )}
         <Stack direction="row" spacing={0.75} alignItems="flex-end">
           <TextField
@@ -1497,6 +1549,8 @@ export default function SpecPage() {
   const [staleValidation, setStaleValidation] = useState(false);
   // Onda 1 — nº de GAPs (findings da última validação) para o badge e o botão "Resolver GAPs".
   const [gapCount, setGapCount] = useState<number | null>(null);
+  /** PR-4 — GAPs ativos por arquivo da spec (+ fila sugerida). null = não carregado/sem validação. */
+  const [gapScope, setGapScope] = useState<GapScopeWire | null>(null);
   // Onda 3 (b) — diálogo de "Promover à Fábrica" com confirmação por digitação quando há GAPs.
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteConfirmText, setPromoteConfirmText] = useState("");
@@ -1642,6 +1696,30 @@ export default function SpecPage() {
         setGapCount(Array.isArray(r.latestRun.findings) ? r.latestRun.findings.filter((f) => !f?.triage).length : 0);
       })
       .catch(() => { if (alive) setGapCount(null); });
+    return () => { alive = false; };
+  }, [editProjectId, validationReloadSignal]);
+
+  // PR-4 (F2) — mapa GAPs ↔ ARQUIVOS. Duas coisas dependem disso: o botão "Resolver GAPs deste
+  // arquivo" (quantos GAPs há no arquivo aberto) e o badge por arquivo na árvore. O GET é grátis
+  // (lê o `file` que o validador já devolveu + as rotas persistidas); quando sobram GAPs sem arquivo
+  // e a spec tem 2+ arquivos, pedimos UMA vez o roteamento por agente (POST, custo baixo, gravado
+  // na run) — senão os GAPs globais ficariam invisíveis em todo arquivo e o botão nunca apareceria.
+  useEffect(() => {
+    if (!editProjectId) { setGapScope(null); return; }
+    let alive = true;
+    setGapScope(null);
+    (async () => {
+      try {
+        let scope = await apiGet<GapScopeWire>(`/api/specs/${editProjectId}/gap-scope`);
+        if (!alive) return;
+        setGapScope(scope);
+        if (scope.unrouted > 0 && scope.fileCount > 1) {
+          scope = await apiPost<GapScopeWire>(`/api/specs/${editProjectId}/gap-routes`, {});
+          if (!alive) return;
+          setGapScope(scope);
+        }
+      } catch { if (alive) setGapScope(null); }
+    })();
     return () => { alive = false; };
   }, [editProjectId, validationReloadSignal]);
 
@@ -2057,6 +2135,10 @@ export default function SpecPage() {
     const advanced = prev?.runId === run.id && (run.round !== prev.round || (prev.active && !run.active));
     if (advanced || (!prev && run.active)) {
       await reloadSpecFromServer();
+      // PR-5: no modo por arquivo quem muda no disco são os ARQUIVOS da árvore (não a spec
+      // primária) — sem recarregar a árvore o usuário veria o conteúdo velho e cairia em conflito
+      // de If-Match ao editar.
+      if (run.mode === "per_file") setTreeReloadSignal((n) => n + 1);
       setValidationReloadSignal((n) => n + 1);
       setStaleValidation(false);
     }
@@ -2147,6 +2229,70 @@ export default function SpecPage() {
 
     startChatPolling({ jobId, seq, kind: "resolve_gaps", filePath: null, baseSha: null, deadlineMs });
   }, [autonomyOn, handleStartAutonomy, chatSending, editProjectId, specMarkdown, chatMessages, gapCount, stopChatPolling, startChatPolling]);
+
+  // PR-4 (F2) — "Resolver GAPs DESTE ARQUIVO": mesma ideia do botão da spec inteira, mas escopado.
+  // É este caminho que faz sentido depois de dividir a spec: o CTO recebe UM arquivo + os GAPs
+  // daquele arquivo e devolve o arquivo editado (que o usuário aplica com If-Match, como no chat
+  // por-arquivo). Sem isso, uma spec de 98k chars voltaria a ser reemitida inteira e truncaria.
+  const fileGapCount = useMemo(() => {
+    if (!activeFile || !gapScope) return null;
+    return gapScope.files.find((f) => f.path === activeFile.path)?.active ?? 0;
+  }, [activeFile, gapScope]);
+
+  // Badge por arquivo na árvore: sem isto o usuário não descobre ONDE estão os GAPs de uma spec
+  // dividida (a aba GAPs lista findings; o trabalho agora é arquivo a arquivo).
+  const gapsByPath = useMemo(() => {
+    if (!gapScope) return null;
+    const map: Record<string, { active: number; blockers: number }> = {};
+    for (const f of gapScope.files) {
+      if (f.active > 0) map[f.path] = { active: f.active, blockers: f.blockers };
+    }
+    return map;
+  }, [gapScope]);
+
+  const handleResolveFileGaps = useCallback(async () => {
+    if (chatSending || !editProjectId || !activeFile) return;
+    if (treeDirty) {
+      setChatError("Há edições não salvas neste arquivo. Salve ou descarte antes de pedir uma revisão por IA.");
+      return;
+    }
+    const seq = (chatSeqRef.current += 1);
+    const sentFilePath = activeFile.path;
+    const sentBaseSha = activeFile.baseSha;
+    setChatMessages((prev) => [...prev, {
+      role: "user",
+      content: `🛠️ Resolver GAPs de \`${sentFilePath}\`${fileGapCount ? ` (${fileGapCount})` : ""}`,
+    }]);
+    setChatSending(true);
+    setChatError(null);
+    setPendingApply(null); setApplyError(null); setApplyConflict(false);
+    stopChatPolling();
+
+    let jobId: string;
+    let deadlineMs = Date.now() + CHAT_CLIENT_DEADLINE_MS;
+    try {
+      const res = await apiPost<SpecChatJobResponse>("/api/spec-chat", {
+        specMarkdown: activeFile.content,
+        messages: [],
+        projectId: editProjectId,
+        resolveGaps: true,
+        filePath: sentFilePath,
+        baseSha: sentBaseSha ?? undefined,
+      });
+      jobId = res.jobId;
+      const d = res.deadlineAt ? Date.parse(res.deadlineAt) : NaN;
+      if (Number.isFinite(d)) deadlineMs = d;
+    } catch (e) {
+      setChatError(e instanceof Error ? e.message : "Erro ao resolver os GAPs deste arquivo.");
+      setChatSending(false);
+      return;
+    }
+    if (seq !== chatSeqRef.current) { setChatSending(false); return; }
+
+    // kind "file": o resultado é OFERECIDO para "Aplicar ao arquivo" (com If-Match no baseSha),
+    // exatamente como uma revisão pedida por chat — nunca escrito por cima sem confirmação.
+    startChatPolling({ jobId, seq, kind: "file", filePath: sentFilePath, baseSha: sentBaseSha, deadlineMs });
+  }, [chatSending, editProjectId, activeFile, treeDirty, fileGapCount, stopChatPolling, startChatPolling]);
 
   // Evoluir E2 — pede ao arquiteto da Bancada os artefatos da evolução. Job assíncrono no
   // servidor (/invoke/raw); ao terminar, a árvore é recarregada e o resumo/pendências vão ao chat.
@@ -2592,6 +2738,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -2633,6 +2780,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -2825,7 +2973,7 @@ export default function SpecPage() {
                 }}
               />
             )}
-            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
+            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} isEvolution={isEvolution} gapsByPath={gapsByPath} />
           </Box>
         )}
 
@@ -2889,6 +3037,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -3075,6 +3224,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}

@@ -818,9 +818,18 @@ def invoke_raw(body: dict):
     NOTA sobre temperature: modelos extended-thinking (Opus 4.7, 4.8, Sonnet 4.5+) exigem
     temperature=1 (deprecated aceitar outros valores). Modelos anteriores aceitam 0-1.
     Estratégia: se o modelo é opus-4-7/4-8/sonnet-4-x, força temperature=1. Senão respeita input.
+
+    PR-4 (2026-09-05) — a resposta passou a carregar `usage` e `stop_reason` (campos ADITIVOS; quem
+    já consumia `response`/`model_used` não muda). Motivo: este endpoint é o caminho de TODA edição
+    por arquivo da Bancada e (a) o gasto era invisível ao cost cap — `_report_direct_usage` só
+    reporta com `usage_project_id`, que este endpoint nunca passou (família G5) — e (b) o corte no
+    teto de saída (`stop_reason=max_tokens`) era só uma linha de log: o chamador aplicava o arquivo
+    MUTILADO por cima do bom (família T1/T2). Agora a api debita e recusa o truncado.
     """
     try:
-        from orchestrator.agents.runtime import call_bedrock_direct, LAST_EFFECTIVE_MODEL
+        from orchestrator.agents.runtime import (
+            call_bedrock_direct, LAST_EFFECTIVE_MODEL, LAST_STOP_REASON, LAST_USAGE,
+        )
     except ImportError:
         raise HTTPException(status_code=500, detail="call_bedrock_direct não disponível neste container")
 
@@ -835,6 +844,21 @@ def invoke_raw(body: dict):
     def _effective(requested: str) -> str:
         # Modelo realmente usado (cascata de indisponibilidade dentro de call_bedrock_direct).
         return LAST_EFFECTIVE_MODEL.get() or requested
+
+    def _outcome() -> dict:
+        """Telemetria da chamada que ACABOU de rodar neste contexto (tokens + motivo da parada)."""
+        u = LAST_USAGE.get() or {}
+        stop = LAST_STOP_REASON.get()
+        out: dict = {
+            "usage": {
+                "input_tokens": int(u.get("input_tokens") or 0),
+                "output_tokens": int(u.get("output_tokens") or 0),
+            },
+            "stop_reason": stop,
+        }
+        # `truncated` explícito: o chamador não deveria ter de conhecer o vocabulário do provedor.
+        out["truncated"] = stop == "max_tokens"
+        return out
     # temperature: modelos extended-thinking exigem 1.0 (deprecated aceitar outros).
     # Detecta e força 1.0 pra evitar erro Bedrock 400.
     def _temp_for(model: str) -> float:
@@ -855,7 +879,7 @@ def invoke_raw(body: dict):
                                     model_id=model_id, max_tokens=max_tokens, temperature=_temp_for(model_id),
                                     llm_cfg=llm_cfg)
         if resp and resp.strip():
-            return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id}
+            return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id, **_outcome()}
         logger.warning(f"[/invoke/raw] Principal ({model_id}) retornou resposta VAZIA — escalando para fallback")
     except Exception as e:
         logger.warning(f"[/invoke/raw] Principal falhou ({model_id}): {e}")
@@ -868,12 +892,13 @@ def invoke_raw(body: dict):
             resp = call_bedrock_direct(system=system_prompt, user=user_message,
                                         model_id=fallback_id, max_tokens=max_tokens,
                                         temperature=_temp_for(fallback_id), llm_cfg=llm_cfg)
-            return {"response": resp, "model_used": _effective(fallback_id), "model_requested": model_id, "fallback": True}
+            return {"response": resp, "model_used": _effective(fallback_id), "model_requested": model_id,
+                    "fallback": True, **_outcome()}
         except Exception as e2:
             raise HTTPException(status_code=500,
                                 detail=f"Principal ({model_id}) e fallback ({fallback_id}) falharam: {e2}")
     # Sem fallback configurado e principal veio vazio → devolve o vazio (comportamento antigo).
-    return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id}
+    return {"response": resp, "model_used": _effective(model_id), "model_requested": model_id, **_outcome()}
 
 
 if __name__ == "__main__":

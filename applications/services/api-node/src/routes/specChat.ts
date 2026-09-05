@@ -35,7 +35,7 @@ import { canAccessProjectRow } from "../lib/projectAccess.js";
 import {
   createSpecChatJob, setAgentsJobId, touchSpecChatJob, finishSpecChatJob, getSpecChatJob,
   findInFlightSpecChatJob, markSpecChatJobCollected, loadSpecChatHistory, judgeCtoResult,
-  recordCtoUsage, CHAT_JOB_DEADLINE_MS, FILE_JOB_DEADLINE_MS,
+  recordCtoUsage, recordRawUsage, CHAT_JOB_DEADLINE_MS, FILE_JOB_DEADLINE_MS,
   type SpecChatJobStatus, type SpecChatJobKind,
 } from "../services/specChatJobs.js";
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
@@ -469,8 +469,26 @@ const RAW_FILE_SYSTEM = [
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código, sem comentários, sem preâmbulo.",
 ].join(" ");
 
-/** P4: teto do contexto extra (mapa + GAPs) no modo por-arquivo — o `/invoke/raw` tem max_tokens 8k. */
+/** P4: teto do contexto extra (mapa + GAPs) no modo por-arquivo. */
 const RAW_FILE_CONTEXT_BUDGET = 12_000;
+
+/**
+ * PR-4 (2026-09-05) — ORÇAMENTO DE SAÍDA do `/invoke/raw`, derivado do TAMANHO DO ARQUIVO.
+ *
+ * Era `max_tokens: 8000` fixo para arquivos de até 20.000 chars. Só para DEVOLVER um arquivo de
+ * 20.000 chars de Markdown pt-BR o modelo precisa de ~6.500 tokens — ou seja, o teto ficava a
+ * poucas centenas de tokens da borda e qualquer acréscimo pedido pelo humano cortava a resposta.
+ * E o corte era SILENCIOSO: `call_bedrock_direct` não expunha `stop_reason`, então a api aplicava o
+ * arquivo MUTILADO por cima do bom (a mesma família do truncamento de 64k que este épico ataca).
+ *
+ * ~2,8 chars/token é o pior caso medido em pt-BR com Markdown; +2.000 tokens de folga cobrem o que
+ * o pedido ACRESCENTA. O teto de 32.000 é seguro porque `call_bedrock_direct` passa `timeout`
+ * explícito (sem ele o SDK recusa max_tokens > 21.333 — ver `_nonstreaming_timeout_sec`).
+ */
+export function rawMaxTokensFor(chars: number): number {
+  const need = Math.ceil(Math.max(0, chars) / 2.8) + 2_000;
+  return Math.min(32_000, Math.max(8_000, need));
+}
 
 function buildRawFileRequest(
   content: string,
@@ -509,7 +527,78 @@ function buildRawFileRequest(
   return {
     prompt_override: RAW_FILE_SYSTEM,
     user_message: userMessage,
-    max_tokens: 8000,
+    max_tokens: rawMaxTokensFor(content.length),
+  };
+}
+
+// ── PR-4: "Resolver GAPs" POR ARQUIVO (F2) ────────────────────────────────────
+// Este é o caminho que mata a CAUSA do truncamento de 64k: em vez de mandar o CTO reemitir a spec
+// inteira (98k chars → ~75% do orçamento de saída gasto copiando o que não mudou), uma rodada trata
+// UM arquivo e só os GAPs daquele arquivo.
+//
+// POR QUE NÃO PASSA PELO CTO (`spec_intake_and_normalize`): aquele modo é NORMALIZADOR — regenera um
+// PRODUCT_SPEC completo e descarta o conteúdo original (ver a nota de RAW_FILE_SYSTEM acima). Mandar
+// `tecnico/dados.md` por lá o transformaria numa spec inteira. Aqui o papel é de CTO-EDITOR: o
+// mesmo rigor arquitetural do "Resolver GAPs", mas exercido DENTRO do arquivo, preservando o resto.
+const GAP_FILE_SYSTEM = [
+  "Você é o CTO/arquiteto responsável pela especificação de um produto de software.",
+  "Recebe UM arquivo da especificação e a lista de GAPs (problemas de uma validação adversarial) que",
+  "pertencem a ESTE arquivo. Corrija cada GAP com profundidade de especialista: decida o que falta,",
+  "escreva o requisito/contrato/critério que resolve o problema e seja concreto (nomes, campos,",
+  "limites, códigos de erro) — nunca responda com generalidades ou com um TODO.",
+  "REGRAS DE ESCOPO (invioláveis):",
+  "1) PRESERVE todo o conteúdo do arquivo que não precisa mudar — você está EDITANDO, não reescrevendo.",
+  "2) NÃO renomeie nem reordene seções existentes sem necessidade, e NÃO remova requisito válido.",
+  "3) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
+  "4) Se um GAP claramente não é deste arquivo, deixe-o como está e explique na última linha.",
+  "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código e sem preâmbulo.",
+].join(" ");
+
+/** Teto de conteúdo do "Resolver GAPs por arquivo": ver `rawMaxTokensFor` (cabe no orçamento). */
+const MAX_GAP_FILE_CHARS = 48_000;
+
+function fmtGapForFile(f: ValidationFinding): string {
+  const sev = (f.severity || "info").toUpperCase();
+  const anchor = (f as { anchor?: string | null }).anchor;
+  const loc = anchor ? ` (em: ${anchor})` : f.line ? ` (linha ~${f.line})` : "";
+  return `- [${sev}]${loc} ${f.title}${f.rationale ? `\n  motivo: ${f.rationale}` : ""}`;
+}
+
+/**
+ * Pedido de "Resolver GAPs" escopado em UM arquivo. `findings` são os GAPs ATIVOS já atribuídos a
+ * este arquivo (specGapScope) — o modelo não escolhe o que é seu, só resolve o que é.
+ */
+function buildGapFileRequest(
+  content: string,
+  filePath: string,
+  findings: ValidationFinding[],
+  ctx: ChatContext = EMPTY_CTX,
+): Record<string, unknown> {
+  const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
+  // Mapa do produto (Fase 1) como contexto só-leitura: o arquivo é uma PARTE de um todo, e sem saber
+  // onde ele vive o CTO-editor duplica o que já está no irmão.
+  const contextBlock = (ctx.productMapBlock ?? "").slice(0, RAW_FILE_CONTEXT_BUDGET);
+  const userMessage = [
+    `ARQUIVO: ${filePath}`,
+    "",
+    contextBlock
+      ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
+      : "",
+    "--- CONTEÚDO ATUAL DO ARQUIVO ---",
+    content,
+    "--- FIM DO CONTEÚDO ---",
+    "",
+    `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
+    gaps,
+    "--- FIM DOS GAPs ---",
+    "",
+    "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
+  ].join("\n");
+  return {
+    prompt_override: GAP_FILE_SYSTEM,
+    user_message: userMessage,
+    // A saída CRESCE (o arquivo ganha o que faltava): folga proporcional ao número de GAPs.
+    max_tokens: rawMaxTokensFor(content.length + findings.length * 900),
   };
 }
 
@@ -545,7 +634,13 @@ function settleJob(
   void finishSpecChatJob(pool, jobId, patch);
 }
 
-function runFileChatJob(jobId: string, raw: Record<string, unknown>, agentsUrl: string): void {
+function runFileChatJob(
+  jobId: string,
+  raw: Record<string, unknown>,
+  agentsUrl: string,
+  /** Resposta exibida ao humano quando dá certo (o `/invoke/raw` devolve só o arquivo). */
+  doneReply = "Revisão pronta — confira e clique em “Aplicar ao arquivo”.",
+): void {
   const job = _chatJobs.get(jobId);
   if (!job) return;
   job.status = "running";
@@ -563,8 +658,15 @@ function runFileChatJob(jobId: string, raw: Record<string, unknown>, agentsUrl: 
   httpPost(`${base}/invoke/raw`, JSON.stringify(raw), 180_000)
     .then((text) => {
       clearTimeout(guard);
-      const data = JSON.parse(text) as { response?: string; model_used?: string };
+      const data = JSON.parse(text) as {
+        response?: string; model_used?: string;
+        // PR-4: campos aditivos do `/invoke/raw` (ausentes se o agents for antigo → tratados como 0/false).
+        usage?: { input_tokens?: number; output_tokens?: number } | null; stop_reason?: string | null; truncated?: boolean;
+      };
       const md = stripOuterFence(data.response ?? "");
+      // PR-4/G5: o gasto deste caminho era INVISÍVEL ao cost cap. Debita ANTES de qualquer veredito —
+      // o token foi queimado mesmo quando a resposta é imprestável.
+      void recordRawUsage(pool, { id: jobId, projectId: job.projectId ?? null }, data);
       // Sanidade: resposta vazia/trivial = falha (o /invoke/raw já escala fallback internamente,
       // então vazio aqui significa que nem o fallback produziu conteúdo). NÃO aplicamos lixo.
       if (!md || md.trim().length < 2) {
@@ -572,11 +674,23 @@ function runFileChatJob(jobId: string, raw: Record<string, unknown>, agentsUrl: 
         settleJob(jobId, { status: "error", error: "A IA não retornou conteúdo para o arquivo. Reformule o pedido e tente de novo." });
         return;
       }
+      // PR-4/T1: bateu no teto de saída → o arquivo devolvido está CORTADO. Aqui o resultado é
+      // aplicado POR CIMA de um arquivo bom, então entregar truncado é perda de dados. Recusamos:
+      // melhor a rodada falhar (e o laço parar) do que mutilar a spec.
+      if (data.truncated === true) {
+        console.warn(`[SpecChat] job=${jobId} raw TRUNCADO (stop_reason=${data.stop_reason ?? "?"}) — ${md.length} chars descartados`);
+        settleJob(jobId, {
+          status: "error",
+          truncated: true,
+          error: "A resposta da IA bateu no teto de saída do modelo e o arquivo voltou INCOMPLETO — nada foi aplicado. Divida o arquivo (ou peça menos de uma vez) e tente de novo.",
+        });
+        return;
+      }
       settleJob(jobId, {
         status: "done",
         specMarkdown: md,
         // /invoke/raw devolve SÓ o conteúdo do arquivo — a "resposta" ao usuário é sintetizada aqui.
-        reply: "Revisão pronta — confira e clique em “Aplicar ao arquivo”.",
+        reply: doneReply,
         modelUsed: data.model_used ?? null,
       });
       console.log(`[SpecChat] ✓ job=${jobId} DONE (raw) — ${md.length} chars, model=${data.model_used ?? "?"}`);
@@ -717,6 +831,66 @@ export async function dispatchResolveGapsJob(opts: {
   return { ok: true, gaps: ctx.findings.length };
 }
 
+/**
+ * PR-5 (F2, 2026-09-05): dispara "Resolver GAPs DESTE ARQUIVO" pelo MESMO caminho do botão do PR-4.
+ *
+ * É o que o laço autônomo usa depois da divisão da spec. Existe por dois motivos:
+ *   • o `dispatchResolveGapsJob` manda a spec INTEIRA ao CTO normalizador — depois do split o
+ *     primário é só o ÍNDICE, então aquele caminho revisaria o índice (e o CTO reemitiria a spec
+ *     inteira: exatamente a causa do truncamento de 64k que este épico mata);
+ *   • o prompt, o orçamento de saída (`rawMaxTokensFor`) e as regras de escopo do CTO-EDITOR vivem
+ *     aqui. Se o laço montasse o pedido por conta própria, divergiria do botão no primeiro ajuste.
+ *
+ * Autorização é do CHAMADOR (a rota do autônomo já validou dono/tenant). Aqui só se recusa o que
+ * tornaria a rodada inútil ou perigosa: sem GAP para este arquivo, ou arquivo acima do teto.
+ */
+export async function dispatchGapFileJob(opts: {
+  jobId: string;
+  projectId: string;
+  tenantId: string | null;
+  ownerUserId: string;
+  filePath: string;
+  fileContent: string;
+  findings: ValidationFinding[];
+  userMessage: string;
+  agentsUrl: string;
+  llm: Record<string, unknown>;
+}): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
+  if (opts.findings.length === 0) {
+    return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
+  }
+  if (opts.fileContent.length > MAX_GAP_FILE_CHARS) {
+    return {
+      ok: false, code: "FILE_TOO_LARGE",
+      message: `${opts.filePath} tem ${opts.fileContent.length} caracteres (teto ${MAX_GAP_FILE_CHARS}) — a resposta não caberia no orçamento de saída do modelo. Divida este arquivo.`,
+    };
+  }
+  // Mapa do produto como contexto só-leitura (Fase 1). Best-effort e só com a flag ligada — sem ele
+  // o CTO-editor não sabe onde este arquivo vive e duplica o que já está no irmão.
+  const ctx = productScopeEnabled()
+    ? await loadChatContext(opts.projectId, opts.fileContent, opts.userMessage, { siblingBodies: false })
+    : EMPTY_CTX;
+
+  _chatJobs.set(opts.jobId, {
+    id: opts.jobId, status: "pending", createdAt: Date.now(),
+    projectId: opts.projectId, ownerUserId: opts.ownerUserId,
+    sentFilePath: opts.filePath, sentBaseSha: sha256(opts.fileContent),
+  });
+  await createSpecChatJob(pool, {
+    id: opts.jobId, projectId: opts.projectId, tenantId: opts.tenantId, ownerUserId: opts.ownerUserId,
+    // `kind: "file"` (migração 089) → herda durabilidade, rehidratação por `filePath` e o apply com If-Match.
+    kind: "file", filePath: opts.filePath, baseSha: sha256(opts.fileContent),
+    baseSpecSha: sha256(opts.fileContent), userMessage: opts.userMessage,
+  });
+  runFileChatJob(
+    opts.jobId,
+    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx), ...opts.llm },
+    opts.agentsUrl,
+    `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
+  );
+  return { ok: true, gaps: opts.findings.length };
+}
+
 /** Traduz o estado do banco para o contrato da rota (o cliente só conhece 4 estados). */
 function wireStatus(status: SpecChatJobStatus): "pending" | "running" | "done" | "error" {
   if (status === "done") return "done";
@@ -766,17 +940,22 @@ export async function specChatRoutes(app: FastifyInstance) {
       if (!specMarkdown) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "specMarkdown obrigatório" });
       }
-      // Resolver GAPs é sempre no escopo da SPEC INTEIRA de um projeto (nunca por-arquivo).
-      if (resolveGaps) {
-        if (!projectId) return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolver GAPs exige projectId" });
-        if (filePath) return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolver GAPs não opera em modo por-arquivo" });
+      // Resolver GAPs exige projeto (é de onde vêm a árvore e os findings).
+      // PR-4 (F2): com `filePath`, resolve os GAPs DAQUELE arquivo — é o modo que existe para a spec
+      // dividida (antes isto era 400: "Resolver GAPs não opera em modo por-arquivo").
+      if (resolveGaps && !projectId) {
+        return reply.status(400).send({ code: "BAD_REQUEST", message: "Resolver GAPs exige projectId" });
       }
+      const gapsPerFile = resolveGaps && !!filePath;
       // C1: em modo por-arquivo, bloqueia conteúdo acima do teto (evita revisão truncada → apply
       // sobrescrevendo o arquivo real com versão cortada). O chat da spec inteira não tem esse apply.
-      if (filePath && specMarkdown.length > MAX_FILE_CHAT_CHARS) {
+      // O teto do Resolver GAPs por arquivo é maior: o orçamento de saída agora é derivado do
+      // tamanho do arquivo (`rawMaxTokensFor`) em vez de fixo em 8k.
+      const fileChatCap = gapsPerFile ? MAX_GAP_FILE_CHARS : MAX_FILE_CHAT_CHARS;
+      if (filePath && specMarkdown.length > fileChatCap) {
         return reply.status(413).send({
           code: "FILE_TOO_LARGE",
-          message: `Arquivo grande demais para o chat por-arquivo (${specMarkdown.length} > ${MAX_FILE_CHAT_CHARS} caracteres). Edite manualmente ou divida o arquivo.`,
+          message: `Arquivo grande demais para edição por IA (${specMarkdown.length} > ${fileChatCap} caracteres). Divida o arquivo e tente de novo.`,
         });
       }
       const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content?.trim();
@@ -821,17 +1000,47 @@ export async function specChatRoutes(app: FastifyInstance) {
         : EMPTY_CTX;
 
       // Resolver GAPs sem findings em aberto = nada a fazer → erro claro (não gera turno vazio).
-      if (resolveGaps && ctx.findings.length === 0) {
+      // No modo por-arquivo quem responde isso é o escopo (abaixo): `ctx.findings` é do PROJETO e
+      // pode vir vazio só porque a flag de contexto está off.
+      if (resolveGaps && !gapsPerFile && ctx.findings.length === 0) {
         return reply.status(409).send({
           code: "NO_GAPS",
           message: "Nenhum GAP ATIVO na última validação (ignorados/refutados não são tratados). Rode Validar para (re)avaliar a spec.",
         });
       }
 
+      // PR-4: GAPs DESTE arquivo. O `file` de cada finding vem do validador (decisão de LLM); o que
+      // não tiver arquivo resolvível é roteado por agente UMA vez e persistido na run (migração 094).
+      let fileGaps: ValidationFinding[] = [];
+      if (gapsPerFile) {
+        const { ensureGapScope } = await import("../services/specGapScope.js");
+        const { scope, routing } = await ensureGapScope(pool, projectId!, { route: true });
+        if (routing) {
+          console.log(`[SpecChat] roteamento de GAPs projeto=${projectId!.slice(0, 8)} routed=${routing.routed} restantes=${routing.stillUnrouted}${routing.skipped ? ` (skip: ${routing.reason})` : ""}`);
+        }
+        if (scope.totalActive === 0) {
+          return reply.status(409).send({
+            code: "NO_GAPS",
+            message: "Nenhum GAP ATIVO na última validação (ignorados/refutados não são tratados). Rode Validar para (re)avaliar a spec.",
+          });
+        }
+        fileGaps = scope.byPath.get(filePath!) ?? [];
+        if (fileGaps.length === 0) {
+          return reply.status(409).send({
+            code: "NO_GAPS_IN_FILE",
+            message: `Este arquivo não tem GAP ATIVO (o projeto tem ${scope.totalActive}${scope.unrouted.length ? `, sendo ${scope.unrouted.length} ainda sem arquivo definido` : ""}). Abra um arquivo com GAPs ou resolva pela spec inteira.`,
+            totalActive: scope.totalActive,
+            unrouted: scope.unrouted.length,
+          });
+        }
+      }
+
       // Mensagem do usuário a persistir/logar: sintetizada em Resolver GAPs.
-      const persistedUserMsg = resolveGaps
-        ? `🛠️ Resolver GAPs — pedi ao CTO para corrigir os ${ctx.findings.length} GAP(s) da validação adversarial.`
-        : (lastUser ?? "");
+      const persistedUserMsg = gapsPerFile
+        ? `🛠️ Resolver GAPs de \`${filePath}\` — pedi ao CTO para corrigir os ${fileGaps.length} GAP(s) deste arquivo.`
+        : resolveGaps
+          ? `🛠️ Resolver GAPs — pedi ao CTO para corrigir os ${ctx.findings.length} GAP(s) da validação adversarial.`
+          : (lastUser ?? "");
 
       const jobId = randomUUID(); // S3: id não-adivinhável (o antigo scj-<ts>-<5 base36> era fraco)
       const job: ChatJob = {
@@ -854,7 +1063,16 @@ export async function specChatRoutes(app: FastifyInstance) {
       // A Bancada usa a MESMA config de LLM da fábrica (modelo, rework e credenciais do tenant/projeto).
       // Sem config do tenant → campos omitidos → agents seguem no env (comportamento anterior).
       const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId: user.tenantId }));
-      if (filePath) {
+      if (gapsPerFile) {
+        // PR-4: CTO-EDITOR escopado — resolve os GAPs deste arquivo sem tocar nos irmãos e sem
+        // passar pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo).
+        runFileChatJob(
+          jobId,
+          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx), ...llm },
+          agentsUrl,
+          `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
+        );
+      } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
         runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx), ...llm }, agentsUrl);
       } else {
