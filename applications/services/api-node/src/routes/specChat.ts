@@ -57,6 +57,25 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Bloqueamos o chat por-arquivo acima deste teto (o chat da spec inteira continua liberado).
 const MAX_FILE_CHAT_CHARS = 20_000;
 
+/**
+ * F1 (2026-09-05) — o CTO entrega EDIÇÕES (search/replace) em vez da spec inteira.
+ *
+ * POR QUE A FLAG VIVE AQUI E NÃO NOS AGENTS: é esta função que escreve a regra "Devolva a SPEC
+ * INTEIRA revisada" no `task`. Se a decisão do formato morasse no agents, o prompt chegaria ao
+ * modelo se contradizendo (a api pedindo o documento inteiro, o agents pedindo só os edits) — e o
+ * modelo obedeceria o hábito, reemitindo 98k chars e truncando de novo. Com a flag aqui, a api
+ * reescreve a regra e MARCA o pedido (`inputs.edit_format`); o agents é tolerante (materializa os
+ * edits quando aparecem, sem flag própria), então api e agents podem ser deployados em qualquer
+ * ordem: flag ON com agents velho = o modelo manda edits e o gate de artefato reprova (nada é
+ * aplicado); flag OFF com agents novo = nenhum artefato vem como edits e nada muda.
+ *
+ * Causa que isto ataca: a spec do NVX LastMile tem 98.045 chars e o CTO reemitia o documento
+ * inteiro → ~75% dos 64.000 tokens de saída do Opus 5 gastos copiando o que não mudou → corte.
+ */
+export function ctoEditFormatEnabled(): boolean {
+  return (process.env.SPEC_CTO_EDIT_FORMAT ?? "whole").trim().toLowerCase() === "edits";
+}
+
 function getUser(request: FastifyRequest): AuthUser {
   return (request as unknown as { user: AuthUser }).user;
 }
@@ -255,6 +274,9 @@ function buildChatMessage(
   /** Projeto REAL — só para o ESCOPO do circuit breaker dos agents (ver `circuit_scope` abaixo). */
   scopeProjectId: string | null = null,
 ): Record<string, unknown> {
+  // F1: quando ON, a regra 4 (e o OBJETIVO) param de pedir o documento inteiro — ver
+  // `ctoEditFormatEnabled`. O agents descreve o FORMATO dos edits e materializa o resultado.
+  const editMode = ctoEditFormatEnabled();
   // Mantém apenas as últimas mensagens para não estourar o contexto do agente.
   const history = messages.slice(-12);
   // Em "Resolver GAPs" a instrução é sintetizada aqui (o cliente pode não enviar mensagem).
@@ -336,8 +358,16 @@ o HISTÓRICO da conversa, a ÚLTIMA MENSAGEM do usuário e — quando houver —
 produto e o RELATÓRIO DE VALIDAÇÃO adversarial. Você TEM acesso a tudo isso abaixo; use-o com precisão.
 
 OBJETIVO: ${resolveGaps
-      ? "resolver os GAPs e ENRIQUECER a spec para um produto real, funcional e Connect-compliant, devolvendo a spec COMPLETA revisada e um summary com perguntas/premissas/features."
-      : "aplicar SOMENTE as mudanças que o usuário pediu na última mensagem, devolvendo a spec COMPLETA e revisada, e uma resposta curta explicando o que mudou."}
+      ? `resolver os GAPs e ENRIQUECER a spec para um produto real, funcional e Connect-compliant, ${
+          editMode
+            ? "entregando as EDIÇÕES da spec (search/replace, ver o formato adiante)"
+            : "devolvendo a spec COMPLETA revisada"
+        } e um summary com perguntas/premissas/features.`
+      : `aplicar SOMENTE as mudanças que o usuário pediu na última mensagem, ${
+          editMode
+            ? "entregando as EDIÇÕES da spec (search/replace, ver o formato adiante)"
+            : "devolvendo a spec COMPLETA e revisada"
+        }, e uma resposta curta explicando o que mudou.`}
 
 REGRAS:
 1. ${resolveGaps
@@ -347,9 +377,15 @@ REGRAS:
       ? "Trate os GAPs com profundidade de especialista e sem criar novas inconsistências."
       : "Aplique de forma cirúrgica o que foi pedido na última mensagem (adicionar/remover/ajustar)."}
 3. Mantenha a spec consistente e implementável (FRs com critérios de aceite DADO/QUANDO/ENTÃO, modelo de dados, stack).
-4. Devolva a SPEC INTEIRA revisada como o artefato Markdown principal (não só o trecho alterado).
+4. ${editMode
+      ? `Devolva APENAS AS EDIÇÕES (search/replace) do artefato Markdown principal — NÃO reescreva o
+   documento inteiro. O formato exato dos edits está descrito adiante, na seção "Formato de entrega".
+   O servidor aplica as suas edições sobre a spec atual e monta o documento final.
    IMPORTANTE: o artefato principal DEVE ter o caminho EXATO "docs/spec/PRODUCT_SPEC.md"
-   (esse é o único path aceito — usar outro caminho REPROVA a revisão e força um retrabalho lento).
+   (esse é o único path aceito — usar outro caminho REPROVA a revisão e força um retrabalho lento).`
+      : `Devolva a SPEC INTEIRA revisada como o artefato Markdown principal (não só o trecho alterado).
+   IMPORTANTE: o artefato principal DEVE ter o caminho EXATO "docs/spec/PRODUCT_SPEC.md"
+   (esse é o único path aceito — usar outro caminho REPROVA a revisão e força um retrabalho lento).`}
 5. No campo summary, ${resolveGaps
       ? "responda em português listando GAPs resolvidos, premissas assumidas, perguntas de dimensionamento (2-5) e features propostas."
       : "escreva uma resposta CURTA (1-3 frases) ao usuário, em português, dizendo o que você mudou."}${resolveGapsBlock}
@@ -391,18 +427,22 @@ ${transcript}${contextSections}
       context_emit: ctx.emitV2 ? "v2" : undefined,
       resolve_gaps: resolveGaps || undefined,
       input_type: "spec_refinement",
+      // F1/D1: a DECISÃO do formato nasce aqui (a api monta a regra 4). O agents é tolerante: só
+      // descreve o formato dos edits quando vê esta marca e materializa o artefato quando ele vier
+      // como `format:"edits"` — logo api e agents podem ser deployados em qualquer ordem.
+      edit_format: editMode ? "edits" : undefined,
       constraints: resolveGaps
         ? [
             "resolve-validation-gaps",
             "enrich-to-real-functional-product",
             "connect-compliant-contract",
-            "return-full-revised-spec",
+            editMode ? "return-edits-not-full-spec" : "return-full-revised-spec",
             "no-new-contradictions",
           ]
         : [
             "preserve-unrequested-content",
             "apply-only-requested-changes",
-            "return-full-revised-spec",
+            editMode ? "return-edits-not-full-spec" : "return-full-revised-spec",
           ],
     },
     existing_artifacts: [],

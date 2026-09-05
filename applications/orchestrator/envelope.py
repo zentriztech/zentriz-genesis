@@ -145,6 +145,16 @@ def validate_response_quality(agent: str, response: dict) -> tuple[bool, list[st
     for art in artifacts:
         if not isinstance(art, dict):
             continue
+        # 🔴 Bloco 4 M8 / F1 (corrigido em 2026-09-05): um artefato `format:"edits"` entrega
+        # `edits:[{search,replace}]` e NÃO tem `content` — quem produz o texto final é a
+        # MATERIALIZAÇÃO, que roda depois (`runner.py` para o Dev; `run_agent` para o CTO da Bancada).
+        # Sem este guard, `art.get("content", "")` devolvia "" e a regra de tamanho abaixo reprovava
+        # com "muito curto (0 chars)" DENTRO do `run_agent` — ou seja, o caminho de edits nunca podia
+        # passar pelo gate de qualidade, e o repair da LEI 5 pedia um `content` que o formato não tem.
+        # (Não foi notado antes porque `EVOLUTION_DEV_EDIT_FORMAT` está OFF em prod.)
+        # Quando o artefato traz `content` JUNTO dos edits, o `content` continua sendo validado.
+        if art.get("format") == "edits" and not isinstance(art.get("content"), str):
+            continue
         content = art.get("content", "")
         path = art.get("path", "")
         if isinstance(content, str):
