@@ -27,6 +27,13 @@ services:
       # padrão (manual primeiro); ligar = SPEC_VALIDATION_AUTO=on. Quiet configurável.
       - SPEC_VALIDATION_AUTO=${SPEC_VALIDATION_AUTO:-off}
       - SPEC_VALIDATION_AUTO_QUIET_MIN=${SPEC_VALIDATION_AUTO_QUIET_MIN:-2}
+      # Contexto do produto inteiro para o CTO (Fase 1) — só a API lê esta flag; os agents
+      # reagem ao campo `context_emit: "v2"` do envelope, então api/agents podem ser
+      # deployados em qualquer ordem. OFF = prompt byte-idêntico ao legado.
+      - SPEC_CONTEXT_PRODUCT_SCOPE=${SPEC_CONTEXT_PRODUCT_SCOPE:-off}
+      # Certificado Genesis Factory — selo informativo (NUNCA gate). OFF = payload de
+      # /api/specs, /api/products e /api/specs/:id/validation idêntico ao legado.
+      - FACTORY_CERTIFICATE=${FACTORY_CERTIFICATE:-off}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem
