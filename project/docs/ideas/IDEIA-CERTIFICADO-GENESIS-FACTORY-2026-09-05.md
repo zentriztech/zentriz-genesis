@@ -2,7 +2,7 @@
 
 # Ideia — Certificado "Genesis Factory" na Bancada de Spec
 
-**Data:** 2026-09-05 · **Status:** ✅ **D1–D5 decididas · PR1+PR2+PR4 implementados no `dev` atrás de `FACTORY_CERTIFICATE=off`** (ver §7) · PR3 (portal) pendente
+**Data:** 2026-09-05 · **Status:** ✅ **EM PRODUÇÃO com `FACTORY_CERTIFICATE=on`** — D1–D5 decididas, PR1–PR4 entregues (ver §7 e §8)
 **Pedido (verbatim do Jean):** *"adicionar uma flag certificadora no Produto de Spec da Bancada, no sentido de informar se o modelo já é aceitável por parte da fábrica e exibir no card do produto de spec e outros locais um tipo de certificado Genesis Factory para sinalizar que o projeto agora tem suas especificações no modelo que a fábrica aceita e quando for promovido existe uma maior garantia de sucesso na fabricação."*
 
 ---
@@ -176,5 +176,28 @@ mudança grande de percepção — por isso a flag continua OFF até o Jean ver 
 quiser um caminho intermediário, a opção natural é ligar `SPEC_VALIDATION_GATE` e o certificado
 juntos (a barreira e o selo passam a contar a mesma história), o que é uma decisão separada.
 
-**Próximos passos:** o Jean avaliar a tela com a flag ligada em dev e então decidir
-`FACTORY_CERTIFICATE=on` em prod.
+---
+
+## 8. Em produção — 2026-09-05 (decisão do Jean: "ligar em prod junto com o deploy")
+
+Deployado no host de prod (`3.220.66.113`, `main` `5477a34`, imagens do ECR, rollback
+`rollback-<svc>:pre-fase1-cert-20260905`) com **`FACTORY_CERTIFICATE=on`** desde o primeiro minuto —
+o selo não passou por um período OFF em prod.
+
+**Medido ao vivo, com dados reais e ZERO chamada de LLM (A4 confirmado em produção):**
+
+| Rota | Resultado |
+|------|-----------|
+| `GET /api/products` | agregado presente em 8 produtos; 7 em `unknown 0/0` e `VNX LastMile` em `blocked 0/1` |
+| `GET /api/specs` | 1 spec (`NVX LastMile - Backend`) → `blocked`, check reprovado **C4** |
+| `GET /api/specs/:id/validation` | selo completo: C1/C2/C7/C3 ✅, **C4 ❌** (1 blocker ativo), C5 ✅, `gateEnforced: true`, `connect.level: absent` (5 chaves faltantes), `specHash` do disco |
+
+**Por que quase tudo é `0/0`** (e a coluna "Pronto para promover" mudou menos do que o §7 previa): o
+agregado do produto tem escopo **Bancada**, e em prod **todo produto multi-projeto está 100%
+`accepted`** — a Bancada inteira tem **uma** spec. O aviso do §7 segue valendo para quando a Bancada
+voltar a encher.
+
+**Pendência de redação (não de lógica):** `C5 "Avisos reconhecidos" ok=true` aparece com o detalhe
+`"14 aviso(s) ativo(s) sem ack"`. É a projeção fiel do gate (C5 só reprova quando o motivo do bloqueio
+seria `SPEC_WARNINGS_UNACKED`; aqui o motivo é o blocker de C4), mas um ✅ ao lado de "14 sem ack" lê
+mal na tela. Ajustar o `detail`/label, preservando A1.

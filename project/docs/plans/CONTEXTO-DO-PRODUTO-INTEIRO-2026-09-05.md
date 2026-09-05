@@ -2,8 +2,15 @@
 
 # A LLM tem que conhecer o Produto inteiro — desenho v1 (pesquisa + adversarial + GAPs)
 
-> **Status:** pesquisa medida em PROD + revisão adversarial + GAPs → **aguardando decisões D1–D4 do
-> Jean. NADA implementado.**
+> **Status:** ✅ **Fase 1 EM PRODUÇÃO desde 2026-09-05 com `SPEC_CONTEXT_PRODUCT_SCOPE=on`** (D1–D4
+> decididas; `main` `5477a34`). **Prova ao vivo aprovada** no âncora `ZVoices/SPEC-15-bff-mobile`: o CTO
+> citou `SPEC-19-mobile` (mobile_crossplatform) e `SPEC-20-tokens` (lib_ts) — irmãos **ausentes** da
+> spec, com os tipos que só existem na coluna "tipo" do Mapa do Produto — e leu a aresta na direção
+> certa ("SPEC-19-mobile, cujas dependências declaradas são SPEC-15-bff-mobile, SPEC-20-tokens e
+> SPEC-00-contracts"). A **Fase 2 (escrita multi-arquivo, §6) segue não escrita**.
+> **Correção de premissa medida em prod:** o produto "OrienteMe (9 projetos)" são **9 versões do mesmo
+> app** (sem `dependsOn`, sem `superseded_by`); o único produto com arestas reais é o ZVoices (11 em
+> `project_triggers`). Sem `superseded_by`, versões antigas entram no mapa como irmãs vivas.
 > **Origem (verbatim, 2026-09-05):** *"lembre-se que em um Produto de Spec com diversos projetos e
 > arquivos deve existir uma maneira da LLM conhecer tudo para poder trabalhar de forma coesa e
 > entregar as evoluções e correções solicitadas ou detectadas."*
