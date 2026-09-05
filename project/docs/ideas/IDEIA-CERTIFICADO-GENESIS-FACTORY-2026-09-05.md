@@ -2,7 +2,7 @@
 
 # Ideia — Certificado "Genesis Factory" na Bancada de Spec
 
-**Data:** 2026-09-05 · **Status:** 💡 ideia em maturação — **nada decidido, nada implementado**
+**Data:** 2026-09-05 · **Status:** ✅ **D1–D5 decididas · PR1+PR2+PR4 implementados no `dev` atrás de `FACTORY_CERTIFICATE=off`** (ver §7) · PR3 (portal) pendente
 **Pedido (verbatim do Jean):** *"adicionar uma flag certificadora no Produto de Spec da Bancada, no sentido de informar se o modelo já é aceitável por parte da fábrica e exibir no card do produto de spec e outros locais um tipo de certificado Genesis Factory para sinalizar que o projeto agora tem suas especificações no modelo que a fábrica aceita e quando for promovido existe uma maior garantia de sucesso na fabricação."*
 
 ---
@@ -140,6 +140,26 @@ Uma tabela `spec_certificates` seria uma segunda fonte de verdade — e certific
 
 ---
 
-## 7. Estado
+## 7. Estado (atualizado 2026-09-05, após a implementação)
 
-Nada implementado. Este documento é o resultado da etapa **pesquisa + adversarial** da regra "pesquisa → adversarial → fechar GAPs → implementar → validar". Próximo passo: o Jean responder D1–D5.
+**Decisões do Jean:** D1(a) substitui o `ReadinessBadge` · D2(b) selo Connect separado · D3(b) projeto + produto · D4(a) nunca vira gate agora · D5(a) "Certificado Genesis Factory".
+
+**Implementado no branch `dev`, atrás de `FACTORY_CERTIFICATE=off`** (payload byte-idêntico ao legado com a flag OFF):
+
+| PR | Estado | Onde |
+|----|--------|------|
+| **PR1** | ✅ | `services/factoryCertificate.ts` — níveis `certified · certified_with_acks · stale · blocked · unknown`, checks C1/C2/C3/C4/C5/C7 |
+| **PR1.5** | ✅ | `services/specValidation.ts` — núcleo `assessSpecValidation()` extraído; `checkSpecValidationGate` virou a projeção `{ok}` dele → **fecha A2 por construção, com uma implementação só** |
+| **PR2** | ✅ | agregado `aggregateProductCertificate` (AND + `n/m`) em `GET /api/products`; lote `computeFactoryCertificates` (concorrência 6) em `GET /api/specs` |
+| **PR3** | ⏳ pendente | `components/FactoryCertificateBadge.tsx` + troca nos 3 pontos (card `/specs`, diálogo Promover, aba GAPs) |
+| **PR4** | ✅ | coerência selo↔dispatch (A1, matriz de 6 casos contra uma réplica de `runnerDispatch.ts:76-99`) e escopo de tenant (A8) |
+
+**Desvio consciente do §6:** o **cache** `(project_id, spec_hash)` **não** foi implementado. O custo é I/O local (não LLM); qualquer cache abre janela de "verde depois da edição", proibida por A5; e para conhecer o hash já é preciso ler o disco — o cache não pouparia o passo caro. Um prefetch em lote reescreveria os mesmos `WHERE/ORDER BY` do caminho unitário, ou seja, **A1 voltando pela porta de trás**. No lugar: concorrência limitada, best-effort por projeto.
+
+**Escopo do agregado do produto:** só projetos na Bancada (`draft`, `spec_submitted`, `pending_conversion`, reusando `SPEC_DECOMPOSABLE_STATUSES`), porque o selo responde *"quando eu promover, há maior garantia?"*.
+
+**Assimetria consciente da coerência:** `certified` ⇒ o dispatch não recusa por motivo de spec. O inverso vale para C1–C5, mas **não** para C7 (`project_type`): o dispatch não checa isso, e o selo ser mais estrito nunca cria falsa promessa.
+
+**Validação:** `factoryCertificate.test.ts` 26 · `specs.certificate.test.ts` 3 · `products.test.ts` 39 · `specValidation.test.ts` 12 · suíte completa da api **1295 passed / 1 skipped (115 arquivos)** · `tsc --noEmit` limpo.
+
+**Próximos passos:** PR3 (portal) e depois a decisão do Jean de ligar `FACTORY_CERTIFICATE=on` em prod — o selo só deve acender quando a tela estiver aprovada.

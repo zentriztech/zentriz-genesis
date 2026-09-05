@@ -504,56 +504,120 @@ export async function expireOverdueValidationRuns(pool: Pool): Promise<void> {
 export type SpecGateResult = { ok: true } | { ok: false; code: string; message: string };
 
 /**
+ * Avaliação do estado de validação da spec, **independente da env-flag** do gate.
+ *
+ * Existe porque o gate devolve `{ok:true}` de graça quando `SPEC_VALIDATION_GATE=off`
+ * (o default em prod) — quem quer *informar* o estado (Certificado Genesis Factory) não pode
+ * chamar o gate direto, senão pinta tudo de verde. Extraído para haver UMA implementação da
+ * regra: `checkSpecValidationGate` passou a ser a projeção `{ok}` desta função.
+ */
+export interface SpecValidationAssessment {
+  /** Hash do que está EM DISCO agora; `null` = nenhum arquivo legível (nada a validar). */
+  specHash: string | null;
+  /** Conteúdo lido no cálculo do hash (evita 2ª leitura de disco por quem também precisa do texto). */
+  files: Array<SpecFileRow & { content: string }>;
+  /** Run terminal do hash ATUAL (`null` = hash nunca validado). */
+  run: { id: string; status: string; ackedRole: string | null } | null;
+  /** Última run terminal de QUALQUER hash — distingue "nunca validou" de "verde ficou stale". */
+  latestRun: { id: string; status: string; specHash: string } | null;
+  /** Findings ATIVOS (triagem RFC-0005 aplicada quando possível). */
+  activeFindings: ValidationFinding[];
+  /** `enrichRunFindings` funcionou — sem isso, blocker triado NÃO pode ser descontado. */
+  triageApplied: boolean;
+  activeBlockers: number;
+  activeWarnings: number;
+  acked: boolean;
+  forcedByAdmin: boolean;
+  /** Veredito: motivo pelo qual o gate recusaria (`null` = passaria). */
+  block: { code: string; message: string } | null;
+}
+
+export async function assessSpecValidation(
+  db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  projectId: string,
+): Promise<SpecValidationAssessment> {
+  const empty = {
+    files: [] as Array<SpecFileRow & { content: string }>,
+    run: null, latestRun: null, activeFindings: [] as ValidationFinding[],
+    triageApplied: false, activeBlockers: 0, activeWarnings: 0, acked: false, forcedByAdmin: false,
+  };
+  const current = await computeCurrentSpecHash(db, projectId);
+  if (!current) {
+    return { ...empty, specHash: null,
+      block: { code: "SPEC_FILES_MISSING", message: "Spec sem arquivos legíveis — valide antes de promover." } };
+  }
+
+  // Uma consulta serve aos dois usos: a run do hash atual (o gate) e a última de qualquer hash
+  // (para saber se o certificado está VENCIDO ou se nunca existiu). `(spec_hash = $2) DESC` põe
+  // as do hash atual na frente → o `LIMIT 1` devolve exatamente o que o WHERE antigo devolvia.
+  const row = (await db.query(
+    `SELECT id, status, findings, acked_by, acked_role, spec_hash FROM spec_validation_runs
+      WHERE project_id = $1 AND status IN ('passed','failed')
+      ORDER BY (spec_hash = $2) DESC, created_at DESC LIMIT 1`,
+    [projectId, current.specHash],
+  )).rows[0];
+  const latestRun = row
+    ? { id: String(row.id), status: String(row.status), specHash: String(row.spec_hash) }
+    : null;
+  const base = { ...empty, specHash: current.specHash, files: current.files, latestRun };
+
+  if (!row || String(row.spec_hash) !== current.specHash) {
+    // hash atual nunca validado (inclui o caso "verde ficou stale após edição")
+    return { ...base, block: { code: "SPEC_NOT_VALIDATED",
+      message: "Spec não validada (ou editada após a última validação). Rode Validar e tente de novo." } };
+  }
+
+  const rawFindings = (row.findings ?? []) as ValidationFinding[];
+  // RFC-0005: só findings ATIVOS contam — ignorados/refutados (triagem viva, auditada) não bloqueiam.
+  const enriched = await enrichRunFindings(db, projectId, rawFindings).catch(() => null);
+  const findings: ValidationFinding[] = enriched ? enriched.filter((f) => !f.triage) : rawFindings;
+  // Sinal de ack = acked_role/acked_at — acked_by pode ser NULL legitimamente (token
+  // estático admin tem sub não-UUID; a identidade crua vive no snapshot da auditoria).
+  const acked = !!row.acked_role;
+  const forcedByAdmin = acked && row.acked_role === "zentriz_admin";
+  const activeBlockers = findings.filter((f) => f.severity === "blocker").length;
+  const activeWarnings = findings.filter((f) => f.severity === "warning").length;
+  const status = String(row.status);
+  const assessed: SpecValidationAssessment = {
+    ...base,
+    run: { id: String(row.id), status, ackedRole: (row.acked_role as string | null) ?? null },
+    activeFindings: findings, triageApplied: !!enriched,
+    activeBlockers, activeWarnings, acked, forcedByAdmin,
+    block: null,
+  };
+
+  if (status === "failed") {
+    // force do zentriz_admin passa NA HORA (inclusive por cima de warnings sem ack) — preservado
+    // do gate original, onde este caminho era um `return { ok: true }` antes do check de warnings.
+    if (forcedByAdmin) return assessed;
+    if (!(enriched && activeBlockers === 0)) {
+      // `enriched && activeBlockers === 0` = todos os blockers foram triados (auditado) → segue
+      return { ...assessed, block: { code: "SPEC_VALIDATION_BLOCKED",
+        message: `Validação reprovou com ${activeBlockers || "findings"} blocker(s) ativo(s). Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.` } };
+    }
+  }
+  if (activeWarnings > 0 && !acked) {
+    return { ...assessed, block: { code: "SPEC_WARNINGS_UNACKED",
+      message: "Validação passou com avisos — reconheça os findings (ack) antes de promover." } };
+  }
+  return assessed;
+}
+
+/**
  * Gate de validação no CHOKE-POINT (dispatchProjectRun + /run inline do pipeline.ts).
  * OFF por env (default) → sempre passa (byte-idêntico ao legado).
  * ON → exige run 'passed' para o HASH ATUAL, com regra de ack:
  *   • findings só info → passa;
  *   • com warnings → exige acked (qualquer papel);
  *   • run 'failed' (blockers) → só passa se acked por zentriz_admin (force, auditado).
+ *
+ * A REGRA vive em `assessSpecValidation` (uma implementação só); aqui fica apenas a flag.
  */
 export async function checkSpecValidationGate(
   db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
   projectId: string,
 ): Promise<SpecGateResult> {
   if (!specValidationGateEnabled()) return { ok: true };
-  const current = await computeCurrentSpecHash(db, projectId);
-  if (!current) return { ok: false, code: "SPEC_FILES_MISSING", message: "Spec sem arquivos legíveis — valide antes de promover." };
-
-  const run = (await db.query(
-    `SELECT id, status, findings, acked_by, acked_role FROM spec_validation_runs
-      WHERE project_id = $1 AND spec_hash = $2 AND status IN ('passed','failed')
-      ORDER BY created_at DESC LIMIT 1`,
-    [projectId, current.specHash],
-  )).rows[0];
-
-  if (!run) {
-    // hash atual nunca validado (inclui o caso "verde ficou stale após edição")
-    return { ok: false, code: "SPEC_NOT_VALIDATED",
-      message: "Spec não validada (ou editada após a última validação). Rode Validar e tente de novo." };
-  }
-  const rawFindings = (run.findings ?? []) as ValidationFinding[];
-  // RFC-0005: só findings ATIVOS contam — ignorados/refutados (triagem viva, auditada) não bloqueiam.
-  const enriched = await enrichRunFindings(db, projectId, rawFindings).catch(() => null);
-  const findings = enriched ? enriched.filter((f) => !f.triage) : rawFindings;
-  // Sinal de ack = acked_role/acked_at — acked_by pode ser NULL legitimamente (token
-  // estático admin tem sub não-UUID; a identidade crua vive no snapshot da auditoria).
-  const acked = !!run.acked_role;
-  const forcedByAdmin = acked && run.acked_role === "zentriz_admin";
-
-  if (run.status === "failed") {
-    if (forcedByAdmin) return { ok: true };
-    const activeBlockers = findings.filter((f) => f.severity === "blocker").length;
-    if (enriched && activeBlockers === 0) {
-      // todos os blockers foram triados (ignorados/refutados por tenant_admin, auditado) → segue
-    } else {
-      return { ok: false, code: "SPEC_VALIDATION_BLOCKED",
-        message: `Validação reprovou com ${activeBlockers || "findings"} blocker(s) ativo(s). Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.` };
-    }
-  }
-  const hasWarnings = findings.some((f) => f.severity === "warning");
-  if (hasWarnings && !acked) {
-    return { ok: false, code: "SPEC_WARNINGS_UNACKED",
-      message: "Validação passou com avisos — reconheça os findings (ack) antes de promover." };
-  }
-  return { ok: true };
+  const a = await assessSpecValidation(db, projectId);
+  return a.block ? { ok: false, code: a.block.code, message: a.block.message } : { ok: true };
 }

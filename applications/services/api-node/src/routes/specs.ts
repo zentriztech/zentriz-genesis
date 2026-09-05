@@ -12,6 +12,7 @@ import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
+import { computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
@@ -460,6 +461,14 @@ export async function specRoutes(app: FastifyInstance) {
       // antigo), degrada para as specs cruas — a listagem nunca quebra por causa disso.
       try {
         const enriched = await enrichSpecs(client, rows as unknown as SpecForEnrichment[]);
+        // Certificado Genesis Factory (flag OFF por padrão): só ANEXA um campo — com a flag
+        // desligada o payload é byte-idêntico ao legado. O escopo de tenant vem de `rows`
+        // (já filtrado acima), nunca de parâmetro do cliente (A8 / P0 de vazamento 2026-09-03).
+        if (factoryCertificateEnabled()) {
+          const certs = await computeFactoryCertificates(client as unknown as { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> }, enriched.map((s) => s.id))
+            .catch((err) => { request.log.warn({ err }, "factory certificate failed; specs sem selo"); return new Map(); });
+          return reply.send(enriched.map((s) => ({ ...s, factoryCertificate: certs.get(s.id) ?? null })));
+        }
         return reply.send(enriched);
       } catch (err) {
         request.log.warn({ err }, "spec enrichment failed; returning bare specs");
