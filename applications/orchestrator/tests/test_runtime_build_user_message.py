@@ -157,3 +157,64 @@ def test_build_system_prompt_lei2_critical_rules_at_start_and_end():
     assert "## INÍCIO — Regras críticas (LEI 2)" in out
     assert "## LEMBRETES FINAIS (LEI 2 — leia com atenção)" in out
     assert "NUNCA" in out and "<response>" in out
+
+
+# ── Contexto de PRODUTO (Fase 1, 2026-09-05) — defeito C: campos INERTES no montador ──────────────
+def _envelope_com_contexto_de_produto(**extra):
+    """Envelope de chat de spec com os 3 campos de contexto que a api passou a mandar."""
+    inputs = {
+        "spec_raw": "# tms\n\n## Contexto\nspec do projeto ancora.",
+        "product_map": "## MAPA DO PRODUTO — Venuxx V2 (28 projetos vigentes)\n| tms ← | ... |",
+        "sibling_files_context": "### ARQUIVO IRMÃO: identity/connect.yaml\nsystemId: identity",
+        "validation_report": "GAP ATIVO L-01: contrato de autenticação não declarado.",
+    }
+    inputs.update(extra)
+    return {"request_id": "req-ctx", "mode": "spec_chat_review", "task": "Revisar", "inputs": inputs}
+
+
+def test_contexto_de_produto_e_emitido_quando_context_emit_v2():
+    """Defeito C: os 3 campos chegavam em `inputs` e NUNCA eram emitidos no prompt."""
+    from orchestrator.agents.runtime import build_user_message
+    out = build_user_message(_envelope_com_contexto_de_produto(context_emit="v2"))
+    assert "## Mapa do Produto (SÓ LEITURA)" in out
+    assert "Venuxx V2" in out
+    assert "## Arquivos de Projetos Irmãos" in out
+    assert "systemId: identity" in out
+    assert "## Relatório de Validação / GAPs a resolver" in out
+    assert "GAP ATIVO L-01" in out
+    # A instrução anti-escrita-em-irmão precisa acompanhar o bloco (decisão D4: divergência = GAP).
+    assert "RELATADA no summary como GAP" in out
+
+
+def test_gaps_gastam_orcamento_antes_do_mapa_e_dos_irmaos():
+    """Ordem de gasto: validation_report > product_map > sibling_files_context."""
+    from orchestrator.agents.runtime import build_user_message
+    out = build_user_message(_envelope_com_contexto_de_produto(context_emit="v2"))
+    assert out.index("## Relatório de Validação") < out.index("## Mapa do Produto")
+    assert out.index("## Mapa do Produto") < out.index("## Arquivos de Projetos Irmãos")
+
+
+def test_sem_context_emit_prompt_e_byte_identico_ao_antigo():
+    """Flag OFF na api (sem `context_emit`): nada é emitido — deploy em qualquer ordem é seguro."""
+    from orchestrator.agents.runtime import build_user_message
+    com_campos = build_user_message(_envelope_com_contexto_de_produto())
+    env_limpo = _envelope_com_contexto_de_produto()
+    for k in ("product_map", "sibling_files_context", "validation_report"):
+        env_limpo["inputs"].pop(k)
+    assert com_campos == build_user_message(env_limpo)
+    assert "Mapa do Produto" not in com_campos
+
+
+def test_context_emit_desconhecido_nao_emite():
+    """Só a marca exata `v2` liga a emissão (fail-closed contra valor legado/aleatório)."""
+    from orchestrator.agents.runtime import build_user_message
+    out = build_user_message(_envelope_com_contexto_de_produto(context_emit="v1"))
+    assert "Mapa do Produto" not in out
+
+
+def test_campos_de_contexto_tem_piso_de_orcamento_proprio():
+    """Piso = o teto que a api usa hoje, para nada regredir quando o modelo é pequeno."""
+    from orchestrator.agents.runtime import _PROMPT_FIELD_FLOORS
+    assert _PROMPT_FIELD_FLOORS["sibling_files_context"] >= 14_000
+    assert _PROMPT_FIELD_FLOORS["product_map"] >= 10_000
+    assert _PROMPT_FIELD_FLOORS["validation_report"] >= 6_000

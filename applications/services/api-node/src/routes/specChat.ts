@@ -40,6 +40,7 @@ import {
 import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
+import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -109,8 +110,25 @@ interface ChatContext {
   findingsBlock: string; // "" quando nunca validado / sem findings
   findings: ValidationFinding[];
   derivedStatus: string;
+  /**
+   * Fase 1 (escopo de PRODUTO, flag `SPEC_CONTEXT_PRODUCT_SCOPE`): índice determinístico
+   * Produto > Projeto > arquivo. "" quando a flag está off, o produto tem 1 projeto vigente
+   * (custo zero no caso mais comum) ou o mapa não pôde ser montado.
+   */
+  productMapBlock: string;
+  /** Furos do contexto (spec ilegível, escopo divergente) — logados; não silenciados (GAP-10). */
+  contextWarnings: string[];
+  /**
+   * `true` = os blocos de contexto vão como CAMPOS PRÓPRIOS para o runtime emitir
+   * (`context_emit: "v2"`) e a api PARA de colá-los no `task`. Sem isto, ligar a emissão no
+   * runtime mandaria o mesmo texto duas vezes. Só liga junto com a flag.
+   */
+  emitV2: boolean;
 }
-const EMPTY_CTX: ChatContext = { siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated" };
+const EMPTY_CTX: ChatContext = {
+  siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated",
+  productMapBlock: "", contextWarnings: [], emitV2: false,
+};
 
 function fmtFinding(f: ValidationFinding): string {
   const loc = f.line ? `${f.file}:${f.line}` : f.file;
@@ -124,7 +142,17 @@ function fmtFinding(f: ValidationFinding): string {
  * (b) os findings da última run de validação (GAPs conhecidos). Best-effort: qualquer falha
  * devolve contexto vazio — jamais derruba a rota do chat.
  */
-async function loadChatContext(projectId: string, primaryContent: string): Promise<ChatContext> {
+async function loadChatContext(
+  projectId: string,
+  primaryContent: string,
+  /** Mensagem do humano — só usada na seleção por relevância do corpo dos irmãos (P2). */
+  userMessage = "",
+  /**
+   * P4: no chat POR-ARQUIVO o modelo recebe o MAPA (para saber onde aquele arquivo vive) mas NÃO o
+   * corpo dos irmãos — é edição pontual e o `/invoke/raw` tem teto próprio.
+   */
+  opts: { siblingBodies?: boolean } = {},
+): Promise<ChatContext> {
   try {
     const { computeCurrentSpecHash } = await import("../services/specValidation.js");
     const current = await computeCurrentSpecHash(pool, projectId);
@@ -171,7 +199,40 @@ async function loadChatContext(projectId: string, primaryContent: string): Promi
       }
       findingsBlock = block;
     }
-    return { siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated" };
+
+    // ── Fase 1: escopo de PRODUTO (flag off → nada abaixo roda; contexto byte-idêntico ao antigo) ──
+    let productMapBlock = "";
+    const contextWarnings: string[] = [];
+    let emitV2 = false;
+    if (productScopeEnabled()) {
+      emitV2 = true;
+      // Falha do mapa NÃO derruba o chat (mas também não fica invisível — GAP-10).
+      const map = await buildProductMap(pool, projectId).catch((e) => {
+        contextWarnings.push(`mapa do produto falhou: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      });
+      if (map) {
+        productMapBlock = map.block;
+        contextWarnings.push(...map.warnings);
+        // Corpo dos irmãos por relevância (P2), SOMANDO ao bloco de irmãos do mesmo projeto (que
+        // continua existindo; em prod ele é vazio porque 58/58 projetos têm 1 arquivo).
+        const picked = opts.siblingBodies === false
+          ? { block: "", included: [] as string[], omitted: [] as string[] }
+          : selectSiblingBodies(map, { findings, userMessage });
+        if (picked.block) siblingsBlock = siblingsBlock ? `${siblingsBlock}\n${picked.block}` : picked.block;
+        console.info(
+          `[SpecChat] contexto de produto: projeto=${projectId} produto=${map.productName ?? "—"} ` +
+          `projetos=${map.projects.length} corpos=${picked.included.length} omitidos=${picked.omitted.length} ` +
+          `mapa=${productMapBlock.length}c irmãos=${siblingsBlock.length}c`,
+        );
+      }
+      for (const w of contextWarnings) console.warn(`[SpecChat] ⚠️ contexto: ${w}`);
+    }
+
+    return {
+      siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated",
+      productMapBlock, contextWarnings, emitV2,
+    };
   } catch (e) {
     console.warn(`[SpecChat] loadChatContext falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
     return EMPTY_CTX;
@@ -198,7 +259,10 @@ function buildChatMessage(
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "CTO"}: ${m.content}`)
     .join("\n\n");
 
-  const contextSections = [
+  // Com `emitV2` (flag de produto ligada) os blocos viajam como CAMPOS e o runtime os emite com
+  // orçamento derivado do modelo — colá-los aqui TAMBÉM mandaria o mesmo texto duas vezes (era o
+  // que já acontecia de fato: `task` + `inputs`, sendo que os `inputs` eram inertes).
+  const contextSections = ctx.emitV2 ? "" : [
     ctx.siblingsBlock
       ? `\n\n─── ARQUIVOS IRMÃOS DO PRODUTO (SÓ LEITURA — contexto do Produto>Projeto>Spec) ───\n${ctx.siblingsBlock}`
       : "",
@@ -314,6 +378,11 @@ ${transcript}${contextSections}
       user_message: lastUser,
       sibling_files_context: ctx.siblingsBlock || undefined,
       validation_report: ctx.findingsBlock || undefined,
+      // Fase 1 (P1/P3): índice do produto + marca que autoriza o runtime a EMITIR estes campos
+      // (`build_user_message`). Sem a marca o runtime os ignora, como sempre fez — assim api e
+      // agents podem ser deployados em qualquer ordem sem duplicar nem perder contexto.
+      product_map: ctx.productMapBlock || undefined,
+      context_emit: ctx.emitV2 ? "v2" : undefined,
       resolve_gaps: resolveGaps || undefined,
       input_type: "spec_refinement",
       constraints: resolveGaps
@@ -354,10 +423,15 @@ const RAW_FILE_SYSTEM = [
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código, sem comentários, sem preâmbulo.",
 ].join(" ");
 
+/** P4: teto do contexto extra (mapa + GAPs) no modo por-arquivo — o `/invoke/raw` tem max_tokens 8k. */
+const RAW_FILE_CONTEXT_BUDGET = 12_000;
+
 function buildRawFileRequest(
   content: string,
   messages: ChatMessage[],
   filePath: string,
+  /** Fase 1 P4: o chat por-arquivo rodava com contexto ZERO (defeito E) — era o caminho mais cego. */
+  ctx: ChatContext = EMPTY_CTX,
 ): Record<string, unknown> {
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
@@ -365,9 +439,18 @@ function buildRawFileRequest(
   const transcript = history
     .map((m) => `${m.role === "user" ? "USUÁRIO" : "EDITOR"}: ${m.content}`)
     .join("\n");
+  // Mapa + GAPs entram como CONTEXTO SÓ-LEITURA e cabem no orçamento; a edição continua sendo de UM
+  // arquivo (o retorno é um único documento — o modelo é fisicamente incapaz de tocar num irmão).
+  const contextBlock = ctx.emitV2
+    ? [ctx.productMapBlock, ctx.findingsBlock ? `GAPs conhecidos desta spec:\n${ctx.findingsBlock}` : ""]
+        .filter(Boolean).join("\n\n").slice(0, RAW_FILE_CONTEXT_BUDGET)
+    : "";
   const userMessage = [
     `ARQUIVO: ${filePath}`,
     "",
+    contextBlock
+      ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
+      : "",
     "--- CONTEÚDO ATUAL ---",
     content,
     "--- FIM ---",
@@ -563,7 +646,7 @@ export async function dispatchResolveGapsJob(opts: {
   agentsUrl: string;
   llm: Record<string, unknown>;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS" }> {
-  const ctx = await loadChatContext(opts.projectId, opts.specMarkdown);
+  const ctx = await loadChatContext(opts.projectId, opts.specMarkdown, opts.userMessage);
   if (ctx.findings.length === 0) return { ok: false, code: "NO_GAPS" };
 
   _chatJobs.set(opts.jobId, {
@@ -676,7 +759,12 @@ export async function specChatRoutes(app: FastifyInstance) {
 
       // Onda 1: no modo SPEC INTEIRA com projeto, carrega contexto SÓ-LEITURA (irmãos + GAPs)
       // para o CTO agir com precisão. Best-effort (falha → contexto vazio, sem derrubar a rota).
-      const ctx = projectId && !filePath ? await loadChatContext(projectId, specMarkdown) : EMPTY_CTX;
+      // Fase 1 (P4): o modo POR-ARQUIVO deixa de rodar cego — recebe o MAPA do produto e os GAPs
+      // (sem corpo de irmãos). Com a flag off ambos os caminhos ficam como estavam.
+      const loadCtx = projectId && (!filePath || productScopeEnabled());
+      const ctx = loadCtx
+        ? await loadChatContext(projectId!, specMarkdown, lastUser ?? "", { siblingBodies: !filePath })
+        : EMPTY_CTX;
 
       // Resolver GAPs sem findings em aberto = nada a fazer → erro claro (não gera turno vazio).
       if (resolveGaps && ctx.findings.length === 0) {
@@ -714,7 +802,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId, tenantId: user.tenantId }));
       if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
-        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath), ...llm }, agentsUrl);
+        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx), ...llm }, agentsUrl);
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).

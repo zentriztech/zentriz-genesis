@@ -394,3 +394,95 @@ describe("GET /api/spec-chat/history — o chat deixa de nascer vazio", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+// ── Fase 1: escopo de PRODUTO (SPEC_CONTEXT_PRODUCT_SCOPE) ─────────────────────
+// O que estes testes protegem: (a) com a flag OFF o envelope é o de ANTES (deploy de api e agents
+// em qualquer ordem é seguro); (b) com ON os blocos viajam como CAMPOS PRÓPRIOS e a api PARA de
+// colá-los no `task` (senão o runtime, que agora os emite, mandaria o mesmo texto duas vezes);
+// (c) o chat por-arquivo — que rodava com contexto ZERO (defeito E) — passa a receber o mapa.
+describe("POST /api/spec-chat — Fase 1: contexto de PRODUTO", () => {
+  const PRODUCT = "66666666-6666-4666-8666-666666666666";
+  const SIB = "77777777-7777-4777-8777-777777777777";
+  const FINDINGS = [
+    { file: "tms.md", line: 3, severity: "blocker", title: "Contrato de auth ausente", rationale: "", source: "stage_b" },
+  ];
+  /** Responde às 4 consultas do productContext + acesso + última validação. */
+  const withProduct = (sql: string) => {
+    const s = sql.replace(/\s+/g, " ");
+    if (s.includes("pr.name AS product_name")) {
+      return { rows: [{ id: PROJ, title: "tms", status: "on_bench", product_id: PRODUCT, tenant_id: TENANT, created_by: USER_ID, product_name: "Venuxx V2" }] };
+    }
+    if (s.includes("p.extra->>'project_type'")) {
+      return { rows: [
+        { id: PROJ, title: "tms", status: "on_bench", project_type: "backend_api_python" },
+        { id: SIB, title: "identity", status: "accepted", project_type: "backend_api_python" },
+      ] };
+    }
+    if (s.includes("FROM project_triggers")) return { rows: [{ project_id: PROJ, trigger_project_id: SIB }] };
+    if (s.includes("FROM project_spec_files")) return { rows: [] };
+    if (s.includes("spec_validation_runs")) return { rows: [{ status: "failed", findings: FINDINGS }] };
+    if (s.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+    return { rows: [] };
+  };
+
+  beforeEach(() => { queryHandler = withProduct; delete process.env.SPEC_CONTEXT_PRODUCT_SCOPE; });
+
+  it("flag OFF: nenhum campo novo no envelope e o contexto segue colado no task (byte-idêntico)", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# tms", messages: msg("detalhe o modelo"), projectId: PROJ },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.inputs.context_emit).toBeUndefined();
+    expect(body.inputs.product_map).toBeUndefined();
+    // Comportamento antigo preservado: o bloco (com o finding) continua COLADO no task.
+    expect(body.task).toContain("─── RELATÓRIO DE VALIDAÇÃO / GAPs A RESOLVER");
+    expect(body.task).toContain("Contrato de auth ausente");
+  });
+
+  it("flag ON: mapa vai em inputs.product_map com context_emit=v2 e SAI do task (sem duplicar)", async () => {
+    process.env.SPEC_CONTEXT_PRODUCT_SCOPE = "on";
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# tms", messages: msg("detalhe o modelo"), projectId: PROJ },
+    });
+    expect(res.statusCode).toBe(202);
+    const body = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/cto/async"))!.body);
+    expect(body.inputs.context_emit).toBe("v2");
+    expect(body.inputs.product_map).toContain("MAPA DO PRODUTO");
+    expect(body.inputs.product_map).toContain("Venuxx V2");
+    expect(body.inputs.product_map).toContain("identity"); // o irmão que o CTO nunca viu
+    expect(body.inputs.validation_report).toContain("Contrato de auth ausente");
+    // O `task` não repete o que agora é campo próprio (o runtime emite uma vez). A menção
+    // "RELATÓRIO DE VALIDAÇÃO" segue no texto fixo do prompt; o que não pode voltar é o BLOCO.
+    expect(body.task).not.toContain("─── RELATÓRIO DE VALIDAÇÃO / GAPs A RESOLVER");
+    expect(body.task).not.toContain("Contrato de auth ausente");
+    expect(body.task).not.toContain("MAPA DO PRODUTO");
+  });
+
+  it("flag ON no modo por-arquivo: o mapa entra como contexto só-leitura (fecha o defeito E)", async () => {
+    process.env.SPEC_CONTEXT_PRODUCT_SCOPE = "on";
+    rawResponse = JSON.stringify({ response: "# tms\n\nrevisado" });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# tms", messages: msg("ajuste"), projectId: PROJ, filePath: "tms.md" },
+    });
+    expect(res.statusCode).toBe(202);
+    const rawCall = httpPostCalls.find((c) => c.url.includes("/invoke/raw"));
+    const prompt = JSON.parse(rawCall!.body).user_message as string;
+    expect(prompt).toContain("CONTEXTO SÓ-LEITURA");
+    expect(prompt).toContain("MAPA DO PRODUTO");
+    expect(prompt).toContain("NÃO o copie para o arquivo");
+  });
+
+  it("flag OFF no modo por-arquivo: contexto zero (não regride nem gasta contexto)", async () => {
+    rawResponse = JSON.stringify({ response: "# tms\n\nrevisado" });
+    await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# tms", messages: msg("ajuste"), projectId: PROJ, filePath: "tms.md" },
+    });
+    const prompt = JSON.parse(httpPostCalls.find((c) => c.url.includes("/invoke/raw"))!.body).user_message as string;
+    expect(prompt).not.toContain("CONTEXTO SÓ-LEITURA");
+  });
+});

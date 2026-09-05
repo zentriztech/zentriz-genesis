@@ -218,6 +218,13 @@ _PROMPT_FIELD_FLOORS: dict[str, int] = {
     "engineer_proposal": 15_000,
     "charter": 15_000,
     "backlog": 15_000,
+    # Fase 1 do "conhecer o PRODUTO inteiro" (2026-09-05). Os pisos são EXATAMENTE os tetos que a api
+    # aplicava sozinha (`specChat.ts`: SIBLINGS_BUDGET=14.000, FINDINGS_BUDGET=6.000) — nada regride —
+    # e agora escalam com `max_output` como os demais campos. O `product_map` é o índice determinístico
+    # Produto>Projeto>arquivo (28 projetos ≈ 6–10 KB; 10.000 é folga).
+    "product_map": 10_000,
+    "sibling_files_context": 14_000,
+    "validation_report": 6_000,
 }
 _PROMPT_OUTPUT_RESERVE_TOKENS = 8_000   # <thinking> + envelope JSON + summary/evidence
 _PROMPT_SAFETY_FACTOR = 0.65            # escape JSON + PT-BR (~3,3 chars/token) + o CTO ENRIQUECE a spec
@@ -384,6 +391,38 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
             )
         else:
             parts.append(f"## Product Spec Atual\n{_take(_ps, 'product_spec')}")
+    # ── Contexto de PRODUTO (Fase 1, 2026-09-05) — fecha o defeito C ───────────────────────────────
+    # `sibling_files_context` e `validation_report` chegavam em `inputs` desde a Onda 1 e NUNCA eram
+    # emitidos aqui (nenhum `envelope.get(...)`): só apareciam no prompt porque a api TAMBÉM os colava
+    # no `task` — mesma classe do bug do envelope aninhado. Agora são campos de primeira classe, com
+    # orçamento derivado do modelo, e a api para de duplicá-los.
+    # A emissão é condicionada a `context_emit == "v2"` (marca que a api só envia com
+    # `SPEC_CONTEXT_PRODUCT_SCOPE=on`): com a flag off o prompt segue byte-idêntico e api/agents podem
+    # ser deployados em qualquer ordem sem mandar o mesmo texto duas vezes nem perder contexto.
+    if str(envelope.get("context_emit") or "") == "v2":
+        _vr = envelope.get("validation_report") or ""          # GAPs = o trabalho → gasta primeiro
+        _pm = envelope.get("product_map") or ""                # índice do produto (barato)
+        _sb = envelope.get("sibling_files_context") or ""      # corpos selecionados por relevância
+        if _vr:
+            parts.append(
+                "## Relatório de Validação / GAPs a resolver (adversarial)\n"
+                + _take(_vr, "validation_report")
+            )
+        if _pm:
+            parts.append(
+                "## Mapa do Produto (SÓ LEITURA)\n"
+                "Hierarquia Produto > Projeto > arquivo de spec. Serve para você manter os contratos "
+                "entre projetos irmãos coerentes — não é conteúdo a copiar.\n"
+                + _take(_pm, "product_map")
+            )
+        if _sb:
+            parts.append(
+                "## Arquivos de Projetos Irmãos (SÓ LEITURA — NÃO reescreva, NÃO copie)\n"
+                "Divergência de contrato com um irmão deve ser RELATADA no summary como GAP, nunca "
+                "'corrigida' dentro do documento que você está editando.\n"
+                + _take(_sb, "sibling_files_context")
+            )
+
     # O orçamento global é GASTO em ordem de prioridade (charter > backlog > engineer), mas os blocos
     # são EMITIDOS na ordem histórica (engineer, charter, backlog) — mexer na ordem do prompt seria
     # uma mudança de comportamento não pedida e quebraria a garantia de byte-identidade da flag off.
