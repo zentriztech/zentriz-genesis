@@ -5,6 +5,7 @@ import { authRoutes } from "./routes/auth.js";
 import { projectRoutes } from "./routes/projects.js";
 import { specRoutes } from "./routes/specs.js";
 import { specChatRoutes } from "./routes/specChat.js";
+import { specAutonomyRoutes } from "./routes/specAutonomy.js";
 import { specQuestionRoutes } from "./routes/specQuestions.js";
 import { specFileRoutes } from "./routes/specFiles.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
@@ -87,6 +88,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(projectRoutes);
   await app.register(specRoutes);
   await app.register(specChatRoutes);
+  await app.register(specAutonomyRoutes); // Modo autônomo: Resolver GAPs → Salvar → Validar × N
   await app.register(specQuestionRoutes); // D3: perguntas da fábrica ↔ respostas humanas
   await app.register(specFileRoutes);
   await app.register(dashboardRoutes);

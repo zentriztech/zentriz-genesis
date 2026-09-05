@@ -534,6 +534,44 @@ function runChatJob(jobId: string, message: Record<string, unknown>, agentsUrl: 
  *     pollers a mesma resposta podia ser inserida duas vezes.
  */
 
+/**
+ * MODO AUTÔNOMO (2026-09-05): dispara "Resolver GAPs" pelo MESMO caminho do botão manual.
+ *
+ * Existe para o `specAutonomy` não reimplementar contexto (irmãos + findings ativos), prompt,
+ * persistência do turno do usuário nem o gate H4 — se o servidor resolvesse GAPs por um caminho
+ * paralelo, o autônomo divergiria do manual no primeiro ajuste de prompt. As checagens de
+ * autorização (dono/tenant, `svc:"runner"`, `denyCreationForManagement`) ficam na ROTA do
+ * autônomo: aqui já se assume um pedido autorizado.
+ *
+ * Devolve `NO_GAPS` quando não há finding ATIVO — para o laço isso é SUCESSO, não erro.
+ */
+export async function dispatchResolveGapsJob(opts: {
+  jobId: string;
+  projectId: string;
+  tenantId: string | null;
+  ownerUserId: string;
+  specMarkdown: string;
+  userMessage: string;
+  agentsUrl: string;
+  llm: Record<string, unknown>;
+}): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS" }> {
+  const ctx = await loadChatContext(opts.projectId, opts.specMarkdown);
+  if (ctx.findings.length === 0) return { ok: false, code: "NO_GAPS" };
+
+  _chatJobs.set(opts.jobId, {
+    id: opts.jobId, status: "pending", createdAt: Date.now(),
+    projectId: opts.projectId, ownerUserId: opts.ownerUserId,
+    sentFilePath: null, sentBaseSha: null,
+  });
+  await createSpecChatJob(pool, {
+    id: opts.jobId, projectId: opts.projectId, tenantId: opts.tenantId, ownerUserId: opts.ownerUserId,
+    kind: "resolve_gaps", filePath: null, baseSha: null, baseSpecSha: sha256(opts.specMarkdown),
+    userMessage: opts.userMessage,
+  });
+  runChatJob(opts.jobId, { ...buildChatMessage(opts.specMarkdown, [], ctx, true), ...opts.llm }, opts.agentsUrl);
+  return { ok: true, gaps: ctx.findings.length };
+}
+
 /** Traduz o estado do banco para o contrato da rota (o cliente só conhece 4 estados). */
 function wireStatus(status: SpecChatJobStatus): "pending" | "running" | "done" | "error" {
   if (status === "done") return "done";

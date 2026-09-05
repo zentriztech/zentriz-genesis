@@ -90,6 +90,10 @@ try {
     // a ter `agents_job_id`; os demais ficam para o specChatWorker resolver por probe.
     const { reapOrphanSpecChatJobs } = await import("./services/specChatJobs.js");
     await reapOrphanSpecChatJobs(pool).catch((e) => console.error("[boot] reapOrphanSpecChatJobs:", e));
+    // Migração 090: o laço autônomo é RETOMÁVEL do banco (o tick continua de onde parou) — aqui só
+    // encerramos o caso irrecuperável: rodada que morreu ENTRE o claim e o registro do job do CTO.
+    const { reapAutonomyRuns } = await import("./services/specAutonomy.js");
+    await reapAutonomyRuns(pool).catch((e) => console.error("[boot] reapAutonomyRuns:", e));
   }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);
