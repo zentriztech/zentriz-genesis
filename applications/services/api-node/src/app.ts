@@ -8,6 +8,7 @@ import { specChatRoutes } from "./routes/specChat.js";
 import { specAutonomyRoutes } from "./routes/specAutonomy.js";
 import { specQuestionRoutes } from "./routes/specQuestions.js";
 import { specFileRoutes } from "./routes/specFiles.js";
+import { specSplitRoutes } from "./routes/specSplit.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { tenantRoutes } from "./routes/tenants.js";
@@ -91,6 +92,7 @@ export async function buildApp(opts?: { logger?: boolean }): Promise<FastifyInst
   await app.register(specAutonomyRoutes); // Modo autônomo: Resolver GAPs → Salvar → Validar × N
   await app.register(specQuestionRoutes); // D3: perguntas da fábrica ↔ respostas humanas
   await app.register(specFileRoutes);
+  await app.register(specSplitRoutes); // F2/PR-3: divisão agêntica da spec monolítica em arquivos
   await app.register(dashboardRoutes);
   await app.register(catalogRoutes);
   await app.register(tenantRoutes);

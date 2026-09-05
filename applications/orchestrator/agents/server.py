@@ -628,6 +628,100 @@ def get_product_architect_status(job_id: str):
     return {"jobId": job_id, "status": "running", "elapsed": elapsed}
 
 
+# ── Spec Split (F2/PR-3) — UMA spec monolítica → N arquivos, por agentes ─────────
+# Mesmo par do product_architect (PASSO 1 arquiteto decide a estrutura; PASSO 2 um redator por
+# arquivo), mas dentro de UM projeto: em vez de gerar N specs novas, reorganiza a spec existente em
+# arquivos temáticos. Motivo: a spec de 98k chars não cabe na SAÍDA de nenhum modelo (teto 64k
+# tokens) → toda revisão do CTO era truncada. PROPÕE, nunca grava: a api-node aplica depois do
+# humano aprovar na Bancada.
+
+def _run_spec_split(spec_md: str, model_id: str, usage_project_id: str | None = None,
+                    llm_cfg: dict | None = None, project_name: str = "",
+                    project_type: str = "") -> dict:
+    """Chama split_spec_into_files com call_bedrock_direct como llm_fn.
+
+    Agrega o consumo de TODAS as chamadas (1-2 do arquiteto + N+1 dos redatores, estas em
+    ThreadPoolExecutor) em result["usage"] — a api persiste para telemetria de custo (lição do G5:
+    o que não reporta usage fica invisível no medidor).
+    """
+    from orchestrator.spec_file_splitter import split_spec_into_files
+    from orchestrator.agents.runtime import call_bedrock_direct, _UsageCollector, collect_usage
+
+    max_tokens = int(os.environ.get("SPLITTER_MAX_TOKENS", "32000"))
+    collector = _UsageCollector()
+
+    def _llm(system: str, user: str, mid: str) -> str:
+        ml = (mid or "").lower()
+        temp = 1.0 if any(m in ml for m in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-4", "sonnet-5", "fable-5")) else 0.2
+        # O sink é instalado AQUI (dentro de cada worker do PASSO 2): contextvars não propagam
+        # para threads de um Executor. O coletor é thread-safe.
+        with collect_usage(collector):
+            return call_bedrock_direct(system=system, user=user, model_id=mid,
+                                       max_tokens=max_tokens, temperature=temp,
+                                       usage_project_id=usage_project_id,
+                                       usage_agent="spec_split", llm_cfg=llm_cfg)
+
+    result = split_spec_into_files(spec_md, llm_fn=_llm, model_id=model_id,
+                                   project_name=project_name, project_type=project_type)
+    if isinstance(result, dict):
+        result["usage"] = collector.totals()
+    return result
+
+
+def _run_spec_split_async(job_id: str, body: dict) -> None:
+    """Roda a divisão da spec numa thread e guarda o resultado em _async_jobs."""
+    try:
+        spec_md = (body.get("spec_md") or body.get("spec_text") or "").strip()
+        if not spec_md:
+            raise ValueError("spec_md (o texto da spec atual) é obrigatório")
+        model_id = body.get("model_id") or os.environ.get("CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-6")
+        llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
+        result = _run_spec_split(spec_md, model_id,
+                                 usage_project_id=(body.get("originProjectId") or None),
+                                 llm_cfg=llm_cfg,
+                                 project_name=(body.get("project_name") or ""),
+                                 project_type=(body.get("project_type") or ""))
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "done"
+                _async_jobs[job_id]["result"] = result
+    except Exception as e:
+        # SpecSplitError traz .code estável (SPEC_SPLIT_*) — a UI mostra o motivo, não "erro".
+        code = getattr(e, "code", None)
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "error"
+                _async_jobs[job_id]["error"] = (f"[{code}] " if code else "") + str(e)[:500]
+
+
+@app.post("/invoke/spec_split/async")
+def invoke_spec_split_async(body: dict):
+    """Inicia a divisão da spec em background. Retorna jobId imediatamente.
+    Poll GET /invoke/spec_split/status/{job_id}. Guardrail: PROPÕE, não grava."""
+    _cleanup_old_jobs()
+    job_id = f"ss-{uuid.uuid4().hex[:12]}"
+    with _jobs_lock:
+        _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
+    thread = threading.Thread(target=_run_spec_split_async, args=(job_id, body), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+
+@app.get("/invoke/spec_split/status/{job_id}")
+def get_spec_split_status(job_id: str):
+    """Poll do job de divisão. Retorna {status, result} (proposta) ou {status, error}."""
+    with _jobs_lock:
+        job = _async_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    elapsed = int(time.time() - job.get("created_at", time.time()))
+    if job["status"] == "done":
+        return {"jobId": job_id, "status": "done", "result": job.get("result"), "elapsed": elapsed}
+    if job["status"] == "error":
+        return {"jobId": job_id, "status": "error", "error": job.get("error"), "elapsed": elapsed}
+    return {"jobId": job_id, "status": "running", "elapsed": elapsed}
+
+
 # ── Spec Validator (RFC-0004 F4, estágio B) — refutação adversarial SEM ferramentas ──
 
 def _run_spec_validator_async(job_id: str, body: dict) -> None:

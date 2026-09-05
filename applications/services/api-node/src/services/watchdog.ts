@@ -526,6 +526,13 @@ async function runWatchdogCycle(): Promise<void> {
       await expireOverdueProposals(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueProposals:", e));
     }
 
+    // 0f-bis. F2/PR-3 (migração 093): mesmo backstop para a DIVISÃO da spec — deadline_at (40 min,
+    // alinhado ao TTL de 45 min do job nos agents) + purga de payload de proposta nunca decidida.
+    {
+      const { expireOverdueSplits } = await import("./specSplit.js");
+      await expireOverdueSplits(pool).catch((e) => console.error("[Watchdog] Erro em expireOverdueSplits:", e));
+    }
+
     // 0g. Escalada de projetos TRAVADOS (furo 2026-08-31: alerta de bloqueio era tiro único;
     // projeto preso em blocked_cyborg por 2 dias sem ninguém perceber). Re-alerta o ops por
     // e-mail enquanto o projeto seguir parado (6h, depois a cada 24h, máx. 3). Estado em

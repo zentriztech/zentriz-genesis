@@ -17,6 +17,7 @@
 import { pool } from "../db/client.js";
 import { collectSpecChatJobsTick } from "./specChatJobs.js";
 import { advanceAutonomyRunsTick } from "./specAutonomy.js";
+import { collectSpecSplitsTick } from "./specSplit.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
 /** 20 s: barato (só toca jobs órfãos) e rápido o bastante para o usuário que volta à tela. */
@@ -43,6 +44,20 @@ async function probeAgents(agentsJobId: string): Promise<{ status: string; resul
   }
 }
 
+/** Mesmo probe, outro endpoint: a divisão da spec tem job próprio no serviço agents. */
+async function probeSpecSplit(agentsJobId: string) {
+  const base = (process.env.API_AGENTS_URL ?? "").trim().replace(/\/$/, "");
+  if (!base) throw new Error("API_AGENTS_URL não configurado");
+  try {
+    const text = await httpGet(`${base}/invoke/spec_split/status/${agentsJobId}`, 60_000);
+    return JSON.parse(text) as { status: string; result?: Record<string, unknown>; error?: string };
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    if (/\b404\b/.test(m) || /not\s*found/i.test(m)) return "not_found" as const;
+    throw e;
+  }
+}
+
 async function tick(): Promise<void> {
   const out = await collectSpecChatJobsTick(pool, probeAgents, extractSpecMarkdown);
   if (out.collected || out.lost || out.expired) {
@@ -55,6 +70,15 @@ async function tick(): Promise<void> {
   const auto = await advanceAutonomyRunsTick(pool);
   if (auto.advanced) {
     console.info(`[SpecChatWorker] modo autônomo: ${auto.advanced}/${auto.scanned} laço(s) avançado(s).`);
+  }
+  // F2/PR-3 (migração 093): mesma classe de furo para a DIVISÃO da spec — são ~10 chamadas de LLM
+  // por proposta, e um deploy no meio as jogaria fora. Endpoint próprio nos agents (spec_split).
+  const split = await collectSpecSplitsTick(pool, probeSpecSplit).catch((e) => {
+    console.warn(`[SpecChatWorker] coleta de divisões falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return { scanned: 0, collected: 0, lost: 0 };
+  });
+  if (split.collected || split.lost) {
+    console.info(`[SpecChatWorker] divisão de spec: ${split.collected} coletada(s), ${split.lost} perdida(s) de ${split.scanned} órfã(s).`);
   }
 }
 
