@@ -39,6 +39,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { apiGet, apiPost, apiDeleteJson, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
+import { ProductCertificateChip, type ProductFactoryCertificate } from "@/components/FactoryCertificate";
 
 interface ProductRow {
   id: string;
@@ -52,6 +53,8 @@ interface ProductRow {
   is_inbox?: boolean;
   /** §4.15: true = produto homônimo de um App solo (auto-criado ao promover do inbox ou na migração 064). */
   solo_app?: boolean;
+  /** Certificado Genesis Factory agregado (AND dos projetos na Bancada). Ausente com a flag off. */
+  factoryCertificate?: ProductFactoryCertificate | null;
 }
 
 // Rótulo + cor do ciclo de vida do produto (Bancada vs fábrica vs terminal).
@@ -235,10 +238,16 @@ function ProductsPageInner() {
                         {p.description}
                       </Typography>
                     )}
-                    <Chip
-                      label={`${p.project_count} projeto${p.project_count !== 1 ? "s" : ""}`}
-                      size="small" variant="outlined" sx={{ fontSize: "0.62rem", height: 20 }}
-                    />
+                    <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                      <Chip
+                        label={`${p.project_count} projeto${p.project_count !== 1 ? "s" : ""}`}
+                        size="small" variant="outlined" sx={{ fontSize: "0.62rem", height: 20 }}
+                      />
+                      {/* A6: agregado em AND, sempre com n/m explícito (nunca porcentagem). */}
+                      {p.factoryCertificate && p.factoryCertificate.total > 0 && (
+                        <ProductCertificateChip certificate={p.factoryCertificate} />
+                      )}
+                    </Stack>
                   </CardContent>
                 </CardActionArea>
                 {/* Promover produto inteiro — só quando ainda na Bancada (draft). Operação: master OK.

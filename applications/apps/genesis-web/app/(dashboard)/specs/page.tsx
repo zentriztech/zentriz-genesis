@@ -65,6 +65,7 @@ import { authStore } from "@/stores/authStore";
 import { projectsStore } from "@/stores/projectsStore";
 import { DecomposeDialog, fmtUsd, type DecomposeSpecRef, type ProposalSource } from "@/components/DecomposeDialog";
 import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
+import { FactoryCertificateBadge, isCertified, type FactoryCertificate } from "@/components/FactoryCertificate";
 import { ResourceBadges } from "@/components/ResourceBadges";
 
 interface SpecItem {
@@ -87,6 +88,9 @@ interface SpecItem {
   gapCount?: number | null;
   gapCountIgnored?: number;
   gapCountRefuted?: number;
+  // Certificado Genesis Factory — só vem quando FACTORY_CERTIFICATE=on. Ausente/`null`
+  // (flag off ou falha no cálculo) → a tela cai no readiness legado.
+  factoryCertificate?: FactoryCertificate | null;
 }
 // Onda 4 — GET /api/products/proposals (tenant-scoped). Uma proposta é o job do Product
 // Architect: em análise (pending/running), pronta para revisão (done sem consumo), salva
@@ -451,14 +455,18 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   }, [specs]);
 
   // E1 · Board de triagem — duas colunas de Bancada por prontidão + uma coluna do que já
-  // foi promovido. "Pronto para promover" = readiness.level === "ready" (título+tech+deps ok).
-  // "Rascunho" = todo o resto (incompleta/quase, ou sem enriquecimento). "Promovido" vem do
+  // foi promovido. "Pronto para promover" = **Certificado Genesis Factory** quando ele existe
+  // (D1a: é o veredito dos gates reais); senão cai no readiness legado (readiness.level ===
+  // "ready", só título+tech+deps). "Rascunho" = todo o resto. "Promovido" vem do
   // projectsStore (já escopado por tenant) filtrando fora os status pré-fábrica.
   const triage = useMemo(() => {
     const rascunho: SpecItem[] = [];
     const pronto: SpecItem[] = [];
     for (const s of specs) {
-      if (s.readiness?.level === "ready") pronto.push(s);
+      const ok = s.factoryCertificate
+        ? isCertified(s.factoryCertificate.level)
+        : s.readiness?.level === "ready";
+      if (ok) pronto.push(s);
       else rascunho.push(s);
     }
     return { rascunho, pronto };
@@ -475,7 +483,11 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
               <Typography variant="subtitle2" fontWeight={600}>{s.title}</Typography>
               <Chip label={specStatusLabel(s.status)} size="small" color="default" sx={{ fontSize: "0.62rem", height: 18 }} />
-              {s.readiness && <ReadinessBadge readiness={s.readiness} />}
+              {/* D1(a): o Certificado Genesis Factory SUBSTITUI o readiness quando existe —
+                  dois selos concorrentes confundem, e o readiness é o que mente hoje. */}
+              {s.factoryCertificate
+                ? <FactoryCertificateBadge certificate={s.factoryCertificate} />
+                : s.readiness && <ReadinessBadge readiness={s.readiness} />}
               {/* Onda 3 (c): aviso de GAPs em aberto na validação da spec. */}
               <GapWarningChip count={s.gapCount ?? 0} ignored={s.gapCountIgnored ?? 0} />
               {/* Onda 4: há uma proposta de decomposição PRONTA desta spec → clique reabre a revisão. */}
@@ -863,7 +875,13 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             Esta ação dispara o pipeline — confira a prontidão e a estimativa antes.
           </Typography>
 
-          {promoteTarget?.readiness && (
+          {/* D1(a) + D3(b): no momento da decisão, quem fala é o certificado (gates reais). */}
+          {promoteTarget?.factoryCertificate ? (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+              <Typography variant="caption" color="text.secondary">Certificado:</Typography>
+              <FactoryCertificateBadge certificate={promoteTarget.factoryCertificate} />
+            </Stack>
+          ) : promoteTarget?.readiness && (
             <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
               <Typography variant="caption" color="text.secondary">Prontidão:</Typography>
               <ReadinessBadge readiness={promoteTarget.readiness} />
@@ -876,7 +894,20 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             </Stack>
           )}
 
-          {promoteTarget?.readiness && promoteTarget.readiness.level !== "ready" && (
+          {/* A11: o certificado NUNCA é gate — o aviso informa, o botão continua liberado. */}
+          {promoteTarget?.factoryCertificate ? (
+            !isCertified(promoteTarget.factoryCertificate.level) && (
+              <Alert
+                severity={promoteTarget.factoryCertificate.level === "blocked" ? "error" : "warning"}
+                sx={{ mt: 1.5, py: 0.5 }}
+              >
+                {promoteTarget.factoryCertificate.message}{" "}
+                {promoteTarget.factoryCertificate.gateEnforced
+                  ? "A fábrica deve recusar esta promoção por motivo de spec — abra o certificado acima para ver o que falta."
+                  : "Como o bloqueio por spec está desligado, a promoção segue permitida — abra o certificado acima para ver o que falta."}
+              </Alert>
+            )
+          ) : promoteTarget?.readiness && promoteTarget.readiness.level !== "ready" && (
             <Alert severity="warning" sx={{ mt: 1.5, py: 0.5 }}>
               Esta SPEC ainda não passou no pré-flight. Você pode promover mesmo assim, mas a fábrica
               pode barrar dependências não concluídas. Abra a prontidão acima para ver o que falta.

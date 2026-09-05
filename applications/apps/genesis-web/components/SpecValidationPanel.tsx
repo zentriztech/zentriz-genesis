@@ -34,6 +34,7 @@ import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import { authStore } from "@/stores/authStore";
+import { FactoryCertificateBadge, type FactoryCertificate } from "@/components/FactoryCertificate";
 
 type Severity = "blocker" | "warning" | "info";
 type TriageState = "ignored" | "refuted";
@@ -52,6 +53,8 @@ interface ValidationState {
   resolved?: Resolved[];
   counts?: Counts | null;
   gate?: { wouldPass: boolean; blockersActive: number | null; warningsActive: number | null } | null;
+  /** Certificado Genesis Factory — ausente quando FACTORY_CERTIFICATE=off. */
+  factoryCertificate?: FactoryCertificate | null;
 }
 
 const STATUS_META: Record<string, { label: string; color: "default" | "success" | "error" | "warning" | "info" }> = {
@@ -227,6 +230,9 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
         <FactCheckOutlinedIcon sx={{ fontSize: "1.1rem" }} />
         <Typography variant="subtitle2" sx={{ flex: 1, minWidth: 160 }}>Validação da especificação</Typography>
         <Chip size="small" color={meta.color} label={meta.label} />
+        {/* Certificado Genesis Factory — o veredito consolidado dos gates da fábrica ao lado do
+            estado da validação (só aparece com FACTORY_CERTIFICATE=on). */}
+        {state.factoryCertificate && <FactoryCertificateBadge certificate={state.factoryCertificate} />}
         {acked && <Chip size="small" color={run?.acked_role === "zentriz_admin" && hasBlockerActive ? "error" : "success"}
                         label={run?.acked_role === "zentriz_admin" && hasBlockerActive ? "forçada (admin)" : "avisos reconhecidos"} />}
         <Button size="small" variant="outlined"

@@ -12,7 +12,7 @@ import { InboxError } from "../services/inbox.js";
 import { extractUiuxSpec, type UiuxProvider } from "../services/uiuxExtract.js";
 import { ensureFreshUiuxCreds } from "../services/uiuxAuth.js";
 import { enrichSpecs, type SpecForEnrichment } from "../services/specEnrichment.js";
-import { computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
+import { computeFactoryCertificate, computeFactoryCertificates, factoryCertificateEnabled } from "../services/factoryCertificate.js";
 import { validateIntake } from "../services/intakeGate.js";
 import { checkSpecIsMinimallyValid } from "../services/specSemanticGate.js";
 import { recordSelfApproval } from "../services/governanceAudit.js";
@@ -977,7 +977,17 @@ export async function specRoutes(app: FastifyInstance) {
     const covers = !!(latest && current && latest.spec_hash === current.specHash);
     const wouldPass = covers && !!triage && triage.counts.blockersActive === 0 && (derived === "validated" || derived === "failed");
     if (derived === "failed" && wouldPass) derived = "failed_triaged";
+    // Certificado Genesis Factory (3º ponto de exibição — aba GAPs). Flag OFF → campo ausente,
+    // payload idêntico ao legado. Best-effort: falha no selo não pode derrubar a aba.
+    let factoryCertificate: unknown;
+    if (factoryCertificateEnabled()) {
+      factoryCertificate = await computeFactoryCertificate(pool, id).catch((err) => {
+        request.log.warn({ err, projectId: id }, "factory certificate failed; validação sem selo");
+        return null;
+      });
+    }
     return reply.send({
+      ...(factoryCertificateEnabled() ? { factoryCertificate } : {}),
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
       derivedStatus: derived,
