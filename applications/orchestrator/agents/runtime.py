@@ -243,6 +243,18 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
       caem nos PISOS históricos, então chamadores antigos seguem com o comportamento de antes.
     """
     envelope = message.get("inputs") or message.get("input") or message
+    # 🔴 CAUSA RAIZ do "não tenho acesso à spec atual" (2026-09-05). A Bancada (spec-chat /
+    # Resolver GAPs) manda um corpo PLANO — `{task, mode, inputs:{spec_raw, ...}}` — sem a chave
+    # `input`. O `server.py::_wrap_with_llm_config` então embrulha tudo em `{"input": body}`, e a
+    # resolução acima devolve o CORPO PLANO como envelope: os campos de conteúdo ficam UM NÍVEL
+    # abaixo, em `envelope["inputs"]`, e NENHUM deles era emitido. Medido em prod: o prompt do CTO
+    # da Bancada tinha **322 caracteres** — só Tarefa e Modo, spec ZERO. Não era truncamento em 30k;
+    # a spec nunca chegava ao modelo, e o CTO (corretamente) se recusava a reescrever o que não viu.
+    # A fábrica escapava porque `_build_message_envelope` já duplica `"input": inputs` de propósito.
+    # O merge preserva `task`/`mode`/`limits` do nível de fora e faz os campos de dentro aparecerem.
+    _nested_inputs = envelope.get("inputs") if isinstance(envelope, dict) else None
+    if isinstance(_nested_inputs, dict) and _nested_inputs:
+        envelope = {**envelope, **_nested_inputs}
     task = message.get("task") or envelope.get("task") or ""
     mode = message.get("mode") or envelope.get("mode") or "default"
     limits = message.get("limits") or envelope.get("limits") or {}
@@ -339,7 +351,10 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     if _bl_src:
         parts.append(f"## Backlog\n{_bl}")
 
-    if message.get("existing_artifacts"):
+    # Mesma classe do embrulho acima: num corpo plano, `existing_artifacts` fica no envelope, não
+    # no topo. Aditivo — quando o topo tem a lista (fábrica), nada muda.
+    _existing_artifacts = message.get("existing_artifacts") or envelope.get("existing_artifacts")
+    if _existing_artifacts:
         parts.append("## Artefatos Existentes")
         # Limite de tamanho por agente: QA precisa ver artifacts COMPLETOS para validar.
         # Dev/PM/outros recebem contexto parcial — 8000 chars é suficiente para feedback.
@@ -365,7 +380,7 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
             except ValueError:
                 _scope_budget = 120_000
         _scope_spent = 0
-        for art in message["existing_artifacts"]:
+        for art in _existing_artifacts:
             path = art.get("path", "")
             content = art.get("content", "[não disponível]")
             _limit = _max_artifact

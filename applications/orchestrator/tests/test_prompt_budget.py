@@ -291,6 +291,78 @@ def test_override_nao_pode_baixar_do_piso(monkeypatch):
     assert _prompt_budget(OPUS5)["spec_raw"] == _PROMPT_FIELD_FLOORS["spec_raw"]
 
 
+# ── CAUSA RAIZ: corpo plano embrulhado pelo server em {"input": body} ─────────
+# A Bancada manda `{task, mode, inputs:{...}}` (sem `input`); `server.py::_wrap_with_llm_config`
+# embrulha em `{"input": body}` e os campos de conteúdo ficavam um nível abaixo do que o montador
+# lia. Medido em prod: prompt do CTO com 322 chars, spec ZERO.
+
+
+def _corpo_bancada(spec: str) -> dict:
+    """Forma EXATA de `specChat.ts::buildChatMessage` + o embrulho de `_invoke_agent`."""
+    return {
+        "request_id": "http",
+        "input": {
+            "project_id": "spec_chat",
+            "agent": "CTO",
+            "mode": "spec_intake_and_normalize",
+            "task": "Você é um CTO sênior refinando uma especificação",
+            "inputs": {
+                "spec_raw": spec,
+                "product_spec": spec,
+                "chat_transcript": "user: revise",
+                "input_type": "spec_refinement",
+            },
+        },
+    }
+
+
+def test_corpo_da_bancada_entrega_a_spec_ao_modelo():
+    spec = "# Spec NVX\n" + ("x" * 39_000)
+    out = build_user_message(_corpo_bancada(spec), role="CTO", model=OPUS5)
+    assert "## Spec do Projeto (input principal)" in out
+    assert spec in out
+    assert "Você é um CTO sênior" in out          # a tarefa do nível de fora não se perde
+    assert "spec_intake_and_normalize" in out      # nem o modo
+    assert len(out) > 39_000
+
+
+def test_corpo_da_bancada_tambem_deduplica():
+    spec = "# Spec\n" + ("y" * 20_000)
+    out = build_user_message(_corpo_bancada(spec), role="CTO", model=OPUS5)
+    assert "MESMO documento" in out
+    assert out.count(spec) == 1
+
+
+def test_corpo_da_bancada_respeita_a_flag_off(monkeypatch):
+    """Com a flag off o embrulho continua resolvido (é bug, não orçamento), mas nos tetos antigos."""
+    monkeypatch.setenv("AGENT_PROMPT_BUDGET", "off")
+    spec = _SPEC * 50_000
+    out = build_user_message(_corpo_bancada(spec), role="CTO", model=OPUS5)
+    assert out.count(_SPEC) == 30_000 + 20_000   # sem dedupe: os dois blocos, nos pisos
+
+
+def test_envelope_plano_sem_inputs_nao_muda():
+    """Caminho da fábrica (`_build_message_envelope` já duplica `input: inputs`): intacto."""
+    inputs = {"spec_raw": _SPEC * 1_000, "constraints": ["x"]}
+    fabrica = {"request_id": "r", "mode": "m", "task": "t", "inputs": inputs, "input": inputs,
+               "existing_artifacts": []}
+    out = build_user_message(fabrica, role="CTO", model=OPUS5)
+    assert out.count(_SPEC) == 1_000
+
+
+def test_existing_artifacts_do_envelope_plano_aparecem():
+    out = build_user_message(
+        {"request_id": "http", "input": {
+            "task": "t", "inputs": {"spec_raw": "s"},
+            "existing_artifacts": [{"path": "docs/x.md", "content": "conteúdo do artefato"}],
+        }},
+        role="CTO",
+        model=OPUS5,
+    )
+    assert "## Artefatos Existentes" in out
+    assert "conteúdo do artefato" in out
+
+
 # ── Robustez: valores não-string não podem estourar o montador ────────────────
 
 def test_valor_nao_string_nao_quebra():
