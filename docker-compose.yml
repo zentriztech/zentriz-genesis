@@ -34,6 +34,10 @@ services:
       # Certificado Genesis Factory — selo informativo (NUNCA gate). OFF = payload de
       # /api/specs, /api/products e /api/specs/:id/validation idêntico ao legado.
       - FACTORY_CERTIFICATE=${FACTORY_CERTIFICATE:-off}
+      # Modo autônomo de GAPs na Bancada (migração 090): o servidor resolve → salva → valida →
+      # repete SEM humano no meio. Fail-closed por desenho (G4): instalação nova nasce OFF e
+      # prod liga EXPLICITAMENTE no .env (SPEC_AUTONOMY=on). O 1º clique é sempre do humano.
+      - SPEC_AUTONOMY=${SPEC_AUTONOMY:-off}
       - UPLOAD_DIR=/shared/uploads
       - RUNNER_SERVICE_URL=http://runner:8001
       - GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/zentriz-autonomy.2026-04-24.private-key.pem

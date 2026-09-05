@@ -35,6 +35,7 @@ import { sha256Hex } from "../lib/specTreeHash.js";
 import { projectFindingsState, type EnrichedFinding } from "./findingTriage.js";
 import { startValidation } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
+import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 
 type Db = Pick<Pool, "query" | "connect">;
@@ -57,9 +58,77 @@ const MIN_SHRINK_RATIO = 0.7;
 /** Duas rodadas seguidas sem derrubar GAP importante = o modelo não está convergindo. */
 const MAX_NO_PROGRESS = 2;
 
-/** Kill-switch sem redeploy (padrão das flags da casa, mas nasce LIGADO: é a feature pedida). */
+/**
+ * Kill-switch sem redeploy. **Nasce DESLIGADO** (G4, 2026-09-05): a feature escreve na spec do
+ * cliente sem humano no meio, então qualquer instalação nova (dev, homolog, um deploy futuro que
+ * esqueça o `.env`) tem de ser fail-closed. Em prod a flag é ligada EXPLICITAMENTE no `.env`.
+ */
 export function autonomyEnabled(): boolean {
-  return (process.env.SPEC_AUTONOMY ?? "on").trim().toLowerCase() !== "off";
+  return (process.env.SPEC_AUTONOMY ?? "off").trim().toLowerCase() !== "off";
+}
+
+// ── T2: guarda de INTEGRIDADE da revisão (truncamento / perda de seções) ─────
+
+/** Títulos de seção de nível 2 — a unidade que o CTO normalizador perde quando corta. */
+function headingsOf(md: string): string[] {
+  const out: string[] = [];
+  for (const line of md.split("\n")) {
+    const m = /^##\s+(.+?)\s*$/.exec(line);
+    if (m) out.push(m[1].trim().toLowerCase());
+  }
+  return out;
+}
+
+/** Cercas de código abertas e não fechadas indicam documento cortado no meio de um bloco. */
+function fenceCount(md: string): number {
+  let n = 0;
+  for (const line of md.split("\n")) if (/^\s*```/.test(line)) n += 1;
+  return n;
+}
+
+export type RevisionIntegrity = { ok: true } | { ok: false; reason: string; detail: string };
+
+/**
+ * Recusa aplicar uma revisão INCOMPLETA. Medido em prod 2026-09-05: a spec do NVX LastMile
+ * (98.045 chars) faz o CTO regenerar o documento inteiro e bater no teto de 64k tokens de SAÍDA
+ * do Opus 5 — `stop_reason=max_tokens`. O texto para no meio de uma linha (`… ON deliveries(
+ * courier_id) WHERE`) e, se aplicado, o que o modelo não chegou a reescrever é APAGADO da spec.
+ * A guarda de encolhimento (70%) não pega isso: cortar 3 das 14 seções ainda deixa 80% dos chars.
+ *
+ * Três sinais, do mais forte para o mais fraco:
+ *  1. `truncated` — o próprio provedor disse que cortou (`_truncated` do runtime);
+ *  2. contagem de `##` menor que a base — tolerante a RENOMEAÇÃO (o set-diff só compõe a mensagem);
+ *  3. cerca ``` ímpar quando a base tinha número par — bloco de código aberto e nunca fechado.
+ */
+export function assessRevisionIntegrity(base: string, revised: string, truncated: boolean): RevisionIntegrity {
+  if (truncated) {
+    return {
+      ok: false,
+      reason: "truncada no teto de saída do modelo",
+      detail: `a resposta do CTO foi CORTADA no limite de tokens de saída — o fim do documento não chegou a ser gerado (revisão com ${revised.length} caracteres; a spec atual tem ${base.length})`,
+    };
+  }
+  const baseHeads = headingsOf(base);
+  const revHeads = headingsOf(revised);
+  if (revHeads.length < baseHeads.length) {
+    const missing = baseHeads.filter((h) => !revHeads.includes(h)).slice(0, 6);
+    return {
+      ok: false,
+      reason: "seções desaparecidas",
+      detail: `a revisão tem ${revHeads.length} seções contra ${baseHeads.length} da spec atual` +
+        (missing.length ? ` — sumiram, entre outras: ${missing.map((h) => `“${h}”`).join(", ")}` : ""),
+    };
+  }
+  const baseFences = fenceCount(base);
+  const revFences = fenceCount(revised);
+  if (revFences % 2 === 1 && baseFences % 2 === 0) {
+    return {
+      ok: false,
+      reason: "bloco de código aberto",
+      detail: `a revisão terminou com um bloco de código sem fechar (${revFences} cercas, ímpar) — sinal de documento cortado no meio`,
+    };
+  }
+  return { ok: true };
 }
 
 export interface AutonomyRoundLog {
@@ -178,8 +247,24 @@ async function readPrimarySpec(db: Db, projectId: string): Promise<PrimarySpec |
   return { filePath: row.file_path, content: buf.toString("utf-8"), sha: sha256Hex(buf) };
 }
 
-/** Mesma sequência do PATCH manual: conteúdo → content_sha256 → spec_dirty_at. */
-async function writePrimarySpec(db: Db, projectId: string, filePath: string, content: string): Promise<void> {
+/**
+ * Mesma sequência do PATCH manual: conteúdo → content_sha256 → spec_dirty_at.
+ *
+ * G2: antes de sobrescrever, o conteúdo ANTERIOR vai para `project_spec_snapshots`. Aqui o
+ * snapshot é OBRIGATÓRIO (lança se falhar): o laço escreve sem humano no meio, então sem rede de
+ * segurança ele não escreve. `previous` é o que está no disco AGORA (já lido pelo chamador).
+ */
+async function writePrimarySpec(
+  db: Db, projectId: string, filePath: string, content: string,
+  snapshot: { previous: string; reason: string; createdBy?: string | null },
+): Promise<void> {
+  const saved = await snapshotSpecFile(db as Pool, {
+    projectId, filePath, content: snapshot.previous,
+    reason: snapshot.reason, createdBy: snapshot.createdBy ?? null,
+  });
+  if (!saved) {
+    throw new Error("não foi possível guardar o snapshot da spec atual — escrita abortada para não perder conteúdo");
+  }
   await writeFile(filePath, content, "utf-8");
   await db.query(
     "UPDATE project_spec_files SET content_sha256 = $1 WHERE project_id = $2 AND file_path = $3",
@@ -559,7 +644,30 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
       `A revisão do CTO veio com ${revised.length} caracteres contra ${spec.content.length} da spec atual (perda > ${Math.round((1 - MIN_SHRINK_RATIO) * 100)}%). NÃO apliquei — a revisão está no chat para você conferir.`);
     return true;
   } else {
-    await writePrimarySpec(db, run.projectId, spec.filePath, revised);
+    // 🔴 T2 — GUARDA DE INTEGRIDADE: revisão truncada no teto de saída ou com seções a menos.
+    // Sem ela, o laço APLICAVA uma spec cortada e a rodada seguinte partia do documento mutilado
+    // (foi assim que 7 das 14 seções do NVX LastMile desapareceram em prod, 2026-09-05).
+    const integrity = assessRevisionIntegrity(spec.content, revised, job?.truncated === true);
+    if (!integrity.ok) {
+      await patchLastRound(db, run, { applied: false, note: `revisão recusada (${integrity.reason}): ${integrity.detail}` });
+      await finishRun(db, run, "stalled",
+        `NÃO apliquei a revisão desta rodada: ${integrity.detail}. A spec no disco está INTACTA e a revisão parcial continua no chat para você aproveitar o que servir. ` +
+        `Caminho recomendado para specs grandes: revisar POR ARQUIVO (spec dividida) ou tratar os GAPs em blocos menores — a resposta inteira não cabe no teto de saída do modelo.`);
+      return true;
+    }
+    try {
+      await writePrimarySpec(db, run.projectId, spec.filePath, revised, {
+        previous: spec.content,
+        reason: `autonomy:round-${run.round}`,
+        createdBy: run.ownerUserId,
+      });
+    } catch (e) {
+      // G2: snapshot é pré-condição da escrita autônoma. Falhou → não escreve, encerra com motivo.
+      await patchLastRound(db, run, { applied: false, note: `escrita abortada: ${msg(e)}` });
+      await finishRun(db, run, "stalled",
+        `NÃO apliquei a revisão: ${msg(e)}. A spec no disco está INTACTA e a revisão continua no chat.`);
+      return true;
+    }
     applied = true;
     note = `Spec aplicada no disco (${spec.content.length} → ${revised.length} chars).`;
   }

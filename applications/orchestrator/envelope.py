@@ -497,14 +497,21 @@ def resilient_json_parse(raw_text: str, request_id: str = "unknown") -> tuple[di
         parts.append(json_str[last:])
         cleaned = "".join(parts)
         # Resposta truncada: fechar JSON se o último replacement vai até o fim
+        _forced_close = False
         if replacements and replacements[-1][1] >= len(json_str):
             if not cleaned.rstrip().endswith("}"):
                 cleaned = cleaned.rstrip()
                 cleaned += "\n    }\n  ]\n}"
+                _forced_close = True
                 logger.warning("Resposta IA truncada: JSON fechado para recuperar envelope e artifact parcial.")
         data = json.loads(cleaned)
         if not isinstance(data, dict):
             raise json.JSONDecodeError("not a dict", cleaned, 0)
+        # 🔴 2026-09-05: recuperar o parcial é CERTO (20 min de Opus 5 não vão para o lixo), mas
+        # devolvê-lo SEM MARCA era o que fazia uma spec mutilada chegar à Bancada como `status: OK`.
+        # A marca é consumida por `_mark_truncation` (runtime.py), que a converte em `_truncated`.
+        if _forced_close:
+            data["_json_recovered_truncated"] = True
         for art in data.get("artifacts") or []:
             if not isinstance(art, dict):
                 continue
