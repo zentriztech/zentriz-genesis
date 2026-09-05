@@ -195,7 +195,7 @@ edição pontual), mas com consciência de onde aquele arquivo vive.
 
 | # | Decisão | Resposta do Jean |
 |---|---|---|
-| **D1** | Reparar agora os 28 `file_path` do Venuxx V2 (P0)? | ⏸️ **ADIADO** — *"anote isso para depois me lembre"*. **Consequência aceita:** o Venuxx V2 (28 projetos) continua sem validar, sem promover (gate ON) e sem contexto de irmãos. A prova ao vivo usa o **OrienteMe** (9 projetos, arquivos legíveis). Pendência registrada em memória. |
+| **D1** | Reparar agora os 28 `file_path` do Venuxx V2 (P0)? | ⏸️ adiado de manhã → ✅ **REABERTO E DECIDIDO no mesmo dia**: *"Materializar arquivo mínimo e corrigir o path"*. A pesquisa mostrou que **não é um defeito de prefixo**: `specs/<título>.md` é um path que nunca existiu em disco (semeado por `seed-venuxx-v2.ts:197`), logo o backfill por casamento de sha do P0 **não teria candidato**. Implementado como `src/db/backfill-venuxx-v2-spec-files.ts` (dry-run por default): gera uma spec mínima que **declara a própria procedência e as lacunas L-01…L-07** e corrige `file_path`/`filename`/`content_sha256`/`spec_ref` para o formato canônico do `projectCreation.ts`. Consequência aceita: esses 28 projetos vão gerar GAPs verdadeiros — a lacuna é real e fica visível em vez de silenciosa. |
 | **D2** | Corpo dos irmãos por heurística ou round-trip? | ✅ **Heurística, sem round-trip** (`dependsOn` → findings ativos → citados na mensagem). |
 | **D3** | Ligar direto em prod ou flag OFF + prova ao vivo? | ✅ **Flag OFF em prod**, ON no dev, prova ao vivo no OrienteMe, depois ligar. |
 | **D4** | O modelo pode propor edição em spec de irmão (multi-arquivo)? | ✅ **SIM — frente aberta.** Deixa de ser "fora de escopo": vira a **Fase 2** deste desenho (§6), com pesquisa+adversarial próprios ANTES do código. A Fase 1 (consciência) é pré-requisito duro: não se edita com segurança um irmão que o modelo não consegue ver. |
@@ -204,7 +204,10 @@ edição pontual), mas com consciência de onde aquele arquivo vive.
 
 ## 5. Plano de execução — Fase 1 (consciência), aprovada
 
-1. P0 backfill + rota admin + `dryRun` → relatório ao Jean → gravar.
+1. ~~P0 backfill + rota admin + `dryRun`~~ → **feito de outra forma (D1 acima)**: script
+   `src/db/backfill-venuxx-v2-spec-files.ts`, dry-run → relatório ao Jean → `--commit`. Sem rota
+   admin: é uma correção de acervo de uma vez, não uma capacidade permanente da API (menos
+   superfície exposta).
 2. `services/productContext.ts` (mapa + seleção de corpos) com testes de tenant-scope e linhagem.
 3. `loadChatContext` passa a usar o mapa; `buildChatMessage` para de duplicar contexto no `task`.
 4. `build_user_message` emite `product_map`/`sibling_files_context`/`validation_report` (fecha C).
@@ -214,3 +217,113 @@ edição pontual), mas com consciência de onde aquele arquivo vive.
 8. Deploy em janela quieta, flag OFF, digest conferido; prova ao vivo no OrienteMe (9 projetos):
    o CTO tem que **citar corretamente um irmão que ele nunca viu antes**.
 9. Memória + relatório.
+
+---
+
+## 6. Fase 2 — escrita multi-arquivo (D4 = SIM) · pesquisa + adversarial · **nada implementado**
+
+> **Status desta seção:** etapa *pesquisa → adversarial → fechar GAPs* da regra obrigatória.
+> Escrita em 2026-09-05, **antes** de qualquer código. Depende da Fase 1 (§5) estar em pé: não se
+> edita com segurança um irmão que o modelo não consegue ver.
+> **Pergunta que a Fase 2 responde:** hoje o CTO só pode devolver **um** documento; quando a
+> correção certa exige mexer em **dois** arquivos (o contrato do produtor *e* o do consumidor), o
+> modelo é obrigado a escolher um e descrever o outro em prosa — e a prosa não vira spec.
+
+### 6.1 Fatos medidos no código (2026-09-05)
+
+| # | Fato | Onde | Consequência para a Fase 2 |
+|---|------|------|----------------------------|
+| F1 | O **transporte já é multi-artefato**: o envelope do agente é `artifacts: [{path, content, …}]` e o validador aceita N entradas com `path` sanitizado. | `orchestrator/envelope.py:49-105` (`sanitize_artifact_path`, `ALLOWED_PATH_PREFIXES`) | **Nada a inventar no protocolo.** O afunilamento é na api: `extractSpecMarkdown` pega **o primeiro** `.md` e descarta o resto (silenciosamente). |
+| F2 | O **job é single-valued**: `spec_chat_jobs` tem `file_path`, `base_sha`, `spec_markdown` — um arquivo, um sha, um corpo. | migr. `089_spec_chat_jobs.sql` | Fase 2 precisa de um **conjunto** persistido (tabela filha), não de mais colunas. |
+| F3 | A **escrita é per-projeto e contida**: `resolvePhysical` ancora tudo em `path.resolve(UPLOAD_DIR, projectId)` e recusa qualquer coisa fora. | `routes/specFiles.ts:64-69` | Escrever em irmão = **outro `projectId`** = outra âncora. Não existe hoje um caminho de escrita que atravesse projetos — e isso é uma **guarda**, não um bug. |
+| F4 | **Concorrência otimista por arquivo**: `PUT /spec-file` exige `baseSha` e devolve **409 CONFLICT** se o sha em disco divergiu. | `routes/specFiles.ts:179-217` | O conjunto precisa de `baseSha` **por arquivo**; um único conflito tem de decidir o destino do conjunto inteiro (ver **D6**). |
+| F5 | **Guarda de status por projeto**: `SPEC_EDITABLE_STATUSES` + `svc:"runner"` → 403 (spec é autoria humana). | `routes/specFiles.ts:81-94` | Cada arquivo do conjunto passa pela guarda do **seu** projeto: um irmão em `running` bloqueia só a parte dele. |
+| F6 | O **laço autônomo escreve só a spec primária** (`readPrimarySpec`/`writePrimarySpec`, `ORDER BY is_primary DESC … LIMIT 1`). | `services/specAutonomy.ts:169-188` | Se o conjunto multi-arquivo entrar no modo autônomo sem tratamento, ele aplica **um** arquivo e considera a rodada feita → GAP silencioso (ver **F2-6**). |
+| F7 | **Validação é por projeto e one-flight**: `spec_validation_runs` tem `CHECK (num_nonnulls(project_id, product_id) = 1)` e unique parcial `svr_one_flight` enquanto `status IN ('pending','running')`. | migr. `074` | Um conjunto que toca 3 projetos **invalida 3 vínculos hash↔veredito**. Aplicar sem marcar os 3 como sujos deixa selo verde sobre spec alterada. |
+| F8 | `spec_dirty_at` já existe e é o insumo do debounce da auto-validação. | `routes/specFiles.ts:96-99`, `specAutonomy.ts:186` | É o gancho correto: aplicar em N projetos = `spec_dirty_at = now()` nos N. |
+| F9 | O **hash do certificado/gate é do arquivo em disco** (`computeCurrentSpecHash`). | `services/specValidation.ts:114` | Confirma F7: mexer no irmão derruba o certificado dele — o que é **certo** e precisa ser visível ao humano ANTES de aplicar. |
+| F10 | O chat por-arquivo **não passa pelo enforcer** (rota `/invoke/raw`, resposta crua). | `routes/specChat.ts` (modo `file`) | Um conjunto multi-arquivo não pode usar `/invoke/raw`: precisa de envelope validado para carregar N artefatos com `path`. |
+
+### 6.2 Desenho proposto — "conjunto de mudanças proposto, aplicação humana, tudo-ou-nada"
+
+**Princípio:** o modelo **propõe**, o humano **aplica**; a unidade de aplicação é o **conjunto**, não o
+arquivo. Nunca há escrita implícita em spec de irmão.
+
+1. **Novo artefato de domínio — `spec_change_sets` + `spec_change_set_files`** (migrations novas):
+   - conjunto: `id, product_id, origin_project_id, tenant_id, owner_user_id, chat_job_id, status
+     (proposed|applied|partially_applied|rejected|stale), created_at, applied_at, applied_by`;
+   - arquivo: `id, change_set_id, project_id, rel_dir, filename, base_sha, new_sha, content,
+     intent (edit|create), status (pending|applied|rejected|conflict|blocked_status), reason`.
+   - Por que tabela e não JSONB no job: cada linha precisa de guarda própria (tenant, status do
+     projeto, sha) e de **destino auditável** — é isso que o `spec_finding_triage` provou valer.
+2. **Coleta**: `extractSpecMarkdown` ganha uma irmã `extractSpecArtifacts(envelope, {scope})` que
+   devolve **todos** os `.md` com `path` resolvível dentro do escopo do produto. Cada `path` do
+   modelo é mapeado para `(projectId, relDir, filename)` pelo **Mapa do Produto** da Fase 1 (o mapa
+   passa a carregar um identificador estável por projeto) — **jamais** por caminho livre do modelo.
+   `path` que não casa com o mapa é **descartado com aviso visível**, nunca gravado.
+3. **Diff antes de aplicar**: o portal mostra o conjunto como uma lista de arquivos com contagem de
+   linhas +/− e diff por arquivo (CodeMirror já está na tela da Bancada). O humano aprova o conjunto
+   inteiro, ou desmarca arquivos (o que rebaixa para `partially_applied`).
+4. **Aplicação transacional** `POST /api/products/:id/spec-change-sets/:csid/apply`:
+   - **pré-checagem de todos** os arquivos (tenant, status do projeto, `baseSha` vs. disco) →
+     qualquer reprovação **aborta o conjunto** e devolve o motivo por arquivo (tudo-ou-nada, ver **D6**);
+   - escrita em disco arquivo por arquivo + `content_sha256` + `spec_dirty_at` **na mesma transação**
+     de banco, com desfazimento em disco se a transação falhar (grava em `.tmp` + `rename`, e em erro
+     restaura o conteúdo anterior lido na pré-checagem);
+   - registro em `project_dialogue` de **cada** projeto tocado ("spec alterada por conjunto <id>
+     originado no projeto X") — o dono do irmão precisa ver isso no histórico dele.
+5. **Escopo do produto, nunca do tenant**: o conjunto só aceita `project_id` que pertença ao
+   **mesmo `product_id`** do projeto de origem **e** ao tenant do JWT. Produto de 1 projeto → a
+   Fase 2 é inerte (mesma economia da Fase 1, GAP-12).
+6. **Duas flags, duas etapas**:
+   - `SPEC_MULTIFILE_WRITE=off` → **Fase 2a**: multi-arquivo **dentro do mesmo projeto** (é onde está
+     a maior parte do valor: specs hierárquicas do RFC-0004 já são multi-arquivo por projeto e hoje
+     o chat só edita um);
+   - `SPEC_SIBLING_WRITE=off` → **Fase 2b**: atravessar para o irmão. Só se liga depois de a 2a rodar
+     ao vivo. Uma flag por salto de risco, nunca uma só.
+7. **Modo autônomo**: `applyRound` do `specAutonomy.ts` passa a aplicar o **conjunto** quando ele
+   existir; enquanto `SPEC_SIBLING_WRITE=off`, o laço **rejeita** conjuntos que toquem irmãos e
+   registra no `rounds[]` (nunca aplica parcialmente por omissão — é o defeito F6).
+
+### 6.3 Revisão adversarial da Fase 2 (F2-1…F2-14)
+
+| # | Risco | Sev. | Fechamento proposto |
+|---|-------|------|---------------------|
+| **F2-1** | **Escrita cruzada indevida** — o modelo devolve `path` apontando para o projeto de outro tenant e a api obedece. | 🔴 | `path` nunca é caminho: é **chave do Mapa do Produto** resolvida no servidor, com `product_id` + `tenant_id` do JWT. Fora do mapa = descartado. Teste da família do vazamento cross-tenant de 2026-09-03. |
+| **F2-2** | **Aplicação parcial** deixa o produto **pior** que antes (contrato do produtor mudou, do consumidor não). | 🔴 | Tudo-ou-nada por default (**D6**); `partially_applied` só por desmarcação **explícita** do humano, e o conjunto guarda o que ficou de fora. |
+| **F2-3** | **Selo/veredito de N projetos vira mentira** silenciosamente (F7/F9). | 🔴 | `spec_dirty_at` em todos os projetos tocados + invalidação explícita do último `spec_validation_run` por mudança de hash; o certificado (ideia irmã) vira `stale` sozinho — por construção, não por rotina extra. |
+| **F2-4** | **Sobrescrita de trabalho humano** no irmão (alguém editava a spec do irmão na outra aba). | 🔴 | `baseSha` **por arquivo**, verificado na pré-checagem *e* imediatamente antes da escrita; divergência = 409 do conjunto. |
+| **F2-5** | **Irmão em `running`/`accepted`** (spec travada) recebe escrita e quebra a disciplina do `SPEC_EDITABLE_STATUSES`. | 🟠 | Guarda de status por arquivo, com o status do **projeto dono**; motivo `blocked_status` na linha, conjunto abortado. |
+| **F2-6** | **Laço autônomo aplica só o primário** e segue como se tivesse resolvido (defeito F6 amplificado). | 🔴 | `applyRound` ciente de conjunto; com `SPEC_SIBLING_WRITE=off` o conjunto com irmão é **rejeitado com motivo**, contando como rodada sem progresso (nunca como sucesso). |
+| **F2-7** | **Custo/latência**: reemitir N documentos inteiros em Opus 5 (o Dev já sofre disso — whole-file). | 🟠 | Teto de arquivos por conjunto (proposta: 3) e de bytes por conjunto derivado do `_prompt_budget`; acima disso o modelo é instruído a **propor GAP** em vez de reescrever. |
+| **F2-8** | **Reescrita destrutiva do irmão** (o modelo "aproveita" e reformata o documento inteiro do vizinho). | 🟠 | Diff obrigatório na tela + regra de razão: alteração > X% do irmão exige confirmação por digitação (mesmo padrão do Excluir por ID já em prod). |
+| **F2-9** | **Loop de harmonização**: A muda para casar com B, próxima rodada B muda para casar com A. | 🟠 | O conjunto registra `origin_project_id` e a rodada autônoma não pode aplicar um conjunto que **reverta** o hash anterior (memória de 1 passo, barata) — e o `no_progress_streak` já corta em 2. |
+| **F2-10** | **`rename` atômico não cobre disco cheio / permissão** no meio do conjunto. | 🟠 | Escrita em `.tmp` no **mesmo diretório** + `rename`; restauração do conteúdo lido na pré-checagem; falha = conjunto `proposed` de novo (nada aplicado) + erro visível. |
+| **F2-11** | **Sem autoria clara**: o dono do irmão não sabe quem mudou a spec dele. | 🟡 | `applied_by` + `project_dialogue` em cada projeto tocado + `origin_project_id` no conjunto. |
+| **F2-12** | **Enforcer rejeita o envelope multi-artefato** por regra pensada para 1 arquivo. | 🟡 | O modo do chat multi-arquivo usa `cto/async` com envelope (F10) e teste de contrato com N artefatos; `require_artifacts` já aceita N. |
+| **F2-13** | **Promoção durante o conjunto**: alguém promove o irmão à fábrica entre a proposta e a aplicação. | 🟠 | A pré-checagem lê o status **dentro** da transação; promover muda o status → `blocked_status` → conjunto abortado (fail-closed). |
+| **F2-14** | **Superfície nova de API** (`/spec-change-sets`) exposta antes de valer. | 🟡 | Rotas atrás das flags; com as duas OFF, `POST` responde 404 (rota não registrada) — mesma disciplina do `GENESIS_IAC_DEVOPS`. |
+
+### 6.4 Decisões que precisam do Jean (Fase 2 — D5…D9)
+
+| # | Decisão | Opções | Recomendação |
+|---|---------|--------|--------------|
+| **D5** | Ordem de entrega | (a) 2a (multi-arquivo no mesmo projeto) e só depois 2b (irmão) · (b) as duas juntas | **(a)** — o risco de 2b é de outra ordem (escrever no documento de outro projeto) e a 2a já resolve as specs hierárquicas de hoje |
+| **D6** | Conflito de `baseSha` em 1 de N arquivos | (a) aborta o conjunto (tudo-ou-nada) · (b) aplica os demais e marca o conflitante · (c) pergunta na tela | **(a)** — aplicação parcial é exatamente o estado incoerente que a Fase 2 existe para evitar (F2-2) |
+| **D7** | O modelo pode **criar** arquivo novo em irmão (`intent=create`)? | (a) não, só editar existente · (b) sim, com confirmação | **(a) agora** — criar arquivo no projeto de outra pessoa é a ação mais difícil de desfazer; reabrir depois de a 2b rodar |
+| **D8** | Teto de arquivos por conjunto | (a) 3 · (b) 5 · (c) sem teto (só bytes) | **(a) 3** — cobre "contrato + consumidor + índice" e mantém o custo previsível (F2-7) |
+| **D9** | O modo autônomo pode aplicar conjunto multi-arquivo sozinho? | (a) nunca (só humano) · (b) sim, dentro do mesmo projeto · (c) sim, inclusive irmão | **(b)** — dentro do projeto o laço já aplica spec inteira hoje; atravessar para o irmão sem humano é onde o erro escala |
+
+### 6.5 Esboço de execução (só depois de D5–D9)
+
+- **PR-1** migrations `spec_change_sets` + `spec_change_set_files` (sem `;` em literal; numeração a
+  conferir no momento do PR) + `services/specChangeSet.ts` puro e testado (resolução de `path` pelo
+  mapa, pré-checagem, aplicação transacional).
+- **PR-2** `extractSpecArtifacts` + modo multi-arquivo do chat (`cto/async`, envelope) + persistência
+  do conjunto no job.
+- **PR-3** portal: lista do conjunto + diff por arquivo + aplicar/desmarcar (`FACTORY`/Bancada).
+- **PR-4** `specAutonomy` ciente de conjunto (D9) + rejeição com motivo.
+- **PR-5** testes adversariais: cross-tenant, 409 por arquivo, status travado, disco cheio, teto de
+  arquivos, loop de harmonização.
+- Flags `SPEC_MULTIFILE_WRITE=off` e `SPEC_SIBLING_WRITE=off`; prova ao vivo no **OrienteMe** antes de
+  qualquer ligação em prod.
