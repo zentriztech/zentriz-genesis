@@ -1,7 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "path";
-import fs from "fs/promises";
-import crypto from "crypto";
 import AdmZip from "adm-zip";
 import { pool } from "../db/client.js";
 import { authMiddleware, type AuthUser } from "../middleware/auth.js";
@@ -29,7 +27,6 @@ import {
 } from "../services/specTextExtract.js";
 import { createRateLimiter, clientIp } from "../services/rateLimit.js";
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 const ALLOWED_EXT = new Set([".md", ".txt", ".doc", ".docx", ".pdf"]);
 
 // Statuses de projeto que representam uma SPEC ainda NÃO promovida ao pipeline de build.
@@ -944,8 +941,10 @@ export async function specRoutes(app: FastifyInstance) {
     const { computeCurrentSpecHash } = await import("../services/specValidation.js");
     const current = await computeCurrentSpecHash(pool, id);
     const latest = (await pool.query(
+      // GAP-18: `stage_b_coverage` diz QUANTO da spec o juiz leu por inteiro nesta run. Sem isso a aba
+      // GAPs mostra "0 GAPs" sem dizer sobre que fração da spec — foi o que aconteceu em prod.
       `SELECT id, spec_hash, catalog_version, status, findings, acked_by, acked_role, acked_at,
-              started_at, finished_at, created_at
+              started_at, finished_at, created_at, stage_b_ran, stage_b_coverage
          FROM spec_validation_runs
         WHERE project_id = $1
         ORDER BY created_at DESC LIMIT 1`,

@@ -142,10 +142,12 @@ const db = {
     if (s.startsWith("SELECT status FROM projects")) return { rows: [{ status: projectStatus }], rowCount: 1 };
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
     if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
-    if (s.startsWith("SELECT status, stage_b_ran FROM spec_validation_runs")) {
+    if (s.startsWith("SELECT status, stage_b_ran, stage_b_coverage FROM spec_validation_runs")) {
       // GAP-13 (migração 099): `true` = validação COMPLETA — é o caso destes testes.
-      return { rows: [{ status: validationStatus, stage_b_ran: true }], rowCount: 1 };
+      // GAP-18 (migração 101): cobertura NULL = run legada → gate de cobertura não interfere.
+      return { rows: [{ status: validationStatus, stage_b_ran: true, stage_b_coverage: null }], rowCount: 1 };
     }
+    if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) return { rows: [], rowCount: 0 };
 
     if (s.startsWith("INSERT INTO spec_autonomy_runs")) {
       run = {

@@ -36,8 +36,24 @@
  */
 import { splitSections, headingOutline } from "../lib/markdownSections.js";
 
-/** Teto de entrada do estágio B (era um `slice` mudo dentro do `runStageB`). */
-export const VALIDATION_INPUT_CAP = 200_000;
+/**
+ * Teto de entrada do estágio B (era um `slice` mudo dentro do `runStageB`).
+ *
+ * 🔴 GAP-18 (2026-09-06) — os 200.000 originais eram um número tirado do ar, e ERRAVAM a unidade: o
+ * teto é em CHARS, a janela do modelo é em TOKENS. Markdown em PT-BR fica em ~3,5 chars/token, então
+ * 200.000 chars ≈ 57k tokens de uma janela de ~200k — o validador descartava ~70% da própria
+ * capacidade. Medido em prod na spec do NVX LastMile (12 arquivos, 950.965 chars): **2** arquivos
+ * julgados por inteiro, 10 só em sumário, rodada após rodada.
+ *
+ * Aritmética do teto atual: 400.000 chars ÷ 3,5 ≈ 114k tokens de entrada + 32k de saída
+ * (`_refuter_max_tokens`) ≈ 146k — dentro da janela de 200k com folga para o system prompt e para
+ * português mais denso que a média. Subir mais exige medir tokens de verdade, não chutar chars.
+ * `SPEC_VALIDATION_INPUT_CAP` (env) sobrepõe, para spec grande com modelo de janela maior.
+ */
+export const VALIDATION_INPUT_CAP = (() => {
+  const raw = parseInt((process.env.SPEC_VALIDATION_INPUT_CAP ?? "").trim(), 10);
+  return Number.isFinite(raw) && raw >= 50_000 ? raw : 400_000;
+})();
 /** Teto do sumário de UM arquivo, para um arquivo com centenas de seções não comer o inventário. */
 export const VALIDATION_OUTLINE_CAP = 6_000;
 
@@ -45,6 +61,13 @@ export interface ValidationInputFile {
   /** Caminho relativo como o validador deve citá-lo (`rel_dir/filename`). */
   path: string;
   content: string;
+  /**
+   * GAP-18: este arquivo JÁ foi julgado integralmente pelo estágio adversarial **neste conteúdo**
+   * (`project_spec_files.stage_b_full_sha` == sha atual). Quem ainda não foi julgado entra primeiro
+   * na promoção a integral — é o que faz a cobertura ROTACIONAR em vez de repetir os mesmos arquivos.
+   * Ausente/false = ainda não julgado.
+   */
+  judged?: boolean;
 }
 
 export interface ValidationInput {
@@ -56,6 +79,14 @@ export interface ValidationInput {
   outlineOnly: string[];
   /** Soma dos tamanhos de TODOS os arquivos (o que a spec realmente tem). */
   totalChars: number;
+  /** Teto usado (vai para `stage_b_coverage`: sem ele o registro não é interpretável depois). */
+  cap: number;
+  /**
+   * GAP-19: arquivos que NÃO cabem integralmente nem sozinhos (nem com todos os outros em sumário).
+   * Rotação nenhuma resolve isso — o arquivo precisa ser DIVIDIDO. Sem este fato o laço autônomo
+   * revalidaria para sempre esperando uma cobertura que não pode acontecer.
+   */
+  oversized: string[];
 }
 
 function outlineOf(content: string): string {
@@ -99,7 +130,16 @@ function inventory(
  * Monta o `spec_text` do estágio B respeitando o teto SEM esconder o que ficou de fora.
  *
  * Estratégia de orçamento: parte do pior caso (todos os arquivos em sumário, que é o que garante o
- * inventário) e vai PROMOVENDO arquivos a integral, do menor para o maior, enquanto couber.
+ * inventário) e vai PROMOVENDO arquivos a integral enquanto couber, em DUAS FILAS:
+ *
+ *   1ª fila — arquivos AINDA NÃO julgados integralmente no conteúdo atual (`judged !== true`);
+ *   2ª fila — os já julgados, que só entram se sobrar orçamento.
+ *
+ * Dentro de cada fila, do menor para o maior: maximiza quantos arquivos o validador vê por inteiro e
+ * é critério de FATO (tamanho), não julgamento de conteúdo. A 1ª fila é o que corrige o GAP-18: sem
+ * ela a ordem por tamanho é determinística e os arquivos grandes NUNCA são julgados — a cobertura
+ * fica congelada nos mesmos arquivinhos e "GAPs = 0" passa a significar "0 GAPs no pedaço que eu
+ * olhei". Com ela, cada rodada julga um pedaço novo e a spec inteira é coberta em N rodadas.
  */
 export function buildValidationInput(
   files: ValidationInputFile[],
@@ -116,9 +156,18 @@ export function buildValidationInput(
       : `===== ${f.path} — SÓ SUMÁRIO (arquivo EXISTE, ${f.content.length} chars) =====\n${outlines.get(f.path) ?? ""}`;
 
   const fullSet = new Set<string>();
-  let spent = header(fullSet, true).length + files.reduce((n, f) => n + frame(f, false).length + 2, 0);
+  const baseline = header(fullSet, true).length + files.reduce((n, f) => n + frame(f, false).length + 2, 0);
+  let spent = baseline;
 
-  for (const f of [...files].sort((a, b) => a.content.length - b.content.length)) {
+  // GAP-19: quem não cabe nem SOZINHO (pior caso + só o seu delta) nunca será julgado por rotação.
+  const oversized = files
+    .filter((f) => baseline + (frame(f, true).length - frame(f, false).length) > cap)
+    .map((f) => f.path);
+
+  const bySize = (a: ValidationInputFile, b: ValidationInputFile) => a.content.length - b.content.length;
+  const naoJulgados = files.filter((f) => f.judged !== true).sort(bySize);
+  const jaJulgados = files.filter((f) => f.judged === true).sort(bySize);
+  for (const f of [...naoJulgados, ...jaJulgados]) {
     const delta = frame(f, true).length - frame(f, false).length;
     if (spent + delta > cap) continue;
     spent += delta;
@@ -136,5 +185,7 @@ export function buildValidationInput(
     full: files.filter((f) => fullSet.has(f.path)).map((f) => f.path),
     outlineOnly: files.filter((f) => !fullSet.has(f.path)).map((f) => f.path),
     totalChars,
+    cap,
+    oversized,
   };
 }
