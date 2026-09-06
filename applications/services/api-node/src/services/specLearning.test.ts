@@ -305,6 +305,42 @@ describe("collectBancadaLessonsTick", () => {
     expect(String(find(/SET learning_result = \$2::jsonb/)[0]?.params[1])).toContain("ECONNREFUSED");
   });
 
+  it("falha transitória DEVOLVE a run à fila (o 404 da janela de deploy não pode perder o episódio)", async () => {
+    // MEDIDO em prod 2026-09-06: o primeiro tick caiu no intervalo em que o agents ainda rodava a
+    // imagem antiga → 404. Sem retry o episódio ficaria reclamado e nunca mais seria aprendido.
+    const { db, find } = fakeDb({ pending: [pendingRow()] });
+    const tp = transport({ post: async () => { throw new Error("HTTP 404: Not Found"); } });
+    await collectBancadaLessonsTick(db, tp);
+    expect(String(find(/SET learning_result = \$2::jsonb/)[0]?.params[1])).toContain('"attempts":1');
+    expect(find(/SET learning_kicked_at = NULL/)).toHaveLength(1);
+  });
+
+  it("depois de MAX_KICK_ATTEMPTS a run para de voltar à fila", async () => {
+    const { db, find } = fakeDb({ pending: [pendingRow({ learning_result: { error: "x", attempts: 2 } })] });
+    const tp = transport({ post: async () => { throw new Error("HTTP 404: Not Found"); } });
+    await collectBancadaLessonsTick(db, tp);
+    expect(String(find(/SET learning_result = \$2::jsonb/)[0]?.params[1])).toContain('"attempts":3');
+    expect(find(/SET learning_kicked_at = NULL/)).toEqual([]);
+  });
+
+  it("timestamps vindos como Date viram ISO — o Postgres recusa o toString() do JS", async () => {
+    // MEDIDO em prod: `invalid input syntax for type timestamp with time zone:
+    // "Sat Sep 05 2026 12:15:39 GMT+0000 (Coordinated Universal Time)"` — a janela de validações
+    // não era lida e o material ia SEM os GAPs de antes/depois (o valor da lição).
+    const { db, calls } = fakeDb({
+      pending: [pendingRow({
+        created_at: new Date("2026-09-05T12:00:00Z"), finished_at: new Date("2026-09-05T12:40:00Z"),
+      })],
+      validations: [{ findings: [FINDING], created_at: "2026-09-05T12:05:00Z" }],
+    });
+    const tp = transport();
+    await collectBancadaLessonsTick(db, tp);
+    const vq = calls.find((c) => /FROM spec_validation_runs/.test(c.sql))!;
+    expect(vq.params[1]).toBe("2026-09-05T12:00:00.000Z");
+    expect(vq.params[2]).toBe("2026-09-05T12:40:00.000Z");
+    expect(String(tp.posts[0]?.body.material)).toContain("Contrato do webhook sem idempotência");
+  });
+
   it("identidade indisponível aborta o kick — melhor não extrair do que contaminar o corpus", async () => {
     const { db, find } = fakeDb({ pending: [pendingRow()], identityFails: true });
     const tp = transport();
