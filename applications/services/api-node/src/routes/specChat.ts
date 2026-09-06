@@ -490,12 +490,27 @@ export function rawMaxTokensFor(chars: number): number {
   return Math.min(32_000, Math.max(8_000, need));
 }
 
+/**
+ * G7 (lado consumidor) — bloco `cag` do `/invoke/raw`.
+ *
+ * O endpoint só recupera lições se o CHAMADOR pedir (ele também serve o gate semântico e o
+ * planejador de evolução, que não devem mudar de prompt nem pagar tokens por isto). O `project_id`
+ * vai como UUID REAL: os agents filtram `project_id = %s::uuid OR project_id IS NULL`, e o
+ * pseudo-projeto `"spec_chat"` faria o Postgres estourar → zero lições, em silêncio.
+ * `query` é o texto que orienta a busca semântica; `CAG_ENABLED=off` continua vencendo tudo.
+ */
+function cagBlock(projectId: string | null, query: string): Record<string, unknown> {
+  return { cag: { role: "CTO", stack_key: "generic", project_id: projectId, query: query.slice(0, 4_000) } };
+}
+
 function buildRawFileRequest(
   content: string,
   messages: ChatMessage[],
   filePath: string,
   /** Fase 1 P4: o chat por-arquivo rodava com contexto ZERO (defeito E) — era o caminho mais cego. */
   ctx: ChatContext = EMPTY_CTX,
+  /** Projeto REAL — escopo da recuperação de lições (G7). Ver `cagBlock`. */
+  scopeProjectId: string | null = null,
 ): Record<string, unknown> {
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
@@ -528,6 +543,8 @@ function buildRawFileRequest(
     prompt_override: RAW_FILE_SYSTEM,
     user_message: userMessage,
     max_tokens: rawMaxTokensFor(content.length),
+    // Consulta = o PEDIDO humano (a intenção da rodada) + o arquivo; não a spec inteira.
+    ...cagBlock(scopeProjectId, `${lastUser}\n${filePath}`),
   };
 }
 
@@ -573,6 +590,8 @@ function buildGapFileRequest(
   filePath: string,
   findings: ValidationFinding[],
   ctx: ChatContext = EMPTY_CTX,
+  /** Projeto REAL — escopo da recuperação de lições (G7). Ver `cagBlock`. */
+  scopeProjectId: string | null = null,
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   // Mapa do produto (Fase 1) como contexto só-leitura: o arquivo é uma PARTE de um todo, e sem saber
@@ -599,6 +618,8 @@ function buildGapFileRequest(
     user_message: userMessage,
     // A saída CRESCE (o arquivo ganha o que faltava): folga proporcional ao número de GAPs.
     max_tokens: rawMaxTokensFor(content.length + findings.length * 900),
+    // Consulta = os GAPs a resolver; é o que define de que lição esta rodada precisa.
+    ...cagBlock(scopeProjectId, `${filePath}\n${gaps}`),
   };
 }
 
@@ -884,7 +905,7 @@ export async function dispatchGapFileJob(opts: {
   });
   runFileChatJob(
     opts.jobId,
-    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx), ...opts.llm },
+    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx, opts.projectId), ...opts.llm },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
   );
@@ -1068,13 +1089,13 @@ export async function specChatRoutes(app: FastifyInstance) {
         // passar pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo).
         runFileChatJob(
           jobId,
-          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx), ...llm },
+          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx, projectId), ...llm },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
         );
       } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
-        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx), ...llm }, agentsUrl);
+        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx, projectId), ...llm }, agentsUrl);
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).

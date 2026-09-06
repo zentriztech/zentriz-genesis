@@ -151,6 +151,14 @@ describe("POST /api/spec-chat — guardas do modo por-arquivo", () => {
     expect(rawCall).toBeTruthy();
     expect(httpPostCalls.some((c) => c.url.includes("/invoke/cto/async"))).toBe(false);
     expect(JSON.parse(rawCall!.body).prompt_override).toContain("PRESERVANDO");
+    // G7 (consumidor): o pedido DECLARA o escopo de recuperação de lições. `project_id` tem de ser
+    // o UUID REAL — os agents filtram `project_id = %s::uuid`, e o pseudo-projeto "spec_chat"
+    // faria o Postgres estourar e devolver ZERO lição, em silêncio.
+    const cag = JSON.parse(rawCall!.body).cag as { role: string; project_id: string; query: string; stack_key: string };
+    expect(cag.role).toBe("CTO");
+    expect(cag.stack_key).toBe("generic");
+    expect(cag.project_id).toBe(PROJ);
+    expect(cag.query).toContain("adicione uma nota");
   });
 
   it("modo por-arquivo: cerca de código externa é removida do conteúdo aplicado", async () => {
@@ -623,6 +631,11 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(payload.user_message).not.toContain("Sem critérios de aceite");
     // orçamento de saída derivado do tamanho (nunca os 8k fixos que truncavam)
     expect(payload.max_tokens).toBeGreaterThanOrEqual(8_000);
+    // G7: no "Resolver GAPs por arquivo" a consulta de lições é o GAP a resolver — é ele que diz
+    // de que aprendizado esta rodada precisa.
+    const cagGap = (JSON.parse(raw!.body) as { cag: { project_id: string; query: string } }).cag;
+    expect(cagGap.project_id).toBe(PROJ);
+    expect(cagGap.query).toContain("Falta authz nos endpoints");
   });
 
   it("arquivo SEM GAP ativo → 409 NO_GAPS_IN_FILE informando quantos o projeto tem", async () => {
