@@ -54,7 +54,7 @@ import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { projectFindingsState, type EnrichedFinding } from "./findingTriage.js";
-import { startValidation } from "./specValidation.js";
+import { startValidation, unjudgedSpecFiles } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
@@ -1497,8 +1497,15 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   const prevCov = cov ? await previousCoverage(db, run.projectId, run.validationRunId) : null;
   const surfaceChanged = !!cov && !!prevCov && !sameSet(cov.full, prevCov.full);
   const streak = progressed ? 0 : surfaceChanged ? run.noProgressStreak : run.noProgressStreak + 1;
+  // 🔴 A pendência de cobertura é ACUMULADA, nunca o `outlineOnly` de UMA run: a spec do NVX LastMile
+  // tem 950.965 chars contra um teto de 400.000, então nenhuma validação isolada leva os 12 arquivos
+  // por inteiro e `outlineOnly` nunca fica vazio. Quem fecha a conta é a UNIÃO das rodadas —
+  // `project_spec_files.stage_b_full_sha` (migração 101). Medir pelo `outlineOnly` faria este laço
+  // revalidar até o teto e terminar `exhausted` mesmo com a spec inteira já julgada.
+  const cobertura = await unjudgedSpecFiles(db as never, run.projectId).catch(() => null);
   const covNote = cov && cov.outlineOnly.length > 0
-    ? ` Cobertura desta validação: ${cov.full.length} de ${cov.full.length + cov.outlineOnly.length} arquivo(s) julgado(s) por INTEIRO (os demais entraram só como sumário).`
+    ? ` Cobertura desta validação: ${cov.full.length} de ${cov.full.length + cov.outlineOnly.length} arquivo(s) julgado(s) por INTEIRO (os demais entraram só como sumário).` +
+      (cobertura ? ` Acumulado da spec: ${cobertura.judged}/${cobertura.total} arquivo(s) já julgado(s) neste conteúdo.` : "")
     : "";
   await patchLastRound(db, run, {
     gapsAfter: gaps.important, blockers: gaps.blockers, warnings: gaps.warnings,
@@ -1518,10 +1525,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // determinística por tamanho. Declarar `succeeded` ali seria dizer "spec sem GAP" sobre 2/12 da
     // spec. Com a rotação (GAP-18) a cobertura avança a cada validação: aqui o laço só REVALIDA até
     // todo arquivo ter sido julgado no conteúdo atual.
-    const pendentes = cov?.outlineOnly ?? [];
+    // Pendência ACUMULADA (não a desta run). Cobertura não medível (`null`) → comportamento legado:
+    // zero GAP importante encerra em sucesso, como antes da migração 101.
+    const pendentes = cobertura?.unjudged ?? [];
     if (pendentes.length === 0) {
       await finishRun(db, run, "succeeded",
-        `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cov ? ` — e o estágio adversarial julgou os ${cov.full.length} arquivo(s) da spec por INTEIRO` : ""}.`, { gaps });
+        `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cobertura ? ` — e o estágio adversarial julgou os ${cobertura.total} arquivo(s) da spec por INTEIRO` : ""}.`, { gaps });
       return true;
     }
     const grandes = pendentes.filter((p) => (cov?.oversized ?? []).includes(p));
@@ -1545,8 +1554,8 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       [run.id, gaps.important],
     );
     await postChatNote(db, run,
-      `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — mas ${pendentes.length} arquivo(s) ainda entraram só como sumário. **Não declaro a spec validada com base em parte dela**: vou revalidar priorizando ${pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${pendentes.length > 4 ? " e os demais" : ""}.`);
-    console.info(`[SpecAutonomy] run=${run.id} 0 GAP na superfície medida, cobertura INCOMPLETA (${pendentes.length} arquivo(s) só em sumário) — revalidando com rotação (GAP-19).`);
+      `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — mas ${pendentes.length} de ${cobertura?.total ?? "?"} arquivo(s) da spec ainda não passaram por um juiz neste conteúdo. **Não declaro a spec validada com base em parte dela**: vou revalidar priorizando ${pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${pendentes.length > 4 ? " e os demais" : ""}.`);
+    console.info(`[SpecAutonomy] run=${run.id} 0 GAP na superfície medida, cobertura ACUMULADA incompleta (${pendentes.length} arquivo(s) nunca julgados por inteiro) — revalidando com rotação (GAP-19).`);
     return true;
   }
   if (atCap) {

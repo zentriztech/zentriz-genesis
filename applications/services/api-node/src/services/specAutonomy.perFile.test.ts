@@ -89,7 +89,13 @@ vi.mock("./specGapScope.js", () => ({
 }));
 
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
-vi.mock("./specValidation.js", () => ({ startValidation: (...a: unknown[]) => startValidation(...(a as [])) }));
+// GAP-19: a pendência de cobertura é ACUMULADA (`stage_b_full_sha` × sha atual) e vem daqui —
+// `coberturaAcumulada = null` reproduz "não foi possível medir" (comportamento legado).
+let coberturaAcumulada: { unjudged: string[]; judged: number; total: number } | null = null;
+vi.mock("./specValidation.js", () => ({
+  startValidation: (...a: unknown[]) => startValidation(...(a as [])),
+  unjudgedSpecFiles: async () => coberturaAcumulada,
+}));
 
 let job: { status: string; specMarkdown: string | null; error: string | null; truncated?: boolean } | null = null;
 vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
@@ -234,6 +240,7 @@ beforeEach(() => {
   projectStatus = "draft";
   latestRunId = "run-0";
   validationStatus = "passed";
+  coberturaAcumulada = null;
   snapshotFails = false;
   sqlLog.length = 0;
   unroutedFindings = [];

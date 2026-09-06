@@ -33,7 +33,13 @@ vi.mock("./findingTriage.js", () => ({
 }));
 
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
-vi.mock("./specValidation.js", () => ({ startValidation: (...a: unknown[]) => startValidation(...(a as [])) }));
+// GAP-19: a pendência de cobertura é ACUMULADA (`stage_b_full_sha` × sha atual) e vem daqui —
+// `coberturaAcumulada = null` reproduz "não foi possível medir" (comportamento legado).
+let coberturaAcumulada: { unjudged: string[]; judged: number; total: number } | null = null;
+vi.mock("./specValidation.js", () => ({
+  startValidation: (...a: unknown[]) => startValidation(...(a as [])),
+  unjudgedSpecFiles: async () => coberturaAcumulada,
+}));
 
 // `truncated` (T1) chega do runtime via `spec_chat_jobs.truncated` — é o sinal que o laço consulta.
 let job: {
@@ -190,6 +196,7 @@ beforeEach(() => {
   stageBPending = false;
   stageBCoverage = null;
   prevCoverage = null;
+  coberturaAcumulada = null;
   insertFails23505 = false;
   snapshotFails = false;
   sqlLog.length = 0;
@@ -514,6 +521,7 @@ describe("validação dentro do laço", () => {
       const r = await reachValidating(5);
       findings = [];
       stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      coberturaAcumulada = { unjudged: ["modelo-dados.md"], judged: 1, total: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).not.toBe("succeeded");
       expect(run!.status).toBe("validating");            // segue no laço, sem alvo → o tick revalida
@@ -527,10 +535,24 @@ describe("validação dentro do laço", () => {
       const r = await reachValidating(5);
       findings = [];
       stageBCoverage = { full: ["01-spec.md", "modelo-dados.md"], outlineOnly: [], oversized: [] };
+      coberturaAcumulada = { unjudged: [], judged: 2, total: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("succeeded");
       expect(String(run!.last_error)).toContain("julgou os 2 arquivo(s) da spec por INTEIRO");
       expect(JSON.stringify(run!.rounds)).not.toContain("Cobertura desta validação");
+    });
+
+    it("🔴 spec grande: `outlineOnly` desta run NUNCA é vazio — o que fecha a conta é a UNIÃO das rodadas", async () => {
+      // Defeito pego antes do deploy: medir a pendência pelo `outlineOnly` de UMA validação faria o
+      // laço revalidar até o teto e terminar `exhausted` mesmo com a spec inteira já julgada — numa
+      // spec de 950.965 chars contra teto de 400.000, nenhuma run isolada leva os 12 arquivos.
+      const r = await reachValidating(5);
+      findings = [];
+      stageBCoverage = { full: ["g.md", "h.md"], outlineOnly: ["a.md", "b.md"], oversized: [] };
+      coberturaAcumulada = { unjudged: [], judged: 12, total: 12 };   // as rodadas anteriores cobriram o resto
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("succeeded");
+      expect(String(run!.last_error)).toContain("julgou os 12 arquivo(s) da spec por INTEIRO");
     });
 
     it("cobertura ausente (run anterior à migração 101) → comportamento legado: succeeded", async () => {
@@ -545,6 +567,7 @@ describe("validação dentro do laço", () => {
       const r = await reachValidating(5);
       findings = [];
       stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["monstro.md"], oversized: ["monstro.md"] };
+      coberturaAcumulada = { unjudged: ["monstro.md"], judged: 1, total: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("stalled");
       expect(String(run!.last_error)).toContain("Dividir");
@@ -555,6 +578,7 @@ describe("validação dentro do laço", () => {
       const r = await reachValidating(1);
       findings = [];
       stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      coberturaAcumulada = { unjudged: ["modelo-dados.md"], judged: 1, total: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("exhausted");
       expect(String(run!.last_error)).toContain("NÃO declaro a spec validada");

@@ -348,28 +348,63 @@ export type StartValidationResult =
   | { ok: true; runId: string; reused: boolean }
   | { ok: false; code: string; message: string; status: number };
 
-/**
- * GAP-18/19: arquivos que a run anterior deixou SEM julgar e que uma nova rodada ainda pode julgar —
- * ou seja, os que ficaram só em sumário DESCONTANDO os `oversized` (esses não cabem nem sozinhos:
- * rotação nenhuma os cobre, só a divisão do arquivo).
- *
- * Cobertura ausente/ilegível (run anterior à migração 101, ou JSON estranho) → lista vazia, que
- * preserva o comportamento legado do dedupe: reaproveita.
- */
-export function pendingCoverage(rawCoverage: unknown): string[] {
-  const cov = (rawCoverage ?? null) as { outlineOnly?: unknown; oversized?: unknown } | null;
-  const pend = Array.isArray(cov?.outlineOnly) ? (cov!.outlineOnly as string[]) : [];
-  const over = Array.isArray(cov?.oversized) ? (cov!.oversized as string[]) : [];
-  return pend.filter((p) => !over.includes(p));
+/** Os `oversized` registrados numa cobertura (arquivos que não cabem integrais nem sozinhos). */
+export function oversizedOf(rawCoverage: unknown): string[] {
+  const cov = (rawCoverage ?? null) as { oversized?: unknown } | null;
+  return Array.isArray(cov?.oversized) ? (cov!.oversized as string[]).filter((x) => typeof x === "string") : [];
 }
 
 /**
- * GAP-19: a regra do dedupe por hash. Uma run `passed` só pode ser reaproveitada se ela julgou tudo o
- * que era julgável — senão "reaproveitar" é congelar a cobertura nos mesmos arquivos e devolver ao
- * laço autônomo exatamente a run que o fez pedir uma validação nova.
+ * GAP-18/19: o que AINDA falta ser julgado e que uma nova rodada pode julgar.
+ *
+ * 🔴 A pendência é ACUMULADA (`project_spec_files.stage_b_full_sha`), nunca o `outlineOnly` de UMA
+ * run: numa spec grande — a do NVX LastMile tem 950.965 chars contra um teto de 400.000 — nenhuma
+ * validação isolada consegue levar todos os arquivos por inteiro, então `outlineOnly` NUNCA fica vazio
+ * e um laço que olhasse só para ele jamais declararia a spec coberta, por mais rodadas que rodasse.
+ * O que fecha a conta é a UNIÃO das rodadas: cada uma julga um pedaço novo e a marca fica no arquivo.
+ *
+ * Desconta os `oversized` da última cobertura conhecida: esses não cabem nem sozinhos, então esperar
+ * por eles seria esperar para sempre — quem resolve é a divisão do arquivo (ação da Bancada).
  */
-export function canReusePassedRun(rawCoverage: unknown): boolean {
-  return pendingCoverage(rawCoverage).length === 0;
+export function pendingCoverage(unjudged: string[], rawCoverage: unknown): string[] {
+  const over = oversizedOf(rawCoverage);
+  return unjudged.filter((p) => !over.includes(p));
+}
+
+/**
+ * GAP-19: a regra do dedupe por hash. Uma run `passed` só pode ser reaproveitada se não há mais nada
+ * julgável a acrescentar — senão "reaproveitar" é congelar a cobertura e devolver ao laço autônomo
+ * exatamente a run que o fez pedir uma validação nova.
+ */
+export function canReusePassedRun(unjudged: string[], rawCoverage: unknown): boolean {
+  return pendingCoverage(unjudged, rawCoverage).length === 0;
+}
+
+/** Caminho como o validador o cita (`rel_dir/filename`) — a chave da cobertura. */
+function specPathOf(f: { rel_dir?: string | null; filename: string }): string {
+  const dir = (f.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+  return dir ? `${dir}/${f.filename}` : f.filename;
+}
+
+/**
+ * GAP-19: arquivos da spec que o estágio adversarial AINDA não julgou por inteiro NO CONTEÚDO ATUAL.
+ *
+ * Fato acumulado entre validações (é o par `stage_b_full_sha` × sha de agora): arquivo editado depois
+ * do julgamento volta a contar como não julgado — "coberto quando era outro texto" não é coberto.
+ * `null` = não foi possível medir (spec sem arquivos legíveis) e quem chama deve tratar como
+ * desconhecido, não como coberto.
+ */
+export async function unjudgedSpecFiles(
+  pool: Pool,
+  projectId: string,
+): Promise<{ unjudged: string[]; judged: number; total: number } | null> {
+  const current = await computeCurrentSpecHash(pool, projectId);
+  if (!current) return null;
+  const judgedShas = await loadJudgedShas(pool, projectId);
+  // connect.yaml e afins não vão ao estágio B (validação por schema) — não podem contar como pendência.
+  const files = current.files.filter((f) => !/\.ya?ml$/i.test(f.filename));
+  const unjudged = files.filter((f) => judgedShas.get(specPathOf(f)) !== f.contentSha256).map(specPathOf);
+  return { unjudged, judged: files.length - unjudged.length, total: files.length };
 }
 
 export async function startValidation(pool: Pool, opts: {
@@ -413,11 +448,16 @@ export async function startValidation(pool: Pool, opts: {
     [projectId, current.specHash],
   );
   if (dup.rows[0]) {
-    if (canReusePassedRun(dup.rows[0].stage_b_coverage)) {
+    const judged = await loadJudgedShas(pool, projectId);
+    const unjudged = current.files
+      .filter((f) => !/\.ya?ml$/i.test(f.filename))
+      .filter((f) => judged.get(specPathOf(f)) !== f.contentSha256)
+      .map(specPathOf);
+    if (canReusePassedRun(unjudged, dup.rows[0].stage_b_coverage)) {
       return { ok: true, runId: dup.rows[0].id as string, reused: true };
     }
-    const pend = pendingCoverage(dup.rows[0].stage_b_coverage).length;
-    console.log(`[spec-validation] ${projectId.slice(0, 8)}: run 'passed' de mesmo hash tem cobertura INCOMPLETA (${pend} arquivo(s) só em sumário) — validando de novo para julgar o que faltou (GAP-19).`);
+    const pend = pendingCoverage(unjudged, dup.rows[0].stage_b_coverage).length;
+    console.log(`[spec-validation] ${projectId.slice(0, 8)}: run 'passed' de mesmo hash, mas ${pend} arquivo(s) da spec nunca foram julgados por inteiro neste conteúdo — validando de novo para cobrir o que faltou (GAP-19).`);
   }
 
   const catalogVersion = loadArchetypeCatalog().catalogVersion;
