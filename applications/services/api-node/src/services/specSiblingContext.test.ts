@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildSiblingContext, SIBLING_FILE_BUDGET, type SiblingRef } from "./specSiblingContext.js";
+import { buildSiblingContext, disputedTerms, SIBLING_FILE_BUDGET, type SiblingRef } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 let root = "";
@@ -93,7 +93,7 @@ describe("buildSiblingContext — seleção por citação", () => {
 });
 
 describe("buildSiblingContext — orçamento", () => {
-  it("irmão gigante é truncado COM aviso (sem o aviso o editor concluiria que o irmão não define nada)", async () => {
+  it("irmão gigante SEM termo em disputa cai no head-truncate, COM aviso", async () => {
     await put("gigante.md", `# G\n${"y".repeat(SIBLING_FILE_BUDGET + 5_000)}`);
     const ctx = await buildSiblingContext([...files, ref("gigante.md")], "definicao-de-pronto.md", [gap("x", "ver gigante.md")]);
     expect(ctx.used).toContain("gigante.md");
@@ -111,5 +111,86 @@ describe("buildSiblingContext — orçamento", () => {
     expect(ctx.used.length).toBe(1);
     expect(ctx.omitted.length).toBeGreaterThan(0);
     expect(ctx.block).toContain("não couberam nesta rodada");
+  });
+});
+
+/**
+ * A5.6 — o recorte dirigido. Medido no run `75b3cf5d` (o que provou o A5.5): com irmãos de ~20k, o
+ * head-truncate só deixava 2 entrarem e gastava o orçamento no COMEÇO do arquivo, que raramente é
+ * onde mora a regra contestada. Estes testes amarram as duas propriedades que fazem o recorte valer:
+ * mostrar a seção que discute o termo em disputa e NUNCA deixar o modelo achar que o irmão silencia.
+ */
+describe("disputedTerms", () => {
+  it("extrai identificadores em backticks, códigos em CAIXA_ALTA e números de status", () => {
+    const t = disputedTerms([gap("Status HTTP divergente: 422 vs 400", "O campo `status_entrega` e o erro VALIDATION_ERROR conflitam.")]);
+    expect(t).toContain("status_entrega");
+    expect(t).toContain("validation_error");
+    expect(t).toContain("422");
+    expect(t).toContain("400");
+  });
+  it("não confunde palavra comum com termo (nada de 'de', 'e', 'HTTP' solto virar filtro inútil)", () => {
+    const t = disputedTerms([gap("falta critério", "sem detalhe")]);
+    expect(t).toEqual([]);
+  });
+});
+
+describe("buildSiblingContext — A5.6 resumo dirigido", () => {
+  /** Enchimento IDENTIFICÁVEL por seção — é como se distingue o que entrou do que ficou de fora. */
+  const filler = (tag: string, n: number) => `${`${tag} `.repeat(n)}\n`;
+
+  beforeAll(async () => {
+    await put("contratos-erros.md", [
+      "# Contratos de erro",
+      filler("abertura", 900),
+      "## Códigos de estado",
+      "Toda falha de validação devolve 422 UNPROCESSABLE_ENTITY com corpo `{code, message}`.",
+      filler("codigos", 100),
+      "## Paginação",
+      filler("paginacao", 900),
+      "## Idempotência",
+      filler("idempotencia", 900),
+    ].join("\n"));
+  });
+
+  it("a seção que discute o termo em disputa entra, mesmo estando no MEIO de um arquivo grande", async () => {
+    const ctx = await buildSiblingContext(
+      [...files, ref("contratos-erros.md")],
+      "definicao-de-pronto.md",
+      [gap("Status HTTP divergente: 400 vs 422", "contratos-erros.md especifica outro código para `VALIDATION_ERROR`.")],
+    );
+    expect(ctx.used).toContain("contratos-erros.md");
+    expect(ctx.block).toContain("RESUMO DIRIGIDO");
+    expect(ctx.block).toContain("422 UNPROCESSABLE_ENTITY");
+    // O sumário lista o que existe — inclusive o que NÃO foi transcrito.
+    expect(ctx.block).toContain("## Paginação");
+    // …e as seções irrelevantes não gastam orçamento com o CORPO delas.
+    expect(ctx.block).not.toContain("paginacao paginacao");
+    expect(ctx.block).not.toContain("idempotencia idempotencia");
+    expect(ctx.block).not.toContain("abertura abertura");
+  });
+
+  it("avisa que uma regra pode viver em seção não transcrita (senão o editor duplica a regra aqui)", async () => {
+    const ctx = await buildSiblingContext(
+      [...files, ref("contratos-erros.md")],
+      "definicao-de-pronto.md",
+      [gap("422 vs 400", "ver contratos-erros.md")],
+    );
+    expect(ctx.block).toContain("não conclua que o irmão silencia");
+    expect(ctx.block).toContain("SUMÁRIO DE SEÇÕES");
+  });
+
+  it("o resumo é MUITO menor que o head-truncate — é o que faz caber mais de um irmão citado", async () => {
+    const alvo = [gap("422 vs 400", "ver contratos-erros.md e modelo-dados.md")];
+    const ctx = await buildSiblingContext([...files, ref("contratos-erros.md")], "definicao-de-pronto.md", alvo);
+    expect(ctx.block.length).toBeLessThan(SIBLING_FILE_BUDGET);
+    expect(ctx.omitted).toEqual([]);
+    expect(ctx.used).toContain("contratos-erros.md");
+    expect(ctx.used).toContain("tecnico/modelo-dados.md");
+  });
+
+  it("irmão pequeno continua indo INTEIRO (recortar arquivo curto só cria risco de omitir a regra)", async () => {
+    const ctx = await buildSiblingContext(files, "definicao-de-pronto.md", [gap("422 vs 400", "ver api-entregas-entregadores.md")]);
+    expect(ctx.block).toContain("Erro de validação devolve 422.");
+    expect(ctx.block).not.toContain("RESUMO DIRIGIDO");
   });
 });

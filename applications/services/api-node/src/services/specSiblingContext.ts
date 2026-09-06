@@ -20,6 +20,15 @@
  * findings citam um `.md` no `rationale`) e os entrega como bloco SÓ LEITURA, mais o índice primário
  * quando sobra orçamento. A seleção é determinística — é transporte de fato ("o GAP cita este
  * arquivo"), não julgamento: o que fazer com a divergência continua sendo decisão do agente.
+ *
+ * ## A5.6 — por que o recorte deixou de ser head-truncate
+ *
+ * A primeira versão mandava os primeiros 20k chars de cada irmão. Medido no run `75b3cf5d` (a rodada
+ * que PROVOU o A5.5 em prod): com arquivos de ~20k, **só 2 irmãos citados cabiam** e em
+ * `modelo-dados.md` **8 ficaram de fora** — e os 20k gastos eram justamente o começo do arquivo, que
+ * raramente é onde mora a regra em disputa. Agora o irmão grande vira RESUMO DIRIGIDO: sumário
+ * COMPLETO de cabeçalhos (para o modelo saber o que existe) + só as seções que mencionam os termos que
+ * o GAP coloca em disputa. Mesmo orçamento, mais irmãos e sinal melhor.
  */
 import { readFile } from "node:fs/promises";
 import type { ValidationFinding } from "./specValidation.js";
@@ -27,7 +36,11 @@ import type { ValidationFinding } from "./specValidation.js";
 /** Orçamento total do bloco de irmãos. ~21k tokens: cabe com o arquivo (≤120k chars) na janela. */
 export const SIBLING_TOTAL_BUDGET = 60_000;
 /** Teto por irmão, para um arquivo gigante não comer o orçamento dos outros citados. */
-export const SIBLING_FILE_BUDGET = 20_000;
+export const SIBLING_FILE_BUDGET = 12_000;
+/** Abaixo disto o irmão vai INTEIRO — recortar um arquivo pequeno só cria risco de omitir a regra. */
+export const SIBLING_FILE_FULL_MAX = 8_000;
+/** Teto de uma seção dentro do resumo, para uma seção quilométrica não virar o resumo todo. */
+export const SIBLING_SECTION_BUDGET = 3_000;
 
 export interface SiblingRef {
   path: string;
@@ -68,10 +81,101 @@ function citations(text: string, ref: SiblingRef): number {
   return n;
 }
 
-function excerpt(path: string, content: string): { text: string; truncated: boolean } {
-  if (content.length <= SIBLING_FILE_BUDGET) return { text: content, truncated: false };
-  // Head-truncate e AVISA: sem o aviso o modelo concluiria "o irmão não define isso" e escreveria a
-  // regra de novo no arquivo errado — trocaria uma divergência por uma duplicação normativa.
+/**
+ * A5.6 — TERMOS EM DISPUTA extraídos do próprio GAP.
+ *
+ * O head-truncate do A5.5 gastava 20k chars nas PRIMEIRAS linhas do irmão, que raramente são onde a
+ * regra contestada mora — e com isso só 2 irmãos citados caíam no orçamento (medido em prod:
+ * `modelo-dados.md` deixou 8 de fora). Estes termos são o que o GAP literalmente coloca em disputa:
+ * identificadores entre backticks, códigos em CAIXA_ALTA e números de 3–4 dígitos (é assim que
+ * "422 vs 400" e "VALIDATION_ERROR" aparecem). Servem para escolher QUAIS seções do irmão mostrar.
+ */
+export function disputedTerms(findings: ValidationFinding[]): string[] {
+  const text = findings
+    .map((f) => `${f.title}\n${f.rationale ?? ""}`)
+    .join("\n");
+  const terms = new Set<string>();
+  for (const m of text.matchAll(/`([^`\n]{2,60})`/g)) terms.add(m[1].toLowerCase());
+  for (const m of text.matchAll(/\b[A-Z][A-Z0-9_]{3,}\b/g)) terms.add(m[0].toLowerCase());
+  for (const m of text.matchAll(/\b\d{3,4}\b/g)) terms.add(m[0]);
+  return [...terms];
+}
+
+/** Quebra o Markdown em seções por cabeçalho ATX, preservando o cabeçalho em cada pedaço. */
+function sections(content: string): { heading: string; body: string }[] {
+  const lines = content.split("\n");
+  const out: { heading: string; body: string }[] = [];
+  let heading = "(topo do arquivo)";
+  let buf: string[] = [];
+  const flush = () => { if (buf.join("\n").trim()) out.push({ heading, body: buf.join("\n") }); };
+  for (const line of lines) {
+    if (/^#{1,6}\s+\S/.test(line)) { flush(); heading = line.trim(); buf = [line]; }
+    else buf.push(line);
+  }
+  flush();
+  return out;
+}
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}\n[… seção truncada …]`;
+}
+
+/**
+ * Recorte de UM irmão. Arquivo pequeno vai inteiro; grande vira RESUMO DIRIGIDO: o sumário completo
+ * de cabeçalhos (para o modelo saber o que existe) + só as seções que mencionam os termos em disputa.
+ *
+ * O aviso é obrigatório nos dois casos de corte: sem ele o modelo concluiria "o irmão não define
+ * isso" e escreveria a regra de novo no arquivo errado — trocaria uma divergência por uma duplicação
+ * normativa, que é o mesmo defeito com outro nome.
+ */
+function excerpt(path: string, content: string, terms: string[]): { text: string; truncated: boolean } {
+  if (content.length <= SIBLING_FILE_FULL_MAX) return { text: content, truncated: false };
+
+  const secs = sections(content);
+  const outline = secs.map((s) => s.heading).filter((h) => h.startsWith("#")).join("\n");
+  const scored = secs
+    .map((s, i) => {
+      const hay = s.body.toLowerCase();
+      let hits = 0;
+      for (const t of terms) if (t && hay.includes(t)) hits += 1;
+      return { i, s, hits };
+    })
+    .filter((x) => x.hits > 0)
+    .sort((a, b) => b.hits - a.hits || a.i - b.i);
+
+  if (scored.length > 0) {
+    const parts: string[] = [];
+    let spent = outline.length;
+    // Ordem de LEITURA (i crescente) depois de escolher por relevância: o arquivo continua fazendo
+    // sentido de cima para baixo, o que importa quando as seções se referenciam entre si.
+    const chosen: typeof scored = [];
+    for (const x of scored) {
+      const body = clip(x.s.body, SIBLING_SECTION_BUDGET);
+      if (spent + body.length > SIBLING_FILE_BUDGET) continue;
+      spent += body.length;
+      chosen.push(x);
+    }
+    if (chosen.length > 0) {
+      for (const x of chosen.sort((a, b) => a.i - b.i)) parts.push(clip(x.s.body, SIBLING_SECTION_BUDGET));
+      return {
+        text: [
+          `[RESUMO DIRIGIDO de \`${path}\` (${content.length} chars) — abaixo, o SUMÁRIO COMPLETO de seções e,`,
+          "em seguida, apenas as seções que mencionam o que o GAP disputa. Uma regra pode existir numa seção",
+          "NÃO transcrita: o sumário diz o que existe, então não conclua que o irmão "
+            + "silencia sobre um assunto listado ali.]",
+          "",
+          "SUMÁRIO DE SEÇÕES:",
+          outline,
+          "",
+          "SEÇÕES RELEVANTES:",
+          parts.join("\n\n"),
+        ].join("\n"),
+        truncated: true,
+      };
+    }
+  }
+
+  // Nenhum termo casou (ou nada caberia): volta ao head-truncate, que ao menos preserva o começo.
   return {
     text: `${content.slice(0, SIBLING_FILE_BUDGET)}\n\n[… \`${path}\` truncado aqui (${content.length} chars no total) — a ausência de um trecho neste recorte NÃO significa que ele não exista no arquivo …]`,
     truncated: true,
@@ -102,6 +206,7 @@ export async function buildSiblingContext(
   const primary = others.find((f) => f.isPrimary);
   const queue = primary && !cited.includes(primary) ? [...cited, primary] : cited;
 
+  const terms = disputedTerms(findings);
   const parts: string[] = [];
   const used: string[] = [];
   const omitted: string[] = [];
@@ -109,7 +214,7 @@ export async function buildSiblingContext(
   for (const ref of queue) {
     const raw = await readFile(ref.filePath, "utf-8").catch(() => null);
     if (raw === null) continue;
-    const { text: body } = excerpt(ref.path, raw);
+    const { text: body } = excerpt(ref.path, raw, terms);
     if (spent + body.length > budget) { omitted.push(ref.path); continue; }
     spent += body.length;
     used.push(ref.path);
