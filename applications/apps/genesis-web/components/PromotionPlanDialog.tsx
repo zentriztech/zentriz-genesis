@@ -32,6 +32,7 @@ import Typography from "@mui/material/Typography";
 import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import { FACTORY_LABEL, startWaveLabel } from "@/lib/factoryActions";
 
 /** Um projeto no plano. Espelha `PromotionPlanItem` do backend (mais os campos do GET). */
 export interface PromotionPlanItem {
@@ -282,7 +283,9 @@ export function PromotionPlanDialog({
             disabled={starting}
             onClick={onStart}
           >
-            {starting ? "Iniciando…" : `Iniciar onda ${pendingWave}`}
+            {/* Rótulo da fonte única (`lib/factoryActions.ts`): `/start` dispara SÓ a onda pendente
+                mais baixa — o texto tem de dizer QUAL onda, nunca "Iniciar produto". */}
+            {starting ? FACTORY_LABEL.starting : startWaveLabel(pendingWave)}
           </Button>
         )}
       </DialogActions>

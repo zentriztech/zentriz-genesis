@@ -72,6 +72,8 @@ import SpecQuestionsPanel from "@/components/SpecQuestionsPanel";
 import DeadpoolPromotionApprovals from "@/components/DeadpoolPromotionApprovals";
 import { getAgentProfile } from "@/lib/agentProfiles";
 import { apiGet, apiPost, apiPatch, apiPut, apiDelete } from "@/lib/api";
+// Padronização 2026-09-06: rótulos das ações de fábrica vêm de um módulo único.
+import { FACTORY_LABEL } from "@/lib/factoryActions";
 import { authStore } from "@/stores/authStore";
 import EvolutionPanel from "@/components/EvolutionPanel";
 import type { DialogueEntry } from "@/components/LiveDialogue";
@@ -878,21 +880,21 @@ function ProjectDetailPageInner() {
     async () => { await apiPost(`/api/projects/${id}/reject`, {}); await projectsStore.loadProject(id); }
   );
 
-  const handleStopSafe = () => openConfirm(
-    "Interromper Com Segurança",
-    "⏳ O pipeline aguardará a task atual finalizar antes de parar. Isso pode levar alguns minutos.",
-    async () => { await apiPost(`/api/projects/${id}/stop`, {}); await projectsStore.loadProject(id); }
-  );
-
-  const handleStopNow = () => openConfirm(
-    "Interromper Imediatamente",
-    "⚠️ ATENÇÃO: O pipeline será interrompido agora. A task em execução ficará incompleta e poderá gerar artefatos corrompidos.",
+  // B2 (revisão adversarial 2026-09-06) — havia DUAS opções de parada prometendo semânticas
+  // diferentes ("aguarda a task atual" vs "para agora") e as duas postavam o MESMO
+  // `POST /projects/:id/stop`, que repassa ao runner (`runner_server.py:/stop`) → SIGTERM
+  // escalando para SIGKILL. Parada graciosa não existe em nenhum ponto do caminho. Uma única
+  // ação, com o texto verdadeiro: quem quer preservar artefatos precisa saber que não há como.
+  const handleStop = () => openConfirm(
+    FACTORY_LABEL.stopRun,
+    "⚠️ O pipeline é encerrado AGORA (o processo do runner recebe SIGTERM e, se resistir, SIGKILL). " +
+    "A task em execução fica incompleta e pode deixar artefatos parciais. Para retomar depois, use “Reiniciar”.",
     async () => { await apiPost(`/api/projects/${id}/stop`, {}); await projectsStore.loadProject(id); },
     true,
   );
 
   const handleDeleteKeepFiles = () => openConfirm(
-    "Excluir e Manter Arquivos",
+    "Excluir e manter arquivos",
     "O projeto será removido do banco de dados mas os arquivos gerados em disco serão mantidos em /zentriz-files.",
     async () => {
       // Garantir que está parado antes de excluir
@@ -904,7 +906,7 @@ function ProjectDetailPageInner() {
   );
 
   const handleDeleteAll = () => openConfirm(
-    "Excluir Completamente",
+    "Excluir completamente",
     "🔴 AÇÃO IRREVERSÍVEL: O projeto e TODOS os arquivos gerados serão apagados permanentemente do banco e do disco.",
     async () => {
       if (isRunning) await apiPost(`/api/projects/${id}/stop`, {}).catch(() => {});
@@ -1294,12 +1296,11 @@ function ProjectDetailPageInner() {
           </IconButton>
         </Tooltip>
         <Menu anchorEl={actionsAnchor} open={!!actionsAnchor} onClose={() => setActionsAnchor(null)}>
-          {isRunning && <MenuItem onClick={handleStopSafe}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Com Segurança</MenuItem>}
-          {isRunning && <MenuItem onClick={handleStopNow} sx={{ color: "warning.main" }}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />Interromper Imediatamente</MenuItem>}
+          {isRunning && <MenuItem onClick={handleStop} sx={{ color: "warning.main" }}><StopIcon sx={{ mr: 1, fontSize: "1rem" }} />{FACTORY_LABEL.stopRun}</MenuItem>}
           {(isRunning || isDone || isAwaitingStart || isConverting) && <MenuItem onClick={handleReject}><CancelIcon sx={{ mr: 1, fontSize: "1rem" }} />Rejeitar</MenuItem>}
           <Divider />
-          <MenuItem onClick={handleDeleteKeepFiles} sx={{ color: "warning.main" }}><DeleteOutlineIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir e Manter Arquivos</MenuItem>
-          <MenuItem onClick={handleDeleteAll} sx={{ color: "error.main" }}><DeleteForeverIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir Completamente</MenuItem>
+          <MenuItem onClick={handleDeleteKeepFiles} sx={{ color: "warning.main" }}><DeleteOutlineIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir e manter arquivos</MenuItem>
+          <MenuItem onClick={handleDeleteAll} sx={{ color: "error.main" }}><DeleteForeverIcon sx={{ mr: 1, fontSize: "1rem" }} />Excluir completamente</MenuItem>
         </Menu>
         </>)}
         {/* Diálogo de confirmação */}

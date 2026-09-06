@@ -76,6 +76,11 @@ import {
   PromotionPlanDialog, describeStartResult,
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
 } from "@/components/PromotionPlanDialog";
+import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+// Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
+import {
+  FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTED_SPEC_NOTICE, promoteConfirmBody, promotedProductNotice,
+} from "@/lib/factoryActions";
 
 interface SpecItem {
   id: string;
@@ -282,6 +287,9 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   const [view, setView] = useState<"list" | "triage">("list");
   // E3: confirmação de promoção mostra estimativa + pré-flight antes de queimar fábrica.
   const [promoteTarget, setPromoteTarget] = useState<SpecItem | null>(null);
+  // Padronização 2026-09-06 (N1): promover o PRODUTO INTEIRO também confirma — antes era 1 clique
+  // aqui e digitação obrigatória na Bancada para a MESMA rota (escada de guardas invertida).
+  const [confirmProduct, setConfirmProduct] = useState<{ id: string; name: string; specs: number } | null>(null);
   // Migração 097 — plano de promoção do PRODUTO (ordem por onda), exibido após promover.
   const [planOpen, setPlanOpen] = useState(false);
   const [planProduct, setPlanProduct] = useState<{ id: string; name: string } | null>(null);
@@ -420,10 +428,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     try {
       await apiPost<{ productId: string | null; graduated: boolean }>(`/api/projects/${id}/promote`, {});
       setPromoteTarget(null);   // antes a navegação fechava o diálogo; agora ficamos na Bancada
-      setNotice(
-        "Spec promovida à fábrica — ela sai da Bancada e passa a esperar o início. " +
-        "Inicie na tela do projeto (botão “Iniciar”) ou em “Meus produtos”.",
-      );
+      setNotice(PROMOTED_SPEC_NOTICE);
       await load();
       projectsStore.loadProjects();
     } catch (e) {
@@ -444,9 +449,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
         promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
         notes?: string | null; warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
       }>(`/api/products/${productId}/promote`, {});
-      setNotice(
-        `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). Nada foi iniciado.`,
-      );
+      setNotice(promotedProductNotice(res.promoted.length, res.waves));
       setPlanProduct({ id: productId, name: productName });
       setPlanMeta({
         promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [],
@@ -618,7 +621,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
               <Button size="small" variant="contained" color="success"
                 startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
                 disabled={busy} onClick={() => setPromoteTarget(s)}>
-                Promover à fábrica
+                {FACTORY_LABEL.promoteSpec}
               </Button>
             </Stack>
           )}
@@ -870,13 +873,16 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                     {/* Promover produto inteiro — operação; master também pode (C6). Migração 097:
                         entrega TODOS os projetos na ordem de interdependência e NÃO inicia nada. */}
                     <Box sx={{ px: 2, pb: 1.5, pt: 0.25 }}>
-                      <Tooltip title="Envia todos os projetos deste produto à fábrica, na ordem de interdependência decidida pelo arquiteto — sem iniciar nada.">
+                      <Tooltip title={FACTORY_TOOLTIP.promoteProduct}>
                         <span>
                           <Button fullWidth size="small" variant="contained" color="success"
                             startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
                             disabled={busyId === `prod:${g.productId}`}
-                            onClick={(e) => { e.stopPropagation(); promoteProduct(g.productId, g.name); }}>
-                            Promover produto inteiro
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmProduct({ id: g.productId, name: g.name, specs: g.specs.length });
+                            }}>
+                            {FACTORY_LABEL.promoteProduct}
                           </Button>
                         </span>
                       </Tooltip>
@@ -986,7 +992,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
           passo separado), mas continua sendo decisão consciente: a spec sai da Bancada e congela. */}
       <Dialog open={!!promoteTarget} onClose={() => busyId ? undefined : setPromoteTarget(null)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontSize: "1rem", display: "flex", alignItems: "center", gap: 1 }}>
-          <RocketLaunchIcon sx={{ fontSize: "1.1rem", color: "success.main" }} /> Promover à fábrica
+          <RocketLaunchIcon sx={{ fontSize: "1.1rem", color: "success.main" }} /> {FACTORY_LABEL.promoteSpec}
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" sx={{ mb: 2 }}>
@@ -1040,10 +1046,29 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
             startIcon={busyId === promoteTarget?.id ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
             disabled={!!busyId}
             onClick={() => { if (promoteTarget) promoteToFactory(promoteTarget.id); }}>
-            Promover agora
+            {FACTORY_LABEL.promoteSpec}
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Confirmação N1 do PRODUTO INTEIRO (mesmo componente e mesmo texto de /products e da
+          Bancada) — o escopo real é dito antes do clique valer. */}
+      <ConfirmActionDialog
+        open={!!confirmProduct}
+        title={FACTORY_LABEL.promoteProduct}
+        message={promoteConfirmBody("product", {
+          productName: confirmProduct?.name ?? null,
+          siblings: confirmProduct?.specs ?? null,
+        })}
+        confirmLabel={FACTORY_LABEL.promoteProduct}
+        busy={!!confirmProduct && busyId === `prod:${confirmProduct.id}`}
+        onClose={() => setConfirmProduct(null)}
+        onConfirm={() => {
+          const target = confirmProduct;
+          setConfirmProduct(null);
+          if (target) void promoteProduct(target.id, target.name);
+        }}
+      />
 
       {/* Migração 097 — ordem de entrada na fábrica do PRODUTO promovido (por onda), com o início
           como clique separado. Abre logo após "Promover produto inteiro". */}
