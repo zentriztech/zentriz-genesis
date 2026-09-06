@@ -31,6 +31,7 @@
  * o GAP coloca em disputa. Mesmo orçamento, mais irmãos e sinal melhor.
  */
 import { readFile } from "node:fs/promises";
+import { splitSections, clipSection, headingOutline } from "../lib/markdownSections.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 /** Orçamento total do bloco de irmãos. ~21k tokens: cabe com o arquivo (≤120k chars) na janela. */
@@ -101,24 +102,13 @@ export function disputedTerms(findings: ValidationFinding[]): string[] {
   return [...terms];
 }
 
-/** Quebra o Markdown em seções por cabeçalho ATX, preservando o cabeçalho em cada pedaço. */
-function sections(content: string): { heading: string; body: string }[] {
-  const lines = content.split("\n");
-  const out: { heading: string; body: string }[] = [];
-  let heading = "(topo do arquivo)";
-  let buf: string[] = [];
-  const flush = () => { if (buf.join("\n").trim()) out.push({ heading, body: buf.join("\n") }); };
-  for (const line of lines) {
-    if (/^#{1,6}\s+\S/.test(line)) { flush(); heading = line.trim(); buf = [line]; }
-    else buf.push(line);
-  }
-  flush();
-  return out;
-}
-
-function clip(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max)}\n[… seção truncada …]`;
-}
+/**
+ * A5.7/GAP-7: o recorte por seção vive em `lib/markdownSections.ts` porque o arquivo ALVO passou a
+ * precisar exatamente do mesmo comportamento. Duas réguas diferentes fariam o modelo montar um
+ * `SEARCH` que não casa no arquivo.
+ */
+const sections = splitSections;
+const clip = clipSection;
 
 /**
  * Recorte de UM irmão. Arquivo pequeno vai inteiro; grande vira RESUMO DIRIGIDO: o sumário completo
@@ -132,7 +122,7 @@ function excerpt(path: string, content: string, terms: string[]): { text: string
   if (content.length <= SIBLING_FILE_FULL_MAX) return { text: content, truncated: false };
 
   const secs = sections(content);
-  const outline = secs.map((s) => s.heading).filter((h) => h.startsWith("#")).join("\n");
+  const outline = headingOutline(secs);
   const scored = secs
     .map((s, i) => {
       const hay = s.body.toLowerCase();

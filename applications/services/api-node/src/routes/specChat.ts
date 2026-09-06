@@ -725,6 +725,12 @@ function buildGapFileRequest(
   scopeProjectId: string | null = null,
   /** A5.5: irmãos CITADOS pelos GAPs, só leitura. Vazio = comportamento anterior. */
   siblingBlock = "",
+  /**
+   * A5.7/GAP-7: `content` é um RECORTE do arquivo (arquivo acima do teto de entrada), não o arquivo
+   * inteiro. Anunciar isso é obrigatório: um modelo que pensa estar vendo o arquivo todo conclui que
+   * a seção ausente não existe e a recria — troca um GAP por uma contradição interna.
+   */
+  digested = false,
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -742,9 +748,11 @@ function buildGapFileRequest(
     siblingBlock
       ? `--- ARQUIVOS IRMÃOS CITADOS PELOS GAPs (SÓ LEITURA — não os copie, não os edite) ---\n${siblingBlock}\n--- FIM DOS IRMÃOS ---\n`
       : "",
-    "--- CONTEÚDO ATUAL DO ARQUIVO ---",
+    digested
+      ? "--- RECORTE DIRIGIDO DO ARQUIVO (NÃO é o arquivo inteiro; leia as REGRAS dentro do bloco) ---"
+      : "--- CONTEÚDO ATUAL DO ARQUIVO ---",
     content,
-    "--- FIM DO CONTEÚDO ---",
+    digested ? "--- FIM DO RECORTE ---" : "--- FIM DO CONTEÚDO ---",
     "",
     `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
     gaps,
@@ -774,6 +782,30 @@ function buildGapFileRequest(
  * falharem, a rodada segue como antes (com o defeito conhecido) em vez de não acontecer. Os dois
  * chamadores — o botão humano e o laço autônomo — passam por aqui para não divergirem.
  */
+/**
+ * A5.7/GAP-7 — recorte do arquivo ALVO quando ele passou do teto de entrada.
+ *
+ * Só existe no formato `edits`: lá a saída é proporcional à CORREÇÃO, então ler um recorte verbatim
+ * basta para montar `SEARCH/REPLACE` válidos. No formato `whole` o modelo devolveria o "arquivo
+ * inteiro" a partir de um recorte — arquivo mutilado — e o teto continua valendo.
+ *
+ * Diferente do bloco de irmãos, este NÃO é best-effort: se o recorte falhar, a rodada tem de falhar
+ * (mandar o arquivo cortado sem o aviso e sem o sumário é o cenário que corrompe a spec).
+ */
+async function gapFileTargetContent(
+  filePath: string,
+  content: string,
+  findings: ValidationFinding[],
+): Promise<{ text: string; digested: boolean } | { tooLarge: true; cap: number }> {
+  const cap = maxGapFileChars();
+  if (content.length <= cap) return { text: content, digested: false };
+  if (!gapFileEditsEnabled()) return { tooLarge: true, cap };
+  const { buildFileDigest } = await import("../services/specFileDigest.js");
+  const d = buildFileDigest(filePath, content, findings, cap);
+  console.log(`[SpecChat] alvo recortado ${filePath}: ${content.length} chars > teto ${cap} → resumo dirigido de ${d.text.length} chars (${d.used}/${d.total} seções)`);
+  return { text: d.text, digested: d.digested };
+}
+
 async function gapSiblingBlock(
   projectId: string,
   filePath: string,
@@ -1109,11 +1141,14 @@ export async function dispatchGapFileJob(opts: {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
   }
-  const gapFileCap = maxGapFileChars();
-  if (opts.fileContent.length > gapFileCap) {
+  // A5.7/GAP-7: acima do teto o arquivo NÃO é mais recusado no formato `edits` — entra recortado pelas
+  // seções que os GAPs apontam. Era daqui que saía "divida este arquivo", que pede ao humano
+  // exatamente o que ele acionou o autônomo para não fazer (e o arquivo ficava irrevisável para sempre).
+  const target = await gapFileTargetContent(opts.filePath, opts.fileContent, opts.findings);
+  if ("tooLarge" in target) {
     return {
       ok: false, code: "FILE_TOO_LARGE",
-      message: `${opts.filePath} tem ${opts.fileContent.length} caracteres (teto ${gapFileCap}) — não cabe na janela de contexto desta rodada. Divida este arquivo.`,
+      message: `${opts.filePath} tem ${opts.fileContent.length} caracteres (teto ${target.cap}) — não cabe na janela de contexto desta rodada. Divida este arquivo.`,
     };
   }
   // Mapa do produto como contexto só-leitura (Fase 1). Best-effort e só com a flag ligada — sem ele
@@ -1138,7 +1173,7 @@ export async function dispatchGapFileJob(opts: {
   });
   runFileChatJob(
     opts.jobId,
-    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx, opts.projectId, siblings), ...opts.llm },
+    { ...buildGapFileRequest(target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested), ...opts.llm },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
@@ -1334,7 +1369,12 @@ export async function specChatRoutes(app: FastifyInstance) {
       // O teto do Resolver GAPs por arquivo é maior: o orçamento de saída agora é derivado do
       // tamanho do arquivo (`rawMaxTokensFor`) em vez de fixo em 8k.
       const fileChatCap = gapsPerFile ? maxGapFileChars() : MAX_FILE_CHAT_CHARS;
-      if (filePath && specMarkdown.length > fileChatCap) {
+      // A5.7/GAP-7: em "Resolver GAPs por arquivo" no formato `edits`, o arquivo acima do teto deixa de
+      // ser recusado — entra recortado pelas seções que os GAPs apontam (ver `gapFileTargetContent`).
+      // O chat livre por arquivo e o formato `whole` continuam recusando: lá o modelo devolve o arquivo
+      // INTEIRO, e reemitir "o arquivo inteiro" a partir de um recorte mutilaria o arquivo.
+      const canDigestOversize = gapsPerFile && gapFileEditsEnabled();
+      if (filePath && !canDigestOversize && specMarkdown.length > fileChatCap) {
         return reply.status(413).send({
           code: "FILE_TOO_LARGE",
           message: `Arquivo grande demais para edição por IA (${specMarkdown.length} > ${fileChatCap} caracteres). Divida o arquivo e tente de novo.`,
@@ -1448,9 +1488,12 @@ export async function specChatRoutes(app: FastifyInstance) {
       if (gapsPerFile) {
         // PR-4: CTO-EDITOR escopado — resolve os GAPs deste arquivo sem tocar nos irmãos e sem
         // passar pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo).
+        // A5.7: o botão humano recorta o arquivo grande pelo MESMO caminho do laço (o guard acima já
+        // garantiu que o recorte é possível) — dois recortes diferentes dariam dois resultados.
+        const humanTarget = await gapFileTargetContent(filePath!, specMarkdown, fileGaps);
         runFileChatJob(
           jobId,
-          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx, projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps)), ...llm },
+          { ...buildGapFileRequest("tooLarge" in humanTarget ? specMarkdown : humanTarget.text, filePath!, fileGaps, ctx, projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps), !("tooLarge" in humanTarget) && humanTarget.digested), ...llm },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
           gapFileEditsEnabled() ? specMarkdown : null,
