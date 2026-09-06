@@ -402,6 +402,39 @@ describe("GET /api/spec-chat/history — o chat deixa de nascer vazio", () => {
     const res = await app.inject({ method: "GET", url: `/api/spec-chat/history?projectId=${PROJ}` });
     expect(res.statusCode).toBe(404);
   });
+
+  // Defeito relatado pelo Jean (2026-09-06): "quando seleciono um arquivo que tem historico de
+  // conversas" o chat vinha vazio — a tela buscava SEM `filePath` e o SELECT filtra `file_path IS NULL`.
+  it("com filePath, filtra a conversa DAQUELE arquivo (relDir/arquivo normalizado)", async () => {
+    let seenParams: unknown[] = [];
+    queryHandler = (sql, params) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_messages")) {
+        seenParams = params as unknown[];
+        return { rows: [{ id: "1", role: "user", content: "só deste arquivo", created_at: new Date().toISOString(), job_id: null }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/spec-chat/history?projectId=${PROJ}&filePath=${encodeURIComponent("docs/modelo-dados.md")}`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(seenParams[1]).toBe("docs/modelo-dados.md");
+    expect(JSON.parse(res.body).messages).toHaveLength(1);
+  });
+
+  // Outra metade do mesmo relato ("às vezes preciso forçar o refresh"): falha de banco devolvia
+  // 200 com `messages: []` (catch vazio) → indistinguível de "não há conversa". Agora é erro.
+  it("falha de banco NÃO vira conversa vazia — devolve erro para a tela poder avisar", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      if (sql.includes("FROM spec_chat_messages")) throw new Error("connection terminated unexpectedly");
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "GET", url: `/api/spec-chat/history?projectId=${PROJ}` });
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+  });
 });
 
 // ── Fase 1: escopo de PRODUTO (SPEC_CONTEXT_PRODUCT_SCOPE) ─────────────────────

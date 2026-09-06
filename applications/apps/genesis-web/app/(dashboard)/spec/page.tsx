@@ -1179,6 +1179,8 @@ function SpecEditor({
 function SpecChatPanel({
   messages, input, onInput, onSend, sending, error,
   activeFilePath = null, treeDirty = false,
+  openFilePath = null, openFileIsPrimary = false,
+  historyLoading = false, historyError = null, onRetryHistory,
   pending = null, applying = false, applyError = null, conflict = false,
   onApply, onDiscard, onOverwrite,
   gapCount = null, onResolveGaps,
@@ -1208,6 +1210,17 @@ function SpecChatPanel({
   // quando ausentes, o painel opera no modo clássico de spec inteira).
   activeFilePath?: string | null;
   treeDirty?: boolean;
+  /**
+   * Arquivo ABERTO na lista, para exibição no topo — inclusive o PRIMÁRIO, que edita a spec
+   * inteira (`activeFilePath = null`). Sem isto, selecionar o índice deixava o topo dizendo só
+   * "Editando a spec inteira", sem dizer QUAL arquivo estava aberto (Jean, 2026-09-06).
+   */
+  openFilePath?: string | null;
+  openFileIsPrimary?: boolean;
+  /** Histórico da conversa deste escopo: carregando / falhou (com "tentar de novo"). */
+  historyLoading?: boolean;
+  historyError?: string | null;
+  onRetryHistory?: () => void;
   pending?: PendingApply | null;
   applying?: boolean;
   applyError?: string | null;
@@ -1236,6 +1249,8 @@ function SpecChatPanel({
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, sending, pending, recovered]);
   const fileMode = Boolean(activeFilePath);
+  /** Caminho a EXIBIR: o arquivo em escopo ou, se o aberto for o primário, o próprio primário. */
+  const scopePath = activeFilePath ?? openFilePath;
   // Migração 090 — laço autônomo do servidor: enquanto ativo, o botão "Resolver GAPs" fica
   // travado (o laço já está chamando o CTO) e o painel abaixo mostra o que ele fez em cada rodada.
   const autonomyRun = autonomy?.run ?? null;
@@ -1249,19 +1264,42 @@ function SpecChatPanel({
         <Typography variant="subtitle2" fontWeight={600} sx={{ fontSize: "0.8rem" }}>Melhorar com IA</Typography>
       </Stack>
 
-      {/* T4.3 — indicador de escopo: arquivo selecionado na árvore vs. spec inteira. */}
+      {/* T4.3 — indicador de escopo: arquivo selecionado na árvore vs. spec inteira.
+          2026-09-06 — o NOME do arquivo aberto aparece SEMPRE (inclusive o primário/índice, que
+          edita a spec inteira). O escopo continua sendo dito em texto ao lado do chip, para o
+          usuário não confundir "arquivo aberto" com "o que a IA vai reescrever". */}
       <Box sx={{ px: 1.5, py: 0.75, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0, bgcolor: "action.hover" }}>
-        {fileMode ? (
-          <Tooltip title={activeFilePath as string}>
-            <Chip size="small" variant="outlined" color="primary"
-              icon={<InsertDriveFileOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
-              label={(activeFilePath as string).split("/").pop()}
-              sx={{ maxWidth: "100%", "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.7rem" } }} />
-          </Tooltip>
-        ) : (
-          <Typography variant="caption" color="text.secondary">Editando a spec inteira</Typography>
-        )}
+        <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+          {scopePath ? (
+            <Tooltip title={scopePath}>
+              <Chip size="small" variant="outlined" color={fileMode ? "primary" : "default"}
+                icon={<InsertDriveFileOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                label={scopePath.split("/").pop()}
+                sx={{ maxWidth: "60%", "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.7rem" } }} />
+            </Tooltip>
+          ) : null}
+          <Typography variant="caption" color="text.secondary" noWrap>
+            {fileMode ? "só este arquivo" : openFileIsPrimary ? "arquivo principal · edita a spec inteira" : "Editando a spec inteira"}
+          </Typography>
+        </Stack>
       </Box>
+
+      {/* Histórico da conversa: carregando / falhou. Antes a falha era silenciosa (catch vazio) e o
+          chat simplesmente nascia vazio — Jean: "nem sempre o historico carrega, as vezes preciso
+          forçar o refresh da tela". Agora ele vê o motivo e recarrega sem sair da tela. */}
+      {historyError ? (
+        <Alert severity="warning" sx={{ mx: 1.5, my: 0.75, py: 0, fontSize: "0.7rem" }}
+          action={onRetryHistory ? (
+            <Button size="small" onClick={onRetryHistory} sx={{ fontSize: "0.7rem" }}>Tentar de novo</Button>
+          ) : undefined}>
+          Não foi possível carregar o histórico desta conversa.
+        </Alert>
+      ) : historyLoading ? (
+        <Stack direction="row" spacing={0.75} alignItems="center" sx={{ px: 1.5, py: 0.5 }}>
+          <CircularProgress size={11} />
+          <Typography variant="caption" color="text.secondary">Carregando histórico…</Typography>
+        </Stack>
+      ) : null}
 
       <Box ref={scrollRef} sx={{ flexGrow: 1, overflowY: "auto", p: 1.5 }}>
         {messages.length === 0 && !fileMode && (
@@ -1714,6 +1752,15 @@ export default function SpecPage() {
   const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
   /** Metadados do projeto aberto reportados pela árvore (evita repetir o GET do índice). */
   const [specFileMeta, setSpecFileMeta] = useState<{ editable: boolean; fileCount: number } | null>(null);
+  /**
+   * Arquivo que o usuário ABRIU na lista — inclusive quando é o PRIMÁRIO. Existe separado de
+   * `activeFile` porque abrir o primário significa "spec inteira" (`activeFile = null`, regra de
+   * integridade: um só rascunho dos mesmos bytes). Jean, 2026-09-06: "quando seleciono um arquivo
+   * que tem historico de conversas, o nome do arquivo atual nao é exibido no topo" — era exatamente
+   * o primário, o único cujo histórico existe desde antes da divisão. Isto é EXIBIÇÃO: nunca
+   * decide escopo de escrita nem de chat.
+   */
+  const [openFile, setOpenFile] = useState<{ path: string; primary: boolean } | null>(null);
   /** Bump para trazer o editor à aba "Autonomia" (o relatório do laço saiu do corpo da página). */
   const [openAutonomySignal, setOpenAutonomySignal] = useState(0);
   /** Diálogo "Dividir a spec em arquivos" (abre pelo ícone da lista) + estado espelhado do painel. */
@@ -2030,8 +2077,11 @@ export default function SpecPage() {
     deadlineMs: number;
     /** true = job de outra sessão: OFERECE o resultado, não escreve no editor por conta própria. */
     recovered?: boolean;
+    /** Quando a revisão foi PEDIDA (ms). Uma recuperada pode ser de ontem — aplicar sem saber a
+     *  idade sobrescreveria o trabalho feito depois dela. */
+    requestedAtMs?: number;
   }) => {
-    const { jobId, seq, kind, filePath, baseSha, deadlineMs, recovered } = opts;
+    const { jobId, seq, kind, filePath, baseSha, deadlineMs, recovered, requestedAtMs } = opts;
     chatJobIdRef.current = jobId;
     let pollErrors = 0;
 
@@ -2039,11 +2089,13 @@ export default function SpecPage() {
 
     const tick = async () => {
       if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
-      if (Date.now() > deadlineMs) {
-        finish();
-        setChatError("Esta revisão passou do tempo máximo. O servidor continua tentando coletar o resultado — se o CTO terminar, ele aparece ao reabrir esta tela.");
-        return;
-      }
+      // 2026-09-06 (Jean: "porque o arquivo principal exibe o aviso 'Esta revisão passou do tempo
+      // máximo'?") — o teto era conferido ANTES do poll. Um job já `done` no banco, com a spec
+      // pronta e `collected_at IS NULL`, era descartado no primeiro tick da rehidratação só porque
+      // o `deadline_at` dele havia passado — e, como o resultado nunca era coletado, o
+      // `/in-flight` o reofertava a CADA abertura da tela: aviso eterno que refresh não limpava
+      // (medido em prod: job 4cc2a5a0, `resolve_gaps` done desde 2026-09-05 18:19).
+      // O teto expira a ESPERA, nunca o RESULTADO → a conferência mudou para o ramo pending/running.
       try {
         const poll = await apiGet<SpecChatJobResponse>(`/api/spec-chat/${jobId}`);
         if (seq !== chatSeqRef.current) { stopChatPolling(); return; }
@@ -2061,7 +2113,11 @@ export default function SpecPage() {
             // Terminou enquanto ninguém olhava: nesse intervalo o usuário pode ter editado a spec
             // à mão. Um `setSpecMarkdown` cego apagaria a edição em silêncio → oferecemos.
             if (poll.specMarkdown) setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: poll.reply ?? null, kind, truncated: poll.truncated === true });
-            setChatMessages((prev) => [...prev, { role: "assistant", content: poll.reply || "Revisão concluída enquanto esta tela estava fechada." }]);
+            // A IDADE vai no texto: uma revisão pedida ontem, aplicada hoje, apagaria tudo o que foi
+            // editado no meio. Quem decide é o usuário — mas com a data à vista.
+            const age = requestedAtMs && Number.isFinite(requestedAtMs)
+              ? ` (pedida em ${new Date(requestedAtMs).toLocaleString("pt-BR")})` : "";
+            setChatMessages((prev) => [...prev, { role: "assistant", content: (poll.reply || "Revisão concluída enquanto esta tela estava fechada.") + age }]);
           } else if (poll.truncated === true) {
             // T1 — a resposta foi CORTADA no teto de saída do modelo: a spec está INCOMPLETA.
             // Encher o editor com ela e o usuário salvar = apagar o trecho final que o modelo não
@@ -2092,8 +2148,14 @@ export default function SpecPage() {
           if (kind !== "file" && poll.specMarkdown) {
             setRecoveredSpec({ jobId, content: poll.specMarkdown, reply: null, kind, rejected: poll.error ?? null, truncated: poll.truncated === true });
           }
+        } else if (Date.now() > deadlineMs) {
+          // AINDA pending/running e o teto passou: aqui sim a espera acabou (o trabalho pode
+          // continuar no agente — o coletor do servidor fecha o job quando souber o desfecho).
+          finish();
+          setChatError("Esta revisão passou do tempo máximo. O servidor continua tentando coletar o resultado — se o CTO terminar, ele aparece ao reabrir esta tela.");
+          return;
         }
-        // pending/running → segue pollando (o servidor também coleta em paralelo, sem duplicar).
+        // pending/running dentro do teto → segue pollando (o servidor também coleta, sem duplicar).
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         pollErrors += 1;
@@ -2171,6 +2233,8 @@ export default function SpecPage() {
       const f = await apiGet<{ path: string; content: string; contentSha256: string; isPrimary: boolean }>(
         `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(specPath)}`,
       );
+      // Rótulo do arquivo aberto (inclusive o primário) — só exibição, ver `openFile`.
+      setOpenFile({ path: f.path, primary: f.isPrimary });
       if (f.isPrimary) { handleFileSelected(null); return; }
       handleFileSelected({ path: f.path, content: f.content, baseSha: f.contentSha256 });
     } catch (e) {
@@ -2293,6 +2357,7 @@ export default function SpecPage() {
     try {
       await apiDelete(`/api/projects/${projId}/spec-file?path=${encodeURIComponent(specPath)}`);
       if (activeFileRef.current?.path === specPath) handleFileSelected(null);
+      setOpenFile((prev) => (prev?.path === specPath ? null : prev));
       setTreeReloadSignal((n) => n + 1);
       setValidationReloadSignal((n) => n + 1);
       setStaleValidation(true);
@@ -2303,8 +2368,15 @@ export default function SpecPage() {
 
   // A árvore já leu o índice: reaproveitamos o `editable`/nº de arquivos dela em vez de repetir o
   // GET. Compara antes de setar — as 3 instâncias (rail, tela cheia, mobile) reportam o mesmo.
-  const handleTreeMeta = useCallback((m: { editable: boolean; fileCount: number }) => {
+  const handleTreeMeta = useCallback((m: { editable: boolean; fileCount: number; primaryPath?: string | null }) => {
     setSpecFileMeta((prev) => (prev && prev.editable === m.editable && prev.fileCount === m.fileCount ? prev : m));
+    // 2026-09-06 (Jean: "ainda não vejo o nome do arquivo no topo") — ao ABRIR a tela nenhum arquivo
+    // foi clicado, mas o editor JÁ mostra o primário (é ele que o `spec-content` grava). Sem semear
+    // o rótulo aqui, o topo do chat só dizia "Editando a spec inteira", sem dizer QUAL arquivo.
+    // Só semeia quando não há arquivo aberto — um clique do usuário nunca é sobrescrito.
+    if (m.primaryPath) {
+      setOpenFile((prev) => (prev ? prev : { path: m.primaryPath as string, primary: true }));
+    }
   }, []);
 
   // Linha compacta do chat → aba "Autonomia" do editor. Fecha os overlays do mobile, senão o
@@ -2336,6 +2408,7 @@ export default function SpecPage() {
     setChatSending(false);
     setChatError(null);
     setActiveFile(null);
+    setOpenFile(null);       // e o rótulo do arquivo aberto é do projeto anterior
     setFileDraft("");        // trocou de projeto → o rascunho do arquivo anterior não vale mais
     setSpecFileMeta(null);   // e o `editable`/nº de arquivos vêm do índice do projeto novo
     setTreeDirty(false);
@@ -2350,17 +2423,8 @@ export default function SpecPage() {
     const projectAtStart = editProjectId;
     let cancelled = false;
     void (async () => {
-      // 1) Histórico da conversa — o chat deixa de nascer vazio. É EXIBIÇÃO (`seeded`): não volta
-      //    ao CTO, senão um pedido de dias atrás ("remova o módulo X") reentraria num turno novo.
-      try {
-        const h = await apiGet<{ messages: Array<{ role: "user" | "assistant"; content: string }> }>(
-          `/api/spec-chat/history?projectId=${projectAtStart}&limit=40`,
-        );
-        if (cancelled) return;
-        if (Array.isArray(h?.messages) && h.messages.length) {
-          setChatMessages(h.messages.map((m) => ({ role: m.role, content: m.content, seeded: true })));
-        }
-      } catch { /* sem histórico → chat vazio, como antes */ }
+      // 1) O histórico da conversa é carregado por ESCOPO num efeito próprio (projeto + arquivo
+      //    aberto) — ver `loadChatHistory` abaixo. Aqui ficou só a reanexação do job em voo.
 
       // 2) Job em voo (ou concluído e não coletado) da spec INTEIRA deste projeto.
       //    Sem `filePath`, o servidor devolve só jobs de spec inteira — jobs por-arquivo dependem
@@ -2374,7 +2438,14 @@ export default function SpecPage() {
         // `cancelled` acima já barrou; capturar antes só criaria uma janela para o inverso.
         const seq = chatSeqRef.current;
         if (chatPollRef.current) return; // o usuário já disparou um turno novo enquanto isto voltava
-        const deadlineMs = job.deadlineAt ? Date.parse(job.deadlineAt) : Date.now() + 40 * 60_000;
+        // Job JÁ TERMINAL (done, ou reprovado com spec salva): não há espera a expirar — só falta
+        // buscar o resultado. Herdar um `deadline_at` vencido aqui é o que fazia a tela avisar
+        // "passou do tempo máximo" para uma revisão pronta (ver comentário no `tick`).
+        const terminal = job.status !== "pending" && job.status !== "running";
+        const serverDeadline = job.deadlineAt ? Date.parse(job.deadlineAt) : NaN;
+        const deadlineMs = terminal
+          ? Date.now() + 5 * 60_000
+          : (Number.isFinite(serverDeadline) ? serverDeadline : Date.now() + 40 * 60_000);
         if (job.status === "error" && !job.salvaged) {
           setChatError(job.error ?? "A revisão anterior terminou em erro.");
           return;
@@ -2390,14 +2461,59 @@ export default function SpecPage() {
           kind: job.kind,
           filePath: job.filePath,
           baseSha: job.baseSha,
-          deadlineMs: Number.isFinite(deadlineMs) ? deadlineMs : Date.now() + 40 * 60_000,
+          deadlineMs,
           // Reanexado de outra sessão → o resultado é OFERECIDO, nunca escrito no editor sozinho.
           recovered: true,
+          requestedAtMs: job.createdAt ? Date.parse(job.createdAt) : undefined,
         });
       } catch { /* rehidratação é best-effort: falhar aqui só devolve a tela ao estado limpo */ }
     })();
     return () => { cancelled = true; };
   }, [editProjectId, stopChatPolling, startChatPolling]);
+
+  // ── Histórico da conversa POR ESCOPO (projeto + arquivo aberto) ──────────────────────────────
+  // Dois defeitos relatados pelo Jean em 2026-09-06 nasciam do mesmo lugar: o histórico era buscado
+  // UMA vez, no efeito de troca de projeto, SEM `filePath` e com `catch {}` vazio. Consequências:
+  //   (a) conversa de um arquivo específico NUNCA aparecia (o servidor filtra por `file_path`);
+  //   (b) qualquer falha transitória deixava o chat vazio em silêncio — só um refresh da página
+  //       dava outra chance ("nem sempre o historico carrega, as vezes preciso forçar o refresh").
+  // Agora: refaz o fetch quando o ESCOPO muda, mostra estado de carga, e falha VISÍVEL com retry.
+  const historyScopeKey = `${editProjectId ?? ""}|${activeFile?.path ?? ""}`;
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const retryChatHistory = useCallback(() => setHistoryRetry((n) => n + 1), []);
+  useEffect(() => {
+    const [projId, filePath] = [editProjectId, activeFile?.path ?? null];
+    if (!projId) { setHistoryLoading(false); setHistoryError(null); return; }
+    let cancelled = false;
+    // `seq` de partida: se o usuário mandar uma mensagem (ou trocar de arquivo) enquanto o histórico
+    // volta, o resultado é DESCARTADO — nunca por cima do turno vivo.
+    const seqAtStart = chatSeqRef.current;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    void (async () => {
+      try {
+        const qs = new URLSearchParams({ projectId: projId, limit: "40" });
+        if (filePath) qs.set("filePath", filePath);
+        const h = await apiGet<{ messages: Array<{ role: "user" | "assistant"; content: string }> }>(
+          `/api/spec-chat/history?${qs.toString()}`,
+        );
+        if (cancelled || seqAtStart !== chatSeqRef.current) return;
+        const msgs = Array.isArray(h?.messages) ? h.messages : [];
+        // É EXIBIÇÃO (`seeded`): não volta ao CTO, senão um pedido de dias atrás reentraria no turno.
+        setChatMessages(msgs.map((m) => ({ role: m.role, content: m.content, seeded: true })));
+      } catch (e) {
+        if (cancelled || seqAtStart !== chatSeqRef.current) return;
+        setHistoryError(e instanceof Error ? e.message : "falha ao carregar histórico");
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // `historyScopeKey` é a chave real (projeto+arquivo); `historyRetry` é o botão "tentar de novo".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyScopeKey, historyRetry]);
 
   const handleChatSend = useCallback(async () => {
     const text = chatInput.trim();
@@ -3125,6 +3241,7 @@ export default function SpecPage() {
           onApplied={() => {
             void reloadSpecFromServer();
             handleFileSelected(null); // o primário virou índice: o arquivo aberto pode não existir mais
+            setOpenFile(null);
             setTreeReloadSignal((n) => n + 1);
             setValidationReloadSignal((n) => n + 1);
             setStaleValidation(true);
@@ -3209,6 +3326,8 @@ export default function SpecPage() {
               messages={chatMessages} input={chatInput} onInput={setChatInput}
               onSend={handleChatSend} sending={chatSending} error={chatError}
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              openFilePath={openFile?.path ?? null} openFileIsPrimary={openFile?.primary === true}
+              historyLoading={historyLoading} historyError={historyError} onRetryHistory={retryChatHistory}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
@@ -3251,6 +3370,8 @@ export default function SpecPage() {
             messages={chatMessages} input={chatInput} onInput={setChatInput}
             onSend={handleChatSend} sending={chatSending} error={chatError}
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              openFilePath={openFile?.path ?? null} openFileIsPrimary={openFile?.primary === true}
+              historyLoading={historyLoading} historyError={historyError} onRetryHistory={retryChatHistory}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
@@ -3510,6 +3631,8 @@ export default function SpecPage() {
                     messages={chatMessages} input={chatInput} onInput={setChatInput}
                     onSend={handleChatSend} sending={chatSending} error={chatError}
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              openFilePath={openFile?.path ?? null} openFileIsPrimary={openFile?.primary === true}
+              historyLoading={historyLoading} historyError={historyError} onRetryHistory={retryChatHistory}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
@@ -3700,6 +3823,8 @@ export default function SpecPage() {
                           messages={chatMessages} input={chatInput} onInput={setChatInput}
                           onSend={handleChatSend} sending={chatSending} error={chatError}
               activeFilePath={activeFile?.path ?? null} treeDirty={treeDirty}
+              openFilePath={openFile?.path ?? null} openFileIsPrimary={openFile?.primary === true}
+              historyLoading={historyLoading} historyError={historyError} onRetryHistory={retryChatHistory}
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}

@@ -336,8 +336,11 @@ export async function loadSpecChatHistory(
       }))
       .reverse();
   } catch (e) {
+    // 2026-09-06 — antes devolvia `[]`: uma falha de banco chegava à tela como "conversa vazia"
+    // (metade do "nem sempre o histórico carrega, às vezes preciso forçar o refresh" do Jean).
+    // Falha VISÍVEL: a rota devolve erro e a Bancada mostra o aviso com "Tentar de novo".
     console.warn(`[SpecChatJobs] loadSpecChatHistory falhou: ${msg(e)}`);
-    return [];
+    throw e;
   }
 }
 
@@ -374,6 +377,37 @@ export async function reapOrphanSpecChatJobs(db: Db): Promise<{ interrupted: num
     console.warn(`[SpecChatJobs] reapOrphanSpecChatJobs falhou: ${msg(e)}`);
   }
   return { interrupted, lost };
+}
+
+/**
+ * Zumbis: jobs `pending`/`running` cujo `deadline_at` passou e que NENHUM laço fecha.
+ *
+ * `collectSpecChatJobsTick` só varre `kind IN ('chat','resolve_gaps') AND agents_job_id IS NOT NULL`
+ * (é por probe que ele decide), e o reaper de `kind='file'` roda uma única vez, no BOOT. Sobra um
+ * conjunto que ficava `running` para sempre: (a) chat/resolve_gaps que morreram antes do
+ * `agents_job_id` sem que a api reiniciasse depois, (b) por-arquivo cuja requisição morreu sem
+ * fechar o registro. Consequência real: `findInFlightSpecChatJob` os reofertava a cada abertura da
+ * Bancada e a tela avisava "passou do tempo máximo" eternamente. Fechar com causa honesta é o que
+ * tira o zumbi do caminho — e nunca toca em job dentro do prazo.
+ */
+export async function expireZombieSpecChatJobs(db: Db): Promise<number> {
+  try {
+    const r = await db.query(
+      `UPDATE spec_chat_jobs
+          SET status = 'lost', error = $1, finished_at = now(), updated_at = now()
+        WHERE status IN ('pending','running')
+          AND deadline_at IS NOT NULL
+          AND deadline_at < now()
+          AND (agents_job_id IS NULL OR kind = 'file')`,
+      ["Esta revisão passou do tempo máximo sem resposta rastreável e o servidor não tem mais como coletá-la. Peça de novo."],
+    );
+    const n = r.rowCount ?? 0;
+    if (n > 0) console.info(`[SpecChatJobs] ${n} job(s) zumbi(s) expirado(s) (sem coletor possível).`);
+    return n;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] expireZombieSpecChatJobs falhou: ${msg(e)}`);
+    return 0;
+  }
 }
 
 /** Resultado de um probe ao agents (injetado para permitir teste sem rede). */
