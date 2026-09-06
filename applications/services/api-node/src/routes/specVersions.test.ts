@@ -130,6 +130,32 @@ describe("GET /api/projects/:id/spec-versions — listagem", () => {
     expect(listSpy).not.toHaveBeenCalled();
   });
 
+  /**
+   * Defeito MEDIDO na prova ao vivo (prod, 2026-09-06): o arquivo em disco é o do upload
+   * (`1785093867177-nvx-lastmile-backend.md`) e a árvore mostra `nvx-lastmile-backend.md`.
+   * Derivando o nome do caminho físico, a lista exibia um arquivo que o humano nunca viu.
+   */
+  it("nome de exibição vem da ÁRVORE, não do arquivo físico do upload", async () => {
+    const fisico = `${UPLOADS}/${PROJ}/1785093867177-nvx.md`;
+    treeRow = { rel_dir: "", filename: "nvx.md", file_path: fisico };
+    listSpy.mockImplementationOnce(async () => [{
+      id: SNAP, filePath: fisico, contentSha256: "s", chars: 10, reason: "spec-chat",
+      createdBy: null, createdAt: "2026-09-06T00:00:00.000Z",
+    }]);
+    const res = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/spec-versions` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().versions[0].path).toBe("nvx.md");
+  });
+
+  it("versão de arquivo já removido da árvore ainda aparece — sem caminho do servidor", async () => {
+    treeRow = null; // nenhuma linha na árvore para mapear: cai no fallback do caminho físico
+    const res = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/spec-versions` });
+    expect(res.statusCode).toBe(200);
+    const paths = (res.json().versions as Array<{ path: string }>).map((v) => v.path);
+    expect(paths).toEqual(["backend/01-api.md", "spec.md"]);
+    expect(res.body).not.toContain(UPLOADS);
+  });
+
   it("projeto de OUTRO tenant → 404, sem tocar no histórico", async () => {
     projectRow = { id: PROJ, tenant_id: OTHER_TENANT, created_by: "outro", status: "draft" };
     const res = await app.inject({ method: "GET", url: `/api/projects/${PROJ}/spec-versions` });
