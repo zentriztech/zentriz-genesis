@@ -199,3 +199,28 @@ seção 3k, arquivo ≤ 8k continua indo INTEIRO (recortar arquivo curto só cri
 regra). O aviso "não conclua que o irmão silencia" é obrigatório: sem ele o editor duplicaria a regra
 no arquivo errado — trocaria divergência por duplicação normativa, o mesmo defeito com outro nome.
 6 testes novos (a seção relevante no MEIO do arquivo entra; os corpos das irrelevantes não).
+
+**Prova ao vivo do GAP-5 + A5.6 (`main ab87a8d`, api `sha256:95622d29…`, run `75b3cf5d`):**
+- GAP-5: rodada **15** — log `passe 3/5 arquivo 15 (README.md)` **sem "CRIAÇÃO"** e resultado
+  `` `README.md` salvo no disco (6387 → 9111 chars) ``, `applied: true`. É o MESMO arquivo que na
+  rodada 11 tinha sido recusado com "o manifesto passou a existir durante a rodada".
+- A5.6: `usados=[api-entregas-entregadores.md, autenticacao-sessao.md, connect-interoperabilidade.md,
+  contratos-erros.md] chars=49542` — **4 irmãos citados** contra **2** antes do recorte dirigido,
+  no mesmo orçamento de 60k.
+- GAPs continuaram caindo: rodada 11 registrou `Validação failed: 18 → 16`.
+
+**Custo assumido do deploy (registro honesto):** a janela estava quieta na medição (`0` jobs
+`pending`/`running`), mas um tick disparou entre a medição e o `--force-recreate`: a rodada **14**
+(`visao-escopo.md`) morreu com `CTO não entregou revisão: Revisão interrompida por reinício do
+servidor`. O laço tratou como falha de ARQUIVO e seguiu (não parou), mas foi **uma rodada de LLM
+perdida** — a regra "nunca rebuildar com run em voo" precisa de uma janela verificada por
+*travamento*, não só por leitura pontual.
+
+**GAP-7 🔴 (aberto, medido agora): a spec só CRESCE, e o crescimento mata o próprio arquivo.**
+Rodada 13: `modelo-dados.md tem 126742 caracteres (teto 120000) — não cabe na janela de contexto` →
+o arquivo **saiu da fila para sempre**, com os GAPs dele ativos. Ele não nasceu assim: o CTO-editor só
+ACRESCENTA (na mesma sequência, `definicao-de-pronto.md` foi de 49.362 → 56.692 chars numa rodada).
+Ou seja, o próprio laço empurra os arquivos maiores em direção ao teto até que fiquem
+irrevisáveis — e nenhum GAP explica isso ao humano. Candidatos: dividir o arquivo (a divisão é ação
+de agente, Lei 100% LLM), revisar **por seção** dentro do arquivo, ou impor orçamento de crescimento
+por rodada. **Não corrigido nesta onda.**
