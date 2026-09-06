@@ -481,3 +481,44 @@ na **edição** o laço podia quebrar o único arquivo cujo frontmatter a fábri
    é não-regressão, não perfeição.
 
 9 testes novos (4 no laço por arquivo, 4 na leitura parcial da validação, 1 no bloco de fatos).
+
+---
+
+## GAP-11 — o teto expirava a ESPERA do estágio adversarial e jogava o RESULTADO fora
+
+### O que foi medido (prod, 2026-09-06, projeto `e2a1988c`)
+
+```
+spec_validation_runs 16e467cf | error | 20:47:22 → 21:08:02 (20m40s) | 0 findings
+  (as validações reais deste projeto: 05748a75 = 312 s, 8acc108b = 272 s)
+spec_autonomy_runs.rounds[…] = "validação terminou em 'error' (sem medição de GAPs)"
+```
+
+A espera bateu no teto do próprio código (`SPEC_VALIDATION_DEADLINE_MIN`, 20 min). `runStageB` polla o
+job assíncrono do serviço `agents` e, quando o relógio estoura, devolve `timeout do estágio
+adversarial` — e o `jobId` **morre numa variável local**. O job do LLM continua vivo do outro lado,
+termina, e o resultado (uma leitura adversarial inteira da spec, **já paga**) é descartado pelo TTL em
+memória dos agents. A run fica `error` com 0 findings e o laço autônomo gasta uma rodada "sem medição".
+
+É a **mesma família** do defeito do chat da Bancada fechado horas antes: lá o cliente checava o
+deadline **antes** de pollar e descartava um job `done`. A lição repetida: **prazo limita quanto se
+espera, nunca a validade do que já foi produzido e pago.**
+
+### Correção (migração 100 — `agents_job_id` + `stage_b_collected_at`)
+
+1. **O fato vai ao banco antes do primeiro poll** (`runStageB`): sem o `jobId` persistido, nenhum outro
+   processo — tick do worker, api reiniciada — consegue voltar e buscar o resultado.
+2. **Coletor server-side** (`collectStageBResults`, molde do `collectSpecChatJobsTick`): varre runs
+   `error`/`interrupted` com job pendente e, com o resultado em mão, grava o veredito real (união
+   estágio A + B, `stage_b_ran = true`). Se a spec mudou nesse meio-tempo → `superseded`, porque dizer
+   `passed`/`failed` sobre outro conteúdo seria mentir. 404 no agents = perdido; erro do job = nada a
+   recuperar; falha de **rede** não encerra o assunto (tenta no próximo tick); teto duro
+   (`SPEC_VALIDATION_COLLECT_GRACE_MIN`, 15 min após o deadline) evita espera infinita.
+3. **O laço ESPERA em vez de gastar rodada** (`checkValidation`): validação em `error` com coleta
+   pendente devolve "sem transição". Contar rodada sem progresso ali jogava fora trabalho pago **e**
+   aproximava o `stalled` por um relógio, não por falta de convergência.
+4. **Ordem no tick** (`specChatWorker`): a coleta do estágio B roda **antes** de `advanceAutonomyRunsTick`
+   — resultado recuperado no mesmo tick já é lido como validação concluída.
+
+9 testes novos no coletor (done/superseded/passed, 404, falha de rede, pendente, teto duro, coluna
+ausente) + 3 no laço (espera, retomada após coleta encerrada, teto de passes não força `stalled`).

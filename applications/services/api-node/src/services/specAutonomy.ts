@@ -60,7 +60,7 @@ import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 // Só o TIPO: o módulo em si é carregado por `import()` dinâmico apenas no modo por arquivo (ele
 // alcança `routes/specs.js` → `db/client.js`, que o modo `whole` não precisa pagar).
-import type { GapFileBucket, GapGroups, SpecFileRef } from "./specGapScope.js";
+import type { GapFileBucket, GapGroups } from "./specGapScope.js";
 import { MANIFEST_PATH, assessManifest, expectedArchetype } from "./specManifest.js";
 
 type Db = Pick<Pool, "query" | "connect">;
@@ -1399,6 +1399,21 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
 
   // superseded/error: não mediu GAP nenhum. Conta como rodada sem progresso e tenta de novo.
   if (st !== "passed" && st !== "failed") {
+    // 🔴 GAP-11 (migração 100): `error` por teto de ESPERA não significa que o resultado morreu — o
+    // job adversarial pode seguir vivo no agents, e o coletor server-side ainda vai buscá-lo (medido
+    // em prod: run 16e467cf esperou 20m40s e a leitura paga foi descartada). Contar rodada sem
+    // progresso aqui joga fora o trabalho E aproxima o laço do `stalled` por um relógio, não por
+    // falta de convergência. Espero: o coletor encerra o assunto (resultado recuperado, job perdido
+    // ou teto duro) e no tick seguinte esta run cai no caminho normal.
+    const pend = await db.query(
+      `SELECT 1 FROM spec_validation_runs
+        WHERE id = $1 AND agents_job_id IS NOT NULL AND stage_b_collected_at IS NULL`,
+      [run.validationRunId],
+    ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }));
+    if (pend.rows[0]) {
+      console.log(`[SpecAutonomy] run=${run.id} validação em '${st}' com resultado do estágio B PENDENTE de coleta — aguardando em vez de contar rodada sem progresso (GAP-11).`);
+      return false;
+    }
     const streak = run.noProgressStreak + 1;
     await patchLastRound(db, run, { note: `validação terminou em '${st}' (sem medição de GAPs)` });
     if (streak >= MAX_NO_PROGRESS || atCap) {

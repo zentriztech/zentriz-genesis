@@ -275,7 +275,19 @@ export function parseStageBFindings(raw: unknown): ValidationFinding[] {
   return out;
 }
 
-async function runStageB(projectId: string, specText: string): Promise<{ findings: ValidationFinding[]; error?: string }> {
+/**
+ * GAP-11 (migração 100): encerra o assunto de um job do estágio B — resultado entregue, job perdido
+ * no agents, ou desistência por teto duro. Enquanto `stage_b_collected_at` for NULL e houver
+ * `agents_job_id`, o coletor volta a tentar e o laço autônomo ESPERA.
+ */
+async function markStageBCollected(pool: Pool, runId: string): Promise<void> {
+  await pool.query(
+    "UPDATE spec_validation_runs SET stage_b_collected_at = now() WHERE id = $1 AND stage_b_collected_at IS NULL",
+    [runId],
+  ).catch((e) => console.warn(`[spec-validation] run ${runId}: stage_b_collected_at não gravado (${e instanceof Error ? e.message : String(e)}).`));
+}
+
+async function runStageB(pool: Pool, runId: string, projectId: string, specText: string): Promise<{ findings: ValidationFinding[]; error?: string }> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
   const base = agentsUrl.replace(/\/$/, "");
@@ -293,22 +305,38 @@ async function runStageB(projectId: string, specText: string): Promise<{ finding
   if (start.status !== 200 || !jobId) {
     return { findings: [], error: `agents start falhou (${start.status}): ${String(start.data.error ?? "")}`.slice(0, 300) };
   }
+  // GAP-11 (migração 100): o jobId vai para o BANCO antes do primeiro poll. Enquanto ele vivia só
+  // nesta variável local, estourar o teto de espera custava uma leitura adversarial inteira já PAGA
+  // (medido em prod: run 16e467cf, 20m40s de espera, 0 findings, resultado descartado pelo TTL em
+  // memória dos agents). Prazo limita QUANTO SE ESPERA, nunca a validade do que já foi produzido.
+  await pool.query("UPDATE spec_validation_runs SET agents_job_id = $2 WHERE id = $1", [runId, jobId])
+    .catch((e) => console.warn(`[spec-validation] run ${runId}: agents_job_id não gravado (${e instanceof Error ? e.message : String(e)}) — resultado NÃO será recuperável se a espera estourar.`));
   const deadline = Date.now() + VALIDATION_DEADLINE_MIN * 60_000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 8_000));
     const poll = await httpJson(`${base}/invoke/spec_validator/status/${jobId}`, "GET", undefined, 30_000)
       .catch(() => ({ status: 0, data: {} as Record<string, unknown> }));
     // 404 = agents reiniciou e perdeu o job em memória → interrupted (NUNCA insistir 11min).
-    if (poll.status === 404) return { findings: [], error: "agents reiniciou durante a validação (job perdido)" };
+    if (poll.status === 404) {
+      await markStageBCollected(pool, runId); // não há o que recuperar: o job não existe mais
+      return { findings: [], error: "agents reiniciou durante a validação (job perdido)" };
+    }
     if (poll.status !== 200) continue;
     const st = String(poll.data.status ?? "");
     if (st === "done") {
       const result = (poll.data.result ?? {}) as Record<string, unknown>;
+      await markStageBCollected(pool, runId); // esta espera COLHEU o resultado — nada pendente
       return { findings: parseStageBFindings(result.findings) };
     }
-    if (st === "error") return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300) };
+    if (st === "error") {
+      await markStageBCollected(pool, runId); // o job falhou do outro lado: recuperar não traz nada
+      return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300) };
+    }
   }
-  return { findings: [], error: "timeout do estágio adversarial" };
+  // Único caminho que deixa `stage_b_collected_at` NULL de propósito: o job pode estar VIVO no
+  // agents e o `collectStageBResults` (tick do worker) volta para buscá-lo.
+  console.log(`[spec-validation] run ${runId}: espera do estágio B expirou (${VALIDATION_DEADLINE_MIN} min) — job ${jobId} fica PENDENTE de coleta (GAP-11).`);
+  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)" };
 }
 
 // ── ciclo de vida da run ──────────────────────────────────────────────────────
@@ -416,7 +444,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
         source: "stage_a",
       });
     }
-    const b = await runStageB(projectId, input.text);
+    const b = await runStageB(pool, runId, projectId, input.text);
     findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
     stageBError = b.error;
     stageBRan = !b.error;
@@ -501,6 +529,125 @@ export async function autoValidateDirtySpecs(pool: Pool): Promise<void> {
       .catch((e) => ({ ok: false as const, code: "ERROR", message: String(e), status: 500 }));
     console.log(`[spec-validation][auto] ${p.id.slice(0, 8)}: ${r.ok ? `run ${"runId" in r ? r.runId.slice(0, 8) : ""}${"reused" in r && r.reused ? " (dedupe)" : ""}` : `${r.code}`}`);
   }
+}
+
+// ── GAP-11: coletor server-side do estágio B ─────────────────────────────────
+
+/** Teto DURO depois do deadline: passado isto, desistimos do job e a run para de segurar o laço. */
+const STAGE_B_COLLECT_GRACE_MIN = parseInt(process.env.SPEC_VALIDATION_COLLECT_GRACE_MIN ?? "15", 10);
+
+export type StageBProbe = (jobId: string) => Promise<
+  { status: string; result?: Record<string, unknown>; error?: string } | "not_found"
+>;
+
+async function defaultStageBProbe(jobId: string): ReturnType<StageBProbe> {
+  const base = (process.env.API_AGENTS_URL ?? "").trim().replace(/\/$/, "");
+  if (!base) throw new Error("API_AGENTS_URL ausente");
+  const r = await httpJson(`${base}/invoke/spec_validator/status/${jobId}`, "GET", undefined, 30_000);
+  if (r.status === 404) return "not_found";
+  if (r.status !== 200) throw new Error(`status ${r.status}`);
+  return {
+    status: String(r.data.status ?? ""),
+    result: (r.data.result ?? {}) as Record<string, unknown>,
+    error: r.data.error === undefined || r.data.error === null ? undefined : String(r.data.error),
+  };
+}
+
+/**
+ * GAP-11 — o teto expira a ESPERA do estágio adversarial, nunca o RESULTADO.
+ *
+ * Medido em prod 2026-09-06: a validação `16e467cf` esperou 20m40s (as reais deste projeto levam
+ * ~5 min), estourou o deadline e terminou `error` com 0 findings — enquanto o job do LLM seguia vivo
+ * no serviço agents. Uma leitura adversarial inteira, já paga, foi para o lixo, e o laço autônomo
+ * contou a rodada como "sem medição de GAPs". Mesma família do defeito do chat da Bancada.
+ *
+ * Molde: `collectSpecChatJobsTick` / `collectSpecSplitsTick` (probe injetável, nunca lança).
+ * Só toca runs `error`/`interrupted` COM `agents_job_id` e ainda não coletadas.
+ */
+export async function collectStageBResults(
+  pool: Pool,
+  probe: StageBProbe = defaultStageBProbe,
+): Promise<{ scanned: number; collected: number; lost: number; givenUp: number }> {
+  const out = { scanned: 0, collected: 0, lost: 0, givenUp: 0 };
+  let rows: Array<{ id: string; project_id: string | null; spec_hash: string; agents_job_id: string; findings: unknown; deadline_at: string | null }>;
+  try {
+    rows = (await pool.query(
+      `SELECT id, project_id, spec_hash, agents_job_id, findings, deadline_at
+         FROM spec_validation_runs
+        WHERE agents_job_id IS NOT NULL
+          AND stage_b_collected_at IS NULL
+          AND status IN ('error', 'interrupted')
+        ORDER BY finished_at ASC NULLS FIRST
+        LIMIT 5`,
+    )).rows as typeof rows;
+  } catch (e) {
+    // Coluna ausente (migração 100 não aplicada) não pode derrubar o tick do worker.
+    console.warn(`[spec-validation] coleta do estágio B falhou na varredura: ${e instanceof Error ? e.message : String(e)}`);
+    return out;
+  }
+  out.scanned = rows.length;
+  for (const r of rows) {
+    const short = String(r.id).slice(0, 8);
+    let res: Awaited<ReturnType<StageBProbe>>;
+    try {
+      res = await probe(String(r.agents_job_id));
+    } catch (e) {
+      // Falha de rede é transitória: NÃO marca coletado — tenta no próximo tick (até o teto duro).
+      console.warn(`[spec-validation] run ${short}: probe do estágio B falhou (${e instanceof Error ? e.message : String(e)}) — tentarei de novo.`);
+      continue;
+    }
+    const overdue = r.deadline_at
+      ? Date.now() > new Date(r.deadline_at).getTime() + STAGE_B_COLLECT_GRACE_MIN * 60_000
+      : false;
+    if (res === "not_found") {
+      await markStageBCollected(pool, r.id);
+      out.lost += 1;
+      console.log(`[spec-validation] run ${short}: job ${r.agents_job_id} não existe mais no agents (TTL/restart) — resultado perdido, assunto encerrado.`);
+      continue;
+    }
+    const st = String(res.status);
+    if (st === "done") {
+      const stageB = parseStageBFindings((res.result ?? {}).findings);
+      // O estágio A já está gravado na linha — a UNIÃO se mantém (o LLM só ADICIONA).
+      const existing = Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [];
+      const findings = [...existing, ...stageB];
+      const after = r.project_id ? await computeCurrentSpecHash(pool, r.project_id).catch(() => null) : null;
+      // A spec pode ter mudado enquanto o resultado ficou pendente: dizer 'passed'/'failed' sobre
+      // outro conteúdo seria mentir. 'superseded' é honesto e o laço autônomo não compara contagem.
+      const superseded = after?.specHash !== r.spec_hash;
+      const status = superseded
+        ? "superseded"
+        : findings.some((f) => f.severity === "blocker") ? "failed" : "passed";
+      await pool.query(
+        `UPDATE spec_validation_runs
+            SET status = $1, findings = $2::jsonb, stage_b_ran = true,
+                stage_b_collected_at = now(), finished_at = now()
+          WHERE id = $3 AND stage_b_collected_at IS NULL`,
+        [status, JSON.stringify(findings), r.id],
+      );
+      if (!superseded) {
+        await registerRecurrences(pool, String(r.project_id), findings).catch((e) =>
+          console.warn(`[spec-validation] run ${short}: registerRecurrences falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`));
+      }
+      out.collected += 1;
+      console.log(`[spec-validation] run ${short}: resultado do estágio B RECUPERADO após a espera expirar — ${stageB.length} finding(s) do LLM, status '${status}'${superseded ? " (a spec mudou desde o início da validação)" : ""}.`);
+      continue;
+    }
+    if (st === "error") {
+      await markStageBCollected(pool, r.id);
+      out.lost += 1;
+      console.log(`[spec-validation] run ${short}: job do estágio B terminou em erro no agents (${(res.error ?? "").slice(0, 200)}) — nada a recuperar.`);
+      continue;
+    }
+    if (overdue) {
+      await markStageBCollected(pool, r.id);
+      out.givenUp += 1;
+      console.log(`[spec-validation] run ${short}: job ${r.agents_job_id} ainda em '${st}' ${STAGE_B_COLLECT_GRACE_MIN} min após o deadline — desisto (o laço não pode esperar para sempre).`);
+      continue;
+    }
+    console.log(`[spec-validation] run ${short}: job do estágio B ainda em '${st}' — sigo aguardando a coleta.`);
+  }
+  return out;
 }
 
 export async function expireOverdueValidationRuns(pool: Pool): Promise<void> {

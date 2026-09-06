@@ -91,6 +91,10 @@ const db = {
     if (s.startsWith("SELECT status, stage_b_ran FROM spec_validation_runs")) {
       return { rows: [{ status: validationStatus, stage_b_ran: stageBRan }], rowCount: 1 };
     }
+    // GAP-11 (migração 100): "ainda há resultado do estágio B a coletar para esta validação?"
+    if (s.startsWith("SELECT 1 FROM spec_validation_runs")) {
+      return { rows: stageBPending ? [{ "?column?": 1 }] : [], rowCount: stageBPending ? 1 : 0 };
+    }
 
     if (s.startsWith("INSERT INTO spec_autonomy_runs")) {
       if (insertFails23505) throw Object.assign(new Error("dup"), { code: "23505" });
@@ -157,6 +161,8 @@ const db = {
 let validationStatus = "passed";
 /** GAP-13 (migração 099): `false` = estágio adversarial NÃO rodou → contagem não comparável. */
 let stageBRan: boolean | null = true;
+/** GAP-11 (migração 100): `true` = job do estágio B ainda vivo no agents, resultado por coletar. */
+let stageBPending = false;
 
 function writeSpec(content: string): void {
   const dir = mkdtempSync(join(tmpdir(), "spec-autonomy-"));
@@ -173,6 +179,7 @@ beforeEach(() => {
   latestRunId = "run-0";
   validationStatus = "passed";
   stageBRan = true;
+  stageBPending = false;
   insertFails23505 = false;
   snapshotFails = false;
   sqlLog.length = 0;
@@ -452,6 +459,40 @@ describe("validação dentro do laço", () => {
       expect(run!.status).toBe("pending");
       expect(run!.gaps_current).toBe(1);            // comportamento histórico intocado
       expect(run!.no_progress_streak).toBe(0);
+    });
+  });
+
+  // GAP-11 (medido em prod 2026-09-06): a validação `16e467cf` esperou 20m40s, estourou o teto e
+  // terminou 'error' com 0 findings — enquanto o job adversarial seguia vivo no agents. O teto
+  // expira a ESPERA, nunca o RESULTADO: com coleta pendente o laço aguarda em vez de gastar rodada.
+  describe("GAP-11 — validação em erro com resultado pendente de coleta", () => {
+    it("resultado pendente → o laço ESPERA (sem rodada sem progresso, sem transição)", async () => {
+      const r = await reachValidating(5);
+      validationStatus = "error";
+      stageBPending = true;
+      expect(await advanceAutonomyRun(db, r.id)).toBe(false);
+      expect(run!.status).toBe("validating");         // continua esperando o coletor
+      expect(run!.no_progress_streak).toBe(0);        // 🔴 nada foi gasto por causa do relógio
+      expect(JSON.stringify(run!.rounds)).not.toContain("sem medição de GAPs");
+    });
+
+    it("coleta encerrada (nada a recuperar) → volta ao comportamento de antes", async () => {
+      const r = await reachValidating(5);
+      validationStatus = "error";
+      stageBPending = false;                          // coletor já desistiu / job perdido
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.no_progress_streak).toBe(1);
+      expect(JSON.stringify(run!.rounds)).toContain("sem medição de GAPs");
+    });
+
+    it("teto de passes + pendência não força `stalled` por relógio (espera primeiro)", async () => {
+      const r = await reachValidating(1);             // teto 1 → o próximo veredito encerraria a run
+      validationStatus = "error";
+      stageBPending = true;
+      expect(await advanceAutonomyRun(db, r.id)).toBe(false);
+      expect(run!.status).toBe("validating");
+      expect(run!.status).not.toBe("stalled");
     });
   });
 
