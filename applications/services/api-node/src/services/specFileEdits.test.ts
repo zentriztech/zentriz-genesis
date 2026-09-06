@@ -168,6 +168,45 @@ describe("applySpecEditResponse (o caminho que o job usa)", () => {
     expect(r.content).toContain("O titular pode solicitar exclusão.");
   });
 
+  /**
+   * GAP-9 — o marcador de conflito que FOI gravado numa spec de produção.
+   *
+   * `modelo-dados.md` (NVX LastMile) ficou com uma linha `=======` no meio de uma tabela de
+   * convenções e com a linha substituída DUPLICADA, enquanto o log dizia "16 aplicadas, 0
+   * descartadas". Causa: um segundo separador dentro do lado REPLACE era engolido como CONTEÚDO.
+   */
+  it("segundo separador dentro do REPLACE: bloco DESCARTADO, nada de `=======` no arquivo", () => {
+    const raw = [
+      "<<<<<<< SEARCH",
+      "Os dados são retidos.",
+      "=======",
+      "=======",
+      "Os dados são retidos por 5 anos.",
+      ">>>>>>> REPLACE",
+      block("O titular pode solicitar exclusão.", "O titular pode solicitar exclusão em 15 dias."),
+    ].join("\n");
+    const r = applySpecEditResponse(BASE, raw);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.applied).toBe(1);
+    expect(r.dropped).toBe(1);
+    // o bloco malformado não entrou…
+    expect(r.content).not.toContain("=======");
+    expect(r.content).toContain("Os dados são retidos.");
+    // …e o bloco são da mesma resposta continua valendo (descarte é por BLOCO, não por rodada).
+    expect(r.content).toContain("em 15 dias");
+  });
+
+  it("bloco montado à mão com marcador no REPLACE é VETADO (invariante, não só do parser)", () => {
+    const r = applySpecEditBlocks(BASE, [
+      { search: "Os dados são retidos.", replace: "Título\n=======\nOs dados são retidos." },
+    ]);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("MARKER_IN_REPLACE");
+    expect(r.message).toContain("conflito de merge");
+  });
+
   it("normaliza CRLF dos dois lados", () => {
     const base = "## Retenção\r\nOs dados são retidos.\r\n";
     const raw = block("Os dados são retidos.", "Os dados são retidos por 5 anos.").replace(/\n/g, "\r\n");
