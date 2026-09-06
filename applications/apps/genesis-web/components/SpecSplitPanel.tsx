@@ -62,12 +62,20 @@ function fmt(n: number) {
   return n.toLocaleString("pt-BR");
 }
 
-export default function SpecSplitPanel({ projectId, editable = true, onApplied }: {
+export default function SpecSplitPanel({ projectId, editable = true, onApplied, embedded = false, onStateChange }: {
   projectId: string;
   /** Espelha a guarda do servidor (status do projeto) — desabilita o botão em vez de dar 409. */
   editable?: boolean;
   /** O pai recarrega a árvore/editor: a spec primária virou índice e nasceram N arquivos. */
   onApplied?: (created: string[]) => void;
+  /**
+   * UI/UX 2026-09-06 — o painel agora mora num diálogo aberto pelo ícone “dividir” da lista de
+   * arquivos (antes era um card no corpo da página). `embedded` remove a moldura/margem que só
+   * fazia sentido empilhado com outros cards.
+   */
+  embedded?: boolean;
+  /** Espelha o estado ao pai (o ícone da lista precisa saber se existe proposta aguardando). */
+  onStateChange?: (s: { enabled: boolean; awaitingDecision: boolean; active: boolean }) => void;
 }) {
   const [state, setState] = useState<SplitState | null>(null);
   const [busy, setBusy] = useState<"start" | "apply" | "discard" | null>(null);
@@ -75,11 +83,20 @@ export default function SpecSplitPanel({ projectId, editable = true, onApplied }
   const [applied, setApplied] = useState<string[] | null>(null);
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Callback em ref: se entrasse nas deps de `load`, um pai que passasse função inline
+  // recriaria `load` a cada render e o efeito viraria um laço de fetch.
+  const stateCbRef = useRef(onStateChange);
+  useEffect(() => { stateCbRef.current = onStateChange; }, [onStateChange]);
 
   const load = useCallback(async (): Promise<SplitState | null> => {
     try {
       const s = await apiGet<SplitState>(`/api/spec-split?projectId=${encodeURIComponent(projectId)}&payload=1`);
       setState(s);
+      stateCbRef.current?.({
+        enabled: s.enabled === true,
+        awaitingDecision: s.proposal?.awaitingDecision === true,
+        active: s.proposal?.active === true,
+      });
       return s;
     } catch {
       return null; // api antiga / sem permissão: o painel simplesmente não aparece
@@ -153,10 +170,13 @@ export default function SpecSplitPanel({ projectId, editable = true, onApplied }
   const showStart = state.enabled && (!p || !p.active) && p?.status !== "done";
 
   return (
-    <Box sx={{ mb: 1.5, p: 1.5, borderRadius: 1, border: "1px solid", borderColor: p?.awaitingDecision ? "warning.main" : "divider", bgcolor: "background.paper" }}>
+    <Box sx={embedded
+      ? { p: 0 }
+      : { mb: 1.5, p: 1.5, borderRadius: 1, border: "1px solid", borderColor: p?.awaitingDecision ? "warning.main" : "divider", bgcolor: "background.paper" }}>
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
-        <CallSplitIcon sx={{ fontSize: "1.05rem", color: "primary.main" }} />
-        <Typography variant="subtitle2" sx={{ fontWeight: 700, flexGrow: 1 }}>
+        {/* No diálogo o título já está na barra do modal → aqui sobra só o estado da proposta. */}
+        {!embedded && <CallSplitIcon sx={{ fontSize: "1.05rem", color: "primary.main" }} />}
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, flexGrow: 1, display: embedded ? "none" : "block" }}>
           Dividir a spec em arquivos
         </Typography>
         {p && <Chip size="small" label={STATUS_LABEL[p.status]} color={p.awaitingDecision ? "warning" : "default"} variant="outlined" />}

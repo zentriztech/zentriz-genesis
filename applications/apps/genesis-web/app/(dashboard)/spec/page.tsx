@@ -14,6 +14,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
 import Fab from "@mui/material/Fab";
 import IconButton from "@mui/material/IconButton";
@@ -44,13 +45,19 @@ import HistoryIcon from "@mui/icons-material/History";
 import PreviewIcon from "@mui/icons-material/Preview";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import SendIcon from "@mui/icons-material/Send";
+import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
+import StopCircleOutlinedIcon from "@mui/icons-material/StopCircleOutlined";
+import NoteAddOutlinedIcon from "@mui/icons-material/NoteAddOutlined";
+import PostAddOutlinedIcon from "@mui/icons-material/PostAddOutlined";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { ApiError, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
 import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
-import SpecTreePanel from "@/components/SpecTreePanel";
+// UI/UX 2026-09-06 — `SpecTreePanel` (a segunda lista de arquivos, com editor próprio) saiu daqui:
+// a lista única é o `ProductFolderNav` abaixo e o editor é o desta página. O arquivo do componente
+// permanece no repo (não é papel desta frente apagá-lo), mas já não tem nenhum importador.
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
 import SpecSplitPanel from "@/components/SpecSplitPanel";
@@ -702,6 +709,81 @@ function autonomySeverity(s: AutonomyStatus): "info" | "success" | "warning" | "
   return "info";
 }
 
+/**
+ * UI/UX 2026-09-06 — UMA frase para o estado do laço, usada nos TRÊS lugares que o mostram
+ * (aviso do corpo da página, linha compacta do chat e aba "Autonomia" do editor). Antes o corpo
+ * da página dizia "rodada 12/5" em runs `per_file`, porque lá `round` conta ARQUIVOS e quem
+ * respeita `maxRounds` é `passes` — a mesma confusão que já tinha sido corrigida só no chat.
+ */
+function autonomyHeadline(run: AutonomyRun, running = run.active): string {
+  if (run.mode === "per_file") {
+    const pass = Math.min((run.passes ?? 0) + (running ? 1 : 0), run.maxRounds);
+    return `Modo autônomo por arquivo — passe ${pass}/${run.maxRounds} · ${run.round} arquivo(s) revisado(s)`;
+  }
+  return `Modo autônomo — rodada ${run.round}/${run.maxRounds}`;
+}
+
+/**
+ * Relatório do laço autônomo (o registro de AÇÕES por rodada). Vive numa ABA do editor: no chat
+ * ele consumia a coluna inteira — no mobile, a tela inteira — empurrando o campo de mensagem para
+ * fora da vista. Aqui tem espaço para respirar e o chat fica com uma linha só.
+ */
+function AutonomyReport({ run, running, onStop }: {
+  run: AutonomyRun;
+  running: boolean;
+  onStop?: () => void;
+}) {
+  return (
+    <Box sx={{ p: { xs: 1.5, md: 2 } }} aria-live="polite">
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+        {running && <CircularProgress size={16} />}
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, flexGrow: 1, minWidth: 0 }}>
+          🤖 {autonomyHeadline(run, running)}
+        </Typography>
+        {running && onStop && (
+          <Button size="small" color="inherit" variant="outlined" onClick={onStop}
+            sx={{ fontSize: "0.7rem", textTransform: "none", flexShrink: 0 }}>
+            Interromper laço
+          </Button>
+        )}
+      </Stack>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.6, mb: 1 }}>
+        {AUTONOMY_LABEL[run.status]}
+        {run.currentFile ? ` · arquivo atual: ${run.currentFile}` : ""}
+        {typeof run.gapsInitial === "number" && typeof run.gapsCurrent === "number"
+          ? ` · GAPs importantes: ${run.gapsInitial} → ${run.gapsCurrent}`
+          : ""}
+      </Typography>
+      {run.lastError && (
+        <Alert severity={autonomySeverity(run.status)} sx={{ mb: 1, fontSize: "0.72rem" }}>{run.lastError}</Alert>
+      )}
+      {run.rounds.length === 0 ? (
+        <Typography variant="caption" color="text.secondary">
+          Nenhuma rodada registrada ainda — o laço vive no servidor e continua mesmo com esta tela fechada.
+        </Typography>
+      ) : (
+        <Stack spacing={0.4}>
+          {run.rounds.map((r) => (
+            <Stack key={r.round} direction="row" spacing={0.75} alignItems="baseline" flexWrap="wrap" useFlexGap
+              sx={{ py: 0.4, borderBottom: "1px solid", borderColor: "divider" }}>
+              <Typography variant="caption" sx={{ fontWeight: 700, minWidth: 26 }}>#{r.round}</Typography>
+              {r.filePath && (
+                <Typography variant="caption" sx={{ fontFamily: "monospace", overflowWrap: "anywhere" }}>{r.filePath}</Typography>
+              )}
+              <Typography variant="caption" color="text.secondary">
+                🔴 {r.blockers ?? 0} · 🟡 {r.warnings ?? 0}
+                {typeof r.gapsAfter === "number" ? ` → ${r.gapsAfter} restante(s)` : ""}
+                {r.applied === false ? " · não aplicada" : ""}
+                {r.note ? ` · ${r.note}` : ""}
+              </Typography>
+            </Stack>
+          ))}
+        </Stack>
+      )}
+    </Box>
+  );
+}
+
 function formatFileSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
@@ -837,6 +919,7 @@ function SpecEditor({
   projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
   onPromote, fileExt = "md", onValidationChange, openGapsSignal,
   activeFilePath = null, onVersionRestored,
+  saveLabel = "Salvar rascunho", autonomy = null, onStopAutonomy, openAutonomySignal,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -869,9 +952,22 @@ function SpecEditor({
   // continuar com o texto velho — salvar por cima desfaria a restauração em silêncio).
   activeFilePath?: string | null;
   onVersionRestored?: (path: string) => void;
+  // UI/UX 2026-09-06 — rótulo do botão de salvar: com um arquivo da árvore aberto, o que se salva
+  // é AQUELE arquivo (PUT /spec-file com If-Match), não o rascunho da spec inteira.
+  saveLabel?: string;
+  // UI/UX 2026-09-06 — o laço autônomo virou uma ABA daqui (antes ocupava a coluna inteira do chat,
+  // e no mobile a tela toda). `openAutonomySignal` traz o usuário a ela a partir do chat.
+  autonomy?: AutonomyState | null;
+  onStopAutonomy?: () => void;
+  openAutonomySignal?: number;
 }) {
   const hasGapsTab = !!projectId;
-  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps" | "versions">("split");
+  const autonomyRun = autonomy?.run ?? null;
+  // A aba só existe quando há um laço para mostrar (nunca uma aba vazia).
+  const hasAutonomyTab = Boolean(autonomyRun);
+  // "Preview deve ser a tab default" (pedido do Jean, 2026-09-06): quem abre a Bancada quer LER a
+  // spec; editar é uma decisão seguinte. "Lado a lado" continua a um clique.
+  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps" | "versions" | "autonomy">("preview");
   // Abre a aba GAPs quando o pai sinaliza (pós-salvar). Ignora o mount inicial (só reage a bumps).
   const lastOpenGaps = useRef(openGapsSignal);
   useEffect(() => {
@@ -879,6 +975,18 @@ function SpecEditor({
     lastOpenGaps.current = openGapsSignal;
     if (hasGapsTab) setEditorTab("gaps");
   }, [openGapsSignal, hasGapsTab]);
+  // Mesmo padrão para a aba Autonomia (link "detalhes" na linha compacta do chat).
+  const lastOpenAutonomy = useRef(openAutonomySignal);
+  useEffect(() => {
+    if (openAutonomySignal === lastOpenAutonomy.current) return;
+    lastOpenAutonomy.current = openAutonomySignal;
+    if (hasAutonomyTab) setEditorTab("autonomy");
+  }, [openAutonomySignal, hasAutonomyTab]);
+  // O laço terminou e a aba desapareceu (ou nunca existiu) enquanto estava selecionada → volta ao
+  // Preview em vez de renderizar uma aba fantasma sem conteúdo.
+  useEffect(() => {
+    if (!hasAutonomyTab) setEditorTab((t) => (t === "autonomy" ? "preview" : t));
+  }, [hasAutonomyTab]);
   // Badge dos GAPs: >99 vira "99+"; 0 não mostra número (aba fica só "GAPs").
   const gapBadge = gapCount == null ? null : gapCount > 99 ? "99+" : String(gapCount);
   // "Lado a lado": proporção do editor (%) arrastável entre 20% e 80%; duplo-clique reseta a 50%.
@@ -914,7 +1022,26 @@ function SpecEditor({
             <Tab value="versions" icon={<HistoryIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Versões"
               sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           )}
+          {/* UI/UX 2026-09-06: o registro do laço autônomo saiu do chat e virou esta aba. */}
+          {hasAutonomyTab && (
+            <Tab value="autonomy" icon={<SmartToyOutlinedIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start"
+              label={
+                <Stack direction="row" spacing={0.5} alignItems="center" component="span">
+                  <span>Autonomia</span>
+                  {autonomyRun?.active && <CircularProgress size={10} />}
+                </Stack>
+              }
+              sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
+          )}
         </Tabs>
+        {/* Qual arquivo está no editor: com a árvore única, o editor deixa de ser sempre "a spec
+            inteira" — sem este rótulo o usuário não sabe o que o botão Salvar vai gravar. */}
+        {activeFilePath && (
+          <Tooltip title={activeFilePath}>
+            <Chip size="small" variant="outlined" color="primary" label={activeFilePath.split("/").pop()}
+              sx={{ ml: 1, height: 18, maxWidth: 180, "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.62rem" } }} />
+          </Tooltip>
+        )}
         <Chip label={`${value.split("\n").length} linhas`} size="small" sx={{ fontSize: "0.65rem", height: 18, ml: 1 }} />
       </Stack>
       <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap sx={{ rowGap: 0.5 }}>
@@ -936,7 +1063,7 @@ function SpecEditor({
               startIcon={approving === "save" ? <CircularProgress size={12} color="inherit" /> : <span style={{ fontSize: "0.9rem" }}>💾</span>}
               disabled={approving !== null || !value.trim()} onClick={onSave}
               sx={{ fontSize: "0.72rem", py: 0.35 }}>
-              {approving === "save" ? "Salvando…" : "Salvar rascunho"}
+              {approving === "save" ? "Salvando…" : saveLabel}
             </Button>
           </span>
         </Tooltip>
@@ -968,7 +1095,19 @@ function SpecEditor({
 
   const content = (areaH: string) => {
     if (editorTab === "edit") return editorArea(areaH);
-    if (editorTab === "preview") return <MarkdownPreview content={value} />;
+    // UI/UX 2026-09-06 — Preview virou a aba DEFAULT, e a árvore única abre também arquivos que
+    // não são Markdown (`connect.yaml`, JSON). Renderizar YAML como Markdown come a indentação —
+    // que é a sintaxe do arquivo. Fora de .md/.markdown, o preview é o texto cru monoespaçado.
+    if (editorTab === "preview") {
+      const md = /^(md|markdown|mdx)$/i.test(fileExt);
+      return md ? <MarkdownPreview content={value} /> : (
+        <Box component="pre" sx={{
+          height: areaH, width: "100%", minWidth: 0, overflow: "auto", m: 0, p: 1.5,
+          bgcolor: "background.default", fontFamily: "monospace", fontSize: "0.78rem",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}>{value}</Box>
+      );
+    }
     // Onda 3 (a): aba GAPs — a validação da spec vive aqui dentro (antes era um card à parte).
     if (editorTab === "gaps") {
       return (
@@ -985,6 +1124,16 @@ function SpecEditor({
         <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", bgcolor: "background.default", overflowWrap: "anywhere" }}>
           {projectId
             ? <SpecVersionsPanel projectId={projectId} activeFilePath={activeFilePath} onRestored={onVersionRestored} />
+            : null}
+        </Box>
+      );
+    }
+    // UI/UX 2026-09-06 — aba Autonomia: o log de rodadas do laço do servidor.
+    if (editorTab === "autonomy") {
+      return (
+        <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", bgcolor: "background.default", overflowWrap: "anywhere" }}>
+          {autonomyRun
+            ? <AutonomyReport run={autonomyRun} running={autonomyRun.active} onStop={onStopAutonomy} />
             : null}
         </Box>
       );
@@ -1037,7 +1186,7 @@ function SpecChatPanel({
   isEvolution = false, onEvolvePlan,
   recovered = null, onApplyRecovered, onDiscardRecovered,
   autonomyOn = false, onAutonomyToggle, autonomy = null, autonomyError = null,
-  autonomyStarting = false, onStopAutonomy,
+  autonomyStarting = false, onStopAutonomy, onShowAutonomy,
 }: {
   // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
   // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
@@ -1079,6 +1228,8 @@ function SpecChatPanel({
   autonomyError?: string | null;
   autonomyStarting?: boolean;
   onStopAutonomy?: () => void;
+  /** UI/UX 2026-09-06 — leva o usuário à aba "Autonomia" do editor (fecha overlays do mobile). */
+  onShowAutonomy?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1270,56 +1421,46 @@ function SpecChatPanel({
             para o usuário ver por que o laço parou sem precisar abrir o histórico. */}
         {/* PR-5: no modo POR ARQUIVO o laço trabalha arquivo a arquivo — o painel também aparece
             quando o usuário está com um arquivo aberto (é ali que ele vê a spec mudar sozinha). */}
+        {/* UI/UX 2026-09-06 — aqui sobra UMA LINHA. O log completo de rodadas foi para a aba
+            "Autonomia" do editor: no chat ele ocupava a coluna inteira (no mobile, a tela toda) e
+            empurrava o campo de mensagem para fora da vista. O estado continua à vista — o que
+            mudou é o espaço que ele cobra. */}
         {(!fileMode || autonomyRun?.mode === "per_file") && autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
-          <Box
-            sx={{
-              mb: 0.75, p: 1, borderRadius: 1.5, bgcolor: "action.hover",
-              border: "1px solid", borderColor: autonomyRunning ? "primary.main" : "divider",
-            }}
-            aria-live="polite"
-          >
-            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.5 }}>
-              {autonomyRunning && <CircularProgress size={12} />}
-              <Typography variant="caption" sx={{ fontWeight: 700, fontSize: "0.7rem" }}>
-                {autonomyRun.mode === "per_file"
-                  ? `🤖 Modo autônomo por arquivo — passe ${Math.min((autonomyRun.passes ?? 0) + (autonomyRunning ? 1 : 0), autonomyRun.maxRounds)}/${autonomyRun.maxRounds} · ${autonomyRun.round} arquivo(s) revisado(s)`
-                  : `🤖 Modo autônomo — rodada ${autonomyRun.round}/${autonomyRun.maxRounds}`}
+          <Tooltip title={autonomyRun.lastError
+            ? `${AUTONOMY_LABEL[autonomyRun.status]} — ${autonomyRun.lastError}`
+            : AUTONOMY_LABEL[autonomyRun.status]}>
+            <Stack direction="row" spacing={0.5} alignItems="center" aria-live="polite"
+              sx={{
+                mb: 0.75, pl: 0.75, pr: 0.25, py: 0.25, borderRadius: 1.5, bgcolor: "action.hover",
+                border: "1px solid",
+                borderColor: autonomyRunning
+                  ? "primary.main"
+                  : autonomyRun.lastError ? `${autonomySeverity(autonomyRun.status)}.main` : "divider",
+              }}
+            >
+              {autonomyRunning
+                ? <CircularProgress size={12} sx={{ flexShrink: 0 }} />
+                : <SmartToyOutlinedIcon sx={{ fontSize: "0.9rem", flexShrink: 0, color: "text.secondary" }} />}
+              <Typography variant="caption" noWrap
+                sx={{ flexGrow: 1, minWidth: 0, fontWeight: 700, fontSize: "0.66rem", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {autonomyHeadline(autonomyRun, autonomyRunning)}
               </Typography>
+              {onShowAutonomy && (
+                <Button size="small" onClick={onShowAutonomy}
+                  sx={{ flexShrink: 0, minWidth: 0, px: 0.5, fontSize: "0.62rem", textTransform: "none" }}>
+                  detalhes
+                </Button>
+              )}
+              {autonomyRunning && onStopAutonomy && (
+                <Tooltip title="Interromper o laço autônomo">
+                  <IconButton size="small" aria-label="Interromper o laço autônomo" onClick={onStopAutonomy}
+                    sx={{ flexShrink: 0, p: 0.25 }}>
+                    <StopCircleOutlinedIcon sx={{ fontSize: "1rem" }} />
+                  </IconButton>
+                </Tooltip>
+              )}
             </Stack>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.5 }}>
-              {AUTONOMY_LABEL[autonomyRun.status]}
-              {autonomyRun.currentFile ? ` · arquivo atual: ${autonomyRun.currentFile}` : ""}
-              {typeof autonomyRun.gapsInitial === "number" && typeof autonomyRun.gapsCurrent === "number"
-                ? ` · GAPs importantes: ${autonomyRun.gapsInitial} → ${autonomyRun.gapsCurrent}`
-                : ""}
-            </Typography>
-            {autonomyRun.rounds.length > 0 && (
-              <Stack spacing={0.25} sx={{ mt: 0.75 }}>
-                {autonomyRun.rounds.map((r) => (
-                  <Typography key={r.round} variant="caption" color="text.secondary"
-                    sx={{ display: "block", fontSize: "0.65rem", lineHeight: 1.5 }}>
-                    <Box component="span" sx={{ fontWeight: 700 }}>#{r.round}</Box>
-                    {r.filePath ? <Box component="span" sx={{ fontFamily: "monospace" }}> {r.filePath}</Box> : null}
-                    {" "}🔴 {r.blockers ?? 0} · 🟡 {r.warnings ?? 0}
-                    {typeof r.gapsAfter === "number" ? ` → ${r.gapsAfter} restante(s)` : ""}
-                    {r.applied === false ? " · não aplicada" : ""}
-                    {r.note ? ` · ${r.note}` : ""}
-                  </Typography>
-                ))}
-              </Stack>
-            )}
-            {autonomyRun.lastError && (
-              <Alert severity={autonomySeverity(autonomyRun.status)} sx={{ mt: 0.75, fontSize: "0.68rem", py: 0 }}>
-                {autonomyRun.lastError}
-              </Alert>
-            )}
-            {autonomyRunning && onStopAutonomy && (
-              <Button size="small" color="inherit" onClick={onStopAutonomy}
-                sx={{ mt: 0.5, fontSize: "0.68rem", textTransform: "none" }}>
-                Interromper laço
-              </Button>
-            )}
-          </Box>
+          </Tooltip>
         )}
         {autonomyError && !fileMode && (
           <Alert severity="warning" sx={{ mb: 0.75, fontSize: "0.7rem", py: 0 }}>{autonomyError}</Alert>
@@ -1563,6 +1704,24 @@ export default function SpecPage() {
   const [validationReloadSignal, setValidationReloadSignal] = useState(0);
   // Bump para trazer o editor à aba GAPs (pós-salvar rascunho → revalidação ao vivo).
   const [openGapsSignal, setOpenGapsSignal] = useState(0);
+  // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
+  // O editor PRINCIPAL passou a editar o arquivo escolhido na lista (antes o `SpecTreePanel` tinha
+  // um editor próprio, escondido numa segunda lista). `fileDraft` é o texto não salvo do arquivo;
+  // `activeFile.content` continua sendo o conteúdo SALVO (o que casa com `baseSha` e o que o chat
+  // manda para a IA) — é a diferença entre os dois que define `treeDirty`.
+  const [fileDraft, setFileDraft] = useState("");
+  /** Arquivo que veio na URL (`?file=`) e só pode ser aberto depois que o projeto carregar. */
+  const [pendingFilePath, setPendingFilePath] = useState<string | null>(null);
+  /** Metadados do projeto aberto reportados pela árvore (evita repetir o GET do índice). */
+  const [specFileMeta, setSpecFileMeta] = useState<{ editable: boolean; fileCount: number } | null>(null);
+  /** Bump para trazer o editor à aba "Autonomia" (o relatório do laço saiu do corpo da página). */
+  const [openAutonomySignal, setOpenAutonomySignal] = useState(0);
+  /** Diálogo "Dividir a spec em arquivos" (abre pelo ícone da lista) + estado espelhado do painel. */
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitState, setSplitState] = useState<{ enabled: boolean; awaitingDecision: boolean; active: boolean } | null>(null);
+  // `handleSaveSpec` (spec inteira) é declarado bem depois nesta função; o botão único de salvar
+  // precisa dele desde cedo. Ref preenchido por efeito = sem reordenar 1.000 linhas de handlers.
+  const handleSaveSpecRef = useRef<((startNow: boolean) => Promise<void>) | null>(null);
   // Largura (px) do painel de chat "Melhorar com IA" — arrastável pela divisória (300–640).
   const [chatWidth, setChatWidth] = useState(380);
   const shrinkChat = useCallback((dx: number) => setChatWidth((w) => clampChatWidth(w - dx)), []);
@@ -1659,11 +1818,15 @@ export default function SpecPage() {
     const pt = searchParams?.get("parentTitle");
     const ep = searchParams?.get("editProjectId");
     const prod = searchParams?.get("productId");
+    const file = searchParams?.get("file");
     if (pp) setParentProjectId(pp);
     if (pt) setParentTitle(decodeURIComponent(pt));
     if (ep) setEditProjectId(ep);
     // Só a árvore de navegação usa este productId; não confunde com o do fluxo de criação.
     setTreeProductId(prod ?? "");
+    // UI/UX 2026-09-06 — arquivo escolhido na lista de OUTRO projeto viaja na URL: o projeto muda
+    // primeiro (e reseta o editor/chat), então o arquivo só pode ser aberto depois disso.
+    if (file) setPendingFilePath(file);
   }, [searchParams]);
 
   // Evoluir E2/E6 — é um projeto de EVOLUÇÃO? (extra.evolution) → habilita "Gerar RFC / CHANGELOG"
@@ -1986,7 +2149,171 @@ export default function SpecPage() {
       }
       return f;
     });
+    // UI/UX 2026-09-06 — o EDITOR PRINCIPAL passou a editar o arquivo selecionado (antes o
+    // `SpecTreePanel` tinha um editor próprio). O rascunho nasce igual ao conteúdo do servidor.
+    setFileDraft(f?.content ?? "");
+    setTreeDirty(false);
   }, [stopChatPolling]);
+
+  // ── Árvore única (UI/UX 2026-09-06): abrir / salvar / criar / excluir arquivo ───────────────
+  // Tudo isto vivia dentro do `SpecTreePanel` — a SEGUNDA lista de arquivos da Bancada, com seu
+  // próprio editor. Jean: "criar duas listas de arquivos quebra o conceito de UI/UX fácil de usar
+  // e é contra intuitivo". A lista agora é uma só (`ProductFolderNav`) e é a PÁGINA que carrega o
+  // arquivo no editor principal, com o chat e os GAPs já escopados por arquivo.
+  //
+  // Regra de integridade (não é detalhe de UI): o arquivo PRIMÁRIO é o que o `spec-content`
+  // grava — abrir o primário significa "spec inteira" (`activeFile = null`), senão existiriam
+  // DOIS rascunhos dos mesmos bytes (o `specMarkdown` e o do arquivo) e o último a salvar apagaria
+  // o outro em silêncio.
+  const openSpecFile = useCallback(async (specPath: string) => {
+    if (!editProjectId) return;
+    try {
+      const f = await apiGet<{ path: string; content: string; contentSha256: string; isPrimary: boolean }>(
+        `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(specPath)}`,
+      );
+      if (f.isPrimary) { handleFileSelected(null); return; }
+      handleFileSelected({ path: f.path, content: f.content, baseSha: f.contentSha256 });
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : "Falha ao abrir o arquivo da spec.");
+    }
+  }, [editProjectId, handleFileSelected]);
+
+  // Estado atual em refs: o efeito de recarga não deve re-disparar por digitação no editor.
+  const activeFileRef = useRef<{ path: string; content: string; baseSha: string } | null>(null);
+  useEffect(() => { activeFileRef.current = activeFile; }, [activeFile]);
+  const treeDirtyRef = useRef(false);
+  useEffect(() => { treeDirtyRef.current = treeDirty; }, [treeDirty]);
+
+  // Algo reescreveu os arquivos no servidor (revisão aplicada, divisão, rodada do laço autônomo):
+  // reabre o arquivo ativo para pegar conteúdo e sha novos. NUNCA por cima de edição não salva —
+  // aí o usuário perderia o texto que está digitando.
+  const lastTreeReload = useRef(treeReloadSignal);
+  useEffect(() => {
+    if (treeReloadSignal === lastTreeReload.current) return;
+    lastTreeReload.current = treeReloadSignal;
+    const cur = activeFileRef.current;
+    if (cur && !treeDirtyRef.current) void openSpecFile(cur.path);
+  }, [treeReloadSignal, openSpecFile]);
+
+  // Clique num arquivo da árvore. Outro projeto → navega (o arquivo viaja na URL, `?file=`, e é
+  // aberto pelo efeito de baixo depois que o novo projeto carrega); mesmo projeto → abre direto.
+  const handleOpenTreeFile = useCallback((projId: string, specPath: string) => {
+    if (projId === editProjectId) { void openSpecFile(specPath); return; }
+    const q = new URLSearchParams({ editProjectId: projId, file: specPath });
+    if (treeProductId) q.set("productId", treeProductId);
+    // replace (não push): navegar entre arquivos da pasta é troca de contexto, não um passo de
+    // histórico — senão "Voltar" percorreria cada arquivo já aberto.
+    router.replace(`/spec?${q.toString()}`);
+  }, [editProjectId, treeProductId, openSpecFile, router]);
+
+  useEffect(() => {
+    if (!editProjectId || !pendingFilePath) return;
+    const p = pendingFilePath;
+    setPendingFilePath(null);
+    void openSpecFile(p);
+  }, [editProjectId, pendingFilePath, openSpecFile]);
+
+  // Salvar o ARQUIVO aberto (PUT com If-Match). Conflito → mensagem que diz o que fazer, em vez
+  // de sobrescrever a edição de outra pessoa/agente.
+  const handleSaveActiveFile = useCallback(async () => {
+    const cur = activeFile;
+    if (!editProjectId || !cur) return;
+    setApproving("save"); setApproveError(null);
+    try {
+      const r = await apiPut<{ ok: boolean; contentSha256: string }>(
+        `/api/projects/${editProjectId}/spec-file?path=${encodeURIComponent(cur.path)}`,
+        { content: fileDraft, baseSha: cur.baseSha },
+      );
+      setActiveFile((prev) => (prev && prev.path === cur.path
+        ? { ...prev, content: fileDraft, baseSha: r.contentSha256 } : prev));
+      setTreeDirty(false);
+      setTreeReloadSignal((n) => n + 1);
+      setValidationReloadSignal((n) => n + 1);
+      setStaleValidation(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setApproveError(msg.includes("mudou desde") || msg.toUpperCase().includes("CONFLICT")
+        ? `${cur.path} mudou no servidor desde que você o abriu (revisão da IA, laço autônomo ou outra sessão). Clique no arquivo na lista para recarregar — sua versão atual está no editor, copie o que quiser manter antes.`
+        : msg);
+    } finally { setApproving(null); }
+  }, [editProjectId, activeFile, fileDraft]);
+
+  // Um único botão "Salvar": grava o arquivo aberto ou o rascunho da spec inteira.
+  const handleSaveCurrent = useCallback(() => {
+    if (activeFile) { void handleSaveActiveFile(); return; }
+    void handleSaveSpecRef.current?.(false);
+  }, [activeFile, handleSaveActiveFile]);
+
+  // Digitação no editor principal: em modo arquivo alimenta o rascunho do arquivo (e o `treeDirty`
+  // que bloqueia pedir revisão à IA com bytes ambíguos); senão a spec inteira.
+  const handleEditorChange = useCallback((v: string) => {
+    if (activeFile) {
+      setFileDraft(v);
+      setTreeDirty(v !== activeFile.content);
+      return;
+    }
+    setSpecMarkdown(v);
+  }, [activeFile]);
+
+  // Criar arquivo / RFC e excluir — os ícones que Jean pediu NA LISTA, junto do excluir.
+  const handleCreateSpecFile = useCallback(async () => {
+    if (!editProjectId) return;
+    const p = window.prompt("Caminho do novo arquivo (ex.: backend/02-fila.md):");
+    if (!p) return;
+    try {
+      await apiPost(`/api/projects/${editProjectId}/spec-file`, { path: p, content: `# ${p}\n\n` });
+      setTreeReloadSignal((n) => n + 1);
+      await openSpecFile(p);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : "Falha ao criar o arquivo.");
+    }
+  }, [editProjectId, openSpecFile]);
+
+  const handleCreateRfc = useCallback(async () => {
+    if (!editProjectId) return;
+    const title = window.prompt("Título da funcionalidade do RFC (ex.: Exportar extrato em PDF):");
+    if (!title) return;
+    try {
+      const r = await apiPost<{ ok: boolean; path: string; number: number }>(
+        `/api/projects/${editProjectId}/rfc-from-template`, { title },
+      );
+      setTreeReloadSignal((n) => n + 1);
+      await openSpecFile(r.path);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : "Falha ao criar o RFC.");
+    }
+  }, [editProjectId, openSpecFile]);
+
+  const handleDeleteSpecFile = useCallback(async (projId: string, specPath: string) => {
+    // A lista mostra a pasta do PRODUTO inteiro; excluir só vale no projeto aberto (é dele que
+    // temos permissão de escrita confirmada e GAPs carregados) — a árvore já esconde o ícone nos
+    // irmãos, isto é a guarda de defesa-em-profundidade.
+    if (projId !== editProjectId) return;
+    if (!window.confirm(`Excluir ${specPath} da spec? Esta ação não pode ser desfeita.`)) return;
+    try {
+      await apiDelete(`/api/projects/${projId}/spec-file?path=${encodeURIComponent(specPath)}`);
+      if (activeFileRef.current?.path === specPath) handleFileSelected(null);
+      setTreeReloadSignal((n) => n + 1);
+      setValidationReloadSignal((n) => n + 1);
+      setStaleValidation(true);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : "Falha ao excluir o arquivo.");
+    }
+  }, [editProjectId, handleFileSelected]);
+
+  // A árvore já leu o índice: reaproveitamos o `editable`/nº de arquivos dela em vez de repetir o
+  // GET. Compara antes de setar — as 3 instâncias (rail, tela cheia, mobile) reportam o mesmo.
+  const handleTreeMeta = useCallback((m: { editable: boolean; fileCount: number }) => {
+    setSpecFileMeta((prev) => (prev && prev.editable === m.editable && prev.fileCount === m.fileCount ? prev : m));
+  }, []);
+
+  // Linha compacta do chat → aba "Autonomia" do editor. Fecha os overlays do mobile, senão o
+  // usuário clicaria em "detalhes" e continuaria olhando o chat em tela cheia.
+  const handleShowAutonomy = useCallback(() => {
+    setMobileChatOpen(false);
+    setFsPane("editor");
+    setOpenAutonomySignal((n) => n + 1);
+  }, []);
 
   // Pivô Bancada (Opção 1): a árvore "Pasta do produto" NAVEGA o editor trocando
   // editProjectId na MESMA rota (/spec) — a página NÃO desmonta. Sem este reset, o
@@ -2009,6 +2336,8 @@ export default function SpecPage() {
     setChatSending(false);
     setChatError(null);
     setActiveFile(null);
+    setFileDraft("");        // trocou de projeto → o rascunho do arquivo anterior não vale mais
+    setSpecFileMeta(null);   // e o `editable`/nº de arquivos vêm do índice do projeto novo
     setTreeDirty(false);
     setPendingApply(null);
     setApplyError(null);
@@ -2428,6 +2757,9 @@ export default function SpecPage() {
       const appliedContent = pendingApply.content;
       setActiveFile((prev) => (prev && prev.path === appliedPath
         ? { ...prev, content: appliedContent, baseSha: r.contentSha256 } : prev));
+      // UI/UX 2026-09-06 — o editor principal mostra `fileDraft`: sem isto a revisão da IA era
+      // gravada no servidor e a tela continuava exibindo o texto anterior.
+      if (activeFileRef.current?.path === appliedPath) { setFileDraft(appliedContent); setTreeDirty(false); }
       setPendingApply(null);
       setApplyConflict(false);
       setTreeReloadSignal((n) => n + 1);
@@ -2601,19 +2933,18 @@ export default function SpecPage() {
     void handleSaveSpec(true);
   }, [handleSaveSpec]);
 
+  // Publica o "salvar spec inteira" no ref lido por `handleSaveCurrent` (declarado antes daqui).
+  useEffect(() => { handleSaveSpecRef.current = handleSaveSpec; }, [handleSaveSpec]);
+
   // ── Pivô Bancada (Opção 1): árvore "Pasta do produto" dirige o editor ───────
-  // Clicar num arquivo da árvore navega o editor para o projeto dono. O editor,
-  // o chat "Melhorar com IA" e a Validação/GAPs já são por-projeto; então trocar
-  // de arquivo = trocar de editProjectId (mesma página /spec). Mesmo projeto já
-  // aberto → no-op (em prod cada projeto tem 1 arquivo; a spec dele já está no editor).
-  const openProductFile = useCallback((projId: string) => {
-    if (projId === editProjectId) return;
-    const q = new URLSearchParams({ editProjectId: projId });
-    if (treeProductId) q.set("productId", treeProductId);
-    // replace (não push): navegar entre arquivos da pasta é troca de contexto, não
-    // um passo de histórico — senão "Voltar" percorreria cada arquivo já aberto.
-    router.replace(`/spec?${q.toString()}`);
-  }, [editProjectId, treeProductId, router]);
+  // Clicar num arquivo da árvore navega o editor para o projeto dono. O editor, o chat "Melhorar
+  // com IA" e a Validação/GAPs já são por-projeto; então trocar de PROJETO = trocar de
+  // editProjectId (mesma página /spec).
+  //
+  // UI/UX 2026-09-06: quem trata o clique agora é `handleOpenTreeFile` — ele leva também o
+  // CAMINHO do arquivo (na URL, `?file=`) e abre o arquivo no editor principal. O antigo
+  // `openProductFile` descartava o caminho e, em spec dividida, abrir qualquer arquivo caía sempre
+  // no primário — que é exatamente o motivo de existir a segunda lista que o Jean mandou matar.
 
   // ── Upload flow ─────────────────────────────────────────────────────────────
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2696,7 +3027,112 @@ export default function SpecPage() {
     autonomyError,
     autonomyStarting,
     onStopAutonomy: handleStopAutonomy,
+    onShowAutonomy: handleShowAutonomy,
   };
+
+  // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
+  // A lista de arquivos existe sempre que há um projeto aberto — com ou sem `?productId=`. Antes
+  // ela era gated em `treeProductId`: entrando pela /specs ou /projects/:id (sem produto na URL) a
+  // Bancada ficava SEM lista nenhuma, e a spec dividida em 11 arquivos era ineditável arquivo a
+  // arquivo. `productId=""` põe a árvore em modo projeto-único.
+  // `|| treeProductId`: no fluxo de CRIAÇÃO com produto na URL a árvore continua sendo navegável
+  // (só leitura) como já era antes desta mudança — lá não há projeto aberto para editar.
+  const showTree = !!editProjectId || !!treeProductId;
+  const specEditable = specFileMeta?.editable === true;
+
+  // Estado da proposta de divisão lido pela PÁGINA (não só pelo diálogo): é o que decide se o
+  // ícone aparece e se há decisão pendente. Sem isto o ícone teria que estar sempre visível — ou,
+  // pior, uma proposta pronta ficaria invisível atrás de um diálogo fechado.
+  useEffect(() => {
+    if (!editProjectId || isEvolution) { setSplitState(null); return; }
+    let alive = true;
+    apiGet<{ enabled: boolean; proposal: { awaitingDecision: boolean; active: boolean } | null }>(
+      `/api/spec-split?projectId=${encodeURIComponent(editProjectId)}`,
+    )
+      .then((s) => {
+        if (!alive) return;
+        setSplitState({
+          enabled: s.enabled === true,
+          awaitingDecision: s.proposal?.awaitingDecision === true,
+          active: s.proposal?.active === true,
+        });
+      })
+      .catch(() => { if (alive) setSplitState(null); });
+    return () => { alive = false; };
+  }, [editProjectId, isEvolution, treeReloadSignal]);
+
+  // Ações da LISTA de arquivos: criar arquivo, criar RFC e dividir a spec. Jean: o gatilho da
+  // divisão "pode também ser um botão ícone na lista de arquivos junto com outros (como: Excluir)".
+  const treeHeaderActions = specEditable ? (
+    <>
+      <Tooltip title="Novo arquivo na spec">
+        <IconButton size="small" aria-label="Novo arquivo na spec" onClick={() => void handleCreateSpecFile()}
+          sx={{ p: 0.25, color: "#8B949E", "&:hover": { color: "#58A6FF" } }}>
+          <NoteAddOutlinedIcon sx={{ fontSize: "0.95rem" }} />
+        </IconButton>
+      </Tooltip>
+      {isEvolution && (
+        <Tooltip title="Novo RFC a partir do modelo">
+          <IconButton size="small" aria-label="Novo RFC a partir do modelo" onClick={() => void handleCreateRfc()}
+            sx={{ p: 0.25, color: "#8B949E", "&:hover": { color: "#58A6FF" } }}>
+            <PostAddOutlinedIcon sx={{ fontSize: "0.95rem" }} />
+          </IconButton>
+        </Tooltip>
+      )}
+      {/* Divisão: só faz sentido na spec base (em evolução os artefatos são RFC/CHANGELOG) e só
+          quando o servidor tem o recurso ligado — ou quando existe proposta aguardando decisão. */}
+      {!isEvolution && splitState && (splitState.enabled || splitState.awaitingDecision) && (
+        <Tooltip title={splitState.awaitingDecision
+          ? "Proposta de divisão pronta — aguardando a sua decisão"
+          : splitState.active ? "Os agentes estão dividindo a spec…" : "Dividir a spec em arquivos por tema"}>
+          <IconButton size="small" aria-label="Dividir a spec em arquivos" onClick={() => setSplitOpen(true)}
+            sx={{ p: 0.25, color: splitState.awaitingDecision ? "#F59E0B" : "#8B949E", "&:hover": { color: "#58A6FF" } }}>
+            <CallSplitIcon sx={{ fontSize: "0.95rem" }} />
+          </IconButton>
+        </Tooltip>
+      )}
+    </>
+  ) : null;
+
+  // Os MESMOS props nas três instâncias da árvore (rail ≥lg, painel "Arquivos" da tela cheia e
+  // diálogo do mobile) — a lista tem que se comportar igual nos três lugares.
+  const treeNavProps = {
+    productId: treeProductId,
+    currentProjectId: editProjectId,
+    currentFilePath: activeFile?.path ?? null,
+    onOpen: handleOpenTreeFile,
+    gapsByPath,
+    editable: specEditable,
+    onDeleteFile: handleDeleteSpecFile,
+    headerActions: treeHeaderActions,
+    onProjectMeta: handleTreeMeta,
+    reloadSignal: treeReloadSignal,
+  };
+
+  const splitDialog = editProjectId ? (
+    <Dialog open={splitOpen} onClose={() => setSplitOpen(false)} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontSize: "1rem", display: "flex", alignItems: "center", gap: 1 }}>
+        <CallSplitIcon sx={{ fontSize: "1.1rem", color: "primary.main" }} />
+        Dividir a spec em arquivos
+      </DialogTitle>
+      <DialogContent dividers>
+        <SpecSplitPanel
+          key={editProjectId}
+          projectId={editProjectId}
+          editable={specEditable}
+          embedded
+          onStateChange={setSplitState}
+          onApplied={() => {
+            void reloadSpecFromServer();
+            handleFileSelected(null); // o primário virou índice: o arquivo aberto pode não existir mais
+            setTreeReloadSignal((n) => n + 1);
+            setValidationReloadSignal((n) => n + 1);
+            setStaleValidation(true);
+          }}
+        />
+      </DialogContent>
+    </Dialog>
+  ) : null;
 
   // ── Editor fullscreen dialog ────────────────────────────────────────────────
   const editorDialog = specMarkdown !== null && (
@@ -2709,7 +3145,7 @@ export default function SpecPage() {
             fixo não serve (ficaria por baixo deste Dialog), então a árvore é um TERCEIRO painel. */}
         <Stack direction="row" spacing={1}
           sx={{ display: { xs: "flex", md: "none" }, p: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
-          {treeProductId && (
+          {showTree && (
             <Button fullWidth size="small" startIcon={<FolderOpenIcon />}
               variant={fsPane === "files" ? "contained" : "outlined"} onClick={() => setFsPane("files")}
               sx={{ minWidth: 0, px: 1 }}>Arquivos</Button>
@@ -2725,17 +3161,17 @@ export default function SpecPage() {
           {/* Rail da árvore da PASTA DO PRODUTO também em tela cheia (≥md; no mobile o toggle
               editor↔chat já ocupa a tela). Traz o próprio cabeçalho "PASTA DO PRODUTO · N
               ARQUIVO(S)" e navega o editProjectId. Só quando aberto de um produto (?productId). */}
-          {treeProductId && (
+          {showTree && (
             <>
               <Box sx={{
                 width: { xs: "100%", md: `${treeWidth}px` }, flexShrink: 0, minWidth: 0,
                 display: { xs: fsPane === "files" ? "flex" : "none", md: "flex" },
                 flexDirection: "column", borderRight: "1px solid", borderColor: "divider", overflow: "hidden",
               }}>
-                {/* No mobile, escolher um arquivo troca o projeto do editor → volta ao painel
+                {/* No mobile, escolher um arquivo troca o conteúdo do editor → volta ao painel
                     "Editor" (senão a navegação parece não ter efeito). */}
-                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId}
-                  onOpen={(projId) => { setFsPane("editor"); openProductFile(projId); }} height="100%" />
+                <ProductFolderNav {...treeNavProps}
+                  onOpen={(projId, specPath) => { setFsPane("editor"); handleOpenTreeFile(projId, specPath); }} height="100%" />
               </Box>
               {/* Divisória arrastável árvore↔editor (duplo-clique reseta a 240px). */}
               <Box sx={{ display: { xs: "none", md: "block" }, alignSelf: "stretch" }}>
@@ -2746,9 +3182,11 @@ export default function SpecPage() {
           {/* Editor: sempre visível no desktop; no mobile só quando o painel selecionado é 'editor'. */}
           <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden", display: { xs: fsPane === "editor" ? "flex" : "none", md: "flex" } }}>
             <SpecEditor
-              value={specMarkdown} onChange={setSpecMarkdown}
+              value={activeFile ? fileDraft : specMarkdown} onChange={handleEditorChange}
+              fileExt={activeFile ? (activeFile.path.split(".").pop() || "md") : "md"}
               fullscreen={true} onToggleFullscreen={() => setEditorFullscreen(false)}
-              onSave={() => handleSaveSpec(false)} approving={approving}
+              onSave={handleSaveCurrent} approving={approving}
+              saveLabel={activeFile ? "Salvar arquivo" : "Salvar rascunho"}
               onRegen={editProjectId ? undefined : () => { setEditorFullscreen(false); setSpecMarkdown(null); }}
               regenDisabled={editProjectId ? true : generating}
               projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
@@ -2756,6 +3194,7 @@ export default function SpecPage() {
               onPromote={editProjectId ? handlePromote : undefined}
               onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
               activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
+              autonomy={autonomy} onStopAutonomy={handleStopAutonomy} openAutonomySignal={openAutonomySignal}
             />
           </Box>
           {/* Divisória arrastável editor↔chat (tela cheia). Só ≥md — no mobile os painéis alternam. */}
@@ -2830,10 +3269,10 @@ export default function SpecPage() {
   // produto (era preciso voltar a /products/:id). Mesmo padrão do chat: FAB fixo + Dialog
   // fullScreen "por cima de tudo". O FAB sobe para bottom:96 no xs para não cobrir o FAB do chat
   // (entre md e lg o chat já é inline, então volta a bottom:24). Só quando há produto na URL.
-  const mobileTree = treeProductId ? (
+  const mobileTree = showTree ? (
     <>
       <Fab
-        color="default" aria-label="Abrir a pasta do produto"
+        color="default" aria-label={treeProductId ? "Abrir a pasta do produto" : "Abrir a lista de arquivos da spec"}
         onClick={() => setMobileTreeOpen(true)}
         sx={{
           display: { xs: "flex", lg: "none" }, position: "fixed",
@@ -2848,16 +3287,15 @@ export default function SpecPage() {
           sx={{ px: 2, py: 1, borderBottom: "1px solid", borderColor: "divider", flexShrink: 0 }}>
           <Stack direction="row" spacing={1} alignItems="center">
             <FolderOpenIcon sx={{ color: "text.secondary", fontSize: "1.2rem" }} />
-            <Typography variant="subtitle1" fontWeight={700}>Pasta do produto</Typography>
+            <Typography variant="subtitle1" fontWeight={700}>{treeProductId ? "Pasta do produto" : "Arquivos da spec"}</Typography>
           </Stack>
           <IconButton onClick={() => setMobileTreeOpen(false)} aria-label="Fechar"><CloseIcon /></IconButton>
         </Stack>
         <DialogContent sx={{ p: 0, display: "flex", flexDirection: "column", flexGrow: 1, overflow: "hidden" }}>
-          {/* Abrir um arquivo navega o editor (router.replace) → fecha o overlay, senão o usuário
-              ficaria olhando a árvore sem ver que o editor trocou de arquivo. */}
-          <ProductFolderNav
-            productId={treeProductId} currentProjectId={editProjectId}
-            onOpen={(projId) => { setMobileTreeOpen(false); openProductFile(projId); }}
+          {/* Abrir um arquivo troca o conteúdo do editor → fecha o overlay, senão o usuário ficaria
+              olhando a árvore sem ver que o editor trocou de arquivo. */}
+          <ProductFolderNav {...treeNavProps}
+            onOpen={(projId, specPath) => { setMobileTreeOpen(false); handleOpenTreeFile(projId, specPath); }}
             height="100%"
           />
         </DialogContent>
@@ -2911,8 +3349,8 @@ export default function SpecPage() {
             <Typography variant="h5" fontWeight={700}>Editar Spec</Typography>
             <Typography variant="body2" color="text.secondary">
               {treeProductId
-                ? "Edite a spec do produto — navegue pelos arquivos na árvore da pasta, à esquerda."
-                : "Edite a spec antes de iniciar o pipeline."}
+                ? "Edite a spec do produto — escolha o arquivo na lista da pasta, à esquerda."
+                : "Edite a spec antes de iniciar o pipeline — os arquivos ficam na lista à esquerda."}
             </Typography>
           </Box>
           <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
@@ -2945,10 +3383,10 @@ export default function SpecPage() {
             troca de projeto pela navegação. Só ≥lg (no md a árvore roubaria largura do editor;
             no mobile o editor ocupa a tela). Reusa a árvore da aba "Código" da fábrica. */}
         <Box sx={{ display: "flex", gap: 0, alignItems: { xs: "flex-start", lg: "stretch" }, height: { lg: "calc(100vh - 168px)" }, minHeight: { lg: 560 } }}>
-          {treeProductId && (
+          {showTree && (
             <>
               <Box sx={{ width: `${treeWidth}px`, flexShrink: 0, display: { xs: "none", lg: "flex" }, flexDirection: "column", border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
-                <ProductFolderNav productId={treeProductId} currentProjectId={editProjectId} onOpen={openProductFile} height="100%" />
+                <ProductFolderNav {...treeNavProps} height="100%" />
               </Box>
               {/* Divisória arrastável árvore↔editor (só ≥lg; duplo-clique reseta a 240px). */}
               <Box sx={{ display: { xs: "none", lg: "block" }, alignSelf: "stretch" }}>
@@ -2956,7 +3394,7 @@ export default function SpecPage() {
               </Box>
             </>
           )}
-          <Box sx={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, pl: treeProductId ? { lg: 1.5 } : 0 }}>
+          <Box sx={{ flexGrow: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, pl: showTree ? { lg: 1.5 } : 0 }}>
         {editLoading && (
           <Box sx={{ display: "flex", alignItems: "center", gap: 2, py: 6, justifyContent: "center" }}>
             <CircularProgress size={24} />
@@ -2972,12 +3410,24 @@ export default function SpecPage() {
             {/* Migração 090 — o laço autônomo escreve na MESMA spec. Avisar é mais honesto que
                 travar o editor: a guarda do servidor não sobrescreve edição humana, mas encerra o
                 laço ("stalled") quando ela aparece no meio da rodada. */}
+            {/* UI/UX 2026-09-06 — uma LINHA, com "ver detalhes" levando à aba "Autonomia" do editor.
+                O relatório por rodada (que enchia a tela, sobretudo no mobile) mora lá agora. O texto
+                sai de `autonomyHeadline`: dizia "rodada 12/5" em runs por arquivo, porque nesse modo
+                `round` conta ARQUIVOS e quem respeita `maxRounds` é `passes`. */}
             {autonomy?.run?.active && (
-              <Alert severity="info" sx={{ mb: 1 }} aria-live="polite">
-                <strong>Modo autônomo em andamento</strong> (rodada {autonomy.run.round}/{autonomy.run.maxRounds})
+              <Alert severity="info" sx={{ mb: 1 }} aria-live="polite"
+                action={<Button size="small" color="inherit" onClick={handleShowAutonomy}>Ver detalhes</Button>}>
+                <strong>{autonomyHeadline(autonomy.run)}</strong>
                 {" "}— o CTO está resolvendo os GAPs, salvando e revalidando a spec no servidor.
                 Evite editar ou salvar a spec agora: uma edição manual no meio da rodada interrompe o
                 laço (o servidor não sobrescreve o seu texto).
+              </Alert>
+            )}
+            {/* Uma proposta de divisão pronta não pode ficar escondida atrás de um diálogo fechado. */}
+            {splitState?.awaitingDecision && (
+              <Alert severity="warning" sx={{ mb: 1 }}
+                action={<Button size="small" color="inherit" onClick={() => setSplitOpen(true)}>Ver proposta</Button>}>
+                Os agentes propuseram dividir esta spec em arquivos — aguardando a sua decisão.
               </Alert>
             )}
             {staleValidation && (
@@ -2985,30 +3435,14 @@ export default function SpecPage() {
                 O conteúdo da spec mudou (revisão da IA aplicada ou versão restaurada). A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
               </Alert>
             )}
-            {/* key={editProjectId}: ao navegar entre projetos pela árvore da pasta, remonta
-                o painel para zerar seu `selected` interno (senão destacaria o arquivo do
-                projeto anterior e não re-emitiria onFileSelected). */}
             {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
                 que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
             <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
-            {/* F2/PR-3 — dividir a spec monolítica em arquivos por tema (agentes propõem, humano
-                aplica). Fica FORA do SpecTreePanel de propósito: aquele painel só aparece com 2+
-                arquivos, e é justamente a spec de arquivo único que precisa ser dividida. Aplicar
-                troca o conteúdo do primário pelo índice → recarregar editor, árvore e validação.
-                Em evolução não aparece: lá os artefatos da árvore são RFC/CHANGELOG, não a spec base. */}
-            {!isEvolution && (
-              <SpecSplitPanel
-                key={editProjectId}
-                projectId={editProjectId}
-                onApplied={() => {
-                  void reloadSpecFromServer();
-                  setTreeReloadSignal((n) => n + 1);
-                  setValidationReloadSignal((n) => n + 1);
-                  setStaleValidation(true);
-                }}
-              />
-            )}
-            <SpecTreePanel key={editProjectId} projectId={editProjectId} onFileSelected={handleFileSelected} onDirtyChange={setTreeDirty} reloadSignal={treeReloadSignal} isEvolution={isEvolution} gapsByPath={gapsByPath} />
+            {/* UI/UX 2026-09-06 — aqui viviam DOIS blocos que saíram do corpo da página:
+                • `SpecTreePanel` ("Árvore da especificação"), a segunda lista de arquivos → agora é
+                  a lista única (`ProductFolderNav`), no rail/painel "Arquivos"/diálogo do mobile;
+                • os cards de "Dividir a spec em arquivos" → viraram um ícone na lista, que abre
+                  `splitDialog`. Ambos ocupavam o corpo permanentemente sem serem o foco da tela. */}
           </Box>
         )}
 
@@ -3031,10 +3465,13 @@ export default function SpecPage() {
                   <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
                     Descartar
                   </Button>
+                  {/* UI/UX 2026-09-06 — o editor principal edita a spec inteira OU o arquivo
+                      escolhido na lista; o botão salva o que está aberto (PUT com If-Match no caso
+                      do arquivo, para não sobrescrever revisão da IA/laço autônomo). */}
                   <Button size="small" variant="outlined" disabled={!!approving}
                     startIcon={approving === "save" ? <CircularProgress size={14} color="inherit" /> : undefined}
-                    onClick={() => handleSaveSpec(false)}>
-                    {approving === "save" ? "Salvando…" : "Salvar rascunho"}
+                    onClick={handleSaveCurrent}>
+                    {approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho"}
                   </Button>
                   {/* Onda 3 (b): "Salvar e Iniciar" → "Promover à Fábrica". A spec só vai ao
                       pipeline por aqui; com GAPs em aberto exige confirmação por digitação. */}
@@ -3051,15 +3488,18 @@ export default function SpecPage() {
               <Box sx={{ flexGrow: { lg: 1 }, minHeight: { lg: 0 }, height: { xs: 520, md: "calc(100vh - 240px)", lg: "auto" }, overflow: "hidden", display: "flex" }}>
                 <Box sx={{ flexGrow: 1, minWidth: 0, overflow: "hidden" }}>
                   <SpecEditor
-                    value={specMarkdown} onChange={setSpecMarkdown}
+                    value={activeFile ? fileDraft : specMarkdown} onChange={handleEditorChange}
+                    fileExt={activeFile ? (activeFile.path.split(".").pop() || "md") : "md"}
                     fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                    onSave={() => handleSaveSpec(false)} approving={approving}
+                    onSave={handleSaveCurrent} approving={approving}
+                    saveLabel={activeFile ? "Salvar arquivo" : "Salvar rascunho"}
                     onRegen={undefined}
                     regenDisabled={true}
                     projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
                     validationReloadSignal={validationReloadSignal} gapCount={gapCount}
                     onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
               activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
+              autonomy={autonomy} onStopAutonomy={handleStopAutonomy} openAutonomySignal={openAutonomySignal}
                   />
                 </Box>
                 {/* Divisória arrastável editor↔chat (duplo-clique reseta a 380px). */}
@@ -3088,6 +3528,9 @@ export default function SpecPage() {
 
         {editorDialog}
         {promoteDialog}
+        {/* Divisão da spec: diálogo (não card no corpo) aberto pelo ícone da lista de arquivos.
+            Fica fora do gate de `specMarkdown` de propósito — a proposta vive no servidor. */}
+        {splitDialog}
         {specMarkdown !== null && !editLoading && mobileChat}
         {/* Árvore da pasta do produto: acessível no mobile/tablet mesmo com a spec ainda
             carregando (é navegação, não depende do conteúdo do editor). */}
