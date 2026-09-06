@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
 import Chip from "@mui/material/Chip";
@@ -117,10 +117,13 @@ export async function getLanguageExtension(ext: string) {
 
 // ── Tree node component ───────────────────────────────────────────────────────
 export function TreeItem({
-  node, depth, selected, onSelect, filterActive = false,
+  node, depth, selected, onSelect, filterActive = false, renderAdornment,
 }: {
   node: TreeNode; depth: number; selected: string | null; onSelect: (path: string) => void;
   filterActive?: boolean;
+  // Adorno opcional à direita de cada ARQUIVO (badge de GAPs, botões excluir/dividir…).
+  // A aba "Código" da fábrica não passa nada → comportamento idêntico ao anterior.
+  renderAdornment?: (node: TreeNode) => ReactNode;
 }) {
   const [open, setOpen] = useState(depth < 2);
   // Com filtro ativo, toda pasta abre para que as correspondências fiquem visíveis
@@ -148,7 +151,7 @@ export function TreeItem({
           <Typography variant="caption" sx={{ color: "#E6EDF3", fontSize: "0.75rem" }}>{node.name}</Typography>
         </Box>
         {effectiveOpen && node.children?.map((child) => (
-          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} filterActive={filterActive} />
+          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} filterActive={filterActive} renderAdornment={renderAdornment} />
         ))}
       </Box>
     );
@@ -178,6 +181,11 @@ export function TreeItem({
         <Typography variant="caption" sx={{ color: "#484F58", fontSize: "0.65rem", flexShrink: 0 }}>
           {node.sizeBytes >= 1024 ? `${(node.sizeBytes/1024).toFixed(1)}k` : `${node.sizeBytes}b`}
         </Typography>
+      )}
+      {renderAdornment && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.25, flexShrink: 0 }}>
+          {renderAdornment(node)}
+        </Box>
       )}
     </Box>
   );
