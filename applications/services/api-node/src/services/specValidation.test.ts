@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash } from "./specValidation.js";
+import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -269,8 +269,68 @@ describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
     expect(queries.some((q) => q.sql.includes("SET stage_b_collected_at = now()"))).toBe(true);
   });
 
+  it("🔴 GAP-18: resultado coletado depois também MARCA a cobertura (o julgamento aconteceu)", async () => {
+    // Sem isto o arquivo julgado por uma run que só foi coletada no tick voltaria à fila de
+    // "não julgados" e a rotação repetiria o trabalho já pago.
+    const { row, files } = await pendingRun({
+      stage_b_coverage: { fullShas: { "README.md": "sha-do-conteudo-julgado", "docs/x.md": "sha-x" } },
+    });
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+    const marcas = queries.filter((q) => q.sql.includes("UPDATE project_spec_files") && q.sql.includes("stage_b_full_sha = $4"));
+    expect(marcas).toHaveLength(2);
+    expect(marcas[0].params).toEqual(["proj-1", "", "README.md", "sha-do-conteudo-julgado"]);
+    expect(marcas[1].params).toEqual(["proj-1", "docs", "x.md", "sha-x"]);
+  });
+
+  it("run sem cobertura (anterior à migração 101) → coleta normal, nenhuma marca inventada", async () => {
+    const { row, files } = await pendingRun({ stage_b_coverage: null });
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+    expect(out.collected).toBe(1);
+    expect(queries.some((q) => q.sql.includes("stage_b_full_sha"))).toBe(false);
+  });
+
   it("coluna ausente (migração 100 não aplicada) não derruba o tick", async () => {
     const pool = { query: async () => { throw new Error('column "agents_job_id" does not exist'); } } as unknown as Pool;
     await expect(collectStageBResults(pool, async () => ({ status: "done" }))).resolves.toMatchObject({ scanned: 0, collected: 0 });
+  });
+});
+
+/**
+ * 🔴 GAP-19 — o dedupe por hash reaproveitava uma run `passed` que havia julgado 2 de 12 arquivos.
+ *
+ * Medido em prod 2026-09-06 (NVX LastMile, 12 arquivos / 950.965 chars): o modo autônomo pedia
+ * revalidação justamente porque a cobertura estava incompleta, e recebia de volta o `id` da MESMA run
+ * — cobertura congelada, laço "convergindo" sobre um pedaço da spec. Reaproveitar só é economia
+ * quando não há nada novo a julgar.
+ */
+describe("canReusePassedRun / pendingCoverage (GAP-19)", () => {
+  it("cobertura completa (nada em sumário) → reaproveita", () => {
+    expect(canReusePassedRun({ full: ["a.md", "b.md"], outlineOnly: [], oversized: [] })).toBe(true);
+  });
+
+  it("🔴 cobertura incompleta → NÃO reaproveita (a rodada nova julga arquivos diferentes)", () => {
+    const cov = { full: ["a.md"], outlineOnly: ["grande.md", "modelo-dados.md"], oversized: [] };
+    expect(pendingCoverage(cov)).toEqual(["grande.md", "modelo-dados.md"]);
+    expect(canReusePassedRun(cov)).toBe(false);
+  });
+
+  it("o que falta é só `oversized` → reaproveita (rotação não cobre o que não cabe nem sozinho)", () => {
+    const cov = { full: ["a.md"], outlineOnly: ["monstro.md"], oversized: ["monstro.md"] };
+    expect(pendingCoverage(cov)).toEqual([]);
+    expect(canReusePassedRun(cov)).toBe(true);
+  });
+
+  it("parte do que falta cabe → revalida, mesmo havendo um `oversized` no meio", () => {
+    const cov = { full: [], outlineOnly: ["monstro.md", "medio.md"], oversized: ["monstro.md"] };
+    expect(pendingCoverage(cov)).toEqual(["medio.md"]);
+    expect(canReusePassedRun(cov)).toBe(false);
+  });
+
+  it("cobertura ausente/ilegível (run legada, JSON estranho) → comportamento legado: reaproveita", () => {
+    for (const raw of [null, undefined, {}, { outlineOnly: "nao-e-array" }, "lixo", 7]) {
+      expect(canReusePassedRun(raw)).toBe(true);
+    }
   });
 });

@@ -70,5 +70,71 @@ describe("buildValidationInput", () => {
     expect(inp.text.length).toBeLessThanOrEqual(VALIDATION_INPUT_CAP + 40);
     expect(inp.totalChars).toBeGreaterThan(700_000);
     expect(inp.text).toContain("INVENTÁRIO DA SPEC — 12 arquivo(s)");
+    expect(inp.cap).toBe(VALIDATION_INPUT_CAP); // vai para `stage_b_coverage`: registro interpretável
+  });
+});
+
+/**
+ * 🔴 GAP-18 (rotação de cobertura) — medido em prod 2026-09-06 no NVX LastMile: 12 arquivos /
+ * 950.965 chars, e o estágio adversarial julgava **os mesmos 2 arquivos** por inteiro em TODA rodada.
+ * Não era aleatório: a promoção "menores primeiro" é determinística, então os grandes (entre eles
+ * `modelo-dados.md`, 172.323 chars) nunca eram lidos por um juiz. O laço "convergia" 21 → 14 sobre
+ * 2/12 da spec.
+ */
+describe("buildValidationInput — rotação de cobertura (GAP-18)", () => {
+  it("quem AINDA NÃO foi julgado entra na frente, mesmo sendo maior que os já julgados", () => {
+    // Mesmo orçamento, mesmos tamanhos: a ÚNICA variável é a marca de julgamento. É isso que prova a
+    // rotação — e nada aqui depende de acertar a aritmética exata do teto.
+    const grande = file("nunca-visto.md", 9_000);
+    const p1 = file("ja-visto-1.md", 900);
+    const p2 = file("ja-visto-2.md", 900);
+
+    const semMarca = buildValidationInput([p1, p2, grande], 10_800);
+    // Ordem só por tamanho (comportamento legado): os dois pequenos comem o orçamento e o grande
+    // fica em sumário — para sempre, porque a escolha é determinística.
+    expect(semMarca.full.sort()).toEqual(["ja-visto-1.md", "ja-visto-2.md"]);
+    expect(semMarca.outlineOnly).toEqual(["nunca-visto.md"]);
+
+    const comMarca = buildValidationInput(
+      [{ ...p1, judged: true }, { ...p2, judged: true }, { ...grande, judged: false }],
+      10_800,
+    );
+    // Com a fila por julgamento o grande NÃO julgado passa à frente e é lido por um juiz.
+    expect(comMarca.full).toContain("nunca-visto.md");
+    expect(comMarca.outlineOnly.length).toBeGreaterThan(0);
+  });
+
+  it("orçamento só para UM: o não julgado vence o já julgado (a cobertura AVANÇA a cada rodada)", () => {
+    const files = [
+      { ...file("ja-visto.md", 5_000), judged: true },
+      { ...file("nunca-visto.md", 5_000), judged: false },
+    ];
+    const inp = buildValidationInput(files, 6_000);
+    expect(inp.full).toEqual(["nunca-visto.md"]);
+    expect(inp.outlineOnly).toEqual(["ja-visto.md"]);
+  });
+
+  it("sem marca de julgamento (legado/1ª validação) a ordem segue sendo só por tamanho", () => {
+    const inp = buildValidationInput([file("g.md", 9_000), file("p.md", 900)], 3_000);
+    expect(inp.full).toEqual(["p.md"]);
+  });
+
+  it("🔴 arquivo que não cabe NEM SOZINHO é declarado `oversized` — rotação nenhuma o cobre", () => {
+    // Sem este fato o laço autônomo revalidaria para sempre esperando uma cobertura impossível.
+    const inp = buildValidationInput([file("monstro.md", 300_000), file("p.md", 900)], 50_000);
+    expect(inp.oversized).toEqual(["monstro.md"]);
+    expect(inp.full).toEqual(["p.md"]);
+    expect(inp.outlineOnly).toEqual(["monstro.md"]);
+  });
+
+  it("spec que cabe inteira não tem `oversized` nem pendência de cobertura", () => {
+    const inp = buildValidationInput([file("a.md", 1_000), file("b.md", 2_000)]);
+    expect(inp.oversized).toEqual([]);
+    expect(inp.outlineOnly).toEqual([]);
+  });
+
+  it("o teto default é maior que os 200k originais (a unidade era chars, a janela é em tokens)", () => {
+    // 200.000 chars ≈ 57k tokens de uma janela de ~200k: o validador descartava ~70% da capacidade.
+    expect(VALIDATION_INPUT_CAP).toBeGreaterThanOrEqual(400_000);
   });
 });

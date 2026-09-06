@@ -88,8 +88,12 @@ const db = {
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
     if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
 
-    if (s.startsWith("SELECT status, stage_b_ran FROM spec_validation_runs")) {
-      return { rows: [{ status: validationStatus, stage_b_ran: stageBRan }], rowCount: 1 };
+    if (s.startsWith("SELECT status, stage_b_ran, stage_b_coverage FROM spec_validation_runs")) {
+      return { rows: [{ status: validationStatus, stage_b_ran: stageBRan, stage_b_coverage: stageBCoverage }], rowCount: 1 };
+    }
+    // GAP-18 (migração 101): cobertura da validação ANTERIOR (a comparação de superfície medida).
+    if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) {
+      return { rows: prevCoverage ? [{ stage_b_coverage: prevCoverage }] : [], rowCount: prevCoverage ? 1 : 0 };
     }
     // GAP-11 (migração 100): "ainda há resultado do estágio B a coletar para esta validação?"
     if (s.startsWith("SELECT 1 FROM spec_validation_runs")) {
@@ -163,6 +167,10 @@ let validationStatus = "passed";
 let stageBRan: boolean | null = true;
 /** GAP-11 (migração 100): `true` = job do estágio B ainda vivo no agents, resultado por coletar. */
 let stageBPending = false;
+/** GAP-18 (migração 101): cobertura desta validação. `null` = run legada (coluna NULL). */
+let stageBCoverage: unknown = null;
+/** GAP-18: cobertura da validação ANTERIOR — muda a resposta de "a superfície medida mudou?". */
+let prevCoverage: unknown = null;
 
 function writeSpec(content: string): void {
   const dir = mkdtempSync(join(tmpdir(), "spec-autonomy-"));
@@ -180,6 +188,8 @@ beforeEach(() => {
   validationStatus = "passed";
   stageBRan = true;
   stageBPending = false;
+  stageBCoverage = null;
+  prevCoverage = null;
   insertFails23505 = false;
   snapshotFails = false;
   sqlLog.length = 0;
@@ -493,6 +503,83 @@ describe("validação dentro do laço", () => {
       expect(await advanceAutonomyRun(db, r.id)).toBe(false);
       expect(run!.status).toBe("validating");
       expect(run!.status).not.toBe("stalled");
+    });
+  });
+
+  // GAP-18/GAP-19 (medido em prod 2026-09-06, NVX LastMile: 12 arquivos / 950.965 chars): o estágio
+  // adversarial julgava por INTEIRO sempre os MESMOS 2 arquivos (promoção determinística por tamanho)
+  // e os outros 10 entravam só como sumário de cabeçalhos. "Zero GAP" ali é zero GAP em 2/12 da spec.
+  describe("GAP-19 — `succeeded` exige que o juiz tenha lido a spec INTEIRA", () => {
+    it("🔴 zero GAPs com cobertura INCOMPLETA → revalida (não declara sucesso sobre parte da spec)", async () => {
+      const r = await reachValidating(5);
+      findings = [];
+      stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).not.toBe("succeeded");
+      expect(run!.status).toBe("validating");            // segue no laço, sem alvo → o tick revalida
+      expect(run!.validation_run_id).toBeNull();
+      const upd = sqlLog.filter((q) => q.sql.includes("UPDATE spec_autonomy_runs") && q.sql.includes("round = round + 1"));
+      expect(upd.length).toBeGreaterThan(0);
+      expect(JSON.stringify(run!.rounds)).toContain("Cobertura desta validação");
+    });
+
+    it("cobertura COMPLETA → succeeded dizendo quantos arquivos foram julgados por inteiro", async () => {
+      const r = await reachValidating(5);
+      findings = [];
+      stageBCoverage = { full: ["01-spec.md", "modelo-dados.md"], outlineOnly: [], oversized: [] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("succeeded");
+      expect(String(run!.last_error)).toContain("julgou os 2 arquivo(s) da spec por INTEIRO");
+      expect(JSON.stringify(run!.rounds)).not.toContain("Cobertura desta validação");
+    });
+
+    it("cobertura ausente (run anterior à migração 101) → comportamento legado: succeeded", async () => {
+      const r = await reachValidating(5);
+      findings = [];
+      stageBCoverage = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("succeeded");
+    });
+
+    it("o que falta não cabe nem sozinho → stalled pedindo a DIVISÃO (rotação não resolve)", async () => {
+      const r = await reachValidating(5);
+      findings = [];
+      stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["monstro.md"], oversized: ["monstro.md"] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("stalled");
+      expect(String(run!.last_error)).toContain("Dividir");
+      expect(String(run!.last_error)).toContain("monstro.md");
+    });
+
+    it("teto de rodadas + cobertura incompleta → exhausted honesto, nunca `succeeded`", async () => {
+      const r = await reachValidating(1);
+      findings = [];
+      stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("NÃO declaro a spec validada");
+    });
+
+    it("🔴 superfície medida MUDOU → contagem não comparável: o streak não avança (lei do GAP-13)", async () => {
+      const r = await reachValidating(5);
+      // Mesmos 2 GAPs importantes de antes, mas o juiz leu OUTRO arquivo: a contagem igual não prova
+      // laço travado. Sem isto a rotação de cobertura mataria a run por `stalled` em 2 rodadas.
+      stageBCoverage = { full: ["modelo-dados.md"], outlineOnly: ["01-spec.md"], oversized: [] };
+      prevCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.no_progress_streak).toBe(0);
+      expect(JSON.stringify(run!.rounds)).toContain("Superfície medida MUDOU");
+    });
+
+    it("mesma superfície e mesma contagem → streak avança normalmente (o freio continua vivo)", async () => {
+      const r = await reachValidating(5);
+      stageBCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      prevCoverage = { full: ["01-spec.md"], outlineOnly: ["modelo-dados.md"], oversized: [] };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.no_progress_streak).toBe(1);
+      expect(JSON.stringify(run!.rounds)).not.toContain("Superfície medida MUDOU");
     });
   });
 

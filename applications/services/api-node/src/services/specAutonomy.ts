@@ -1376,6 +1376,36 @@ async function kickValidation(db: Db, run: AutonomyRun): Promise<void> {
   await finishRun(db, run, "failed", `Validação não pôde ser iniciada (${res.code}): ${res.message}`);
 }
 
+// ── GAP-18/GAP-19: cobertura do estágio adversarial ───────────────────────────
+
+/** O que a run de validação MEDIU (migração 101). Ausente/legado = `null` = cobertura desconhecida. */
+interface StageBCoverage { full: string[]; outlineOnly: string[]; oversized: string[] }
+
+export function readStageBCoverage(raw: unknown): StageBCoverage | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (!Array.isArray(o.full) && !Array.isArray(o.outlineOnly)) return null;
+  const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  return { full: arr(o.full), outlineOnly: arr(o.outlineOnly), oversized: arr(o.oversized) };
+}
+
+/** Cobertura da validação ANTERIOR do mesmo projeto — para saber se a superfície medida MUDOU. */
+async function previousCoverage(db: Db, projectId: string, exceptRunId: string): Promise<StageBCoverage | null> {
+  const row = (await db.query(
+    `SELECT stage_b_coverage FROM spec_validation_runs
+      WHERE project_id = $1 AND id <> $2 AND stage_b_coverage IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1`,
+    [projectId, exceptRunId],
+  ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }))).rows[0] as { stage_b_coverage?: unknown } | undefined;
+  return readStageBCoverage(row?.stage_b_coverage);
+}
+
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const s = new Set(a);
+  return b.every((x) => s.has(x));
+}
+
 /** validating → lê a run de validação e decide: sucesso, nova rodada, esgotado ou travado. */
 async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   if (!run.validationRunId) {
@@ -1383,8 +1413,8 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     return false;
   }
   const vr = (await db.query(
-    "SELECT status, stage_b_ran FROM spec_validation_runs WHERE id = $1", [run.validationRunId],
-  )).rows[0] as { status?: string; stage_b_ran?: boolean | null } | undefined;
+    "SELECT status, stage_b_ran, stage_b_coverage FROM spec_validation_runs WHERE id = $1", [run.validationRunId],
+  )).rows[0] as { status?: string; stage_b_ran?: boolean | null; stage_b_coverage?: unknown } | undefined;
   if (!vr) {
     await finishRun(db, run, "failed", "A run de validação desta rodada desapareceu.");
     return true;
@@ -1458,21 +1488,65 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   const gaps = await currentGaps(db, run.projectId);
   const before = run.gapsCurrent ?? gaps.important;
   const progressed = gaps.important < before;
-  const streak = progressed ? 0 : run.noProgressStreak + 1;
+  // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
+  // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
+  // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
+  // "sem progresso" não avança (ele existe para matar laço que não converge, não para punir cobertura
+  // nova); o teto de rodadas continua sendo o freio.
+  const cov = readStageBCoverage(vr.stage_b_coverage);
+  const prevCov = cov ? await previousCoverage(db, run.projectId, run.validationRunId) : null;
+  const surfaceChanged = !!cov && !!prevCov && !sameSet(cov.full, prevCov.full);
+  const streak = progressed ? 0 : surfaceChanged ? run.noProgressStreak : run.noProgressStreak + 1;
+  const covNote = cov && cov.outlineOnly.length > 0
+    ? ` Cobertura desta validação: ${cov.full.length} de ${cov.full.length + cov.outlineOnly.length} arquivo(s) julgado(s) por INTEIRO (os demais entraram só como sumário).`
+    : "";
   await patchLastRound(db, run, {
     gapsAfter: gaps.important, blockers: gaps.blockers, warnings: gaps.warnings,
     validationRunId: run.validationRunId,
-    note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).`,
+    note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — as duas contagens não são comparáveis." : ""}`,
   });
   const cycleLabel = perFile
     ? `**Passe ${run.passes}/${run.maxRounds} concluído** (${appliedInPass({ ...run, passes: run.passes - 1 })} arquivo(s) revisado(s))`
     : `**Rodada ${run.round}/${run.maxRounds} concluída**`;
   await postChatNote(db, run,
-    `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).`);
+    `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).${covNote}`);
 
   if (gaps.important === 0) {
-    await finishRun(db, run, "succeeded",
-      `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`, { gaps });
+    // 🔴 GAP-19: "zero GAPs" só é sucesso se o juiz LEU a spec inteira. Medido em prod 2026-09-06
+    // (NVX LastMile, 12 arquivos/950.965 chars): o estágio adversarial julgava 2 arquivos por INTEIRO e
+    // os outros 10 só pelo sumário de cabeçalhos — sempre os mesmos, porque a promoção a integral era
+    // determinística por tamanho. Declarar `succeeded` ali seria dizer "spec sem GAP" sobre 2/12 da
+    // spec. Com a rotação (GAP-18) a cobertura avança a cada validação: aqui o laço só REVALIDA até
+    // todo arquivo ter sido julgado no conteúdo atual.
+    const pendentes = cov?.outlineOnly ?? [];
+    if (pendentes.length === 0) {
+      await finishRun(db, run, "succeeded",
+        `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cov ? ` — e o estágio adversarial julgou os ${cov.full.length} arquivo(s) da spec por INTEIRO` : ""}.`, { gaps });
+      return true;
+    }
+    const grandes = pendentes.filter((p) => (cov?.oversized ?? []).includes(p));
+    if (grandes.length === pendentes.length) {
+      // Rotação nenhuma resolve: o arquivo não cabe integralmente nem sozinho. Quem resolve é a
+      // divisão da spec (ação da Bancada) — e isso é decisão do humano, não do laço.
+      await finishRun(db, run, "stalled",
+        `Nenhum GAP importante restante NA PARTE JULGADA, mas ${grandes.length} arquivo(s) não cabem numa janela de validação nem sozinhos e por isso NUNCA foram julgados por inteiro: ${grandes.map((p) => `\`${p}\``).join(", ")}. Divida esse(s) arquivo(s) (ação "Dividir" da Bancada) e rode o modo autônomo de novo — só assim a spec passa a ser julgada completa.`, { gaps });
+      return true;
+    }
+    if (atCap) {
+      await finishRun(db, run, "exhausted",
+        `Zero GAP importante na superfície medida, porém o estágio adversarial ainda não julgou por inteiro ${pendentes.length} arquivo(s) (${pendentes.slice(0, 6).map((p) => `\`${p}\``).join(", ")}${pendentes.length > 6 ? ", …" : ""}) e o limite de ${run.maxRounds} ${perFile ? "passe(s)" : "rodada(s)"} acabou. NÃO declaro a spec validada: rode o modo autônomo novamente para cobrir o resto.`, { gaps });
+      return true;
+    }
+    await db.query(
+      `UPDATE spec_autonomy_runs
+          SET validation_run_id = NULL, gaps_current = $2, no_progress_streak = 0,
+              ${perFile ? "passes = passes + 1," : "round = round + 1,"} updated_at = now()
+        WHERE id = $1 AND status = 'validating'`,
+      [run.id, gaps.important],
+    );
+    await postChatNote(db, run,
+      `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — mas ${pendentes.length} arquivo(s) ainda entraram só como sumário. **Não declaro a spec validada com base em parte dela**: vou revalidar priorizando ${pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${pendentes.length > 4 ? " e os demais" : ""}.`);
+    console.info(`[SpecAutonomy] run=${run.id} 0 GAP na superfície medida, cobertura INCOMPLETA (${pendentes.length} arquivo(s) só em sumário) — revalidando com rotação (GAP-19).`);
     return true;
   }
   if (atCap) {

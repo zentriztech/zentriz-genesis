@@ -115,19 +115,22 @@ export interface SpecFileRow {
 export async function computeCurrentSpecHash(
   db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
   projectId: string,
-): Promise<{ specHash: string; files: Array<SpecFileRow & { content: string }> } | null> {
+): Promise<{ specHash: string; files: Array<SpecFileRow & { content: string; contentSha256: string }> } | null> {
   const rows = (await db.query(
     "SELECT filename, file_path, rel_dir FROM project_spec_files WHERE project_id = $1",
     [projectId],
   )).rows as unknown as SpecFileRow[];
   if (rows.length === 0) return null;
-  const files: Array<SpecFileRow & { content: string }> = [];
+  const files: Array<SpecFileRow & { content: string; contentSha256: string }> = [];
   const entries: Array<{ relDir: string; filename: string; contentSha256: string }> = [];
   for (const r of rows) {
     const buf = await readFile(r.file_path).catch(() => null);
     if (buf === null) return null; // arquivo sumiu do disco — estado inválido p/ validar
-    files.push({ ...r, content: buf.toString("utf-8") });
-    entries.push({ relDir: r.rel_dir ?? "", filename: r.filename, contentSha256: sha256Hex(buf) });
+    // GAP-18: o sha POR ARQUIVO já era calculado aqui para o hash da árvore. Devolvê-lo é o que
+    // permite comparar com `stage_b_full_sha` (arquivo julgado integralmente em QUAL conteúdo).
+    const contentSha256 = sha256Hex(buf);
+    files.push({ ...r, content: buf.toString("utf-8"), contentSha256 });
+    entries.push({ relDir: r.rel_dir ?? "", filename: r.filename, contentSha256 });
   }
   return { specHash: computeSpecTreeHash(entries), files };
 }
@@ -345,6 +348,30 @@ export type StartValidationResult =
   | { ok: true; runId: string; reused: boolean }
   | { ok: false; code: string; message: string; status: number };
 
+/**
+ * GAP-18/19: arquivos que a run anterior deixou SEM julgar e que uma nova rodada ainda pode julgar —
+ * ou seja, os que ficaram só em sumário DESCONTANDO os `oversized` (esses não cabem nem sozinhos:
+ * rotação nenhuma os cobre, só a divisão do arquivo).
+ *
+ * Cobertura ausente/ilegível (run anterior à migração 101, ou JSON estranho) → lista vazia, que
+ * preserva o comportamento legado do dedupe: reaproveita.
+ */
+export function pendingCoverage(rawCoverage: unknown): string[] {
+  const cov = (rawCoverage ?? null) as { outlineOnly?: unknown; oversized?: unknown } | null;
+  const pend = Array.isArray(cov?.outlineOnly) ? (cov!.outlineOnly as string[]) : [];
+  const over = Array.isArray(cov?.oversized) ? (cov!.oversized as string[]) : [];
+  return pend.filter((p) => !over.includes(p));
+}
+
+/**
+ * GAP-19: a regra do dedupe por hash. Uma run `passed` só pode ser reaproveitada se ela julgou tudo o
+ * que era julgável — senão "reaproveitar" é congelar a cobertura nos mesmos arquivos e devolver ao
+ * laço autônomo exatamente a run que o fez pedir uma validação nova.
+ */
+export function canReusePassedRun(rawCoverage: unknown): boolean {
+  return pendingCoverage(rawCoverage).length === 0;
+}
+
 export async function startValidation(pool: Pool, opts: {
   projectId: string;
   tenantId: string | null;
@@ -370,12 +397,28 @@ export async function startValidation(pool: Pool, opts: {
     return { ok: false, code: "SPEC_FILES_MISSING", message: "Spec sem arquivos legíveis para validar.", status: 422 };
   }
 
-  // dedupe por hash: conteúdo idêntico já validado → devolve a run existente (custo zero)
+  // dedupe por hash: conteúdo idêntico já validado → devolve a run existente (custo zero).
+  //
+  // 🔴 GAP-19: "já validado" só vale se a validação anterior tiver julgado a spec INTEIRA. Com o teto
+  // de janela, uma run `passed` pode ter lido 2 de 12 arquivos (medido em prod no NVX LastMile) — e aí
+  // reaproveitá-la não é economia, é congelar a cobertura: a rotação do `buildValidationInput` nunca
+  // chegaria aos arquivos grandes, e o laço autônomo receberia de volta a MESMA run que o fez pedir
+  // uma nova validação. Cobertura incompleta ⇒ vale rodar de novo, porque a rodada nova julga
+  // arquivos DIFERENTES. Exceção: se o que falta são só arquivos que não cabem nem sozinhos
+  // (`oversized`), rodar de novo não acrescenta nada — o dedupe volta a valer.
   const dup = await pool.query(
-    "SELECT id FROM spec_validation_runs WHERE project_id = $1 AND spec_hash = $2 AND status = 'passed' LIMIT 1",
+    `SELECT id, stage_b_coverage FROM spec_validation_runs
+      WHERE project_id = $1 AND spec_hash = $2 AND status = 'passed'
+      ORDER BY created_at DESC LIMIT 1`,
     [projectId, current.specHash],
   );
-  if (dup.rows[0]) return { ok: true, runId: dup.rows[0].id as string, reused: true };
+  if (dup.rows[0]) {
+    if (canReusePassedRun(dup.rows[0].stage_b_coverage)) {
+      return { ok: true, runId: dup.rows[0].id as string, reused: true };
+    }
+    const pend = pendingCoverage(dup.rows[0].stage_b_coverage).length;
+    console.log(`[spec-validation] ${projectId.slice(0, 8)}: run 'passed' de mesmo hash tem cobertura INCOMPLETA (${pend} arquivo(s) só em sumário) — validando de novo para julgar o que faltou (GAP-19).`);
+  }
 
   const catalogVersion = loadArchetypeCatalog().catalogVersion;
   let runId: string;
@@ -411,6 +454,48 @@ export async function startValidation(pool: Pool, opts: {
   return { ok: true, runId, reused: false };
 }
 
+/**
+ * GAP-18: quais arquivos deste projeto JÁ foram julgados integralmente pelo estágio adversarial, e
+ * com qual conteúdo. Coluna ausente (migração 101 não aplicada) → mapa vazio = ninguém julgado, que é
+ * exatamente o comportamento legado (ordem só por tamanho).
+ */
+async function loadJudgedShas(pool: Pool, projectId: string): Promise<Map<string, string>> {
+  try {
+    const rows = (await pool.query(
+      "SELECT rel_dir, filename, stage_b_full_sha FROM project_spec_files WHERE project_id = $1",
+      [projectId],
+    )).rows as unknown as Array<{ rel_dir: string | null; filename: string; stage_b_full_sha: string | null }>;
+    const out = new Map<string, string>();
+    for (const r of rows) {
+      if (!r.stage_b_full_sha) continue;
+      const dir = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+      out.set(dir ? `${dir}/${r.filename}` : r.filename, r.stage_b_full_sha);
+    }
+    return out;
+  } catch (e) {
+    console.warn(`[spec-validation] ${projectId.slice(0, 8)}: stage_b_full_sha indisponível (${e instanceof Error ? e.message : String(e)}) — cobertura sem rotação nesta rodada.`);
+    return new Map();
+  }
+}
+
+/**
+ * GAP-18: registra que ESTES arquivos foram julgados integralmente NESTE conteúdo. O sha é o do texto
+ * que foi ao validador — se o arquivo mudar depois, ele volta a contar como não julgado (é a diferença
+ * entre "coberto" e "coberto quando era outro texto").
+ */
+async function markFilesJudged(pool: Pool, projectId: string, fullShas: Record<string, string>): Promise<void> {
+  for (const [path, sha] of Object.entries(fullShas)) {
+    const i = path.lastIndexOf("/");
+    const relDir = i >= 0 ? path.slice(0, i) : "";
+    const filename = i >= 0 ? path.slice(i + 1) : path;
+    await pool.query(
+      `UPDATE project_spec_files SET stage_b_full_sha = $4, stage_b_full_at = now()
+        WHERE project_id = $1 AND coalesce(rel_dir, '') = $2 AND filename = $3`,
+      [projectId, relDir, filename, sha],
+    ).catch((e) => console.warn(`[spec-validation] ${projectId.slice(0, 8)}: cobertura de '${path}' não gravada (${e instanceof Error ? e.message : String(e)}).`));
+  }
+}
+
 async function processValidationRun(pool: Pool, runId: string, projectId: string, startHash: string): Promise<void> {
   const current = await computeCurrentSpecHash(pool, projectId);
   const files = current?.files ?? [];
@@ -427,27 +512,44 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   let stageBRan = false;
   if (!hasStageABlocker && files.length > 0) {
     const { buildValidationInput } = await import("./specValidationInput.js");
-    const input = buildValidationInput(
-      files
-        // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
-        .filter((f) => !/\.ya?ml$/i.test(f.filename))
-        .map((f) => ({ path: `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`, content: f.content })),
-    );
+    const judged = await loadJudgedShas(pool, projectId);
+    const candidates = files
+      // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
+      .filter((f) => !/\.ya?ml$/i.test(f.filename))
+      .map((f) => {
+        const path = `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`;
+        return { path, content: f.content, sha: f.contentSha256, judged: judged.get(path) === f.contentSha256 };
+      });
+    const input = buildValidationInput(candidates);
+    const shaOf = new Map(candidates.map((c) => [c.path, c.sha]));
+    const fullShas: Record<string, string> = {};
+    for (const p of input.full) fullShas[p] = shaOf.get(p) ?? "";
+    // 🔴 GAP-17/GAP-18: aqui existia um finding SINTÉTICO ("spec maior que a janela"). Ele contava
+    // como GAP 🟡 ATIVO — sustentava rodada nova do modo autônomo —, nascia com `file: ""` e por isso
+    // ia ao roteador LLM em TODA validação (medido em prod: uma chamada `opus-5` por rodada só para
+    // apontá-lo ao arquivo primário), onde o CTO-editor não tinha como resolvê-lo: não é defeito da
+    // spec, é propriedade da MEDIÇÃO. Com ele na lista, "GAPs = 0" era inalcançável por construção.
+    // Fato de medição vira METADADO da run (como o `stage_b_ran` do GAP-13), não achado.
+    const coverage = {
+      full: input.full, outlineOnly: input.outlineOnly, oversized: input.oversized,
+      totalChars: input.totalChars, cap: input.cap, fullShas,
+    };
+    await pool.query(
+      "UPDATE spec_validation_runs SET stage_b_coverage = $2::jsonb WHERE id = $1",
+      [runId, JSON.stringify(coverage)],
+    ).catch((e) => console.warn(`[spec-validation] run ${runId}: stage_b_coverage não gravada (${e instanceof Error ? e.message : String(e)}) — o laço autônomo tratará a cobertura como desconhecida.`));
     if (input.outlineOnly.length > 0) {
       // GAP-10: o humano tem de VER que a spec passou do que cabe numa validação — antes isso era
       // um `slice` silencioso e o sintoma chegava como blocker falso de "arquivo ausente".
-      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${input.totalChars} chars > teto de janela — ${input.full.length} arquivo(s) integrais, ${input.outlineOnly.length} só em sumário: ${input.outlineOnly.join(", ")}`);
-      findings.push({
-        file: "", line: null, severity: "warning",
-        title: "Spec maior que a janela de validação — parte foi julgada só pelo sumário",
-        rationale: `A spec tem ${input.totalChars} caracteres em ${files.length} arquivos. ${input.full.length} foram enviados integralmente ao validador; ${input.outlineOnly.length} entraram apenas como sumário de cabeçalhos (${input.outlineOnly.join(", ")}). Contradições internas a esses arquivos podem não ter sido vistas nesta rodada.`,
-        source: "stage_a",
-      });
+      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${input.totalChars} chars > teto de janela (${input.cap}) — ${input.full.length} arquivo(s) integrais, ${input.outlineOnly.length} só em sumário: ${input.outlineOnly.join(", ")}`);
     }
     const b = await runStageB(pool, runId, projectId, input.text);
     findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
     stageBError = b.error;
     stageBRan = !b.error;
+    // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
+    // (GAP-11): resultado pago que chega depois também cobre esses arquivos.
+    if (stageBRan) await markFilesJudged(pool, projectId, fullShas);
   }
 
   // TOCTOU: recomputa o hash ao FINAL — editou durante a validação → superseded (não é erro)
@@ -569,10 +671,10 @@ export async function collectStageBResults(
   probe: StageBProbe = defaultStageBProbe,
 ): Promise<{ scanned: number; collected: number; lost: number; givenUp: number }> {
   const out = { scanned: 0, collected: 0, lost: 0, givenUp: 0 };
-  let rows: Array<{ id: string; project_id: string | null; spec_hash: string; agents_job_id: string; findings: unknown; deadline_at: string | null }>;
+  let rows: Array<{ id: string; project_id: string | null; spec_hash: string; agents_job_id: string; findings: unknown; deadline_at: string | null; stage_b_coverage: unknown }>;
   try {
     rows = (await pool.query(
-      `SELECT id, project_id, spec_hash, agents_job_id, findings, deadline_at
+      `SELECT id, project_id, spec_hash, agents_job_id, findings, deadline_at, stage_b_coverage
          FROM spec_validation_runs
         WHERE agents_job_id IS NOT NULL
           AND stage_b_collected_at IS NULL
@@ -628,6 +730,12 @@ export async function collectStageBResults(
       if (!superseded) {
         await registerRecurrences(pool, String(r.project_id), findings).catch((e) =>
           console.warn(`[spec-validation] run ${short}: registerRecurrences falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`));
+      }
+      // GAP-18: o resultado recuperado julgou os MESMOS arquivos que a run mandou — a cobertura conta
+      // (o sha guardado é o do texto julgado, então arquivo editado no meio não é marcado como visto).
+      const cov = (r.stage_b_coverage ?? null) as { fullShas?: Record<string, string> } | null;
+      if (r.project_id && cov?.fullShas && Object.keys(cov.fullShas).length > 0) {
+        await markFilesJudged(pool, String(r.project_id), cov.fullShas);
       }
       out.collected += 1;
       console.log(`[spec-validation] run ${short}: resultado do estágio B RECUPERADO após a espera expirar — ${stageB.length} finding(s) do LLM, status '${status}'${superseded ? " (a spec mudou desde o início da validação)" : ""}.`);
