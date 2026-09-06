@@ -251,17 +251,42 @@ export async function fetchHistoryBuckets(client: Queryable): Promise<HistoryBuc
   }));
 }
 
+/**
+ * Nº de ARQUIVOS de spec por projeto (`project_spec_files`). A Bancada precisa disto porque,
+ * depois de dividir uma spec, o card dizia "1 spec" para um projeto com 11 arquivos — o
+ * totalizador visível contava PROJETOS e o usuário lia "arquivos". Nunca lança: em falha
+ * (tabela ausente em ambiente antigo) devolve mapa vazio e o card degrada para sem contagem.
+ */
+export async function fetchSpecFileCounts(client: Queryable, specIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (specIds.length === 0) return out;
+  try {
+    const rows = (await client.query(
+      `SELECT project_id AS id, count(*)::int AS n
+         FROM project_spec_files
+        WHERE project_id = ANY($1)
+        GROUP BY project_id`,
+      [specIds],
+    )).rows as Array<{ id: string; n: number }>;
+    for (const r of rows) out.set(String(r.id), Number(r.n) || 0);
+  } catch {
+    return out;
+  }
+  return out;
+}
+
 // Anexa { readiness, estimate } a cada spec. NÃO lança: em falha, devolve as specs cruas
 // (o chamador deve envolver em try/catch mesmo assim, mas aqui já degradamos por sinal).
 export async function enrichSpecs<T extends SpecForEnrichment>(
   client: Queryable,
   specs: T[],
-): Promise<Array<T & { readiness: Readiness; estimate: Estimate; gapCount: number | null; gapCountIgnored: number; gapCountRefuted: number }>> {
+): Promise<Array<T & { readiness: Readiness; estimate: Estimate; gapCount: number | null; gapCountIgnored: number; gapCountRefuted: number; fileCount: number }>> {
   const ids = specs.map((s) => s.id);
-  const [deps, buckets, gaps] = await Promise.all([
+  const [deps, buckets, gaps, files] = await Promise.all([
     fetchDepSignals(client, ids),
     fetchHistoryBuckets(client),
     fetchGapCounts(client, ids),
+    fetchSpecFileCounts(client, ids),
   ]);
   const estimator = buildEstimator(buckets);
   return specs.map((s) => {
@@ -272,6 +297,12 @@ export async function enrichSpecs<T extends SpecForEnrichment>(
     // null = spec nunca validada (sem aviso no card).
     const g = gaps.get(s.id);
     const gapCount = g ? g.active : null;
-    return { ...s, readiness, estimate, gapCount, gapCountIgnored: g?.ignored ?? 0, gapCountRefuted: g?.refuted ?? 0 };
+    // `fileCount` 0 = spec sem arquivo em `project_spec_files` (rascunho só em `extra`/legado):
+    // o card não inventa "1 arquivo" — mostra a contagem real e quem tem 0 não ganha chip.
+    return {
+      ...s, readiness, estimate, gapCount,
+      gapCountIgnored: g?.ignored ?? 0, gapCountRefuted: g?.refuted ?? 0,
+      fileCount: files.get(s.id) ?? 0,
+    };
   });
 }

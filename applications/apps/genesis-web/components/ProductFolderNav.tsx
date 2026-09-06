@@ -72,7 +72,7 @@ function buildFolderLabels(projects: ProductSpecProject[]): Map<string, string> 
 
 export default function ProductFolderNav({
   productId, currentProjectId, currentFilePath = null, onOpen, height = 560,
-  gapsByPath = null, editable = false, onDeleteFile, headerActions = null, onProjectMeta,
+  gapsByPath = null, gapsUnrouted = null, editable = false, onDeleteFile, headerActions = null, onProjectMeta,
   reloadSignal = 0,
 }: {
   /** Produto dono da spec. Vazio → modo PROJETO-ÚNICO (lê o índice do próprio projeto). */
@@ -90,6 +90,12 @@ export default function ProductFolderNav({
    * carregado / spec nunca validada (nenhum badge).
    */
   gapsByPath?: Record<string, { active: number; blockers: number }> | null;
+  /**
+   * UI/UX 2026-09-06 (item 2 — totalizadores de GAP) — nº de GAPs ATIVOS que o roteador NÃO
+   * conseguiu atribuir a nenhum arquivo. Sem isto a soma dos badges da lista dava menos que o
+   * badge da aba GAPs e nada explicava a diferença. 0/null → nada no cabeçalho.
+   */
+  gapsUnrouted?: number | null;
   /** Spec do projeto aberto aceita escrita (status/runner) → mostra o botão de excluir. */
   editable?: boolean;
   /** Excluir arquivo (nunca o primário). Ausente → nenhum botão de excluir. */
@@ -112,6 +118,8 @@ export default function ProductFolderNav({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const projectOnly = !productId;
+  /** Última URL carregada — distingue "trocou de escopo" (zera) de "recarregou o mesmo" (mantém). */
+  const loadedUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Modo produto: a pasta inteira. Modo projeto-único: só o projeto aberto — normalizado na
@@ -121,6 +129,10 @@ export default function ProductFolderNav({
       : currentProjectId ? `/api/projects/${currentProjectId}/spec-tree` : null;
     if (!url) return;
     let alive = true;
+    // UI/UX 2026-09-06 — trocar de produto/projeto ZERA a lista antes do fetch: senão o
+    // cabeçalho ficava exibindo "N arquivo(s)" do ANTERIOR enquanto o novo carregava (número
+    // errado à vista). Bump de `reloadSignal` no MESMO escopo não zera (evita piscar a árvore).
+    if (loadedUrlRef.current !== url) { loadedUrlRef.current = url; setData(null); }
     setLoading(true); setError(null);
     apiGet<SpecTreeResponse | ProjectTreeResponse>(url)
       .then((r) => {
@@ -249,6 +261,19 @@ export default function ProductFolderNav({
               excluir de cada linha, em vez de virarem cards ocupando o corpo da página. */}
           {headerActions}
         </Stack>
+        {/* UI/UX 2026-09-06 — GAPs sem arquivo atribuído: explicam por que a soma dos badges
+            desta lista pode ser MENOR que o número da aba GAPs. O botão por-arquivo não os
+            alcança; quem os resolve é o caminho da spec inteira / modo autônomo. */}
+        {(gapsUnrouted ?? 0) > 0 && (
+          <Tooltip title="GAPs que afetam a spec como um todo (o roteador não conseguiu atribuí-los a um arquivo). Resolva pelo modo autônomo, que percorre a spec inteira.">
+            <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.5 }}>
+              <WarningAmberIcon sx={{ fontSize: "0.8rem", color: "#F59E0B", flexShrink: 0 }} />
+              <Typography variant="caption" sx={{ color: "#F59E0B", fontSize: "0.62rem", lineHeight: 1.3 }}>
+                {gapsUnrouted} GAP(s) sem arquivo atribuído — fora dos badges abaixo.
+              </Typography>
+            </Stack>
+          </Tooltip>
+        )}
         {data?.truncated && (
           <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.5 }}>
             <WarningAmberIcon sx={{ fontSize: "0.8rem", color: "#F59E0B", flexShrink: 0 }} />

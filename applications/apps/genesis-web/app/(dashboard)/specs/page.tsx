@@ -36,8 +36,10 @@ import Tab from "@mui/material/Tab";
 import Tabs from "@mui/material/Tabs";
 import ToggleButton from "@mui/material/ToggleButton";
 import ToggleButtonGroup from "@mui/material/ToggleButtonGroup";
+import Tooltip from "@mui/material/Tooltip";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import { alpha } from "@mui/material/styles";
 import EditIcon from "@mui/icons-material/Edit";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
@@ -88,6 +90,12 @@ interface SpecItem {
   gapCount?: number | null;
   gapCountIgnored?: number;
   gapCountRefuted?: number;
+  /**
+   * Nº de ARQUIVOS de spec do projeto (`project_spec_files`). Sem isto o único totalizador do
+   * card era "N spec(s)" — que conta PROJETOS — e uma spec dividida em 11 arquivos aparecia
+   * como "1". 0/ausente (ambiente antigo, rascunho sem arquivo) → nenhum chip.
+   */
+  fileCount?: number | null;
   // Certificado Genesis Factory — só vem quando FACTORY_CERTIFICATE=on. Ausente/`null`
   // (flag off ou falha no cálculo) → a tela cai no readiness legado.
   factoryCertificate?: FactoryCertificate | null;
@@ -490,6 +498,19 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                 : s.readiness && <ReadinessBadge readiness={s.readiness} />}
               {/* Onda 3 (c): aviso de GAPs em aberto na validação da spec. */}
               <GapWarningChip count={s.gapCount ?? 0} ignored={s.gapCountIgnored ?? 0} />
+              {/* UI/UX 2026-09-06 — quantos ARQUIVOS esta spec tem. Depois da divisão, o card
+                  só dizia "N spec(s)" (= projetos) e nada revelava que a spec virou 11 arquivos. */}
+              {(s.fileCount ?? 0) > 0 && (
+                <Tooltip title={(s.fileCount ?? 0) > 1
+                  ? `Spec dividida em ${s.fileCount} arquivos — abra a pasta para trabalhar arquivo a arquivo`
+                  : "Spec em arquivo único"}>
+                  <Chip
+                    icon={<DescriptionOutlinedIcon sx={{ fontSize: "0.75rem !important" }} />}
+                    label={`${s.fileCount} arquivo${s.fileCount === 1 ? "" : "s"}`}
+                    size="small" variant="outlined"
+                    sx={{ fontSize: "0.62rem", height: 18 }} />
+                </Tooltip>
+              )}
               {/* Onda 4: há uma proposta de decomposição PRONTA desta spec → clique reabre a revisão. */}
               {readyByOrigin.has(s.id) && (
                 <Chip
@@ -754,6 +775,21 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         </Stack>
                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                           <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                          {/* UI/UX 2026-09-06 — o totalizador de ARQUIVOS do produto. "N spec(s)"
+                              conta projetos; um produto com 3 specs divididas tem dezenas de
+                              arquivos, e era isso que o usuário lia errado no card. */}
+                          {(() => {
+                            const totalFiles = g.specs.reduce((acc, s) => acc + (s.fileCount ?? 0), 0);
+                            if (totalFiles === 0) return null;
+                            return (
+                              <Tooltip title="Arquivos de spec de todos os projetos deste produto">
+                                <Chip
+                                  icon={<DescriptionOutlinedIcon sx={{ fontSize: "0.7rem !important" }} />}
+                                  label={`${totalFiles} arquivo${totalFiles === 1 ? "" : "s"}`}
+                                  size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                              </Tooltip>
+                            );
+                          })()}
                           {/* Onda 3 (c): soma dos GAPs das specs do produto — aviso agregado no card. */}
                           {(() => {
                             const totalGaps = g.specs.reduce((acc, s) => acc + (s.gapCount ?? 0), 0);
@@ -790,6 +826,17 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                 <HandymanIcon sx={{ fontSize: "1rem", color: "#F59E0B" }} />
                 <Typography variant="subtitle2" fontWeight={700} sx={{ color: "#F59E0B" }}>{g.name}</Typography>
                 <Chip label={`${g.specs.length} spec(s)`} size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                {/* UI/UX 2026-09-06 — arquivos da caixa de entrada (rascunho dividido conta N). */}
+                {(() => {
+                  const totalFiles = g.specs.reduce((acc, s) => acc + (s.fileCount ?? 0), 0);
+                  if (totalFiles === 0) return null;
+                  return (
+                    <Chip
+                      icon={<DescriptionOutlinedIcon sx={{ fontSize: "0.7rem !important" }} />}
+                      label={`${totalFiles} arquivo${totalFiles === 1 ? "" : "s"}`}
+                      size="small" variant="outlined" sx={{ fontSize: "0.6rem", height: 18 }} />
+                  );
+                })()}
                 {staleCount > 0 && (
                   <Chip label={`${staleCount} parada(s) há +${STALE_DAYS}d`} size="small" color="warning" variant="outlined"
                     sx={{ fontSize: "0.6rem", height: 18 }} />
