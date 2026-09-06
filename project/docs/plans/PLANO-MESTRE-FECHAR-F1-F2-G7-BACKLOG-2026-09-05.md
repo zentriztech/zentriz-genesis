@@ -178,6 +178,52 @@ projeto, e que a árvore de 1 arquivo continua no caminho da 090. Suíte api-nod
 - **A3.6 🟡 PII em lição:** lição vira prompt de outros tenants (`learningBundle`). → escopo por tenant
   e sem trecho literal de spec de cliente.
 
+#### ✅ ONDA 3 ENTREGUE E PROVADA EM PROD (2026-09-06) — migração 096
+
+Dois deploys: **produtor** (main `7aaf398`, migração **096**, rollback `pre-g7-20260906`) e **consumidor**
+(main `1b9b8d2`, rollback `pre-cagconsumer-20260906`). Flags finais de prod:
+`RAG_ENABLED=live RAG_RETRIEVAL=semantic RAG_EMBED_PROVIDER=bedrock CAG_ENABLED=live`.
+
+- **A3.1 ✅** as 4 variáveis (`RAG_ENABLED`, `RAG_RETRIEVAL`, `RAG_EMBED_PROVIDER`, `CAG_ENABLED`) passaram a
+  ser declaradas em `agents`/`runner`/`cyborg` no `docker-compose.yml`. A premissa era pior do que o
+  previsto: **sem a declaração, todo produtor/consumidor nascia `off` mesmo com o `.env` preenchido.**
+- **A3.2 ✅** indexer rodando com **Titan V2** (`amazon.titan-embed-text-v2:0`, 1024 dims): **8/8**
+  embeddings indexados, `lessons_index_outbox` drenado a 0. A conta 820 TEM entitlement Titan, apesar de
+  `ListFoundationModels` ser negado por IAM.
+- **A3.3 ✅** produtor novo: `services/specLearning.ts` + hook no fim do `specChatWorker.tick()`. Episódio =
+  run de `spec_autonomy_runs` terminada → relatório **anonimizado** → `/invoke/lesson_extract/async`.
+  Claim idempotente (`WHERE learning_kicked_at IS NULL` **antes** do POST) e retry limitado (3).
+- **A3.4 ✅** a heurística de `lesson_extractor.py` foi **removida**: sem LLM não extrai. `_veto_leaks`
+  recusa vazamento literal.
+- **A3.5 ✅ medido:** 8 lições reais (Opus 4.8, `in=6236 out=1211` e `in=7580 out=1338`) + 8 embeddings.
+- **A3.6 ✅** `pii_redacted=t`, rótulos "arquivo A/B", `forbidden_terms` de produto/tenant/arquivo —
+  **zero** linha do corpus contém NVX/LastMile/ZFactory/`.md`.
+
+**Achado NOVO (o lado que faltava): as lições eram escritas e lidas por NINGUÉM.** Duas causas em
+`agents/runtime.py`: (1) o prefixo de CAG só era aplicado dentro de `load_system_prompt_with_skills`,
+chamada **apenas pelo `runner.py`** (dev/qa/devops) — o CTO da Bancada entra por `run_agent` e ia direto ao
+modelo; (2) a recuperação filtra `project_id = %s::uuid` e a Bancada manda o pseudo-projeto
+`project_id="spec_chat"` (default do `run_agent` = `"default"`), que estoura `invalid input syntax for type
+uuid`, o `except` engole e devolve **zero lição em silêncio**. Correções: CAG no ramo sem
+`system_prompt_override` (**antes** do `calculate_token_budget`), `_cag_project_uuid()` extraindo o UUID real
+do `circuit_scope`, `_cag_query_from()` dando um sinal de busca de verdade (pedido humano > validador >
+spec, teto 4k) e o log `[CAG/live]` subindo de debug para **INFO** com `lessons=N`. No caminho por-arquivo
+(F2), `/invoke/raw` aceita um bloco **`cag` opt-in** — o gate semântico Haiku e o planejador de evolução
+não mudam de prompt nem pagam tokens.
+
+**2 defeitos medidos na 1ª rodada em prod (corrigidos, com teste):** `TIMESTAMPTZ` do driver `pg` volta como
+`Date` e `String(date)` não é SQL-parseável → a janela de validações não era lida e o material ia **sem os
+GAPs de antes/depois** (helper `tsIso()`); e um `404` no kick durante a janela de recreate era **terminal**
+(run já reclamada) → retry com contador em `learning_result.attempts`.
+
+**Gate DEPOIS cumprido (4 provas ao vivo):** (1) recuperação real contra o banco de prod = 8 lições,
+prefixo de 2.881 chars; (2) ranking semântico muda por query ("IP atrás de proxy" → `0.451 Declarar origem
+confiável do IP`); (3) `/invoke/raw` `input_tokens` **28 → 980** com o bloco `cag` (opt-in respeitado);
+(4) rodada REAL de CTO (`cto-8191eceb3441`, 70 s, artefato de 9.172 chars) com **1** linha
+`[CAG/live] role=CTO … lessons=8` e o artefato reproduzindo as 3 lições recuperadas — vindas de um episódio
+de **outro** projeto. Testes: 15 pytest novos (`test_cag_consumer.py`) + 29 do produtor; 487 pytest e
+1442 vitest verdes.
+
 ### Onda 4 — backlog menor
 - **A4.1 🔴 `CLAUDE_MODEL=opus-4-8` (403):** duas memórias divergem sobre o entitlement da conta 820
   (uma diz "só sonnet-4-6", outra diz "Claude 5 no catálogo, validado por `/invoke/raw`").
@@ -209,7 +255,7 @@ Nenhuma onda começa com a anterior sem prova.
 | **0** | Deploy F1, flag OFF (4 imagens) | janela quieta, testes verdes, digests atuais anotados, rollback tags | digests conferidos, `ctoEditFormatEnabled()=false`, gate `edits` aceito no agents, prompt legado, `/health` 200 |
 | **1** | PR-3: `split_spec_into_files` (arquiteto + N redatores), `/invoke/spec_split/async`, `POST /api/projects/:id/spec-split` (dry-run/apply), botão + preview na Bancada | testes verdes, snapshot G2 funcionando, teto de arquivos conhecido | dry-run real no LastMile mostrando o plano + cobertura; apply num projeto de teste; árvore com N arquivos e README primário |
 | **2** | PR-4 + PR-5: resolve_gaps por arquivo, prefixo de path, B8, `writeSpecFile`, fila 1-arquivo/rodada, validação quando a fila esvazia | Onda 1 provada; findings com `file` real | rodada escopada real: só o arquivo alvo muda; `output_tokens` < 8k; laço percorre a fila |
-| **3** | G7: `RAG_ENABLED` declarado nos serviços, produtor de lição na Bancada (LLM), fallback heurístico **removido**, indexer agendado | corpus = 0 confirmado, pgvector presente | `lessons_corpus` > 0 com lições da Bancada; `retrieved_lessons` aparecendo no prompt; embeddings indexados |
+| **3 ✅** | G7: `RAG_ENABLED` declarado nos serviços, produtor de lição na Bancada (LLM), fallback heurístico **removido**, indexer rodando, **+ consumidor CAG no `run_agent`/`/invoke/raw`** | corpus = 0 confirmado, pgvector presente | ✅ `lessons_corpus` **0→8** com lições da Bancada; `[CAG/live] lessons=8` no prompt de uma rodada real de CTO; 8/8 embeddings Titan V2 |
 | **4** | Backlog: rotas de snapshot + UI, texto do C5, backfill D1 na imagem, `superseded_by` (com OK do Jean), `CLAUDE_MODEL` (só se a medição passar) | medições/`SELECT`s antes | rotas 200 com guarda de tenant; C5 legível; 403 do modelo eliminado ou reportado |
 | **5** | Prova ao vivo F1+F2 no LastMile + relatório da auditoria da lei | tudo acima em prod | spec dividida, GAPs caindo por arquivo, custo/rodada medido; relatório entregue |
 

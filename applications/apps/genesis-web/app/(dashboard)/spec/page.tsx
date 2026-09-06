@@ -40,6 +40,7 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
+import HistoryIcon from "@mui/icons-material/History";
 import PreviewIcon from "@mui/icons-material/Preview";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import SendIcon from "@mui/icons-material/Send";
@@ -54,6 +55,7 @@ import SpecValidationPanel from "@/components/SpecValidationPanel";
 import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
 import SpecSplitPanel from "@/components/SpecSplitPanel";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
+import SpecVersionsPanel from "@/components/SpecVersionsPanel";
 import ProductFolderNav from "@/components/ProductFolderNav";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
@@ -834,6 +836,7 @@ function SpecEditor({
   onSave, approving, onRegen, regenDisabled,
   projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
   onPromote, fileExt = "md", onValidationChange, openGapsSignal,
+  activeFilePath = null, onVersionRestored,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -861,9 +864,14 @@ function SpecEditor({
   // trazer o usuário à aba GAPs — onde o SpecValidationPanel mostra a revalidação ao vivo e a
   // lista já sem os GAPs resolvidos.
   openGapsSignal?: number;
+  // Onda 4 (A4.3) — aba "Versões": arquivo aberto na árvore (liga o filtro "só este arquivo") e
+  // aviso de restauração feita, para o pai recarregar a spec do servidor (o editor não pode
+  // continuar com o texto velho — salvar por cima desfaria a restauração em silêncio).
+  activeFilePath?: string | null;
+  onVersionRestored?: (path: string) => void;
 }) {
   const hasGapsTab = !!projectId;
-  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps">("split");
+  const [editorTab, setEditorTab] = useState<"edit" | "preview" | "split" | "gaps" | "versions">("split");
   // Abre a aba GAPs quando o pai sinaliza (pós-salvar). Ignora o mount inicial (só reage a bumps).
   const lastOpenGaps = useRef(openGapsSignal);
   useEffect(() => {
@@ -899,6 +907,11 @@ function SpecEditor({
                   )}
                 </Stack>
               }
+              sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
+          )}
+          {/* Onda 4 (A4.3): o histórico de versões da spec (G2) — só existe com projeto. */}
+          {hasGapsTab && (
+            <Tab value="versions" icon={<HistoryIcon sx={{ fontSize: "0.85rem" }} />} iconPosition="start" label="Versões"
               sx={{ minHeight: 32, py: 0.5, fontSize: "0.78rem", textTransform: "none" }} />
           )}
         </Tabs>
@@ -962,6 +975,16 @@ function SpecEditor({
         <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", p: 1.5, bgcolor: "background.default", overflowWrap: "anywhere", wordBreak: "break-word" }}>
           {projectId
             ? <SpecValidationPanel projectId={projectId} isAdmin={isAdmin} reloadSignal={validationReloadSignal} onFindingsChange={onValidationChange} />
+            : null}
+        </Box>
+      );
+    }
+    // Onda 4 (A4.3) — aba Versões: o histórico da spec (G2/migração 092) com "ver" e "restaurar".
+    if (editorTab === "versions") {
+      return (
+        <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", bgcolor: "background.default", overflowWrap: "anywhere" }}>
+          {projectId
+            ? <SpecVersionsPanel projectId={projectId} activeFilePath={activeFilePath} onRestored={onVersionRestored} />
             : null}
         </Box>
       );
@@ -2119,6 +2142,17 @@ export default function SpecPage() {
     } catch { /* mantém o editor como está; o próximo tick tenta de novo */ }
   }, [editProjectId]);
 
+  // Onda 4 (A4.3) — restaurou uma versão (G2): o servidor já reescreveu o arquivo, e é AQUI que o
+  // editor deixa de mentir. Sem este recarregamento, o texto em memória continuaria o de antes e o
+  // próximo "Salvar rascunho" desfaria a restauração em silêncio — exatamente o modo de falha que
+  // as versões existem para consertar. A validação anterior passa a valer para outro conteúdo.
+  const handleVersionRestored = useCallback(() => {
+    void reloadSpecFromServer();
+    setTreeReloadSignal((n) => n + 1);
+    setValidationReloadSignal((n) => n + 1);
+    setStaleValidation(true);
+  }, [reloadSpecFromServer]);
+
   const refreshAutonomy = useCallback(async () => {
     if (!editProjectId) return;
     let state: AutonomyState;
@@ -2721,6 +2755,7 @@ export default function SpecPage() {
               validationReloadSignal={validationReloadSignal} gapCount={gapCount}
               onPromote={editProjectId ? handlePromote : undefined}
               onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
+              activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
             />
           </Box>
           {/* Divisória arrastável editor↔chat (tela cheia). Só ≥md — no mobile os painéis alternam. */}
@@ -2947,7 +2982,7 @@ export default function SpecPage() {
             )}
             {staleValidation && (
               <Alert severity="warning" sx={{ mb: 1 }} onClose={() => setStaleValidation(false)}>
-                Você aplicou uma revisão de arquivo pela IA. A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
+                O conteúdo da spec mudou (revisão da IA aplicada ou versão restaurada). A validação anterior pode estar desatualizada — revalide na aba GAPs antes de promover à fábrica.
               </Alert>
             )}
             {/* key={editProjectId}: ao navegar entre projetos pela árvore da pasta, remonta
@@ -3024,6 +3059,7 @@ export default function SpecPage() {
                     projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
                     validationReloadSignal={validationReloadSignal} gapCount={gapCount}
                     onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
+              activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
                   />
                 </Box>
                 {/* Divisória arrastável editor↔chat (duplo-clique reseta a 380px). */}

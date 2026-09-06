@@ -216,6 +216,41 @@ describe("computeFactoryCertificate — níveis", () => {
     expect(triaged.caveats.join(" ")).toContain("triados");
   });
 
+  it("A4.4 — barrado nos BLOCKERS: C5 é indeterminado, nunca '✅ com avisos sem ack'", async () => {
+    const hash = await currentHash();
+    fx.db.runs = [{
+      id: RUN, status: "failed", spec_hash: hash, acked_role: null,
+      findings: [
+        { file: "tms.md", line: null, severity: "blocker", title: "contrato ausente", rationale: "", source: "stage_b" },
+        { file: "tms.md", line: null, severity: "warning", title: "sem métricas", rationale: "", source: "stage_b" },
+        { file: "tms.md", line: null, severity: "warning", title: "sem SLO", rationale: "", source: "stage_b" },
+      ],
+    }];
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.code).toBe("SPEC_VALIDATION_BLOCKED");
+    const c5 = cert.checks.find((c) => c.id === "C5")!;
+    // O ack dos avisos só é testado DEPOIS dos blockers: aqui ninguém avaliou → `null` (cinza).
+    expect(c5.ok).toBeNull();
+    expect(c5.detail).toContain("não avaliado");
+    expect(c5.detail).toContain("2 aviso(s)");
+    expect(c5.detail).not.toContain("sem ack");
+  });
+
+  it("A4.4 — force de zentriz_admin: C5 diz que os avisos foram DISPENSADOS, não reconhecidos", async () => {
+    const hash = await currentHash();
+    fx.db.runs = [{
+      id: RUN, status: "failed", spec_hash: hash, acked_role: "zentriz_admin",
+      findings: [
+        { file: "tms.md", line: null, severity: "blocker", title: "x", rationale: "", source: "stage_b" },
+        { file: "tms.md", line: null, severity: "warning", title: "w", rationale: "", source: "stage_b" },
+      ],
+    }];
+    const c5 = (await computeFactoryCertificate(db(), PROJ)).checks.find((c) => c.id === "C5")!;
+    expect(c5.ok).toBe(true);
+    expect(c5.detail).toContain("dispensado");
+    expect(c5.detail).toContain("zentriz_admin");
+  });
+
   it("force de zentriz_admin em run failed → `certified_with_acks` com a ressalva explícita", async () => {
     const hash = await currentHash();
     fx.db.runs = [{
