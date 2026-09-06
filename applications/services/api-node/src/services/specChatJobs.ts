@@ -95,8 +95,19 @@ function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null
 
 /** Teto do job de spec inteira: 40 min (< TTL de 45 min do `_async_jobs` dos agents). */
 export const CHAT_JOB_DEADLINE_MS = 40 * 60_000;
-/** Modo por-arquivo é síncrono (`/invoke/raw`, 180 s) — teto curto, só para não ficar `running` órfão. */
-export const FILE_JOB_DEADLINE_MS = 6 * 60_000;
+/**
+ * Teto do job por-arquivo (`/invoke/raw`, síncrono) — rede de segurança ACIMA do socket.
+ *
+ * 🔴 A5.1, medido em prod 2026-09-06 (run `b3932af7`, modo `per_file`): eram 6 min com socket de
+ * 180 s, e a rodada 1 (`privacidade-lgpd.md`, 47.816 chars → orçamento de 21.649 tokens de saída)
+ * morreu em `Socket timeout after 180s` — a geração seguiu viva nos agents (teto de 900 s lá) e o
+ * trabalho pago foi jogado fora SEM nem debitar custo. Throughput real medido hoje no mesmo host
+ * (Opus 5, `project_agent_metrics`): 89–115 tokens/s. Ou seja, 32.000 tokens de saída pedem
+ * ~350 s: o socket de 180 s era estruturalmente MENOR que o orçamento que o próprio código concede.
+ *
+ * Mesma lei do F17 (`runChatJob`): **expira a ESPERA, nunca o TRABALHO.** Ver `rawSocketTimeoutMs`.
+ */
+export const FILE_JOB_DEADLINE_MS = 12 * 60_000;
 /** Sem heartbeat por este tempo, o worker adota o job (o processo que o disparou morreu). */
 const HEARTBEAT_STALE_MS = 75_000;
 /** Falhas consecutivas de poll a partir das quais o job é declarado perdido. */

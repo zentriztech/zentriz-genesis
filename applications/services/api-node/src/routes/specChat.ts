@@ -491,6 +491,42 @@ export function rawMaxTokensFor(chars: number): number {
 }
 
 /**
+ * A5.1 (2026-09-06) — orçamento de saída do "Resolver GAPs POR ARQUIVO".
+ *
+ * MEDIDO EM PROD (run `b3932af7`, rodada 2, `nvx-lastmile-backend.md`): 10.517 chars + 5 GAPs →
+ * `rawMaxTokensFor(10.517 + 5×900)` = 8.000 (o PISO da fórmula) → `spec_cto out=8000 TRUNCATED`.
+ * A rodada inteira foi descartada pelo guard T1 e o laço autônomo parou como `stalled`: 7.179
+ * tokens de entrada + 8.000 de saída pagos para ZERO progresso.
+ *
+ * POR QUE A FÓRMULA DO CHAT NÃO SERVE AQUI: `rawMaxTokensFor` dimensiona "devolver ESTE arquivo com
+ * uma edição humana pequena" (chars/2,8 + 2.000 de folga). O "Resolver GAPs" é o oposto: o arquivo
+ * CRESCE por definição — o CTO escreve o requisito/contrato/critério que faltava, com nomes, campos,
+ * limites e códigos de erro. A folga de 900 tokens por GAP subestimou isso em prod.
+ *
+ * POR QUE CONCEDER O MÁXIMO: `max_tokens` é TETO, não gasto — só se paga o que for gerado. A entrada
+ * já é limitada a `MAX_GAP_FILE_CHARS` (48.000 chars ≈ 17.000 tokens), então 32.000 permite ~2× de
+ * crescimento, que é a forma desta tarefa. E a corrupção continua vetada: `_truncated` recusa a
+ * rodada (não mutila o arquivo) e o laço para. Racionar o teto não economizou nada — desperdiçou uma
+ * rodada inteira. 32.000 é o teto seguro do caminho (`call_bedrock_direct` recebe `timeout`
+ * explícito; sem ele o SDK recusa max_tokens > 21.333).
+ */
+export const GAP_FILE_MAX_TOKENS = 32_000;
+
+/**
+ * Teto de ESPERA do socket, derivado do orçamento concedido. Antes era 180 s fixo — menor que o
+ * tempo físico de gerar o que o próprio código pedia (ver `FILE_JOB_DEADLINE_MS`).
+ *
+ * Piso de 60 tokens/s: conservador contra os 89–115 tokens/s medidos hoje em prod (Opus 5 direto,
+ * `project_agent_metrics`), + 30 s de overhead de rede/fallback. Nunca abaixo dos 180 s de antes
+ * (nenhuma regressão para arquivos pequenos) e sempre ABAIXO de `FILE_JOB_DEADLINE_MS`, senão o
+ * guard do job mataria a espera antes do socket e o erro exibido seria o genérico.
+ */
+export function rawSocketTimeoutMs(maxTokens: number): number {
+  const ms = Math.ceil(Math.max(0, maxTokens) / 60) * 1_000 + 30_000;
+  return Math.min(FILE_JOB_DEADLINE_MS - 30_000, Math.max(180_000, ms));
+}
+
+/**
  * G7 (lado consumidor) — bloco `cag` do `/invoke/raw`.
  *
  * O endpoint só recupera lições se o CHAMADOR pedir (ele também serve o gate semântico e o
@@ -616,8 +652,9 @@ function buildGapFileRequest(
   return {
     prompt_override: GAP_FILE_SYSTEM,
     user_message: userMessage,
-    // A saída CRESCE (o arquivo ganha o que faltava): folga proporcional ao número de GAPs.
-    max_tokens: rawMaxTokensFor(content.length + findings.length * 900),
+    // A saída CRESCE (o arquivo ganha o que faltava) — e o teto derivado do tamanho reprovou a
+    // rodada 2 em prod com `out=8000 TRUNCATED`. Ver `GAP_FILE_MAX_TOKENS` (teto ≠ gasto).
+    max_tokens: GAP_FILE_MAX_TOKENS,
     // Consulta = os GAPs a resolver; é o que define de que lição esta rodada precisa.
     ...cagBlock(scopeProjectId, `${filePath}\n${gaps}`),
   };
@@ -668,15 +705,19 @@ function runFileChatJob(
   const base = agentsUrl.replace(/\/$/, "");
 
   // D4: o modo por-arquivo não tinha teto algum — uma resposta que nunca chegasse deixava o job
-  // `running` até o TTL do Map varrer, e o frontend girava para sempre. O `/invoke/raw` tem
-  // timeout de 180 s; o teto do job (FILE_JOB_DEADLINE_MS) é a rede de segurança acima disso.
+  // `running` até o TTL do Map varrer, e o frontend girava para sempre. O socket do `/invoke/raw`
+  // é derivado do orçamento de saída (`rawSocketTimeoutMs`); o teto do job (FILE_JOB_DEADLINE_MS)
+  // é a rede de segurança ACIMA dele.
   const guard = setTimeout(() => {
     settleJob(jobId, { status: "error", error: "A IA não respondeu no tempo máximo desta edição. Tente de novo." });
   }, FILE_JOB_DEADLINE_MS);
   guard.unref?.();
 
+  // A5.1: a espera acompanha o que foi PEDIDO. Um socket fixo de 180 s descartava geração que
+  // seguia viva nos agents (medido em prod: 47.816 chars → 21.649 tokens de orçamento).
+  const socketMs = rawSocketTimeoutMs(Number(raw.max_tokens ?? 0) || 8_000);
   // Síncrono: /invoke/raw responde no próprio request (não há fila/poll no lado dos agentes).
-  httpPost(`${base}/invoke/raw`, JSON.stringify(raw), 180_000)
+  httpPost(`${base}/invoke/raw`, JSON.stringify(raw), socketMs)
     .then((text) => {
       clearTimeout(guard);
       const data = JSON.parse(text) as {
