@@ -92,4 +92,18 @@ describe("checkSpecIsMinimallyValid — veredito", () => {
     const r = await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "[preencher aqui]" });
     expect(r.ok).toBe(false);
   });
+
+  /**
+   * Regressão medida em PROD 2026-09-06: o default era o APELIDO `us.anthropic.claude-haiku-4-5`, que
+   * o Bedrock recusa (`400 The provided model identifier is invalid`). Como este gate é fail-open, o
+   * defeito não aparecia em lugar nenhum — TODA submissão passava sem juiz. Um gate que não julga é
+   * pior que gate nenhum: dá a impressão de proteção.
+   */
+  it("o modelo default do gate é um inference profile COM VERSÃO (não o apelido)", async () => {
+    delete process.env.SPEC_GATE_MODEL;
+    mockVerdictOnce('{"is_spec": true, "confidence": 0.9, "reason": "ok"}');
+    await checkSpecIsMinimallyValid({ title: "X", projectType: "backend_api", content: "spec real..." });
+    const sent = JSON.parse(String(httpPostMock.mock.calls[0][1])) as { model_id: string };
+    expect(sent.model_id).toMatch(/^us\.anthropic\.claude-haiku-4-5-\d{8}-v\d+:\d+$/);
+  });
 });

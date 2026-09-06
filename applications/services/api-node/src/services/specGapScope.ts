@@ -268,8 +268,16 @@ const ROUTER_SYSTEM = [
   '{"routes": [{"id": "g1", "file": "caminho/exato.md"}]}',
 ].join(" ");
 
-/** Modelo do roteador: decisão leve e frequente — barato por padrão, sobrescrevível por env. */
-const ROUTER_MODEL = process.env.SPEC_GAP_ROUTER_MODEL ?? "us.anthropic.claude-haiku-4-5";
+/**
+ * Modelo do roteador: decisão leve e frequente — barato por padrão, sobrescrevível por env.
+ *
+ * ⚠️ ID **COM VERSÃO**. Medido em prod 2026-09-06 com a spec dividida do LastMile: o apelido
+ * `us.anthropic.claude-haiku-4-5` devolve `400 The provided model identifier is invalid`, então TODO
+ * lote caía no `catch` e os findings globais ficavam eternamente `unrouted` (`routed: 0`,
+ * `model: null`). O apelido curto aparece na tabela de contexto do `runtime.py`, mas isso não o torna
+ * um inference profile válido no Bedrock.
+ */
+const ROUTER_MODEL = process.env.SPEC_GAP_ROUTER_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const ROUTER_TIMEOUT_MS = Number(process.env.SPEC_GAP_ROUTER_TIMEOUT_MS ?? "60000");
 /** Lote por chamada: mantém o prompt pequeno e o JSON de volta curto. */
 const ROUTER_BATCH = 25;

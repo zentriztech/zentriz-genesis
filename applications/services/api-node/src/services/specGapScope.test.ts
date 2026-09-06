@@ -185,7 +185,7 @@ const fakeDb = (files: Array<{ filename: string; rel_dir: string | null; is_prim
   return { db, updates };
 };
 
-const rawOk = (routes: Array<{ id: string; file: string }>, model = "us.anthropic.claude-haiku-4-5") =>
+const rawOk = (routes: Array<{ id: string; file: string }>, model = "us.anthropic.claude-haiku-4-5-20251001-v1:0") =>
   JSON.stringify({ response: JSON.stringify({ routes }), model_used: model, usage: { input_tokens: 10, output_tokens: 5 } });
 
 describe("loadSpecFiles / gapScopeForProject", () => {
@@ -272,7 +272,7 @@ describe("routeUnroutedFindings — o roteador é LLM e não tem fallback burro"
     httpPost.mockResolvedValue(rawOk([{ id: "g1", file: "backend/01-api.md" }, { id: "g2", file: "00-indice.md" }]));
 
     const r = await routeUnroutedFindings(db, "p1");
-    expect(r).toMatchObject({ routed: 2, stillUnrouted: 0, skipped: false, model: "us.anthropic.claude-haiku-4-5" });
+    expect(r).toMatchObject({ routed: 2, stillUnrouted: 0, skipped: false, model: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
     expect(updates).toHaveLength(1);
     expect(JSON.parse(String(updates[0].values[1]))).toEqual({
       [g1.fingerprint]: "backend/01-api.md",
@@ -284,7 +284,8 @@ describe("routeUnroutedFindings — o roteador é LLM e não tem fallback burro"
     expect(body.user_message).toContain("não-confiável");
     expect(body.prompt_override).toContain("SOMENTE caminhos");
     expect(body.temperature).toBe(0);
-    expect(body.model_id).toBe("us.anthropic.claude-haiku-4-5");
+    // ID com versão: o apelido curto é recusado pelo Bedrock (400), medido em prod 2026-09-06.
+    expect(body.model_id).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
   });
 
   it("path inventado pelo modelo, id inexistente ou JSON inválido NÃO gravam rota", async () => {
@@ -372,5 +373,20 @@ describe("ensureGapScope", () => {
     const { routing } = await ensureGapScope(fakeDb(twoFiles).db, "p1", { route: true });
     expect(routing).toBeNull();
     expect(httpPost).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Regressão medida em PROD 2026-09-06 (spec dividida do LastMile): o default era o APELIDO
+   * `us.anthropic.claude-haiku-4-5`, que o Bedrock recusa com `400 The provided model identifier is
+   * invalid`. Resultado: todo lote caía no catch e os 5 GAPs globais ficavam `unrouted` para sempre
+   * (`routed: 0`, `model: null`) — falha silenciosa, porque o roteador não inventa rota.
+   */
+  it("o modelo default do roteador é um inference profile COM VERSÃO (não o apelido)", async () => {
+    delete process.env.SPEC_GAP_ROUTER_MODEL;
+    projectFindingsState.mockResolvedValue({ latestRunId: "r1", findings: [F({ file: "" })], resolved: [], counts: {} });
+    httpPost.mockResolvedValue(rawOk([]));
+    await routeUnroutedFindings(fakeDb(twoFiles).db, "p1");
+    const sent = JSON.parse(httpPost.mock.calls[0][1]) as { model_id: string };
+    expect(sent.model_id).toMatch(/^us\.anthropic\.claude-haiku-4-5-\d{8}-v\d+:\d+$/);
   });
 });
