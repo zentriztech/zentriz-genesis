@@ -43,6 +43,8 @@ import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
+import { MANIFEST_PATH } from "../services/specManifest.js";
+import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatalog.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -594,6 +596,29 @@ function buildRawFileRequest(
 // PRODUCT_SPEC completo e descarta o conteúdo original (ver a nota de RAW_FILE_SYSTEM acima). Mandar
 // `tecnico/dados.md` por lá o transformaria numa spec inteira. Aqui o papel é de CTO-EDITOR: o
 // mesmo rigor arquitetural do "Resolver GAPs", mas exercido DENTRO do arquivo, preservando o resto.
+/**
+ * A5.5 (2026-09-06) — a regra que impede o editor de MOVER a contradição em vez de resolvê-la.
+ *
+ * Medido em prod (run `dd587b75`, passe 1): 21 findings resolvidos e a contagem total SUBINDO de
+ * 20 → 24. O par decisivo: "RESOLVIDO 422 vs 400" em `api-entregas-entregadores.md` e, na mesma
+ * rodada, "NOVO 400 vs 422" em `definicao-de-pronto.md`. Sem ver o irmão, o editor escolhia um lado
+ * e a divergência migrava de arquivo — o laço pagava LLM para andar de lado, para sempre.
+ *
+ * A regra é o par obrigatório do bloco de irmãos (`services/specSiblingContext.ts`): o código passou
+ * a MOSTRAR o irmão citado; esta instrução diz o que fazer com ele. Sem a regra, o irmão no contexto
+ * só aumenta a chance de o editor copiar conteúdo alheio para dentro do arquivo.
+ */
+function DIVERGENCE_RULE(n: string): string {
+  return [
+    `${n}) DIVERGÊNCIA ENTRE ARQUIVOS: quando o GAP diz que este arquivo contradiz um irmão (dois`,
+    "   valores para a mesma regra), o irmão vai no CONTEXTO SÓ-LEITURA abaixo. Adote o valor do",
+    "   arquivo que DEFINE o assunto (o contrato de API define código HTTP; o modelo de dados define",
+    "   campo e tipo; o glossário define nome) — se quem define é ESTE arquivo, mantenha o seu valor e",
+    "   diga na linha final que o irmão precisa acompanhar. NUNCA invente um terceiro valor e NUNCA",
+    "   'resolva' apenas aqui de um jeito que deixe o irmão divergente: isso não fecha o GAP, só o move.",
+  ].join(" ");
+}
+
 const GAP_FILE_SYSTEM = [
   "Você é o CTO/arquiteto responsável pela especificação de um produto de software.",
   "Recebe UM arquivo da especificação e a lista de GAPs (problemas de uma validação adversarial) que",
@@ -605,6 +630,7 @@ const GAP_FILE_SYSTEM = [
   "2) NÃO renomeie nem reordene seções existentes sem necessidade, e NÃO remova requisito válido.",
   "3) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
   "4) Se um GAP claramente não é deste arquivo, deixe-o como está e explique na última linha.",
+  DIVERGENCE_RULE("5"),
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código e sem preâmbulo.",
 ].join(" ");
 
@@ -641,6 +667,7 @@ const GAP_FILE_EDITS_SYSTEM = [
   "4) NÃO renomeie nem reordene seções existentes sem necessidade, e NÃO remova requisito válido.",
   "5) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
   "6) Se um GAP claramente não é deste arquivo, não invente edição para ele.",
+  DIVERGENCE_RULE("7"),
   "Fora dos blocos, escreva no máximo uma linha final de observação. Nada de preâmbulo.",
 ].join(" ");
 
@@ -669,6 +696,15 @@ export function maxGapFileChars(): number {
   return gapFileEditsEnabled() ? 120_000 : 48_000;
 }
 
+/**
+ * A5.5 — kill-switch do bloco de irmãos citados. Nasce LIGADA porque o comportamento sem ela está
+ * PROVADO insuficiente (a contradição migra de arquivo); `SPEC_GAP_SIBLING_CONTEXT=off` volta ao
+ * comportamento anterior sem deploy, se o custo de entrada incomodar.
+ */
+export function gapSiblingContextEnabled(): boolean {
+  return (process.env.SPEC_GAP_SIBLING_CONTEXT ?? "on").trim().toLowerCase() !== "off";
+}
+
 function fmtGapForFile(f: ValidationFinding): string {
   const sev = (f.severity || "info").toUpperCase();
   const anchor = (f as { anchor?: string | null }).anchor;
@@ -687,6 +723,8 @@ function buildGapFileRequest(
   ctx: ChatContext = EMPTY_CTX,
   /** Projeto REAL — escopo da recuperação de lições (G7). Ver `cagBlock`. */
   scopeProjectId: string | null = null,
+  /** A5.5: irmãos CITADOS pelos GAPs, só leitura. Vazio = comportamento anterior. */
+  siblingBlock = "",
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -698,6 +736,11 @@ function buildGapFileRequest(
     "",
     contextBlock
       ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
+      : "",
+    // A5.5: vem ANTES do conteúdo a editar de propósito — quando o editor chegar ao arquivo alvo já
+    // sabe o que o irmão define, e a última coisa que lê antes de gerar é o pedido, não o irmão.
+    siblingBlock
+      ? `--- ARQUIVOS IRMÃOS CITADOS PELOS GAPs (SÓ LEITURA — não os copie, não os edite) ---\n${siblingBlock}\n--- FIM DOS IRMÃOS ---\n`
       : "",
     "--- CONTEÚDO ATUAL DO ARQUIVO ---",
     content,
@@ -722,6 +765,37 @@ function buildGapFileRequest(
     // Consulta = os GAPs a resolver; é o que define de que lição esta rodada precisa.
     ...cagBlock(scopeProjectId, `${filePath}\n${gaps}`),
   };
+}
+
+/**
+ * A5.5 — carrega os irmãos que os GAPs deste arquivo CITAM, para o bloco só-leitura.
+ *
+ * Best-effort de propósito: é contexto que melhora a decisão, não pré-condição. Se o banco ou o disco
+ * falharem, a rodada segue como antes (com o defeito conhecido) em vez de não acontecer. Os dois
+ * chamadores — o botão humano e o laço autônomo — passam por aqui para não divergirem.
+ */
+async function gapSiblingBlock(
+  projectId: string,
+  filePath: string,
+  findings: ValidationFinding[],
+): Promise<string> {
+  if (!gapSiblingContextEnabled()) return "";
+  try {
+    const [{ loadSpecFiles }, { buildSiblingContext }] = await Promise.all([
+      import("../services/specGapScope.js"),
+      import("../services/specSiblingContext.js"),
+    ]);
+    const files = await loadSpecFiles(pool, projectId);
+    if (files.length < 2) return ""; // spec de arquivo único não tem irmão a citar
+    const { block, used, omitted } = await buildSiblingContext(files, filePath, findings);
+    if (used.length || omitted.length) {
+      console.log(`[SpecChat] irmãos citados projeto=${projectId.slice(0, 8)} alvo=${filePath} usados=[${used.join(", ")}]${omitted.length ? ` fora_do_orcamento=[${omitted.join(", ")}]` : ""} chars=${block.length}`);
+    }
+    return block;
+  } catch (e) {
+    console.warn(`[SpecChat] contexto de irmãos indisponível (segue sem ele): ${(e as Error).message}`);
+    return "";
+  }
 }
 
 // Remove cerca de código envolvente (```md … ```) SE o modelo tiver desobedecido e cercado
@@ -1047,6 +1121,9 @@ export async function dispatchGapFileJob(opts: {
   const ctx = productScopeEnabled()
     ? await loadChatContext(opts.projectId, opts.fileContent, opts.userMessage, { siblingBodies: false })
     : EMPTY_CTX;
+  // A5.5: o mapa do produto diz ONDE o arquivo vive; o irmão citado diz O QUE ele já normatiza — é o
+  // que faltava para a divergência ser resolvida em vez de migrar para o próximo arquivo.
+  const siblings = await gapSiblingBlock(opts.projectId, opts.filePath, opts.findings);
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),
@@ -1061,7 +1138,7 @@ export async function dispatchGapFileJob(opts: {
   });
   runFileChatJob(
     opts.jobId,
-    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx, opts.projectId), ...opts.llm },
+    { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx, opts.projectId, siblings), ...opts.llm },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
@@ -1069,6 +1146,131 @@ export async function dispatchGapFileJob(opts: {
     gapFileEditsEnabled() ? opts.fileContent : null,
   );
   return { ok: true, gaps: opts.findings.length };
+}
+
+// ── A5.3: o manifesto (README.md) que faltava ────────────────────────────────
+//
+// POR QUE ESTE CAMINHO EXISTE: o finding `no_readme` do Estágio A aponta um arquivo que NÃO
+// EXISTE. Nenhum caminho da Bancada sabia criar arquivo — "Resolver GAPs por arquivo" edita um
+// arquivo existente, o CTO da spec inteira reescreve o primário. Resultado medido em prod: o GAP
+// sustentava rodada do laço autônomo para sempre e nunca podia cair. Ver `services/specManifest.ts`.
+//
+// O conteúdo é decisão do AGENTE (Lei: 100% LLM). O código só entrega os FATOS (título, arquétipo
+// do `project_type`, árvore de arquivos) e veta o que o validador reprovaria.
+const MANIFEST_SYSTEM = [
+  "Você é o CTO/arquiteto responsável pela especificação de um produto de software.",
+  "A especificação deste projeto está dividida em vários arquivos Markdown, mas falta o MANIFESTO",
+  "(`README.md` na raiz): o documento de entrada que declara o que este projeto é e indexa os demais.",
+  "Escreva esse manifesto do zero, a partir da árvore de arquivos e da spec primária que recebe.",
+  "FORMATO (obrigatório, nesta ordem):",
+  "1) Um bloco YAML de frontmatter, com `---` na PRIMEIRA linha do arquivo e `---` fechando, contendo",
+  "   EXATAMENTE estas chaves: `kind: project`, `archetype: <o id informado>`,",
+  "   `stack: [t1, t2, ...]` (tecnologias que a própria spec já determina), `depends_on: [...]`",
+  "   (outros projetos/produtos de que este depende; lista vazia se nenhum) e `deploy_target: <um dos informados>`.",
+  "2) `# <título do projeto>` seguido de UM parágrafo dizendo o que o sistema faz e para quem.",
+  "3) Uma seção `## Índice da especificação` listando CADA arquivo da árvore com uma linha dizendo",
+  "   o que ele normatiza (use o caminho exato entre backticks).",
+  "4) Opcionalmente uma seção curta `## Decisões estruturais` com o que vale para todos os arquivos.",
+  "REGRAS (invioláveis):",
+  "a) NUNCA inclua `spec_hash` nem `status_spec` no frontmatter — estado vive no banco, não no arquivo.",
+  "b) Não invente arquivo que não está na árvore, e não repita o conteúdo dos arquivos: isto é um índice.",
+  "c) Não altere o arquétipo informado — ele é o tipo com que a fábrica já roteia este projeto. Se",
+  "   nenhum for informado, ESCOLHA um id da lista oferecida; jamais invente um id fora dela.",
+  "Devolva SOMENTE o conteúdo final do arquivo, começando em `---`, sem cercas de código e sem preâmbulo.",
+].join(" ");
+
+/** Orçamento de saída do manifesto: é um índice curto, não uma spec. Teto ≠ gasto. */
+const MANIFEST_MAX_TOKENS = 8_000;
+
+/**
+ * Pedido do manifesto. O `archetype` NÃO é escolha do modelo quando o banco já sabe
+ * (`projects.extra.project_type`) — mandamos o id e o veto recusa qualquer outro. Quando o banco NÃO
+ * sabe (spec importada crua, sem `project_type`), o catálogo inteiro vai como menu e a escolha é do
+ * agente: adivinhar o tipo no código seria decidir arquitetura por automação fixa (Lei do Jean), e
+ * cravar um id errado faria o manifesto MENTIR sobre o produto.
+ */
+function buildManifestRequest(opts: {
+  projectTitle: string;
+  archetype: Archetype | null;
+  files: string[];
+  primaryPath: string;
+  primaryContent: string;
+  scopeProjectId: string | null;
+}): Record<string, unknown> {
+  const arch = opts.archetype
+    ? [
+      `ARQUÉTIPO (use exatamente este id): ${opts.archetype.id} — ${opts.archetype.description}`,
+      `VOCABULÁRIO DE STACK sugerido para este arquétipo: ${opts.archetype.validStacks.join(", ")}`,
+      `VALORES ACEITOS EM deploy_target: ${opts.archetype.deployTargets.join(", ")}`,
+    ]
+    : [
+      "ARQUÉTIPO: este projeto não declara tipo no banco — ESCOLHA o id que descreve o produto, entre:",
+      ...loadArchetypeCatalog().archetypes.map((a) =>
+        `- ${a.id} — ${a.description} · stack: ${a.validStacks.join(", ")} · deploy_target: ${a.deployTargets.join(", ")}`),
+    ];
+  const userMessage = [
+    `PROJETO: ${opts.projectTitle}`,
+    ...arch,
+    "",
+    `--- ÁRVORE DA ESPECIFICAÇÃO (${opts.files.length} arquivos; o manifesto será o \`README.md\` na raiz) ---`,
+    ...opts.files.map((p) => `- ${p}${p === opts.primaryPath ? "  (arquivo primário / índice atual)" : ""}`),
+    "--- FIM DA ÁRVORE ---",
+    "",
+    `--- CONTEÚDO DO ARQUIVO PRIMÁRIO (\`${opts.primaryPath}\`, só leitura) ---`,
+    opts.primaryContent.slice(0, 40_000),
+    "--- FIM DO CONTEÚDO ---",
+    "",
+    "Escreva agora o `README.md` completo deste projeto, no formato exigido.",
+  ].join("\n");
+  return {
+    prompt_override: MANIFEST_SYSTEM,
+    user_message: userMessage,
+    max_tokens: MANIFEST_MAX_TOKENS,
+    ...cagBlock(opts.scopeProjectId, `manifesto README.md ${opts.projectTitle}`),
+  };
+}
+
+/**
+ * Enfileira o job que ESCREVE o manifesto. Mesma mecânica durável dos outros jobs de arquivo
+ * (`kind: "file"`, `filePath` = README.md): sobrevive a restart e é recoletável pelo worker.
+ *
+ * `baseSha` é o sha do vazio: o arquivo não existe ainda, então a pré-condição de escrita é
+ * "continua não existindo" — o mesmo contrato do If-Match para criação.
+ */
+export async function dispatchManifestJob(opts: {
+  jobId: string;
+  projectId: string;
+  tenantId: string | null;
+  ownerUserId: string;
+  projectTitle: string;
+  archetype: Archetype | null;
+  files: string[];
+  primaryPath: string;
+  primaryContent: string;
+  userMessage: string;
+  agentsUrl: string;
+  llm: Record<string, unknown>;
+}): Promise<{ ok: true }> {
+  const emptySha = sha256("");
+  _chatJobs.set(opts.jobId, {
+    id: opts.jobId, status: "pending", createdAt: Date.now(),
+    projectId: opts.projectId, ownerUserId: opts.ownerUserId,
+    sentFilePath: MANIFEST_PATH, sentBaseSha: emptySha,
+  });
+  await createSpecChatJob(pool, {
+    id: opts.jobId, projectId: opts.projectId, tenantId: opts.tenantId, ownerUserId: opts.ownerUserId,
+    kind: "file", filePath: MANIFEST_PATH, baseSha: emptySha, baseSpecSha: emptySha,
+    userMessage: opts.userMessage,
+  });
+  runFileChatJob(
+    opts.jobId,
+    { ...buildManifestRequest({ ...opts, scopeProjectId: opts.projectId }), ...opts.llm },
+    opts.agentsUrl,
+    `Manifesto \`${MANIFEST_PATH}\` proposto — confira antes de aplicar.`,
+    // Arquivo NOVO: não existe base para ancorar edições; a resposta é o arquivo inteiro.
+    null,
+  );
+  return { ok: true };
 }
 
 /** Traduz o estado do banco para o contrato da rota (o cliente só conhece 4 estados). */
@@ -1248,7 +1450,7 @@ export async function specChatRoutes(app: FastifyInstance) {
         // passar pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo).
         runFileChatJob(
           jobId,
-          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx, projectId), ...llm },
+          { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx, projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps)), ...llm },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
           gapFileEditsEnabled() ? specMarkdown : null,

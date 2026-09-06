@@ -96,9 +96,11 @@ vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }))
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
 const dispatchGapFileJob = vi.fn(async () => ({ ok: true as const, gaps: 2 }) as unknown);
+const dispatchManifestJob = vi.fn(async () => ({ ok: true as const }));
 vi.mock("../routes/specChat.js", () => ({
   dispatchResolveGapsJob: (...a: unknown[]) => dispatchResolveGapsJob(...(a as [])),
   dispatchGapFileJob: (...a: unknown[]) => dispatchGapFileJob(...(a as [])),
+  dispatchManifestJob: (...a: unknown[]) => dispatchManifestJob(...(a as [])),
 }));
 
 vi.mock("./tenantLlmConfig.js", () => ({
@@ -109,7 +111,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   startAutonomyRun, advanceAutonomyRun, isTerminalAutonomyStatus,
-  AUTONOMY_MAX_FILE_ROUNDS, type AutonomyStatus,
+  AUTONOMY_MAX_FILE_ROUNDS, AUTONOMY_MAX_TOTAL_FILE_ROUNDS, type AutonomyStatus,
 } from "./specAutonomy.js";
 
 // ── banco falso (uma linha de spec_autonomy_runs em memória) ───────────────────
@@ -250,6 +252,7 @@ beforeEach(() => {
   startValidation.mockClear().mockResolvedValue({ ok: true as const, runId: "vr-1", reused: false });
   dispatchResolveGapsJob.mockClear().mockResolvedValue({ ok: true as const, gaps: 3 });
   dispatchGapFileJob.mockClear().mockResolvedValue({ ok: true as const, gaps: 2 });
+  dispatchManifestJob.mockClear().mockResolvedValue({ ok: true as const });
 });
 
 afterEach(() => { delete process.env.SPEC_AUTONOMY; });
@@ -411,6 +414,121 @@ describe("tetos do laço por arquivo", () => {
 
   it("teto de arquivos do laço existe e é maior que o de passes", () => {
     expect(AUTONOMY_MAX_FILE_ROUNDS).toBeGreaterThan(5);
+    // GAP-3: o teto por passe não pode ser o teto do laço — senão uma spec com mais arquivos que o
+    // teto gasta todos os passes no primeiro e nunca chega à 2ª validação.
+    expect(AUTONOMY_MAX_TOTAL_FILE_ROUNDS).toBeGreaterThan(AUTONOMY_MAX_FILE_ROUNDS);
+  });
+
+  it("GAP-3: o teto de arquivos é do PASSE — o passe 2 não herda as rodadas do passe 1", async () => {
+    const r = await start(3);
+    await drainPass(r.id);
+    findings = [gap("frontend/01-web.md", "blocker", "sem estado de erro")];
+    await advanceAutonomyRun(db, r.id);                    // validação medida → passe 2
+    expect(run!.passes).toBe(1);
+    // O passe 1 gastou MUITAS rodadas-arquivo (spec grande). Com o teto global antigo o laço morria
+    // aqui em `exhausted` anunciando "até 3 passes" — foi o que aconteceu nos runs a4ad542f/dd587b75.
+    run!.rounds = [
+      ...(run!.rounds as unknown[]),
+      ...Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: 100 + i, pass: 0, applied: true })),
+    ];
+    run!.round = AUTONOMY_MAX_FILE_ROUNDS + 3;
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("cto_running");               // o passe 2 recebeu seu arquivo
+    expect(lastFileCall().filePath).toBe("frontend/01-web.md");
+  });
+
+  it("GAP-3: dentro do MESMO passe o teto continua valendo (trava de custo)", async () => {
+    const r = await start(3);
+    await advanceAutonomyRun(db, r.id);
+    // 12 rodadas já gastas NESTE passe → a próxima não sai, e a mensagem diz "neste passe".
+    run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+    run!.status = "pending";
+    run!.current_file = null;
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("exhausted");
+    expect(String(run!.last_error)).toContain("neste passe");
+  });
+});
+
+// ── 3.1 A5.3: o manifesto (README.md) — o GAP que nenhuma ação resolvia ───────
+
+describe("A5.3 — criação do manifesto pelo laço", () => {
+  const MANIFESTO = [
+    "---",
+    "kind: project",
+    "archetype: backend-service",
+    "stack: [nodejs]",
+    "depends_on: []",
+    "deploy_target: aws-ecs",
+    "---",
+    "",
+    "# NVX LastMile",
+    "",
+    "Serviço de última milha. ".repeat(30),
+    "",
+    "## Índice da especificação",
+    "- `00-indice.md` — visão e escopo",
+  ].join("\n");
+
+  /** O finding do Estágio A: aponta um arquivo que NÃO existe (`file` vazio, âncora `no_readme`). */
+  function noReadme(): F & { anchor: string } {
+    return { ...gap("", "warning", "Spec sem manifesto (README.md)"), anchor: "no_readme" };
+  }
+
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;                        // o laço cria o arquivo DE VERDADE
+    unroutedFindings = [noReadme()];
+    // Como em prod: o `no_readme` também está no estado de findings do projeto (é ele que sustenta a
+    // rodada em `tallyGaps`); o que o escopo faz é deixá-lo em `unrouted`, porque `file` é vazio.
+    findings = [noReadme(), gap("backend/01-api.md", "blocker", "sem authz")];
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  it("entra no FIM da fila e é pedido ao CTO com a árvore inteira como insumo", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().filePath).toBe("backend/01-api.md");   // conteúdo antes do índice
+    await ctoReturns(r.id, `${onDisk("backend/01-api.md")}\n## 99. Authz\nagora tem.\n`);
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.current_file).toBe("README.md");
+    expect(dispatchManifestJob).toHaveBeenCalledTimes(1);
+    const arg = (dispatchManifestJob.mock.calls[0] as unknown as unknown[])[0] as
+      { files: string[]; primaryPath: string };
+    expect(arg.files).toEqual(["00-indice.md", "backend/01-api.md", "frontend/01-web.md"]);
+    expect(arg.primaryPath).toBe("00-indice.md");
+  });
+
+  it("aprovado pelo veto → o arquivo é CRIADO no disco e registrado na árvore", async () => {
+    const r = await start();
+    findings = [noReadme()];                               // só o manifesto pendente
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.current_file).toBe("README.md");
+    await ctoReturns(r.id, MANIFESTO);
+    expect(readFileSync(join(root, PROJECT, "README.md"), "utf-8")).toContain("archetype: backend-service");
+    expect(sqlLog.some((q) => q.sql.startsWith("INSERT INTO project_spec_files")
+      && (q.params as unknown[])[1] === "README.md")).toBe(true);
+    expect(run!.files_done).toContain("README.md");
+    expect(run!.status).toBe("pending");
+  });
+
+  it("recusado pelo veto (sem frontmatter) → NÃO escreve e o motivo fica na rodada", async () => {
+    const r = await start();
+    findings = [noReadme()];
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `# NVX LastMile\n\n${"conteúdo. ".repeat(40)}`);
+    expect(() => readFileSync(join(root, PROJECT, "README.md"), "utf-8")).toThrow();
+    expect(String(JSON.stringify(run!.rounds))).toContain("NO_FRONTMATTER");
+  });
+
+  it("sem o GAP `no_readme` ativo, o laço NÃO cria manifesto nenhum", async () => {
+    unroutedFindings = [];
+    findings = [gap("backend/01-api.md", "blocker", "sem authz")];
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);                     // arquivo de conteúdo
+    await ctoReturns(r.id, `${onDisk("backend/01-api.md")}\n## 99. Authz\nagora tem.\n`);
+    await advanceAutonomyRun(db, r.id);                     // fila vazia → valida o passe
+    expect(dispatchManifestJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("validating");
   });
 });
 

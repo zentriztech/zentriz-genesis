@@ -49,7 +49,8 @@
  * laço é o que é do PROJETO: edição humana, spec que saiu de edição, snapshot indisponível.
  */
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { projectFindingsState, type EnrichedFinding } from "./findingTriage.js";
@@ -59,7 +60,8 @@ import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 // Só o TIPO: o módulo em si é carregado por `import()` dinâmico apenas no modo por arquivo (ele
 // alcança `routes/specs.js` → `db/client.js`, que o modo `whole` não precisa pagar).
-import type { GapFileBucket } from "./specGapScope.js";
+import type { GapFileBucket, GapGroups, SpecFileRef } from "./specGapScope.js";
+import { MANIFEST_PATH, assessManifest, expectedArchetype } from "./specManifest.js";
 
 type Db = Pick<Pool, "query" | "connect">;
 
@@ -81,12 +83,24 @@ const MIN_SHRINK_RATIO = 0.7;
 /** Duas rodadas seguidas sem derrubar GAP importante = o modelo não está convergindo. */
 const MAX_NO_PROGRESS = 2;
 /**
- * PR-5: teto de RODADAS-ARQUIVO por laço (todos os passes somados). Existe só para limitar custo:
- * um arquivo de spec revisado pelo CTO-editor custa ~1/10 de uma rodada de spec inteira, então 12
- * cabem folgadamente no orçamento de uma rodada antiga. Quem manda na convergência é `max_rounds`
- * (passes de validação), não este número.
+ * Teto de RODADAS-ARQUIVO **por passe**. Existe só para limitar custo: um arquivo revisado pelo
+ * CTO-editor custa ~1/10 de uma rodada de spec inteira, então 12 arquivos cabem folgadamente no
+ * orçamento de uma rodada antiga. Quem manda na convergência é `max_rounds` (passes), não este número.
+ *
+ * GAP-3 (medido 2026-09-06): este teto era GLOBAL (`round >= 12`, e `round` nunca zera). Com uma spec
+ * de 11 arquivos, o passe 1 consumia 8 rodadas e o passe 2 morria na 4ª — o laço encerrava em
+ * `exhausted` com "teto de 12 arquivos", tendo feito UM único passe de validação, embora a UI e a
+ * própria mensagem anunciassem "até 5 passes". Provado nos runs `a4ad542f` (morreu exatamente em
+ * `round=12`, `passes=1`) e `dd587b75` (`round=9` ao ENTRAR no passe 2). Agora o teto conta o passe
+ * corrente; o custo total continua limitado por `AUTONOMY_MAX_TOTAL_FILE_ROUNDS`, pelo `max_rounds`
+ * e pelo `AUTONOMY_DEADLINE_MS`.
  */
 export const AUTONOMY_MAX_FILE_ROUNDS = 12;
+/**
+ * Teto ABSOLUTO de rodadas-arquivo do laço inteiro (todos os passes). É a trava de custo que o teto
+ * por passe deixou de ser: 5 passes × 12 arquivos seria caro demais para rodar sem humano na frente.
+ */
+export const AUTONOMY_MAX_TOTAL_FILE_ROUNDS = 30;
 /** Duas falhas SEGUIDAS em nível de arquivo = o problema é o modelo/serviço, não o arquivo. */
 const MAX_FILE_FAILURES = 2;
 
@@ -687,6 +701,23 @@ function importantFileQueue(list: GapFileBucket[]): string[] {
     .map((b) => b.path);
 }
 
+/**
+ * A5.3 — o GAP `no_readme` está ATIVO? É o único finding que aponta um arquivo que NÃO EXISTE, e
+ * por isso jamais entrou na fila (que é por arquivo da árvore). Ele é procurado nos DOIS lados do
+ * escopo: `unrouted` (onde nasce, com `file` vazio) e `byPath` (se o roteador LLM o tiver atribuído
+ * a algum arquivo — atribuição que não o resolve, porque o Estágio A só aceita `README.md` na raiz).
+ *
+ * Se o humano triou o finding (risco aceito / falso positivo), ele não vem em `scope` — logo o laço
+ * NÃO cria manifesto contra a decisão do humano.
+ */
+function manifestGapFindings(scope: GapGroups): EnrichedFinding[] {
+  const isManifestGap = (f: EnrichedFinding) =>
+    (f.anchor ?? "") === "no_readme" && (f.severity === "blocker" || f.severity === "warning");
+  const out = scope.unrouted.filter(isManifestGap);
+  for (const list of scope.byPath.values()) out.push(...list.filter(isManifestGap));
+  return out;
+}
+
 /** Quantos arquivos foram efetivamente ESCRITOS no passe corrente (lido do log de rodadas). */
 function appliedInPass(run: AutonomyRun): number {
   return run.rounds.filter((r) => (r.pass ?? 0) === run.passes && r.applied === true).length;
@@ -731,10 +762,17 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)). Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
     return true;
   }
-  if (run.round >= AUTONOMY_MAX_FILE_ROUNDS) {
+  // GAP-3: o teto de arquivos é do PASSE (o do laço inteiro é o `TOTAL`). Sem isto, uma spec com mais
+  // arquivos que o teto gastava todos os passes no primeiro e nunca chegava à 2ª validação.
+  const roundsInPass = run.rounds.filter((r) => (r.pass ?? 0) === run.passes).length;
+  if (roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS || run.round >= AUTONOMY_MAX_TOTAL_FILE_ROUNDS) {
     const gaps = await currentGaps(db, run.projectId).catch(() => null);
+    const perPass = roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS;
     await finishRun(db, run, "exhausted",
-      `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste laço atingido. Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`, { gaps });
+      perPass
+        ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo). Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`
+        : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido. Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
+      { gaps });
     return true;
   }
   const editable = await specEditable(db, run.projectId);
@@ -762,7 +800,15 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (routing) {
     console.info(`[SpecAutonomy] run=${run.id} roteamento de GAPs: routed=${routing.routed} restantes=${routing.stillUnrouted}${routing.skipped ? ` (skip: ${routing.reason})` : ""}`);
   }
-  const queue = importantFileQueue(buckets(scope)).filter((p) => !run.filesDone.includes(p));
+  // A5.3: o manifesto é o ÚNICO alvo que pode não existir ainda — entra no FIM da fila (os GAPs de
+  // conteúdo valem mais que o índice, e criar o arquivo muda o hash da árvore).
+  const manifestTarget = manifestGapFindings(scope).length > 0
+    && !run.filesDone.includes(MANIFEST_PATH)
+    && !scope.files.some((f) => f.path.toLowerCase() === MANIFEST_PATH.toLowerCase());
+  const queue = [
+    ...importantFileQueue(buckets(scope)),
+    ...(manifestTarget ? [MANIFEST_PATH] : []),
+  ].filter((p) => !run.filesDone.includes(p));
 
   if (queue.length === 0) {
     const applied = appliedInPass(run);
@@ -794,6 +840,8 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
 
   const target = queue[0];
+  // A5.3: o manifesto não tem arquivo para ler nem GAPs "deste arquivo" — é criação, não edição.
+  if (target === MANIFEST_PATH) return startManifestRound(db, run, scope, gaps, agentsUrl, llm);
   const file = await readSpecFileAt(db, run.projectId, target);
   if (!file) {
     // Arquivo saiu da árvore/disco entre a validação e agora (split, remoção). Não é falha do
@@ -846,6 +894,153 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
 }
 
+/** Sha do vazio: a pré-condição de CRIAÇÃO é "o arquivo continua não existindo" (If-Match de criação). */
+const EMPTY_SHA = sha256Hex(Buffer.alloc(0));
+
+/**
+ * A5.3 — rodada que CRIA o manifesto (`README.md`), o único alvo do laço que ainda não existe.
+ *
+ * Difere da rodada normal em três pontos, todos consequência de ser criação e não edição:
+ *  • não há arquivo para ler → a base é o vazio (`EMPTY_SHA`), e a guarda de edição humana passa a
+ *    significar "alguém criou o README no meio da rodada" (aí o laço NÃO sobrescreve);
+ *  • não há "GAPs deste arquivo" para mandar ao CTO — o insumo é a árvore + o arquivo primário;
+ *  • o conteúdo é do agente; o código só entrega fatos e veta (`assessManifest`).
+ */
+async function startManifestRound(
+  db: Db, run: AutonomyRun, scope: GapGroups, gaps: GapTally,
+  agentsUrl: string, llm: Record<string, unknown>,
+): Promise<boolean> {
+  const row = (await db.query("SELECT title, extra FROM projects WHERE id = $1", [run.projectId])).rows[0] as
+    { title?: string; extra?: unknown } | undefined;
+  const primary = scope.files.find((f) => f.isPrimary) ?? scope.files[0];
+  if (!primary) {
+    return skipFileAndContinue(db, run, MANIFEST_PATH,
+      "a spec não tem nenhum arquivo para basear o manifesto", { failure: false, fromStatus: "pending" });
+  }
+  const primaryContent = await readFile(primary.filePath, "utf-8").catch(() => null);
+  if (primaryContent === null) {
+    return skipFileAndContinue(db, run, MANIFEST_PATH,
+      `arquivo primário \`${primary.path}\` não está legível no disco`, { failure: false, fromStatus: "pending" });
+  }
+
+  const nextRound = run.round + 1;
+  const jobId = randomUUID();
+  const claim = await db.query(
+    `UPDATE spec_autonomy_runs
+        SET status = 'cto_running', mode = 'per_file', round = $2, chat_job_id = $3, base_spec_sha = $4,
+            current_file = $5, gaps_current = $6, validation_run_id = NULL, updated_at = now()
+      WHERE id = $1 AND status = 'pending' AND round = $7`,
+    [run.id, nextRound, jobId, EMPTY_SHA, MANIFEST_PATH, gaps.important, run.round],
+  );
+  if ((claim.rowCount ?? 0) === 0) return false;
+
+  const manifestGaps = manifestGapFindings(scope);
+  await appendRoundLog(db, run.id, {
+    round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
+    filePath: MANIFEST_PATH, gapsBefore: gaps.important,
+    blockers: manifestGaps.filter((f) => f.severity === "blocker").length,
+    warnings: manifestGaps.filter((f) => f.severity === "warning").length,
+    specChars: 0,
+    note: `\`${MANIFEST_PATH}\` não existe — pedindo ao CTO o manifesto do projeto (${scope.files.length} arquivo(s) na árvore).`,
+  });
+
+  const { dispatchManifestJob } = await import("../routes/specChat.js");
+  try {
+    await dispatchManifestJob({
+      jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
+      projectTitle: (row?.title ?? "").trim() || "projeto sem título",
+      archetype: expectedArchetype(row?.extra ?? null),
+      files: scope.files.map((f) => f.path),
+      primaryPath: primary.path, primaryContent, agentsUrl, llm,
+      userMessage: `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: criar o manifesto \`${MANIFEST_PATH}\` (GAP "Spec sem manifesto").`,
+    });
+    console.info(`[SpecAutonomy] run=${run.id} passe ${run.passes + 1}/${run.maxRounds} arquivo ${nextRound} (${MANIFEST_PATH}, CRIAÇÃO) → CTO job=${jobId}`);
+    return true;
+  } catch (e) {
+    const fresh = (await getAutonomyRun(db, run.id))!;
+    return skipFileAndContinue(db, fresh, MANIFEST_PATH, `falha ao pedir o manifesto: ${msg(e).slice(0, 300)}`,
+      { failure: true, fromStatus: "cto_running" });
+  }
+}
+
+/**
+ * A5.3 — escreve o manifesto APROVADO no disco e registra o arquivo novo na árvore.
+ *
+ * Ordem: disco → linha em `project_spec_files` → `spec_dirty_at`. Não há snapshot porque não há
+ * conteúdo anterior a preservar; a pré-condição (`ON CONFLICT DO NOTHING` + checagem do chamador) é
+ * "não existia". `is_primary` fica FALSO: o primário atual continua sendo o primário — o manifesto é
+ * a porta de entrada, e mudar o primário no meio de um laço trocaria o alvo de todas as outras ações.
+ */
+async function createManifestFile(db: Db, projectId: string, content: string): Promise<string> {
+  const uploadDir = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
+  const physical = path.resolve(uploadDir, projectId, MANIFEST_PATH);
+  await mkdir(path.dirname(physical), { recursive: true });
+  await writeFile(physical, content, "utf-8");
+  await db.query(
+    `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
+     VALUES ($1, $2, $3, 'text/markdown', '', false, $4) ON CONFLICT DO NOTHING`,
+    [projectId, MANIFEST_PATH, physical, sha256Hex(Buffer.from(content, "utf-8"))],
+  );
+  await db.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [projectId]);
+  return physical;
+}
+
+/**
+ * applying (manifesto) → CRIA o arquivo se o veto aprovar. As guardas aqui são de outra natureza:
+ * não existe "encolheu" nem "veio igual" (não havia base), e o que substitui `assessRevisionIntegrity`
+ * é o `assessManifest` — cada recusa dele corresponde a um finding que o Estágio A reaplicaria, ou
+ * seja: escrever assim faria o laço andar para trás.
+ */
+async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, truncated: boolean): Promise<boolean> {
+  const editable = await specEditable(db, run.projectId);
+  if (!editable.ok) {
+    await finishRun(db, run, "stalled",
+      `A spec deixou de ser editável antes de criar o manifesto (projeto em '${editable.status}') — nada foi escrito.`);
+    return true;
+  }
+  if (truncated) {
+    return skipFileAndContinue(db, run, MANIFEST_PATH,
+      "o manifesto voltou truncado (teto de saída) — não escrevo índice pela metade", { failure: true, fromStatus: "applying" });
+  }
+  // Guarda de criação concorrente: se o README passou a existir durante a rodada (humano, split),
+  // a proposta do CTO NÃO sobrescreve — ela fica no chat do arquivo.
+  const already = await readSpecFileAt(db, run.projectId, MANIFEST_PATH);
+  if (already) {
+    return skipFileAndContinue(db, run, MANIFEST_PATH,
+      "o manifesto passou a existir durante a rodada — não sobrescrevi", { failure: false, fromStatus: "applying" });
+  }
+  const row = (await db.query("SELECT extra FROM projects WHERE id = $1", [run.projectId])).rows[0] as
+    { extra?: unknown } | undefined;
+  const verdict = assessManifest(revised, { expected: expectedArchetype(row?.extra ?? null) });
+  if (!verdict.ok) {
+    return skipFileAndContinue(db, run, MANIFEST_PATH, `manifesto recusado (${verdict.code}): ${verdict.message}`,
+      { failure: true, fromStatus: "applying" });
+  }
+  try {
+    await createManifestFile(db, run.projectId, verdict.content);
+  } catch (e) {
+    await patchLastRound(db, run, { applied: false, filePath: MANIFEST_PATH, note: `criação abortada: ${msg(e)}` });
+    await finishRun(db, run, "stalled",
+      `NÃO criei o manifesto \`${MANIFEST_PATH}\`: ${msg(e)}. A spec no disco está INTACTA e a proposta continua no chat.`);
+    return true;
+  }
+  await patchLastRound(db, run, {
+    applied: true, filePath: MANIFEST_PATH, specChars: verdict.content.length,
+    note: `\`${MANIFEST_PATH}\` CRIADO (${verdict.content.length} chars, arquétipo \`${verdict.archetypeId}\`).`,
+  });
+  const claim = await db.query(
+    `UPDATE spec_autonomy_runs
+        SET status = 'pending', chat_job_id = NULL, current_file = NULL, file_failures = 0,
+            files_done = files_done || $2::jsonb, updated_at = now()
+      WHERE id = $1 AND status = 'applying'`,
+    [run.id, JSON.stringify([MANIFEST_PATH])],
+  );
+  if ((claim.rowCount ?? 0) === 0) return false;
+  await postChatNote(db, run,
+    `🤖 **Arquivo ${run.round} do passe ${run.passes + 1}** — \`${MANIFEST_PATH}\`: manifesto do projeto **criado** (${verdict.content.length} chars, arquétipo \`${verdict.archetypeId}\`). Era o GAP que nenhuma ação da Bancada sabia resolver.`);
+  return true;
+}
+
 /**
  * applying (modo por arquivo) → escreve NO ARQUIVO da rodada e volta para a fila (a validação só
  * roda quando a fila esvazia). As guardas são as MESMAS do modo inteiro, com uma diferença de
@@ -863,6 +1058,9 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (!revised) {
     return skipFileAndContinue(db, run, target, "a revisão do CTO desapareceu antes de ser aplicada", { failure: true, fromStatus: "applying" });
   }
+  // A5.3: o manifesto é CRIAÇÃO — as guardas de edição (base, encolhimento, integridade) não se
+  // aplicam a um arquivo que não existia, e `readSpecFileAt` abaixo devolveria null.
+  if (target === MANIFEST_PATH) return applyManifestRound(db, run, revised, job?.truncated === true);
   const file = await readSpecFileAt(db, run.projectId, target);
   if (!file) {
     return skipFileAndContinue(db, run, target, "arquivo não está mais legível no disco", { failure: false, fromStatus: "applying" });
