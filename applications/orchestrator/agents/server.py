@@ -773,6 +773,104 @@ def get_spec_validator_status(job_id: str):
     return {"jobId": job_id, "status": "running", "elapsed": elapsed}
 
 
+# ── Lesson Extract (G7/A3.3, 2026-09-05) — a BANCADA passa a aprender ────────────
+# Até aqui o ÚNICO produtor de lição era o Cyborg (no accept/reject de uma entrega), então o laço de
+# refinamento de spec — onde um validador adversarial aponta GAPs e o CTO reescreve — não deixava
+# nenhum aprendizado: `lessons_corpus` medido em prod = 0 linhas (G7).
+#
+# Este endpoint é o produtor da Bancada. Ele NÃO decide o que é lição (isso é do modelo, ⚖️ LEI) e
+# NÃO recebe lição pronta da api: recebe o RELATÓRIO do episódio (GAPs iniciais/finais, o que cada
+# rodada mudou, o motivo da parada) e delega ao `LessonExtractor` com `kind="spec"` — que tem prompt
+# próprio, veto de contaminação (`forbidden_terms`), redação de PII, upsert idempotente por slug e
+# outbox. Em `live`, ainda cutuca o indexer: sem embedding a lição existe mas ninguém recupera (A3.2).
+
+def _run_lesson_extract(body: dict) -> dict:
+    """Extrai lições de UM episódio (laço da Bancada ou entrega da fábrica). Nunca lança por si."""
+    from orchestrator.lesson_extractor import LessonExtractor
+
+    material = (body.get("material") or body.get("dialogue_text") or "").strip()
+    if not material:
+        raise ValueError("material (o relatório do episódio) é obrigatório")
+    kind = (body.get("kind") or "spec").strip().lower()
+    project_id = body.get("project_id") or body.get("originProjectId") or None
+    stack_key = (body.get("stack_key") or "generic").strip() or "generic"
+    forbidden = body.get("forbidden_terms")
+    forbidden = [str(t) for t in forbidden][:40] if isinstance(forbidden, list) else []
+    llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
+
+    extractor = LessonExtractor()
+    if extractor.mode == "off":
+        # Resposta EXPLÍCITA em vez de silêncio: foi assim que o G7 passou meses invisível
+        # (`RAG_ENABLED` ausente nos containers = extrator inerte, sem ninguém reclamar).
+        return {"mode": "off", "extracted": 0, "persisted": 0, "slugs": [],
+                "reason": "RAG_ENABLED=off no container do agents"}
+
+    lessons = extractor.extract(material, project_id=project_id, stack_key=stack_key,
+                                kind=kind, forbidden_terms=forbidden, llm_cfg=llm_cfg)
+    out: dict = {
+        "mode": extractor.mode,
+        "extracted": len(lessons),
+        "persisted": extractor.last_persisted,
+        "slugs": [ln.slug for ln in lessons][:12],
+        "kind": kind,
+    }
+    if extractor.mode == "live" and lessons:
+        try:
+            from orchestrator.lessons_indexer import run_indexer
+            res = run_indexer()
+            out["indexer"] = {"embedded": res.get("embedded"),
+                              "pending_consumed": res.get("pending_consumed"),
+                              "provider": res.get("provider"),
+                              "reason": res.get("reason")}
+        except Exception as exc:  # indexar é recuperável (o sweep do cyborg tenta de novo)
+            out["indexer_error"] = str(exc)[:200]
+    logger.info("[/invoke/lesson_extract] kind=%s mode=%s extracted=%d persisted=%d project=%s",
+                kind, extractor.mode, out["extracted"], out["persisted"], project_id)
+    return out
+
+
+def _run_lesson_extract_async(job_id: str, body: dict) -> None:
+    try:
+        result = _run_lesson_extract(body)
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "done"
+                _async_jobs[job_id]["result"] = result
+    except Exception as e:
+        with _jobs_lock:
+            if job_id in _async_jobs:
+                _async_jobs[job_id]["status"] = "error"
+                _async_jobs[job_id]["error"] = str(e)[:500]
+
+
+@app.post("/invoke/lesson_extract/async")
+def invoke_lesson_extract_async(body: dict):
+    """Inicia a extração de lições em background. Retorna jobId imediatamente.
+    Poll GET /invoke/lesson_extract/status/{job_id} (o resultado é telemetria: a persistência
+    em `lessons_corpus` acontece aqui dentro, não depende de o chamador ler o poll)."""
+    _cleanup_old_jobs()
+    job_id = f"le-{uuid.uuid4().hex[:12]}"
+    with _jobs_lock:
+        _async_jobs[job_id] = {"status": "running", "created_at": time.time()}
+    thread = threading.Thread(target=_run_lesson_extract_async, args=(job_id, body), daemon=True)
+    thread.start()
+    return {"jobId": job_id, "status": "running"}
+
+
+@app.get("/invoke/lesson_extract/status/{job_id}")
+def get_lesson_extract_status(job_id: str):
+    with _jobs_lock:
+        job = _async_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    elapsed = int(time.time() - job.get("created_at", time.time()))
+    if job["status"] == "done":
+        return {"jobId": job_id, "status": "done", "result": job.get("result"), "elapsed": elapsed}
+    if job["status"] == "error":
+        return {"jobId": job_id, "status": "error", "error": job.get("error"), "elapsed": elapsed}
+    return {"jobId": job_id, "status": "running", "elapsed": elapsed}
+
+
 @app.post("/invoke/engineer")
 def invoke_engineer(body: dict):
     return _invoke_agent(body, ENGINEER_SYSTEM_PROMPT_PATH, "ENGINEER")

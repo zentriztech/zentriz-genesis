@@ -322,10 +322,16 @@ export function runSplitJob(
   ).catch((e) => console.error(`[SpecSplit] set running ${id}: ${msg(e)}`));
 
   void (async () => {
+    // As colunas reais são `title` e `extra->>'project_type'` (mesma armadilha do "T-05 fix" em
+    // routes/projects.ts): `p.name`/`p.type` NÃO existem, o SELECT dava erro, o `.catch` engolia e
+    // o arquiteto da divisão recebia nome/tipo VAZIOS — contexto perdido em silêncio.
     const meta = (await db.query(
-      "SELECT p.name, p.type FROM projects p WHERE p.id = $1", [opts.projectId],
-    ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }))).rows[0] as
-      { name?: string; type?: string } | undefined;
+      "SELECT p.title AS name, p.extra->>'project_type' AS type FROM projects p WHERE p.id = $1",
+      [opts.projectId],
+    ).catch((e) => {
+      console.warn(`[SpecSplit] meta do projeto ${opts.projectId}: ${msg(e)}`);
+      return { rows: [] as Array<Record<string, unknown>> };
+    })).rows[0] as { name?: string; type?: string } | undefined;
     const llm = await resolveWorkbenchLlm({ projectId: opts.projectId, tenantId: opts.tenantId })
       .catch(() => null);
     const body = JSON.stringify({

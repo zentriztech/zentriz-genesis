@@ -18,6 +18,7 @@ import { pool } from "../db/client.js";
 import { collectSpecChatJobsTick } from "./specChatJobs.js";
 import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { collectSpecSplitsTick } from "./specSplit.js";
+import { collectBancadaLessonsTick } from "./specLearning.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
 /** 20 s: barato (só toca jobs órfãos) e rápido o bastante para o usuário que volta à tela. */
@@ -79,6 +80,16 @@ async function tick(): Promise<void> {
   });
   if (split.collected || split.lost) {
     console.info(`[SpecChatWorker] divisão de spec: ${split.collected} coletada(s), ${split.lost} perdida(s) de ${split.scanned} órfã(s).`);
+  }
+  // G7 (migração 096): a Bancada APRENDE. Depois de avançar os laços, os que TERMINARAM neste tick
+  // (ou em ticks anteriores, se a api reiniciou) viram material de extração de lição. Vem por
+  // último de propósito: aprender é acessório e nunca deve atrasar a coleta ou o laço.
+  const learn = await collectBancadaLessonsTick(pool).catch((e) => {
+    console.warn(`[SpecChatWorker] extração de lições falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return { scanned: 0, kicked: 0, skipped: 0, polled: 0, finished: 0 };
+  });
+  if (learn.kicked || learn.finished || learn.skipped) {
+    console.info(`[SpecChatWorker] aprendizado: ${learn.kicked} episódio(s) enviado(s), ${learn.finished} concluído(s), ${learn.skipped} sem rodadas.`);
   }
 }
 
