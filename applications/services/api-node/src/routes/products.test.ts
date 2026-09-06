@@ -261,6 +261,9 @@ describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM inici
     expect(body.promoted).toEqual([R1, R2]);         // o produto TODO, não só as raízes
     expect(body.waves).toBe(2);
     expect(body.plan.map((i: FakePlanItem) => i.projectId)).toEqual([R1, R2]);
+    // Quem decidiu a ordem aparece no ATO (o diálogo mostra o modelo sem refetch).
+    expect(body.modelUsed).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
+    expect(body.edgesSource).toBe("triggers");
     await flushImmediate();
     expect(dispatchSpy).not.toHaveBeenCalled();      // ← "promovidos mas não iniciados"
     // O plano fica gravado (auditoria da ordem) e cada item também.

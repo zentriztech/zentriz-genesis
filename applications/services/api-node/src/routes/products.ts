@@ -1212,6 +1212,9 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       notes: plan.notes,
       warnings: plan.warnings,
       edgesSource: plan.edgesSource,
+      // Quem decidiu a ordem tem de aparecer no ATO (a prova em prod mostrou o diálogo dizendo
+      // "modelo: —" logo após promover, porque só o GET /promotion devolvia este campo).
+      modelUsed: plan.modelUsed,
     });
   });
 

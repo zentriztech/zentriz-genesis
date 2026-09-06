@@ -48,7 +48,10 @@ import { apiGet, apiPost, apiDeleteJson, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
 import { ProductCertificateChip, type ProductFactoryCertificate } from "@/components/FactoryCertificate";
-import { PromotionPlanDialog, type PromotionPlanItem, type PromotionPlanMeta } from "@/components/PromotionPlanDialog";
+import {
+  PromotionPlanDialog, describeStartResult,
+  type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
+} from "@/components/PromotionPlanDialog";
 
 interface ProductRow {
   id: string;
@@ -95,6 +98,7 @@ function ProductsPageInner() {
   const [planItems, setPlanItems] = useState<PromotionPlanItem[]>([]);
   const [planError, setPlanError] = useState<string | null>(null);
   const [startedNotice, setStartedNotice] = useState<string | null>(null);
+  const [startedSeverity, setStartedSeverity] = useState<"success" | "warning">("success");
 
   // Estado do diálogo de exclusão.
   const [deleteTarget, setDeleteTarget] = useState<ProductRow | null>(null);
@@ -130,14 +134,17 @@ function ProductsPageInner() {
     try {
       const res = await apiPost<{
         promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
-        notes?: string | null; warnings?: string[]; edgesSource?: string | null;
+        notes?: string | null; warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
       }>(`/api/products/${p.id}/promote`, {});
       setNotice(
         `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). ` +
         "Nada foi iniciado — use “Iniciar produto” quando quiser começar.",
       );
       setPlanProduct(p);
-      setPlanMeta({ promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [], edgesSource: res.edgesSource ?? null });
+      setPlanMeta({
+        promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [],
+        edgesSource: res.edgesSource ?? null, modelUsed: res.modelUsed ?? null,
+      });
       setPlanItems(res.plan ?? []);
       setPlanOpen(true);
       await load();
@@ -173,12 +180,11 @@ function ProductsPageInner() {
   const startProduct = async (p: ProductRow) => {
     setBusyId(p.id); setPlanError(null); setStartedNotice(null);
     try {
-      const res = await apiPost<{ wave: number; started: string[]; skipped: { projectId: string; reason?: string }[] }>(
-        `/api/products/${p.id}/start`, {},
-      );
-      const msg = `Onda ${res.wave} iniciada — ${res.started.length} projeto(s) na fábrica` +
-        (res.skipped.length > 0 ? `; ${res.skipped.length} não entrou(ram) ainda (dependência ou fila).` : ".");
+      const res = await apiPost<StartWaveResult>(`/api/products/${p.id}/start`, {});
+      // O motivo é o do SERVIDOR (não um palpite "dependência ou fila") — ver describeStartResult.
+      const { message: msg, severity } = describeStartResult(res);
       setStartedNotice(msg);
+      setStartedSeverity(severity);
       setNotice(msg);
       // Recarrega o plano para o diálogo refletir os status novos (e não prometer início já feito).
       try {
@@ -428,6 +434,7 @@ function ProductsPageInner() {
         starting={!!planProduct && busyId === planProduct.id}
         startError={planError}
         startedNotice={startedNotice}
+        startedSeverity={startedSeverity}
       />
 
       {/* Diálogo de exclusão — reescrever o ID + (se houver projetos) marcar a caixa. */}

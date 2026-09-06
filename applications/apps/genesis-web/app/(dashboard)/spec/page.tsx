@@ -64,7 +64,10 @@ import SpecSplitPanel from "@/components/SpecSplitPanel";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import SpecVersionsPanel from "@/components/SpecVersionsPanel";
 import ProductFolderNav from "@/components/ProductFolderNav";
-import { PromotionPlanDialog, type PromotionPlanItem, type PromotionPlanMeta } from "@/components/PromotionPlanDialog";
+import {
+  PromotionPlanDialog, describeStartResult,
+  type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
+} from "@/components/PromotionPlanDialog";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
 const ReactMarkdown = dynamic(
@@ -1874,6 +1877,7 @@ export default function SpecPage() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [planStarting, setPlanStarting] = useState(false);
   const [startedNotice, setStartedNotice] = useState<string | null>(null);
+  const [startedSeverity, setStartedSeverity] = useState<"success" | "warning">("success");
   // Pivô Bancada (Opção 1): produto dono da spec em edição (vem da URL ?productId=…).
   // Habilita a árvore "Pasta do produto" ao lado do editor, que navega entre os
   // projetos do produto sem abrir a tela redundante /products/:id/spec.
@@ -3234,13 +3238,11 @@ export default function SpecPage() {
     if (!planProduct) return;
     setPlanStarting(true); setPlanError(null); setStartedNotice(null);
     try {
-      const res = await apiPost<{ wave?: number; started?: string[]; skipped?: string[] }>(
-        `/api/products/${planProduct.id}/start`, {},
-      );
-      setStartedNotice(
-        `Onda ${res.wave ?? 1} iniciada — ${(res.started ?? []).length} projeto(s) na fila da fábrica.` +
-        ((res.skipped ?? []).length > 0 ? ` ${(res.skipped ?? []).length} ignorado(s).` : ""),
-      );
+      const res = await apiPost<StartWaveResult>(`/api/products/${planProduct.id}/start`, {});
+      // Motivo do SERVIDOR (medido em prod: `SPEC_NOT_VALIDATED` era escondido atrás de "ignorado(s)").
+      const { message, severity } = describeStartResult(res);
+      setStartedNotice(message);
+      setStartedSeverity(severity);
       try {
         const plan = await apiGet<{ promotion?: PromotionPlanMeta; items?: PromotionPlanItem[] }>(
           `/api/products/${planProduct.id}/promotion`,
@@ -3882,6 +3884,7 @@ export default function SpecPage() {
           starting={planStarting}
           startError={planError}
           startedNotice={startedNotice}
+          startedSeverity={startedSeverity}
         />
         {/* Divisão da spec: diálogo (não card no corpo) aberto pelo ícone da lista de arquivos.
             Fica fora do gate de `specMarkdown` de propósito — a proposta vive no servidor. */}

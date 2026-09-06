@@ -59,6 +59,47 @@ export interface PromotionPlanMeta {
   startedAt?: string | null;
 }
 
+/** Resposta do `POST /api/products/:id/start` (o que interessa para o aviso). */
+export interface StartWaveResult {
+  wave?: number;
+  started?: string[];
+  skipped?: Array<{ projectId?: string; reason?: string }>;
+}
+
+/**
+ * Traduz o resultado do início da onda SEM adivinhar o motivo.
+ *
+ * Medido em prod (2026-09-06): o `skipped` volta com `reason` real — ex.
+ * `SPEC_NOT_VALIDATED: Spec não validada...` — e os três chamadores diziam "dependência ou fila",
+ * um palpite que escondia o motivo verdadeiro. Aqui o motivo do servidor é MOSTRADO e, quando
+ * NADA entrou, o aviso deixa de ser "sucesso".
+ */
+export function describeStartResult(res: StartWaveResult): { message: string; severity: "success" | "warning" } {
+  const started = res.started ?? [];
+  const skipped = res.skipped ?? [];
+  const wave = res.wave ?? 1;
+  const head = started.length > 0
+    ? `Onda ${wave} iniciada — ${started.length} projeto(s) na fábrica.`
+    : `Onda ${wave} NÃO entrou na fábrica: nenhum projeto foi aceito para início.`;
+  if (skipped.length === 0) return { message: head, severity: started.length > 0 ? "success" : "warning" };
+  // Agrupa motivos iguais (o mesmo gate costuma recusar vários projetos).
+  const counts = new Map<string, number>();
+  for (const s of skipped) {
+    const reason = (s.reason ?? "sem motivo informado pelo servidor").trim();
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  // `Array.from` (não spread do iterador): o target do tsconfig do portal é ES5 para os iteradores.
+  const lines = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([reason, n]) => `• ${n}× ${reason}`);
+  const rest = counts.size > 4 ? `\n• … e mais ${counts.size - 4} motivo(s).` : "";
+  return {
+    message: `${head}\n${skipped.length} projeto(s) não entraram agora:\n${lines.join("\n")}${rest}`,
+    severity: started.length > 0 ? "success" : "warning",
+  };
+}
+
 /** Rótulo curto por status de projeto (o suficiente para ler a onda em execução). */
 function statusLabel(s: string | null | undefined): { label: string; color: "default" | "info" | "success" | "warning" | "error" } {
   switch (s) {
@@ -77,6 +118,7 @@ function statusLabel(s: string | null | undefined): { label: string; color: "def
 
 export function PromotionPlanDialog({
   open, onClose, productName, meta, items, onStart, starting, startError, startedNotice,
+  startedSeverity = "success",
 }: {
   open: boolean;
   onClose: () => void;
@@ -88,6 +130,11 @@ export function PromotionPlanDialog({
   starting?: boolean;
   startError?: string | null;
   startedNotice?: string | null;
+  /**
+   * Iniciar uma onda em que TODO projeto foi recusado por um gate (ex.: `SPEC_NOT_VALIDATED`,
+   * medido em prod) não é sucesso — quem chama passa "warning" para o aviso não mentir.
+   */
+  startedSeverity?: "success" | "warning";
 }) {
   // Agrupa por onda preservando a ordem que o servidor mandou (não reordena nada).
   const waves: Array<{ wave: number; items: PromotionPlanItem[] }> = [];
@@ -113,7 +160,9 @@ export function PromotionPlanDialog({
         </Box>
       </DialogTitle>
       <DialogContent dividers>
-        {startedNotice && <Alert severity="success" sx={{ mb: 2 }}>{startedNotice}</Alert>}
+        {startedNotice && (
+          <Alert severity={startedSeverity} sx={{ mb: 2, whiteSpace: "pre-line" }}>{startedNotice}</Alert>
+        )}
         {startError && <Alert severity="error" sx={{ mb: 2 }}>{startError}</Alert>}
 
         {items.length === 0 ? (

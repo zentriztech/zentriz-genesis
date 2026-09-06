@@ -521,6 +521,24 @@ export async function pipelineRoutes(app: FastifyInstance) {
       const allowed = await checkProjectAccess(client, projectId, user);
       if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
 
+      // Migração 097 — armadilha MEDIDA em prod (2026-09-06): esta rota não tinha guarda de status e
+      // marcava `stopped` qualquer projeto, inclusive um que NUNCA entrou na fábrica. Um projeto
+      // `promoted` levado a `stopped` deixa o produto sem saída: `unpromote` recusa ("a fábrica já
+      // começou") e `promote` recusa (lifecycle ≠ draft). Parar é para pipeline em andamento — quem
+      // nunca começou volta pela Bancada, não pelo freio.
+      const cur = (await client.query("SELECT status FROM projects WHERE id = $1", [projectId])).rows[0];
+      const curStatus = cur ? String(cur.status) : null;
+      if (curStatus === "draft" || curStatus === "promoted") {
+        return reply.status(409).send({
+          code: "NOTHING_TO_STOP",
+          message: curStatus === "promoted"
+            ? "Este projeto foi admitido na fábrica e ainda não iniciou — não há execução para parar. " +
+              "Para devolvê-lo à Bancada, use “Devolver” no produto."
+            : "Este projeto está na Bancada (rascunho) — não há execução para parar.",
+          status: curStatus,
+        });
+      }
+
       const runnerServiceUrl = process.env.RUNNER_SERVICE_URL?.trim();
       if (runnerServiceUrl) {
         try {

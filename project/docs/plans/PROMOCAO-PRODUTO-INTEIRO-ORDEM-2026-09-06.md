@@ -235,3 +235,61 @@ eslint nos arquivos tocados: **0 erros** (2 warnings pré-existentes de `exhaust
 `next build` · commit em `dev` → merge `--no-ff` em `main` → push · deploy ECR (api + genesis-web) com
 tag de rollback · verificar digest + prova ao vivo em prod (migração aplicada, promover produto real
 **sem** disparar run) · memória (LEI 0).
+
+---
+
+## 6. PROVA AO VIVO EM PROD (2026-09-06, `3.220.66.113`)
+
+Prod não tinha **nenhum** projeto `draft` (accepted=40, archived=1, blocked_cyborg=3, completed=13,
+spec_submitted=1) — sem rascunho não há o que promover. Foi criado um **fixture sintético**
+(`PROVA-097`: 3 projetos + 3 specs em `/shared/uploads/prova097` + 1 aresta de fato em
+`project_triggers`), inserido **na ordem ERRADA de propósito** (dashboard → backend → banco) e
+**removido por completo no fim** (verificado: 0 produtos, 0 projetos, 0 planos, 0 itens, 0 métricas,
+0 arquivos; distribuição de status idêntica à do baseline).
+
+| Prova | Resultado medido |
+|-------|------------------|
+| Produto TODO promovido | `POST /promote` → 202, `promoted: 3`, `lifecycleStatus: "promoted"` |
+| Ordem decidida por AGENTE, não pela inserção | plano: **onda 1 banco → onda 2 backend → onda 3 dashboard** (inverso da ordem de criação), `notes` do agente citando expand–contract |
+| Quem decidiu | `model_used = us.anthropic.claude-opus-5` (BYOC do tenant vence o default haiku), `in=1968 / out=378` tokens |
+| Grafo real usado | `edges_source = triggers` (a aresta dashboard→backend do banco entrou no plano), `warnings: []` |
+| **NADA iniciou** | 3 projetos em `promoted`, `started_at` e `queued_at` NULL, `pipeline_runs = 0`, `dispatched_at` NULL em todos os itens |
+| Custo visível (A10/G5) | `project_agent_metrics`: `promotion_planner / task=promotion_plan:<id> / OK` |
+| Value meter | `spec_promoted` com `{"started": false, "promoted_projects": 3}` |
+| `/start` respeita a barreira | 202 com `wave: 1` **só** (ondas 2 e 3 intocadas); o único projeto da onda 1 foi **recusado pelo gate** `SPEC_NOT_VALIDATED` (spec do fixture nunca validada) → prova que o `/start` **não fura gate** |
+| `/unpromote` | 200, os 3 voltam a `draft`, plano vira `canceled` (índice `pprom_one_live` respeitado: 1 vivo + 1 cancelado) |
+| Reprodutibilidade | segundo `POST /promote` devolveu **a mesma ordem** por onda |
+
+### 6.1 Três defeitos que só a prova ao vivo revelou (corrigidos e re-deployados)
+
+1. **`POST /promote` não devolvia `modelUsed`** → o diálogo dizia "modelo: —" justamente no ato da
+   promoção (só o `GET /promotion` trazia o campo). Corrigido no payload 202 e nas 3 telas; teste em
+   `routes/products.test.ts`.
+2. **O aviso de início ADIVINHAVA o motivo do skip** ("dependência ou fila") — o servidor manda
+   `reason` real (ao vivo: `SPEC_NOT_VALIDATED`) e as 3 telas o jogavam no lixo. Agora existe
+   `describeStartResult` (única fonte da mensagem): mostra os motivos do servidor agrupados e, quando
+   **nada** entrou, o `Alert` deixa de ser `success` (novo prop `startedSeverity`).
+3. **`POST /api/projects/:id/stop` não tinha guarda de status** — marcava `stopped` até um projeto que
+   nunca começou. Um `promoted → stopped` deixava o produto **sem saída**: `unpromote` recusa ("a
+   fábrica já começou") e `promote` recusa (lifecycle ≠ draft). Agora `draft`/`promoted` → 409
+   `NOTHING_TO_STOP` com o caminho certo na mensagem (3 testes em `routes/pipeline.promote.test.ts`).
+   Provado ao vivo depois do redeploy.
+
+### 6.2 Assimetria deliberada (registrada, não é bug)
+
+`dispatchPromotionWave` marca a promoção como `started` **antes** de disparar (se a api morrer no
+meio, um segundo `/start` não redispara o que já foi). Consequência: se **todos** os projetos da onda
+forem recusados por gate, o plano fica `started` sem nada rodando. É recuperável — a escolha de onda
+olha o **status do projeto** (`promoted`), então o `/start` seguinte tenta a mesma onda 1 — e agora o
+aviso da UI diz a verdade (item 2 acima). Trocar isso por "marcar depois" reabriria o furo de
+crash-safety, que é pior.
+
+### 6.3 Deploys desta frente (todos com digest verificado)
+
+| Imagem | Digest | Tag de rollback |
+|--------|--------|-----------------|
+| api (097 + rotas) | `8d331007…` | `rollback-genesis-api:pre-promote097-20260906` |
+| genesis-web (097) | `f2c1d471…` | `rollback-genesis-genesis-web:pre-promote097-20260906` |
+| api (`modelUsed`) | `40f933d0…` | `rollback-genesis-api:pre-modelused-20260906` |
+| genesis-web (motivo real + severidade) | `3491e4aa…` | `rollback-genesis-genesis-web:pre-startreason-20260906` |
+| api (guarda do `/stop`) | `95ac6b82…` | (a anterior serve: `pre-modelused`) |

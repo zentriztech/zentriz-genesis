@@ -72,7 +72,10 @@ import { DecomposeDialog, fmtUsd, type DecomposeSpecRef, type ProposalSource } f
 import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
 import { FactoryCertificateBadge, isCertified, type FactoryCertificate } from "@/components/FactoryCertificate";
 import { ResourceBadges } from "@/components/ResourceBadges";
-import { PromotionPlanDialog, type PromotionPlanItem, type PromotionPlanMeta } from "@/components/PromotionPlanDialog";
+import {
+  PromotionPlanDialog, describeStartResult,
+  type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
+} from "@/components/PromotionPlanDialog";
 
 interface SpecItem {
   id: string;
@@ -286,6 +289,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   const [planItems, setPlanItems] = useState<PromotionPlanItem[]>([]);
   const [planError, setPlanError] = useState<string | null>(null);
   const [startedNotice, setStartedNotice] = useState<string | null>(null);
+  const [startedSeverity, setStartedSeverity] = useState<"success" | "warning">("success");
   // Onda 4 — "Propostas de produto": lista tenant-scoped; `available=false` quando a rota não
   // existe (API anterior ao PR-3 → 404) → a seção some sem erro. resumeJob reabre o diálogo.
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
@@ -438,13 +442,16 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     try {
       const res = await apiPost<{
         promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
-        notes?: string | null; warnings?: string[]; edgesSource?: string | null;
+        notes?: string | null; warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
       }>(`/api/products/${productId}/promote`, {});
       setNotice(
         `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). Nada foi iniciado.`,
       );
       setPlanProduct({ id: productId, name: productName });
-      setPlanMeta({ promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [], edgesSource: res.edgesSource ?? null });
+      setPlanMeta({
+        promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [],
+        edgesSource: res.edgesSource ?? null, modelUsed: res.modelUsed ?? null,
+      });
       setPlanItems(res.plan ?? []);
       setPlanOpen(true);
       await load();
@@ -463,13 +470,11 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     setBusyId(`prod:${planProduct.id}`);
     setPlanError(null); setStartedNotice(null);
     try {
-      const res = await apiPost<{ wave: number; started: string[]; skipped: { projectId: string }[] }>(
-        `/api/products/${planProduct.id}/start`, {},
-      );
-      setStartedNotice(
-        `Onda ${res.wave} iniciada — ${res.started.length} projeto(s) na fábrica` +
-        (res.skipped.length > 0 ? `; ${res.skipped.length} aguardando dependência ou fila.` : "."),
-      );
+      const res = await apiPost<StartWaveResult>(`/api/products/${planProduct.id}/start`, {});
+      // Motivo do SERVIDOR, não palpite (ver describeStartResult).
+      const { message, severity } = describeStartResult(res);
+      setStartedNotice(message);
+      setStartedSeverity(severity);
       try {
         const fresh = await apiGet<{ promotion: PromotionPlanMeta | null; items: PromotionPlanItem[] }>(
           `/api/products/${planProduct.id}/promotion`,
@@ -1052,6 +1057,7 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
         starting={!!planProduct && busyId === `prod:${planProduct.id}`}
         startError={planError}
         startedNotice={startedNotice}
+        startedSeverity={startedSeverity}
       />
     </Box>
   );

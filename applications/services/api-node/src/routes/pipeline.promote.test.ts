@@ -161,3 +161,43 @@ describe("POST /api/projects/:id/promote — admite na fábrica SEM iniciar", ()
     expect(res.statusCode).toBe(404);
   });
 });
+
+/**
+ * Armadilha MEDIDA em prod (2026-09-06): parar um projeto que NUNCA começou o jogava em `stopped` e
+ * o produto ficava sem saída — `unpromote` recusa ("a fábrica já começou") e `promote` recusa
+ * (lifecycle ≠ draft). Freio é para quem está andando.
+ */
+describe("POST /api/projects/:id/stop — não freia quem nunca começou", () => {
+  function stopHandler(status: string) {
+    return (sql: string): { rows: unknown[]; rowCount?: number } => {
+      if (sql.includes("SELECT tenant_id, created_by FROM projects")) {
+        return { rows: [{ tenant_id: TENANT, created_by: "u1" }] };
+      }
+      if (sql.includes("SELECT status FROM projects")) return { rows: [{ status }] };
+      return { rows: [], rowCount: 1 };
+    };
+  }
+
+  it("projeto 'promoted' → 409 NOTHING_TO_STOP e NENHUM UPDATE para 'stopped'", async () => {
+    queryHandler = stopHandler("promoted");
+    const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/stop` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: "NOTHING_TO_STOP", status: "promoted" });
+    expect(captured.some((c) => c.sql.includes("UPDATE projects SET status = $1"))).toBe(false);
+  });
+
+  it("rascunho → 409 (mesma razão: não há execução para parar)", async () => {
+    queryHandler = stopHandler("draft");
+    const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/stop` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe("NOTHING_TO_STOP");
+  });
+
+  it("projeto em execução → 200 e o UPDATE para 'stopped' acontece", async () => {
+    queryHandler = stopHandler("running");
+    const res = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/stop` });
+    expect(res.statusCode).toBe(200);
+    const upd = captured.find((c) => c.sql.includes("UPDATE projects SET status = $1"));
+    expect(upd?.params?.[0]).toBe("stopped");
+  });
+});
