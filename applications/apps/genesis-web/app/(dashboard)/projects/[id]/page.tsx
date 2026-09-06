@@ -105,6 +105,10 @@ const CYBORG_LETTERS = ["C", "Y", "B", "O", "R", "G"];
 
 const ALLOW_RUN_STATUS = new Set([
   "draft", "spec_submitted", "pending_conversion", "cto_charter", "pm_backlog", "stopped", "failed",
+  // Migração 097: `promoted` = admitido na fábrica pela promoção do produto e aguardando início
+  // EXPLÍCITO. Sem entrar aqui, o único caminho para iniciar seria o /start do produto — e o
+  // projeto ficaria parado sem nenhuma ação na própria tela dele.
+  "promoted",
 ]);
 
 // §5.5 (migration 064): status pré-fábrica. Só um App pré-fábrica pode voltar ao INBOX

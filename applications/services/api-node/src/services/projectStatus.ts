@@ -41,6 +41,10 @@ export const SPEC_EDITABLE_STATUSES = new Set([
 export const FACTORY_OR_TERMINAL_STATUSES = [
   "running",
   "queued",
+  // Migração 097 — `promoted`: já ENTREGUE à fábrica (com ordem de interdependência gravada),
+  // só não iniciado. Não é rascunho de inbox: mover para o INBOX quebraria o plano do produto.
+  // A saída legítima é `POST /api/products/:id/unpromote`, que devolve tudo a `draft`.
+  "promoted",
   "cto_charter",
   "pm_backlog",
   "dev_qa",

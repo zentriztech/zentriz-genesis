@@ -15,7 +15,10 @@ import { claimSlotOrQueue, revertSlotClaim } from "./tenantLlmConfig.js";
 import { scheduleFactoryStart } from "./opsNotify.js";
 import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 
-const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed"]);
+// `promoted` (migração 097): produto promovido em bloco à fábrica, aguardando início EXPLÍCITO.
+// É elegível ao /run — é justamente assim que o /start do produto e a cascata de ondas o tiram de lá
+// (o estado é inerte para os laços automáticos; quem dispara é sempre um pedido, nunca um watchdog).
+const RUNNABLE_STATUSES = new Set(["draft", "spec_submitted", "pending_conversion", "stopped", "failed", "promoted"]);
 
 export interface DispatchResult {
   projectId: string;

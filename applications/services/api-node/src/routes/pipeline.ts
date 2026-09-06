@@ -11,6 +11,10 @@ import { checkSpecContentReady } from "../services/specContentGate.js";
 import { graduateFromInbox, demoteToInbox } from "../services/inbox.js";
 import { scheduleFactoryStart } from "../services/opsNotify.js";
 import { checkTenantBudget, budgetExceededMessage } from "../services/tenantCostCap.js";
+// Migração 097: promover (admitir sem iniciar) recomputa o ciclo de vida do produto e conta como
+// evento de valor Bancada→fábrica — os dois eram exclusivos do /run e da promoção de produto.
+import { recomputeProductLifecycle } from "../services/productLifecycle.js";
+import { emitValueEvent } from "../services/valueEvents.js";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? path.join(process.cwd(), "uploads");
 
@@ -60,6 +64,9 @@ const ALLOWED_STATUS_FOR_RUN = new Set([
   // /run nos projetos enfileirados quando abre slot; sem isto eles nunca sairiam da fila. O
   // claim atômico reserva o slot (ou re-enfileira se ainda não houver).
   "queued",
+  // Migração 097: `promoted` = produto promovido em bloco, esperando início explícito. Sem isto o
+  // /start do produto (e o botão "Iniciar") bateria em 409 no próprio estado que a promoção cria.
+  "promoted",
 ]);
 
 /**
@@ -91,6 +98,95 @@ export async function pipelineRoutes(app: FastifyInstance) {
     const content = loadRfcTemplate();
     if (!content) return reply.code(404).send({ error: "TEMPLATE_UNAVAILABLE", message: "Modelo de RFC não encontrado nesta instalação." });
     return reply.send({ kind: "rfc", dir: RFC_DIR, suggested_filename: "RFC-0001-<slug>.md", content });
+  });
+
+  // ── POST /api/projects/:id/promote — ADMITE a spec na fábrica SEM iniciar (migração 097) ──
+  //
+  // Requisito do Jean (2026-09-06): "os projetos devem ser promovidos a fabrica mas nao inciados
+  // automaticamente". Para um PRODUTO isso é `POST /api/products/:id/promote` (que também decide a
+  // ORDEM das ondas com um agente). Esta rota é o caso ATÔMICO: uma spec solta (INBOX) ou um único
+  // projeto — não há ordem a decidir, então não há chamada de LLM nem custo.
+  //
+  // Diferença do `/run`: aqui NADA é disparado — nenhum slot é reservado, nenhum runner é chamado.
+  // O projeto fica em `status='promoted'`, estado inerte (o watchdog G39 só drena `queued`), e sai
+  // dele por um pedido EXPLÍCITO (`/run`, ou o `Iniciar` do portal). Gates aplicados aqui são só os
+  // que custam zero e não dependem de predecessor: existência de spec `.md` e o gate de conteúdo
+  // (spec ainda template/placeholder). O gate de dependência NÃO se aplica: admitir todo mundo em
+  // ordem é justamente o que a promoção faz — a barreira entre ondas vive no início, não na admissão.
+  app.post<{ Params: { id: string } }>("/api/projects/:id/promote", async (request, reply) => {
+    const user = getUser(request);
+    const { id: projectId } = request.params;
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, projectId, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const project = (await client.query(
+        "SELECT status, product_id, title, created_by FROM projects WHERE id = $1", [projectId],
+      )).rows[0];
+      if (!project) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const status = String(project.status);
+      // Idempotente: promover duas vezes não é erro (o portal pode ter a lista velha em tela).
+      if (status === "promoted") {
+        return reply.send({ ok: true, status: "promoted", productId: project.product_id ?? null, graduated: false, alreadyPromoted: true });
+      }
+      if (status !== "draft") {
+        return reply.status(409).send({
+          code: "NOT_ON_WORKBENCH",
+          message: `Só um rascunho pode ser promovido (estado atual: "${status}").`,
+        });
+      }
+      const specFilePath = await getProjectSpecFilePath(client, projectId);
+      if (!specFilePath) {
+        return reply.status(400).send({
+          code: "BAD_REQUEST",
+          message: "Adicione uma spec em Markdown ao projeto antes de promovê-lo à fábrica.",
+        });
+      }
+      // Gate de conteúdo (incidente Cabral 2026-08-29): não admite template/placeholder na fábrica.
+      // Falha de leitura não bloqueia (a existência já foi checada acima) — mesmo racional do /run.
+      try {
+        const { readFileSync } = await import("fs");
+        const contentGate = checkSpecContentReady(readFileSync(specFilePath).toString("utf8"));
+        if (!contentGate.ok) return reply.status(422).send(contentGate.block);
+      } catch (err) {
+        request.log.warn({ projectId, err: String(err) }, "[Pipeline/promote] gate de conteúdo: falha ao ler spec (ignorado)");
+      }
+
+      // §4.11 (migração 064): um App que ENTRA na fábrica não pode viver no INBOX. Promover é
+      // entrar — então gradua para o produto homônimo aqui, e não só no /run. Falha ⇒ 500 e o
+      // projeto continua rascunho (nada meio-promovido).
+      const tenantId = user.tenantId ?? "";
+      let graduatedSolo: string | null = null;
+      if (tenantId && project.product_id) {
+        const prod = await client.query("SELECT is_inbox FROM products WHERE id = $1", [project.product_id]);
+        if ((prod.rows[0] as { is_inbox?: boolean } | undefined)?.is_inbox === true) {
+          try {
+            graduatedSolo = await graduateFromInbox(client, {
+              projectId, tenantId, createdBy: String(project.created_by), title: String(project.title ?? projectId),
+            });
+          } catch (err) {
+            request.log.error({ err, projectId }, "[Pipeline/promote] falha ao graduar App do INBOX");
+            return reply.status(500).send({ code: "GRADUATION_FAILED", message: "Falha ao promover o App para produto próprio." });
+          }
+        }
+      }
+      await client.query(
+        "UPDATE projects SET status = 'promoted', updated_at = now() WHERE id = $1 AND status = 'draft'", [projectId],
+      );
+      const productId = graduatedSolo ?? (project.product_id as string | null) ?? null;
+      // Sem isto o produto continuaria 'draft' e o portal não ofereceria "Iniciar produto".
+      await recomputeProductLifecycle(client, productId);
+      // Value meter: promoção Bancada→fábrica (o /run não emite este evento — só a promoção).
+      void emitValueEvent(pool, {
+        tenantId: user.tenantId ?? null,
+        eventType: "spec_promoted",
+        metadata: { project_id: projectId, product_id: productId, scope: "project", started: false },
+      });
+      request.log.info({ projectId, productId, graduated: !!graduatedSolo }, "[Pipeline/promote] spec admitida na fábrica (não iniciada)");
+      return reply.send({ ok: true, status: "promoted", productId, graduated: !!graduatedSolo });
+    } finally {
+      client.release();
+    }
   });
 
   app.post<{ Params: { id: string } }>("/api/projects/:id/run", async (request, reply) => {

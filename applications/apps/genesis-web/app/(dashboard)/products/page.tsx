@@ -6,6 +6,11 @@
 // lifecycle_status distingue produto ainda na Bancada (draft) de já em fábrica (running).
 // Promover produto inteiro é OPERAÇÃO → o master (zentriz_admin) também pode (C6).
 //
+// Migração 097 (requisito do Jean, 2026-09-06): "Promover à fábrica" entrega o produto TODO, na
+// ordem de interdependência decidida pelo arquiteto, e NÃO inicia nada — o produto fica
+// `lifecycle_status='promoted'`. Daí saem três ações: "Iniciar produto" (dispara só a onda
+// pendente mais baixa), "Ver ordem" (o plano por onda) e "Devolver" (volta tudo à Bancada).
+//
 // Excluir: com confirmação por reescrita do ID. Sem projetos → apaga de verdade. Com
 // projetos → arquiva (oculta do portal), preservando tudo no banco (apagar é arriscado).
 
@@ -36,10 +41,14 @@ import Inventory2OutlinedIcon from "@mui/icons-material/Inventory2Outlined";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
+import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
+import UndoRoundedIcon from "@mui/icons-material/UndoRounded";
 import { apiGet, apiPost, apiDeleteJson, withQuery } from "@/lib/api";
 import { tenantScopeStore } from "@/stores/tenantScopeStore";
 import { authStore } from "@/stores/authStore";
 import { ProductCertificateChip, type ProductFactoryCertificate } from "@/components/FactoryCertificate";
+import { PromotionPlanDialog, type PromotionPlanItem, type PromotionPlanMeta } from "@/components/PromotionPlanDialog";
 
 interface ProductRow {
   id: string;
@@ -58,9 +67,12 @@ interface ProductRow {
 }
 
 // Rótulo + cor do ciclo de vida do produto (Bancada vs fábrica vs terminal).
-function lifecycleChip(ls: string | null): { label: string; color: "default" | "info" | "success" | "warning" } {
+function lifecycleChip(ls: string | null): { label: string; color: "default" | "info" | "success" | "warning" | "secondary" } {
   switch (ls) {
     case "draft": return { label: "Na Bancada", color: "warning" };
+    // Migração 097: promovido = a fábrica RECEBEU o produto todo, na ordem, e não iniciou nada.
+    // Rótulo explícito porque "em fábrica" aqui seria mentira (nenhum projeto está rodando).
+    case "promoted": return { label: "Promovido — aguardando início", color: "secondary" };
     case "running": return { label: "Em fábrica", color: "info" };
     case "completed":
     case "accepted": return { label: "Concluído", color: "success" };
@@ -75,6 +87,14 @@ function ProductsPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // Estado do diálogo do PLANO de promoção (ordem por onda) — migração 097.
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planProduct, setPlanProduct] = useState<ProductRow | null>(null);
+  const [planMeta, setPlanMeta] = useState<PromotionPlanMeta | null>(null);
+  const [planItems, setPlanItems] = useState<PromotionPlanItem[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [startedNotice, setStartedNotice] = useState<string | null>(null);
 
   // Estado do diálogo de exclusão.
   const [deleteTarget, setDeleteTarget] = useState<ProductRow | null>(null);
@@ -100,15 +120,92 @@ function ProductsPageInner() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Promover produto inteiro à fábrica (dispara as raízes; ondas seguintes em cascata).
-  const promote = async (id: string) => {
-    setBusyId(id);
+  // ── Promoção do produto INTEIRO, na ordem de interdependência, SEM iniciar (migração 097) ──
+  // Antes esta ação promovia só as RAÍZES e as disparava na hora. Agora todos os projetos entram
+  // (status `promoted`, inerte) na ordem que o agente arquiteto decidiu, e o início é um clique
+  // separado — requisito do Jean (2026-09-06).
+  const promote = async (p: ProductRow) => {
+    setBusyId(p.id);
+    setPlanError(null); setStartedNotice(null);
     try {
-      const res = await apiPost<{ promoted?: string[] }>(`/api/products/${id}/promote`, {});
-      setNotice(`Produto promovido — ${res.promoted?.length ?? 0} raiz(es) em execução.`);
+      const res = await apiPost<{
+        promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
+        notes?: string | null; warnings?: string[]; edgesSource?: string | null;
+      }>(`/api/products/${p.id}/promote`, {});
+      setNotice(
+        `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). ` +
+        "Nada foi iniciado — use “Iniciar produto” quando quiser começar.",
+      );
+      setPlanProduct(p);
+      setPlanMeta({ promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [], edgesSource: res.edgesSource ?? null });
+      setPlanItems(res.plan ?? []);
+      setPlanOpen(true);
       await load();
     } catch (e) {
+      // O planejador é um agente: sem agents / JSON inválido / ciclo ⇒ 422 e NADA é promovido.
       setError(e instanceof Error ? e.message : "Falha ao promover o produto");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Plano vigente (a UI mostra a ordem por onda, com o status de cada projeto).
+  const openPlan = async (p: ProductRow) => {
+    setBusyId(p.id);
+    setPlanError(null); setStartedNotice(null);
+    try {
+      const res = await apiGet<{
+        promotion: PromotionPlanMeta | null; items: PromotionPlanItem[];
+      }>(`/api/products/${p.id}/promotion`);
+      setPlanProduct(p);
+      setPlanMeta(res.promotion);
+      setPlanItems(res.items ?? []);
+      setPlanOpen(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao carregar a ordem de promoção");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Início EXPLÍCITO: dispara só a onda mais baixa pendente; as seguintes entram pela cascata de
+  // accept, cada uma passando pelo gate de dependência.
+  const startProduct = async (p: ProductRow) => {
+    setBusyId(p.id); setPlanError(null); setStartedNotice(null);
+    try {
+      const res = await apiPost<{ wave: number; started: string[]; skipped: { projectId: string; reason?: string }[] }>(
+        `/api/products/${p.id}/start`, {},
+      );
+      const msg = `Onda ${res.wave} iniciada — ${res.started.length} projeto(s) na fábrica` +
+        (res.skipped.length > 0 ? `; ${res.skipped.length} não entrou(ram) ainda (dependência ou fila).` : ".");
+      setStartedNotice(msg);
+      setNotice(msg);
+      // Recarrega o plano para o diálogo refletir os status novos (e não prometer início já feito).
+      try {
+        const fresh = await apiGet<{ promotion: PromotionPlanMeta | null; items: PromotionPlanItem[] }>(
+          `/api/products/${p.id}/promotion`,
+        );
+        setPlanMeta(fresh.promotion); setPlanItems(fresh.items ?? []);
+      } catch { /* o notice acima já informou o resultado */ }
+      await load();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Falha ao iniciar o produto";
+      setPlanError(msg); setError(planOpen ? null : msg);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Saída da promoção: promovido volta a rascunho (a spec destrava). Recusado se a fábrica começou.
+  const unpromote = async (p: ProductRow) => {
+    setBusyId(p.id);
+    try {
+      const res = await apiPost<{ returned: string[] }>(`/api/products/${p.id}/unpromote`, {});
+      setNotice(`Produto devolvido à Bancada — ${res.returned.length} projeto(s) voltaram a rascunho.`);
+      setPlanOpen(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Falha ao devolver o produto à Bancada");
     } finally {
       setBusyId(null);
     }
@@ -254,13 +351,61 @@ function ProductsPageInner() {
                     Excluir virou ícone no topo do card (canto superior direito, junto ao título). */}
                 {p.lifecycle_status === "draft" && (
                   <Box sx={{ px: 2, pb: 2, pt: 0 }}>
-                    <Button
-                      size="small" fullWidth variant="contained" color="success"
-                      startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
-                      disabled={busy}
-                      onClick={() => promote(p.id)}
-                    >
-                      Promover à fábrica
+                    <Tooltip title="Envia TODOS os projetos do produto à fábrica, na ordem de interdependência decidida pelo arquiteto — sem iniciar nada.">
+                      <span>
+                        <Button
+                          size="small" fullWidth variant="contained" color="success"
+                          startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+                          disabled={busy}
+                          onClick={() => promote(p)}
+                        >
+                          Promover à fábrica
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                )}
+                {/* Migração 097 — produto PROMOVIDO e parado: início explícito, ver a ordem, ou voltar
+                    à Bancada. Sem estas ações, "promovido mas não iniciado" seria um beco sem saída. */}
+                {p.lifecycle_status === "promoted" && (
+                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                    <Tooltip title="Inicia a onda 1 do plano. As ondas seguintes entram quando a anterior for aceita.">
+                      <span>
+                        <Button
+                          size="small" fullWidth variant="contained" color="success"
+                          startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon sx={{ fontSize: "0.95rem" }} />}
+                          disabled={busy}
+                          onClick={() => startProduct(p)}
+                        >
+                          Iniciar produto
+                        </Button>
+                      </span>
+                    </Tooltip>
+                    <Stack direction="row" spacing={0.5} sx={{ mt: 0.75 }}>
+                      <Button size="small" fullWidth variant="outlined" color="inherit" disabled={busy}
+                        startIcon={<AccountTreeOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                        onClick={() => openPlan(p)} sx={{ fontSize: "0.68rem" }}>
+                        Ver ordem
+                      </Button>
+                      <Tooltip title="Devolve o produto e seus projetos à Bancada (a spec volta a ser editável). Recusado se a fábrica já começou.">
+                        <span style={{ width: "100%" }}>
+                          <Button size="small" fullWidth variant="outlined" color="warning" disabled={busy}
+                            startIcon={<UndoRoundedIcon sx={{ fontSize: "0.9rem" }} />}
+                            onClick={() => unpromote(p)} sx={{ fontSize: "0.68rem" }}>
+                            Devolver
+                          </Button>
+                        </span>
+                      </Tooltip>
+                    </Stack>
+                  </Box>
+                )}
+                {/* Produto já em fábrica: a ordem gravada continua consultável (leitura). */}
+                {p.lifecycle_status !== "draft" && p.lifecycle_status !== "promoted" && (
+                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                    <Button size="small" fullWidth variant="text" color="inherit" disabled={busy}
+                      startIcon={<AccountTreeOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                      onClick={() => openPlan(p)} sx={{ fontSize: "0.68rem" }}>
+                      Ver ordem de entrada
                     </Button>
                   </Box>
                 )}
@@ -269,6 +414,21 @@ function ProductsPageInner() {
           })}
         </Box>
       )}
+
+      {/* Migração 097 — ordem de entrada na fábrica (por onda). Abre ao promover e no "Ver ordem".
+          `onStart` vai sempre: o próprio diálogo só mostra o botão quando há onda pendente (o
+          `lifecycle_status` do card pode estar velho — o produto acabou de ser promovido). */}
+      <PromotionPlanDialog
+        open={planOpen}
+        onClose={() => { setPlanOpen(false); setPlanError(null); setStartedNotice(null); }}
+        productName={planProduct?.name ?? null}
+        meta={planMeta}
+        items={planItems}
+        onStart={planProduct ? () => { if (planProduct) void startProduct(planProduct); } : undefined}
+        starting={!!planProduct && busyId === planProduct.id}
+        startError={planError}
+        startedNotice={startedNotice}
+      />
 
       {/* Diálogo de exclusão — reescrever o ID + (se houver projetos) marcar a caixa. */}
       <Dialog open={!!deleteTarget} onClose={closeDelete} maxWidth="xs" fullWidth>

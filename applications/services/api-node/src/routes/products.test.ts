@@ -28,15 +28,17 @@ vi.mock("../middleware/auth.js", () => ({
 // Fake pool: captura (sql, params) e devolve linhas conforme o handler configurável.
 const captured: Array<{ sql: string; params: unknown[] }> = [];
 let queryHandler: (sql: string, params: unknown[]) => { rows: unknown[] } = () => ({ rows: [] });
+// O fake só tinha `connect`: uma rota que use `pool.query` direto (como o promote, que não pode
+// segurar um client do pool durante a chamada de LLM do planejador) batia em 500 no teste enquanto
+// funcionava em produção — o `pg.Pool` real tem os dois. O fake agora espelha isso.
+const fakeQuery = async (sql: string, params: unknown[] = []) => {
+  captured.push({ sql, params });
+  return queryHandler(sql, params);
+};
 vi.mock("../db/client.js", () => ({
   pool: {
-    connect: async () => ({
-      query: async (sql: string, params: unknown[] = []) => {
-        captured.push({ sql, params });
-        return queryHandler(sql, params);
-      },
-      release: () => {},
-    }),
+    query: fakeQuery,
+    connect: async () => ({ query: fakeQuery, release: () => {} }),
   },
 }));
 
@@ -46,6 +48,38 @@ vi.mock("../services/runnerDispatch.js", () => ({
   dispatchProjectRun: (poolArg: unknown, projectId: string) => dispatchSpy(poolArg, projectId),
 }));
 const flushImmediate = () => new Promise((r) => setImmediate(r));
+
+// Promoção do PRODUTO TODO (migração 097): a ORDEM é decisão de agente (chamada de LLM) — aqui o
+// planejador é isolado por mock e validamos a ORQUESTRAÇÃO (o que é escrito, o que NÃO é disparado).
+class FakePlanError extends Error {
+  code: string;
+  details?: Record<string, unknown>;
+  constructor(code: string, message: string, details?: Record<string, unknown>) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+}
+interface FakePlanItem {
+  projectId: string; title: string; position: number; wave: number; layer: string;
+  dependsOn: string[]; rationale: string;
+}
+let plannerResult: (() => Promise<{
+  items: FakePlanItem[]; notes: string; warnings: string[];
+  edgesSource: "triggers" | "agent"; modelUsed: string; inputTokens: number; outputTokens: number;
+}>) | null = null;
+const plannerSpy = vi.fn(async () => {
+  if (!plannerResult) throw new FakePlanError("NO_PROMOTABLE_PROJECTS", "sem projetos");
+  return plannerResult();
+});
+vi.mock("../services/promotionPlanner.js", () => ({
+  PromotionPlanError: FakePlanError,
+  buildPromotionPlan: (...args: unknown[]) => plannerSpy(...(args as [])),
+  debitPromotionPlannerUsage: async () => {},
+}));
+vi.mock("../services/productLifecycle.js", () => ({
+  recomputeProductLifecycle: async () => ({ changed: false }),
+}));
 
 let app: FastifyInstance;
 
@@ -173,58 +207,110 @@ describe("PATCH /api/products/:id — autorização por papel (B3)", () => {
   });
 });
 
-describe("POST /api/products/:id/promote — B2 (promover da Bancada)", () => {
+describe("POST /api/products/:id/promote — o PRODUTO TODO, na ORDEM, SEM iniciar (migração 097)", () => {
   const R1 = "44444444-4444-4444-8444-444444444444";
   const R2 = "55555555-5555-4555-8555-555555555555";
 
-  // Roteia as 3 queries do promote: SELECT produto, SELECT raízes, UPDATE lifecycle.
-  function promoteHandler(opts: { tenant?: string | null; lifecycle?: string; roots?: string[]; updRowCount?: number }) {
-    const { tenant = TENANT, lifecycle = "draft", roots = [R1, R2], updRowCount = 1 } = opts;
+  // Plano de 2 ondas: R1 (banco, onda 1) → R2 (backend, onda 2, depende de R1).
+  const twoWavePlan = () => ({
+    items: [
+      { projectId: R1, title: "DB", position: 1, wave: 1, layer: "banco", dependsOn: [], rationale: "sem predecessor" },
+      { projectId: R2, title: "API", position: 1, wave: 2, layer: "backend", dependsOn: [R1], rationale: "consome o banco" },
+    ] as FakePlanItem[],
+    notes: "ordem por interdependência",
+    warnings: [] as string[],
+    edgesSource: "triggers" as const,
+    modelUsed: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    inputTokens: 1200,
+    outputTokens: 300,
+  });
+
+  // Roteia as queries do promote: SELECT produto, UPDATE lifecycle, UPDATE dos projetos.
+  function promoteHandler(opts: {
+    tenant?: string | null; lifecycle?: string; updRowCount?: number; promotedIds?: string[];
+    pendingWave?: Array<{ project_id: string; wave: number }>;
+  }) {
+    const {
+      tenant = TENANT, lifecycle = "draft", updRowCount = 1, promotedIds = [R1, R2],
+      pendingWave = [{ project_id: R1, wave: 1 }, { project_id: R2, wave: 2 }],
+    } = opts;
     return (sql: string) => {
       if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id")) {
-        return { rows: [{ id: PROD_ID, tenant_id: tenant, lifecycle_status: lifecycle, is_inbox: false }] };
+        return { rows: [{ id: PROD_ID, tenant_id: tenant, name: "Produto X", lifecycle_status: lifecycle, is_inbox: false }] };
       }
-      if (sql.includes("p.status = 'draft'")) return { rows: roots.map((id) => ({ id })) };
-      if (sql.includes("UPDATE products SET lifecycle_status = 'running'")) return { rows: [], rowCount: updRowCount } as { rows: unknown[]; rowCount: number };
+      if (sql.includes("UPDATE products SET lifecycle_status = 'promoted'")) {
+        return { rows: [], rowCount: updRowCount } as { rows: unknown[]; rowCount: number };
+      }
+      if (sql.includes("UPDATE projects SET status = 'promoted'")) {
+        return { rows: promotedIds.map((id) => ({ id })) };
+      }
+      if (sql.includes("FROM product_promotion_items i JOIN projects p")) return { rows: pendingWave };
       return { rows: [] };
     };
   }
 
-  it("master promove produto draft → 202, dispara as raízes (dispatch-only)", async () => {
+  beforeEach(() => { plannerResult = async () => twoWavePlan(); plannerSpy.mockClear(); });
+
+  it("promove TODOS os projetos do plano e NÃO inicia nenhum (requisito do Jean)", async () => {
     queryHandler = promoteHandler({ tenant: OTHER_TENANT });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(202);
     const body = JSON.parse(res.body);
-    expect(body.lifecycleStatus).toBe("running");
-    expect(body.promoted).toEqual([R1, R2]);
+    expect(body.lifecycleStatus).toBe("promoted");   // nunca "running": nada começou
+    expect(body.started).toBe(false);
+    expect(body.promoted).toEqual([R1, R2]);         // o produto TODO, não só as raízes
+    expect(body.waves).toBe(2);
+    expect(body.plan.map((i: FakePlanItem) => i.projectId)).toEqual([R1, R2]);
     await flushImmediate();
-    expect(dispatchSpy).toHaveBeenCalledTimes(2);
-    expect(dispatchSpy.mock.calls.map((c) => c[1])).toEqual([R1, R2]);
-    // NUNCA re-decompõe (G1): sem chamada a decomposeProduct.
+    expect(dispatchSpy).not.toHaveBeenCalled();      // ← "promovidos mas não iniciados"
+    // O plano fica gravado (auditoria da ordem) e cada item também.
+    expect(captured.some((q) => q.sql.includes("INSERT INTO product_promotions"))).toBe(true);
+    expect(captured.filter((q) => q.sql.includes("INSERT INTO product_promotion_items"))).toHaveLength(2);
+    expect(captured.some((q) => q.sql === "COMMIT")).toBe(true);
+    // NUNCA re-decompõe (G1): sem criação de produto.
     expect(captured.some((q) => q.sql.includes("INSERT INTO products"))).toBe(false);
   });
 
-  it("produto fora da Bancada (running) → 409 NOT_ON_WORKBENCH, não dispara", async () => {
+  it("com {start:true} dispara SOMENTE a onda 1 (barreira entre ondas)", async () => {
+    queryHandler = promoteHandler({});
+    const res = await app.inject({
+      method: "POST", url: `/api/products/${PROD_ID}/promote`, payload: { start: true },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(JSON.parse(res.body).started).toBe(true);
+    await flushImmediate();
+    await flushImmediate();
+    expect(dispatchSpy.mock.calls.map((c) => c[1])).toEqual([R1]); // R2 é da onda 2
+  });
+
+  it("planejador recusa (ciclo/id inválido/sem spec) → 422 e NADA muda de estado", async () => {
+    queryHandler = promoteHandler({});
+    plannerResult = null; // planejador lança PromotionPlanError
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
+    expect(res.statusCode).toBe(422);
+    expect(JSON.parse(res.body).code).toBe("NO_PROMOTABLE_PROJECTS");
+    await flushImmediate();
+    expect(captured.some((q) => /UPDATE products SET lifecycle_status|UPDATE projects SET status/.test(q.sql))).toBe(false);
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("produto fora da Bancada (running) → 409 NOT_ON_WORKBENCH, sem chamar o planejador", async () => {
     queryHandler = promoteHandler({ lifecycle: "running" });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body).code).toBe("NOT_ON_WORKBENCH");
     await flushImmediate();
+    expect(plannerSpy).not.toHaveBeenCalled(); // não gasta LLM em produto fora da Bancada
     expect(dispatchSpy).not.toHaveBeenCalled();
   });
 
-  it("sem raízes em rascunho → 409 NO_PROMOTABLE_ROOTS", async () => {
-    queryHandler = promoteHandler({ roots: [] });
-    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
-    expect(res.statusCode).toBe(409);
-    expect(JSON.parse(res.body).code).toBe("NO_PROMOTABLE_ROOTS");
-  });
-
-  it("dupla promoção concorrente (UPDATE rowCount 0) → 409 ALREADY_PROMOTED", async () => {
+  it("dupla promoção concorrente (UPDATE rowCount 0) → 409 ALREADY_PROMOTED com ROLLBACK", async () => {
     queryHandler = promoteHandler({ updRowCount: 0 });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body).code).toBe("ALREADY_PROMOTED");
+    expect(captured.some((q) => q.sql === "ROLLBACK")).toBe(true);
+    expect(captured.some((q) => q.sql.includes("INSERT INTO product_promotions"))).toBe(false);
     await flushImmediate();
     expect(dispatchSpy).not.toHaveBeenCalled();
   });
@@ -246,6 +332,82 @@ describe("POST /api/products/:id/promote — B2 (promover da Bancada)", () => {
     queryHandler = () => ({ rows: [] });
     const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/promote` });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("POST /api/products/:id/start e /unpromote — início EXPLÍCITO e volta à Bancada", () => {
+  const R1 = "44444444-4444-4444-8444-444444444444";
+  const R2 = "55555555-5555-4555-8555-555555555555";
+  const PROMO_ID = "99999999-9999-4999-8999-999999999999";
+
+  it("/start sem plano vivo → 409 NOT_PROMOTED (não dispara nada)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id")) {
+        return { rows: [{ id: PROD_ID, tenant_id: TENANT, lifecycle_status: "draft", is_inbox: false }] };
+      }
+      return { rows: [] }; // nenhuma promoção viva
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/start` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("NOT_PROMOTED");
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it("/start dispara só a onda mais baixa ainda promovida e marca o plano como iniciado", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("lifecycle_status, is_inbox FROM products WHERE id")) {
+        return { rows: [{ id: PROD_ID, tenant_id: TENANT, lifecycle_status: "promoted", is_inbox: false }] };
+      }
+      if (sql.includes("FROM product_promotions WHERE product_id")) return { rows: [{ id: PROMO_ID }] };
+      if (sql.includes("FROM product_promotion_items i JOIN projects p")) {
+        return { rows: [{ project_id: R1, wave: 1 }, { project_id: R2, wave: 2 }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/start` });
+    expect(res.statusCode).toBe(202);
+    const body = JSON.parse(res.body);
+    expect(body.wave).toBe(1);
+    expect(body.started).toEqual([R1]);
+    expect(dispatchSpy.mock.calls.map((c) => c[1])).toEqual([R1]);
+    expect(captured.some((q) => q.sql.includes("SET status = 'started'"))).toBe(true);
+  });
+
+  it("/unpromote com a fábrica já em andamento → 409 ALREADY_STARTED (nada volta a rascunho)", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("lifecycle_status FROM products WHERE id")) {
+        return { rows: [{ id: PROD_ID, tenant_id: TENANT, lifecycle_status: "promoted" }] };
+      }
+      if (sql.includes("COUNT(*) AS n FROM projects WHERE product_id")) {
+        return { rows: [{ status: "promoted", n: "1" }, { status: "cto_charter", n: "1" }] };
+      }
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/unpromote` });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).code).toBe("ALREADY_STARTED");
+    expect(captured.some((q) => q.sql.includes("SET status = 'draft'"))).toBe(false);
+    expect(captured.some((q) => q.sql === "ROLLBACK")).toBe(true);
+  });
+
+  it("/unpromote com todos ainda promovidos → devolve produto e projetos à Bancada", async () => {
+    queryHandler = (sql) => {
+      if (sql.includes("lifecycle_status FROM products WHERE id")) {
+        return { rows: [{ id: PROD_ID, tenant_id: TENANT, lifecycle_status: "promoted" }] };
+      }
+      if (sql.includes("COUNT(*) AS n FROM projects WHERE product_id")) {
+        return { rows: [{ status: "promoted", n: "2" }] };
+      }
+      if (sql.includes("SET status = 'draft'")) return { rows: [{ id: R1 }, { id: R2 }] };
+      return { rows: [] };
+    };
+    const res = await app.inject({ method: "POST", url: `/api/products/${PROD_ID}/unpromote` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.lifecycleStatus).toBe("draft");
+    expect(body.returned).toEqual([R1, R2]);
+    expect(captured.some((q) => q.sql.includes("SET status = 'canceled'"))).toBe(true);
+    expect(captured.some((q) => q.sql === "COMMIT")).toBe(true);
   });
 });
 

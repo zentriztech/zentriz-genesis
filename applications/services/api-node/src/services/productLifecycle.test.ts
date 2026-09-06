@@ -59,6 +59,31 @@ describe("deriveProductLifecycle", () => {
     // 2 aceitos + 1 bloqueado: NÃO é accepted (não são todos aceitos) e há bloqueio → stalled
     expect(deriveProductLifecycle(["accepted", "accepted", "blocked_cyborg"])).toBe("stalled_waiting_human");
   });
+
+  // ── Migração 097: promovido à fábrica ≠ em execução ────────────────────────
+  it("097: TODOS 'promoted' → promoted (admitido na fábrica, NADA iniciado)", () => {
+    expect(deriveProductLifecycle(["promoted"])).toBe("promoted");
+    expect(deriveProductLifecycle(["promoted", "promoted", "promoted"])).toBe("promoted");
+    // projeto sem spec fica fora do plano e continua rascunho — o produto segue "promovido"
+    expect(deriveProductLifecycle(["promoted", "draft"])).toBe("promoted");
+  });
+
+  it("097: promovido + qualquer projeto JÁ RODANDO → running (a onda 1 começou)", () => {
+    expect(deriveProductLifecycle(["promoted", "queued"])).toBe("running");
+    expect(deriveProductLifecycle(["promoted", "running"])).toBe("running");
+    expect(deriveProductLifecycle(["promoted", "promoted", "dev_qa"])).toBe("running");
+  });
+
+  it("097: promovido convivendo com aceito → partially_accepted (promoted conta como em andamento)", () => {
+    expect(deriveProductLifecycle(["accepted", "promoted"])).toBe("partially_accepted");
+    expect(deriveProductLifecycle(["accepted", "accepted", "promoted"])).toBe("partially_accepted");
+  });
+
+  it("097: falha/bloqueio continuam com precedência sobre 'promoted'", () => {
+    expect(deriveProductLifecycle(["promoted", "failed"])).toBe("failed");
+    expect(deriveProductLifecycle(["promoted", "blocked_cyborg"])).toBe("stalled_waiting_human");
+    expect(deriveProductLifecycle(["promoted", "needs_spec_input"])).toBe("stalled_waiting_human");
+  });
 });
 
 describe("recomputeProductLifecycle — I/O + isenção do INBOX (§4.13, migration 064)", () => {
