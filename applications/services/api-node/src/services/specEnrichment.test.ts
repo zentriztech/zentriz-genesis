@@ -5,6 +5,7 @@ import {
   enrichSpecs,
   fetchDepSignals,
   fetchGapCounts,
+  fetchSpecFileCounts,
   type HistoryBucket,
   type SpecForEnrichment,
   type Queryable,
@@ -174,6 +175,30 @@ describe("enrichSpecs (orquestrador)", () => {
     expect(out[0].gapCountIgnored).toBe(1);
     expect(out[1].gapCount).toBeNull();       // B nunca validada
     expect(out[1].gapCountIgnored).toBe(0);
+  });
+
+  // ── UI/UX 2026-09-06: totalizador de ARQUIVOS no card da Bancada ──
+  it("anexa fileCount por spec (spec dividida em N arquivos não pode aparecer como 1)", async () => {
+    const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const fake: Queryable = {
+      query: async (sql: string) => {
+        if (sql.includes("project_spec_files")) return { rows: [{ id: A, n: 11 }] };
+        if (sql.includes("pipeline_runs")) return { rows: [] };
+        return { rows: [] };
+      },
+    };
+    const out = await enrichSpecs(fake, [spec({ id: A }), spec({ id: B })]);
+    expect(out[0].fileCount).toBe(11);
+    expect(out[1].fileCount).toBe(0); // sem arquivo em project_spec_files → 0, não "1"
+  });
+
+  it("fetchSpecFileCounts degrada para mapa vazio quando o SQL falha", async () => {
+    const fake: Queryable = {
+      query: async () => { throw new Error("relation project_spec_files does not exist"); },
+    };
+    const map = await fetchSpecFileCounts(fake, ["11111111-1111-1111-1111-111111111111"]);
+    expect(map.size).toBe(0);
   });
 
   it("fetchGapCounts degrada para mapa vazio quando o SQL falha", async () => {

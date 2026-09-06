@@ -1087,10 +1087,20 @@ function SpecEditor({
     </Stack>
   );
 
+  /**
+   * UI/UX 2026-09-06 (item 3 do Jean: "sempre que um arquivo for carregado nos editores e preview,
+   * rolar para o início do texto"). Chave de ESCOPO (projeto + arquivo aberto): usada como `key`
+   * do editor e do preview, o que os REMONTA ao trocar de arquivo — DOM novo nasce com
+   * `scrollTop = 0`. Trocar de arquivo mantendo o mesmo nó deixava o CodeMirror/preview na
+   * posição de rolagem do arquivo ANTERIOR (no meio de um arquivo grande, parecia que o
+   * conteúdo estava cortado). Não entra no `key` a aba nem o `value`: digitar não pode remontar.
+   */
+  const scopeKey = `${projectId ?? ""}|${activeFilePath ?? ""}`;
+
   // Onda 3 (d): editor com REALCE DE SINTAXE por tipo de arquivo (CodeMirror + tema vscodeDark),
   // no lugar do antigo <textarea> de cor única. `fileExt` decide a linguagem (default markdown).
   const editorArea = (h: string) => (
-    <SpecCodeEditor value={value} onChange={onChange} ext={fileExt} height={h} />
+    <SpecCodeEditor key={scopeKey} value={value} onChange={onChange} ext={fileExt} height={h} />
   );
 
   const content = (areaH: string) => {
@@ -1100,8 +1110,9 @@ function SpecEditor({
     // que é a sintaxe do arquivo. Fora de .md/.markdown, o preview é o texto cru monoespaçado.
     if (editorTab === "preview") {
       const md = /^(md|markdown|mdx)$/i.test(fileExt);
-      return md ? <MarkdownPreview content={value} /> : (
-        <Box component="pre" sx={{
+      // `key={scopeKey}` nos dois: trocar de arquivo remonta → rolagem volta ao início (item 3).
+      return md ? <MarkdownPreview key={scopeKey} content={value} /> : (
+        <Box key={scopeKey} component="pre" sx={{
           height: areaH, width: "100%", minWidth: 0, overflow: "auto", m: 0, p: 1.5,
           bgcolor: "background.default", fontFamily: "monospace", fontSize: "0.78rem",
           whiteSpace: "pre-wrap", wordBreak: "break-word",
@@ -1153,7 +1164,7 @@ function SpecEditor({
           }}
         />
         <Box sx={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-          <MarkdownPreview content={value} />
+          <MarkdownPreview key={scopeKey} content={value} />
         </Box>
       </Box>
     );
@@ -1185,10 +1196,11 @@ function SpecChatPanel({
   onApply, onDiscard, onOverwrite,
   gapCount = null, onResolveGaps,
   fileGapCount = null, onResolveFileGaps,
+  gapReconcile = null,
   isEvolution = false, onEvolvePlan,
   recovered = null, onApplyRecovered, onDiscardRecovered,
   autonomyOn = false, onAutonomyToggle, autonomy = null, autonomyError = null,
-  autonomyStarting = false, onStopAutonomy, onShowAutonomy,
+  autonomyStarting = false, onStopAutonomy, onShowAutonomy, onStartAutonomy,
 }: {
   // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
   // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
@@ -1206,6 +1218,14 @@ function SpecChatPanel({
   // PR-4 (F2) — mesmo botão, escopado no ARQUIVO aberto. null = sem validação/sem escopo carregado.
   fileGapCount?: number | null;
   onResolveFileGaps?: () => void;
+  /**
+   * UI/UX 2026-09-06 (item 2 do Jean: "revisar todos os totalizadores de GAPs"). Os números da
+   * tela batem entre si (todos contam finding sem triagem), MAS a soma dos badges por arquivo
+   * podia ser MENOR que o badge da aba GAPs sem nenhuma explicação: os GAPs que o roteador não
+   * conseguiu atribuir a um arquivo (`unrouted`) não apareciam em lugar nenhum. Esta linha
+   * reconcilia o total com o que está visível por arquivo.
+   */
+  gapReconcile?: { total: number; unrouted: number; fileCount: number } | null;
   // T4.3 — contexto por-arquivo + fluxo de aplicação com confirmação (opcionais:
   // quando ausentes, o painel opera no modo clássico de spec inteira).
   activeFilePath?: string | null;
@@ -1243,6 +1263,14 @@ function SpecChatPanel({
   onStopAutonomy?: () => void;
   /** UI/UX 2026-09-06 — leva o usuário à aba "Autonomia" do editor (fecha overlays do mobile). */
   onShowAutonomy?: () => void;
+  /**
+   * UI/UX 2026-09-06 (Jean: "no arquivo principal existe o `Ativar modo autônomo`, por que os
+   * demais não têm essa opção?"). Inicia o laço autônomo DIRETO, sem passar pelo turno único da
+   * spec inteira — é o que o escopo de arquivo precisa: o laço é POR PROJETO e, com spec dividida,
+   * ele já roda em modo `per_file` (percorre arquivo a arquivo). Antes o controle só existia no
+   * arquivo primário, escondendo justamente o caminho correto de uma spec grande.
+   */
+  onStartAutonomy?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1463,7 +1491,9 @@ function SpecChatPanel({
             "Autonomia" do editor: no chat ele ocupava a coluna inteira (no mobile, a tela toda) e
             empurrava o campo de mensagem para fora da vista. O estado continua à vista — o que
             mudou é o espaço que ele cobra. */}
-        {(!fileMode || autonomyRun?.mode === "per_file") && autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
+        {/* UI/UX 2026-09-06 — a linha aparece em QUALQUER escopo. O laço é do PROJETO: esconder o
+            estado com um arquivo aberto fazia a spec mudar sozinha sem nada na tela explicando. */}
+        {autonomyRun && (autonomyRunning || autonomyRun.rounds.length > 0) && (
           <Tooltip title={autonomyRun.lastError
             ? `${AUTONOMY_LABEL[autonomyRun.status]} — ${autonomyRun.lastError}`
             : AUTONOMY_LABEL[autonomyRun.status]}>
@@ -1500,8 +1530,27 @@ function SpecChatPanel({
             </Stack>
           </Tooltip>
         )}
-        {autonomyError && !fileMode && (
+        {/* O erro de iniciar/parar o laço também vale em escopo de arquivo (o botão está lá agora). */}
+        {autonomyError && (
           <Alert severity="warning" sx={{ mb: 0.75, fontSize: "0.7rem", py: 0 }}>{autonomyError}</Alert>
+        )}
+        {/* UI/UX 2026-09-06 — item 2 do Jean: os totalizadores agora FECHAM na tela. Em spec
+            dividida, a soma dos badges por arquivo podia dar menos que o badge da aba GAPs, e
+            nada dizia por quê: os GAPs que o roteador não conseguiu atribuir a um arquivo
+            (`unrouted`) eram invisíveis — e o botão por-arquivo nunca os alcança. */}
+        {gapReconcile && gapReconcile.fileCount > 1 && gapReconcile.total > 0 && (
+          <Tooltip title={gapReconcile.unrouted > 0
+            ? "GAPs \"sem arquivo\" são os que o roteador não conseguiu atribuir (afetam a spec como um todo). O botão por-arquivo não os alcança — use o modo autônomo, que percorre a spec inteira."
+            : "Todos os GAPs ativos estão atribuídos a um arquivo — a soma dos badges da lista fecha com o total."}>
+            <Typography variant="caption" color="text.secondary"
+              sx={{ display: "block", mb: 0.5, fontSize: "0.64rem", lineHeight: 1.4 }}>
+              {gapReconcile.total} GAP(s) ativo(s) na spec
+              {fileMode && fileGapCount != null ? ` · ${fileGapCount} neste arquivo` : ""}
+              {gapReconcile.unrouted > 0
+                ? ` · ${gapReconcile.unrouted} sem arquivo atribuído`
+                : " · todos atribuídos a um arquivo"}
+            </Typography>
+          </Tooltip>
         )}
         {/* Onda 1 — Resolver GAPs (só na spec inteira): manda o CTO corrigir os findings da
             validação adversarial, com o relatório + arquivos irmãos como contexto.
@@ -1554,6 +1603,36 @@ function SpecChatPanel({
               </span>
             </Tooltip>
           </>
+        )}
+        {/* UI/UX 2026-09-06 — item 1 do Jean: "por que os demais arquivos não têm 'Ativar modo
+            autônomo'?". O laço é POR PROJETO e, em spec dividida, o servidor já o roda em modo
+            `per_file` (fila de arquivos). Esconder o controle no escopo de arquivo escondia o
+            caminho CORRETO de uma spec grande. Aqui ele é um BOTÃO, não um checkbox: no escopo de
+            arquivo não existe o turno único da spec inteira para um checkbox "modificar" — e o
+            rótulo diz o alcance real (TODOS os arquivos), para ninguém confundir com o botão
+            de um arquivo só logo abaixo. */}
+        {fileMode && onStartAutonomy && (
+          <Tooltip title={autonomy?.enabled === false
+            ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
+            : (gapCount ?? 0) > 0
+              ? `O laço percorre a spec INTEIRA — arquivo a arquivo — resolvendo, salvando e revalidando, enquanto sobrar GAP 🔴/🟡, até ${autonomy?.maxRoundsAllowed ?? 5} rodada(s). Roda no servidor: continua mesmo se você fechar esta tela.`
+              : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar"}>
+            <span>
+              <Button fullWidth size="small" variant="outlined" color="secondary"
+                startIcon={autonomyStarting
+                  ? <CircularProgress size={14} color="inherit" />
+                  : <SmartToyOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
+                disabled={autonomyRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0}
+                onClick={onStartAutonomy}
+                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
+                {autonomyRunning
+                  ? "Laço autônomo em andamento…"
+                  : (gapCount ?? 0) > 0
+                    ? `Modo autônomo em TODOS os arquivos (${gapCount})`
+                    : "Modo autônomo — sem GAPs em aberto"}
+              </Button>
+            </span>
+          </Tooltip>
         )}
         {/* PR-4 (F2) — Resolver GAPs DESTE ARQUIVO. Aparece só com um arquivo aberto: é o caminho
             correto numa spec dividida (o botão da spec inteira reemitiria o documento todo). */}
@@ -2729,6 +2808,17 @@ export default function SpecPage() {
     return map;
   }, [gapScope]);
 
+  /**
+   * UI/UX 2026-09-06 (item 2) — insumo da linha que RECONCILIA os totalizadores de GAP: total
+   * ativo da spec, quanto está no arquivo aberto e quanto ficou SEM arquivo atribuído. Sem o
+   * `unrouted` à vista, a soma dos badges da lista dava menos que o badge da aba GAPs e o
+   * usuário não tinha como saber que aqueles GAPs só o caminho da spec inteira alcança.
+   */
+  const gapReconcile = useMemo(() => {
+    if (!gapScope) return null;
+    return { total: gapScope.totalActive, unrouted: gapScope.unrouted, fileCount: gapScope.fileCount };
+  }, [gapScope]);
+
   const handleResolveFileGaps = useCallback(async () => {
     if (chatSending || !editProjectId || !activeFile) return;
     if (treeDirty) {
@@ -3144,6 +3234,8 @@ export default function SpecPage() {
     autonomyStarting,
     onStopAutonomy: handleStopAutonomy,
     onShowAutonomy: handleShowAutonomy,
+    // UI/UX 2026-09-06 — inicia o laço a partir de QUALQUER arquivo (o laço é do projeto).
+    onStartAutonomy: handleStartAutonomy,
   };
 
   // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
@@ -3218,6 +3310,8 @@ export default function SpecPage() {
     currentFilePath: activeFile?.path ?? null,
     onOpen: handleOpenTreeFile,
     gapsByPath,
+    // UI/UX 2026-09-06 (item 2) — o que NÃO está nos badges, dito no cabeçalho da lista.
+    gapsUnrouted: gapScope?.unrouted ?? null,
     editable: specEditable,
     onDeleteFile: handleDeleteSpecFile,
     headerActions: treeHeaderActions,
@@ -3331,7 +3425,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
-              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps} gapReconcile={gapReconcile}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -3375,7 +3469,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
-              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps} gapReconcile={gapReconcile}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -3636,7 +3730,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
-              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps} gapReconcile={gapReconcile}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
@@ -3828,7 +3922,7 @@ export default function SpecPage() {
               pending={pendingApply} applying={applying} applyError={applyError} conflict={applyConflict}
               onApply={handleApplyFile} onDiscard={handleDiscardApply} onOverwrite={handleOverwriteApply}
               gapCount={gapCount} onResolveGaps={handleResolveGaps}
-              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps}
+              fileGapCount={fileGapCount} onResolveFileGaps={handleResolveFileGaps} gapReconcile={gapReconcile}
               isEvolution={isEvolution} onEvolvePlan={handleEvolvePlan}
               recovered={recoveredSpec} onApplyRecovered={handleApplyRecovered} onDiscardRecovered={handleDiscardRecovered}
               {...autonomyPanelProps}
