@@ -142,8 +142,9 @@ const db = {
     if (s.startsWith("SELECT status FROM projects")) return { rows: [{ status: projectStatus }], rowCount: 1 };
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
     if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
-    if (s.startsWith("SELECT status FROM spec_validation_runs")) {
-      return { rows: [{ status: validationStatus }], rowCount: 1 };
+    if (s.startsWith("SELECT status, stage_b_ran FROM spec_validation_runs")) {
+      // GAP-13 (migração 099): `true` = validação COMPLETA — é o caso destes testes.
+      return { rows: [{ status: validationStatus, stage_b_ran: true }], rowCount: 1 };
     }
 
     if (s.startsWith("INSERT INTO spec_autonomy_runs")) {
@@ -576,6 +577,74 @@ describe("GAP-5 — manifesto que JÁ existe é editado, não recriado", () => {
     expect(onDisk("README.md")).toBe(revised);
     expect(run!.files_done).toContain("README.md");
     expect(run!.last_error).toBeNull();
+  });
+
+  /**
+   * GAP-14 — medido em prod 2026-09-06 (run `c3757985`, rodada 2): o CTO reescreveu o `README.md`
+   * (15.720 → 19.392 chars) trocando `archetype: backend-service` por `backend_api`, que não existe no
+   * catálogo. O Estágio A virou BLOCKER estrutural, o adversarial não rodou e a validação seguinte
+   * mediu 1 GAP em vez de 21 (é o produtor do GAP-13). O veto de manifesto só cobria a CRIAÇÃO.
+   */
+  describe("GAP-14 — a edição não pode ESTRAGAR um manifesto válido", () => {
+    const VALIDO = [
+      "---", "archetype: backend-service", "stack: [nodejs-20]", "depends_on: []", "---", "",
+      "# Manifesto", "", "## 1. Escopo", "escopo ".repeat(60), "",
+    ].join("\n");
+
+    beforeEach(() => {
+      makeTree([
+        { path: "00-indice.md", content: INDEX, isPrimary: true },
+        { path: "backend/01-api.md", content: API },
+        { path: "README.md", content: VALIDO },
+      ]);
+      process.env.UPLOAD_DIR = root;
+      findings = [gap("README.md", "warning", "manifesto sem seção de deploy")];
+      unroutedFindings = [];
+    });
+
+    it("🔴 arquétipo FORA do catálogo → recusa, disco INTACTO e motivo registrado", async () => {
+      const r = await start();
+      await advanceAutonomyRun(db, r.id);
+      const quebrado = `${VALIDO}\n## 2. Deploy\ndocker.\n`.replace("backend-service", "backend_api");
+      await ctoReturns(r.id, quebrado);
+      expect(onDisk("README.md")).toBe(VALIDO);
+      const log = JSON.stringify(run!.rounds);
+      expect(log).toContain("ARCHETYPE_UNKNOWN");
+      // Sai da fila deste passe (como toda falha de arquivo), mas NÃO como rodada aplicada.
+      expect(log).toContain("\"applied\":false");
+    });
+
+    it("🔴 frontmatter removido do manifesto válido → recusa (a fábrica não leria mais o projeto)", async () => {
+      const r = await start();
+      await advanceAutonomyRun(db, r.id);
+      await ctoReturns(r.id, `# Manifesto\n\n## 1. Escopo\n${"escopo ".repeat(60)}\n## 2. Deploy\ndocker.\n`);
+      expect(onDisk("README.md")).toBe(VALIDO);
+      expect(JSON.stringify(run!.rounds)).toContain("NO_FRONTMATTER");
+    });
+
+    it("edição que PRESERVA o frontmatter é escrita normalmente", async () => {
+      const r = await start();
+      await advanceAutonomyRun(db, r.id);
+      const bom = `${VALIDO}\n## 2. Deploy\ndocker compose em um nó.\n`;
+      await ctoReturns(r.id, bom);
+      expect(onDisk("README.md")).toBe(bom);
+      expect(run!.files_done).toContain("README.md");
+    });
+
+    it("manifesto que JÁ era inválido continua editável (a regra é não-regressão, não perfeição)", async () => {
+      makeTree([
+        { path: "00-indice.md", content: INDEX, isPrimary: true },
+        { path: "backend/01-api.md", content: API },
+        { path: "README.md", content: body("Manifesto sem frontmatter", 4) },
+      ]);
+      process.env.UPLOAD_DIR = root;
+      const r = await start();
+      await advanceAutonomyRun(db, r.id);
+      const revisado = `${onDisk("README.md")}\n## 99. Deploy\ndocker.\n`;
+      await ctoReturns(r.id, revisado);
+      expect(onDisk("README.md")).toBe(revisado);
+      expect(run!.files_done).toContain("README.md");
+    });
   });
 
   it("o manifesto AUSENTE continua indo pelo caminho de criação (marcado na rodada)", async () => {

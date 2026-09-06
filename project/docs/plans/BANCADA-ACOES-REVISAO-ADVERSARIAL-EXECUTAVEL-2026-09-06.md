@@ -413,3 +413,71 @@ reemitir o arquivo inteiro, e nesse caso o guard histórico tem de continuar val
 O que ainda protege a spec: teto de encolhimento em chars (30%), âncora inexistente/ambígua,
 `MARKER_IN_REPLACE` (GAP-9), snapshot obrigatório antes da escrita e o versionamento com restore.
 8 testes novos (5 na guarda, 1 dentro do laço, e os dois casos negativos preservados).
+
+---
+
+## GAP-13 — o laço aceitava a contagem de uma validação que não olhou a spec
+
+### O que foi medido (prod, 2026-09-06, run de autonomia `c3757985`)
+
+```
+spec_validation_runs  8e3286b2 | failed | 21:25:32.733 -> 21:25:32.963 | 1 finding
+rounds[4].note = "Validação failed: 21 → 1 GAP(s) importante(s) (🔴 1 · 🟡 0 · ℹ️ 0)"
+rounds[5].note = "Validação failed: 1 → 21 GAP(s) importante(s) (🔴 13 · 🟡 8 · ℹ️ 1)"
+```
+
+A validação durou **230 ms** (as reais levam ~5 min). O Estágio A achou um blocker estrutural
+(`archetype_unknown`, ver GAP-14) e — **por desenho correto** — o Estágio B não roda em spec quebrada:
+não se paga LLM adversarial para julgar um documento que a fábrica nem sabe rotear.
+
+O defeito não é o pulo: é o laço tratar as duas contagens como a mesma medida. Aquele `1` não era
+"a spec com 1 GAP", era **1 GAP medido sobre outra superfície**. O laço registrou `21 → 1` como
+**progresso** (zerando `no_progress_streak`) e, no tick seguinte, `1 → 21` como **regressão**. As duas
+leituras são ficção — e a primeira é a perigosa: perto do teto de passes, o laço anunciaria
+convergência com 21 GAPs reais em aberto.
+
+### Correção
+
+`spec_validation_runs.stage_b_ran` (migração **099**) — porque "quantos findings de B vieram" **não**
+responde à pergunta: zero findings de B também é o resultado legítimo de um B que rodou e não achou
+nada. Derivar seria opinião; o fato nasce no `processValidationRun` e é consumido depois, noutro
+processo, pelo tick do autônomo.
+
+Com `stage_b_ran = false`, o `checkValidation`:
+
+- **mantém** a última contagem comparável (`gaps_current` intocado);
+- **não** conta progresso (o streak anda — nada foi provado);
+- **nunca** declara `succeeded` (zero GAPs numa leitura parcial é vitória fictícia);
+- diz o motivo no log da rodada e no chat, e o `stalled` aponta o bloqueador estrutural a resolver.
+
+`NULL` (run anterior à migração) preserva o comportamento histórico: só `false` explícito marca parcial.
+
+---
+
+## GAP-14 — o laço rebaixava o próprio manifesto a bloqueador estrutural
+
+### O que foi medido (prod, 2026-09-06, run `c3757985`, rodada 2)
+
+```
+rounds[1].note = "`README.md` salvo no disco (15720 → 19392 chars)."
+8e3286b2 finding único (stage_a): {"file":"README.md","anchor":"archetype_unknown",
+  "severity":"blocker","title":"Arquétipo desconhecido: backend_api",
+  "rationale":"Fora do catálogo v1.0.0 — a fábrica não sabe processá-lo. Válidos: backend-service, …"}
+```
+
+O CTO-editor reescreveu o manifesto e trocou `archetype: backend-service` por `backend_api`
+(sublinhado, fora do catálogo). O veto `assessManifest` existia **só no caminho de CRIAÇÃO** (A5.3);
+na **edição** o laço podia quebrar o único arquivo cujo frontmatter a fábrica lê para rotear o projeto
+— e foi isso que produziu o GAP-13 na validação seguinte.
+
+### Correção (duas pontas, nenhuma decide conteúdo)
+
+1. **Fato para o agente** (`manifestFactBlock`, `routes/specChat.ts`): editando o `README.md` da raiz,
+   o pedido leva o catálogo fechado de arquétipos, o aviso de que valor fora dele é bloqueador, e as
+   regras que o Estágio A reaplica (`---` na primeira linha, sem `spec_hash`/`status_spec`).
+2. **Veto de NÃO-REGRESSÃO** (`applyFileRound`, `services/specAutonomy.ts`): a escrita é recusada
+   quando o manifesto **era válido e a revisão o invalida**. Um manifesto que já estava sem frontmatter
+   **continua editável** — adicioná-lo pode levar rodadas e é um GAP legítimo daquele arquivo. A regra
+   é não-regressão, não perfeição.
+
+9 testes novos (4 no laço por arquivo, 4 na leitura parcial da validação, 1 no bloco de fatos).

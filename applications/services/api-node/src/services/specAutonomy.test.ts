@@ -88,8 +88,8 @@ const db = {
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
     if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
 
-    if (s.startsWith("SELECT status FROM spec_validation_runs")) {
-      return { rows: [{ status: validationStatus }], rowCount: 1 };
+    if (s.startsWith("SELECT status, stage_b_ran FROM spec_validation_runs")) {
+      return { rows: [{ status: validationStatus, stage_b_ran: stageBRan }], rowCount: 1 };
     }
 
     if (s.startsWith("INSERT INTO spec_autonomy_runs")) {
@@ -155,6 +155,8 @@ const db = {
 } as any;
 
 let validationStatus = "passed";
+/** GAP-13 (migração 099): `false` = estágio adversarial NÃO rodou → contagem não comparável. */
+let stageBRan: boolean | null = true;
 
 function writeSpec(content: string): void {
   const dir = mkdtempSync(join(tmpdir(), "spec-autonomy-"));
@@ -170,6 +172,7 @@ beforeEach(() => {
   projectStatus = "draft";
   latestRunId = "run-0";
   validationStatus = "passed";
+  stageBRan = true;
   insertFails23505 = false;
   snapshotFails = false;
   sqlLog.length = 0;
@@ -396,6 +399,60 @@ describe("validação dentro do laço", () => {
     await advanceAutonomyRun(db, r.id);
     expect(run!.status).toBe("pending");
     expect(run!.no_progress_streak).toBe(1);
+  });
+
+  // GAP-13 (medido em prod 2026-09-06, run c3757985): a validação `8e3286b2` durou 230 ms, achou 1
+  // blocker estrutural no Estágio A e por isso NÃO rodou o adversarial. O laço registrou "21 → 1 GAP"
+  // como progresso e, no tick seguinte, "1 → 21" como regressão. Nenhum dos dois é medida da spec.
+  describe("GAP-13 — contagem de validação PARCIAL não é comparável", () => {
+    it("estágio B pulado → NÃO conta progresso, mantém a contagem e diz o motivo", async () => {
+      const r = await reachValidating(5);
+      expect(run!.gaps_current).toBe(2);            // 1 blocker + 1 warning da validação completa
+      stageBRan = false;
+      validationStatus = "failed";
+      findings = [{ severity: "blocker" }];          // a leitura parcial "só" vê 1 GAP
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.gaps_current).toBe(2);            // 🔴 o "1" NÃO virou a nova verdade
+      expect(run!.no_progress_streak).toBe(1);      // nada foi provado → não zera o streak
+      const note = JSON.stringify(run!.rounds);
+      expect(note).toContain("PARCIAL");
+      expect(note).toContain("NÃO são comparáveis");
+    });
+
+    it("🔴 zero GAPs numa validação PARCIAL não declara `succeeded` (vitória fictícia)", async () => {
+      const r = await reachValidating(5);
+      stageBRan = false;
+      validationStatus = "passed";
+      findings = [];                                 // o Estágio A não achou nada — mas ninguém julgou o resto
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.status).not.toBe("succeeded");
+    });
+
+    it("parcial no segundo passe sem progresso → stalled explicando o bloqueador estrutural", async () => {
+      const r = await reachValidating(5);
+      await advanceAutonomyRun(db, r.id);           // rodada 1 completa, GAPs iguais → streak 1
+      expect(run!.no_progress_streak).toBe(1);
+      await advanceAutonomyRun(db, r.id);           // dispara rodada 2
+      job = { status: "done", specMarkdown: BASE_SPEC + "\n\noutra tentativa do CTO.", error: null };
+      await advanceAutonomyRun(db, r.id);           // aplica + valida
+      stageBRan = false;
+      validationStatus = "failed";
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("stalled");
+      expect(String(run!.last_error)).toContain("estrutural");
+    });
+
+    it("`stage_b_ran` NULL (run anterior à migração 099) mantém a comparação de antes", async () => {
+      const r = await reachValidating(5);
+      stageBRan = null;
+      findings = [{ severity: "blocker" }];
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("pending");
+      expect(run!.gaps_current).toBe(1);            // comportamento histórico intocado
+      expect(run!.no_progress_streak).toBe(0);
+    });
   });
 
   it("validação ainda rodando → nenhuma transição (o tick só espera)", async () => {

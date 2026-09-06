@@ -899,6 +899,24 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(payload.user_message).toContain("Global do Stage A");
   });
 
+  /**
+   * GAP-14 — medido em prod 2026-09-06 (run `c3757985`, rodada 2): editando o `README.md` o CTO
+   * trocou `archetype: backend-service` por `backend_api` (fora do catálogo), o Estágio A virou
+   * BLOCKER estrutural e a validação seguinte nem chegou ao adversarial. O veto no `specAutonomy`
+   * impede a escrita; este bloco é o outro lado: o agente recebe o FATO antes de decidir.
+   */
+  it("manifestFactBlock: só no README.md, com o catálogo fechado e as regras do frontmatter", async () => {
+    const { manifestFactBlock } = await import("./specChat.js");
+    expect(manifestFactBlock("backend/01-api.md")).toBe("");
+    expect(manifestFactBlock("docs/README.md")).toBe("");        // manifesto é o da RAIZ
+    const block = manifestFactBlock("README.md");
+    expect(block).toContain("FATOS DO MANIFESTO");
+    expect(block).toContain("backend-service");                  // catálogo real, não lista fixa
+    expect(block).toContain("BLOQUEADOR de validação");
+    expect(block).toContain("spec_hash");
+    expect(manifestFactBlock(" readme.md ")).toBe(block);        // o nome não é case-sensitive
+  });
+
   it("rawMaxTokensFor: piso de 8k, cresce com o arquivo, teto de 32k (guard do SDK)", async () => {
     const { rawMaxTokensFor } = await import("./specChat.js");
     expect(rawMaxTokensFor(0)).toBe(8_000);
