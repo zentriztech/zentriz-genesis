@@ -924,3 +924,93 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(FILE_JOB_DEADLINE_MS).toBe(12 * 60_000);
   });
 });
+
+/**
+ * A5.5 — o irmão CITADO pelo GAP tem de chegar ao prompt.
+ *
+ * Medido em prod (run `dd587b75`, passe 1): 21 findings resolvidos e o total SUBINDO de 20 → 24,
+ * porque o editor só via o arquivo alvo. Ele escolhia um lado da contradição ("422") e o outro
+ * arquivo passava a ser o divergente ("400 vs 422") na validação seguinte: o laço pagava LLM para
+ * empurrar o mesmo conflito de arquivo em arquivo. Estes testes provam o transporte do fato (o irmão)
+ * e a instrução que diz o que fazer com ele.
+ */
+describe("POST /api/spec-chat — A5.5: irmão citado pelo GAP vai como contexto só-leitura", () => {
+  const DIVERGENTE = {
+    file: "definicao-de-pronto.md", line: null, severity: "blocker",
+    title: "Status HTTP de erro de validação divergente: 400 vs 422",
+    rationale: "Este arquivo diz 400, mas api-entregas-entregadores.md especifica 422.",
+    source: "stage_b", category: "contradiction", anchor: null,
+  };
+  let root = "";
+
+  beforeEach(async () => {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = (await import("node:path")).default;
+    root = await mkdtemp(path.join(tmpdir(), "a55-route-"));
+    await writeFile(path.join(root, "api-entregas-entregadores.md"), "# API\n\nErro de validação devolve 422 UNPROCESSABLE_ENTITY.\n", "utf-8");
+    await writeFile(path.join(root, "definicao-de-pronto.md"), "# DoD\n\nErro de validação devolve 400.\n", "utf-8");
+    delete process.env.SPEC_GAP_SIBLING_CONTEXT;
+
+    queryHandler = (sql) => {
+      const s = sql.replace(/\s+/g, " ");
+      if (s.includes("SELECT finding_routes")) return { rows: [{}] };
+      if (s.includes("UPDATE spec_validation_runs")) return { rows: [] };
+      if (s.includes("FROM project_spec_files")) {
+        return { rows: [
+          { filename: "api-entregas-entregadores.md", rel_dir: null, file_path: `${root}/api-entregas-entregadores.md`, is_primary: false },
+          { filename: "definicao-de-pronto.md", rel_dir: null, file_path: `${root}/definicao-de-pronto.md`, is_primary: false },
+        ] };
+      }
+      if (s.includes("FROM spec_validation_runs")) return { rows: [{ id: "run-1", created_at: new Date().toISOString(), status: "failed", findings: [DIVERGENTE] }] };
+      if (s.includes("FROM projects")) return { rows: [{ tenant_id: TENANT, created_by: USER_ID }] };
+      return { rows: [] };
+    };
+  });
+
+  const resolver = () => app.inject({
+    method: "POST", url: "/api/spec-chat",
+    payload: { specMarkdown: "# DoD\n\nErro de validação devolve 400.\n", projectId: PROJ, filePath: "definicao-de-pronto.md", resolveGaps: true },
+  });
+
+  it("o conteúdo do irmão citado entra no prompt, marcado como só leitura", async () => {
+    rawResponse = JSON.stringify({ response: "# DoD revisada" });
+    expect((await resolver()).statusCode).toBe(202);
+    const payload = JSON.parse(editorCall()!.body) as { user_message: string; prompt_override: string };
+    expect(payload.user_message).toContain("ARQUIVOS IRMÃOS CITADOS PELOS GAPs");
+    expect(payload.user_message).toContain("IRMÃO SÓ LEITURA: `api-entregas-entregadores.md`");
+    expect(payload.user_message).toContain("422 UNPROCESSABLE_ENTITY");
+    // O irmão vem ANTES do conteúdo a editar: quando o editor chega no alvo já sabe o que o irmão define.
+    expect(payload.user_message.indexOf("IRMÃO SÓ LEITURA"))
+      .toBeLessThan(payload.user_message.indexOf("CONTEÚDO ATUAL DO ARQUIVO"));
+  });
+
+  it("a instrução de divergência acompanha o bloco (mostrar o irmão sem regra só convida a copiá-lo)", async () => {
+    rawResponse = JSON.stringify({ response: "# DoD revisada" });
+    await resolver();
+    const { prompt_override } = JSON.parse(editorCall()!.body) as { prompt_override: string };
+    expect(prompt_override).toContain("DIVERGÊNCIA ENTRE ARQUIVOS");
+    expect(prompt_override).toContain("NUNCA invente um terceiro valor");
+    expect(prompt_override).toContain("só o move");
+  });
+
+  it("SPEC_GAP_SIBLING_CONTEXT=off volta ao comportamento anterior sem deploy", async () => {
+    process.env.SPEC_GAP_SIBLING_CONTEXT = "off";
+    rawResponse = JSON.stringify({ response: "# DoD revisada" });
+    expect((await resolver()).statusCode).toBe(202);
+    const { user_message } = JSON.parse(editorCall()!.body) as { user_message: string };
+    expect(user_message).not.toContain("IRMÃO SÓ LEITURA");
+    expect(user_message).toContain("CONTEÚDO ATUAL DO ARQUIVO");
+    delete process.env.SPEC_GAP_SIBLING_CONTEXT;
+  });
+
+  it("irmão ilegível no disco não impede a rodada (é contexto, não pré-condição)", async () => {
+    const { rm } = await import("node:fs/promises");
+    await rm(`${root}/api-entregas-entregadores.md`);
+    rawResponse = JSON.stringify({ response: "# DoD revisada" });
+    expect((await resolver()).statusCode).toBe(202);
+    const { user_message } = JSON.parse(editorCall()!.body) as { user_message: string };
+    expect(user_message).not.toContain("IRMÃO SÓ LEITURA");
+    expect(user_message).toContain("Status HTTP de erro de validação divergente");
+  });
+});

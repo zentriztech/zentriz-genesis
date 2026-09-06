@@ -1,0 +1,169 @@
+> **Jean Ol'Bar** — AI Engineer · jean@zentriz.com.br
+
+# Bancada — revisão adversarial EXECUTÁVEL de todas as ações (humanas e automáticas)
+
+**Data:** 2026-09-06 · **Repo:** `zentriz-genesis` · **Branch:** `dev` → `main`
+**Cobaia:** produto **NVX LastMile** (projeto `e2a1988c-bb4b-437b-a7b3-96192b837717`, spec dividida em 11 arquivos, 22 GAPs ativos)
+**Ambiente de prova:** PRODUÇÃO (`3.220.66.113` / `https://genesis.zentriz.com.br`) — este host é só build.
+
+Pedido do Jean (verbatim):
+
+> "monte um plano adversarial para revisar, testar, e resolver GAPs e erros em todas as acoes da bancada
+> acionadas por humano ou automaticas, use o projeto `NVX LastMile`, execute essa revisao adversarial até
+> que cada acao obtenha sucesso no que ela propoe; modo autonomo, com email do plano e email de cada
+> tarefa realizada e final;"
+
+---
+
+## 0. Definição de "sucesso" (o critério que este plano usa)
+
+Uma ação **não** é aprovada por devolver `200`/`202`. Ela é aprovada quando o **efeito que ela promete**
+é medido em prod, no NVX LastMile:
+
+| Nível | O que exige |
+|-------|-------------|
+| **P0 — responde** | a rota devolve o contrato documentado (status + campos) |
+| **P1 — efeito** | o estado mudou onde a ação diz mudar (linha no banco, byte no disco, container, chunk servido) |
+| **P2 — propósito** | o efeito **resolve** o que a ação propõe (ex.: "Resolver GAPs" tem de FAZER o GAP desaparecer da próxima validação, não só editar o arquivo) |
+| **P3 — hostil** | a ação recusa o caminho ruim com motivo verdadeiro (concorrência, base velha, teto, falta de LLM) e **sem** corromper nada |
+
+Uma ação só é fechada em **P3**. Falha em qualquer nível = GAP registrado, corrigido **no código do
+agente/rota** (nunca "consertando o dado à mão") e re-testado.
+
+---
+
+## 1. Inventário das ações (o universo a cobrir)
+
+### 1.1 Acionadas por HUMANO (Bancada `/spec` e telas irmãs)
+
+| # | Ação | Recurso | O que promete |
+|---|------|---------|---------------|
+| H1 | Criar spec (upload / colar) | `POST /api/specs` (multipart, `draft=true`) | nasce projeto em `draft`, nada inicia |
+| H2 | Salvar rascunho | `PATCH /api/projects/:id/spec-content` | conteúdo persiste, sem iniciar fábrica |
+| H3 | Editar arquivo | `PUT /api/projects/:id/spec-files/*` (If-Match) | grava o byte e recusa base velha (409) |
+| H4 | Dividir spec | `POST …/spec-split` (agente) | N arquivos coerentes, primário = índice |
+| H5 | Chat do CTO (spec inteira) | `POST /api/spec-chat` | revisão aplicável, histórico durável |
+| H6 | Chat por arquivo | `POST /api/spec-chat` + `filePath` | edita UM arquivo, preserva o resto |
+| H7 | Validar spec | `POST …/spec-validate` | findings ancorados por arquivo |
+| H8 | Resolver GAPs (spec inteira) | `POST /api/spec-chat` `resolveGaps` | GAPs caem na validação seguinte |
+| H9 | **Resolver GAPs por arquivo** | idem + `filePath` | idem, escopado (é o caminho do laço) |
+| H10 | Aplicar revisão ao arquivo | `PUT …/spec-files/*` com If-Match | grava só se a base não mudou |
+| H11 | Modo autônomo (liga/desliga) | `POST …/spec-autonomy` | laço roda sozinho até o critério |
+| H12 | Versões da spec / restaurar | `GET/POST …/spec-versions` | snapshot restaurável, com pré-condição |
+| H13 | Promover (spec / produto) | `POST …/promote` | admite INERTE (`promoted`), em ondas |
+| H14 | Ver ordem e iniciar onda | `GET /promotion` + `POST /start` | dispara só a onda pendente mais baixa |
+| H15 | Devolver à Bancada | `POST …/unpromote` | volta ao estado editável |
+| H16 | Interromper execução | `POST …/stop` | SIGTERM→SIGKILL, sem promessa falsa |
+| H17 | Apagar projeto/produto | `DELETE …` | remove com guarda por digitação |
+| H18 | Certificado Factory | `GET …/certificate` | projeta os gates REAIS do dispatch |
+
+### 1.2 Acionadas por MÁQUINA (sem humano na frente)
+
+| # | Ação automática | Onde vive | O que promete |
+|---|-----------------|-----------|---------------|
+| A1 | Coleta de jobs do CTO | `specChatWorker` | nenhum resultado pago se perde |
+| A2 | Expiração de zumbis | `expireZombieSpecChatJobs` | job morto não é reofertado |
+| A3 | Laço autônomo por arquivo | `specAutonomy` (`per_file`) | percorre a fila e reduz GAPs |
+| A4 | Roteador de GAPs (Stage A) | `finding_routes` (LLM) | todo GAP global recebe arquivo |
+| A5 | Validador adversarial | `spec_validation_runs` (3 votos) | findings reprodutíveis e ancorados |
+| A6 | Gate semântico | juiz LLM | reprova mudança que não resolve o GAP |
+| A7 | Learning loop (G7) | `lessons_corpus` + CAG | lição entra no prompt seguinte |
+| A8 | Planejador de promoção | `promotionPlanner` (097) | ordem por dependência, em ondas |
+| A9 | Watchdog da fila | dispatcher | drena `queued`, ignora `promoted` |
+| A10 | Breaker / fallback de modelo | `circuit_scope`, deny-cache | degrada sem travar o produto todo |
+
+---
+
+## 2. Ataques adversariais por ação (o que vou tentar quebrar)
+
+Para cada ação, o teste hostil que costuma revelar o defeito real:
+
+- **Concorrência:** duas edições sobre a mesma base (`If-Match`) → a segunda tem de dar 409, nunca sobrescrever.
+- **Teto de saída:** arquivo grande + muitos GAPs → não pode descartar 100% do trabalho pago (foi o defeito A5.2).
+- **Escopo:** ação de arquivo não pode tocar irmão; ação de spec não pode virar ação de produto (foi o B1).
+- **Verdade do rótulo:** o que o botão diz é o que a rota faz (foi o B2/B6).
+- **Tenant:** master sem escopo não pode ver/afetar produto de outro tenant (foi o B4).
+- **Sem LLM:** com modelo negado/403, a ação tem de FALHAR com motivo — nunca cair em automação fixa (Lei do Jean).
+- **Idempotência:** disparar duas vezes não paga dois LLMs nem duplica linha.
+- **Reinício:** matar a api no meio → o resultado tem de ser recuperável (`agents_job_id`).
+- **Base velha:** aplicar revisão feita sobre conteúdo que já mudou → recusa explícita.
+- **Encolhimento/corrupção:** resultado que apaga seção → vetado por `assessRevisionIntegrity`.
+
+---
+
+## 3. Ondas de execução (ordem obrigatória: medir → atacar → corrigir → re-medir)
+
+| Onda | Foco | Ações | Fecha quando |
+|------|------|-------|--------------|
+| **O1** | O caminho que estava QUEBRADO | H9, A3 | todos os 11 arquivos do NVX LastMile passam pelo CTO-editor sem truncar e os GAPs caem |
+| **O2** | Escrita e concorrência | H2, H3, H10, H12 | If-Match provado nos dois sentidos + restore com pré-condição |
+| **O3** | Geração de conhecimento | H7, A4, A5, A6 | todo GAP tem arquivo; findings ancorados; gate semântico com juiz real |
+| **O4** | Autonomia ponta a ponta | H11, A1, A2, A7 | laço roda só, coleta sobrevive a restart, lição entra no prompt (medido) |
+| **O5** | Fábrica | H13, H14, H15, H16, A8, A9 | promover ≠ iniciar; ordem respeitada; stop honesto |
+| **O6** | Destrutivas e leitura | H1, H4, H17, H18 | guardas por digitação + certificado igual ao gate real |
+
+Cada onda: **baseline medido → ataque → GAP → correção no código → re-teste → e-mail**.
+
+---
+
+## 4. Registro de execução
+
+> Preenchido durante a execução. Cada item traz o **fato medido** (id/linha/log), não impressão.
+
+### O1 — Resolver GAPs por arquivo + laço autônomo
+
+**Baseline (antes de qualquer correção), medido em prod:**
+`privacidade-lgpd.md` (47.816 chars, 9 GAPs / 5 blockers) falhou **4/4** —
+jobs `548f7273` (socket 180 s), `dc0b4d6b`, `febcaa74`, `aeaefbc1`, os três últimos com
+`stop_reason=max_tokens`, `in=27.481 / out=32.000`, **69.058 chars gerados e descartados**.
+
+**GAP-1 🔴 (fechado):** o formato "devolva o arquivo completo" faz o custo de saída crescer com o
+TAMANHO DO ARQUIVO, não com o tamanho da correção → nenhum teto resolve. Correção: `A5.2` —
+CTO-editor entrega blocos `SEARCH/REPLACE`, aplicados pela api com veto de corrupção
+(`services/specFileEdits.ts`), teto de entrada 48k→120k, `model_used` gravado também no erro.
+Commit `08e2056` → `main` `db281a9`; imagem api `sha256:a3d16976…` verificada em prod.
+
+**Efeito medido do GAP-1 (run `dd587b75`, passe 1):** o A5.2 FUNCIONOU no nível do arquivo —
+**21 findings resolvidos**, entre eles os **9 de `privacidade-lgpd.md`** que antes falhavam 4/4.
+Foi essa rodada boa que expôs os três GAPs seguintes.
+
+**GAP-2 🔴 (fechado): o GAP que nenhuma ação da Bancada sabia resolver.**
+O finding `no_readme` do Estágio A ("Spec sem manifesto") aponta um arquivo que **não existe**.
+"Resolver GAPs por arquivo" edita arquivo existente; o CTO da spec inteira reescreve o primário —
+logo o GAP sustentava rodada do laço **para sempre** e nenhuma spec dividida podia chegar a
+`succeeded`. Correção `A5.3`: rodada de MANIFESTO dentro do laço (`startManifestRound` /
+`applyManifestRound` em `services/specAutonomy.ts` + `dispatchManifestJob` em `routes/specChat.ts`).
+O conteúdo é do AGENTE (Lei 100% LLM): o código entrega só os fatos (título, arquétipo derivado de
+`extra.project_type`, árvore de arquivos, spec primária) e **veta** com 8 códigos o que o Estágio A
+reprovaria na validação seguinte (`services/specManifest.ts`) — sem arquétipo no banco, o catálogo
+inteiro vai como MENU em vez de o código adivinhar. Parser de frontmatter extraído para
+`lib/frontmatter.ts` para que veto e validador usem **a mesma regra** (parsers divergentes trocariam
+um GAP por outro). 16 testes de veto + 4 de laço.
+
+**GAP-3 🔴 (fechado): o teto de rodadas era GLOBAL, não por passe.**
+`AUTONOMY_MAX_FILE_ROUNDS = 12` contava rodadas do laço TODO enquanto a UI anunciava "até 5 passes".
+Medido: `a4ad542f` **exhausted em `round=12, passes=1`** e `dd587b75` **idem** — numa spec de 11
+arquivos o primeiro passe consome o orçamento inteiro e o passe 2 **nunca acontece**. Correção: o
+teto passa a ser **por passe** (12 arquivos por passe) com trava absoluta nova
+`AUTONOMY_MAX_TOTAL_FILE_ROUNDS = 30` para o custo do laço; a mensagem de `exhausted` diz **qual**
+teto bateu.
+
+**GAP-4 🔴 (fechado): o editor por arquivo MOVIA a contradição em vez de resolvê-la.**
+Ainda em `dd587b75` passe 1, com 21 findings resolvidos, o total de GAPs importantes **subiu 20 → 24**
+(validação `cedb11df` 10blk/10wrn → `a01ba932` 13blk/11wrn), com 24 findings NOVOS. O par decisivo:
+`RESOLVIDO` em `api-entregas-entregadores.md` — "Conflito de status HTTP para VALIDATION_ERROR:
+422 vs 400" e, na MESMA rodada, `NOVO` em `definicao-de-pronto.md` — "Status HTTP de erro de
+validação divergente: 400 vs 422". Causa: `buildGapFileRequest` mandava **só o arquivo alvo + o mapa
+do produto** (`loadChatContext(..., { siblingBodies: false })`), então o editor escolhia um lado do
+conflito às cegas e o outro arquivo virava o divergente. Medido: **19 de 25** findings citam um `.md`
+irmão no `rationale`. Correção `A5.5`: `services/specSiblingContext.ts` seleciona por **citação
+literal** os irmãos que os próprios GAPs mencionam (orçamento 60k total / 20k por irmão, índice
+primário por último, truncamento **com aviso** para o modelo não concluir "o irmão não define isso") e
+os entrega como bloco SÓ LEITURA; a regra `DIVERGÊNCIA ENTRE ARQUIVOS` entra nos dois prompts do
+CTO-editor: adote o valor do arquivo que **define** o assunto, nunca invente um terceiro, nunca
+"resolva" só aqui deixando o irmão divergente. Best-effort por design (é contexto, não pré-condição)
+e reversível sem deploy por `SPEC_GAP_SIBLING_CONTEXT=off`. 9 + 4 testes.
+
+**Critério de fechamento da O1 (a re-medir em prod depois do deploy):** numa rodada nova do laço,
+(a) o `no_readme` desaparece, (b) o passe 2 acontece de fato e (c) a contagem total de GAPs
+importantes **CAI** — não basta resolver findings, o saldo tem de ser negativo.

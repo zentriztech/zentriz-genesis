@@ -28,6 +28,7 @@ import { UUID_RE } from "../lib/tenantScope.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
 import { normalizeCategory, enrichRunFindings, registerRecurrences } from "./findingTriage.js";
+import { parseFrontmatter } from "../lib/frontmatter.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -132,18 +133,6 @@ export async function computeCurrentSpecHash(
 }
 
 // ── Estágio A — determinístico, sempre, custo zero ───────────────────────────
-
-function parseFrontmatter(content: string): Record<string, string> | null {
-  if (!content.startsWith("---\n")) return null;
-  const end = content.indexOf("\n---", 4);
-  if (end === -1) return null;
-  const out: Record<string, string> = {};
-  for (const line of content.slice(4, end).split("\n")) {
-    const idx = line.indexOf(":");
-    if (idx > 0) out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-  }
-  return out;
-}
 
 export function runStageA(files: Array<SpecFileRow & { content: string }>, opts: { evolution?: boolean } = {}): ValidationFinding[] {
   const findings: ValidationFinding[] = [];
