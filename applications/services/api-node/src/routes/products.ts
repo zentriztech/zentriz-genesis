@@ -45,6 +45,11 @@ import { createRateLimiter } from "../services/rateLimit.js";
 import { checkTenantBudget, budgetExceededMessage } from "../services/tenantCostCap.js";
 import { costUsd } from "../lib/modelPricing.js";
 import { GATE_TEXT_EXT, extractDocxText, extractPdfTextBestEffort } from "../services/specTextExtract.js";
+import {
+  buildPromotionPlan, debitPromotionPlannerUsage, PromotionPlanError, type PromotionPlan,
+} from "../services/promotionPlanner.js";
+import { recomputeProductLifecycle } from "../services/productLifecycle.js";
+import { randomUUID } from "node:crypto";
 
 function getUser(r: FastifyRequest): AuthUser {
   return (r as unknown as { user: AuthUser }).user;
@@ -106,6 +111,70 @@ const RELATION_LABELS: Record<RelationType, string> = {
 // RFC-0004 T1.6b: a proposta do Splitter (doc→N) NASCE persistida em `product_proposals`
 // (migration 076). O runner do job, o reaper de boot e o tick de deadline vivem em
 // services/productProposals.ts — aqui só criamos a linha e fazemos poll/ingest sobre ela.
+
+/** Logger mínimo que este módulo usa (o `request.log` do Fastify satisfaz a forma). */
+interface WaveLog {
+  info: (o: unknown, m?: string) => void;
+  warn: (o: unknown, m?: string) => void;
+  error: (o: unknown, m?: string) => void;
+}
+
+/**
+ * Dispara a PRÓXIMA onda de um plano de promoção (migração 097).
+ *
+ * Por que ONDA e não "tudo de uma vez": é a barreira de saúde entre waves do Argo CD — o backend não
+ * começa antes do banco existir. As ondas seguintes entram sozinhas pela cascata de gatilhos
+ * (`project_triggers`) quando a onda anterior é aceita, e cada disparo ainda passa pelo gate de
+ * dependência do `dispatchProjectRun` (`DEPENDENCY_NOT_READY`) — este helper NÃO fura fila.
+ *
+ * Escolhe a onda mais BAIXA que ainda tem item com o projeto em `promoted`: reexecutar é seguro
+ * (idempotente por status — quem já saiu de `promoted` não é redisparado).
+ */
+async function dispatchPromotionWave(
+  log: WaveLog, productId: string, promotionId: string,
+): Promise<{ wave: number; projectIds: string[]; results: Array<{ projectId: string; dispatched: boolean; reason?: string }> }> {
+  const pending = (await pool.query(
+    `SELECT i.project_id, i.wave
+       FROM product_promotion_items i JOIN projects p ON p.id = i.project_id
+      WHERE i.promotion_id = $1 AND p.status = 'promoted'
+      ORDER BY i.wave ASC, i.position ASC`,
+    [promotionId],
+  )).rows as Array<{ project_id: string; wave: number }>;
+  if (pending.length === 0) return { wave: 0, projectIds: [], results: [] };
+  const wave = Number(pending[0].wave);
+  const projectIds = pending.filter((r) => Number(r.wave) === wave).map((r) => String(r.project_id));
+
+  // `started` ANTES de disparar: se a api morrer no meio, o plano não volta a parecer "só promovido"
+  // (o que faria um segundo /start disparar de novo o que já foi).
+  await pool.query(
+    `UPDATE product_promotions SET status = 'started', started_at = COALESCE(started_at, now()), updated_at = now()
+      WHERE id = $1 AND status IN ('promoted','started')`,
+    [promotionId],
+  ).catch((e) => { log.warn({ promotionId, err: e }, "[products/wave] falha ao marcar plano como iniciado"); });
+
+  const results: Array<{ projectId: string; dispatched: boolean; reason?: string }> = [];
+  for (const pid of projectIds) {
+    try {
+      const r = await dispatchProjectRun(pool, pid);
+      results.push({ projectId: pid, dispatched: r.dispatched, reason: r.reason });
+      if (r.dispatched) {
+        await pool.query(
+          "UPDATE product_promotion_items SET dispatched_at = now() WHERE promotion_id = $1 AND project_id = $2",
+          [promotionId, pid],
+        ).catch(() => { /* best-effort: o status do projeto é a fonte da verdade */ });
+      }
+      log.info({ productId, projectId: pid, wave, dispatched: r.dispatched, reason: r.reason }, "[products/wave] disparo");
+    } catch (e) {
+      results.push({ projectId: pid, dispatched: false, reason: e instanceof Error ? e.message : String(e) });
+      log.error({ productId, projectId: pid, wave, err: e }, "[products/wave] falha ao disparar projeto");
+    }
+  }
+  // O ciclo de vida do produto passa a refletir o que REALMENTE começou (nada de "running" fictício).
+  await recomputeProductLifecycle(pool, productId).catch((e) => {
+    log.warn({ productId, err: e }, "[products/wave] falha ao recalcular ciclo de vida");
+  });
+  return { wave, projectIds, results };
+}
 
 export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authMiddleware);
@@ -991,95 +1060,299 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     } finally { client.release(); }
   });
 
-  // ── POST /api/products/:id/promote — RFC-0003 B2: promover produto da Bancada ──
-  // Promove um produto 'draft' (Bancada) para a fábrica. DISPATCH-ONLY sobre as RAÍZES
-  // (projetos sem predecessores dentro do produto) — NUNCA re-decompõe (fecha o gap G1:
-  // os projetos já existem como rascunhos). As ondas seguintes disparam pela cascata de
-  // accept, cada uma passando pelo gate de dependência/contrato (Task 3, G3/C3). A
-  // promoção INDIVIDUAL de um projeto é o /run existente: um projeto-filho 'draft' com
-  // dependências não-aceitas é barrado pelo mesmo gate (DEPENDENCY_NOT_READY).
-  app.post<{ Params: { id: string } }>("/api/products/:id/promote", async (request, reply) => {
+  // ── POST /api/products/:id/promote — o PRODUTO TODO entra na fábrica, NA ORDEM, SEM iniciar ──
+  //
+  // Requisito do Jean (2026-09-06): "a fabrica recebi tudo os arquivos e todos os projetos que compoe
+  // o produto (...) devemos enviar na ordem de interdependencias (...) e os projetos devem ser
+  // promovidos a fabrica mas nao inciados automaticamente".
+  //
+  // O que MUDOU em relação ao RFC-0003 B2 (comportamento anterior):
+  //   • antes: só as RAÍZES eram promovidas e eram DISPARADAS na hora (produto → 'running' mesmo sem
+  //     nada rodar, e projeto não-raiz ficava 'draft' esperando o accept do predecessor);
+  //   • agora: TODOS os projetos em rascunho vão para `status='promoted'` (estado inerte: nenhum laço
+  //     automático o adota — o watchdog G39 só drena 'queued'), o produto vai para
+  //     `lifecycle_status='promoted'` e a ORDEM decidida pelo agente fica gravada em
+  //     `product_promotions` + `product_promotion_items` para o /start disparar só a onda 1.
+  //   • `{start:true}` no corpo mantém o comportamento antigo (promove E dispara a onda 1) para quem
+  //     pedir explicitamente.
+  //
+  // A ordem é DECISÃO de agente (lei do 100% LLM) — ver services/promotionPlanner.ts. Falha do
+  // planejador ⇒ 422 e NADA é promovido (sem fallback burro que ordene por heurística fixa).
+  app.post<{ Params: { id: string }; Body: { start?: boolean } }>("/api/products/:id/promote", async (request, reply) => {
     const user = getUser(request);
     const { id } = request.params;
     if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const startNow = (request.body ?? {}).start === true;
+    // Guardas de leitura ANTES de tomar conexão dedicada: o planejador faz uma chamada de LLM (dezenas
+    // de segundos) e segurar um client do pool nesse intervalo esgota o pool sob concorrência.
+    const prod = await pool.query(
+      "SELECT id, tenant_id, name, lifecycle_status, is_inbox FROM products WHERE id = $1", [id],
+    );
+    const row = prod.rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+    // §4.12 (migration 064): o INBOX "Rascunhos" não é promovível em bloco — cada spec
+    // gradua individualmente ao rodar (/run) ou ao ser movida para um produto.
+    if (row.is_inbox) {
+      return reply.status(409).send({
+        code: "INBOX_NOT_PROMOTABLE",
+        message: "O INBOX (Rascunhos) não pode ser promovido em bloco. Promova cada spec individualmente.",
+      });
+    }
+    // C6: o master (zentriz_admin) PODE promover qualquer produto — promover é operação,
+    // não autoria (não passa por denyCreationForManagement). Não-master: só o próprio tenant.
+    if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+      return reply.status(404).send({ code: "NOT_FOUND" });
+    }
+    // Só promove da Bancada. Já em fábrica/terminal → 409 informativo (idempotente-safe).
+    if (row.lifecycle_status !== "draft") {
+      return reply.status(409).send({
+        code: "NOT_ON_WORKBENCH",
+        message: `Produto não está na Bancada (estado atual: ${row.lifecycle_status}).`,
+        lifecycleStatus: row.lifecycle_status,
+      });
+    }
+
+    // ORDEM = decisão do agente arquiteto. Fora de transação (é uma chamada de LLM). Falha aqui ⇒
+    // 422 e NADA muda de estado: promover fora de ordem é pior que não promover.
+    let plan: PromotionPlan;
+    try {
+      plan = await buildPromotionPlan(pool, {
+        productId: id,
+        productName: String(row.name ?? "Produto"),
+        tenantId: (row.tenant_id as string | null) ?? null,
+      });
+    } catch (e) {
+      if (e instanceof PromotionPlanError) {
+        request.log.warn({ productId: id, code: e.code }, "[products/promote] plano de promoção recusado");
+        return reply.status(422).send({ code: e.code, message: e.message, details: e.details });
+      }
+      throw e;
+    }
+
+    // Escrita ATÔMICA: produto → 'promoted', plano gravado, projetos 'draft' → 'promoted'.
+    const promotionId = randomUUID();
+    let promotedIds: string[] = [];
     const client = await pool.connect();
     try {
-      const prod = await client.query(
-        "SELECT id, tenant_id, lifecycle_status, is_inbox FROM products WHERE id = $1", [id],
-      );
-      const row = prod.rows[0];
-      if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
-      // §4.12 (migration 064): o INBOX "Rascunhos" não é promovível em bloco — cada spec
-      // gradua individualmente ao rodar (/run) ou ao ser movida para um produto.
-      if (row.is_inbox) {
-        return reply.status(409).send({
-          code: "INBOX_NOT_PROMOTABLE",
-          message: "O INBOX (Rascunhos) não pode ser promovido em bloco. Promova cada spec individualmente.",
-        });
-      }
-      // C6: o master (zentriz_admin) PODE promover qualquer produto — promover é operação,
-      // não autoria (não passa por denyCreationForManagement). Não-master: só o próprio tenant.
-      if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
-        return reply.status(404).send({ code: "NOT_FOUND" });
-      }
-      // Só promove da Bancada. Já em fábrica/terminal → 409 informativo (idempotente-safe).
-      if (row.lifecycle_status !== "draft") {
-        return reply.status(409).send({
-          code: "NOT_ON_WORKBENCH",
-          message: `Produto não está na Bancada (estado atual: ${row.lifecycle_status}).`,
-          lifecycleStatus: row.lifecycle_status,
-        });
-      }
-      // Raízes AINDA em rascunho (mesma definição de raiz do GET :id — predecessores só
-      // contam DENTRO do produto).
-      const roots = await client.query(
-        `SELECT p.id FROM projects p
-         WHERE p.product_id = $1 AND p.status = 'draft'
-           AND NOT EXISTS (
-             SELECT 1 FROM project_triggers pt
-             WHERE pt.project_id = p.id
-               AND pt.trigger_project_id IN (SELECT id FROM projects WHERE product_id = $1)
-           )`,
-        [id],
-      );
-      const rootIds = roots.rows.map((r) => r.id as string);
-      if (rootIds.length === 0) {
-        return reply.status(409).send({
-          code: "NO_PROMOTABLE_ROOTS",
-          message: "Nenhuma raiz em rascunho para promover (produto sem projetos ou já em andamento).",
-        });
-      }
-      // Transição atômica draft→running: guarda contra dupla promoção concorrente
-      // (rowCount 0 ⇒ outra requisição já promoveu entre o SELECT e o UPDATE).
+      await client.query("BEGIN");
+      // Guarda contra dupla promoção concorrente (rowCount 0 ⇒ outra requisição chegou primeiro).
       const upd = await client.query(
-        "UPDATE products SET lifecycle_status = 'running', updated_at = now() WHERE id = $1 AND lifecycle_status = 'draft'",
+        "UPDATE products SET lifecycle_status = 'promoted', updated_at = now() WHERE id = $1 AND lifecycle_status = 'draft'",
         [id],
       );
       if (upd.rowCount === 0) {
+        await client.query("ROLLBACK");
         return reply.status(409).send({ code: "ALREADY_PROMOTED", message: "Produto já promovido por outra requisição." });
       }
-      // Value meter MVP (spec 2026-08-20): promoção Bancada→fábrica (spec vira produto
-      // em execução). Emitido só na transição atômica draft→running (idempotente por
-      // construção — dupla promoção cai no 409 acima). Best-effort, nunca lança.
-      void emitValueEvent(pool, {
-        tenantId: (row.tenant_id as string | null) ?? null,
-        eventType: "spec_promoted",
-        metadata: { product_id: id, promoted_roots: rootIds.length },
-      });
-      // Dispara as raízes (dispatch-only). Gate de dependência + claim atômico de slot
-      // são aplicados por dispatchProjectRun (Task 3). Best-effort em background.
-      setImmediate(async () => {
-        for (const pid of rootIds) {
-          try {
-            const r = await dispatchProjectRun(pool, pid);
-            request.log.info({ projectId: pid, dispatched: r.dispatched, reason: r.reason }, "[products/promote] disparo de raiz");
-          } catch (e) {
-            request.log.error({ projectId: pid, err: e }, "[products/promote] falha ao disparar raiz");
-          }
-        }
-      });
-      return reply.status(202).send({ productId: id, promoted: rootIds, lifecycleStatus: "running" });
+      // Só existe UM plano vivo por produto (índice pprom_one_live): o anterior sai de cena.
+      await client.query(
+        `UPDATE product_promotions SET status = 'canceled', canceled_at = now(), updated_at = now()
+          WHERE product_id = $1 AND status IN ('promoted','started')`,
+        [id],
+      );
+      await client.query(
+        `INSERT INTO product_promotions
+           (id, product_id, tenant_id, promoted_by, status, edges_source, model_used,
+            input_tokens, output_tokens, notes, payload)
+         VALUES ($1, $2, $3, $4, 'promoted', $5, $6, $7, $8, $9, $10::jsonb)`,
+        [promotionId, id, (row.tenant_id as string | null) ?? null, user.id, plan.edgesSource,
+          plan.modelUsed, plan.inputTokens, plan.outputTokens, plan.notes,
+          JSON.stringify({ items: plan.items, warnings: plan.warnings })],
+      );
+      for (const it of plan.items) {
+        await client.query(
+          `INSERT INTO product_promotion_items
+             (id, promotion_id, project_id, position, wave, layer, depends_on, rationale)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+          [randomUUID(), promotionId, it.projectId, it.position, it.wave, it.layer,
+            JSON.stringify(it.dependsOn), it.rationale],
+        );
+      }
+      // TODOS os projetos do plano entram na fábrica — não só as raízes (requisito do Jean).
+      const promotedRes = await client.query(
+        `UPDATE projects SET status = 'promoted', updated_at = now()
+          WHERE id = ANY($1::uuid[]) AND status = 'draft' RETURNING id`,
+        [plan.items.map((i) => i.projectId)],
+      );
+      promotedIds = promotedRes.rows.map((r) => String(r.id));
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw e;
     } finally { client.release(); }
+
+    // Value meter MVP (spec 2026-08-20): promoção Bancada→fábrica. Emitido só na transição atômica
+    // (dupla promoção cai no 409 acima). Best-effort, nunca lança.
+    void emitValueEvent(pool, {
+      tenantId: (row.tenant_id as string | null) ?? null,
+      eventType: "spec_promoted",
+      metadata: { product_id: id, promotion_id: promotionId, promoted_projects: promotedIds.length, started: startNow },
+    });
+    // G5: o custo do planejador não pode ser invisível ao cost cap (o /invoke/raw não reporta usage).
+    if (plan.items.length > 0) {
+      void debitPromotionPlannerUsage(pool, {
+        promotionId, projectId: plan.items[0].projectId,
+        inputTokens: plan.inputTokens, outputTokens: plan.outputTokens, model: plan.modelUsed,
+      });
+    }
+    // PROMOVIDO ≠ INICIADO. Só dispara com `{start:true}` explícito — e aí somente a ONDA 1.
+    if (startNow) {
+      setImmediate(() => {
+        void dispatchPromotionWave(request.log, id, promotionId);
+      });
+    }
+    return reply.status(202).send({
+      productId: id,
+      promotionId,
+      promoted: promotedIds,
+      lifecycleStatus: "promoted",
+      started: startNow,
+      waves: plan.items.reduce((max, it) => Math.max(max, it.wave), 0),
+      plan: plan.items,
+      notes: plan.notes,
+      warnings: plan.warnings,
+      edgesSource: plan.edgesSource,
+      // Quem decidiu a ordem tem de aparecer no ATO (a prova em prod mostrou o diálogo dizendo
+      // "modelo: —" logo após promover, porque só o GET /promotion devolvia este campo).
+      modelUsed: plan.modelUsed,
+    });
+  });
+
+  // ── POST /api/products/:id/start — dispara a PRÓXIMA onda do plano de promoção ──
+  // "Promovido mas não iniciado" só é honesto se existir um começo EXPLÍCITO. Dispara a onda mais baixa
+  // que ainda tem projeto 'promoted'; as seguintes entram pela cascata de accept, cada uma passando
+  // pelo gate de dependência (DEPENDENCY_NOT_READY) — a mesma barreira entre ondas do Argo CD.
+  app.post<{ Params: { id: string } }>("/api/products/:id/start", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const row = (await pool.query(
+      "SELECT id, tenant_id, lifecycle_status, is_inbox FROM products WHERE id = $1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+    if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+      return reply.status(404).send({ code: "NOT_FOUND" });
+    }
+    const live = (await pool.query(
+      `SELECT id FROM product_promotions WHERE product_id = $1 AND status IN ('promoted','started')
+        ORDER BY created_at DESC LIMIT 1`,
+      [id],
+    )).rows[0];
+    if (!live) {
+      return reply.status(409).send({
+        code: "NOT_PROMOTED",
+        message: "Este produto não tem plano de promoção vivo. Promova-o à fábrica primeiro.",
+        lifecycleStatus: row.lifecycle_status,
+      });
+    }
+    const promotionId = String(live.id);
+    const wave = await dispatchPromotionWave(request.log, id, promotionId);
+    if (wave.projectIds.length === 0) {
+      return reply.status(409).send({
+        code: "NOTHING_TO_START",
+        message: "Nenhum projeto promovido aguardando início neste produto.",
+      });
+    }
+    return reply.status(202).send({
+      productId: id, promotionId, wave: wave.wave,
+      started: wave.results.filter((r) => r.dispatched).map((r) => r.projectId),
+      skipped: wave.results.filter((r) => !r.dispatched).map((r) => ({ projectId: r.projectId, reason: r.reason })),
+    });
+  });
+
+  // ── POST /api/products/:id/unpromote — devolve o produto à Bancada ──
+  // Congelar a spec ao promover (promovido sai de SPEC_EDITABLE_STATUSES) só é aceitável com saída:
+  // sem isto, promover por engano trancaria a edição. Recusa se a fábrica já começou — aí o caminho é
+  // parar/rejeitar o projeto, não fingir que ele nunca entrou.
+  app.post<{ Params: { id: string } }>("/api/products/:id/unpromote", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const row = (await pool.query(
+      "SELECT id, tenant_id, lifecycle_status FROM products WHERE id = $1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+    if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+      return reply.status(404).send({ code: "NOT_FOUND" });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const statuses = (await client.query(
+        "SELECT status, COUNT(*) AS n FROM projects WHERE product_id = $1 GROUP BY status", [id],
+      )).rows as Array<{ status: string; n: string }>;
+      const started = statuses.filter((s) => s.status !== "draft" && s.status !== "promoted");
+      if (started.length > 0) {
+        await client.query("ROLLBACK");
+        return reply.status(409).send({
+          code: "ALREADY_STARTED",
+          message: `A fábrica já começou neste produto (${started.map((s) => `${s.n} ${s.status}`).join(", ")}). ` +
+            "Pare ou rejeite os projetos em execução em vez de devolver o produto à Bancada.",
+        });
+      }
+      const back = await client.query(
+        "UPDATE projects SET status = 'draft', updated_at = now() WHERE product_id = $1 AND status = 'promoted' RETURNING id",
+        [id],
+      );
+      await client.query(
+        `UPDATE product_promotions SET status = 'canceled', canceled_at = now(), updated_at = now()
+          WHERE product_id = $1 AND status IN ('promoted','started')`,
+        [id],
+      );
+      await client.query(
+        "UPDATE products SET lifecycle_status = 'draft', updated_at = now() WHERE id = $1", [id],
+      );
+      await client.query("COMMIT");
+      return reply.send({
+        productId: id, lifecycleStatus: "draft",
+        returned: back.rows.map((r) => String(r.id)),
+      });
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw e;
+    } finally { client.release(); }
+  });
+
+  // ── GET /api/products/:id/promotion — plano vigente (a UI mostra a ORDEM por onda) ──
+  app.get<{ Params: { id: string } }>("/api/products/:id/promotion", async (request, reply) => {
+    const user = getUser(request);
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+    const row = (await pool.query(
+      "SELECT id, tenant_id, lifecycle_status FROM products WHERE id = $1", [id],
+    )).rows[0];
+    if (!row) return reply.status(404).send({ code: "NOT_FOUND" });
+    if (user.role !== "zentriz_admin" && row.tenant_id !== user.tenantId) {
+      return reply.status(404).send({ code: "NOT_FOUND" });
+    }
+    const prom = (await pool.query(
+      `SELECT id, status, edges_source, model_used, notes, payload, created_at, started_at
+         FROM product_promotions WHERE product_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [id],
+    )).rows[0];
+    if (!prom) return reply.send({ productId: id, promotion: null, items: [] });
+    const items = (await pool.query(
+      `SELECT i.project_id, i.position, i.wave, i.layer, i.depends_on, i.rationale, i.dispatched_at,
+              p.title, p.status
+         FROM product_promotion_items i JOIN projects p ON p.id = i.project_id
+        WHERE i.promotion_id = $1 ORDER BY i.wave ASC, i.position ASC`,
+      [prom.id],
+    )).rows;
+    const payload = (prom.payload ?? {}) as { warnings?: unknown };
+    return reply.send({
+      productId: id,
+      lifecycleStatus: row.lifecycle_status,
+      promotion: {
+        id: prom.id, status: prom.status, edgesSource: prom.edges_source, modelUsed: prom.model_used,
+        notes: prom.notes, createdAt: prom.created_at, startedAt: prom.started_at,
+        warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+      },
+      items: items.map((r) => ({
+        projectId: r.project_id, title: r.title, status: r.status, position: r.position, wave: r.wave,
+        layer: r.layer, dependsOn: Array.isArray(r.depends_on) ? r.depends_on : [],
+        rationale: r.rationale, dispatchedAt: r.dispatched_at,
+      })),
+    });
   });
 
   // ── DELETE /api/products/:id ─────────────────────────────────────────────────

@@ -64,6 +64,10 @@ import SpecSplitPanel from "@/components/SpecSplitPanel";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import SpecVersionsPanel from "@/components/SpecVersionsPanel";
 import ProductFolderNav from "@/components/ProductFolderNav";
+import {
+  PromotionPlanDialog, describeStartResult,
+  type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
+} from "@/components/PromotionPlanDialog";
 
 // Lazy-load react-markdown with GFM (tables, strikethrough, task lists)
 const ReactMarkdown = dynamic(
@@ -1068,7 +1072,9 @@ function SpecEditor({
           </span>
         </Tooltip>
         {onPromote && (
-          <Tooltip title="Enviar à fábrica — inicia o pipeline">
+          // Migração 097: promover ADMITE na fábrica e NÃO inicia. Com produto, entra o produto
+          // TODO na ordem de interdependência; o início é um clique separado.
+          <Tooltip title="Admitir na fábrica (produto inteiro, na ordem de dependência) — nada é iniciado agora">
             <span>
               <Button size="small" variant="contained" color="success"
                 startIcon={approving === "start" ? <CircularProgress size={12} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.85rem !important" }} />}
@@ -1862,6 +1868,16 @@ export default function SpecPage() {
   // Onda 3 (b) — diálogo de "Promover à Fábrica" com confirmação por digitação quando há GAPs.
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteConfirmText, setPromoteConfirmText] = useState("");
+  // Migração 097 — plano de promoção do PRODUTO (ordem por onda). Preenchido pelo 202 do
+  // POST /api/products/:id/promote e re-lido do GET /api/products/:id/promotion depois de iniciar.
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planProduct, setPlanProduct] = useState<{ id: string; name: string } | null>(null);
+  const [planMeta, setPlanMeta] = useState<PromotionPlanMeta | null>(null);
+  const [planItems, setPlanItems] = useState<PromotionPlanItem[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [planStarting, setPlanStarting] = useState(false);
+  const [startedNotice, setStartedNotice] = useState<string | null>(null);
+  const [startedSeverity, setStartedSeverity] = useState<"success" | "warning">("success");
   // Pivô Bancada (Opção 1): produto dono da spec em edição (vem da URL ?productId=…).
   // Habilita a árvore "Pasta do produto" ao lado do editor, que navega entre os
   // projetos do produto sem abrir a tela redundante /products/:id/spec.
@@ -3017,6 +3033,10 @@ export default function SpecPage() {
   const handleDiscardRecovered = useCallback(() => setRecoveredSpec(null), []);
 
   // ── Save spec (draft or start) ──────────────────────────────────────────────
+  // Migração 097: o botão "Promover à Fábrica" NÃO passa mais por aqui — ele usa
+  // `promoteToFactory` (abaixo), que salva com `startNow: false` e ADMITE na fábrica sem iniciar.
+  // O caminho `startNow: true` sobrevive apenas para o fluxo de CRIAÇÃO ("salvar e iniciar"), hoje
+  // sem chamador: nenhuma tela inicia pipeline no ato do salvamento.
   const handleSaveSpec = useCallback(async (startNow: boolean) => {
     if (!specMarkdown) return;
     // INTAKE-GATE (espelha o backend): título e tipo são obrigatórios; texto livre >=500 letras.
@@ -3122,7 +3142,81 @@ export default function SpecPage() {
   }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
       projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router]);
 
-  // Onda 3 (b) — "Promover à Fábrica" = enviar a spec ao pipeline (handleSaveSpec(true)).
+  // ── "Promover à Fábrica" (migração 097) ─────────────────────────────────────
+  // Requisito do Jean (2026-09-06): este botão promove o PRODUTO TODO, na ordem de
+  // interdependência, e NÃO inicia nada. Duas rotas, escolhidas pelo dono da spec:
+  //   • spec dentro de um produto real → POST /api/products/:id/promote → admite TODOS os
+  //     projetos do produto em ondas (agente arquiteto decide a ordem) e abre o plano;
+  //   • spec solta (dona é o INBOX "Rascunhos", que NÃO é produto) → POST /api/projects/:id/promote
+  //     → admite só esta spec. Promover o INBOX inteiro seria empurrar rascunhos alheios à fábrica.
+  // Em ambos os casos a spec é PERSISTIDA antes (`startNow: false`): a fábrica lê o disco, não o
+  // editor — promover sem salvar admitiria a versão velha.
+  const promoteToFactory = useCallback(async () => {
+    if (!editProjectId || !specMarkdown) return;
+    setApproving("start");
+    setApproveError(null); setPlanError(null); setStartedNotice(null);
+    try {
+      await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
+        specMarkdown,
+        title: projectTitle.trim() || undefined,
+        startNow: false,
+      });
+
+      // Dono da spec pela fonte autoritativa (o `?productId=` da URL é só navegação da árvore e
+      // `allProjects` pode nem ter carregado — errar aqui promoveria o escopo errado).
+      const detail = await apiGet<{ productId: string | null; productName?: string | null }>(
+        `/api/projects/${editProjectId}`,
+      );
+      const ownerId = detail.productId ?? null;
+      let owner = ownerId ? products.find((p) => p.id === ownerId) : undefined;
+      if (ownerId && !owner) {
+        try {
+          const fresh = await apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1");
+          setProducts(fresh);
+          owner = fresh.find((p) => p.id === ownerId);
+        } catch { /* sem a lista não dá para saber se é INBOX → cai no promote da spec */ }
+      }
+      const promoteWholeProduct = !!ownerId && owner !== undefined && owner.is_inbox !== true;
+
+      if (promoteWholeProduct && ownerId) {
+        const res = await apiPost<{
+          promotionId?: string; promoted?: string[]; lifecycleStatus?: string; started?: boolean;
+          waves?: number; plan?: PromotionPlanItem[]; notes?: string | null;
+          warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
+        }>(`/api/products/${ownerId}/promote`, {});
+        setPlanProduct({ id: ownerId, name: owner?.name ?? detail.productName ?? "Produto" });
+        setPlanMeta({
+          promotionId: res.promotionId ?? null,
+          status: res.lifecycleStatus ?? "promoted",
+          notes: res.notes ?? null,
+          warnings: res.warnings ?? [],
+          edgesSource: res.edgesSource ?? null,
+          modelUsed: res.modelUsed ?? null,
+        });
+        setPlanItems(res.plan ?? []);
+        setStartedNotice(
+          `Produto admitido na fábrica: ${(res.promoted ?? []).length} projeto(s) em ${res.waves ?? 0} onda(s). ` +
+          "Nada foi iniciado — use “Iniciar onda 1” quando quiser começar.",
+        );
+        setPlanOpen(true);
+        projectsStore.loadProjects();
+        return;
+      }
+
+      await apiPost(`/api/projects/${editProjectId}/promote`, {});
+      projectsStore.loadProjects();
+      setChatMessages((prev) => [...prev, {
+        role: "assistant",
+        content: "🏭 Spec **admitida na fábrica** — e **nada foi iniciado**. Ela sai da Bancada e espera o início explícito na tela do projeto.",
+      }]);
+      setTimeout(() => router.push(`/projects/${editProjectId}`), 400);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : "Erro ao promover à fábrica.");
+    } finally {
+      setApproving(null);
+    }
+  }, [editProjectId, specMarkdown, projectTitle, products, router]);
+
   // Sem GAPs → promove direto; com GAPs → exige confirmação por digitação (qualquer papel).
   const PROMOTE_CONFIRM_WORD = "PROMOVER";
   const handlePromote = useCallback(() => {
@@ -3131,13 +3225,38 @@ export default function SpecPage() {
       setPromoteOpen(true);
       return;
     }
-    void handleSaveSpec(true);
-  }, [gapCount, handleSaveSpec]);
+    void promoteToFactory();
+  }, [gapCount, promoteToFactory]);
 
   const confirmPromote = useCallback(() => {
     setPromoteOpen(false);
-    void handleSaveSpec(true);
-  }, [handleSaveSpec]);
+    void promoteToFactory();
+  }, [promoteToFactory]);
+
+  /** Inicia a onda pendente mais baixa do produto promovido (POST /:id/start) e recarrega o plano. */
+  const startPromotedProduct = useCallback(async () => {
+    if (!planProduct) return;
+    setPlanStarting(true); setPlanError(null); setStartedNotice(null);
+    try {
+      const res = await apiPost<StartWaveResult>(`/api/products/${planProduct.id}/start`, {});
+      // Motivo do SERVIDOR (medido em prod: `SPEC_NOT_VALIDATED` era escondido atrás de "ignorado(s)").
+      const { message, severity } = describeStartResult(res);
+      setStartedNotice(message);
+      setStartedSeverity(severity);
+      try {
+        const plan = await apiGet<{ promotion?: PromotionPlanMeta; items?: PromotionPlanItem[] }>(
+          `/api/products/${planProduct.id}/promotion`,
+        );
+        if (plan.promotion) setPlanMeta(plan.promotion);
+        setPlanItems(plan.items ?? []);
+      } catch { /* o aviso acima já conta o que aconteceu */ }
+      projectsStore.loadProjects();
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Erro ao iniciar o produto.");
+    } finally {
+      setPlanStarting(false);
+    }
+  }, [planProduct]);
 
   // Publica o "salvar spec inteira" no ref lido por `handleSaveCurrent` (declarado antes daqui).
   useEffect(() => { handleSaveSpecRef.current = handleSaveSpec; }, [handleSaveSpec]);
@@ -3533,6 +3652,14 @@ export default function SpecPage() {
           promovê-la assim mesmo, mas a fábrica trabalhará com lacunas conhecidas — o resultado pode
           exigir retrabalho. Recomendado resolver os GAPs na aba <strong>GAPs</strong> antes.
         </Alert>
+        {/* Migração 097 — o que este botão faz (e o que NÃO faz). Sem isto, "Promover" continuava
+            lendo como "iniciar agora", que é justamente o que o Jean pediu para separar. */}
+        <Alert severity="info" sx={{ mb: 2 }}>
+          A promoção <strong>admite na fábrica</strong> e <strong>não inicia nada</strong>. Se esta
+          spec pertence a um produto, o produto <strong>inteiro</strong> entra — cada projeto na
+          onda certa, respeitando as dependências (banco antes de acesso a dados, antes de backend,
+          antes de frontend). O início é um clique separado.
+        </Alert>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
           Para confirmar, digite <strong>{PROMOTE_CONFIRM_WORD}</strong> abaixo.
         </Typography>
@@ -3745,6 +3872,20 @@ export default function SpecPage() {
 
         {editorDialog}
         {promoteDialog}
+        {/* Migração 097 — ordem de entrada na fábrica do produto promovido. `onStart` só existe
+            porque o produto foi admitido AQUI: iniciar é decisão explícita do humano. */}
+        <PromotionPlanDialog
+          open={planOpen}
+          onClose={() => { setPlanOpen(false); setPlanError(null); setStartedNotice(null); }}
+          productName={planProduct?.name ?? null}
+          meta={planMeta}
+          items={planItems}
+          onStart={planProduct ? () => { void startPromotedProduct(); } : undefined}
+          starting={planStarting}
+          startError={planError}
+          startedNotice={startedNotice}
+          startedSeverity={startedSeverity}
+        />
         {/* Divisão da spec: diálogo (não card no corpo) aberto pelo ícone da lista de arquivos.
             Fica fora do gate de `specMarkdown` de propósito — a proposta vive no servidor. */}
         {splitDialog}

@@ -15,6 +15,7 @@ import type { Pool, PoolClient } from "pg";
 
 export type ProductLifecycle =
   | "draft"
+  | "promoted"
   | "ingesting"
   | "running"
   | "partially_accepted"
@@ -26,6 +27,9 @@ export type ProductLifecycle =
 const IN_PROGRESS = new Set<string>([
   "draft", "spec_submitted", "pending_conversion", "spec_validation_failed",
   "running", "queued", "dev_qa", "devops", "completed", "stopped", "pending_cyborg",
+  // Migração 097: promovido à fábrica e aguardando início — não terminou, então conta como
+  // "em andamento" quando CONVIVE com projetos já rodando (o caso "só promovido" é tratado antes).
+  "promoted",
 ]);
 
 /**
@@ -40,6 +44,13 @@ export function deriveProductLifecycle(projectStatuses: string[]): ProductLifecy
   // 'running' (já rodando). Estreito de propósito: basta um projeto fora de 'draft'
   // (ex.: pending_conversion, spec_submitted) para o produto ser considerado em fábrica.
   if (projectStatuses.every((s) => s === "draft")) return "draft";
+
+  // Migração 097 — PROMOVIDO mas NÃO INICIADO: o produto todo já foi entregue à fábrica, com a ordem
+  // de interdependência gravada, e nenhum projeto começou. Sem esta regra o fallback defensivo lá
+  // embaixo devolveria "running" e o portal MENTIRIA ("em execução") sobre um produto parado —
+  // além de fazer o próprio /promote se contradizer no primeiro recompute.
+  // Aceita `draft` na mistura: um projeto sem spec fica de fora do plano e continua rascunho.
+  if (projectStatuses.every((s) => s === "promoted" || s === "draft")) return "promoted";
 
   const hasFailed  = projectStatuses.some((s) => s === "failed");
   // D3: `needs_spec_input` (fábrica pausada aguardando resposta humana) é EXATAMENTE

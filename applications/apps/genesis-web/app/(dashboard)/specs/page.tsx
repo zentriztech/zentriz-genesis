@@ -6,8 +6,11 @@
 // - Aba "Minhas SPECs": lista rascunhos do tenant, AGRUPADOS por produto. Cada SPEC pode:
 //   Editar; Vincular a produto (PATCH /api/projects/:id/product); Decompor em vários projetos
 //   (DecomposeDialog → /decompose, salva rascunhos na Bancada, dispatch:false); ou
-//   Promover à fábrica (POST /api/projects/:id/run). Um produto inteiro promove pelas raízes
-//   (POST /api/products/:id/promote). "Decompor uma ideia" abre o mesmo diálogo em modo cru.
+//   Promover à fábrica (POST /api/projects/:id/promote — ADMITE sem iniciar, migração 097). Um
+//   produto inteiro promove TODOS os seus projetos na ordem de interdependência decidida pelo
+//   agente arquiteto (POST /api/products/:id/promote), também SEM iniciar: o diálogo do plano
+//   mostra a ordem por onda e o início é um clique separado (POST /api/products/:id/start).
+//   "Decompor uma ideia" abre o mesmo diálogo em modo cru.
 // - Aba "Catálogo": SPECs pré-prontas (GET /api/catalog); "Usar" cria uma SPEC do template.
 
 import { observer } from "mobx-react-lite";
@@ -69,6 +72,10 @@ import { DecomposeDialog, fmtUsd, type DecomposeSpecRef, type ProposalSource } f
 import { ReadinessBadge, EstimateChip, type Readiness, type Estimate } from "@/components/SpecEnrichment";
 import { FactoryCertificateBadge, isCertified, type FactoryCertificate } from "@/components/FactoryCertificate";
 import { ResourceBadges } from "@/components/ResourceBadges";
+import {
+  PromotionPlanDialog, describeStartResult,
+  type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
+} from "@/components/PromotionPlanDialog";
 
 interface SpecItem {
   id: string;
@@ -275,6 +282,14 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
   const [view, setView] = useState<"list" | "triage">("list");
   // E3: confirmação de promoção mostra estimativa + pré-flight antes de queimar fábrica.
   const [promoteTarget, setPromoteTarget] = useState<SpecItem | null>(null);
+  // Migração 097 — plano de promoção do PRODUTO (ordem por onda), exibido após promover.
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planProduct, setPlanProduct] = useState<{ id: string; name: string } | null>(null);
+  const [planMeta, setPlanMeta] = useState<PromotionPlanMeta | null>(null);
+  const [planItems, setPlanItems] = useState<PromotionPlanItem[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [startedNotice, setStartedNotice] = useState<string | null>(null);
+  const [startedSeverity, setStartedSeverity] = useState<"success" | "warning">("success");
   // Onda 4 — "Propostas de produto": lista tenant-scoped; `available=false` quando a rota não
   // existe (API anterior ao PR-3 → 404) → a seção some sem erro. resumeJob reabre o diálogo.
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
@@ -397,28 +412,79 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
     return m;
   }, [proposalGroups.ready]);
 
-  // Promover à FÁBRICA (spec individual). POST /run — o backend barra dependência não-pronta.
+  // Promover à FÁBRICA (spec individual). Migração 097: ADMITE sem iniciar (`POST /promote`) —
+  // antes isto era `POST /run`, que disparava o pipeline no mesmo clique. Quem inicia é a tela do
+  // projeto (botão "Iniciar") ou o /start do produto.
   const promoteToFactory = async (id: string) => {
     setBusyId(id);
     try {
-      await apiPost(`/api/projects/${id}/run`, {});
-      router.push(`/projects/${id}`);
+      await apiPost<{ productId: string | null; graduated: boolean }>(`/api/projects/${id}/promote`, {});
+      setPromoteTarget(null);   // antes a navegação fechava o diálogo; agora ficamos na Bancada
+      setNotice(
+        "Spec promovida à fábrica — ela sai da Bancada e passa a esperar o início. " +
+        "Inicie na tela do projeto (botão “Iniciar”) ou em “Meus produtos”.",
+      );
+      await load();
+      projectsStore.loadProjects();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao promover à fábrica");
+    } finally {
       setBusyId(null);
     }
   };
 
-  // Promover PRODUTO inteiro (raízes disparadas em cascata pela fábrica). Operação: master OK.
-  const promoteProduct = async (productId: string) => {
+  // Promover PRODUTO inteiro (migração 097): TODOS os projetos entram, na ordem de interdependência
+  // decidida pelo agente arquiteto, e NADA é iniciado. O diálogo mostra a ordem por onda e oferece o
+  // início como clique separado. Operação: master OK (C6).
+  const promoteProduct = async (productId: string, productName: string) => {
     setBusyId(`prod:${productId}`);
+    setPlanError(null); setStartedNotice(null);
     try {
-      const res = await apiPost<{ promoted?: string[] }>(`/api/products/${productId}/promote`, {});
-      const n = res.promoted?.length ?? 0;
-      setNotice(`Produto promovido à fábrica — ${n} raiz(es) em execução. As ondas seguintes disparam automaticamente.`);
-      router.push("/projects");
+      const res = await apiPost<{
+        promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
+        notes?: string | null; warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
+      }>(`/api/products/${productId}/promote`, {});
+      setNotice(
+        `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). Nada foi iniciado.`,
+      );
+      setPlanProduct({ id: productId, name: productName });
+      setPlanMeta({
+        promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [],
+        edgesSource: res.edgesSource ?? null, modelUsed: res.modelUsed ?? null,
+      });
+      setPlanItems(res.plan ?? []);
+      setPlanOpen(true);
+      await load();
+      projectsStore.loadProjects();
     } catch (e) {
+      // O planejador é um AGENTE: agents fora, JSON inválido ou ciclo ⇒ 422 e NADA é promovido.
       setError(e instanceof Error ? e.message : "Falha ao promover o produto");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Início EXPLÍCITO da onda pendente mais baixa (mesma rota que o /products usa).
+  const startPromotedProduct = async () => {
+    if (!planProduct) return;
+    setBusyId(`prod:${planProduct.id}`);
+    setPlanError(null); setStartedNotice(null);
+    try {
+      const res = await apiPost<StartWaveResult>(`/api/products/${planProduct.id}/start`, {});
+      // Motivo do SERVIDOR, não palpite (ver describeStartResult).
+      const { message, severity } = describeStartResult(res);
+      setStartedNotice(message);
+      setStartedSeverity(severity);
+      try {
+        const fresh = await apiGet<{ promotion: PromotionPlanMeta | null; items: PromotionPlanItem[] }>(
+          `/api/products/${planProduct.id}/promotion`,
+        );
+        setPlanMeta(fresh.promotion); setPlanItems(fresh.items ?? []);
+      } catch { /* o aviso acima já reportou o resultado */ }
+      projectsStore.loadProjects();
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Falha ao iniciar o produto");
+    } finally {
       setBusyId(null);
     }
   };
@@ -801,14 +867,19 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
                         </Stack>
                       </CardContent>
                     </CardActionArea>
-                    {/* Promover produto inteiro — operação; master também pode (C6). */}
+                    {/* Promover produto inteiro — operação; master também pode (C6). Migração 097:
+                        entrega TODOS os projetos na ordem de interdependência e NÃO inicia nada. */}
                     <Box sx={{ px: 2, pb: 1.5, pt: 0.25 }}>
-                      <Button fullWidth size="small" variant="contained" color="success"
-                        startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
-                        disabled={busyId === `prod:${g.productId}`}
-                        onClick={(e) => { e.stopPropagation(); promoteProduct(g.productId); }}>
-                        Promover produto inteiro
-                      </Button>
+                      <Tooltip title="Envia todos os projetos deste produto à fábrica, na ordem de interdependência decidida pelo arquiteto — sem iniciar nada.">
+                        <span>
+                          <Button fullWidth size="small" variant="contained" color="success"
+                            startIcon={busyId === `prod:${g.productId}` ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
+                            disabled={busyId === `prod:${g.productId}`}
+                            onClick={(e) => { e.stopPropagation(); promoteProduct(g.productId, g.name); }}>
+                            Promover produto inteiro
+                          </Button>
+                        </span>
+                      </Tooltip>
                     </Box>
                   </Card>
                 ))}
@@ -911,15 +982,17 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
       </Dialog>
 
       {/* E3 · Confirmação de promoção — mostra estimativa (tempo/custo) + pré-flight ANTES de
-          queimar fábrica. Promover é irreversível (roda o pipeline), então nunca é 1-clique. */}
+          admitir na fábrica. Migração 097: promover NÃO dispara mais o pipeline (o início é um
+          passo separado), mas continua sendo decisão consciente: a spec sai da Bancada e congela. */}
       <Dialog open={!!promoteTarget} onClose={() => busyId ? undefined : setPromoteTarget(null)} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontSize: "1rem", display: "flex", alignItems: "center", gap: 1 }}>
           <RocketLaunchIcon sx={{ fontSize: "1.1rem", color: "success.main" }} /> Promover à fábrica
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2" sx={{ mb: 2 }}>
-            A SPEC <b>{promoteTarget?.title}</b> sairá da Bancada e a fábrica começará a executá-la.
-            Esta ação dispara o pipeline — confira a prontidão e a estimativa antes.
+            A SPEC <b>{promoteTarget?.title}</b> sairá da Bancada e será <b>admitida na fábrica</b> —
+            aguardando início. <b>Nada será iniciado agora</b>: você inicia na tela do projeto
+            (botão “Iniciar”). A spec fica congelada enquanto estiver promovida.
           </Typography>
 
           {/* D1(a) + D3(b): no momento da decisão, quem fala é o certificado (gates reais). */}
@@ -971,6 +1044,21 @@ const MySpecs = observer(function MySpecs({ router }: { router: ReturnType<typeo
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Migração 097 — ordem de entrada na fábrica do PRODUTO promovido (por onda), com o início
+          como clique separado. Abre logo após "Promover produto inteiro". */}
+      <PromotionPlanDialog
+        open={planOpen}
+        onClose={() => { setPlanOpen(false); setPlanError(null); setStartedNotice(null); }}
+        productName={planProduct?.name ?? null}
+        meta={planMeta}
+        items={planItems}
+        onStart={planProduct ? () => { void startPromotedProduct(); } : undefined}
+        starting={!!planProduct && busyId === `prod:${planProduct.id}`}
+        startError={planError}
+        startedNotice={startedNotice}
+        startedSeverity={startedSeverity}
+      />
     </Box>
   );
 });
