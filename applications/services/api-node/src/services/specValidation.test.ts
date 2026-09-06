@@ -306,31 +306,34 @@ describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
  * quando não há nada novo a julgar.
  */
 describe("canReusePassedRun / pendingCoverage (GAP-19)", () => {
-  it("cobertura completa (nada em sumário) → reaproveita", () => {
-    expect(canReusePassedRun({ full: ["a.md", "b.md"], outlineOnly: [], oversized: [] })).toBe(true);
+  // A pendência é ACUMULADA (`stage_b_full_sha` × sha atual de cada arquivo), não o `outlineOnly` de
+  // uma run: numa spec de 950.965 chars contra teto de 400.000, nenhuma validação isolada leva todos
+  // os arquivos por inteiro — quem cobre a spec é a UNIÃO das rodadas.
+  const cov = (oversized: string[] = []) => ({ full: ["a.md"], outlineOnly: ["b.md"], oversized });
+
+  it("nada pendente (todo arquivo já julgado no conteúdo atual) → reaproveita", () => {
+    expect(canReusePassedRun([], cov())).toBe(true);
   });
 
-  it("🔴 cobertura incompleta → NÃO reaproveita (a rodada nova julga arquivos diferentes)", () => {
-    const cov = { full: ["a.md"], outlineOnly: ["grande.md", "modelo-dados.md"], oversized: [] };
-    expect(pendingCoverage(cov)).toEqual(["grande.md", "modelo-dados.md"]);
-    expect(canReusePassedRun(cov)).toBe(false);
+  it("🔴 há arquivo nunca julgado → NÃO reaproveita (a rodada nova julga arquivos diferentes)", () => {
+    expect(pendingCoverage(["grande.md", "modelo-dados.md"], cov())).toEqual(["grande.md", "modelo-dados.md"]);
+    expect(canReusePassedRun(["grande.md"], cov())).toBe(false);
   });
 
   it("o que falta é só `oversized` → reaproveita (rotação não cobre o que não cabe nem sozinho)", () => {
-    const cov = { full: ["a.md"], outlineOnly: ["monstro.md"], oversized: ["monstro.md"] };
-    expect(pendingCoverage(cov)).toEqual([]);
-    expect(canReusePassedRun(cov)).toBe(true);
+    expect(pendingCoverage(["monstro.md"], cov(["monstro.md"]))).toEqual([]);
+    expect(canReusePassedRun(["monstro.md"], cov(["monstro.md"]))).toBe(true);
   });
 
   it("parte do que falta cabe → revalida, mesmo havendo um `oversized` no meio", () => {
-    const cov = { full: [], outlineOnly: ["monstro.md", "medio.md"], oversized: ["monstro.md"] };
-    expect(pendingCoverage(cov)).toEqual(["medio.md"]);
-    expect(canReusePassedRun(cov)).toBe(false);
+    expect(pendingCoverage(["monstro.md", "medio.md"], cov(["monstro.md"]))).toEqual(["medio.md"]);
+    expect(canReusePassedRun(["monstro.md", "medio.md"], cov(["monstro.md"]))).toBe(false);
   });
 
-  it("cobertura ausente/ilegível (run legada, JSON estranho) → comportamento legado: reaproveita", () => {
-    for (const raw of [null, undefined, {}, { outlineOnly: "nao-e-array" }, "lixo", 7]) {
-      expect(canReusePassedRun(raw)).toBe(true);
+  it("cobertura ilegível (run legada, JSON estranho) não inventa `oversized`: pendência manda", () => {
+    for (const raw of [null, undefined, {}, { oversized: "nao-e-array" }, "lixo", 7]) {
+      expect(canReusePassedRun([], raw)).toBe(true);
+      expect(canReusePassedRun(["b.md"], raw)).toBe(false);
     }
   });
 });
