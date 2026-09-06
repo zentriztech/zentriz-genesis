@@ -194,6 +194,13 @@ export interface AutonomyRoundLog {
   applied?: boolean;
   specChars?: number | null;
   note?: string;
+  /**
+   * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
+   * existe). Discriminar pelo caminho não serve: depois de criado, o manifesto ganha GAPs próprios e
+   * volta à fila como arquivo normal — foi assim que o laço pagou uma rodada de criação para o guard
+   * recusá-la com "o manifesto passou a existir" (medido no run `75b3cf5d`, passe 2, rodada 11).
+   */
+  manifestCreation?: boolean;
 }
 
 /** PR-5: `whole` = spec de um arquivo só (comportamento da 090); `per_file` = fila de arquivos. */
@@ -840,9 +847,11 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
 
   const target = queue[0];
-  // A5.3: o manifesto não tem arquivo para ler nem GAPs "deste arquivo" — é criação, não edição.
-  if (target === MANIFEST_PATH) return startManifestRound(db, run, scope, gaps, agentsUrl, llm);
   const file = await readSpecFileAt(db, run.projectId, target);
+  // A5.3: o manifesto não tem arquivo para ler nem GAPs "deste arquivo" — é criação, não edição.
+  // GAP-5: o que decide é a EXISTÊNCIA, não o nome. Depois de criado, o `README.md` ganha GAPs
+  // próprios e volta à fila como qualquer outro arquivo — aí o caminho certo é o CTO-editor.
+  if (target === MANIFEST_PATH && !file) return startManifestRound(db, run, scope, gaps, agentsUrl, llm);
   if (!file) {
     // Arquivo saiu da árvore/disco entre a validação e agora (split, remoção). Não é falha do
     // modelo: só sai da fila deste passe.
@@ -937,7 +946,7 @@ async function startManifestRound(
   const manifestGaps = manifestGapFindings(scope);
   await appendRoundLog(db, run.id, {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
-    filePath: MANIFEST_PATH, gapsBefore: gaps.important,
+    filePath: MANIFEST_PATH, manifestCreation: true, gapsBefore: gaps.important,
     blockers: manifestGaps.filter((f) => f.severity === "blocker").length,
     warnings: manifestGaps.filter((f) => f.severity === "warning").length,
     specChars: 0,
@@ -1060,7 +1069,13 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
   // A5.3: o manifesto é CRIAÇÃO — as guardas de edição (base, encolhimento, integridade) não se
   // aplicam a um arquivo que não existia, e `readSpecFileAt` abaixo devolveria null.
-  if (target === MANIFEST_PATH) return applyManifestRound(db, run, revised, job?.truncated === true);
+  // GAP-5: quem decide é a rodada REGISTRADA, não o nome do arquivo. Se o `README.md` já existia, a
+  // rodada foi de edição e tem de ser aplicada como tal — senão o guard de criação descartaria uma
+  // revisão paga com "o manifesto passou a existir".
+  const lastRound = run.rounds[run.rounds.length - 1];
+  if (lastRound?.manifestCreation === true && lastRound.round === run.round) {
+    return applyManifestRound(db, run, revised, job?.truncated === true);
+  }
   const file = await readSpecFileAt(db, run.projectId, target);
   if (!file) {
     return skipFileAndContinue(db, run, target, "arquivo não está mais legível no disco", { failure: false, fromStatus: "applying" });

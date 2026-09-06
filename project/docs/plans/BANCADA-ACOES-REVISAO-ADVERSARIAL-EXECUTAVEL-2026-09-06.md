@@ -167,3 +167,35 @@ e reversível sem deploy por `SPEC_GAP_SIBLING_CONTEXT=off`. 9 + 4 testes.
 **Critério de fechamento da O1 (a re-medir em prod depois do deploy):** numa rodada nova do laço,
 (a) o `no_readme` desaparece, (b) o passe 2 acontece de fato e (c) a contagem total de GAPs
 importantes **CAI** — não basta resolver findings, o saldo tem de ser negativo.
+
+**Efeito medido do deploy da O1 (`main 4601374`, api `sha256:78ab7098…`) — run `75b3cf5d`:**
+o saldo passou a ser **negativo em todo passe**, que era o critério: validação `a01ba932`
+(13 blk + 11 wrn = **24**) → `5fc0f9e7` (12 + 6 = **18**) → `a90aba9b` (11 + 5 = **16**).
+Antes do deploy a contagem SUBIA (20 → 24) mesmo resolvendo 21 findings. Também provados ao vivo:
+`passe 1/5 arquivo 7 (README.md, CRIAÇÃO)` com o arquivo de 6.573 B no disco e na árvore
+(`no_readme` desapareceu), e `passe 2/5 arquivo 8` — o passe 2 acontecendo pela primeira vez.
+
+**GAP-5 🔴 (fechado, ainda não deployado): o laço pagou uma rodada de LLM para o próprio guard recusá-la.**
+No passe 2 do `75b3cf5d`, rodada 11: log `arquivo 11 (README.md, CRIAÇÃO)` e depois
+`last_error = "o manifesto passou a existir durante a rodada — não sobrescrevi"`. Causa: o manifesto
+criado no passe 1 ganhou **GAPs próprios** e voltou à fila como arquivo normal, mas os DOIS caminhos
+do laço chaveavam pelo **NOME** (`target === MANIFEST_PATH`) — então a fila de conteúdo era desviada
+para o gerador de manifesto, que corretamente se recusa a sobrescrever. Resultado: uma rodada paga e
+descartada e o `README.md` **nunca corrigido** (os GAPs dele sustentariam passe após passe).
+Correção: quem decide é a **EXISTÊNCIA** do arquivo, não o nome — `startFileRound` lê o arquivo antes
+de escolher o caminho (`if (target === MANIFEST_PATH && !file)`), e o `apply` deixa de reinferir o
+caminho: a rodada carrega o fato `manifestCreation: true` no seu próprio log (com conferência do
+número da rodada, para uma rodada antiga não contaminar a atual). 3 testes novos.
+
+**GAP-6 🟡 (fechado, ainda não deployado): o orçamento de irmãos era gasto no COMEÇO do arquivo.**
+Medido no mesmo run `75b3cf5d`, que provou o A5.5: com irmãos de ~20 KB, o head-truncate deixava
+**só 2 irmãos citados caberem** por rodada (`chars≈40.5k` de 60k) e em `modelo-dados.md` **8 ficaram
+de fora** — e os 20k gastos eram justamente a abertura do arquivo, que raramente é onde mora a regra
+em disputa. Correção `A5.6`: irmão grande vira **RESUMO DIRIGIDO** — sumário COMPLETO de cabeçalhos
+(para o modelo saber o que existe) + apenas as seções que mencionam os **termos que o GAP coloca em
+disputa** (`disputedTerms`: identificadores entre backticks, códigos em CAIXA_ALTA, números de 3–4
+dígitos — é assim que "422 vs 400" e `VALIDATION_ERROR` aparecem). Teto por irmão 20k → 12k, teto de
+seção 3k, arquivo ≤ 8k continua indo INTEIRO (recortar arquivo curto só cria risco de omitir a
+regra). O aviso "não conclua que o irmão silencia" é obrigatório: sem ele o editor duplicaria a regra
+no arquivo errado — trocaria divergência por duplicação normativa, o mesmo defeito com outro nome.
+6 testes novos (a seção relevante no MEIO do arquivo entra; os corpos das irrelevantes não).

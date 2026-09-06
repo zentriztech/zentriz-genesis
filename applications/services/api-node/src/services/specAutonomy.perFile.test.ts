@@ -532,6 +532,69 @@ describe("A5.3 — criação do manifesto pelo laço", () => {
   });
 });
 
+/**
+ * GAP-5 — medido em prod no run `75b3cf5d` (passe 2, rodada 11): log
+ * `arquivo 11 (README.md, CRIAÇÃO)` e depois `last_error = "o manifesto passou a existir durante a
+ * rodada — não sobrescrevi"`. O manifesto criado no passe 1 ganhou GAPs próprios e voltou à fila como
+ * arquivo normal; como os DOIS caminhos chaveavam pelo NOME (`target === MANIFEST_PATH`), o laço
+ * pagou uma rodada de CRIAÇÃO para o próprio guard recusá-la. Uma rodada de LLM jogada fora e o
+ * arquivo nunca corrigido. Agora quem decide é a EXISTÊNCIA do arquivo.
+ */
+describe("GAP-5 — manifesto que JÁ existe é editado, não recriado", () => {
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;
+    makeTree([
+      { path: "00-indice.md", content: INDEX, isPrimary: true },
+      { path: "backend/01-api.md", content: API },
+      { path: "README.md", content: body("Manifesto", 4) },
+    ]);
+    // Como em prod depois do passe 1: o manifesto existe na árvore E tem GAPs seus.
+    findings = [
+      gap("README.md", "blocker", "manifesto sem arquétipo declarado"),
+      gap("README.md", "warning", "manifesto sem stack"),
+    ];
+    unroutedFindings = [];
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  it("vai ao CTO-editor com o conteúdo do arquivo (não ao gerador de manifesto)", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchManifestJob).not.toHaveBeenCalled();
+    expect(dispatchGapFileJob).toHaveBeenCalledTimes(1);
+    expect(lastFileCall().filePath).toBe("README.md");
+    expect(lastFileCall().fileContent).toBe(onDisk("README.md"));
+    expect(lastFileCall().findings.map((f) => f.severity)).toEqual(["blocker", "warning"]);
+    expect(String(JSON.stringify(run!.rounds))).not.toContain("manifestCreation");
+  });
+
+  it("a revisão é ESCRITA no arquivo — o guard de criação não pode recusá-la", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    const revised = `${onDisk("README.md")}\n## 99. Arquétipo\nbackend-service.\n`;
+    await ctoReturns(r.id, revised);
+    expect(onDisk("README.md")).toBe(revised);
+    expect(run!.files_done).toContain("README.md");
+    expect(run!.last_error).toBeNull();
+  });
+
+  it("o manifesto AUSENTE continua indo pelo caminho de criação (marcado na rodada)", async () => {
+    makeTree([
+      { path: "00-indice.md", content: INDEX, isPrimary: true },
+      { path: "backend/01-api.md", content: API },
+    ]);
+    process.env.UPLOAD_DIR = root;
+    const semManifesto = { ...gap("", "warning", "Spec sem manifesto (README.md)"), anchor: "no_readme" };
+    unroutedFindings = [semManifesto];
+    findings = [semManifesto];
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchManifestJob).toHaveBeenCalledTimes(1);
+    expect(dispatchGapFileJob).not.toHaveBeenCalled();
+    expect(String(JSON.stringify(run!.rounds))).toContain("\"manifestCreation\":true");
+  });
+});
+
 // ── 4. falha de ARQUIVO ≠ falha do laço ──────────────────────────────────────
 
 describe("falhas em nível de arquivo", () => {
