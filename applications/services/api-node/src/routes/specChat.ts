@@ -42,6 +42,7 @@ import { extractSpecMarkdown, httpPost, httpGet } from "./specs.js";
 import { parseSpecPath } from "./specFiles.js";
 import type { ValidationFinding } from "../services/specValidation.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
+import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -504,7 +505,7 @@ export function rawMaxTokensFor(chars: number): number {
  * limites e códigos de erro. A folga de 900 tokens por GAP subestimou isso em prod.
  *
  * POR QUE CONCEDER O MÁXIMO: `max_tokens` é TETO, não gasto — só se paga o que for gerado. A entrada
- * já é limitada a `MAX_GAP_FILE_CHARS` (48.000 chars ≈ 17.000 tokens), então 32.000 permite ~2× de
+ * já é limitada a `maxGapFileChars()` (48.000 chars ≈ 17.000 tokens no formato `whole`), então 32.000 permite ~2× de
  * crescimento, que é a forma desta tarefa. E a corrupção continua vetada: `_truncated` recusa a
  * rodada (não mutila o arquivo) e o laço para. Racionar o teto não economizou nada — desperdiçou uma
  * rodada inteira. 32.000 é o teto seguro do caminho (`call_bedrock_direct` recebe `timeout`
@@ -607,8 +608,66 @@ const GAP_FILE_SYSTEM = [
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código e sem preâmbulo.",
 ].join(" ");
 
-/** Teto de conteúdo do "Resolver GAPs por arquivo": ver `rawMaxTokensFor` (cabe no orçamento). */
-const MAX_GAP_FILE_CHARS = 48_000;
+/**
+ * A5.2 (2026-09-06) — o MESMO papel do GAP_FILE_SYSTEM, mas entregando EDIÇÕES em vez do arquivo.
+ *
+ * Medido em prod: `privacidade-lgpd.md` (~47k chars, 9 GAPs) estourou os 32.000 tokens de saída
+ * QUATRO vezes (69.058 chars gerados e ainda incompleto) porque o formato "arquivo inteiro" faz o
+ * custo de saída crescer com o TAMANHO DO ARQUIVO em vez do tamanho da correção. Ver
+ * `services/specFileEdits.ts` para a análise completa e para o veto de corrupção.
+ *
+ * As regras de escopo são as mesmas — só o CANAL de entrega muda. A instrução de ancoragem é
+ * explícita porque o único jeito de este formato falhar é âncora inexistente ou ambígua, e é isso
+ * que o aplicador recusa.
+ */
+const GAP_FILE_EDITS_SYSTEM = [
+  "Você é o CTO/arquiteto responsável pela especificação de um produto de software.",
+  "Recebe UM arquivo da especificação e a lista de GAPs (problemas de uma validação adversarial) que",
+  "pertencem a ESTE arquivo. Corrija cada GAP com profundidade de especialista: decida o que falta,",
+  "escreva o requisito/contrato/critério que resolve o problema e seja concreto (nomes, campos,",
+  "limites, códigos de erro) — nunca responda com generalidades ou com um TODO.",
+  "FORMATO DA RESPOSTA (obrigatório): NÃO reemita o arquivo. Devolva APENAS blocos de edição, assim:",
+  "<<<<<<< SEARCH",
+  "(trecho EXATO e literal do arquivo atual, copiado caractere por caractere)",
+  "=======",
+  "(o trecho já corrigido, que substitui o de cima)",
+  ">>>>>>> REPLACE",
+  "REGRAS DOS BLOCOS (invioláveis):",
+  "1) O trecho em SEARCH precisa existir LITERALMENTE no arquivo e ser ÚNICO — inclua linhas de",
+  "   contexto (o cabeçalho da seção, por exemplo) até que só case em um lugar.",
+  "2) Para ACRESCENTAR conteúdo novo, use como SEARCH a última linha existente do ponto de inserção e",
+  "   repita-a no REPLACE seguida do conteúdo novo. Nunca use SEARCH vazio.",
+  "3) Um bloco por edição; quantos blocos precisar. Ordene-os de cima para baixo no arquivo.",
+  "4) NÃO renomeie nem reordene seções existentes sem necessidade, e NÃO remova requisito válido.",
+  "5) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
+  "6) Se um GAP claramente não é deste arquivo, não invente edição para ele.",
+  "Fora dos blocos, escreva no máximo uma linha final de observação. Nada de preâmbulo.",
+].join(" ");
+
+/**
+ * A5.2 — canal de entrega do "Resolver GAPs por arquivo".
+ *
+ * Default `edits` porque o formato `whole` está PROVADO insuficiente para arquivo grande (4/4
+ * falhas em prod). `SPEC_GAP_FILE_EDIT_FORMAT=whole` restaura o comportamento anterior sem deploy —
+ * é o rollback de comportamento, separado da flag do CTO da spec inteira (`SPEC_CTO_EDIT_FORMAT`),
+ * que rege OUTRO caminho (`/invoke/cto/async`) e tem outro aplicador (nos agents).
+ */
+export function gapFileEditsEnabled(): boolean {
+  return (process.env.SPEC_GAP_FILE_EDIT_FORMAT ?? "edits").trim().toLowerCase() !== "whole";
+}
+
+/**
+ * Teto de conteúdo do "Resolver GAPs por arquivo".
+ *
+ * No formato `whole` o teto de ENTRADA existia para a SAÍDA caber no orçamento (o arquivo voltava
+ * inteiro) — daí 48.000. No formato `edits` a saída não é mais proporcional ao arquivo, então o
+ * limite passa a ser só a janela de contexto: 120.000 chars ≈ 43.000 tokens de entrada, folgado
+ * dentro dos 200k, e destrava arquivos que hoje o laço recusa com FILE_TOO_LARGE sem ter como
+ * dividi-los sozinho.
+ */
+export function maxGapFileChars(): number {
+  return gapFileEditsEnabled() ? 120_000 : 48_000;
+}
 
 function fmtGapForFile(f: ValidationFinding): string {
   const sev = (f.severity || "info").toUpperCase();
@@ -630,6 +689,7 @@ function buildGapFileRequest(
   scopeProjectId: string | null = null,
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
+  const edits = gapFileEditsEnabled();
   // Mapa do produto (Fase 1) como contexto só-leitura: o arquivo é uma PARTE de um todo, e sem saber
   // onde ele vive o CTO-editor duplica o que já está no irmão.
   const contextBlock = (ctx.productMapBlock ?? "").slice(0, RAW_FILE_CONTEXT_BUDGET);
@@ -647,10 +707,14 @@ function buildGapFileRequest(
     gaps,
     "--- FIM DOS GAPs ---",
     "",
-    "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
+    edits
+      // A instrução final repete o formato porque é a última coisa que o modelo lê antes de gerar —
+      // e o hábito de reemitir o documento inteiro é justamente o que causou 4 truncamentos em prod.
+      ? "Resolva TODOS os GAPs acima e devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE. Não reemita o arquivo."
+      : "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
   ].join("\n");
   return {
-    prompt_override: GAP_FILE_SYSTEM,
+    prompt_override: edits ? GAP_FILE_EDITS_SYSTEM : GAP_FILE_SYSTEM,
     user_message: userMessage,
     // A saída CRESCE (o arquivo ganha o que faltava) — e o teto derivado do tamanho reprovou a
     // rodada 2 em prod com `out=8000 TRUNCATED`. Ver `GAP_FILE_MAX_TOKENS` (teto ≠ gasto).
@@ -698,6 +762,12 @@ function runFileChatJob(
   agentsUrl: string,
   /** Resposta exibida ao humano quando dá certo (o `/invoke/raw` devolve só o arquivo). */
   doneReply = "Revisão pronta — confira e clique em “Aplicar ao arquivo”.",
+  /**
+   * A5.2 — conteúdo base quando a resposta esperada são EDIÇÕES (search/replace) em vez do arquivo.
+   * Presente só no caminho "Resolver GAPs por arquivo" com `SPEC_GAP_FILE_EDIT_FORMAT=edits`.
+   * `null` = a resposta é o arquivo inteiro (comportamento histórico, intocado).
+   */
+  editsBase: string | null = null,
 ): void {
   const job = _chatJobs.get(jobId);
   if (!job) return;
@@ -733,8 +803,49 @@ function runFileChatJob(
       // então vazio aqui significa que nem o fallback produziu conteúdo). NÃO aplicamos lixo.
       if (!md || md.trim().length < 2) {
         console.warn(`[SpecChat] job=${jobId} raw vazio — model=${data.model_used ?? "?"}`);
-        settleJob(jobId, { status: "error", error: "A IA não retornou conteúdo para o arquivo. Reformule o pedido e tente de novo." });
+        settleJob(jobId, { status: "error", modelUsed: data.model_used ?? null, error: "A IA não retornou conteúdo para o arquivo. Reformule o pedido e tente de novo." });
         return;
+      }
+      // ── A5.2: resposta em EDIÇÕES (search/replace) ────────────────────────────────────────────
+      // Só quando o chamador mandou a base. Se o modelo desobedecer e reemitir o arquivo inteiro
+      // (o hábito que causou os 4 truncamentos), NÃO jogamos fora trabalho pago: sem nenhum marcador
+      // de bloco, o resultado segue para o gate histórico de arquivo completo, logo abaixo.
+      if (editsBase != null && looksLikeEdits(data.response ?? "")) {
+        // `stripOuterFence` não vale aqui: os marcadores não são uma cerca de código e um `trim`
+        // global poderia comer indentação que faz parte do trecho a casar.
+        const applied = applySpecEditResponse(editsBase, (data.response ?? "").replace(/\r\n/g, "\n"));
+        if (!applied.ok) {
+          console.warn(`[SpecChat] job=${jobId} edits REPROVADOS (${applied.code}) — ${applied.message}`);
+          settleJob(jobId, {
+            status: "error",
+            modelUsed: data.model_used ?? null,
+            // Deliberadamente NÃO marca `truncated`: a causa foi a âncora, não o teto — e `truncated`
+            // tem significado próprio para o laço (`assessRevisionIntegrity`).
+            error: `A IA devolveu edições que não puderam ser ancoradas no arquivo — nada foi alterado. ${applied.message}`,
+          });
+          return;
+        }
+        // POR QUE `truncated` NÃO É PROPAGADO NUM `done` DE EDIÇÕES: no formato de arquivo inteiro,
+        // corte = documento mutilado (daí o veto de `assessRevisionIntegrity`). Aqui o corte só
+        // descarta o bloco que não fechou — os aplicados são íntegros e o resto do arquivo não muda.
+        // Marcar `truncated` faria o laço autônomo recusar um resultado BOM (e pago).
+        const partial = applied.dropped > 0 || data.truncated === true;
+        settleJob(jobId, {
+          status: "done",
+          specMarkdown: applied.content,
+          modelUsed: data.model_used ?? null,
+          reply: partial
+            ? `${doneReply}\n\n⚠️ A resposta bateu no teto de saída: ${applied.applied} edição(ões) aplicada(s) e ${applied.dropped} incompleta(s) descartada(s). O que faltou continua nos GAPs — rode de novo para o restante.`
+            : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`,
+        });
+        console.log(
+          `[SpecChat] ✓ job=${jobId} DONE (edits) — ${applied.applied} aplicadas, ${applied.dropped} descartadas, ` +
+          `${editsBase.length}→${applied.content.length} chars, out=${data.usage?.output_tokens ?? "?"}, model=${data.model_used ?? "?"}`,
+        );
+        return;
+      }
+      if (editsBase != null) {
+        console.warn(`[SpecChat] job=${jobId} pediu EDITS e veio arquivo inteiro (${md.length} chars) — aplicando o gate de arquivo completo`);
       }
       // PR-4/T1: bateu no teto de saída → o arquivo devolvido está CORTADO. Aqui o resultado é
       // aplicado POR CIMA de um arquivo bom, então entregar truncado é perda de dados. Recusamos:
@@ -744,6 +855,9 @@ function runFileChatJob(
         settleJob(jobId, {
           status: "error",
           truncated: true,
+          // `model_used` faltava aqui e no caminho vazio: o job de erro nascia sem modelo e a
+          // análise de custo ficava cega justamente nas rodadas que só gastaram (GAP registrado).
+          modelUsed: data.model_used ?? null,
           error: "A resposta da IA bateu no teto de saída do modelo e o arquivo voltou INCOMPLETO — nada foi aplicado. Divida o arquivo (ou peça menos de uma vez) e tente de novo.",
         });
         return;
@@ -921,10 +1035,11 @@ export async function dispatchGapFileJob(opts: {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
   }
-  if (opts.fileContent.length > MAX_GAP_FILE_CHARS) {
+  const gapFileCap = maxGapFileChars();
+  if (opts.fileContent.length > gapFileCap) {
     return {
       ok: false, code: "FILE_TOO_LARGE",
-      message: `${opts.filePath} tem ${opts.fileContent.length} caracteres (teto ${MAX_GAP_FILE_CHARS}) — a resposta não caberia no orçamento de saída do modelo. Divida este arquivo.`,
+      message: `${opts.filePath} tem ${opts.fileContent.length} caracteres (teto ${gapFileCap}) — não cabe na janela de contexto desta rodada. Divida este arquivo.`,
     };
   }
   // Mapa do produto como contexto só-leitura (Fase 1). Best-effort e só com a flag ligada — sem ele
@@ -949,6 +1064,9 @@ export async function dispatchGapFileJob(opts: {
     { ...buildGapFileRequest(opts.fileContent, opts.filePath, opts.findings, ctx, opts.projectId), ...opts.llm },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
+    // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
+    // continua comparando a mesma impressão.
+    gapFileEditsEnabled() ? opts.fileContent : null,
   );
   return { ok: true, gaps: opts.findings.length };
 }
@@ -1013,7 +1131,7 @@ export async function specChatRoutes(app: FastifyInstance) {
       // sobrescrevendo o arquivo real com versão cortada). O chat da spec inteira não tem esse apply.
       // O teto do Resolver GAPs por arquivo é maior: o orçamento de saída agora é derivado do
       // tamanho do arquivo (`rawMaxTokensFor`) em vez de fixo em 8k.
-      const fileChatCap = gapsPerFile ? MAX_GAP_FILE_CHARS : MAX_FILE_CHAT_CHARS;
+      const fileChatCap = gapsPerFile ? maxGapFileChars() : MAX_FILE_CHAT_CHARS;
       if (filePath && specMarkdown.length > fileChatCap) {
         return reply.status(413).send({
           code: "FILE_TOO_LARGE",
@@ -1133,6 +1251,7 @@ export async function specChatRoutes(app: FastifyInstance) {
           { ...buildGapFileRequest(specMarkdown, filePath!, fileGaps, ctx, projectId), ...llm },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
+          gapFileEditsEnabled() ? specMarkdown : null,
         );
       } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
