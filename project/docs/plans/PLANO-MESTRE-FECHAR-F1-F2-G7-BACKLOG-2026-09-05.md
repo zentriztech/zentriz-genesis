@@ -236,6 +236,75 @@ de **outro** projeto. Testes: 15 pytest novos (`test_cag_consumer.py`) + 29 do p
 - **A4.4 🟢 C5** é texto; **A4.5 🟢 backfill D1** = mover o script para o repo e rodar por `docker exec`
   a partir da imagem (não `docker cp`).
 
+#### ✅ ONDA 4 ENTREGUE E PROVADA EM PROD (2026-09-06) — sem migração
+
+Dois deploys: **api + genesis-web + agents + runner + cyborg** (main `f0ce77e`) e um **fix só de api**
+(main `07e3f50`). Rollback: `rollback-<svc>:pre-onda4-20260906` para os 5 serviços. Digests finais em prod:
+api `4761ce3b…`, genesis-web `ef72a00b…`, agents `fb5087d2…`, runner `126f9177…`, cyborg `b991e1a1…`;
+`/health` 200 `1.4.0-beta`. **Nenhuma migração nesta onda.**
+
+- **A4.1 ✅ (medição REPROVOU a troca do `.env` — e a correção ficou melhor):** `/invoke/raw` no agents de
+  prod contra a conta 820 confirmou a memória pessimista: **só `us.anthropic.claude-sonnet-4-6` responde**;
+  `opus-4-8` e `opus-5` voltam 403 "not available for this account". Como a condição do plano ("só troco o
+  `.env` se a medição passar") **falhou**, o `.env` **não foi tocado** — apontar para baixo esconderia o
+  problema e ninguém lembraria de voltar no dia do entitlement. Em vez disso: **cache de negação por TTL**
+  em `agents/runtime.py` (`CLAUDE_MODEL_DENY_TTL_SEC`, default **1800 s**, `0` desliga). O 403 não custa
+  tokens, mas custava **uma das `CLAUDE_RETRY_ATTEMPTS`** — sob 429 a resiliência da rodada caía de 3 para 2.
+  `is_model_unavailable_error` distingue 403 de entitlement de erro de rede/quota (senão um timeout tiraria
+  o modelo bom por 30 min) e `preferred_model` faz a rodada **nascer** no fallback — o que também corrige um
+  efeito colateral silencioso: o `calculate_token_budget` passa a ser calculado para o modelo REALMENTE usado
+  (Opus 64k vs Haiku 8.192). **Prova ao vivo:** duas chamadas `/invoke/raw` pedindo `opus-4-8` → **200** com
+  `model_used=sonnet-4-6`, e no log **um único** 403 (1ª chamada), seguido na 2ª de
+  `[call_bedrock_direct] Modelo 'us.anthropic.claude-opus-4-8' está marcado como indisponível na conta —
+  usando 'us.anthropic.claude-sonnet-4-6' sem tentar de novo`. 10 pytest novos (`test_model_deny_cache.py`).
+- **A4.2 ⏸️ CÓDIGO PRONTO, EXECUÇÃO REPRESADA (exige OK do Jean — exigência deste plano):** o `SELECT` foi
+  feito e confirma o desenho: 9 projetos OrienteMe **V5…V13**, todos `accepted`, **nenhum** com
+  `parent_project_id` ou `extra.superseded_by` → `productContext.ts:168` (que filtra exatamente
+  `COALESCE(p.extra->>'superseded_by','')=''`) conta 9 projetos vivos e o CTO recebe nove contextos
+  concorrentes da MESMA aplicação. `src/db/link-project-lineage.ts` escreve a **mesma forma de dado** que o
+  `evolutionAccept.ts` escreveria (`status=archived` + `extra.superseded_by/at/version` no antecessor;
+  `extra.supersedes/lineage_version` no sucessor; `parent_project_id` **não** é tocado, porque não houve
+  evolução e inventar essa aresta faria a herança do runner buscar tasks inexistentes). Guardas: DRY-RUN por
+  default, cadeia de ids **explícita** na linha de comando, uuid validado, id repetido e cadeia multi-tenant
+  recusadas, **backup em `projects_lineage_backup_<stamp>` antes de qualquer UPDATE** + statement de rollback
+  impresso, transação única, idempotente. 4 vitest (`linkProjectLineage.test.ts`). **Nada foi alterado no
+  banco de produção.**
+- **A4.3 ✅** três rotas em `specFiles.ts`: `GET /spec-versions[?path=]` (**só metadados**),
+  `GET /spec-versions/:snapshotId` (conteúdo, rota separada) e `POST /spec-versions/:snapshotId/restore`
+  (escrita, com o conteúdo VIVO virando versão como **pré-condição** → 503 `SNAPSHOT_FAILED` se o snapshot
+  falha, 409 `FILE_GONE`, `unchanged:true` idempotente). Guarda igual à do resto da família
+  (`canAccessProjectRow` + `guardWrite`: `svc=runner` 403, status não-editável 409 `SPEC_LOCKED`) e o `PUT
+  /spec-file` passou a gravar versão (G2 no caminho humano principal, que era o único write sem rede de
+  segurança). **Prova ao vivo na spec NVX LastMile (98k chars):** listagem 200 sem `"content"` e sem
+  `/shared/uploads`, outro tenant 404, sem token 401, traversal 400 `BAD_PATH`, PUT gerando versão
+  `manual-file-edit`, rota de conteúdo byte a byte igual ao texto pré-PUT, restore 200 devolvendo o arquivo ao
+  sha `f0f6d46c…` (e guardando `pre-restore:5ef39e00`), projeto `accepted` 409 `SPEC_LOCKED`, id não-uuid 404,
+  `?path=` filtrando 2 versões. 19 vitest.
+- **A4.4 ✅** o C5 do certificado deixou de mentir: `blocked` → **`null`** ("não avaliado: N aviso(s) atrás
+  dos blockers"), avisos ativos sem ack → **`false`**, e `true` só com "sem avisos" / "dispensado(s) pelo
+  force do zentriz_admin (auditado)" / "reconhecido(s) por ack". **Prova:** projeto `e2a1988c` (nível
+  `blocked`, 6 blockers ativos) hoje reporta `C5: None — não avaliado: 14 aviso(s) atrás dos blockers`;
+  antes exibia `✅` com "14 avisos sem ack" no mesmo card.
+- **A4.5 ✅** `dist/db/backfill-venuxx-v2-spec-files.js` viaja **dentro da imagem** e roda por `docker exec`
+  (o `docker cp` da 1ª tentativa não sobrevivia ao recreate). Dry-run em prod: "linhas com `file_path`
+  relativo: **0** … nada a fazer (idempotente)"; o banco confirma **58 absolutos / 0 relativos**.
+
+**Defeito encontrado PELA prova ao vivo (e corrigido no 2º deploy):** a listagem de versões exibia o nome do
+arquivo **físico** do upload (`1785093867177-nvx-lastmile-backend.md`) em vez do nome que o humano vê na
+árvore (`nvx-lastmile-backend.md`) — a rota derivava o caminho do disco. Correção: `displayPathMap()` lê
+`rel_dir`/`filename` de `project_spec_files` e o caminho físico só sobra como fallback para versão de arquivo
+já removido da árvore (2 testes travam os dois casos).
+
+**Achado NOVO para o backlog:** antes do PUT da prova, `project_spec_files.content_sha256` do LastMile estava
+**velho** (`8c533806…`) em relação ao arquivo em disco (`f0f6d46c…`) — algum escritor da spec não atualiza a
+coluna. Isso afeta `baseSha`/If-Match (409 falso para o humano) e as checagens do certificado. O restore
+corrigiu a coluna; a causa segue viva. Some-se aos GAPs abertos: `model_used` NULL no cto/async e
+G1/G3/G6/G8 dos GAPs sistêmicos.
+
+**Gate DEPOIS cumprido:** rotas 200 com guarda de tenant ✅ · C5 legível ✅ · 403 do modelo **eliminado do
+caminho quente e reportado** ✅ (o entitlement em si é da conta AWS, fora do código). Testes: 1.470 vitest
+(123 arquivos) + 10 pytest novos; `tsc --noEmit` limpo. Único item **não** executado: o UPDATE do A4.2.
+
 ### Onda 5 — prova ao vivo + auditoria da lei
 - **A5.1 🔴 ligar `edits` sem prova = fé:** medir `_edits_applied` e `output_tokens` por rodada contra o
   baseline (≈64k truncado). Se o modelo ignorar o formato e reemitir tudo, a rodada custa igual → medir
@@ -256,7 +325,7 @@ Nenhuma onda começa com a anterior sem prova.
 | **1** | PR-3: `split_spec_into_files` (arquiteto + N redatores), `/invoke/spec_split/async`, `POST /api/projects/:id/spec-split` (dry-run/apply), botão + preview na Bancada | testes verdes, snapshot G2 funcionando, teto de arquivos conhecido | dry-run real no LastMile mostrando o plano + cobertura; apply num projeto de teste; árvore com N arquivos e README primário |
 | **2** | PR-4 + PR-5: resolve_gaps por arquivo, prefixo de path, B8, `writeSpecFile`, fila 1-arquivo/rodada, validação quando a fila esvazia | Onda 1 provada; findings com `file` real | rodada escopada real: só o arquivo alvo muda; `output_tokens` < 8k; laço percorre a fila |
 | **3 ✅** | G7: `RAG_ENABLED` declarado nos serviços, produtor de lição na Bancada (LLM), fallback heurístico **removido**, indexer rodando, **+ consumidor CAG no `run_agent`/`/invoke/raw`** | corpus = 0 confirmado, pgvector presente | ✅ `lessons_corpus` **0→8** com lições da Bancada; `[CAG/live] lessons=8` no prompt de uma rodada real de CTO; 8/8 embeddings Titan V2 |
-| **4** | Backlog: rotas de snapshot + UI, texto do C5, backfill D1 na imagem, `superseded_by` (com OK do Jean), `CLAUDE_MODEL` (só se a medição passar) | medições/`SELECT`s antes | rotas 200 com guarda de tenant; C5 legível; 403 do modelo eliminado ou reportado |
+| **4 ✅** | Backlog: rotas de snapshot + UI, texto do C5, backfill D1 na imagem, `superseded_by` (⏸️ aguarda OK do Jean), `CLAUDE_MODEL` (medição REPROVOU a troca → cache de negação por TTL) | ✅ medições/`SELECT`s feitos antes | ✅ rotas 200 com guarda de tenant (prova no LastMile de 98k); C5 `None` em projeto `blocked`; um único 403 e as chamadas seguintes nascendo no fallback |
 | **5** | Prova ao vivo F1+F2 no LastMile + relatório da auditoria da lei | tudo acima em prod | spec dividida, GAPs caindo por arquivo, custo/rodada medido; relatório entregue |
 
 **Ordem:** 0 → 1 → 2 → 3 → 4 → 5. As ondas 3 e 4 são independentes da 1/2 e podem entrar no mesmo
