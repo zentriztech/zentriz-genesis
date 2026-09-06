@@ -46,6 +46,8 @@ const MAX_POLLS_PER_TICK = 5;
 export const LEARNING_MATERIAL_MAX_CHARS = 24_000;
 /** Depois disto, desistimos do poll (o TTL do job no agents é 45 min). */
 const LEARNING_POLL_MAX_MIN = 20;
+/** Tentativas de kick por episódio: cobre janela de deploy/agents fora do ar sem virar loop. */
+const MAX_KICK_ATTEMPTS = 3;
 /** GAPs listados no relatório, por lado (início/fim). Mais que isso é ruído para a lição. */
 const MAX_FINDINGS_PER_SIDE = 30;
 
@@ -266,7 +268,21 @@ export interface LearningTransport {
 
 const RUN_COLS =
   "id, project_id, tenant_id, status, mode, round, passes, max_rounds, gaps_initial, gaps_current, " +
-  "rounds, last_error, created_at, finished_at, learning_job_id, learning_kicked_at";
+  "rounds, last_error, created_at, finished_at, learning_job_id, learning_kicked_at, learning_result";
+
+/**
+ * `TIMESTAMPTZ` chega do driver `pg` como **Date**, e `String(date)` produz
+ * "Sat Sep 05 2026 12:15:39 GMT+0000 (Coordinated Universal Time)" — que o Postgres recusa
+ * (`invalid input syntax for type timestamp with time zone`). MEDIDO em prod na primeira rodada do
+ * G7: a janela de validações não era lida e o material ia sem os GAPs de antes/depois, que é
+ * justamente o valor da lição. ISO-8601 sempre.
+ */
+function tsIso(v: unknown): string | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (v instanceof Date) return v.toISOString();
+  const parsed = new Date(String(v));
+  return Number.isNaN(parsed.getTime()) ? String(v) : parsed.toISOString();
+}
 
 function rowToEpisodeRun(r: Record<string, unknown>): LearningEpisode["run"] & { projectId: string; tenantId: string | null } {
   return {
@@ -282,9 +298,18 @@ function rowToEpisodeRun(r: Record<string, unknown>): LearningEpisode["run"] & {
     gapsCurrent: r.gaps_current === null || r.gaps_current === undefined ? null : Number(r.gaps_current),
     rounds: Array.isArray(r.rounds) ? (r.rounds as AutonomyRoundLog[]) : [],
     lastError: (r.last_error as string | null) ?? null,
-    createdAt: String(r.created_at ?? ""),
-    finishedAt: (r.finished_at as string | null) ?? null,
+    createdAt: tsIso(r.created_at) ?? "",
+    finishedAt: tsIso(r.finished_at),
   };
+}
+
+/** Quantas vezes já tentamos extrair este episódio (guardado no próprio `learning_result`). */
+function attemptsOf(raw: unknown): number {
+  if (!raw) return 0;
+  try {
+    const o = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : (raw as Record<string, unknown>);
+    return Number(o?.attempts ?? 0) || 0;
+  } catch { return 0; }
 }
 
 async function recordResult(db: Db, runId: string, result: Record<string, unknown>): Promise<void> {
@@ -368,8 +393,19 @@ export async function collectBancadaLessonsTick(
       out.kicked += 1;
       console.info(`[SpecLearning] episódio ${run.id} (${run.status}) → job ${started.jobId}, material ${material.length} chars`);
     } catch (e) {
-      await recordResult(db, run.id, { error: msg(e).slice(0, 300) });
-      console.warn(`[SpecLearning] kick do episódio ${run.id} falhou: ${msg(e)}`);
+      // Falha de kick é quase sempre TRANSITÓRIA — e a primeira que aconteceu em prod foi
+      // exatamente isso: o tick disparou na janela em que o agents ainda rodava a imagem antiga
+      // (sem a rota) e devolveu 404. Sem retry, aquele episódio perderia o aprendizado para sempre,
+      // porque a run já estava reclamada. Devolvemos a run à fila até `MAX_KICK_ATTEMPTS`.
+      const attempts = attemptsOf(row.learning_result) + 1;
+      await recordResult(db, run.id, { error: msg(e).slice(0, 300), attempts });
+      if (attempts < MAX_KICK_ATTEMPTS) {
+        await db.query(
+          "UPDATE spec_autonomy_runs SET learning_kicked_at = NULL, updated_at = now() WHERE id = $1",
+          [run.id],
+        ).catch(() => {});
+      }
+      console.warn(`[SpecLearning] kick do episódio ${run.id} falhou (tentativa ${attempts}/${MAX_KICK_ATTEMPTS}): ${msg(e)}`);
     }
   }
 
