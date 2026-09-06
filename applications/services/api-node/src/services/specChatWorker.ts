@@ -15,7 +15,7 @@
  * Molde: `evolutionMergeWorker.ts` (timer de módulo + guarda de reentrância + stop no SIGTERM).
  */
 import { pool } from "../db/client.js";
-import { collectSpecChatJobsTick } from "./specChatJobs.js";
+import { collectSpecChatJobsTick, expireZombieSpecChatJobs } from "./specChatJobs.js";
 import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { collectSpecSplitsTick } from "./specSplit.js";
 import { collectBancadaLessonsTick } from "./specLearning.js";
@@ -60,6 +60,9 @@ async function probeSpecSplit(agentsJobId: string) {
 }
 
 async function tick(): Promise<void> {
+  // Zumbis PRIMEIRO: job vencido que nenhum coletor alcança era reofertado à tela para sempre
+  // ("Esta revisão passou do tempo máximo…" a cada abertura da Bancada). Nunca lança.
+  await expireZombieSpecChatJobs(pool);
   const out = await collectSpecChatJobsTick(pool, probeAgents, extractSpecMarkdown);
   if (out.collected || out.lost || out.expired) {
     console.info(`[SpecChatWorker] tick: ${out.scanned} órfão(s) varrido(s) — ${out.collected} coletado(s), ${out.lost} perdido(s), ${out.expired} expirado(s).`);

@@ -102,7 +102,9 @@ export default function ProductFolderNav({
    * sem repetir o GET da árvore. Chamado com o MESMO valor por cada instância montada — o pai
    * compara antes de setar estado (senão rail + diálogos se re-renderizariam em laço).
    */
-  onProjectMeta?: (m: { editable: boolean; fileCount: number }) => void;
+  /** `primaryPath`: caminho do arquivo PRIMÁRIO do projeto aberto — o pai usa como rótulo do
+   *  arquivo em edição quando ninguém clicou em nada ainda (a tela já mostra o primário). */
+  onProjectMeta?: (m: { editable: boolean; fileCount: number; primaryPath: string | null }) => void;
   /** Bump externo (criou/excluiu/aplicou revisão) → recarrega o índice. */
   reloadSignal?: number;
 }) {
@@ -170,7 +172,11 @@ export default function ProductFolderNav({
   useEffect(() => {
     const cur = data?.projects.find((p) => p.projectId === currentProjectId);
     if (!cur) return;
-    metaCbRef.current?.({ editable: cur.editable === true, fileCount: cur.files.length });
+    metaCbRef.current?.({
+      editable: cur.editable === true,
+      fileCount: cur.files.length,
+      primaryPath: cur.files.find((f) => f.isPrimary === true)?.path ?? null,
+    });
   }, [data, currentProjectId]);
 
   // Destaca o arquivo aberto. Sem arquivo escolhido, destaca o PRIMÁRIO do projeto atual — é ele
