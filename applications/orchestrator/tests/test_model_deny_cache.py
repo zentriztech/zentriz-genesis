@@ -129,6 +129,46 @@ def test_fallback_tambem_negado_nao_gera_troca_inutil():
     assert preferred_model(OPUS, SONNET) == OPUS
 
 
+# ── o 403 é da CONTA: a marca é por IDENTIDADE, não só por modelo ─────────────
+
+def test_403_da_plataforma_nao_rebaixa_o_tenant_que_tem_o_modelo():
+    """Caso REAL medido em prod (2026-09-06): o tenant `beca944e` (NVX LastMile) roda `opus-5` com
+    credencial PRÓPRIA (BYOC, 19 chamadas de validador em 2026-09-05), enquanto a instance role da
+    conta 820 leva 403 no MESMO modelo. Cache por `model_id` puro rebaixaria o tenant por 30 min.
+    """
+    from orchestrator.agents.runtime import model_identity_scope, note_model_denied, preferred_model
+    opus5 = "us.anthropic.claude-opus-5"
+    plataforma = model_identity_scope(None)                                    # instance role
+    tenant = model_identity_scope({"aws_access_key_id": "AKIA-DO-TENANT",
+                                   "aws_secret_access_key": "x"})              # BYOC
+    assert plataforma != tenant
+    note_model_denied(opus5, plataforma)
+    assert preferred_model(opus5, SONNET, plataforma) == SONNET   # a plataforma cai
+    assert preferred_model(opus5, SONNET, tenant) == opus5        # o tenant NÃO é afetado
+
+
+def test_escopo_identifica_a_conta_sem_expor_a_credencial():
+    from orchestrator.agents.runtime import model_identity_scope
+    ak = "AKIAIOSFODNN7EXAMPLE"
+    escopo = model_identity_scope({"aws_access_key_id": ak, "aws_secret_access_key": "segredo"})
+    assert escopo.startswith("bedrock:")
+    assert ak not in escopo and "segredo" not in escopo
+    # mesma conta → mesmo escopo (a marca de uma chamada vale para a próxima do mesmo tenant)
+    assert escopo == model_identity_scope({"aws_access_key_id": ak, "aws_secret_access_key": "outro"})
+    # contas diferentes → escopos diferentes
+    assert escopo != model_identity_scope({"aws_access_key_id": "AKIA-OUTRA-CONTA"})
+    # provider diferente não colide com o Bedrock (Foundry é outro entitlement)
+    assert model_identity_scope({"provider": "foundry", "foundry_api_key": "k"}).startswith("foundry:")
+
+
+def test_sem_escopo_explicito_a_marca_continua_valendo_para_a_identidade_do_container():
+    """Compatibilidade: quem não passa escopo (testes, chamadas antigas) fica no escopo do env."""
+    from orchestrator.agents.runtime import note_model_denied, is_model_denied, model_identity_scope
+    note_model_denied(OPUS)
+    assert is_model_denied(OPUS) is True
+    assert is_model_denied(OPUS, model_identity_scope(None)) is True
+
+
 # ── o orçamento de tokens passa a ser do modelo REALMENTE usado ───────────────
 
 def test_orcamento_de_saida_segue_o_modelo_efetivo():

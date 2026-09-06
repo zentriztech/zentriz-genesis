@@ -1581,7 +1581,10 @@ def run_agent(
     _model_downgraded = False
     # A4.1 (2026-09-06): modelo já negado pela conta neste processo → nasce no fallback. Antes, todo
     # agente queimava a 1ª das CLAUDE_RETRY_ATTEMPTS num 403 conhecido (9 vezes em 24 h em prod).
-    _preferred = preferred_model(model, _fallback_model)
+    # O escopo é a IDENTIDADE desta chamada (BYOC do tenant vs. role do container): o entitlement é
+    # por conta, e um tenant com acesso próprio ao Opus não pode ser rebaixado pelo 403 da plataforma.
+    _deny_scope = model_identity_scope(_llm_cfg)
+    _preferred = preferred_model(model, _fallback_model, _deny_scope)
     if _preferred != model:
         logger.info("[%s] Modelo '%s' está marcado como indisponível na conta — usando '%s' "
                     "sem tentar de novo (CLAUDE_MODEL_DENY_TTL_SEC).", agent_name, model, _preferred)
@@ -1691,8 +1694,9 @@ def run_agent(
                         "[%s] Modelo '%s' indisponível na conta — caindo para CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s",
                         agent_name, model, _fallback_model, str(e)[:200],
                     )
-                    # A4.1: marca a negação para as PRÓXIMAS chamadas nascerem já no fallback.
-                    note_model_denied(model)
+                    # A4.1: marca a negação para as PRÓXIMAS chamadas nascerem já no fallback
+                    # (só para ESTA identidade — outro tenant/conta não é afetado).
+                    note_model_denied(model, _deny_scope)
                     model = _fallback_model
                     _model_downgraded = True
                     continue
@@ -2060,6 +2064,13 @@ def _is_thinking_param_error(e: Exception) -> bool:
 # entitlement do Opus for concedido, o `.env` já estaria apontando para baixo e ninguém lembraria
 # de voltar. O TTL resolve os dois lados — para de bater no que já sabemos negado, e reavalia de
 # vez em quando (sem redeploy, sem restart) para subir de volta sozinho.
+#
+# ⚠️ O 403 é da CONTA, não do modelo: a chave do cache inclui a IDENTIDADE que fez a chamada.
+# Medido em prod 2026-09-06 (Onda 5, gate ANTES): o tenant `beca944e` (NVX LastMile) tem
+# `tenant_llm_configs.credentials` PRÓPRIO (BYOC) e roda `us.anthropic.claude-opus-5` com sucesso —
+# 19 chamadas de `spec_validator` em Opus 5 em 2026-09-05 —, enquanto a identidade do container
+# (instance role da conta 820) leva 403 no MESMO modelo. Um cache por `model_id` puro faria o 403 da
+# plataforma REBAIXAR silenciosamente, por 30 min, o tenant que paga a própria conta e tem acesso.
 _MODEL_DENIED: dict[str, float] = {}
 
 
@@ -2071,24 +2082,49 @@ def _model_denied_ttl() -> int:
         return 1800
 
 
-def is_model_denied(model_id: str) -> bool:
-    """O modelo levou 403 de entitlement há menos de um TTL? (entrada vencida é esquecida)."""
+def model_identity_scope(llm_cfg: dict | None = None) -> str:
+    """Identidade que VAI fazer a chamada — escopo do entitlement (nunca a credencial em claro).
+
+    Só o prefixo do hash entra na chave (e no log, se algum dia entrar): identifica a conta sem
+    revelar a chave. Sem credencial explícita, a chamada usa a credential chain do container
+    (instance role) — um escopo estável e distinto de qualquer BYOC.
+    """
+    cfg = llm_cfg or {}
+    provider = (str(cfg.get("provider") or "").strip().lower()
+                or os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower()
+                or "bedrock")
+    if provider == "foundry":
+        key = (str(cfg.get("foundry_api_key") or "") or os.environ.get("ANTHROPIC_FOUNDRY_API_KEY", "")).strip()
+        return "foundry:" + (_hashlib.sha256(key.encode()).hexdigest()[:12] if key else "env")
+    ak = (str(cfg.get("aws_access_key_id") or "") or os.environ.get("AWS_ACCESS_KEY_ID", "")).strip()
+    if ak:
+        return "bedrock:" + _hashlib.sha256(ak.encode()).hexdigest()[:12]
+    return "bedrock:role"
+
+
+def _deny_key(model_id: str, scope: str | None) -> str:
+    return f"{scope if scope is not None else model_identity_scope()}|{model_id}"
+
+
+def is_model_denied(model_id: str, scope: str | None = None) -> bool:
+    """O modelo levou 403 de entitlement NESTA identidade há menos de um TTL? (vencido é esquecido)."""
     ttl = _model_denied_ttl()
     if not ttl or not model_id:
         return False
-    at = _MODEL_DENIED.get(model_id)
+    key = _deny_key(model_id, scope)
+    at = _MODEL_DENIED.get(key)
     if at is None:
         return False
     if time.time() - at >= ttl:
-        _MODEL_DENIED.pop(model_id, None)
+        _MODEL_DENIED.pop(key, None)
         return False
     return True
 
 
-def note_model_denied(model_id: str) -> None:
-    """Registra o 403 de entitlement — as próximas chamadas já nascem no fallback."""
+def note_model_denied(model_id: str, scope: str | None = None) -> None:
+    """Registra o 403 de entitlement DESTA identidade — as próximas chamadas nascem no fallback."""
     if model_id and _model_denied_ttl():
-        _MODEL_DENIED[model_id] = time.time()
+        _MODEL_DENIED[_deny_key(model_id, scope)] = time.time()
 
 
 def is_model_unavailable_error(e: Exception) -> bool:
@@ -2103,9 +2139,10 @@ def is_model_unavailable_error(e: Exception) -> bool:
     )
 
 
-def preferred_model(model_id: str, fallback_model: str) -> str:
-    """Modelo a usar AGORA: pula o principal enquanto ele estiver marcado como negado."""
-    if fallback_model and fallback_model != model_id and is_model_denied(model_id) and not is_model_denied(fallback_model):
+def preferred_model(model_id: str, fallback_model: str, scope: str | None = None) -> str:
+    """Modelo a usar AGORA: pula o principal enquanto ele estiver negado PARA ESTA identidade."""
+    if (fallback_model and fallback_model != model_id
+            and is_model_denied(model_id, scope) and not is_model_denied(fallback_model, scope)):
         return fallback_model
     return model_id
 
@@ -2259,9 +2296,11 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # passam model_id derivado de CLAUDE_MODEL e não tinham fallback próprio (o /invoke/raw
     # do Cyborg já traz fallback_id explícito).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
-    # A4.1: se este modelo já levou 403 de entitlement há pouco, começa direto no fallback —
-    # o `except` abaixo continua sendo a rede (o cache pode ter vencido no meio da chamada).
-    _used_model = preferred_model(model_id, _fallback_model)
+    # A4.1: se este modelo já levou 403 de entitlement há pouco NESTA identidade, começa direto no
+    # fallback — o `except` abaixo continua sendo a rede (o cache pode vencer no meio da chamada).
+    # `llm_cfg` pode trazer credencial do tenant (BYOC): o escopo separa as contas.
+    _deny_scope = model_identity_scope(llm_cfg)
+    _used_model = preferred_model(model_id, _fallback_model, _deny_scope)
     if _used_model != model_id:
         logger.info("[call_bedrock_direct] Modelo '%s' está marcado como indisponível na conta — "
                     "usando '%s' sem tentar de novo (CLAUDE_MODEL_DENY_TTL_SEC).", model_id, _used_model)
@@ -2285,7 +2324,7 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
         if is_model_unavailable_error(e) and _fallback_model and _fallback_model != _used_model:
             logger.error("[call_bedrock_direct] Modelo '%s' indisponível na conta — caindo para "
                          "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", _used_model, _fallback_model, str(e)[:200])
-            note_model_denied(_used_model)
+            note_model_denied(_used_model, _deny_scope)
             _create_kw["model"] = _fallback_model
             _used_model = _fallback_model
             resp = _create_with_thinking_guard()
