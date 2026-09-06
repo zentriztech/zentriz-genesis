@@ -56,6 +56,13 @@ export interface SpecChatJob {
    *  existe mas está INCOMPLETO — nada pode ser aplicado a partir dele sem revisão humana, e o
    *  modo autônomo recusa a rodada. Ver `_truncated` em `agents/runtime.py`. */
   truncated: boolean;
+  /**
+   * GAP-12 (migração 098): quantos blocos SEARCH/REPLACE **ancorados** geraram `specMarkdown`.
+   * `null` = o job devolveu o arquivo inteiro (ou é anterior à migração). O modo autônomo usa isto
+   * para distinguir REMOÇÃO DECIDIDA (bloco ancorado, byte a byte) de PERDA por truncamento — a
+   * heurística de "seções desaparecidas" só faz sentido no formato de arquivo inteiro.
+   */
+  editsApplied: number | null;
   createdAt: string;
   finishedAt: string | null;
   collectedAt: string | null;
@@ -66,7 +73,7 @@ export interface SpecChatJob {
  *  a cada mount da tela só para desenhar um banner. */
 const SCALAR_COLS =
   "id, project_id, tenant_id, owner_user_id, agents_job_id, kind, file_path, base_sha, base_spec_sha, " +
-  "status, reply, error, truncated, created_at, finished_at, collected_at, deadline_at, " +
+  "status, reply, error, truncated, edits_applied, created_at, finished_at, collected_at, deadline_at, " +
   "(spec_markdown IS NOT NULL) AS has_spec";
 
 function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null): SpecChatJob {
@@ -86,6 +93,7 @@ function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null
     reply: (r.reply as string | null) ?? null,
     error: (r.error as string | null) ?? null,
     truncated: r.truncated === true,
+    editsApplied: r.edits_applied == null ? null : Number(r.edits_applied),
     createdAt: String(r.created_at ?? new Date().toISOString()),
     finishedAt: (r.finished_at as string | null) ?? null,
     collectedAt: (r.collected_at as string | null) ?? null,
@@ -197,6 +205,8 @@ export interface FinishPatch {
   modelUsed?: string | null;
   /** Migração 091: resposta cortada no teto de saída do modelo. `undefined` preserva o valor atual. */
   truncated?: boolean | null;
+  /** GAP-12 / migração 098: nº de blocos ancorados aplicados. `undefined`/`null` preserva o atual. */
+  editsApplied?: number | null;
 }
 
 /**
@@ -213,11 +223,12 @@ export async function finishSpecChatJob(db: Db, id: string, patch: FinishPatch):
           SET status = $2, spec_markdown = COALESCE($3, spec_markdown), reply = COALESCE($4, reply),
               error = COALESCE($5, error), model_used = COALESCE($6, model_used),
               truncated = COALESCE($7::boolean, truncated),
+              edits_applied = COALESCE($8::integer, edits_applied),
               finished_at = now(), updated_at = now()
         WHERE id = $1 AND status IN ('pending','running')`,
       [id, patch.status, patch.specMarkdown ?? null, patch.reply ?? null,
         patch.error ? patch.error.slice(0, 500) : null, patch.modelUsed ?? null,
-        patch.truncated ?? null],
+        patch.truncated ?? null, patch.editsApplied ?? null],
     );
     const won = (r.rowCount ?? 0) > 0;
     if (won && patch.status === "done" && patch.reply) {

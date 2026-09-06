@@ -355,3 +355,61 @@ isso era um `slice` mudo e o sintoma chegava como blocker falso. 7 testes novos.
 **Consequência de método:** as duas causas só apareceram porque a prova ao vivo foi lida **finding a
 finding**, não pelo total. O total dizia "piorou 17 → 22"; o diff dizia "o código corrompeu um arquivo
 e o validador está cego". Contagem agregada não substitui diff.
+
+---
+
+## GAP-12 — o veto que proibia REMOÇÃO (e por isso a spec só podia crescer)
+
+> Achado na PRIMEIRA rodada do laço já com o validador honesto (run `c3757985`, passe 1, rodada 1).
+> É o par que faltava do GAP-10: o validador voltou a dizer a verdade, o editor tentou consertar o
+> estrago — e o **código jogou o conserto no lixo**.
+
+### O que foi medido
+
+```
+[SpecChat] job=439b9e24 DONE (edits) — 6 aplicadas, 0 descartadas, 34531→28232 chars, out=21190
+rounds[0].note = "revisão recusada (seções desaparecidas): a revisão tem 6 seções contra 9 da spec
+  atual — sumiram, entre outras: “contrato mínimo de rotas de negócio (substitui
+  `api-entregas-entregadores.md` enquanto ausente)”, “contrato mínimo de observabilidade …”,
+  “contrato mínimo de runtime e boot …”, “declaração connect mínima …”"
+```
+
+As quatro seções que o laço removeu são **exatamente as quatro que o GAP-10 fez o editor escrever** na
+spec do cliente (o fantasma "arquivo ausente" que virou texto normativo). O laço encontrou o estrago
+e o desfez, ancorado byte a byte, sem descartar um único bloco. `assessRevisionIntegrity` recusou a
+rodada porque a contagem de `##` caiu de 9 para 6 — **in=46.907 / out=21.190 tokens pagos e jogados
+fora**, e a contaminação continuou no disco.
+
+### Causa
+
+A guarda tem três sinais; o sinal 2 (menos `##` que a base) é uma **heurística de truncamento do
+formato ARQUIVO INTEIRO** — nasceu para pegar o corte de 64k tokens que apagou 7 das 14 seções do
+LastMile em 2026-09-05. Ela estava sendo aplicada também a conteúdo produzido por **edições
+ancoradas**, onde não existe perda silenciosa: uma seção só desaparece por um bloco SEARCH/REPLACE
+**completo**, com âncora que casou byte a byte e de forma única no arquivo do disco (bloco incompleto
+é descartado antes de tocar o arquivo). Ou seja, no formato `edits` **remoção é decisão do agente**,
+não corte — e vetar decisão de conteúdo viola a LEI (estrutura e conteúdo de spec são do agente; o
+código só transporta fatos e veta corrupção).
+
+**Este é o mecanismo do GAP-8.** A spec inflava ~18% por rodada não porque o agente só saiba somar,
+mas porque **a única operação capaz de encolhê-la estava proibida pelo código**.
+
+### Correção
+
+`assessRevisionIntegrity(base, revised, truncated, { anchoredEdits })`:
+
+- `truncated` do provedor **continua vencendo tudo** (é fato, não decisão);
+- cerca ``` ímpar **continua vetada** (markdown corrompido);
+- o sinal de "seções a menos" só veta quando o conteúdo veio de **arquivo inteiro**;
+- remoção autorizada é **declarada**: os títulos que saíram voltam em `removedSections` e aparecem no
+  log da rodada e no chat ("cortar é aceitável, mentir sobre o corte não");
+- renomeação não é confundida com remoção (só conta quando a contagem líquida cai).
+
+O fato "veio de edições ancoradas" **precisa ser persistido** (migração 098,
+`spec_chat_jobs.edits_applied`): quem produz é a rota do chat e quem consome é o tick do modo
+autônomo, noutro processo. "Eu pedi edições" não prova "a resposta veio em edições" — o modelo pode
+reemitir o arquivo inteiro, e nesse caso o guard histórico tem de continuar valendo.
+
+O que ainda protege a spec: teto de encolhimento em chars (30%), âncora inexistente/ambígua,
+`MARKER_IN_REPLACE` (GAP-9), snapshot obrigatório antes da escrita e o versionamento com restore.
+8 testes novos (5 na guarda, 1 dentro do laço, e os dois casos negativos preservados).

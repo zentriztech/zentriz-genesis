@@ -132,7 +132,9 @@ function fenceCount(md: string): number {
   return n;
 }
 
-export type RevisionIntegrity = { ok: true } | { ok: false; reason: string; detail: string };
+export type RevisionIntegrity =
+  | { ok: true; removedSections?: string[] }
+  | { ok: false; reason: string; detail: string };
 
 /**
  * Recusa aplicar uma revisão INCOMPLETA. Medido em prod 2026-09-05: a spec do NVX LastMile
@@ -145,8 +147,35 @@ export type RevisionIntegrity = { ok: true } | { ok: false; reason: string; deta
  *  1. `truncated` — o próprio provedor disse que cortou (`_truncated` do runtime);
  *  2. contagem de `##` menor que a base — tolerante a RENOMEAÇÃO (o set-diff só compõe a mensagem);
  *  3. cerca ``` ímpar quando a base tinha número par — bloco de código aberto e nunca fechado.
+ *
+ * 🔴 GAP-12 (medido 2026-09-06, run `c3757985`, passe 1, rodada 1) — `anchoredEdits`.
+ *
+ * O sinal 2 é uma HEURÍSTICA de truncamento do formato ARQUIVO INTEIRO, e estava sendo aplicada
+ * também a conteúdo que veio de EDIÇÕES ancoradas. Consequência medida: o laço finalmente removeu as
+ * quatro seções-fantasma que o próprio sistema havia escrito na spec do cliente por causa do GAP-10
+ * (`contrato mínimo … substitui X enquanto ausente`) — `6 aplicadas, 0 descartadas,
+ * 34531→28232 chars` — e esta função **descartou a rodada paga** (in=46.907 / out=21.190 tokens)
+ * porque a contagem de `##` caiu de 9 para 6. É a explicação mecânica do GAP-8 (a spec só cresce
+ * ~18% por rodada): o código vetava a ÚNICA operação capaz de encolhê-la, e vetava justamente o
+ * conserto do estrago que ele mesmo tinha causado.
+ *
+ * Por que é seguro liberar no formato `edits` — e só nele: uma seção só desaparece por um bloco
+ * SEARCH/REPLACE **completo**, cuja âncora casou byte a byte e de forma única no arquivo do disco
+ * (bloco incompleto é descartado antes de tocar o arquivo — `specFileEdits.ts`). Ou seja, remoção em
+ * `edits` é DECISÃO do agente (LEI: estrutura e conteúdo de spec são decisão de agente), não perda
+ * por corte. O que continua vetando corrupção: `truncated`, cerca ímpar, âncora inexistente/ambígua,
+ * marcador no REPLACE (GAP-9) e o teto de encolhimento em chars (`MIN_SHRINK_RATIO`, no chamador) —
+ * mais o snapshot obrigatório e o versionamento da spec, que tornam a remoção reversível.
+ *
+ * A remoção liberada NÃO é silenciosa: os títulos que sumiram voltam em `removedSections` para o
+ * chamador escrever no log da rodada e no chat ("cortar é aceitável, mentir sobre o corte não").
  */
-export function assessRevisionIntegrity(base: string, revised: string, truncated: boolean): RevisionIntegrity {
+export function assessRevisionIntegrity(
+  base: string,
+  revised: string,
+  truncated: boolean,
+  opts: { anchoredEdits?: boolean } = {},
+): RevisionIntegrity {
   if (truncated) {
     return {
       ok: false,
@@ -156,8 +185,9 @@ export function assessRevisionIntegrity(base: string, revised: string, truncated
   }
   const baseHeads = headingsOf(base);
   const revHeads = headingsOf(revised);
-  if (revHeads.length < baseHeads.length) {
-    const missing = baseHeads.filter((h) => !revHeads.includes(h)).slice(0, 6);
+  const removed = baseHeads.filter((h) => !revHeads.includes(h));
+  if (revHeads.length < baseHeads.length && opts.anchoredEdits !== true) {
+    const missing = removed.slice(0, 6);
     return {
       ok: false,
       reason: "seções desaparecidas",
@@ -174,7 +204,11 @@ export function assessRevisionIntegrity(base: string, revised: string, truncated
       detail: `a revisão terminou com um bloco de código sem fechar (${revFences} cercas, ímpar) — sinal de documento cortado no meio`,
     };
   }
-  return { ok: true };
+  // Só reporta como REMOÇÃO quando a contagem líquida caiu: com contagem igual ou maior, um título
+  // que "sumiu" do set é RENOMEAÇÃO (que o sinal 2 sempre tolerou de propósito), não perda.
+  return revHeads.length < baseHeads.length && removed.length > 0
+    ? { ok: true, removedSections: removed }
+    : { ok: true };
 }
 
 export interface AutonomyRoundLog {
@@ -1104,10 +1138,25 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       `revisão encolheu (${revised.length} < ${Math.round(file.content.length * MIN_SHRINK_RATIO)} chars)`,
       { failure: true, fromStatus: "applying" });
   }
-  const integrity = assessRevisionIntegrity(file.content, revised, job?.truncated === true);
+  // GAP-12: `editsApplied != null` é o FATO de que o conteúdo saiu de blocos ancorados — nesse
+  // formato, seção que sai é remoção DECIDIDA, não perda por corte (ver `assessRevisionIntegrity`).
+  const anchoredEdits = (job?.editsApplied ?? 0) > 0;
+  const integrity = assessRevisionIntegrity(file.content, revised, job?.truncated === true, { anchoredEdits });
   if (!integrity.ok) {
     return skipFileAndContinue(db, run, target, `revisão recusada (${integrity.reason}): ${integrity.detail}`,
       { failure: true, fromStatus: "applying" });
+  }
+  // A remoção autorizada é DECLARADA: no log da rodada e no chat, com os títulos que saíram.
+  const removedNote = integrity.removedSections?.length
+    ? ` ${integrity.removedSections.length} seção(ões) REMOVIDA(S) por edição ancorada: ` +
+      `${integrity.removedSections.slice(0, 6).map((h) => `“${h}”`).join(", ")}` +
+      `${integrity.removedSections.length > 6 ? " …" : ""}.`
+    : "";
+  if (removedNote) {
+    console.log(
+      `[SpecAutonomy] run=${run.id.slice(0, 8)} ${target}: ${integrity.removedSections!.length} seção(ões) removida(s) ` +
+      `por ${job?.editsApplied ?? 0} edição(ões) ancorada(s) (${file.content.length}→${revised.length} chars)`,
+    );
   }
   try {
     await writeSpecFile(db, run.projectId, file.filePath, revised, {
@@ -1125,7 +1174,7 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
 
   await patchLastRound(db, run, {
     applied: true, filePath: target, specChars: revised.length,
-    note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).`,
+    note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`,
   });
   const claim = await db.query(
     `UPDATE spec_autonomy_runs
@@ -1136,7 +1185,7 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   );
   if ((claim.rowCount ?? 0) === 0) return false;
   await postChatNote(db, run,
-    `🤖 **Arquivo ${run.round} do passe ${run.passes + 1}** — \`${target}\`: revisão do CTO aplicada e salva (${file.content.length} → ${revised.length} chars). Seguindo para o próximo arquivo da fila.`);
+    `🤖 **Arquivo ${run.round} do passe ${run.passes + 1}** — \`${target}\`: revisão do CTO aplicada e salva (${file.content.length} → ${revised.length} chars).${removedNote} Seguindo para o próximo arquivo da fila.`);
   return true;
 }
 
@@ -1240,7 +1289,10 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 T2 — GUARDA DE INTEGRIDADE: revisão truncada no teto de saída ou com seções a menos.
     // Sem ela, o laço APLICAVA uma spec cortada e a rodada seguinte partia do documento mutilado
     // (foi assim que 7 das 14 seções do NVX LastMile desapareceram em prod, 2026-09-05).
-    const integrity = assessRevisionIntegrity(spec.content, revised, job?.truncated === true);
+    // GAP-12: o modo `whole` também pode receber edições ancoradas (o CTO da spec inteira roda com
+    // `SPEC_CTO_EDIT_FORMAT=edits`). O fato vem do job, não da flag — a flag diz o que foi PEDIDO.
+    const integrity = assessRevisionIntegrity(spec.content, revised, job?.truncated === true,
+      { anchoredEdits: (job?.editsApplied ?? 0) > 0 });
     if (!integrity.ok) {
       await patchLastRound(db, run, { applied: false, note: `revisão recusada (${integrity.reason}): ${integrity.detail}` });
       await finishRun(db, run, "stalled",
@@ -1262,7 +1314,12 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
       return true;
     }
     applied = true;
-    note = `Spec aplicada no disco (${spec.content.length} → ${revised.length} chars).`;
+    note = `Spec aplicada no disco (${spec.content.length} → ${revised.length} chars).` +
+      (integrity.removedSections?.length
+        ? ` ${integrity.removedSections.length} seção(ões) REMOVIDA(S) por edição ancorada: ` +
+          `${integrity.removedSections.slice(0, 6).map((h) => `“${h}”`).join(", ")}` +
+          `${integrity.removedSections.length > 6 ? " …" : ""}.`
+        : "");
   }
 
   await patchLastRound(db, run, { applied, specChars: revised.length, note });

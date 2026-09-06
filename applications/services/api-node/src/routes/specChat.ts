@@ -846,7 +846,7 @@ function stripOuterFence(s: string): string {
  */
 function settleJob(
   jobId: string,
-  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null; truncated?: boolean | null },
+  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null; truncated?: boolean | null; editsApplied?: number | null },
 ): void {
   const j = _chatJobs.get(jobId);
   if (j) {
@@ -940,6 +940,10 @@ function runFileChatJob(
           status: "done",
           specMarkdown: applied.content,
           modelUsed: data.model_used ?? null,
+          // GAP-12 (migração 098): o FATO de que este conteúdo saiu de N blocos ANCORADOS. Quem
+          // consome é o modo autônomo, noutro processo e noutro tick: sem persistir, ele só sabe o
+          // que PEDIU (edições) e não o que RECEBEU — e o modelo pode reemitir o arquivo inteiro.
+          editsApplied: applied.applied,
           reply: partial
             ? `${doneReply}\n\n⚠️ A resposta bateu no teto de saída: ${applied.applied} edição(ões) aplicada(s) e ${applied.dropped} incompleta(s) descartada(s). O que faltou continua nos GAPs — rode de novo para o restante.`
             : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`,

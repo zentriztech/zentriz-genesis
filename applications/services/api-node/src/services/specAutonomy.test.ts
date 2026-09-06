@@ -36,7 +36,11 @@ const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", r
 vi.mock("./specValidation.js", () => ({ startValidation: (...a: unknown[]) => startValidation(...(a as [])) }));
 
 // `truncated` (T1) chega do runtime via `spec_chat_jobs.truncated` — é o sinal que o laço consulta.
-let job: { status: string; specMarkdown: string | null; error: string | null; truncated?: boolean } | null = null;
+let job: {
+  status: string; specMarkdown: string | null; error: string | null; truncated?: boolean;
+  /** GAP-12 (migração 098): nº de blocos ancorados que geraram `specMarkdown`. */
+  editsApplied?: number | null;
+} | null = null;
 vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
@@ -459,6 +463,50 @@ describe("assessRevisionIntegrity", () => {
     const base = `${SECTIONED_SPEC}\n\`\`\`sql\nsem fechar`;
     expect(assessRevisionIntegrity(base, `${base}\nmais texto`, false).ok).toBe(true);
   });
+
+  /**
+   * GAP-12 — o veto que impedia o laço de DESFAZER o próprio estrago (e a causa mecânica do GAP-8).
+   *
+   * Medido em prod (run `c3757985`, passe 1, rodada 1): 6 edições ancoradas removeram as quatro
+   * seções-fantasma "contrato mínimo … (substitui X enquanto ausente)" que o GAP-10 havia escrito na
+   * spec (34.531 → 28.232 chars) e esta função descartou a rodada paga por contagem de `##`.
+   */
+  describe("GAP-12 — remoção por EDIÇÃO ANCORADA é decisão, não perda", () => {
+    const withoutObs = SECTIONED_SPEC.slice(0, SECTIONED_SPEC.indexOf("## 4. Observabilidade"));
+
+    it("aceita seção a menos quando o conteúdo veio de blocos ancorados, e DECLARA o que saiu", () => {
+      const r = assessRevisionIntegrity(SECTIONED_SPEC, withoutObs, false, { anchoredEdits: true });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.removedSections).toEqual(["4. observabilidade"]);
+    });
+
+    it("continua RECUSANDO a mesma perda quando veio arquivo inteiro (comportamento intocado)", () => {
+      const r = assessRevisionIntegrity(SECTIONED_SPEC, withoutObs, false);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("seções desaparecidas");
+    });
+
+    it("`truncated` do provedor vence a permissão de remover (o corte é FATO, não decisão)", () => {
+      const r = assessRevisionIntegrity(SECTIONED_SPEC, withoutObs, true, { anchoredEdits: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("truncada");
+    });
+
+    it("cerca de código aberta continua vetada mesmo em edições ancoradas", () => {
+      const revised = `${SECTIONED_SPEC}\n\`\`\`sql\nCREATE INDEX ON deliveries(courier_id) WHERE`;
+      const r = assessRevisionIntegrity(SECTIONED_SPEC, revised, false, { anchoredEdits: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("bloco de código aberto");
+    });
+
+    it("não confunde RENOMEAÇÃO com remoção (contagem igual ⇒ nada declarado)", () => {
+      const revised = SECTIONED_SPEC.replace("## 4. Observabilidade", "## 4. Observabilidade e SLOs");
+      const r = assessRevisionIntegrity(SECTIONED_SPEC, revised, false, { anchoredEdits: true });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.removedSections).toBeUndefined();
+    });
+  });
 });
 
 describe("T2 + G2 dentro do laço — o disco é a última coisa a mudar", () => {
@@ -486,6 +534,18 @@ describe("T2 + G2 dentro do laço — o disco é a última coisa a mudar", () =>
     expect(run!.status).toBe("stalled");
     expect(readFileSync(specPath, "utf-8")).toBe(SECTIONED_SPEC);
     expect(startValidation).not.toHaveBeenCalled();
+  });
+
+  it("GAP-12: a MESMA perda de seção é APLICADA quando o job veio de edições ancoradas, e declarada", async () => {
+    const r = await reachApplying(SECTIONED_SPEC);
+    const revised = SECTIONED_SPEC.slice(0, SECTIONED_SPEC.indexOf("## 4. Observabilidade"));
+    job = { status: "done", specMarkdown: revised, error: null, editsApplied: 6 };
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("validating");
+    expect(readFileSync(specPath, "utf-8")).toBe(revised);
+    // "cortar é aceitável, mentir sobre o corte não": o título removido aparece no log da rodada.
+    expect(JSON.stringify(run!.rounds)).toContain("REMOVIDA");
+    expect(JSON.stringify(run!.rounds).toLowerCase()).toContain("observabilidade");
   });
 
   it("G2: o conteúdo ANTERIOR vai para project_spec_snapshots antes da escrita", async () => {
