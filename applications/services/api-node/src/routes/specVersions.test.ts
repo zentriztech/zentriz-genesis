@@ -59,14 +59,19 @@ const snapshots = [
     contentSha256: "sha-2", chars: 99, reason: "autonomy:round-3", createdBy: null,
     createdAt: "2026-09-04T12:00:00.000Z" },
 ];
-const listSpy = vi.fn(async () => snapshots);
+// Assinaturas explícitas (no TIPO, não em parâmetros ociosos): os testes inspecionam
+// `mock.calls[0][1]`/`[2]` — o `file_path` que a rota resolveu, o `reason` do snapshot —, e sem a
+// assinatura declarada o `tsc` veria uma tupla vazia de argumentos.
+const listSpy = vi.fn<(db: unknown, pid: string, filePath?: string | null) => Promise<typeof snapshots>>(
+  async () => snapshots,
+);
 const getSpy = vi.fn(async (_db: unknown, _pid: string, id: string) =>
   (id === SNAP ? { filePath: ABS, content: "# versão antiga\n" } : null));
-const snapSpy = vi.fn(async () => true);
+const snapSpy = vi.fn<(db: unknown, input: unknown) => Promise<boolean>>(async () => true);
 vi.mock("../services/specSnapshots.js", () => ({
-  listSpecSnapshots: (db: unknown, pid: string, fp?: string | null) => listSpy(db as never, pid as never, fp as never),
+  listSpecSnapshots: (db: unknown, pid: string, fp?: string | null) => listSpy(db, pid, fp),
   getSpecSnapshotContent: (db: unknown, pid: string, id: string) => getSpy(db, pid, id),
-  snapshotSpecFile: (db: unknown, input: unknown) => snapSpy(db as never, input as never),
+  snapshotSpecFile: (db: unknown, input: unknown) => snapSpy(db, input),
 }));
 
 const written: Array<{ file: string; content: string }> = [];
