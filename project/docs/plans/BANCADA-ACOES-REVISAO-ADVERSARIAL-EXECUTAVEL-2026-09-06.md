@@ -522,3 +522,103 @@ espera, nunca a validade do que já foi produzido e pago.**
 
 9 testes novos no coletor (done/superseded/passed, 404, falha de rede, pendente, teto duro, coluna
 ausente) + 3 no laço (espera, retomada após coleta encerrada, teto de passes não força `stalled`).
+
+---
+
+# Onda 2 — Escrita e concorrência (H2, H3, H10, H12)
+
+Critério da onda: **If-Match provado nos dois sentidos + restore com pré-condição.** Cada ação foi
+medida **em produção** (projeto `e2a1988c`, NVX LastMile — Backend) antes de qualquer código, com sondas
+desenhadas para **não poder destruir dado**: conteúdo idêntico ao que já está no disco + base errada.
+
+## H3 / H10 — editar arquivo e aplicar revisão ✅ APROVADAS (medido ao vivo)
+
+`PUT /api/projects/:id/spec-file` é o caminho das duas ações (a revisão do CTO aplica o texto pelo mesmo
+endpoint). Sonda em prod, no arquivo primário de 44.695 chars:
+
+```
+baseSha ERRADO      → 409 CONFLICT, currentSha = cc1b440444a512b5… (o sha REAL do disco)
+baseSha AUSENTE     → 409 (não existe escrita sem pré-condição neste caminho)
+path ../../../etc/passwd → 400 BAD_PATH
+arquivo antes/depois: byte a byte IDÊNTICO (cc1b440444a512b5…, 44.695 chars)
+```
+
+### GAP histórico "409 falso por `content_sha256` velho" — 🔵 REFUTADO (duas evidências)
+
+1. **Estrutural:** `PUT` compara o `baseSha` contra os **bytes do disco**, nunca contra a coluna; e o
+   `GET /spec-file` **auto-cura** a coluna quando ela divergiu do disco. O portal só usa como base o sha
+   que o próprio `GET` devolveu → não existe caminho em que a coluna velha gere 409.
+2. **Empírico:** nos 12 arquivos do NVX em prod, `content_sha256` do banco == sha do disco (12/12),
+   medido **no meio** de uma run autônoma que reescreve arquivo a cada rodada.
+
+## H12 — versões / restaurar ✅ APROVADA por revisão (`/spec-versions`)
+
+O invariante certo já estava no código: o conteúdo **vivo** vira versão **como pré-condição** do
+restore — se o snapshot falha, nada é sobrescrito (`503 SNAPSHOT_FAILED`). Também cobertos: `409
+FILE_GONE` (linha órfã), atalho `unchanged: true` (restaurar o que já está lá não gera versão nem
+sujeira), refresh do `content_sha256` na mesma transação e `guardWrite` (svc `runner` 403, status não
+editável 409).
+
+## GAP-15 🔴→✅ "Salvar rascunho" sobrescrevia a spec às cegas (H2)
+
+### O que foi medido (prod, 2026-09-06)
+
+```
+GET   /api/projects/e2a1988c…/spec-content  → 200, corpo SEM contentSha256
+PATCH /api/projects/e2a1988c…/spec-content {baseSha: <sha inventado>} → 200  ← E GRAVOU
+```
+
+`PATCH /spec-content` (a ação "Salvar rascunho" do editor da spec inteira) era o **único caminho de
+escrita da spec sem pré-condição alguma**: o `baseSha` era ignorado, e o `GET` nem devolvia um sha para
+o editor usar como base. Modo de falha real, não hipotético: com o modo autônomo ligado, o servidor
+reescreve o arquivo primário **a cada rodada**; uma aba aberta antes disso guarda o texto velho, e um
+clique em "Salvar rascunho" apagava silenciosamente todas as rodadas do CTO — sem 409, sem aviso, sem
+ninguém perceber. (A sonda não causou dano: gravou conteúdo idêntico, e `SPEC_VALIDATION_AUTO=off`
+neste projeto faz o `spec_dirty_at` resultante não disparar nada.)
+
+### Correção (api + portal, sem migração)
+
+1. **`GET /spec-content` passa a emitir `contentSha256`** — o sha do que foi **lido do disco** viaja com
+   o conteúdo, para o editor ter sobre o que provar.
+2. **`PATCH` ganha pré-condição** — `baseSha` divergente do disco → `409 CONFLICT` com o `currentSha`
+   real; disco intacto; nem a coluna é tocada. O campo é **opcional de propósito**: a api sobe antes do
+   portal, e um cliente que ainda não sabe mandá-lo precisa continuar salvando como antes.
+3. **O portal fecha o laço** (`app/(dashboard)/spec/page.tsx`): guarda o sha de cada carga/recarga, o
+   envia no save, avança a base com o sha da resposta e, no 409, abre um diálogo em que **o humano
+   decide** — "Recarregar do servidor" (mantém o que o laço gravou) ou "Sobrescrever" (re-lê o sha atual
+   e reaplica). Recarregar **move** a base, senão o save seguinte tomaria 409 de um conflito já resolvido.
+
+5 testes novos (`routes/projects.specContent.test.ts`): sha do GET == disco; 409 com base divergente
+**+ disco intacto + nenhum `UPDATE content_sha256`**; base igual → grava e devolve o sha novo; sem
+`baseSha` → grava (compatibilidade); e as guardas anteriores intactas (svc `runner` 403, status
+`running` 409 `SPEC_LOCKED`).
+
+## GAP-16 🔴→✅ Um arquivo gravado pela metade travava validação e promoção do produto INTEIRO
+
+### O que foi medido (leitura de código + reprodução em teste)
+
+`computeCurrentSpecHash` (`specValidation.ts:115`) devolve **`null`** se **qualquer** linha de
+`project_spec_files` apontar para um caminho que não existe no disco. E os dois criadores de arquivo de
+spec — `POST /api/projects/:id/spec-file` ("Novo arquivo" na árvore) e
+`evolutionPlanner.upsertSpecFile` (RFC/ADR/CHANGELOG do "Evoluir") — inseriam a linha e **não a
+desfaziam** se o `mkdir`/`writeFile` falhasse (ENOSPC, permissão, `rel_dir` irrecuperável). Uma única
+falha de disco deixava um **arquivo fantasma**: o projeto todo parava de validar e de promover, a UI não
+dizia por quê, e a única saída era apagar a linha no banco.
+
+### Correção nos dois escritores
+
+A linha continua vindo **antes** do disco — ela é a **reserva do caminho** (a unicidade de
+`(project_id, rel_dir, filename)` é do banco, é dela que sai o `409 EXISTS`; o `SELECT` anterior é só um
+atalho). O que faltava era **desfazê-la** quando o disco falha: `DELETE` exato da linha criada + erro
+honesto (`500 WRITE_FAILED`, "nada foi criado", com a causa real).
+
+> **Inverter a ordem NÃO serve** — e essa foi a minha primeira correção, descartada na revisão: gravando
+> o disco primeiro, duas propostas simultâneas passam o `SELECT`, a perdedora toma `23505` e, ao limpar
+> "o seu" arquivo, **apaga o arquivo da vencedora**. Um fantasma pior que o original.
+
+7 testes: 3 em `evolutionPlanner.test.ts` (caminho feliz com a ordem `select→count→insert`; falha de
+disco **real** — `rel_dir` é um arquivo, `mkdir` dá ENOTDIR — exigindo exatamente 1 `DELETE` com
+`[pid, relDir, filename]`; teto de arquivos vetando antes de tocar o disco) e 4 em
+`routes/specFiles.create.test.ts` (201 com sha; `WRITE_FAILED` desfazendo a linha e **sem** marcar
+`spec_dirty_at`; `23505` → `409 EXISTS` **sem** `DELETE`, que destruiria o arquivo do vencedor;
+traversal/`runner`/status travado/teto vetando antes de qualquer escrita).

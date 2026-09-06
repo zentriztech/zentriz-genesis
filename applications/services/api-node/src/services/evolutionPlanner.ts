@@ -321,13 +321,27 @@ export async function upsertSpecFile(db: Db, projectId: string, relPath: string,
   }
   const count = (await db.query("SELECT count(*)::int AS n FROM project_spec_files WHERE project_id=$1", [projectId])).rows[0] as { n: number };
   if (count.n >= SPEC_TREE_MAX_FILES) throw new Error("TOO_MANY_FILES");
+  // Onda 2 / escrita (adversarial): a linha é a RESERVA do caminho (a unicidade de
+  // `(project_id, rel_dir, filename)` é do banco, não do SELECT acima — que é só um atalho), e por
+  // isso continua vindo primeiro. O que faltava era DESFAZÊ-LA quando o disco falha (ENOSPC,
+  // permissão, `rel_dir` irrecuperável): sem isso ficava um arquivo FANTASMA na árvore, e
+  // `computeCurrentSpecHash` devolve `null` se QUALQUER arquivo sumiu do disco — ou seja, uma
+  // escrita parcial de UM artefato de evolução deixava o projeto INTEIRO sem poder validar nem
+  // promover. (Gravar o disco primeiro NÃO serve: duas propostas simultâneas passariam o SELECT, a
+  // perdedora tomaria 23505 e, ao limpar "o seu" arquivo, apagaria o da vencedora.)
   await db.query(
     `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
      VALUES ($1, $2, $3, 'text/markdown', $4, false, $5)`,
     [projectId, parsed.filename, physical, parsed.relDir, sha],
   );
-  await fsp.mkdir(path.dirname(physical), { recursive: true });
-  await fsp.writeFile(physical, content, "utf-8");
+  try {
+    await fsp.mkdir(path.dirname(physical), { recursive: true });
+    await fsp.writeFile(physical, content, "utf-8");
+  } catch (e) {
+    await db.query("DELETE FROM project_spec_files WHERE project_id=$1 AND rel_dir=$2 AND filename=$3",
+      [projectId, parsed.relDir, parsed.filename]).catch(() => {});
+    throw e;
+  }
   return "created";
 }
 

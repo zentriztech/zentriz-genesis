@@ -754,7 +754,7 @@ export async function projectRoutes(app: FastifyInstance) {
           const productId = u.product_id as string | null;
           const title = u.title as string ?? "";
           if (productId) {
-            const { readFileSync, existsSync, mkdirSync, copyFileSync } = await import("fs");
+            const { existsSync, mkdirSync, copyFileSync } = await import("fs");
             const { join } = await import("path");
             const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
             if (filesRoot) {
@@ -2189,7 +2189,6 @@ export async function projectRoutes(app: FastifyInstance) {
       // Item 2(b): deploy permanente (nunca expira por idade) OU prazo em dias (default 7, máx 30).
       const permanent = body.permanent === true;
       const ttlDays = permanent ? null : Math.min(Math.max(Number(body.ttlDays ?? 7), 1), 30);
-      const ttlMinutes = Math.min(body.ttlMinutes ?? 30, 60);
       const consented = body.consented === true;
 
       const client = await pool.connect();
@@ -3128,8 +3127,13 @@ export async function projectRoutes(app: FastifyInstance) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
         }
         try {
-          const content = await readFile(specRow.file_path, "utf-8");
-          return reply.send({ specMarkdown: content, filename: specRow.filename, projectId: id, title: row.title });
+          const buf = await readFile(specRow.file_path);
+          // H2 (adversarial Onda 2): o sha do que foi LIDO viaja com o conteúdo para o editor poder
+          // salvar com If-Match. Sem ele, "Salvar rascunho" não tinha como provar sobre o que edita.
+          return reply.send({
+            specMarkdown: buf.toString("utf-8"), filename: specRow.filename, projectId: id, title: row.title,
+            contentSha256: sha256Hex(buf),
+          });
         } catch {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Arquivo de spec não encontrado no disco" });
         }
@@ -3167,12 +3171,12 @@ export async function projectRoutes(app: FastifyInstance) {
   );
 
   // PATCH /api/projects/:id/spec-content — atualiza spec existente (sem criar novo projeto)
-  app.patch<{ Params: { id: string }; Body: { specMarkdown: string; title?: string; startNow?: boolean } }>(
+  app.patch<{ Params: { id: string }; Body: { specMarkdown: string; title?: string; startNow?: boolean; baseSha?: string } }>(
     "/api/projects/:id/spec-content",
     async (request, reply) => {
       const user = getUser(request);
       const { id } = request.params;
-      const { specMarkdown, title, startNow } = request.body ?? {};
+      const { specMarkdown, title, startNow, baseSha } = request.body ?? {};
       if (!specMarkdown || typeof specMarkdown !== "string" || !specMarkdown.trim()) {
         return reply.status(400).send({ code: "BAD_REQUEST", message: "specMarkdown obrigatório" });
       }
@@ -3210,12 +3214,28 @@ export async function projectRoutes(app: FastifyInstance) {
         if (!specRow?.file_path) {
           return reply.status(404).send({ code: "NOT_FOUND", message: "Spec não encontrada para este projeto" });
         }
+        // H2 (adversarial Onda 2): ESTE era o único caminho de escrita da spec SEM pré-condição —
+        // "Salvar rascunho" sobrescrevia o disco às cegas. Com o laço autônomo ligado isso apaga em
+        // silêncio as rodadas que o CTO acabou de gravar (o editor da aba antiga ainda tem o texto
+        // velho). O `baseSha` é OPCIONAL de propósito: a api sobe antes do portal e um cliente
+        // antigo, que não sabe mandá-lo, precisa continuar salvando (comportamento de hoje).
+        const diskBuf = await readFile(specRow.file_path).catch(() => null);
+        if (baseSha) {
+          const diskSha = diskBuf ? sha256Hex(diskBuf) : null;
+          if (baseSha !== diskSha) {
+            return reply.status(409).send({
+              code: "CONFLICT",
+              message: "A spec mudou desde a sua leitura (outra aba, o chat ou o modo autônomo salvaram antes). Recarregue e reaplique a edição.",
+              currentSha: diskSha,
+            });
+          }
+        }
         // G2 (migração 092): guarda a versão ANTERIOR antes de sobrescrever. Best-effort aqui —
         // este caminho é humano e o conteúdo antigo ainda está no editor de quem salvou; no
         // caminho autônomo (specAutonomy) o snapshot é PRÉ-CONDIÇÃO da escrita.
         {
           const { snapshotSpecFile } = await import("../services/specSnapshots.js");
-          const previous = await readFile(specRow.file_path, "utf-8").catch(() => null);
+          const previous = diskBuf ? diskBuf.toString("utf-8") : null;
           if (previous !== null && previous !== specMarkdown) {
             void snapshotSpecFile(pool, {
               projectId: id, filePath: String(specRow.file_path), content: previous,
@@ -3226,9 +3246,10 @@ export async function projectRoutes(app: FastifyInstance) {
         await writeFile(specRow.file_path, specMarkdown, "utf-8");
         // F3 (adversarial Onda 1): sem isto o content_sha256 fica STALE após a edição —
         // quebra o If-Match do editor (Onda 4) e o GET /spec-files expõe sha errado.
+        const newSha = sha256Hex(Buffer.from(specMarkdown, "utf-8"));
         await client.query(
           "UPDATE project_spec_files SET content_sha256 = $1 WHERE project_id = $2 AND file_path = $3",
-          [sha256Hex(Buffer.from(specMarkdown, "utf-8")), id, specRow.file_path],
+          [newSha, id, specRow.file_path],
         );
         // RFC-0004 Onda 3 (D1): marca a spec como "suja" — insumo do debounce POR DADO do
         // Validar automático (desligado por ora; o tick do watchdog o consumirá ao ligar).
@@ -3252,7 +3273,10 @@ export async function projectRoutes(app: FastifyInstance) {
               .catch((e) => console.error(`[startNow] erro ao disparar runner (${id}):`, e));
           });
         }
-        return reply.send({ ok: true, projectId: id });
+        // H2: o sha do que ACABOU de ser gravado volta para o editor virar a nova base do If-Match —
+        // sem isto o segundo salvamento seguido levaria o sha da carga inicial e tomaria 409 contra
+        // a própria escrita anterior.
+        return reply.send({ ok: true, projectId: id, contentSha256: newSha });
       } finally {
         client.release();
       }

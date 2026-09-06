@@ -13,6 +13,7 @@ import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
 import Divider from "@mui/material/Divider";
@@ -1822,6 +1823,14 @@ export default function SpecPage() {
 
   // Spec editor
   const [specMarkdown, setSpecMarkdown] = useState<string | null>(null);
+  // H2 (adversarial Onda 2) — sha do que foi LIDO do disco na última carga/recarga. Viaja no
+  // "Salvar rascunho" como If-Match: sem ele, salvar sobrescrevia às cegas o que o modo autônomo
+  // (ou outra aba) já tinha gravado. `null` = ainda não sei sobre o que estou editando → salvo como
+  // antes, sem pré-condição, porque bloquear o salvamento seria pior do que o risco que ele corre.
+  const [specBaseSha, setSpecBaseSha] = useState<string | null>(null);
+  /** H2 — conflito do último "Salvar rascunho": nada foi gravado e o humano decide o desfecho. */
+  const [specSaveConflict, setSpecSaveConflict] = useState(false);
+  const [specConflictBusy, setSpecConflictBusy] = useState(false);
   const [editorFullscreen, setEditorFullscreen] = useState(false);
   // Em tela cheia, no mobile não cabem editor, chat e árvore lado a lado → alterna o painel
   // visível ("files" só existe quando a spec veio de um produto). No desktop todos aparecem
@@ -2043,9 +2052,10 @@ export default function SpecPage() {
     if (!editProjectId) return;
     setEditLoading(true);
     setEditLoadError(null);
-    apiGet<{ specMarkdown: string; title: string }>(`/api/projects/${editProjectId}/spec-content`)
+    apiGet<{ specMarkdown: string; title: string; contentSha256?: string }>(`/api/projects/${editProjectId}/spec-content`)
       .then((data) => {
         setSpecMarkdown(data.specMarkdown);
+        setSpecBaseSha(data.contentSha256 ?? null);
         if (data.title) setProjectTitle(data.title);
       })
       .catch((e) => setEditLoadError(e instanceof Error ? e.message : "Erro ao carregar spec"))
@@ -2721,8 +2731,12 @@ export default function SpecPage() {
   const reloadSpecFromServer = useCallback(async () => {
     if (!editProjectId) return;
     try {
-      const data = await apiGet<{ specMarkdown: string; title: string }>(`/api/projects/${editProjectId}/spec-content`);
+      const data = await apiGet<{ specMarkdown: string; title: string; contentSha256?: string }>(`/api/projects/${editProjectId}/spec-content`);
       setSpecMarkdown(data.specMarkdown);
+      // H2: recarregar move a BASE do If-Match — o editor passa a editar sobre o que o servidor
+      // acabou de gravar (rodada do laço, restauração de versão). Sem isto o próximo salvamento
+      // levaria o sha antigo e tomaria 409 por um conflito que já foi resolvido pelo recarregamento.
+      setSpecBaseSha(data.contentSha256 ?? null);
     } catch { /* mantém o editor como está; o próximo tick tenta de novo */ }
   }, [editProjectId]);
 
@@ -3082,14 +3096,56 @@ export default function SpecPage() {
    * de admitir, porque a fábrica lê o disco, não o editor.
    * `startNow: false` é explícito — nunca inicia nada a partir da Bancada.
    */
-  const persistSpecMarkdown = useCallback(async () => {
+  const persistSpecMarkdown = useCallback(async (baseShaOverride?: string | null) => {
     if (!editProjectId) throw new Error("Sem projeto em edição.");
-    await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
-      specMarkdown,
-      title: projectTitle.trim() || undefined,
-      startNow: false,
-    });
-  }, [editProjectId, specMarkdown, projectTitle]);
+    const base = baseShaOverride !== undefined ? baseShaOverride : specBaseSha;
+    try {
+      const r = await apiPatch<{ ok: boolean; contentSha256?: string }>(`/api/projects/${editProjectId}/spec-content`, {
+        specMarkdown,
+        title: projectTitle.trim() || undefined,
+        startNow: false,
+        ...(base ? { baseSha: base } : {}),
+      });
+      // H2 — a base avança para o que ACABOU de ser gravado; sem isto o segundo salvamento seguido
+      // levaria o sha da carga inicial e tomaria 409 contra a própria escrita anterior.
+      if (r.contentSha256) setSpecBaseSha(r.contentSha256);
+      setSpecSaveConflict(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // 409 do If-Match: NADA foi gravado. O texto do humano segue no editor e ele escolhe o
+      // desfecho no diálogo (recarregar ou sobrescrever) — falhar sem saída seria pior que o risco.
+      if (msg.includes("mudou desde") || msg.toUpperCase().includes("CONFLICT")) setSpecSaveConflict(true);
+      throw e;
+    }
+  }, [editProjectId, specMarkdown, projectTitle, specBaseSha]);
+
+  /** H2 — desfecho 1: fica com a versão do servidor (o texto do editor é descartado). */
+  const handleSpecConflictReload = useCallback(async () => {
+    setSpecConflictBusy(true);
+    await reloadSpecFromServer();
+    setSpecSaveConflict(false);
+    setApproveError(null);
+    setValidationReloadSignal((n) => n + 1);
+    setStaleValidation(true);
+    setSpecConflictBusy(false);
+  }, [reloadSpecFromServer]);
+
+  /** H2 — desfecho 2: grava por cima. A versão do servidor NÃO se perde (snapshot → "Versões"). */
+  const handleSpecConflictOverwrite = useCallback(async () => {
+    if (!editProjectId) return;
+    setSpecConflictBusy(true);
+    try {
+      const cur = await apiGet<{ contentSha256?: string }>(`/api/projects/${editProjectId}/spec-content`);
+      await persistSpecMarkdown(cur.contentSha256 ?? null);
+      setSpecSaveConflict(false);
+      setApproveError(null);
+      setTreeReloadSignal((n) => n + 1);
+      setValidationReloadSignal((n) => n + 1);
+      setStaleValidation(true);
+    } catch (e) {
+      setApproveError(e instanceof Error ? e.message : String(e));
+    } finally { setSpecConflictBusy(false); }
+  }, [editProjectId, persistSpecMarkdown]);
 
   /**
    * B1 — escopo REAL da promoção, para o rótulo/tooltip/confirmação. `null` = ainda não sei quem é o
@@ -3728,6 +3784,35 @@ export default function SpecPage() {
     />
   );
 
+  // ── H2 (adversarial Onda 2): conflito no "Salvar rascunho" da spec inteira ─────────────────────
+  // Renderizado UMA vez: serve o editor normal, o fullscreen e o mobile (um Alert por tela não
+  // apareceria no fullscreen, que é onde a Bancada é de fato usada). Nada foi gravado quando ele
+  // abre — as duas saídas são explícitas e nenhuma delas perde trabalho em silêncio.
+  const specConflictDialog = (
+    <Dialog open={specSaveConflict} onClose={() => setSpecSaveConflict(false)} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontSize: "1rem" }}>A spec mudou desde a sua leitura</DialogTitle>
+      <DialogContent dividers>
+        <Typography variant="body2" sx={{ whiteSpace: "pre-line" }}>
+          {"O arquivo no servidor não é mais o que você abriu — outra aba, o chat da Bancada ou o modo " +
+           "autônomo gravaram antes de você. Nada foi salvo.\n\n" +
+           "• Recarregar: fica com a versão do servidor e descarta o texto que está no editor.\n" +
+           "• Sobrescrever: grava o seu texto por cima; a versão do servidor não se perde — ela vai " +
+           "para o histórico em \"Versões\"."}
+        </Typography>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setSpecSaveConflict(false)} disabled={specConflictBusy}>Cancelar</Button>
+        <Button onClick={() => void handleSpecConflictReload()} disabled={specConflictBusy}>
+          Recarregar do servidor
+        </Button>
+        <Button color="warning" variant="contained" disabled={specConflictBusy}
+          onClick={() => void handleSpecConflictOverwrite()}>
+          Sobrescrever
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+
   // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
   if (editProjectId) {
     return (
@@ -3922,6 +4007,7 @@ export default function SpecPage() {
 
         {editorDialog}
         {promoteDialog}
+        {specConflictDialog}
         {/* Migração 097 — ordem de entrada na fábrica do produto promovido. `onStart` só existe
             porque o produto foi admitido AQUI: iniciar é decisão explícita do humano. */}
         <PromotionPlanDialog
