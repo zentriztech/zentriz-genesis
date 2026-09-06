@@ -283,7 +283,9 @@ async function runStageB(projectId: string, specText: string): Promise<{ finding
   // SPEC_VALIDATOR_MODEL do env como override explícito (precedência no spec_validator.py).
   const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId }));
   const start = await httpJson(`${base}/invoke/spec_validator/async`, "POST", {
-    spec_text: specText.slice(0, 200_000),
+    // GAP-10: o corte cego `slice(0, 200_000)` vivia aqui e produzia blockers FANTASMAS de "arquivo
+    // ausente". Quem monta (e declara) o recorte agora é `buildValidationInput`, no chamador.
+    spec_text: specText,
     originProjectId: projectId, // débito de usage no orçamento do tenant (F6)
     ...llm,
   }, 30_000).catch((e) => ({ status: 0, data: { error: String(e) } as Record<string, unknown> }));
@@ -392,12 +394,25 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   const hasStageABlocker = findings.some((f) => f.severity === "blocker");
   let stageBError: string | undefined;
   if (!hasStageABlocker && files.length > 0) {
-    const specText = files
-      // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
-      .filter((f) => !/\.ya?ml$/i.test(f.filename))
-      .map((f) => `===== ${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename} =====\n${f.content}`)
-      .join("\n\n");
-    const b = await runStageB(projectId, specText);
+    const { buildValidationInput } = await import("./specValidationInput.js");
+    const input = buildValidationInput(
+      files
+        // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
+        .filter((f) => !/\.ya?ml$/i.test(f.filename))
+        .map((f) => ({ path: `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`, content: f.content })),
+    );
+    if (input.outlineOnly.length > 0) {
+      // GAP-10: o humano tem de VER que a spec passou do que cabe numa validação — antes isso era
+      // um `slice` silencioso e o sintoma chegava como blocker falso de "arquivo ausente".
+      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${input.totalChars} chars > teto de janela — ${input.full.length} arquivo(s) integrais, ${input.outlineOnly.length} só em sumário: ${input.outlineOnly.join(", ")}`);
+      findings.push({
+        file: "", line: null, severity: "warning",
+        title: "Spec maior que a janela de validação — parte foi julgada só pelo sumário",
+        rationale: `A spec tem ${input.totalChars} caracteres em ${files.length} arquivos. ${input.full.length} foram enviados integralmente ao validador; ${input.outlineOnly.length} entraram apenas como sumário de cabeçalhos (${input.outlineOnly.join(", ")}). Contradições internas a esses arquivos podem não ter sido vistas nesta rodada.`,
+        source: "stage_a",
+      });
+    }
+    const b = await runStageB(projectId, input.text);
     findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
     stageBError = b.error;
   }

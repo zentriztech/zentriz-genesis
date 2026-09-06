@@ -284,3 +284,74 @@ cresce sem contrapartida em GAPs fechados. Candidatos (nesta ordem): **orçament
 rodada como contrato de saída** (G1 do relatório de GAPs sistêmicos), edits de **remoção/consolidação**
 explicitamente permitidos e pedidos no prompt, e **divisão por agente** quando a seção passa de um
 tamanho — nunca automação fixa (Lei 100% LLM).
+
+---
+
+## O que a validação do passe 1 revelou: 17 → 22 GAPs não era ruído
+
+O passe 1 pós-A5.7 aplicou 31 edições em 3 arquivos com **0 descartes** e a contagem de GAPs
+importantes **subiu 17 → 22** (blockers 10 → 14). O diff título-a-título entre as duas validações
+(17 resolvidos, 22 novos) não mostrou "mais ou menos do mesmo": mostrou **duas causas novas, as duas
+no código, as duas piores que qualquer GAP de conteúdo.**
+
+### GAP-9 🔴→✅ Um marcador de conflito de merge foi GRAVADO na spec de produção
+
+Novo blocker do validador: *"Marcador de conflito de merge não resolvido no meio da tabela de
+convenções"*. Não era alucinação — está no disco:
+
+```
+| Relógio de prazo jurídico | ...texto ANTIGO... |
+=======
+| Enums | ... |
+| Relógio de prazo jurídico | ...texto NOVO... |
+```
+
+Uma linha `=======` no meio de uma tabela **e a linha substituída duplicada** — e o log da rodada
+dizia `16 aplicadas, 0 descartadas`. Causa em `specFileEdits.ts`: o parser trata `RE_MID` como
+separador **apenas** no estado `search`; um SEGUNDO separador, já no estado `replace`, caía no
+`else if (state === "replace") replace.push(line)` e ia para o arquivo como **conteúdo**. O módulo
+que existe para "vetar corrupção" era a fonte da corrupção. Ocorreu **2×** (também no arquivo
+monolítico original).
+
+Correção: (a) no parser, `RE_MID` dentro de `replace` = bloco malformado → **descarta só aquele
+bloco** e ressincroniza (o resto da rodada continua valendo, exatamente como no truncamento);
+(b) invariante nova no aplicador — `MARKER_IN_REPLACE` recusa qualquer bloco cujo texto novo
+contenha linha de marcador, com mensagem que ensina a saída (`# Título` ATX em vez de sublinhado
+`=======`). 2 testes novos.
+
+### GAP-10 🔴→✅ O validador julgava 27% da spec e reprovava os outros 73% por "ausência"
+
+O achado mais grave da onda. `runStageB` mandava `spec_text: specText.slice(0, 200_000)`. A spec do
+LastMile tem hoje **12 arquivos / 747.170 chars** — o corte cego caía **no meio do 5º arquivo**.
+Quatro dos novos blockers são **fantasmas** produzidos por esse corte:
+
+```
+"Spec entregue viola o próprio gate de completude: 9 dos 12 arquivos obrigatórios estão ausentes"
+"Catálogo fechado de 26 códigos ... não está presente na spec entregue"
+"Inventário FR/NFR/RN declarado fonte única e fechada está ausente"
+"Documento de Definição de Pronto está truncado, reprovando-se por construção"
+```
+
+`contratos-erros.md` (74.196 chars) e `definicao-de-pronto.md` (87.631) existem e estão íntegros no
+disco. E o ciclo é **vicioso**: o CTO-editor "resolve" o fantasma **acrescentando** conteúdo aos
+arquivos que o validador vê → mais texto passa do corte → mais fantasmas na rodada seguinte. É a
+explicação mecânica de por que o critério de fechamento da O1 (a contagem TEM de cair) vinha
+falhando: **o laço estava competindo contra um teto invisível do próprio código.**
+
+Correção (`services/specValidationInput.ts`, mesma regra do A5.7 na outra ponta — *cortar é
+aceitável, mentir sobre o corte não é*):
+1. **inventário completo sempre** — todos os arquivos, tamanho e marca `INTEGRAL`/`SÓ SUMÁRIO`;
+2. cabe integral ⇒ vai integral, priorizando os **menores** (maximiza quantos arquivos são vistos
+   por inteiro; é critério de fato, não julgamento de conteúdo);
+3. não cabe ⇒ vai o **sumário de cabeçalhos**, marcado como tal;
+4. regra escrita no prompt: *arquivo em `SÓ SUMÁRIO` **existe** — é proibido reportá-lo como ausente,
+   faltando ou truncado, e proibido concluir que uma definição não existe por não tê-la visto*;
+5. o corpo sai na **ordem de leitura** original, não na ordem de tamanho.
+
+Além disso o humano passa a **ver** o teto: um `warning` de estágio A ("Spec maior que a janela de
+validação — parte foi julgada só pelo sumário") lista os arquivos que entraram só em sumário. Antes
+isso era um `slice` mudo e o sintoma chegava como blocker falso. 7 testes novos.
+
+**Consequência de método:** as duas causas só apareceram porque a prova ao vivo foi lida **finding a
+finding**, não pelo total. O total dizia "piorou 17 → 22"; o diff dizia "o código corrompeu um arquivo
+e o validador está cego". Contagem agregada não substitui diff.

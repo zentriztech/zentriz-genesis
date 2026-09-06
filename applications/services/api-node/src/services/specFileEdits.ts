@@ -121,6 +121,15 @@ export function parseSpecEditBlocks(raw: string): SpecEditParseResult {
       replace = [];
       continue;
     }
+    // GAP-9: um SEGUNDO separador dentro do lado REPLACE = bloco malformado. Antes esta linha era
+    // engolida como CONTEÚDO e o `=======` ia para o disco — foi assim que `modelo-dados.md` ganhou
+    // um marcador de conflito no meio de uma tabela (e a linha substituída ficou DUPLICADA), com o
+    // log dizendo "16 aplicadas, 0 descartadas". Descartar só ESTE bloco preserva a rodada: os
+    // demais continuam válidos, exatamente como no truncamento.
+    if (state === "replace" && RE_MID.test(t)) {
+      closeIncomplete();
+      continue;
+    }
     if (state === "search") search.push(line);
     else if (state === "replace") replace.push(line);
     else if (t) prose.push(line);
@@ -134,6 +143,7 @@ export type SpecEditApplyFailure =
   | { code: "EMPTY_SEARCH"; message: string; index: number }
   | { code: "SEARCH_NOT_FOUND"; message: string; index: number }
   | { code: "SEARCH_AMBIGUOUS"; message: string; index: number }
+  | { code: "MARKER_IN_REPLACE"; message: string; index: number }
   | { code: "SHRUNK"; message: string };
 
 export type SpecEditApplyResult =
@@ -198,6 +208,18 @@ export function applySpecEditBlocks(
     const search = b.search.replace(/\r\n/g, "\n");
     if (!search.trim()) {
       return { ok: false, code: "EMPTY_SEARCH", index: i, message: `Edição ${i + 1}: bloco SEARCH vazio.` };
+    }
+    // GAP-9 (invariante, não heurística): nenhuma substituição pode INTRODUZIR uma linha de marcador
+    // no arquivo. Gravar `=======` numa spec normativa é corrupção — o validador a lê como conflito de
+    // merge não resolvido, e com razão. O parser já descarta o bloco malformado; isto garante a
+    // invariante para qualquer chamador, inclusive um bloco montado à mão em teste.
+    const badLine = b.replace.replace(/\r\n/g, "\n").split("\n")
+      .find((l) => { const s = l.trim(); return RE_START.test(s) || RE_MID.test(s) || RE_END.test(s); });
+    if (badLine !== undefined) {
+      return {
+        ok: false, code: "MARKER_IN_REPLACE", index: i,
+        message: `Edição ${i + 1}: o texto novo contém uma linha de marcador de edição ("${badLine.trim().slice(0, 20)}") — recusado para não gravar conflito de merge na spec. Reemita o bloco; se a linha for mesmo conteúdo, use cabeçalho ATX (\`# Título\`) em vez de sublinhado.`,
+      };
     }
     let hits = countOccurrences(current, search);
     let effective = search;
