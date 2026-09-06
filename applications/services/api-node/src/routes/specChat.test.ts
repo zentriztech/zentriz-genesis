@@ -655,8 +655,12 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     // NÃO passa pelo normalizador (que regeneraria uma PRODUCT_SPEC inteira em cima do arquivo)
     expect(httpPostCalls.some((c) => c.url.includes("/invoke/cto/async"))).toBe(false);
     const payload = JSON.parse(raw!.body) as { prompt_override: string; user_message: string; max_tokens: number };
-    expect(payload.prompt_override).toContain("REGRAS DE ESCOPO");
-    expect(payload.prompt_override).toContain("PRESERVE todo o conteúdo");
+    // A5.2: o canal de entrega passou a ser EDIÇÕES (search/replace) — o formato "arquivo inteiro"
+    // truncou 4/4 vezes em prod num arquivo de 47k. As regras de escopo continuam no prompt.
+    expect(payload.prompt_override).toContain("REGRAS DOS BLOCOS");
+    expect(payload.prompt_override).toContain("<<<<<<< SEARCH");
+    expect(payload.prompt_override).toContain("NÃO remova requisito válido");
+    expect(payload.user_message).toContain("Não reemita o arquivo");
     expect(payload.user_message).toContain("GAPs A RESOLVER NESTE ARQUIVO (1)");
     expect(payload.user_message).toContain("Falta authz nos endpoints");
     expect(payload.user_message).toContain("(em: FR-03)");
@@ -698,7 +702,7 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(httpPostCalls).toHaveLength(0);
   });
 
-  it("teto por-arquivo do Resolver GAPs é 48k (o chat comum segue em 20k)", async () => {
+  it("teto por-arquivo do Resolver GAPs é 120k em `edits` (o chat comum segue em 20k)", async () => {
     const mid = "x".repeat(30_000);
     rawResponse = JSON.stringify({ response: "# API revisada" });
     const ok = await app.inject({
@@ -713,12 +717,115 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     });
     expect(chat.statusCode).toBe(413);
 
+    // A5.2: no formato de EDIÇÕES a saída não é mais proporcional ao arquivo, então o teto de
+    // entrada é a janela de contexto (120k chars ≈ 43k tokens) — arquivos de 48k–120k, que antes
+    // eram recusados com FILE_TOO_LARGE sem ninguém para dividi-los, agora entram.
+    const grande = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "x".repeat(60_000), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(grande.statusCode).toBe(202);
+
     const tooBig = await app.inject({
       method: "POST", url: "/api/spec-chat",
-      payload: { specMarkdown: "x".repeat(48_001), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+      payload: { specMarkdown: "x".repeat(120_001), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
     });
     expect(tooBig.statusCode).toBe(413);
-    expect(JSON.parse(tooBig.body).message).toContain("48000");
+    expect(JSON.parse(tooBig.body).message).toContain("120000");
+  });
+
+  it("A5.2: resposta em EDIÇÕES → job `done` com o arquivo APLICADO (não com o texto do modelo)", async () => {
+    const base = "# API\n\n## FR-03 Autorização\n\nEndpoints públicos.\n";
+    rawResponse = JSON.stringify({
+      response: [
+        "<<<<<<< SEARCH",
+        "Endpoints públicos.",
+        "=======",
+        "Endpoints exigem papel `courier` ou `admin` (403 `FORBIDDEN_ROLE`).",
+        ">>>>>>> REPLACE",
+      ].join("\n"),
+      model_used: "us.anthropic.claude-opus-5",
+      usage: { input_tokens: 100, output_tokens: 60 },
+    });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: base, projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("done");
+    // O que sai para o apply é o ARQUIVO INTEIRO com a edição dentro — o cabeçalho sobreviveu.
+    expect(String(done?.specMarkdown)).toContain("# API");
+    expect(String(done?.specMarkdown)).toContain("FORBIDDEN_ROLE");
+    expect(String(done?.specMarkdown)).not.toContain("SEARCH");
+    expect(String(done?.reply)).toContain("1 edição(ões) aplicada(s)");
+  });
+
+  it("A5.2: edição com âncora inexistente → job em erro e NADA aplicado (código não adivinha)", async () => {
+    rawResponse = JSON.stringify({
+      response: ["<<<<<<< SEARCH", "trecho que não existe no arquivo", "=======", "novo", ">>>>>>> REPLACE"].join("\n"),
+      model_used: "m",
+    });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# API\n\nEndpoints.\n", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("error");
+    expect(String(done?.error)).toContain("não puderam ser ancoradas");
+    expect(done?.specMarkdown).toBeFalsy();
+  });
+
+  it("A5.2: EDIÇÕES + resposta cortada → aplica as completas e NÃO marca truncado (o laço aproveita)", async () => {
+    const base = "# API\n\n## FR-03\n\nEndpoints públicos.\n\n## FR-04\n\nSem critérios.\n";
+    rawResponse = JSON.stringify({
+      response: [
+        "<<<<<<< SEARCH",
+        "Endpoints públicos.",
+        "=======",
+        "Endpoints exigem papel `courier` (403 `FORBIDDEN_ROLE`).",
+        ">>>>>>> REPLACE",
+        "<<<<<<< SEARCH",
+        "Sem critérios.",
+        "=======",
+        "Critérios de aceite: dado um cour",
+      ].join("\n"),
+      truncated: true, stop_reason: "max_tokens", model_used: "us.anthropic.claude-opus-5",
+    });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: base, projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    const { jobId } = JSON.parse(res.body);
+    let done: Record<string, unknown> | null = null;
+    for (let i = 0; i < 20 && !done; i++) {
+      const p = await app.inject({ method: "GET", url: `/api/spec-chat/${jobId}` });
+      const b = JSON.parse(p.body);
+      if (b.status === "done" || b.status === "error") done = b;
+      else await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(done?.status).toBe("done");
+    expect(String(done?.specMarkdown)).toContain("FORBIDDEN_ROLE");
+    // o bloco cortado não entrou e o texto original dele continua intacto
+    expect(String(done?.specMarkdown)).toContain("Sem critérios.");
+    expect(String(done?.specMarkdown)).not.toContain("dado um cour");
+    // `truncated` NÃO propaga: aqui o corte não mutila nada, e marcá-lo faria
+    // `assessRevisionIntegrity` recusar um resultado bom e pago.
+    expect(done?.truncated).toBeFalsy();
+    expect(String(done?.reply)).toContain("1 incompleta(s) descartada(s)");
   });
 
   it("resposta TRUNCADA → job em erro e NADA é oferecido para aplicar (não mutila o arquivo)", async () => {
