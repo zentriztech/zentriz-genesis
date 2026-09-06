@@ -255,3 +255,32 @@ mostrarem textos diferentes do mesmo arquivo. A rota humana também deixou de de
 recorte é possível (`canDigestOversize`). 8 testes novos (7 do digest + 1 do 413 que sobrevive no
 `whole`); o teste que exigia 413 em 120.001 chars foi reescrito para 202 — a mudança de comportamento
 é o próprio conserto.
+
+**Prova ao vivo do A5.7 (`main 90c3e33`, api `sha256:77b7aae6…`, run novo `f5d12be4`):**
+```
+[SpecChat] alvo recortado modelo-dados.md: 126742 chars > teto 120000
+           → resumo dirigido de 90422 chars (27/56 seções)
+[SpecAutonomy] passe 1/5 arquivo 1 (modelo-dados.md) → CTO job=276d0333 (13 GAPs)
+[SpecChat] ✓ job=276d0333 DONE (edits) — 16 aplicadas, 0 descartadas,
+           126742→149393 chars, model=us.anthropic.claude-opus-5
+```
+O arquivo que a rodada 13 tinha **descartado para sempre** voltou a ser o **primeiro** da fila, com os
+13 GAPs dele. O número que importa é `0 descartadas`: todos os 16 blocos `SEARCH` casaram byte a byte
+no arquivo COMPLETO do disco — é a prova de que mostrar seções verbatim (e não um head-truncate)
+sustenta o formato `edits`. No mesmo passe, `definicao-de-pronto.md` (6 edits) e `visao-escopo.md`
+(9 edits) também foram revisados, todos com 0 descartes.
+
+**A janela quieta foi verificada por TERMINALIDADE, não por leitura pontual** (lição do custo do deploy
+anterior): o run `75b3cf5d` encerrou-se sozinho em `stalled` — *"Dois passes seguidos sem derrubar GAP
+importante"* — e só então a api foi recriada (`--no-deps`). Zero rodada perdida.
+
+**GAP-8 🔴 (aberto, agora é o defeito dominante): a spec infla ~18% por rodada.** A mesma prova que
+fechou a perna de leitura escancarou a de escrita: `modelo-dados.md` **126.742 → 149.393 chars numa
+única rodada** (+22.651), `definicao-de-pronto.md` +5.174, `visao-escopo.md` +3.751. O A5.7 removeu a
+*parada dura* (o arquivo volta a ser revisável a qualquer tamanho), mas não a causa: o CTO-editor
+**só acrescenta** — nenhum GAP é fechado por remoção ou consolidação, e nada mede o custo dessa
+inflação. Consequências já visíveis: cada rodada recorta mais (27/56 seções hoje) e o custo de token
+cresce sem contrapartida em GAPs fechados. Candidatos (nesta ordem): **orçamento de crescimento por
+rodada como contrato de saída** (G1 do relatório de GAPs sistêmicos), edits de **remoção/consolidação**
+explicitamente permitidos e pedidos no prompt, e **divisão por agente** quando a seção passa de um
+tamanho — nunca automação fixa (Lei 100% LLM).
