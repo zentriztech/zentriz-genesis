@@ -35,8 +35,15 @@ export type SemanticResult = { ok: true; skipped?: boolean } | { ok: false; bloc
 const MIN_CONFIDENCE = Number(process.env.SPEC_GATE_MIN_CONFIDENCE ?? "0.75");
 /** Timeout curto: é um check de intake, não pode segurar o request. */
 const TIMEOUT_MS = Number(process.env.SPEC_GATE_TIMEOUT_MS ?? "45000");
-/** Modelo barato/rápido. Sobrescrevível por env. */
-const SPEC_GATE_MODEL = process.env.SPEC_GATE_MODEL ?? "us.anthropic.claude-haiku-4-5";
+/**
+ * Modelo barato/rápido. Sobrescrevível por env.
+ *
+ * ⚠️ ID **COM VERSÃO**. Medido em prod 2026-09-06: o apelido `us.anthropic.claude-haiku-4-5` (sem
+ * `-20251001-v1:0`) devolve `400 The provided model identifier is invalid` no Bedrock. Como este gate
+ * é fail-open, o defeito era INVISÍVEL — toda submissão passava sem juiz nenhum. O apelido curto
+ * existe na tabela de contexto do `runtime.py`, o que não o torna um inference profile válido.
+ */
+const SPEC_GATE_MODEL = process.env.SPEC_GATE_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 /** Máximo de conteúdo enviado ao LLM (corta specs enormes; suficiente para julgar). */
 const MAX_CONTENT_CHARS = 12_000;
 

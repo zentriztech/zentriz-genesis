@@ -11,9 +11,12 @@ import pytest
 from orchestrator.spec_file_splitter import (
     SPEC_SPLIT_MAX_FILES,
     SpecSplitError,
+    _BEGIN,
+    _END,
     _norm_title,
     build_plan_prompt,
     build_writer_prompt,
+    extract_writer_content,
     split_markdown_sections,
     split_spec_into_files,
 )
@@ -244,3 +247,69 @@ def test_plan_prompt_announces_the_limits_and_the_index_numbering():
     assert f"Máximo de {SPEC_SPLIT_MAX_FILES} arquivos" in msg
     assert "1. 1. Visão do produto" in msg  # índice numerado pela fábrica
     assert "readme.md" in msg  # nomes reservados anunciados ao agente
+
+
+# ── Envelope do redator: Markdown CRU entre marcadores (Onda 5, prod 2026-09-06) ───────────────────
+#
+# Duas propostas ao vivo morreram porque o redator tinha de embrulhar 30 kB de Markdown numa string
+# JSON: `connect.md` emitiu uma aspa sem escape e `Expecting ',' delimiter: line 1 column 29574`
+# levou consigo as 17 chamadas de Opus 5 já pagas. Marcador não tem escape para errar.
+
+def test_marcadores_devolvem_o_markdown_literal_com_aspas_cercas_e_barras():
+    """O caso EXATO que quebrava: conteúdo que, em JSON, exigiria escape em todo caractere hostil."""
+    hostil = (
+        '# Connect\n\nO campo `"eventType"` é obrigatório e o separador é `\\`.\n\n'
+        '```json\n{"a": "b\\"c"}\n```\n\n## Fim\n' + "texto suficientemente longo. " * 4
+    )
+    assert extract_writer_content(f"{_BEGIN}\n{hostil}\n{_END}") == hostil.strip()
+
+
+def test_marcadores_ignoram_prosa_antes_e_depois():
+    corpo = "# A\n\ncorpo do arquivo com tamanho de sobra. " * 3
+    raw = f"Claro, segue o arquivo:\n{_BEGIN}\n{corpo}\n{_END}\nPosso ajustar se quiser."
+    assert extract_writer_content(raw) == corpo.strip()
+
+
+def test_marcador_de_fim_ecoado_no_texto_nao_perde_conteudo():
+    """Se o modelo citar o próprio marcador, o ÚLTIMO é o que fecha — nada é cortado."""
+    corpo = f"# A\n\nresponda entre {_END} quando terminar.\n\n## Fim\n"
+    assert extract_writer_content(f"{_BEGIN}\n{corpo}\n{_END}").endswith("## Fim")
+    assert _END in extract_writer_content(f"{_BEGIN}\n{corpo}\n{_END}")
+
+
+def test_json_antigo_continua_aceito_como_fallback():
+    """Compatibilidade: prompt/versão em voo que ainda responda `{content}` não quebra."""
+    corpo = "# A\n\nconteúdo do contrato antigo, longo o bastante. " * 3
+    assert extract_writer_content(json.dumps({"content": corpo}, ensure_ascii=False)) == corpo.strip()
+
+
+def test_resposta_sem_marcador_e_sem_content_falha_com_codigo_estavel():
+    with pytest.raises(Exception) as e:
+        extract_writer_content("desculpe, não consegui escrever este arquivo")
+    assert getattr(e.value, "code", "") in ("PROPOSAL_INVALID_JSON", "SPEC_SPLIT_WRITER_FAILED")
+
+
+def test_writer_prompt_pede_marcador_e_nao_pede_mais_json():
+    from orchestrator.spec_file_splitter import _validate_plan
+    _, sections = split_markdown_sections(SPEC)
+    plan = _validate_plan(json.loads(json.dumps(PLAN)), sections, [])
+    msg = build_writer_prompt(plan, plan["files"][0], "preâmbulo", "NVX")
+    assert _BEGIN in msg and _END in msg
+    assert "SOMENTE o JSON" not in msg
+    idx = build_writer_prompt(plan, None, "preâmbulo", "NVX")
+    assert _BEGIN in idx and "SOMENTE o JSON" not in idx
+
+
+def test_pipeline_completo_com_redator_usando_marcadores():
+    """Ponta a ponta com o envelope novo — inclusive uma cerca de código dentro do conteúdo."""
+    corpo = "# Arquivo\n\n```sql\nSELECT 1;\n```\n\n" + "conteúdo acima do piso de tamanho. " * 4
+
+    def fn(system: str, user: str, model_id: str) -> str:
+        if "PASSO 1 do divisor" in system:
+            return json.dumps(PLAN, ensure_ascii=False)
+        return f"{_BEGIN}\n{corpo}\n{_END}"
+
+    out = split_spec_into_files(SPEC, llm_fn=fn, project_name="NVX")
+    assert set(out["files"]) == {"objetivo-escopo.md", "requisitos.md", "tecnico/dados-e-contratos.md"}
+    assert all("```sql" in c for c in out["files"].values())
+    assert out["index"].startswith("# Arquivo")

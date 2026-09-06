@@ -68,6 +68,40 @@ def test_json_invalido_lanca():
     assert e.value.code == "PROPOSAL_INVALID_JSON"
 
 
+# ── o defeito que derrubou a proposta do splitter em prod (2026-09-06) ────────
+# O redator devolve `{"content": "<markdown>"}` e Markdown de spec TEM bloco de código. Com a
+# extração non-greedy anterior, a primeira ``` do conteúdo fechava a cerca e sobrava
+# `{"content": "…` → "Unterminated string starting at: line 1 column 13". 17 chamadas de Opus 5
+# (`end_turn` em todas) foram descartadas por causa de um arquivo.
+def test_conteudo_com_cerca_de_codigo_dentro_da_cerca_json():
+    md = "# Regras\n\n```sql\nSELECT 1;\n```\n\nfim.\n"
+    raw = "```json\n" + json.dumps({"content": md}, ensure_ascii=False) + "\n```"
+    assert _extract_json(raw)["content"] == md
+
+
+def test_conteudo_com_cerca_de_codigo_sem_cerca_externa():
+    md = "## DDL\n\n```sql\nCREATE TABLE t (id uuid);\n```\n"
+    assert _extract_json(json.dumps({"content": md}, ensure_ascii=False))["content"] == md
+
+
+def test_chaves_dentro_do_markdown_nao_desbalanceiam():
+    """`{` de template/JSON de exemplo dentro do conteúdo não pode fechar o objeto antes da hora."""
+    md = 'Exemplo: `{"a": {"b": 1}}` e um `}` solto.\n'
+    assert _extract_json(json.dumps({"content": md}, ensure_ascii=False))["content"] == md
+
+
+def test_prosa_com_chave_falsa_antes_do_json_de_verdade():
+    """O prompt manda "responda o JSON {content}" — o modelo às vezes ecoa isso antes da resposta."""
+    raw = 'Segue o JSON {content} pedido:\n```json\n{"content": "# ok\\n"}\n```'
+    assert _extract_json(raw) == {"content": "# ok\n"}
+
+
+def test_quebra_de_linha_crua_na_string_e_tolerada_como_transporte():
+    """Modelo que esquece de escapar `\\n` é ruído de transporte, não decisão: aceitar em vez de
+    perder 17 chamadas de LLM. `strict=True` é sempre tentado primeiro."""
+    assert _extract_json('{"content": "linha 1\nlinha 2"}')["content"] == "linha 1\nlinha 2"
+
+
 # ── infer_manifest (happy path + variações de formatação) ────────────────────
 def test_infer_happy_path():
     out = infer_manifest("prosa", PRESENT, llm_fn=_stub(_good_manifest()))

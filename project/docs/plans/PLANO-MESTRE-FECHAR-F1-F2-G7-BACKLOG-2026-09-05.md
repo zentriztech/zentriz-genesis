@@ -312,6 +312,76 @@ caminho quente e reportado** ✅ (o entitlement em si é da conta AWS, fora do c
 - **A5.2 🟡 auditoria:** entrega um RELATÓRIO com os pontos onde o código julga em vez de vetar; correção
   vira plano próprio (não mexer em tudo de uma vez).
 
+#### Onda 5 — EXECUTADA 2026-09-06 (medições em PRODUÇÃO)
+
+**A5.1 — o veredito é DIFERENTE do que a pergunta assumia.** A pergunta era "o modelo obedece o formato
+`edits` ou reemite tudo?". A medição achou algo anterior a isso: **`SPEC_CTO_EDIT_FORMAT=edits` é INERTE no
+modo `per_file`**, que é justamente o modo que a F2 criou. `ctoEditFormatEnabled()`
+(`routes/specChat.ts:76`) só reescreve a regra do caminho de **spec inteira** (`/invoke/cto/async`); o
+caminho por-arquivo usa `/invoke/raw` com o `GAP_FILE_SYSTEM`, cujo prompt manda *"Devolva SOMENTE o
+conteúdo final COMPLETO do arquivo"*. E `mode` nasce de `specFileCount > 1` → **toda spec dividida cai em
+`per_file` e nunca exercita `edits`**. Ou seja: aqui a reemissão integral não é desobediência do modelo, é
+**exigência do código**. Medir `_edits_applied` exige projeto com spec de 1 arquivo (modo `whole`).
+
+**Dois defeitos de TETO, medidos e corrigidos (commit `3094086`, api em prod digest `7f5bbd7144…`,
+rollback `rollback-api:pre-a51-tetos-20260906`):**
+
+| # | Defeito | Evidência (prod) |
+|---|---------|------------------|
+| 1 | Socket de **180 s fixo** menor que o tempo físico de gerar o que o próprio código pedia (21.649 tokens) | run `b3932af7`, rodada 1: `Socket timeout after 180s` em 3m13s com a geração **ainda viva nos agents** (teto de 900 s lá) → trabalho pago em Opus 5 descartado **e custo nem debitado** |
+| 2 | `max_tokens` do "Resolver GAPs por arquivo" derivado do tamanho de ENTRADA → caía no piso de **8.000** | run `b3932af7`, rodada 2: `spec_cto in=7179 out=8000 **TRUNCATED**` num arquivo de 10.517 chars |
+
+Fix: `GAP_FILE_MAX_TOKENS = 32_000` (teto ≠ gasto; a entrada já é limitada a 48.000 chars) e
+`rawSocketTimeoutMs(maxTokens)` = `maxTokens/60 tok/s + 30 s` (piso 180 s), com `FILE_JOB_DEADLINE_MS`
+6 → 12 min para seguir sendo a rede de segurança ACIMA do socket. Lei do F17: **expira a ESPERA, nunca o
+TRABALHO.** Throughput usado no cálculo é medido, não estimado: **89–115 tokens/s** (Opus 5 `direct`,
+`project_agent_metrics` do mesmo host e do mesmo dia).
+
+**Prova ao vivo DEPOIS do fix — run `a4ad542f-90ff-4f40-8e62-4f8e0eacf2e4`** (LastMile, `per_file`,
+27 GAPs iniciais). `output_tokens` por rodada, tudo do `project_agent_metrics` de prod:
+
+| Rodada | Arquivo | Chars in | GAPs | `output_tokens` | Antes do fix seria |
+|--------|---------|---------:|-----:|----------------:|--------------------|
+| 1 | `privacidade-lgpd.md` | 47.816 | 9 | **32.000 TRUNCATED** | timeout de socket em 180 s |
+| 2 | `nvx-lastmile-backend.md` | 10.517 | 5 | **13.980 OK** → aplicado (10.517 → 29.338 chars) | TRUNCATED em 8.000 |
+| 3 | `modelo-dados.md` | 45.825 | 4 | **29.978 OK** → aplicado | TRUNCATED **e** timeout |
+| 4 | `definicao-de-pronto.md` | — | 1 | **15.673 OK** → aplicado | TRUNCATED em 8.000 |
+| 5 | `visao-escopo.md` | — | 1 | **12.370 OK** → aplicado | TRUNCATED em 8.000 |
+| 6 | `contratos-erros.md` | — | 6 | **30.439 OK** → aplicado | TRUNCATED **e** timeout |
+
+**Leitura honesta destes números:** (a) **nenhuma** das 5 rodadas que aplicaram caberia no teto antigo de
+8.000 — o menor `out` foi 12.370, 1,55× o teto; (b) o custo por rodada NÃO é "menor que a spec inteira por
+ser um arquivo": 30.439 tokens de saída para revisar um arquivo é a MESMA ordem de grandeza do baseline
+monolítico (≈64k truncado), porque o caminho copia o arquivo inteiro de volta a cada rodada; (c) o teto
+de 32.000 **não** é suficiente para arquivo de ~48 kB (rodada 1) — e subir o teto só empurra o problema,
+porque o CTO praticamente **dobra** o arquivo (10.517 → 29.338 na rodada 2).
+
+**Conclusão da A5.1 (a resposta à pergunta do gate):** o gargalo não é o teto, é o **contrato de saída**.
+Enquanto o caminho por-arquivo pedir o documento completo de volta, `output_tokens ∝ tamanho do arquivo`,
+e a economia prometida pela F2 fica limitada a "arquivos menores que ~40 kB". **Levar o `edits` da F1 ao
+caminho por-arquivo é o próximo plano** (saída ∝ tamanho da MUDANÇA, não do arquivo) — e é a única
+correção que fecha a causa de verdade. Até lá, `SPEC_CTO_EDIT_FORMAT` fica como está: em `per_file` não
+tem efeito nenhum, e no caminho `whole` segue sem prova ao vivo (nenhum projeto de prod com spec de 1
+arquivo e GAP ativo foi exercitado).
+
+**A5.2 ✅ entregue:** `project/docs/analysis/AUDITORIA-100-LLM-CODIGO-QUE-JULGA-2026-09-06.md` — 10 achados
+(J1/J2/J3 julgamento, C1–C3 corrupção silenciosa, P1–P3 fronteira, O1 operacional), fila de correção de 6
+planos e tabela do que **não** é violação (padrão de referência). Nenhuma correção aplicada pelo relatório.
+
+**3 defeitos de prod encontrados, corrigidos e provados no caminho da Onda 5** (além dos 2 tetos acima):
+`_extract_json` cortando no primeiro fence interno (`a483604`), envelope do redator estourando com aspa
+não escapada em 29,5 kB (`4f45475`) e — o mais grave — o **apelido `us.anthropic.claude-haiku-4-5` não é
+inference profile válido** (`400 The provided model identifier is invalid`), o que deixava o roteador de
+GAPs 100% inoperante (`routed: 0`) e, pior, o **gate semântico de admissão passando TUDO sem juiz** por
+ser fail-open (`a711b17`; provado depois com `routed: 5, stillUnrouted: 0`).
+
+**Gate DEPOIS:** spec dividida ✅ (98.045 chars → 11 arquivos/346.851 chars, run de validação `e4ba0dbe`
+com 29 findings ancorados por arquivo) · GAPs caindo por arquivo ✅ (5 rodadas aplicadas em sequência,
+arquivos salvos e íntegros no disco) · custo/rodada medido ✅ (tabela acima) · relatório entregue ✅.
+**GAPs novos abertos:** `/invoke/raw` que estoura o socket queima tokens **invisíveis** (a api não recebe o
+`usage`); `duration_ms` NULL nas linhas `spec_cto`; J1 (rota de GAP presa ao ex-monólito) segue vivo e
+contornado à mão por revalidar-depois-de-dividir.
+
 ---
 
 ## 3. Ondas, gates e ordem de execução

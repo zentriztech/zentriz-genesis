@@ -743,4 +743,44 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(rawMaxTokensFor(200_000)).toBe(32_000);       // teto: sem `timeout` o SDK recusa > 21.333
     expect(rawMaxTokensFor(-5)).toBe(8_000);
   });
+
+  /**
+   * A5.1 — regressão MEDIDA em prod 2026-09-06 (run `b3932af7`, rodada 2): o "Resolver GAPs por
+   * arquivo" usava `rawMaxTokensFor(chars + GAPs×900)`, o que dava exatamente o PISO de 8.000 para o
+   * `nvx-lastmile-backend.md` (10.517 chars, 5 GAPs) → `spec_cto out=8000 TRUNCATED`, rodada
+   * descartada pelo guard T1 e laço `stalled`. Resolver GAPs FAZ o arquivo crescer: o teto tem de ser
+   * o máximo seguro do caminho, não uma projeção do tamanho de entrada (teto ≠ gasto).
+   */
+  it("A5.1: o Resolver GAPs por arquivo pede o teto máximo de saída, não o derivado do tamanho", async () => {
+    const { GAP_FILE_MAX_TOKENS, rawMaxTokensFor } = await import("./specChat.js");
+    expect(GAP_FILE_MAX_TOKENS).toBe(32_000);
+    // O defeito em uma linha: a fórmula do chat devolvia o piso para o arquivo que truncou em prod.
+    expect(rawMaxTokensFor(10_517 + 5 * 900)).toBe(8_000);
+
+    rawResponse = JSON.stringify({ response: "# API revisada" });
+    const res = await app.inject({
+      method: "POST", url: "/api/spec-chat",
+      payload: { specMarkdown: "# API", projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+    });
+    expect(res.statusCode).toBe(202);
+    const payload = JSON.parse(editorCall()!.body) as { max_tokens: number };
+    expect(payload.max_tokens).toBe(32_000);
+  });
+
+  /**
+   * A5.1 — o socket era 180 s FIXO enquanto o mesmo código concedia até 32.000 tokens de saída.
+   * Medido em prod: 89–115 tokens/s (Opus 5 direto) → 32.000 tokens pedem ~350 s, e a rodada 1
+   * (47.816 chars) morreu em `Socket timeout after 180s` com a geração ainda VIVA nos agents — o
+   * trabalho pago foi jogado fora sem nem debitar custo. A espera passa a acompanhar o pedido.
+   */
+  it("A5.1: o teto do socket é derivado do orçamento de saída e nunca ultrapassa o do job", async () => {
+    const { rawSocketTimeoutMs } = await import("./specChat.js");
+    const { FILE_JOB_DEADLINE_MS } = await import("../services/specChatJobs.js");
+    expect(rawSocketTimeoutMs(8_000)).toBe(180_000);            // piso: nenhuma regressão nos pequenos
+    expect(rawSocketTimeoutMs(32_000)).toBe(564_000);           // 32k/60 tok/s + 30 s de overhead
+    expect(rawSocketTimeoutMs(32_000)).toBeGreaterThan(180_000);
+    // O guard do job tem de ser SEMPRE a rede de segurança acima do socket, nunca o inverso.
+    expect(rawSocketTimeoutMs(999_999)).toBeLessThan(FILE_JOB_DEADLINE_MS);
+    expect(FILE_JOB_DEADLINE_MS).toBe(12 * 60_000);
+  });
 });

@@ -155,19 +155,73 @@ def build_prompt(master_md: str, present_specs: list[str]) -> str:
     )
 
 
+def _json_object_candidates(s: str):
+    """Todo objeto `{...}` BALANCEADO de `s`, na ordem, respeitando strings e escapes JSON.
+
+    Contar chaves ignorando o estado de string é o que quebra quando o valor é Markdown: uma `{`
+    dentro de um bloco de código desbalancearia a conta. Aqui `"` alterna o modo string e `\\`
+    escapa o próximo caractere — então chave, cerca e crase dentro do texto são apenas bytes.
+    """
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        while j < n:
+            ch = s[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    yield s[i:j + 1]
+                    break
+            j += 1
+        i = j + 1
+
+
 def _extract_json(raw: str) -> dict:
-    """Extrai o objeto JSON da resposta do LLM (tolera cercas ```json e texto ao redor)."""
-    text = raw.strip()
-    # Remove cercas de código se houver.
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    else:
-        # Pega do primeiro { ao último } balanceando de forma simples.
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start:end + 1]
+    """Extrai o objeto JSON da resposta do LLM (tolera cercas ```json e texto ao redor).
+
+    ⚠️ MEDIDO EM PROD 2026-09-06 (Onda 5, prova ao vivo do splitter F2): a versão anterior usava
+    `re.search(r"```(?:json)?\\s*(\\{.*?\\})\\s*```")` — NON-GREEDY. O redator do `spec_file_splitter`
+    devolve `{"content": "<markdown do arquivo>"}` e o markdown de uma spec de backend tem blocos de
+    código. A primeira ``` de DENTRO do conteúdo fechava a cerca no meio da string, e o que sobrava
+    era `{"content": "…` → `Unterminated string starting at: line 1 column 13`. Foi assim que o
+    arquivo `regras-negocio.md` derrubou a proposta INTEIRA (17 chamadas Opus 5, `stop_reason=end_turn`
+    em TODAS: nada foi truncado pelo modelo — quem truncou foi o parser).
+
+    Agora a extração não adivinha onde a cerca termina: pula a cerca de ABERTURA (se houver) e lê o
+    primeiro objeto BALANCEADO, tratando o conteúdo das strings como opaco. Sem candidato válido,
+    tenta o texto cru para preservar a mensagem de diagnóstico original.
+    """
+    text = (raw or "").strip()
+    # Só a linha de ABERTURA da cerca interessa: o fim do objeto quem determina é o balanceamento.
+    fence = re.search(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n", text)
+    bodies = [text[fence.end():], text] if fence else [text]
+    for body in bodies:
+        for cand in _json_object_candidates(body):
+            for strict in (True, False):
+                try:
+                    obj = json.loads(cand, strict=strict)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    return obj
+                break  # parseou mas não é objeto: tentar o próximo candidato, não relaxar o strict
     try:
         obj = json.loads(text)
     except json.JSONDecodeError as e:

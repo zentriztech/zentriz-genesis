@@ -249,6 +249,44 @@ def _validate_plan(plan: dict, sections: list[dict], warnings: list[str]) -> dic
 
 # ── PASSO 2 — os Redatores ────────────────────────────────────────────────────────────────────────
 
+#: Envelope de saída do redator. Markdown CRU entre marcadores — não JSON.
+#:
+#: ⚠️ MEDIDO EM PROD 2026-09-06 (Onda 5, A5.1). O contrato anterior era `{"content": "<markdown>"}`.
+#: Embrulhar um documento de 30 kB numa ÚNICA string JSON põe em cima do modelo a obrigação de
+#: escapar cada `"`, `\` e quebra de linha do documento — e ele erra. Duas propostas seguidas
+#: morreram assim, cada uma depois de ~17 chamadas de Opus 5 com `stop_reason=end_turn`:
+#:   1ª — `regras-negocio.md`: `Unterminated string ... column 13` (era o parser: cerca non-greedy,
+#:        corrigido em product_architect._extract_json);
+#:   2ª — `connect.md`: `Expecting ',' delimiter: line 1 column 29574` — aspa NÃO escapada no meio
+#:        do markdown. Aqui o parser está correto: o JSON chegou de fato inválido.
+#: Marcador não tem escape para errar. O JSON continua aceito como fallback (compatibilidade com
+#: qualquer prompt/versão antiga em voo), mas não é mais o que se pede.
+_BEGIN = "<<<SPEC_FILE>>>"
+_END = "<<<END_SPEC_FILE>>>"
+
+
+def extract_writer_content(raw: str) -> str:
+    """Conteúdo Markdown da resposta do redator: marcadores primeiro, JSON `{content}` como fallback.
+
+    Transporte puro — nada aqui decide o que a spec diz. Só desembrulha o envelope.
+    """
+    text = raw or ""
+    i = text.find(_BEGIN)
+    if i != -1:
+        body = text[i + len(_BEGIN):]
+        # O ÚLTIMO marcador de fim: se o modelo ecoar o marcador dentro do texto, nada se perde.
+        j = body.rfind(_END)
+        return (body[:j] if j != -1 else body).strip()
+    # Sem marcador: pode ser uma resposta no contrato antigo. `_extract_json` levanta
+    # ManifestProposalError("PROPOSAL_INVALID_JSON") quando não há JSON — o `_write_one` retenta.
+    content = _extract_json(text).get("content")
+    if not isinstance(content, str):
+        raise SpecSplitError(
+            "SPEC_SPLIT_WRITER_FAILED",
+            f"resposta do redator sem {_BEGIN} e sem campo `content`.",
+        )
+    return content.strip()
+
 def build_writer_prompt(
     plan: dict,
     target: Optional[dict],
@@ -274,7 +312,7 @@ def build_writer_prompt(
             + "# Preâmbulo da spec original (texto antes da primeira seção — preserve o que informa)\n\n"
             + (preamble.strip() or "(a spec original não tinha preâmbulo)")
             + "\n\nEste arquivo SUBSTITUI a spec monolítica: ele aponta para os arquivos do plano, "
-              "não repete o conteúdo deles. Responda SOMENTE o JSON {content}."
+              f"não repete o conteúdo deles. Responda o Markdown entre {_BEGIN} e {_END}."
         )
     material = "\n\n".join(s["body"] for s in target.get("_matched") or [])
     return (
@@ -284,7 +322,7 @@ def build_writer_prompt(
         + f"Seções da spec atual designadas a você: {', '.join(target.get('sections') or [])}\n\n"
         + "# Material de origem (texto INTEGRAL das suas seções — nada aqui pode ser perdido)\n\n"
         + material
-        + "\n\nResponda SOMENTE o JSON {content} no formato do system prompt."
+        + f"\n\nResponda o Markdown do arquivo entre {_BEGIN} e {_END}, sem JSON e sem escapes."
     )
 
 
@@ -304,9 +342,8 @@ def _write_one(
     last: Optional[Exception] = None
     for attempt in range(2):
         try:
-            out = _extract_json(llm_fn(system, user, model_id))
-            content = out.get("content")
-            if not isinstance(content, str) or len(content.strip()) < MIN_SPEC_CONTENT_CHARS:
+            content = extract_writer_content(llm_fn(system, user, model_id))
+            if len(content.strip()) < MIN_SPEC_CONTENT_CHARS:
                 raise SpecSplitError(
                     "SPEC_SPLIT_EMPTY_FILE",
                     f'Arquivo "{label}": conteúdo ausente ou trivial (mínimo {MIN_SPEC_CONTENT_CHARS} caracteres).',
