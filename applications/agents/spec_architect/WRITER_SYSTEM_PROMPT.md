@@ -44,10 +44,23 @@ monolítica), escreva um documento curto e navegável:
   trouxer informação (versão, autoria, contexto);
 - nada de duplicar requisitos: o índice aponta, não repete.
 
-## 3) SAÍDA (contrato EXATO — responda SOMENTE o JSON, sem cercas de código)
+## 3) SAÍDA (contrato EXATO — Markdown CRU entre marcadores, **sem JSON**)
+
+Responda o arquivo inteiro entre estes dois marcadores, e **nada** fora deles:
 
 ```
-{ "content": "# Título do arquivo\n\n## ...\n" }
+<<<SPEC_FILE>>>
+# Título do arquivo
+
+## ...
+<<<END_SPEC_FILE>>>
 ```
 
-Nenhum outro campo. Nenhum texto fora do JSON.
+O conteúdo entre os marcadores é Markdown **literal**: escreva blocos de código, aspas, barras
+invertidas e chaves normalmente — não escape nada, não embrulhe em JSON e não use cercas de código
+em volta do documento (as cercas de dentro do documento, essas sim, são bem-vindas).
+
+> **Por que não JSON:** medido em produção em 2026-09-06, embrulhar 30 kB de Markdown numa string
+> JSON fez o próprio modelo errar o escape (uma aspa não escapada no meio de `connect.md`) e a
+> proposta inteira — 17 arquivos já escritos — foi perdida. Markdown entre marcadores não tem escape
+> para errar.
