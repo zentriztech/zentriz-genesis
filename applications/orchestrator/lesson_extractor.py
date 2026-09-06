@@ -12,8 +12,15 @@ Controlado por RAG_ENABLED env var (off/shadow/live):
   - live   → extrai, redige PII e persiste em lessons_corpus
 
 Dependências: nenhuma além das já presentes no orchestrator (psycopg2 opcional).
-LLM call: opcional — se não houver Anthropic client, o extrator usa heurísticas
-simples (regex em error_log, bug_checklists batidos) para gerar lições candidatas.
+
+⚖️ LEI (2026-09-05, G7/A3.4): **a extração é 100% LLM — não existe fallback burro.**
+Até hoje este módulo caía numa lista de regex (`_HEURISTIC_PATTERNS`) quando o LLM falhava ou
+quando ele julgava, pelo env, que não havia provedor. O efeito real medido em produção era pior
+que "nenhuma lição": o corpus receberia SOMENTE lições de regex — em prod
+`GENESIS_LLM_PROVIDER=bedrock` sem `AWS_ACCESS_KEY_ID` (a EC2 usa instance role), e o gate
+"auto" devolvia [] antes de tentar o modelo. Como o corpus vira PROMPT de outros projetos
+(`context_loader` → CAG), lição inventada por regex é contaminação com aparência de aprendizado.
+Agora: sem LLM **não há extração** (loga o erro e devolve lista vazia).
 """
 
 from __future__ import annotations
@@ -77,39 +84,6 @@ class Lesson:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Heurísticas para extração sem LLM
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Padrões comuns que viram lições candidatas
-_HEURISTIC_PATTERNS: list[tuple[re.Pattern[str], str, str, str]] = [
-    (re.compile(r"setuptools.*(>=|>)\s*80", re.I),
-     "python.setuptools-80",
-     "setuptools 80+ quebra pip install -e",
-     "Pinar setuptools<80 no requirements quando usar pip install -e ."),
-    (re.compile(r"asyncpg.*ENUM|ENUM.*asyncpg", re.I),
-     "python.fastapi.asyncpg.enum-native",
-     "ENUM PostgreSQL com asyncpg",
-     "Use create_type=False e crie o tipo via op.execute(\"CREATE TYPE...\")."),
-    (re.compile(r"findAll is not a function", re.I),
-     "nodejs.drizzle.findall-vs-findmany",
-     "Drizzle não expõe findAll — usar findMany",
-     "Padronize repositórios para db.query.<table>.findMany()."),
-    (re.compile(r"prefix.*duplicat|duplicate.*prefix", re.I),
-     "python.fastapi.router-prefix-duplicado",
-     "Prefixo duplicado em include_router",
-     "Defina prefix em apenas um dos pontos: APIRouter ou include_router."),
-    (re.compile(r"python-multipart.*not installed|requires python-multipart", re.I),
-     "python.fastapi.python-multipart",
-     "python-multipart obrigatório para uploads",
-     "Adicione python-multipart em requirements quando usar UploadFile/Form."),
-    (re.compile(r"CORS.*not allowed|Access-Control-Allow-Origin", re.I),
-     "nodejs.cors-pre-route",
-     "CORS configurado depois das rotas",
-     "Sempre app.use(cors(...)) antes de qualquer app.use(router)."),
-]
-
-
 _LLM_EXTRACT_ENABLED = os.environ.get("LESSON_EXTRACT_LLM", "auto").strip().lower()
 _VALID_CATEGORIES = {
     "bug", "pattern", "antipattern", "stack", "contract",
@@ -130,6 +104,31 @@ _LLM_SYSTEM = (
     '"category":"bug|pattern|antipattern|stack|contract|performance|security|ux",'
     '"scope":"task|project|product|ecosystem","confidence":0.0-1.0,"tags":["..."]}'
 )
+
+# G7/A3.3 (2026-09-05) — a BANCADA passa a aprender. O episódio dela não é uma entrega de código:
+# é um laço de refinamento de ESPECIFICAÇÃO (GAPs apontados por um validador adversarial, revisões
+# do CTO, o que convergiu e o que empacou). Prompt próprio porque as lições úteis aqui são de
+# ENGENHARIA DE ESPECIFICAÇÃO — e porque o material de entrada é spec de CLIENTE: o corpus é global
+# (vira prompt de outros projetos/tenants), então a proibição de conteúdo literal é explícita.
+_LLM_SYSTEM_SPEC = (
+    "Você é um extrator de lições de ENGENHARIA DE ESPECIFICAÇÃO. Recebe o relatório de um laço de "
+    "refinamento de spec de produto numa fábrica autônoma: os GAPs que um validador adversarial "
+    "apontou (bloqueadores e avisos), o que o CTO revisou em cada rodada, e o resultado (convergiu, "
+    "empacou ou esgotou as rodadas). Extraia de 0 a 4 LIÇÕES REUTILIZÁVEIS sobre COMO ESCREVER E "
+    "REVISAR SPECS que ajudem os próximos produtos a nascerem sem os mesmos GAPs (ex.: 'toda spec de "
+    "API precisa declarar idempotência das rotas de escrita'). "
+    "PROIBIDO ABSOLUTO — o corpus é compartilhado entre clientes: nada de nome de cliente, produto, "
+    "projeto, pessoa, marca, domínio, ID, caminho de arquivo, nem trecho LITERAL copiado da spec. "
+    "Se a lição só faz sentido citando o produto, ela NÃO é generalizável: descarte. "
+    "Se não houver lição de valor durável, retorne lista vazia. "
+    "Responda APENAS com um array JSON (sem prosa, sem cercas markdown). Cada item: "
+    '{"slug":"spec.tema.regra","title":"curto","body_md":"**Regra:** ... (acionável)",'
+    '"category":"pattern|antipattern|contract|security|performance|ux",'
+    '"scope":"project|product|ecosystem","confidence":0.0-1.0,"tags":["..."]}'
+)
+
+# Prompt por tipo de episódio. `delivery` = entrega auditada pelo Cyborg (comportamento histórico).
+_SYSTEM_BY_KIND = {"delivery": _LLM_SYSTEM, "spec": _LLM_SYSTEM_SPEC}
 
 
 def _coerce_llm_lessons(raw: str) -> list[Lesson]:
@@ -185,54 +184,75 @@ def _coerce_llm_lessons(raw: str) -> list[Lesson]:
     return out
 
 
-def _llm_extract(dialogue_text: str, stack_key: str) -> list[Lesson]:
-    """Extrai lições via LLM (Bedrock/Foundry). Best-effort: falha → []."""
+def _llm_extract(
+    dialogue_text: str,
+    stack_key: str,
+    kind: str = "delivery",
+    usage_project_id: Optional[str] = None,
+    llm_cfg: Optional[dict] = None,
+) -> list[Lesson]:
+    """
+    Extrai lições via LLM (Bedrock/Foundry). Sem LLM → [] (e o motivo no log).
+
+    O gate antigo ("auto" só liga com `GENESIS_LLM_PROVIDER=foundry` ou `AWS_ACCESS_KEY_ID`
+    presente) ADIVINHAVA a disponibilidade do provedor e errava exatamente em produção, onde a EC2
+    fala com o Bedrock pela **instance role** — sem chave no env. Quem sabe chamar é o
+    `call_bedrock_direct` (cascata de modelos, credenciais do tenant, fallback de região): se não
+    houver como chamar, ele levanta e o erro aparece. `LESSON_EXTRACT_LLM=off` continua sendo o
+    desligamento EXPLÍCITO.
+    """
     if _LLM_EXTRACT_ENABLED in {"0", "off", "false", "no"}:
+        logger.info("[LessonExtractor/llm] LESSON_EXTRACT_LLM=off — extração desligada explicitamente")
         return []
-    # 'auto' só liga se houver um provider LLM configurado; senão cai na heurística.
-    if _LLM_EXTRACT_ENABLED == "auto":
-        _provider = os.environ.get("GENESIS_LLM_PROVIDER", "").strip().lower()
-        _has_bedrock = bool(os.environ.get("AWS_ACCESS_KEY_ID", "").strip())
-        if _provider != "foundry" and not _has_bedrock:
-            return []
     try:
         from orchestrator.agents.runtime import call_bedrock_direct
     except Exception as exc:
-        logger.debug("[LessonExtractor/llm] runtime indisponível: %s", exc)
+        logger.warning("[LessonExtractor/llm] runtime indisponível (sem LLM → sem lição): %s", exc)
         return []
     model = (os.environ.get("CLAUDE_MODEL_SPEC")
              or os.environ.get("CLAUDE_MODEL")
              or "claude-sonnet-5")
-    user = f"Stack: {stack_key}\n\n## Diálogo do projeto + auditoria\n{dialogue_text[:38000]}"
+    system = _SYSTEM_BY_KIND.get((kind or "delivery").strip().lower(), _LLM_SYSTEM)
+    header = "## Laço de refinamento da spec" if kind == "spec" else "## Diálogo do projeto + auditoria"
+    user = f"Stack: {stack_key}\n\n{header}\n{dialogue_text[:38000]}"
     try:
-        raw = call_bedrock_direct(_LLM_SYSTEM, user, model, max_tokens=4000)
+        # `usage_project_id` não é enfeite: sem ele a chamada é INVISÍVEL ao medidor de custo e ao
+        # cost cap (é a família do G5, medida em prod). O aprendizado tem preço e ele aparece.
+        raw = call_bedrock_direct(
+            system, user, model, max_tokens=4000,
+            usage_project_id=usage_project_id, usage_agent="lesson_extract", llm_cfg=llm_cfg,
+        )
     except Exception as exc:
-        logger.warning("[LessonExtractor/llm] chamada falhou (fallback heurística): %s", exc)
+        # NÃO existe plano B: aprendizado inventado por regex é pior que aprendizado nenhum.
+        logger.error("[LessonExtractor/llm] chamada ao modelo FALHOU — nenhuma lição extraída: %s", exc)
         return []
     lessons = _coerce_llm_lessons(raw)
-    logger.info("[LessonExtractor/llm] model=%s extracted=%d", model, len(lessons))
+    logger.info("[LessonExtractor/llm] kind=%s model=%s extracted=%d", kind, model, len(lessons))
     return lessons
 
 
-def _heuristic_extract(dialogue_text: str) -> list[Lesson]:
-    """Extrai lições via regex matching — fallback sem LLM."""
-    found: list[Lesson] = []
-    seen_slugs: set[str] = set()
-    for pat, slug, title, rule in _HEURISTIC_PATTERNS:
-        if pat.search(dialogue_text) and slug not in seen_slugs:
-            found.append(
-                Lesson(
-                    slug=slug,
-                    title=title,
-                    body_md=f"**Regra:** {rule}",
-                    category="bug",
-                    scope="project",
-                    confidence=0.6,  # heurística → confiança moderada
-                    tags=["auto-extracted", "heuristic"],
-                )
+def _veto_leaks(lessons: list[Lesson], forbidden_terms: list[str]) -> list[Lesson]:
+    """
+    VETO de contaminação (não é julgamento de conteúdo): descarta a lição que carrega um termo
+    identificável do projeto/cliente de origem. O corpus é GLOBAL — vira prompt de outros tenants —
+    e o prompt já proíbe citar nome de produto/cliente; isto é a rede que pega a desobediência.
+    Só compara termos que o chamador conhece de fato (título do projeto, nome do tenant, IDs).
+    """
+    terms = [t.strip().lower() for t in forbidden_terms if t and len(t.strip()) >= 4]
+    if not terms:
+        return lessons
+    kept: list[Lesson] = []
+    for ln in lessons:
+        hay = f"{ln.slug}\n{ln.title}\n{ln.body_md}".lower()
+        hit = next((t for t in terms if t in hay), None)
+        if hit:
+            logger.warning(
+                "[LessonExtractor/veto] lição '%s' descartada: cita termo do projeto de origem (%d chars)",
+                ln.slug, len(hit),
             )
-            seen_slugs.add(slug)
-    return found
+            continue
+        kept.append(ln)
+    return kept
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,21 +437,38 @@ class LessonExtractor:
         self.mode = (mode or RAG_ENABLED).strip().lower()
         if self.mode not in VALID_RAG_MODES:
             self.mode = "off"
+        # Quantas lições da ÚLTIMA chamada foram de fato gravadas em `lessons_corpus`. O retorno de
+        # extract() são as candidatas; sem este contador o chamador não distingue "o modelo não achou
+        # lição" de "achou e o banco recusou" — que foi exatamente o G7 ("corpus = 0", sem sinal).
+        self.last_persisted: int = 0
 
     def extract(
         self,
         dialogue_text: str,
         project_id: Optional[str] = None,
         stack_key: str = "generic",
+        kind: str = "delivery",
+        forbidden_terms: Optional[list[str]] = None,
+        llm_cfg: Optional[dict] = None,
     ) -> list[Lesson]:
-        """Retorna lições extraídas. Nunca lança — falhas viram []."""
+        """
+        Retorna lições extraídas. Nunca lança — falhas viram [].
+
+        `kind`: "delivery" (entrega auditada pelo Cyborg) ou "spec" (laço da Bancada — prompt e
+        proibições próprias). `forbidden_terms`: termos do projeto de origem que NÃO podem aparecer
+        na lição (veto de contaminação do corpus global). `llm_cfg`: credenciais do TENANT (mesmo
+        shape do envelope) — a extração usa a mesma identidade que gerou o episódio.
+        """
+        self.last_persisted = 0
         if self.mode == "off":
             return []
         if not dialogue_text:
             return []
 
         try:
-            return self._extract_safe(dialogue_text, project_id, stack_key)
+            return self._extract_safe(
+                dialogue_text, project_id, stack_key, kind, forbidden_terms or [], llm_cfg,
+            )
         except Exception as exc:
             logger.warning("[LessonExtractor] falha em extract(): %s", exc)
             return []
@@ -441,18 +478,23 @@ class LessonExtractor:
         dialogue_text: str,
         project_id: Optional[str],
         stack_key: str,
+        kind: str = "delivery",
+        forbidden_terms: Optional[list[str]] = None,
+        llm_cfg: Optional[dict] = None,
     ) -> list[Lesson]:
-        # LLM primeiro (lições ricas e generalizáveis); heurística como fallback e
-        # complemento (padrões conhecidos que o LLM pode não verbalizar). Dedup por slug.
-        candidates = _llm_extract(dialogue_text, stack_key)
-        _seen = {ln.slug for ln in candidates}
-        for ln in _heuristic_extract(dialogue_text):
-            if ln.slug not in _seen:
-                candidates.append(ln)
-                _seen.add(ln.slug)
+        # 100% LLM (LEI): quem decide o que é lição é o modelo. Sem modelo, sem lição.
+        candidates = _llm_extract(
+            dialogue_text, stack_key, kind, usage_project_id=project_id, llm_cfg=llm_cfg,
+        )
+        candidates = _veto_leaks(candidates, forbidden_terms or [])
 
         # Aplica PII redaction e metadata final
         for ln in candidates:
+            # Proveniência do episódio: dá para separar no corpus o que a Bancada aprendeu do que a
+            # fábrica aprendeu (e medir o G7 sem adivinhar).
+            _origin = "bancada" if (kind or "").strip().lower() == "spec" else "factory"
+            if _origin not in ln.tags:
+                ln.tags.append(_origin)
             ln.body_md = _redact(ln.body_md)
             ln.title = _redact(ln.title)
             ln.project_id = project_id
@@ -468,6 +510,7 @@ class LessonExtractor:
 
         # mode == "live": persistir
         n = _persist_lessons(candidates)
+        self.last_persisted = n
         if project_id:
             _enqueue_outbox(project_id, event="project_accepted")
         logger.info(

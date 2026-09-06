@@ -160,6 +160,17 @@ services:
       # R4 PR5: o splitter (product_architect) valida o connect.yaml contra o schema Connect —
       # sem o repo irmão montado a validação era silenciosamente nula (só o runner montava).
       - ZENTRIZ_CONNECT_ROOT=/zentriz-connect
+      # G7 (2026-09-05): o aprendizado precisa ser DECLARADO. Estas variáveis existiam só no código
+      # Python; em prod nenhuma estava no ambiente, então o extrator nascia `off` e o
+      # `lessons_corpus` ficou em 0 linhas sem ninguém perceber. Agora o default aparece aqui e o
+      # valor real vem do `.env` (o mesmo arquivo que o compose usa para interpolar).
+      # `off` = não aprende · `shadow` = extrai e loga sem persistir · `live` = persiste + indexa.
+      - RAG_ENABLED=${RAG_ENABLED:-off}
+      # Recuperação da lição no prompt: `lexical` não usa embedding, `semantic` usa pgvector.
+      - RAG_RETRIEVAL=${RAG_RETRIEVAL:-lexical}
+      - RAG_EMBED_PROVIDER=${RAG_EMBED_PROVIDER:-bedrock}
+      # CAG = injeção das lições recuperadas no prompt. `shadow` mede antes de valer.
+      - CAG_ENABLED=${CAG_ENABLED:-off}
     env_file:
       - .env
     volumes:
@@ -220,6 +231,12 @@ services:
       # TASK-FULL-TEST: URL do full-test-server.py rodando no host
       - FULL_TEST_SERVER_URL=http://host.docker.internal:7878
       - FTS_AUTH_TOKEN=${FTS_AUTH_TOKEN:-}
+      # G7: mesmas variáveis do agents — o runner é quem monta o prompt da pipeline e portanto quem
+      # RECUPERA a lição (`context_loader`). Declaradas para o default ser visível, não implícito.
+      - RAG_ENABLED=${RAG_ENABLED:-off}
+      - RAG_RETRIEVAL=${RAG_RETRIEVAL:-lexical}
+      - RAG_EMBED_PROVIDER=${RAG_EMBED_PROVIDER:-bedrock}
+      - CAG_ENABLED=${CAG_ENABLED:-off}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -256,6 +273,12 @@ services:
       - CYBORG_PLAYBOOK_TIMEOUT=${CYBORG_PLAYBOOK_TIMEOUT:-300}
       - CYBORG_PRODUCT_ID=${CYBORG_PRODUCT_ID:-}
       - FTS_AUTH_TOKEN=${FTS_AUTH_TOKEN:-}
+      # G7: o Cyborg era o ÚNICO produtor de lições (accept/reject de entrega) e mesmo ele nascia
+      # `off` em prod por a variável não existir no ambiente. Agora é explícita.
+      - RAG_ENABLED=${RAG_ENABLED:-off}
+      - RAG_RETRIEVAL=${RAG_RETRIEVAL:-lexical}
+      - RAG_EMBED_PROVIDER=${RAG_EMBED_PROVIDER:-bedrock}
+      - CAG_ENABLED=${CAG_ENABLED:-off}
     volumes:
       - ${HOST_PROJECT_FILES_ROOT:-./zentriz-files}:/project-files
       - zentriz-genesis_uploads:/shared/uploads
