@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -207,5 +207,67 @@ describe("evolutionPlanner (Evoluir E2)", () => {
 
   it("buildRepoMap: vazio quando o diretório não existe", async () => {
     expect(await buildRepoMap(path.join(tmpRoot, "nope"))).toBe("");
+  });
+});
+
+/**
+ * Onda 2 / escrita (revisão adversarial das ações da Bancada) — o banco nunca pode afirmar um arquivo
+ * que o disco não sustenta: `computeCurrentSpecHash` devolve `null` se QUALQUER linha aponta para
+ * caminho inexistente, então um único artefato de evolução gravado pela metade deixava o projeto
+ * INTEIRO sem poder validar nem promover.
+ */
+describe("upsertSpecFile — atomicidade da criação (Onda 2)", () => {
+  const { upsertSpecFile } = mod;
+
+  /** db fake: arquivo NÃO existe na árvore; registra as queries na ordem em que chegam. */
+  function db(onInsert?: () => never) {
+    const order: string[] = [];
+    const q = vi.fn(async (sql: string) => {
+      if (/SELECT file_path FROM project_spec_files/.test(sql)) { order.push("select"); return { rows: [] }; }
+      if (/SELECT count\(\*\)/.test(sql)) { order.push("count"); return { rows: [{ n: 3 }] }; }
+      if (/INSERT INTO project_spec_files/.test(sql)) { order.push("insert"); if (onInsert) onInsert(); return { rows: [] }; }
+      order.push("outra");
+      return { rows: [] };
+    });
+    return { db: { query: q }, order };
+  }
+
+  it("cria o arquivo e registra a linha (caminho feliz)", async () => {
+    const { db: d, order } = db();
+    const pid = "11111111-1111-4111-8111-aaaaaaaaaaaa";
+    const physical = path.join(process.env.UPLOAD_DIR!, pid, "docs", "rfc", "RFC-0009-x.md");
+    expect(await upsertSpecFile(d as never, pid, "docs/rfc/RFC-0009-x.md", "# RFC\n", false)).toBe("created");
+    expect(order).toEqual(["select", "count", "insert"]);
+    expect(await fs.readFile(physical, "utf-8")).toBe("# RFC\n");
+  });
+
+  it("🔴 disco falhou → a LINHA é desfeita (sem arquivo fantasma) e o erro sobe", async () => {
+    const pid = "22222222-2222-4222-8222-bbbbbbbbbbbb";
+    // `rel_dir` é um ARQUIVO existente → o mkdir do diretório-pai falha (ENOTDIR) de verdade.
+    const bloqueio = path.join(process.env.UPLOAD_DIR!, pid, "docs");
+    await fs.mkdir(path.dirname(bloqueio), { recursive: true });
+    await fs.writeFile(bloqueio, "sou um arquivo, não um diretório", "utf-8");
+    const deletes: unknown[][] = [];
+    const d = { query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/SELECT file_path FROM project_spec_files/.test(sql)) return { rows: [] };
+      if (/SELECT count\(\*\)/.test(sql)) return { rows: [{ n: 3 }] };
+      if (/DELETE FROM project_spec_files/.test(sql)) { deletes.push(params); return { rows: [] }; }
+      return { rows: [] };
+    }) };
+    await expect(upsertSpecFile(d as never, pid, "docs/adr/ADR-002-z.md", "# ADR\n", false)).rejects.toThrow();
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toEqual([pid, "docs/adr", "ADR-002-z.md"]);   // desfaz exatamente a linha criada
+  });
+
+  it("teto de arquivos veta ANTES de tocar o disco", async () => {
+    const pid = "33333333-3333-4333-8333-cccccccccccc";
+    const physical = path.join(process.env.UPLOAD_DIR!, pid, "docs", "adr", "ADR-001-y.md");
+    const d = { query: vi.fn(async (sql: string) => {
+      if (/SELECT file_path FROM project_spec_files/.test(sql)) return { rows: [] };
+      if (/SELECT count\(\*\)/.test(sql)) return { rows: [{ n: 500 }] };
+      return { rows: [] };
+    }) };
+    await expect(upsertSpecFile(d as never, pid, "docs/adr/ADR-001-y.md", "# ADR\n", false)).rejects.toThrow("TOO_MANY_FILES");
+    expect(await fs.access(physical).then(() => true).catch(() => false)).toBe(false);
   });
 });

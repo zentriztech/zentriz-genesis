@@ -2,8 +2,11 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled } from "./specValidation.js";
+import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash } from "./specValidation.js";
 import type { Pool } from "pg";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 function file(filename: string, content: string, relDir = "") {
   return { filename, file_path: `/x/${filename}`, rel_dir: relDir, content };
@@ -146,5 +149,128 @@ describe("autoValidateDirtySpecs — tick env-gated (RFC-0004 Onda 3, D1)", () =
     const { pool, queries } = db([]);
     await autoValidateDirtySpecs(pool);
     expect(queries.some((q) => q.sql.includes("spec_dirty_at = NULL"))).toBe(false);
+  });
+});
+
+/**
+ * GAP-11 — o teto expira a ESPERA do estágio adversarial, nunca o RESULTADO.
+ *
+ * Medido em prod 2026-09-06 (NVX LastMile): a validação `16e467cf` esperou 20m40s (as reais deste
+ * projeto levam ~5 min), estourou o deadline e terminou `error` com 0 findings, enquanto o job do
+ * LLM seguia vivo no serviço agents. Uma leitura adversarial inteira, já paga, foi descartada.
+ */
+describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
+  function specOnDisk(content: string) {
+    const dir = mkdtempSync(join(tmpdir(), "gap11-"));
+    const p = join(dir, "README.md");
+    writeFileSync(p, content, "utf-8");
+    return [{ filename: "README.md", file_path: p, rel_dir: "" }];
+  }
+
+  function db(row: Record<string, unknown> | null, specFiles: Array<Record<string, unknown>> = []) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("FROM spec_validation_runs") && sql.includes("ORDER BY finished_at")) {
+          return { rows: row ? [row] : [] };
+        }
+        if (sql.includes("FROM project_spec_files")) return { rows: specFiles };
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+
+  const RICH_README = `---\narchetype: backend-service\n---\n\n## Escopo\n\n${"Requisito com critérios de aceite. ".repeat(20)}`;
+
+  /** Monta uma run pendente cujo `spec_hash` casa com o que está no disco (spec NÃO mudou). */
+  async function pendingRun(overrides: Record<string, unknown> = {}) {
+    const files = specOnDisk(RICH_README);
+    const probe = db(null, files);
+    const cur = await computeCurrentSpecHash(probe.pool, "proj-1");
+    const row = {
+      id: "11111111-1111-4111-8111-111111111111",
+      project_id: "proj-1",
+      spec_hash: cur!.specHash,
+      agents_job_id: "job-b-1",
+      findings: [{ file: "", line: null, severity: "warning", title: "do estágio A", rationale: "", source: "stage_a" }],
+      deadline_at: new Date(Date.now() - 60_000).toISOString(),
+      ...overrides,
+    };
+    return { row, files };
+  }
+
+  it("job `done` e spec inalterada → grava o veredito, marca `stage_b_ran` e encerra a coleta", async () => {
+    const { row, files } = await pendingRun();
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => ({
+      status: "done",
+      result: { findings: [{ severity: "blocker", title: "contradição achada pelo LLM", rationale: "x", file: "README.md" }] },
+    }));
+    expect(out).toMatchObject({ scanned: 1, collected: 1, lost: 0, givenUp: 0 });
+    const upd = queries.find((q) => q.sql.includes("UPDATE spec_validation_runs") && q.sql.includes("stage_b_ran = true"));
+    expect(upd).toBeTruthy();
+    expect(upd!.params[0]).toBe("failed");                       // blocker do LLM → failed
+    const gravadas = JSON.parse(String(upd!.params[1])) as Array<{ source: string }>;
+    expect(gravadas).toHaveLength(2);                             // UNIÃO: estágio A + estágio B
+    expect(gravadas.map((f) => f.source)).toEqual(["stage_a", "stage_b"]);
+    expect(upd!.sql).toContain("stage_b_collected_at = now()");
+    expect(upd!.sql).toContain("stage_b_collected_at IS NULL");   // claim: não sobrescreve coleta alheia
+  });
+
+  it("job `done` mas a spec MUDOU desde o início → 'superseded' (não mente sobre outro conteúdo)", async () => {
+    const { row, files } = await pendingRun({ spec_hash: "hash-de-outra-spec" });
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+    expect(out.collected).toBe(1);
+    const upd = queries.find((q) => q.sql.includes("UPDATE spec_validation_runs") && q.sql.includes("stage_b_ran = true"));
+    expect(upd!.params[0]).toBe("superseded");
+  });
+
+  it("job sem blocker e spec inalterada → 'passed'", async () => {
+    const { row, files } = await pendingRun();
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [{ severity: "info", title: "nota" }] } }));
+    const upd = queries.find((q) => q.sql.includes("UPDATE spec_validation_runs") && q.sql.includes("stage_b_ran = true"));
+    expect(upd!.params[0]).toBe("passed");
+  });
+
+  it("404 no agents (job sumiu do TTL) → encerra o assunto SEM inventar veredito", async () => {
+    const { row, files } = await pendingRun();
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => "not_found");
+    expect(out).toMatchObject({ collected: 0, lost: 1 });
+    expect(queries.some((q) => q.sql.includes("stage_b_ran = true"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("SET stage_b_collected_at = now()"))).toBe(true);
+  });
+
+  it("🔴 falha de REDE no probe não encerra o assunto (tenta no próximo tick)", async () => {
+    const { row, files } = await pendingRun();
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => { throw new Error("ECONNREFUSED"); });
+    expect(out).toMatchObject({ scanned: 1, collected: 0, lost: 0, givenUp: 0 });
+    expect(queries.some((q) => q.sql.includes("stage_b_collected_at = now()"))).toBe(false);
+  });
+
+  it("job ainda rodando dentro da tolerância → segue pendente (nada é escrito)", async () => {
+    const { row, files } = await pendingRun({ deadline_at: new Date(Date.now() - 60_000).toISOString() });
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => ({ status: "running" }));
+    expect(out).toMatchObject({ collected: 0, lost: 0, givenUp: 0 });
+    expect(queries.some((q) => q.sql.includes("stage_b_collected_at = now()"))).toBe(false);
+  });
+
+  it("job pendurado além do teto duro pós-deadline → desiste (o laço não espera para sempre)", async () => {
+    const { row, files } = await pendingRun({ deadline_at: new Date(Date.now() - 120 * 60_000).toISOString() });
+    const { pool, queries } = db(row, files);
+    const out = await collectStageBResults(pool, async () => ({ status: "running" }));
+    expect(out).toMatchObject({ collected: 0, givenUp: 1 });
+    expect(queries.some((q) => q.sql.includes("SET stage_b_collected_at = now()"))).toBe(true);
+  });
+
+  it("coluna ausente (migração 100 não aplicada) não derruba o tick", async () => {
+    const pool = { query: async () => { throw new Error('column "agents_job_id" does not exist'); } } as unknown as Pool;
+    await expect(collectStageBResults(pool, async () => ({ status: "done" }))).resolves.toMatchObject({ scanned: 0, collected: 0 });
   });
 });

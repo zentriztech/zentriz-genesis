@@ -19,6 +19,7 @@ import { collectSpecChatJobsTick, expireZombieSpecChatJobs } from "./specChatJob
 import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { collectSpecSplitsTick } from "./specSplit.js";
 import { collectBancadaLessonsTick } from "./specLearning.js";
+import { collectStageBResults } from "./specValidation.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
 /** 20 s: barato (só toca jobs órfãos) e rápido o bastante para o usuário que volta à tela. */
@@ -66,6 +67,17 @@ async function tick(): Promise<void> {
   const out = await collectSpecChatJobsTick(pool, probeAgents, extractSpecMarkdown);
   if (out.collected || out.lost || out.expired) {
     console.info(`[SpecChatWorker] tick: ${out.scanned} órfão(s) varrido(s) — ${out.collected} coletado(s), ${out.lost} perdido(s), ${out.expired} expirado(s).`);
+  }
+  // GAP-11 (migração 100): mesma classe de furo na VALIDAÇÃO — a espera em processo estoura no teto
+  // e o job adversarial (pago) segue vivo no agents. Vem ANTES do laço de propósito: um resultado
+  // recuperado neste tick já é visto como validação concluída pelo `checkValidation` logo abaixo,
+  // em vez de virar rodada "sem medição de GAPs".
+  const stageB = await collectStageBResults(pool).catch((e) => {
+    console.warn(`[SpecChatWorker] coleta do estágio B falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return { scanned: 0, collected: 0, lost: 0, givenUp: 0 };
+  });
+  if (stageB.collected || stageB.lost || stageB.givenUp) {
+    console.info(`[SpecChatWorker] validação/estágio B: ${stageB.collected} recuperado(s), ${stageB.lost} perdido(s), ${stageB.givenUp} desistência(s) de ${stageB.scanned} pendente(s).`);
   }
   // MODO AUTÔNOMO (migração 090): o mesmo tick avança o laço "Resolver GAPs → Salvar → Validar".
   // A ORDEM importa: coletar PRIMEIRO encerra o job do CTO desta rodada, e só então o laço vê
