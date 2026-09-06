@@ -726,12 +726,37 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     });
     expect(grande.statusCode).toBe(202);
 
-    const tooBig = await app.inject({
+    // A5.7/GAP-7: acima do teto NÃO é mais recusa — o arquivo entra RECORTADO. Recusar era pedir ao
+    // humano "divida este arquivo", que é exatamente o que ele acionou a Bancada para não fazer;
+    // e no laço o arquivo saía da fila com os GAPs dele ativos, para sempre.
+    httpPostCalls = [];
+    const acimaDoTeto = await app.inject({
       method: "POST", url: "/api/spec-chat",
-      payload: { specMarkdown: "x".repeat(120_001), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+      payload: {
+        specMarkdown: `# API\n\n## 1. Erros\n\nValidação devolve 400.\n${"y".repeat(130_000)}`,
+        projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true,
+      },
     });
-    expect(tooBig.statusCode).toBe(413);
-    expect(JSON.parse(tooBig.body).message).toContain("120000");
+    expect(acimaDoTeto.statusCode).toBe(202);
+    const recorte = JSON.parse(editorCall()!.body).user_message as string;
+    expect(recorte).toContain("RECORTE DIRIGIDO DO ARQUIVO");
+    expect(recorte).toContain("SUMÁRIO DE SEÇÕES");
+    expect(recorte.length).toBeLessThan(130_000);       // o arquivo inteiro NÃO foi enviado
+  });
+
+  it("A5.7: no formato `whole` o arquivo acima do teto continua sendo RECUSADO", async () => {
+    // Recortar + pedir "o conteúdo final completo" devolveria um arquivo MUTILADO: perda de dados.
+    process.env.SPEC_GAP_FILE_EDIT_FORMAT = "whole";
+    try {
+      const res = await app.inject({
+        method: "POST", url: "/api/spec-chat",
+        payload: { specMarkdown: "x".repeat(48_001), projectId: PROJ, filePath: "backend/01-api.md", resolveGaps: true },
+      });
+      expect(res.statusCode).toBe(413);
+      expect(JSON.parse(res.body).message).toContain("48000");
+    } finally {
+      delete process.env.SPEC_GAP_FILE_EDIT_FORMAT;
+    }
   });
 
   it("A5.2: resposta em EDIÇÕES → job `done` com o arquivo APLICADO (não com o texto do modelo)", async () => {

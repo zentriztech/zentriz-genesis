@@ -224,3 +224,34 @@ Ou seja, o próprio laço empurra os arquivos maiores em direção ao teto até 
 irrevisáveis — e nenhum GAP explica isso ao humano. Candidatos: dividir o arquivo (a divisão é ação
 de agente, Lei 100% LLM), revisar **por seção** dentro do arquivo, ou impor orçamento de crescimento
 por rodada. **Não corrigido nesta onda.**
+
+**A5.7 (fecha a perna "revisar por seção" do GAP-7; orçamento de crescimento segue aberto).**
+
+Descartados adversarialmente antes de codar:
+- *subir o teto* — com ~7k chars de crescimento por rodada, qualquer teto é alcançado; só adia;
+- *veto numérico de crescimento* — não teria pegado os +15%/rodada medidos e arrisca travar o laço
+  (duas recusas seguidas → `MAX_FILE_FAILURES` → `stalled`), trocando um GAP aberto por um laço morto;
+- *mandar dividir* — pede ao humano exatamente o que ele acionou o autônomo para não fazer.
+
+O que foi feito: no formato `edits` (SEARCH/REPLACE) o modelo **não precisa ler o arquivo inteiro**,
+precisa ler os trechos que vai mudar — e o `apply` já roda contra o arquivo COMPLETO no disco
+(`runFileChatJob` recebe o conteúdo integral). Então o arquivo alvo acima do teto entra como **RESUMO
+DIRIGIDO** (`services/specFileDigest.ts`): sumário COMPLETO de cabeçalhos + as seções que os GAPs deste
+arquivo apontam, **verbatim** (byte a byte, senão o `SEARCH` não casa). O sinal de seleção são os
+`disputedTerms` **mais as âncoras do validador** — a âncora é literalmente o endereço que ele achou do
+problema. O recorte é só de LEITURA: nada é perdido na escrita.
+
+Três garantias sem as quais o recorte seria pior que a recusa, cada uma travada por teste:
+1. o bloco declara que é recorte e proíbe recriar seção listada no sumário e não transcrita (sem isso,
+   troca-se um GAP por uma contradição interna — duplicação normativa dentro do MESMO arquivo);
+2. manda o modelo **dizer** na linha final quando o GAP só puder ser resolvido numa seção ausente, em
+   vez de adivinhar o conteúdo dela;
+3. no formato `whole` o teto **continua valendo** e a recusa por tamanho continua correta — ali o
+   modelo devolve o arquivo inteiro, e responder a um recorte produziria um arquivo MUTILADO.
+
+Efeito colateral desejado: a régua de corte por seção passou a ser **uma só**
+(`lib/markdownSections.ts`, extraída do A5.6) — duas cópias divergentes fariam o irmão e o alvo
+mostrarem textos diferentes do mesmo arquivo. A rota humana também deixou de devolver 413 quando o
+recorte é possível (`canDigestOversize`). 8 testes novos (7 do digest + 1 do 413 que sobrevive no
+`whole`); o teste que exigia 413 em 120.001 chars foi reescrito para 202 — a mudança de comportamento
+é o próprio conserto.
