@@ -968,6 +968,28 @@ def invoke_raw(body: dict):
     if not system_prompt or not user_message:
         raise HTTPException(status_code=400, detail="prompt_override + user_message obrigatórios")
 
+    # G7 (lado consumidor) — lições recuperadas no prompt, mas SÓ SE O CHAMADOR PEDIR (`cag`).
+    # Este endpoint é o caminho da edição por-arquivo da Bancada, e também do gate semântico (Haiku,
+    # classificação barata) e do planejador de evolução. Injetar em todos seria mudar prompts que
+    # ninguém pediu para mudar e pagar tokens por isso — por isso opt-in, decidido pelo chamador.
+    # `CAG_ENABLED=off` continua vencendo tudo (a função devolve o prompt intacto).
+    cag = body.get("cag") if isinstance(body.get("cag"), dict) else None
+    if cag:
+        try:
+            from orchestrator.agents.runtime import (
+                _maybe_apply_cag_prefix, _cag_project_uuid, CAG_QUERY_MAX_CHARS,
+            )
+            system_prompt = _maybe_apply_cag_prefix(
+                system_prompt,
+                str(cag.get("role") or "CTO"),
+                str(cag.get("stack_key") or "generic"),
+                _cag_project_uuid(cag.get("project_id"), cag.get("circuit_scope")),
+                str(cag.get("query") or user_message)[:CAG_QUERY_MAX_CHARS],
+            )
+        except Exception as _cag_exc:
+            # Aprender é acessório: nunca derruba a edição do arquivo.
+            logger.warning(f"[/invoke/raw] CAG no-op ({_cag_exc}) — prompt original mantido")
+
     # Achado #30 (2026-08-10): uma resposta VAZIA (200, response="") é uma falha real —
     # o Foundry às vezes devolve content vazio (stop precoce/streaming interrompido) sem lançar
     # exceção. Antes só o `except` acionava o fallback → o Cyborg recebia "" e desistia do rework.

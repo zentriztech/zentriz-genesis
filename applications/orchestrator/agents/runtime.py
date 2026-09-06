@@ -696,14 +696,81 @@ def _maybe_apply_cag_prefix(
         if not prefix:
             return base_prompt
 
-        logger.debug(
-            "[CAG/live] role=%s stack=%s — prefixando %d chars (tokens~=%d)",
-            role, stack_key, len(prefix), pkg.payload_tokens,
+        # INFO (era debug): em prod o nível é INFO, então `live` era INVISÍVEL — não havia como
+        # provar que a lição recuperada realmente entrou no prompt. `lessons=` é o número que
+        # fecha o gate do G7 ("retrieved_lessons aparecendo no prompt").
+        logger.info(
+            "[CAG/live] role=%s stack=%s project=%s lessons=%d — prefixando %d chars (tokens~=%d)",
+            role, stack_key, project_id, len(pkg.lessons_hot), len(prefix), pkg.payload_tokens,
         )
         return prefix + "\n" + base_prompt
     except Exception as exc:
         logger.debug("[CAG] no-op por exceção (%s) — prompt original mantido", exc)
         return base_prompt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CAG para agentes chamados FORA do runner (G7 — lado CONSUMIDOR)
+# ─────────────────────────────────────────────────────────────────────────────
+# O prefixo de CAG só era aplicado dentro de `load_system_prompt_with_skills`, que apenas o
+# `runner.py` chama (dev/qa/devops). Todo agente invocado direto por `run_agent` — em especial o
+# **CTO da Bancada** — montava o system prompt sem passar por ali: as lições extraídas pelo G7
+# eram gravadas, indexadas... e nunca lidas por quem as gerou. As duas funções abaixo fecham isso.
+
+import re as _re
+
+_UUID_RE = _re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _cag_project_uuid(*candidates: object) -> str | None:
+    """
+    Extrai um UUID de projeto dos candidatos, ou `None`.
+
+    POR QUE ISTO É OBRIGATÓRIO: a recuperação de lições compara `project_id = %s::uuid`. A Bancada
+    manda o pseudo-projeto `project_id="spec_chat"` (e o default do `run_agent` é a string
+    `"default"`); qualquer um dos dois faz o Postgres estourar `invalid input syntax for type uuid`
+    → o `except` devolve ZERO lições, silenciosamente. O UUID real chega no `circuit_scope`
+    (`spec_chat:<uuid>`). Sem UUID → `None` = escopo global, que é onde o G7 grava as lições
+    (`project_id IS NULL`); ou seja, o caminho degradado ainda recupera o corpus da Bancada.
+    """
+    for cand in candidates:
+        if not isinstance(cand, str) or not cand.strip():
+            continue
+        found = _UUID_RE.search(cand)
+        if found:
+            return found.group(0)
+    return None
+
+
+# Teto do texto de consulta: o embedder (Titan V2) tem limite próprio e a consulta não melhora
+# com a spec inteira — os primeiros milhares de chars já carregam o domínio e o pedido.
+CAG_QUERY_MAX_CHARS = 4000
+
+
+def _cag_query_from(message: dict, inp: dict) -> str:
+    """
+    Texto de consulta para a recuperação SEMÂNTICA de lições.
+
+    Ordem deliberada: o **pedido humano** primeiro (é o que define a intenção da rodada), depois o
+    relatório do validador (os GAPs que precisam morrer) e por fim o começo da spec (o domínio).
+    Sem isto, `RAG_RETRIEVAL=semantic` cai no sinal grosseiro "role + stack", que para o CTO é
+    literalmente a string "cto generic" — recuperação praticamente aleatória.
+    """
+    parts: list[str] = []
+    for key in ("user_message", "task", "description", "validation_report", "spec_raw",
+                "product_spec"):
+        val = inp.get(key) if isinstance(inp, dict) else None
+        if val is None:
+            val = message.get(key)
+        if isinstance(val, dict):
+            val = json.dumps(val, ensure_ascii=False)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        if sum(len(p) for p in parts) >= CAG_QUERY_MAX_CHARS:
+            break
+    return "\n".join(parts)[:CAG_QUERY_MAX_CHARS]
 
 
 def load_system_prompt_with_skills(
@@ -1430,6 +1497,21 @@ def run_agent(
         system_content = system_prompt_override
     else:
         system_content = build_system_prompt(Path(system_prompt_path), role, mode)
+        # G7 (lado consumidor): quem NÃO vem do runner também aprende. O override já passou pelo
+        # CAG dentro de `load_system_prompt_with_skills` — aplicar aqui de novo duplicaria o
+        # prefixo, por isso só o ramo `else`. Gate: `CAG_ENABLED` (off = byte-idêntico ao anterior).
+        # Vem ANTES do `calculate_token_budget` de propósito: o prefixo é prompt real e tem de
+        # entrar no orçamento, senão o budget mente sobre o tamanho da chamada.
+        system_content = _maybe_apply_cag_prefix(
+            system_content,
+            role,
+            str(inp.get("stack_key") or message.get("stack_key") or "generic"),
+            _cag_project_uuid(
+                message.get("project_id"), inp.get("project_id"),
+                message.get("circuit_scope"), inp.get("circuit_scope"),
+            ),
+            _cag_query_from(message, inp),
+        )
     t0_run = time.perf_counter()
     if _circuit_blocked(circuit_key):
         logger.warning(
