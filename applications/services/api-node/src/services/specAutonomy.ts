@@ -1152,6 +1152,27 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       `${integrity.removedSections.slice(0, 6).map((h) => `“${h}”`).join(", ")}` +
       `${integrity.removedSections.length > 6 ? " …" : ""}.`
     : "";
+  // 🔴 GAP-14 (medido em prod 2026-09-06, run c3757985 rodada 2): o CTO REESCREVEU o `README.md`
+  // (15.720 → 19.392 chars) e trocou o arquétipo por `backend_api` — que não existe no catálogo. O
+  // veto de manifesto (`assessManifest`) só protegia a CRIAÇÃO (A5.3); na EDIÇÃO o laço podia
+  // rebaixar o próprio manifesto a BLOCKER estrutural (`archetype_unknown`), e aí o Estágio A cala o
+  // adversarial: a validação seguinte mediu 1 GAP em vez de 21 (o GAP-13 acima é o outro lado disto).
+  // O manifesto é o ÚNICO arquivo cujo frontmatter a fábrica LÊ para rotear o projeto — o código não
+  // escolhe o conteúdo (isso é do agente), só recusa o que quebraria a leitura da própria fábrica.
+  // A regra é NÃO-REGRESSÃO, não perfeição: um manifesto que JÁ está sem frontmatter continua
+  // editável (adicioná-lo pode levar rodadas, e é um GAP legítimo deste arquivo). O que o código
+  // recusa é a rodada que ESTRAGA um manifesto que estava válido.
+  if (target.toLowerCase() === MANIFEST_PATH.toLowerCase()) {
+    const prj = (await db.query("SELECT extra FROM projects WHERE id = $1", [run.projectId])).rows[0] as
+      { extra?: unknown } | undefined;
+    const expected = expectedArchetype(prj?.extra ?? null);
+    const wasValid = assessManifest(file.content, { expected }).ok;
+    const verdict = assessManifest(revised, { expected });
+    if (wasValid && !verdict.ok) {
+      return skipFileAndContinue(db, run, target,
+        `manifesto recusado (${verdict.code}): ${verdict.message}`, { failure: true, fromStatus: "applying" });
+    }
+  }
   if (removedNote) {
     console.log(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} ${target}: ${integrity.removedSections!.length} seção(ões) removida(s) ` +
@@ -1362,8 +1383,8 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     return false;
   }
   const vr = (await db.query(
-    "SELECT status FROM spec_validation_runs WHERE id = $1", [run.validationRunId],
-  )).rows[0] as { status?: string } | undefined;
+    "SELECT status, stage_b_ran FROM spec_validation_runs WHERE id = $1", [run.validationRunId],
+  )).rows[0] as { status?: string; stage_b_ran?: boolean | null } | undefined;
   if (!vr) {
     await finishRun(db, run, "failed", "A run de validação desta rodada desapareceu.");
     return true;
@@ -1388,6 +1409,33 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     await db.query(
       "UPDATE spec_autonomy_runs SET status = 'pending', no_progress_streak = $2, updated_at = now() WHERE id = $1 AND status = 'validating'",
       [run.id, streak],
+    );
+    return true;
+  }
+
+  // 🔴 GAP-13 (migração 099): validação PARCIAL — o Estágio A achou blocker estrutural e o
+  // adversarial não rodou. A contagem existe, mas é de outra SUPERFÍCIE: em prod (run c3757985) isto
+  // virou "21 → 1 GAP" registrado como progresso e, no tick seguinte, "1 → 21" como regressão. Nenhum
+  // dos dois aconteceu. Aqui o laço mantém a última contagem COMPARÁVEL, não conta progresso e diz o
+  // motivo — e nunca declara `succeeded` sobre uma medição que não olhou a spec inteira.
+  if (vr.stage_b_ran === false) {
+    const partial = await currentGaps(db, run.projectId);
+    const streakP = run.noProgressStreak + 1;
+    const why = `Validação ${st} PARCIAL: o estágio adversarial não rodou (🔴 ${partial.blockers} blocker(s) estrutural(is) do estágio determinístico barram a spec antes dele). ` +
+      `Os ${partial.important} GAP(s) desta leitura NÃO são comparáveis com os ${run.gapsCurrent ?? partial.important} da última validação completa — contagem mantida.`;
+    await patchLastRound(db, run, { validationRunId: run.validationRunId, note: why });
+    await postChatNote(db, run,
+      `🤖 ${perFile ? `**Passe ${run.passes}/${run.maxRounds}**` : `**Rodada ${run.round}/${run.maxRounds}**`} — validação **${st}**, porém **parcial**: ` +
+      `${partial.blockers} bloqueador(es) estrutural(is) impediram o estágio adversarial, então a spec não foi julgada por inteiro. ` +
+      `Não conto isto como progresso: sigo tratando o(s) bloqueador(es) e revalido.`);
+    if (streakP >= MAX_NO_PROGRESS || atCap) {
+      await finishRun(db, { ...run, noProgressStreak: streakP }, "stalled",
+        `${why} Resolva o(s) bloqueador(es) estrutural(is) (aba GAPs) para que a validação volte a julgar a spec completa.`);
+      return true;
+    }
+    await db.query(
+      "UPDATE spec_autonomy_runs SET status = 'pending', no_progress_streak = $2, file_failures = 0, updated_at = now() WHERE id = $1 AND status = 'validating'",
+      [run.id, streakP],
     );
     return true;
   }

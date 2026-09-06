@@ -393,6 +393,10 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   // Estágio B só quando o A não achou blocker estrutural (economiza LLM em spec quebrada)
   const hasStageABlocker = findings.some((f) => f.severity === "blocker");
   let stageBError: string | undefined;
+  // GAP-13 (migração 099): pular o estágio adversarial é uma decisão CORRETA, mas muda a SUPERFÍCIE
+  // medida — e quem compara contagens entre validações (o modo autônomo) precisa saber disso. Zero
+  // findings de B não distingue "B não rodou" de "B rodou e não achou nada": o fato tem de ser dito.
+  let stageBRan = false;
   if (!hasStageABlocker && files.length > 0) {
     const { buildValidationInput } = await import("./specValidationInput.js");
     const input = buildValidationInput(
@@ -415,6 +419,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
     const b = await runStageB(projectId, input.text);
     findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
     stageBError = b.error;
+    stageBRan = !b.error;
   }
 
   // TOCTOU: recomputa o hash ao FINAL — editou durante a validação → superseded (não é erro)
@@ -427,10 +432,14 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
 
   await pool.query(
     `UPDATE spec_validation_runs
-        SET status = $1, findings = $2::jsonb, finished_at = now()
+        SET status = $1, findings = $2::jsonb, stage_b_ran = $4::boolean, finished_at = now()
       WHERE id = $3 AND status = 'running'`,
-    [finalStatus, JSON.stringify(findings), runId],
+    [finalStatus, JSON.stringify(findings), runId, stageBRan],
   );
+  if (!stageBRan && finalStatus === "failed") {
+    // GAP-13: o log diz em voz alta o que a coluna guarda — esta contagem NÃO é comparável.
+    console.log(`[spec-validation] run ${runId}: estágio B não rodou (blocker estrutural do A) — ${findings.length} finding(s) sobre superfície PARCIAL.`);
+  }
   // RFC-0005 (G2): supressão é PÓS-PROCESSAMENTO — findings que reincidem sobre um Refutado vivo
   // contam reincidência (a leitura já os mostra como Refutados; a run continua snapshot imutável).
   if (finalStatus === "passed" || finalStatus === "failed") {

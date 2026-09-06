@@ -716,6 +716,28 @@ function fmtGapForFile(f: ValidationFinding): string {
  * Pedido de "Resolver GAPs" escopado em UM arquivo. `findings` são os GAPs ATIVOS já atribuídos a
  * este arquivo (specGapScope) — o modelo não escolhe o que é seu, só resolve o que é.
  */
+/**
+ * GAP-14 — o bloco de FATOS do manifesto, só quando o arquivo em edição é o `README.md` da raiz.
+ *
+ * Vazio para qualquer outro arquivo (é o comportamento anterior). Não diz o que escrever: diz o que a
+ * fábrica lê no frontmatter e qual é o catálogo fechado de arquétipos — as MESMAS regras que o
+ * Estágio A reaplica na validação seguinte e que `assessManifest` veta na escrita.
+ */
+export function manifestFactBlock(filePath: string): string {
+  if (filePath.trim().toLowerCase() !== MANIFEST_PATH.toLowerCase()) return "";
+  const ids = loadArchetypeCatalog().archetypes.map((a) => a.id).join(", ");
+  return [
+    "--- FATOS DO MANIFESTO (este arquivo é o README.md do projeto — leia antes de editar) ---",
+    "O bloco YAML de abertura é CONTRATO DE MÁQUINA: a fábrica o lê para rotear o projeto.",
+    `• \`archetype\` só pode ser um destes: ${ids}. Valor fora da lista é BLOQUEADOR de validação.`,
+    "• Mantenha o `archetype` atual — corrigi-lo não é um GAP deste arquivo.",
+    "• NÃO acrescente `spec_hash` nem `status_spec`: estado vive no banco, não no documento.",
+    "• O `---` de abertura continua sendo a PRIMEIRA linha do arquivo.",
+    "--- FIM DOS FATOS DO MANIFESTO ---",
+    "",
+  ].join("\n");
+}
+
 function buildGapFileRequest(
   content: string,
   filePath: string,
@@ -748,6 +770,11 @@ function buildGapFileRequest(
     siblingBlock
       ? `--- ARQUIVOS IRMÃOS CITADOS PELOS GAPs (SÓ LEITURA — não os copie, não os edite) ---\n${siblingBlock}\n--- FIM DOS IRMÃOS ---\n`
       : "",
+    // GAP-14: quando o arquivo em edição É o manifesto, o frontmatter deixa de ser prosa — é o
+    // contrato que a fábrica LÊ para rotear o projeto. Em prod o editor trocou `archetype` por
+    // `backend_api` (fora do catálogo) e rebaixou a spec a BLOCKER estrutural. O código não escolhe o
+    // conteúdo: entrega o FATO (o catálogo fechado) para a decisão do agente ser informada.
+    manifestFactBlock(filePath),
     digested
       ? "--- RECORTE DIRIGIDO DO ARQUIVO (NÃO é o arquivo inteiro; leia as REGRAS dentro do bloco) ---"
       : "--- CONTEÚDO ATUAL DO ARQUIVO ---",
