@@ -200,9 +200,27 @@ export async function computeFactoryCertificate(db: Db, projectId: string): Prom
   const c4: [FactoryCheckId, string, boolean | null, string?] = ["C4", "Zero GAP blocker ativo",
     assessment.block?.code === "SPEC_VALIDATION_BLOCKED" ? false : true,
     assessment.activeBlockers ? `${assessment.activeBlockers} blocker(s) ativo(s)` : "nenhum blocker ativo"];
-  const c5: [FactoryCheckId, string, boolean | null, string?] = ["C5", "Avisos reconhecidos",
-    assessment.block?.code === "SPEC_WARNINGS_UNACKED" ? false : true,
-    assessment.activeWarnings ? `${assessment.activeWarnings} aviso(s) ativo(s)${assessment.acked ? " reconhecidos" : " sem ack"}` : "sem avisos"];
+  // C5 — Onda 4 (A4.4): o texto tinha de bater com o veredito. Antes, um projeto barrado nos
+  // BLOCKERS saía com "✅ Avisos reconhecidos — 14 aviso(s) ativo(s) sem ack" — ✅ e "sem ack"
+  // na mesma linha, ilegível. A causa é a ordem de `assessSpecValidation`: o teste de ack só
+  // roda DEPOIS do de blockers, então em `SPEC_VALIDATION_BLOCKED` o ack **não foi avaliado**
+  // → indeterminado (`null`), como já se faz quando não há run para o hash atual.
+  const c5: [FactoryCheckId, string, boolean | null, string?] =
+    assessment.block?.code === "SPEC_VALIDATION_BLOCKED"
+      ? ["C5", "Avisos reconhecidos", null,
+        assessment.activeWarnings
+          ? `não avaliado: ${assessment.activeWarnings} aviso(s) atrás dos blockers`
+          : "não avaliado: os blockers vêm antes"]
+      : assessment.block?.code === "SPEC_WARNINGS_UNACKED"
+        ? ["C5", "Avisos reconhecidos", false, `${assessment.activeWarnings} aviso(s) ativo(s) sem reconhecimento`]
+        : ["C5", "Avisos reconhecidos", true,
+          assessment.activeWarnings === 0
+            ? "sem avisos"
+            // `forcedByAdmin` dispensa o ack dos avisos (o force do zentriz_admin retorna antes
+            // do teste): dizer só "reconhecidos" esconderia que ninguém reconheceu aviso a aviso.
+            : assessment.forcedByAdmin
+              ? `${assessment.activeWarnings} aviso(s) dispensado(s) pelo force do zentriz_admin (auditado)`
+              : `${assessment.activeWarnings} aviso(s) reconhecido(s) por ack`];
   const checks = checksOf([c1, c2, c7, c3, c4, c5]);
 
   // ── C4/C5 — o veredito é o do gate, sem reinterpretação ────────────────────

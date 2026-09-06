@@ -1579,6 +1579,14 @@ def run_agent(
     # só ativa em prod-bedrock (no Foundry a var fica vazia → nenhuma mudança de comportamento).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
     _model_downgraded = False
+    # A4.1 (2026-09-06): modelo já negado pela conta neste processo → nasce no fallback. Antes, todo
+    # agente queimava a 1ª das CLAUDE_RETRY_ATTEMPTS num 403 conhecido (9 vezes em 24 h em prod).
+    _preferred = preferred_model(model, _fallback_model)
+    if _preferred != model:
+        logger.info("[%s] Modelo '%s' está marcado como indisponível na conta — usando '%s' "
+                    "sem tentar de novo (CLAUDE_MODEL_DENY_TTL_SEC).", agent_name, model, _preferred)
+        model = _preferred
+        _model_downgraded = True
     # Rede de segurança do `thinking={"type":"disabled"}`: se a rota/modelo recusar o parâmetro,
     # desliga a otimização para o resto desta execução em vez de derrubar o agente.
     _thinking_rejected = False
@@ -1677,19 +1685,14 @@ def run_agent(
                     continue
                 # Modelo indisponível na conta → troca UMA vez para o fallback e refaz a
                 # tentativa (não é falha de rede: não conta retry nem abre o circuit breaker).
-                _ename = type(e).__name__.lower()
-                _model_unavailable = (
-                    "permissiondenied" in _ename
-                    or "accessdenied" in err_lower
-                    or "not available for this account" in err_lower
-                    or "don't have access to the model" in err_lower
-                )
-                if (_model_unavailable and _fallback_model and not _model_downgraded
+                if (is_model_unavailable_error(e) and _fallback_model and not _model_downgraded
                         and _fallback_model != model and attempt < CLAUDE_RETRY_ATTEMPTS - 1):
                     logger.error(
                         "[%s] Modelo '%s' indisponível na conta — caindo para CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s",
                         agent_name, model, _fallback_model, str(e)[:200],
                     )
+                    # A4.1: marca a negação para as PRÓXIMAS chamadas nascerem já no fallback.
+                    note_model_denied(model)
                     model = _fallback_model
                     _model_downgraded = True
                     continue
@@ -2047,6 +2050,66 @@ def _is_thinking_param_error(e: Exception) -> bool:
     return "thinking" in str(e).lower()
 
 
+# ── Modelos NEGADOS pela conta (Onda 4 / A4.1) ────────────────────────────────────────────────
+# Medido em prod 2026-09-06: a conta 820198199720 só tem entitlement de `sonnet-4-6`, mas o `.env`
+# pede `opus-4-8` (e `CLAUDE_MODEL_REWORK` também) — 9 chamadas em 24 h nasciam com um 403
+# "not available for this account" antes de cair no fallback. O 403 não custa tokens, mas consome
+# uma das `CLAUDE_RETRY_ATTEMPTS` tentativas da rodada: sob 429 a resiliência caía de 3 para 2.
+#
+# Por que um cache em vez de trocar `CLAUDE_MODEL` para o modelo que a conta tem: o dia em que o
+# entitlement do Opus for concedido, o `.env` já estaria apontando para baixo e ninguém lembraria
+# de voltar. O TTL resolve os dois lados — para de bater no que já sabemos negado, e reavalia de
+# vez em quando (sem redeploy, sem restart) para subir de volta sozinho.
+_MODEL_DENIED: dict[str, float] = {}
+
+
+def _model_denied_ttl() -> int:
+    """Por quanto tempo (s) confiamos num 403 de entitlement. 0 desliga o cache."""
+    try:
+        return max(0, int(os.environ.get("CLAUDE_MODEL_DENY_TTL_SEC", "1800").strip()))
+    except (ValueError, AttributeError):
+        return 1800
+
+
+def is_model_denied(model_id: str) -> bool:
+    """O modelo levou 403 de entitlement há menos de um TTL? (entrada vencida é esquecida)."""
+    ttl = _model_denied_ttl()
+    if not ttl or not model_id:
+        return False
+    at = _MODEL_DENIED.get(model_id)
+    if at is None:
+        return False
+    if time.time() - at >= ttl:
+        _MODEL_DENIED.pop(model_id, None)
+        return False
+    return True
+
+
+def note_model_denied(model_id: str) -> None:
+    """Registra o 403 de entitlement — as próximas chamadas já nascem no fallback."""
+    if model_id and _model_denied_ttl():
+        _MODEL_DENIED[model_id] = time.time()
+
+
+def is_model_unavailable_error(e: Exception) -> bool:
+    """403/AccessDenied de ENTITLEMENT (a conta não tem o modelo) — não é erro de rede nem de quota."""
+    ename = type(e).__name__.lower()
+    el = str(e).lower()
+    return (
+        "permissiondenied" in ename
+        or "accessdenied" in el
+        or "not available for this account" in el
+        or "don't have access to the model" in el
+    )
+
+
+def preferred_model(model_id: str, fallback_model: str) -> str:
+    """Modelo a usar AGORA: pula o principal enquanto ele estiver marcado como negado."""
+    if fallback_model and fallback_model != model_id and is_model_denied(model_id) and not is_model_denied(fallback_model):
+        return fallback_model
+    return model_id
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
@@ -2196,7 +2259,13 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     # passam model_id derivado de CLAUDE_MODEL e não tinham fallback próprio (o /invoke/raw
     # do Cyborg já traz fallback_id explícito).
     _fallback_model = os.environ.get("CLAUDE_MODEL_FALLBACK", "").strip()
-    _used_model = model_id
+    # A4.1: se este modelo já levou 403 de entitlement há pouco, começa direto no fallback —
+    # o `except` abaixo continua sendo a rede (o cache pode ter vencido no meio da chamada).
+    _used_model = preferred_model(model_id, _fallback_model)
+    if _used_model != model_id:
+        logger.info("[call_bedrock_direct] Modelo '%s' está marcado como indisponível na conta — "
+                    "usando '%s' sem tentar de novo (CLAUDE_MODEL_DENY_TTL_SEC).", model_id, _used_model)
+        _create_kw["model"] = _used_model
 
     def _create_with_thinking_guard() -> object:
         """Chama o modelo; se a rota recusar o parâmetro `thinking`, reenvia UMA vez sem ele."""
@@ -2213,17 +2282,10 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
     try:
         resp = _create_with_thinking_guard()
     except Exception as e:
-        _ename = type(e).__name__.lower()
-        _el = str(e).lower()
-        _model_unavailable = (
-            "permissiondenied" in _ename
-            or "accessdenied" in _el
-            or "not available for this account" in _el
-            or "don't have access to the model" in _el
-        )
-        if _model_unavailable and _fallback_model and _fallback_model != model_id:
+        if is_model_unavailable_error(e) and _fallback_model and _fallback_model != _used_model:
             logger.error("[call_bedrock_direct] Modelo '%s' indisponível na conta — caindo para "
-                         "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", model_id, _fallback_model, str(e)[:200])
+                         "CLAUDE_MODEL_FALLBACK='%s'. Detalhe: %s", _used_model, _fallback_model, str(e)[:200])
+            note_model_denied(_used_model)
             _create_kw["model"] = _fallback_model
             _used_model = _fallback_model
             resp = _create_with_thinking_guard()
