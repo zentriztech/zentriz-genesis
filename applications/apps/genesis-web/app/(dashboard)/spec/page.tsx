@@ -51,13 +51,21 @@ import NoteAddOutlinedIcon from "@mui/icons-material/NoteAddOutlined";
 import PostAddOutlinedIcon from "@mui/icons-material/PostAddOutlined";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { motion, AnimatePresence } from "framer-motion";
-import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPostMultipart, apiPut, withQuery } from "@/lib/api";
 import { projectsStore } from "@/stores/projectsStore";
 import { authStore } from "@/stores/authStore";
+import { tenantScopeStore } from "@/stores/tenantScopeStore";
+// Padronização das ações de fábrica (revisão adversarial da Bancada, 2026-09-06): rótulos, tooltips
+// e texto de confirmação vivem em UM lugar — três telas diziam coisas diferentes para a MESMA ação.
+import {
+  FACTORY_LABEL, FACTORY_TOOLTIP, PROMOTE_CONFIRM_WORD, PROMOTED_SPEC_NOTICE,
+  promoteButtonLabel, promoteConfirmBody, promotedProductNotice, type PromoteScope,
+} from "@/lib/factoryActions";
 import { DecomposeDialog, describeEstimate, estimateProposal, type DecomposeSpecRef } from "@/components/DecomposeDialog";
 // UI/UX 2026-09-06 — `SpecTreePanel` (a segunda lista de arquivos, com editor próprio) saiu daqui:
 // a lista única é o `ProductFolderNav` abaixo e o editor é o desta página. O arquivo do componente
 // permanece no repo (não é papel desta frente apagá-lo), mas já não tem nenhum importador.
+import ConfirmActionDialog from "@/components/ConfirmActionDialog";
 import SpecValidationPanel from "@/components/SpecValidationPanel";
 import ConnectReadyChecklist from "@/components/ConnectReadyChecklist";
 import SpecSplitPanel from "@/components/SpecSplitPanel";
@@ -921,7 +929,7 @@ function SpecEditor({
   value, onChange, fullscreen, onToggleFullscreen,
   onSave, approving, onRegen, regenDisabled,
   projectId = null, isAdmin = false, validationReloadSignal, gapCount = null,
-  onPromote, fileExt = "md", onValidationChange, openGapsSignal,
+  onPromote, promoteScope = null, fileExt = "md", onValidationChange, openGapsSignal,
   activeFilePath = null, onVersionRestored,
   saveLabel = "Salvar rascunho", autonomy = null, onStopAutonomy, openAutonomySignal,
 }: {
@@ -939,9 +947,13 @@ function SpecEditor({
   isAdmin?: boolean;
   validationReloadSignal?: number;
   gapCount?: number | null;
-  // Onda 3 (b): "Promover à Fábrica" (substitui "Salvar e iniciar"). Só aparece quando provido
-  // (modo edição). A confirmação com digitação (quando há GAPs) é tratada pelo pai.
+  // Onda 3 (b): promoção (substitui "Salvar e iniciar"). Só aparece quando provido (modo edição).
+  // A confirmação com digitação (quando há GAPs) é tratada pelo pai.
   onPromote?: () => void;
+  // B1 da revisão adversarial (2026-09-06): o rótulo tem de dizer o ESCOPO REAL do clique — a spec
+  // dentro de um produto promove o produto INTEIRO; uma spec avulsa promove só ela. Escondê-lo fazia
+  // o usuário admitir N projetos acreditando ter admitido um.
+  promoteScope?: PromoteScope | null;
   // Onda 3 (d): extensão do arquivo em edição → realce de sintaxe por tipo (default markdown).
   fileExt?: string;
   // Onda 3 — a validação (dentro da aba GAPs) reporta o nº de GAPs ao pai p/ manter o badge
@@ -1060,7 +1072,7 @@ function SpecEditor({
           </Tooltip>
         )}
         {/* Onda 3 (b): a spec APENAS salva aqui — nunca "salva e inicia". A ida à fábrica é
-            exclusiva do botão "Promover à Fábrica" (abaixo, só no modo edição). */}
+            exclusiva do botão de promoção (abaixo, só no modo edição). */}
         <Tooltip title="Guardar a spec — promova à fábrica quando estiver pronta">
           <span>
             <Button size="small" variant="contained"
@@ -1073,13 +1085,14 @@ function SpecEditor({
         </Tooltip>
         {onPromote && (
           // Migração 097: promover ADMITE na fábrica e NÃO inicia. Com produto, entra o produto
-          // TODO na ordem de interdependência; o início é um clique separado.
-          <Tooltip title="Admitir na fábrica (produto inteiro, na ordem de dependência) — nada é iniciado agora">
+          // TODO na ordem de interdependência; o início é um clique separado. B1: o rótulo e o
+          // tooltip vêm do escopo real, não de um texto fixo que valia só para um dos dois casos.
+          <Tooltip title={promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct}>
             <span>
               <Button size="small" variant="contained" color="success"
                 startIcon={approving === "start" ? <CircularProgress size={12} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.85rem !important" }} />}
                 disabled={approving !== null || !value.trim()} onClick={onPromote} sx={{ fontSize: "0.75rem", py: 0.4 }}>
-                {approving === "start" ? "Promovendo…" : "Promover à Fábrica"}
+                {approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope)}
               </Button>
             </span>
           </Tooltip>
@@ -1768,6 +1781,26 @@ export default function SpecPage() {
 
   // Produto e links (§5.3: inclui o INBOX "Rascunhos" via ?includeInbox=1; is_inbox marca-o)
   const [products, setProducts]       = useState<{ id: string; name: string; is_inbox?: boolean }[]>([]);
+  /**
+   * B4 da revisão adversarial (2026-09-06): UM único carregamento de produtos, com o MESMO escopo de
+   * tenant que `/products` usa. A Bancada tinha quatro `fetch` crus sem `tenantId` — para o master,
+   * `GET /api/products` sem `tenantId` devolve produtos de TODOS os tenants, então o select de
+   * produto oferecia destinos de outro cliente. Sem `observer`, o valor é lido a cada chamada.
+   */
+  const reloadProducts = useCallback(async (): Promise<{ id: string; name: string; is_inbox?: boolean }[] | null> => {
+    try {
+      // O `useEffect` do layout (que hidrata o escopo) roda DEPOIS dos efeitos dos filhos: sem este
+      // `hydrate()` idempotente, a primeira carga da Bancada sairia sem `tenantId`.
+      tenantScopeStore.hydrate();
+      const rows = await apiGet<{ id: string; name: string; is_inbox?: boolean }[]>(
+        withQuery("/api/products", { includeInbox: 1, tenantId: tenantScopeStore.selectedTenantId }),
+      );
+      setProducts(rows);
+      return rows;
+    } catch {
+      return null;                 // select fica com o que já tinha; a tela segue utilizável
+    }
+  }, []);
   // "" = sentinela → o backend resolve para o INBOX do tenant (normalizeProductId→resolveInboxProductId).
   const [productId, setProductId]     = useState("");
   const [linkProjectId, setLinkProjectId] = useState("");
@@ -1853,7 +1886,7 @@ export default function SpecPage() {
   const [splitState, setSplitState] = useState<{ enabled: boolean; awaitingDecision: boolean; active: boolean } | null>(null);
   // `handleSaveSpec` (spec inteira) é declarado bem depois nesta função; o botão único de salvar
   // precisa dele desde cedo. Ref preenchido por efeito = sem reordenar 1.000 linhas de handlers.
-  const handleSaveSpecRef = useRef<((startNow: boolean) => Promise<void>) | null>(null);
+  const handleSaveSpecRef = useRef<(() => Promise<void>) | null>(null);
   // Largura (px) do painel de chat "Melhorar com IA" — arrastável pela divisória (300–640).
   const [chatWidth, setChatWidth] = useState(380);
   const shrinkChat = useCallback((dx: number) => setChatWidth((w) => clampChatWidth(w - dx)), []);
@@ -1865,7 +1898,7 @@ export default function SpecPage() {
   const [gapCount, setGapCount] = useState<number | null>(null);
   /** PR-4 — GAPs ativos por arquivo da spec (+ fila sugerida). null = não carregado/sem validação. */
   const [gapScope, setGapScope] = useState<GapScopeWire | null>(null);
-  // Onda 3 (b) — diálogo de "Promover à Fábrica" com confirmação por digitação quando há GAPs.
+  // Onda 3 (b) — diálogo da promoção com confirmação por digitação quando há GAPs.
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteConfirmText, setPromoteConfirmText] = useState("");
   // Migração 097 — plano de promoção do PRODUTO (ordem por onda). Preenchido pelo 202 do
@@ -1974,13 +2007,24 @@ export default function SpecPage() {
   // Evoluir E2/E6 — é um projeto de EVOLUÇÃO? (extra.evolution) → habilita "Gerar RFC / CHANGELOG"
   // e orienta o humano no chat (uma vez por projeto).
   const [isEvolution, setIsEvolution] = useState(false);
+  /**
+   * B1 — dono da spec em edição, para o botão de promoção poder dizer o ESCOPO REAL do clique.
+   * Vem da MESMA rota autoritativa que `promoteToFactory` reconsulta no clique (`/api/projects/:id`),
+   * nunca do `?productId=` da URL (que é só navegação da árvore).
+   */
+  const [ownerProduct, setOwnerProduct] = useState<{ id: string | null; name: string | null } | null>(null);
   useEffect(() => {
     setIsEvolution(false);
+    setOwnerProduct(null);
     if (!editProjectId) return;
     let cancelled = false;
-    apiGet<{ extra?: { evolution?: boolean; evolution_plan?: unknown } | null }>(`/api/projects/${editProjectId}`)
+    apiGet<{
+      extra?: { evolution?: boolean; evolution_plan?: unknown } | null;
+      productId?: string | null; productName?: string | null;
+    }>(`/api/projects/${editProjectId}`)
       .then((p) => {
         if (cancelled) return;
+        setOwnerProduct({ id: p?.productId ?? null, name: p?.productName ?? null });
         const evo = p?.extra?.evolution === true;
         setIsEvolution(evo);
         if (evo && !p?.extra?.evolution_plan) {
@@ -2053,9 +2097,9 @@ export default function SpecPage() {
 
   // Load products + projects for linking (§5.3: ?includeInbox=1 traz o INBOX p/ o select)
   useEffect(() => {
-    apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {});
+    void reloadProducts();
     apiGet<{ id: string; title: string; status: string; project_type?: string; productId?: string | null }[]>("/api/projects").then(setAllProjects).catch(() => {});
-  }, []);
+  }, [reloadProducts]);
 
   // §5.3: default do produto = herdado do pai (nova versão) senão o INBOX. Só semeia enquanto
   // o usuário não escolheu nada (productId === "") — não sobrescreve escolha manual.
@@ -2400,7 +2444,7 @@ export default function SpecPage() {
   // Um único botão "Salvar": grava o arquivo aberto ou o rascunho da spec inteira.
   const handleSaveCurrent = useCallback(() => {
     if (activeFile) { void handleSaveActiveFile(); return; }
-    void handleSaveSpecRef.current?.(false);
+    void handleSaveSpecRef.current?.();
   }, [activeFile, handleSaveActiveFile]);
 
   // Digitação no editor principal: em modo arquivo alimenta o rascunho do arquivo (e o `treeDirty`
@@ -2935,7 +2979,7 @@ export default function SpecPage() {
           const qs = r.questions.length ? `\n\n❓ **Perguntas do arquiteto** (responda editando o RFC ou pelo chat do arquivo):\n${r.questions.map((q) => `- ${q}`).join("\n")}` : "";
           setChatMessages((prev) => [...prev, {
             role: "assistant",
-            content: `${r.summary || "Artefatos de evolução gerados."}\n\n**Compatibilidade:** ${r.compat.toUpperCase()}\n\n**Arquivos:**\n${files}${problems}${warns}${qs}\n\n➡️ Revise os arquivos na árvore (o \`## Impacto\` do RFC define o que a fábrica PODE tocar). Quando estiver satisfeito, **Validar** e **Promover à Fábrica**.`,
+            content: `${r.summary || "Artefatos de evolução gerados."}\n\n**Compatibilidade:** ${r.compat.toUpperCase()}\n\n**Arquivos:**\n${files}${problems}${warns}${qs}\n\n➡️ Revise os arquivos na árvore (o \`## Impacto\` do RFC define o que a fábrica PODE tocar). Quando estiver satisfeito, **Validar** e promover à fábrica.`,
           }]);
           setTreeReloadSignal((n) => n + 1);
           setValidationReloadSignal((n) => n + 1);
@@ -3032,12 +3076,47 @@ export default function SpecPage() {
   }, [recoveredSpec]);
   const handleDiscardRecovered = useCallback(() => setRecoveredSpec(null), []);
 
-  // ── Save spec (draft or start) ──────────────────────────────────────────────
-  // Migração 097: o botão "Promover à Fábrica" NÃO passa mais por aqui — ele usa
-  // `promoteToFactory` (abaixo), que salva com `startNow: false` e ADMITE na fábrica sem iniciar.
-  // O caminho `startNow: true` sobrevive apenas para o fluxo de CRIAÇÃO ("salvar e iniciar"), hoje
-  // sem chamador: nenhuma tela inicia pipeline no ato do salvamento.
-  const handleSaveSpec = useCallback(async (startNow: boolean) => {
+  /**
+   * B9 — ÚNICO ponto de escrita da spec inteira (`PATCH /spec-content`). Havia duas cópias desta
+   * chamada (salvar e promover) e elas podiam divergir em silêncio: a que promove GRAVA a spec antes
+   * de admitir, porque a fábrica lê o disco, não o editor.
+   * `startNow: false` é explícito — nunca inicia nada a partir da Bancada.
+   */
+  const persistSpecMarkdown = useCallback(async () => {
+    if (!editProjectId) throw new Error("Sem projeto em edição.");
+    await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
+      specMarkdown,
+      title: projectTitle.trim() || undefined,
+      startNow: false,
+    });
+  }, [editProjectId, specMarkdown, projectTitle]);
+
+  /**
+   * B1 — escopo REAL da promoção, para o rótulo/tooltip/confirmação. `null` = ainda não sei quem é o
+   * dono (rótulo genérico); `spec` = dono é o INBOX "Rascunhos" (que não é produto) ou não há dono;
+   * `product` = produto real → o clique admite o produto INTEIRO.
+   */
+  const promoteScope = useMemo<PromoteScope | null>(() => {
+    if (!editProjectId || !ownerProduct) return null;
+    if (!ownerProduct.id) return "spec";
+    const owner = products.find((p) => p.id === ownerProduct.id);
+    if (!owner) return null;                       // lista ainda não carregou → não afirma escopo
+    return owner.is_inbox === true ? "spec" : "product";
+  }, [editProjectId, ownerProduct, products]);
+
+  /** Projetos ainda na Bancada no mesmo produto — só para o humano dimensionar o escopo. */
+  const promoteSiblings = useMemo(() => {
+    if (promoteScope !== "product" || !ownerProduct?.id) return null;
+    return allProjects.filter((p) => p.productId === ownerProduct.id && p.status === "draft").length || null;
+  }, [promoteScope, ownerProduct, allProjects]);
+
+  // ── Save spec (SEMPRE rascunho) ─────────────────────────────────────────────
+  // Migração 097: o botão "Promover à fábrica" usa `promoteToFactory` (abaixo) — salva e ADMITE
+  // sem iniciar. B5 da revisão adversarial (2026-09-06): o caminho `startNow: true` que existia
+  // aqui e no upload NÃO tinha chamador nenhum (só `false` era passado) e ainda assim mantinha um
+  // `POST /projects/:id/run` pronto para reabrir o "promover = iniciar" que a 097 fechou.
+  // Foi removido: salvar na Bancada é SEMPRE rascunho; iniciar é decisão de outra tela.
+  const handleSaveSpec = useCallback(async () => {
     if (!specMarkdown) return;
     // INTAKE-GATE (espelha o backend): título e tipo são obrigatórios; texto livre >=500 letras.
     if (!editProjectId) {
@@ -3047,24 +3126,15 @@ export default function SpecPage() {
         setApproveError(`A descrição em texto livre precisa de no mínimo ${MIN_FREE_TEXT_CHARS} caracteres.`); return;
       }
     }
-    setApproving(startNow ? "start" : "save"); setApproveError(null);
+    setApproving("save"); setApproveError(null);
     try {
       // Modo edição: PATCH spec existente sem criar novo projeto
       if (editProjectId) {
-        await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
-          specMarkdown,
-          title: projectTitle.trim() || undefined,
-          startNow,
-        });
+        await persistSpecMarkdown();
         projectsStore.loadProjects();
-        // "Promover à Fábrica" (startNow) → vai para a fábrica. "Salvar rascunho" (!startNow) →
-        // FICA na tela do editor: a spec foi persistida no disco, então revalidamos para que a
-        // lista de GAPs reflita a spec nova (os GAPs resolvidos SOMEM; a run antiga fica como
-        // histórico em spec_validation_runs). Trazemos o usuário à aba GAPs para acompanhar.
-        if (startNow) {
-          setTimeout(() => router.push(`/projects/${editProjectId}`), 300);
-          return;
-        }
+        // "Salvar rascunho" FICA na tela do editor: a spec foi persistida no disco, então
+        // revalidamos para que a lista de GAPs reflita a spec nova (os GAPs resolvidos SOMEM; a run
+        // antiga fica como histórico em spec_validation_runs). Trazemos o usuário à aba GAPs.
         setApproving(null);
         setStaleValidation(false);
         setChatMessages((prev) => [...prev, { role: "assistant", content: "💾 Rascunho salvo. Revalidando os GAPs na spec nova…" }]);
@@ -3114,10 +3184,10 @@ export default function SpecPage() {
         if (approver) formData.append("approvedBy", approver);
       }
       formData.append("files", file);
-      // RASCUNHO: quando não é "iniciar agora", nasce como 'draft' (aguardando início manual),
-      // não 'spec_submitted' — assim o portal mostra "Rascunho" + botão Iniciar, em vez de
-      // "Em execução" sem ação.
-      if (!startNow) formData.append("draft", "true");
+      // RASCUNHO: a spec criada na Bancada nasce SEMPRE como 'draft' (aguardando promoção +
+      // início manual), não 'spec_submitted' — o portal mostra "Rascunho" com ações, em vez de
+      // "Em execução" sem nada rodando.
+      formData.append("draft", "true");
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", formData);
       projectsStore.loadProjects();
 
@@ -3130,9 +3200,6 @@ export default function SpecPage() {
         try { await apiPost(`/api/projects/${data.projectId}/links`, { to_project_id: linkProjectId, relation_type: linkRelation }); } catch { /* non-critical */ }
       }
 
-      if (startNow) {
-        try { await apiPost(`/api/projects/${data.projectId}/run`, {}); } catch { /* ok */ }
-      }
       setTimeout(() => router.push(`/projects/${data.projectId}`), 500);
     } catch (e) {
       setApproveError(e instanceof Error ? e.message : "Erro ao salvar spec.");
@@ -3140,9 +3207,9 @@ export default function SpecPage() {
       setApproving(null);
     }
   }, [specMarkdown, projectTitle, parentProjectId, editProjectId, freeText, uiuxConnId, uiuxProjectIds,
-      projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router]);
+      projectType, deliveryMode, cloudConnId, deployFormat, deployTtlDays, router, persistSpecMarkdown]);
 
-  // ── "Promover à Fábrica" (migração 097) ─────────────────────────────────────
+  // ── Promoção à fábrica (migração 097) ───────────────────────────────────────
   // Requisito do Jean (2026-09-06): este botão promove o PRODUTO TODO, na ordem de
   // interdependência, e NÃO inicia nada. Duas rotas, escolhidas pelo dono da spec:
   //   • spec dentro de um produto real → POST /api/products/:id/promote → admite TODOS os
@@ -3156,11 +3223,7 @@ export default function SpecPage() {
     setApproving("start");
     setApproveError(null); setPlanError(null); setStartedNotice(null);
     try {
-      await apiPatch<{ ok: boolean }>(`/api/projects/${editProjectId}/spec-content`, {
-        specMarkdown,
-        title: projectTitle.trim() || undefined,
-        startNow: false,
-      });
+      await persistSpecMarkdown();
 
       // Dono da spec pela fonte autoritativa (o `?productId=` da URL é só navegação da árvore e
       // `allProjects` pode nem ter carregado — errar aqui promoveria o escopo errado).
@@ -3170,11 +3233,9 @@ export default function SpecPage() {
       const ownerId = detail.productId ?? null;
       let owner = ownerId ? products.find((p) => p.id === ownerId) : undefined;
       if (ownerId && !owner) {
-        try {
-          const fresh = await apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1");
-          setProducts(fresh);
-          owner = fresh.find((p) => p.id === ownerId);
-        } catch { /* sem a lista não dá para saber se é INBOX → cai no promote da spec */ }
+        // Sem a lista não dá para saber se o dono é o INBOX → cai no promote de UMA spec (escopo menor).
+        const fresh = await reloadProducts();
+        owner = fresh?.find((p) => p.id === ownerId);
       }
       const promoteWholeProduct = !!ownerId && owner !== undefined && owner.is_inbox !== true;
 
@@ -3194,10 +3255,7 @@ export default function SpecPage() {
           modelUsed: res.modelUsed ?? null,
         });
         setPlanItems(res.plan ?? []);
-        setStartedNotice(
-          `Produto admitido na fábrica: ${(res.promoted ?? []).length} projeto(s) em ${res.waves ?? 0} onda(s). ` +
-          "Nada foi iniciado — use “Iniciar onda 1” quando quiser começar.",
-        );
+        setStartedNotice(promotedProductNotice((res.promoted ?? []).length, res.waves ?? 0));
         setPlanOpen(true);
         projectsStore.loadProjects();
         return;
@@ -3207,7 +3265,7 @@ export default function SpecPage() {
       projectsStore.loadProjects();
       setChatMessages((prev) => [...prev, {
         role: "assistant",
-        content: "🏭 Spec **admitida na fábrica** — e **nada foi iniciado**. Ela sai da Bancada e espera o início explícito na tela do projeto.",
+        content: `🏭 ${PROMOTED_SPEC_NOTICE}`,
       }]);
       setTimeout(() => router.push(`/projects/${editProjectId}`), 400);
     } catch (e) {
@@ -3215,18 +3273,25 @@ export default function SpecPage() {
     } finally {
       setApproving(null);
     }
-  }, [editProjectId, specMarkdown, projectTitle, products, router]);
+  }, [editProjectId, specMarkdown, products, router, persistSpecMarkdown, reloadProducts]);
 
-  // Sem GAPs → promove direto; com GAPs → exige confirmação por digitação (qualquer papel).
-  const PROMOTE_CONFIRM_WORD = "PROMOVER";
+  /** GAPs abertos → confirmação N2 (digitada). Sem GAPs, o texto do diálogo é apenas informativo. */
+  const promoteNeedsWord = (gapCount ?? 0) > 0;
+  /**
+   * Escada de guardas por CONSEQUÊNCIA (B7):
+   *  • GAPs abertos → N2, digitar a palavra (risco de CONTEÚDO, independentemente do escopo);
+   *  • escopo `product` (ou ainda desconhecido) → N1, confirmação simples: o clique admite N projetos
+   *    e paga o planejador de ondas. Antes ia direto, com o rótulo de uma spec só;
+   *  • escopo `spec` sem GAPs → direto: admite um projeto e é reversível pelo "Devolver à Bancada".
+   */
   const handlePromote = useCallback(() => {
-    if ((gapCount ?? 0) > 0) {
+    if (promoteNeedsWord || promoteScope !== "spec") {
       setPromoteConfirmText("");
       setPromoteOpen(true);
       return;
     }
     void promoteToFactory();
-  }, [gapCount, promoteToFactory]);
+  }, [promoteNeedsWord, promoteScope, promoteToFactory]);
 
   const confirmPromote = useCallback(() => {
     setPromoteOpen(false);
@@ -3277,7 +3342,9 @@ export default function SpecPage() {
     e.target.value = "";
   };
   const removeFile = (i: number) => setFiles((p) => p.filter((_, idx) => idx !== i));
-  const handleUploadSubmit = async (e: React.FormEvent, startNow = false) => {
+  // B5: o parâmetro `startNow` saiu daqui. Upload na Bancada cria SEMPRE rascunho — nenhum chamador
+  // passava `true`, e o `POST /run` que ele guardava reabria o "promover = iniciar" fechado na 097.
+  const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     // INTAKE-GATE (espelha o backend): título e tipo obrigatórios; pelo menos 1 anexo.
     if (!projectTitle.trim()) { setUploadError("Informe o Título do projeto."); return; }
@@ -3322,18 +3389,15 @@ export default function SpecPage() {
         if (approver) fd.append("approvedBy", approver);
       }
       files.forEach((f) => fd.append("files", f));
-      // RASCUNHO: upload sem "iniciar agora" nasce como 'draft'.
-      if (!startNow) fd.append("draft", "true");
+      // RASCUNHO: o upload na Bancada nasce SEMPRE como 'draft' (promover é outro clique).
+      fd.append("draft", "true");
       const data = await apiPostMultipart<SubmitResponse>("/api/specs", fd);
       setResult(data);
       projectsStore.loadProjects();
-      if (data.projectId && startNow) {
-        try { await apiPost(`/api/projects/${data.projectId}/run`, {}); } catch { /* ok */ }
-      }
       // Onda 4: com o switch ligado, a spec fica salva como rascunho e o DecomposeDialog abre
       // por cima (modo spec, source 'upload') em vez de navegar. Fechar sem salvar → /projects/:id
       // (a spec segue no INBOX com "Decompor" disponível na Bancada); salvar → /products/:id.
-      if (data.projectId && !startNow && canDecomposeOnUpload && decomposeOnUpload) {
+      if (data.projectId && canDecomposeOnUpload && decomposeOnUpload) {
         setDecomposeTarget({ id: data.projectId, title: projectTitle.trim() || "Spec enviada" });
         return;
       }
@@ -3521,7 +3585,7 @@ export default function SpecPage() {
               regenDisabled={editProjectId ? true : generating}
               projectId={editProjectId} isAdmin={authStore.isZentrizAdmin}
               validationReloadSignal={validationReloadSignal} gapCount={gapCount}
-              onPromote={editProjectId ? handlePromote : undefined}
+              onPromote={editProjectId ? handlePromote : undefined} promoteScope={promoteScope}
               onValidationChange={setGapCount} openGapsSignal={openGapsSignal}
               activeFilePath={activeFile?.path ?? null} onVersionRestored={handleVersionRestored}
               autonomy={autonomy} onStopAutonomy={handleStopAutonomy} openAutonomySignal={openAutonomySignal}
@@ -3637,48 +3701,31 @@ export default function SpecPage() {
     </>
   ) : null;
 
-  // ── Onda 3 (b): diálogo de confirmação por digitação para promover COM GAPs em aberto ──
-  // Promover uma spec com GAPs vai para a fábrica mesmo assim (decisão do usuário — qualquer
-  // papel pode), mas exige digitar a palavra de confirmação para evitar promoção acidental.
+  // ── Onda 3 (b) + B1/B2/B8: confirmação N2 (digitada) para promover COM GAPs em aberto ──────
+  // Promover com GAPs vai para a fábrica mesmo assim (decisão do usuário — qualquer papel pode),
+  // mas exige digitar a palavra. B1: o texto declara o ESCOPO REAL (spec vs. produto inteiro) em vez
+  // de dizer "se esta spec pertence a um produto…" e deixar o usuário adivinhar. Componente padrão
+  // (`ConfirmActionDialog`) para que as três telas confirmem do mesmo jeito.
   const promoteDialog = (
-    <Dialog open={promoteOpen} onClose={() => setPromoteOpen(false)} maxWidth="xs" fullWidth>
-      <DialogContent sx={{ p: 3 }}>
-        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
-          <RocketLaunchIcon sx={{ color: "warning.main" }} />
-          <Typography variant="h6" fontWeight={700}>Promover com GAPs em aberto?</Typography>
-        </Stack>
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          Esta spec ainda tem <strong>{gapCount} GAP(s)</strong> apontados pela validação. Você pode
-          promovê-la assim mesmo, mas a fábrica trabalhará com lacunas conhecidas — o resultado pode
-          exigir retrabalho. Recomendado resolver os GAPs na aba <strong>GAPs</strong> antes.
-        </Alert>
-        {/* Migração 097 — o que este botão faz (e o que NÃO faz). Sem isto, "Promover" continuava
-            lendo como "iniciar agora", que é justamente o que o Jean pediu para separar. */}
-        <Alert severity="info" sx={{ mb: 2 }}>
-          A promoção <strong>admite na fábrica</strong> e <strong>não inicia nada</strong>. Se esta
-          spec pertence a um produto, o produto <strong>inteiro</strong> entra — cada projeto na
-          onda certa, respeitando as dependências (banco antes de acesso a dados, antes de backend,
-          antes de frontend). O início é um clique separado.
-        </Alert>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Para confirmar, digite <strong>{PROMOTE_CONFIRM_WORD}</strong> abaixo.
-        </Typography>
-        <TextField
-          fullWidth size="small" autoFocus value={promoteConfirmText}
-          onChange={(e) => setPromoteConfirmText(e.target.value)}
-          placeholder={PROMOTE_CONFIRM_WORD}
-          onKeyDown={(e) => { if (e.key === "Enter" && promoteConfirmText.trim().toUpperCase() === PROMOTE_CONFIRM_WORD) confirmPromote(); }}
-        />
-        <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 2.5 }}>
-          <Button size="small" color="inherit" onClick={() => setPromoteOpen(false)}>Cancelar</Button>
-          <Button size="small" variant="contained" color="success" startIcon={<RocketLaunchIcon />}
-            disabled={promoteConfirmText.trim().toUpperCase() !== PROMOTE_CONFIRM_WORD}
-            onClick={confirmPromote}>
-            Promover à Fábrica
-          </Button>
-        </Stack>
-      </DialogContent>
-    </Dialog>
+    <ConfirmActionDialog
+      open={promoteOpen}
+      title={promoteNeedsWord ? "Promover com GAPs em aberto?" : promoteButtonLabel(promoteScope) + "?"}
+      message={
+        (promoteNeedsWord
+          ? `A validação aponta ${gapCount} GAP(s) nesta spec. A fábrica trabalhará com lacunas ` +
+            "conhecidas e o resultado pode exigir retrabalho — resolver na aba GAPs é o caminho normal.\n\n"
+          : "") +
+        promoteConfirmBody(promoteScope, { productName: ownerProduct?.name, siblings: promoteSiblings })
+      }
+      severity={promoteNeedsWord ? "warning" : "info"}
+      confirmLabel={promoteButtonLabel(promoteScope)}
+      confirmWord={promoteNeedsWord ? PROMOTE_CONFIRM_WORD : undefined}
+      busy={approving === "start"}
+      typed={promoteConfirmText}
+      onTypedChange={setPromoteConfirmText}
+      onConfirm={confirmPromote}
+      onClose={() => setPromoteOpen(false)}
+    />
   );
 
   // ── Modo edição: renderiza editor diretamente sem tabs ────────────────────
@@ -3815,13 +3862,16 @@ export default function SpecPage() {
                     onClick={handleSaveCurrent}>
                     {approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho"}
                   </Button>
-                  {/* Onda 3 (b): "Salvar e Iniciar" → "Promover à Fábrica". A spec só vai ao
-                      pipeline por aqui; com GAPs em aberto exige confirmação por digitação. */}
-                  <Button size="small" variant="contained" color="success" disabled={!!approving}
-                    startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon />}
-                    onClick={handlePromote}>
-                    {approving === "start" ? "Promovendo…" : "Promover à Fábrica"}
-                  </Button>
+                  {/* Onda 3 (b): "Salvar e Iniciar" → promoção. A spec só é admitida na fábrica por
+                      aqui; com GAPs em aberto exige confirmação por digitação. B1: o rótulo diz o
+                      escopo real (produto inteiro vs. só esta spec) — fonte única em factoryActions. */}
+                  <Tooltip title={promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct}>
+                    <Button size="small" variant="contained" color="success" disabled={!!approving}
+                      startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon />}
+                      onClick={handlePromote}>
+                      {approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope)}
+                    </Button>
+                  </Tooltip>
                 </Stack>
               </Stack>
               {/* Altura preenche a viewport (plataforma profissional): em ≥lg o corpo cresce
@@ -3956,7 +4006,7 @@ export default function SpecPage() {
                       onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                     <ProductLinkSection
                       products={products} productId={productId} onProductId={setProductId}
-                      onProductsReload={() => apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {})}
+                      onProductsReload={() => { void reloadProducts(); }}
                       allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                       linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                     />
@@ -4048,7 +4098,7 @@ export default function SpecPage() {
                         <SpecEditor
                           value={specMarkdown} onChange={setSpecMarkdown}
                           fullscreen={false} onToggleFullscreen={() => setEditorFullscreen(true)}
-                          onSave={() => handleSaveSpec(false)} approving={approving}
+                          onSave={() => { void handleSaveSpec(); }} approving={approving}
                           onRegen={() => setSpecMarkdown(null)}
                           regenDisabled={generating}
                         />
@@ -4111,7 +4161,7 @@ export default function SpecPage() {
                     onUiuxAddFigma={addFigmaFile} onUiuxRemoveFigma={removeFigmaFile} />
                   <ProductLinkSection
                     products={products} productId={productId} onProductId={setProductId}
-                    onProductsReload={() => apiGet<{ id: string; name: string; is_inbox?: boolean }[]>("/api/products?includeInbox=1").then(setProducts).catch(() => {})}
+                    onProductsReload={() => { void reloadProducts(); }}
                     allProjects={allProjects} linkProjectId={linkProjectId} onLinkProjectId={setLinkProjectId}
                     linkRelation={linkRelation} onLinkRelation={setLinkRelation}
                   />
@@ -4200,7 +4250,7 @@ export default function SpecPage() {
 
                   <Divider sx={{ my: 2 }} />
                   {/* Onda 3 (b): o upload APENAS salva a spec como rascunho. A ida à fábrica passou a
-                      ser exclusiva do botão "Promover à Fábrica" na edição da spec — não há mais
+                      ser exclusiva do botão de promoção na edição da spec — não há mais
                       "Salvar e iniciar pipeline" aqui. */}
                   <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
                     <Tooltip title={canDecomposeOnUpload && decomposeOnUpload
@@ -4212,7 +4262,7 @@ export default function SpecPage() {
                           startIcon={submitting ? <CircularProgress size={18} color="inherit" />
                             : canDecomposeOnUpload && decomposeOnUpload ? <CallSplitIcon /> : <span style={{ fontSize: "1rem" }}>💾</span>}
                           disabled={submitting || !files.length}
-                          onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent, false); }}>
+                          onClick={(e) => { e.preventDefault(); handleUploadSubmit(e as unknown as React.FormEvent); }}>
                           {submitting ? "Salvando…" : canDecomposeOnUpload && decomposeOnUpload ? "Salvar e decompor" : "Salvar rascunho"}
                         </Button>
                       </span>

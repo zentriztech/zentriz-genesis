@@ -8,8 +8,13 @@
 //
 // Migração 097 (requisito do Jean, 2026-09-06): "Promover à fábrica" entrega o produto TODO, na
 // ordem de interdependência decidida pelo arquiteto, e NÃO inicia nada — o produto fica
-// `lifecycle_status='promoted'`. Daí saem três ações: "Iniciar produto" (dispara só a onda
-// pendente mais baixa), "Ver ordem" (o plano por onda) e "Devolver" (volta tudo à Bancada).
+// `lifecycle_status='promoted'`. Daí saem duas ações: "Ver ordem e iniciar" (abre o plano por onda
+// e inicia SÓ a onda pendente mais baixa, de dentro dele) e "Devolver à Bancada".
+//
+// Padronização 2026-09-06 (revisão adversarial da Bancada): rótulos/tooltips/textos de resultado
+// vêm de `lib/factoryActions.ts`; promover e devolver passam por `ConfirmActionDialog` (N1); o
+// aviso de página tem severidade honesta. Ver
+// `project/docs/plans/BANCADA-REVISAO-ADVERSARIAL-PADRONIZACAO-2026-09-06.md`.
 //
 // Excluir: com confirmação por reescrita do ID. Sem projetos → apaga de verdade. Com
 // projetos → arquiva (oculta do portal), preservando tudo no banco (apagar é arriscado).
@@ -52,6 +57,11 @@ import {
   PromotionPlanDialog, describeStartResult,
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
 } from "@/components/PromotionPlanDialog";
+import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+// Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
+import {
+  FACTORY_LABEL, FACTORY_TOOLTIP, promoteConfirmBody, promotedProductNotice,
+} from "@/lib/factoryActions";
 
 interface ProductRow {
   id: string;
@@ -89,7 +99,14 @@ function ProductsPageInner() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // B3 (revisão adversarial): o aviso de página era SEMPRE verde — um início recusado por gate
+  // aparecia como sucesso. A severidade acompanha o resultado real (fonte: describeStartResult).
+  const [noticeSeverity, setNoticeSeverity] = useState<"success" | "warning">("success");
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Confirmação N1 (escada de guardas): promover produto inteiro e devolver à Bancada.
+  const [confirmAction, setConfirmAction] = useState<
+    { kind: "promote" | "unpromote"; product: ProductRow } | null
+  >(null);
 
   // Estado do diálogo do PLANO de promoção (ordem por onda) — migração 097.
   const [planOpen, setPlanOpen] = useState(false);
@@ -128,6 +145,11 @@ function ProductsPageInner() {
   // Antes esta ação promovia só as RAÍZES e as disparava na hora. Agora todos os projetos entram
   // (status `promoted`, inerte) na ordem que o agente arquiteto decidiu, e o início é um clique
   // separado — requisito do Jean (2026-09-06).
+  /** Aviso de página com severidade honesta (B3). */
+  const showNotice = (msg: string, severity: "success" | "warning" = "success") => {
+    setNoticeSeverity(severity); setNotice(msg);
+  };
+
   const promote = async (p: ProductRow) => {
     setBusyId(p.id);
     setPlanError(null); setStartedNotice(null);
@@ -136,10 +158,7 @@ function ProductsPageInner() {
         promotionId: string; promoted: string[]; waves: number; plan: PromotionPlanItem[];
         notes?: string | null; warnings?: string[]; edgesSource?: string | null; modelUsed?: string | null;
       }>(`/api/products/${p.id}/promote`, {});
-      setNotice(
-        `Produto promovido à fábrica: ${res.promoted.length} projeto(s) em ${res.waves} onda(s). ` +
-        "Nada foi iniciado — use “Iniciar produto” quando quiser começar.",
-      );
+      showNotice(promotedProductNotice(res.promoted.length, res.waves));
       setPlanProduct(p);
       setPlanMeta({
         promotionId: res.promotionId, notes: res.notes ?? null, warnings: res.warnings ?? [],
@@ -157,6 +176,7 @@ function ProductsPageInner() {
   };
 
   // Plano vigente (a UI mostra a ordem por onda, com o status de cada projeto).
+  // B6: este diálogo é TAMBÉM o caminho de início — nenhuma tela dispara `/start` às cegas.
   const openPlan = async (p: ProductRow) => {
     setBusyId(p.id);
     setPlanError(null); setStartedNotice(null);
@@ -185,7 +205,8 @@ function ProductsPageInner() {
       const { message: msg, severity } = describeStartResult(res);
       setStartedNotice(msg);
       setStartedSeverity(severity);
-      setNotice(msg);
+      // B3: o mesmo texto na página, com a MESMA severidade (antes era sempre verde).
+      showNotice(msg, severity);
       // Recarrega o plano para o diálogo refletir os status novos (e não prometer início já feito).
       try {
         const fresh = await apiGet<{ promotion: PromotionPlanMeta | null; items: PromotionPlanItem[] }>(
@@ -207,7 +228,7 @@ function ProductsPageInner() {
     setBusyId(p.id);
     try {
       const res = await apiPost<{ returned: string[] }>(`/api/products/${p.id}/unpromote`, {});
-      setNotice(`Produto devolvido à Bancada — ${res.returned.length} projeto(s) voltaram a rascunho.`);
+      showNotice(`Produto devolvido à Bancada — ${res.returned.length} projeto(s) voltaram a rascunho.`);
       setPlanOpen(false);
       await load();
     } catch (e) {
@@ -218,7 +239,7 @@ function ProductsPageInner() {
   };
 
   const copyId = async (id: string) => {
-    try { await navigator.clipboard.writeText(id); setNotice("ID copiado para a área de transferência."); }
+    try { await navigator.clipboard.writeText(id); showNotice("ID copiado para a área de transferência."); }
     catch { setError("Não foi possível copiar automaticamente — selecione e copie manualmente."); }
   };
 
@@ -243,7 +264,7 @@ function ProductsPageInner() {
         confirmId: confirmText.trim(),
         acknowledge: ack,
       });
-      setNotice(res.message ?? "Produto excluído.");
+      showNotice(res.message ?? "Produto excluído.");
       setDeleteTarget(null);
       setConfirmText("");
       setAck(false);
@@ -272,7 +293,7 @@ function ProductsPageInner() {
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
-      {notice && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</Alert>}
+      {notice && <Alert severity={noticeSeverity} sx={{ mb: 2, whiteSpace: "pre-line" }} onClose={() => setNotice(null)}>{notice}</Alert>}
 
       {loading ? (
         <LinearProgress sx={{ borderRadius: 1 }} />
@@ -357,52 +378,51 @@ function ProductsPageInner() {
                     Excluir virou ícone no topo do card (canto superior direito, junto ao título). */}
                 {p.lifecycle_status === "draft" && (
                   <Box sx={{ px: 2, pb: 2, pt: 0 }}>
-                    <Tooltip title="Envia TODOS os projetos do produto à fábrica, na ordem de interdependência decidida pelo arquiteto — sem iniciar nada.">
+                    <Tooltip title={FACTORY_TOOLTIP.promoteProduct}>
                       <span>
                         <Button
                           size="small" fullWidth variant="contained" color="success"
                           startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon sx={{ fontSize: "0.9rem" }} />}
                           disabled={busy}
-                          onClick={() => promote(p)}
+                          // N1: admitir N projetos (e pagar o planejador) passa por confirmação —
+                          // antes era 1 clique aqui e digitação obrigatória na Bancada (guarda invertida).
+                          onClick={() => setConfirmAction({ kind: "promote", product: p })}
                         >
-                          Promover à fábrica
+                          {FACTORY_LABEL.promoteProduct}
                         </Button>
                       </span>
                     </Tooltip>
                   </Box>
                 )}
                 {/* Migração 097 — produto PROMOVIDO e parado: início explícito, ver a ordem, ou voltar
-                    à Bancada. Sem estas ações, "promovido mas não iniciado" seria um beco sem saída. */}
+                    à Bancada. Sem estas ações, "promovido mas não iniciado" seria um beco sem saída.
+                    B6 (2026-09-06): o início deixou de ser cego. `/start` dispara SÓ a onda pendente
+                    mais baixa — então o botão abre a ORDEM e o início acontece lá dentro, com o
+                    número da onda no rótulo. Um clique a mais em troca de nunca iniciar às cegas. */}
                 {p.lifecycle_status === "promoted" && (
                   <Box sx={{ px: 2, pb: 2, pt: 0 }}>
-                    <Tooltip title="Inicia a onda 1 do plano. As ondas seguintes entram quando a anterior for aceita.">
+                    <Tooltip title={FACTORY_TOOLTIP.openPlanAndStart}>
                       <span>
                         <Button
                           size="small" fullWidth variant="contained" color="success"
                           startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon sx={{ fontSize: "0.95rem" }} />}
                           disabled={busy}
-                          onClick={() => startProduct(p)}
+                          onClick={() => openPlan(p)}
                         >
-                          Iniciar produto
+                          {FACTORY_LABEL.openPlanAndStart}
                         </Button>
                       </span>
                     </Tooltip>
-                    <Stack direction="row" spacing={0.5} sx={{ mt: 0.75 }}>
-                      <Button size="small" fullWidth variant="outlined" color="inherit" disabled={busy}
-                        startIcon={<AccountTreeOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
-                        onClick={() => openPlan(p)} sx={{ fontSize: "0.68rem" }}>
-                        Ver ordem
-                      </Button>
-                      <Tooltip title="Devolve o produto e seus projetos à Bancada (a spec volta a ser editável). Recusado se a fábrica já começou.">
-                        <span style={{ width: "100%" }}>
-                          <Button size="small" fullWidth variant="outlined" color="warning" disabled={busy}
-                            startIcon={<UndoRoundedIcon sx={{ fontSize: "0.9rem" }} />}
-                            onClick={() => unpromote(p)} sx={{ fontSize: "0.68rem" }}>
-                            Devolver
-                          </Button>
-                        </span>
-                      </Tooltip>
-                    </Stack>
+                    <Tooltip title={FACTORY_TOOLTIP.unpromote}>
+                      <span style={{ display: "block", width: "100%" }}>
+                        <Button size="small" fullWidth variant="outlined" color="warning" disabled={busy}
+                          sx={{ mt: 0.75, fontSize: "0.68rem" }}
+                          startIcon={<UndoRoundedIcon sx={{ fontSize: "0.9rem" }} />}
+                          onClick={() => setConfirmAction({ kind: "unpromote", product: p })}>
+                          {FACTORY_LABEL.unpromote}
+                        </Button>
+                      </span>
+                    </Tooltip>
                   </Box>
                 )}
                 {/* Produto já em fábrica: a ordem gravada continua consultável (leitura). */}
@@ -435,6 +455,31 @@ function ProductsPageInner() {
         startError={planError}
         startedNotice={startedNotice}
         startedSeverity={startedSeverity}
+      />
+
+      {/* Confirmação N1 padronizada (mesma em /specs e na Bancada): promover o produto inteiro e
+          devolver à Bancada. Não repete texto — o corpo vem de `lib/factoryActions.ts`. */}
+      <ConfirmActionDialog
+        open={!!confirmAction}
+        title={confirmAction?.kind === "unpromote" ? FACTORY_LABEL.unpromote : FACTORY_LABEL.promoteProduct}
+        message={
+          confirmAction?.kind === "unpromote"
+            ? FACTORY_TOOLTIP.unpromote
+            : promoteConfirmBody("product", {
+                productName: confirmAction?.product.name ?? null,
+                siblings: confirmAction?.product.project_count ?? null,
+              })
+        }
+        confirmLabel={confirmAction?.kind === "unpromote" ? FACTORY_LABEL.unpromote : FACTORY_LABEL.promoteProduct}
+        busy={!!confirmAction && busyId === confirmAction.product.id}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={() => {
+          const act = confirmAction;
+          setConfirmAction(null);
+          if (!act) return;
+          if (act.kind === "promote") void promote(act.product);
+          else void unpromote(act.product);
+        }}
       />
 
       {/* Diálogo de exclusão — reescrever o ID + (se houver projetos) marcar a caixa. */}
