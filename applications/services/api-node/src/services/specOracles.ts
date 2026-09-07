@@ -515,9 +515,13 @@ export function oracleFactBlock(
    */
   fileChars?: number,
   /**
-   * GAP-28 — orçamento que SOBROU no passe. Ausente ⇒ o orçamento cheio (`ORACLE_GROWTH_BUDGET`).
-   * O número anunciado tem de ser o MESMO que `consolidationVeto` vai julgar; quem sabe quanto o passe
-   * já gastou é o laço, então ele informa.
+   * GAP-28 — margem que SOBROU. Ausente ⇒ o orçamento cheio (`ORACLE_GROWTH_BUDGET`).
+   * O número anunciado tem de ser o MESMO que `consolidationVeto` vai julgar; quem sabe quanto já foi
+   * gasto é o laço, então ele informa.
+   *
+   * GAP-33: o gasto é contado no LAÇO inteiro (`ORÇAMENTO × passes − tudo o que já foi escrito`), não
+   * dentro de um passe. Antes, quem chegava depois na fila encontrava margem zero e tinha a rodada
+   * descartada por +143 caracteres numa spec de ~950 mil.
    */
   budget?: number,
 ): string {

@@ -61,7 +61,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
-  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastRejectedAttempt,
+  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastRejectedAttempt, runGrowthUsed, growthAllowance,
   type AutonomyStatus,
 } from "./specAutonomy.js";
 
@@ -851,6 +851,56 @@ describe("passGrowthUsed (GAP-28)", () => {
   it("passe sem nenhuma rodada aplicada não consumiu nada", () => {
     expect(passGrowthUsed({ passes: 3, rounds: [R({ pass: 3, applied: false, deltaChars: 5_000 })] as never })).toBe(0);
     expect(passGrowthUsed({ passes: 0, rounds: [] as never })).toBe(0);
+  });
+});
+
+// ── 9. GAP-33 — o orçamento é do LAÇO; quem chega depois na fila não paga a conta ─
+//
+// Medido no passe 4 da run `d7acccb8`: 3 de 6 rodadas descartadas com +2.873, +448 e +143 chars,
+// porque os primeiros da fila gastaram os 2.000 do passe. Descartar Opus 5 para poupar 143
+// caracteres numa spec de ~950 mil não protege nada.
+
+describe("runGrowthUsed + growthAllowance (GAP-33)", () => {
+  it("soma as rodadas aplicadas de TODOS os passes", () => {
+    const rounds = [
+      R({ round: 1, pass: 0, applied: true, deltaChars: 1_420 }),
+      R({ round: 2, pass: 1, applied: true, deltaChars: 188 }),
+      R({ round: 3, pass: 2, applied: false, deltaChars: 9_999 }), // vetada: não saiu do disco
+      R({ round: 4, pass: 3, applied: true, deltaChars: 1_671 }),
+    ] as never;
+    expect(runGrowthUsed({ rounds })).toBe(3_279);
+  });
+
+  it("o passe 4 da run medida deixa de estrangular quem chega depois", () => {
+    // Fatos da run `d7acccb8`: gasto acumulado 4.627 chars ao chegar na rodada 26.
+    const rounds = [
+      R({ round: 1, pass: 0, applied: true, deltaChars: 1_420 }),
+      R({ round: 2, pass: 1, applied: true, deltaChars: 188 }),
+      R({ round: 3, pass: 2, applied: true, deltaChars: 1_348 }),
+      R({ round: 4, pass: 3, applied: true, deltaChars: 1_671 }),
+    ] as never;
+    // Antes (por passe): 2.000 − 1.671 = 329 ⇒ os +448 da rodada 26 morriam.
+    expect(passGrowthUsed({ passes: 3, rounds })).toBe(1_671);
+    // Agora (no laço): 2.000 × 4 − 4.627 = 3.373 ⇒ +448 e +143 passam.
+    expect(growthAllowance({ passes: 3, rounds }, 2_000)).toBe(3_373);
+  });
+
+  it("estourar num passe APERTA o seguinte — nada é de graça", () => {
+    const rounds = [R({ round: 1, pass: 0, applied: true, deltaChars: 5_000 })] as never;
+    // Passe 1 gastou 5.000 de 2.000. No passe 2 o teto acumulado é 4.000 ⇒ margem ZERO, não negativa.
+    expect(growthAllowance({ passes: 1, rounds }, 2_000)).toBe(0);
+    // Só no passe 4 o laço volta a ter margem (2.000 × 4 = 8.000 − 5.000).
+    expect(growthAllowance({ passes: 3, rounds }, 2_000)).toBe(3_000);
+  });
+
+  it("encolher gera crédito que ATRAVESSA passes (o GAP-28 na escala certa)", () => {
+    const rounds = [R({ round: 1, pass: 0, applied: true, deltaChars: -4_332 })] as never;
+    expect(growthAllowance({ passes: 1, rounds }, 2_000)).toBe(8_332); // 4.000 + 4.332 devolvidos
+  });
+
+  it("laço sem rodada nenhuma tem exatamente o orçamento do primeiro passe", () => {
+    expect(growthAllowance({ passes: 0, rounds: [] as never }, 2_000)).toBe(2_000);
+    expect(runGrowthUsed({ rounds: [] as never })).toBe(0);
   });
 });
 

@@ -817,6 +817,31 @@ export function passGrowthUsed(run: Pick<AutonomyRun, "rounds" | "passes">): num
 }
 
 /**
+ * GAP-33 — quanto a RUN INTEIRA já cresceu (todas as rodadas escritas, de todos os passes).
+ *
+ * MEDIDO na run `d7acccb8`, passe 4: **3 de 6 rodadas descartadas** com deltas de +2.873, +448 e
+ * +143 chars. As duas últimas são absurdas de proporção — o laço jogou fora uma chamada de Opus 5
+ * inteira para poupar 143 caracteres numa spec de ~950 mil. A causa é a granularidade: o orçamento
+ * do passe é gasto por ORDEM DE FILA, e quem chega depois encontra margem zero, mesmo entregando
+ * uma correção minúscula. É a mesma família dos GAP-26/GAP-28 (destruir trabalho pago por causa de
+ * um limite local), um nível acima.
+ *
+ * O objetivo é "a spec não INFLAR", e isso é propriedade do LAÇO, não de um passe: nada justifica
+ * ser mais rígido no passe 4 só porque o passe 1 gastou primeiro. Então a conta passa a ser
+ * cumulativa — o laço tem `ORÇAMENTO × (passes já feitos + 1)` e desconta tudo o que já escreveu.
+ * Estourar num passe aperta o seguinte (nada é de graça); encolher gera crédito que atravessa
+ * passes, que é exatamente o "quem encolhe financia quem cresce" do GAP-28 levado à escala certa.
+ *
+ * Medido no mesmo passe 4: sob a conta cumulativa a margem seria 3.373 em vez de 329 ⇒ as três
+ * rodadas descartadas teriam sido aplicadas, com a spec crescendo 0,5% no laço todo.
+ */
+export function runGrowthUsed(run: Pick<AutonomyRun, "rounds">): number {
+  return run.rounds
+    .filter((r) => r.applied === true)
+    .reduce((sum, r) => sum + (typeof r.deltaChars === "number" ? r.deltaChars : 0), 0);
+}
+
+/**
  * GAP-28 — margem que resta ao passe. Nunca negativa: se o passe já estourou, a margem é ZERO (o
  * arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
  */
@@ -853,10 +878,21 @@ export function lastRejectedAttempt(
   return null;
 }
 
+/**
+ * GAP-28/GAP-33 — margem de crescimento que resta ao LAÇO. Nunca negativa: se já estourou, a margem
+ * é ZERO (o arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
+ *
+ * A conta é cumulativa (GAP-33): `ORÇAMENTO × (passes concluídos + 1) − tudo o que a run já
+ * escreveu`. Relê a run FRESCA do banco porque a rodada anterior acabou de gravar o `deltaChars`.
+ */
+export function growthAllowance(run: Pick<AutonomyRun, "rounds" | "passes">, budgetPerPass: number): number {
+  return Math.max(0, budgetPerPass * (run.passes + 1) - runGrowthUsed(run));
+}
+
 async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
   const { ORACLE_GROWTH_BUDGET } = await import("./specOracles.js");
   const fresh = (await getAutonomyRun(db, run.id)) ?? run;
-  return Math.max(0, ORACLE_GROWTH_BUDGET - passGrowthUsed(fresh));
+  return growthAllowance(fresh, ORACLE_GROWTH_BUDGET);
 }
 
 /**
@@ -940,10 +976,17 @@ async function ensureOracles(
  * mesma rodada também resolve 2 a 6 GAPs daquele arquivo — e o descarte total é o mesmo anti-padrão que
  * o GAP-26 acabou de matar um nível abaixo (jogar fora o trabalho bom por causa de um limite local).
  *
- * O objetivo verdadeiro nunca foi "nenhum arquivo cresce": é **a spec não inflar**. Isso é propriedade
- * do PASSE. Então o orçamento passa a ser um só para o passe inteiro, e quem consolidou devolve margem
- * para quem precisa acrescentar. O número que sobra é o mesmo que o prompt ANUNCIA (GAP-25) — o laço
- * calcula e informa, o veto julga contra ele.
+ * O objetivo verdadeiro nunca foi "nenhum arquivo cresce": é **a spec não inflar**. Então o orçamento
+ * passa a ser um só, e quem consolidou devolve margem para quem precisa acrescentar. O número que
+ * sobra é o mesmo que o prompt ANUNCIA (GAP-25) — o laço calcula e informa, o veto julga contra ele.
+ *
+ * ## GAP-33 (2026-09-07) — e o orçamento é do LAÇO, não de um passe
+ *
+ * Com o orçamento fechado dentro do passe, ele é gasto por ORDEM DE FILA: medido no passe 4 da run
+ * `d7acccb8`, **3 de 6 rodadas descartadas** com deltas de +2.873, +448 e **+143** chars. Descartar
+ * uma chamada de Opus 5 para poupar 143 caracteres numa spec de ~950 mil não protege nada — é o
+ * mesmo desperdício que o GAP-28 veio matar, reaparecendo por granularidade. Nada justifica ser mais
+ * rígido no passe 4 porque o passe 1 gastou primeiro: "não inflar" é propriedade do LAÇO.
  */
 async function consolidationVeto(
   db: Db, projectId: string, target: string, before: string, after: string, budget: number,
@@ -960,7 +1003,7 @@ async function consolidationVeto(
   if (delta > budget) {
     return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida era`
       + ` REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
-      + ` e a margem que restava nesta revisão da spec era ${budget}. Nada foi escrito.`;
+      + ` e a margem de crescimento que restava ao laço era ${budget}. Nada foi escrito.`;
   }
   // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
   // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
