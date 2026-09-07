@@ -57,6 +57,8 @@ vi.mock("./findingTriage.js", () => ({
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
   // GAP-41: aqui o diff não é o objeto de teste (tem suíte própria) — vazio = comportamento legado.
   gapDeltaSinceLastRun: vi.fn(async () => ({ closed: [], opened: [], openedOnNewSurface: 0 })),
+  // GAP-76: idem para o nível comparável — `null` = não foi possível medir (comportamento legado).
+  comparableTallySinceLastRun: vi.fn(async () => null),
 }));
 
 // `specGapScope` real alcança `routes/specs.js` → `db/client.js` (pool de verdade). Aqui ele é

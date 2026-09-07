@@ -3,6 +3,7 @@ import {
   normalizeText, normalizeCategory, findingFingerprint, findingTitleFingerprint, jaccard, isTriageable, matchTriage,
   enrichFindings, countFindings, deriveResolved, checkTriagePolicy, applyTriage, registerRecurrences, type TriageRow,
   surveyFindings, judgedFilesOf, projectFindingsState, unionFindingsByCoverage, gapDelta, gapDeltaSinceLastRun,
+  comparableTally, comparableTallySinceLastRun,
 } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -532,5 +533,76 @@ describe("findingTriage — GAP-41: diff finding-a-finding entre validações", 
     const d = await gapDeltaSinceLastRun(db as never, "p1", ["a.md"]);
     expect(db.query).toHaveBeenCalledTimes(1);
     expect(d.closed.map((f) => f.title)).toEqual(["GAP de A"]);
+  });
+});
+
+describe("findingTriage — GAP-76: nível COMPARÁVEL (a rotação de cobertura mentia)", () => {
+  const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+  const V = (id: string, findings: ValidationFinding[], coverage: unknown) => ({ id, created_at: id, findings, coverage });
+  /** N GAPs distintos no mesmo arquivo (âncoras estáveis) — a forma dos dados reais de prod. */
+  const gaps = (file: string, n: number, from = 1) =>
+    Array.from({ length: n }, (_, k) => F({ file, anchor: `§${from + k}`, title: `defeito ${from + k} de ${file}` }));
+
+  it("🔴 REPROVA o agregado: 23 → 20 por rotação de cobertura é 20 → 20, as MESMAS âncoras", () => {
+    // Caso real medido em prod (NVX LastMile, 2026-09-07 15:23 → 15:44): `visao-escopo.md` foi julgado
+    // por INTEIRO na primeira e só por sumário na segunda. Os 3 GAPs dele não tinham COMO aparecer.
+    const comuns = [...gaps("modelo-dados.md", 12), ...gaps("privacidade-lgpd.md", 8)];
+    const antes = V("r1", [...comuns, ...gaps("visao-escopo.md", 3)], cov("modelo-dados.md", "privacidade-lgpd.md", "visao-escopo.md"));
+    const agora = V("r2", comuns, cov("modelo-dados.md", "privacidade-lgpd.md", "nvx-lastmile-backend.md"));
+    expect(antes.findings.length).toBe(23);
+    expect(agora.findings.length).toBe(20); // o agregado "caiu" — e nada foi corrigido
+    const c = comparableTally(antes, agora, [])!;
+    expect(c.files).toEqual(["modelo-dados.md", "privacidade-lgpd.md"]);
+    expect({ before: c.before, now: c.now, same: c.same }).toEqual({ before: 20, now: 20, same: 20 });
+  });
+
+  it("queda REAL no subconjunto comum aparece como queda (o número não é cego para progresso)", () => {
+    const antes = V("r1", gaps("modelo-dados.md", 12), cov("modelo-dados.md"));
+    const agora = V("r2", gaps("modelo-dados.md", 11), cov("modelo-dados.md"));
+    const c = comparableTally(antes, agora, [])!;
+    expect({ before: c.before, now: c.now, same: c.same }).toEqual({ before: 12, now: 11, same: 11 });
+  });
+
+  it("sem arquivo em comum: `files` vazio e só o que não depende de rotação conta", () => {
+    // `stage_a` é determinístico e lê a spec inteira em toda run; finding global (sem `file`) idem.
+    const sa = F({ file: "a.md", source: "stage_a", anchor: "file_too_large" });
+    const global = F({ file: "", anchor: "spec_global" });
+    const antes = V("r1", [...gaps("a.md", 5), sa, global], cov("a.md"));
+    const agora = V("r2", [...gaps("b.md", 9), sa, global], cov("b.md"));
+    const c = comparableTally(antes, agora, [])!;
+    expect(c.files).toEqual([]);
+    expect({ before: c.before, now: c.now, same: c.same }).toEqual({ before: 2, now: 2, same: 2 });
+  });
+
+  it("triagem viva e `info` não são defeito — mesma régua do `tallyGaps`", () => {
+    const g = F({ file: "a.md", anchor: "§1", title: "risco aceito" });
+    const info = F({ file: "a.md", anchor: "§2", severity: "info" });
+    const runs = [V("r1", [g, info], cov("a.md")), V("r2", [g, info], cov("a.md"))] as const;
+    expect(comparableTally(runs[0], runs[1], [])!.before).toBe(1); // o `info` já ficou fora
+    const t = T({ fingerprint: findingFingerprint(g), state: "ignored" });
+    expect(comparableTally(runs[0], runs[1], [t])!.before).toBe(0);
+  });
+
+  it("cobertura ausente em qualquer dos dois lados ⇒ null (não invento cobertura que não medi)", () => {
+    const antes = V("r1", gaps("a.md", 3), undefined);
+    const agora = V("r2", gaps("a.md", 3), cov("a.md"));
+    expect(comparableTally(antes, agora, [])).toBeNull();
+    expect(comparableTally(agora, antes, [])).toBeNull();
+  });
+
+  it("comparableTallySinceLastRun localiza a run ATUAL por id — não assume que é a mais recente", async () => {
+    const db = { query: vi.fn(async (q: string) => {
+      if (q.includes("spec_finding_triage")) return { rows: [] };
+      expect(q).toContain("status IN ('passed','failed')");
+      return { rows: [
+        // Uma validação mais nova entrou no meio: a atual do laço é a do MEIO.
+        { id: "r3", created_at: "3", findings: gaps("a.md", 99), stage_b_coverage: cov("a.md") },
+        { id: "r2", created_at: "2", findings: gaps("a.md", 4), stage_b_coverage: cov("a.md") },
+        { id: "r1", created_at: "1", findings: gaps("a.md", 6), stage_b_coverage: cov("a.md") },
+      ] };
+    }) };
+    const c = await comparableTallySinceLastRun(db as never, "p1", "r2");
+    expect({ before: c!.before, now: c!.now }).toEqual({ before: 6, now: 4 });
+    expect(await comparableTallySinceLastRun(db as never, "p1", "desconhecida")).toBeNull();
   });
 });

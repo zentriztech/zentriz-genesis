@@ -254,11 +254,22 @@ function isEvidenceFor(run: RunForSurvey, f: ValidationFinding, covTracked: bool
   if (!judged) return false; // run sem cobertura num projeto que já rastreia: não prova ausência
   const file = (f.file ?? "").toLowerCase();
   if (!file) return true; // finding global do estágio B: qualquer run que rodou o estágio serve
-  if (judged.has(file)) return true;
-  // O validador devolve `file` às vezes como path canônico, às vezes só o nome. Casar por basename
-  // só quando NÃO há ambiguidade: com `backend/README.md` e `web/README.md` julgados, um não fala
-  // pelo outro (isso resolveria GAP alheio — a mentira que este GAP-20 existe para matar).
-  const b = baseName(file);
+  return fileJudgedIn(file, judged);
+}
+
+/**
+ * Este arquivo foi julgado por INTEIRO no conjunto dado? Régua ÚNICA (lição do GAP-72: quem MEDE e
+ * quem DECIDE não podem divergir) — usada pelo GAP-20 (`isEvidenceFor`) e pelo GAP-76
+ * (`comparableTally`).
+ *
+ * O validador devolve `file` às vezes como path canônico, às vezes só o nome. Casar por basename só
+ * quando NÃO há ambiguidade: com `backend/README.md` e `web/README.md` julgados, um não fala pelo
+ * outro (isso resolveria GAP alheio — a mentira que o GAP-20 existe para matar).
+ */
+export function fileJudgedIn(file: string, judged: Set<string>): boolean {
+  const f = file.toLowerCase();
+  if (judged.has(f)) return true;
+  const b = baseName(f);
   let hits = 0;
   for (const p of judged) if (baseName(p) === b) hits++;
   return hits === 1;
@@ -446,6 +457,80 @@ export async function gapDeltaSinceLastRun(db: Db, projectId: string, currentFil
     rows.map((r) => ({ id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage, findings: Array.isArray(r.findings) ? r.findings : [] })),
     files,
   );
+}
+
+/**
+ * 🔴 GAP-76 — o NÍVEL de GAPs no subconjunto que as duas validações julgaram por inteiro.
+ *
+ * O `gapDelta` (GAP-41) responde "o que saiu e o que entrou"; o que faltava era um NÍVEL comparável.
+ * Sem ele, o único número de nível que o laço tinha era o agregado do projeto — e o agregado sobe e
+ * desce sozinho por **rotação de cobertura**, porque nenhuma validação isolada julga os 12 arquivos
+ * do NVX LastMile por inteiro (950.965 chars contra um teto de 400.000).
+ *
+ * Medido em prod 2026-09-07: `192b8dc4` (15:23) → `9edcb54e` (15:44) caiu de **23 para 20** findings e
+ * eu quase reportei isso como progresso. `visao-escopo.md` foi julgado `full` na primeira e só por
+ * sumário na segunda: as 3 constatações dele não tinham como aparecer. No subconjunto julgado inteiro
+ * nas DUAS é **20 → 20, as mesmas 20 âncoras, zero fechado** — apesar de 22 edições aplicadas.
+ *
+ * Contrato: `null` quando alguma das duas runs não tem cobertura registrada (não invento cobertura que
+ * não medi). `files` VAZIO é resultado legítimo e significa "nenhum arquivo em comum" — nesse caso os
+ * números valem apenas para os findings que não dependem de rotação (`stage_a`, que lê a spec inteira
+ * em toda run, e os globais sem arquivo), e o chamador tem de dizer isso em voz alta.
+ */
+export interface ComparableTally {
+  /** Arquivos que AS DUAS validações julgaram por INTEIRO — a base declarada da comparação. */
+  files: string[];
+  /** GAPs importantes (🔴/🟡, sem triagem viva) comparáveis: na validação anterior e nesta. */
+  before: number;
+  now: number;
+  /** Quantos são o MESMO fingerprint nas duas — é o que permite dizer "as mesmas âncoras, zero fechado". */
+  same: number;
+}
+
+export function comparableTally(prev: RunForSurvey, curr: RunForSurvey, triages: TriageRow[]): ComparableTally | null {
+  const jPrev = judgedFilesOf(prev.coverage);
+  const jCurr = judgedFilesOf(curr.coverage);
+  if (!jPrev || !jCurr) return null;
+  const judged = new Set([...jCurr].filter((p) => jPrev.has(p)));
+  const pick = (r: RunForSurvey) => {
+    const out = new Map<string, ValidationFinding>();
+    for (const f of enrichFindings(Array.isArray(r.findings) ? r.findings : [], triages)) {
+      if (f.triage) continue; // risco aceito/falso positivo não é defeito (mesma régua do `tallyGaps`)
+      if (f.severity !== "blocker" && f.severity !== "warning") continue;
+      const file = String(f.file ?? "");
+      // `stage_a` é determinístico e lê a spec inteira em toda run; finding sem arquivo não pertence a
+      // nenhuma superfície rotativa. Os dois são comparáveis sempre. O resto só vale se AS DUAS olharam.
+      if (f.source !== "stage_a" && file && !fileJudgedIn(file, judged)) continue;
+      out.set(f.fingerprint, f);
+    }
+    return out;
+  };
+  const b = pick(prev), a = pick(curr);
+  let same = 0;
+  for (const k of a.keys()) if (b.has(k)) same++;
+  return { files: [...judged].sort(), before: b.size, now: a.size, same };
+}
+
+/** `comparableTally` sobre a validação dada e a imediatamente anterior do mesmo projeto. */
+export async function comparableTallySinceLastRun(
+  db: Db, projectId: string, currentRunId: string,
+): Promise<ComparableTally | null> {
+  const rows = (await db.query(
+    `SELECT id, created_at, findings, stage_b_coverage FROM spec_validation_runs
+      WHERE project_id = $1 AND status IN ('passed','failed')
+      ORDER BY created_at DESC LIMIT 3`,
+    [projectId],
+  )).rows as unknown as Array<{ id: string; created_at: string; findings: ValidationFinding[]; stage_b_coverage?: unknown }>;
+  // A run atual pode não ser a mais recente (outra validação pode ter entrado no meio) — localizo por
+  // id e comparo com a vizinha mais antiga. Sem a atual na janela, não afirmo nada.
+  const i = rows.findIndex((r) => r.id === currentRunId);
+  if (i < 0 || !rows[i + 1]) return null;
+  const triages = await loadLiveTriages(db, projectId);
+  const as = (r: (typeof rows)[number]): RunForSurvey => ({
+    id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage,
+    findings: Array.isArray(r.findings) ? r.findings : [],
+  });
+  return comparableTally(as(rows[i + 1]), as(rows[i]), triages);
 }
 
 export async function projectFindingsState(db: Db, projectId: string, opts: { currentFiles?: string[] | null } = {}): Promise<ProjectFindingsState> {
