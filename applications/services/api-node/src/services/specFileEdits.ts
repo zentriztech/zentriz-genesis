@@ -57,6 +57,12 @@
 export interface SpecEditBlock {
   search: string;
   replace: string;
+  /**
+   * GAP-65 — quantas linhas separadoras (`=======`) o bloco trazia. Só serve à MENSAGEM de erro:
+   * com 2+, "âncora não encontrada" quase sempre significa que o agente contou o separador errado,
+   * e dizer isso é o que transforma a recusa em lição.
+   */
+  separators?: number;
 }
 
 export interface SpecEditParseResult {
@@ -79,59 +85,77 @@ export function looksLikeEdits(text: string): boolean {
   return text.replace(/\r\n/g, "\n").split("\n").some((l) => RE_START.test(l.trim()));
 }
 
+/** `true` se a linha é um dos três marcadores do envelope de edição. */
+function isMarkerLine(trimmed: string): boolean {
+  return RE_START.test(trimmed) || RE_MID.test(trimmed) || RE_END.test(trimmed);
+}
+
 /**
  * Parser de blocos search/replace.
  *
  * Deliberadamente linha-a-linha (não regex global): a resposta pode terminar NO MEIO de um bloco
  * (truncamento) e um regex `[\s\S]*?` casaria pares errados atravessando blocos. Aqui um bloco só
  * existe quando os três marcadores apareceram na ordem certa.
+ *
+ * ## GAP-65 (2026-09-07) — o separador é o ÚLTIMO `=======` do bloco, não o primeiro
+ *
+ * O GAP-9 fechou a porta de ENTRADA da corrupção (marcador no lado REPLACE nunca é gravado), mas
+ * deixou a de SAÍDA fechada também: para apagar uma linha `=======` que já está no arquivo, o agente
+ * precisa copiá-la dentro do SEARCH — e o parser antigo lia essa cópia como o separador do bloco,
+ * transformando a edição CORRETA em `NO_BLOCKS`. Medido em prod: `modelo-dados.md` (NVX LastMile)
+ * carrega 4 marcadores e linhas duplicadas desde antes do GAP-9; o juiz reabre o blocker em toda
+ * validação e o CTO, sem conseguir remover, passou a escrever prosa declarando o marcador "resíduo
+ * nulo". Um blocker impossível de fechar impede a contagem de GAPs de cair, para sempre.
+ *
+ * Dividir no ÚLTIMO marcador resolve os dois lados de uma vez, e a segurança é ESTRUTURAL, não uma
+ * tolerância: o lado REPLACE passa a ser, por construção, o texto depois do último marcador — logo
+ * nunca contém marcador — e um SEARCH com `=======` só casa se o arquivo REALMENTE tiver aquela
+ * linha. O formato ganha o poder de REMOVER corrupção sem ganhar o de CRIAR.
  */
 export function parseSpecEditBlocks(raw: string): SpecEditParseResult {
   const lines = raw.replace(/\r\n/g, "\n").split("\n");
   const blocks: SpecEditBlock[] = [];
   const prose: string[] = [];
   let dropped = 0;
-  let state: "idle" | "search" | "replace" = "idle";
-  let search: string[] = [];
-  let replace: string[] = [];
+  let inBlock = false;
+  let body: string[] = [];
 
+  /** Fecha um bloco cujo `>>>>>>> REPLACE` chegou: divide no último separador ou descarta. */
+  const closeComplete = () => {
+    let mid = -1;
+    let separators = 0;
+    for (let i = 0; i < body.length; i += 1) {
+      if (RE_MID.test(body[i].trim())) {
+        mid = i;
+        separators += 1;
+      }
+    }
+    // Bloco sem separador nenhum é malformado — não há como saber o que substitui o quê.
+    if (mid === -1) dropped += 1;
+    else blocks.push({ search: body.slice(0, mid).join("\n"), replace: body.slice(mid + 1).join("\n"), separators });
+    inBlock = false;
+    body = [];
+  };
+
+  /** Bloco aberto que nunca fechou (resposta cortada, ou novo SEARCH antes do fim do anterior). */
   const closeIncomplete = () => {
-    if (state !== "idle") dropped += 1;
-    state = "idle";
-    search = [];
-    replace = [];
+    if (inBlock) dropped += 1;
+    inBlock = false;
+    body = [];
   };
 
   for (const line of lines) {
     const t = line.trim();
     if (RE_START.test(t)) {
-      // Um novo SEARCH antes de fechar o anterior = bloco anterior corrompido/cortado.
       closeIncomplete();
-      state = "search";
+      inBlock = true;
       continue;
     }
-    if (state === "search" && RE_MID.test(t)) {
-      state = "replace";
+    if (inBlock && RE_END.test(t)) {
+      closeComplete();
       continue;
     }
-    if (state === "replace" && RE_END.test(t)) {
-      blocks.push({ search: search.join("\n"), replace: replace.join("\n") });
-      state = "idle";
-      search = [];
-      replace = [];
-      continue;
-    }
-    // GAP-9: um SEGUNDO separador dentro do lado REPLACE = bloco malformado. Antes esta linha era
-    // engolida como CONTEÚDO e o `=======` ia para o disco — foi assim que `modelo-dados.md` ganhou
-    // um marcador de conflito no meio de uma tabela (e a linha substituída ficou DUPLICADA), com o
-    // log dizendo "16 aplicadas, 0 descartadas". Descartar só ESTE bloco preserva a rodada: os
-    // demais continuam válidos, exatamente como no truncamento.
-    if (state === "replace" && RE_MID.test(t)) {
-      closeIncomplete();
-      continue;
-    }
-    if (state === "search") search.push(line);
-    else if (state === "replace") replace.push(line);
+    if (inBlock) body.push(line);
     else if (t) prose.push(line);
   }
   closeIncomplete();
@@ -244,8 +268,7 @@ export function applySpecEditBlocks(
     // no arquivo. Gravar `=======` numa spec normativa é corrupção — o validador a lê como conflito de
     // merge não resolvido, e com razão. O parser já descarta o bloco malformado; isto garante a
     // invariante para qualquer chamador, inclusive um bloco montado à mão em teste.
-    const badLine = b.replace.replace(/\r\n/g, "\n").split("\n")
-      .find((l) => { const s = l.trim(); return RE_START.test(s) || RE_MID.test(s) || RE_END.test(s); });
+    const badLine = b.replace.replace(/\r\n/g, "\n").split("\n").find((l) => isMarkerLine(l.trim()));
     if (badLine !== undefined) {
       skip({
         code: "MARKER_IN_REPLACE", index: i,
@@ -267,9 +290,15 @@ export function applySpecEditBlocks(
       }
     }
     if (hits === 0) {
+      // GAP-65: com 2+ separadores, o motivo mais provável é o agente ter contado o separador errado.
+      // Dizer QUAL é a regra é o que permite ele reemitir certo na rodada seguinte.
+      const sep = (b.separators ?? 1) > 1
+        ? ` Este bloco trazia ${b.separators} linhas separadoras (\`=======\`): a divisão usa a ÚLTIMA delas,`
+          + " e todas as anteriores contam como texto do arquivo dentro do SEARCH."
+        : "";
       skip({
         code: "SEARCH_NOT_FOUND", index: i,
-        message: `Edição ${i + 1}: o trecho a substituir não existe no arquivo — âncora: "${label(search)}".`,
+        message: `Edição ${i + 1}: o trecho a substituir não existe no arquivo — âncora: "${label(search)}".${sep}`,
       });
       continue;
     }

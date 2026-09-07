@@ -667,7 +667,13 @@ const GAP_FILE_EDITS_SYSTEM = [
   "4) NÃO renomeie nem reordene seções existentes sem necessidade, e NÃO remova requisito válido.",
   "5) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
   "6) Se um GAP claramente não é deste arquivo, não invente edição para ele.",
-  DIVERGENCE_RULE("7"),
+  // GAP-65: sem esta regra o agente não tem COMO apagar um `=======` residual (a linha que ele
+  // copiaria no SEARCH era lida como o separador do bloco) e o blocker de corrupção nunca fecha.
+  "7) Se o trecho a corrigir contém uma linha formada só por `=`, `<` ou `>` (resíduo de conflito de",
+  "   merge no arquivo), COPIE essa linha normalmente dentro do SEARCH e omita-a no REPLACE: assim ela",
+  "   é apagada. O separador do bloco é sempre o ÚLTIMO `=======` do bloco, então marcadores que vêm",
+  "   antes dele são lidos como texto do arquivo. Nunca escreva um marcador no lado REPLACE.",
+  DIVERGENCE_RULE("8"),
   "Fora dos blocos, escreva no máximo uma linha final de observação. Nada de preâmbulo.",
 ].join(" ");
 

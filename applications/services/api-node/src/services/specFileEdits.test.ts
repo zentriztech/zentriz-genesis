@@ -175,7 +175,7 @@ describe("applySpecEditResponse (o caminho que o job usa)", () => {
    * convenções e com a linha substituída DUPLICADA, enquanto o log dizia "16 aplicadas, 0
    * descartadas". Causa: um segundo separador dentro do lado REPLACE era engolido como CONTEÚDO.
    */
-  it("segundo separador dentro do REPLACE: bloco DESCARTADO, nada de `=======` no arquivo", () => {
+  it("segundo separador dentro do REPLACE: bloco RECUSADO, nada de `=======` no arquivo", () => {
     const raw = [
       "<<<<<<< SEARCH",
       "Os dados são retidos.",
@@ -188,8 +188,11 @@ describe("applySpecEditResponse (o caminho que o job usa)", () => {
     const r = applySpecEditResponse(BASE, raw);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    // GAP-65 mudou o MECANISMO da recusa (o separador passou a ser o ÚLTIMO do bloco, então este
+    // bloco vira "âncora que não existe" em vez de "bloco malformado"). A INVARIANTE é a mesma e é
+    // ela que este teste protege: nada de marcador no arquivo e o bloco são continua valendo.
     expect(r.applied).toBe(1);
-    expect(r.dropped).toBe(1);
+    expect(r.skipped.map((s) => s.code)).toEqual(["SEARCH_NOT_FOUND"]);
     // o bloco malformado não entrou…
     expect(r.content).not.toContain("=======");
     expect(r.content).toContain("Os dados são retidos.");
@@ -295,5 +298,123 @@ describe("GAP-26 — veto POR BLOCO", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.skipped).toEqual([]);
+  });
+});
+
+/**
+ * GAP-65 — a corrupção de marcador que JÁ está no disco tem de poder SAIR.
+ *
+ * Medido em prod 2026-09-07 (`modelo-dados.md` do NVX LastMile, 216.524 chars): o arquivo tem 4
+ * linhas `=======` e linhas de tabela duplicadas, resíduo do defeito que o GAP-9 fechou. O GAP-9
+ * impede gravar marcador NOVO, mas não removia o antigo: para apagar a linha `=======` o agente
+ * precisa copiá-la dentro do SEARCH, e o parser lia essa linha como o separador do bloco — a
+ * resposta correta do CTO virava `NO_BLOCKS` e a rodada falhava inteira. Resultado: um blocker
+ * ("bloco de convenções corrompido com marcadores de merge") que o juiz reencontra em TODA validação
+ * e que era impossível de fechar — e o CTO passou a escrever prosa dizendo que o marcador é
+ * "resíduo nulo" em vez de removê-lo, porque remover não era possível.
+ *
+ * A partir daqui o separador é o ÚLTIMO marcador do bloco. Isso libera a âncora sem abrir espaço
+ * para corrupção nova, e a razão é estrutural: o lado REPLACE passa a ser, por construção, o texto
+ * DEPOIS do último marcador (nunca contém marcador), e um SEARCH com `=======` só casa se o arquivo
+ * REALMENTE tiver aquela linha. Ou seja: só é possível remover corrupção existente, nunca criá-la.
+ */
+describe("GAP-65 — remover marcador de conflito que já está no arquivo", () => {
+  const CORROMPIDO = [
+    "## Convenções gerais",
+    "",
+    "| Convenção | Regra |",
+    "|-----------|-------|",
+    "| Enums | `VARCHAR(n)` + `CHECK`. |",
+    "=======",
+    "| Normalização de email | `lower(trim(email))` (RN-06). |",
+    "=======",
+    "| Normalização de email | `lower(trim(email))` (RN-06). |",
+    "",
+    "## Próxima seção",
+    "",
+  ].join("\n");
+
+  it("o SEARCH PODE conter as linhas `=======` do arquivo — é o único jeito de apagá-las", () => {
+    const raw = [
+      "<<<<<<< SEARCH",
+      "| Enums | `VARCHAR(n)` + `CHECK`. |",
+      "=======",
+      "| Normalização de email | `lower(trim(email))` (RN-06). |",
+      "=======",
+      "| Normalização de email | `lower(trim(email))` (RN-06). |",
+      "=======",
+      "| Enums | `VARCHAR(n)` + `CHECK`. |",
+      "| Normalização de email | `lower(trim(email))` (RN-06). |",
+      ">>>>>>> REPLACE",
+    ].join("\n");
+    const r = applySpecEditResponse(CORROMPIDO, raw, { minRatio: 0.5 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.applied).toBe(1);
+    expect(r.skipped).toEqual([]);
+    // a corrupção SAIU do arquivo…
+    expect(r.content).not.toContain("=======");
+    // …e a linha antes duplicada ficou uma só
+    expect(r.content.split("Normalização de email").length - 1).toBe(1);
+    expect(r.content).toContain("## Próxima seção");
+  });
+
+  it("o parser divide no ÚLTIMO separador e conta quantos o bloco tinha", () => {
+    const parsed = parseSpecEditBlocks([
+      "<<<<<<< SEARCH",
+      "a",
+      "=======",
+      "b",
+      "=======",
+      "c",
+      ">>>>>>> REPLACE",
+    ].join("\n"));
+    expect(parsed.dropped).toBe(0);
+    expect(parsed.blocks).toHaveLength(1);
+    expect(parsed.blocks[0].search).toBe("a\n=======\nb");
+    expect(parsed.blocks[0].replace).toBe("c");
+    expect(parsed.blocks[0].separators).toBe(2);
+  });
+
+  it("bloco SEM separador nenhum continua sendo descartado (malformado)", () => {
+    const parsed = parseSpecEditBlocks([
+      "<<<<<<< SEARCH",
+      "Os dados são retidos.",
+      ">>>>>>> REPLACE",
+      block("O titular pode solicitar exclusão.", "O titular pode solicitar exclusão em 15 dias."),
+    ].join("\n"));
+    expect(parsed.dropped).toBe(1);
+    // …e o bloco seguinte NÃO é engolido pelo malformado
+    expect(parsed.blocks).toHaveLength(1);
+    expect(parsed.blocks[0].replace).toContain("em 15 dias");
+  });
+
+  it("âncora não encontrada num bloco com 2+ separadores DIZ que o separador é o último", () => {
+    const raw = [
+      "<<<<<<< SEARCH",
+      "Os dados são retidos.",
+      "=======",
+      "=======",
+      "Os dados são retidos por 5 anos.",
+      ">>>>>>> REPLACE",
+    ].join("\n");
+    const r = applySpecEditResponse(BASE, raw);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("SEARCH_NOT_FOUND");
+    expect(r.message).toContain("2 linhas separadoras");
+    expect(r.message).toContain("a divisão usa a ÚLTIMA delas");
+  });
+
+  it("o lado REPLACE nunca pode receber marcador vindo do parser (invariante estrutural)", () => {
+    // Qualquer resposta parseada tem `replace` = texto DEPOIS do último marcador ⇒ sem marcador.
+    for (const raw of [
+      block("Os dados são retidos.", "x\n=======\ny"),
+      "<<<<<<< SEARCH\na\n=======\nb\n=======\nc\n>>>>>>> REPLACE",
+    ]) {
+      for (const b of parseSpecEditBlocks(raw).blocks) {
+        expect(b.replace.split("\n").some((l) => /^[=<>]{5,}/.test(l.trim()))).toBe(false);
+      }
+    }
   });
 });
