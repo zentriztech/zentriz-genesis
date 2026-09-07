@@ -1088,9 +1088,105 @@ export function growthAllowance(
    * grande deixa de ser estrangulada por um número absoluto. Ausente/0 ⇒ só o piso (regra do GAP-33).
    */
   proportional = 0,
+  /**
+   * 🔴 GAP-69 — o que as runs IRMÃS do mesmo projeto já escreveram na janela. Ver
+   * `projectGrowthUsedInWindow`: sem isto o teto de "não inflar" se REGENERA a cada run.
+   */
+  siblingUsed = 0,
 ): number {
   const floor = budgetPerPass * (run.passes + 1);
-  return Math.max(0, Math.max(floor, proportional) - runGrowthUsed(run));
+  const base = Math.max(floor, proportional);
+  // GAP-69: a dívida das irmãs corta a parcela PROPORCIONAL e PARA NO PISO.
+  //
+  // Duas guardas numa linha, e as duas foram medidas:
+  //  • só entra quando o proporcional governa (spec grande). Enquanto o piso governa, o projeto é
+  //    jovem e o NORTE é o contrário — texto simples tem de virar spec completa;
+  //  • nunca desce abaixo do piso. Sem esta parte a dívida real do NVX LastMile (154.456 chars em 24 h,
+  //    medida em prod) zeraria a margem de TODA run nova por um dia inteiro. Margem zero não faz o
+  //    laço consolidar: faz cada rodada que cresça um caractere ser descartada inteira (é o penhasco
+  //    do GAP-64), o laço queimar passes de Opus sem aplicar nada, e a contagem de GAPs ficar
+  //    parada — exatamente o oposto do critério do Jean ("a contagem tem de CAIR").
+  //
+  // O que morre é o COMPOSTO, que é o defeito: em vez de ~2% da massa por run, cada run passa a ter no
+  // máximo a regra pré-GAP-36 (`ORÇAMENTO × passes`) depois que a janela foi gasta. Nas 9 runs medidas
+  // isso seria ~45.000 chars em vez de ~150.000 — e nenhum caso fica mais restrito do que a regra do
+  // GAP-33, que rodou por semanas.
+  const afterSibling = proportional > floor ? Math.max(floor, base - siblingUsed) : base;
+  return Math.max(0, afterSibling - runGrowthUsed(run));
+}
+
+/**
+ * 🔴 GAP-69 (2026-09-07) — o teto de crescimento se REGENERA a cada run: 2% compostos.
+ *
+ * ## O que estava errado (MEDIDO em prod, NVX LastMile, projeto `e2a1988c`)
+ *
+ * O GAP-36 fez o orçamento ser uma fração da massa da spec, e o próprio `specTotalBytes` registra por
+ * que a massa é medida UMA vez: "remedir a cada rodada faria cada crescimento aplicado ampliar o
+ * orçamento da rodada seguinte, um laço que se auto-autoriza a inflar (o motor do GAP-8)". Isso foi
+ * resolvido DENTRO da run — e continua valendo integralmente entre runs, um nível acima: **cada run
+ * nova remede a massa e ganha 2% dela outra vez**.
+ *
+ * Nove runs de 2026-09-07, mesma spec, medido em `spec_autonomy_runs`:
+ *
+ *   04:40  986.117 bytes  ·  orçamento anunciado 19.723  ·  GAPs 26
+ *   ...
+ *   12:26  1.136.538 bytes ·  orçamento anunciado 22.731  ·  GAPs 38
+ *
+ * **+150.421 bytes (+15,3%) em 7h46**, com a contagem de GAPs SUBINDO de 26 para 38. E não é abuso do
+ * teto: cada run gastou quase exatamente o que lhe foi dado (19.414 de 28.455; 20.157 de 21.913;
+ * 19.925 de 21.498). O orçamento não estava funcionando como teto — estava funcionando como **meta de
+ * gasto**, e como é proporcional a uma massa que ele mesmo faz crescer, a próxima run recebe um
+ * orçamento maior. Juros compostos com o sinal errado, contra o critério do Jean: a contagem de GAPs
+ * importantes tem de CAIR.
+ *
+ * ## O que muda
+ *
+ * "A spec não INFLAR" é propriedade da SPEC, não de uma run. A dívida passa a ser lida numa JANELA do
+ * projeto (`SPEC_ORACLE_GROWTH_WINDOW_HOURS`, 24 h por padrão): o que as runs irmãs escreveram nessa
+ * janela é descontado do orçamento desta. Duas runs seguidas não ganham 2% cada uma — ganham 2% no
+ * total, e a segunda nasce em modo consolidação se a primeira gastou tudo.
+ *
+ * Encolher continua gerando crédito (mesma regra do GAP-33, agora atravessando runs): a soma é o delta
+ * LÍQUIDO das rodadas aplicadas, então uma run que consolidou de verdade financia a seguinte.
+ *
+ * ## O que a correção NÃO faz, e por quê (revisão adversarial dela mesma)
+ *
+ * A dívida real deste projeto na janela é **154.456 chars** (medido em prod). Descontada crua, ela
+ * zeraria a margem de toda run nova por 24 h — e margem zero não faz o laço consolidar: faz cada
+ * rodada que cresça um caractere ser DESCARTADA inteira (o penhasco do GAP-64), o laço queimar passes
+ * de Opus sem aplicar nada e a contagem de GAPs ficar parada. Seria trocar um defeito por outro pior,
+ * contra o critério do Jean.
+ *
+ * Então a dívida **para no piso** (`growthAllowance`): depois de gasta a janela, cada run cai para a
+ * regra pré-GAP-36 em vez de zero. O que morre é o COMPOSTO — nas 9 runs medidas, ~45.000 chars em vez
+ * de ~150.000 — e nenhum caso fica mais restrito do que a regra do GAP-33, que rodou por semanas.
+ *
+ * `SPEC_ORACLE_GROWTH_WINDOW_HOURS=0` desliga a dívida sem deploy se a medição mostrar o contrário.
+ */
+export async function projectGrowthUsedInWindow(
+  db: Db, projectId: string, excludeRunId: string, windowHours: number,
+): Promise<number> {
+  if (!Number.isFinite(windowHours) || windowHours <= 0) return 0;
+  try {
+    const r = await db.query(
+      `SELECT COALESCE(SUM((e->>'deltaChars')::int), 0) AS used
+         FROM spec_autonomy_runs r, jsonb_array_elements(r.rounds) e
+        WHERE r.project_id = $1
+          AND r.id <> $2
+          AND r.created_at > now() - make_interval(hours => $3::int)
+          AND e ? 'deltaChars'
+          AND (e->>'applied') = 'true'`,
+      [projectId, excludeRunId, Math.ceil(windowHours)],
+    );
+    const used = Number((r.rows[0] as { used?: unknown } | undefined)?.used ?? 0);
+    return Number.isFinite(used) ? used : 0;
+  } catch (e) {
+    // Orçamento é guarda-corpo, não pré-condição de escrita: falha de leitura degrada para o
+    // comportamento do GAP-36 (sem dívida de irmãs) em vez de travar o laço. Declarado no log porque
+    // um degrade silencioso aqui reabre o GAP-69 sem ninguém notar.
+    console.warn(`[SpecAutonomy] GAP-69: não foi possível ler o crescimento das runs irmãs (${msg(e)}) — orçamento sem a dívida da janela.`);
+    return 0;
+  }
 }
 
 /**
@@ -1119,11 +1215,23 @@ async function specTotalBytes(db: Db, projectId: string): Promise<number> {
 }
 
 async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
-  const { ORACLE_GROWTH_BUDGET, proportionalGrowthBudget } = await import("./specOracles.js");
+  const { ORACLE_GROWTH_BUDGET, ORACLE_GROWTH_WINDOW_HOURS, proportionalGrowthBudget } = await import("./specOracles.js");
   const fresh = (await getAutonomyRun(db, run.id)) ?? run;
+  const proportional = proportionalGrowthBudget(fresh.specBytes ?? 0);
+  // 🔴 GAP-69: a dívida das runs IRMÃS da janela. Lida aqui (e não em `growthAllowance`, que segue
+  // pura e testável) porque quem tem o `db` é o laço.
+  const sibling = await projectGrowthUsedInWindow(db, fresh.projectId, fresh.id, ORACLE_GROWTH_WINDOW_HOURS);
   // GAP-36: `specBytes` foi medido na criação do laço. Laço criado antes da migração 103 vem `null` ⇒
   // parcela proporcional 0 ⇒ vale o piso por passe (comportamento do GAP-33, sem regressão).
-  return growthAllowance(fresh, ORACLE_GROWTH_BUDGET, proportionalGrowthBudget(fresh.specBytes ?? 0));
+  const allowance = growthAllowance(fresh, ORACLE_GROWTH_BUDGET, proportional, sibling);
+  if (sibling !== 0) {
+    console.info(
+      `[SpecAutonomy] run=${fresh.id} orçamento de crescimento: proporcional=${proportional}`
+      + ` gasto_nesta_run=${runGrowthUsed(fresh)} gasto_runs_irmãs_${ORACLE_GROWTH_WINDOW_HOURS}h=${sibling}`
+      + ` ⇒ margem=${allowance}`,
+    );
+  }
+  return allowance;
 }
 
 /**
