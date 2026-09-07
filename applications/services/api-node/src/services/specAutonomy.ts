@@ -1002,6 +1002,44 @@ export function lastPersistedGaps(run: Pick<AutonomyRun, "rounds">): PersistentG
 }
 
 /**
+ * 🔴 GAP-68 (revisão adversarial da própria correção) — reincidência é conhecimento do PROJETO, não da
+ * run.
+ *
+ * `lastPersistedGaps` só olha o log da run corrente, e uma run NASCE com `rounds: []`. Consequência
+ * medida no desenho: a run `b1bc1195` terminou `exhausted` sabendo de 8 defeitos rebatizados, e a run
+ * seguinte (`f101303f`) começaria cega — o primeiro passe de TODA run repetiria exatamente o erro que
+ * esta correção existe para evitar. Como o Jean opera o laço em runs sucessivas, esse primeiro passe é
+ * uma fração grande do gasto.
+ *
+ * O fallback só entra quando a run corrente AINDA não mediu nada (nenhuma rodada com `persistedGaps`
+ * nem `gapsPersisted`): dentro da run, a medição de agora sempre vence a herdada.
+ *
+ * Herdar é seguro porque quem afirma reincidência é `persistentGapsFor`, e ele casa por fingerprint
+ * EXATO contra os findings da validação ATUAL: defeito já corrigido simplesmente não casa e nada é
+ * dito. Falha de banco devolve o que a run tem — o fato é um extra, nunca uma pré-condição.
+ */
+export async function knownPersistentGaps(db: Db, run: AutonomyRun): Promise<PersistentGapRef[]> {
+  const own = lastPersistedGaps(run);
+  if (own.length > 0) return own;
+  const mediu = run.rounds.some((r) => Array.isArray(r.persistedGaps) || r.gapsPersisted === 0);
+  if (mediu) return own;
+  const rows = (await db.query(
+    `SELECT rounds FROM spec_autonomy_runs
+      WHERE project_id = $1 AND id <> $2
+      ORDER BY created_at DESC LIMIT 3`,
+    [run.projectId, run.id],
+  ).catch(() => ({ rows: [] as Array<{ rounds: unknown }> }))).rows as Array<{ rounds: unknown }>;
+  for (const row of rows) {
+    const refs = lastPersistedGaps({ rounds: Array.isArray(row.rounds) ? (row.rounds as AutonomyRoundLog[]) : [] });
+    if (refs.length > 0) {
+      console.info(`[SpecAutonomy] run=${run.id}: ${refs.length} ref(s) de reincidência HERDADAS da run anterior do projeto (esta run ainda não mediu).`);
+      return refs;
+    }
+  }
+  return [];
+}
+
+/**
  * 🔴 GAP-68 — quais dos GAPs que vão AGORA para o CTO são reincidentes conhecidos.
  *
  * Casa por fingerprint EXATO com os findings do despacho, porque as refs foram gravadas a partir da
@@ -1390,7 +1428,7 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const priorRejection = lastRejectedAttempt(run, target);
   // 🔴 GAP-68: e se algum destes GAPs já foi entregue antes e SOBREVIVEU à edição, o agente recebe
   // esse fato também — é a única coisa que ele não pode deduzir do texto do arquivo.
-  const knownRefs = lastPersistedGaps(run);
+  const knownRefs = await knownPersistentGaps(db, run);
   const persistentGaps = persistentGapsFor(knownRefs, target, fileFindings);
   if (knownRefs.length > 0 && persistentGaps.length === 0) {
     // Refs existem mas nenhuma casou com este arquivo: normal se os reincidentes são de OUTRO arquivo.

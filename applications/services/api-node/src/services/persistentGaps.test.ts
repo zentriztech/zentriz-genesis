@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
-import { lastPersistedGaps, persistentGapsFor } from "./specAutonomy.js";
+import { lastPersistedGaps, persistentGapsFor, knownPersistentGaps } from "./specAutonomy.js";
 import { persistentGapFactBlock } from "../routes/specChat.js";
 import { findingFingerprint } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -96,6 +96,70 @@ describe("lastPersistedGaps", () => {
 
   it("run sem nenhuma medição devolve vazio, não `undefined`", () => {
     expect(lastPersistedGaps({ rounds: [] } as never)).toEqual([]);
+  });
+});
+
+/**
+ * 🔴 O defeito que a revisão adversarial da PRÓPRIA correção achou: as refs vivem no log da RUN, e uma
+ * run nasce com `rounds: []`. A run `b1bc1195` morreu sabendo de 8 defeitos rebatizados e a seguinte
+ * começaria CEGA — o primeiro passe de toda run repetiria o erro que a correção existe para evitar.
+ */
+describe("knownPersistentGaps (herança entre runs)", () => {
+  const REF = (id: string, times = 2): PersistentGapRef => ({
+    fingerprint: id, file: "modelo-dados.md", anchor: "§6", anchorBefore: "§6.1",
+    title: `t-${id}`, why: "w", times,
+  });
+  const run = (over: Record<string, unknown>) =>
+    ({ id: "run-atual", projectId: "proj-1", rounds: [], ...over }) as never;
+  const dbWith = (rows: Array<{ rounds: unknown }>) => {
+    const calls: unknown[][] = [];
+    return {
+      calls,
+      db: { query: (sql: string, params: unknown[]) => { calls.push([sql, params]); return Promise.resolve({ rows }); } } as never,
+    };
+  };
+
+  it("a medição da PRÓPRIA run vence a herança — nunca busca no banco", async () => {
+    const { db, calls } = dbWith([{ rounds: [{ persistedGaps: [REF("herdado")] }] }]);
+    const refs = await knownPersistentGaps(db, run({ rounds: [{ persistedGaps: [REF("proprio")] }] }));
+    expect(refs.map((r) => r.fingerprint)).toEqual(["proprio"]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("run que JÁ mediu e não achou reincidente não herda (o passado não ressuscita)", async () => {
+    const { db, calls } = dbWith([{ rounds: [{ persistedGaps: [REF("herdado")] }] }]);
+    expect(await knownPersistentGaps(db, run({ rounds: [{ gapsPersisted: 0 }] }))).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("run NOVA (rounds vazio) herda as refs da run anterior do MESMO projeto", async () => {
+    const { db, calls } = dbWith([{ rounds: [{ persistedGaps: [REF("herdado")] }] }]);
+    const refs = await knownPersistentGaps(db, run({}));
+    expect(refs.map((r) => r.fingerprint)).toEqual(["herdado"]);
+    // A consulta tem de excluir a run corrente, senão ela herdaria de si mesma.
+    expect(String(calls[0][0])).toContain("id <> $2");
+    expect(calls[0][1]).toEqual(["proj-1", "run-atual"]);
+  });
+
+  it("run anterior sem reincidente não impede achar numa mais antiga", async () => {
+    const { db } = dbWith([{ rounds: [{ note: "sem medição" }] }, { rounds: [{ persistedGaps: [REF("antiga")] }] }]);
+    expect((await knownPersistentGaps(db, run({}))).map((r) => r.fingerprint)).toEqual(["antiga"]);
+  });
+
+  it("rodada que só CORREU sem reconciliar não conta como medição — ainda herda", async () => {
+    const { db } = dbWith([{ rounds: [{ persistedGaps: [REF("herdado")] }] }]);
+    const refs = await knownPersistentGaps(db, run({ rounds: [{ gapsPersisted: null }] }));
+    expect(refs.map((r) => r.fingerprint)).toEqual(["herdado"]);
+  });
+
+  it("falha do banco degrada para vazio — nunca derruba o despacho do CTO", async () => {
+    const db = { query: () => Promise.reject(new Error("relation does not exist")) } as never;
+    await expect(knownPersistentGaps(db, run({}))).resolves.toEqual([]);
+  });
+
+  it("`rounds` corrompido no banco (não-array) não explode", async () => {
+    const { db } = dbWith([{ rounds: "lixo" }, { rounds: null }]);
+    await expect(knownPersistentGaps(db, run({}))).resolves.toEqual([]);
   });
 });
 
