@@ -121,6 +121,21 @@ export interface PersistentGapRef {
   /** Por que o reconciliador concluiu que é o mesmo defeito (texto do agente, recortado). */
   why: string;
   times: number;
+  /**
+   * 🔴 GAP-71 — COMO a reincidência foi estabelecida, porque as duas formas pedem coisas diferentes
+   * do agente:
+   *  • `renamed` (default, comportamento anterior): o reconciliador do GAP-67 pareou o defeito que
+   *    saiu com o que entrou — a edição RENUMEROU a seção e o defeito sobreviveu de endereço novo;
+   *  • `stable`: o MESMO fingerprint voltou em validações competentes sucessivas — a âncora nem se
+   *    moveu. Dizer "só mudou de endereço no documento" aqui seria FALSO, e o texto do bloco muda.
+   */
+  kind?: "renamed" | "stable";
+  /**
+   * 🔴 GAP-71 — a rodada anterior neste arquivo foi APLICADA e o trecho ancorado por este GAP
+   * continuou **byte-a-byte idêntico** (ver `untouchedAnchors`). É o fato que nomeia a patologia
+   * medida: o agente acrescenta uma errata declarando o trecho nulo e não toca no trecho.
+   */
+  untouched?: boolean;
 }
 
 function describe(id: string, f: ValidationFinding): string {

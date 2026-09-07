@@ -611,6 +611,31 @@ function buildRawFileRequest(
  * a MOSTRAR o irmão citado; esta instrução diz o que fazer com ele. Sem a regra, o irmão no contexto
  * só aumenta a chance de o editor copiar conteúdo alheio para dentro do arquivo.
  */
+/**
+ * 🔴 GAP-71 (2026-09-07) — a regra que proíbe ANULAR o trecho ofensor em vez de reescrevê-lo.
+ *
+ * MEDIDO em prod (NVX LastMile, `modelo-dados.md`, run `f101303f`): 4 rodadas aplicadas, 13/7/7/8
+ * edições ancoradas, e as MESMAS 11 âncoras nas 6 validações seguintes. O CTO havia criado uma
+ * convenção própria — declarar o trecho "errata nula com efeito de remoção" e mandar ler outro
+ * requisito (`REQ-CONTACT-01`, `VISIB-ANON-01`, `D-24`) — que aparece **23 vezes** no arquivo. Os
+ * literais ofensores continuam no disco, e o juiz, que relê o texto original, escreve no `rationale`:
+ * "Duas prescrições executáveis opostas coexistem no mesmo arquivo … A correção é reescrever
+ * fisicamente §8.6 (c)".
+ *
+ * A regra não decide conteúdo: diz como a CORREÇÃO é lida por quem valida. Anulação por errata é
+ * exatamente o motor do GAP-8 — o GAP não fecha e o arquivo cresce.
+ */
+function ANNULMENT_RULE(n: string): string {
+  return [
+    `${n}) ANULAR NÃO É CORRIGIR: nunca resolva uma contradição acrescentando em outro ponto do arquivo`,
+    "   uma errata, nota, requisito ou tabela que declare o trecho ofensor 'nulo', 'sem efeito',",
+    "   'superado' ou que mande 'ler REQ-X em vez dele'. Quem valida relê o TRECHO ORIGINAL, encontra a",
+    "   prescrição antiga ainda lá e reabre o mesmo problema — e o arquivo só cresceu. Corrija NO LUGAR:",
+    "   apague a frase/linha/célula que não vale mais, ou substitua o texto dela pela decisão que vale.",
+    "   Se o arquivo já tem uma errata sobre o trecho, APLIQUE-A no texto agora e remova a errata.",
+  ].join(" ");
+}
+
 function DIVERGENCE_RULE(n: string): string {
   return [
     `${n}) DIVERGÊNCIA ENTRE ARQUIVOS: quando o GAP diz que este arquivo contradiz um irmão (dois`,
@@ -634,6 +659,7 @@ const GAP_FILE_SYSTEM = [
   "3) NÃO traga para este arquivo o conteúdo de arquivos irmãos (o contexto é só leitura).",
   "4) Se um GAP claramente não é deste arquivo, deixe-o como está e explique na última linha.",
   DIVERGENCE_RULE("5"),
+  ANNULMENT_RULE("6"),
   "Devolva SOMENTE o conteúdo final COMPLETO do arquivo, sem cercas de código e sem preâmbulo.",
 ].join(" ");
 
@@ -677,6 +703,7 @@ const GAP_FILE_EDITS_SYSTEM = [
   "   é apagada. O separador do bloco é sempre o ÚLTIMO `=======` do bloco, então marcadores que vêm",
   "   antes dele são lidos como texto do arquivo. Nunca escreva um marcador no lado REPLACE.",
   DIVERGENCE_RULE("8"),
+  ANNULMENT_RULE("9"),
   "Fora dos blocos, escreva no máximo uma linha final de observação. Nada de preâmbulo.",
 ].join(" ");
 
@@ -993,25 +1020,71 @@ export function persistentGapFactBlock(refs: PersistentGapRef[] | null | undefin
   const list = (refs ?? []).filter((r) => r && r.times >= 2);
   if (list.length === 0) return "";
   const worst = Math.max(...list.map((r) => r.times));
+  // 🔴 GAP-71: as duas formas de reincidência coexistem na mesma leva e NÃO se descrevem com a mesma
+  // frase. "Só mudou de endereço" é verdade sobre `renamed` e mentira sobre `stable` (a âncora nem se
+  // moveu) — e uma afirmação falsa aqui manda o agente renumerar seção justamente quando o que falta
+  // é reescrever o trecho onde ele está.
+  const renamed = list.filter((r) => r.kind !== "stable");
+  const stable = list.filter((r) => r.kind === "stable");
+  const untouched = list.filter((r) => r.untouched === true);
   const lines = [
     "--- ESTES GAPs JÁ FORAM ENTREGUES ANTES E SOBREVIVERAM À EDIÇÃO (fato registrado pelo laço) ---",
-    `Depois de cada rodada, um revisor compara a lista de problemas de antes com a de depois. Ele`
-    + ` concluiu que ${list.length === 1 ? "o GAP abaixo" : `os ${list.length} GAPs abaixo`}`
-    + ` NÃO ${list.length === 1 ? "é novo" : "são novos"}: já ${list.length === 1 ? "havia" : "haviam"}`
-    + " sido apontado(s) numa rodada anterior, um agente editou o arquivo, e o problema CONTINUOU —"
-    + " só mudou de endereço no documento.",
   ];
+  if (renamed.length > 0) {
+    lines.push(
+      `Depois de cada rodada, um revisor compara a lista de problemas de antes com a de depois. Ele`
+      + ` concluiu que ${renamed.length === 1 ? "1 dos GAPs abaixo" : `${renamed.length} dos GAPs abaixo`}`
+      + " NÃO é novo: já havia sido apontado numa rodada anterior, um agente editou o arquivo, e o"
+      + " problema CONTINUOU — só mudou de endereço no documento.",
+    );
+  }
+  if (stable.length > 0) {
+    lines.push(
+      `O laço também contou, validação por validação, quantas vezes cada problema foi reencontrado no`
+      + ` MESMO endereço: ${stable.length === 1 ? "1 dos GAPs abaixo já voltou assim" : `${stable.length} dos GAPs abaixo já voltaram assim`}.`
+      + " Aqui a âncora nem se moveu: rodadas anteriores editaram este arquivo e o trecho apontado"
+      + " continua dizendo o que dizia.",
+    );
+  }
   for (const r of list) {
     const de = r.anchorBefore && r.anchorBefore !== r.anchor ? `${r.anchorBefore} → ${r.anchor ?? "(sem âncora)"}` : (r.anchor ?? "(sem âncora)");
-    lines.push(`• ${de} — ${r.times}ª aparição :: ${r.title}${r.why ? ` (o revisor: ${r.why})` : ""}`);
+    // GAP-71: o fato mais duro que existe sobre a rodada anterior vai COLADO no item, porque é ele
+    // que diz o que fazer diferente — não "tente mais", e sim "o trecho está lá, intocado".
+    const intacto = r.untouched === true ? " ⚠️ a rodada anterior NÃO alterou este trecho (ele está idêntico no arquivo acima)" : "";
+    lines.push(`• ${de} — ${r.times}ª aparição :: ${r.title}${r.why ? ` (o revisor: ${r.why})` : ""}${intacto}`);
   }
   lines.push(
-    "RENUMERAR, RENOMEAR OU REESCREVER A SEÇÃO NÃO FECHA ESTES GAPs — foi exatamente o que a rodada"
-    + " anterior fez, e é por isso que a âncora mudou e o problema não. Feche-os na RAIZ: decida qual"
+    // 🔴 GAP-71: "é por isso que a âncora mudou" só é verdade quando HOUVE rebatismo. Numa leva
+    // puramente `stable` a âncora não se moveu, e afirmar que se moveu mandaria o agente atacar um
+    // sintoma que não existe. O diagnóstico muda; o pedido (decidir e apagar) é o mesmo.
+    (renamed.length > 0
+      ? "RENUMERAR, RENOMEAR OU REESCREVER A SEÇÃO NÃO FECHA ESTES GAPs — foi exatamente o que a rodada"
+        + " anterior fez, e é por isso que a âncora mudou e o problema não."
+      : "REESCREVER A SEÇÃO COM OUTRAS PALAVRAS NÃO FECHA ESTES GAPs — rodadas anteriores já editaram"
+        + " este arquivo e o problema foi reencontrado no MESMO endereço.")
+    + " Feche-os na RAIZ: decida qual"
     + " das duas afirmações em conflito é a que VALE, deixe-a em UM lugar só, e APAGUE a outra (ou"
     + " troque-a por uma remissão ao arquivo-oráculo). Se a decisão não é sua, diga explicitamente no"
     + " texto quem decide e o que fica valendo até lá — uma decisão registrada fecha o GAP; uma"
     + " reformulação mais elegante do mesmo impasse não.",
+  );
+  if (untouched.length > 0) {
+    // 🔴 GAP-71 (medido em prod): o CTO passou a anular trechos por errata — `modelo-dados.md` acumulou
+    // 23 ocorrências de "errata nula" e as 11 âncoras voltaram nas 6 validações seguintes, com os
+    // literais ofensores intactos no disco. O juiz relê o texto ORIGINAL: anulação não é correção.
+    lines.push(
+      `ATENÇÃO — ${untouched.length === 1 ? "1 desses trechos está" : `${untouched.length} desses trechos estão`}`
+      + " marcado(s) como INTOCADO(s) acima. O que não funciona (e já foi tentado neste arquivo):"
+      + " acrescentar em outro lugar uma errata, uma nota de rodapé, um requisito novo ou uma tabela de"
+      + " decisões dizendo que aquele trecho é 'nulo', 'sem efeito', 'superado' ou que se deve 'ler"
+      + " REQ-X em vez dele'. O validador NÃO lê a errata como remoção: ele relê o trecho original,"
+      + " encontra a prescrição antiga ainda lá e reabre o GAP — e o arquivo só engordou."
+      + " Nesta rodada, EDITE O PRÓPRIO TRECHO: apague a frase/linha/célula que contradiz a decisão, ou"
+      + " substitua o texto dela pela decisão que vale. Se já existe uma errata sobre ele, aplique-a"
+      + " agora no texto e REMOVA a errata: ela deixa de ter função quando o texto está correto.",
+    );
+  }
+  lines.push(
     worst >= 3
       ? `ATENÇÃO: um deles está na ${worst}ª aparição. Se a sua edição desta vez não REMOVER o texto`
         + " conflitante, ele volta de novo e a rodada foi gasta à toa."
