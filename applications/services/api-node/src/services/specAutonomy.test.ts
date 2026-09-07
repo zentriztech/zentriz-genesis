@@ -61,7 +61,8 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
-  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, type AutonomyStatus,
+  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastGrowthRejection,
+  type AutonomyStatus,
 } from "./specAutonomy.js";
 
 // ── banco falso: uma linha de spec_autonomy_runs em memória ───────────────────
@@ -442,6 +443,8 @@ describe("validação dentro do laço", () => {
       const note = JSON.stringify(run!.rounds);
       expect(note).toContain("PARCIAL");
       expect(note).toContain("NÃO são comparáveis");
+      // 🔴 GAP-30: a nota da rodada (o que aconteceu com o ARQUIVO) sobrevive à nota do PASSE.
+      expect(note).toContain("Spec aplicada no disco");
     });
 
     it("🔴 zero GAPs numa validação PARCIAL não declara `succeeded` (vitória fictícia)", async () => {
@@ -848,5 +851,46 @@ describe("passGrowthUsed (GAP-28)", () => {
   it("passe sem nenhuma rodada aplicada não consumiu nada", () => {
     expect(passGrowthUsed({ passes: 3, rounds: [R({ pass: 3, applied: false, deltaChars: 5_000 })] as never })).toBe(0);
     expect(passGrowthUsed({ passes: 0, rounds: [] as never })).toBe(0);
+  });
+});
+
+// ── 8. GAP-29 — a tentativa descartada volta ao agente como FATO ──────────────
+//
+// Medido na run `d7acccb8`: `autenticacao-sessao.md` foi descartado 3× entregando +2.661, +2.740 e
+// +2.740 chars contra margens de 580 e 1.143. O pedido era IDÊNTICO nas três — o laço pagava Opus 5
+// para repetir uma resposta que ele já sabia que ia recusar.
+
+const REJ = (p: { round: number; pass?: number; filePath: string; rejectedDelta?: number; rejectedBudget?: number; applied?: boolean }) => ({
+  round: p.round, pass: p.pass ?? 0, startedAt: "2026-09-07T00:00:00.000Z", filePath: p.filePath,
+  ...(p.applied === undefined ? {} : { applied: p.applied }),
+  ...(p.rejectedDelta === undefined ? {} : { rejectedDelta: p.rejectedDelta }),
+  ...(p.rejectedBudget === undefined ? {} : { rejectedBudget: p.rejectedBudget }),
+});
+
+describe("lastGrowthRejection (GAP-29)", () => {
+  it("devolve a recusa MAIS RECENTE do arquivo, atravessando passes", () => {
+    const got = lastGrowthRejection({
+      rounds: [
+        REJ({ round: 8, pass: 0, filePath: "autenticacao-sessao.md", rejectedDelta: 2_661, rejectedBudget: 580 }),
+        REJ({ round: 11, pass: 1, filePath: "modelo-dados.md", applied: true }),
+        REJ({ round: 14, pass: 1, filePath: "autenticacao-sessao.md", rejectedDelta: 2_740, rejectedBudget: 1_143 }),
+      ] as never,
+    }, "autenticacao-sessao.md");
+    expect(got).toEqual({ delta: 2_740, budget: 1_143, pass: 2 });
+  });
+
+  it("não confunde arquivos — a recusa de um não instrui o outro", () => {
+    const rounds = [REJ({ round: 8, filePath: "autenticacao-sessao.md", rejectedDelta: 2_661, rejectedBudget: 580 })] as never;
+    expect(lastGrowthRejection({ rounds }, "modelo-dados.md")).toBeNull();
+    expect(lastGrowthRejection({ rounds }, "AUTENTICACAO-SESSAO.MD")).not.toBeNull(); // caminho é comparado sem caixa
+  });
+
+  it("rodada que falhou por OUTRO motivo (sem `rejectedDelta`) não vira instrução de tamanho", () => {
+    const rounds = [REJ({ round: 3, filePath: "visao-escopo.md", applied: false })] as never;
+    expect(lastGrowthRejection({ rounds }, "visao-escopo.md")).toBeNull();
+  });
+
+  it("primeira tentativa não recebe fato nenhum", () => {
+    expect(lastGrowthRejection({ rounds: [] as never }, "modelo-dados.md")).toBeNull();
   });
 });

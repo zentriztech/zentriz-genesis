@@ -917,6 +917,27 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(manifestFactBlock(" readme.md ")).toBe(block);        // o nome não é case-sensitive
   });
 
+  /**
+   * GAP-29 — medido na run `d7acccb8` (NVX LastMile): `autenticacao-sessao.md` foi descartado três
+   * vezes entregando +2.661, +2.740 e +2.740 chars contra margens de 580 e 1.143. O pedido era
+   * IDÊNTICO nas três, porque nada dizia ao agente que a tentativa anterior existiu — o laço pagava
+   * Opus 5 sobre 74k chars para receber de volta a mesma resposta que já sabia que ia recusar.
+   */
+  it("priorRejectionFactBlock: entrega o número da recusa anterior e a saída, sem decidir pelo agente", async () => {
+    const { priorRejectionFactBlock } = await import("./specChat.js");
+    const block = priorRejectionFactBlock({ delta: 2_740, budget: 1_143, pass: 2 });
+    expect(block).toContain("passe 2");
+    expect(block).toContain("+2740");
+    expect(block).toContain("1143");
+    expect(block).toContain("DESCARTADA INTEIRA");
+    expect(block).toContain("os GAPs seguem abertos");
+    expect(block).toContain("GAP fechado em parte é progresso");
+    // Primeira tentativa (ou recusa de outra natureza): nenhum aviso genérico entra no pedido.
+    expect(priorRejectionFactBlock(null)).toBe("");
+    expect(priorRejectionFactBlock(undefined)).toBe("");
+    expect(priorRejectionFactBlock({ delta: -500, budget: 2_000, pass: 1 })).toBe("");
+  });
+
   it("rawMaxTokensFor: piso de 8k, cresce com o arquivo, teto de 32k (guard do SDK)", async () => {
     const { rawMaxTokensFor } = await import("./specChat.js");
     expect(rawMaxTokensFor(0)).toBe(8_000);

@@ -233,6 +233,14 @@ export interface AutonomyRoundLog {
    * conta como 0 (não inventa gasto retroativo).
    */
   deltaChars?: number | null;
+  /**
+   * GAP-29: a rodada foi DESCARTADA por estourar a margem de crescimento do passe — e este é o
+   * tamanho que ela tinha entregado, com a margem que havia. Serve à tentativa SEGUINTE deste
+   * arquivo: sem este fato, o laço repete uma tentativa já reprovada ao preço cheio de Opus 5
+   * (medido: `autenticacao-sessao.md` entregou +2.661 e depois +2.740 contra margens de 580 e 1.143).
+   */
+  rejectedDelta?: number | null;
+  rejectedBudget?: number | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -455,10 +463,30 @@ async function appendRoundLog(db: Db, runId: string, entry: AutonomyRoundLog): P
 }
 
 /** Atualiza o ÚLTIMO item de `rounds` (fecha a rodada com o resultado medido). */
-async function patchLastRound(db: Db, run: AutonomyRun, patch: Partial<AutonomyRoundLog>): Promise<void> {
+async function patchLastRound(
+  db: Db, run: AutonomyRun, patch: Partial<AutonomyRoundLog>,
+  /**
+   * 🔴 GAP-30 — `keepNote` PRESERVA a nota que a rodada já tinha, concatenando a nova.
+   *
+   * A validação é evento do PASSE, mas era gravada sobre a ÚLTIMA rodada de arquivo. Medido nesta
+   * sessão na run `d7acccb8`: a rodada 10 (`visao-escopo.md`) registrava "consolidação recusada …" e,
+   * na leitura seguinte, a MESMA rodada dizia apenas "Validação failed: 42 → 30" — o motivo da recusa
+   * desapareceu do log. O método inteiro depende desse log ("cortar é aceitável, mentir sobre o corte
+   * não"), e sem a nota da rodada não há como diferenciar arquivo recusado de arquivo aplicado.
+   */
+  opts: { keepNote?: boolean } = {},
+): Promise<void> {
   const rounds = [...run.rounds];
   if (rounds.length === 0) return;
-  rounds[rounds.length - 1] = { ...rounds[rounds.length - 1], ...patch, finishedAt: new Date().toISOString() };
+  const prevNote = rounds[rounds.length - 1]?.note;
+  const note = opts.keepNote && prevNote && patch.note && !prevNote.includes(patch.note)
+    ? `${prevNote} ⟶ ${patch.note}`
+    : patch.note;
+  rounds[rounds.length - 1] = {
+    ...rounds[rounds.length - 1], ...patch,
+    ...(note === undefined ? {} : { note }),
+    finishedAt: new Date().toISOString(),
+  };
   await db.query("UPDATE spec_autonomy_runs SET rounds = $2::jsonb, updated_at = now() WHERE id = $1",
     [run.id, JSON.stringify(rounds)]);
 }
@@ -785,6 +813,31 @@ export function passGrowthUsed(run: Pick<AutonomyRun, "rounds" | "passes">): num
  * GAP-28 — margem que resta ao passe. Nunca negativa: se o passe já estourou, a margem é ZERO (o
  * arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
  */
+/**
+ * GAP-29 — a ÚLTIMA tentativa deste arquivo que foi descartada por estourar a margem, se houver.
+ *
+ * MEDIDO na run `d7acccb8`: `autenticacao-sessao.md` foi descartado 3 vezes entregando +2.661,
+ * +2.740 e +2.740 chars contra margens de 580 e 1.143 — praticamente a MESMA resposta, paga em
+ * Opus 5 sobre um arquivo de 74k, três vezes. O pedido era idêntico nas três: nada dizia ao agente
+ * que a tentativa anterior existiu e por quanto ela passou. O código não decide o que fazer com o
+ * fato (isso é do agente); ele só para de esconder o fato.
+ *
+ * Procura de trás para frente, em TODO o log da run (a retentativa é no passe seguinte, não no
+ * mesmo), e devolve só a mais recente — as anteriores são história, não instrução.
+ */
+export function lastGrowthRejection(
+  run: Pick<AutonomyRun, "rounds">, filePath: string,
+): { delta: number; budget: number; pass: number } | null {
+  const norm = (p: string) => p.trim().toLowerCase();
+  for (let i = run.rounds.length - 1; i >= 0; i--) {
+    const r = run.rounds[i];
+    if (norm(r.filePath ?? "") !== norm(filePath)) continue;
+    if (typeof r.rejectedDelta !== "number") continue;
+    return { delta: r.rejectedDelta, budget: typeof r.rejectedBudget === "number" ? r.rejectedBudget : 0, pass: (r.pass ?? 0) + 1 };
+  }
+  return null;
+}
+
 async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
   const { ORACLE_GROWTH_BUDGET } = await import("./specOracles.js");
   const fresh = (await getAutonomyRun(db, run.id)) ?? run;
@@ -797,11 +850,16 @@ async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
  * (duas seguidas = o problema é o modelo/serviço, não o arquivo).
  */
 async function skipFileAndContinue(
-  db: Db, run: AutonomyRun, path: string, note: string, opts: { failure: boolean; fromStatus: AutonomyStatus },
+  db: Db, run: AutonomyRun, path: string, note: string,
+  opts: {
+    failure: boolean; fromStatus: AutonomyStatus;
+    /** GAP-29: fatos da recusa que a PRÓXIMA tentativa deste arquivo precisa receber. */
+    patch?: Partial<AutonomyRoundLog>;
+  },
 ): Promise<boolean> {
   const failures = opts.failure ? run.fileFailures + 1 : run.fileFailures;
   const fresh = (await getAutonomyRun(db, run.id)) ?? run;
-  await patchLastRound(db, fresh, { applied: false, filePath: path, note });
+  await patchLastRound(db, fresh, { applied: false, filePath: path, note, ...(opts.patch ?? {}) });
   if (opts.failure && failures >= MAX_FILE_FAILURES) {
     await finishRun(db, fresh, "stalled",
       `${MAX_FILE_FAILURES} arquivos seguidos sem revisão aplicável (último: \`${path}\` — ${note}). Parei para não gastar mais LLM. Os arquivos já revisados neste passe estão salvos e íntegros no disco.`,
@@ -1038,10 +1096,13 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const { dispatchGapFileJob } = await import("../routes/specChat.js");
   // GAP-28: a margem ANUNCIADA é a que sobrou do passe — a mesma que o veto vai julgar no apply.
   const growthBudget = await passGrowthBudget(db, run);
+  // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
+  const priorRejection = lastGrowthRejection(run, target);
   try {
     const res = await dispatchGapFileJob({
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
       filePath: target, fileContent: file.content, findings: fileFindings, agentsUrl, llm, growthBudget,
+      priorRejection,
       userMessage: `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
     });
     if (!res.ok) {
@@ -1303,11 +1364,15 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // O código não julga o conteúdo: mede DELTA DE TAMANHO e CITAÇÃO LITERAL do path do oráculo — dois
   // fatos. Recusar não é falha de arquivo (`failure: false`): é o laço se negando a pagar crescimento
   // como se fosse correção, deixando o disco intacto e seguindo para o próximo arquivo.
-  const oracleVeto = await consolidationVeto(
-    db, run.projectId, target, file.content, revised, await passGrowthBudget(db, run),
-  );
+  const passBudget = await passGrowthBudget(db, run);
+  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised, passBudget);
   if (oracleVeto) {
-    return skipFileAndContinue(db, run, target, oracleVeto, { failure: false, fromStatus: "applying" });
+    // GAP-29: o TAMANHO da tentativa recusada vai para o log — é o único jeito de a próxima
+    // tentativa deste arquivo não ser uma repetição paga da mesma resposta reprovada.
+    return skipFileAndContinue(db, run, target, oracleVeto, {
+      failure: false, fromStatus: "applying",
+      patch: { rejectedDelta: revised.length - file.content.length, rejectedBudget: passBudget },
+    });
   }
   if (removedNote) {
     console.log(
@@ -1584,7 +1649,8 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       return false;
     }
     const streak = run.noProgressStreak + 1;
-    await patchLastRound(db, run, { note: `validação terminou em '${st}' (sem medição de GAPs)` });
+    // GAP-30: a nota da rodada de arquivo sobrevive à nota do passe.
+    await patchLastRound(db, run, { note: `validação terminou em '${st}' (sem medição de GAPs)` }, { keepNote: true });
     if (streak >= MAX_NO_PROGRESS || atCap) {
       await finishRun(db, { ...run, noProgressStreak: streak }, "stalled",
         `A validação terminou em '${st}' e não foi possível medir os GAPs. Rode Validar manualmente para ver o estado atual.`);
@@ -1607,7 +1673,7 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     const streakP = run.noProgressStreak + 1;
     const why = `Validação ${st} PARCIAL: o estágio adversarial não rodou (🔴 ${partial.blockers} blocker(s) estrutural(is) do estágio determinístico barram a spec antes dele). ` +
       `Os ${partial.important} GAP(s) desta leitura NÃO são comparáveis com os ${run.gapsCurrent ?? partial.important} da última validação completa — contagem mantida.`;
-    await patchLastRound(db, run, { validationRunId: run.validationRunId, note: why });
+    await patchLastRound(db, run, { validationRunId: run.validationRunId, note: why }, { keepNote: true });
     await postChatNote(db, run,
       `🤖 ${perFile ? `**Passe ${run.passes}/${run.maxRounds}**` : `**Rodada ${run.round}/${run.maxRounds}**`} — validação **${st}**, porém **parcial**: ` +
       `${partial.blockers} bloqueador(es) estrutural(is) impediram o estágio adversarial, então a spec não foi julgada por inteiro. ` +
@@ -1646,11 +1712,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     ? ` Cobertura desta validação: ${cov.full.length} de ${cov.full.length + cov.outlineOnly.length} arquivo(s) julgado(s) por INTEIRO (os demais entraram só como sumário).` +
       (cobertura ? ` Acumulado da spec: ${cobertura.judged}/${cobertura.total} arquivo(s) já julgado(s) neste conteúdo.` : "")
     : "";
+  // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
   await patchLastRound(db, run, {
     gapsAfter: gaps.important, blockers: gaps.blockers, warnings: gaps.warnings,
     validationRunId: run.validationRunId,
     note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — as duas contagens não são comparáveis." : ""}`,
-  });
+  }, { keepNote: true });
   const cycleLabel = perFile
     ? `**Passe ${run.passes}/${run.maxRounds} concluído** (${appliedInPass({ ...run, passes: run.passes - 1 })} arquivo(s) revisado(s))`
     : `**Rodada ${run.round}/${run.maxRounds} concluída**`;

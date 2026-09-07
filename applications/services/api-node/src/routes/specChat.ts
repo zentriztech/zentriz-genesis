@@ -758,6 +758,12 @@ function buildGapFileRequest(
    * este arquivo não tem papel em nenhum contrato decidido (ou a flag está desligada).
    */
   oracleBlock = "",
+  /**
+   * GAP-29: a tentativa ANTERIOR neste arquivo foi descartada por estourar a margem — e por quanto.
+   * Vazio = primeira tentativa (ou recusa de outra natureza). Sem isto o laço repete, ao preço cheio
+   * de Opus 5, uma resposta que ele já sabe que vai recusar.
+   */
+  priorRejectionBlock = "",
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -793,6 +799,9 @@ function buildGapFileRequest(
     gaps,
     "--- FIM DOS GAPs ---",
     "",
+    // GAP-29: vem por ÚLTIMO, antes só da instrução de formato, porque é a correção de rota — o
+    // modelo lê o pedido inteiro e só então descobre que a resposta óbvia já foi reprovada.
+    priorRejectionBlock,
     edits
       // A instrução final repete o formato porque é a última coisa que o modelo lê antes de gerar —
       // e o hábito de reemitir o documento inteiro é justamente o que causou 4 truncamentos em prod.
@@ -896,6 +905,31 @@ async function gapOracleBlock(
     console.warn(`[SpecChat] registro de oráculos indisponível (segue sem ele): ${(e as Error).message}`);
     return "";
   }
+}
+
+/**
+ * GAP-29 — o FATO da tentativa anterior descartada, para a retentativa não ser uma repetição paga.
+ *
+ * MEDIDO na run `d7acccb8` (NVX LastMile): `autenticacao-sessao.md` foi descartado três vezes
+ * entregando +2.661, +2.740 e +2.740 caracteres contra margens de 580 e 1.143 — o pedido era
+ * IDÊNTICO nas três, porque nada dizia ao agente que a tentativa anterior tinha existido. Aqui o
+ * código só transporta o número; a estratégia (consolidar primeiro, entregar em partes, ou insistir
+ * porque o acréscimo é indispensável) é decisão do agente.
+ */
+export function priorRejectionFactBlock(prior: { delta: number; budget: number; pass: number } | null | undefined): string {
+  if (!prior || prior.delta <= 0) return "";
+  return [
+    "--- TENTATIVA ANTERIOR NESTE ARQUIVO (fato registrado pelo laço) ---",
+    `No passe ${prior.pass} a sua revisão deste arquivo foi DESCARTADA INTEIRA: ela entregou`
+    + ` +${prior.delta} caracteres e a margem de crescimento disponível era ${prior.budget}. Nada dela`
+    + " foi salvo — o conteúdo acima é o de ANTES dela e os GAPs seguem abertos.",
+    "NÃO repita a mesma tentativa: entregar de novo um crescimento desse tamanho gasta a rodada e não"
+    + " fecha GAP nenhum. Se o conserto exige texto novo, PAGUE-O removendo as redeclarações que o"
+    + " bloco de fonte única aponta; se ainda não couber, resolva nesta rodada os GAPs que CABEM na"
+    + " margem, deixando o arquivo coerente, e deixe os demais para a próxima — GAP fechado em parte é"
+    + " progresso, rodada descartada não é.",
+    "--- FIM DA TENTATIVA ANTERIOR ---",
+  ].join("\n");
 }
 
 // Remove cerca de código envolvente (```md … ```) SE o modelo tiver desobedecido e cercado
@@ -1222,6 +1256,11 @@ export async function dispatchGapFileJob(opts: {
   llm: Record<string, unknown>;
   /** GAP-28: margem de crescimento que resta no passe. Só o laço autônomo informa. */
   growthBudget?: number;
+  /**
+   * GAP-29: a tentativa anterior neste arquivo foi DESCARTADA por estourar a margem (tamanho que ela
+   * entregou × margem que havia). Só o laço autônomo tem esse histórico; o botão humano não retenta.
+   */
+  priorRejection?: { delta: number; budget: number; pass: number } | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1262,7 +1301,13 @@ export async function dispatchGapFileJob(opts: {
   });
   runFileChatJob(
     opts.jobId,
-    { ...buildGapFileRequest(target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles), ...opts.llm },
+    {
+      ...buildGapFileRequest(
+        target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
+        priorRejectionFactBlock(opts.priorRejection),
+      ),
+      ...opts.llm,
+    },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
