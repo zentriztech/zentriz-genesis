@@ -391,15 +391,55 @@ class PipelineContext:
         return inputs
 
     def get_relevant_artifacts_for_task(self, task_id: str, max_content: int = 8000) -> list[dict]:
-        """Retorna artefatos existentes formatados para existing_artifacts (path + content)."""
-        out = []
-        for path, content in self.artifacts.items():
-            if len(content) > max_content:
-                content = content[:max_content] + "\n... [truncado]"
-            out.append({"path": path, "content": content})
+        """Artefatos existentes para `existing_artifacts` (path + content), com ORDEM e RESERVA.
+
+        Antes: TODO artefato entrava com o MESMO prefixo de `max_content` chars e um corte MUDO —
+        o arquivo que a task cita recebia a mesma fatia de um arquivo irrelevante, e o agente
+        (que devolve o arquivo INTEIRO) reescrevia a partir do prefixo, apagando o resto.
+        Arquétipos GAP-72/73 (ordem/reserva) e GAP-71 (corte mudo) — ver `context_budget.py`.
+        """
+        from orchestrator.context_budget import apply_cut, cited_paths, omitted_note, plan_allocation
+
+        items = [(path, len(content or "")) for path, content in self.artifacts.items()]
+        if not items:
+            return []
+        task = self.current_task if isinstance(self.current_task, dict) else {}
+        cited = cited_paths(
+            [
+                str(task.get("title") or ""),
+                str(task.get("description") or ""),
+                str(task.get("requirements") or ""),
+                "\n".join(str(x) for x in (task.get("acceptance_criteria") or [])),
+                "\n".join(str(x) for x in (task.get("depends_on_files") or task.get("dependsOnFiles") or [])),
+                "\n".join(str(x) for x in (task.get("estimated_files") or task.get("estimatedFiles") or [])),
+            ],
+            [p for p, _ in items],
+        )
+        # O teto POR ITEM é o que muda: citado pode chegar inteiro (até CITED_ARTIFACT_CHARS),
+        # não citado mantém o teto histórico. A reserva impede que o citado fique com a sobra.
+        cited_set = set(cited)
+        want = [
+            (path, min(size, self.CITED_ARTIFACT_CHARS if path in cited_set else max_content))
+            for path, size in items
+        ]
+        alloc = plan_allocation(want, self.MAX_TOTAL_ARTIFACT_CHARS, cited=cited)
+        out: list[dict] = []
+        for path in alloc:
+            content = self.artifacts.get(path) or ""
+            cap = alloc[path]
+            if cap <= 0:
+                out.append({"path": path, "content": omitted_note(path, len(content))})
+                continue
+            out.append({"path": path, "content": apply_cut(path, content, cap)})
         return out
 
     MAX_TOTAL_DEPENDENCY_CHARS = 60_000  # ~15K tokens total (LEI 7)
+    # Orçamento total de `existing_artifacts` e teto por arquivo CITADO pela task. O runner só
+    # carrega arquivos de `apps/` com menos de 50.000 bytes, então 50.000 significa "o arquivo
+    # que a task cita chega INTEIRO" — que é a única forma de o Dev devolvê-lo inteiro sem
+    # apagar código (o veto "SÍMBOLOS REMOVIDOS" do runner é o sintoma do contrário).
+    MAX_TOTAL_ARTIFACT_CHARS = int(os.environ.get("AGENT_ARTIFACT_TOTAL_CHARS", "160000"))
+    CITED_ARTIFACT_CHARS = int(os.environ.get("AGENT_CITED_ARTIFACT_CHARS", "50000"))
 
     def _extract_interfaces(self, code: str) -> str:
         """
@@ -435,29 +475,75 @@ class PipelineContext:
         LEI 7: Retorna APENAS o código que esta tarefa precisa.
         Se um arquivo excede 20K chars, envia apenas interfaces/assinaturas.
         Total limitado a MAX_TOTAL_DEPENDENCY_CHARS (~15K tokens).
-        """
-        result: dict[str, str] = {}
-        total_chars = 0
-        FILE_INTERFACE_THRESHOLD = 20_000
 
-        for path in depends_on or []:
-            if path not in self.artifacts:
-                continue
+        🔴 Arquétipo GAP-72/GAP-45 (ordem + cauda muda): o laço gastava o orçamento em ORDEM DE
+        LISTA e, ao estourar, fazia `break` — **a cauda de `depends_on` desaparecia em silêncio**.
+        O arquivo que a task cita por último chegava com ZERO e o Dev, sem saber, inventava a
+        interface dele. Agora TODO item pedido tem reserva mínima e o que não couber é
+        DECLARADO (`omitted_note`), nunca omitido. O corte declara números (GAP-71).
+        """
+        from orchestrator.context_budget import (
+            DEFAULT_MIN_SHARE,
+            apply_cut,
+            cut_note,
+            omitted_note,
+            plan_allocation,
+        )
+
+        FILE_INTERFACE_THRESHOLD = 20_000
+        requested = [p for p in (depends_on or []) if p in self.artifacts]
+        if not requested:
+            return {}
+
+        # Conteúdo pretendido por arquivo (interfaces quando é grande demais para ir cru).
+        wanted: dict[str, str] = {}
+        for path in requested:
             content = self.artifacts[path]
             if len(content) > FILE_INTERFACE_THRESHOLD:
                 content = self._extract_interfaces(content)
-            if len(content) > max_per_file:
-                content = content[:max_per_file] + "\n... [truncado]"
-            if total_chars + len(content) > self.MAX_TOTAL_DEPENDENCY_CHARS:
-                logger.warning(
-                    "Contexto de dependências excedeu %s chars (LEI 7). Cortando em %s arquivos de %s solicitados.",
-                    self.MAX_TOTAL_DEPENDENCY_CHARS,
-                    len(result),
-                    len(depends_on or []),
+            wanted[path] = content
+
+        # Todo `depends_on` é, por definição, CITADO pela task: a reserva vale para todos e a
+        # ordem preservada é a que o PM declarou.
+        alloc = plan_allocation(
+            [(p, min(len(wanted[p]), max_per_file)) for p in requested],
+            self.MAX_TOTAL_DEPENDENCY_CHARS,
+            cited=requested,
+            min_share=min(DEFAULT_MIN_SHARE, max_per_file),
+        )
+        result: dict[str, str] = {}
+        cut: list[str] = []
+        for path in requested:
+            original = self.artifacts[path]
+            cap = alloc.get(path, 0)
+            content = wanted[path]
+            if cap <= 0:
+                result[path] = omitted_note(path, len(original))
+                cut.append(path)
+                continue
+            if cap < len(content):
+                # Janela útil (GAP-74): assinaturas inteiras valem mais que um prefixo cru do
+                # mesmo tamanho. Só troca quando elas cabem E têm substância — em conteúdo sem
+                # nada extraível o resumo vira uma linha de cabeçalho e entregaria MENOS
+                # informação que o prefixo, desperdiçando a fatia.
+                signatures = self._extract_interfaces(content)
+                content = (
+                    signatures
+                    if len(signatures) <= cap and len(signatures) >= min(cap // 4, 500)
+                    else content[:cap]
                 )
-                break
+            # Qualquer redução — inclusive a troca por assinaturas, que o código antigo fazia
+            # SEM declarar magnitude — é medida contra o arquivo ORIGINAL e vai declarada.
+            if len(content) < len(original):
+                content += cut_note(path, len(content), len(original))
+                cut.append(path)
             result[path] = content
-            total_chars += len(content)
+        if cut:
+            logger.warning(
+                "Contexto de dependências acima de %s chars (LEI 7): %d de %d arquivo(s) "
+                "entregues PARCIALMENTE, com o corte declarado ao agente: %s",
+                self.MAX_TOTAL_DEPENDENCY_CHARS, len(cut), len(requested), ", ".join(cut[:8]),
+            )
         return result
 
     def register_artifact(self, path: str, content: str, task_id: str = "") -> None:

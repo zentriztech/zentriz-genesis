@@ -28,14 +28,24 @@ def test_pipeline_context_get_dependency_code_returns_only_requested():
 
 
 def test_pipeline_context_get_dependency_code_truncates_large_file():
+    """O corte existe, mas DECLARADO: arquétipo GAP-71 (corte mudo faz o Dev apagar código).
+
+    Antes o marcador era `... [truncado]` — sem números. O Dev entrega o arquivo INTEIRO, então
+    concluía que tinha visto tudo e reescrevia a partir do prefixo, apagando o resto (o veto
+    "SÍMBOLOS REMOVIDOS" do runner é o sintoma). Agora o corte diz quanto ficou de fora e
+    proíbe a reescrita integral.
+    """
     from orchestrator.pipeline_context import PipelineContext
     ctx = PipelineContext("proj-1")
     large = "x" * 12000
     ctx.add_artifact("apps/big.ts", large)
     dep = ctx.get_dependency_code(["apps/big.ts"], max_per_file=5000)
     assert "apps/big.ts" in dep
-    assert len(dep["apps/big.ts"]) == 5000 + len("\n... [truncado]")
-    assert dep["apps/big.ts"].endswith("... [truncado]")
+    assert dep["apps/big.ts"].startswith("x" * 5000)
+    assert "apps/big.ts" in dep["apps/big.ts"], "o corte tem de nomear o arquivo"
+    assert "5000 de 12000" in dep["apps/big.ts"], "o corte tem de dizer os NÚMEROS"
+    assert "7000" in dep["apps/big.ts"], "quantos chars ficaram de fora"
+    assert "não reescreva" in dep["apps/big.ts"].lower()
 
 
 def test_pipeline_context_get_dependency_code_missing_path_omitted():
@@ -59,15 +69,24 @@ def test_pipeline_context_lei7_extract_interfaces_for_large_file():
 
 
 def test_pipeline_context_lei7_caps_total_chars():
-    """LEI 7: total de dependency_code limitado a MAX_TOTAL_DEPENDENCY_CHARS."""
+    """LEI 7: total de dependency_code limitado a MAX_TOTAL_DEPENDENCY_CHARS.
+
+    ⚠️ Arquétipo GAP-72/GAP-45: o teto continua valendo, mas a CAUDA não pode desaparecer.
+    Antes o laço fazia `break` ao estourar o orçamento e os últimos arquivos de `depends_on`
+    sumiam em SILÊNCIO — o Dev inventava a interface deles. Agora todo arquivo pedido aparece,
+    inteiro ou com o corte declarado.
+    """
     from orchestrator.pipeline_context import PipelineContext
     ctx = PipelineContext("p1")
     for i in range(10):
         ctx.add_artifact(f"apps/f{i}.ts", "x" * 10000)
-    dep = ctx.get_dependency_code([f"apps/f{i}.ts" for i in range(10)])
+    pedidos = [f"apps/f{i}.ts" for i in range(10)]
+    dep = ctx.get_dependency_code(pedidos)
     total = sum(len(v) for v in dep.values())
-    assert total <= ctx.MAX_TOTAL_DEPENDENCY_CHARS + 1000
-    assert len(dep) < 10
+    assert total <= ctx.MAX_TOTAL_DEPENDENCY_CHARS + 10 * 600, "teto + as marcas de corte"
+    assert list(dep.keys()) == pedidos, "nenhum arquivo pedido pode desaparecer"
+    assert all(v for v in dep.values()), "nem chegar vazio"
+    assert dep["apps/f9.ts"], "a CAUDA da lista era exatamente o que o `break` engolia"
 
 
 def test_validate_backlog_tasks_max_files_lei8_ok():
