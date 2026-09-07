@@ -61,6 +61,12 @@ export interface FileDigest {
   anchorsDropped: string[];
   /** Âncoras que o código não endereçou a nenhuma seção (IDs cunhados pelo juiz, p.ex.). */
   anchorsUnlocatable: string[];
+  /** 🔴 GAP-73 — seções que o TEXTO do GAP cita como a OUTRA ponta da contradição e que entraram. */
+  cited: number;
+  /** Quantas dessas seções citadas o código conseguiu endereçar (antes do orçamento). */
+  citedLocated: number;
+  /** Citadas que não caberiam — declaradas ao modelo, nunca omitidas em silêncio. */
+  citedDropped: string[];
 }
 
 /**
@@ -122,6 +128,80 @@ function anchoredSections(secs: ReturnType<typeof splitSections>, findings: Vali
   return { picks: [...byIndex.values()], unlocatable };
 }
 
+/** Nome do arquivo alvo sem diretório, minúsculo — é como o juiz cita irmãos no texto do GAP. */
+function targetBase(filePath: string): string {
+  const p = String(filePath ?? "").trim().toLowerCase();
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+
+/** Endereço de seção citado no texto de um GAP (`§8.1`, `§2.3.1`). */
+const SECTION_REF_RE = /§\s?\d+(?:\.\d+)*/g;
+/** Janela de texto antes da citação onde se procura um nome de arquivo (`contratos-erros.md §2.3`). */
+const CROSS_FILE_WINDOW = 48;
+
+/**
+ * 🔴 GAP-73 — os endereços que o GAP cita ALÉM da própria âncora.
+ *
+ * Puramente mecânico: extrai `§x.y` do título e do `rationale`. Citação precedida de um nome de
+ * arquivo DIFERENTE do alvo é descartada — `contratos-erros.md §2.3` aponta a seção 2.3 DO IRMÃO, e
+ * trazer a §2.3 do alvo mostraria o trecho errado (pior que não mostrar nada). Auto-referência pelo
+ * nome (`modelo-dados.md §8.1` dentro de `modelo-dados.md`) continua valendo.
+ */
+function citedRefs(f: ValidationFinding, targetBase: string): string[] {
+  const out: string[] = [];
+  for (const text of [String(f.title ?? ""), String(f.rationale ?? "")]) {
+    SECTION_REF_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = SECTION_REF_RE.exec(text)) !== null) {
+      const before = text.slice(Math.max(0, m.index - CROSS_FILE_WINDOW), m.index);
+      const fileHit = before.match(/([A-Za-z0-9._-]+\.md)[^.]*$/i);
+      if (fileHit && fileHit[1].toLowerCase() !== targetBase) continue;
+      out.push(m[0]);
+    }
+  }
+  return out;
+}
+
+interface CitedSection {
+  i: number;
+  body: string;
+  /** Os endereços citados que caem nesta seção — é o que vai na declaração ao modelo. */
+  refs: string[];
+  /** Peso do GAP mais grave que a cita. */
+  rank: number;
+}
+
+/**
+ * 🔴 GAP-73 — as seções que o texto dos GAPs cita como a OUTRA PONTA da contradição.
+ *
+ * `skip` recebe TODAS as seções já endereçadas por âncora (inclusive as que não couberam), para uma
+ * seção nunca ser reservada duas vezes nem declarada em duas listas.
+ */
+function citedSections(
+  secs: ReturnType<typeof splitSections>,
+  findings: ValidationFinding[],
+  targetBase: string,
+  skip: Set<number>,
+): CitedSection[] {
+  const index = buildAnchorIndex(secs);
+  const byIndex = new Map<number, CitedSection>();
+  for (const f of findings) {
+    const rank = severityRank((f as { severity?: unknown }).severity);
+    for (const ref of citedRefs(f, targetBase)) {
+      const i = locateSectionIndex(index, ref);
+      if (i === null || skip.has(i)) continue;
+      const cur = byIndex.get(i);
+      if (cur) {
+        if (!cur.refs.includes(ref)) cur.refs.push(ref);
+        cur.rank = Math.min(cur.rank, rank);
+        continue;
+      }
+      byIndex.set(i, { i, body: clipSection(secs[i].body, TARGET_SECTION_BUDGET), refs: [ref], rank });
+    }
+  }
+  return [...byIndex.values()];
+}
+
 /**
  * Recorta o arquivo ALVO quando ele não cabe no teto de entrada. Abaixo do teto nada muda —
  * recortar um arquivo que cabe só criaria risco de o modelo não ver o trecho que precisa mudar.
@@ -140,6 +220,18 @@ function anchoredSections(secs: ReturnType<typeof splitSections>, findings: Vali
  * Agora as seções ENDEREÇADAS pelas âncoras são reservadas ANTES do preenchimento por relevância, e o
  * que não couber é DECLARADO ao modelo (nome da âncora) em vez de desaparecer. Continua sendo transporte
  * de fato — "o juiz disse que o defeito está neste endereço" —, não julgamento de conteúdo.
+ *
+ * ## 🔴 GAP-73 — a âncora chegava, a OUTRA PONTA da contradição não
+ *
+ * MEDIDO em prod na rodada seguinte ao deploy do GAP-72 (run `32992636`, mesmo arquivo): âncoras
+ * 11/11 no prompt, 26 edições aplicadas, spec −3.007 chars — e as MESMAS 12 constatações voltaram na
+ * validação seguinte, anchor por anchor. A razão está no texto do juiz: o defeito de `§5.2` é o
+ * literal *"Sim, quando `expires_at < NOW()`"* que mora em **§8.1**; o de `§11.3 etapa C` mora em
+ * `§3`, `§3.2`, `§3.4`. Reprodução com o arquivo real: das **25 seções citadas nos `rationale`, 8
+ * estavam FORA** do recorte — e as ausentes são 1.389 / 758 / 1.897 / 2.198 / 3.014 chars, ou seja
+ * cabiam de sobra. Sem enxergar o literal, a única saída que resta ao agente é **inventar uma regra
+ * de substituição textual global** (`PURGA-RT-01.1`, `ETAPA-C-01`) — errata com outro nome, que o
+ * juiz relê e reabre. Por isso as seções CITADAS entram como segunda reserva, antes da relevância.
  */
 export function buildFileDigest(
   filePath: string,
@@ -152,6 +244,7 @@ export function buildFileDigest(
     return {
       text: content, digested: false, used: secs.length, total: secs.length,
       anchored: 0, anchorsLocated: 0, anchorsDropped: [], anchorsUnlocatable: [],
+      cited: 0, citedLocated: 0, citedDropped: [],
     };
   }
 
@@ -174,7 +267,21 @@ export function buildFileDigest(
   }
   const anchored = chosen.length;
 
-  // 2) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
+  // 2) 🔴 GAP-73 — a OUTRA PONTA da contradição: as seções que o texto do GAP cita. Vêm ANTES da
+  //    relevância porque foram apontadas pelo juiz, não estimadas por contagem de termos. Mesma ordem
+  //    do passo 1 (blocker antes de warning, menor primeiro, empate pela ordem do arquivo).
+  const citedPicks = citedSections(secs, findings, targetBase(filePath), new Set(picks.map((p) => p.i)));
+  citedPicks.sort((a, b) => a.rank - b.rank || a.body.length - b.body.length || a.i - b.i);
+  const citedDropped: string[] = [];
+  for (const p of citedPicks) {
+    if (spent + p.body.length > budget) { citedDropped.push(...p.refs); continue; }
+    spent += p.body.length;
+    chosenIdx.add(p.i);
+    chosen.push({ i: p.i, body: p.body });
+  }
+  const cited = chosen.length - anchored;
+
+  // 3) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
   for (const x of scoreSections(secs, targetTerms(findings))) {
     if (chosenIdx.has(x.i)) continue;
     const body = clipSection(x.section.body, TARGET_SECTION_BUDGET);
@@ -209,6 +316,9 @@ export function buildFileDigest(
       anchorsLocated: picks.length,
       anchorsDropped: dropped,
       anchorsUnlocatable: unlocatable,
+      cited: 0,
+      citedLocated: citedPicks.length,
+      citedDropped,
     };
   }
 
@@ -220,7 +330,8 @@ export function buildFileDigest(
     text: [
       `[RESUMO DIRIGIDO de \`${filePath}\` — o arquivo tem ${content.length} chars e NÃO cabe inteiro nesta`,
       `rodada. Abaixo, o SUMÁRIO COMPLETO de seções e, VERBATIM, as ${parts.length} seção(ões) selecionadas —`,
-      `${anchored} delas é/são a(s) seção(ões) que os GAPs desta rodada ENDEREÇAM. REGRAS desta rodada:`,
+      `${anchored} delas é/são a(s) seção(ões) que os GAPs desta rodada ENDEREÇAM e ${cited} é/são`,
+      "seção(ões) que o TEXTO dos GAPs cita como a outra ponta da contradição. REGRAS desta rodada:",
       "  • cada bloco SEARCH deve copiar texto que você está VENDO aqui — é byte a byte igual ao arquivo;",
       "  • NÃO recrie uma seção que aparece no sumário e não foi transcrita: ela EXISTE no arquivo e",
       "    duplicá-la troca um GAP por uma contradição interna;",
@@ -232,6 +343,14 @@ export function buildFileDigest(
         ? [`[ATENÇÃO: a(s) seção(ões) endereçada(s) por ${dropped.join(", ")} NÃO caberam no orçamento desta`,
            " rodada. Para esses GAPs, DECLARE na linha final que o trecho não veio — não improvise o conteúdo",
            " e não anule o trecho por errata.]"]
+        : []),
+      // 🔴 GAP-73: a seção citada como a outra ponta da contradição é onde mora o literal a matar. Sem
+      // esta linha o modelo só tem uma saída: inventar uma regra de substituição textual global — que é
+      // errata com outro nome e não fecha GAP nenhum (medido em prod: `PURGA-RT-01.1`, `ETAPA-C-01`).
+      ...(citedDropped.length > 0
+        ? [`[ATENÇÃO: ${citedDropped.join(", ")} — citada(s) pelos GAPs como a outra ponta da contradição —`,
+           " NÃO caberam nesta rodada. DECLARE na linha final que faltou o trecho; NÃO crie regra de",
+           " substituição textual global ('toda redação que diga X, leia-se Y') para contornar a ausência.]"]
         : []),
       "",
       "SUMÁRIO DE SEÇÕES:",
@@ -247,5 +366,8 @@ export function buildFileDigest(
     anchorsLocated: picks.length,
     anchorsDropped: dropped,
     anchorsUnlocatable: unlocatable,
+    cited,
+    citedLocated: citedPicks.length,
+    citedDropped,
   };
 }
