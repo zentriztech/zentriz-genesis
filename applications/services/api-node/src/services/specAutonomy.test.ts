@@ -63,6 +63,9 @@ vi.mock("./tenantLlmConfig.js", () => ({
 
 vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft", "spec_submitted"]) }));
 
+// GAP-46: para provar QUAL lista de arquivos o laço entrega ao survey de findings.
+import { projectFindingsState, gapDeltaSinceLastRun } from "./findingTriage.js";
+
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
   isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastRejectedAttempt, runGrowthUsed, growthAllowance,
@@ -75,6 +78,8 @@ interface FakeRow { [k: string]: unknown }
 let run: FakeRow | null = null;
 let projectStatus = "draft";
 let specPath = "";
+/** GAP-46: árvore de `project_spec_files` como o laço a lê (canonicalização `rel_dir/filename`). */
+let specTreeFiles: Array<{ filename: string; rel_dir: string | null }> = [];
 let insertFails23505 = false;
 // G2: `project_spec_snapshots` é a rede de segurança da spec. O log deixa provar que o conteúdo
 // ANTERIOR foi guardado ANTES da escrita, e o flag simula a rede rasgada (banco fora do ar).
@@ -95,6 +100,11 @@ const db = {
 
     if (s.startsWith("SELECT file_path FROM project_spec_files")) {
       return { rows: specPath ? [{ file_path: specPath }] : [], rowCount: specPath ? 1 : 0 };
+    }
+    // GAP-46: a árvore ATUAL da spec — é o que diz à contagem quais findings apontam para arquivo que
+    // já saiu. Lista vazia reproduz "não sei" (leitura transitória), e o esperado é comportamento legado.
+    if (s.startsWith("SELECT filename, rel_dir FROM project_spec_files")) {
+      return { rows: [...specTreeFiles], rowCount: specTreeFiles.length };
     }
     if (s.startsWith("SELECT status FROM projects")) return { rows: [{ status: projectStatus }], rowCount: 1 };
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
@@ -206,6 +216,7 @@ beforeEach(() => {
   delta = null;
   insertFails23505 = false;
   snapshotFails = false;
+  specTreeFiles = [];
   sqlLog.length = 0;
   findings = [{ severity: "blocker" }, { severity: "warning" }, { severity: "info" }];
   writeSpec(BASE_SPEC);
@@ -508,6 +519,40 @@ describe("validação dentro do laço", () => {
     expect(depois.passBlockers).toBe(3);      // o recorte do PASSE, rotulado como tal
     expect(depois.passWarnings).toBe(2);
     expect(depois.gapsAfter).toBe(5);
+  });
+
+  /**
+   * 🔴 GAP-46 — a contagem que decide a parada do laço não sabia quais arquivos AINDA existem.
+   *
+   * `surveyFindings` (`findingTriage.ts:268`) só resolve um finding por REMOÇÃO do arquivo quando
+   * recebe `currentFiles`; o laço chamava `projectFindingsState` sem esse argumento. Efeito: GAP em
+   * arquivo que saiu da spec ficava ATIVO para sempre (nenhuma rotação de cobertura o rejulgaria), e a
+   * lista da Bancada — que SEMPRE passou `currentFiles` — divergia do laço. Latente no NVX hoje
+   * (medido: os 7 arquivos citados nos findings existem todos), ativo no primeiro `split`/remoção.
+   */
+  describe("GAP-46 — a contagem enxerga arquivo REMOVIDO da spec", () => {
+    it("a árvore atual da spec é entregue ao survey (e ao diff finding-a-finding)", async () => {
+      specTreeFiles = [
+        { filename: "README.md", rel_dir: "" },
+        { filename: "01-api.md", rel_dir: "backend" },
+        { filename: "modelo.md", rel_dir: "/dados/" },   // barras nas pontas são normalizadas
+      ];
+      const r = await reachValidating(5);
+      await advanceAutonomyRun(db, r.id);
+      const esperado = ["README.md", "backend/01-api.md", "dados/modelo.md"];
+      expect(projectFindingsState).toHaveBeenCalledWith(db, PROJECT, { currentFiles: esperado });
+      expect(gapDeltaSinceLastRun).toHaveBeenCalledWith(db, PROJECT, esperado);
+    });
+
+    it("🔴 árvore VAZIA não vira 'todos os arquivos foram removidos' — cai no legado (`null`)", async () => {
+      // Sem esta guarda uma leitura transitória apagaria a contagem inteira e o laço declararia
+      // `succeeded` sobre uma spec cheia de GAPs. Erro seguro = não detectar remoção nenhuma.
+      specTreeFiles = [];
+      const r = await reachValidating(5);
+      await advanceAutonomyRun(db, r.id);
+      expect(projectFindingsState).toHaveBeenCalledWith(db, PROJECT, { currentFiles: null });
+      expect(gapDeltaSinceLastRun).toHaveBeenCalledWith(db, PROJECT, null);
+    });
   });
 
   // GAP-13 (medido em prod 2026-09-06, run c3757985): a validação `8e3286b2` durou 230 ms, achou 1

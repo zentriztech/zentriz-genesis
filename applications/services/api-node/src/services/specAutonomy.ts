@@ -401,8 +401,35 @@ export function tallyGaps(findings: EnrichedFinding[]): GapTally {
   return t;
 }
 
+/**
+ * 🔴 GAP-46 — a lista de arquivos ATUAIS da spec, para a contagem do laço enxergar arquivo REMOVIDO.
+ *
+ * `surveyFindings` só marca um finding como resolvido-por-remoção quando recebe `currentFiles`
+ * (`findingTriage.ts:268`). O laço autônomo chamava `projectFindingsState` SEM esse argumento, então
+ * um GAP apontado para arquivo que saiu da spec ficava ATIVO para sempre — nenhuma rotação de
+ * cobertura o julgaria de novo, e a contagem que decide a parada nunca poderia cair. Pior: a lista de
+ * GAPs da Bancada (`specGapScope.ts:240`) SEMPRE passou `currentFiles`, então UI e laço divergiam —
+ * a tela podia mostrar zero enquanto o laço queimava os 5 passes atrás de um fantasma.
+ *
+ * ⚠️ Guarda contra o próprio remédio: lista VAZIA marcaria TODOS os findings como removidos e o laço
+ * declararia `succeeded` sobre uma spec cheia de GAPs. Vazio ⇒ `null` ⇒ comportamento legado (nenhuma
+ * remoção detectada), que é o erro seguro. Falha de leitura idem.
+ */
+async function specFilePaths(db: Db, projectId: string): Promise<string[] | null> {
+  const rows = (await db.query(
+    "SELECT filename, rel_dir FROM project_spec_files WHERE project_id = $1", [projectId],
+  )).rows as unknown as Array<{ filename: string; rel_dir: string | null }>;
+  // Mesma canonicalização do `loadSpecFiles` (é a que a UI, o PUT e a fila de GAPs usam).
+  const paths = rows.map((r) => {
+    const relDir = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+    return relDir ? `${relDir}/${r.filename}` : r.filename;
+  });
+  return paths.length > 0 ? paths : null;
+}
+
 async function currentGaps(db: Db, projectId: string): Promise<GapTally> {
-  const state = await projectFindingsState(db, projectId);
+  const currentFiles = await specFilePaths(db, projectId).catch(() => null); // GAP-46
+  const state = await projectFindingsState(db, projectId, { currentFiles });
   return tallyGaps(state.findings);
 }
 
@@ -1914,7 +1941,11 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // do Jean ("a contagem tem de CAIR") só é respondível pela diferença finding-a-finding, então ela
   // entra no log e no chat. Falha aqui não derruba o passe: sem diff, o laço volta a decidir só pelo
   // agregado, como antes.
-  const delta = await gapDeltaSinceLastRun(db, run.projectId).catch(() => null);
+  // GAP-46: o diff também precisa saber quais arquivos AINDA existem — sem isso um GAP de arquivo
+  // removido não aparece como fechado nem no agregado nem no diff, e o laço fica sem nenhuma via para
+  // registrar progresso por remoção (justamente o mecanismo do GAP-12).
+  const delta = await gapDeltaSinceLastRun(db, run.projectId, await specFilePaths(db, run.projectId).catch(() => null))
+    .catch(() => null);
   // ⚠️ Revisão adversarial da própria correção: aceitar `closed > 0` como progresso premiaria justamente
   // o comportamento medido no NVX (1 fecha, 25 entram) e o laço queimaria os 5 passes sem convergir —
   // matando a função do `no_progress_streak`, que é cortar gasto de LLM que não anda. Progresso é SALDO:
