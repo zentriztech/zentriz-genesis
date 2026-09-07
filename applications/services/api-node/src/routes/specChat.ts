@@ -628,7 +628,8 @@ function buildRawFileRequest(
 function ANNULMENT_RULE(n: string): string {
   return [
     `${n}) ANULAR NÃO É CORRIGIR: nunca resolva uma contradição acrescentando em outro ponto do arquivo`,
-    "   uma errata, nota, requisito ou tabela que declare o trecho ofensor 'nulo', 'sem efeito',",
+    "   uma errata, nota, requisito, tabela ou REGRA DE SUBSTITUIÇÃO TEXTUAL GLOBAL ('toda redação deste",
+    "   arquivo que diga X, leia-se Y') que declare o trecho ofensor 'nulo', 'sem efeito',",
     "   'superado' ou que mande 'ler REQ-X em vez dele'. Quem valida relê o TRECHO ORIGINAL, encontra a",
     "   prescrição antiga ainda lá e reabre o mesmo problema — e o arquivo só cresceu. Corrija NO LUGAR:",
     "   apague a frase/linha/célula que não vale mais, ou substitua o texto dela pela decisão que vale.",
@@ -896,7 +897,11 @@ async function gapFileTargetContent(
     `[SpecChat] alvo recortado ${filePath}: ${content.length} chars > teto ${cap} → resumo dirigido de ` +
     `${d.text.length} chars (${d.used}/${d.total} seções; ancoradas ${d.anchored}/${d.anchorsLocated}` +
     `${d.anchorsDropped.length > 0 ? `, FORA por orçamento: ${d.anchorsDropped.join(", ")}` : ""}` +
-    `${d.anchorsUnlocatable.length > 0 ? `, não endereçáveis: ${d.anchorsUnlocatable.join(", ")}` : ""})`,
+    `${d.anchorsUnlocatable.length > 0 ? `, não endereçáveis: ${d.anchorsUnlocatable.join(", ")}` : ""}` +
+    // 🔴 GAP-73: a âncora sozinha não fecha o GAP quando o literal ofensor mora em OUTRA seção citada
+    // no rationale. Este par é o que diz se a outra ponta da contradição chegou ao prompt.
+    `; citadas ${d.cited}/${d.citedLocated}` +
+    `${d.citedDropped.length > 0 ? `, FORA por orçamento: ${d.citedDropped.join(", ")}` : ""})`,
   );
   return { text: d.text, digested: d.digested };
 }

@@ -212,3 +212,103 @@ describe("buildFileDigest — cobertura garantida das seções ancoradas (GAP-72
     expect(d.text).toContain("O campo `status_entrega` é enum: PENDENTE, EM_ROTA, ENTREGUE.");
   });
 });
+
+/**
+ * 🔴 GAP-73 — a âncora chegava, a OUTRA PONTA da contradição não.
+ *
+ * Medido em prod na rodada seguinte ao GAP-72 (run `32992636`): âncoras 11/11 no prompt, 26 edições
+ * aplicadas, −3.007 chars — e as MESMAS 12 constatações voltaram. O juiz diz por quê: o defeito
+ * ancorado em `§5.2` é o literal *"Sim, quando `expires_at < NOW()`"* que mora em **§8.1**. Das 25
+ * seções citadas nos `rationale`, **8 estavam fora** do recorte (as ausentes tinham 758 a 3.014 chars:
+ * cabiam). Sem ver o literal, a única saída do agente é uma regra de substituição textual global —
+ * errata com outro nome. Os testes abaixo travam a segunda reserva e a declaração do que não couber.
+ */
+const CITADA = [
+  "# Modelo de dados",
+  "## Convenções gerais",
+  // Mesma armadilha do GAP-72: superset dos identificadores, logo a mais "relevante" pela contagem.
+  "Aqui aparecem todos: `idx_rt_expires_at`, `revoked_at`, `expires_at` e `refresh_tokens`." +
+  ` ${filler("generico", 1_600)}`,
+  "### 5.2 Índices e o requisito de cada um",
+  `A justificativa de \`idx_rt_expires_at\` fala de limpeza física. ${filler("indices", 100)}`,
+  // Nenhum termo em disputa aparece aqui de propósito: pela contagem de relevância esta seção vale
+  // ZERO e nunca seria escolhida — é só o texto dos GAPs que a aponta. É a forma do defeito em prod.
+  "### 8.1 RN-05 — Nenhum registro físico removido",
+  `A linha da tabela diz "Sim, quando expirado". ${filler("rn05", 100)}`,
+  "## 99. Apêndice sem relação",
+  filler("cauda", 1_500),
+].join("\n");
+
+/** O GAP ancora em §5.2 e diz, no texto, que a outra prescrição está em §8.1 — o padrão de prod. */
+const OUTRA_PONTA = gap(
+  "Duas prescrições para o único DELETE",
+  "A justificativa de índice de §5.2 e a linha de `refresh_tokens` de §8.1 prescrevem remoção física.",
+  "§5.2",
+);
+
+describe("buildFileDigest — a outra ponta da contradição (GAP-73)", () => {
+  const CAP_C = 20_000; // orçamento = 15.000
+
+  it("a seção CITADA no texto do GAP entra antes da genérica, mesmo sem ser a âncora", () => {
+    const d = buildFileDigest("modelo-dados.md", CITADA, [OUTRA_PONTA], CAP_C);
+    expect(d.digested).toBe(true);
+    expect(d.anchored).toBe(1);
+    expect(d.text).toContain("indices indices");
+    // O literal que o juiz manda matar mora AQUI — antes ficava fora e sobrava só inventar errata.
+    expect(d.cited).toBe(1);
+    expect(d.citedLocated).toBe(1);
+    expect(d.citedDropped).toEqual([]);
+    expect(d.text).toContain("rn05 rn05");
+    expect(d.text).not.toContain("generico generico");
+  });
+
+  it("citação com nome de OUTRO arquivo não puxa a seção homônima do alvo (mostraria o trecho errado)", () => {
+    const d = buildFileDigest("modelo-dados.md", CITADA, [gap(
+      "Divergência com irmão",
+      "O par (`code`, HTTP) é de `contratos-erros.md` §8.1 — fonte única daquele contrato.",
+      "§5.2",
+    )], CAP_C);
+    expect(d.citedLocated).toBe(0);
+    expect(d.cited).toBe(0);
+    expect(d.text).not.toContain("rn05 rn05");
+  });
+
+  it("citação pelo PRÓPRIO nome do arquivo continua valendo (auto-referência não é cross-file)", () => {
+    const d = buildFileDigest("specs/modelo-dados.md", CITADA, [gap(
+      "Auto-referência",
+      "A linha de `modelo-dados.md` §8.1 contradiz a justificativa do índice.",
+      "§5.2",
+    )], CAP_C);
+    expect(d.cited).toBe(1);
+    expect(d.text).toContain("rn05 rn05");
+  });
+
+  it("seção citada que já é a ANCORADA não é reservada duas vezes", () => {
+    const d = buildFileDigest("modelo-dados.md", CITADA, [gap(
+      "Mesma seção",
+      "A justificativa de §5.2 contradiz a própria §5.2.",
+      "§5.2",
+    )], CAP_C);
+    expect(d.anchored).toBe(1);
+    expect(d.citedLocated).toBe(0);
+    expect(d.cited).toBe(0);
+  });
+
+  it("citada que não cabe é DECLARADA, com a proibição da substituição textual global", () => {
+    // Orçamento só para a ancorada (~1.100 chars com o sumário): a citada fica de fora.
+    const d = buildFileDigest("modelo-dados.md", CITADA, [OUTRA_PONTA], 2_000);
+    expect(d.anchored).toBe(1);
+    expect(d.cited).toBe(0);
+    expect(d.citedDropped).toEqual(["§8.1"]);
+    expect(d.text).toContain("outra ponta da contradição");
+    expect(d.text).toContain("substituição textual global");
+  });
+
+  it("GAP sem citação nenhuma no texto não muda nada do comportamento do GAP-72", () => {
+    const d = buildFileDigest("modelo-dados.md", CITADA, [gap("Índice", "`idx_rt_expires_at` mente", "§5.2")], CAP_C);
+    expect(d.cited).toBe(0);
+    expect(d.citedLocated).toBe(0);
+    expect(d.citedDropped).toEqual([]);
+    expect(d.anchored).toBe(1);
+  });
+});
