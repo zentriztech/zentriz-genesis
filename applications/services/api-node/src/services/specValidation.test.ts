@@ -2,11 +2,12 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge } from "./specValidation.js";
+import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { randomUUID } from "crypto";
 
 function file(filename: string, content: string, relDir = "") {
   return { filename, file_path: `/x/${filename}`, rel_dir: relDir, content };
@@ -378,5 +379,68 @@ describe("GAP-39 — lista de continuidade de anchor para o refutador", () => {
     const [f] = knownFindingsForJudge([{ file: "modelo-dados.md", anchor: "x".repeat(400), title: "y".repeat(400), severity: "info" }], cov);
     expect(f.anchor).toHaveLength(160);
     expect(f.title).toHaveLength(200);
+  });
+});
+
+/**
+ * 🔴 GAP-44 — o one-flight de validação é por PROJETO, não por CONTEÚDO.
+ *
+ * Medido em prod 2026-09-07 (NVX LastMile): a validação `a17bf391` nasceu 05:58:12. A run de autonomia
+ * `fb57dec7` começou 06:00:12, reescreveu SETE arquivos entre 06:02 e 06:13:45 e, ao pedir a validação
+ * que mediria o passe, recebeu de volta `a17bf391` — uma leitura que não viu um byte do que o passe
+ * escreveu. Ela morreu no deadline e o passe foi debitado como "sem medição de GAPs". Mesmo no caminho
+ * felizardo teria sido pior: a medição do passe seria a contagem do conteúdo ANTERIOR a ele.
+ *
+ * `startValidation` continua devolvendo a run em voo (ela existe e é legítima de se olhar), mas agora
+ * MARCA que ela não mede o conteúdo atual — e quem registra a run como "a medição do meu passe" recusa.
+ */
+describe("GAP-44 — one-flight devolve run em voo; `staleReuse` diz se ela mede o conteúdo atual", () => {
+  function specOnDisk(content: string) {
+    const dir = mkdtempSync(join(tmpdir(), "gap44-"));
+    const p = join(dir, "README.md");
+    writeFileSync(p, content, "utf-8");
+    return [{ filename: "README.md", file_path: p, rel_dir: "" }];
+  }
+
+  /** Pool que barra o INSERT com 23505 (one-flight) e devolve a run em voo com o hash pedido. */
+  function pool(specFiles: Array<Record<string, unknown>>, inFlightHash: string | null) {
+    return {
+      query: async (sql: string) => {
+        if (sql.includes("FROM project_spec_files")) return { rows: specFiles };
+        if (sql.includes("INSERT INTO spec_validation_runs")) throw Object.assign(new Error("dup"), { code: "23505" });
+        if (sql.includes("status IN ('pending','running')")) {
+          return { rows: inFlightHash === null ? [] : [{ id: "vr-em-voo", spec_hash: inFlightHash }] };
+        }
+        return { rows: [] }; // dedupe por 'passed' não acha nada
+      },
+    } as unknown as Pool;
+  }
+
+  const opts = (projectId: string) => ({ projectId, tenantId: null, requestedBy: "auto-validate" });
+
+  it("run em voo de OUTRO conteúdo → devolvida, mas marcada `staleReuse`", async () => {
+    const files = specOnDisk("# NVX\n\nconteúdo NOVO escrito pelo passe.");
+    const res = await startValidation(pool(files, "hash-de-antes-do-passe"), opts(randomUUID()));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.runId).toBe("vr-em-voo");
+    expect(res.reused).toBe(true);
+    expect(res.staleReuse).toBe(true);
+  });
+
+  it("run em voo do MESMO conteúdo → reuso legítimo, SEM a marca (nada muda para esse caso)", async () => {
+    const content = "# NVX\n\nmesmo conteúdo dos dois lados.";
+    const files = specOnDisk(content);
+    const projectId = randomUUID();
+    // O hash da árvore é o mesmo que a própria função calcula para estes arquivos.
+    const cur = await computeCurrentSpecHash(
+      { query: async () => ({ rows: files }) } as unknown as Pool, projectId,
+    );
+    const res = await startValidation(pool(files, cur!.specHash), opts(projectId));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.runId).toBe("vr-em-voo");
+    expect(res.reused).toBe(true);
+    expect(res.staleReuse).toBeUndefined();
   });
 });

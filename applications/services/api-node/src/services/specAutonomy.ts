@@ -271,6 +271,14 @@ export interface AutonomyRoundLog {
    * recusá-la com "o manifesto passou a existir" (medido no run `75b3cf5d`, passe 2, rodada 11).
    */
   manifestCreation?: boolean;
+  /**
+   * 🔴 GAP-43: o passe terminou e a validação que devia medi-lo NÃO mediu (`error`/`superseded`). Isso
+   * é diferente de "o passe não progrediu": não se sabe se progrediu. O fato fica no log porque é o que
+   * permite ao passe seguinte distinguir uma falha ISOLADA de medição (perdoável uma vez) de um
+   * validador consistentemente quebrado (aí o laço para e DIZ que parou por falta de medição, não por
+   * falta de convergência). Ausente = a validação deste passe mediu.
+   */
+  unmeasured?: boolean;
 }
 
 /** PR-5: `whole` = spec de um arquivo só (comportamento da 090); `per_file` = fila de arquivos. */
@@ -902,6 +910,21 @@ export function lastRejectedAttempt(
     };
   }
   return null;
+}
+
+/**
+ * 🔴 GAP-43 — quantas vezes esta run já terminou um passe SEM medição?
+ *
+ * Deriva do log (nada de coluna nova): a rodada que fecha um passe não medido leva a marca
+ * `unmeasured`, e a marca do passe corrente só é escrita DEPOIS desta conta — então o retorno é
+ * "quantas vezes eu já perdoei". Deliberadamente NÃO exige que sejam consecutivas: a marca existe para
+ * frear custo de LLM, e duas medições perdidas na mesma run já são sinal de validador instável, não de
+ * azar. Contar por rodada em vez de por índice de passe mantém a conta correta nos dois modos
+ * (`whole` não incrementa `passes`). Rodada antiga sem a marca ⇒ não conta (não inventa falha
+ * retroativa).
+ */
+export function unmeasuredPassesSoFar(run: Pick<AutonomyRun, "rounds">): number {
+  return run.rounds.filter((r) => r.unmeasured === true).length;
 }
 
 /**
@@ -1716,6 +1739,20 @@ async function kickValidation(db: Db, run: AutonomyRun): Promise<void> {
   const res = await startValidation(db as Pool, {
     projectId: run.projectId, tenantId: run.tenantId, requestedBy: run.ownerUserId,
   });
+  // 🔴 GAP-44: o one-flight de validação é por PROJETO. Se já havia uma validação em voo quando o
+  // passe terminou, `startValidation` devolve ELA — e ela está medindo o conteúdo de ANTES do passe.
+  // Adotá-la é gravar como "a medição deste passe" uma leitura que não viu nada do que o passe
+  // escreveu: o resultado sai como "sem progresso" mesmo que todo o trabalho tenha dado certo.
+  // Medido em prod: passe 0 da run `fb57dec7` reescreveu 7 arquivos (06:02→06:13) e herdou a validação
+  // `a17bf391` de 05:58, que terminou em `error` ⇒ `no_progress_streak = 1` sobre uma medição que
+  // nunca existiu. Espero o tick seguinte, como no rate-limit: a run em voo termina (ou cai no
+  // deadline) e aí a próxima validação nasce do conteúdo certo. O teto de 4h30 do laço é o freio.
+  if (res.ok && res.staleReuse) {
+    const why = "Havia uma validação em voo iniciada antes deste passe (one-flight por projeto): ela não mede o que o passe escreveu. Aguardando ela terminar para validar o conteúdo atual (GAP-44).";
+    await db.query("UPDATE spec_autonomy_runs SET last_error = $2 WHERE id = $1", [run.id, why]);
+    console.info(`[SpecAutonomy] run=${run.id} validação ${res.runId.slice(0, 8)} em voo é de conteúdo ANTERIOR ao passe — não adotada; revalida no próximo tick (GAP-44).`);
+    return;
+  }
   if (res.ok) {
     await db.query(
       "UPDATE spec_autonomy_runs SET validation_run_id = $2, updated_at = now() WHERE id = $1 AND status = 'validating'",
@@ -1801,17 +1838,31 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       console.log(`[SpecAutonomy] run=${run.id} validação em '${st}' com resultado do estágio B PENDENTE de coleta — aguardando em vez de contar rodada sem progresso (GAP-11).`);
       return false;
     }
-    const streak = run.noProgressStreak + 1;
+    // 🔴 GAP-43: um passe NÃO MEDIDO não é um passe SEM PROGRESSO — não se sabe se progrediu, e
+    // `no_progress_streak` existe para matar laço que não converge, não para punir medição perdida.
+    // Medido em prod: o passe 0 da run `fb57dec7` reescreveu 7 arquivos com sucesso e levou streak = 1
+    // porque a validação que herdou (GAP-44) morreu no deadline. A tolerância é de UMA vez por run: na
+    // segunda o laço para e diz que parou por FALTA DE MEDIÇÃO — atribuir isto a "não convergiu" seria
+    // a mesma mentira que o resto desta onda existe para matar.
+    const forgiven = unmeasuredPassesSoFar(run);
     // GAP-30: a nota da rodada de arquivo sobrevive à nota do passe.
-    await patchLastRound(db, run, { note: `validação terminou em '${st}' (sem medição de GAPs)` }, { keepNote: true });
-    if (streak >= MAX_NO_PROGRESS || atCap) {
-      await finishRun(db, { ...run, noProgressStreak: streak }, "stalled",
-        `A validação terminou em '${st}' e não foi possível medir os GAPs. Rode Validar manualmente para ver o estado atual.`);
+    await patchLastRound(db, run, { note: `validação terminou em '${st}' (sem medição de GAPs)`, unmeasured: true }, { keepNote: true });
+    if (forgiven >= 1) {
+      await finishRun(db, run, "stalled",
+        `Duas validações desta run terminaram sem medir os GAPs (a última em '${st}'). Não é falta de convergência: é falta de medição — o trabalho dos passes pode estar correto e nunca ter sido conferido. Rode Validar manualmente para ver o estado atual.`);
       return true;
     }
+    if (atCap) {
+      await finishRun(db, run, "exhausted",
+        `A validação do último passe terminou em '${st}' e não foi possível medir os GAPs, e o teto de passes foi atingido. Rode Validar manualmente para ver o estado atual.`);
+      return true;
+    }
+    await postChatNote(db, run,
+      `🤖 ${perFile ? `**Passe ${run.passes}/${run.maxRounds}**` : `**Rodada ${run.round}/${run.maxRounds}**`} — a validação terminou em **${st}** e não mediu GAP nenhum. ` +
+      `Não conto isto como passe sem progresso (não sei se progrediu): revalido. Se acontecer de novo, encerro dizendo que faltou medição.`);
     await db.query(
-      "UPDATE spec_autonomy_runs SET status = 'pending', no_progress_streak = $2, updated_at = now() WHERE id = $1 AND status = 'validating'",
-      [run.id, streak],
+      "UPDATE spec_autonomy_runs SET status = 'pending', updated_at = now() WHERE id = $1 AND status = 'validating'",
+      [run.id],
     );
     return true;
   }

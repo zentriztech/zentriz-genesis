@@ -377,6 +377,32 @@ describe("validação dentro do laço", () => {
     expect(run!.validation_run_id).toBe("vr-1");
   });
 
+  /**
+   * 🔴 GAP-44 (medido em prod 2026-09-07) — o one-flight de validação é por PROJETO, não por conteúdo.
+   * A validação `a17bf391` nasceu 05:58; a run de autonomia `fb57dec7` começou 06:00, reescreveu 7
+   * arquivos entre 06:02 e 06:13 e, ao pedir sua validação, recebeu `a17bf391` de volta — uma leitura
+   * que não viu UM byte do que o passe escreveu. Ela morreu no deadline e o passe foi debitado como
+   * "sem medição". Mesmo se tivesse passado, mediria o conteúdo ERRADO.
+   */
+  it("🔴 GAP-44: validação em voo de conteúdo ANTERIOR ao passe não é adotada como medição dele", async () => {
+    startValidation.mockResolvedValueOnce({
+      ok: true, runId: "vr-antiga", reused: true, staleReuse: true,
+    } as never);
+    const r = await reachValidating();
+    expect(run!.status).toBe("validating");
+    expect(run!.validation_run_id).toBeFalsy();       // 🔴 NÃO herdou a run velha
+    expect(String(run!.last_error)).toContain("não mede o que o passe escreveu");
+    await advanceAutonomyRun(db, r.id);               // tick seguinte: a run em voo já terminou
+    expect(startValidation).toHaveBeenCalledTimes(2);
+    expect(run!.validation_run_id).toBe("vr-1");
+  });
+
+  it("GAP-44: reuso de run que mede o MESMO conteúdo continua sendo adotado (sem regressão)", async () => {
+    startValidation.mockResolvedValueOnce({ ok: true, runId: "vr-mesma", reused: true } as never);
+    await reachValidating();
+    expect(run!.validation_run_id).toBe("vr-mesma");
+  });
+
   it("GAP-B: orçamento do tenant estourado (402) → failed com a mensagem financeira", async () => {
     startValidation.mockResolvedValueOnce({
       ok: false, code: "TENANT_LLM_BUDGET_EXCEEDED", message: "Orçamento de LLM excedido.", status: 402,
@@ -424,12 +450,36 @@ describe("validação dentro do laço", () => {
     expect(run!.status).toBe("stalled");
   });
 
-  it("validação em 'superseded' não conta como progresso e o laço reporta", async () => {
+  // 🔴 GAP-43 (2026-09-07): esta asserção pedia `no_progress_streak = 1`. Ela estava ERRADA e a prova
+  // veio de prod: o passe 0 da run `fb57dec7` reescreveu SETE arquivos com sucesso e levou streak = 1
+  // porque a validação que o mediria morreu no deadline (GAP-44). O streak existe para matar laço que
+  // não converge — e uma medição perdida não diz nada sobre convergência. Agora: perdoa UMA vez por run
+  // (sem tocar no streak) e, na segunda, PARA dizendo que faltou medição.
+  it("validação em 'superseded' NÃO mediu ⇒ não conta como passe sem progresso (GAP-43)", async () => {
     const r = await reachValidating(5);
     validationStatus = "superseded";
     await advanceAutonomyRun(db, r.id);
     expect(run!.status).toBe("pending");
-    expect(run!.no_progress_streak).toBe(1);
+    expect(run!.no_progress_streak).toBe(0);
+    const log = JSON.stringify(run!.rounds);
+    expect(log).toContain("sem medição de GAPs");
+    expect(log).toContain('"unmeasured":true');
+  });
+
+  it("🔴 GAP-43 — SEGUNDA validação sem medição encerra a run culpando a MEDIÇÃO, não a convergência", async () => {
+    const r = await reachValidating(5);
+    validationStatus = "superseded";
+    await advanceAutonomyRun(db, r.id);              // 1ª: perdoada
+    expect(run!.status).toBe("pending");
+    await advanceAutonomyRun(db, r.id);              // dispara a rodada seguinte
+    job = { status: "done", specMarkdown: BASE_SPEC + "\n\noutra tentativa do CTO.", error: null };
+    await advanceAutonomyRun(db, r.id);              // aplica + valida
+    await advanceAutonomyRun(db, r.id);              // 2ª validação também não mede
+    expect(run!.status).toBe("stalled");
+    expect(String(run!.last_error)).toContain("sem medir os GAPs");
+    expect(String(run!.last_error)).toContain("falta de medição");
+    // o perdão é de UMA vez: o streak nunca foi usado para justificar a parada
+    expect(run!.no_progress_streak).toBe(0);
   });
 
   // GAP-13 (medido em prod 2026-09-06, run c3757985): a validação `8e3286b2` durou 230 ms, achou 1
@@ -502,14 +552,18 @@ describe("validação dentro do laço", () => {
       expect(JSON.stringify(run!.rounds)).not.toContain("sem medição de GAPs");
     });
 
-    it("coleta encerrada (nada a recuperar) → volta ao comportamento de antes", async () => {
+    it("coleta encerrada (nada a recuperar) → registra a falta de medição e revalida (GAP-43)", async () => {
       const r = await reachValidating(5);
       validationStatus = "error";
       stageBPending = false;                          // coletor já desistiu / job perdido
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("pending");
-      expect(run!.no_progress_streak).toBe(1);
+      // GAP-43: o resultado morreu de verdade, mas isso ainda não é "o passe não progrediu" — o streak
+      // (freio de custo por NÃO CONVERGÊNCIA) não avança na primeira vez; a marca `unmeasured` é que
+      // segura a segunda.
+      expect(run!.no_progress_streak).toBe(0);
       expect(JSON.stringify(run!.rounds)).toContain("sem medição de GAPs");
+      expect(JSON.stringify(run!.rounds)).toContain('"unmeasured":true');
     });
 
     it("teto de passes + pendência não força `stalled` por relógio (espera primeiro)", async () => {

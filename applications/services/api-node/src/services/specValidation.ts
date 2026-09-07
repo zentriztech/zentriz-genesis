@@ -392,7 +392,19 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
 // ── ciclo de vida da run ──────────────────────────────────────────────────────
 
 export type StartValidationResult =
-  | { ok: true; runId: string; reused: boolean }
+  | {
+      ok: true;
+      runId: string;
+      reused: boolean;
+      /**
+       * 🔴 GAP-44: a run devolvida é uma run JÁ EM VOO (barrada pelo one-flight) que está medindo um
+       * conteúdo **anterior** ao de agora. Ela é uma run legítima — só não é a medição de quem acabou
+       * de escrever. Quem REGISTRA a run como "a medição do meu passe" (o laço autônomo) tem de
+       * recusá-la; quem só quer olhar uma validação (o humano) pode usá-la. Ausente = mede o conteúdo
+       * atual.
+       */
+      staleReuse?: true;
+    }
   | { ok: false; code: string; message: string; status: number };
 
 /** Os `oversized` registrados numa cobertura (arquivos que não cabem integrais nem sozinhos). */
@@ -557,10 +569,20 @@ export async function startValidation(pool: Pool, opts: {
     if ((e as { code?: string }).code === "23505") {
       // one-flight: já há run pendente/rodando p/ este alvo
       const running = await pool.query(
-        "SELECT id FROM spec_validation_runs WHERE project_id = $1 AND status IN ('pending','running') LIMIT 1",
+        "SELECT id, spec_hash FROM spec_validation_runs WHERE project_id = $1 AND status IN ('pending','running') LIMIT 1",
         [projectId],
       );
-      if (running.rows[0]) return { ok: true, runId: running.rows[0].id as string, reused: true };
+      if (running.rows[0]) {
+        // 🔴 GAP-44: o one-flight é por PROJETO, não por conteúdo — a run em voo pode ter começado
+        // ANTES desta escrita. Medido em prod (NVX LastMile): a validação `a17bf391` nasceu 05:58, o
+        // passe 0 da run de autonomia `fb57dec7` reescreveu 7 arquivos entre 06:02 e 06:13, pediu
+        // validação e recebeu de volta `a17bf391` — uma leitura que não viu UM byte do que o passe
+        // escreveu. O `spec_hash` é o fato que separa "validação em voo" de "medição deste conteúdo".
+        const same = String(running.rows[0].spec_hash ?? "") === current.specHash;
+        return same
+          ? { ok: true, runId: running.rows[0].id as string, reused: true }
+          : { ok: true, runId: running.rows[0].id as string, reused: true, staleReuse: true };
+      }
     }
     throw e;
   }
@@ -602,6 +624,43 @@ async function loadJudgedShas(
 }
 
 /**
+ * GAP-42: quando cada arquivo foi ESCRITO por último (o snapshot mais recente da migração 092, que é
+ * tirado no caminho da escrita). Vira o FIFO da 1ª fila de promoção do `buildValidationInput`: entre os
+ * arquivos que ninguém julgou no conteúdo atual, entra primeiro quem está esperando medição há mais
+ * tempo. Sem isto a ordem é só por tamanho e o laço mede tudo MENOS os arquivos grandes que acabou de
+ * corrigir (medido em prod: 15 findings de `privacidade-lgpd.md` idênticos antes e depois da correção).
+ *
+ * Falha/tabela ausente devolve mapa vazio ⇒ ordem legada por tamanho. Nunca derruba a validação.
+ */
+async function loadLastWrites(
+  pool: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  projectId: string,
+): Promise<Map<string, string>> {
+  try {
+    const rows = (await pool.query(
+      `SELECT f.rel_dir, f.filename, max(s.created_at) AS last_write
+         FROM project_spec_files f
+         JOIN project_spec_snapshots s
+           ON s.project_id = f.project_id AND s.file_path = f.file_path
+        WHERE f.project_id = $1
+        GROUP BY f.rel_dir, f.filename`,
+      [projectId],
+    )).rows as unknown as Array<{ rel_dir: string | null; filename: string; last_write: Date | string | null }>;
+    const out = new Map<string, string>();
+    for (const r of rows) {
+      if (!r.last_write) continue;
+      const dir = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+      const iso = r.last_write instanceof Date ? r.last_write.toISOString() : String(r.last_write);
+      out.set(dir ? `${dir}/${r.filename}` : r.filename, iso);
+    }
+    return out;
+  } catch (e) {
+    console.warn(`[spec-validation] ${projectId.slice(0, 8)}: histórico de escrita indisponível (${e instanceof Error ? e.message : String(e)}) — promoção só por tamanho nesta rodada.`);
+    return new Map();
+  }
+}
+
+/**
  * GAP-18: registra que ESTES arquivos foram julgados integralmente NESTE conteúdo. O sha é o do texto
  * que foi ao validador — se o arquivo mudar depois, ele volta a contar como não julgado (é a diferença
  * entre "coberto" e "coberto quando era outro texto").
@@ -636,12 +695,17 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   if (!hasStageABlocker && files.length > 0) {
     const { buildValidationInput } = await import("./specValidationInput.js");
     const judged = await loadJudgedShas(pool, projectId);
+    const lastWrite = await loadLastWrites(pool, projectId);
     const candidates = files
       // R4 PR3: connect.yaml é machine-readable (validado por schema, não por LLM) — fora do estágio B.
       .filter((f) => !/\.ya?ml$/i.test(f.filename))
       .map((f) => {
         const path = `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`;
-        return { path, content: f.content, sha: f.contentSha256, judged: judged.get(path) === f.contentSha256 };
+        return {
+          path, content: f.content, sha: f.contentSha256,
+          judged: judged.get(path) === f.contentSha256,
+          pendingSince: lastWrite.get(path) ?? null,
+        };
       });
     const input = buildValidationInput(candidates);
     const shaOf = new Map(candidates.map((c) => [c.path, c.sha]));

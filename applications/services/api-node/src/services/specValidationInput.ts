@@ -68,6 +68,14 @@ export interface ValidationInputFile {
    * Ausente/false = ainda não julgado.
    */
   judged?: boolean;
+  /**
+   * GAP-42: instante da última ESCRITA deste arquivo (o snapshot mais recente da migração 092), ISO.
+   * Só é consultado quando `judged !== true` — aí ele significa "há trabalho escrito aqui que ninguém
+   * julgou desde então", e a fila dos não julgados vira FIFO por esse instante (o mais antigo primeiro).
+   * Ausente/null = não sei quando foi escrito ⇒ o arquivo cai atrás dos datados, na ordem de tamanho
+   * (comportamento legado, byte-idêntico).
+   */
+  pendingSince?: string | null;
 }
 
 export interface ValidationInput {
@@ -132,14 +140,40 @@ function inventory(
  * Estratégia de orçamento: parte do pior caso (todos os arquivos em sumário, que é o que garante o
  * inventário) e vai PROMOVENDO arquivos a integral enquanto couber, em DUAS FILAS:
  *
- *   1ª fila — arquivos AINDA NÃO julgados integralmente no conteúdo atual (`judged !== true`);
- *   2ª fila — os já julgados, que só entram se sobrar orçamento.
+ *   1ª fila — arquivos AINDA NÃO julgados integralmente no conteúdo atual (`judged !== true`),
+ *             em FIFO pelo instante da última escrita (`pendingSince`); sem data, por tamanho;
+ *   2ª fila — os já julgados, que só entram se sobrar orçamento, do menor para o maior.
  *
- * Dentro de cada fila, do menor para o maior: maximiza quantos arquivos o validador vê por inteiro e
- * é critério de FATO (tamanho), não julgamento de conteúdo. A 1ª fila é o que corrige o GAP-18: sem
- * ela a ordem por tamanho é determinística e os arquivos grandes NUNCA são julgados — a cobertura
- * fica congelada nos mesmos arquivinhos e "GAPs = 0" passa a significar "0 GAPs no pedaço que eu
- * olhei". Com ela, cada rodada julga um pedaço novo e a spec inteira é coberta em N rodadas.
+ * A 1ª fila é o que corrige o GAP-18: sem ela a ordem por tamanho é determinística e os arquivos
+ * grandes NUNCA são julgados — a cobertura fica congelada nos mesmos arquivinhos e "GAPs = 0" passa a
+ * significar "0 GAPs no pedaço que eu olhei".
+ *
+ * ## GAP-42 (2026-09-07) — por que DENTRO da 1ª fila a ordem deixou de ser por tamanho
+ *
+ * "Menor primeiro" maximiza QUANTOS arquivos o validador vê por inteiro, mas escolhe sempre os
+ * mesmos: os maiores só entram quando não há nenhum menor pendente. E o laço autônomo corrige
+ * primeiro os arquivos com MAIS blockers — que são justamente os maiores. O resultado medido em prod
+ * (NVX LastMile, run de autonomia `5d377da0`, passe 0) é que a validação que MEDE o passe julga tudo
+ * MENOS o que o passe acabou de escrever:
+ *
+ * ```
+ * passe 0 reescreveu: privacidade-lgpd(96k) modelo-dados(183k) README(77k)
+ *                     definicao-de-pronto(94k) visao-escopo(62k) observabilidade(89k)
+ * validação 525b22f5 julgou por INTEIRO: README, observabilidade, visao-escopo,
+ *                     definicao-de-pronto, nvx-lastmile-backend   ← os 2 GIGANTES ficaram de fora
+ * ```
+ *
+ * Consequência provada finding a finding: os 15 GAPs importantes de `privacidade-lgpd.md` ficaram
+ * **byte-a-byte idênticos** antes e depois de o arquivo ser reescrito — ninguém os rejulgou, então
+ * `absentRuns` continuou 0 e nenhum pôde fechar. Enquanto isso a validação achava GAPs novos nos
+ * arquivos que o passe NÃO tocou, e a contagem só subia (36 → 44). O laço pagava LLM para escrever e
+ * media outra coisa.
+ *
+ * FIFO por `pendingSince` conserta isso com um FATO (quando foi escrito), não com julgamento: quem
+ * está esperando medição há mais tempo entra na frente, ninguém é preterido para sempre e, depois de
+ * julgado, o arquivo vai para o fim da fila naturalmente. Preço declarado: um gigante consome o
+ * orçamento de ~3 arquivos médios, então cabem MENOS arquivos por validação — o que se ganha é que os
+ * que entram são os que têm trabalho novo dentro.
  */
 export function buildValidationInput(
   files: ValidationInputFile[],
@@ -165,7 +199,17 @@ export function buildValidationInput(
     .map((f) => f.path);
 
   const bySize = (a: ValidationInputFile, b: ValidationInputFile) => a.content.length - b.content.length;
-  const naoJulgados = files.filter((f) => f.judged !== true).sort(bySize);
+  // GAP-42: FIFO da medição pendente. Quem tem data de escrita vem antes de quem não tem (não datado
+  // não é "escrito agora", é "não sei" — e chutar que é antigo furaria a fila de quem tem prova).
+  const pending = (f: ValidationInputFile) => (typeof f.pendingSince === "string" && f.pendingSince ? f.pendingSince : null);
+  const byPendingThenSize = (a: ValidationInputFile, b: ValidationInputFile) => {
+    const pa = pending(a), pb = pending(b);
+    if (pa && pb) return pa < pb ? -1 : pa > pb ? 1 : bySize(a, b);
+    if (pa) return -1;
+    if (pb) return 1;
+    return bySize(a, b);
+  };
+  const naoJulgados = files.filter((f) => f.judged !== true).sort(byPendingThenSize);
   const jaJulgados = files.filter((f) => f.judged === true).sort(bySize);
   for (const f of [...naoJulgados, ...jaJulgados]) {
     const delta = frame(f, true).length - frame(f, false).length;
