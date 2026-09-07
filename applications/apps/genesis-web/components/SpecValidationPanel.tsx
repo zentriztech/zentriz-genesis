@@ -52,7 +52,9 @@ interface ValidationState {
   latestRun: { id: string; status: string; findings: Finding[]; acked_role: string | null; finished_at: string | null } | null;
   resolved?: Resolved[];
   counts?: Counts | null;
-  gate?: { wouldPass: boolean; blockersActive: number | null; warningsActive: number | null } | null;
+  gate?: { wouldPass: boolean; blockersActive: number | null; warningsActive: number | null;
+    /** GAP-21: quanto da spec um juiz leu por INTEIRO no conteúdo atual (`null` = não medido). */
+    coverage?: { judged: number; total: number; unjudged: string[] } | null } | null;
   /** Certificado Genesis Factory — ausente quando FACTORY_CERTIFICATE=off. */
   factoryCertificate?: FactoryCertificate | null;
 }
@@ -253,6 +255,16 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
       {state.derivedStatus === "stale" && (
         <Alert severity="warning" sx={{ mt: 1 }}>
           A spec foi editada depois da última validação — o resultado abaixo é da versão anterior. Revalide antes de promover.
+        </Alert>
+      )}
+      {/* GAP-21: sem isto, a aba mostrava "0 GAP ativo" e o Promover recusava — a spec estava
+          julgada só em parte. A cobertura acumula: cada Validar cobre os arquivos que faltaram. */}
+      {state.gate?.coverage && state.gate.coverage.unjudged.length > 0 && (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          Validação parcial: <strong>{state.gate.coverage.judged}/{state.gate.coverage.total}</strong> arquivo(s) da spec
+          foram julgados por inteiro neste conteúdo. Faltam {state.gate.coverage.unjudged.slice(0, 4).join(", ")}
+          {state.gate.coverage.unjudged.length > 4 ? ` e mais ${state.gate.coverage.unjudged.length - 4}` : ""} —
+          rode Validar novamente (cada rodada cobre os que faltaram) antes de promover.
         </Alert>
       )}
       {state.derivedStatus === "failed_triaged" && (

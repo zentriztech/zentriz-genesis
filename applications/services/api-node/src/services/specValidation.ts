@@ -27,7 +27,7 @@ import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 import { UUID_RE } from "../lib/tenantScope.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
-import { normalizeCategory, enrichRunFindings, registerRecurrences } from "./findingTriage.js";
+import { normalizeCategory, enrichRunFindings, registerRecurrences, judgedFilesOf, unionFindingsByCoverage } from "./findingTriage.js";
 import { parseFrontmatter } from "../lib/frontmatter.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
@@ -397,10 +397,43 @@ function specPathOf(f: { rel_dir?: string | null; filename: string }): string {
 export async function unjudgedSpecFiles(
   pool: Pool,
   projectId: string,
-): Promise<{ unjudged: string[]; judged: number; total: number } | null> {
+): Promise<SpecCoverageState | null> {
   const current = await computeCurrentSpecHash(pool, projectId);
   if (!current) return null;
-  const judgedShas = await loadJudgedShas(pool, projectId);
+  return unjudgedFrom(pool, projectId, current);
+}
+
+export interface SpecCoverageState { unjudged: string[]; judged: number; total: number }
+
+/**
+ * GAP-21: cobertura pendente **só** quando o projeto de fato rastreia cobertura (existe run terminal do
+ * hash atual com `stage_b_coverage`). Sem isso, `stage_b_full_sha` é NULL em toda linha e "tudo pendente"
+ * seria uma mentira retroativa — spec validada antes da migração 101 travaria a promoção. `null` = regra
+ * legada (não sei medir; não invento).
+ */
+export async function trackedCoverageState(
+  db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  projectId: string,
+): Promise<SpecCoverageState | null> {
+  const current = await computeCurrentSpecHash(db, projectId);
+  if (!current) return null;
+  const tracked = (await db.query(
+    `SELECT 1 FROM spec_validation_runs
+      WHERE project_id = $1 AND spec_hash = $2 AND status IN ('passed','failed') AND stage_b_coverage IS NOT NULL
+      LIMIT 1`,
+    [projectId, current.specHash],
+  )).rows.length > 0;
+  if (!tracked) return null;
+  return unjudgedFrom(db, projectId, current);
+}
+
+/** Mesma conta com a spec JÁ lida do disco (evita 2ª leitura em quem acabou de calcular o hash). */
+async function unjudgedFrom(
+  db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  projectId: string,
+  current: { files: Array<SpecFileRow & { contentSha256: string }> },
+): Promise<SpecCoverageState> {
+  const judgedShas = await loadJudgedShas(db, projectId);
   // connect.yaml e afins não vão ao estágio B (validação por schema) — não podem contar como pendência.
   const files = current.files.filter((f) => !/\.ya?ml$/i.test(f.filename));
   const unjudged = files.filter((f) => judgedShas.get(specPathOf(f)) !== f.contentSha256).map(specPathOf);
@@ -499,7 +532,10 @@ export async function startValidation(pool: Pool, opts: {
  * com qual conteúdo. Coluna ausente (migração 101 não aplicada) → mapa vazio = ninguém julgado, que é
  * exatamente o comportamento legado (ordem só por tamanho).
  */
-async function loadJudgedShas(pool: Pool, projectId: string): Promise<Map<string, string>> {
+async function loadJudgedShas(
+  pool: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  projectId: string,
+): Promise<Map<string, string>> {
   try {
     const rows = (await pool.query(
       "SELECT rel_dir, filename, stage_b_full_sha FROM project_spec_files WHERE project_id = $1",
@@ -836,9 +872,19 @@ export interface SpecValidationAssessment {
   activeWarnings: number;
   acked: boolean;
   forcedByAdmin: boolean;
+  /**
+   * GAP-21: cobertura ACUMULADA do estágio adversarial sobre o conteúdo atual.
+   * `null` = projeto sem rastreio de cobertura (nenhuma run com `stage_b_coverage`) → regra legada.
+   */
+  coverage: SpecCoverageState | null;
+  /** Quantas runs do hash atual entraram na união dos findings (1 = comportamento legado). */
+  runsUnioned: number;
   /** Veredito: motivo pelo qual o gate recusaria (`null` = passaria). */
   block: { code: string; message: string } | null;
 }
+
+/** Runs do MESMO hash consideradas na união de findings do gate (GAP-21). */
+const ASSESS_WINDOW_RUNS = 12;
 
 export async function assessSpecValidation(
   db: { query: (q: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
@@ -848,6 +894,7 @@ export async function assessSpecValidation(
     files: [] as Array<SpecFileRow & { content: string }>,
     run: null, latestRun: null, activeFindings: [] as ValidationFinding[],
     triageApplied: false, activeBlockers: 0, activeWarnings: 0, acked: false, forcedByAdmin: false,
+    coverage: null as SpecCoverageState | null, runsUnioned: 0,
   };
   const current = await computeCurrentSpecHash(db, projectId);
   if (!current) {
@@ -858,12 +905,16 @@ export async function assessSpecValidation(
   // Uma consulta serve aos dois usos: a run do hash atual (o gate) e a última de qualquer hash
   // (para saber se o certificado está VENCIDO ou se nunca existiu). `(spec_hash = $2) DESC` põe
   // as do hash atual na frente → o `LIMIT 1` devolve exatamente o que o WHERE antigo devolvia.
-  const row = (await db.query(
-    `SELECT id, status, findings, acked_by, acked_role, spec_hash FROM spec_validation_runs
+  // GAP-21: a MESMA consulta traz a janela de runs do hash atual (a união de findings) — a de índice 0
+  // continua sendo exatamente a run que o `LIMIT 1` devolvia (representante do gate).
+  const rows = (await db.query(
+    `SELECT id, created_at, status, findings, acked_by, acked_role, spec_hash, stage_b_coverage
+      FROM spec_validation_runs
       WHERE project_id = $1 AND status IN ('passed','failed')
-      ORDER BY (spec_hash = $2) DESC, created_at DESC LIMIT 1`,
-    [projectId, current.specHash],
-  )).rows[0];
+      ORDER BY (spec_hash = $2) DESC, created_at DESC LIMIT $3`,
+    [projectId, current.specHash, ASSESS_WINDOW_RUNS],
+  )).rows;
+  const row = rows[0];
   const latestRun = row
     ? { id: String(row.id), status: String(row.status), specHash: String(row.spec_hash) }
     : null;
@@ -875,7 +926,18 @@ export async function assessSpecValidation(
       message: "Spec não validada (ou editada após a última validação). Rode Validar e tente de novo." } };
   }
 
-  const rawFindings = (row.findings ?? []) as ValidationFinding[];
+  // 🔴 GAP-21: com a rotação de cobertura (GAP-18) uma run julga um SUBCONJUNTO dos arquivos; contar
+  // blockers só dela liberaria o gate sobre o que ninguém leu. Projeto SEM rastreio de cobertura
+  // (nenhuma run com `stage_b_coverage`) mantém o caminho legado — byte-idêntico.
+  const sameHash = rows.filter((r) => String(r.spec_hash) === current.specHash);
+  const covTracked = sameHash.some((r) => judgedFilesOf(r.stage_b_coverage) !== null);
+  const rawFindings: ValidationFinding[] = covTracked
+    ? unionFindingsByCoverage(sameHash.map((r) => ({
+      id: String(r.id), created_at: String(r.created_at), coverage: r.stage_b_coverage,
+      findings: (Array.isArray(r.findings) ? r.findings : []) as ValidationFinding[],
+    })))
+    : ((row.findings ?? []) as ValidationFinding[]);
+  const coverage = covTracked ? await unjudgedFrom(db, projectId, current).catch(() => null) : null;
   // RFC-0005: só findings ATIVOS contam — ignorados/refutados (triagem viva, auditada) não bloqueiam.
   const enriched = await enrichRunFindings(db, projectId, rawFindings).catch(() => null);
   const findings: ValidationFinding[] = enriched ? enriched.filter((f) => !f.triage) : rawFindings;
@@ -891,18 +953,35 @@ export async function assessSpecValidation(
     run: { id: String(row.id), status, ackedRole: (row.acked_role as string | null) ?? null },
     activeFindings: findings, triageApplied: !!enriched,
     activeBlockers, activeWarnings, acked, forcedByAdmin,
+    coverage, runsUnioned: covTracked ? sameHash.length : 1,
     block: null,
   };
 
-  if (status === "failed") {
+  // 🔴 GAP-21 (2ª face): o VEREDITO também vinha de uma run só. Com rotação, a run mais recente pode
+  // ser `passed` (julgou 2 arquivos limpos) enquanto os blockers vivem no julgamento de outro arquivo,
+  // feito em outra rodada do MESMO conteúdo — e o `if (status === 'failed')` nem era avaliado. Onde há
+  // cobertura rastreada, quem manda é a UNIÃO: blocker ativo bloqueia, venha da run que vier.
+  if (covTracked ? activeBlockers > 0 : status === "failed") {
     // force do zentriz_admin passa NA HORA (inclusive por cima de warnings sem ack) — preservado
     // do gate original, onde este caminho era um `return { ok: true }` antes do check de warnings.
     if (forcedByAdmin) return assessed;
     if (!(enriched && activeBlockers === 0)) {
       // `enriched && activeBlockers === 0` = todos os blockers foram triados (auditado) → segue
+      const uniao = covTracked && sameHash.length > 1 ? ` (união de ${sameHash.length} rodadas do mesmo conteúdo)` : "";
       return { ...assessed, block: { code: "SPEC_VALIDATION_BLOCKED",
-        message: `Validação reprovou com ${activeBlockers || "findings"} blocker(s) ativo(s). Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.` } };
+        message: status === "failed"
+          ? `Validação reprovou com ${activeBlockers || "findings"} blocker(s) ativo(s)${uniao}. Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.`
+          : `A validação do conteúdo atual tem ${activeBlockers} blocker(s) ativo(s)${uniao}. Corrija a spec, triagem os blockers (tenant_admin, auditado) ou um zentriz_admin pode forçar.` } };
     }
+  }
+  // 🔴 GAP-21: "zero blocker" só vale sobre o que foi JULGADO. Cobertura incompleta no conteúdo atual =
+  // a spec não está validada por inteiro → não promove. Vem DEPOIS dos blockers (quando há blocker, o
+  // texto acionável é o dele) e ANTES do ack (não faz sentido reconhecer avisos de leitura parcial).
+  // O force do zentriz_admin continua passando por cima (auditado), como no caminho de `failed`.
+  if (coverage && coverage.unjudged.length > 0 && !forcedByAdmin) {
+    const faltam = coverage.unjudged.slice(0, 3).join(", ") + (coverage.unjudged.length > 3 ? "…" : "");
+    return { ...assessed, block: { code: "SPEC_COVERAGE_INCOMPLETE",
+      message: `Validação parcial: ${coverage.judged}/${coverage.total} arquivo(s) da spec foram julgados por inteiro no conteúdo atual — faltam ${faltam}. Rode Validar novamente (cada rodada cobre os que faltaram) antes de promover.` } };
   }
   if (activeWarnings > 0 && !acked) {
     return { ...assessed, block: { code: "SPEC_WARNINGS_UNACKED",

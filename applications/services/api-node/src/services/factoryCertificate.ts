@@ -66,6 +66,11 @@ export interface FactoryCertificate {
   /** Informativo (C8/C9 ficam fora do veredito). */
   activeBlockers: number;
   activeWarnings: number;
+  /**
+   * GAP-21: quanto da spec um juiz adversarial leu por INTEIRO no conteúdo atual.
+   * `null` = projeto sem rastreio de cobertura (regra legada) — não é "0 coberto", é "não medido".
+   */
+  coverage: { judged: number; total: number; unjudged: string[] } | null;
 }
 
 /** Agregado por PRODUTO (A6): **AND**, com contagem explícita `n/m` — nunca porcentagem sozinha. */
@@ -117,6 +122,7 @@ export async function computeFactoryCertificate(db: Db, projectId: string): Prom
     gateEnforced,
     activeBlockers: assessment.activeBlockers,
     activeWarnings: assessment.activeWarnings,
+    coverage: assessment.coverage,
   };
 
   // ── C1 — spec existe e é legível em disco ──────────────────────────────────
@@ -195,8 +201,15 @@ export async function computeFactoryCertificate(db: Db, projectId: string): Prom
   }
 
   const failed = assessment.run.status === "failed";
-  const c3: [FactoryCheckId, string, boolean | null, string?] = ["C3", "Validação do conteúdo atual", true,
-    `run ${assessment.run.id.slice(0, 8)} (${assessment.run.status})`];
+  // C3 — GAP-21: "validada" tem de dizer QUANTO da spec um juiz realmente leu. Com a rotação de
+  // cobertura (GAP-18) uma run julga um subconjunto dos arquivos; o selo que só citava o id da run
+  // dizia "validação do conteúdo atual ✅" sobre 2 de 12 arquivos. Cobertura pendente reprova o C3.
+  const cov = assessment.coverage;
+  const covSuffix = cov ? ` · ${cov.judged}/${cov.total} arquivo(s) julgado(s) por inteiro` : "";
+  const runs = assessment.runsUnioned > 1 ? ` + ${assessment.runsUnioned - 1} rodada(s) do mesmo conteúdo` : "";
+  const c3: [FactoryCheckId, string, boolean | null, string?] = ["C3", "Validação do conteúdo atual",
+    assessment.block?.code === "SPEC_COVERAGE_INCOMPLETE" ? false : true,
+    `run ${assessment.run.id.slice(0, 8)} (${assessment.run.status})${runs}${covSuffix}`];
   const c4: [FactoryCheckId, string, boolean | null, string?] = ["C4", "Zero GAP blocker ativo",
     assessment.block?.code === "SPEC_VALIDATION_BLOCKED" ? false : true,
     assessment.activeBlockers ? `${assessment.activeBlockers} blocker(s) ativo(s)` : "nenhum blocker ativo"];
@@ -211,6 +224,9 @@ export async function computeFactoryCertificate(db: Db, projectId: string): Prom
         assessment.activeWarnings
           ? `não avaliado: ${assessment.activeWarnings} aviso(s) atrás dos blockers`
           : "não avaliado: os blockers vêm antes"]
+      // Mesma honestidade do caso acima (Onda 4/A4.4): com cobertura pendente o ack não foi avaliado.
+      : assessment.block?.code === "SPEC_COVERAGE_INCOMPLETE"
+        ? ["C5", "Avisos reconhecidos", null, "não avaliado: a cobertura da validação vem antes"]
       : assessment.block?.code === "SPEC_WARNINGS_UNACKED"
         ? ["C5", "Avisos reconhecidos", false, `${assessment.activeWarnings} aviso(s) ativo(s) sem reconhecimento`]
         : ["C5", "Avisos reconhecidos", true,

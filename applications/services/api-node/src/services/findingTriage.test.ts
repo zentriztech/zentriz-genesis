@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   normalizeText, normalizeCategory, findingFingerprint, findingTitleFingerprint, jaccard, isTriageable, matchTriage,
   enrichFindings, countFindings, deriveResolved, checkTriagePolicy, applyTriage, registerRecurrences, type TriageRow,
+  surveyFindings, judgedFilesOf, projectFindingsState, unionFindingsByCoverage,
 } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -114,6 +115,153 @@ describe("findingTriage — estado derivado (§4)", () => {
   });
 });
 
+/**
+ * 🔴 GAP-20 — ausência só é prova se ALGUÉM OLHOU.
+ *
+ * Medido em prod 2026-09-06 (NVX LastMile): 4 runs seguidas com o MESMO `spec_hash` (721cb185 — spec
+ * byte-idêntica, zero edição) devolveram 14 / 15 / 22 GAPs "ativos" e **110 findings RESOLVIDOS**,
+ * incluindo dezenas de blockers. Causa: com a rotação de cobertura (GAP-18) cada validação julga um
+ * subconjunto diferente dos 12 arquivos; quem não entrou "desaparecia" e virava resolvido sozinho.
+ */
+describe("findingTriage — GAP-20: cobertura decide o que é ausência", () => {
+  const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+  const gA = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+  const gB = F({ file: "b.md", title: "GAP de B", anchor: "b1" });
+
+  it("judgedFilesOf: só `full` conta; cobertura ausente/inválida = desconhecida", () => {
+    expect(judgedFilesOf(cov("A.md"))?.has("a.md")).toBe(true);
+    expect(judgedFilesOf(null)).toBeNull();
+    expect(judgedFilesOf({ outlineOnly: ["a.md"] })).toBeNull();
+  });
+
+  it("🔴 o caso de prod: rodadas que NÃO julgaram o arquivo não resolvem nem tiram dos ativos", () => {
+    // r3 e r2 julgaram só `b.md`; `a.md` foi julgado pela última vez em r1 e continua com o GAP.
+    const runs = [
+      { id: "r3", created_at: "3", findings: [gB], coverage: cov("b.md") },
+      { id: "r2", created_at: "2", findings: [gB], coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [gA, gB], coverage: cov("a.md", "b.md") },
+    ];
+    const s = surveyFindings(runs, new Set(["a.md", "b.md"]));
+    expect(s.active.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B"]);
+    expect(s.resolved).toEqual([]);
+    // Antes da correção: `a.md` ausente em 2 runs ⇒ resolvido sem ninguém ter corrigido.
+    expect(deriveResolved(runs.map((r) => ({ ...r, coverage: undefined })), null).map((r) => r.title)).toEqual(["GAP de A"]);
+  });
+
+  it("ativos = UNIÃO do julgamento mais recente de cada arquivo (não os da última run)", () => {
+    const gA2 = F({ file: "a.md", title: "GAP novo de A", anchor: "a2" });
+    const runs = [
+      { id: "r2", created_at: "2", findings: [gB], coverage: cov("b.md") },     // só b.md
+      { id: "r1", created_at: "1", findings: [gA, gA2], coverage: cov("a.md") }, // só a.md
+    ];
+    const s = surveyFindings(runs, null);
+    expect(s.active.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B", "GAP novo de A"]);
+  });
+
+  it("quem JULGOU e não viu resolve normalmente (a correção não cega o resolvedor)", () => {
+    const runs = [
+      { id: "r3", created_at: "3", findings: [], coverage: cov("a.md") },
+      { id: "r2", created_at: "2", findings: [], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ];
+    const s = surveyFindings(runs, new Set(["a.md"]));
+    expect(s.active).toEqual([]);
+    expect(s.resolved.map((r) => ({ t: r.title, n: r.absentRuns }))).toEqual([{ t: "GAP de A", n: 2 }]);
+  });
+
+  it("uma só rodada julgando de novo = limbo anti-flapping (nem ativo, nem resolvido)", () => {
+    const runs = [
+      { id: "r2", created_at: "2", findings: [], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ];
+    const s = surveyFindings(runs, null);
+    expect(s.active).toEqual([]);
+    expect(s.resolved).toEqual([]);
+  });
+
+  it("stage_a é determinístico e lê a spec inteira → ausência conta mesmo sem cobertura", () => {
+    const sa = F({ file: "a.md", source: "stage_a", severity: "blocker", title: "Spec sem manifesto", anchor: null });
+    const runs = [
+      { id: "r2", created_at: "2", findings: [], coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [sa], coverage: cov("a.md", "b.md") },
+    ];
+    expect(surveyFindings(runs, null).resolved.map((r) => r.title)).toEqual(["Spec sem manifesto"]);
+  });
+
+  it("run SEM cobertura num projeto que já rastreia não prova ausência (juiz lia 2 de 12)", () => {
+    const runs = [
+      { id: "r3", created_at: "3", findings: [] },                              // cobertura desconhecida
+      { id: "r2", created_at: "2", findings: [] },                              // cobertura desconhecida
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ];
+    expect(surveyFindings(runs, null).resolved).toEqual([]);
+    expect(surveyFindings(runs, null).active.map((f) => f.title)).toEqual(["GAP de A"]);
+  });
+
+  it("projeto sem NENHUMA cobertura (legado, pré-migração 101) mantém o comportamento antigo", () => {
+    const runs = [
+      { id: "r3", created_at: "3", findings: [] },
+      { id: "r2", created_at: "2", findings: [] },
+      { id: "r1", created_at: "1", findings: [gA] },
+    ];
+    expect(surveyFindings(runs, null).resolved.map((r) => r.title)).toEqual(["GAP de A"]);
+  });
+
+  it("🔴 arquivo apagado da spec: resolve na hora — senão o GAP trava a promoção para sempre", () => {
+    const runs = [
+      { id: "r2", created_at: "2", findings: [], coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ];
+    const s = surveyFindings(runs, new Set(["b.md"]));
+    expect(s.active).toEqual([]);
+    expect(s.resolved[0]).toMatchObject({ title: "GAP de A", fileRemoved: true });
+  });
+
+  it("`file` sem diretório casa com o path canônico (o validador devolve os dois formatos)", () => {
+    const g = F({ file: "01-api.md", title: "GAP", anchor: "x" });
+    const runs = [
+      { id: "r2", created_at: "2", findings: [], coverage: cov("backend/01-api.md") },
+      { id: "r1", created_at: "1", findings: [g], coverage: cov("backend/01-api.md") },
+    ];
+    // quem julgou `backend/01-api.md` é evidência sobre um finding cujo `file` veio só como basename
+    expect(surveyFindings(runs, new Set(["backend/01-api.md"])).resolved.length).toBe(0); // 1 ausência < 2
+    const s = surveyFindings([{ id: "r3", created_at: "3", findings: [], coverage: cov("backend/01-api.md") }, ...runs], new Set(["backend/01-api.md"]));
+    expect(s.resolved.map((r) => r.title)).toEqual(["GAP"]);
+    // …e não é declarado "arquivo removido" só porque o path veio sem o diretório
+    expect(s.resolved[0].fileRemoved).toBe(false);
+  });
+
+  it("🔴 basename AMBÍGUO não fala pelo outro arquivo (`backend/README.md` ≠ `web/README.md`)", () => {
+    const g = F({ file: "README.md", title: "GAP do README", anchor: "x" });
+    const dois = cov("backend/README.md", "web/README.md");
+    const runs = [
+      { id: "r3", created_at: "3", findings: [], coverage: dois },
+      { id: "r2", created_at: "2", findings: [], coverage: dois },
+      { id: "r1", created_at: "1", findings: [g], coverage: dois },
+    ];
+    // dois candidatos com o mesmo nome → nenhum é evidência sobre um `file` sem diretório
+    expect(surveyFindings(runs, new Set(["backend/README.md", "web/README.md"])).resolved).toEqual([]);
+  });
+
+  it("projectFindingsState lê `stage_b_coverage` e conta a união (ativos ≠ findings da última run)", async () => {
+    const rows = [
+      { id: "r2", created_at: "2", findings: [gB], stage_b_coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [gA], stage_b_coverage: cov("a.md") },
+    ];
+    const db = { query: vi.fn(async (q: string) => {
+      if (q.includes("FROM spec_validation_runs")) {
+        expect(q).toContain("stage_b_coverage");
+        return { rows };
+      }
+      return { rows: [] };
+    }) };
+    const st = await projectFindingsState(db as never, "p1", { currentFiles: ["a.md", "b.md"] });
+    expect(st.latestRunId).toBe("r2");
+    expect(st.findings.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B"]);
+    expect(st.counts.active).toBe(2);
+  });
+});
+
 describe("findingTriage — política e transação (§5/§7)", () => {
   const user = { id: "11111111-1111-1111-1111-111111111111", role: "user" };
   const admin = { id: "22222222-2222-2222-2222-222222222222", role: "tenant_admin" };
@@ -200,5 +348,83 @@ describe("findingTriage — política e transação (§5/§7)", () => {
     // não triável nunca é auto-refutado
     const n2 = await registerRecurrences(db as never, "p", [F({ ...ref, category: "prompt_injection" })]);
     expect(n2).toBe(0);
+  });
+});
+
+/**
+ * 🔴 GAP-21 — o GATE de promoção contava blockers de UMA run só.
+ *
+ * Mesma raiz do GAP-20, outra vítima: `assessSpecValidation` lia a run mais recente do hash atual e
+ * contava os blockers DELA. Com a rotação de cobertura, essa run pode ter julgado 2 dos 12 arquivos —
+ * então uma spec com blockers nos outros 10 passava no gate e saía com Certificado Factory verde.
+ */
+describe("findingTriage — GAP-21: união por cobertura para o gate", () => {
+  const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+  const gA = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+  const gB = F({ file: "b.md", title: "GAP de B", anchor: "b1" });
+
+  it("une as rodadas do mesmo conteúdo: cada arquivo entra pelo julgamento que o leu", () => {
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [gB], coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ]);
+    expect(out.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B"]);
+  });
+
+  it("o julgamento INTEGRAL mais recente vence: rejulgou o arquivo e não achou → o GAP sai da conta", () => {
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("a.md") },
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it("leitura PARCIAL não fala por quem leu tudo: finding de outra run sobre arquivo já rejulgado cai fora", () => {
+    // r2 leu `a.md` por inteiro (nada achou); r1 leu `b.md` por inteiro e opinou sobre `a.md` pelo outline.
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [gA, gB], coverage: cov("b.md") },
+    ]);
+    expect(out.map((f) => f.title)).toEqual(["GAP de B"]);
+  });
+
+  it("arquivo que NENHUM juiz leu por inteiro: o que existe vale (é o único sinal que temos)", () => {
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [], coverage: cov("b.md") },
+      { id: "r1", created_at: "1", findings: [gA], coverage: cov("b.md") },
+    ]);
+    expect(out.map((f) => f.title)).toEqual(["GAP de A"]);
+  });
+
+  it("`stage_a` é determinístico sobre a spec inteira → só a run mais recente conta (sem duplicar)", () => {
+    const fa = F({ file: "", title: "Spec sem manifesto", anchor: "no_readme", source: "stage_a" });
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [fa], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [fa], coverage: cov("b.md") },
+    ]);
+    expect(out).toHaveLength(1);
+    // A run mais nova não repetiu o finding do Stage A → ele não sobrevive pela run velha.
+    expect(unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [], coverage: cov("a.md") },
+      { id: "r1", created_at: "1", findings: [fa], coverage: cov("b.md") },
+    ])).toEqual([]);
+  });
+
+  it("basename ambíguo não fala pelo irmão (mesma regra do GAP-20)", () => {
+    const g = F({ file: "README.md", title: "sem critérios", anchor: "r1" });
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [], coverage: cov("backend/README.md", "web/README.md") },
+      { id: "r1", created_at: "1", findings: [g], coverage: cov("backend/README.md") },
+    ]);
+    // `README.md` casa com DOIS paths julgados → não sei de qual é; o finding permanece.
+    expect(out.map((f) => f.title)).toEqual(["sem critérios"]);
+  });
+
+  it("sem cobertura em nenhuma run: união vira a lista crua, deduplicada por fingerprint", () => {
+    const out = unionFindingsByCoverage([
+      { id: "r2", created_at: "2", findings: [gA] },
+      { id: "r1", created_at: "1", findings: [gA, gB] },
+    ]);
+    expect(out.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B"]);
   });
 });

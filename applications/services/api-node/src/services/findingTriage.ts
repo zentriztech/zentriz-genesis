@@ -182,16 +182,72 @@ export function countFindings(findings: EnrichedFinding[], resolved: ResolvedFin
   return c;
 }
 
+/** Run da janela, com a cobertura do estágio adversarial (migração 101) quando existir. */
+export interface RunForSurvey {
+  id: string; created_at: string; findings: ValidationFinding[];
+  /** `spec_validation_runs.stage_b_coverage` cru. `null`/ausente = cobertura desconhecida. */
+  coverage?: unknown;
+}
+
+/** Arquivos que ESTA run julgou por INTEIRO no estágio adversarial. `null` = desconhecido. */
+export function judgedFilesOf(coverage: unknown): Set<string> | null {
+  if (!coverage || typeof coverage !== "object") return null;
+  const full = (coverage as { full?: unknown }).full;
+  if (!Array.isArray(full)) return null;
+  return new Set(full.map((p) => String(p).toLowerCase()));
+}
+
+/** Só o basename, minúsculo — tolera `file` sem `rel_dir` (o validador às vezes devolve o nome puro). */
+function baseName(p: string): string {
+  const s = p.toLowerCase();
+  const i = s.lastIndexOf("/");
+  return i < 0 ? s : s.slice(i + 1);
+}
+
 /**
- * Resolvidos derivados: findings de runs anteriores (janela) ausentes na run atual há ≥ RESOLVED_AFTER_RUNS
- * runs válidas consecutivas (Stage A: 1). `runs` deve vir ordenado da mais recente para a mais antiga e
- * conter só status passed|failed. Arquivo que não existe mais na spec → fileRemoved.
+ * 🔴 GAP-20 — ausência só é prova se ALGUÉM OLHOU.
+ *
+ * Medido em prod 2026-09-06 (NVX LastMile, `spec_hash` 721cb185 idêntico em 4 runs seguidas): a mesma
+ * spec, sem uma única edição, produziu 14 / 15 / 22 GAPs "ativos" e **110 findings declarados
+ * RESOLVIDOS** — entre eles dezenas de blockers em `nvx-lastmile-backend.md`, `infraestrutura-deploy.md`
+ * e `observabilidade-operacao.md`. Ninguém corrigiu nada: com a rotação de cobertura (GAP-18) cada
+ * validação julga um SUBCONJUNTO diferente dos 12 arquivos, e o finding do arquivo que não entrou
+ * "desaparecia" da run atual → saía dos ativos e, em 2 rodadas, virava resolvido.
+ *
+ * Regra: uma run é evidência sobre um finding apenas se o estágio que o produz realmente olhou o alvo.
+ *  - `stage_a` é determinístico e lê a spec inteira em toda run → toda run é evidência.
+ *  - `stage_b` (juiz LLM) só é evidência se `stage_b_coverage.full` contém o arquivo do finding.
+ *  - Projeto SEM rastreio de cobertura (nenhuma run com `stage_b_coverage`, ex.: anterior à migração
+ *    101) mantém o comportamento legado — não invento cobertura que não medi.
  */
-export function deriveResolved(
-  runs: Array<{ id: string; created_at: string; findings: ValidationFinding[] }>,
-  currentFiles: Set<string> | null,
-): ResolvedFinding[] {
-  if (runs.length < 2) return [];
+function isEvidenceFor(run: RunForSurvey, f: ValidationFinding, covTracked: boolean): boolean {
+  if (f.source === "stage_a") return true;
+  if (!covTracked) return true;
+  const judged = judgedFilesOf(run.coverage);
+  if (!judged) return false; // run sem cobertura num projeto que já rastreia: não prova ausência
+  const file = (f.file ?? "").toLowerCase();
+  if (!file) return true; // finding global do estágio B: qualquer run que rodou o estágio serve
+  if (judged.has(file)) return true;
+  // O validador devolve `file` às vezes como path canônico, às vezes só o nome. Casar por basename
+  // só quando NÃO há ambiguidade: com `backend/README.md` e `web/README.md` julgados, um não fala
+  // pelo outro (isso resolveria GAP alheio — a mentira que este GAP-20 existe para matar).
+  const b = baseName(file);
+  let hits = 0;
+  for (const p of judged) if (baseName(p) === b) hits++;
+  return hits === 1;
+}
+
+export interface FindingsSurvey {
+  /** GAPs em aberto: união do julgamento MAIS RECENTE de cada arquivo (não os da última run). */
+  active: ValidationFinding[];
+  resolved: ResolvedFinding[];
+}
+
+/**
+ * Classifica os findings da janela em ATIVOS × RESOLVIDOS contando só as runs que são evidência.
+ * `runs` vem da mais recente para a mais antiga, só com status passed|failed.
+ */
+export function surveyFindings(runs: RunForSurvey[], currentFiles: Set<string> | null): FindingsSurvey {
   const present = new Map<string, number>(); // fingerprint → índice da run mais recente onde aparece
   const meta = new Map<string, { f: ValidationFinding; runId: string; at: string }>();
   runs.forEach((r, idx) => {
@@ -201,33 +257,120 @@ export function deriveResolved(
       if (!present.has(fp)) { present.set(fp, idx); meta.set(fp, { f, runId: r.id, at: r.created_at }); }
     });
   });
-  const out: ResolvedFinding[] = [];
+  const covTracked = runs.some((r) => judgedFilesOf(r.coverage) !== null);
+  const bases = currentFiles ? new Set([...currentFiles].map(baseName)) : null;
+  const active: ValidationFinding[] = [];
+  const resolved: ResolvedFinding[] = [];
   for (const [fp, idx] of present) {
-    if (idx === 0) continue; // está na run atual → não resolvido
     const m = meta.get(fp)!;
-    const absentRuns = idx; // runs mais recentes sem o finding
+    // Arquivo que saiu da spec: o GAP morreu com ele — e nenhuma rotação vai julgá-lo de novo, então
+    // sem esta saída o finding ficaria ATIVO para sempre, travando a promoção.
+    const removed = !!(bases && currentFiles && m.f.file
+      && !currentFiles.has(m.f.file.toLowerCase()) && !bases.has(baseName(m.f.file)));
+    // Quantas runs MAIS RECENTES que a última aparição olharam este alvo e não o encontraram.
+    const absentRuns = runs.slice(0, idx).filter((r) => isEvidenceFor(r, m.f, covTracked)).length;
     const needed = m.f.source === "stage_a" ? 1 : RESOLVED_AFTER_RUNS;
-    if (absentRuns < needed) continue;
-    const fileRemoved = !!(currentFiles && m.f.file && !currentFiles.has(m.f.file.toLowerCase()));
-    out.push({ fingerprint: fp, file: m.f.file, title: m.f.title, severity: m.f.severity, source: m.f.source,
-      category: normalizeCategory(m.f.category), lastSeenRunId: m.runId, lastSeenAt: m.at, absentRuns, fileRemoved });
+    if (removed || absentRuns >= needed) {
+      resolved.push({ fingerprint: fp, file: m.f.file, title: m.f.title, severity: m.f.severity, source: m.f.source,
+        category: normalizeCategory(m.f.category), lastSeenRunId: m.runId, lastSeenAt: m.at, absentRuns, fileRemoved: removed });
+      continue;
+    }
+    // Nenhum juiz competente disse que sumiu → segue em aberto. `absentRuns` entre 1 e `needed`-1 é o
+    // limbo anti-flapping do RFC-0005: nem ativo, nem resolvido (preservado).
+    if (absentRuns === 0) active.push(m.f);
   }
+  return { active, resolved };
+}
+
+/**
+ * Resolvidos derivados (projeção de `surveyFindings`, mantida pela compatibilidade dos chamadores).
+ * Sem `coverage` nas runs o comportamento é o legado: ausência em ≥ RESOLVED_AFTER_RUNS runs
+ * consecutivas (Stage A: 1).
+ */
+export function deriveResolved(runs: RunForSurvey[], currentFiles: Set<string> | null): ResolvedFinding[] {
+  if (runs.length < 2) return [];
+  return surveyFindings(runs, currentFiles).resolved;
+}
+
+/**
+ * 🔴 GAP-21 — o GATE de promoção também contava blockers de UMA run só.
+ *
+ * `assessSpecValidation` lia `ORDER BY (spec_hash = atual) DESC, created_at DESC LIMIT 1`: com a rotação
+ * de cobertura (GAP-18), essa run pode ter julgado 2 dos 12 arquivos. Uma spec cujos blockers vivem nos
+ * outros 10 sairia com `activeBlockers = 0` → gate liberado e Certificado Factory verde sobre conteúdo
+ * que ninguém julgou. Aqui a conta passa a ser a UNIÃO das runs do MESMO conteúdo, por arquivo:
+ *
+ *  - `stage_a` é determinístico sobre a spec inteira → vale só a run mais recente (evita duplicar).
+ *  - `stage_b` de um arquivo com leitura INTEGRAL: vence o julgamento integral mais recente; leituras
+ *    parciais (o arquivo entrou só como outline) do mesmo arquivo são descartadas — quem leu tudo manda.
+ *  - arquivo que NENHUMA run leu por inteiro: tudo o que existe vale (é o único sinal que temos) — e a
+ *    pendência de cobertura bloqueia em separado (`SPEC_COVERAGE_INCOMPLETE`).
+ *
+ * `runs` da mais recente para a mais antiga, todas do mesmo `spec_hash`.
+ */
+export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding[] {
+  if (runs.length === 0) return [];
+  const allJudged = new Set<string>();
+  const newestFull = new Map<string, number>(); // path julgado por inteiro → índice da run mais recente
+  runs.forEach((r, idx) => {
+    const judged = judgedFilesOf(r.coverage);
+    if (!judged) return;
+    for (const p of judged) { allJudged.add(p); if (!newestFull.has(p)) newestFull.set(p, idx); }
+  });
+  const byBase = new Map<string, string[]>();
+  for (const p of allJudged) {
+    const b = baseName(p);
+    const list = byBase.get(b) ?? [];
+    list.push(p);
+    byBase.set(b, list);
+  }
+  /** `file` do finding → path julgado. Basename só quando não há ambiguidade (regra do GAP-20). */
+  const canon = (file: string): string | null => {
+    const f = file.toLowerCase();
+    if (allJudged.has(f)) return f;
+    const list = byBase.get(baseName(f));
+    return list && list.length === 1 ? list[0] : null;
+  };
+  const keep = (f: ValidationFinding, idx: number): boolean => {
+    if (f.source === "stage_a") return idx === 0;
+    const file = (f.file ?? "").trim();
+    if (!file) return idx === 0; // finding global do estágio B: sem arquivo, a run mais recente responde
+    const c = canon(file);
+    if (c === null) return true;
+    return newestFull.get(c) === idx;
+  };
+  const out: ValidationFinding[] = [];
+  const seen = new Set<string>();
+  runs.forEach((r, idx) => {
+    const fps = effectiveFingerprints(r.findings ?? []);
+    (r.findings ?? []).forEach((f, j) => {
+      if (!keep(f, idx)) return;
+      if (seen.has(fps[j])) return;
+      seen.add(fps[j]);
+      out.push(f);
+    });
+  });
   return out;
 }
 
 export async function projectFindingsState(db: Db, projectId: string, opts: { currentFiles?: string[] | null } = {}): Promise<ProjectFindingsState> {
   const runs = (await db.query(
-    `SELECT id, created_at, findings FROM spec_validation_runs
+    // 🔴 GAP-20: `stage_b_coverage` entra aqui porque é ele que diz se a ausência de um finding é prova
+    // de correção ou só efeito da rotação de cobertura.
+    `SELECT id, created_at, findings, stage_b_coverage FROM spec_validation_runs
       WHERE project_id = $1 AND status IN ('passed','failed')
       ORDER BY created_at DESC LIMIT $2`,
     [projectId, RESOLVED_WINDOW_RUNS],
-  )).rows as unknown as Array<{ id: string; created_at: string; findings: ValidationFinding[] }>;
+  )).rows as unknown as Array<{ id: string; created_at: string; findings: ValidationFinding[]; stage_b_coverage?: unknown }>;
   const latest = runs[0] ?? null;
   const triages = await loadLiveTriages(db, projectId);
-  const findings = enrichFindings((latest?.findings ?? []) as ValidationFinding[], triages);
   const files = opts.currentFiles ? new Set(opts.currentFiles.map((p) => p.toLowerCase())) : null;
-  const resolved = deriveResolved(runs.map((r) => ({ ...r, findings: Array.isArray(r.findings) ? r.findings : [] })), files);
-  return { latestRunId: latest?.id ?? null, findings, resolved, counts: countFindings(findings, resolved) };
+  const survey = surveyFindings(
+    runs.map((r) => ({ id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage, findings: Array.isArray(r.findings) ? r.findings : [] })),
+    files,
+  );
+  const findings = enrichFindings(survey.active, triages);
+  return { latestRunId: latest?.id ?? null, findings, resolved: survey.resolved, counts: countFindings(findings, survey.resolved) };
 }
 
 /** Só o que o gate/contagens precisam (barato): findings da run dada enriquecidos com triagens vivas. */
