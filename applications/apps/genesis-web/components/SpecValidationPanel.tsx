@@ -57,6 +57,24 @@ interface ValidationState {
     coverage?: { judged: number; total: number; unjudged: string[] } | null } | null;
   /** Certificado Genesis Factory — ausente quando FACTORY_CERTIFICATE=off. */
   factoryCertificate?: FactoryCertificate | null;
+  /**
+   * 🔴 GAP-77 — parecer de PROMOVIBILIDADE sobre GAPs REINCIDENTES, produzido numa rodada adversarial
+   * do laço autônomo (promotor acusa nomeando o artefato que a Fábrica construiria errado; juiz decide).
+   *
+   * É campo PARALELO à severidade: os 🔴/🟡 das listas abaixo NÃO mudam e o gate de promoção continua
+   * exigindo zero blocker ativo. Serve para o humano ver, com endereço e motivo, o que o juiz considera
+   * que não impede a entrega — e por que a spec segue (ou não) promovível. Ausente = sem parecer, e
+   * sem parecer todo GAP é impeditivo.
+   */
+  promotion?: {
+    impeditive: number; released: number; promotable: boolean; blockers: string[];
+    verdicts: Array<{
+      fingerprint: string; file: string; anchor: string | null;
+      impact: "impeditivo" | "nao_impeditivo"; reason: string; factoryArtifact: string;
+      /** `true` = o arquivo mudou depois do parecer: ele não vale mais. */
+      stale: boolean; createdAt: string;
+    }>;
+  } | null;
 }
 
 const STATUS_META: Record<string, { label: string; color: "default" | "success" | "error" | "warning" | "info" }> = {
@@ -265,6 +283,32 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
           foram julgados por inteiro neste conteúdo. Faltam {state.gate.coverage.unjudged.slice(0, 4).join(", ")}
           {state.gate.coverage.unjudged.length > 4 ? ` e mais ${state.gate.coverage.unjudged.length - 4}` : ""} —
           rode Validar novamente (cada rodada cobre os que faltaram) antes de promover.
+        </Alert>
+      )}
+      {/* 🔴 GAP-77: o parecer do juiz sobre os REINCIDENTES. Nunca mexe nos 🔴/🟡 nem no gate — diz
+          apenas se, na leitura do juiz, o que sobrou impede a Fábrica construir certo. */}
+      {state.promotion && (
+        <Alert severity={state.promotion.promotable ? "success" : "info"} sx={{ mt: 1 }}>
+          <strong>Parecer de promovibilidade</strong> (GAPs reincidentes, julgados em rodada adversarial — a
+          severidade 🔴/🟡 não muda):{" "}
+          {state.promotion.promotable
+            ? "nenhum GAP importante impeditivo. Promover à Fábrica segue sendo decisão sua."
+            : `NÃO promovível — ${state.promotion.blockers.join("; ")}.`}
+          {state.promotion.verdicts.filter((v) => v.impact === "nao_impeditivo" && !v.stale).length > 0 && (
+            <Box component="ul" sx={{ m: 0, mt: 0.5, pl: 2.5 }}>
+              {state.promotion.verdicts.filter((v) => v.impact === "nao_impeditivo" && !v.stale).map((v) => (
+                <li key={v.fingerprint}>
+                  <code>{v.file}</code>{v.anchor ? ` ${v.anchor}` : ""} — declarado NÃO impeditivo
+                  {v.factoryArtifact ? ` (artefato analisado: ${v.factoryArtifact})` : ""}: {v.reason}
+                </li>
+              ))}
+            </Box>
+          )}
+          {state.promotion.verdicts.some((v) => v.stale) && (
+            <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
+              Há parecer(es) obsoleto(s): o arquivo mudou depois do julgamento, então eles não valem mais.
+            </Typography>
+          )}
         </Alert>
       )}
       {state.derivedStatus === "failed_triaged" && (

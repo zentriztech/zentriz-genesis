@@ -53,12 +53,25 @@ function body(title: string, sections: number): string {
 type F = { file: string; severity: string; title: string; fingerprint: string };
 let findings: F[] = [];
 let latestRunId: string | null = "run-0";
-vi.mock("./findingTriage.js", () => ({
+/**
+ * ⚠️ `importOriginal` de propósito — ver a nota gêmea em `specAutonomy.test.ts`: mock de módulo é
+ * FÁBRICA e substitui o módulo inteiro, então export novo no `specAutonomy.ts` derrubava a suíte com
+ * TypeError sincrônico (queimado no GAP-76). `findingTriage` é puro, herdar o original é seguro.
+ */
+vi.mock("./findingTriage.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./findingTriage.js")>()),
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
   // GAP-41: aqui o diff não é o objeto de teste (tem suíte própria) — vazio = comportamento legado.
   gapDeltaSinceLastRun: vi.fn(async () => ({ closed: [], opened: [], openedOnNewSurface: 0 })),
   // GAP-76: idem para o nível comparável — `null` = não foi possível medir (comportamento legado).
   comparableTallySinceLastRun: vi.fn(async () => null),
+}));
+
+// GAP-77: neste arquivo o veredicto fica DESLIGADO (`minGapsResolved: 0`) — o objeto de teste é a fila
+// do modo por arquivo, e o parecer do juiz tem suíte própria (`gapPromotionVerdict.test.ts`) mais os
+// testes de fim de laço em `specAutonomy.test.ts`.
+vi.mock("./gapPromotionVerdict.js", () => ({
+  verdictConfig: vi.fn(() => ({ minGapsResolved: 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
 }));
 
 // `specGapScope` real alcança `routes/specs.js` → `db/client.js` (pool de verdade). Aqui ele é

@@ -991,8 +991,42 @@ export async function specRoutes(app: FastifyInstance) {
         return null;
       });
     }
+    // 🔴 GAP-77 — parecer de PROMOVIBILIDADE: campo PARALELO, nunca reclassificação.
+    //
+    // O limite (a) do Jean é que a severidade não muda: `latestRun.findings` continua com os mesmos
+    // 🔴/🟡 e o `gate` acima segue exigindo zero blocker ATIVO. Isto é o parecer auditável que o humano
+    // lê antes de promover — quem quiser cruzar liga `verdicts[].fingerprint` com o do finding.
+    // Best-effort: falha no parecer não pode derrubar a aba, e ausência de parecer = tudo impeditivo.
+    let promotion: unknown;
+    try {
+      const { verdictConfig, specFileShas, livePromotionVerdicts, promotabilityReport } =
+        await import("../services/gapPromotionVerdict.js");
+      const cfg = verdictConfig();
+      if (cfg.minGapsResolved > 0 && triage) {
+        const verdicts = await livePromotionVerdicts(pool, id, await specFileShas(pool, id));
+        if (verdicts.length > 0) {
+          const { gapScopeForProject } = await import("../services/specGapScope.js");
+          const scope = await gapScopeForProject(pool, id).catch(() => null);
+          promotion = {
+            ...promotabilityReport({
+              findings: triage.findings,
+              verdicts,
+              unroutedImportant: scope
+                ? scope.unrouted.filter((f) => f.severity === "blocker" || f.severity === "warning").length
+                : 0,
+              unjudgedFiles: coverage?.unjudged ?? [],
+              cfg,
+            }),
+            verdicts,
+          };
+        }
+      }
+    } catch (err) {
+      request.log.warn({ err, projectId: id }, "parecer de promovibilidade indisponível; aba GAPs sem ele");
+    }
     return reply.send({
       ...(factoryCertificateEnabled() ? { factoryCertificate } : {}),
+      ...(promotion ? { promotion } : {}),
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
       derivedStatus: derived,

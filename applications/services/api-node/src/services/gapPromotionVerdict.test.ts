@@ -1,0 +1,545 @@
+/**
+ * gapPromotionVerdict.test.ts — 🔴 GAP-77: o juiz pode declarar um GAP reincidente NÃO-impeditivo.
+ *
+ * O que estes testes protegem (e por quê) — são os três limites que o Jean impôs, virados em asserção:
+ *
+ *  (a) A SEVERIDADE NÃO MUDA. Nada aqui escreve em `findings` nem em triagem: o veredicto vive numa
+ *      tabela paralela. Os testes só afirmam sobre `spec_gap_promotion_verdicts` e sobre o parecer.
+ *
+ *  (b) SÓ DEPOIS DE TRABALHO FEITO. Sem N GAPs fechados (e reconciliados, GAP-67) NENHUM candidato
+ *      existe — o recurso não pode ser um atalho para aprovar a spec original.
+ *
+ *  (c) A AUTORIDADE NÃO PODE BAIXAR A QUALIDADE. É a maior parte deste arquivo, porque é aqui que a
+ *      autoridade viraria anistia se alguém afrouxasse uma guarda:
+ *       - veredicto é por GAP COM ENDEREÇO (arquivo + âncora), nunca em bloco;
+ *       - arquivo visto só por SUMÁRIO não é julgável (GAP-20: ausência só é prova se alguém olhou);
+ *       - **âncora INTOCADA descarta o candidato** — trecho que sobreviveu byte a byte significa que o
+ *         agente não chegou lá: o defeito é NÃO-TENTADO, não insistente (é caso de modo foco);
+ *       - reincidência contada SÓ em validações competentes para AQUELE arquivo;
+ *       - falha em acusar NÃO é inocência: sem artefato concreto o candidato sai da rodada, e sem LLM /
+ *         sem JSON / com motivo curto nada é liberado (fail-CLOSED — a lição do GAP-62, onde perguntar
+ *         ao humano era fail-OPEN);
+ *       - o parecer morre com o texto (`file_sha_at`), e o teto acumulado anula TODAS as liberações;
+ *       - promovível exige também zero GAP importante sem arquivo e zero arquivo pendente de medição:
+ *         parecer sobre a parte medida não vira aval sobre a parte que ninguém julgou.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { EnrichedFinding } from "./findingTriage.js";
+import { findingFingerprint } from "./findingTriage.js";
+import type { PastValidation } from "./gapPersistence.js";
+
+const httpPost = vi.fn<(url: string, body: string, timeoutMs: number) => Promise<string>>();
+vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]) => httpPost(...a) }));
+
+const {
+  verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
+  focusRoundsByFile, saveVerdicts, livePromotionVerdicts, promotabilityReport,
+} = await import("./gapPromotionVerdict.js");
+
+type Candidate = import("./gapPromotionVerdict.js").Candidate;
+type LiveVerdict = import("./gapPromotionVerdict.js").LiveVerdict;
+type VerdictConfig = import("./gapPromotionVerdict.js").VerdictConfig;
+
+/** Config explícita em todo teste: o default vem do ambiente e não pode decidir o resultado da suíte. */
+const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 };
+
+const F = (o: Partial<EnrichedFinding> = {}): EnrichedFinding => ({
+  file: "modelo-dados.md", line: null, severity: "blocker", title: "contrato ambíguo", rationale: "",
+  source: "stage_b", category: "other", anchor: "## 4. Autenticação", fingerprint: "",
+  triageable: true, triage: null, ...o,
+});
+
+/** Validação passada que julgou `full` os arquivos dados e reportou os findings dados. */
+const V = (full: string[], findings: EnrichedFinding[]): PastValidation =>
+  ({ findings, coverage: { full } }) as unknown as PastValidation;
+
+const SECTION = "## 4. Autenticação\nO login usa hash de senha.\n";
+const sections = (anchor = "## 4. Autenticação", body = SECTION): Map<string, string> => new Map([[anchor, body]]);
+
+const base = (o: Partial<Parameters<typeof selectVerdictCandidates>[0]> = {}): Parameters<typeof selectVerdictCandidates>[0] => ({
+  findings: [F()],
+  runs: [V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], [F()])],
+  judged: new Set(["modelo-dados.md"]),
+  focusByFile: new Map([["modelo-dados.md", 4]]),
+  untouched: new Set<string>(),
+  sections: sections(),
+  gapsResolved: 5,
+  cfg: CFG,
+  ...o,
+});
+
+const C = (o: Partial<Candidate> = {}): Candidate => ({
+  finding: F() as unknown as Candidate["finding"],
+  fingerprint: findingFingerprint(F()),
+  file: "modelo-dados.md",
+  anchor: "## 4. Autenticação",
+  times: 4,
+  focusRounds: 3,
+  section: SECTION,
+  ...o,
+});
+
+const fakeDb = (rows: Record<string, unknown>[] = []) => {
+  const calls: Array<{ text: string; values: unknown[] }> = [];
+  return {
+    calls,
+    query: vi.fn(async (text: string, values?: unknown[]) => {
+      calls.push({ text, values: values ?? [] });
+      return { rows } as { rows: Record<string, unknown>[] };
+    }),
+  };
+};
+
+const ENV_KEYS = [
+  "SPEC_VERDICT_MIN_GAPS_RESOLVED", "SPEC_VERDICT_MIN_RECURRENCE", "SPEC_VERDICT_MIN_FOCUS_ROUNDS",
+  "SPEC_VERDICT_MAX_PER_RUN", "SPEC_VERDICT_MAX_PER_SPEC", "SPEC_VERDICT_MODEL",
+];
+const saved: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+  httpPost.mockReset();
+  for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  process.env.API_AGENTS_URL = "http://agents:8000";
+});
+afterEach(() => {
+  for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+});
+
+describe("verdictConfig", () => {
+  it("liga por padrão com barra alta e aceita override por env", () => {
+    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 });
+    process.env.SPEC_VERDICT_MIN_RECURRENCE = "5";
+    process.env.SPEC_VERDICT_MAX_PER_RUN = "1";
+    expect(verdictConfig().minRecurrence).toBe(5);
+    expect(verdictConfig().maxPerRun).toBe(1);
+  });
+
+  it("valor inválido cai no default (nunca vira NaN, que liberaria tudo)", () => {
+    process.env.SPEC_VERDICT_MIN_RECURRENCE = "muitas";
+    process.env.SPEC_VERDICT_MAX_PER_SPEC = "-3";
+    expect(verdictConfig().minRecurrence).toBe(3);
+    expect(verdictConfig().maxPerSpec).toBe(8);
+  });
+
+  it("SPEC_VERDICT_MIN_GAPS_RESOLVED=0 desliga o recurso sem deploy", () => {
+    process.env.SPEC_VERDICT_MIN_GAPS_RESOLVED = "0";
+    expect(verdictConfig().minGapsResolved).toBe(0);
+    const gate = selectVerdictCandidates(base({ cfg: verdictConfig() }));
+    expect(gate.enabled).toBe(false);
+    expect(gate.candidates).toEqual([]);
+    expect(gate.reason).toMatch(/desligado/);
+  });
+});
+
+describe("selectVerdictCandidates — limite (b): só depois de trabalho feito", () => {
+  it("sem GAPs fechados o bastante, nenhum candidato existe", () => {
+    const gate = selectVerdictCandidates(base({ gapsResolved: 2 }));
+    expect(gate.enabled).toBe(false);
+    expect(gate.candidates).toEqual([]);
+    expect(gate.reason).toMatch(/2 de 3 GAP/);
+  });
+
+  it("sem cobertura registrada, ninguém é julgável (GAP-20)", () => {
+    const gate = selectVerdictCandidates(base({ judged: null }));
+    expect(gate.enabled).toBe(false);
+    expect(gate.reason).toMatch(/não registrou cobertura/);
+  });
+});
+
+describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () => {
+  it("o candidato só existe com endereço, reincidência medida, foco pago e trecho verbatim", () => {
+    const gate = selectVerdictCandidates(base());
+    expect(gate.enabled).toBe(true);
+    expect(gate.rejected).toEqual([]);
+    expect(gate.candidates).toHaveLength(1);
+    expect(gate.candidates[0]).toMatchObject({
+      file: "modelo-dados.md", anchor: "## 4. Autenticação", times: 3, focusRounds: 4, section: SECTION,
+    });
+  });
+
+  it("GAP sem âncora não é candidato — veredicto é por GAP com endereço", () => {
+    const gate = selectVerdictCandidates(base({ findings: [F({ anchor: null })] }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/sem arquivo ou sem âncora/);
+  });
+
+  it("GAP sem arquivo não é candidato", () => {
+    const gate = selectVerdictCandidates(base({ findings: [F({ file: "" })] }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0]).toMatchObject({ file: "(sem arquivo)" });
+  });
+
+  it("arquivo visto só por SUMÁRIO nesta validação não é julgável", () => {
+    const gate = selectVerdictCandidates(base({ judged: new Set(["outro.md"]) }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/só por SUMÁRIO/);
+  });
+
+  it("âncora INTOCADA descarta: o agente não chegou lá, é NÃO-TENTADO (modo foco)", () => {
+    const gate = selectVerdictCandidates(base({ untouched: new Set(["## 4. Autenticação"]) }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/NÃO-TENTADO/);
+  });
+
+  it("reincidência insuficiente descarta, e conta só validações COMPETENTES para o arquivo", () => {
+    // 3 validações reportaram o defeito, mas duas não julgaram `modelo-dados.md` por inteiro.
+    const gate = selectVerdictCandidates(base({
+      runs: [V(["modelo-dados.md"], [F()]), V(["outro.md"], [F()]), V(["outro.md"], [F()])],
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/reapareceu em 1 validação/);
+  });
+
+  it("validação sem cobertura não conta como reincidência", () => {
+    const noCov = { findings: [F()] } as unknown as PastValidation;
+    const gate = selectVerdictCandidates(base({ runs: [V(["modelo-dados.md"], [F()]), noCov, noCov] }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/reincidência insuficiente/);
+  });
+
+  it("foco individual insuficiente descarta — é o gatilho que o Jean exigiu", () => {
+    const gate = selectVerdictCandidates(base({ focusByFile: new Map([["modelo-dados.md", 1]]) }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/foco individual insuficiente: 1 rodada/);
+  });
+
+  it("âncora não localizável descarta: o juiz decidiria sobre um resumo", () => {
+    const gate = selectVerdictCandidates(base({ sections: new Map() }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/não localizável/);
+  });
+
+  it("GAP triado e GAP de severidade baixa ficam fora (não são GAPs importantes)", () => {
+    const gate = selectVerdictCandidates(base({
+      findings: [
+        F({ triage: { state: "ignored" } as unknown as EnrichedFinding["triage"] }),
+        F({ severity: "info", anchor: "## 5. Outro" }),
+      ],
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected).toEqual([]);
+  });
+
+  it("ordena por reincidência e corta no teto de candidatos — cai o menos insistente", () => {
+    const many = Array.from({ length: 10 }, (_, i) => F({ anchor: `## ${i} Seção`, title: `t${i}` }));
+    // O defeito de índice i reapareceu em (i + 3) validações competentes.
+    const runs: PastValidation[] = [];
+    for (let k = 0; k < 13; k++) runs.push(V(["modelo-dados.md"], many.filter((_, i) => i + 3 > k)));
+    const gate = selectVerdictCandidates(base({
+      findings: many,
+      runs,
+      sections: new Map(many.map((f) => [String(f.anchor), SECTION])),
+    }));
+    expect(gate.candidates).toHaveLength(8);
+    expect(gate.candidates[0].times).toBeGreaterThanOrEqual(gate.candidates[7].times);
+    expect(gate.candidates.map((c) => c.anchor)).not.toContain("## 0 Seção");
+  });
+});
+
+describe("runVerdictRound — a rodada adversarial, fail-CLOSED em cada degrau", () => {
+  const claim = (id: string) => ({ id, artifact: "POST /shipments", harm: "eu criaria status como enum de 4 valores e §7 exige 6 valores distintos" });
+  const ok = (impact: string, id = "g1") => JSON.stringify({
+    verdicts: [{ id, impact, reason: "é redundância consistente: os dois trechos declaram o MESMO enum, então a fábrica constrói igual" }],
+  });
+
+  it("sem candidatos a rodada não acontece", async () => {
+    const r = await runVerdictRound([]);
+    expect(r).toMatchObject({ ran: false, released: 0, verdicts: [] });
+    expect(httpPost).not.toHaveBeenCalled();
+  });
+
+  it("promotor indisponível → nada liberado e o motivo diz que todos seguem impeditivos", async () => {
+    httpPost.mockRejectedValueOnce(new Error("timeout"));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r).toMatchObject({ ran: false, released: 0, verdicts: [] });
+    expect(r.reason).toMatch(/seguem impeditivos/);
+  });
+
+  it("promotor sem JSON → nada liberado", async () => {
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: "acho que sim, mas depende" }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r.ran).toBe(false);
+    expect(r.reason).toMatch(/não devolveu JSON/);
+  });
+
+  it("falha em ACUSAR não é inocência: sem artefato concreto o juiz nem é chamado", async () => {
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "", harm: "nenhum dano real" }] }) }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(httpPost).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ ran: true, released: 0, verdicts: [] });
+    expect(r.reason).toMatch(/não sustentou nenhuma acusação concreta/);
+  });
+
+  it("acusação genérica (curta) também descarta o candidato", async () => {
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "API", harm: "fica ruim" }] }) }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(httpPost).toHaveBeenCalledTimes(1);
+    expect(r.released).toBe(0);
+  });
+
+  it("só os candidatos ACUSADOS vão ao juiz", async () => {
+    const cands = [C(), C({ anchor: "## 5. Erros", fingerprint: "fp2" })];
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g2")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: ok("impeditivo", "g2"), model_used: "m1" }));
+    const r = await runVerdictRound(cands, { maxRelease: 3 });
+    const judgeBody = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+    expect(judgeBody.user_message).toContain("g2");
+    expect(judgeBody.user_message).not.toContain("### g1 ");
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0].anchor).toBe("## 5. Erros");
+    expect(r.reason).toMatch(/1 sem acusação concreta seguem impeditivos/);
+  });
+
+  it("juiz indisponível → nada liberado", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1")] }) }))
+      .mockRejectedValueOnce(new Error("500"));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r).toMatchObject({ ran: false, released: 0, verdicts: [] });
+    expect(r.reason).toMatch(/juiz não respondeu/);
+  });
+
+  it("nao_impeditivo com motivo suficiente é liberado, com a acusação anexada ao parecer", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: ok("nao_impeditivo"), model_used: "opus" }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r).toMatchObject({ ran: true, released: 1, model: "opus" });
+    expect(r.verdicts[0]).toMatchObject({
+      impact: "nao_impeditivo", file: "modelo-dados.md", factoryArtifact: "POST /shipments", times: 4, focusRounds: 3,
+    });
+    expect(r.verdicts[0].accusation).toMatch(/enum de 4 valores/);
+  });
+
+  it("motivo curto NÃO sustenta liberação: volta a impeditivo e a recusa é declarada", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ verdicts: [{ id: "g1", impact: "nao_impeditivo", reason: "é só texto" }] }) }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r.released).toBe(0);
+    expect(r.verdicts[0].impact).toBe("impeditivo");
+    expect(r.reason).toMatch(/motivo insuficiente/);
+  });
+
+  it("impacto desconhecido/ausente cai em impeditivo (default seguro)", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ verdicts: [{ id: "g1", reason: "uma frase bem longa que justificaria qualquer coisa aqui" }] }) }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r.verdicts[0].impact).toBe("impeditivo");
+    expect(r.released).toBe(0);
+  });
+
+  it("teto por rodada: o excedente volta a impeditivo, declarado no motivo", async () => {
+    const cands = [C(), C({ anchor: "## 5. Erros", fingerprint: "fp2" })];
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1"), claim("g2")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({
+        response: JSON.stringify({
+          verdicts: [
+            { id: "g1", impact: "nao_impeditivo", reason: "redundância consistente entre os dois trechos, a fábrica constrói igual" },
+            { id: "g2", impact: "nao_impeditivo", reason: "ordem do documento apenas, nenhum contrato muda por causa disto" },
+          ],
+        }),
+      }));
+    const r = await runVerdictRound(cands, { maxRelease: 1 });
+    expect(r.released).toBe(1);
+    expect(r.verdicts.filter((v) => v.impact === "impeditivo")).toHaveLength(1);
+    expect(r.reason).toMatch(/teto de 1 por rodada/);
+  });
+
+  it("id inventado e id repetido são ignorados", async () => {
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [claim("g1")] }) }))
+      .mockResolvedValueOnce(JSON.stringify({
+        response: JSON.stringify({
+          verdicts: [
+            { id: "g99", impact: "nao_impeditivo", reason: "uma justificativa longa o suficiente para passar do mínimo" },
+            { id: "g1", impact: "impeditivo", reason: "a fábrica escolheria errado o enum de status" },
+            { id: "g1", impact: "nao_impeditivo", reason: "segunda tentativa de liberar o mesmo item, deve ser ignorada" },
+          ],
+        }),
+      }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.verdicts[0].impact).toBe("impeditivo");
+    expect(r.released).toBe(0);
+  });
+
+  it("manda o trecho VERBATIM e avisa que a spec é dado não-confiável", async () => {
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: "{}" }));
+    await runVerdictRound([C()], { maxRelease: 3 });
+    const body = JSON.parse(httpPost.mock.calls[0][1]) as { user_message: string; prompt_override: string; model_id?: string };
+    expect(body.user_message).toContain("O login usa hash de senha.");
+    expect(body.user_message).toMatch(/não-confiável/);
+    expect(body.prompt_override).toMatch(/CONSTRUIRIA ERRADO/);
+    // Sem override de env, deixa o runtime escolher o modelo mais capaz (idem specOracles).
+    expect(body.model_id).toBeUndefined();
+  });
+
+  it("SPEC_VERDICT_MODEL força o modelo quando existe", async () => {
+    process.env.SPEC_VERDICT_MODEL = "us.anthropic.claude-opus-5";
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: "{}" }));
+    await runVerdictRound([C()], { maxRelease: 3 });
+    expect((JSON.parse(httpPost.mock.calls[0][1]) as { model_id?: string }).model_id).toBe("us.anthropic.claude-opus-5");
+  });
+});
+
+describe("parseListResponse", () => {
+  it("tolera cercas de código e prosa em volta", () => {
+    expect(parseListResponse('```json\n{"claims":[{"id":"g1"}]}\n```', "claims")).toEqual([{ id: "g1" }]);
+    expect(parseListResponse('Segue: {"claims":[{"id":"g2"}]} espero ter ajudado', "claims")).toEqual([{ id: "g2" }]);
+  });
+
+  it("chave ausente, lixo e vazio devolvem null (fail-CLOSED)", () => {
+    expect(parseListResponse('{"outra":[]}', "claims")).toBeNull();
+    expect(parseListResponse("sem json aqui", "claims")).toBeNull();
+    expect(parseListResponse("", "claims")).toBeNull();
+  });
+});
+
+describe("anchoredSection", () => {
+  const doc = "# Spec\npreâmbulo\n\n## 4. Autenticação\nsenha com Argon2id\n\n## 5. Erros\ncódigos\n";
+
+  it("devolve o trecho da seção ancorada, verbatim", () => {
+    const s = anchoredSection(doc, "## 4. Autenticação");
+    expect(s).toContain("Argon2id");
+    expect(s).not.toContain("códigos");
+  });
+
+  it("âncora inexistente devolve vazio (e o chamador descarta o candidato)", () => {
+    expect(anchoredSection(doc, "## 99. Nada disso existe aqui")).toBe("");
+    expect(anchoredSection(doc, "")).toBe("");
+  });
+});
+
+describe("focusRoundsByFile", () => {
+  it("conta rodadas despachadas por arquivo, em TODAS as runs do projeto", async () => {
+    const db = fakeDb([{ f: "modelo-dados.md", n: 4 }, { f: "visao-escopo.md", n: 2 }, { f: null, n: 9 }]);
+    const map = await focusRoundsByFile(db as never, "p1");
+    expect(map.get("modelo-dados.md")).toBe(4);
+    expect(map.get("visao-escopo.md")).toBe(2);
+    expect(map.size).toBe(2);
+    expect(db.calls[0].text).toContain("spec_autonomy_runs");
+  });
+});
+
+describe("saveVerdicts", () => {
+  it("grava o parecer com o SHA do arquivo julgado — a chave de obsolescência", async () => {
+    const db = fakeDb();
+    const n = await saveVerdicts(db as never, {
+      projectId: "p1", autonomyRunId: "r1", validationRunId: "v1",
+      verdicts: [{
+        fingerprint: "fp1", file: "Modelo-Dados.md", anchor: "## 4", severity: "blocker", title: "t",
+        impact: "nao_impeditivo", reason: "motivo", factoryArtifact: "POST /x", accusation: "dano",
+        times: 4, focusRounds: 3,
+      }],
+      shaByFile: new Map([["modelo-dados.md", "sha-abc"]]),
+      model: "opus",
+    });
+    expect(n).toBe(1);
+    expect(db.calls[0].text).toContain("INSERT INTO spec_gap_promotion_verdicts");
+    expect(db.calls[0].values).toContain("sha-abc");
+    expect(db.calls[0].values).toContain("nao_impeditivo");
+  });
+});
+
+describe("livePromotionVerdicts", () => {
+  const row = (o: Record<string, unknown> = {}) => ({
+    fingerprint: "fp1", file_path: "modelo-dados.md", anchor: "## 4", impact: "nao_impeditivo",
+    reason: "motivo", factory_artifact: "POST /x", file_sha_at: "sha-abc", created_at: "2026-09-07T12:00:00Z", ...o,
+  });
+
+  it("parecer sobre o conteúdo ATUAL vale; sobre conteúdo antigo fica obsoleto", async () => {
+    const db = fakeDb([row(), row({ fingerprint: "fp2", file_sha_at: "sha-velho" })]);
+    const live = await livePromotionVerdicts(db as never, "p1", new Map([["modelo-dados.md", "sha-abc"]]));
+    expect(live.find((v) => v.fingerprint === "fp1")!.stale).toBe(false);
+    expect(live.find((v) => v.fingerprint === "fp2")!.stale).toBe(true);
+  });
+
+  it("sem SHA atual (arquivo removido) o parecer não pode ser afirmado", async () => {
+    const db = fakeDb([row()]);
+    const live = await livePromotionVerdicts(db as never, "p1", new Map());
+    expect(live[0].stale).toBe(true);
+  });
+
+  it("um parecer por defeito: o mais recente ganha", async () => {
+    const db = fakeDb([row({ impact: "impeditivo" }), row({ impact: "nao_impeditivo", created_at: "2026-09-01T00:00:00Z" })]);
+    const live = await livePromotionVerdicts(db as never, "p1", new Map([["modelo-dados.md", "sha-abc"]]));
+    expect(live).toHaveLength(1);
+    expect(live[0].impact).toBe("impeditivo");
+  });
+});
+
+describe("promotabilityReport — o que o humano lê antes de promover", () => {
+  const LV = (o: Partial<LiveVerdict> = {}): LiveVerdict => ({
+    fingerprint: "x", file: "modelo-dados.md", anchor: "## 4", impact: "nao_impeditivo",
+    reason: "r", factoryArtifact: "a", stale: false, createdAt: "2026-09-07T12:00:00Z", ...o,
+  });
+
+  it("GAP liberado sai da conta de impeditivos e a spec fica promovível", () => {
+    const f = F();
+    const rep = promotabilityReport({
+      findings: [f], verdicts: [LV({ fingerprint: findingFingerprint(f) })],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep).toMatchObject({ impeditive: 0, released: 1, promotable: true, blockers: [] });
+  });
+
+  it("sem veredicto, GAP importante segue impeditivo e bloqueia", () => {
+    const rep = promotabilityReport({ findings: [F()], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG });
+    expect(rep.impeditive).toBe(1);
+    expect(rep.promotable).toBe(false);
+    expect(rep.blockers[0]).toMatch(/1 GAP\(s\) importante\(s\) seguem impeditivos/);
+  });
+
+  it("parecer OBSOLETO não libera nada — a anistia morre com o texto", () => {
+    const f = F();
+    const rep = promotabilityReport({
+      findings: [f], verdicts: [LV({ fingerprint: findingFingerprint(f), stale: true })],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep).toMatchObject({ impeditive: 1, released: 0, promotable: false });
+  });
+
+  it("parecer impeditivo não libera (só `nao_impeditivo` conta)", () => {
+    const f = F();
+    const rep = promotabilityReport({
+      findings: [f], verdicts: [LV({ fingerprint: findingFingerprint(f), impact: "impeditivo" })],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep.impeditive).toBe(1);
+  });
+
+  it("teto acumulado excedido ANULA todas as liberações — muitas rodadas não contornam o teto", () => {
+    const many = Array.from({ length: 4 }, (_, i) => F({ anchor: `## ${i}`, title: `t${i}` }));
+    const rep = promotabilityReport({
+      findings: many,
+      verdicts: many.map((f) => LV({ fingerprint: findingFingerprint(f) })),
+      unroutedImportant: 0, unjudgedFiles: [], cfg: { ...CFG, maxPerSpec: 3 },
+    });
+    expect(rep).toMatchObject({ impeditive: 4, released: 0, promotable: false });
+    expect(rep.blockers.some((b) => /teto acumulado de 3/.test(b))).toBe(true);
+  });
+
+  it("GAP importante sem arquivo atribuído bloqueia mesmo com tudo liberado", () => {
+    const rep = promotabilityReport({ findings: [], verdicts: [], unroutedImportant: 2, unjudgedFiles: [], cfg: CFG });
+    expect(rep.promotable).toBe(false);
+    expect(rep.blockers[0]).toMatch(/sem arquivo atribuído/);
+  });
+
+  it("arquivo nunca julgado por inteiro bloqueia: aval da parte medida não vale pela não-medida", () => {
+    const rep = promotabilityReport({ findings: [], verdicts: [], unroutedImportant: 0, unjudgedFiles: ["privacidade-lgpd.md"], cfg: CFG });
+    expect(rep.promotable).toBe(false);
+    expect(rep.blockers[0]).toMatch(/nunca julgado\(s\) por inteiro/);
+  });
+
+  it("GAP triado pelo humano não é impeditivo — triagem e veredicto são coisas diferentes", () => {
+    const rep = promotabilityReport({
+      findings: [F({ triage: { state: "ignored" } as unknown as EnrichedFinding["triage"] })],
+      verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep).toMatchObject({ impeditive: 0, promotable: true });
+  });
+});
