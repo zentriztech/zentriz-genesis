@@ -106,6 +106,11 @@ vi.mock("./specOracles.js", () => ({
   // irrisório e o piso de 2.000 continua vencendo — é o que mantém estes casos medindo o VETO em vez da
   // calibração do orçamento (essa é medida em `specAutonomy.test.ts`).
   proportionalGrowthBudget: (bytes: number) => (bytes > 0 ? Math.ceil(bytes * 0.02) : 0),
+  // 🔴 GAP-69: janela da dívida das runs IRMÃS. `0` no dublê = kill-switch ligado, então estes casos
+  // seguem medindo o VETO com o orçamento de uma run só — a dívida da janela é medida em
+  // `growthWindow.test.ts`. Sem esta chave o mock quebra com "No export is defined", que é como o
+  // GAP-69 apareceu aqui na primeira rodada de testes.
+  ORACLE_GROWTH_WINDOW_HOURS: 0,
   // GAP-64: tolerância de quase-conformidade — fração da margem que RESTA, por isso se extingue com
   // ela. Reimplementada aqui (é lógica pura, testada em `specOracles.test.ts`); com o piso de 2.000 do
   // dublê, a banda destes casos é de 100 chars.

@@ -110,6 +110,16 @@ export const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET
 export const ORACLE_GROWTH_RATIO = Number(process.env.SPEC_ORACLE_GROWTH_RATIO ?? "0.02");
 
 /**
+ * 🔴 GAP-69 — a janela em que os 2% valem. Mora aqui, junto de `ORACLE_GROWTH_RATIO`, porque as duas
+ * juntas são a guarda: "2% da massa POR JANELA", não por run.
+ *
+ * 24 h é o default porque foi a escala em que o motor foi medido (nove runs do NVX LastMile em 7h46
+ * somaram +15,3% na spec, cada uma achando que respeitava o teto de 2%). `0` desliga a dívida das runs
+ * irmãs e volta ao comportamento do GAP-36 — sem deploy, se o teto se mostrar apertado demais.
+ */
+export const ORACLE_GROWTH_WINDOW_HOURS = Number(process.env.SPEC_ORACLE_GROWTH_WINDOW_HOURS ?? "24");
+
+/**
  * GAP-36 — a parcela PROPORCIONAL do orçamento de crescimento do laço. Quem soma o piso por passe e
  * desconta o já gasto é o laço (`growthAllowance`), que é dono do log de rodadas.
  *
