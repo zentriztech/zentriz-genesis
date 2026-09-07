@@ -22,6 +22,7 @@ vi.mock("fs/promises", () => ({
 
 const {
   crossFileFindings, parseOracleResponse, oracleRegistryEnabled, oracleRoleForFile, oracleFactBlock,
+  growthMarginIsNoise,
   ensureOracleDecisions, dropImpossibleDecisions, loadOracleDecisions, decidedContractsBlock,
   _resetOracleMemo,
 } = await import("./specOracles.js");
@@ -597,5 +598,56 @@ describe("oracleFactBlock — GAP-28: margem restante do passe", () => {
   it("sem saldo informado (botão humano) mantém o orçamento cheio do GAP-25", () => {
     const block = oracleFactBlock([D()], "modelo-dados.md", 50_000);
     expect(block).toContain("52000");
+  });
+});
+
+// ── GAP-38: margem de RUÍDO — anunciar o número convida a estourá-lo ──────────
+//
+// Medido na run `be406f3c` (passe 1, com o GAP-36 já em prod): `README.md` voltou +1.431 contra 447
+// anunciados, `definicao-de-pronto.md` +1.511 contra 447 e `observabilidade-operacao.md` +2.827 contra
+// 680. Três chamadas de Opus 5 pagas e descartadas. O teto está certo (é a guarda contra o GAP-8); o que
+// falhava era o ENQUADRAMENTO: "Você tem 447 caracteres de margem" num arquivo de 68.590 lê-se como
+// folga. O número continua sendo dito — mentir dizendo "zero" seria o defeito oposto.
+describe("oracleFactBlock — GAP-38: margem irrisória é dita como impossibilidade, não como folga", () => {
+  it("margem abaixo de 1% do arquivo vira CONSOLIDAÇÃO OBRIGATÓRIA (caso medido: 447 em 68.590)", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 68_590, 447);
+    expect(block).toContain("CONSOLIDAÇÃO OBRIGATÓRIA");
+    expect(block).toContain("447");                          // o número REAL continua no texto
+    expect(block).toContain("praticamente nada");
+    expect(block).not.toContain("Você tem 447 caracteres de margem");
+    // O teto verificado por código não muda: quem julga é o veto, não a redação.
+    expect(block).toContain("Se a revisão passar de 69037");
+  });
+
+  it("oferece a saída honesta: consolidar primeiro e DIZER qual GAP ficou para depois", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 68_590, 447);
+    expect(block).toContain("qual GAP");
+    expect(block).toContain("ficou para a próxima rodada");
+  });
+
+  it("margem folgada NÃO muda de tom — zero regressão no caminho normal", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 68_590, 12_000);
+    expect(block).toContain("Você tem 12000 caracteres de margem");
+    expect(block).not.toContain("CONSOLIDAÇÃO OBRIGATÓRIA");
+  });
+
+  it("saldo zero continua com o texto próprio do GAP-28 (não é caso de ruído)", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 68_590, 0);
+    expect(block).toContain("NÃO pode crescer nem um caractere");
+    expect(block).not.toContain("CONSOLIDAÇÃO OBRIGATÓRIA");
+  });
+
+  it("piso de 500: em arquivo PEQUENO, 1% seria ruído demais para servir de limiar", () => {
+    // 1% de 8.000 = 80. Sem o piso, 300 chars de margem passariam por "folga" num arquivo em que 300
+    // chars são 3,75% — e é justamente aí que o agente ainda tem espaço real para trabalhar.
+    expect(growthMarginIsNoise(300, 8_000)).toBe(true);
+    expect(growthMarginIsNoise(600, 8_000)).toBe(false);
+  });
+
+  it("não classifica como ruído o que não é margem (zero, negativo, arquivo sem tamanho)", () => {
+    expect(growthMarginIsNoise(0, 68_590)).toBe(false);
+    expect(growthMarginIsNoise(-100, 68_590)).toBe(false);
+    expect(growthMarginIsNoise(447, 0)).toBe(false);
+    expect(growthMarginIsNoise(Number.NaN, 68_590)).toBe(false);
   });
 });

@@ -117,6 +117,39 @@ export const ORACLE_GROWTH_RATIO = Number(process.env.SPEC_ORACLE_GROWTH_RATIO ?
  * uma fração generoso. É deliberado — a guarda é de ORDEM DE GRANDEZA (2% contra os 18%/rodada do
  * GAP-8), não uma contabilidade de caracteres.
  */
+/**
+ * GAP-38 (2026-09-07) — margem que sobrou é IRRISÓRIA: anunciar o número convida a negociar.
+ *
+ * ## Medido em prod (run `be406f3c`, NVX LastMile, com o GAP-36 já no ar)
+ *
+ * O passe 0 rodou **7/7 rodadas APLICADAS** (antes do GAP-36 eram 5/7) e consumiu **17.417 dos 19.723**
+ * chars do orçamento do laço. Sobraram ~2.300 para os passes 1–4 — que são justamente os que carregam
+ * os blockers remanescentes. No passe 1, **3 de 7 rodadas foram descartadas**: `README.md` **+1.431**
+ * contra margem **447**, `definicao-de-pronto.md` **+1.511** contra **447**, e
+ * `observabilidade-operacao.md` **+2.827** contra **680**. Três chamadas de Opus 5 pagas e descartadas.
+ *
+ * O ponto não é que o teto seja apertado — ele é o teto de propósito (2% da massa contra os 18%/rodada
+ * do GAP-8), e afrouxá-lo ressuscitaria a doença. O ponto é que **o CONTRATO DE SAÍDA anunciado em
+ * número não constrange o modelo quando o número é ruído**: 447 chars são 0,65% de um arquivo de 68.590
+ * e a frase "Você tem 447 caracteres de margem" lê-se como permissão, não como impossibilidade. As três
+ * rodadas voltaram entre 2× e 6× acima do anunciado.
+ *
+ * ## O que muda
+ *
+ * Abaixo do limiar de ruído o bloco para de anunciar um número permissivo e passa a dizer a VERDADE com
+ * a forma imperativa que o caso exige: a margem é praticamente nada, então a rodada é
+ * CONSOLIDAÇÃO OBRIGATÓRIA — a revisão precisa encolher e cada linha nova tem de ser paga com a remoção
+ * de uma redeclaração. O número real continua no texto (nada de mentir dizendo "zero"), o que muda é o
+ * enquadramento. Nenhuma regra do veto muda: quem julga continua sendo `consolidationVeto`.
+ */
+export function growthMarginIsNoise(allowance: number, fileChars: number): boolean {
+  if (!Number.isFinite(allowance) || allowance <= 0) return false;   // zero tem texto próprio
+  if (!Number.isFinite(fileChars) || fileChars <= 0) return false;
+  // 1% do arquivo porque a edição do agente escala com o arquivo; o piso de 500 porque abaixo disso não
+  // cabe nem uma frase normativa — anunciar o número seria convidar a estourá-lo.
+  return allowance < Math.max(500, Math.round(fileChars * 0.01));
+}
+
 export function proportionalGrowthBudget(specBytes: number): number {
   if (!Number.isFinite(specBytes) || specBytes <= 0) return 0;
   if (!Number.isFinite(ORACLE_GROWTH_RATIO) || ORACLE_GROWTH_RATIO <= 0) return 0;
@@ -679,10 +712,19 @@ export function oracleFactBlock(
         ? " A margem de crescimento desta revisão da spec já foi consumida por outros arquivos: aqui o"
           + " arquivo NÃO pode crescer nem um caractere. Toda linha nova precisa ser paga com a remoção"
           + " de uma redeclaração listada acima."
-        : ` Você tem ${allowance} caracteres de margem — é o que resta do orçamento desta revisão da`
-          + " spec, já descontado o que os arquivos anteriores gastaram. Se precisa acrescentar texto"
-          + " para resolver outro GAP do mesmo arquivo, compense removendo as redeclarações acima: é"
-          + " para isso que elas estão listadas."),
+        // GAP-38: margem de ruído (medido: 3 rodadas voltaram 2×–6× acima de 447/447/680 anunciados).
+        // O número continua dito — o que muda é o enquadramento: não é folga, é impossibilidade prática.
+        : growthMarginIsNoise(allowance, fileChars)
+          ? ` Restam ao laço apenas ${allowance} caracteres de margem — menos de 1% deste arquivo, ou`
+            + " seja, praticamente nada. Trate esta rodada como CONSOLIDAÇÃO OBRIGATÓRIA: a revisão"
+            + " precisa ENCOLHER. Cada linha nova tem de ser paga com a remoção de uma redeclaração"
+            + " listada acima. Se um GAP deste arquivo só se resolve acrescentando texto que não cabe,"
+            + " resolva primeiro as consolidações (que liberam margem) e diga na resposta qual GAP"
+            + " ficou para a próxima rodada — é melhor do que ter a revisão inteira descartada."
+          : ` Você tem ${allowance} caracteres de margem — é o que resta do orçamento desta revisão da`
+            + " spec, já descontado o que os arquivos anteriores gastaram. Se precisa acrescentar texto"
+            + " para resolver outro GAP do mesmo arquivo, compense removendo as redeclarações acima: é"
+            + " para isso que elas estão listadas."),
     );
   }
   lines.push("--- FIM DA FONTE ÚNICA ---", "");

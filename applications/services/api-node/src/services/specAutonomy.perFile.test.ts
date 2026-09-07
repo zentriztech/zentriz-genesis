@@ -835,6 +835,17 @@ describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", ()
     expect(dispatchGapFileJob).toHaveBeenCalledTimes(1);
   });
 
+  it("GAP-38 — a margem ANUNCIADA fica no log da rodada, igual à que foi ao agente", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // Sem o anunciado no log, "o agente sabia onde estava a linha" era indemonstrável: dava para ver a
+    // recusa, não o pedido. Medir pedido × entrega é o que provou que 447 voltaram como +1.431.
+    const round = (run!.rounds as { round: number; announcedBudget?: number }[]).at(-1)!;
+    expect(round.announcedBudget).toBe(lastFileCall().growthBudget);
+    expect(typeof round.announcedBudget).toBe("number");
+  });
+
   it("arquivo que REDECLARA e cresceu além do orçamento → NÃO escreve e o laço segue", async () => {
     decideOraculo();
     const r = await start();

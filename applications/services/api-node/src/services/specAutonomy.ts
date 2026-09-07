@@ -248,6 +248,13 @@ export interface AutonomyRoundLog {
   rejectedDelta?: number | null;
   rejectedBudget?: number | null;
   rejectedReason?: string | null;
+  /**
+   * GAP-38: a margem ANUNCIADA ao agente no despacho desta rodada. Só a RECUSA era registrada, então a
+   * afirmação "o agente sabia onde estava a linha" (o contrato de saída do GAP-25) era indemonstrável:
+   * dava para ver que a revisão estourou, não o que tinha sido pedido. Com o anunciado no log, comparar
+   * pedido × entrega é aritmética — foi assim que se mediu que 447 anunciados voltaram como +1.431.
+   */
+  announcedBudget?: number | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -1210,16 +1217,19 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   );
   if ((claim.rowCount ?? 0) === 0) return false;
 
+  // GAP-28: a margem ANUNCIADA é a que sobrou do passe — a mesma que o veto vai julgar no apply.
+  // GAP-38: calculada ANTES do log da rodada, porque agora ela também é registrada (auditoria do
+  // contrato de saída: pedido × entrega). O CLAIM já aconteceu acima, então nada aqui compete.
+  const growthBudget = await passGrowthBudget(db, run);
+
   await appendRoundLog(db, run.id, {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
     filePath: target, gapsBefore: gaps.important, blockers: fileBlockers, warnings: fileFindings.length - fileBlockers,
-    specChars: file.content.length,
+    specChars: file.content.length, announcedBudget: growthBudget,
     note: `\`${target}\` enviado ao CTO (${fileFindings.length} GAP(s) deste arquivo).`,
   });
 
   const { dispatchGapFileJob } = await import("../routes/specChat.js");
-  // GAP-28: a margem ANUNCIADA é a que sobrou do passe — a mesma que o veto vai julgar no apply.
-  const growthBudget = await passGrowthBudget(db, run);
   // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
   const priorRejection = lastRejectedAttempt(run, target);
   try {
