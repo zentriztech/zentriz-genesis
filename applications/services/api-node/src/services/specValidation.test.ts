@@ -1,7 +1,7 @@
 /**
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runStageA, parseStageBFindings, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
@@ -331,6 +331,108 @@ describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
   it("coluna ausente (migração 100 não aplicada) não derruba o tick", async () => {
     const pool = { query: async () => { throw new Error('column "agents_job_id" does not exist'); } } as unknown as Pool;
     await expect(collectStageBResults(pool, async () => ({ status: "done" }))).resolves.toMatchObject({ scanned: 0, collected: 0 });
+  });
+
+  /**
+   * GAP-66 (migração 104) — o coletor só olhava run JÁ MORTA, então o laço pagava o deadline inteiro
+   * de espera morta por um resultado que já estava recuperável.
+   *
+   * Medido em prod 2026-09-07: um deploy da api matou o esperador em processo de uma validação
+   * `running` cujo `agents_job_id` já estava no banco e cujo job seguia vivo no agents. Como a
+   * varredura exigia `status IN ('error','interrupted')`, ela só foi vista depois de
+   * `expireOverdueValidationRuns` virá-la `error` NO DEADLINE — ~20 min de espera morta. O resultado
+   * foi recuperado (22 findings, `stage_b_ran = true`): o defeito não é perda, é LATÊNCIA.
+   *
+   * Incluir `running` às cegas seria pior — `runStageB` tem um esperador em processo pollando o mesmo
+   * job a cada 8 s, e dois escritores na mesma linha é corrupção. Daí o lease por heartbeat.
+   */
+  describe("GAP-66 — run órfã por restart é adotada pelo lease, não pelo deadline", () => {
+    /** A varredura do coletor (a única query com `ORDER BY finished_at`). */
+    function scan(queries: { sql: string; params: unknown[] }[]) {
+      return queries.find((q) => q.sql.includes("FROM spec_validation_runs") && q.sql.includes("ORDER BY finished_at"))!;
+    }
+
+    it("a varredura passou a incluir `pending`/`running` SEM sinal de vida recente", async () => {
+      const { row, files } = await pendingRun({ status: "running" });
+      const { pool, queries } = db(row, files);
+      await collectStageBResults(pool, async () => ({ status: "running" }));
+      const s = scan(queries);
+      expect(s.sql).toContain("'pending', 'running'");
+      // O critério é a IDADE do heartbeat, e `started_at` cobre a linha escrita por código antigo.
+      expect(s.sql).toContain("COALESCE(stage_b_polled_at, started_at)");
+      expect(s.sql).toContain("status IN ('error', 'interrupted')");   // o caminho antigo continua
+      expect(s.params[0]).toBe("120");                                  // lease default, em segundos
+    });
+
+    it("o lease nunca desce abaixo de 30 s — um valor pequeno confundiria esperador vivo com morto", async () => {
+      const antes = process.env.SPEC_VALIDATION_STAGEB_LEASE_SEC;
+      try {
+        // O módulo lê o env no import, então aqui provamos o piso pelo valor JÁ resolvido: o default
+        // (120) tem de ser ≥ 38 s, que é o pior caso legítimo entre dois heartbeats (8 s + 30 s).
+        const { row, files } = await pendingRun({ status: "running" });
+        const { pool, queries } = db(row, files);
+        await collectStageBResults(pool, async () => ({ status: "running" }));
+        expect(Number(scan(queries).params[0])).toBeGreaterThanOrEqual(38);
+      } finally {
+        if (antes === undefined) delete process.env.SPEC_VALIDATION_STAGEB_LEASE_SEC;
+        else process.env.SPEC_VALIDATION_STAGEB_LEASE_SEC = antes;
+      }
+    });
+
+    it("órfã `running` com job `done` → resultado COLETADO sem esperar o deadline", async () => {
+      // Este é o caso do prod: o job terminou do outro lado enquanto ninguém mais o esperava.
+      const { row, files } = await pendingRun({
+        status: "running",
+        deadline_at: new Date(Date.now() + 15 * 60_000).toISOString(), // deadline AINDA NO FUTURO
+      });
+      const { pool, queries } = db(row, files);
+      const out = await collectStageBResults(pool, async () => ({
+        status: "done",
+        result: { findings: [{ severity: "blocker", title: "achado pelo LLM", rationale: "x", file: "README.md" }] },
+      }));
+      expect(out).toMatchObject({ scanned: 1, collected: 1, givenUp: 0 });
+      const upd = queries.find((q) => q.sql.includes("stage_b_ran = true"))!;
+      expect(upd.params[0]).toBe("failed");
+      const gravadas = JSON.parse(String(upd.params[1])) as Array<{ source: string }>;
+      expect(gravadas.map((f) => f.source)).toEqual(["stage_a", "stage_b"]);
+    });
+
+    it("órfã ainda `running` no agents e com deadline no futuro → segue aguardando (nada escrito)", async () => {
+      const { row, files } = await pendingRun({
+        status: "running",
+        deadline_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+      const { pool, queries } = db(row, files);
+      const out = await collectStageBResults(pool, async () => ({ status: "running" }));
+      expect(out).toMatchObject({ collected: 0, lost: 0, givenUp: 0 });
+      expect(queries.some((q) => q.sql.includes("SET stage_b_collected_at = now()"))).toBe(false);
+    });
+
+    it("a adoção é DECLARADA no log (senão a recuperação parece mágica e some do rastro)", async () => {
+      const logs: string[] = [];
+      const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+      try {
+        const { row, files } = await pendingRun({ status: "running" });
+        const { pool } = db(row, files);
+        await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+        expect(logs.some((l) => l.includes("sem sinal de vida") && l.includes("restart da api"))).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("run TERMINAL não recebe o aviso de adoção (ela nunca teve esperador vivo a perder)", async () => {
+      const logs: string[] = [];
+      const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+      try {
+        const { row, files } = await pendingRun({ status: "error" });
+        const { pool } = db(row, files);
+        await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+        expect(logs.some((l) => l.includes("sem sinal de vida"))).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
 

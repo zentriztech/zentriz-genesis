@@ -54,6 +54,7 @@ import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { projectFindingsState, gapDeltaSinceLastRun, type EnrichedFinding } from "./findingTriage.js";
+import { reconcileGapDelta } from "./gapContinuity.js";
 import { startValidation, unjudgedSpecFiles } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
@@ -270,6 +271,14 @@ export interface AutonomyRoundLog {
    */
   gapsClosed?: number | null;
   gapsOpened?: number | null;
+  /**
+   * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
+   *
+   * Sem este número, `gapsClosed`/`gapsOpened` não são auditáveis: em prod (run `b1bc1195`, passe 1)
+   * `11 fechado / 12 novo` tinha 8+ pares idênticos, só renumerados pela edição do CTO. `null` ⇒ a
+   * reconciliação NÃO rodou e os dois números acima são crus (limite superior, não medida).
+   */
+  gapsPersisted?: number | null;
   /**
    * 🔴 GAP-45 — o recorte 🔴/🟡 do PASSE, separado do recorte 🔴/🟡 do ARQUIVO.
    *
@@ -1978,14 +1987,35 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-46: o diff também precisa saber quais arquivos AINDA existem — sem isso um GAP de arquivo
   // removido não aparece como fechado nem no agregado nem no diff, e o laço fica sem nenhuma via para
   // registrar progresso por remoção (justamente o mecanismo do GAP-12).
-  const delta = await gapDeltaSinceLastRun(db, run.projectId, await specFilePaths(db, run.projectId).catch(() => null))
+  const rawDelta = await gapDeltaSinceLastRun(db, run.projectId, await specFilePaths(db, run.projectId).catch(() => null))
     .catch(() => null);
+  // 🔴 GAP-67: o `gapDelta` casa por fingerprint EXATO (`file|source|anchor`), então a renumeração de
+  // seção feita pela edição DO PRÓPRIO CTO rebatiza o defeito não-corrigido e ele conta como 1 fechado
+  // + 1 novo. MEDIDO em prod (run `b1bc1195`, passe 1): `11 fechado / 12 novo` com **8+ dos 11**
+  // idênticos a um "novo" em outra âncora (`§6.1`→`§6`, `§4.2 Passo 3`→`PRIV-JANELA-01`). Quem separa
+  // reformulação de resolução é um agente (`reconcileGapDelta`) — string matching já falhou: Jaccard de
+  // título sobre os pares REAIS deu ZERO fantasma, porque o estilo de título do juiz muda entre runs.
+  const cont = rawDelta ? await reconcileGapDelta(rawDelta.closed, rawDelta.opened).catch(() => null) : null;
+  // `openedOnNewSurface` é do diff cru e não pode passar da parcela de novos que sobrou.
+  const delta = rawDelta
+    ? {
+        closed: cont?.reconciled ? cont.closed : rawDelta.closed,
+        opened: cont?.reconciled ? cont.opened : rawDelta.opened,
+        openedOnNewSurface: cont?.reconciled
+          ? Math.min(rawDelta.openedOnNewSurface, cont.opened.length)
+          : rawDelta.openedOnNewSurface,
+      }
+    : null;
+  const persisted = cont?.reconciled ? cont.persisted.length : 0;
   // ⚠️ Revisão adversarial da própria correção: aceitar `closed > 0` como progresso premiaria justamente
   // o comportamento medido no NVX (1 fecha, 25 entram) e o laço queimaria os 5 passes sem convergir —
   // matando a função do `no_progress_streak`, que é cortar gasto de LLM que não anda. Progresso é SALDO:
   // ou o agregado caiu, ou saíram mais GAPs do que entraram (o caminho que sobrevive à rotação de
   // cobertura, quando o agregado não é comparável).
-  const progressed = gaps.important < before || (!!delta && delta.closed.length > delta.opened.length);
+  // GAP-67: e o saldo só vale se a diferença foi RECONCILIADA. Sem reconciliação, `closed > opened` é
+  // gatilho que a deriva de âncora fabrica sozinha — zeraria o `no_progress_streak` de graça. Aí o
+  // agregado volta a ser o único juiz de progresso, como antes do GAP-41.
+  const progressed = gaps.important < before || (!!delta && !!cont?.reconciled && delta.closed.length > delta.opened.length);
   // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
   // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
   // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
@@ -2008,11 +2038,22 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-41: a diferença finding-a-finding dita em voz alta. `openedOnNewSurface` separa a parcela de
   // DESCOBERTA (arquivo inédito) da de REGRESSÃO (arquivo já julgado antes) — medida em ZERO nos dados
   // de prod, o que refuta a hipótese de que a rotação de cobertura explicava a subida do total.
+  // GAP-67: `persisted` é a parcela que o diff cru chamava de "fechado + novo" e que na verdade é o
+  // MESMO defeito com âncora nova. Ela vai dita em voz alta, e a falta de reconciliação também — um
+  // número não reconciliado não pode passar por medida de progresso.
+  const contNote = !delta
+    ? ""
+    : cont?.reconciled
+      ? (persisted > 0
+        ? ` ${persisted} dele(s) era(m) o MESMO defeito rebatizado pela edição (seção renumerada/movida) — continua(m) ABERTO(s), não conta como fechado nem como novo.`
+        : ` Reconciliação por agente não achou defeito rebatizado: os números acima são identidade real.`)
+      : ` ⚠️ Números NÃO reconciliados (${cont?.reason ?? "reconciliador indisponível"}) — parte pode ser o mesmo defeito com âncora nova, então não os uso como prova de progresso.`;
   const deltaNote = delta
     ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
       (delta.openedOnNewSurface > 0
         ? ` (${delta.openedOnNewSurface} em arquivo julgado por INTEIRO pela 1ª vez — descoberta, não regressão).`
-        : ` — todos em arquivo já julgado antes, ou seja REGRESSÃO/reformulação, não descoberta.`)
+        : ` — todos em arquivo já julgado antes, ou seja REGRESSÃO/reformulação, não descoberta.`) +
+      contNote
     : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
   // GAP-45: e os números do PASSE vão em campos próprios — `blockers`/`warnings` continuam sendo os do
@@ -2021,6 +2062,7 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     gapsAfter: gaps.important, passBlockers: gaps.blockers, passWarnings: gaps.warnings,
     validationRunId: run.validationRunId,
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
+    gapsPersisted: cont?.reconciled ? persisted : null,
     note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${deltaNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — o AGREGADO das duas não é comparável (a diferença acima é)." : ""}`,
   }, { keepNote: true });
   const cycleLabel = perFile
@@ -2028,7 +2070,11 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     : `**Rodada ${run.round}/${run.maxRounds} concluída**`;
   await postChatNote(db, run,
     `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).${covNote}` +
-    (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior${delta.openedOnNewSurface > 0 ? `, ${delta.openedOnNewSurface} deles em arquivo julgado por inteiro pela primeira vez` : ""}.` : ""));
+    (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior${delta.openedOnNewSurface > 0 ? `, ${delta.openedOnNewSurface} deles em arquivo julgado por inteiro pela primeira vez` : ""}.` : "") +
+    // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
+    // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.
+    (persisted > 0 ? ` ⚠️ **${persisted} defeito(s) apenas REBATIZADO(s)** pela edição (seção renumerada/movida): continuam abertos e não entram em nenhuma das duas contagens.` : "") +
+    (delta && cont && !cont.reconciled ? ` ⚠️ Estes dois números **não foram reconciliados** (${cont.reason ?? "reconciliador indisponível"}) — parte pode ser o mesmo defeito com âncora nova.` : ""));
 
   if (gaps.important === 0) {
     // 🔴 GAP-19: "zero GAPs" só é sucesso se o juiz LEU a spec inteira. Medido em prod 2026-09-06

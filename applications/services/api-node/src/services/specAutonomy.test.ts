@@ -36,6 +36,24 @@ vi.mock("./findingTriage.js", () => ({
   gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0 }),
 }));
 
+/**
+ * 🔴 GAP-67: quantos pares "fechado + novo" do diff cru eram O MESMO defeito com âncora nova, e se a
+ * reconciliação por agente rodou. `reconciled: false` (o default, que reproduz reconciliador
+ * indisponível) proíbe o laço de tratar saldo favorável como progresso — é a única forma de o
+ * `no_progress_streak` não ser zerado por deriva de âncora, medida em prod na run `b1bc1195`.
+ */
+let continuity: { persisted: number; reconciled: boolean; reason?: string } = { persisted: 0, reconciled: false, reason: "dublê" };
+vi.mock("./gapContinuity.js", () => ({
+  reconcileGapDelta: vi.fn(async (closed: unknown[], opened: unknown[]) => {
+    const n = Math.min(continuity.persisted, closed.length, opened.length);
+    return {
+      closed: closed.slice(n), opened: opened.slice(n),
+      persisted: closed.slice(0, n).map((c, i) => ({ closed: c, opened: opened[i], why: "seção renumerada" })),
+      reconciled: continuity.reconciled, reason: continuity.reason, truncated: 0, model: "dublê",
+    };
+  }),
+}));
+
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
 // GAP-19: a pendência de cobertura é ACUMULADA (`stage_b_full_sha` × sha atual) e vem daqui —
 // `coberturaAcumulada = null` reproduz "não foi possível medir" (comportamento legado).
@@ -214,6 +232,7 @@ beforeEach(() => {
   prevCoverage = null;
   coberturaAcumulada = null;
   delta = null;
+  continuity = { persisted: 0, reconciled: false, reason: "dublê" };
   insertFails23505 = false;
   snapshotFails = false;
   specTreeFiles = [];
@@ -764,6 +783,9 @@ describe("validação dentro do laço", () => {
     it("saldo FAVORÁVEL conta como progresso mesmo com o agregado parado (sobrevive à rotação)", async () => {
       const r = await reachValidating(5);
       delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0 };
+      // GAP-67: o saldo só é progresso quando a diferença foi RECONCILIADA — sem isso, "3 fecharam"
+      // pode ser deriva de âncora. Aqui o reconciliador rodou e não achou rebatismo.
+      continuity = { persisted: 0, reconciled: true };
       await advanceAutonomyRun(db, r.id);
       expect(run!.gaps_current).toBe(2);            // agregado idêntico ao do passe anterior
       expect(run!.no_progress_streak).toBe(0);      // …mas saíram 3 e entrou 1
@@ -786,6 +808,74 @@ describe("validação dentro do laço", () => {
       delta = { closed: [], opened: [{}, {}], openedOnNewSurface: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(JSON.stringify(run!.rounds)).toContain("2 em arquivo julgado por INTEIRO pela 1ª vez");
+    });
+  });
+
+  /**
+   * 🔴 GAP-67 — o diff casava por fingerprint EXATO (`file|source|anchor`), então a renumeração de
+   * seção feita pela edição DO PRÓPRIO CTO rebatizava o defeito não-corrigido: 1 fechado + 1 novo.
+   * MEDIDO em prod (NVX LastMile, run `b1bc1195`, passe 1): `11 fechado / 12 novo` com 8+ pares
+   * idênticos em âncora diferente (`§6.1`→`§6`, `§4.2 Passo 3`→`PRIV-JANELA-01`). Identidade de
+   * defeito é julgamento de agente — Jaccard de título sobre os pares reais deu ZERO fantasma.
+   */
+  describe("GAP-67 — rebatismo por deriva de âncora não conta como fechado nem como novo", () => {
+    it("par rebatizado sai das duas contagens e vira `gapsPersisted`", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}, {}], opened: [{}, {}], openedOnNewSurface: 0 };
+      continuity = { persisted: 2, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      const rounds = run!.rounds as Array<Record<string, unknown>>;
+      expect(rounds.at(-1)).toMatchObject({ gapsClosed: 1, gapsOpened: 0, gapsPersisted: 2 });
+      const note = JSON.stringify(run!.rounds);
+      expect(note).toContain("1 fechado(s), 0 novo(s)");
+      expect(note).toContain("MESMO defeito rebatizado");
+    });
+
+    it("🔴 saldo favorável SEM reconciliação NÃO zera o streak (deriva de âncora fabrica o gatilho)", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0 };
+      continuity = { persisted: 0, reconciled: false, reason: "reconciliador indisponível" };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.gaps_current).toBe(2);
+      expect(run!.no_progress_streak).toBe(1);      // sem reconciliar, 3×1 não prova nada
+      expect(JSON.stringify(run!.rounds)).toContain("NÃO reconciliados");
+    });
+
+    it("sem reconciliação, `gapsPersisted` é null — não finge medida que não existe", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}], openedOnNewSurface: 0 };
+      continuity = { persisted: 0, reconciled: false, reason: "API_AGENTS_URL ausente" };
+      await advanceAutonomyRun(db, r.id);
+      const rounds = run!.rounds as Array<Record<string, unknown>>;
+      expect(rounds.at(-1)!.gapsPersisted).toBeNull();
+      expect(JSON.stringify(run!.rounds)).toContain("API_AGENTS_URL ausente");
+    });
+
+    it("rebatismo COMPLETO (tudo pareado) deixa a contagem em 0/0 e diz que nada fechou", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}], opened: [{}, {}], openedOnNewSurface: 0 };
+      continuity = { persisted: 2, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      const rounds = run!.rounds as Array<Record<string, unknown>>;
+      expect(rounds.at(-1)).toMatchObject({ gapsClosed: 0, gapsOpened: 0, gapsPersisted: 2 });
+      expect(run!.no_progress_streak).toBe(1);      // 0 × 0 não é saldo favorável
+    });
+
+    it("`openedOnNewSurface` não pode passar dos novos que sobraram após a reconciliação", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}], opened: [{}, {}], openedOnNewSurface: 2 };
+      continuity = { persisted: 2, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      // 0 novos sobraram ⇒ a nota NÃO pode alegar descoberta em arquivo inédito.
+      expect(JSON.stringify(run!.rounds)).not.toContain("em arquivo julgado por INTEIRO pela 1ª vez");
+    });
+
+    it("reconciliado e sem rebatismo: declara que os números são identidade real", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}, {}], openedOnNewSurface: 0 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      expect(JSON.stringify(run!.rounds)).toContain("identidade real");
     });
   });
 
