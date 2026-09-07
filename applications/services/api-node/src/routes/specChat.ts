@@ -1310,6 +1310,17 @@ export async function dispatchGapFileJob(opts: {
   // MANDA — e é isso que faltava para a contradição ser CONSOLIDADA em vez de migrar de arquivo (24
   // dos 26 blockers do NVX eram desta família, com o mesmo contrato reaparecendo em 5 rodadas).
   const oracles = await gapOracleBlock(opts.projectId, opts.filePath, opts.fileContent.length, opts.growthBudget);
+  // GAP-29/GAP-31: o prompt NÃO é persistido em `spec_chat_jobs` (só o `reply`), então sem esta linha
+  // a entrega do fato da recusa anterior é INAUDITÁVEL em produção — dá para ver que o laço gravou a
+  // recusa, não que o agente a recebeu. Loga o que foi entregue, não o texto (que é longo e derivável).
+  const priorBlock = priorRejectionFactBlock(opts.priorRejection);
+  if (priorBlock) {
+    const p = opts.priorRejection!;
+    console.log(
+      `[SpecChat] fato de recusa anterior entregue alvo=${opts.filePath} delta=${p.delta} margem=${p.budget}`
+      + ` passe=${p.pass} motivo=${p.reason ? "gravado" : "ausente(rodada antiga)"} chars=${priorBlock.length}`,
+    );
+  }
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),
@@ -1327,7 +1338,7 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorRejectionFactBlock(opts.priorRejection),
+        priorBlock,
       ),
       ...opts.llm,
     },
