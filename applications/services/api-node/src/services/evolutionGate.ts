@@ -167,7 +167,12 @@ export type EvolutionGateResult =
   | { ok: true; applied: true; rfcs: number; scope: string[]; compat: RfcCompat | null }
   | { ok: false; code: "EVOLUTION_RFC_REQUIRED" | "EVOLUTION_RFC_INVALID"; message: string; details?: unknown };
 
-function compatMax(list: Array<RfcCompat | null>): RfcCompat | null {
+/**
+ * Compatibilidade EFETIVA de um conjunto de RFCs: a mais alta manda (fail-safe — um breaking change
+ * no meio de mudanças menores não pode ser diluído). Exportada porque o planner (Evoluir) precisa
+ * declarar a MESMA conta que o gate fará na promoção: replanejar não substitui os RFCs anteriores.
+ */
+export function compatMax(list: Array<RfcCompat | null>): RfcCompat | null {
   const rank: Record<RfcCompat, number> = { patch: 1, minor: 2, major: 3 };
   let best: RfcCompat | null = null;
   for (const c of list) if (c && (!best || rank[c] > rank[best])) best = c;

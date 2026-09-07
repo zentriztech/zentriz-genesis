@@ -3012,7 +3012,10 @@ export default function SpecPage() {
         if (poll.status === "done" && poll.result) {
           stopChatPolling();
           const r = poll.result;
-          const files = r.written.map((w) => `- \`${w.path}\` (${w.action === "created" ? "criado" : w.action === "updated" ? "atualizado" : "já existia — mantido"})`).join("\n");
+          // 🔴 GAP-60: "já existia — mantido" se lia como "nada a fazer", quando na verdade o conteúdo
+          // que o arquiteto propôs foi DESCARTADO (o arquivo atual venceu). O aviso detalhado vem em
+          // `warnings`; aqui o rótulo deixa de ser tranquilizador.
+          const files = r.written.map((w) => `- \`${w.path}\` (${w.action === "created" ? "criado" : w.action === "updated" ? "atualizado" : "⚠️ já existia — proposta DESCARTADA"})`).join("\n");
           const problems = r.rfcProblems.length
             ? `\n\n⚠️ **Pendências para o gate de promoção:**\n${r.rfcProblems.map((p) => `- \`${p.path}\`: ${p.problems.join("; ")}`).join("\n")}`
             : "";

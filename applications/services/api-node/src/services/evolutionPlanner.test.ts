@@ -114,8 +114,9 @@ describe("evolutionPlanner (Evoluir E2)", () => {
       if (/FROM project_spec_files WHERE project_id = \$1 ORDER/.test(sql)) return { rows: files };
       if (/SELECT next_rfc_seq, next_adr_seq FROM products/.test(sql)) return { rows: [{ next_rfc_seq: seqRfc, next_adr_seq: seqAdr }] };
       if (/UPDATE products SET next_rfc_seq/.test(sql)) {
-        const [, minRfc, nR, nA] = params as [string, number, number, number];
-        seqRfc = Math.max(seqRfc, minRfc) + nR; seqAdr += nA;
+        // GAP-60: o ADR também é GREATEST(seq, piso local) + n — antes era `seq + n`, ignorando o piso.
+        const [, minRfc, nR, nA, minAdr] = params as [string, number, number, number, number];
+        seqRfc = Math.max(seqRfc, minRfc) + nR; seqAdr = Math.max(seqAdr, minAdr) + nA;
         return { rows: [{ next_rfc_seq: seqRfc, next_adr_seq: seqAdr }] };
       }
       if (/SELECT file_path FROM project_spec_files WHERE project_id=\$1 AND rel_dir=\$2 AND filename=\$3/.test(sql)) {
@@ -165,6 +166,9 @@ describe("evolutionPlanner (Evoluir E2)", () => {
     expect(res2.rfcProblems.some((p) => /RFC-0006-vago/.test(p.path) && p.problems.length >= 2)).toBe(true);
     expect(res2.warnings.some((w) => /pendências para o gate/.test(w))).toBe(true);
     expect(res2.written.find((w) => w.path === "CHANGELOG.md")?.action).toBe("updated");
+    // 🔴 GAP-60: o RFC-0004 da 1ª rodada continua na árvore ⇒ continua no escopo da fábrica. Antes,
+    // replanejar sobrescrevia a visão do painel com só o último plano e nada dizia isso ao humano.
+    expect(res2.warnings.some((w) => /rodadas anteriores permanecem na árvore/.test(w) && /RFC-0004-exportar-pdf-do-extrato\.md/.test(w))).toBe(true);
   });
 
   it("nextRfcNumber: por produto (atômico, nunca abaixo dos RFCs locais) e sem produto (max local + 1)", async () => {
@@ -207,6 +211,158 @@ describe("evolutionPlanner (Evoluir E2)", () => {
 
   it("buildRepoMap: vazio quando o diretório não existe", async () => {
     expect(await buildRepoMap(path.join(tmpRoot, "nope"))).toBe("");
+  });
+});
+
+/**
+ * 🔴 GAP-60 — revisão adversarial das AÇÕES DE EVOLUÇÃO (Onda 4 da Bancada). Três defeitos do mesmo
+ * caminho ("Gerar RFC / CHANGELOG"), todos de DECLARAÇÃO — nada aqui apaga arquivo do humano:
+ *  a) a numeração de ADR não tinha piso local (só o RFC tinha) ⇒ ADR-001 reemitido;
+ *  b) `upsertSpecFile` devolvendo "skipped" descartava a proposta do arquiteto em silêncio;
+ *  c) replanejar acumula RFCs: o gate usa TODOS (escopo = união, compat = a mais alta), mas o plano
+ *     sobrescrevia `evolution_compat` com a visão só do último plano — o painel amaciava o risco.
+ */
+describe("applyEvolutionPlan — GAP-60: piso de ADR, descarte declarado e compat efetiva", () => {
+  const { applyEvolutionPlan, buildEvolutionPlanContext, parseEvolutionPlan } = mod;
+
+  const rfcBody = (compat: string | null) => `# Título
+
+## Sumário
+Um resumo suficientemente longo para passar do mínimo exigido pelo parser do gate.
+
+## Escopo
+**Não-objetivos:** nada além do descrito.
+
+## Critérios de aceite
+### Cenário: caminho feliz
+- **Dado** um usuário autenticado
+- **Quando** executa a ação
+- **Então** vê o resultado esperado
+${compat ? `\n## Compatibilidade\n- Tipo (SemVer): ${compat}\n` : ""}
+## Impacto
+\`\`\`yaml
+files_allowed:
+  - "apps/api/src/**"
+\`\`\`
+`;
+
+  type Row = { filename: string; file_path: string; rel_dir: string; is_primary: boolean; content_sha256?: string | null };
+
+  /** Projeto de evolução com arquivos REAIS em disco + db stub (sem produto, salvo `productId`). */
+  async function mkProject(
+    id: string,
+    seed: Array<{ path: string; content: string }>,
+    opts: { productId?: string | null; adrSeq?: number; rfcSeq?: number; forceExists?: boolean } = {},
+  ) {
+    const dir = path.join(process.env.UPLOAD_DIR!, id);
+    await fs.mkdir(dir, { recursive: true });
+    const primary = path.join(dir, "spec.md");
+    await fs.writeFile(primary, "# Spec vigente\nFR-01 — algo.", "utf-8");
+    const files: Row[] = [{ filename: "spec.md", file_path: primary, rel_dir: "", is_primary: true }];
+    for (const s of seed) {
+      const cut = s.path.lastIndexOf("/");
+      const relDir = cut < 0 ? "" : s.path.slice(0, cut);
+      const filename = s.path.slice(cut + 1);
+      const phys = path.join(dir, relDir, filename);
+      await fs.mkdir(path.dirname(phys), { recursive: true });
+      await fs.writeFile(phys, s.content, "utf-8");
+      files.push({ filename, file_path: phys, rel_dir: relDir, is_primary: false });
+    }
+    const updates: Array<{ sql: string; params: unknown[] }> = [];
+    const seq = { rfc: opts.rfcSeq ?? 1, adr: opts.adrSeq ?? 1 };
+    const db = { query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/FROM projects WHERE id/.test(sql)) {
+        return { rows: [{ id, title: "Serviço — Evolução v2", product_id: opts.productId ?? null, parent_project_id: null, extra: { evolution: true, evolution_request_original: "quero algo" } }] };
+      }
+      if (/FROM project_spec_files WHERE project_id = \$1 ORDER/.test(sql)) return { rows: files };
+      if (/SELECT next_rfc_seq, next_adr_seq FROM products/.test(sql)) return { rows: [{ next_rfc_seq: seq.rfc, next_adr_seq: seq.adr }] };
+      if (/UPDATE products SET next_rfc_seq/.test(sql)) {
+        updates.push({ sql, params });
+        const [, minRfc, nR, nA, minAdr] = params as [string, number, number, number, number];
+        seq.rfc = Math.max(seq.rfc, minRfc) + nR; seq.adr = Math.max(seq.adr, minAdr) + nA;
+        return { rows: [{ next_rfc_seq: seq.rfc, next_adr_seq: seq.adr }] };
+      }
+      if (/SELECT file_path FROM project_spec_files WHERE project_id=\$1 AND rel_dir=\$2 AND filename=\$3/.test(sql)) {
+        // `forceExists`: simula o caminho em que o alvo JÁ existe (qualquer causa) → "skipped".
+        if (opts.forceExists) return { rows: [{ file_path: path.join(dir, String(params[1]), String(params[2])) }] };
+        const f = files.find((x) => x.rel_dir === params[1] && x.filename === params[2]);
+        return { rows: f ? [{ file_path: f.file_path }] : [] };
+      }
+      if (/count\(\*\)/.test(sql)) return { rows: [{ n: files.length }] };
+      if (/INSERT INTO project_spec_files/.test(sql)) {
+        files.push({ filename: String(params[1]), file_path: String(params[2]), rel_dir: String(params[3]), is_primary: false, content_sha256: String(params[4]) });
+        return { rows: [] };
+      }
+      if (/UPDATE/.test(sql)) { updates.push({ sql, params }); return { rows: [] }; }
+      return { rows: [] };
+    }) };
+    return { db, files, updates, dir };
+  }
+
+  const planJson = (o: Record<string, unknown>) => parseEvolutionPlan(JSON.stringify({
+    summary: "plano", rfcs: [{ slug: "novo-recurso", title: "Novo recurso", content: rfcBody("MINOR") }],
+    changelog: { added: ["algo"] }, ...o,
+  }));
+  const extraPatch = (updates: Array<{ sql: string; params: unknown[] }>) =>
+    JSON.parse(updates.filter((u) => /UPDATE projects SET extra/.test(u.sql)).slice(-1)[0].params[1] as string);
+
+  it("🔴 (a) ADR ganha piso local: sem produto o número não volta para 001", async () => {
+    const p = await mkProject("gap60-adr-local", [{ path: "docs/adr/ADR-003-decisao-antiga.md", content: "# ADR-003 — Decisão antiga\n" }]);
+    const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-adr-local");
+    expect(ctx.existingAdrs).toEqual(["ADR-003-decisao-antiga.md"]);
+    expect(ctx.nextAdrSeq).toBe(4);   // ANTES do GAP-60: 1 — o ADR-001 seria reemitido
+    const res = await applyEvolutionPlan(p.db as never, ctx, planJson({
+      adrs: [{ slug: "usar-postgres", title: "Usar Postgres", content: "## Contexto\nPrecisamos de transações.\n## Decisão\nPostgres." }],
+    }));
+    expect(res.written.find((w) => w.path.startsWith("docs/adr"))).toEqual({ path: "docs/adr/ADR-004-usar-postgres.md", action: "created" });
+  });
+
+  it("🔴 (a) ADR com produto: o piso local vence a sequência atrasada do produto (17/17 em prod estavam em 1)", async () => {
+    const p = await mkProject("gap60-adr-prod", [{ path: "docs/adr/ADR-007-herdado.md", content: "# ADR-007 — Herdado\n" }], { productId: "prod-x", adrSeq: 1, rfcSeq: 1 });
+    const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-adr-prod");
+    expect(ctx.nextAdrSeq).toBe(8);
+    const res = await applyEvolutionPlan(p.db as never, ctx, planJson({
+      adrs: [{ slug: "usar-redis", title: "Usar Redis", content: "## Contexto\nCache necessário.\n## Decisão\nRedis." }],
+    }));
+    // ANTES: `next_adr_seq + 1` = 2 → ADR-001/ADR-002, atropelando o ADR-007 herdado.
+    expect(res.written.find((w) => w.path.startsWith("docs/adr"))?.path).toBe("docs/adr/ADR-008-usar-redis.md");
+    const upd = p.updates.find((u) => /UPDATE products SET next_rfc_seq/.test(u.sql))!;
+    expect(upd.sql).toMatch(/next_adr_seq = GREATEST\(next_adr_seq, \$5\) \+ \$4/);
+    expect(upd.params[4]).toBe(8);
+  });
+
+  it("🔴 (b) alvo já existente → a proposta do arquiteto é declarada como DESCARTADA (arquivo preservado)", async () => {
+    const p = await mkProject("gap60-skip", [], { forceExists: true });
+    const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-skip");
+    const res = await applyEvolutionPlan(p.db as never, ctx, planJson({}));
+    expect(res.written.find((w) => w.path.startsWith("docs/rfc"))?.action).toBe("skipped");
+    expect(res.warnings.some((w) => /NÃO foram gravados/.test(w) && /RFC-0001-novo-recurso\.md/.test(w) && /descartada/i.test(w))).toBe(true);
+  });
+
+  it("🔴 (c) compat EFETIVA: RFC MAJOR de rodada anterior manda, e a diferença é declarada", async () => {
+    const p = await mkProject("gap60-compat", [{ path: "docs/rfc/RFC-0001-quebra-api.md", content: rfcBody("MAJOR") }]);
+    const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-compat");
+    const res = await applyEvolutionPlan(p.db as never, ctx, planJson({ compat: "minor" }));
+    expect(res.compat).toBe("major");                       // ANTES: "minor" (só o último plano)
+    const patch = extraPatch(p.updates);
+    expect(patch.evolution_compat).toBe("major");
+    expect(patch.evolution_compat_explicit).toBe(true);      // o MAJOR foi declarado num RFC
+    expect(patch.evolution_plan.compat).toBe("minor");       // o que o arquiteto disse DESTE plano
+    expect(res.warnings.some((w) => /rodadas anteriores permanecem na árvore/.test(w) && /RFC-0001-quebra-api\.md/.test(w))).toBe(true);
+    expect(res.warnings.some((w) => /Compatibilidade efetiva/.test(w) && /MAJOR/.test(w))).toBe(true);
+  });
+
+  it("🔴 (c) um RFC vizinho MENOR não transforma o default silencioso 'minor' em compat DECLARADA", async () => {
+    const p = await mkProject("gap60-implicito", [{ path: "docs/rfc/RFC-0001-ajuste.md", content: rfcBody("PATCH") }]);
+    const ctx = await buildEvolutionPlanContext(p.db as never, "gap60-implicito");
+    // Sem `compat` no JSON e sem seção Compatibilidade no RFC → o "minor" é default do código.
+    const res = await applyEvolutionPlan(p.db as never, ctx, parseEvolutionPlan(JSON.stringify({
+      summary: "plano", rfcs: [{ slug: "sem-compat", title: "Sem compat", content: rfcBody(null) }], changelog: { added: ["x"] },
+    })));
+    expect(res.compat).toBe("minor");
+    const patch = extraPatch(p.updates);
+    expect(patch.evolution_compat).toBe("minor");
+    expect(patch.evolution_compat_explicit).toBe(false);     // PATCH < MINOR ⇒ o que vale não foi declarado
   });
 });
 

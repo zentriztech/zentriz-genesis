@@ -18,7 +18,7 @@ import fsp from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { Pool } from "pg";
-import { parseRfcMarkdown, RFC_DIR } from "./evolutionGate.js";
+import { parseRfcMarkdown, RFC_DIR, collectEvolutionRfcs, compatMax } from "./evolutionGate.js";
 import { projectRootCandidates } from "./connectManifestsDisk.js";
 import { parseSpecPath } from "../routes/specFiles.js";
 import { sha256Hex, SPEC_TREE_MAX_FILES, SPEC_TREE_MAX_FILE_BYTES } from "../lib/specTreeHash.js";
@@ -58,9 +58,16 @@ export interface EvolutionPlanContext {
   repoMap: string;
   connectYaml: string | null;
   existingRfcs: string[];
+  /**
+   * 🔴 GAP-60: ADRs já presentes no filho. Existiam apenas para os RFCs, e por isso a numeração de ADR
+   * não tinha piso local — ver `nextAdrSeq` abaixo.
+   */
+  existingAdrs: string[];
   existingChangelog: string | null;
   nextRfcSeq: number;
   nextAdrSeq: number;
+  /** `projects.extra` do filho — o planner precisa dele para a MESMA conta do gate (RFCs herdados). */
+  extra: Record<string, unknown>;
 }
 
 async function readCapped(p: string, cap: number): Promise<string> {
@@ -133,6 +140,7 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
   const changelogRow = files.find((f) => f.filename.toLowerCase() === "changelog.md" && norm(f.rel_dir) === "");
   const existingChangelog = changelogRow ? (await readCapped(changelogRow.file_path, 16_000) || null) : null;
   const existingRfcs = files.filter((f) => norm(f.rel_dir).toLowerCase() === RFC_DIR).map((f) => f.filename);
+  const existingAdrs = files.filter((f) => norm(f.rel_dir).toLowerCase() === ADR_DIR).map((f) => f.filename);
 
   const filesRoot = (process.env.PROJECT_FILES_ROOT ?? process.env.HOST_PROJECT_FILES_ROOT ?? "").trim();
   let charter = "";
@@ -162,8 +170,20 @@ export async function buildEvolutionPlanContext(db: Db, childId: string, request
     const n = Number(f.match(/^RFC-(\d{4})/i)?.[1] ?? 0);
     if (n >= nextRfcSeq) nextRfcSeq = n + 1;
   }
+  /**
+   * 🔴 GAP-60: o mesmo piso local faltava para o ADR — e a falta MORDE, com ou sem produto:
+   *  - sem produto, `nextAdrSeq` ficava em 1 SEMPRE ⇒ replanejar reemitia `ADR-001-<slug>`; slug igual
+   *    ⇒ `upsertSpecFile` devolve "skipped" e o ADR revisado do arquiteto é DESCARTADO; slug diferente
+   *    ⇒ dois ADR-001 na árvore (numeração MADR quebrada, sem nenhum gate que perceba);
+   *  - com produto, medido em prod 2026-09-07: **17/17 produtos com `next_adr_seq = 1`**, enquanto o
+   *    `/evolve` COPIA `docs/adr` do pai ⇒ o primeiro ADR gerado já colidiria com o ADR-001 herdado.
+   */
+  for (const f of existingAdrs) {
+    const n = Number(f.match(/^ADR-(\d{3,})/i)?.[1] ?? 0);
+    if (n >= nextAdrSeq) nextAdrSeq = n + 1;
+  }
 
-  return { childId, parentId, productId: row.product_id, title: row.title, request, specMarkdown, charter, repoMap, connectYaml, existingRfcs, existingChangelog, nextRfcSeq, nextAdrSeq };
+  return { childId, parentId, productId: row.product_id, title: row.title, request, specMarkdown, charter, repoMap, connectYaml, existingRfcs, existingAdrs, existingChangelog, nextRfcSeq, nextAdrSeq, extra };
 }
 
 // ── Pedido ao arquiteto (/invoke/raw) ────────────────────────────────────────
@@ -406,11 +426,14 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
   const warnings: string[] = [];
 
   // Numeração por produto — alocação atômica (E-D4). Sem produto: sequência local do filho.
+  // 🔴 GAP-60: o `GREATEST` existia só para o RFC — o ADR somava sobre `next_adr_seq` ignorando o piso
+  // local, então varrer a árvore no contexto não bastaria: a sequência do produto (1 em 17/17 produtos
+  // de prod) venceria o piso e reemitiria um número já usado por um ADR herdado.
   let rfcBase = ctx.nextRfcSeq, adrBase = ctx.nextAdrSeq;
   if (ctx.productId) {
     const r = (await db.query(
-      "UPDATE products SET next_rfc_seq = GREATEST(next_rfc_seq, $2) + $3, next_adr_seq = next_adr_seq + $4 WHERE id = $1 RETURNING next_rfc_seq, next_adr_seq",
-      [ctx.productId, ctx.nextRfcSeq, plan.rfcs.length, plan.adrs.length],
+      "UPDATE products SET next_rfc_seq = GREATEST(next_rfc_seq, $2) + $3, next_adr_seq = GREATEST(next_adr_seq, $5) + $4 WHERE id = $1 RETURNING next_rfc_seq, next_adr_seq",
+      [ctx.productId, ctx.nextRfcSeq, plan.rfcs.length, plan.adrs.length, ctx.nextAdrSeq],
     )).rows[0] as { next_rfc_seq: number; next_adr_seq: number } | undefined;
     if (r) { rfcBase = Number(r.next_rfc_seq) - plan.rfcs.length; adrBase = Number(r.next_adr_seq) - plan.adrs.length; }
   }
@@ -454,6 +477,63 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
   if (rfcProblems.length) {
     warnings.push(`${rfcProblems.length} RFC(s) com pendências para o gate de promoção — corrija no editor ou peça ao chat do arquivo.`);
   }
+
+  /**
+   * 🔴 GAP-60 — DECLARAR o que foi descartado. `upsertSpecFile(..., overwrite=false)` devolve
+   * "skipped" quando já existe arquivo com aquele nome: o conteúdo que o arquiteto (LLM) produziu é
+   * jogado fora e o painel rotulava isso como "já existia — mantido", que se lê como "nada a fazer".
+   * Não apagamos o arquivo do humano — mas ele tem de SABER que a proposta não entrou.
+   */
+  const skipped = written.filter((w) => w.action === "skipped");
+  if (skipped.length) {
+    warnings.push(
+      `⚠️ ${skipped.length} artefato(s) propostos pelo arquiteto NÃO foram gravados: já existe arquivo com o mesmo nome e o conteúdo atual foi PRESERVADO — a proposta foi descartada (${skipped.map((w) => `\`${w.path}\``).join(", ")}). ` +
+      "Para aplicar a nova versão, peça a alteração pelo chat do arquivo (aplica com If-Match) ou renomeie o arquivo atual e replaneje.",
+    );
+  }
+
+  /**
+   * 🔴 GAP-60 — replanejar ACUMULA escopo, e só o gate sabia. O gate de promoção
+   * (`evaluateEvolutionGate`) usa TODOS os `RFC-*.md` da árvore: escopo = união dos `files_allowed`,
+   * compat = a MAIS ALTA. Já `applyEvolutionPlan` sobrescrevia `evolution_compat` e `evolution_plan`
+   * com a visão do ÚLTIMO plano — então, depois de replanejar, o painel mostrava um escopo menor e uma
+   * compatibilidade mais branda do que a fábrica vai de fato executar (um RFC MAJOR de uma rodada
+   * anterior aparecia como MINOR). Aqui a conta é a MESMA do gate, e a diferença é DECLARADA.
+   * Nada é apagado: RFC que não faz mais parte da evolução é decisão do humano na árvore.
+   */
+  const planRfcPaths = new Set(written.filter((w) => w.path.toLowerCase().startsWith(`${RFC_DIR}/`)).map((w) => w.path.toLowerCase()));
+  let effectiveCompat: Compat = plan.compat;
+  let compatExplicit = plan.compatExplicit;
+  try {
+    const tree = await collectEvolutionRfcs(db, ctx.childId, ctx.extra);
+    const others = tree.filter((r) => !planRfcPaths.has(r.path.toLowerCase()));
+    // Declarações que VALEM são as das seções `## Compatibilidade` dos RFCs — é o que o gate lê.
+    // `plan.compat` (campo do JSON) entra só como PISO, para nunca amaciar o que o arquiteto pediu.
+    const declaredInTree = tree.map((r) => r.compat);
+    effectiveCompat = compatMax([...declaredInTree, plan.compat]) ?? plan.compat;
+    // Uma compat que NASCEU do default silencioso "minor" não pode virar "declarada" só porque um RFC
+    // vizinho declarou algo MENOR: `explicit` continua sendo "o valor que vale foi declarado".
+    const RANK: Record<Compat, number> = { patch: 1, minor: 2, major: 3 };
+    const declaredMax = compatMax([...declaredInTree, plan.compatExplicit ? plan.compat : null]);
+    compatExplicit = declaredMax !== null && RANK[declaredMax] >= RANK[effectiveCompat];
+    if (others.length) {
+      warnings.push(
+        `${others.length} RFC(s) de rodadas anteriores permanecem na árvore e CONTINUAM no escopo desta evolução — a fábrica implementa TODOS (${others.map((r) => `\`${r.path.split("/").pop()}\``).join(", ")}). ` +
+        "Replanejar não substitui os RFCs anteriores: se algum não faz mais parte desta evolução, remova-o na árvore antes de promover.",
+      );
+    }
+    if (effectiveCompat !== plan.compat) {
+      warnings.push(
+        `Compatibilidade efetiva desta evolução: **${effectiveCompat.toUpperCase()}** — o arquiteto declarou ${plan.compat.toUpperCase()} neste plano, mas um RFC da árvore é ${effectiveCompat.toUpperCase()} e o gate de promoção usa a MAIS ALTA.`,
+      );
+    }
+  } catch (e) {
+    // Ler a árvore é INFORMATIVO: se falhar, o plano já está gravado e o gate refará a conta na
+    // promoção — degradar para a visão deste plano é honesto desde que o aviso diga isso.
+    warnings.push("Não foi possível conferir os RFCs já presentes na árvore — a compatibilidade e o escopo mostrados podem considerar só este plano; o gate de promoção refaz a conta com todos os RFCs.");
+    console.warn(`[EvolvePlan] child=${ctx.childId} conferência da árvore falhou: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   await db.query(
     "UPDATE projects SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = now(), spec_dirty_at = now() WHERE id = $1",
     [ctx.childId, JSON.stringify({
@@ -463,12 +543,14 @@ export async function applyEvolutionPlan(db: Db, ctx: EvolutionPlanContext, plan
         adrs: written.filter((w) => w.path.startsWith(ADR_DIR)).map((w) => w.path),
         questions: plan.questions,
       },
-      evolution_compat: plan.compat,
+      // GAP-60: `evolution_plan.compat` (acima) é o que o ARQUITETO declarou neste plano; o campo de
+      // topo é a compat EFETIVA da evolução — a que o gate aplicará e a que o painel e o merge leem.
+      evolution_compat: effectiveCompat,
       // GAP 7: explícito só quando o arquiteto (LLM) declarou a compatibilidade (não o default "minor").
-      evolution_compat_explicit: plan.compatExplicit,
+      evolution_compat_explicit: compatExplicit,
     })],
   );
-  return { written, rfcProblems, warnings, compat: plan.compat, summary: plan.summary, questions: plan.questions };
+  return { written, rfcProblems, warnings, compat: effectiveCompat, summary: plan.summary, questions: plan.questions };
 }
 
 // ── Jobs PERSISTIDOS (H3 — migration 082; padrão 076/product_proposals) ─────────────────────
