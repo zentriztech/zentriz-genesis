@@ -18,7 +18,7 @@
  * Os caminhos exigem disco real (`computeCurrentSpecHash` lê bytes) → tmpdir por caso.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -29,6 +29,7 @@ import {
 import { checkSpecValidationGate, type ValidationFinding } from "./specValidation.js";
 import { checkSpecContentReady } from "./specContentGate.js";
 import { findingFingerprint } from "./findingTriage.js";
+import { sha256Hex } from "../lib/specTreeHash.js";
 
 const PROJ = "11111111-1111-1111-1111-111111111111";
 const RUN = "99999999-9999-9999-9999-999999999999";
@@ -57,8 +58,11 @@ interface Fixture {
   db: {
     projectType: string | null;
     files: Array<{ filename: string; rel_dir: string; file_path: string; is_primary: boolean }>;
-    /** Runs terminais, mais nova primeiro. */
-    runs: Array<{ id: string; status: string; spec_hash: string | null; acked_role: string | null; findings: ValidationFinding[] }>;
+    /** Runs terminais, mais nova primeiro. `stage_b_coverage` ausente = projeto sem rastreio (legado). */
+    runs: Array<{ id: string; status: string; spec_hash: string | null; acked_role: string | null; findings: ValidationFinding[];
+      stage_b_coverage?: { full: string[] } | null }>;
+    /** GAP-21: sha do conteúdo que um juiz leu por INTEIRO, por arquivo (migração 101). */
+    judgedShas?: Record<string, string>;
     triages: Array<Record<string, unknown>>;
     /** SQLs vistos — usado para provar que nada além do previsto é consultado. */
     seen: string[];
@@ -84,10 +88,16 @@ function db() {
         const ordered = fx.db.files.slice().sort((a, b) => Number(b.is_primary) - Number(a.is_primary));
         return { rows: ordered.length ? [{ file_path: ordered[0].file_path }] : [] };
       }
+      // GAP-21: a janela de runs do mesmo hash (o `LIMIT $3` do assess) — a de índice 0 continua
+      // sendo a que o antigo `LIMIT 1` devolvia.
       if (sql.includes("FROM spec_validation_runs")) {
         const hash = p[1] as string;
         const ordered = fx.db.runs.slice().sort((a, b) => Number(b.spec_hash === hash) - Number(a.spec_hash === hash));
-        return { rows: ordered.length ? [ordered[0]] : [] };
+        return { rows: ordered.slice(0, (p[2] as number | undefined) ?? 1) };
+      }
+      // GAP-21: cobertura acumulada por arquivo (só consultada quando há run com stage_b_coverage).
+      if (sql.startsWith("SELECT rel_dir, filename, stage_b_full_sha FROM project_spec_files")) {
+        return { rows: fx.db.files.map((f) => ({ rel_dir: f.rel_dir, filename: f.filename, stage_b_full_sha: fx.db.judgedShas?.[f.filename] ?? null })) };
       }
       if (sql.includes("FROM spec_finding_triage")) return { rows: fx.db.triages };
       if (sql.startsWith("SELECT extra->>'project_type'")) return { rows: [{ project_type: fx.db.projectType }] };
@@ -344,6 +354,118 @@ describe("A1 — coerência selo ↔ gates de spec do dispatch", () => {
   });
 });
 
+describe("GAP-21 — o selo e o gate contam a UNIÃO das rodadas do mesmo conteúdo", () => {
+  const MODELO = ["# Modelo de dados", "", "## Entidades", "Entrega e Entregador com estados.", ""].join("\n");
+  const RUN2 = "88888888-8888-8888-8888-888888888888";
+  const blocker = (file: string): ValidationFinding =>
+    ({ file, line: null, severity: "blocker", title: `sem chave primária em ${file}`, rationale: "", source: "stage_b" });
+
+  /** Segundo arquivo de spec — é o cenário real: 12 arquivos, juiz lê alguns por rodada. */
+  async function comDoisArquivos(): Promise<void> {
+    const modeloPath = path.join(fx.dir, "modelo.md");
+    await writeFile(modeloPath, MODELO);
+    fx.db.files.push({ filename: "modelo.md", rel_dir: "", file_path: modeloPath, is_primary: false });
+  }
+  /** `stage_b_full_sha` só é verdade se for o sha do conteúdo que está no disco AGORA. */
+  async function marcarJulgados(...nomes: string[]): Promise<void> {
+    const out: Record<string, string> = {};
+    for (const n of nomes) {
+      const f = fx.db.files.find((x) => x.filename === n)!;
+      out[n] = sha256Hex(await readFile(f.file_path));
+    }
+    fx.db.judgedShas = out;
+  }
+
+  it("cobertura pendente NÃO é 'validada': 1 de 2 arquivos julgados → `SPEC_COVERAGE_INCOMPLETE` no selo E no gate", async () => {
+    await comDoisArquivos();
+    const h = await currentHash();
+    fx.db.runs = [{ id: RUN, status: "passed", spec_hash: h, acked_role: null, findings: [], stage_b_coverage: { full: ["tms.md"] } }];
+    await marcarJulgados("tms.md");
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.code).toBe("SPEC_COVERAGE_INCOMPLETE");
+    expect(cert.level).toBe("blocked");
+    // C3 reprova e DIZ a fração; C4 foi avaliado (0 blocker); C5 não foi (a cobertura vem antes).
+    expect(cert.checks.find((c) => c.id === "C3")!.ok).toBe(false);
+    expect(cert.checks.find((c) => c.id === "C3")!.detail).toContain("1/2");
+    expect(cert.checks.find((c) => c.id === "C4")!.ok).toBe(true);
+    expect(cert.checks.find((c) => c.id === "C5")!.ok).toBeNull();
+    expect(await dispatchSpecRefusal()).toBe("SPEC_COVERAGE_INCOMPLETE");
+  });
+
+  it("todos os arquivos julgados no conteúdo atual → `certified`, com a fração no detalhe", async () => {
+    await comDoisArquivos();
+    const h = await currentHash();
+    fx.db.runs = [{ id: RUN, status: "passed", spec_hash: h, acked_role: null, findings: [], stage_b_coverage: { full: ["tms.md", "modelo.md"] } }];
+    await marcarJulgados("tms.md", "modelo.md");
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.level).toBe("certified");
+    expect(cert.checks.find((c) => c.id === "C3")!.detail).toContain("2/2");
+    expect(await dispatchSpecRefusal()).toBeNull();
+  });
+
+  it("🔴 o defeito: blocker julgado em OUTRA rodada do mesmo conteúdo bloqueia (sem cobertura, o selo saía verde)", async () => {
+    await comDoisArquivos();
+    const h = await currentHash();
+    await marcarJulgados("tms.md", "modelo.md");
+    // Rodada mais nova julgou só tms.md e passou; a anterior julgou modelo.md e achou um blocker.
+    const runs = [
+      { id: RUN2, status: "passed", spec_hash: h, acked_role: null, findings: [] as ValidationFinding[], stage_b_coverage: { full: ["tms.md"] } },
+      { id: RUN, status: "failed", spec_hash: h, acked_role: null, findings: [blocker("modelo.md")], stage_b_coverage: { full: ["modelo.md"] } },
+    ];
+    fx.db.runs = runs;
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.code).toBe("SPEC_VALIDATION_BLOCKED");
+    expect(cert.activeBlockers).toBe(1);
+    expect(cert.checks.find((c) => c.id === "C4")!.ok).toBe(false);
+    expect(cert.checks.find((c) => c.id === "C3")!.detail).toContain("+ 1 rodada(s) do mesmo conteúdo");
+    expect(await dispatchSpecRefusal()).toBe("SPEC_VALIDATION_BLOCKED");
+
+    // A/B do GAP-21: as MESMAS runs sem rastreio de cobertura caem na regra legada — a run mais
+    // recente é `passed` sem findings → certificado verde sobre um blocker que ninguém corrigiu.
+    fx.db.runs = runs.map((r) => ({ ...r, stage_b_coverage: null }));
+    fx.db.judgedShas = undefined;
+    const legado = await computeFactoryCertificate(db(), PROJ);
+    expect(legado.level).toBe("certified");
+    expect(legado.activeBlockers).toBe(0);
+  });
+
+  it("a leitura INTEGRAL mais recente vence a parcial: finding de quem só viu o outline cai fora", async () => {
+    await comDoisArquivos();
+    const h = await currentHash();
+    await marcarJulgados("tms.md", "modelo.md");
+    fx.db.runs = [
+      // mais nova: leu modelo.md por INTEIRO e não achou nada nele
+      { id: RUN2, status: "passed", spec_hash: h, acked_role: null, findings: [], stage_b_coverage: { full: ["modelo.md"] } },
+      // anterior: leu tms.md por inteiro; o que disse sobre modelo.md veio do outline
+      { id: RUN, status: "failed", spec_hash: h, acked_role: null, findings: [blocker("modelo.md")], stage_b_coverage: { full: ["tms.md"] } },
+    ];
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.activeBlockers).toBe(0);
+    expect(cert.level).toBe("certified");
+  });
+
+  it("projeto SEM rastreio de cobertura: regra legada e nem consulta `stage_b_full_sha`", async () => {
+    await comDoisArquivos();
+    fx.db.runs = [{ id: RUN, status: "passed", spec_hash: await currentHash(), acked_role: null, findings: [] }];
+    fx.db.seen = [];
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.level).toBe("certified");
+    expect(cert.coverage ?? null).toBeNull();
+    expect(fx.db.seen.some((s) => s.includes("stage_b_full_sha"))).toBe(false);
+  });
+
+  it("force do zentriz_admin passa por cima da cobertura pendente (auditado), como no caminho de `failed`", async () => {
+    await comDoisArquivos();
+    const h = await currentHash();
+    fx.db.runs = [{ id: RUN, status: "passed", spec_hash: h, acked_role: "zentriz_admin",
+      findings: [], stage_b_coverage: { full: ["tms.md"] } }];
+    await marcarJulgados("tms.md");
+    const cert = await computeFactoryCertificate(db(), PROJ);
+    expect(cert.code).toBeNull();
+    expect(await dispatchSpecRefusal()).toBeNull();
+  });
+});
+
 describe("D2b — selo Connect é SEPARADO", () => {
   it("connect.yaml completo → connect_ready, sem alterar o nível", async () => {
     const connectPath = path.join(fx.dir, "connect.yaml");
@@ -373,6 +495,7 @@ describe("A6 — agregado do produto é AND com n/m", () => {
   const cert = (level: FactoryCertificateLevel, connect: "connect_ready" | "absent" = "absent"): FactoryCertificate => ({
     level, code: null, message: "", specHash: "h", checks: [], caveats: [],
     connect: { level: connect, missing: [] }, gateEnforced: false, activeBlockers: 0, activeWarnings: 0,
+    coverage: null,
   });
 
   it("20 certificados + 2 blocked NÃO viram 'quase pronto' — o produto fica `blocked`", () => {

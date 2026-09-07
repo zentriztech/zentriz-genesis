@@ -974,7 +974,13 @@ export async function specRoutes(app: FastifyInstance) {
     // vermelho contradizendo o botão Promover. `gate.wouldPass` espelha checkSpecValidationGate
     // (sem o ack de warnings, que a UI já trata).
     const covers = !!(latest && current && latest.spec_hash === current.specHash);
-    const wouldPass = covers && !!triage && triage.counts.blockersActive === 0 && (derived === "validated" || derived === "failed");
+    // GAP-21: o preview do gate tem de reprovar cobertura incompleta — senão a aba GAPs diz
+    // "passaria" e o Promover devolve 409, ou pior, promove spec que ninguém julgou por inteiro.
+    const { trackedCoverageState } = await import("../services/specValidation.js");
+    const coverage = await trackedCoverageState(pool, id).catch(() => null);
+    const coverageIncomplete = !!coverage && coverage.unjudged.length > 0;
+    const wouldPass = covers && !!triage && triage.counts.blockersActive === 0
+      && !coverageIncomplete && (derived === "validated" || derived === "failed");
     if (derived === "failed" && wouldPass) derived = "failed_triaged";
     // Certificado Genesis Factory (3º ponto de exibição — aba GAPs). Flag OFF → campo ausente,
     // payload idêntico ao legado. Best-effort: falha no selo não pode derrubar a aba.
@@ -993,7 +999,9 @@ export async function specRoutes(app: FastifyInstance) {
       latestRun: latest ?? null,
       resolved: triage?.resolved ?? [],
       counts: triage?.counts ?? null,
-      gate: { wouldPass, blockersActive: triage?.counts.blockersActive ?? null, warningsActive: triage ? triage.findings.filter((f) => !f.triage && f.severity === "warning").length : null },
+      gate: { wouldPass, blockersActive: triage?.counts.blockersActive ?? null, warningsActive: triage ? triage.findings.filter((f) => !f.triage && f.severity === "warning").length : null,
+        // GAP-21: por que "passaria" é falso mesmo com 0 blocker — a UI tem de poder dizer isso.
+        coverage: coverage ? { judged: coverage.judged, total: coverage.total, unjudged: coverage.unjudged } : null },
     });
   });
 
