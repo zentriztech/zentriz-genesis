@@ -901,7 +901,11 @@ async function gapFileTargetContent(
     // 🔴 GAP-73: a âncora sozinha não fecha o GAP quando o literal ofensor mora em OUTRA seção citada
     // no rationale. Este par é o que diz se a outra ponta da contradição chegou ao prompt.
     `; citadas ${d.cited}/${d.citedLocated}` +
-    `${d.citedDropped.length > 0 ? `, FORA por orçamento: ${d.citedDropped.join(", ")}` : ""})`,
+    `${d.citedDropped.length > 0 ? `, FORA por orçamento: ${d.citedDropped.join(", ")}` : ""}` +
+    // 🔴 GAP-74: seção grande demais para caber inteira (medido: `§7.4`, 16.399 chars) vinha como
+    // "FORA por orçamento" duas rodadas seguidas e travava 2 dos 4 GAPs que não fechavam. `janelas`
+    // separa "não veio" de "veio recortada" — sem isso o log não distingue os dois casos.
+    `${d.windowed > 0 ? `; janelas ${d.windowed}: ${[...d.anchorsWindowed, ...d.citedWindowed].join(", ")}` : ""})`,
   );
   return { text: d.text, digested: d.digested };
 }

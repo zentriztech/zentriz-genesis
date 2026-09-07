@@ -310,5 +310,107 @@ describe("buildFileDigest — a outra ponta da contradição (GAP-73)", () => {
     expect(d.citedLocated).toBe(0);
     expect(d.citedDropped).toEqual([]);
     expect(d.anchored).toBe(1);
+    expect(d.windowed).toBe(0);
+    expect(d.text).not.toContain("[JANELA:");
+  });
+});
+
+/**
+ * 🔴 GAP-74 — a seção que não cabe INTEIRA passava a não vir, e travava o GAP para sempre.
+ *
+ * Medido em prod (run `a33a0d29`, rodada seguinte ao GAP-73): `ancoradas 9/9`, `citadas 3/4`, **10
+ * edições aplicadas / 0 recusadas** — e 4 dos 10 trechos endereçados ficaram byte-a-byte IDÊNTICOS,
+ * com o arquivo crescendo 2.039 chars (diff por seção: 5 seções, todas por acréscimo). O footprint dos
+ * 4 GAPs que não fecharam é `§6+§7.4`, `§8.6`, `§7.4+§8.4`, `§1.3+§9`: **dois dependem de `§7.4`**, a
+ * única seção grande demais (16.399 chars) para caber no orçamento — recusada nas duas rodadas. O
+ * agente escrevia em outro lugar porque o lugar certo nunca chegava. Os testes abaixo travam a janela.
+ */
+const linhas = (tag: string, n: number): string =>
+  Array.from({ length: n }, (_, k) => `${tag} linha ${k}: ${"detalhe ".repeat(6)}`).join("\n");
+
+/**
+ * Réplica da patologia: a seção ENDEREÇADA (`§7.4`) é maior que o orçamento inteiro, então nem a
+ * reserva do GAP-72 nem o preenchimento por relevância conseguem trazê-la — no algoritmo anterior ela
+ * saía apenas DECLARADA em `anchorsDropped`, rodada após rodada, e o GAP não tinha como fechar.
+ */
+const GRANDE = [
+  "# Modelo de dados",
+  "## Convenções gerais",
+  `Nada em disputa aqui. ${filler("generico", 300)}`,
+  "### 7.4 Retenção e expurgo de tokens",
+  linhas("retencao", 120),
+  "O DELETE físico de `refresh_tokens` roda no expurgo trimestral.",
+  linhas("expurgo", 120),
+  "## 99. Apêndice",
+  filler("cauda", 200),
+].join("\n");
+
+describe("buildFileDigest — janela da seção que não cabe inteira (GAP-74)", () => {
+  const CAP_G = 20_000; // orçamento = 15.000; a §7.4 sozinha tem ~17k
+
+  it("a seção endereçada que não cabe vem RECORTADA em vez de não vir", () => {
+    const d = buildFileDigest("modelo-dados.md", GRANDE, [
+      gap("Duas prescrições para o DELETE", "o expurgo de `refresh_tokens` contradiz a retenção", "§7.4"),
+    ], CAP_G);
+    expect(d.digested).toBe(true);
+    // No algoritmo anterior isto era `anchorsDropped: ["§7.4"]` e `used` sem a seção.
+    expect(d.anchorsDropped).toEqual([]);
+    expect(d.anchorsWindowed).toEqual(["§7.4"]);
+    expect(d.windowed).toBe(1);
+    // O literal que o juiz manda corrigir, verbatim — é o que permite montar um SEARCH válido.
+    expect(d.text).toContain("O DELETE físico de `refresh_tokens` roda no expurgo trimestral.");
+    // …e só ele: se a seção inteira tivesse entrado, o orçamento teria estourado.
+    expect(d.text).not.toContain("retencao linha 0:");
+    expect(d.text.length).toBeLessThan(CAP_G);
+  });
+
+  it("a janela avisa que é PARCIAL (senão o modelo reescreve a seção 'completa' e perde conteúdo)", () => {
+    const d = buildFileDigest("modelo-dados.md", GRANDE, [
+      gap("x", "`refresh_tokens`", "§7.4"),
+    ], CAP_G);
+    expect(d.text).toContain("[JANELA:");
+    expect(d.text).toContain("§7.4");
+    expect(d.text).toContain("[… trecho omitido da mesma seção …]");
+    expect(d.text).toContain("NÃO reescreva a seção inteira");
+  });
+
+  it("a mesma janela vale para a seção CITADA no texto do GAP (a outra ponta do GAP-73)", () => {
+    const d = buildFileDigest("modelo-dados.md", GRANDE, [
+      gap("Índice mente", "a purga de `refresh_tokens` prometida em §7.4 não acontece", "Convenções gerais"),
+    ], CAP_G);
+    expect(d.anchored).toBe(1); // `## Convenções gerais` cabe
+    expect(d.citedWindowed).toEqual(["§7.4"]);
+    expect(d.citedDropped).toEqual([]);
+    expect(d.windowed).toBe(1);
+    expect(d.text).toContain("O DELETE físico de `refresh_tokens` roda no expurgo trimestral.");
+  });
+
+  it("seção que não cabe NEM em janela continua DECLARADA (nunca omitida em silêncio)", () => {
+    // Nenhum termo em disputa aparece dentro da seção endereçada ⇒ não há o que janelar.
+    const semTermo = [
+      "# M",
+      "## 1. Endereçada e sem o termo",
+      linhas("opaca", 300),
+      // Existe só para o recorte não cair no caminho "nenhuma seção casou" — o que se testa é a §1.
+      "## 2. Pequena e relevante",
+      "O `courier_id` aparece aqui.",
+      "## 3. Cauda",
+      filler("cauda", 200),
+    ].join("\n");
+    const d = buildFileDigest("m.md", semTermo, [gap("x", "`courier_id` some", "§1")], CAP_G);
+    expect(d.windowed).toBe(0);
+    expect(d.anchorsWindowed).toEqual([]);
+    expect(d.anchorsDropped).toEqual(["§1"]);
+    expect(d.text).toContain("NÃO caberam no orçamento");
+  });
+
+  it("seção que cabe inteira NÃO é janelada (janela é último recurso, não o padrão)", () => {
+    const d = buildFileDigest("modelo-dados.md", PATOLOGIA, [
+      gap("Índice mente", "`idx_rt_expires_at` promete o que só `revoked_at` faz", "§5.2"),
+    ], 20_000);
+    expect(d.anchored).toBe(1);
+    expect(d.windowed).toBe(0);
+    expect(d.text).toContain("indices indices");
+    expect(d.text).not.toContain("[JANELA:");
   });
 });
