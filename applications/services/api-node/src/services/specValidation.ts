@@ -952,7 +952,8 @@ export async function collectStageBResults(
     const short = String(r.id).slice(0, 8);
     // GAP-66: adoção de órfã é fato operacional — o log tem de dizer que o esperador em processo
     // morreu, senão a recuperação parece mágica e ninguém liga o ponto ao restart que a causou.
-    if (r.status === "pending" || r.status === "running") {
+    const adopted = r.status === "pending" || r.status === "running";
+    if (adopted) {
       console.log(`[spec-validation] run ${short}: status '${r.status}' sem sinal de vida há mais de ${STAGE_B_LEASE_SEC}s — o esperador em processo morreu (restart da api). Adotando a coleta em vez de esperar o deadline.`);
     }
     let res: Awaited<ReturnType<StageBProbe>>;
@@ -1003,7 +1004,13 @@ export async function collectStageBResults(
         await markFilesJudged(pool, String(r.project_id), cov.fullShas);
       }
       out.collected += 1;
-      console.log(`[spec-validation] run ${short}: resultado do estágio B RECUPERADO após a espera expirar — ${stageB.length} finding(s) do LLM, status '${status}'${superseded ? " (a spec mudou desde o início da validação)" : ""}.`);
+      // A CAUSA da recuperação muda o diagnóstico: órfã adotada aponta para restart da api;
+      // "espera expirou" aponta para lentidão do agents. Dizer a errada manda o próximo a investigar
+      // no lugar errado — por isso o texto segue `adopted`, não um chute.
+      const causa = adopted
+        ? "por adoção de órfã (o esperador em processo morreu)"
+        : "após a espera em processo terminar";
+      console.log(`[spec-validation] run ${short}: resultado do estágio B RECUPERADO ${causa} — ${stageB.length} finding(s) do LLM, status '${status}'${superseded ? " (a spec mudou desde o início da validação)" : ""}.`);
       continue;
     }
     if (st === "error") {
