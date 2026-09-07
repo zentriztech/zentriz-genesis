@@ -244,6 +244,23 @@ interface AgentsSplitResult {
  * caber nas guardas da árvore de spec) — nunca o mérito do agrupamento, que é decisão do arquiteto.
  */
 export async function finishSplit(db: Db, id: string, result: AgentsSplitResult): Promise<void> {
+  // 🔴 GAP-51: esta função é `await`-ada dentro de um `void (async () => …)()` de `setInterval` —
+  // não existe ninguém para pegar uma rejeição dela. Sem handler global de `unhandledRejection`
+  // (o repo depende disso em 4 lugares, todos comentados), Node 20 transforma a rejeição em
+  // uncaughtException e MATA o processo da api — levando com ela toda run de autonomia, revisão
+  // do CTO e coleta de validação em voo. Eventos ordinários bastam para chegar aqui: um erro
+  // transitório do pool no `collidingSplitNames`, ou um ` ` no markdown do redator (o jsonb
+  // recusa `unsupported Unicode escape sequence` no UPDATE). O gêmeo deste desenho
+  // (`productProposals.finishProposal`) já roda dentro de try/catch → falha vira linha `error` e o
+  // humano refaz. Aqui a MESMA falha derrubava o serviço. Igualado.
+  try {
+    await finishSplitInner(db, id, result);
+  } catch (e) {
+    await failSplit(db, id, `Falha ao concluir a divisão: ${msg(e)}`.slice(0, 500));
+  }
+}
+
+async function finishSplitInner(db: Db, id: string, result: AgentsSplitResult): Promise<void> {
   const files = result.files ?? {};
   const names = Object.keys(files);
   const plan = result.plan;
@@ -437,13 +454,20 @@ export function runSplitJob(
           }
           return;
         }
-        const poll = JSON.parse(pollText) as { status: string; result?: AgentsSplitResult; error?: string };
-        if (poll.status === "done" && poll.result) {
-          clearInterval(timer);
-          await finishSplit(db, id, poll.result);
-        } else if (poll.status === "error") {
-          clearInterval(timer);
-          await failSplit(db, id, poll.error ?? "O divisor de spec falhou.");
+        // GAP-51: `JSON.parse` de um 2xx que não seja JSON (agents devolvendo corpo vazio, proxy
+        // no meio) rejeitava sem dono → morte do processo. Uma falha de parse não é motivo para
+        // descartar uma divisão de 10 minutos: loga e o próximo tick (ou o watchdog) resolve.
+        try {
+          const poll = JSON.parse(pollText) as { status: string; result?: AgentsSplitResult; error?: string };
+          if (poll.status === "done" && poll.result) {
+            clearInterval(timer);
+            await finishSplit(db, id, poll.result);
+          } else if (poll.status === "error") {
+            clearInterval(timer);
+            await failSplit(db, id, poll.error ?? "O divisor de spec falhou.");
+          }
+        } catch (e) {
+          console.warn(`[SpecSplit] poll ilegível ${id}: ${msg(e)}`);
         }
       })();
     }, 8_000);

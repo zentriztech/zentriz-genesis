@@ -178,7 +178,10 @@ export function runProposeJob(
         void (async () => {
           if (Date.now() - startedAt > MAX_MS) {
             clearInterval(timer);
-            await failProposal(pool, jobId, "Timeout: Product Architect demorou mais de 11 minutos.");
+            // GAP-52 (classe do GAP-45): a mensagem dizia "11 minutos" desde antes de o R4 PR3
+            // levar o teto a 18 — quem esperou 18 min lia que o corte foi aos 11. O número agora
+            // deriva da constante; mentir sobre o próprio limite não é aceitável.
+            await failProposal(pool, jobId, `Timeout: Product Architect passou de ${Math.round(MAX_MS / 60_000)} minutos.`);
             return;
           }
           let pollText: string;
@@ -196,13 +199,21 @@ export function runProposeJob(
             }
             return;
           }
-          const poll = JSON.parse(pollText) as { status: string; result?: AgentsResult; error?: string };
-          if (poll.status === "done" && poll.result?.manifest && poll.result?.specs) {
-            clearInterval(timer);
-            await finishProposal(pool, jobId, poll.result);
-          } else if (poll.status === "error") {
-            clearInterval(timer);
-            await failProposal(pool, jobId, poll.error ?? "Product Architect falhou");
+          // GAP-51: `JSON.parse` de um 2xx não-JSON rejeitava dentro de um `void async` sem dono →
+          // sem handler global de `unhandledRejection`, Node 20 mata o processo da api (e com ele
+          // toda run em voo). Uma resposta ilegível é motivo para logar e tentar no próximo tick,
+          // nunca para derrubar o serviço.
+          try {
+            const poll = JSON.parse(pollText) as { status: string; result?: AgentsResult; error?: string };
+            if (poll.status === "done" && poll.result?.manifest && poll.result?.specs) {
+              clearInterval(timer);
+              await finishProposal(pool, jobId, poll.result);
+            } else if (poll.status === "error") {
+              clearInterval(timer);
+              await failProposal(pool, jobId, poll.error ?? "Product Architect falhou");
+            }
+          } catch (e) {
+            console.warn(`[Propose] poll ilegível job=${jobId}: ${e instanceof Error ? e.message : String(e)}`);
           }
         })();
       }, 8_000);

@@ -178,6 +178,35 @@ describe("finishSplit", () => {
     expect(sqlOf(/SET status='error'/)).toBeUndefined();
     expect(sqlOf(/SET status='done'/)).toBeDefined();
   });
+
+  /**
+   * 🔴 GAP-51 — `finishSplit` é `await`-ada dentro de um `void (async () => …)()` de `setInterval`.
+   * Uma rejeição ali não tem dono e, sem handler global de `unhandledRejection`, Node 20 MATA o
+   * processo da api — levando toda run de autonomia/CTO/validação em voo. Basta um evento
+   * ordinário: erro transitório do pool, ou um ` ` no markdown do redator (o jsonb recusa).
+   * O gêmeo do mesmo desenho (`finishProposal`) já tinha try/catch; este NÃO tinha.
+   */
+  it("🔴 GAP-51: falha do banco ao concluir NÃO rejeita — vira linha 'error' (a api não morre)", async () => {
+    const calls: Call[] = [];
+    const db = {
+      query: async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        // O UPDATE final falha (ex.: `unsupported Unicode escape sequence` no jsonb);
+        // o UPDATE de erro do failSplit precisa passar, senão não há como registrar o motivo.
+        if (/SET status='done'/.test(sql)) throw new Error("unsupported Unicode escape sequence \\u0000");
+        return { rows: [], rowCount: 1 };
+      },
+    } as unknown as never;
+    await expect(finishSplit(db, "split-1", PAYLOAD)).resolves.toBeUndefined();
+    const fail = calls.find((c) => /SET status='error'/.test(c.sql));
+    expect(fail).toBeDefined();
+    expect(String(fail!.params[1])).toContain("Unicode");
+  });
+
+  it("GAP-51: nem o `failSplit` do resgate pode rejeitar (banco inteiro fora)", async () => {
+    const db = { query: async () => { throw new Error("db down"); } } as unknown as never;
+    await expect(finishSplit(db, "split-1", PAYLOAD)).resolves.toBeUndefined();
+  });
 });
 
 // ── applySplitProposal: a única escrita ─────────────────────────────────────────────────────
