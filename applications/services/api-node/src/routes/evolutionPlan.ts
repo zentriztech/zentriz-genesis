@@ -196,6 +196,13 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
   // travas de realidade do GitHub (conflito/proteção/permissão/head movido) nem o fail-closed sem
   // evidência. `confirm:"MERGE"` é OBRIGATÓRIO quando a mudança é MAJOR ou quando a trava seria
   // `blocked_regressions`/`blocked_no_tests` — o humano assume o risco explicitamente.
+  //
+  // 🔴 GAP-59: a exigência de confirmação é decidida por uma SONDA (`evaluateOnly`) e não pelo estado
+  // gravado antes. O estado só existe quando o merge AUTOMÁTICO rodou e bloqueou; com
+  // `EVOLUTION_AUTO_MERGE` desligado (o default) a etapa da flag retorna antes de avaliar qualquer
+  // coisa e nada é gravado ⇒ `evolution_merge_state` vazio ⇒ o botão mergeava com regressões sem pedir
+  // confirmação e sem contar ao humano que havia regressões. A pergunta certa não é "o que bloqueou
+  // antes?", é "o que o `force` vai contornar AGORA?".
   app.post<{ Params: { id: string }; Body: { confirm?: string } }>(
     "/api/projects/:id/evolution/merge",
     { bodyLimit: 4 * 1024 },
@@ -212,17 +219,37 @@ export async function evolutionPlanRoutes(app: FastifyInstance) {
       if (typeof ex.evolution_pr_number !== "number" || ex.evolution_push_pending === true) {
         return reply.status(409).send({ code: "NO_PR", message: "Não há PR publicado para esta evolução (verifique a publicação)." });
       }
-      // Confirmação explícita para os casos de risco (MAJOR / sem-testes / regressões).
-      const compat = String(ex.evolution_compat ?? "minor").toLowerCase();
-      const priorState = String(ex.evolution_merge_state ?? "");
-      const needsConfirm = compat === "major" || priorState === "blocked_regressions" || priorState === "blocked_no_tests";
-      if (needsConfirm && (request.body?.confirm ?? "") !== "MERGE") {
-        return reply.status(400).send({
-          code: "CONFIRM_REQUIRED",
-          message: "Esta evolução exige confirmação (mudança MAJOR ou sem evidência limpa de testes). Reenvie com { confirm: \"MERGE\" }.",
+      const { tryAutoMergeEvolution } = await import("../services/evolutionMerge.js");
+
+      // Sonda: aplica as travas de política SEM tocar o GitHub, sem reivindicar `merging` e sem
+      // persistir estado. É o que diz ao humano o que ele está a ponto de contornar.
+      const probe = await tryAutoMergeEvolution(pool, proj.id, { evaluateOnly: true });
+      // Travas que o `force` NÃO contorna: recusar já aqui evita um force inútil e uma mensagem confusa.
+      if (probe.state === "blocked_no_evidence" || probe.state === "blocked_permission") {
+        return reply.status(409).send({
+          ok: false, state: probe.state, sha: null, detail: probe.detail ?? null, acceptedPermissions: null,
+          message: probe.state === "blocked_no_evidence"
+            ? "Sem evidência de testes (checkpoint do runner ausente): o merge é bloqueado por segurança e a confirmação humana não contorna isso."
+            : "A instalação do GitHub App do tenant está ausente ou foi revogada.",
         });
       }
-      const { tryAutoMergeEvolution } = await import("../services/evolutionMerge.js");
+      // Travas de POLÍTICA: o humano pode assumir o risco — mas tem de VER qual risco é.
+      const RISK: Record<string, string> = {
+        blocked_major: "a mudança é MAJOR (incompatível)",
+        blocked_compat_implicit: "a compatibilidade não foi declarada no RFC",
+        blocked_no_tests: "a linha de base não tem testes (PASS_TO_PASS vazio)",
+        blocked_regressions: "há regressões no PASS_TO_PASS",
+      };
+      const risk = RISK[probe.state];
+      if (risk && (request.body?.confirm ?? "") !== "MERGE") {
+        return reply.status(400).send({
+          code: "CONFIRM_REQUIRED",
+          state: probe.state,
+          blockedBy: probe.state,
+          detail: probe.detail ?? null,
+          message: `Esta evolução exige confirmação: ${risk}${probe.detail ? ` (${probe.detail})` : ""}. Reenvie com { confirm: "MERGE" } para assumir o risco.`,
+        });
+      }
       const result = await tryAutoMergeEvolution(pool, proj.id, { force: true, actorUserId: user.id });
       const merged = result.state === "merged";
       return reply.status(merged ? 200 : 409).send({

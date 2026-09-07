@@ -81,6 +81,12 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   const [merging, setMerging] = useState(false);
   const [mergeMsg, setMergeMsg] = useState<{ severity: "success" | "warning" | "error"; text: string } | null>(null);
   const [confirmText, setConfirmText] = useState("");
+  /**
+   * 🔴 GAP-59: o back-end decide a confirmação por uma sonda ao vivo; o painel só conhece o estado
+   * GRAVADO, que fica vazio quando o merge automático está desligado. Sem isto o usuário levava o 400
+   * "exige confirmação" e não tinha onde digitar MERGE — erro sem saída.
+   */
+  const [confirmDemanded, setConfirmDemanded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -106,16 +112,18 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
       );
       if (res.ok) {
         setMergeMsg({ severity: "success", text: "Evolução mergeada em 'dev'." });
-        setConfirmText("");
+        setConfirmText(""); setConfirmDemanded(false);
       } else {
         const info = MERGE_STATE_INFO[res.state];
         setMergeMsg({ severity: "warning", text: `Não mergeado (${info?.label ?? res.state})${res.detail ? `: ${res.detail}` : ""}.` });
       }
       await load();
     } catch (e) {
-      // 400 CONFIRM_REQUIRED chega aqui como ApiError — orienta o usuário a confirmar.
+      // 400 CONFIRM_REQUIRED chega aqui como ApiError — a mensagem já NOMEIA o risco (GAP-59) e o
+      // campo de confirmação passa a aparecer, mesmo que o estado gravado não indicasse risco nenhum.
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Falha ao mergear";
-      setMergeMsg({ severity: "error", text: msg });
+      if (e instanceof ApiError && e.code === "CONFIRM_REQUIRED") setConfirmDemanded(true);
+      setMergeMsg({ severity: e instanceof ApiError && e.code === "CONFIRM_REQUIRED" ? "warning" : "error", text: msg });
     } finally { setMerging(false); }
   }, [projectId, load]);
 
@@ -153,8 +161,9 @@ export default function EvolutionPanel({ projectId, productId }: { projectId: st
   const hasPr = typeof state.publish.prNumber === "number" || (merge?.prNumber ?? null) !== null;
   const isMerged = mergeState === "merged";
   const commitHref = merge?.sha && state.publish.repo ? `https://github.com/${state.publish.repo}/commit/${merge.sha}` : null;
-  // Confirmação exigida: MAJOR ou estados de risco (o back-end também exige — dupla-trava).
-  const needsConfirm = (state.compat ?? "").toLowerCase() === "major" || (mergeState ? MERGE_CONFIRM_STATES.has(mergeState) : false);
+  // Confirmação exigida: MAJOR, estados de risco JÁ gravados, ou o back-end tendo pedido agora
+  // (GAP-59 — a sonda vê riscos que o estado gravado não registra). O back-end é a trava real.
+  const needsConfirm = confirmDemanded || (state.compat ?? "").toLowerCase() === "major" || (mergeState ? MERGE_CONFIRM_STATES.has(mergeState) : false);
   const rs = state.rewriteStats as { files_rewritten?: number; lines_added?: number; lines_removed?: number; symbols_preserved?: number } | null;
   const showMerge = hasPr && !state.publish.pending;
 

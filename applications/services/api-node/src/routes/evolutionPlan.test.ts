@@ -47,7 +47,16 @@ vi.mock("../services/evolutionPlanner.js", () => planner);
 vi.mock("../services/evolutionGate.js", () => ({ loadRfcTemplate: () => "# RFC-NNNN — <título>\n\n## Sumário\n", RFC_DIR: "docs/rfc" }));
 const accept = { runEvolutionAcceptFlow: vi.fn(async () => { project = { ...project, extra: { ...(project.extra as object), evolution_push_pending: false } }; return true; }) };
 vi.mock("../services/evolutionAccept.js", () => accept);
-const merge = { tryAutoMergeEvolution: vi.fn(async (): Promise<{ state: string; sha?: string; detail?: string }> => ({ state: "merged", sha: "MERGESHA" })) };
+// 🔴 GAP-59: a rota faz DUAS chamadas com papéis diferentes — a sonda (`evaluateOnly`, que só avalia a
+// política) e o merge real (`force`). O mock precisa distinguí-las, senão o teste não consegue afirmar
+// que a confirmação foi exigida pelo veredito de AGORA e não pelo estado gravado antes.
+let probeResult: { state: string; detail?: string } = { state: "would_merge" };
+let mergeResult: { state: string; sha?: string; detail?: string } = { state: "merged", sha: "MERGESHA" };
+const merge = {
+  tryAutoMergeEvolution: vi.fn(async (
+    _db: unknown, _id: string, opts: { force?: boolean; evaluateOnly?: boolean; actorUserId?: string } = {},
+  ): Promise<{ state: string; sha?: string; detail?: string }> => (opts.evaluateOnly ? probeResult : mergeResult)),
+};
 vi.mock("../services/evolutionMerge.js", () => merge);
 
 let app: FastifyInstance;
@@ -64,7 +73,9 @@ beforeEach(async () => {
   project = { id: PROJ, tenant_id: TENANT, created_by: USER_ID, status: "spec_submitted", extra: { evolution: true, evolution_request: "quero pdf" } };
   queries = [];
   planner.createPlanJob.mockClear(); planner.runEvolutionPlan.mockClear(); planner.upsertSpecFile.mockClear(); accept.runEvolutionAcceptFlow.mockClear();
-  merge.tryAutoMergeEvolution.mockClear(); merge.tryAutoMergeEvolution.mockResolvedValue({ state: "merged", sha: "MERGESHA" });
+  merge.tryAutoMergeEvolution.mockClear();
+  probeResult = { state: "would_merge" };
+  mergeResult = { state: "merged", sha: "MERGESHA" };
 });
 
 describe("POST /api/projects/:id/evolution-plan", () => {
@@ -153,28 +164,74 @@ describe("POST /api/projects/:id/evolution/merge (M1)", () => {
     expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalled();
   });
 
-  it("MAJOR sem confirm → 400 CONFIRM_REQUIRED; com confirm → chama force:true + actorUserId e devolve 200", async () => {
+  it("MAJOR sem confirm → 400 CONFIRM_REQUIRED (e NÃO força); com confirm → chama force:true + actorUserId e devolve 200", async () => {
+    probeResult = { state: "blocked_major", detail: "compatibilidade major exige merge manual" };
     project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "major" } };
     let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
     expect(r.statusCode).toBe(400); expect(JSON.parse(r.body).code).toBe("CONFIRM_REQUIRED");
-    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalled();
+    // A sonda roda (é ela que decide), mas o merge real não: nada foi forçado sem confirmação.
+    expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { evaluateOnly: true });
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
     r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
     expect(r.statusCode).toBe(200);
     expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { force: true, actorUserId: USER_ID });
     expect(JSON.parse(r.body)).toMatchObject({ ok: true, state: "merged", sha: "MERGESHA" });
   });
 
-  it("estado de risco (blocked_regressions) sem confirm → 400; minor limpo → 200 sem confirm", async () => {
-    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor", evolution_merge_state: "blocked_regressions" } };
-    let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
-    expect(r.statusCode).toBe(400); expect(JSON.parse(r.body).code).toBe("CONFIRM_REQUIRED");
-    project = { ...project, extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
-    r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+  it("🔴 GAP-59: regressões com a flag DESLIGADA (estado gravado vazio) → 400 dizendo QUAL é o risco", async () => {
+    // O defeito: a confirmação vinha de `extra.evolution_merge_state`, que só é gravado quando o merge
+    // AUTOMÁTICO roda e bloqueia. Com `EVOLUTION_AUTO_MERGE` off (default) o estado nunca existe ⇒ um
+    // clique mergeava com regressões, calado. Agora quem decide é a sonda.
+    probeResult = { state: "blocked_regressions", detail: "2 regressão(ões)" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+    expect(r.statusCode).toBe(400);
+    const body = JSON.parse(r.body);
+    expect(body).toMatchObject({ code: "CONFIRM_REQUIRED", state: "blocked_regressions", blockedBy: "blocked_regressions", detail: "2 regressão(ões)" });
+    expect(body.message).toContain("regressões no PASS_TO_PASS");
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+  });
+
+  it("🔴 GAP-59: compat implícita e sem-testes também exigem confirmação — e passam com ela", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    for (const [state, trecho] of [["blocked_compat_implicit", "não foi declarada"], ["blocked_no_tests", "não tem testes"]] as const) {
+      probeResult = { state };
+      let r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
+      expect(r.statusCode).toBe(400);
+      expect(JSON.parse(r.body)).toMatchObject({ code: "CONFIRM_REQUIRED", blockedBy: state });
+      expect(JSON.parse(r.body).message).toContain(trecho);
+      r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+      expect(r.statusCode).toBe(200);
+    }
+  });
+
+  it("🔴 GAP-59: sem evidência de testes → 409 imediato — `confirm` NÃO contorna fail-closed", async () => {
+    probeResult = { state: "blocked_no_evidence", detail: "checkpoint / baseline PASS_TO_PASS ausente" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+    expect(r.statusCode).toBe(409);
+    expect(JSON.parse(r.body)).toMatchObject({ ok: false, state: "blocked_no_evidence" });
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+  });
+
+  it("🔴 GAP-59: instalação revogada → 409 imediato (o `force` não cria permissão)", async () => {
+    probeResult = { state: "blocked_permission", detail: "GitHub App do tenant ausente ou revogado" };
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: { confirm: "MERGE" } });
+    expect(r.statusCode).toBe(409);
+    expect(JSON.parse(r.body)).toMatchObject({ ok: false, state: "blocked_permission" });
+    expect(merge.tryAutoMergeEvolution).not.toHaveBeenCalledWith(expect.anything(), PROJ, expect.objectContaining({ force: true }));
+  });
+
+  it("veredito limpo (would_merge) → mergeia sem exigir confirmação", async () => {
+    project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
+    const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
     expect(r.statusCode).toBe(200);
+    expect(merge.tryAutoMergeEvolution).toHaveBeenCalledWith(expect.anything(), PROJ, { force: true, actorUserId: USER_ID });
   });
 
   it("estado não-merged → 409 com o estado", async () => {
-    merge.tryAutoMergeEvolution.mockResolvedValueOnce({ state: "blocked_conflict", detail: "conflito com 'dev'" });
+    mergeResult = { state: "blocked_conflict", detail: "conflito com 'dev'" };
     project = { ...project, status: "accepted", extra: { evolution: true, evolution_pr_number: 5, evolution_compat: "minor" } };
     const r = await app.inject({ method: "POST", url: `/api/projects/${PROJ}/evolution/merge`, payload: {} });
     expect(r.statusCode).toBe(409);

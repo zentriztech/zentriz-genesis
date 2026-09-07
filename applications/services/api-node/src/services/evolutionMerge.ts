@@ -24,6 +24,12 @@ type Db = Pick<Pool, "query">;
 
 export type MergeState =
   | "merged"
+  /**
+   * 🔴 GAP-59: veredito de AVALIAÇÃO (`evaluateOnly`) — passou por todas as travas de POLÍTICA.
+   * Não toca o GitHub e não persiste estado; existe para a rota manual saber O QUE ela vai forçar
+   * ANTES de forçar. Nunca é gravado em `extra.evolution_merge_state`.
+   */
+  | "would_merge"
   | "skipped_flag"
   | "skipped_no_pr"
   | "blocked_permission"
@@ -111,13 +117,36 @@ async function finish(db: Db, childId: string, res: TryAutoMergeResult, humanMsg
 /**
  * Tenta mergear o PR da evolução. `opts.force` (rota manual com confirmação humana) ignora só as
  * travas de política; `opts.actorUserId` vira o `evolution_merge_actor` (senão "genesis").
+ * `opts.evaluateOnly` só AVALIA a política e devolve o veredito (`would_merge` ou o `blocked_*`),
+ * sem tocar o GitHub, sem reivindicar `merging` e sem persistir nada — ver GAP-59 abaixo.
  */
 export async function tryAutoMergeEvolution(
   db: Db,
   childId: string,
-  opts: { force?: boolean; actorUserId?: string } = {},
+  opts: { force?: boolean; actorUserId?: string; evaluateOnly?: boolean } = {},
 ): Promise<TryAutoMergeResult> {
   const force = opts.force === true;
+  /**
+   * 🔴 GAP-59 — `evaluateOnly`: aplica as travas de POLÍTICA e devolve o veredito **sem** tocar o
+   * GitHub, **sem** o claim de `merging` e **sem** persistir estado. Ignora só a flag
+   * `EVOLUTION_AUTO_MERGE` (no manual, o humano ocupa o lugar da flag).
+   *
+   * Por que existe: a rota manual exigia confirmação com base no estado ANTERIOR
+   * (`blocked_regressions`/`blocked_no_tests`) — estado que só é gravado quando o merge automático
+   * roda e bloqueia. Com a flag DESLIGADA (o default), a etapa 1 devolve `skipped_flag` e **nada é
+   * gravado** ⇒ o estado anterior fica vazio ⇒ "Mergear agora" não pedia confirmação e o `force`
+   * pulava compat implícito, ausência de testes e REGRESSÕES em silêncio. A confirmação de risco não
+   * pode depender de um bloqueio que a configuração impede de existir.
+   */
+  const evaluate = opts.evaluateOnly === true;
+  /**
+   * Travas de POLÍTICA valem quando não há `force` — e SEMPRE em avaliação. Avaliar com `force`
+   * devolveria `would_merge` justamente para o caso perigoso (regressões), que é o oposto do objetivo.
+   */
+  const policy = !force || evaluate;
+  /** Em avaliação, nada é gravado: o veredito é informação para o humano, não estado do projeto. */
+  const stop = (res: TryAutoMergeResult, humanMsg: string): Promise<TryAutoMergeResult> =>
+    evaluate ? Promise.resolve(res) : finish(db, childId, res, humanMsg);
 
   // ── Carrega projeto + instalação do tenant (revoked → fail-closed) + repo da linhagem ──
   const row = (await db.query(
@@ -148,8 +177,8 @@ export async function tryAutoMergeEvolution(
     return { state: "merged", sha: (extra.evolution_merge_sha as string | undefined) ?? undefined };
   }
 
-  // 1. Flag (force ignora só esta).
-  if (!force && !flagOn("EVOLUTION_AUTO_MERGE")) {
+  // 1. Flag (force ignora só esta; avaliação também — no manual, o humano ocupa o lugar da flag).
+  if (!force && !evaluate && !flagOn("EVOLUTION_AUTO_MERGE")) {
     return { state: "skipped_flag", detail: "EVOLUTION_AUTO_MERGE desligado" };
   }
 
@@ -160,44 +189,48 @@ export async function tryAutoMergeEvolution(
   }
   const installationId = row.installation_id != null ? Number(row.installation_id) : null;
   if (!installationId || row.revoked_at) {
-    return finish(db, childId,
+    return stop(
       { state: "blocked_permission", detail: "GitHub App do tenant ausente ou revogado" },
       "⚠️ Merge não realizado: a instalação do GitHub App do tenant está ausente ou foi revogada.");
   }
   const [owner, repo] = row.repo_full_name.split("/");
   if (!owner || !repo) {
-    return finish(db, childId, { state: "failed", detail: `repo inválido: ${row.repo_full_name}` },
+    return stop({ state: "failed", detail: `repo inválido: ${row.repo_full_name}` },
       `⚠️ Merge não realizado: repositório inválido (${row.repo_full_name}).`);
   }
 
   // 3. Claim atômico do estado `merging` (GAP 3 — accept + republish + observador ao mesmo tempo).
-  const claim = await db.query(
-    `UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || '{"evolution_merge_state":"merging"}'::jsonb, updated_at = now()
-      WHERE id = $1 AND coalesce(extra->>'evolution_merge_state','') NOT IN ('merging','merged') RETURNING id`,
-    [childId],
-  );
-  if ((claim.rows as unknown[]).length === 0) {
-    // Outra tentativa está em curso (ou já mergeou entre o load e o claim) — não duplicar.
-    const cur = (await db.query("SELECT extra->>'evolution_merge_state' AS s, extra->>'evolution_merge_sha' AS sha FROM projects WHERE id=$1", [childId])).rows[0] as { s?: string; sha?: string } | undefined;
-    if (cur?.s === "merged") return { state: "merged", sha: cur.sha ?? undefined };
-    return { state: "failed", detail: "outra tentativa de merge em andamento" };
+  // Avaliação NÃO reivindica: marcar `merging` para só informar o humano bloquearia o merge real
+  // que vem depois (o próprio claim recusa `merging`) — o veredito viraria um deadlock.
+  if (!evaluate) {
+    const claim = await db.query(
+      `UPDATE projects SET extra = COALESCE(extra,'{}'::jsonb) || '{"evolution_merge_state":"merging"}'::jsonb, updated_at = now()
+        WHERE id = $1 AND coalesce(extra->>'evolution_merge_state','') NOT IN ('merging','merged') RETURNING id`,
+      [childId],
+    );
+    if ((claim.rows as unknown[]).length === 0) {
+      // Outra tentativa está em curso (ou já mergeou entre o load e o claim) — não duplicar.
+      const cur = (await db.query("SELECT extra->>'evolution_merge_state' AS s, extra->>'evolution_merge_sha' AS sha FROM projects WHERE id=$1", [childId])).rows[0] as { s?: string; sha?: string } | undefined;
+      if (cur?.s === "merged") return { state: "merged", sha: cur.sha ?? undefined };
+      return { state: "failed", detail: "outra tentativa de merge em andamento" };
+    }
   }
 
-  // 4. Compatibilidade (política — force ignora).
+  // 4. Compatibilidade (política — force ignora; avaliação sempre aplica).
   const compatRaw = String(extra.evolution_compat ?? "minor").toLowerCase();
   const compat: Compat = compatRaw === "major" || compatRaw === "patch" ? compatRaw : "minor";
   const version = (extra.evolution_version as string | undefined) ?? String(row.version_number ?? "");
-  if (!force) {
+  if (policy) {
     if (compat === "major") {
-      return finish(db, childId, { state: "blocked_major", detail: "compatibilidade major exige merge manual" },
+      return stop({ state: "blocked_major", detail: "compatibilidade major exige merge manual" },
         "⏸️ Merge automático bloqueado: mudança MAJOR exige confirmação humana. Use \"Mergear agora\" no painel.");
     }
     if (extra.evolution_compat_explicit !== true) {
-      return finish(db, childId, { state: "blocked_compat_implicit", detail: "compatibilidade não declarada (default silencioso 'minor')" },
+      return stop({ state: "blocked_compat_implicit", detail: "compatibilidade não declarada (default silencioso 'minor')" },
         "⏸️ Merge automático bloqueado: a compatibilidade não foi declarada no RFC (obrigatória para merge automático).");
     }
     if (COMPAT_RANK[compat] > COMPAT_RANK[maxAutoCompat()]) {
-      return finish(db, childId, { state: "blocked_major", detail: `compat ${compat} acima do teto ${maxAutoCompat()}` },
+      return stop({ state: "blocked_major", detail: `compat ${compat} acima do teto ${maxAutoCompat()}` },
         `⏸️ Merge automático bloqueado: compatibilidade ${compat.toUpperCase()} acima do teto configurado (${maxAutoCompat().toUpperCase()}).`);
     }
   }
@@ -206,7 +239,7 @@ export async function tryAutoMergeEvolution(
   const checkpoint = await readEvolutionCheckpoint(childId);
   const baseline = (checkpoint?.evolution_baseline as Record<string, unknown> | null | undefined) ?? null;
   if (!checkpoint || !baseline) {
-    return finish(db, childId, { state: "blocked_no_evidence", detail: "checkpoint / baseline PASS_TO_PASS ausente" },
+    return stop({ state: "blocked_no_evidence", detail: "checkpoint / baseline PASS_TO_PASS ausente" },
       "⛔ Merge bloqueado: sem evidência de testes (checkpoint do runner ausente). Fail-closed por segurança.");
   }
   const baselineStatus = String((baseline as { status?: unknown }).status ?? "");
@@ -215,16 +248,24 @@ export async function tryAutoMergeEvolution(
     ? ((final as { regressions?: unknown[] }).regressions as unknown[])
     : [];
   if (baselineStatus === "no_tests") {
-    if (!force && !flagOn("EVOLUTION_AUTO_MERGE_ALLOW_NO_TESTS")) {
-      return finish(db, childId, { state: "blocked_no_tests", detail: "baseline sem testes" },
+    if (policy && !flagOn("EVOLUTION_AUTO_MERGE_ALLOW_NO_TESTS")) {
+      return stop({ state: "blocked_no_tests", detail: "baseline sem testes" },
         "⏸️ Merge automático bloqueado: a linha de base não tem testes (PASS_TO_PASS vazio). Confirme manualmente se aceitar o risco.");
     }
-  } else if (!force) {
+  } else if (policy) {
     const finalStatus = String((final as { status?: unknown } | null)?.status ?? "");
     if (!final || finalStatus === "error" || regressions.length > 0) {
-      return finish(db, childId, { state: "blocked_regressions", detail: regressions.length ? `${regressions.length} regressão(ões)` : "sem resultado final de testes" },
+      return stop({ state: "blocked_regressions", detail: regressions.length ? `${regressions.length} regressão(ões)` : "sem resultado final de testes" },
         `⏸️ Merge automático bloqueado: ${regressions.length ? `${regressions.length} regressão(ões) no PASS_TO_PASS` : "sem resultado final de testes (TSK-FULL-TEST não concluído)"}.`);
     }
+  }
+
+  // 🔴 GAP-59: fim da AVALIAÇÃO. Todas as travas de política passaram; a partir daqui o código toca a
+  // rede e muda o mundo — o que a avaliação, por definição, não pode fazer. A realidade do GitHub
+  // (conflito, proteção, head movido) fica deliberadamente FORA do veredito: ela é verificada no merge
+  // real e nunca é contornada por `force`, então antecipá-la só gastaria chamadas de API.
+  if (evaluate) {
+    return { state: "would_merge", sha: (extra.evolution_head_sha as string | undefined) ?? undefined, detail: `compat ${compat}` };
   }
 
   // 6. Realidade do GitHub (nunca contornada por `force`).

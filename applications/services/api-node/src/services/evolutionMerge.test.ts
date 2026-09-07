@@ -245,3 +245,83 @@ describe("tryAutoMergeEvolution — claim atômico (GAP 3)", () => {
     expect(r.state).toBe("failed");
   });
 });
+
+/**
+ * 🔴 GAP-59 — a sonda (`evaluateOnly`). O veredito tem de ser AVALIAÇÃO PURA: aplica a política,
+ * não toca a rede, não reivindica `merging` (senão trava o merge real que vem logo depois) e não
+ * grava estado nenhum (senão a sonda passa a mentir sobre o histórico do projeto).
+ */
+describe("tryAutoMergeEvolution — evaluateOnly (GAP-59)", () => {
+  const REGRESSION_CHECKPOINT = {
+    evolution_baseline: { status: "ok", final: { status: "ok", passed: 9, failed: 1, regressions: ["t_pedido_status"] } },
+  };
+
+  it("flag OFF: a sonda NÃO para em skipped_flag — avalia a política até o fim", async () => {
+    // Este é o defeito: com a flag desligada (default), o merge automático nunca chegou a avaliar
+    // regressões, então o estado gravado ficava vazio e a rota manual não pedia confirmação.
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue(REGRESSION_CHECKPOINT);
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    const r = await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true });
+    expect(r.state).toBe("blocked_regressions");
+    expect(r.detail).toContain("1 regressão");
+  });
+
+  it("política limpa → would_merge, sem tocar o GitHub", async () => {
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    const r = await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true });
+    expect(r.state).toBe("would_merge");
+    expect(gh.getPullRequest).not.toHaveBeenCalled();
+    expect(gh.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("a sonda NÃO reivindica `merging` (senão o merge real logo depois bateria no próprio claim)", async () => {
+    const { db, calls } = makeDb({ row: baseRow(evolExtra()) });
+    await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true });
+    expect(calls.some((c) => /"evolution_merge_state":"merging"/.test(c.sql))).toBe(false);
+  });
+
+  it("a sonda NÃO grava estado nem diálogo, mesmo quando bloqueia", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue(REGRESSION_CHECKPOINT);
+    const { db, calls } = makeDb({ row: baseRow(evolExtra()) });
+    await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true });
+    expect(calls.some((c) => /UPDATE projects SET extra/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => /project_dialogue/.test(c.sql))).toBe(false);
+  });
+
+  it("sem evidência de testes → blocked_no_evidence (a rota recusa antes de forçar)", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue(null);
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_no_evidence");
+  });
+
+  it("baseline sem testes → blocked_no_tests (risco que o humano precisa VER)", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue({ evolution_baseline: { status: "no_tests" } });
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_no_tests");
+  });
+
+  it("compat MAJOR → blocked_major na sonda", async () => {
+    const { db } = makeDb({ row: baseRow(evolExtra({ evolution_compat: "major" })) });
+    expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_major");
+  });
+
+  it("evaluateOnly + force: a política ainda vale — avaliar com force devolveria `would_merge` justo no caso perigoso", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue(REGRESSION_CHECKPOINT);
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    const r = await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true, force: true });
+    expect(r.state).toBe("blocked_regressions");
+  });
+
+  it("já mergeado → merged (a sonda não reabre o que terminou)", async () => {
+    const { db } = makeDb({ row: baseRow(evolExtra({ evolution_merged_at: "2026-09-04T00:00:00Z", evolution_merge_sha: "OLD" })) });
+    expect(await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).toEqual({ state: "merged", sha: "OLD" });
+  });
+
+  it("merge real segue mergeando com force depois de uma sonda (a sonda não deixa resíduo)", async () => {
+    checkpoint.readEvolutionCheckpoint.mockResolvedValue(REGRESSION_CHECKPOINT);
+    const { db } = makeDb({ row: baseRow(evolExtra()) });
+    expect((await tryAutoMergeEvolution(db as never, "child", { evaluateOnly: true })).state).toBe("blocked_regressions");
+    const r = await tryAutoMergeEvolution(db as never, "child", { force: true, actorUserId: "u1" });
+    expect(r).toMatchObject({ state: "merged", sha: "MERGESHA" });
+  });
+});
