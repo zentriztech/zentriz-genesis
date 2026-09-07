@@ -881,6 +881,88 @@ def load_spec_all(project_id: str) -> str:
         return ""
 
 
+def _spec_input_cap() -> int:
+    """Orçamento de chars da SPEC nos prompts da fábrica (GAP-53). Ver PipelineContext._SPEC_CAP."""
+    try:
+        return max(int(os.environ.get("SPEC_INPUT_CHARS", "145000")),
+                   int(os.environ.get("AGENT_INPUT_CHARS", "40000")))
+    except ValueError:
+        return 145_000
+
+
+# Fronteira de arquivo produzida por `load_spec_all` ("---\n# [caminho/arquivo.md]\n\n").
+_SPEC_BLOCK_RE = re.compile(r"(?:^|\n)---\n# \[([^\]\n]+)\]\n\n")
+
+
+def _spec_budget_note(text: str, dropped: list[str], partial: bool) -> str:
+    """Prefixa o aviso do corte NO PRÓPRIO PROMPT (transporte de fato, decisão é do agente)."""
+    if not dropped and not partial:
+        return text
+    lines = [
+        "> ⚠️ **ESTA ESPECIFICAÇÃO CHEGOU INCOMPLETA A VOCÊ** — ela não cabe inteira no",
+        "> orçamento de contexto desta chamada. O que segue são arquivos ÍNTEGROS, na ordem",
+        "> original da Bancada.",
+    ]
+    if partial:
+        lines.append("> O PRIMEIRO arquivo foi cortado no meio: ele sozinho excede o orçamento.")
+    if dropped:
+        lines.append(
+            f"> **{len(dropped)} arquivo(s) da spec NÃO chegaram:** "
+            + ", ".join(dropped[:20]) + ("…" if len(dropped) > 20 else "")
+        )
+    lines += [
+        "> Trate o que falta como LACUNA DECLARADA: **não invente** o conteúdo desses arquivos e",
+        "> registre explicitamente no seu resultado o que não pôde ser considerado.",
+        "",
+    ]
+    return "\n".join(lines) + "\n" + text
+
+
+def fit_spec_to_budget(spec_content: str, cap: int) -> tuple[str, list[str], bool]:
+    """Ajusta a spec ao orçamento CORTANDO EM FRONTEIRA DE ARQUIVO e DECLARANDO o corte.
+
+    Devolve `(texto, arquivos_fora, primeiro_arquivo_parcial)`.
+
+    Duas regras, ambas de TRANSPORTE de fato (a decisão de conteúdo continua sendo do LLM):
+      • nunca cortar no meio de uma frase quando existe fronteira de arquivo — o agente recebe
+        um conjunto de arquivos ÍNTEGROS, na ordem em que a Bancada os criou;
+      • nunca cortar em SILÊNCIO — o prompt carrega o aviso com o nome dos arquivos que ficaram
+        fora. Sem isso o agente obedece `no-invent` sobre uma spec que ele não sabe estar
+        incompleta e "completa" a lacuna inventando (classe do GAP-45: mentir sobre o corte).
+    """
+    if not spec_content or len(spec_content) <= cap:
+        return spec_content, [], False
+    # Reserva para o aviso — ele também consome orçamento.
+    budget = max(1_000, cap - 1_200)
+    matches = list(_SPEC_BLOCK_RE.finditer(spec_content))
+    if not matches:
+        # Spec de arquivo único: não há fronteira onde cortar; corta e declara como parcial.
+        return _spec_budget_note(spec_content[:budget], [], True), [], True
+    blocks: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(spec_content)
+        blocks.append((m.group(1), spec_content[m.start():end]))
+    # Empacotamento FIRST-FIT: um arquivo grande no meio da árvore não pode cancelar todos os
+    # que vêm depois. Medido no NVX: parar no primeiro que não cabe entregava 1 de 12 arquivos
+    # (4,9%) porque `modelo-dados.md` (198.435 chars) é maior que o orçamento INTEIRO; seguir
+    # empacotando entrega 2 (10,7%). A ordem original é preservada; escolher o que fica de fora
+    # continua sendo consequência do orçamento, não julgamento de relevância.
+    kept: list[str] = []
+    kept_labels: set[str] = set()
+    used = 0
+    for label, text in blocks:
+        if used + len(text) <= budget:
+            kept.append(text)
+            kept_labels.add(label)
+            used += len(text)
+    partial = not kept
+    if partial:
+        kept = [spec_content[:budget]]
+        kept_labels.add(blocks[0][0])
+    dropped = [label for label, _t in blocks if label not in kept_labels]
+    return _spec_budget_note("".join(kept), dropped, partial), dropped, partial
+
+
 def _compute_spec_files_hash(project_id: str) -> str:
     """Hash canônico da ÁRVORE de spec (SPEC-APPROVED) — RFC-0004 T1.2.
 
@@ -999,11 +1081,13 @@ def call_engineer(
     if pipeline_ctx:
         inputs = pipeline_ctx.build_inputs_for_engineer(cto_questionamentos)
         if spec_content:
-            inputs["product_spec"] = spec_content[:15000]
+            # GAP-53: era `[:15000]` — no NVX LastMile (1.065.930 chars) isso entregava 1,41% da
+            # spec e ZERO dos 22 FRs ao Engineer, que então propõe stack para um produto que não viu.
+            inputs["product_spec"] = spec_content[:_spec_input_cap()]
     else:
         inputs = {
             "spec_ref": spec_ref,
-            "product_spec": spec_content[:15000] if spec_content else "",
+            "product_spec": spec_content[:_spec_input_cap()] if spec_content else "",
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
         if cto_questionamentos:
@@ -1058,8 +1142,11 @@ def call_cto(
         if engineer_proposal:
             inputs["engineer_stack_proposal"] = engineer_proposal[:_cap]
         if spec_content:
-            inputs["spec_raw"] = spec_content[:_cap]
-            inputs["product_spec"] = spec_content[:_cap]
+            # GAP-53: a spec usa o orçamento DELA (`SPEC_INPUT_CHARS`), não o dos artefatos
+            # intermediários — com `_cap` o CTO via 40.000 de 1.065.930 chars (6 de 22 FRs).
+            _scap = _spec_input_cap()
+            inputs["spec_raw"] = spec_content[:_scap]
+            inputs["product_spec"] = spec_content[:_scap]
         if spec_template:
             inputs["spec_template"] = spec_template[:_cap]
         if backlog_summary:
@@ -1074,8 +1161,9 @@ def call_cto(
         if engineer_proposal:
             inputs["engineer_stack_proposal"] = engineer_proposal
         if spec_content:
-            inputs["spec_raw"] = spec_content[:20000]
-            inputs["product_spec"] = spec_content[:20000]
+            # GAP-53: idem no montador sem pipeline_ctx (era 20.000).
+            inputs["spec_raw"] = spec_content[:_spec_input_cap()]
+            inputs["product_spec"] = spec_content[:_spec_input_cap()]
         if spec_template:
             inputs["spec_template"] = spec_template[:15000]
         if backlog_summary:
@@ -4609,6 +4697,34 @@ def main() -> int:
                         spec_content.count("\n# [") + (1 if spec_content and "\n# [" not in spec_content else 0))
     if not spec_content:
         spec_content = load_spec(spec_path)
+
+    # 🔴 GAP-53 (medido em prod 2026-09-07): a Bancada entrega uma ÁRVORE — no NVX LastMile,
+    # 12 arquivos / 1.065.930 chars — e a fábrica recebia os primeiros 40.000 (3,75%), com o corte
+    # caindo DENTRO do 1º arquivo, sem log e sem aviso ao humano: o log acima anunciava
+    # "1.065.930 chars, 12 arquivo(s)" e passava a impressão de que tudo entrou. Aqui o corte
+    # (quando houver) cai em fronteira de arquivo, vai DECLARADO no prompt e é dito ao humano.
+    _spec_full_len = len(spec_content)
+    _spec_cap = _spec_input_cap()
+    spec_content, _spec_dropped, _spec_partial = fit_spec_to_budget(spec_content, _spec_cap)
+    if _spec_dropped or _spec_partial:
+        logger.warning(
+            "[Pipeline] SPEC TRUNCADA: %d de %d chars entregues (orçamento %d); %d arquivo(s) fora: %s",
+            len(spec_content), _spec_full_len, _spec_cap, len(_spec_dropped), ", ".join(_spec_dropped[:12]),
+        )
+        _post_step(
+            f"⚠️ A especificação tem {_spec_full_len} chars e não cabe inteira no contexto da "
+            f"fábrica (orçamento {_spec_cap}). Foram entregues {len(spec_content)} chars"
+            + (f" e {len(_spec_dropped)} arquivo(s) ficaram fora: " + ", ".join(_spec_dropped[:8])
+               if _spec_dropped else " (primeiro arquivo cortado no meio)")
+            + ". Os agentes foram avisados de que a spec está incompleta — não vão inventar o que "
+            "falta, mas o produto pode sair menor do que a spec. O agente ainda pode cortar mais, "
+            "conforme o modelo, e também declara esse corte. Divida o produto em projetos menores "
+            "na Bancada ou aumente SPEC_INPUT_CHARS.",
+            request_id,
+        )
+    elif _spec_full_len:
+        logger.info("[Pipeline] Spec ÍNTEGRA entregue à fábrica (%d chars, orçamento %d)",
+                    _spec_full_len, _spec_cap)
 
     spec_template_content = _load_spec_template()
     # LEI 11: tentar restaurar checkpoint; senão criar contexto novo

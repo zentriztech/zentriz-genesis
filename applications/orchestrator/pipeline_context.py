@@ -224,11 +224,24 @@ class PipelineContext:
     # recusava gerar backlog (no-invent) → BACKLOG vazio (achados #5 e #19). Env AGENT_INPUT_CHARS.
     _CTX_CAP = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
 
+    # 🔴 GAP-53: a SPEC tem orçamento PRÓPRIO — `AGENT_INPUT_CHARS` nasceu para artefatos
+    # INTERMEDIÁRIOS (proposta do Engineer, charter, backlog). Aplicá-lo à spec entregava à
+    # fábrica 3,75% dela: medido em prod 2026-09-07 no NVX LastMile, a árvore tinha 1.065.930
+    # chars em 12 arquivos e o corte de 40.000 caía DENTRO do primeiro — o CTO via 6 de 22 FRs
+    # e o Engineer 0 de 22. A spec é o CONTRATO do produto (é para ela que a Bancada existe).
+    # O default 145.000 NÃO é número redondo: é o teto que o orçamento do próprio runtime dos
+    # agentes já concede a `spec_raw` com os modelos de prod (`max_output` 64k →
+    # (64000−8000)·4·0,65 = 145.600 — `runtime.py::_prompt_budget`). Alinhar os dois faz o corte
+    # em FRONTEIRA DE ARQUIVO ser o efetivo, em vez de o runtime recortar no meio depois.
+    # Env SPEC_INPUT_CHARS.
+    _SPEC_CAP = max(int(os.environ.get("SPEC_INPUT_CHARS", "145000")), _CTX_CAP)
+
     def set_spec_raw(self, value: str) -> None:
-        self.spec_raw = (value or "")[: max(self._CTX_CAP, 30000)]
+        self.spec_raw = (value or "")[: self._SPEC_CAP]
 
     def set_product_spec(self, value: str) -> None:
-        self.product_spec = (value or "")[: self._CTX_CAP]
+        # product_spec é a spec NORMALIZADA pelo CTO — mesma natureza da spec crua, mesmo teto.
+        self.product_spec = (value or "")[: self._SPEC_CAP]
 
     def set_product_spec_template(self, value: str) -> None:
         self.product_spec_template = (value or "")[: self._CTX_CAP]
