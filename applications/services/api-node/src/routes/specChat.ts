@@ -890,7 +890,14 @@ async function gapFileTargetContent(
   if (!gapFileEditsEnabled()) return { tooLarge: true, cap };
   const { buildFileDigest } = await import("../services/specFileDigest.js");
   const d = buildFileDigest(filePath, content, findings, cap);
-  console.log(`[SpecChat] alvo recortado ${filePath}: ${content.length} chars > teto ${cap} → resumo dirigido de ${d.text.length} chars (${d.used}/${d.total} seções)`);
+  // 🔴 GAP-72: a contagem que importa é a ANCORADA — "7/57 seções" parecia saudável enquanto 8 dos 11
+  // GAPs despachados apontavam seção que o CTO não recebeu. Sem este número no log, o defeito é invisível.
+  console.log(
+    `[SpecChat] alvo recortado ${filePath}: ${content.length} chars > teto ${cap} → resumo dirigido de ` +
+    `${d.text.length} chars (${d.used}/${d.total} seções; ancoradas ${d.anchored}/${d.anchorsLocated}` +
+    `${d.anchorsDropped.length > 0 ? `, FORA por orçamento: ${d.anchorsDropped.join(", ")}` : ""}` +
+    `${d.anchorsUnlocatable.length > 0 ? `, não endereçáveis: ${d.anchorsUnlocatable.join(", ")}` : ""})`,
+  );
   return { text: d.text, digested: d.digested };
 }
 

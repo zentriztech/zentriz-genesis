@@ -61,3 +61,84 @@ export function scoreSections(secs: MdSection[], terms: string[]): Array<{ i: nu
     .filter((x) => x.hits > 0)
     .sort((a, b) => b.hits - a.hits || a.i - b.i);
 }
+
+/**
+ * Normalização de âncora para BUSCA NO TEXTO (não para identidade — isso é `normalizeAnchor`).
+ *
+ * O juiz escreve `§8.6 (c)`, `§9.1 item 0-bis`, `CLI-ANON-01`; o arquivo escreve `## 8.6 Visibilidade`,
+ * `**§8.6**`, `REQ CLI-ANON-01`. Então a busca casa por uma CHAVE mínima e estável: minúsculas, sem
+ * `§`, sem pontuação de enfeite, espaços colapsados. Dígitos são PRESERVADOS (`8.6` ≠ `8.7`).
+ *
+ * ⚠️ Vive AQUI, junto do `splitSections`, porque quem MEDE se o trecho ancorado foi tocado
+ * (`gapPersistence.untouchedAnchors`) e quem DECIDE qual trecho o CTO vai ver
+ * (`specFileDigest.buildFileDigest`) precisam da MESMA régua — ver GAP-72: réguas diferentes fazem o
+ * laço acusar de "intocada" uma seção que ele mesmo nunca mostrou.
+ */
+export function anchorSearchKey(anchor: string): string {
+  return (anchor ?? "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/§/g, " ")
+    .replace(/[^a-z0-9.\-\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Tokens comparáveis de um texto. Pontuação de borda cai (`8.6.` no fim de frase é o mesmo `8.6` do
+ * cabeçalho) — sem isso a âncora deixaria de casar por causa de um ponto final.
+ */
+export function anchorTokens(s: string): string[] {
+  return anchorSearchKey(s)
+    .split(" ")
+    .map((t) => t.replace(/^[.-]+/, "").replace(/[.-]+$/, ""))
+    .filter(Boolean);
+}
+
+/**
+ * Índice da seção que uma âncora endereça, ou `null` se o texto não a contém.
+ *
+ * ⚠️ Por que NÃO é `body.includes(anchor)`: a chave de `§8.6 (c)` é `8.6 c`, mas no arquivo o `8.6` e o
+ * `(c)` estão separados pelo título da seção (`## 8.6 Visibilidade` … `(c) A consulta anônima…`).
+ * Casar substring contígua devolveria `null` para TODAS as âncoras reais medidas em prod.
+ *
+ * Regra: o PRIMEIRO token é o localizador (`8.6`, `11.3`, `cli-anon-01`); os demais só desempatam.
+ * Seção cujo CABEÇALHO contém o localizador vence qualquer seção que só o mencione no corpo — uma
+ * referência cruzada (`ver §8.6`) não é a seção §8.6. Empate mantém a ordem do arquivo (determinístico).
+ */
+export interface AnchorIndex {
+  entries: Array<{ i: number; tokens: Set<string>; headingTokens: Set<string> }>;
+}
+
+/**
+ * Tokeniza as seções UMA vez para localizar N âncoras. Tokenizar um arquivo de 200k chars por âncora
+ * seria quadrático no caminho quente (cada rodada localiza ~12 âncoras).
+ */
+export function buildAnchorIndex(secs: MdSection[]): AnchorIndex {
+  return {
+    entries: secs.map((s, i) => ({
+      i,
+      tokens: new Set(anchorTokens(s.body)),
+      headingTokens: new Set(s.heading.startsWith("#") ? anchorTokens(s.heading) : []),
+    })),
+  };
+}
+
+export function locateSectionIndex(secs: MdSection[] | AnchorIndex, anchor: string): number | null {
+  const idx = Array.isArray(secs) ? buildAnchorIndex(secs) : secs;
+  const toks = anchorTokens(anchor);
+  if (toks.length === 0) return null;
+  const head = toks[0];
+  const rest = toks.slice(1);
+  const cands = idx.entries.filter((s) => s.tokens.has(head));
+  if (cands.length === 0) return null;
+  const byHeading = cands.filter((s) => s.headingTokens.has(head));
+  const pool = byHeading.length > 0 ? byHeading : cands;
+  let best = pool[0].i;
+  let bestScore = -1;
+  for (const s of pool) {
+    const score = rest.reduce((n, t) => n + (s.tokens.has(t) ? 1 : 0), 0);
+    if (score > bestScore) { bestScore = score; best = s.i; }
+  }
+  return best;
+}
