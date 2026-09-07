@@ -55,7 +55,9 @@ import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import { projectFindingsState, gapDeltaSinceLastRun, findingFingerprint, type EnrichedFinding } from "./findingTriage.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
-import { startValidation, unjudgedSpecFiles } from "./specValidation.js";
+// 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
+import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
+import { startValidation, unjudgedSpecFiles, type ValidationFinding } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
@@ -296,6 +298,25 @@ export interface AutonomyRoundLog {
    * achou reincidente, e aí o laço NÃO afirma nada ao agente.
    */
   persistedGaps?: PersistentGapRef[] | null;
+  /**
+   * 🔴 GAP-71 — as âncoras dos GAPs que ESTA rodada mandou ao CTO, gravadas no DESPACHO.
+   *
+   * Existem porque o fato do GAP-71 só pode ser medido na APLICAÇÃO (é aí que se tem o texto de antes
+   * e o de depois) e nesse tick o escopo dos findings já não está em memória — o laço relê a run do
+   * banco. Sem as âncoras no log, medir "o agente encostou no trecho apontado?" exigiria refazer o
+   * roteamento de GAPs, que custa LLM.
+   */
+  gapAnchors?: string[] | null;
+  /**
+   * 🔴 GAP-71 — destas âncoras, quais tiveram o trecho ancorado INALTERADO (byte-a-byte) pela rodada
+   * que acabou de ser APLICADA. Ver `untouchedAnchors`.
+   *
+   * É a assinatura mecânica da patologia medida em prod: o CTO acrescenta uma errata declarando o
+   * trecho nulo em OUTRO lugar do arquivo, o trecho ofensor fica idêntico, e o juiz — que relê o texto
+   * original — reabre o mesmo GAP na validação seguinte. Lista vazia = tocou em todas as âncoras
+   * mensuráveis; ausente = a rodada não tinha âncora mensurável (nada é afirmado).
+   */
+  anchorsUntouched?: string[] | null;
   /**
    * 🔴 GAP-45 — o recorte 🔴/🟡 do PASSE, separado do recorte 🔴/🟡 do ARQUIVO.
    *
@@ -1093,6 +1114,76 @@ export function persistentGapsFor(
 }
 
 /**
+ * 🔴 GAP-71 — as âncoras dos GAPs desta leva, únicas e sem vazias, para o log do despacho.
+ *
+ * Finding sem âncora simplesmente não entra: o fato "o trecho ficou intocado" não é mensurável sem um
+ * trecho, e um `null` na lista faria a medição do apply contar uma âncora que não existe.
+ */
+export function gapAnchorsOf(findings: Array<{ anchor?: string | null }>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const f of findings) {
+    const a = (f.anchor ?? "").trim();
+    if (!a || seen.has(a)) continue;
+    seen.add(a);
+    out.push(a);
+  }
+  return out;
+}
+
+/**
+ * 🔴 GAP-71 — as âncoras que a rodada ANTERIOR **deste arquivo** deixou intocadas.
+ *
+ * Busca de trás para frente pela última rodada do mesmo arquivo que tenha `anchorsUntouched` gravado
+ * (a rodada mais recente pode ser de outro arquivo, ou ter sido descartada por veto e aí não mediu
+ * nada). Não olha rodadas de OUTROS arquivos: a afirmação é sobre este trecho, neste arquivo.
+ */
+export function lastUntouchedAnchors(run: Pick<AutonomyRun, "rounds">, filePath: string): string[] {
+  const norm = (p: string) => p.trim().toLowerCase();
+  for (let i = run.rounds.length - 1; i >= 0; i--) {
+    const r = run.rounds[i];
+    if (norm(r.filePath ?? "") !== norm(filePath)) continue;
+    if (Array.isArray(r.anchorsUntouched)) return r.anchorsUntouched;
+  }
+  return [];
+}
+
+/**
+ * 🔴 GAP-71 — reincidência de fingerprint estável, lida das validações recentes do PROJETO.
+ *
+ * A janela é `RESOLVED_WINDOW`-ish por escolha explícita: 8 validações cobrem com folga os passes de
+ * uma run (`AUTONOMY_MAX_ROUNDS = 5`) e ainda alcançam a run anterior, que é onde o GAP-68 já provou
+ * que a cegueira custa caro (toda run nova começaria em "1ª aparição").
+ *
+ * Falha de banco devolve `[]` **com `console.warn`**: o fato é um extra do prompt, nunca pré-condição
+ * da rodada — mas um degrade silencioso aqui reabriria exatamente o GAP que isto fecha.
+ */
+export async function stableRecurrenceFor(
+  db: Db, run: AutonomyRun, filePath: string, findings: ValidationFinding[],
+): Promise<PersistentGapRef[]> {
+  try {
+    const rows = (await db.query(
+      `SELECT findings, stage_b_coverage FROM spec_validation_runs
+        WHERE project_id = $1 AND status IN ('passed','failed')
+        ORDER BY created_at DESC LIMIT 8`,
+      [run.projectId],
+    )).rows as Array<{ findings: unknown; stage_b_coverage: unknown }>;
+    const past = rows.map((r) => ({
+      findings: Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [],
+      coverage: r.stage_b_coverage,
+    }));
+    const refs = stableRecurrenceRefs(past, filePath, findings);
+    if (refs.length > 0) {
+      console.info(`[SpecAutonomy] run=${run.id} ${filePath}: ${refs.length} GAP(s) reincidente(s) de âncora ESTÁVEL (máx ${Math.max(...refs.map((r) => r.times))} aparições).`);
+    }
+    return refs;
+  } catch (e) {
+    console.warn(`[SpecAutonomy] run=${run.id} ${filePath}: reincidência estável indisponível (${msg(e)}) — o CTO recebe os GAPs sem o fato do GAP-71.`);
+    return [];
+  }
+}
+
+/**
  * 🔴 GAP-43 — quantas vezes esta run já terminou um passe SEM medição?
  *
  * Deriva do log (nada de coluna nova): a rodada que fecha um passe não medido leva a marca
@@ -1605,6 +1696,9 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
     filePath: target, gapsBefore: gaps.important, blockers: fileBlockers, warnings: fileFindings.length - fileBlockers,
     specChars: file.content.length, announcedBudget: growthBudget,
+    // GAP-71: as âncoras vão para o log AQUI porque só o despacho as tem; a medição "o trecho ficou
+    // intocado?" acontece no apply, num tick em que o escopo já não existe.
+    gapAnchors: gapAnchorsOf(fileFindings),
     note: `\`${target}\` enviado ao CTO (${fileFindings.length} GAP(s) deste arquivo).`,
   });
 
@@ -1614,7 +1708,14 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // 🔴 GAP-68: e se algum destes GAPs já foi entregue antes e SOBREVIVEU à edição, o agente recebe
   // esse fato também — é a única coisa que ele não pode deduzir do texto do arquivo.
   const knownRefs = await knownPersistentGaps(db, run);
-  const persistentGaps = persistentGapsFor(knownRefs, target, fileFindings);
+  // 🔴 GAP-71: a reincidência de fingerprint ESTÁVEL — o caso que o reconciliador do GAP-67 não vê (um
+  // GAP que não sai nem entra da lista dá `closed: 0, opened: 0` e `persisted` vazio). Cruzada com as
+  // âncoras que a rodada anterior deixou INTOCADAS, é o que diz ao agente que a errata não funcionou.
+  const stableRefs = await stableRecurrenceFor(db, run, target, fileFindings);
+  const persistentGaps = markUntouched(
+    mergeRecurrenceRefs(persistentGapsFor(knownRefs, target, fileFindings), stableRefs),
+    lastUntouchedAnchors(run, target),
+  );
   if (knownRefs.length > 0 && persistentGaps.length === 0) {
     // Refs existem mas nenhuma casou com este arquivo: normal se os reincidentes são de OUTRO arquivo.
     // Vira sintoma quando acontece para todos os arquivos do passe — aí a ação está inerte.
@@ -1934,11 +2035,29 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     return true;
   }
 
+  // 🔴 GAP-71 — a MEDIÇÃO só é possível AQUI: este é o único ponto do laço que tem os dois textos (o
+  // de antes, `file.content`, e o que acabou de ser escrito) e as âncoras que o despacho pediu. Roda
+  // DEPOIS da escrita porque medir antes afirmaria algo sobre uma rodada que ainda podia ser vetada.
+  // Só as âncoras do DESPACHO DESTA rodada (`lastRound.round === run.round`): as de uma rodada
+  // anterior falariam de um pedido que não é este.
+  const touch = lastRound?.round === run.round
+    ? untouchedAnchors(file.content, revised, lastRound.gapAnchors ?? [])
+    : { measured: [], untouched: [], unlocatable: [] };
+  if (touch.untouched.length > 0) {
+    console.info(
+      `[SpecAutonomy] run=${run.id.slice(0, 8)} ${target}: ${touch.untouched.length}/${touch.measured.length} ` +
+      `âncora(s) INTOCADA(S) apesar de ${job?.editsApplied ?? 0} edição(ões) — ${touch.untouched.slice(0, 6).join(", ")}`,
+    );
+  }
   await patchLastRound(db, run, {
     // GAP-28: `deltaChars` é o que ESTA rodada gastou (+) ou devolveu (−) do orçamento do passe.
     // Só a rodada APLICADA conta — o que foi vetado não saiu do disco, logo não consumiu margem.
     applied: true, filePath: target, specChars: revised.length,
     deltaChars: revised.length - file.content.length,
+    // GAP-71: as âncoras cujo trecho sobreviveu VERBATIM. Lista vazia não polui o log, mas a
+    // diferença entre "vazia" e "ausente" importa: ausente = não medido (rodada de criação, sem
+    // âncoras no despacho), vazia = medido e o agente encostou em todos os trechos.
+    ...(touch.measured.length > 0 ? { anchorsUntouched: touch.untouched } : {}),
     // GAP-64: o excesso tolerado é DECLARADO — foi decisão do laço pagar, e a próxima rodada nasce com
     // a margem já menor. Zero não polui o log.
     ...(toleratedOverflow > 0 ? { toleratedOverflow } : {}),
@@ -1954,6 +2073,13 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
           + " a rodada removeu redeclaração e passou a citar o oráculo, então o laço preferiu escrever a"
           + ` remoção a descartar a rodada inteira. Restam ${Math.max(0, graceLeft - consolidationGrace)} chars`
           + " de graça neste passe."
+        : "")
+      // GAP-71: o fato vai para o log em PROSA também, porque é ele que o humano lê no chat quando
+      // pergunta por que a contagem de GAPs não cai.
+      + (touch.untouched.length > 0
+        ? ` ⚠️ ${touch.untouched.length} de ${touch.measured.length} trecho(s) apontado(s) ficaram`
+          + ` IDÊNTICOS (${touch.untouched.slice(0, 4).join(", ")}) — a rodada seguinte vai exigir a`
+          + " edição no próprio trecho."
         : ""),
   });
   const claim = await db.query(

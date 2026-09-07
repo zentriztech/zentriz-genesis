@@ -9,7 +9,10 @@
  */
 import { describe, it, expect } from "vitest";
 import { buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
-import { lastPersistedGaps, persistentGapsFor, knownPersistentGaps } from "./specAutonomy.js";
+import {
+  lastPersistedGaps, persistentGapsFor, knownPersistentGaps,
+  gapAnchorsOf, lastUntouchedAnchors, stableRecurrenceFor,
+} from "./specAutonomy.js";
 import { persistentGapFactBlock } from "../routes/specChat.js";
 import { findingFingerprint } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -163,6 +166,92 @@ describe("knownPersistentGaps (herança entre runs)", () => {
   });
 });
 
+/**
+ * 🔴 GAP-71 — os três fatos que o LAÇO produz (o módulo `gapPersistence` só sabe calculá-los).
+ *
+ * O que se protege aqui é a cadeia: o despacho grava as âncoras que pediu → o apply mede quais
+ * ficaram intocadas → o despacho seguinte lê essa medição DO ARQUIVO CERTO e a cruza com a
+ * reincidência lida do banco. Qualquer elo frouxo faz a correção ficar inerte em silêncio, que é
+ * exatamente como o GAP-68 passou 23 rodadas sem afirmar nada.
+ */
+describe("gapAnchorsOf", () => {
+  it("guarda as âncoras do despacho, únicas e na ordem", () => {
+    expect(gapAnchorsOf([{ anchor: "§8.6 (c)" }, { anchor: "§11.5" }, { anchor: "§8.6 (c)" }]))
+      .toEqual(["§8.6 (c)", "§11.5"]);
+  });
+
+  it("finding SEM âncora não entra — não há trecho para medir", () => {
+    expect(gapAnchorsOf([{ anchor: null }, { anchor: "  " }, {}])).toEqual([]);
+  });
+});
+
+describe("lastUntouchedAnchors", () => {
+  const run = (rounds: unknown[]) => ({ rounds }) as never;
+
+  it("lê a última rodada DO MESMO arquivo, ignorando as de outros arquivos", () => {
+    const r = run([
+      { filePath: "modelo-dados.md", anchorsUntouched: ["§8.6 (c)"] },
+      { filePath: "privacidade-lgpd.md", anchorsUntouched: ["§4.2"] },
+    ]);
+    expect(lastUntouchedAnchors(r, "modelo-dados.md")).toEqual(["§8.6 (c)"]);
+  });
+
+  it("a medição MAIS RECENTE do arquivo vence", () => {
+    const r = run([
+      { filePath: "modelo-dados.md", anchorsUntouched: ["§8.6 (c)"] },
+      { filePath: "modelo-dados.md", anchorsUntouched: [] },
+    ]);
+    expect(lastUntouchedAnchors(r, "modelo-dados.md")).toEqual([]);
+  });
+
+  it("rodada sem medição (vetada, ou de criação) é pulada — não vira 'nada intocado'", () => {
+    const r = run([
+      { filePath: "modelo-dados.md", anchorsUntouched: ["§8.6 (c)"] },
+      { filePath: "modelo-dados.md", applied: false, rejectedReason: "veto de crescimento" },
+    ]);
+    expect(lastUntouchedAnchors(r, "modelo-dados.md")).toEqual(["§8.6 (c)"]);
+  });
+
+  it("sem rodada do arquivo devolve vazio (1ª vez neste arquivo)", () => {
+    expect(lastUntouchedAnchors(run([{ filePath: "outro.md", anchorsUntouched: ["x"] }]), "modelo-dados.md")).toEqual([]);
+  });
+});
+
+describe("stableRecurrenceFor", () => {
+  const run = { id: "run-1", projectId: "proj-1" } as never;
+  const G = f({ anchor: "§8.6 (c)", title: "contradição de visibilidade" });
+  const rowsWith = (n: number) => Array.from({ length: n }, () => ({
+    findings: [G], stage_b_coverage: { full: ["modelo-dados.md"] },
+  }));
+
+  it("conta as validações competentes e devolve ref `stable`", async () => {
+    const calls: unknown[][] = [];
+    const db = { query: (sql: string, p: unknown[]) => { calls.push([sql, p]); return Promise.resolve({ rows: rowsWith(3) }); } } as never;
+    const refs = await stableRecurrenceFor(db, run, "modelo-dados.md", [G]);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].times).toBe(3);
+    expect(refs[0].kind).toBe("stable");
+    // Só validações CONCLUÍDAS entram: uma run em voo ainda não tem findings comparáveis.
+    expect(String(calls[0][0])).toContain("status IN ('passed','failed')");
+    expect(calls[0][1]).toEqual(["proj-1"]);
+  });
+
+  it("uma aparição só não é reincidência", async () => {
+    const db = { query: () => Promise.resolve({ rows: rowsWith(1) }) } as never;
+    expect(await stableRecurrenceFor(db, run, "modelo-dados.md", [G])).toEqual([]);
+  });
+
+  it("findings corrompidos no banco não explodem o despacho", async () => {
+    const db = { query: () => Promise.resolve({ rows: [{ findings: "lixo", stage_b_coverage: null }] }) } as never;
+    await expect(stableRecurrenceFor(db, run, "modelo-dados.md", [G])).resolves.toEqual([]);
+  });
+
+  it("falha do banco degrada para vazio — o fato é EXTRA, nunca pré-condição da rodada", async () => {
+    const db = { query: () => Promise.reject(new Error("relation does not exist")) } as never;
+    await expect(stableRecurrenceFor(db, run, "modelo-dados.md", [G])).resolves.toEqual([]);
+  });
+});
+
 describe("persistentGapsFor", () => {
   const ref = buildPersistentRefs([{ closed: CLOSED, opened: OPENED, why: "w" }]);
 
@@ -226,5 +315,48 @@ describe("persistentGapFactBlock", () => {
     const b = persistentGapFactBlock([{ ...ref[0], anchor: null, anchorBefore: null }]);
     expect(b).not.toContain("null");
     expect(b).toContain("(sem âncora)");
+  });
+
+  // ── 🔴 GAP-71: a reincidência de âncora ESTÁVEL é outra afirmação ────────────────────────────
+  //
+  // Medido em prod (run `f101303f`): as 11 âncoras de `modelo-dados.md` voltaram nas 6 validações
+  // seguidas SEM trocar de endereço, porque o CTO anulava o trecho por errata em vez de reescrevê-lo.
+  // Dizer a ele "só mudou de endereço no documento" nesse caso é FALSO — e manda atacar o sintoma
+  // errado. Estes testes travam a diferença entre as duas descrições.
+  const stableRef: PersistentGapRef = {
+    ...ref[0], kind: "stable", anchorBefore: "§6", anchor: "§6", why: "", times: 3,
+  };
+
+  it("`stable`: NÃO afirma deriva de âncora (ela não se moveu) e imprime uma âncora só", () => {
+    const b = persistentGapFactBlock([stableRef]);
+    expect(b).not.toContain("→");
+    expect(b).not.toContain("só mudou de endereço");
+    expect(b).not.toContain("um revisor compara");
+    expect(b).toContain("MESMO endereço");
+    expect(b).toContain("REESCREVER A SEÇÃO COM OUTRAS PALAVRAS NÃO FECHA");
+    expect(b).toContain("3ª aparição");
+  });
+
+  it("leva MISTA descreve as duas origens sem confundi-las", () => {
+    const b = persistentGapFactBlock([ref[0], stableRef]);
+    expect(b).toContain("um revisor compara");
+    expect(b).toContain("MESMO endereço");
+    // Com rebatismo na leva, o diagnóstico da deriva volta a ser verdadeiro.
+    expect(b).toContain("RENUMERAR, RENOMEAR OU REESCREVER A SEÇÃO NÃO FECHA");
+    expect(b).toContain("§6.1 → §6");
+  });
+
+  it("`untouched`: marca o item E manda editar o próprio trecho, proibindo a errata", () => {
+    const b = persistentGapFactBlock([{ ...stableRef, untouched: true }]);
+    expect(b).toContain("a rodada anterior NÃO alterou este trecho");
+    expect(b).toContain("EDITE O PRÓPRIO TRECHO");
+    expect(b).toMatch(/errata/);
+    expect(b).toContain("REMOVA a errata");
+  });
+
+  it("sem `untouched` o bloco NÃO acusa o agente de não ter mexido no trecho", () => {
+    const b = persistentGapFactBlock([stableRef]);
+    expect(b).not.toContain("NÃO alterou este trecho");
+    expect(b).not.toContain("EDITE O PRÓPRIO TRECHO");
   });
 });
