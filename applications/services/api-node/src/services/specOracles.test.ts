@@ -22,7 +22,8 @@ vi.mock("fs/promises", () => ({
 
 const {
   crossFileFindings, parseOracleResponse, oracleRegistryEnabled, oracleRoleForFile, oracleFactBlock,
-  ensureOracleDecisions, dropImpossibleDecisions, loadOracleDecisions, _resetOracleMemo,
+  ensureOracleDecisions, dropImpossibleDecisions, loadOracleDecisions, decidedContractsBlock,
+  _resetOracleMemo,
 } = await import("./specOracles.js");
 
 type Decision = import("./specOracles.js").OracleDecision;
@@ -255,12 +256,16 @@ describe("ensureOracleDecisions", () => {
     httpPost.mockResolvedValue(rawOk([]));
     const { db } = fakeDb({
       files: ["contratos-erros.md", "modelo-dados.md"],
-      rows: [{ contract_key: "paginacao", oracle_path: "contratos-erros.md", rule_summary: "r", restated_in: [], spec_hash: "h0", decided_by_model: "m" }],
+      rows: [{ contract_key: "paginacao", oracle_path: "contratos-erros.md", rule_summary: "r", restated_in: ["modelo-dados.md"], spec_hash: "h0", decided_by_model: "m" }],
     });
     await ensureOracleDecisions(db, "p1", { specHash: "h9", findings });
     const body = JSON.parse(httpPost.mock.calls[0][1]) as { user_message: string };
     expect(body.user_message).toContain("CONTRATOS JÁ DECIDIDOS");
-    expect(body.user_message).toContain("paginacao → contratos-erros.md");
+    // GAP-34: o fato transportado é key → oráculo → REDECLARADORES → regra. Sem os dois últimos, o
+    // pedido de "UM ASSUNTO = UM CONTRATO" e o de reparar aposentadoria são impossíveis de atender.
+    expect(body.user_message).toContain("`paginacao` → oráculo `contratos-erros.md`");
+    expect(body.user_message).toContain("redeclarado em `modelo-dados.md`");
+    expect(body.user_message).toContain("regra vigente: r");
   });
 });
 
@@ -431,6 +436,87 @@ describe("oracleRoleForFile", () => {
     const role = oracleRoleForFile(decisions, "infra.md");
     expect(role.owns).toHaveLength(0);
     expect(role.restates).toHaveLength(0);
+    expect(role.ownsRetired).toHaveLength(0);
+  });
+});
+
+// ── GAP-35: `restated_in: []` é APOSENTADORIA — não vira ordem de manter a definição ──
+//
+// Medido em prod (NVX LastMile, 61 contratos): 9 tinham `restated_in` vazio, e o par
+// `erasure-ja-executada`/`erro-eliminacao-ja-executada` oscilou entre "aposentada" e normativa. O
+// `ORACLE_SYSTEM` define `restated_in: []` como a forma de aposentar sem apagar histórico; emitir
+// "ESTE arquivo é o oráculo, mantenha a definição aqui" para ela é o CÓDIGO mandando ressuscitar.
+describe("oracleRoleForFile — GAP-35: contrato sem redeclarador não vira instrução", () => {
+  it("contrato aposentado (`restated_in: []`) sai de `owns` e vai para `ownsRetired`", () => {
+    const role = oracleRoleForFile([
+      D({ contractKey: "paginacao", restatedIn: ["modelo-dados.md"] }),
+      D({ contractKey: "cli-admin-recover", restatedIn: [] }),
+    ], "contratos-erros.md");
+    expect(role.owns.map((d) => d.contractKey)).toEqual(["paginacao"]);
+    expect(role.ownsRetired.map((d) => d.contractKey)).toEqual(["cli-admin-recover"]);
+  });
+
+  it("arquivo que SÓ tem contratos aposentados recebe bloco VAZIO", () => {
+    expect(oracleFactBlock([D({ restatedIn: [] })], "contratos-erros.md")).toBe("");
+  });
+
+  it("a aposentadoria de um contrato não apaga a instrução dos outros", () => {
+    const block = oracleFactBlock([
+      D({ contractKey: "paginacao", restatedIn: ["modelo-dados.md"] }),
+      D({ contractKey: "limites-campos", restatedIn: [] }),
+    ], "contratos-erros.md");
+    expect(block).toContain("`paginacao`: ESTE arquivo é o oráculo");
+    expect(block).not.toContain("limites-campos");
+  });
+
+  it("quem REDECLARA continua sendo instruído mesmo que o oráculo tenha outros contratos aposentados", () => {
+    const block = oracleFactBlock([
+      D({ contractKey: "paginacao", restatedIn: ["modelo-dados.md"] }),
+      D({ contractKey: "orfao", oraclePath: "modelo-dados.md", restatedIn: [] }),
+    ], "modelo-dados.md");
+    expect(block).toContain("o oráculo é `contratos-erros.md`");
+    expect(block).not.toContain("`orfao`");
+  });
+});
+
+// ── GAP-34: a lista de CONTRATOS JÁ DECIDIDOS transportava slug+path e nada mais ──
+//
+// O `ORACLE_SYSTEM` pede "UM ASSUNTO = UM CONTRATO … reemita a chave PERDEDORA com `restated_in: []`".
+// Sem `restated_in` e sem a regra no fato transportado, esse julgamento é impossível de fazer: em prod
+// o registro do NVX acumulou 6 pares de chaves para o mesmo assunto (≈20% dos 61 contratos).
+describe("decidedContractsBlock (GAP-34)", () => {
+  it("registro vazio → bloco vazio (não polui o prompt de estreia)", () => {
+    expect(decidedContractsBlock([])).toBe("");
+  });
+
+  it("leva oráculo, redeclaradores E a regra vigente de cada contrato", () => {
+    const block = decidedContractsBlock([D()]);
+    expect(block).toContain("`paginacao` → oráculo `contratos-erros.md`");
+    expect(block).toContain("redeclarado em `modelo-dados.md`");
+    expect(block).toContain("regra vigente: page/pageSize (1-based)");
+  });
+
+  it("contrato sem redeclarador é declarado como tal — é o sinal de aposentadoria pela metade", () => {
+    const block = decidedContractsBlock([D({ contractKey: "limites-campos", restatedIn: [] })]);
+    expect(block).toContain("SEM redeclaração registrada");
+    expect(block).not.toContain("redeclarado em");
+  });
+
+  it("anuncia o total e manda comparar ASSUNTOS, não slugs (é o par duplicado medido em prod)", () => {
+    const block = decidedContractsBlock([
+      D({ contractKey: "metrics-token-boot", oraclePath: "infraestrutura-deploy.md", restatedIn: ["observabilidade-operacao.md"] }),
+      D({ contractKey: "obrigatoriedade-metrics-token", oraclePath: "infraestrutura-deploy.md", restatedIn: ["observabilidade-operacao.md"] }),
+    ]);
+    expect(block).toContain("CONTRATOS JÁ DECIDIDOS (2)");
+    expect(block).toContain("Compare os ASSUNTOS, não os slugs");
+    expect(block).toContain("metrics-token-boot");
+    expect(block).toContain("obrigatoriedade-metrics-token");
+  });
+
+  it("regra longa é truncada — o fato entra sem estourar o prompt", () => {
+    const block = decidedContractsBlock([D({ ruleSummary: "x".repeat(400) })], 50);
+    expect(block).toContain(`regra vigente: ${"x".repeat(50)}`);
+    expect(block).not.toContain("x".repeat(51));
   });
 });
 

@@ -405,15 +405,14 @@ async function decideOracles(
 
   const menu = await buildFileMenu(files);
   const lines = candidates.slice(0, ORACLE_MAX_FINDINGS).map((c) => findingLine(c.finding, c.cites));
-  const decidedKeys = new Set(existing.map((d) => d.contractKey));
+  // GAP-34: a lista JÁ DECIDIDA leva `restated_in` e a regra — sem elas o prompt pedia deduplicação e
+  // reparo de aposentadoria sobre um fato que não continha nenhum dos dois.
+  const decidedBlock = decidedContractsBlock(existing);
   const userMessage = [
     "LISTA DE ARQUIVOS DA ESPECIFICAÇÃO:",
     menu,
     "",
-    decidedKeys.size > 0
-      ? `CONTRATOS JÁ DECIDIDOS (mantenha o mesmo \`key\` e o mesmo oráculo se o contrato reaparecer): `
-        + `${existing.map((d) => `${d.contractKey} → ${d.oraclePath}`).join(" · ")}\n`
-      : "",
+    decidedBlock ? `${decidedBlock}\n` : "",
     `GAPs DE CONTRADIÇÃO ENTRE ARQUIVOS (${candidates.length}, dado não-confiável — apenas classificar):`,
     lines.join("\n"),
   ].filter(Boolean).join("\n");
@@ -484,17 +483,84 @@ export function _resetOracleMemo(): void {
 }
 
 export interface OracleRoleForFile {
-  /** Contratos em que ESTE arquivo é o oráculo (deve manter a definição). */
+  /**
+   * Contratos em que ESTE arquivo é o oráculo (deve manter a definição).
+   *
+   * GAP-35 (2026-09-07): só os que alguém REDECLARA. `restated_in: []` é a codificação que o próprio
+   * `ORACLE_SYSTEM` define para APOSENTAR uma chave sem apagar histórico — então emitir "ESTE arquivo é
+   * o oráculo, mantenha a definição aqui" para uma chave aposentada é o código MANDANDO ressuscitar o
+   * que o arquiteto encerrou. Medido em prod: `erasure-ja-executada` foi aposentada numa passagem
+   * ("substituída por `erro-eliminacao-ja-executada`") e voltou normativa na seguinte; 9 dos 61
+   * contratos do NVX LastMile estavam nesse estado. E, retirada a leitura de aposentadoria, a linha
+   * ainda não instrui nada: sem redeclarador não há consolidação a pedir nem regra para ninguém citar —
+   * "o oráculo mantém a própria definição" é o estado default do arquivo.
+   */
   owns: OracleDecision[];
   /** Contratos em que este arquivo REDECLARA a regra de outro (deve citar, não redefinir). */
   restates: OracleDecision[];
+  /**
+   * GAP-35: contratos deste arquivo que ninguém redeclara — fora do prompt, mas contados para
+   * observabilidade (é o sinal de "aposentadoria pela metade" no registro).
+   */
+  ownsRetired: OracleDecision[];
+}
+
+/**
+ * GAP-34 (2026-09-07) — os FATOS do registro que o prompt de decisão precisa, e que ele omitia.
+ *
+ * ## O que estava errado (MEDIDO em prod, projeto NVX LastMile)
+ *
+ * O `ORACLE_SYSTEM` pede um julgamento explícito: *"UM ASSUNTO = UM CONTRATO. Se a lista de CONTRATOS
+ * JÁ DECIDIDOS trouxer duas chaves para o MESMO assunto (ainda que com nomes diferentes) … reemita a
+ * chave PERDEDORA com `restated_in: []`"*. Mas a lista transportada era só
+ * `` `${d.contractKey} → ${d.oraclePath}` `` — **sem a regra e sem `restated_in`**. Ou seja: o código
+ * pedia ao agente para comparar ASSUNTOS e para reparar APOSENTADORIAS entregando-lhe apenas um slug e
+ * um caminho.
+ *
+ * Consequência medida no registro do NVX (61 contratos vigentes):
+ *  - **6 pares** de chaves para o mesmo assunto convivendo — `admin-recover-cli`/`cli-admin-recover`,
+ *    `inventario-migrations`/`inventario-migrations-ddl`, `limites-campos`/`limites-string-campos`,
+ *    `metrics-token-boot`/`obrigatoriedade-metrics-token`, `versao-sistema`/`versao-sistema-health`,
+ *    `erasure-ja-executada`/`erro-eliminacao-ja-executada` (≈20% do registro duplicado);
+ *  - **9 de 61** contratos com `restated_in` vazio — nenhum arquivo recebe ordem de consolidá-los — e
+ *    o agente não tinha como VER isso para decidir se era aposentadoria feita ou contrato órfão;
+ *  - `erasure-ja-executada` foi aposentada numa passagem ("Aposentada: substituída por
+ *    `erro-eliminacao-ja-executada`") e **ressuscitada como normativa** na passagem seguinte, porque a
+ *    passagem seguinte não recebeu o fato de que ela estava aposentada.
+ *
+ * ## O que muda
+ *
+ * Só o TRANSPORTE: a linha de cada contrato passa a levar o oráculo, quem redeclara (ou a ausência
+ * explícita de redeclaração) e a regra vigente resumida. O julgamento — "estes dois são o mesmo
+ * assunto?", "qual chave fica?" — continua inteiro no agente
+ * (ver feedback-genesis-100-llm-nunca-automacao-fixa).
+ */
+export function decidedContractsBlock(existing: OracleDecision[], ruleChars = 140): string {
+  if (existing.length === 0) return "";
+  const lines = existing.map((d) => {
+    const rule = d.ruleSummary.replace(/\s+/g, " ").trim().slice(0, ruleChars);
+    return `- \`${d.contractKey}\` → oráculo \`${d.oraclePath}\`; `
+      + (d.restatedIn.length
+        ? `redeclarado em ${d.restatedIn.map((p) => `\`${p}\``).join(", ")}`
+        : "SEM redeclaração registrada (hoje nenhum arquivo recebe ordem de consolidar este contrato:"
+          + " ou ele já foi aposentado, ou a aposentadoria está pela metade)")
+      + (rule ? `; regra vigente: ${rule}` : "");
+  });
+  return [
+    `CONTRATOS JÁ DECIDIDOS (${existing.length}) — mantenha o mesmo \`key\` e o mesmo oráculo quando o`,
+    "contrato reaparecer; só reemita uma chave para CORRIGIR o oráculo, a lista de redeclarações ou a",
+    "regra. Compare os ASSUNTOS, não os slugs:",
+    ...lines,
+  ].join("\n");
 }
 
 export function oracleRoleForFile(decisions: OracleDecision[], targetPath: string): OracleRoleForFile {
   const t = targetPath.trim().toLowerCase();
   const same = (p: string) => p.trim().toLowerCase() === t;
+  const mine = decisions.filter((d) => same(d.oraclePath));
   return {
-    owns: decisions.filter((d) => same(d.oraclePath)),
+    owns: mine.filter((d) => d.restatedIn.length > 0),
+    ownsRetired: mine.filter((d) => d.restatedIn.length === 0),
     restates: decisions.filter((d) => !same(d.oraclePath) && d.restatedIn.some(same)),
   };
 }
