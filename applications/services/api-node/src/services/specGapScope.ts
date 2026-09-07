@@ -298,7 +298,12 @@ function outlineOf(content: string): string {
   return joined.length > OUTLINE_MAX_CHARS ? `${joined.slice(0, OUTLINE_MAX_CHARS)}…` : joined;
 }
 
-async function buildFileMenu(files: SpecFileRef[]): Promise<string> {
+/**
+ * Menu da árvore para um agente escolher ARQUIVO: path + primário + títulos. Exportado porque o
+ * registro de oráculos (GAP-22) precisa do MESMO menu — duas versões divergiriam e um agente passaria a
+ * decidir sobre uma árvore que o outro não vê.
+ */
+export async function buildFileMenu(files: SpecFileRef[]): Promise<string> {
   const parts: string[] = [];
   for (const f of files) {
     const buf = await readFile(f.filePath).catch(() => null);

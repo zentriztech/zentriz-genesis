@@ -753,6 +753,11 @@ function buildGapFileRequest(
    * a seção ausente não existe e a recria — troca um GAP por uma contradição interna.
    */
   digested = false,
+  /**
+   * GAP-22: FATOS do registro de oráculos (quem é a fonte única de cada contrato em disputa). Vazio =
+   * este arquivo não tem papel em nenhum contrato decidido (ou a flag está desligada).
+   */
+  oracleBlock = "",
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -770,6 +775,9 @@ function buildGapFileRequest(
     siblingBlock
       ? `--- ARQUIVOS IRMÃOS CITADOS PELOS GAPs (SÓ LEITURA — não os copie, não os edite) ---\n${siblingBlock}\n--- FIM DOS IRMÃOS ---\n`
       : "",
+    // GAP-22: vem DEPOIS dos irmãos e ANTES do conteúdo porque é o que resolve o que o irmão só
+    // expõe: saber que o outro arquivo diz 400 não basta se a cada rodada se re-decide quem manda.
+    oracleBlock,
     // GAP-14: quando o arquivo em edição É o manifesto, o frontmatter deixa de ser prosa — é o
     // contrato que a fábrica LÊ para rotear o projeto. Em prod o editor trocou `archetype` por
     // `backend_api` (fora do catálogo) e rebaixou a spec a BLOCKER estrutural. O código não escolhe o
@@ -853,6 +861,33 @@ async function gapSiblingBlock(
     return block;
   } catch (e) {
     console.warn(`[SpecChat] contexto de irmãos indisponível (segue sem ele): ${(e as Error).message}`);
+    return "";
+  }
+}
+
+/**
+ * GAP-22 — FATOS do registro de oráculos para o arquivo em edição.
+ *
+ * Só LÊ o que já foi decidido: quem decide é `ensureOracleDecisions` (um agente), acionado pelo laço
+ * autônomo antes de despachar a rodada. O botão humano, por isso, aproveita as decisões existentes mas
+ * não paga uma decisão nova — clicar em "Resolver GAPs" não deve disparar uma segunda chamada de LLM
+ * pelas costas do usuário.
+ *
+ * Best-effort: sem registro (ou com a flag desligada) a rodada segue como antes.
+ */
+async function gapOracleBlock(projectId: string, filePath: string): Promise<string> {
+  try {
+    const { loadOracleDecisions, oracleFactBlock, oracleRegistryEnabled } = await import("../services/specOracles.js");
+    if (!oracleRegistryEnabled()) return "";
+    const decisions = await loadOracleDecisions(pool, projectId);
+    if (decisions.length === 0) return "";
+    const block = oracleFactBlock(decisions, filePath);
+    if (block) {
+      console.log(`[SpecChat] oráculos aplicados projeto=${projectId.slice(0, 8)} alvo=${filePath} contratos=${decisions.length} chars=${block.length}`);
+    }
+    return block;
+  } catch (e) {
+    console.warn(`[SpecChat] registro de oráculos indisponível (segue sem ele): ${(e as Error).message}`);
     return "";
   }
 }
@@ -1190,6 +1225,10 @@ export async function dispatchGapFileJob(opts: {
   // A5.5: o mapa do produto diz ONDE o arquivo vive; o irmão citado diz O QUE ele já normatiza — é o
   // que faltava para a divergência ser resolvida em vez de migrar para o próximo arquivo.
   const siblings = await gapSiblingBlock(opts.projectId, opts.filePath, opts.findings);
+  // GAP-22: o irmão só-leitura diz O QUE o outro arquivo normatiza; o registro de oráculos diz QUEM
+  // MANDA — e é isso que faltava para a contradição ser CONSOLIDADA em vez de migrar de arquivo (24
+  // dos 26 blockers do NVX eram desta família, com o mesmo contrato reaparecendo em 5 rodadas).
+  const oracles = await gapOracleBlock(opts.projectId, opts.filePath);
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),
@@ -1204,7 +1243,7 @@ export async function dispatchGapFileJob(opts: {
   });
   runFileChatJob(
     opts.jobId,
-    { ...buildGapFileRequest(target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested), ...opts.llm },
+    { ...buildGapFileRequest(target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles), ...opts.llm },
     opts.agentsUrl,
     `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match

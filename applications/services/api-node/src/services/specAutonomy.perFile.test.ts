@@ -88,6 +88,28 @@ vi.mock("./specGapScope.js", () => ({
   }),
 }));
 
+// GAP-22: o registro de oráculos também alcança `routes/specs.js` → pool real, então é dublado. O
+// papel do arquivo (`oracleRoleForFile`) é lógica PURA e vem reimplementada aqui de propósito: quem a
+// testa de verdade é `specOracles.test.ts`; aqui o que se prova é o VETO do laço.
+interface FakeDecision { contractKey: string; oraclePath: string; ruleSummary: string; restatedIn: string[] }
+let oracleDecisions: FakeDecision[] = [];
+let oracleRegistryOn = true;
+const ensureOracleDecisions = vi.fn(async () => ({
+  decisions: oracleDecisions, decided: 0, skipped: true, reason: "dublê", model: null,
+}));
+vi.mock("./specOracles.js", () => ({
+  oracleRegistryEnabled: () => oracleRegistryOn,
+  loadOracleDecisions: vi.fn(async () => oracleDecisions),
+  ensureOracleDecisions: (...a: unknown[]) => ensureOracleDecisions(...(a as [])),
+  oracleRoleForFile: (ds: FakeDecision[], target: string) => {
+    const same = (p: string) => p.toLowerCase() === target.toLowerCase();
+    return {
+      owns: ds.filter((d) => same(d.oraclePath)),
+      restates: ds.filter((d) => !same(d.oraclePath) && d.restatedIn.some(same)),
+    };
+  },
+}));
+
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
 // GAP-19: a pendência de cobertura é ACUMULADA (`stage_b_full_sha` × sha atual) e vem daqui —
 // `coberturaAcumulada = null` reproduz "não foi possível medir" (comportamento legado).
@@ -154,6 +176,8 @@ const db = {
       return { rows: [{ status: validationStatus, stage_b_ran: true, stage_b_coverage: null }], rowCount: 1 };
     }
     if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) return { rows: [], rowCount: 0 };
+    // GAP-22: o conteúdo em que os GAPs foram medidos — chave de idempotência da decisão de oráculos.
+    if (s.startsWith("SELECT spec_hash FROM spec_validation_runs")) return { rows: [{ spec_hash: "hash-do-conteudo" }], rowCount: 1 };
 
     if (s.startsWith("INSERT INTO spec_autonomy_runs")) {
       run = {
@@ -244,6 +268,9 @@ beforeEach(() => {
   snapshotFails = false;
   sqlLog.length = 0;
   unroutedFindings = [];
+  oracleDecisions = [];
+  oracleRegistryOn = true;
+  ensureOracleDecisions.mockClear();
   makeTree([
     { path: "00-indice.md", content: INDEX, isPrimary: true },
     { path: "backend/01-api.md", content: API },
@@ -772,5 +799,99 @@ describe("guardas de projeto (param o laço)", () => {
     expect(dispatchGapFileJob).not.toHaveBeenCalled();
     expect(String(run!.last_error)).toContain("SEM arquivo definido");
     expect(startValidation).not.toHaveBeenCalled();
+  });
+});
+
+// ── GAP-22: veto de consolidação (o arquivo que redeclara contrato de outro) ───
+
+describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", () => {
+  /** `backend/01-api.md` redeclara o contrato cujo oráculo é o índice. */
+  const decideOraculo = (): void => {
+    oracleDecisions = [{
+      contractKey: "paginacao", oraclePath: "00-indice.md",
+      ruleSummary: "page/pageSize, 1-based", restatedIn: ["backend/01-api.md"],
+    }];
+  };
+
+  it("pede a decisão de oráculos com o hash do conteúdo VALIDADO e os GAPs ativos", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(ensureOracleDecisions).toHaveBeenCalled();
+    const [, projectId, opts] = ensureOracleDecisions.mock.calls[0] as unknown as
+      [unknown, string, { specHash: string; findings: F[] }];
+    expect(projectId).toBe(PROJECT);
+    expect(opts.specHash).toBe("hash-do-conteudo");
+    // O laço entrega TODOS os ativos (roteados + sem rota); quem filtra por severidade é o próprio
+    // `specOracles` (só 🔴/🟡 sustentam decisão de arquitetura) — filtrar aqui duplicaria a régua.
+    expect(opts.findings.length).toBe(findings.length);
+    expect(dispatchGapFileJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("arquivo que REDECLARA e cresceu além do orçamento → NÃO escreve e o laço segue", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().filePath).toBe("backend/01-api.md");
+    // Um parágrafo normativo a mais: +3.000 chars num arquivo que devia ENCOLHER.
+    await ctoReturns(r.id, `${API}\n## 6. Fonte única de paginação\n${"esta seção é a fonte única. ".repeat(120)}\n`);
+    expect(onDisk("backend/01-api.md")).toBe(API);            // disco INTACTO
+    expect(String(run!.last_error)).toContain("consolidação recusada");
+    expect(String(run!.last_error)).toContain("`paginacao` → `00-indice.md`");
+    expect(run!.status).toBe("pending");                      // não é falha do laço
+    expect(run!.file_failures).toBe(0);                       // nem falha DO ARQUIVO
+    expect(run!.files_done).toContain("backend/01-api.md");   // sai da fila deste passe
+  });
+
+  it("arquivo que REDECLARA, encolhe e cita o oráculo → aplica normalmente", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // A redeclaração sai e fica a citação: encolheu (dentro do teto de 30% do MIN_SHRINK_RATIO).
+    const consolidado = `${API.slice(0, Math.round(API.length * 0.85))}\n## 6. Paginação\nver \`00-indice.md\` — fonte única deste contrato.\n`;
+    await ctoReturns(r.id, consolidado);
+    expect(onDisk("backend/01-api.md")).toBe(consolidado);
+    expect(run!.status).toBe("pending");
+  });
+
+  it("crescimento PEQUENO passa (a mesma rodada resolve outros GAPs do arquivo)", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    const pequeno = `${API}\n## 6. Paginação\nver \`00-indice.md\`.\n`;
+    expect(pequeno.length - API.length).toBeLessThan(2000);
+    await ctoReturns(r.id, pequeno);
+    expect(onDisk("backend/01-api.md")).toBe(pequeno);
+  });
+
+  it("sem citar o oráculo e sem encolher → não houve consolidação (mesmo dentro do orçamento)", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz por escopo.\n`);
+    expect(onDisk("backend/01-api.md")).toBe(API);
+    expect(String(run!.last_error)).toContain("não cita o oráculo");
+  });
+
+  it("arquivo que É o oráculo (ou sem papel) segue sem veto — zero regressão", async () => {
+    // O índice é o oráculo; o veto é só de quem redeclara.
+    oracleDecisions = [{
+      contractKey: "paginacao", oraclePath: "backend/01-api.md",
+      ruleSummary: "page/pageSize", restatedIn: ["00-indice.md"],
+    }];
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    const crescido = `${API}\n## 6. Paginação\n${"regra canônica. ".repeat(300)}\n`;
+    await ctoReturns(r.id, crescido);
+    expect(onDisk("backend/01-api.md")).toBe(crescido);
+  });
+
+  it("flag OFF → nenhum veto (kill-switch sem deploy)", async () => {
+    decideOraculo();
+    oracleRegistryOn = false;
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    const crescido = `${API}\n## 6. Fonte única\n${"texto normativo. ".repeat(300)}\n`;
+    await ctoReturns(r.id, crescido);
+    expect(onDisk("backend/01-api.md")).toBe(crescido);
   });
 });
