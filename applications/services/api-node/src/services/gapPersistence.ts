@@ -47,7 +47,9 @@
  * Nenhuma das duas decide conteúdo (Lei: Genesis é 100% LLM). Elas dizem ao agente a única coisa que
  * ele não pode deduzir do arquivo que recebe: que a resposta que ele já deu ali NÃO funcionou.
  */
-import { splitSections, buildAnchorIndex, locateSectionIndex, anchorSearchKey } from "../lib/markdownSections.js";
+import {
+  splitSections, buildAnchorIndex, locateSectionIndex, anchorSearchKey, sectionSubtree,
+} from "../lib/markdownSections.js";
 import { findingFingerprint, effectiveFingerprints, judgedFilesOf } from "./findingTriage.js";
 import type { PersistentGapRef } from "./gapContinuity.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -72,6 +74,14 @@ export interface PastValidation {
  */
 export { anchorSearchKey };
 
+/**
+ * 🔴 GAP-79 — a partir de que ponto o corpo próprio de um cabeçalho é "toco": quando ele é menos de 40%
+ * da subárvore que a âncora endereça. Só serve para DECLARAR o fato no log (nada é decidido por ele);
+ * medido em prod, os casos reais são muito abaixo disso — `visao-escopo.md §1.3` tem 1,9%,
+ * `autenticacao-sessao.md §6` tem 0,5%.
+ */
+const STUB_PARENT_RATIO = 2.5;
+
 export interface AnchorTouchReport {
   /** Âncoras que o código conseguiu LOCALIZAR no texto de antes (as únicas mensuráveis). */
   measured: string[];
@@ -83,6 +93,12 @@ export interface AnchorTouchReport {
    * não mexeu num trecho que o código não achou seria acusação sem prova.
    */
   unlocatable: string[];
+  /**
+   * 🔴 GAP-79 — âncoras cujo cabeçalho tem corpo PRÓPRIO de toco: o texto que a âncora endereça mora nas
+   * subseções. Não é acusação nem absolvição — é o fato que explica por que exigir "edição no próprio
+   * trecho" era impossível de atender. Vai ao log da rodada para a decisão ficar auditável.
+   */
+  stubParents: string[];
 }
 
 /**
@@ -90,18 +106,31 @@ export interface AnchorTouchReport {
  *
  * Mecânica, sem heurística de conteúdo: `splitSections` corta o texto ANTES em seções por cabeçalho;
  * a seção de uma âncora é a primeira cujo corpo contém a chave de busca. A âncora é "intocada" quando
- * o corpo INTEIRO dessa seção reaparece **verbatim** no texto DEPOIS (`after.includes(body)`).
+ * o trecho INTEIRO que ela endereça reaparece **verbatim** no texto DEPOIS (`after.includes(body)`).
  *
- * Por que a seção inteira e não só a linha: é o critério CONSERVADOR. Mexer em qualquer ponto da
- * seção que contém o trecho ofensor já conta como "tocou" — o fato só é afirmado quando o agente
- * demonstravelmente não encostou naquela vizinhança. É exatamente a assinatura da patologia medida:
- * a errata é acrescentada em OUTRO lugar (ou numa seção nova no fim) e o trecho ofensor fica idêntico.
+ * Por que o trecho inteiro e não só a linha: é o critério CONSERVADOR. Mexer em qualquer ponto da
+ * vizinhança que contém o trecho ofensor já conta como "tocou" — o fato só é afirmado quando o agente
+ * demonstravelmente não encostou nela. É exatamente a assinatura da patologia medida: a errata é
+ * acrescentada em OUTRO lugar (ou numa seção nova no fim) e o trecho ofensor fica idêntico.
+ *
+ * 🔴 GAP-79 — o trecho endereçado é a **SUBÁRVORE** do cabeçalho, não o preâmbulo dele. Medido em prod:
+ * `visao-escopo.md §1.3` acumulou **15 acusações de "intocada" em 8 runs** porque o corpo próprio de
+ * `### 1.3 Serviços e Interfaces` tem 415 chars e o GAP fala da tabela de interfaces, que mora no filho
+ * `#### Serviço api` (subárvore: 21.839 chars). O CTO corrigia a tabela certa e era acusado de não ter
+ * mexido no trecho — e a guarda 3 do GAP-77 usa justamente essa acusação para não absolver, então o
+ * defeito ficava preso: não fechava e não podia ser julgado. Medir a subárvore é o que torna a afirmação
+ * verdadeira: "o agente não encostou em NADA do que esta âncora endereça".
+ *
+ * O risco simétrico é conhecido e aceito: editar um filho VIZINHO ao ofensor passa a contar como "tocou".
+ * A assimetria decide — a acusação falsa é irrecuperável (o laço exige para sempre uma edição impossível),
+ * enquanto a absolvição frouxa é pega na validação seguinte, onde o GAP reaparece e a reincidência sobe.
  */
 export function untouchedAnchors(before: string, after: string, anchors: Array<string | null | undefined>): AnchorTouchReport {
   const measured: string[] = [];
   const untouched: string[] = [];
   const unlocatable: string[] = [];
-  if (!before || !after) return { measured, untouched, unlocatable };
+  const stubParents: string[] = [];
+  if (!before || !after) return { measured, untouched, unlocatable, stubParents };
   const sections = splitSections(before);
   const index = buildAnchorIndex(sections);
   const seen = new Set<string>();
@@ -113,9 +142,11 @@ export function untouchedAnchors(before: string, after: string, anchors: Array<s
     const i = locateSectionIndex(index, anchor);
     if (i === null) { unlocatable.push(anchor); continue; }
     measured.push(anchor);
-    if (after.includes(sections[i].body)) untouched.push(anchor);
+    const sub = sectionSubtree(sections, i);
+    if (sub.children > 0 && sections[i].body.length * STUB_PARENT_RATIO < sub.body.length) stubParents.push(anchor);
+    if (after.includes(sub.body)) untouched.push(anchor);
   }
-  return { measured, untouched, unlocatable };
+  return { measured, untouched, unlocatable, stubParents };
 }
 
 /**

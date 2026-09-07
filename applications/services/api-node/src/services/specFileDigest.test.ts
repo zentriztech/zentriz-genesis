@@ -337,6 +337,12 @@ const GRANDE = [
   "# Modelo de dados",
   "## Convenções gerais",
   `Nada em disputa aqui. ${filler("generico", 300)}`,
+  // 🔴 GAP-79: a `§7.4` precisa de um PAI próprio. Na versão anterior deste fixture ela era filha de
+  // `## Convenções gerais`, o que não existe no arquivo real (medido em prod: `## Convenções gerais`
+  // ocupa as linhas 7–135 sem nenhuma subseção; a `### 7.4` mora sob `## 7. Tabela privacy_requests`,
+  // linha 990). Com a âncora endereçando a SUBÁRVORE, o aninhamento irreal fundia a seção endereçada
+  // com a citada e o teste deixava de exercitar o GAP-73 (duas reservas distintas).
+  "## 7. Tabela `privacy_requests`",
   "### 7.4 Retenção e expurgo de tokens",
   linhas("retencao", 120),
   "O DELETE físico de `refresh_tokens` roda no expurgo trimestral.",

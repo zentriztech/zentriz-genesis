@@ -65,6 +65,7 @@ import type { CandidateGate, VerdictRound, PromotabilityReport } from "./gapProm
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
+import { planFocus } from "./gapFocus.js";
 import { startValidation, unjudgedSpecFiles, type ValidationFinding } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
@@ -350,6 +351,30 @@ export interface AutonomyRoundLog {
    * mensuráveis; ausente = a rodada não tinha âncora mensurável (nada é afirmado).
    */
   anchorsUntouched?: string[] | null;
+  /**
+   * 🔴 GAP-79 — destas âncoras, quais endereçam um cabeçalho cujo corpo PRÓPRIO é toco: o texto que a
+   * âncora aponta mora nas subseções, não no preâmbulo. Medido em prod: `visao-escopo.md §1.3` tem 415
+   * chars próprios de uma subárvore de 21.839 (1,9%) e acumulou 15 acusações de "intocada" em 8 runs,
+   * porque o GAP fala da tabela que mora no filho `#### Serviço api`.
+   *
+   * Não é acusação nem absolvição — é o fato que explica por que exigir "edição no próprio trecho" era
+   * um pedido impossível de atender, e que torna auditável a decisão do juiz (GAP-77).
+   */
+  anchorsStubParent?: string[] | null;
+  /**
+   * 🔴 GAP-81 — o DEGRAU da escalada nesta rodada: `1` = só os GAPs reincidentes do arquivo, `2` = um
+   * defeito só. Ausente = rodada normal (todos os GAPs do arquivo), que é o comportamento anterior.
+   *
+   * É o campo que o veredicto do GAP-77 conta para saber se o "foco individual" que o Jean exigiu
+   * realmente foi pago ("focamos neles individualmente algumas vezes, se insistir a reaparecer ai sim o
+   * juiz usa o novo poder"). Contar rodadas do arquivo, como a primeira versão fazia, chamava de foco a
+   * rodada normal — e o gatilho virava carimbo.
+   */
+  focusLevel?: 1 | 2 | null;
+  /** As âncoras que a rodada dedicada atacou — é por elas que o veredicto conta o foco pago. */
+  focusAnchors?: string[] | null;
+  /** Quantos GAPs do arquivo ficaram FORA desta rodada. Seguem ATIVOS e voltam à fila. */
+  focusDeferred?: number | null;
   /**
    * 🔴 GAP-45 — o recorte 🔴/🟡 do PASSE, separado do recorte 🔴/🟡 do ARQUIVO.
    *
@@ -1264,7 +1289,7 @@ async function promotionVerdictFor(
   try {
     const {
       verdictConfig, selectVerdictCandidates, runVerdictRound, saveVerdicts, livePromotionVerdicts,
-      specFileShas, promotabilityReport, focusRoundsByFile, anchoredSection,
+      specFileShas, promotabilityReport, focusRoundsByFile, focusRoundsByAnchor, anchoredSection,
     } = await import("./gapPromotionVerdict.js");
     const cfg = verdictConfig();
     // `SPEC_VERDICT_MIN_GAPS_RESOLVED=0` desliga o recurso sem deploy: o laço encerra com a mensagem
@@ -1313,6 +1338,9 @@ async function promotionVerdictFor(
     const gate = selectVerdictCandidates({
       findings: important, runs: past, judged, untouched, sections, gapsResolved, cfg,
       focusByFile: await focusRoundsByFile(db, run.projectId).catch(() => new Map<string, number>()),
+      // 🔴 GAP-81: a guarda do foco pago é por ÂNCORA e conta só rodada DEDICADA. Falha de leitura cai
+      // em mapa vazio ⇒ ninguém é elegível: fail-CLOSED, como todo degrau deste recurso.
+      focusByAnchor: await focusRoundsByAnchor(db, run.projectId).catch(() => new Map<string, number>()),
     });
     let round: VerdictRound | null = null;
     let saved = 0;
@@ -1902,6 +1930,39 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     mergeRecurrenceRefs(persistentGapsFor(knownRefs, target, fileFindings), stableRefs),
     lastUntouchedAnchors(run, target),
   );
+  // 🔴 GAP-81: o arquivo teimoso recebia o MESMO pedido em todo passe — todos os GAPs dele de uma vez —
+  // e os mesmos 3–4 itens perdiam a triagem interna do agente rodada após rodada (medido: 5 âncoras
+  // com 5 a 9 eventos "intocada" em 8 runs, em arquivos que iam INTEIROS ao CTO). A escalada é o que
+  // faltava: primeiro só os reincidentes, depois um só. A conta de rodadas é do PROJETO, não da run —
+  // os arquivos teimosos do NVX atravessaram várias runs, e zerar a escalada faria o degrau 2 nunca
+  // chegar. Falha de banco degrada para "nenhuma rodada paga" (fail-CLOSED: sem escalada, não escalada
+  // por acidente de leitura).
+  // O `catch` cobre o import inteiro, não só a consulta: a escalada é um AJUSTE de escopo, e nenhuma
+  // falha ao lê-la pode derrubar a rodada que ia escrever o arquivo.
+  const fileRounds = await (async () => {
+    try {
+      const { focusRoundsByFile } = await import("./gapPromotionVerdict.js");
+      return (await focusRoundsByFile(db, run.projectId)).get(target.toLowerCase()) ?? 0;
+    } catch { return 0; }
+  })();
+  const focus = planFocus({ findings: fileFindings, refs: persistentGaps, fileRounds });
+  const dispatched = focus.level === 0 ? fileFindings : (focus.findings as EnrichedFinding[]);
+  // As refs de reincidência acompanham a lista restrita: mandar o fato de um GAP que NÃO está na lista
+  // faria o agente trabalhar fora do foco, que é exatamente o que esta rodada existe para evitar.
+  const dispatchedFps = new Set(dispatched.map((f) => findingFingerprint(f)));
+  const dispatchGaps = focus.level === 0
+    ? persistentGaps
+    : persistentGaps.filter((r) => dispatchedFps.has(r.fingerprint));
+  if (focus.level > 0) {
+    console.info(`[SpecAutonomy] run=${run.id} ${target}: rodada DEDICADA nível ${focus.level} — ${dispatched.length} de ${fileFindings.length} GAP(s), ${fileRounds} rodada(s) já pagas neste arquivo.`);
+    await mergeIntoLastRound(db, run.id, {
+      focusLevel: focus.level as 1 | 2, focusAnchors: focus.anchors, focusDeferred: focus.deferred,
+      // A âncora medida no apply tem de ser a da lista RESTRITA: medir as outras produziria
+      // "intocada" para GAPs que esta rodada nem pediu — acusação sem pedido.
+      gapAnchors: gapAnchorsOf(dispatched),
+      note: `\`${target}\` enviado ao CTO — ${focus.reason} (${dispatched.length} de ${fileFindings.length} GAP(s); ${focus.deferred} adiado(s), seguem ATIVOS).`,
+    });
+  }
   if (persistentGaps.length > 0) {
     // 🔴 GAP-71 (medido em prod na PRIMEIRA rodada da run 95ba8636): as 11 refs `stable` foram
     // calculadas e ENTREGUES ao CTO (2.561 chars de bloco), mas o log da rodada ficou com
@@ -1921,9 +1982,11 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   try {
     const res = await dispatchGapFileJob({
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
-      filePath: target, fileContent: file.content, findings: fileFindings, agentsUrl, llm, growthBudget,
-      priorRejection, persistentGaps,
-      userMessage: `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
+      filePath: target, fileContent: file.content, findings: dispatched, agentsUrl, llm, growthBudget,
+      priorRejection, persistentGaps: dispatchGaps, focus,
+      userMessage: focus.level > 0
+        ? `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: rodada DEDICADA em \`${target}\` — ${dispatched.length} GAP(s) reincidente(s) de ${fileFindings.length} (${focus.deferred} adiado(s), seguem ativos).`
+        : `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
     });
     if (!res.ok) {
       // Arquivo grande demais para caber no orçamento de saída, ou sem GAP no fim das contas: o
@@ -2239,7 +2302,7 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // anterior falariam de um pedido que não é este.
   const touch = lastRound?.round === run.round
     ? untouchedAnchors(file.content, revised, lastRound.gapAnchors ?? [])
-    : { measured: [], untouched: [], unlocatable: [] };
+    : { measured: [], untouched: [], unlocatable: [], stubParents: [] };
   if (touch.untouched.length > 0) {
     console.info(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} ${target}: ${touch.untouched.length}/${touch.measured.length} ` +
@@ -2255,6 +2318,10 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // diferença entre "vazia" e "ausente" importa: ausente = não medido (rodada de criação, sem
     // âncoras no despacho), vazia = medido e o agente encostou em todos os trechos.
     ...(touch.measured.length > 0 ? { anchorsUntouched: touch.untouched } : {}),
+    // GAP-79: âncora de cabeçalho-PAI cujo corpo próprio é toco — o texto que ela endereça mora nas
+    // subseções. Declarado para a decisão do juiz (GAP-77) ser auditável: era ESTE fato que faltava
+    // quando o laço exigia "edição no próprio trecho" de um preâmbulo sem nada a corrigir.
+    ...(touch.stubParents.length > 0 ? { anchorsStubParent: touch.stubParents } : {}),
     // GAP-64: o excesso tolerado é DECLARADO — foi decisão do laço pagar, e a próxima rodada nasce com
     // a margem já menor. Zero não polui o log.
     ...(toleratedOverflow > 0 ? { toleratedOverflow } : {}),
@@ -2277,6 +2344,12 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
         ? ` ⚠️ ${touch.untouched.length} de ${touch.measured.length} trecho(s) apontado(s) ficaram`
           + ` IDÊNTICOS (${touch.untouched.slice(0, 4).join(", ")}) — a rodada seguinte vai exigir a`
           + " edição no próprio trecho."
+        : "")
+      // GAP-79: sem esta linha o humano lê "§1.3 intocada" e procura o defeito no preâmbulo do
+      // cabeçalho, onde ele não está. A medida é sobre a subárvore; o endereço útil é a subseção.
+      + (touch.stubParents.length > 0
+        ? ` ℹ️ ${touch.stubParents.slice(0, 4).join(", ")}: o corpo próprio do cabeçalho é preâmbulo — o`
+          + " texto endereçado mora nas SUBSEÇÕES, e é a subárvore inteira que foi medida (GAP-79)."
         : ""),
   });
   const claim = await db.query(

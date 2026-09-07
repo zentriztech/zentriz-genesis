@@ -36,7 +36,7 @@
  */
 import {
   splitSections, clipSection, headingOutline, scoreSections, buildAnchorIndex, locateSectionIndex,
-  sectionWindow, citedSectionRefs,
+  sectionWindow, citedSectionRefs, sectionSubtree,
 } from "../lib/markdownSections.js";
 import { disputedTerms } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -112,6 +112,23 @@ interface AnchoredSection {
   anchors: string[];
   /** Peso do GAP mais grave que aponta esta seção. */
   rank: number;
+  /** 🔴 GAP-79 — subárvore completa, base da JANELA quando a seção não couber. */
+  subtree: string;
+}
+
+/**
+ * 🔴 GAP-79 — o trecho que uma âncora endereça é a SUBÁRVORE do cabeçalho (ver
+ * `gapPersistence.untouchedAnchors`). Quem MEDE o intocado e quem MOSTRA o trecho têm de usar a mesma
+ * régua, senão o laço volta a acusar por um recorte que nunca mostrou — é literalmente o GAP-72.
+ *
+ * A subárvore só entra quando cabe no teto de UMA seção; acima disso fica o corpo próprio (comportamento
+ * anterior, nunca pior que hoje) e a subárvore vai para a tentativa de JANELA do GAP-74, que é um recorte
+ * melhor que um `clipSection` cego de 24k. Devolve os dois para o chamador escolher.
+ */
+function anchoredBody(secs: ReturnType<typeof splitSections>, i: number): { body: string; subtree: string } {
+  const sub = sectionSubtree(secs, i);
+  const fits = sub.children > 0 && sub.body.length <= TARGET_SECTION_BUDGET;
+  return { body: fits ? sub.body : clipSection(secs[i].body, TARGET_SECTION_BUDGET), subtree: sub.body };
 }
 
 /**
@@ -136,7 +153,8 @@ function anchoredSections(secs: ReturnType<typeof splitSections>, findings: Vali
     const rank = severityRank((f as { severity?: unknown }).severity);
     const cur = byIndex.get(i);
     if (cur) { cur.anchors.push(anchor); cur.rank = Math.min(cur.rank, rank); continue; }
-    byIndex.set(i, { i, body: clipSection(secs[i].body, TARGET_SECTION_BUDGET), anchors: [anchor], rank });
+    const { body, subtree } = anchoredBody(secs, i);
+    byIndex.set(i, { i, body, anchors: [anchor], rank, subtree });
   }
   return { picks: [...byIndex.values()], unlocatable };
 }
@@ -174,6 +192,8 @@ interface CitedSection {
   refs: string[];
   /** Peso do GAP mais grave que a cita. */
   rank: number;
+  /** 🔴 GAP-79 — subárvore completa, base da JANELA quando a seção não couber. */
+  subtree: string;
 }
 
 /**
@@ -201,7 +221,8 @@ function citedSections(
         cur.rank = Math.min(cur.rank, rank);
         continue;
       }
-      byIndex.set(i, { i, body: clipSection(secs[i].body, TARGET_SECTION_BUDGET), refs: [ref], rank });
+      const { body, subtree } = anchoredBody(secs, i);
+      byIndex.set(i, { i, body, refs: [ref], rank, subtree });
     }
   }
   return [...byIndex.values()];
@@ -315,9 +336,12 @@ export function buildFileDigest(
   const anchorsWindowed: string[] = [];
   const citedWindowed: string[] = [];
   let windowed = 0;
-  const tryWindow = (i: number, labels: string[], extra: string[], into: string[], out: string[]): void => {
+  // 🔴 GAP-79: a janela é aberta sobre a SUBÁRVORE. Quando o cabeçalho é um toco (415 chars de uma
+  // subárvore de 21.839, medido em `visao-escopo.md §1.3`), janelar só o corpo próprio devolveria um
+  // trecho sem nada editável — o pior dos mundos, igual ao que o GAP-74 corrigiu.
+  const tryWindow = (i: number, subtree: string, labels: string[], extra: string[], into: string[], out: string[]): void => {
     const room = Math.min(TARGET_WINDOW_BUDGET, budget - spent);
-    const win = room > 0 ? sectionWindow(secs[i].body, [...terms, ...extra], room) : null;
+    const win = room > 0 ? sectionWindow(subtree, [...terms, ...extra], room) : null;
     if (win === null) { out.push(...labels); return; }
     spent += win.length;
     chosenIdx.add(i);
@@ -325,8 +349,8 @@ export function buildFileDigest(
     windowed += 1;
     into.push(...labels);
   };
-  for (const p of anchorOverflow) tryWindow(p.i, p.anchors, p.anchors, anchorsWindowed, dropped);
-  for (const p of citedOverflow) tryWindow(p.i, p.refs, p.refs, citedWindowed, citedDropped);
+  for (const p of anchorOverflow) tryWindow(p.i, p.subtree, p.anchors, p.anchors, anchorsWindowed, dropped);
+  for (const p of citedOverflow) tryWindow(p.i, p.subtree, p.refs, p.refs, citedWindowed, citedDropped);
 
   // 4) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
   for (const x of scoreSections(secs, terms)) {

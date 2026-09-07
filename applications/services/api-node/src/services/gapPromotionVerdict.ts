@@ -54,7 +54,9 @@
 import { readFile } from "node:fs/promises";
 import { httpPost } from "../routes/specs.js";
 import { sha256Hex } from "../lib/specTreeHash.js";
-import { splitSections, clipSection, buildAnchorIndex, locateSectionIndex } from "../lib/markdownSections.js";
+import {
+  splitSections, clipSection, buildAnchorIndex, locateSectionIndex, sectionSubtree, anchorSearchKey,
+} from "../lib/markdownSections.js";
 import { findingFingerprint, effectiveFingerprints, judgedFilesOf, fileJudgedIn } from "./findingTriage.js";
 import type { Db, EnrichedFinding } from "./findingTriage.js";
 import type { PastValidation } from "./gapPersistence.js";
@@ -114,8 +116,10 @@ export interface Candidate {
   anchor: string;
   /** Validações COMPETENTES (que julgaram o arquivo por inteiro) em que este defeito reapareceu. */
   times: number;
-  /** Rodadas de autonomia que já despacharam este arquivo ao CTO-editor. */
+  /** 🔴 GAP-81 — rodadas DEDICADAS a este defeito (`focusLevel = 2`). É o que a guarda exige. */
   focusRounds: number;
+  /** Rodadas de autonomia que já despacharam este arquivo ao CTO-editor (contexto, não guarda). */
+  fileRounds: number;
   /** Trecho ancorado, verbatim. Vazio = âncora não localizável no arquivo. */
   section: string;
 }
@@ -132,15 +136,24 @@ export interface CandidateGate {
 /**
  * Quantas rodadas de autonomia já despacharam cada arquivo ao CTO-editor, neste projeto.
  *
- * É a medida de "foco individual pago" que o Jean exigiu. Conta rodadas de TODAS as runs do projeto,
- * não só da atual: o Jean focou nos arquivos teimosos ao longo de 16h e várias runs — zerar a conta a
- * cada run faria o gatilho nunca disparar, que é o defeito oposto ao que este módulo resolve.
+ * Conta rodadas de TODAS as runs do projeto, não só da atual: o Jean focou nos arquivos teimosos ao
+ * longo de 16h e várias runs — zerar a conta a cada run faria a escalada nunca chegar ao degrau 2.
+ *
+ * ⚠️ NÃO é a medida de "foco individual pago": uma rodada de arquivo manda TODOS os GAPs dele de uma
+ * vez, e o teimoso perde a triagem interna do agente (é o GAP-81). Esta conta serve para decidir QUANDO
+ * escalar (`gapFocus.FOCUS_INDIVIDUAL_AFTER`) e como contexto do parecer. A guarda do veredicto usa
+ * `focusRoundsByAnchor`.
+ *
+ * 🐛 O campo do log da rodada é **`filePath`**, não `file` (`AutonomyRoundLog`). A primeira versão
+ * consultava `r->>'file'` e devolvia mapa VAZIO em prod ⇒ `focus_rounds = 0` para todo arquivo ⇒ com
+ * `SPEC_VERDICT_MIN_FOCUS_ROUNDS = 2`, **nenhum candidato poderia ser elegível, nunca**. O recurso
+ * rodaria em silêncio devolvendo "zero liberados", e o motivo pareceria rigor das guardas.
  */
 export async function focusRoundsByFile(db: Db, projectId: string): Promise<Map<string, number>> {
   const rows = (await db.query(
-    `SELECT lower(r->>'file') AS f, count(*)::int AS n
+    `SELECT lower(r->>'filePath') AS f, count(*)::int AS n
        FROM spec_autonomy_runs, jsonb_array_elements(rounds) r
-      WHERE project_id = $1 AND r->>'file' IS NOT NULL
+      WHERE project_id = $1 AND r->>'filePath' IS NOT NULL
       GROUP BY 1`,
     [projectId],
   )).rows as unknown as Array<{ f: string | null; n: number }>;
@@ -149,12 +162,51 @@ export async function focusRoundsByFile(db: Db, projectId: string): Promise<Map<
   return out;
 }
 
-/** Trecho ancorado verbatim, pela MESMA régua que mede se o trecho foi tocado (GAP-72: régua única). */
+/**
+ * 🔴 GAP-81 — quantas rodadas de foco **INDIVIDUAL** cada âncora já recebeu, neste projeto.
+ *
+ * É esta a medida que o gatilho do Jean pede. `focusRoundsByFile` conta rodadas do ARQUIVO, e rodada
+ * de arquivo não é foco: com `SPEC_VERDICT_MIN_FOCUS_ROUNDS = 2`, todo arquivo que passou duas vezes
+ * pela fila já satisfazia a guarda — o "focamos neles individualmente algumas vezes" virava carimbo
+ * automático, e a autoridade do juiz nasceria mais frouxa do que o Jean autorizou.
+ *
+ * Conta só `focusLevel = 2` (uma rodada dedicada a UM defeito, ver `gapFocus.planFocus`), pela âncora
+ * normalizada (`anchorSearchKey`): entre uma rodada e a outra o juiz reescreve a grafia da âncora
+ * (§8.6 (c) → Seção 8.6 c) e comparar cru zeraria a conta — o defeito medido no GAP-39/41.
+ */
+export async function focusRoundsByAnchor(db: Db, projectId: string): Promise<Map<string, number>> {
+  const rows = (await db.query(
+    `SELECT a.anchor AS anchor, count(*)::int AS n
+       FROM spec_autonomy_runs,
+            jsonb_array_elements(rounds) r,
+            jsonb_array_elements_text(r->'focusAnchors') a(anchor)
+      WHERE project_id = $1 AND (r->>'focusLevel')::int = 2
+      GROUP BY 1`,
+    [projectId],
+  ).catch(() => ({ rows: [] as Array<{ anchor: string | null; n: number }> }))).rows as unknown as
+    Array<{ anchor: string | null; n: number }>;
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const k = anchorSearchKey(r.anchor ?? "");
+    if (!k) continue;
+    out.set(k, (out.get(k) ?? 0) + Number(r.n ?? 0));
+  }
+  return out;
+}
+
+/**
+ * Trecho ancorado verbatim, pela MESMA régua que mede se o trecho foi tocado (GAP-72: régua única).
+ *
+ * 🔴 GAP-79 — é a SUBÁRVORE do cabeçalho. O promotor precisa ver o texto que o GAP acusa: com o corpo
+ * próprio, o promotor de `visao-escopo.md §1.3` recebia 415 chars de preâmbulo em vez dos 21.839 da
+ * tabela de interfaces que o GAP contesta — e "falha em acusar não é inocência" transformaria a cegueira
+ * do recorte em GAP mantido como impeditivo pelo motivo errado.
+ */
 export function anchoredSection(content: string, anchor: string): string {
   const secs = splitSections(content);
   const i = locateSectionIndex(buildAnchorIndex(secs), anchor);
   if (i === null) return "";
-  return clipSection(secs[i].body, SECTION_SLICE);
+  return clipSection(sectionSubtree(secs, i).body, SECTION_SLICE);
 }
 
 /**
@@ -171,6 +223,11 @@ export function selectVerdictCandidates(args: {
   runs: PastValidation[];
   judged: Set<string> | null;
   focusByFile: Map<string, number>;
+  /**
+   * 🔴 GAP-81 — rodadas de foco INDIVIDUAL por âncora normalizada (`focusRoundsByAnchor`). É esta a
+   * medida que abre a porta do veredicto; `focusByFile` fica só como contexto para o promotor e o juiz.
+   */
+  focusByAnchor: Map<string, number>;
   untouched: Set<string>;
   sections: Map<string, string>;
   gapsResolved: number;
@@ -233,9 +290,14 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: `reincidência insuficiente: reapareceu em ${times} validação(ões) competente(s), mínimo ${cfg.minRecurrence}` });
       continue;
     }
-    const focus = args.focusByFile.get(file.toLowerCase()) ?? 0;
+    // 🔴 GAP-81: a conta é de rodadas DEDICADAS a este defeito (`focusLevel = 2`), não de rodadas do
+    // arquivo. Rodada de arquivo manda todos os GAPs de uma vez e o teimoso perde a triagem interna do
+    // agente — chamar isso de "foco individual pago" seria dar ao juiz um poder que o Jean condicionou
+    // a trabalho que ainda não aconteceu.
+    const focusFile = args.focusByFile.get(file.toLowerCase()) ?? 0;
+    const focus = args.focusByAnchor.get(anchorSearchKey(anchor)) ?? 0;
     if (focus < cfg.minFocusRounds) {
-      rejected.push({ file, anchor, why: `foco individual insuficiente: ${focus} rodada(s) despachada(s) para este arquivo, mínimo ${cfg.minFocusRounds}` });
+      rejected.push({ file, anchor, why: `foco individual insuficiente: ${focus} rodada(s) DEDICADA(S) a este defeito (o arquivo teve ${focusFile} rodada(s) no total), mínimo ${cfg.minFocusRounds}` });
       continue;
     }
     const section = args.sections.get(anchor) ?? "";
@@ -243,7 +305,7 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: "âncora não localizável no arquivo: sem o trecho verbatim o juiz decidiria sobre um resumo" });
       continue;
     }
-    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, section });
+    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, fileRounds: focusFile, section });
   }
   // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente.
   candidates.sort((a, b) => b.times - a.times || b.focusRounds - a.focusRounds);
@@ -304,7 +366,7 @@ function describeCandidate(id: string, c: Candidate): string {
   return [
     `### ${id} [${c.finding.severity}] arquivo=${c.file} âncora=${c.anchor}`,
     `defeito: ${String(c.finding.title ?? "").slice(0, TITLE_SLICE)}${rationale ? ` — ${rationale}` : ""}`,
-    `reincidência: reapareceu em ${c.times} validação(ões) competente(s); este arquivo já foi editado em ${c.focusRounds} rodada(s)`,
+    `reincidência: reapareceu em ${c.times} validação(ões) competente(s); ${c.focusRounds} rodada(s) DEDICADA(S) só a este defeito, ${c.fileRounds} rodada(s) neste arquivo no total`,
     "trecho da spec, VERBATIM:",
     "```",
     c.section,

@@ -50,7 +50,7 @@ function body(title: string, sections: number): string {
 }
 
 // ── dublês dos colaboradores ──────────────────────────────────────────────────
-type F = { file: string; severity: string; title: string; fingerprint: string };
+type F = { file: string; severity: string; title: string; fingerprint: string; anchor?: string; source?: string };
 let findings: F[] = [];
 let latestRunId: string | null = "run-0";
 /**
@@ -72,7 +72,13 @@ vi.mock("./findingTriage.js", async (importOriginal) => ({
 // testes de fim de laço em `specAutonomy.test.ts`.
 vi.mock("./gapPromotionVerdict.js", () => ({
   verdictConfig: vi.fn(() => ({ minGapsResolved: 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
+  // 🔴 GAP-81: `startFileRound` lê as rodadas já pagas neste arquivo para decidir o degrau de foco.
+  // Vazio por padrão = nenhuma escalada (o resto da suíte mede o comportamento normal); os casos de
+  // foco enchem `rodadasPagas`. A lógica do planejador tem suíte própria (`gapFocus.test.ts`).
+  focusRoundsByFile: vi.fn(async () => rodadasPagas),
+  focusRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
 }));
+let rodadasPagas = new Map<string, number>();
 
 // `specGapScope` real alcança `routes/specs.js` → `db/client.js` (pool de verdade). Aqui ele é
 // dublado: o que este arquivo testa é a FILA do laço, não o roteador (que tem suíte própria).
@@ -214,6 +220,11 @@ const db = {
       return { rows: [{ status: validationStatus, stage_b_ran: true, stage_b_coverage: null }], rowCount: 1 };
     }
     if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) return { rows: [], rowCount: 0 };
+    // 🔴 GAP-71/81: o histórico que dá a reincidência de âncora ESTÁVEL. Vazio por padrão (nenhum GAP é
+    // teimoso); os casos de foco preenchem `validacoesPassadas`.
+    if (s.startsWith("SELECT findings, stage_b_coverage FROM spec_validation_runs")) {
+      return { rows: validacoesPassadas, rowCount: validacoesPassadas.length };
+    }
     // GAP-22: o conteúdo em que os GAPs foram medidos — chave de idempotência da decisão de oráculos.
     if (s.startsWith("SELECT spec_hash FROM spec_validation_runs")) return { rows: [{ spec_hash: "hash-do-conteudo" }], rowCount: 1 };
 
@@ -273,6 +284,16 @@ const db = {
       if (mDone) {
         run.files_done = [...(run.files_done as unknown[]), ...JSON.parse(values[Number(mDone[1]) - 1] as string)];
       }
+      // `mergeIntoLastRound` (GAP-71b): funde o patch NA ÚLTIMA rodada, no banco, sem reescrever o
+      // array — é assim que a marca da rodada dedicada (GAP-81) e as refs de reincidência chegam ao log.
+      if (/rounds = jsonb_set\(/.test(s)) {
+        const arr = [...(run.rounds as Record<string, unknown>[])];
+        if (arr.length === 0) return { rows: [], rowCount: 0 };
+        arr[arr.length - 1] = { ...arr[arr.length - 1], ...JSON.parse(values[1] as string) };
+        run.rounds = arr;
+        run.updated_at = nowIso();
+        return { rows: [], rowCount: 1 };
+      }
       if (/rounds = rounds \|\| \$2::jsonb/.test(s)) {
         run.rounds = [...(run.rounds as unknown[]), ...JSON.parse(values[1] as string)];
       } else if (/rounds = \$2::jsonb/.test(s)) {
@@ -289,6 +310,8 @@ const db = {
 } as any;
 
 let validationStatus = "passed";
+/** Validações anteriores do projeto (para a reincidência de âncora estável do GAP-71). */
+let validacoesPassadas: FakeRow[] = [];
 
 const INDEX = body("Índice", 2);
 const API = body("Backend API", 5);
@@ -305,6 +328,8 @@ beforeEach(() => {
   latestRunId = "run-0";
   validationStatus = "passed";
   coberturaAcumulada = null;
+  validacoesPassadas = [];
+  rodadasPagas = new Map();
   snapshotFails = false;
   sqlLog.length = 0;
   unroutedFindings = [];
@@ -449,6 +474,116 @@ describe("uma rodada escreve UM arquivo", () => {
     expect(startValidation).toHaveBeenCalledTimes(1);
     expect(run!.passes).toBe(1);
     expect(run!.files_done).toEqual([]);                   // novo passe começa com a fila cheia
+  });
+});
+
+// ── 2.1 GAP-81: a escalada de foco no arquivo teimoso ────────────────────────
+
+/**
+ * 🔴 GAP-81 — aqui se prova o TRANSPORTE da escalada (o planejador tem suíte própria em
+ * `gapFocus.test.ts`): a lista que chega ao CTO encolhe, o agente é AVISADO de que ela foi restringida,
+ * e a rodada fica marcada no log — sem a marca, o veredicto do GAP-77 não tem como contar foco pago e o
+ * gatilho do Jean ("focamos neles individualmente algumas vezes") nunca abre.
+ */
+describe("GAP-81 — rodada DEDICADA ao GAP teimoso", () => {
+  const TEIMOSO = {
+    file: "backend/01-api.md", severity: "blocker", title: "sem authz", anchor: "§4",
+    source: "stage_b", category: "security_gap",
+  };
+
+  /** 3 GAPs importantes no `01-api.md`, dos quais só `§4` reapareceu em validações COMPETENTES. */
+  function comUmTeimoso() {
+    findings = [
+      { ...gap("backend/01-api.md", "blocker", "sem authz"), anchor: "§4", source: "stage_b" },
+      { ...gap("backend/01-api.md", "blocker", "sem idempotência"), anchor: "§5", source: "stage_b" },
+      { ...gap("backend/01-api.md", "warning", "sem paginação"), anchor: "§6", source: "stage_b" },
+    ];
+    validacoesPassadas = [
+      { findings: [TEIMOSO], stage_b_coverage: { full: ["backend/01-api.md"] } },
+      { findings: [TEIMOSO], stage_b_coverage: { full: ["backend/01-api.md"] } },
+    ];
+  }
+  const ultimaRodada = () => (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+
+  it("sem reincidência, a rodada segue NORMAL — a escalada não pode ser o caso comum", async () => {
+    comUmTeimoso();
+    validacoesPassadas = [];
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().findings).toHaveLength(3);
+    expect(ultimaRodada().focusLevel).toBeUndefined();
+    expect(lastFileCall().userMessage).not.toMatch(/DEDICADA/);
+  });
+
+  it("nível 1: só o reincidente vai ao CTO, e os adiados ficam DECLARADOS no log", async () => {
+    comUmTeimoso();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    const call = lastFileCall();
+    expect(call.findings.map((f) => f.anchor)).toEqual(["§4"]);
+    // O agente PRECISA saber que a lista foi cortada — senão conclui que o arquivo só tem este defeito
+    // e "consolida" o resto (família GAP-73).
+    expect(call.userMessage).toMatch(/rodada DEDICADA/);
+    expect(call.userMessage).toMatch(/2 adiado\(s\), seguem ativos/);
+    expect(ultimaRodada()).toMatchObject({
+      filePath: "backend/01-api.md", focusLevel: 1, focusDeferred: 2, focusAnchors: ["§4"],
+    });
+    // A âncora MEDIDA no apply é a da lista restrita: medir as outras acusaria de "intocado" um GAP que
+    // esta rodada nem pediu.
+    expect(ultimaRodada().gapAnchors).toEqual(["§4"]);
+    expect(String(ultimaRodada().note)).toMatch(/REINCIDENTES/);
+    // E o `gapsBefore` continua sendo a conta REAL do arquivo — a restrição é de escopo, não de contagem.
+    expect(ultimaRodada().gapsBefore).toBe(3);
+  });
+
+  it("nível 2: com rodadas já pagas no arquivo, a rodada trata UM defeito só", async () => {
+    comUmTeimoso();
+    // Dois teimosos: no nível 1 iriam os dois; o degrau 2 escolhe o mais insistente.
+    validacoesPassadas = [
+      { findings: [TEIMOSO, { ...TEIMOSO, title: "sem idempotência", anchor: "§5" }], stage_b_coverage: { full: ["backend/01-api.md"] } },
+      { findings: [TEIMOSO, { ...TEIMOSO, title: "sem idempotência", anchor: "§5" }], stage_b_coverage: { full: ["backend/01-api.md"] } },
+      { findings: [TEIMOSO], stage_b_coverage: { full: ["backend/01-api.md"] } },
+    ];
+    rodadasPagas = new Map([["backend/01-api.md", 3]]);
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().findings.map((f) => f.anchor)).toEqual(["§4"]);
+    expect(ultimaRodada()).toMatchObject({ focusLevel: 2, focusDeferred: 2, focusAnchors: ["§4"] });
+    expect(String(ultimaRodada().note)).toMatch(/foco INDIVIDUAL/);
+  });
+
+  it("o GAP adiado NÃO é perdido: volta no passe seguinte", async () => {
+    comUmTeimoso();
+    const r = await start(3);
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().findings.map((f) => f.anchor)).toEqual(["§4"]);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz por escopo.\n`);
+    expect(run!.files_done).toEqual(["backend/01-api.md"]);
+    await advanceAutonomyRun(db, r.id);                      // fila vazia (o web não tem GAP) → valida
+    expect(run!.status).toBe("validating");
+    // A validação mediu: o teimoso caiu, os DOIS adiados seguem em aberto — ninguém os fechou por
+    // omissão, que é a garantia sem a qual restringir a rodada seria perder trabalho.
+    findings = [
+      { ...gap("backend/01-api.md", "blocker", "sem idempotência"), anchor: "§5", source: "stage_b" },
+      { ...gap("backend/01-api.md", "warning", "sem paginação"), anchor: "§6", source: "stage_b" },
+    ];
+    validacoesPassadas = [];
+    await advanceAutonomyRun(db, r.id);                      // validação medida → passe 2
+    expect(run!.passes).toBe(1);
+    await advanceAutonomyRun(db, r.id);
+    expect(lastFileCall().filePath).toBe("backend/01-api.md");
+    expect(lastFileCall().findings.map((f) => f.anchor)).toEqual(["§5", "§6"]);
+  });
+
+  it("falha ao ler as rodadas pagas não derruba a rodada — degrada para sem escalada", async () => {
+    comUmTeimoso();
+    const { focusRoundsByFile } = await import("./gapPromotionVerdict.js");
+    vi.mocked(focusRoundsByFile).mockRejectedValueOnce(new Error("coluna não existe"));
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchGapFileJob).toHaveBeenCalledTimes(1);
+    // Sem a conta, `fileRounds = 0` ⇒ o degrau 2 não acontece, mas o degrau 1 (que não depende dela) sim.
+    expect(ultimaRodada().focusLevel).toBe(1);
   });
 });
 

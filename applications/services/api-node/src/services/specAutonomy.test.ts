@@ -63,6 +63,8 @@ let verdict: {
 vi.mock("./gapPromotionVerdict.js", () => ({
   verdictConfig: vi.fn(() => ({ minGapsResolved: verdict ? 3 : 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
   focusRoundsByFile: vi.fn(async () => new Map<string, number>([["produto.md", 4]])),
+  // 🔴 GAP-81: rodadas DEDICADAS por âncora — conta separada da de arquivo, e é ela que abre o gatilho.
+  focusRoundsByAnchor: vi.fn(async () => new Map<string, number>([["4 autenticacao", 2]])),
   anchoredSection: vi.fn(() => "## 4. Autenticação\ntexto\n"),
   specFileShas: vi.fn(async () => new Map<string, string>()),
   selectVerdictCandidates: vi.fn(() => ({
