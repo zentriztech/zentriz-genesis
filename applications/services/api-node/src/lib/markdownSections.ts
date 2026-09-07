@@ -45,6 +45,57 @@ export function clipSection(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}\n[… seção truncada …]`;
 }
 
+/** Linhas de contexto de cada lado da linha que casa um termo, na janela de seção. */
+const WINDOW_CONTEXT_LINES = 2;
+/** Marcador entre dois pedaços da MESMA seção — o modelo precisa saber que faltou texto no meio. */
+export const WINDOW_GAP_MARK = "[… trecho omitido da mesma seção …]";
+
+/**
+ * 🔴 GAP-74 — JANELA de uma seção grande demais para caber inteira.
+ *
+ * Medido em prod: `§7.4` (16.399 chars) foi recusada por orçamento em duas medições seguidas, e é
+ * citada por 2 dos 4 GAPs cuja seção ficou byte-a-byte intocada na rodada — ou seja, aqueles GAPs
+ * **não tinham como fechar**. Recusar a seção inteira era o pior dos mundos: o agente sabia que faltava
+ * texto e não tinha o texto.
+ *
+ * A janela mantém o CABEÇALHO (endereço) e os blocos de linhas em torno de cada termo em disputa, com
+ * `WINDOW_CONTEXT_LINES` de folga. Cada bloco é **verbatim** — é o que permite montar um `SEARCH`
+ * válido — e cada salto é marcado. Devolve `null` quando nada casou ou nada cabe: melhor declarar a
+ * ausência do que entregar um recorte que o modelo confunda com a seção completa.
+ */
+export function sectionWindow(body: string, terms: string[], max: number): string | null {
+  const lines = body.split("\n");
+  const head = lines[0]?.startsWith("#") ? lines[0] : null;
+  const needles = terms.map((t) => String(t ?? "").trim().toLowerCase()).filter((t) => t.length >= 3);
+  if (needles.length === 0 || max <= 0) return null;
+  const keep = new Set<number>();
+  for (let i = head ? 1 : 0; i < lines.length; i += 1) {
+    const hay = lines[i].toLowerCase();
+    if (!needles.some((t) => hay.includes(t))) continue;
+    for (let j = Math.max(head ? 1 : 0, i - WINDOW_CONTEXT_LINES); j <= Math.min(lines.length - 1, i + WINDOW_CONTEXT_LINES); j += 1) {
+      keep.add(j);
+    }
+  }
+  if (keep.size === 0) return null;
+  const out: string[] = head ? [head] : [];
+  let spent = out.join("\n").length;
+  let prev = -2;
+  let cut = false;
+  for (const i of [...keep].sort((a, b) => a - b)) {
+    const piece = (i === prev + 1 ? "" : `${WINDOW_GAP_MARK}\n`) + lines[i];
+    // Pula a linha que não cabe em vez de PARAR: uma linha longa no meio (tabela, bloco de código)
+    // não pode custar as linhas seguintes, que podem ser exatamente a que o GAP endereça.
+    if (spent + piece.length + 1 > max) { cut = true; continue; }
+    out.push(...piece.split("\n"));
+    spent += piece.length + 1;
+    prev = i;
+  }
+  // Só cabeçalho (ou cabeçalho + marcador) não é janela: não mostra nenhum texto editável.
+  if (out.filter((l) => l !== WINDOW_GAP_MARK && l !== head).length === 0) return null;
+  if ((cut || prev < lines.length - 1) && out[out.length - 1] !== WINDOW_GAP_MARK) out.push(WINDOW_GAP_MARK);
+  return out.join("\n");
+}
+
 /**
  * Seções que mencionam pelo menos um dos termos, ordenadas por número de acertos (mais relevante
  * primeiro) e, em empate, pela ordem do arquivo. O índice original vai junto para quem quiser

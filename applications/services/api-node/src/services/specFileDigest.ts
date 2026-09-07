@@ -36,6 +36,7 @@
  */
 import {
   splitSections, clipSection, headingOutline, scoreSections, buildAnchorIndex, locateSectionIndex,
+  sectionWindow,
 } from "../lib/markdownSections.js";
 import { disputedTerms } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -44,6 +45,12 @@ import type { ValidationFinding } from "./specValidation.js";
 export const TARGET_SECTION_BUDGET = 24_000;
 /** Fração do teto de entrada que o resumo pode ocupar; o resto é prompt, GAPs e irmãos. */
 export const TARGET_DIGEST_FRACTION = 0.75;
+/**
+ * 🔴 GAP-74 — teto de UMA janela. Menor que o teto de seção de propósito: a janela existe justamente
+ * para a seção que não caberia inteira, e uma janela grande recriaria o problema que ela resolve
+ * (uma seção só consumindo o orçamento das outras endereçadas).
+ */
+export const TARGET_WINDOW_BUDGET = 6_000;
 
 export interface FileDigest {
   /** Texto a mandar no lugar do conteúdo integral. */
@@ -67,6 +74,12 @@ export interface FileDigest {
   citedLocated: number;
   /** Citadas que não caberiam — declaradas ao modelo, nunca omitidas em silêncio. */
   citedDropped: string[];
+  /** 🔴 GAP-74 — quantas seções entraram como JANELA (trecho verbatim em torno dos termos em disputa). */
+  windowed: number;
+  /** Âncoras cuja seção não caberia inteira e entrou como janela (não estão em `anchorsDropped`). */
+  anchorsWindowed: string[];
+  /** Citadas cuja seção não caberia inteira e entrou como janela (não estão em `citedDropped`). */
+  citedWindowed: string[];
 }
 
 /**
@@ -232,6 +245,23 @@ function citedSections(
  * cabiam de sobra. Sem enxergar o literal, a única saída que resta ao agente é **inventar uma regra
  * de substituição textual global** (`PURGA-RT-01.1`, `ETAPA-C-01`) — errata com outro nome, que o
  * juiz relê e reabre. Por isso as seções CITADAS entram como segunda reserva, antes da relevância.
+ *
+ * ## 🔴 GAP-74 — a seção que não cabe INTEIRA passa a vir como JANELA
+ *
+ * MEDIDO em prod na rodada seguinte ao GAP-73 (run `a33a0d29`, `modelo-dados.md`): `ancoradas 9/9`,
+ * `citadas 3/4`, **10 edições aplicadas / 0 recusadas** — e **4 dos 10 trechos endereçados ficaram
+ * byte-a-byte idênticos**, com o arquivo CRESCENDO 2.039 chars. O diff por seção mostra 5 seções
+ * alteradas, **todas por acréscimo**. E o `footprint` completo (âncora + citadas) dos 4 GAPs que não
+ * fecharam é `§6+§7.4`, `§8.6`, `§7.4+§8.4`, `§1.3+§9`: **duas delas dependem de `§7.4`, a única seção
+ * grande demais (16.399 chars) para caber no orçamento** — recusada nas duas medições. Ou seja: o
+ * agente escrevia em OUTRO lugar porque o lugar certo nunca chegava.
+ *
+ * Hipótese **REFUTADA no caminho**: "o medidor de intocado mente porque olha só a âncora" — nesta
+ * rodada o footprint COMPLETO das 4 também não mudou, então a medida por âncora não mentiu.
+ *
+ * Fix: antes do preenchimento por relevância, toda seção recusada por orçamento (ancorada ou citada)
+ * tenta entrar como `sectionWindow` — blocos VERBATIM em torno dos termos em disputa, saltos marcados,
+ * teto próprio (`TARGET_WINDOW_BUDGET`). Só sai como "não veio" o que nem em janela cabe.
  */
 export function buildFileDigest(
   filePath: string,
@@ -245,10 +275,12 @@ export function buildFileDigest(
       text: content, digested: false, used: secs.length, total: secs.length,
       anchored: 0, anchorsLocated: 0, anchorsDropped: [], anchorsUnlocatable: [],
       cited: 0, citedLocated: 0, citedDropped: [],
+      windowed: 0, anchorsWindowed: [], citedWindowed: [],
     };
   }
 
   const budget = Math.floor(cap * TARGET_DIGEST_FRACTION);
+  const terms = targetTerms(findings);
   const outline = headingOutline(secs);
   let spent = outline.length;
   const chosenIdx = new Set<number>();
@@ -258,9 +290,9 @@ export function buildFileDigest(
   //    peso, a MENOR primeiro (cabem mais GAPs acionáveis na rodada); empate pela ordem do arquivo.
   const { picks, unlocatable } = anchoredSections(secs, findings);
   picks.sort((a, b) => a.rank - b.rank || a.body.length - b.body.length || a.i - b.i);
-  const dropped: string[] = [];
+  const anchorOverflow: AnchoredSection[] = [];
   for (const p of picks) {
-    if (spent + p.body.length > budget) { dropped.push(...p.anchors); continue; }
+    if (spent + p.body.length > budget) { anchorOverflow.push(p); continue; }
     spent += p.body.length;
     chosenIdx.add(p.i);
     chosen.push({ i: p.i, body: p.body });
@@ -272,17 +304,40 @@ export function buildFileDigest(
   //    do passo 1 (blocker antes de warning, menor primeiro, empate pela ordem do arquivo).
   const citedPicks = citedSections(secs, findings, targetBase(filePath), new Set(picks.map((p) => p.i)));
   citedPicks.sort((a, b) => a.rank - b.rank || a.body.length - b.body.length || a.i - b.i);
-  const citedDropped: string[] = [];
+  const citedOverflow: CitedSection[] = [];
   for (const p of citedPicks) {
-    if (spent + p.body.length > budget) { citedDropped.push(...p.refs); continue; }
+    if (spent + p.body.length > budget) { citedOverflow.push(p); continue; }
     spent += p.body.length;
     chosenIdx.add(p.i);
     chosen.push({ i: p.i, body: p.body });
   }
   const cited = chosen.length - anchored;
 
-  // 3) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
-  for (const x of scoreSections(secs, targetTerms(findings))) {
+  // 3) 🔴 GAP-74 — a seção que NÃO CABE inteira entra como JANELA em vez de não vir.
+  //    Medido em prod: `§7.4` (16.399 chars) foi recusada por orçamento e é citada por 2 dos 4 GAPs cuja
+  //    seção ficou byte-a-byte intocada — aqueles GAPs não tinham como fechar. A janela é o trecho
+  //    VERBATIM em torno dos termos em disputa, com os saltos marcados: dá ao modelo um `SEARCH` válido
+  //    sem gastar a seção inteira. Continua transporte de fato — quem escolhe o que mudar é o agente.
+  const dropped: string[] = [];
+  const citedDropped: string[] = [];
+  const anchorsWindowed: string[] = [];
+  const citedWindowed: string[] = [];
+  let windowed = 0;
+  const tryWindow = (i: number, labels: string[], extra: string[], into: string[], out: string[]): void => {
+    const room = Math.min(TARGET_WINDOW_BUDGET, budget - spent);
+    const win = room > 0 ? sectionWindow(secs[i].body, [...terms, ...extra], room) : null;
+    if (win === null) { out.push(...labels); return; }
+    spent += win.length;
+    chosenIdx.add(i);
+    chosen.push({ i, body: win });
+    windowed += 1;
+    into.push(...labels);
+  };
+  for (const p of anchorOverflow) tryWindow(p.i, p.anchors, p.anchors, anchorsWindowed, dropped);
+  for (const p of citedOverflow) tryWindow(p.i, p.refs, p.refs, citedWindowed, citedDropped);
+
+  // 4) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
+  for (const x of scoreSections(secs, terms)) {
     if (chosenIdx.has(x.i)) continue;
     const body = clipSection(x.section.body, TARGET_SECTION_BUDGET);
     if (spent + body.length > budget) continue;
@@ -319,6 +374,9 @@ export function buildFileDigest(
       cited: 0,
       citedLocated: citedPicks.length,
       citedDropped,
+      windowed,
+      anchorsWindowed,
+      citedWindowed,
     };
   }
 
@@ -337,6 +395,18 @@ export function buildFileDigest(
       "    duplicá-la troca um GAP por uma contradição interna;",
       "  • se um GAP só puder ser resolvido numa seção que não está aqui, diga isso na linha final em vez",
       "    de adivinhar o conteúdo dela.]",
+      // 🔴 GAP-74: a janela é verbatim mas PARCIAL. Sem esta regra o modelo trata os saltos como se a
+      // seção terminasse ali e reescreve a seção "completa" — trocando o GAP por perda de conteúdo.
+      ...(windowed > 0
+        ? [`[JANELA: ${windowed} seção(ões) não caberia(m) inteira(s) e vieram RECORTADAS — os pedaços que`,
+           ` você vê são verbatim, e cada \`[… trecho omitido da mesma seção …]\` marca texto que EXISTE no`,
+           " arquivo e não está aqui. Edite só o que está visível; NÃO reescreva a seção inteira nem trate o",
+           ` marcador como fim da seção.${
+             [...anchorsWindowed, ...citedWindowed].length > 0
+               ? ` Vieram em janela: ${[...anchorsWindowed, ...citedWindowed].join(", ")}.`
+               : ""
+           }]`]
+        : []),
       // 🔴 GAP-72: âncora cuja seção não caberia sai DECLARADA. Sem esta linha o modelo lê a ausência
       // como "o trecho não existe" e responde com errata — a patologia do GAP-71 causada pelo recorte.
       ...(dropped.length > 0
@@ -369,5 +439,8 @@ export function buildFileDigest(
     cited,
     citedLocated: citedPicks.length,
     citedDropped,
+    windowed,
+    anchorsWindowed,
+    citedWindowed,
   };
 }
