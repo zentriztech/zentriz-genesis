@@ -113,6 +113,40 @@ export function scoreSections(secs: MdSection[], terms: string[]): Array<{ i: nu
     .sort((a, b) => b.hits - a.hits || a.i - b.i);
 }
 
+/** Endereço de seção citado no texto de um GAP (`§8.1`, `§2.3.1`). */
+const SECTION_REF_RE = /§\s?\d+(?:\.\d+)*/g;
+/** Janela de texto antes da citação onde se procura um nome de arquivo (`contratos-erros.md §2.3`). */
+const CROSS_FILE_WINDOW = 48;
+
+export interface CitedSectionRef {
+  /** O endereço como o juiz escreveu (`§8.1`). */
+  ref: string;
+  /** Nome do arquivo (minúsculo) que precede a citação, ou `null` quando ela não nomeia arquivo. */
+  file: string | null;
+}
+
+/**
+ * Endereços de seção citados num texto de GAP, cada um com o arquivo a que a citação se refere.
+ *
+ * ⚠️ Vive AQUI porque as DUAS pontas dependem dela e precisam ser complementares: o recorte do arquivo
+ * ALVO (`specFileDigest`, GAP-73) aceita `file === null` ou o próprio alvo e DESCARTA citação de outro
+ * arquivo; o recorte do IRMÃO (`specSiblingContext`, GAP-75) aceita exatamente o que o alvo descartou.
+ * Com duas réguas, a citação `privacidade-lgpd.md §3.3` cairia no vão entre elas — e foi isso que se
+ * mediu em prod: 7 de 14 seções de irmão citadas pelos GAPs nunca chegavam ao prompt.
+ */
+export function citedSectionRefs(text: string): CitedSectionRef[] {
+  const out: CitedSectionRef[] = [];
+  const s = String(text ?? "");
+  SECTION_REF_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = SECTION_REF_RE.exec(s)) !== null) {
+    const before = s.slice(Math.max(0, m.index - CROSS_FILE_WINDOW), m.index);
+    const fileHit = before.match(/([A-Za-z0-9._-]+\.md)[^.]*$/i);
+    out.push({ ref: m[0], file: fileHit ? fileHit[1].toLowerCase() : null });
+  }
+  return out;
+}
+
 /**
  * Normalização de âncora para BUSCA NO TEXTO (não para identidade — isso é `normalizeAnchor`).
  *

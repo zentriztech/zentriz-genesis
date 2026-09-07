@@ -923,9 +923,19 @@ async function gapSiblingBlock(
     ]);
     const files = await loadSpecFiles(pool, projectId);
     if (files.length < 2) return ""; // spec de arquivo único não tem irmão a citar
-    const { block, used, omitted } = await buildSiblingContext(files, filePath, findings);
+    const { block, used, omitted, citedUsed, citedDropped, citedWindowed } =
+      await buildSiblingContext(files, filePath, findings);
     if (used.length || omitted.length) {
-      console.log(`[SpecChat] irmãos citados projeto=${projectId.slice(0, 8)} alvo=${filePath} usados=[${used.join(", ")}]${omitted.length ? ` fora_do_orcamento=[${omitted.join(", ")}]` : ""} chars=${block.length}`);
+      console.log(
+        `[SpecChat] irmãos citados projeto=${projectId.slice(0, 8)} alvo=${filePath} usados=[${used.join(", ")}]`
+        + `${omitted.length ? ` fora_do_orcamento=[${omitted.join(", ")}]` : ""} chars=${block.length}`
+        // 🔴 GAP-75: 14 de 20 GAPs deste projeto são cross-file, e 7 das 14 seções de irmão citadas
+        // NUNCA chegavam ao prompt (127 a 3.214 chars, com o bloco em 49k de 60k — era ORDEM). Sem este
+        // par no log, a diferença entre "o irmão veio" e "o trecho do irmão veio" fica invisível.
+        + `; seções citadas ${citedUsed.length}/${citedUsed.length + citedDropped.length}`
+        + `${citedWindowed.length ? ` (janelas: ${citedWindowed.join(", ")})` : ""}`
+        + `${citedDropped.length ? ` FORA: ${citedDropped.join(", ")}` : ""}`,
+      );
     }
     return block;
   } catch (e) {

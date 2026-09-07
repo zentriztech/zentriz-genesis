@@ -36,7 +36,7 @@
  */
 import {
   splitSections, clipSection, headingOutline, scoreSections, buildAnchorIndex, locateSectionIndex,
-  sectionWindow,
+  sectionWindow, citedSectionRefs,
 } from "../lib/markdownSections.js";
 import { disputedTerms } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -147,29 +147,21 @@ function targetBase(filePath: string): string {
   return p.slice(p.lastIndexOf("/") + 1);
 }
 
-/** Endereço de seção citado no texto de um GAP (`§8.1`, `§2.3.1`). */
-const SECTION_REF_RE = /§\s?\d+(?:\.\d+)*/g;
-/** Janela de texto antes da citação onde se procura um nome de arquivo (`contratos-erros.md §2.3`). */
-const CROSS_FILE_WINDOW = 48;
-
 /**
  * 🔴 GAP-73 — os endereços que o GAP cita ALÉM da própria âncora.
  *
- * Puramente mecânico: extrai `§x.y` do título e do `rationale`. Citação precedida de um nome de
- * arquivo DIFERENTE do alvo é descartada — `contratos-erros.md §2.3` aponta a seção 2.3 DO IRMÃO, e
- * trazer a §2.3 do alvo mostraria o trecho errado (pior que não mostrar nada). Auto-referência pelo
- * nome (`modelo-dados.md §8.1` dentro de `modelo-dados.md`) continua valendo.
+ * Puramente mecânico: extrai `§x.y` do título e do `rationale` (`citedSectionRefs`, régua compartilhada
+ * com o lado do irmão). Citação precedida de um nome de arquivo DIFERENTE do alvo é descartada —
+ * `contratos-erros.md §2.3` aponta a seção 2.3 DO IRMÃO, e trazer a §2.3 do alvo mostraria o trecho
+ * errado (pior que não mostrar nada); quem cuida dessa é o GAP-75, em `specSiblingContext`.
+ * Auto-referência pelo nome (`modelo-dados.md §8.1` dentro de `modelo-dados.md`) continua valendo.
  */
 function citedRefs(f: ValidationFinding, targetBase: string): string[] {
   const out: string[] = [];
   for (const text of [String(f.title ?? ""), String(f.rationale ?? "")]) {
-    SECTION_REF_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = SECTION_REF_RE.exec(text)) !== null) {
-      const before = text.slice(Math.max(0, m.index - CROSS_FILE_WINDOW), m.index);
-      const fileHit = before.match(/([A-Za-z0-9._-]+\.md)[^.]*$/i);
-      if (fileHit && fileHit[1].toLowerCase() !== targetBase) continue;
-      out.push(m[0]);
+    for (const c of citedSectionRefs(text)) {
+      if (c.file !== null && c.file !== targetBase) continue;
+      out.push(c.ref);
     }
   }
   return out;
