@@ -44,6 +44,9 @@ import type { ValidationFinding } from "../services/specValidation.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
 import { MANIFEST_PATH } from "../services/specManifest.js";
+// GAP-68: `import type` de propósito — `gapContinuity` importa `httpPost` de `routes/specs.js`, e um
+// import de valor fecharia um ciclo entre os dois arquivos de rota no carregamento do módulo.
+import type { PersistentGapRef } from "../services/gapContinuity.js";
 import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatalog.js";
 
 interface ChatMessage {
@@ -770,6 +773,11 @@ function buildGapFileRequest(
    * de Opus 5, uma resposta que ele já sabe que vai recusar.
    */
   priorRejectionBlock = "",
+  /**
+   * 🔴 GAP-68: destes GAPs, quais já foram entregues antes e sobreviveram à edição. Vazio = nenhum
+   * reincidente conhecido (ou a reconciliação do GAP-67 não rodou — e aí o laço não afirma nada).
+   */
+  persistentGapBlock = "",
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -805,6 +813,9 @@ function buildGapFileRequest(
     gaps,
     "--- FIM DOS GAPs ---",
     "",
+    // GAP-68: vem COLADO na lista de GAPs porque é uma qualificação dela — diz quais daqueles itens
+    // não são novidade. Longe da lista, o modelo lê como advertência genérica e não liga ao item.
+    persistentGapBlock,
     // GAP-29: vem por ÚLTIMO, antes só da instrução de formato, porque é a correção de rota — o
     // modelo lê o pedido inteiro e só então descobre que a resposta óbvia já foi reprovada.
     priorRejectionBlock,
@@ -956,6 +967,57 @@ export function priorRejectionFactBlock(
         + " falta é apontar a fonte única, cite o caminho do arquivo-oráculo no lugar da redeclaração e"
         + " remova o texto redundante; entregar o mesmo conteúdo de novo gasta a rodada sem fechar GAP.",
     "--- FIM DA TENTATIVA ANTERIOR ---",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * 🔴 GAP-68 — o FATO de que estes GAPs já foram entregues a um agente antes e SOBREVIVERAM à edição.
+ *
+ * MEDIDO em prod 2026-09-07 (NVX LastMile, run `b1bc1195`): a reconciliação do GAP-67 mostrou que
+ * **8 de 14** GAPs contados como fechados eram o MESMO defeito com a âncora renumerada pela edição
+ * anterior. O agente não tinha como saber: cada rodada lhe entrega o GAP como novidade, ele reescreve
+ * a seção, o número muda, o juiz reencontra o defeito sob o nome novo e a spec engorda. É o motor
+ * medido do GAP-8 (a spec só cresce: 1,13 milhão de chars).
+ *
+ * O bloco não manda o agente fazer nada de novo — informa a ÚNICA coisa que ele não podia deduzir do
+ * texto que recebe: que a resposta óbvia (reescrever/renumerar a seção) JÁ foi tentada aqui e
+ * falhou. Mesma família do `priorRejectionFactBlock`, com uma diferença: ali a rodada foi descartada
+ * e o arquivo não mudou; aqui a rodada foi APLICADA e o defeito continuou.
+ *
+ * A afirmação tem fonte declarada de propósito ("um revisor comparou as duas listas"): é juízo de
+ * agente, não medida de código, e um pareamento errado que se apresente como fato manda o CTO apagar
+ * texto que talvez não devesse.
+ */
+export function persistentGapFactBlock(refs: PersistentGapRef[] | null | undefined): string {
+  const list = (refs ?? []).filter((r) => r && r.times >= 2);
+  if (list.length === 0) return "";
+  const worst = Math.max(...list.map((r) => r.times));
+  const lines = [
+    "--- ESTES GAPs JÁ FORAM ENTREGUES ANTES E SOBREVIVERAM À EDIÇÃO (fato registrado pelo laço) ---",
+    `Depois de cada rodada, um revisor compara a lista de problemas de antes com a de depois. Ele`
+    + ` concluiu que ${list.length === 1 ? "o GAP abaixo" : `os ${list.length} GAPs abaixo`}`
+    + ` NÃO ${list.length === 1 ? "é novo" : "são novos"}: já ${list.length === 1 ? "havia" : "haviam"}`
+    + " sido apontado(s) numa rodada anterior, um agente editou o arquivo, e o problema CONTINUOU —"
+    + " só mudou de endereço no documento.",
+  ];
+  for (const r of list) {
+    const de = r.anchorBefore && r.anchorBefore !== r.anchor ? `${r.anchorBefore} → ${r.anchor ?? "(sem âncora)"}` : (r.anchor ?? "(sem âncora)");
+    lines.push(`• ${de} — ${r.times}ª aparição :: ${r.title}${r.why ? ` (o revisor: ${r.why})` : ""}`);
+  }
+  lines.push(
+    "RENUMERAR, RENOMEAR OU REESCREVER A SEÇÃO NÃO FECHA ESTES GAPs — foi exatamente o que a rodada"
+    + " anterior fez, e é por isso que a âncora mudou e o problema não. Feche-os na RAIZ: decida qual"
+    + " das duas afirmações em conflito é a que VALE, deixe-a em UM lugar só, e APAGUE a outra (ou"
+    + " troque-a por uma remissão ao arquivo-oráculo). Se a decisão não é sua, diga explicitamente no"
+    + " texto quem decide e o que fica valendo até lá — uma decisão registrada fecha o GAP; uma"
+    + " reformulação mais elegante do mesmo impasse não.",
+    worst >= 3
+      ? `ATENÇÃO: um deles está na ${worst}ª aparição. Se a sua edição desta vez não REMOVER o texto`
+        + " conflitante, ele volta de novo e a rodada foi gasta à toa."
+      : "Trocar o texto por uma versão mais longa que preserve as duas afirmações reabre o GAP na"
+        + " próxima validação.",
+    "--- FIM DOS GAPs REINCIDENTES ---",
   );
   return lines.join("\n");
 }
@@ -1290,6 +1352,12 @@ export async function dispatchGapFileJob(opts: {
    * histórico; o botão humano não retenta.
    */
   priorRejection?: { delta: number; budget: number; pass: number; reason?: string | null } | null;
+  /**
+   * 🔴 GAP-68: os GAPs desta leva que a reconciliação do GAP-67 identificou como REINCIDENTES —
+   * já entregues antes, editados, e voltaram só com a âncora trocada. Só o laço autônomo tem esse
+   * histórico (o botão humano não encadeia rodadas).
+   */
+  persistentGaps?: PersistentGapRef[] | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1319,6 +1387,18 @@ export async function dispatchGapFileJob(opts: {
   // GAP-29/GAP-31: o prompt NÃO é persistido em `spec_chat_jobs` (só o `reply`), então sem esta linha
   // a entrega do fato da recusa anterior é INAUDITÁVEL em produção — dá para ver que o laço gravou a
   // recusa, não que o agente a recebeu. Loga o que foi entregue, não o texto (que é longo e derivável).
+  // GAP-68: o bloco é montado a partir das refs que o laço guardou; o log diz quantos GAPs desta leva
+  // são reincidentes e qual a pior reincidência. Sem esta linha, "o agente foi avisado" seria
+  // indemonstrável em prod — o prompt não é persistido, só o `reply`. E `reincidentes=0` com refs
+  // presentes é o sintoma de ação INERTE (fingerprint mudou entre o registro e o despacho).
+  const persistentBlock = persistentGapFactBlock(opts.persistentGaps);
+  if ((opts.persistentGaps ?? []).length > 0) {
+    const pg = opts.persistentGaps!;
+    console.log(
+      `[SpecChat] fato de reincidência entregue alvo=${opts.filePath} reincidentes=${pg.length}`
+      + ` pior=${Math.max(...pg.map((r) => r.times))}ª chars=${persistentBlock.length}`,
+    );
+  }
   const priorBlock = priorRejectionFactBlock(opts.priorRejection);
   if (priorBlock) {
     const p = opts.priorRejection!;
@@ -1344,7 +1424,7 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorBlock,
+        priorBlock, persistentBlock,
       ),
       ...opts.llm,
     },

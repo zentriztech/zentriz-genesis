@@ -52,6 +52,13 @@ vi.mock("./gapContinuity.js", () => ({
       reconciled: continuity.reconciled, reason: continuity.reason, truncated: 0, model: "dublê",
     };
   }),
+  // GAP-68: o dublê tem de existir — o laço chama `buildPersistentRefs` sempre que reconcilia com
+  // reincidentes, e um mock incompleto quebraria com "not a function" em vez de medir o laço.
+  buildPersistentRefs: vi.fn((persisted: unknown[]) =>
+    persisted.map((_, i) => ({
+      fingerprint: `fp-${i}`, file: "modelo-dados.md", anchor: `§${i}`, anchorBefore: `§${i}.1`,
+      title: `reincidente ${i}`, why: "seção renumerada", times: 2,
+    }))),
 }));
 
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));

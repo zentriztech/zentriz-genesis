@@ -44,6 +44,7 @@
  */
 
 import { httpPost } from "../routes/specs.js";
+import { findingFingerprint } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 /**
@@ -95,6 +96,31 @@ export interface GapContinuity {
   /** Itens que não couberam no teto e ficaram fora do pareamento (declarados, não pareados às cegas). */
   truncated: number;
   model: string | null;
+}
+
+/**
+ * 🔴 GAP-68 — o registro de que um defeito SOBREVIVEU a uma edição, no formato que cabe no log da
+ * rodada e volta ao agente na rodada seguinte.
+ *
+ * É a consequência direta do GAP-67: descobrir que 8 de 14 "fechados" eram rebatismo só vale se o
+ * CTO passar a SABER disso. Sem este registro o laço mede o churn e o agente segue recebendo o
+ * mesmo defeito como se fosse novidade — reescreve a seção, a âncora muda outra vez, e a spec
+ * engorda (o motor medido do GAP-8).
+ *
+ * `fingerprint` é o do lado ATUAL (o que o próximo despacho vai enviar): é a chave do reencontro.
+ * `times` conta APARIÇÕES, não rodadas: 2 = apontado, editado, voltou.
+ */
+export interface PersistentGapRef {
+  fingerprint: string;
+  file: string;
+  /** Âncora ATUAL (como o GAP chega ao agente agora). */
+  anchor: string | null;
+  /** Âncora que o MESMO defeito tinha antes da edição — a prova visível do rebatismo. */
+  anchorBefore: string | null;
+  title: string;
+  /** Por que o reconciliador concluiu que é o mesmo defeito (texto do agente, recortado). */
+  why: string;
+  times: number;
 }
 
 function describe(id: string, f: ValidationFinding): string {
@@ -221,4 +247,43 @@ export async function reconcileGapDelta(
     closed, opened, persisted, reconciled: true, model: usedModel, truncated,
     reason: truncated > 0 ? `${truncated} item(ns) acima do teto de ${RECON_MAX_PER_SIDE} por lado ficaram fora do pareamento` : undefined,
   };
+}
+
+/** Teto de refs guardadas por rodada: o log da rodada é JSONB lido a cada tick, não um arquivo. */
+const PERSIST_REF_MAX = 12;
+const WHY_SLICE = 220;
+
+/**
+ * 🔴 GAP-68 — converte os pares reconciliados em refs para a rodada SEGUINTE, carregando a linhagem.
+ *
+ * A linhagem é o que dá força ao fato: "este defeito já voltou 3 vezes" é um pedido diferente de
+ * "conserte este defeito". Ela se acumula pelo lado FECHADO — se o defeito que acabou de ser
+ * rebatizado já era, ele mesmo, o lado atual de um rebatismo anterior, `times` continua de onde
+ * parou. Sem isso cada rodada recomeçaria em "2ª vez" e o laço nunca poderia dizer "pare de
+ * reescrever a seção".
+ *
+ * `priorRefs` são as refs da rodada anterior (do log). O recorte por `PERSIST_REF_MAX` é declarado
+ * pelo chamador; aqui só se preservam as de MAIOR reincidência, que são as que sustentam o pedido.
+ */
+export function buildPersistentRefs(
+  persisted: GapContinuity["persisted"],
+  priorRefs: PersistentGapRef[] = [],
+): PersistentGapRef[] {
+  const byPrior = new Map(priorRefs.map((r) => [r.fingerprint, r]));
+  const refs = persisted.map((p) => {
+    // A ref anterior é indexada pelo fingerprint que ERA o atual — hoje ele é o lado FECHADO.
+    const prev = byPrior.get(findingFingerprint(p.closed));
+    return {
+      fingerprint: findingFingerprint(p.opened),
+      file: p.opened.file ?? "",
+      anchor: (p.opened.anchor ?? null) || null,
+      anchorBefore: (p.closed.anchor ?? null) || null,
+      title: String(p.opened.title ?? "").slice(0, TITLE_SLICE),
+      why: (p.why ?? "").replace(/\s+/g, " ").slice(0, WHY_SLICE),
+      times: (prev?.times ?? 1) + 1,
+    };
+  });
+  // Maior reincidência primeiro: se algo tiver de cair pelo teto, cai o menos reincidente.
+  refs.sort((a, b) => b.times - a.times);
+  return refs.slice(0, PERSIST_REF_MAX);
 }

@@ -53,8 +53,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
-import { projectFindingsState, gapDeltaSinceLastRun, type EnrichedFinding } from "./findingTriage.js";
-import { reconcileGapDelta } from "./gapContinuity.js";
+import { projectFindingsState, gapDeltaSinceLastRun, findingFingerprint, type EnrichedFinding } from "./findingTriage.js";
+import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
 import { startValidation, unjudgedSpecFiles } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
@@ -279,6 +279,16 @@ export interface AutonomyRoundLog {
    * reconciliação NÃO rodou e os dois números acima são crus (limite superior, não medida).
    */
   gapsPersisted?: number | null;
+  /**
+   * 🔴 GAP-68 — QUAIS defeitos sobreviveram à edição, não só quantos.
+   *
+   * `gapsPersisted` é o número; sem a identidade, o fato morre no log e o CTO recebe o mesmo defeito
+   * como novidade na rodada seguinte — reescreve a seção, a âncora muda outra vez, e a spec engorda
+   * (o motor medido do GAP-8). Estas refs são o que volta ao agente em `persistentGapFactBlock`, com
+   * a linhagem (`times`) acumulada entre rodadas. Ausente/`null` ⇒ a reconciliação não rodou ou não
+   * achou reincidente, e aí o laço NÃO afirma nada ao agente.
+   */
+  persistedGaps?: PersistentGapRef[] | null;
   /**
    * 🔴 GAP-45 — o recorte 🔴/🟡 do PASSE, separado do recorte 🔴/🟡 do ARQUIVO.
    *
@@ -969,6 +979,85 @@ export function lastRejectedAttempt(
 }
 
 /**
+ * 🔴 GAP-68 — as refs de reincidência da medição MAIS RECENTE desta run.
+ *
+ * Só a última interessa: cada validação recalcula o conjunto inteiro de reincidentes a partir do diff
+ * daquele momento, e uma ref de dois passes atrás já foi ou reconfirmada (aparece na nova) ou
+ * fechada. Devolver o acumulado histórico faria o laço afirmar ao agente que um GAP já fechado
+ * continua voltando.
+ *
+ * A busca é de trás para frente por `persistedGaps` presente, NÃO por `gapsPersisted > 0`: uma
+ * validação que reconciliou e não achou reincidente grava `gapsPersisted: 0` sem refs, e isso é a
+ * informação "a lista atual é vazia" — parar nela é o comportamento correto.
+ */
+export function lastPersistedGaps(run: Pick<AutonomyRun, "rounds">): PersistentGapRef[] {
+  for (let i = run.rounds.length - 1; i >= 0; i--) {
+    const r = run.rounds[i];
+    if (Array.isArray(r.persistedGaps)) return r.persistedGaps;
+    // A rodada mediu e reconciliou sem achar reincidente ⇒ a lista corrente é vazia, e uma ref mais
+    // antiga não pode ressuscitar. `null`/ausente (não reconciliou) segue procurando.
+    if (r.gapsPersisted === 0) return [];
+  }
+  return [];
+}
+
+/**
+ * 🔴 GAP-68 (revisão adversarial da própria correção) — reincidência é conhecimento do PROJETO, não da
+ * run.
+ *
+ * `lastPersistedGaps` só olha o log da run corrente, e uma run NASCE com `rounds: []`. Consequência
+ * medida no desenho: a run `b1bc1195` terminou `exhausted` sabendo de 8 defeitos rebatizados, e a run
+ * seguinte (`f101303f`) começaria cega — o primeiro passe de TODA run repetiria exatamente o erro que
+ * esta correção existe para evitar. Como o Jean opera o laço em runs sucessivas, esse primeiro passe é
+ * uma fração grande do gasto.
+ *
+ * O fallback só entra quando a run corrente AINDA não mediu nada (nenhuma rodada com `persistedGaps`
+ * nem `gapsPersisted`): dentro da run, a medição de agora sempre vence a herdada.
+ *
+ * Herdar é seguro porque quem afirma reincidência é `persistentGapsFor`, e ele casa por fingerprint
+ * EXATO contra os findings da validação ATUAL: defeito já corrigido simplesmente não casa e nada é
+ * dito. Falha de banco devolve o que a run tem — o fato é um extra, nunca uma pré-condição.
+ */
+export async function knownPersistentGaps(db: Db, run: AutonomyRun): Promise<PersistentGapRef[]> {
+  const own = lastPersistedGaps(run);
+  if (own.length > 0) return own;
+  const mediu = run.rounds.some((r) => Array.isArray(r.persistedGaps) || r.gapsPersisted === 0);
+  if (mediu) return own;
+  const rows = (await db.query(
+    `SELECT rounds FROM spec_autonomy_runs
+      WHERE project_id = $1 AND id <> $2
+      ORDER BY created_at DESC LIMIT 3`,
+    [run.projectId, run.id],
+  ).catch(() => ({ rows: [] as Array<{ rounds: unknown }> }))).rows as Array<{ rounds: unknown }>;
+  for (const row of rows) {
+    const refs = lastPersistedGaps({ rounds: Array.isArray(row.rounds) ? (row.rounds as AutonomyRoundLog[]) : [] });
+    if (refs.length > 0) {
+      console.info(`[SpecAutonomy] run=${run.id}: ${refs.length} ref(s) de reincidência HERDADAS da run anterior do projeto (esta run ainda não mediu).`);
+      return refs;
+    }
+  }
+  return [];
+}
+
+/**
+ * 🔴 GAP-68 — quais dos GAPs que vão AGORA para o CTO são reincidentes conhecidos.
+ *
+ * Casa por fingerprint EXATO com os findings do despacho, porque as refs foram gravadas a partir da
+ * MESMA validação que produziu estes findings — se o fingerprint não casar, algo mudou entre o
+ * registro e o despacho e afirmar reincidência seria chute. Por isso o chamador LOGA quantos casaram:
+ * "0 casados com refs presentes" é o sintoma de ação inerte, não de spec limpa.
+ */
+export function persistentGapsFor(
+  refs: PersistentGapRef[], filePath: string,
+  findings: Array<Parameters<typeof findingFingerprint>[0]>,
+): PersistentGapRef[] {
+  if (refs.length === 0 || findings.length === 0) return [];
+  const norm = (p: string) => p.trim().toLowerCase();
+  const fps = new Set(findings.map((f) => findingFingerprint(f)));
+  return refs.filter((r) => norm(r.file ?? "") === norm(filePath) && fps.has(r.fingerprint));
+}
+
+/**
  * 🔴 GAP-43 — quantas vezes esta run já terminou um passe SEM medição?
  *
  * Deriva do log (nada de coluna nova): a rodada que fecha um passe não medido leva a marca
@@ -1337,11 +1426,20 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const { dispatchGapFileJob } = await import("../routes/specChat.js");
   // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
   const priorRejection = lastRejectedAttempt(run, target);
+  // 🔴 GAP-68: e se algum destes GAPs já foi entregue antes e SOBREVIVEU à edição, o agente recebe
+  // esse fato também — é a única coisa que ele não pode deduzir do texto do arquivo.
+  const knownRefs = await knownPersistentGaps(db, run);
+  const persistentGaps = persistentGapsFor(knownRefs, target, fileFindings);
+  if (knownRefs.length > 0 && persistentGaps.length === 0) {
+    // Refs existem mas nenhuma casou com este arquivo: normal se os reincidentes são de OUTRO arquivo.
+    // Vira sintoma quando acontece para todos os arquivos do passe — aí a ação está inerte.
+    console.info(`[SpecAutonomy] run=${run.id} ${target}: ${knownRefs.length} ref(s) de reincidência conhecidas, nenhuma deste arquivo/leva.`);
+  }
   try {
     const res = await dispatchGapFileJob({
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
       filePath: target, fileContent: file.content, findings: fileFindings, agentsUrl, llm, growthBudget,
-      priorRejection,
+      priorRejection, persistentGaps,
       userMessage: `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
     });
     if (!res.ok) {
@@ -2007,6 +2105,11 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       }
     : null;
   const persisted = cont?.reconciled ? cont.persisted.length : 0;
+  // 🔴 GAP-68: a identidade dos reincidentes, com a linhagem carregada da rodada anterior. Sem isto o
+  // fato do GAP-67 fica só no log e o agente recebe o defeito como novidade no próximo despacho.
+  const persistedRefs = cont?.reconciled && cont.persisted.length > 0
+    ? buildPersistentRefs(cont.persisted, lastPersistedGaps(run))
+    : null;
   // ⚠️ Revisão adversarial da própria correção: aceitar `closed > 0` como progresso premiaria justamente
   // o comportamento medido no NVX (1 fecha, 25 entram) e o laço queimaria os 5 passes sem convergir —
   // matando a função do `no_progress_streak`, que é cortar gasto de LLM que não anda. Progresso é SALDO:
@@ -2063,6 +2166,7 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     validationRunId: run.validationRunId,
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
     gapsPersisted: cont?.reconciled ? persisted : null,
+    persistedGaps: persistedRefs,
     note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${deltaNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — o AGREGADO das duas não é comparável (a diferença acima é)." : ""}`,
   }, { keepNote: true });
   const cycleLabel = perFile
