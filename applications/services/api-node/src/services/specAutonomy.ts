@@ -792,9 +792,81 @@ async function skipFileAndContinue(
 }
 
 /**
+ * GAP-22 — garante o registro de oráculos do conteúdo atual (best-effort).
+ *
+ * A chave de idempotência é o `spec_hash` da VALIDAÇÃO que produziu estes findings: é o conteúdo em que
+ * a contradição foi medida, e é o recorte natural (uma decisão por conteúdo validado, não por rodada).
+ * Sem run de validação não há findings — nada a decidir.
+ */
+async function ensureOracles(
+  db: Db, run: AutonomyRun, scope: GapGroups, llm: Record<string, unknown>,
+): Promise<void> {
+  if (!scope.latestRunId) return;
+  const row = (await db.query(
+    "SELECT spec_hash FROM spec_validation_runs WHERE id = $1", [scope.latestRunId],
+  )).rows[0] as { spec_hash?: string } | undefined;
+  const specHash = String(row?.spec_hash ?? "");
+  if (!specHash) return;
+  const findings = [...[...scope.byPath.values()].flat(), ...scope.unrouted];
+  const { ensureOracleDecisions } = await import("./specOracles.js");
+  const res = await ensureOracleDecisions(db, run.projectId, { specHash, findings, llm });
+  console.info(
+    `[SpecAutonomy] run=${run.id} oráculos: vigentes=${res.decisions.length} novos=${res.decided}`
+    + `${res.skipped ? ` (skip: ${res.reason})` : ` por ${res.model ?? "?"}`}`,
+  );
+}
+
+/**
+ * Quanto um arquivo que REDECLARA um contrato decidido pode crescer numa rodada de consolidação.
+ *
+ * Não é zero porque a mesma rodada resolve outros GAPs do arquivo (uma seção que faltava é crescimento
+ * legítimo). É pequeno porque a patologia medida é justamente "acrescentar um parágrafo normativo em vez
+ * de remover a redeclaração": num arquivo de 100k, 1% de tolerância seria toothless.
+ */
+const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "2000");
+
+/**
+ * GAP-22 — veto de consolidação. Devolve o MOTIVO da recusa, ou `null` se pode aplicar.
+ *
+ * Só age sobre arquivo que redeclara contrato COM oráculo já decidido (fora disso não existe "o que
+ * consolidar" e nada muda em relação ao comportamento anterior).
+ */
+async function consolidationVeto(
+  db: Db, projectId: string, target: string, before: string, after: string,
+): Promise<string | null> {
+  const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled } = await import("./specOracles.js");
+  if (!oracleRegistryEnabled()) return null;
+  const decisions = await loadOracleDecisions(db, projectId);
+  if (decisions.length === 0) return null;
+  const { restates } = oracleRoleForFile(decisions, target);
+  if (restates.length === 0) return null;
+
+  const delta = after.length - before.length;
+  const contracts = restates.map((d) => `\`${d.contractKey}\` → \`${d.oraclePath}\``).join(", ");
+  if (delta > ORACLE_GROWTH_BUDGET) {
+    return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida era`
+      + ` REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
+      + ` (orçamento: ${ORACLE_GROWTH_BUDGET}). Nada foi escrito.`;
+  }
+  // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
+  // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
+  const cites = restates.some((d) => {
+    const p = d.oraclePath.toLowerCase();
+    const base = p.split("/").pop() ?? p;
+    const hay = after.toLowerCase();
+    return hay.includes(p) || hay.includes(base);
+  });
+  if (!cites && delta >= 0) {
+    return `consolidação recusada: a revisão não cita o oráculo (${contracts}) nem encolheu o arquivo`
+      + ` (${delta >= 0 ? "+" : ""}${delta} chars) — não houve consolidação a aplicar. Nada foi escrito.`;
+  }
+  return null;
+}
+
+/**
  * pending (spec DIVIDIDA) → uma rodada = UM arquivo. Ordem de decisões (cada uma fecha um modo de
  * falha real): teto de passes → teto de custo → spec ainda editável → GAPs restantes → escopo
- * (quem é de quem, via specGapScope/094) → fila → despacho do CTO-EDITOR.
+ * (quem é de quem, via specGapScope/094) → oráculos (GAP-22) → fila → despacho do CTO-EDITOR.
  */
 async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (run.passes >= run.maxRounds) {
@@ -841,6 +913,13 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (routing) {
     console.info(`[SpecAutonomy] run=${run.id} roteamento de GAPs: routed=${routing.routed} restantes=${routing.stillUnrouted}${routing.skipped ? ` (skip: ${routing.reason})` : ""}`);
   }
+  // GAP-22: ANTES de despachar, quem é a FONTE ÚNICA de cada contrato em disputa. Sem isto a rodada
+  // por arquivo não tem correção possível para uma contradição ENTRE arquivos (escolher um valor aqui
+  // deixa o irmão dizendo o outro) — e o CTO só consegue ACRESCENTAR mais um parágrafo normativo, que
+  // é o motor medido do GAP-8. A decisão é do agente e é PERSISTIDA: uma vez por conteúdo de spec, não
+  // uma vez por rodada (re-decidir a cada rodada é o que fazia a contradição migrar de arquivo).
+  await ensureOracles(db, run, scope, llm).catch((e) =>
+    console.warn(`[SpecAutonomy] run=${run.id} registro de oráculos indisponível (segue sem ele): ${msg(e).slice(0, 200)}`));
   // A5.3: o manifesto é o ÚNICO alvo que pode não existir ainda — entra no FIM da fila (os GAPs de
   // conteúdo valem mais que o índice, e criar o arquivo muda o hash da árvore).
   const manifestTarget = manifestGapFindings(scope).length > 0
@@ -1172,6 +1251,18 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       return skipFileAndContinue(db, run, target,
         `manifesto recusado (${verdict.code}): ${verdict.message}`, { failure: true, fromStatus: "applying" });
     }
+  }
+  // 🔴 GAP-22 — ORÇAMENTO DE CONSOLIDAÇÃO (o "contrato de saída" do G1, aplicado onde ele é
+  // verificável). Quando este arquivo REDECLARA um contrato cujo oráculo já foi decidido, a correção
+  // pedida é REMOVER a redeclaração e deixar uma citação — ou seja, o arquivo deve encolher. A
+  // patologia medida em prod é o oposto: o CTO acrescenta mais um parágrafo normativo, o arquivo
+  // cresce e a contradição reaparece na rodada seguinte em outro arquivo (motor do GAP-8).
+  // O código não julga o conteúdo: mede DELTA DE TAMANHO e CITAÇÃO LITERAL do path do oráculo — dois
+  // fatos. Recusar não é falha de arquivo (`failure: false`): é o laço se negando a pagar crescimento
+  // como se fosse correção, deixando o disco intacto e seguindo para o próximo arquivo.
+  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised);
+  if (oracleVeto) {
+    return skipFileAndContinue(db, run, target, oracleVeto, { failure: false, fromStatus: "applying" });
   }
   if (removedNote) {
     console.log(
