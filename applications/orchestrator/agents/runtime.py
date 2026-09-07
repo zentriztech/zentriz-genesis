@@ -289,6 +289,44 @@ def _clip(text: str, cap: int, label: str, model: str = "") -> str:
     return text[:cap] + _PROMPT_CLIP_NOTICE.format(shown=cap, total=len(text), omitted=len(text) - cap)
 
 
+def _artifact_cut(path: str, content: str, cap: int) -> str:
+    """Corte de ARQUIVO com números e proibição de reescrita integral (`context_budget`).
+
+    `_PROMPT_CLIP_NOTICE` cobre documento narrativo; aqui a consequência do corte mudo é o
+    agente devolver o arquivo "inteiro" a partir de um prefixo e APAGAR código que existe no
+    disco. Sem fallback mudo: se o transporte não estiver disponível, a chamada falha (Lei —
+    código só transporta e veta corrupção; degradar em silêncio é o defeito que isto mata).
+    """
+    from orchestrator.context_budget import apply_cut
+
+    return apply_cut(path, content, cap)
+
+
+def _artifact_cited_paths(message: dict, envelope: dict, artifacts: list) -> list[str]:
+    """Quais artefatos a TASK cita (título/descrição/critérios/`code_refs`/`dependency_code`).
+
+    Arquétipo GAP-72/73 medido na Bancada: o orçamento gasto em ORDEM DE LISTA entregava ao
+    agente 1 de 10 seções ancoradas, e 8 de 25 literais citados ficavam fora. Aqui a lista
+    chega em ordem alfabética do `rglob` do runner — o arquivo que a task precisa EDITAR
+    disputa a cota com qualquer outro. Citado = tem RESERVA e vem primeiro.
+    """
+    from orchestrator.context_budget import cited_paths
+
+    ct = envelope.get("current_task") if isinstance(envelope.get("current_task"), dict) else {}
+    dep = envelope.get("dependency_code") if isinstance(envelope.get("dependency_code"), dict) else {}
+    refs = envelope.get("code_refs") or []
+    texts = [
+        str(message.get("task") or ""),
+        str(ct.get("title") or ""),
+        str(ct.get("description") or ""),
+        "\n".join(str(x) for x in (ct.get("acceptance_criteria") or [])),
+        "\n".join(str(x) for x in (refs if isinstance(refs, list) else [refs])),
+        "\n".join(str(k) for k in dep.keys()),
+    ]
+    candidates = [a.get("path", "") for a in artifacts if isinstance(a, dict)]
+    return cited_paths(texts, candidates)
+
+
 def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     """
     Monta a mensagem do usuário com TODO o contexto necessário (AGENT_LLM_COMMUNICATION_ANALYSIS).
@@ -337,8 +375,11 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     if dep_code:
         parts.append("## Código Existente (dependências desta tarefa)\nUse como referência; mantenha nomes e padrões consistentes.")
         for path, code in dep_code.items():
+            # GAP-71: o corte era MUDO (`... [truncado]`) — o agente concluía que tinha visto o
+            # arquivo inteiro e o reescrevia a partir do prefixo, apagando o resto. Agora declara
+            # números e proíbe a reescrita integral (`context_budget.apply_cut`).
             if isinstance(code, str) and len(code) > 8000:
-                code = code[:8000] + "\n... [truncado]"
+                code = _artifact_cut(path, code, 8000)
             parts.append(f"### `{path}`\n```\n{code or ''}\n```")
 
     # Orçamento de contexto (D1–D4). Com a flag off, `_budget is None` e cada campo cai no PISO
@@ -475,16 +516,52 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
             except ValueError:
                 _scope_budget = 120_000
         _scope_spent = 0
-        for art in _existing_artifacts:
+        # 🔴 Arquétipo GAP-72/73 (ORDEM + RESERVA) — o mesmo defeito da Bancada, com outra roupa.
+        # `existing_artifacts` chega em ordem ALFABÉTICA (o `rglob` do runner) e TODO arquivo
+        # levava a MESMA fatia: o arquivo que a task manda editar recebia os mesmos 8.000 chars
+        # de um arquivo irrelevante. Como o Dev entrega o arquivo INTEIRO, ele reescrevia a
+        # partir do prefixo e apagava o resto (o veto "SÍMBOLOS REMOVIDOS" do runner é o
+        # sintoma). Agora quem a task CITA vem PRIMEIRO e tem RESERVA própria.
+        # `AGENT_ARTIFACT_CITED_RESERVE=off` volta à ordem e aos tetos históricos.
+        _cited: list[str] = []
+        _cited_budget = 0
+        _cited_per_file = 0
+        if os.environ.get("AGENT_ARTIFACT_CITED_RESERVE", "on").strip().lower() != "off":
+            _cited = _artifact_cited_paths(message, envelope, _existing_artifacts)
+            if _cited:
+                try:
+                    _cited_budget = int(os.environ.get("AGENT_CITED_ARTIFACT_BUDGET", "120000"))
+                except ValueError:
+                    _cited_budget = 120_000
+                try:
+                    _cited_per_file = int(os.environ.get("AGENT_CITED_ARTIFACT_CHARS", "50000"))
+                except ValueError:
+                    _cited_per_file = 50_000
+        _cited_set = set(_cited)
+        _cited_spent = 0
+        _ordered = (
+            [a for a in _existing_artifacts if isinstance(a, dict) and a.get("path", "") in _cited_set]
+            + [a for a in _existing_artifacts if not (isinstance(a, dict) and a.get("path", "") in _cited_set)]
+        ) if _cited_set else list(_existing_artifacts)
+        if _cited_set:
+            parts.append(
+                f"Ordem deliberada: os {len(_cited_set)} arquivo(s) CITADOS por esta task vêm "
+                "primeiro e com orçamento próprio. Os demais são contexto."
+            )
+        for art in _ordered:
             path = art.get("path", "")
             content = art.get("content", "[não disponível]")
             _limit = _max_artifact
+            if path in _cited_set and _cited_spent < _cited_budget:
+                _limit = max(_max_artifact, min(_cited_per_file, _cited_budget - _cited_spent))
+                if isinstance(content, str):
+                    _cited_spent += min(len(content), _limit)
             if _scope_budget and _scope_spent < _scope_budget and _evo_path_in_scope(path, _evo_scope):
-                _limit = max(_max_artifact, min(50_000, _scope_budget - _scope_spent))
+                _limit = max(_limit, min(50_000, _scope_budget - _scope_spent))
                 if isinstance(content, str):
                     _scope_spent += min(len(content), _limit)
             if isinstance(content, str) and len(content) > _limit:
-                content = content[:_limit] + "\n... [truncado]"
+                content = _artifact_cut(path, content, _limit)
             parts.append(f"### {path}\n```\n{content}\n```")
 
     # Retry com feedback do QA (Dev rework)

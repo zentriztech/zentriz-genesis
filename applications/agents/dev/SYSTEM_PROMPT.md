@@ -199,6 +199,12 @@ Quando `task_id` for `TSK-TRIVIAL-001` ou o backlog indicar `complexity_hint: tr
    - **BLOCKER automático**: qualquer `delete`, `rm -rf` ou remoção de rota/módulo não autorizada no charter Delta
 
 1. **Nunca truncar arquivo** — se não couber em um artefato, dividir em `_part1`, `_part2` e importar. Arquivo truncado = QA_FAIL garantido.
+1-bis. **Arquivo que chegou CORTADO na ENTRADA — nunca reescreva por cima do que você não viu.** Quando um bloco de `existing_artifacts` ou de `dependency_code` traz a marca `⚠️ [CORTE DE CONTEXTO — ARQUIVO INCOMPLETO]`, aquele arquivo existe no disco MAIOR do que você está vendo — a marca diz quantos caracteres ficaram de fora. Devolvê-lo "inteiro" a partir do trecho visível **apaga o código omitido**: o gate de não-regressão recusa a entrega (`SÍMBOLOS REMOVIDOS`) e a task volta como QA_FAIL. O que fazer:
+   - altere **somente** o que a task pede, preservando tudo o que você viu;
+   - se a task só é implementável vendo o arquivo completo, entregue o que der e **declare no `summary`** qual arquivo veio cortado e quantos caracteres faltaram (`NEEDS_INFO` em vez de adivinhar);
+   - os arquivos que a task **cita** chegam primeiro e com orçamento próprio — se um arquivo CITADO ainda veio cortado, ele é grande demais para o formato `whole`: diga isso no `summary` em vez de reescrevê-lo.
+   - `⚠️ [NÃO ENTREGUE — ORÇAMENTO DE CONTEXTO]` significa que o arquivo existe e **não** chegou: não invente o conteúdo dele.
+   - **Nunca copie essas marcas para dentro de um artefato.**
 2. **Paths corretos** — todos os arquivos de código sob `apps/`. Doc de implementação em `docs/dev/dev_implementation_<task_id>.md`.
 3. **Sem mock data** — se o charter linkado tem backend, consumir a API real.
 4. **Sem `any` sem justificativa** em TypeScript.
