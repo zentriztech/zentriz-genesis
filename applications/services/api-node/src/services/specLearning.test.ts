@@ -222,6 +222,64 @@ describe("buildLearningMaterial", () => {
     expect(md).toContain("sem revisão aplicável");
   });
 
+  it("🔴 GAP-58 (2ª metade): nome de produto e de arquivo no `rationale` do finding é mascarado", () => {
+    // Medido em prod: com só `note`/`last_error` rotulados, o material ainda vazava `nvx`,
+    // `lastmile` e `modelo-dados` — todos vinham de dentro dos `rationale` do validador.
+    const md = buildLearningMaterial({
+      run: episodeRun(),
+      gapsBefore: [{
+        severity: "blocker",
+        category: "contract_undefined",
+        title: "NVX LastMile não define o contrato de rastreio",
+        rationale: "O modelo-dados.md cita `tracking_event` mas nvx-lastmile-backend.md não o declara.",
+        file: "tecnico/dados.md",
+      }],
+      gapsAfter: [], afterMeasured: true,
+      filePaths: ["tecnico/dados.md"],
+      maskTerms: forbiddenTermsFor({
+        projectTitle: "NVX LastMile", filePaths: ["tecnico/dados.md", "modelo-dados.md"],
+      }),
+    });
+    expect(md.toLowerCase()).not.toContain("nvx");
+    expect(md.toLowerCase()).not.toContain("lastmile");
+    expect(md.toLowerCase()).not.toContain("modelo-dados");
+    // Máscara não é censura do achado: o que ENSINA continua legível.
+    expect(md).toContain("contract_undefined");
+    expect(md).toContain("tracking_event");
+    expect(md).toContain("«produto»");
+  });
+
+  it("🔴 GAP-58: nome de ARQUIVO não é mascarado como se fosse o produto", () => {
+    const md = buildLearningMaterial({
+      run: episodeRun(),
+      gapsBefore: [{ severity: "blocker", title: "x", rationale: "dados-nvx.md tem 198435 chars." }],
+      gapsAfter: [], afterMeasured: true, filePaths: [],
+      maskTerms: forbiddenTermsFor({ projectTitle: "NVX", filePaths: ["dados-nvx.md"] }),
+    });
+    expect(md).toContain("«arquivo da spec» tem 198435 chars");
+  });
+
+  it("🔴 GAP-58: rótulo NÃO come pedaço do nome de outro arquivo", () => {
+    // `dados.md` está na árvore; `modelo-dados.md` não. Sem fronteira, o rótulo entrava no meio do
+    // segundo nome e o texto virava "o modelo-arquivo A cita…" — mentira sobre QUAL arquivo falha.
+    const md = buildLearningMaterial({
+      run: episodeRun({ rounds: [roundLog({ note: "revisão citou modelo-dados.md e dados.md" })] }),
+      gapsBefore: [], gapsAfter: [], afterMeasured: true, filePaths: ["dados.md"], maskTerms: [],
+    });
+    expect(md).not.toContain("modelo-arquivo");
+    expect(md).not.toContain("modelo-dados");
+  });
+
+  it("🔴 GAP-58: `.md` que nem está na árvore atual cai em rótulo genérico", () => {
+    const md = buildLearningMaterial({
+      run: episodeRun(),
+      gapsBefore: [{ severity: "warning", title: "y", rationale: "A seção migrou para arquitetura-antiga.md." }],
+      gapsAfter: [], afterMeasured: true, filePaths: [], maskTerms: [],
+    });
+    expect(md).not.toContain("arquitetura-antiga");
+    expect(md).toContain("«arquivo da spec»");
+  });
+
   it("respeita o teto de chars", () => {
     const rounds = Array.from({ length: 400 }, (_, i) => roundLog({ round: i + 1, note: "x".repeat(200) }));
     const md = buildLearningMaterial({ run: episodeRun({ rounds }), gapsBefore: [], gapsAfter: [], filePaths: [] });

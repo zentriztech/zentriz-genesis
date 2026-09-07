@@ -80,6 +80,12 @@ export interface LearningEpisode {
   afterMeasured?: boolean;
   /** Caminhos reais dos arquivos tocados — usados só para ROTULAR (nunca vão no material). */
   filePaths: string[];
+  /**
+   * 🔴 GAP-58: termos identificáveis a MASCARAR no texto livre (título do projeto, tenant, nomes de
+   * arquivo). São os MESMOS que vão como `forbidden_terms` ao extrator: o que o veto proíbe na SAÍDA
+   * não pode entrar na ENTRADA, senão o modelo cita o termo e a lição inteira é descartada.
+   */
+  maskTerms?: string[];
 }
 
 /** Rótulo estável e anônimo por arquivo: `arquivo A`, `arquivo B`, … */
@@ -132,6 +138,31 @@ export function forbiddenTermsFor(opts: {
 }
 
 /**
+ * 🔴 GAP-58 (2ª metade, medida DEPOIS do primeiro conserto): rotular `note`/`last_error` não bastou.
+ * O maior volume de texto livre do material são os `title`/`rationale` dos findings — escritos pelo
+ * VALIDADOR, que cita nome de produto e de arquivo à vontade. Provado no container de prod: mesmo com
+ * as notas rotuladas, o material ainda continha `nvx`, `lastmile` e `modelo-dados` (dentro dos
+ * `rationale`). Aqui os termos identificáveis — os MESMOS que vão como `forbidden_terms` ao extrator —
+ * são mascarados, e sobra do padrão `<nome>.md` cai em rótulo genérico: lição de engenharia de spec
+ * não precisa do nome do arquivo de ninguém.
+ */
+export function maskIdentifiers(text: string, terms: string[]): string {
+  // Resíduo PRIMEIRO, e não por último: um nome de arquivo é o token mais longo e mais identificável.
+  // Medido no próprio teste: mascarar termo antes quebrava `nvx-lastmile-backend.md` no meio
+  // (`lastmile` → «produto») e o que sobrava do padrão de arquivo era só `backend.md` — o `nvx`
+  // (nome do cliente, 3 chars, abaixo do piso de termo) escapava para o corpus GLOBAL.
+  let out = text.replace(/\b[\w][\w.-]*\.(?:md|markdown)\b/gi, "«arquivo da spec»");
+  for (const term of [...terms].sort((a, b) => b.length - a.length)) {
+    if (term.length < 4) continue;
+    // Um termo com extensão é nome de ARQUIVO; sem extensão, é nome de projeto/tenant. Trocar tudo
+    // por «produto» faria a lição dizer "o «produto» tem 198 mil chars" — máscara certa, frase falsa.
+    const kind = /\.[a-z0-9]{1,8}$/i.test(term) ? "«arquivo da spec»" : "«produto»";
+    out = out.replace(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), kind);
+  }
+  return out;
+}
+
+/**
  * 🔴 GAP-58 — ROTULA os nomes reais de arquivo que aparecem em TEXTO LIVRE.
  *
  * MEDIDO em prod 2026-09-07: o material ia com os campos `file`/`filePath` rotulados, mas
@@ -150,22 +181,33 @@ export function labelFreeText(text: string, labels: Map<string, string>): string
     const base = path.split("/").pop() ?? path;
     for (const needle of [path, base, base.replace(/\.[a-z0-9]+$/i, "")]) {
       if (needle.length < 4 || !out.includes(needle)) continue;
-      out = out.split(needle).join(label);
+      // Fronteira que inclui `-` e `_`: sem ela, o arquivo `dados.md` da árvore rotulava o PEDAÇO
+      // `dados` de `modelo-dados.md` (outro arquivo) e o texto virava "o modelo-arquivo A cita…" —
+      // mentira sobre qual arquivo tem o problema, que é o oposto do que a lição precisa.
+      const esc = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      out = out.replace(new RegExp(`(?<![\\w-])${esc}(?![\\w-])`, "g"), label);
     }
   }
   return out;
 }
 
-function findingLine(f: LearningFinding, labels: Map<string, string>): string {
+/** Rótulo de arquivo + máscara de identificadores, na ordem: o rótulo informa, a máscara protege. */
+function scrub(text: string, labels: Map<string, string>, terms: string[]): string {
+  return maskIdentifiers(labelFreeText(text, labels), terms);
+}
+
+function findingLine(f: LearningFinding, labels: Map<string, string>, terms: string[]): string {
   const sev = (f.severity ?? "info").toString();
   const icon = sev === "blocker" ? "🔴" : sev === "warning" ? "🟡" : "⚪";
   const where = f.file ? ` [${labels.get(f.file) ?? "arquivo"}]` : "";
   const cat = f.category ? ` (${f.category})` : "";
-  const why = (f.rationale ?? "").trim().replace(/\s+/g, " ").slice(0, 320);
-  return `- ${icon}${cat}${where} ${(f.title ?? "").trim().slice(0, 200)}${why ? ` — ${why}` : ""}`;
+  // GAP-58: `title`/`rationale` são texto do VALIDADOR e citam produto e arquivo pelo nome real.
+  const why = scrub((f.rationale ?? "").trim(), labels, terms).replace(/\s+/g, " ").slice(0, 320);
+  const title = scrub((f.title ?? "").trim(), labels, terms).slice(0, 200);
+  return `- ${icon}${cat}${where} ${title}${why ? ` — ${why}` : ""}`;
 }
 
-function roundLine(r: AutonomyRoundLog, labels: Map<string, string>): string {
+function roundLine(r: AutonomyRoundLog, labels: Map<string, string>, terms: string[]): string {
   const target = r.filePath ? (labels.get(r.filePath) ?? "arquivo") : "spec inteira";
   const before = r.gapsBefore ?? null;
   const after = r.gapsAfter ?? null;
@@ -174,7 +216,7 @@ function roundLine(r: AutonomyRoundLog, labels: Map<string, string>): string {
   const applied = r.applied ? "revisão aplicada" : "nada aplicado";
   const chars = r.specChars ? ` · ${r.specChars} chars` : "";
   // GAP-58: `note` é frase livre do laço e cita o arquivo pelo nome REAL — rotular antes de cortar.
-  const note = r.note ? ` · ${labelFreeText(r.note, labels).replace(/\s+/g, " ").slice(0, 240)}` : "";
+  const note = r.note ? ` · ${scrub(r.note, labels, terms).replace(/\s+/g, " ").slice(0, 240)}` : "";
   return `- rodada ${r.round} (passe ${r.pass ?? 0}, ${target}): ${delta}${sev} · ${applied}${chars}${note}`;
 }
 
@@ -185,6 +227,9 @@ function roundLine(r: AutonomyRoundLog, labels: Map<string, string>): string {
  */
 export function buildLearningMaterial(ep: LearningEpisode): string {
   const labels = fileLabels([...ep.filePaths, ...ep.run.rounds.map((r) => r.filePath ?? "").filter(Boolean)]);
+  // GAP-58: os MESMOS termos que vão como `forbidden_terms` ao extrator são mascarados já na entrada.
+  // Mandar o termo proibido no material e depois vetar a lição que o repete é jogar contra o modelo.
+  const terms = ep.maskTerms ?? [];
   const run = ep.run;
   const progress = run.mode === "per_file"
     ? `${run.round} arquivo(s) revisado(s) em ${run.passes} passe(s) de validação (teto ${run.maxRounds})`
@@ -198,17 +243,17 @@ export function buildLearningMaterial(ep: LearningEpisode): string {
     `Arquivos na spec: ${Math.max(1, labels.size)}`,
     run.lastError
       // GAP-58: `last_error` já trouxe `nvx-lastmile-backend.md` (nome do produto do cliente) em prod.
-      ? `Motivo do encerramento: ${labelFreeText(run.lastError, labels).replace(/\s+/g, " ").slice(0, 400)}`
+      ? `Motivo do encerramento: ${scrub(run.lastError, labels, terms).replace(/\s+/g, " ").slice(0, 400)}`
       : "",
   ].filter(Boolean).join("\n"));
 
   if (ep.gapsBefore.length) {
     parts.push(`## GAPs que o validador adversarial apontou ANTES do laço (${ep.gapsBefore.length})\n` +
-      ep.gapsBefore.slice(0, MAX_FINDINGS_PER_SIDE).map((f) => findingLine(f, labels)).join("\n"));
+      ep.gapsBefore.slice(0, MAX_FINDINGS_PER_SIDE).map((f) => findingLine(f, labels, terms)).join("\n"));
   }
   if (ep.gapsAfter.length) {
     parts.push(`## GAPs que CONTINUAVAM depois do laço (${ep.gapsAfter.length}) — resistiram às revisões\n` +
-      ep.gapsAfter.slice(0, MAX_FINDINGS_PER_SIDE).map((f) => findingLine(f, labels)).join("\n"));
+      ep.gapsAfter.slice(0, MAX_FINDINGS_PER_SIDE).map((f) => findingLine(f, labels, terms)).join("\n"));
   } else if (ep.afterMeasured === true && ep.gapsBefore.length) {
     parts.push("## GAPs que CONTINUAVAM depois do laço: nenhum — todos foram resolvidos");
   } else {
@@ -225,7 +270,7 @@ export function buildLearningMaterial(ep: LearningEpisode): string {
     ].join("\n"));
   }
   if (run.rounds.length) {
-    parts.push(`## O que cada rodada fez\n${run.rounds.map((r) => roundLine(r, labels)).join("\n")}`);
+    parts.push(`## O que cada rodada fez\n${run.rounds.map((r) => roundLine(r, labels, terms)).join("\n")}`);
   }
   parts.push([
     "## Pergunta a responder",
@@ -447,7 +492,16 @@ export async function collectBancadaLessonsTick(
           // Falhar em LER a medição não autoriza dizer que o laço resolveu tudo (GAP-56).
           return { before: [], after: [], afterMeasured: false };
         });
-      const material = buildLearningMaterial({ run, gapsBefore: before, gapsAfter: after, afterMeasured, filePaths });
+      // 🔴 GAP-58: os termos são calculados ANTES do material e o MESMO array serve às duas pontas —
+      // máscara na entrada e `forbidden_terms` na saída. Dois cálculos independentes divergiriam, e a
+      // divergência tem custo real: termo que passa na entrada e é vetado na saída DESCARTA a lição.
+      const maskTerms = forbiddenTermsFor({
+        projectTitle: identity.projectTitle, tenantName: identity.tenantName,
+        projectId: run.projectId, filePaths,
+      });
+      const material = buildLearningMaterial({
+        run, gapsBefore: before, gapsAfter: after, afterMeasured, filePaths, maskTerms,
+      });
       const llm = await resolveWorkbenchLlm({ projectId: run.projectId, tenantId: run.tenantId }).catch(() => null);
       const body = JSON.stringify({
         material,
@@ -455,10 +509,7 @@ export async function collectBancadaLessonsTick(
         project_id: run.projectId,
         // Lição de COMO escrever spec não é de uma stack: `generic` é o que o retrieval sempre vê.
         stack_key: "generic",
-        forbidden_terms: forbiddenTermsFor({
-          projectTitle: identity.projectTitle, tenantName: identity.tenantName,
-          projectId: run.projectId, filePaths,
-        }),
+        forbidden_terms: maskTerms,
         ...(llm ? agentsLlmFields(llm) : {}),
       });
       const started = JSON.parse(await post(`${base}/invoke/lesson_extract/async`, body, 30_000)) as { jobId?: string };
