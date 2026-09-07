@@ -98,7 +98,15 @@ parte daquilo já esteja corrigida. Regra:
   anchor de lá LETRA POR LETRA (é assim que o sistema sabe que é o MESMO defeito, e não um novo);
 - se o problema não estiver mais lá, simplesmente NÃO o reporte — a ausência é o registro da
   correção;
-- JAMAIS reporte um item só porque ele aparece na lista.
+- JAMAIS reporte um item só porque ele aparece na lista;
+- PROIBIDO devolver um item para "preservar continuidade". Se você concluiu que o trecho está
+  CONFORME ("não aplicável nesta rodada", "não há divergência detectável", "coincidente com o literal
+  canônico"), a saída CERTA é OMITIR o item. Todo finding devolvido AFIRMA, sob sua responsabilidade,
+  que o defeito EXISTE no texto ATUAL. Um "blocker"/"warning" que se declara conforme fica aberto para
+  SEMPRE — nenhuma edição consegue remover um defeito que não existe — e trava a promoção do produto.
+  MEDIDO EM PROD: anchor "§1.1" voltou como "blocker" com o rationale "o finding é reportado apenas
+  para preservar continuidade de anchor; não há divergência de frontmatter detectável no texto atual".
+  Se ainda assim quiser deixar a observação registrada, ela é "info" — NUNCA "blocker" nem "warning".
 
 CONTRATO DE SAÍDA (JSON, exatamente):
 {{"findings":[{{"file":"<arquivo ou vazio>","line":null,"severity":"blocker|warning|info","category":"<taxonomia>","anchor":"<FR-NN | heading | entidade>","title":"<curto>","rationale":"<por quê + onde na spec>"}}]}}"""

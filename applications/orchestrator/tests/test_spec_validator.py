@@ -321,3 +321,20 @@ def test_refuter_system_forbids_commentary_in_anchor():
     """GAP-39: o anchor é IDENTIDADE. Os exemplos ERRADO/CERTO vêm de pares medidos em prod."""
     assert "É um ID, NÃO uma descrição" in REFUTER_SYSTEM
     assert "letra por letra" in REFUTER_SYSTEM
+
+
+def test_refuter_system_forbids_non_finding_as_blocker():
+    """🔴 GAP-84 — MEDIDO em prod (NVX LastMile, validação eb1c97c0): o juiz devolveu o anchor "§1.1"
+    como **blocker** com o rationale "o finding é reportado apenas para preservar continuidade de
+    anchor; não há divergência de frontmatter detectável no texto atual".
+
+    Um blocker que se declara CONFORME é um GAP eterno: ele conta na contagem importante, ocupa uma
+    rodada da fila por arquivo, e NENHUMA edição pode fechá-lo (não há defeito a remover). O bloco de
+    continuidade do GAP-39 é o convite; a regra explícita é o antídoto. Se a observação vale registro,
+    ela é "info" (não entra na contagem importante nem na fila)."""
+    assert 'PROIBIDO devolver um item para "preservar continuidade"' in REFUTER_SYSTEM
+    assert "a saída CERTA é OMITIR o item" in REFUTER_SYSTEM
+    assert 'NUNCA "blocker" nem "warning"' in REFUTER_SYSTEM
+    # A regra tem de viver no MESMO bloco que cria o risco (continuidade), não perdida no fim.
+    corte = REFUTER_SYSTEM.index("CONTINUIDADE ENTRE VALIDAÇÕES")
+    assert REFUTER_SYSTEM.index("PROIBIDO devolver um item") > corte
