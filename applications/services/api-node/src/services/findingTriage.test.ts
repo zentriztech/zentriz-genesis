@@ -27,7 +27,11 @@ describe("findingTriage — identidade (RFC-0005 §3)", () => {
     expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, anchor: "FR-04" })));
     expect(findingFingerprint(F({ ...a, anchor: "## 3. Modelo" }))).not.toBe(findingFingerprint(F({ ...a, anchor: "## 5. Modelo" })));
     expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, file: "contratos.md" })));
-    expect(findingFingerprint(a)).not.toBe(findingFingerprint(F({ ...a, category: "security_gap" })));
+    // 🔴 GAP-49: a category NÃO é identidade. Este `expect` era o INVERSO e congelava o defeito —
+    // medido em prod 2026-09-07 (NVX LastMile): 32 dos 152 pares (arquivo, anchor) apareceram com 2-3
+    // categorias e 17 das 18 "aberturas" de um passe eram o mesmo defeito com a category trocada.
+    // O `_finding_key` do spec_validator.py (GAP-40) e o CONSOLIDATE_SYSTEM já diziam isso.
+    expect(findingFingerprint(a)).toBe(findingFingerprint(F({ ...a, category: "security_gap" })));
     // sem anchor → cai no título normalizado
     const c = F({ title: "Falta modelo de dados", category: "missing_data_model" });
     expect(findingFingerprint(c)).toBe(findingTitleFingerprint(c));
@@ -35,7 +39,7 @@ describe("findingTriage — identidade (RFC-0005 §3)", () => {
     expect(jaccard("Falta modelo de dados", "Modelo de dados ausente")).toBeLessThan(0.8);
   });
 
-  it("matchTriage: cascata exato → título → Jaccard no mesmo file+category", () => {
+  it("matchTriage: cascata exato → título → Jaccard no mesmo file (category fora — GAP-49)", () => {
     const base = F({ title: "Falta modelo de dados para Usuário", category: "missing_data_model", anchor: "FR-03" });
     const exact = T({ fingerprint: findingFingerprint(base), finding_snapshot: { file: "spec.md", category: "missing_data_model", title: base.title } });
     expect(matchTriage(F({ ...base, title: "Outro título", line: 99 }), [exact])?.id).toBe("t1");
@@ -46,7 +50,9 @@ describe("findingTriage — identidade (RFC-0005 §3)", () => {
     // Jaccard: mesma ideia reordenada + 1 palavra a mais, mesmo file+category
     const jac = T({ id: "t3", fingerprint: "zzz", finding_snapshot: { file: "spec.md", category: "security_gap", title: "Rotas sem autenticação de usuário" } });
     expect(matchTriage(F({ title: "Autenticação de usuário sem rotas", category: "security_gap" }), [jac])?.id).toBe("t3");
-    expect(matchTriage(F({ title: "Autenticação de usuário sem rotas", category: "missing_nfr" }), [jac])).toBeNull();
+    // GAP-49: a category trocada NÃO escapa mais da triagem que o humano decidiu (era `toBeNull`).
+    expect(matchTriage(F({ title: "Autenticação de usuário sem rotas", category: "missing_nfr" }), [jac])?.id).toBe("t3");
+    // o ARQUIVO segue sendo identidade: outro arquivo não herda triagem alheia.
     expect(matchTriage(F({ title: "Autenticação de usuário sem rotas", category: "security_gap", file: "outro.md" }), [jac])).toBeNull();
   });
 
@@ -475,6 +481,35 @@ describe("findingTriage — GAP-41: diff finding-a-finding entre validações", 
     const d = gapDelta([R("r3", [], "b.md"), R("r2", [], "b.md"), R("r1", [gA], "a.md")], null, 2);
     expect(d.closed).toEqual([]);
     expect(d.opened).toEqual([]);
+  });
+
+  it("🔴 GAP-49: só a CATEGORY mudou → nada fecha, nada abre (par literal de prod)", () => {
+    // Par real da janela de 12 validações do NVX (2026-09-07): mesmo arquivo, MESMO anchor `§3.3`, e o
+    // juiz classificou scope_conflict numa run e contract_undefined na seguinte. Antes disto o passe
+    // relatava 17 fechados × 18 abertos e 16 "resolvidos" que ninguém corrigiu.
+    const antes = F({ file: "privacidade-lgpd.md", anchor: "§3.3", category: "scope_conflict",
+      title: "Desfecho de rowCount=0 conflita entre 409 e 422" });
+    const depois = F({ ...antes, category: "contract_undefined",
+      title: "Desfecho de rowCount=0 na execução conflita entre 409 ALREADY_ANONYMIZED e 422 INVALID_STATUS_TRANSITION" });
+    const runs = [R("r3", [depois], "privacidade-lgpd.md"), R("r2", [antes], "privacidade-lgpd.md"), R("r1", [antes], "privacidade-lgpd.md")];
+    const d = gapDelta(runs, null, 2);
+    expect(d.closed).toEqual([]);
+    expect(d.opened).toEqual([]);
+    // e o GAP segue ATIVO, com a redação MAIS RECENTE (é ela que o CTO vai receber para corrigir)
+    const s = surveyFindings(runs, null);
+    expect(s.active).toHaveLength(1);
+    expect(s.active[0].category).toBe("contract_undefined");
+    expect(s.resolved).toEqual([]);
+  });
+
+  it("🔴 GAP-49 não fabrica fusão: anchor diferente no mesmo arquivo segue sendo outro GAP", () => {
+    // O risco da própria correção é fundir defeitos distintos. O anchor continua sendo a identidade:
+    // `§3.3` e `§3.4` não se misturam nem com a MESMA category e o MESMO título.
+    const a = F({ file: "privacidade-lgpd.md", anchor: "§3.3", category: "scope_conflict", title: "conflito" });
+    const b = F({ ...a, anchor: "§3.4" });
+    const d = gapDelta([R("r3", [b], "privacidade-lgpd.md"), R("r2", [a], "privacidade-lgpd.md"), R("r1", [a], "privacidade-lgpd.md")], null, 2);
+    expect(d.closed.map((f) => f.anchor)).toEqual(["§3.3"]);
+    expect(d.opened.map((f) => f.anchor)).toEqual(["§3.4"]);
   });
 
   it("menos de duas validações: não há o que comparar (zeros, nunca um palpite)", () => {

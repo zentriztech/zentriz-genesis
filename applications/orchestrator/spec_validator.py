@@ -127,6 +127,9 @@ TAREFA:
 3. RETORNE somente os grupos com votes >= T (o núcleo estável), descartando singletons de ruído.
    Para cada grupo, use o título e o rationale MAIS CLAROS, a severidade MAIS ALTA do grupo e
    PRESERVE "category" e "anchor" (copie do grupo; se divergirem, use o anchor mais literal — id > heading).
+4. "title" é OBRIGATÓRIO em TODO finding — curto, específico, copiado do grupo. Omiti-lo entrega uma
+   lista de problemas indistinguíveis para quem vai corrigir a spec (medido em prod: 27 findings sem
+   título numa única consolidação). "anchor" também é obrigatório.
 
 Você NÃO tem ferramentas e NÃO deve inventar problemas ausentes das análises. Responda SOMENTE o JSON
 do contrato, sem prosa nem cercas de código:

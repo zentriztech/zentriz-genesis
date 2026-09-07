@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
+import { runStageA, parseStageBFindings, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -73,6 +73,42 @@ describe("parseStageBFindings (schema fechado — saída de LLM nunca entra crua
   it("não-array → []; cap de 50 itens", () => {
     expect(parseStageBFindings({ hack: true })).toEqual([]);
     expect(parseStageBFindings(Array.from({ length: 80 }, () => ({}))).length).toBe(50);
+  });
+
+  it("🔴 GAP-50: sem `title` o título vem do RATIONALE, não de uma constante repetida", () => {
+    // Medido em prod 2026-09-07 (run `d42baef2`): 27 de 27 findings sem `title` → todos `(sem título)`.
+    const out = parseStageBFindings([{
+      file: "modelo-dados.md", severity: "blocker", category: "other", anchor: "Convenções gerais",
+      rationale: "A tabela 'Convenções gerais' contém blocos separados por `=======` repetidos. "
+        + "Isso é resíduo de conflito de merge não resolvido e a fábrica não sabe qual bloco vale.",
+    }]);
+    expect(out[0].title).toBe("A tabela 'Convenções gerais' contém blocos separados por `=======` repetidos.");
+    expect(out[0].title).not.toContain("sem título");
+  });
+
+  it("🔴 GAP-50: dois findings sem título sob o MESMO anchor não colapsam num fingerprint só", async () => {
+    const { effectiveFingerprints } = await import("./findingTriage.js");
+    const out = parseStageBFindings([
+      { file: "m.md", severity: "blocker", anchor: "§7.4", rationale: "O passo 4 grava audit_log duas vezes." },
+      { file: "m.md", severity: "blocker", anchor: "§7.4", rationale: "O DDL do passo 4 omite colunas NOT NULL." },
+    ]);
+    const fps = effectiveFingerprints(out);
+    // Com a constante os dois títulos eram idênticos → o desempate por título fundia os dois e um GAP
+    // real DESAPARECIA da contagem sem ninguém ter corrigido nada.
+    expect(fps[0]).not.toBe(fps[1]);
+  });
+
+  it("GAP-50: rationale vazio é o único caso que ainda cai na constante (não há fato a transportar)", () => {
+    expect(parseStageBFindings([{ file: "a.md", severity: "info" }])[0].title).toBe("(sem título)");
+  });
+
+  it("GAP-50: rationale de uma frase só (sem ponto final) vira o título inteiro, truncado", () => {
+    expect(titleFromRationale("Falta contrato do endpoint")).toBe("Falta contrato do endpoint");
+    expect(titleFromRationale(`${"x".repeat(300)}. Segunda frase.`).length).toBeLessThanOrEqual(160);
+    // `§7.2` e `v1.4` NÃO são fim de frase (o ponto só corta antes de espaço + maiúscula)
+    expect(titleFromRationale("O §7.2 do doc v1.4 conflita com o DDL. Outra coisa."))
+      .toBe("O §7.2 do doc v1.4 conflita com o DDL.");
+    expect(titleFromRationale("   ")).toBe("");
   });
 });
 

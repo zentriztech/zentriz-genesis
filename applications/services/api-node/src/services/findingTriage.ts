@@ -2,9 +2,10 @@
  * findingTriage.ts — RFC-0005: controle de GAPs por finding (Ativos | Ignorados | Resolvidos | Refutados).
  *
  * Princípio (RFC-0004 §4): estado é determinístico e vive no banco; o LLM só opina.
- *  - Identidade: fingerprint SERVER-SIDE `file|source|category|anchor` (nunca linha, nunca título como
- *    primário — o validador reformula títulos em ~60% dos casos). Cascata de matching relaxante (Sonar
- *    Tracker): exato → `file|source|category|título normalizado` → Jaccard ≥ 0,8 no mesmo file+category.
+ *  - Identidade: fingerprint SERVER-SIDE `file|source|anchor` (nunca linha; nunca título como primário —
+ *    o validador reformula títulos em ~60% dos casos; nunca `category` — GAP-49: ela é interpretação do
+ *    juiz sobre o MESMO defeito e troca entre validações). Cascata de matching relaxante (Sonar
+ *    Tracker): exato → `file|source|título normalizado` → Jaccard ≥ 0,8 no mesmo file.
  *  - Estados MANUAIS: `ignored` (risco aceito; pode expirar) e `refuted` (falso positivo; permanente).
  *  - `resolved` é DERIVADO: ausente em ≥ 2 runs válidas consecutivas (Stage A determinístico: 1 run).
  *  - Não triáveis: todo blocker do Stage A e Stage B `prompt_injection` — só se corrigem.
@@ -53,18 +54,38 @@ export function normalizeCategory(raw: unknown): FindingCategory {
 
 function sha(s: string): string { return createHash("sha256").update(s, "utf8").digest("hex").slice(0, 32); }
 
-/** Fingerprint primário. Sem `anchor` → cai no título normalizado (findings antigos / LLM sem anchor). */
+/**
+ * Fingerprint primário: `file|source|anchor`. Sem `anchor` → cai no título normalizado (findings
+ * antigos / LLM sem anchor).
+ *
+ * 🔴 GAP-49 — a `category` SAIU da identidade (era `file|source|category|anchor`).
+ *
+ * Ela é ESCOLHA LIVRE do juiz entre 13 valores sobre o MESMO defeito, e o próprio validador já
+ * tratava assim nos dois lugares onde decide: `_finding_key` do `spec_validator.py` (GAP-40) e o
+ * `CONSOLIDATE_SYSTEM` ("category é INTERPRETAÇÃO do mesmo defeito, NÃO identidade"). Só o Node
+ * continuava contando com ela — e é o Node que decide o que está ativo, resolvido e fechado.
+ *
+ * Medido em prod 2026-09-07 (NVX LastMile, 12 validações / 225 findings): **32 dos 152 pares
+ * (arquivo, anchor) apareceram com 2 ou 3 categorias diferentes** — `§3.3` foi ambiguous_fr,
+ * contract_undefined e scope_conflict; `§7.2 regra 1` foi missing_data_model, scope_conflict e
+ * security_gap. Consequência no passe do laço: **17 das 18 aberturas eram o mesmo arquivo, o mesmo
+ * anchor e a category trocada** — o antigo saía como "fechado" (e em 2 runs virava RESOLVIDO, uma
+ * correção que ninguém fez) e o mesmo defeito entrava como GAP novo. A contagem não podia cair.
+ *
+ * A `category` continua no finding, no snapshot da triagem e em `byCategory` — ela só deixa de
+ * decidir QUEM o finding é.
+ */
 export function findingFingerprint(f: Pick<ValidationFinding, "file" | "source" | "title"> & { category?: string | null; anchor?: string | null }): string {
-  const cat = normalizeCategory(f.category);
   const anchor = normalizeAnchor(f.anchor ?? "");
   const key = anchor
-    ? `${(f.file ?? "").toLowerCase()}|${f.source}|${cat}|${anchor}`
-    : `${(f.file ?? "").toLowerCase()}|${f.source}|${cat}|t:${normalizeText(f.title)}`;
+    ? `${(f.file ?? "").toLowerCase()}|${f.source}|${anchor}`
+    : `${(f.file ?? "").toLowerCase()}|${f.source}|t:${normalizeText(f.title)}`;
   return sha(key);
 }
-/** Fingerprint secundário (título) — usado na cascata quando o primário (anchor) não casa. */
+/** Fingerprint secundário (título) — usado na cascata quando o primário (anchor) não casa. Sem
+ *  `category` pelo mesmo motivo do primário (GAP-49). */
 export function findingTitleFingerprint(f: Pick<ValidationFinding, "file" | "source" | "title"> & { category?: string | null }): string {
-  return sha(`${(f.file ?? "").toLowerCase()}|${f.source}|${normalizeCategory(f.category)}|t:${normalizeText(f.title)}`);
+  return sha(`${(f.file ?? "").toLowerCase()}|${f.source}|t:${normalizeText(f.title)}`);
 }
 
 export function jaccard(a: string, b: string): number {
@@ -100,7 +121,10 @@ export async function loadLiveTriages(db: Db, projectId: string): Promise<Triage
 
 type Snap = { file?: string; source?: string; title?: string; category?: string; anchor?: string; title_fingerprint?: string };
 
-/** Cascata de matching: exato → fingerprint de título → Jaccard no mesmo file+category. */
+/** Cascata de matching: exato → fingerprint de título → Jaccard no mesmo file.
+ *  GAP-49: o último degrau também deixou de filtrar por `category` — se ela não é identidade nos dois
+ *  primeiros degraus, filtrar por ela aqui faria justamente o finding com category trocada (o caso
+ *  MEDIDO) falhar nos três e escapar da triagem que o humano já decidiu. */
 export function matchTriage(f: ValidationFinding, triages: TriageRow[], effectiveFp?: string): TriageRow | null {
   if (!triages.length) return null;
   const fp = effectiveFp ?? findingFingerprint(f);
@@ -109,12 +133,10 @@ export function matchTriage(f: ValidationFinding, triages: TriageRow[], effectiv
   const tfp = findingTitleFingerprint(f);
   const byTitle = triages.find((t) => t.fingerprint === tfp || (t.finding_snapshot as Snap)?.title_fingerprint === tfp);
   if (byTitle) return byTitle;
-  const cat = normalizeCategory(f.category);
   let best: TriageRow | null = null, bestScore = 0;
   for (const t of triages) {
     const s = t.finding_snapshot as Snap;
     if ((s?.file ?? "").toLowerCase() !== (f.file ?? "").toLowerCase()) continue;
-    if (normalizeCategory(s?.category) !== cat) continue;
     const score = jaccard(s?.title ?? "", f.title);
     if (score >= JACCARD_MIN && score > bestScore) { best = t; bestScore = score; }
   }
@@ -141,9 +163,14 @@ export interface ProjectFindingsState {
 }
 
 /**
- * Fingerprint EFETIVO dentro de uma run: quando dois findings distintos colidem (mesmo file|source|category|anchor —
+ * Fingerprint EFETIVO dentro de uma run: quando dois findings distintos colidem (mesmo file|source|anchor —
  * ex.: dois problemas sob o mesmo heading; E2E 2026-09-04), desambigua pelo título normalizado só para os que
  * colidem (determinístico; a cascata de matching já tenta o fingerprint de título). Únicos mantêm o primário.
+ *
+ * ⚠️ Este degrau depende de o título ser REAL: um título CONSTANTE colapsa todos os que colidem num só
+ * fingerprint e some com GAPs sem avisar. Medido em prod 2026-09-07 (run `d42baef2`): o juiz devolveu 27
+ * findings SEM `title` e o parser gravava a constante `(sem título)` em todos — 9 no mesmo arquivo. Por
+ * isso o GAP-50 (título derivado do `rationale` em `parseStageBFindings`) é pré-requisito deste degrau.
  */
 export function effectiveFingerprints(findings: ValidationFinding[]): string[] {
   const primary = findings.map((f) => findingFingerprint(f));

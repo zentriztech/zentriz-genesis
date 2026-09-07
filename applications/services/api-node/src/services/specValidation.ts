@@ -256,6 +256,30 @@ async function httpJson(url: string, method: string, body: unknown, timeoutMs: n
 
 const STAGE_B_SEVERITIES = new Set(["blocker", "warning", "info"]);
 
+/**
+ * 🔴 GAP-50 — título AUSENTE não pode virar uma CONSTANTE.
+ *
+ * `title` é campo obrigatório do contrato do juiz, mas o LLM às vezes omite: medido em prod
+ * 2026-09-07 (NVX LastMile, run `d42baef2`) **27 de 27 findings** vieram sem `title` e o parser
+ * gravou `(sem título)` em todos — 9 deles no mesmo arquivo. Dois danos:
+ *  1. a Bancada e o CTO recebem 27 GAPs indistinguíveis na lista;
+ *  2. pior, o título é o degrau de desempate da identidade (`effectiveFingerprints` /
+ *     `findingTitleFingerprint`): com o MESMO título constante, dois findings distintos sob o mesmo
+ *     anchor colapsam num fingerprint só e um deles DESAPARECE da contagem sem ninguém corrigir nada.
+ *
+ * O `rationale` (que veio completo nesses 27) já contém o fato. Derivar a primeira frase dele é
+ * TRANSPORTE, não julgamento: nenhuma classificação nova, nenhum texto inventado. A constante fica
+ * só para o caso em que não há rationale nenhum — aí realmente não há fato para transportar.
+ */
+export function titleFromRationale(rationale: string): string {
+  const flat = String(rationale ?? "").replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  // Primeira frase: corta no ponto seguido de espaço+maiúscula (não quebra em `§7.2` nem em `v1.4`).
+  const m = /^(.{20,}?[.!?])(\s+[A-ZÀ-Þ«"`(])/.exec(flat);
+  const first = (m ? m[1] : flat).trim();
+  return (first.length > 160 ? `${first.slice(0, 157).trimEnd()}…` : first);
+}
+
 /** Valida/normaliza o JSON do LLM (schema fechado — nada além disso entra). */
 export function parseStageBFindings(raw: unknown): ValidationFinding[] {
   const arr = Array.isArray(raw) ? raw : [];
@@ -263,14 +287,17 @@ export function parseStageBFindings(raw: unknown): ValidationFinding[] {
   for (const item of arr.slice(0, 50)) {
     const o = (item ?? {}) as Record<string, unknown>;
     const sev = String(o.severity ?? "info").toLowerCase();
+    const rationale = String(o.rationale ?? "").slice(0, 1200);
     out.push({
       file: String(o.file ?? "").slice(0, 300),
       line: Number.isFinite(Number(o.line)) ? Math.max(1, Math.trunc(Number(o.line))) : null,
       severity: (STAGE_B_SEVERITIES.has(sev) ? sev : "info") as ValidationFinding["severity"],
-      title: String(o.title ?? "").slice(0, 200) || "(sem título)",
-      rationale: String(o.rationale ?? "").slice(0, 1200),
+      // GAP-50: título ausente cai no fato que o juiz escreveu, nunca numa constante repetida.
+      title: String(o.title ?? "").trim().slice(0, 200) || titleFromRationale(rationale) || "(sem título)",
+      rationale,
       source: "stage_b",
-      // RFC-0005: identidade estável vem de category (taxonomia fechada) + anchor (FR/seção/entidade).
+      // RFC-0005: identidade estável vem do `anchor` (FR/seção/entidade). A `category` é taxonomia
+      // fechada para AGRUPAR e relatar — GAP-49 tirou-a da identidade (ela troca entre validações).
       category: normalizeCategory(o.category),
       anchor: String(o.anchor ?? "").trim().slice(0, 160) || null,
     });
