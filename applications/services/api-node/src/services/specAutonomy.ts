@@ -593,6 +593,31 @@ async function appendRoundLog(db: Db, runId: string, entry: AutonomyRoundLog): P
   );
 }
 
+/**
+ * 🔴 GAP-71 — merge de campos no ÚLTIMO item de `rounds` **dentro do banco**.
+ *
+ * Existe porque `patchLastRound` (abaixo) reconstrói o array a partir de `run.rounds` EM MEMÓRIA, e no
+ * despacho essa cópia é **stale**: o `appendRoundLog` já gravou uma rodada nova que o objeto `run` não
+ * conhece. Usar `patchLastRound` ali gravaria o array antigo de volta e **apagaria a rodada recém
+ * criada** — perda silenciosa do log que é a única prova do que o laço fez.
+ *
+ * Aqui o `jsonb_set` opera sobre o valor ATUAL da coluna, então nenhuma leitura velha participa. Não
+ * escreve `finishedAt`: a rodada continua ABERTA (quem a fecha é o apply).
+ */
+async function mergeIntoLastRound(db: Db, runId: string, patch: Partial<AutonomyRoundLog>): Promise<void> {
+  await db.query(
+    `UPDATE spec_autonomy_runs
+        SET rounds = jsonb_set(
+              rounds,
+              ARRAY[(jsonb_array_length(rounds) - 1)::text],
+              (rounds -> (jsonb_array_length(rounds) - 1)) || $2::jsonb
+            ),
+            updated_at = now()
+      WHERE id = $1 AND jsonb_typeof(rounds) = 'array' AND jsonb_array_length(rounds) > 0`,
+    [runId, JSON.stringify(patch)],
+  );
+}
+
 /** Atualiza o ÚLTIMO item de `rounds` (fecha a rodada com o resultado medido). */
 async function patchLastRound(
   db: Db, run: AutonomyRun, patch: Partial<AutonomyRoundLog>,
@@ -1716,7 +1741,18 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     mergeRecurrenceRefs(persistentGapsFor(knownRefs, target, fileFindings), stableRefs),
     lastUntouchedAnchors(run, target),
   );
-  if (knownRefs.length > 0 && persistentGaps.length === 0) {
+  if (persistentGaps.length > 0) {
+    // 🔴 GAP-71 (medido em prod na PRIMEIRA rodada da run 95ba8636): as 11 refs `stable` foram
+    // calculadas e ENTREGUES ao CTO (2.561 chars de bloco), mas o log da rodada ficou com
+    // `persistedGaps: null` — o campo só era escrito pelo reconciliador do GAP-67, na validação.
+    // Consequência: nem o humano no chat nem uma consulta ao banco conseguiam ver que o agente já
+    // tinha sido avisado, e a única leitura possível ("ninguém avisou") é a oposta da verdade.
+    // Registrar aqui é o que faz a afirmação AUDITÁVEL — e não altera a linhagem, porque as refs
+    // estáveis são recontadas do banco a cada despacho (`mergeRecurrenceRefs` mantém o maior `times`).
+    // ⚠️ `mergeIntoLastRound`, NÃO `patchLastRound`: aqui `run.rounds` é stale (o `appendRoundLog`
+    // acima já gravou a rodada nova) e reescrever o array de memória a APAGARIA.
+    await mergeIntoLastRound(db, run.id, { persistedGaps: persistentGaps });
+  } else if (knownRefs.length > 0) {
     // Refs existem mas nenhuma casou com este arquivo: normal se os reincidentes são de OUTRO arquivo.
     // Vira sintoma quando acontece para todos os arquivos do passe — aí a ação está inerte.
     console.info(`[SpecAutonomy] run=${run.id} ${target}: ${knownRefs.length} ref(s) de reincidência conhecidas, nenhuma deste arquivo/leva.`);
