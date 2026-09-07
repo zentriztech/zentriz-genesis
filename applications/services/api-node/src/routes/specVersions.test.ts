@@ -75,13 +75,18 @@ vi.mock("../services/specSnapshots.js", () => ({
 }));
 
 const written: Array<{ file: string; content: string }> = [];
+const unlinked: string[] = [];
 let liveContent: string | null = "# conteúdo VIVO\n";
+let unlinkFails = false;
 vi.mock("fs/promises", () => ({
   default: {
     readFile: async () => (liveContent === null ? Promise.reject(new Error("ENOENT")) : Buffer.from(liveContent, "utf-8")),
     writeFile: async (file: string, content: string) => { written.push({ file, content }); },
     mkdir: async () => {},
-    unlink: async () => {},
+    unlink: async (file: string) => {
+      if (unlinkFails) throw new Error("EACCES");
+      unlinked.push(file);
+    },
   },
 }));
 
@@ -96,7 +101,8 @@ beforeEach(async () => {
   projectRow = { id: PROJ, tenant_id: TENANT, created_by: "u1", status: "draft" };
   treeRow = { rel_dir: "backend", filename: "01-api.md", file_path: ABS };
   liveContent = "# conteúdo VIVO\n";
-  queries.length = 0; written.length = 0;
+  unlinkFails = false;
+  queries.length = 0; written.length = 0; unlinked.length = 0;
   listSpy.mockClear(); getSpy.mockClear(); snapSpy.mockClear();
   snapSpy.mockImplementation(async () => true);
 });
@@ -254,6 +260,75 @@ describe("POST /api/projects/:id/spec-versions/:id/restore — escrita", () => {
     expect(res.statusCode).toBe(200);
     expect(snapSpy).not.toHaveBeenCalled();
     expect(written).toEqual([{ file: ABS, content: "# versão antiga\n" }]);
+  });
+});
+
+/**
+ * 🔴 GAP-48 — remover arquivo era a ÚNICA escrita de spec sem rede de segurança, e a mais
+ * destrutiva: apagava a linha da árvore E o arquivo do disco. `project_spec_snapshots` guarda a
+ * PRÉ-imagem de cada escrita, logo o conteúdo ATUAL — exatamente o que o DELETE joga fora — nunca
+ * estava lá; e depois do DELETE o `restore` responde 409 FILE_GONE, então nem versão antiga volta.
+ * Prova de que era omissão e não decisão: a listagem de versões já trata "arquivo removido da
+ * árvore ainda pode ter versões" — faltava alguém CRIAR a versão. Aqui o snapshot é PRÉ-CONDIÇÃO
+ * (como no `restore`, não best-effort como no PUT): quem apaga não tem o texto em editor nenhum.
+ */
+describe("DELETE /api/projects/:id/spec-file — GAP-48: versão antes de apagar", () => {
+  beforeEach(() => {
+    treeRow = { id: "file-1", rel_dir: "backend", filename: "01-api.md", file_path: ABS, is_primary: false };
+  });
+
+  it("guarda o conteúdo como versão ANTES de remover a linha e o arquivo", async () => {
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, versionKept: true });
+    expect(snapSpy).toHaveBeenCalledTimes(1);
+    const input = snapSpy.mock.calls[0][1] as unknown as Record<string, string>;
+    expect(input.content).toBe("# conteúdo VIVO\n");
+    expect(input.reason).toBe("pre-delete:backend/01-api.md");
+    expect(queries.some((q) => q.sql.includes("DELETE FROM project_spec_files"))).toBe(true);
+    expect(unlinked).toEqual([ABS]);
+  });
+
+  it("snapshot falhou → 503 e NADA é apagado (nem a linha, nem o disco)", async () => {
+    snapSpy.mockImplementation(async () => false);
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().code).toBe("SNAPSHOT_FAILED");
+    expect(queries.some((q) => q.sql.includes("DELETE FROM project_spec_files"))).toBe(false);
+    expect(unlinked).toHaveLength(0);
+  });
+
+  it("arquivo já ausente do disco: remove a linha sem exigir versão do que não existe", async () => {
+    liveContent = null;
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, versionKept: false });
+    expect(snapSpy).not.toHaveBeenCalled();
+    expect(queries.some((q) => q.sql.includes("DELETE FROM project_spec_files"))).toBe(true);
+  });
+
+  it("unlink falhou depois da versão guardada: a remoção lógica vale (não corrompe o hash da spec)", async () => {
+    unlinkFails = true;
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(200);
+    expect(snapSpy).toHaveBeenCalledTimes(1);
+    expect(queries.some((q) => q.sql.includes("DELETE FROM project_spec_files"))).toBe(true);
+  });
+
+  it("o PRIMÁRIO segue irremovível — e nem chega a pedir versão", async () => {
+    treeRow = { id: "file-1", rel_dir: "backend", filename: "01-api.md", file_path: ABS, is_primary: true };
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe("PRIMARY_FILE");
+    expect(snapSpy).not.toHaveBeenCalled();
+  });
+
+  it("token de serviço (runner) → 403: apagar spec é autoria humana", async () => {
+    currentUser = { id: "runner", role: "tenant_admin", tenantId: TENANT, svc: "runner" };
+    const res = await app.inject({ method: "DELETE", url: `/api/projects/${PROJ}/spec-file?path=backend/01-api.md` });
+    expect(res.statusCode).toBe(403);
+    expect(snapSpy).not.toHaveBeenCalled();
+    expect(unlinked).toHaveLength(0);
   });
 });
 
