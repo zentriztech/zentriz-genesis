@@ -37,10 +37,59 @@ let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number } 
  * decidir pelo agregado, como antes.
  */
 let comparable: { files: string[]; before: number; now: number; same: number } | null = null;
-vi.mock("./findingTriage.js", () => ({
+/**
+ * ⚠️ `importOriginal` de propósito: `vi.mock(mod, () => ({...}))` substitui o módulo INTEIRO, então um
+ * export NOVO consumido pelo `specAutonomy.ts` derrubava 27 testes com `… is not a function` (queimado
+ * no GAP-76 — e o `.catch()` não salva, o TypeError é sincrônico). `findingTriage` é puro (só `crypto`),
+ * então herdar o original e dublar só o que toca banco é seguro e imuniza a suíte.
+ */
+vi.mock("./findingTriage.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./findingTriage.js")>()),
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
   gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0 }),
   comparableTallySinceLastRun: vi.fn(async () => comparable),
+}));
+
+/**
+ * 🔴 GAP-77 — o veredicto de promovibilidade é dublado: o que este arquivo testa é se o LAÇO chama o
+ * juiz nos dois fins de laço, grava o parecer no log e o repete na mensagem final. O julgamento em si
+ * (guardas de elegibilidade, fail-CLOSED, tetos) tem suíte própria em `gapPromotionVerdict.test.ts`.
+ * `verdict = null` reproduz o recurso desligado/indisponível — o laço tem de encerrar como antes.
+ */
+let verdict: {
+  candidates: number; released: number; impeditive: number; promotable: boolean;
+  rejected?: Array<{ file: string; anchor: string; why: string }>;
+} | null = null;
+vi.mock("./gapPromotionVerdict.js", () => ({
+  verdictConfig: vi.fn(() => ({ minGapsResolved: verdict ? 3 : 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
+  focusRoundsByFile: vi.fn(async () => new Map<string, number>([["produto.md", 4]])),
+  anchoredSection: vi.fn(() => "## 4. Autenticação\ntexto\n"),
+  specFileShas: vi.fn(async () => new Map<string, string>()),
+  selectVerdictCandidates: vi.fn(() => ({
+    candidates: Array.from({ length: verdict?.candidates ?? 0 }, (_, i) => ({
+      finding: { severity: "blocker", title: `t${i}` }, fingerprint: `fp${i}`, file: "produto.md",
+      anchor: `## ${i}`, times: 4, focusRounds: 3, section: "trecho",
+    })),
+    rejected: verdict?.rejected ?? [],
+    enabled: true,
+    reason: `${verdict?.candidates ?? 0} GAP(s) elegível(is) a veredicto`,
+  })),
+  runVerdictRound: vi.fn(async () => ({
+    verdicts: Array.from({ length: verdict?.released ?? 0 }, (_, i) => ({
+      fingerprint: `fp${i}`, file: "produto.md", anchor: `## ${i}`, severity: "warning", title: "t",
+      impact: "nao_impeditivo", reason: "redundância consistente entre os dois trechos", factoryArtifact: "POST /x",
+      accusation: "nenhum dano ao artefato", times: 4, focusRounds: 3,
+    })),
+    ran: true, reason: `${verdict?.released ?? 0} declarado(s) não-impeditivo(s)`, released: verdict?.released ?? 0, model: "dublê",
+  })),
+  saveVerdicts: vi.fn(async (_db: unknown, a: { verdicts: unknown[] }) => a.verdicts.length),
+  livePromotionVerdicts: vi.fn(async () => []),
+  promotabilityReport: vi.fn(() => ({
+    impeditive: verdict?.impeditive ?? 0,
+    released: verdict?.released ?? 0,
+    promotable: verdict?.promotable ?? false,
+    blockers: verdict?.promotable ? [] : [`${verdict?.impeditive ?? 0} GAP(s) importante(s) seguem impeditivos`],
+  })),
 }));
 
 /**
@@ -245,6 +294,7 @@ beforeEach(() => {
   stageBCoverage = null;
   prevCoverage = null;
   comparable = null;
+  verdict = null;
   coberturaAcumulada = null;
   delta = null;
   continuity = { persisted: 0, reconciled: false, reason: "dublê" };
@@ -481,6 +531,80 @@ describe("validação dentro do laço", () => {
     await advanceAutonomyRun(db, r.id);            // ainda 3 findings (1 blocker + 1 warning)
     expect(run!.status).toBe("exhausted");
     expect(run!.round).toBe(1);
+  });
+
+  /**
+   * 🔴 GAP-77 — o Jean deu ao juiz autoridade para dizer se um GAP REINCIDENTE impede promover à
+   * Fábrica, e reservou o gatilho ao defeito que voltou DEPOIS de foco individual pago. O lugar do laço
+   * onde isso cabe é o fim: `exhausted` (teto) e `stalled` (não-progresso) — os dois pontos em que ele
+   * ia mandar o humano "tratar à mão" sobre defeitos que ele já provou não conseguir fechar.
+   *
+   * O que estes testes travam:
+   *  - o veredicto roda nos DOIS fins de laço, e o parecer entra no log da rodada E na mensagem final;
+   *  - a severidade NÃO muda (limite (a)): o total importante continua sendo dito, `gaps_current`
+   *    continua sendo o mesmo número, e nada vira `succeeded` por parecer;
+   *  - as RECUSAS de elegibilidade ficam no log (auditoria da guarda (c));
+   *  - veredicto indisponível/desligado → mensagem antiga, sem inventar liberação (fail-CLOSED).
+   */
+  describe("🔴 GAP-77 — veredicto de promovibilidade no fim do laço", () => {
+    it("teto de rodadas: o juiz julga os reincidentes e o parecer entra no log e na mensagem", async () => {
+      verdict = { candidates: 2, released: 1, impeditive: 1, promotable: false };
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+      expect(last).toMatchObject({ verdictCandidates: 2, verdictReleased: 1, verdictImpeditive: 1, promotable: false });
+      expect(String(run!.last_error)).toContain("Rodada adversarial de promovibilidade");
+      expect(String(run!.last_error)).toContain("NÃO promovível");
+      // limite (a): o total importante continua declarado, nada foi reclassificado.
+      expect(String(run!.last_error)).toContain("2 GAP(s) importante(s) em aberto");
+      expect(run!.gaps_current).toBe(2);
+    });
+
+    it("spec declarada PROMOVÍVEL não vira `succeeded` — promover segue ato humano", async () => {
+      verdict = { candidates: 1, released: 1, impeditive: 0, promotable: true };
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");        // NÃO `succeeded`
+      expect(String(run!.last_error)).toContain("Spec PROMOVÍVEL à Fábrica");
+      expect(String(run!.last_error)).toContain("ato humano");
+      expect((run!.rounds as Array<Record<string, unknown>>).at(-1)).toMatchObject({ promotable: true });
+    });
+
+    it("duas rodadas sem progresso: o parecer também aparece no `stalled`", async () => {
+      verdict = { candidates: 1, released: 0, impeditive: 2, promotable: false };
+      const r = await reachValidating(5);
+      await advanceAutonomyRun(db, r.id);
+      job = { status: "done", specMarkdown: BASE_SPEC + "\n\noutra tentativa do CTO.", error: null };
+      await advanceAutonomyRun(db, r.id);
+      await advanceAutonomyRun(db, r.id);
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("stalled");
+      expect(String(run!.last_error)).toContain("sem derrubar GAP importante");
+      expect(String(run!.last_error)).toContain("promovibilidade");
+    });
+
+    it("as RECUSAS de elegibilidade vão para o log — auditoria da guarda (c)", async () => {
+      verdict = {
+        candidates: 0, released: 0, impeditive: 2, promotable: false,
+        rejected: [{ file: "produto.md", anchor: "## 4", why: "o trecho sobreviveu byte a byte: é NÃO-TENTADO" }],
+      };
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+      expect(JSON.stringify(last.verdictRejected)).toContain("NÃO-TENTADO");
+      expect(last).toMatchObject({ verdictCandidates: 0, verdictReleased: 0 });
+    });
+
+    it("veredicto desligado → mensagem antiga, sem campo de parecer no log (fail-CLOSED)", async () => {
+      verdict = null;                                 // `minGapsResolved: 0` no dublê
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).not.toContain("promovibilidade");
+      expect(String(run!.last_error)).toContain("Trate na aba GAPs");
+      expect((run!.rounds as Array<Record<string, unknown>>).at(-1)!.verdictCandidates).toBeUndefined();
+    });
   });
 
   it("duas rodadas sem derrubar GAP importante → stalled (não queima as 5)", async () => {

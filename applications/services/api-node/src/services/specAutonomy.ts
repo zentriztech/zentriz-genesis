@@ -55,8 +55,13 @@ import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
 import {
   projectFindingsState, gapDeltaSinceLastRun, findingFingerprint, comparableTallySinceLastRun,
-  type EnrichedFinding,
+  judgedFilesOf, fileJudgedIn, type EnrichedFinding,
 } from "./findingTriage.js";
+// 🔴 GAP-77 — a autoridade do juiz sobre promovibilidade (ver gapPromotionVerdict.ts). O laço monta os
+// fatos de elegibilidade; quem julga é agente. Só o TIPO entra aqui: o módulo alcança
+// `routes/specs.js` → `db/client.js` e é carregado por `import()` dinâmico nos DOIS fins de laço em que
+// o veredicto existe — o caminho comum não paga por ele (mesma disciplina do `specGapScope`).
+import type { CandidateGate, VerdictRound, PromotabilityReport } from "./gapPromotionVerdict.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
@@ -295,6 +300,19 @@ export interface AutonomyRoundLog {
   gapsComparableNow?: number | null;
   gapsComparableSame?: number | null;
   comparableFiles?: number | null;
+  /**
+   * 🔴 GAP-77 — a rodada adversarial de promovibilidade, quando ela aconteceu (só nos fins de laço).
+   *
+   * `verdictImpeditive` é o número que decide a entrega à Fábrica; `gapsAfter` continua sendo o total
+   * importante, e os dois convivem de propósito — o limite (a) do Jean é que a severidade não muda, e
+   * esconder o total faria o parecer parecer reclassificação. `verdictRejected` guarda a auditoria das
+   * guardas de elegibilidade (por que cada GAP NÃO pôde ser julgado).
+   */
+  verdictCandidates?: number | null;
+  verdictReleased?: number | null;
+  verdictImpeditive?: number | null;
+  promotable?: boolean | null;
+  verdictRejected?: string[] | null;
   /**
    * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
    *
@@ -1221,6 +1239,134 @@ export async function stableRecurrenceFor(
     console.warn(`[SpecAutonomy] run=${run.id} ${filePath}: reincidência estável indisponível (${msg(e)}) — o CTO recebe os GAPs sem o fato do GAP-71.`);
     return [];
   }
+}
+
+/**
+ * 🔴 GAP-77 — a rodada adversarial de PROMOVIBILIDADE, montada com o que só o laço tem em mão.
+ *
+ * O Jean deu ao juiz autoridade para dizer se um GAP realmente impede promover à Fábrica, com um
+ * gatilho explícito: **o defeito tem de ter insistido em voltar DEPOIS de foco individual pago**
+ * (verbatim: "focamos neles individualmente algumas vezes, se insistir a reaparecer ai sim o juiz usa
+ * o novo poder"). Este é o ponto do código onde reincidência, cobertura e âncoras intocadas existem
+ * juntas — por isso a montagem é aqui e o julgamento é no `gapPromotionVerdict`.
+ *
+ * Roda só nos DOIS fins de laço (`exhausted` por teto, `stalled` por não-progresso): é lá que o laço
+ * ia dizer "trate à mão" sobre defeitos que ele já provou não conseguir fechar. Nunca roda no caminho
+ * de sucesso — spec sem GAP importante não precisa de veredicto.
+ *
+ * Falha em qualquer degrau devolve `null` e o laço encerra com a mensagem antiga: fail-CLOSED.
+ */
+async function promotionVerdictFor(
+  db: Db, run: AutonomyRun, ctx: { coverage: unknown; unjudged: string[] },
+): Promise<{
+  gate: CandidateGate; round: VerdictRound | null; report: PromotabilityReport; saved: number;
+} | null> {
+  try {
+    const {
+      verdictConfig, selectVerdictCandidates, runVerdictRound, saveVerdicts, livePromotionVerdicts,
+      specFileShas, promotabilityReport, focusRoundsByFile, anchoredSection,
+    } = await import("./gapPromotionVerdict.js");
+    const cfg = verdictConfig();
+    // `SPEC_VERDICT_MIN_GAPS_RESOLVED=0` desliga o recurso sem deploy: o laço encerra com a mensagem
+    // antiga, sem uma linha de veredicto no log.
+    if (cfg.minGapsResolved === 0) return null;
+    const currentFiles = await specFilePaths(db, run.projectId).catch(() => null);
+    const state = await projectFindingsState(db, run.projectId, { currentFiles });
+    // Limite (b): só conta fechamento RECONCILIADO. `gapsPersisted` não-nulo é a marca de que o
+    // reconciliador do GAP-67 rodou naquela rodada — sem ela, "fechado" inclui rebatismo de âncora.
+    const gapsResolved = run.rounds.reduce(
+      (acc, r) => acc + (r.gapsPersisted === null || r.gapsPersisted === undefined ? 0 : (r.gapsClosed ?? 0)), 0);
+    const judged = judgedFilesOf(ctx.coverage);
+    const important = state.findings.filter((f) => !f.triage && (f.severity === "blocker" || f.severity === "warning"));
+    // Trechos VERBATIM só dos arquivos que esta validação julgou por inteiro — os únicos elegíveis, e
+    // no máximo 3 na spec do NVX, então a leitura é barata.
+    const sections = new Map<string, string>();
+    const untouched = new Set<string>();
+    const byFile = new Map<string, EnrichedFinding[]>();
+    for (const f of important) {
+      const p = String(f.file ?? "").trim();
+      if (!p || !f.anchor) continue;
+      if (judged && !fileJudgedIn(p.toLowerCase(), judged)) continue;
+      byFile.set(p, [...(byFile.get(p) ?? []), f]);
+    }
+    for (const [p, list] of byFile) {
+      const file = await readSpecFileAt(db, run.projectId, p);
+      if (!file) continue;
+      for (const a of lastUntouchedAnchors(run, p)) untouched.add(a);
+      for (const f of list) {
+        const anchor = String(f.anchor ?? "").trim();
+        if (!anchor || sections.has(anchor)) continue;
+        const sec = anchoredSection(file.content, anchor);
+        if (sec) sections.set(anchor, sec);
+      }
+    }
+    const rows = (await db.query(
+      `SELECT findings, stage_b_coverage FROM spec_validation_runs
+        WHERE project_id = $1 AND status IN ('passed','failed')
+        ORDER BY created_at DESC LIMIT 8`,
+      [run.projectId],
+    )).rows as Array<{ findings: unknown; stage_b_coverage: unknown }>;
+    const past = rows.map((r) => ({
+      findings: Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [],
+      coverage: r.stage_b_coverage,
+    }));
+    const gate = selectVerdictCandidates({
+      findings: important, runs: past, judged, untouched, sections, gapsResolved, cfg,
+      focusByFile: await focusRoundsByFile(db, run.projectId).catch(() => new Map<string, number>()),
+    });
+    let round: VerdictRound | null = null;
+    let saved = 0;
+    const shaByFile = await specFileShas(db, run.projectId).catch(() => new Map<string, string>());
+    if (gate.candidates.length > 0) {
+      round = await runVerdictRound(gate.candidates, { maxRelease: cfg.maxPerRun });
+      if (round.verdicts.length > 0) {
+        saved = await saveVerdicts(db, {
+          projectId: run.projectId, autonomyRunId: run.id, validationRunId: run.validationRunId,
+          verdicts: round.verdicts, shaByFile, model: round.model,
+        });
+      }
+    }
+    const { gapScopeForProject } = await import("./specGapScope.js");
+    const scope = await gapScopeForProject(db, run.projectId).catch(() => null);
+    const report = promotabilityReport({
+      findings: state.findings,
+      verdicts: await livePromotionVerdicts(db, run.projectId, shaByFile),
+      unroutedImportant: scope
+        ? scope.unrouted.filter((f) => f.severity === "blocker" || f.severity === "warning").length
+        : 0,
+      unjudgedFiles: ctx.unjudged, cfg,
+    });
+    console.info(
+      `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s), ` +
+      `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s), promovível=${report.promotable}`,
+    );
+    return { gate, round, report, saved };
+  } catch (e) {
+    console.warn(`[SpecAutonomy] run=${run.id} veredicto de promovibilidade indisponível (${msg(e)}) — todos os GAPs seguem impeditivos.`);
+    return null;
+  }
+}
+
+/**
+ * 🔴 GAP-77 — o parecer em prosa, para o fim do laço e para o chat.
+ *
+ * Diz os DOIS números (total importante e quantos seguem impeditivos), porque o limite (a) do Jean é
+ * que a severidade não muda: esconder o total faria o veredicto parecer reclassificação.
+ */
+function verdictNote(v: NonNullable<Awaited<ReturnType<typeof promotionVerdictFor>>>): string {
+  if (!v.gate.enabled) return ` ${v.gate.reason}.`;
+  const head = v.round?.ran
+    ? ` **Rodada adversarial de promovibilidade** (${v.gate.candidates.length} GAP(s) reincidente(s) elegível(is), com foco individual já pago): ${v.round.reason}.`
+    : ` **Veredicto de promovibilidade não rodou**: ${v.round?.reason ?? v.gate.reason} — todos os GAPs seguem impeditivos.`;
+  const liberados = (v.round?.verdicts ?? []).filter((x) => x.impact === "nao_impeditivo");
+  const lista = liberados.length > 0
+    ? ` Declarado(s) NÃO impeditivo(s) — a severidade 🔴/🟡 **não muda**, isto é parecer paralelo e auditável: ` +
+      liberados.map((x) => `\`${x.file}\` ${x.anchor} (${x.reason})`).join("; ") + "."
+    : "";
+  const veredito = v.report.promotable
+    ? ` ✅ **Spec PROMOVÍVEL à Fábrica** pelo parecer do juiz: nenhum GAP importante impeditivo, nenhum sem arquivo, nenhum arquivo pendente de julgamento. A promoção continua sendo sua (ato humano com confirmação).`
+    : ` 🚫 **Spec NÃO promovível**: ${v.report.blockers.join("; ")}.`;
+  return head + lista + veredito;
 }
 
 /**
@@ -2629,14 +2775,31 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     console.info(`[SpecAutonomy] run=${run.id} 0 GAP na superfície medida, cobertura ACUMULADA incompleta (${pendentes.length} arquivo(s) nunca julgados por inteiro) — revalidando com rotação (GAP-19).`);
     return true;
   }
-  if (atCap) {
-    await finishRun(db, run, "exhausted",
-      `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}). Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });
-    return true;
-  }
-  if (streak >= MAX_NO_PROGRESS) {
-    await finishRun(db, run, "stalled",
-      `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto). Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`, { gaps });
+  if (atCap || streak >= MAX_NO_PROGRESS) {
+    // 🔴 GAP-77 — antes de mandar o humano "tratar à mão", o juiz julga os REINCIDENTES. É o fim de
+    // laço que o Jean descreveu: o defeito voltou depois de foco individual pago, então cabe decidir
+    // se ele impede a entrega — em vez de o laço empatar para sempre num número que oscila (GAP-76).
+    const v = await promotionVerdictFor(db, run, { coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [] });
+    if (v) {
+      await patchLastRound(db, run, {
+        verdictCandidates: v.gate.candidates.length,
+        verdictReleased: v.round?.released ?? 0,
+        verdictImpeditive: v.report.impeditive,
+        promotable: v.report.promotable,
+        // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
+        // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.
+        verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),
+        note: verdictNote(v).trim(),
+      }, { keepNote: true });
+    }
+    const verdicto = v ? verdictNote(v) : "";
+    if (atCap) {
+      await finishRun(db, run, "exhausted",
+        `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${verdicto} Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });
+      return true;
+    }
+    await finishRun(db, { ...run, noProgressStreak: streak }, "stalled",
+      `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto).${verdicto} Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`, { gaps });
     return true;
   }
   await db.query(
