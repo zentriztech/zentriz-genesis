@@ -263,6 +263,19 @@ export interface AutonomyRoundLog {
    */
   gapsClosed?: number | null;
   gapsOpened?: number | null;
+  /**
+   * 🔴 GAP-45 — o recorte 🔴/🟡 do PASSE, separado do recorte 🔴/🟡 do ARQUIVO.
+   *
+   * `blockers`/`warnings` significam "GAPs DESTE arquivo" numa rodada `per_file` (gravados no despacho,
+   * de `fileFindings`). A validação, que é evento do PASSE, sobrescrevia esses dois campos com o total
+   * do PROJETO na ÚLTIMA rodada de arquivo — e o portal desenha `🔴 {blockers} · 🟡 {warnings}` colado
+   * no nome do arquivo. Medido em prod (run `5d377da0`): a rodada 6 diz
+   * `observabilidade-operacao.md — 🔴 23 · 🟡 21` (23+21 = 44 = o total do projeto), enquanto a rodada 9,
+   * o MESMO arquivo, diz 🔴 2 · 🟡 4. O log — que é a única evidência do método — atribuía ao arquivo
+   * GAPs de outros onze. Irmão do GAP-30, que salvou a `note` e deixou os números.
+   */
+  passBlockers?: number | null;
+  passWarnings?: number | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -1937,8 +1950,10 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         : ` — todos em arquivo já julgado antes, ou seja REGRESSÃO/reformulação, não descoberta.`)
     : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
+  // GAP-45: e os números do PASSE vão em campos próprios — `blockers`/`warnings` continuam sendo os do
+  // ARQUIVO desta rodada (é o que o portal desenha ao lado do nome dele). `gapsAfter` já carrega o total.
   await patchLastRound(db, run, {
-    gapsAfter: gaps.important, blockers: gaps.blockers, warnings: gaps.warnings,
+    gapsAfter: gaps.important, passBlockers: gaps.blockers, passWarnings: gaps.warnings,
     validationRunId: run.validationRunId,
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
     note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${deltaNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — o AGREGADO das duas não é comparável (a diferença acima é)." : ""}`,

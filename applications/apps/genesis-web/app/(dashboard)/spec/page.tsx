@@ -658,8 +658,16 @@ type AutonomyRoundLog = {
   finishedAt?: string;
   gapsBefore?: number | null;
   gapsAfter?: number | null;
+  /** GAPs 🔴/🟡 DESTE arquivo (rodada `per_file`) ou do projeto no início da rodada (`whole`). */
   blockers?: number | null;
   warnings?: number | null;
+  /**
+   * GAP-45: recorte 🔴/🟡 do PROJETO ao fim do PASSE, medido pela validação. Vive em campo separado
+   * porque antes ele era gravado SOBRE `blockers`/`warnings` da última rodada de arquivo — e esta tela
+   * desenha esses dois números ao lado do nome do arquivo, atribuindo a ele os GAPs dos outros onze.
+   */
+  passBlockers?: number | null;
+  passWarnings?: number | null;
   applied?: boolean;
   specChars?: number | null;
   note?: string;
@@ -785,7 +793,12 @@ function AutonomyReport({ run, running, onStop }: {
               )}
               <Typography variant="caption" color="text.secondary">
                 🔴 {r.blockers ?? 0} · 🟡 {r.warnings ?? 0}
-                {typeof r.gapsAfter === "number" ? ` → ${r.gapsAfter} restante(s)` : ""}
+                {/* GAP-45: os números do arquivo acima; os do PASSE (validação) explicitamente rotulados. */}
+                {typeof r.gapsAfter === "number"
+                  ? ` → ${r.gapsAfter} restante(s) na spec${
+                      typeof r.passBlockers === "number" ? ` (🔴 ${r.passBlockers} · 🟡 ${r.passWarnings ?? 0})` : ""
+                    }`
+                  : ""}
                 {r.applied === false ? " · não aplicada" : ""}
                 {r.note ? ` · ${r.note}` : ""}
               </Typography>

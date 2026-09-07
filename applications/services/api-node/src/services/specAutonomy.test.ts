@@ -482,6 +482,34 @@ describe("validação dentro do laço", () => {
     expect(run!.no_progress_streak).toBe(0);
   });
 
+  /**
+   * 🔴 GAP-45 (medido em prod 2026-09-07) — a validação, que é evento do PASSE, gravava o recorte
+   * 🔴/🟡 do PROJETO INTEIRO sobre os campos `blockers`/`warnings` da última rodada, que significam
+   * "GAPs DESTE arquivo". Na run `5d377da0` a rodada 6 ficou `observabilidade-operacao.md — 🔴 23 · 🟡 21`
+   * (23+21 = 44 = o total do projeto) enquanto a rodada 9, o MESMO arquivo, dizia 🔴 2 · 🟡 4 — e é
+   * exatamente esse par que o portal desenha ao lado do nome do arquivo. Irmão do GAP-30, que salvou a
+   * `note` e deixou os números mentindo.
+   */
+  it("🔴 GAP-45: a validação NÃO sobrescreve o 🔴/🟡 da rodada — o total do passe vai em campo próprio", async () => {
+    const r = await reachValidating(5);
+    // A rodada foi despachada com o recorte de ANTES (1 blocker + 1 warning, do beforeEach).
+    const antes = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+    expect(antes.blockers).toBe(1);
+    expect(antes.warnings).toBe(1);
+    // A validação do passe mede um recorte DIFERENTE — é a única variável do teste.
+    findings = [
+      { severity: "blocker" }, { severity: "blocker" }, { severity: "blocker" },
+      { severity: "warning" }, { severity: "warning" },
+    ];
+    await advanceAutonomyRun(db, r.id);
+    const depois = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+    expect(depois.blockers).toBe(1);          // 🔴 intocado: continua sendo o recorte da RODADA
+    expect(depois.warnings).toBe(1);
+    expect(depois.passBlockers).toBe(3);      // o recorte do PASSE, rotulado como tal
+    expect(depois.passWarnings).toBe(2);
+    expect(depois.gapsAfter).toBe(5);
+  });
+
   // GAP-13 (medido em prod 2026-09-06, run c3757985): a validação `8e3286b2` durou 230 ms, achou 1
   // blocker estrutural no Estágio A e por isso NÃO rodou o adversarial. O laço registrou "21 → 1 GAP"
   // como progresso e, no tick seguinte, "1 → 21" como regressão. Nenhum dos dois é medida da spec.
