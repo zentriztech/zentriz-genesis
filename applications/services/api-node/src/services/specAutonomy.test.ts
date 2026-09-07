@@ -31,9 +31,16 @@ let latestRunId: string | null = "run-0";
 // GAP-41: o diff finding-a-finding entre as duas últimas validações. `null` reproduz o caso em que
 // não há duas validações para comparar (ou a consulta falhou) — o laço volta a olhar só o agregado.
 let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number } | null = null;
+/**
+ * 🔴 GAP-76: o NÍVEL de GAPs no subconjunto que as DUAS últimas validações julgaram por inteiro.
+ * `null` reproduz "não foi possível medir" (cobertura ausente em algum dos lados) — e aí o laço volta a
+ * decidir pelo agregado, como antes.
+ */
+let comparable: { files: string[]; before: number; now: number; same: number } | null = null;
 vi.mock("./findingTriage.js", () => ({
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
   gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0 }),
+  comparableTallySinceLastRun: vi.fn(async () => comparable),
 }));
 
 /**
@@ -237,6 +244,7 @@ beforeEach(() => {
   stageBPending = false;
   stageBCoverage = null;
   prevCoverage = null;
+  comparable = null;
   coberturaAcumulada = null;
   delta = null;
   continuity = { persisted: 0, reconciled: false, reason: "dublê" };
@@ -755,7 +763,66 @@ describe("validação dentro do laço", () => {
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("pending");
       expect(run!.no_progress_streak).toBe(0);
-      expect(JSON.stringify(run!.rounds)).toContain("Superfície medida MUDOU");
+      // GAP-76: a ressalva saiu do FIM da nota para o lugar da seta `antes → agora`, que deixou de
+      // existir quando as duas contagens não são comparáveis.
+      expect(JSON.stringify(run!.rounds)).toContain("a superfície medida MUDOU");
+      expect(JSON.stringify(run!.rounds)).not.toContain("2 → 2 GAP(s)");
+    });
+
+    describe("GAP-76 — o agregado não é progresso quando a superfície não é comparável", () => {
+      /**
+       * Medido em prod 2026-09-07 (NVX LastMile): a contagem do laço caiu de 23 para 20 findings entre
+       * duas validações e no subconjunto julgado por inteiro nas DUAS era 20 → 20, as mesmas 20 âncoras,
+       * zero fechado — apesar de 22 edições aplicadas. O código antigo lia essa queda como progresso,
+       * zerava o `no_progress_streak` e seguia pagando LLM por uma melhora que nunca houve.
+       */
+      it("🔴 agregado que CAIU com a superfície MUDADA não zera mais o freio", async () => {
+        const r = await reachValidating(5);
+        run!.no_progress_streak = 1;
+        findings = [{ severity: "blocker" }];   // agregado 2 → 1: "caiu"
+        stageBCoverage = { full: ["modelo-dados.md"], outlineOnly: [], oversized: [] };
+        prevCoverage = { full: ["visao-escopo.md"], outlineOnly: [], oversized: [] };
+        comparable = { files: ["modelo-dados.md"], before: 20, now: 20, same: 20 };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(1);   // ANTES desta correção: 0
+        const log = JSON.stringify(run!.rounds);
+        expect(log).toContain("as MESMAS 20 âncoras, zero fechado");
+        expect(log).toContain('"gapsComparableBefore":20');
+        expect(log).toContain('"comparableFiles":1');
+      });
+
+      it("queda no nível COMPARÁVEL é progresso, mesmo com a superfície mudada", async () => {
+        const r = await reachValidating(5);
+        run!.no_progress_streak = 1;
+        stageBCoverage = { full: ["modelo-dados.md"], outlineOnly: [], oversized: [] };
+        prevCoverage = { full: ["modelo-dados.md", "visao-escopo.md"], outlineOnly: [], oversized: [] };
+        comparable = { files: ["modelo-dados.md"], before: 20, now: 18, same: 18 };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(0);
+      });
+
+      it("mesma superfície: queda do agregado continua sendo progresso (não apertei demais)", async () => {
+        const r = await reachValidating(5);
+        run!.no_progress_streak = 1;
+        findings = [{ severity: "blocker" }];
+        const mesma = { full: ["01-spec.md"], outlineOnly: [], oversized: [] };
+        stageBCoverage = mesma;
+        prevCoverage = { ...mesma };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(0);
+        expect(JSON.stringify(run!.rounds)).toContain("2 → 1 GAP(s)");
+      });
+
+      it("nenhum arquivo em comum: o laço DIZ que não há nível comparável (não inventa um)", async () => {
+        const r = await reachValidating(5);
+        stageBCoverage = { full: ["modelo-dados.md"], outlineOnly: [], oversized: [] };
+        prevCoverage = { full: ["visao-escopo.md"], outlineOnly: [], oversized: [] };
+        comparable = { files: [], before: 0, now: 0, same: 0 };
+        await advanceAutonomyRun(db, r.id);
+        const log = JSON.stringify(run!.rounds);
+        expect(log).toContain("NÃO existe nível comparável");
+        expect(log).not.toContain("Nível COMPARÁVEL");
+      });
     });
 
     it("mesma superfície e mesma contagem → streak avança normalmente (o freio continua vivo)", async () => {

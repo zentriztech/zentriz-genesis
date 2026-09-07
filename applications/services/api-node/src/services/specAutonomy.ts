@@ -53,7 +53,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
-import { projectFindingsState, gapDeltaSinceLastRun, findingFingerprint, type EnrichedFinding } from "./findingTriage.js";
+import {
+  projectFindingsState, gapDeltaSinceLastRun, findingFingerprint, comparableTallySinceLastRun,
+  type EnrichedFinding,
+} from "./findingTriage.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
@@ -280,6 +283,18 @@ export interface AutonomyRoundLog {
    */
   gapsClosed?: number | null;
   gapsOpened?: number | null;
+  /**
+   * 🔴 GAP-76 — o NÍVEL de GAPs no subconjunto que ESTA validação e a anterior julgaram por inteiro.
+   *
+   * `gapsBefore`/`gapsAfter` são agregados do PROJETO, e o agregado sobe e desce sozinho por rotação de
+   * cobertura: medido em prod, 23 → 20 findings sem uma única âncora fechada, só porque um arquivo saiu
+   * do julgamento integral. Estes campos são a única leitura de nível auditável — `comparableFiles = 0`
+   * significa "as duas validações não julgaram nenhum arquivo em comum", e aí nem eles valem como nível.
+   */
+  gapsComparableBefore?: number | null;
+  gapsComparableNow?: number | null;
+  gapsComparableSame?: number | null;
+  comparableFiles?: number | null;
   /**
    * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
    *
@@ -2478,15 +2493,26 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-67: e o saldo só vale se a diferença foi RECONCILIADA. Sem reconciliação, `closed > opened` é
   // gatilho que a deriva de âncora fabrica sozinha — zeraria o `no_progress_streak` de graça. Aí o
   // agregado volta a ser o único juiz de progresso, como antes do GAP-41.
-  const progressed = gaps.important < before || (!!delta && !!cont?.reconciled && delta.closed.length > delta.opened.length);
+  const cov = readStageBCoverage(vr.stage_b_coverage);
+  const prevCov = cov ? await previousCoverage(db, run.projectId, run.validationRunId) : null;
+  const surfaceChanged = !!cov && !!prevCov && !sameSet(cov.full, prevCov.full);
+  // 🔴 GAP-76: o NÍVEL medido só no subconjunto que as duas validações julgaram por inteiro.
+  const comp = await comparableTallySinceLastRun(db, run.projectId, run.validationRunId).catch(() => null);
+  // 🔴 GAP-76 — com a superfície MUDADA, `gaps.important < before` é rotação de cobertura, não correção.
+  // Medido em prod: 23 → 20 com as MESMAS 20 âncoras no subconjunto comparável. Deixar esse agregado
+  // valer como progresso zerava o `no_progress_streak` de graça — o laço seguia pagando LLM por uma
+  // melhora que nunca houve, exatamente o que o streak existe para cortar. Quando a superfície muda,
+  // quem responde "melhorou?" é o NÍVEL comparável ou o saldo reconciliado do GAP-67.
+  const aggregateFell = gaps.important < before && !surfaceChanged;
+  const comparableFell = !!comp && comp.files.length > 0 && comp.now < comp.before;
+  const progressed = aggregateFell || comparableFell
+    || (!!delta && !!cont?.reconciled && delta.closed.length > delta.opened.length);
   // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
   // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
   // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
   // "sem progresso" não avança (ele existe para matar laço que não converge, não para punir cobertura
-  // nova); o teto de rodadas continua sendo o freio.
-  const cov = readStageBCoverage(vr.stage_b_coverage);
-  const prevCov = cov ? await previousCoverage(db, run.projectId, run.validationRunId) : null;
-  const surfaceChanged = !!cov && !!prevCov && !sameSet(cov.full, prevCov.full);
+  // nova); o teto de rodadas continua sendo o freio. (`cov`/`surfaceChanged` são medidos acima, porque
+  // o GAP-76 precisa deles ANTES para decidir se o agregado vale como progresso.)
   const streak = progressed ? 0 : surfaceChanged ? run.noProgressStreak : run.noProgressStreak + 1;
   // 🔴 A pendência de cobertura é ACUMULADA, nunca o `outlineOnly` de UMA run: a spec do NVX LastMile
   // tem 950.965 chars contra um teto de 400.000, então nenhuma validação isolada leva os 12 arquivos
@@ -2511,6 +2537,17 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         ? ` ${persisted} dele(s) era(m) o MESMO defeito rebatizado pela edição (seção renumerada/movida) — continua(m) ABERTO(s), não conta como fechado nem como novo.`
         : ` Reconciliação por agente não achou defeito rebatizado: os números acima são identidade real.`)
       : ` ⚠️ Números NÃO reconciliados (${cont?.reason ?? "reconciliador indisponível"}) — parte pode ser o mesmo defeito com âncora nova, então não os uso como prova de progresso.`;
+  // 🔴 GAP-76: o nível comparável dito em voz alta, com a BASE declarada (quantos arquivos as duas
+  // julgaram por inteiro). Sem a base, "20 → 20" seria mais um número sem procedência; com ela, é a
+  // única leitura de nível que a rotação de cobertura não distorce.
+  const compNote = !comp
+    ? ""
+    : comp.files.length === 0
+      ? ` ⚠️ As duas validações não julgaram por INTEIRO nenhum arquivo em comum: NÃO existe nível comparável entre elas (só a diferença finding-a-finding vale).`
+      : ` Nível COMPARÁVEL (${comp.files.length} arquivo(s) julgado(s) por inteiro nas duas): ${comp.before} → ${comp.now} GAP(s) importante(s)` +
+        (comp.now > 0 && comp.same === comp.now && comp.same === comp.before
+          ? ` — as MESMAS ${comp.same} âncoras, zero fechado.`
+          : ` (${comp.same} âncora(s) idêntica(s) nas duas).`);
   const deltaNote = delta
     ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
       (delta.openedOnNewSurface > 0
@@ -2521,19 +2558,31 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
   // GAP-45: e os números do PASSE vão em campos próprios — `blockers`/`warnings` continuam sendo os do
   // ARQUIVO desta rodada (é o que o portal desenha ao lado do nome dele). `gapsAfter` já carrega o total.
+  // 🔴 GAP-76: a seta `antes → agora` só é dita quando as duas contagens SÃO comparáveis. Com a
+  // superfície mudada ela era uma trajetória inventada — e a nota antiga a imprimia primeiro, deixando
+  // a ressalva no fim (foi ela que me fez quase reportar 23 → 20 como progresso).
+  const aggNote = surfaceChanged
+    ? `Validação ${st}: ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}) — ⚠️ NÃO comparável com os ${before} da validação anterior: a superfície medida MUDOU (rotação de cobertura).`
+    : `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).`;
   await patchLastRound(db, run, {
     gapsAfter: gaps.important, passBlockers: gaps.blockers, passWarnings: gaps.warnings,
     validationRunId: run.validationRunId,
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
     gapsPersisted: cont?.reconciled ? persisted : null,
     persistedGaps: persistedRefs,
-    note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${deltaNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — o AGREGADO das duas não é comparável (a diferença acima é)." : ""}`,
+    gapsComparableBefore: comp?.before ?? null, gapsComparableNow: comp?.now ?? null,
+    gapsComparableSame: comp?.same ?? null, comparableFiles: comp?.files.length ?? null,
+    note: `${aggNote}${covNote}${compNote}${deltaNote}`,
   }, { keepNote: true });
   const cycleLabel = perFile
     ? `**Passe ${run.passes}/${run.maxRounds} concluído** (${appliedInPass({ ...run, passes: run.passes - 1 })} arquivo(s) revisado(s))`
     : `**Rodada ${run.round}/${run.maxRounds} concluída**`;
   await postChatNote(db, run,
-    `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).${covNote}` +
+    `🤖 ${cycleLabel} — validação **${st}**: ` +
+    (surfaceChanged
+      ? `**${gaps.important}** GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada) — ⚠️ **não comparáveis** com os ${before} da validação anterior, que julgou outro conjunto de arquivos por inteiro.`
+      : `GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).`) +
+    covNote + compNote +
     (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior${delta.openedOnNewSurface > 0 ? `, ${delta.openedOnNewSurface} deles em arquivo julgado por inteiro pela primeira vez` : ""}.` : "") +
     // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
     // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.
