@@ -96,6 +96,8 @@ vi.mock("./specGapScope.js", () => ({
 interface FakeDecision { contractKey: string; oraclePath: string; ruleSummary: string; restatedIn: string[] }
 let oracleDecisions: FakeDecision[] = [];
 let oracleRegistryOn = true;
+/** 🔴 GAP-70 — pool da graça de consolidação. `0` = kill-switch (default destes casos). */
+let gracaDeConsolidacao = 0;
 const ensureOracleDecisions = vi.fn(async () => ({
   decisions: oracleDecisions, decided: 0, skipped: true, reason: "dublê", model: null,
 }));
@@ -111,6 +113,10 @@ vi.mock("./specOracles.js", () => ({
   // `growthWindow.test.ts`. Sem esta chave o mock quebra com "No export is defined", que é como o
   // GAP-69 apareceu aqui na primeira rodada de testes.
   ORACLE_GROWTH_WINDOW_HOURS: 0,
+  // 🔴 GAP-70: graça de consolidação. Nasce DESLIGADA no dublê (getter, para cada caso poder ligá-la)
+  // — assim TODOS os casos do GAP-64 acima continuam medindo o penhasco original, o que é a prova de
+  // monotonicidade da correção: a graça só ALARGA o limite, nunca aperta.
+  get ORACLE_CONSOLIDATION_GRACE() { return gracaDeConsolidacao; },
   // GAP-64: tolerância de quase-conformidade — fração da margem que RESTA, por isso se extingue com
   // ela. Reimplementada aqui (é lógica pura, testada em `specOracles.test.ts`); com o piso de 2.000 do
   // dublê, a banda destes casos é de 100 chars.
@@ -289,6 +295,7 @@ beforeEach(() => {
   unroutedFindings = [];
   oracleDecisions = [];
   oracleRegistryOn = true;
+  gracaDeConsolidacao = 0;   // GAP-70: cada caso liga a graça se quiser medi-la
   ensureOracleDecisions.mockClear();
   makeTree([
     { path: "00-indice.md", content: INDEX, isPrimary: true },
@@ -916,6 +923,73 @@ describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", ()
     const round = (run!.rounds as { applied?: boolean; toleratedOverflow?: number }[]).at(-1)!;
     expect(round.applied).toBe(false);
     expect(round.toleratedOverflow).toBeUndefined();
+  });
+
+  // ── 🔴 GAP-70: com margem 0 a tolerância do GAP-64 também é 0 → o penhasco volta ─────────────
+  // MEDIDO em prod (run `f101303f`, passe 1, rodada 10): o `README.md` ia REMOVER 9 redeclarações de
+  // contrato E fechar 4 GAPs; voltou +692 chars contra margem 0 e foi descartado INTEIRO. Perdeu-se a
+  // REMOÇÃO — a única coisa que ataca o crescimento da spec (GAP-8).
+  it("🔴 GAP-70 — estouro ACIMA da tolerância mas a rodada CONSOLIDOU → empresta do pool e escreve", async () => {
+    gracaDeConsolidacao = 2_000;
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // 2.792 = margem 2.000 + tolerância 100 + os 692 do caso real. Sem a graça, isto é o veto acima.
+    const consolidou = cresceExatamente(2_792);
+    await ctoReturns(r.id, consolidou);
+    expect(onDisk("backend/01-api.md")).toBe(consolidou);       // a REMOÇÃO chega ao disco
+    expect(run!.last_error).toBeFalsy();
+    const round = (run!.rounds as { applied?: boolean; deltaChars?: number; toleratedOverflow?: number; consolidationGrace?: number; note?: string }[]).at(-1)!;
+    expect(round.applied).toBe(true);
+    expect(round.deltaChars).toBe(2_792);
+    // O excesso TOTAL sobre a margem continua declarado (GAP-64)…
+    expect(round.toleratedOverflow).toBe(792);
+    // …e a parcela EMPRESTADA é contabilizada à parte, porque é ela que esgota o pool.
+    expect(round.consolidationGrace).toBe(692);
+    expect(round.note).toContain("EMPRESTADOS da graça de consolidação");
+    expect(round.note).toContain("Restam 1308 chars");
+  });
+
+  it("🔴 GAP-70 — a graça NÃO se aplica a quem só engordou sem citar o oráculo", async () => {
+    gracaDeConsolidacao = 2_000;
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // +3.000 chars de seção normativa nova, SEM citar o oráculo: é o caso que a graça não pode salvar,
+    // senão ela deixa de ser graça de consolidação e passa a ser um segundo orçamento.
+    await ctoReturns(r.id, `${API}\n## 6. Fonte única de paginação\n${"esta seção é a fonte única. ".repeat(120)}\n`);
+    expect(onDisk("backend/01-api.md")).toBe(API);              // disco INTACTO
+    expect(String(run!.last_error)).toContain("consolidação recusada");
+    expect(String(run!.last_error)).toContain("A graça de consolidação NÃO se aplica");
+    expect(String(run!.last_error)).toContain("só vale quando o arquivo passa a CITAR o oráculo");
+  });
+
+  it("🔴 GAP-70 — consolidou mas estourou ATÉ a graça: a recusa diz quanto foi emprestado", async () => {
+    gracaDeConsolidacao = 500;
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, cresceExatamente(2_601));            // 2.000 + 100 + 500 + 1
+    expect(onDisk("backend/01-api.md")).toBe(API);              // disco INTACTO
+    expect(String(run!.last_error)).toContain("EMPRESTOU 500 chars");
+    expect(String(run!.last_error)).toContain("o limite desta rodada era 2600");
+    // 🔴 GAP-70 (achado durante o próprio teste): `last_error` era cortado em 500 chars numa coluna
+    // TEXT, e o corte comia a explicação do GAP-37 — a parte ACIONÁVEL, no único lugar onde o humano
+    // lê por que a rodada paga foi jogada fora. As duas partes têm de caber juntas.
+    expect(String(run!.last_error)).toContain("A rodada pediu DUAS coisas");
+    expect(String(run!.last_error)).not.toMatch(/era 26$/);      // nada cortado no meio da frase
+  });
+
+  it("🔴 GAP-70 — com a graça DESLIGADA a recusa não inventa empréstimo nenhum", async () => {
+    // Kill-switch: `SPEC_ORACLE_CONSOLIDATION_GRACE=0`. Com um número só em vez de `{pool,left}`, esta
+    // recusa acusaria rodadas anteriores de ter gasto uma graça que nunca existiu.
+    gracaDeConsolidacao = 0;
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, cresceExatamente(2_101));
+    expect(String(run!.last_error)).toContain("consolidação recusada");
+    expect(String(run!.last_error)).not.toContain("graça");
   });
 
   it("arquivo que REDECLARA, encolhe e cita o oráculo → aplica normalmente", async () => {

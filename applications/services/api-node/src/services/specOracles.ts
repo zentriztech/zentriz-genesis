@@ -189,6 +189,27 @@ export function growthMarginIsNoise(allowance: number, fileChars: number): boole
  */
 export const ORACLE_GROWTH_TOLERANCE = Number(process.env.SPEC_ORACLE_GROWTH_TOLERANCE ?? "0.05");
 
+/**
+ * 🔴 GAP-70 (2026-09-07) — a tolerância do GAP-64 é uma FRAÇÃO da margem, então **margem 0 ⇒
+ * tolerância 0**, e aí o veto volta a ser o penhasco que o GAP-64 veio matar.
+ *
+ * MEDIDO em prod (run `f101303f`, passe 1, rodada 10): o `README.md` recebeu um pedido DUPLO — fechar
+ * 4 GAPs **e** remover 9 redeclarações de contrato, deixando a citação do oráculo. A revisão voltou
+ * **+692 chars** contra margem 0 e foi **descartada inteira**. O Opus já estava pago, nada foi escrito
+ * e o que se perdeu foi justamente a **REMOÇÃO** — a única coisa que ataca o crescimento (GAP-8).
+ *
+ * Esta é a graça de consolidação: chars que o laço EMPRESTA a uma rodada que **provadamente
+ * consolidou** (o fato mecânico já usado abaixo: o arquivo passou a citar o oráculo). Três limites
+ * impedem que ela reabra o crescimento livre:
+ *   1. só vale com a citação do oráculo presente — rodada que só engordou segue vetada;
+ *   2. é um POOL por PASSE da run, não por rodada (12 arquivos não ganham 12 graças);
+ *   3. é EMPRÉSTIMO: entra em `deltaChars`, logo é descontada das rodadas seguintes e, pelo GAP-69,
+ *      das runs irmãs da janela de 24 h.
+ *
+ * `0` = kill-switch: volta exatamente ao comportamento do GAP-64, sem deploy.
+ */
+export const ORACLE_CONSOLIDATION_GRACE = Number(process.env.SPEC_ORACLE_CONSOLIDATION_GRACE ?? "2000");
+
 /** Quantos chars além da margem o laço aceita PAGAR nesta rodada (0 quando não há margem). */
 export function growthOverflowTolerance(allowance: number): number {
   if (!Number.isFinite(allowance) || allowance <= 0) return 0;
