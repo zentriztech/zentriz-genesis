@@ -875,13 +875,15 @@ async function gapSiblingBlock(
  *
  * Best-effort: sem registro (ou com a flag desligada) a rodada segue como antes.
  */
-async function gapOracleBlock(projectId: string, filePath: string): Promise<string> {
+async function gapOracleBlock(projectId: string, filePath: string, fileChars?: number): Promise<string> {
   try {
     const { loadOracleDecisions, oracleFactBlock, oracleRegistryEnabled } = await import("../services/specOracles.js");
     if (!oracleRegistryEnabled()) return "";
     const decisions = await loadOracleDecisions(pool, projectId);
     if (decisions.length === 0) return "";
-    const block = oracleFactBlock(decisions, filePath);
+    // GAP-25: `fileChars` é o tamanho do arquivo INTEIRO (não do recorte) — o veto compara arquivo
+    // inteiro contra arquivo inteiro, então o número anunciado tem de ser o mesmo que será julgado.
+    const block = oracleFactBlock(decisions, filePath, fileChars);
     if (block) {
       console.log(`[SpecChat] oráculos aplicados projeto=${projectId.slice(0, 8)} alvo=${filePath} contratos=${decisions.length} chars=${block.length}`);
     }
@@ -998,6 +1000,17 @@ function runFileChatJob(
         // descarta o bloco que não fechou — os aplicados são íntegros e o resto do arquivo não muda.
         // Marcar `truncated` faria o laço autônomo recusar um resultado BOM (e pago).
         const partial = applied.dropped > 0 || data.truncated === true;
+        // GAP-26: bloco recusado individualmente é FATO da rodada — o laço precisa saber que aquele
+        // GAP continua aberto, senão lê "aplicado" e conta como progresso o que não aconteceu.
+        const refused = applied.skipped.length > 0
+          ? `\n\n⚠️ ${applied.skipped.length} edição(ões) RECUSADA(S) (as demais foram aplicadas): `
+            + `${applied.skipped.slice(0, 3).map((s) => s.message).join(" · ")}`
+            + `${applied.skipped.length > 3 ? ` … e mais ${applied.skipped.length - 3}.` : ""}`
+            + " O que elas tentavam corrigir continua nos GAPs."
+          : "";
+        if (applied.skipped.length > 0) {
+          console.warn(`[SpecChat] job=${jobId} ${applied.applied} edição(ões) aplicada(s), ${applied.skipped.length} recusada(s): ${applied.skipped.map((s) => `${s.index + 1}/${s.code}`).join(", ")}`);
+        }
         settleJob(jobId, {
           status: "done",
           specMarkdown: applied.content,
@@ -1006,9 +1019,9 @@ function runFileChatJob(
           // consome é o modo autônomo, noutro processo e noutro tick: sem persistir, ele só sabe o
           // que PEDIU (edições) e não o que RECEBEU — e o modelo pode reemitir o arquivo inteiro.
           editsApplied: applied.applied,
-          reply: partial
+          reply: (partial
             ? `${doneReply}\n\n⚠️ A resposta bateu no teto de saída: ${applied.applied} edição(ões) aplicada(s) e ${applied.dropped} incompleta(s) descartada(s). O que faltou continua nos GAPs — rode de novo para o restante.`
-            : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`,
+            : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`) + refused,
         });
         console.log(
           `[SpecChat] ✓ job=${jobId} DONE (edits) — ${applied.applied} aplicadas, ${applied.dropped} descartadas, ` +
@@ -1228,7 +1241,7 @@ export async function dispatchGapFileJob(opts: {
   // GAP-22: o irmão só-leitura diz O QUE o outro arquivo normatiza; o registro de oráculos diz QUEM
   // MANDA — e é isso que faltava para a contradição ser CONSOLIDADA em vez de migrar de arquivo (24
   // dos 26 blockers do NVX eram desta família, com o mesmo contrato reaparecendo em 5 rodadas).
-  const oracles = await gapOracleBlock(opts.projectId, opts.filePath);
+  const oracles = await gapOracleBlock(opts.projectId, opts.filePath, opts.fileContent.length);
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),

@@ -418,3 +418,29 @@ describe("oracleFactBlock — o que o CTO lê", () => {
     expect(block).not.toContain("SUBSTITUA a redeclaração");
   });
 });
+
+// ── GAP-25: o critério de aceitação vira NÚMERO no pedido ─────────────────────
+//
+// Nas 5 primeiras rodadas em prod com o registro ligado, 2 foram DESCARTADAS por crescer (+7.837 e
+// +2.786 chars). O bloco só dizia "deve encolher" — o agente não tinha como saber onde estava a linha.
+describe("oracleFactBlock — GAP-25: orçamento de saída como contrato", () => {
+  it("anuncia o teto em NÚMERO para quem redeclara, quando o chamador de fato veta", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 50_000);
+    expect(block).toContain("50000");
+    expect(block).toContain("52000"); // 50.000 + ORACLE_GROWTH_BUDGET (2.000)
+    expect(block).toContain("DESCARTADA INTEIRA");
+    expect(block).toContain("FICAR ABAIXO de 50000");
+  });
+
+  it("sem tamanho informado NÃO promete descarte (o botão humano não passa pelo veto)", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md");
+    expect(block).toContain("deve ENCOLHER");
+    expect(block).not.toContain("DESCARTADA INTEIRA");
+  });
+
+  it("arquivo que só É oráculo não recebe teto — ele mantém a definição, não consolida nada", () => {
+    const block = oracleFactBlock([D()], "contratos-erros.md", 50_000);
+    expect(block).toContain("ESTE arquivo é o oráculo");
+    expect(block).not.toContain("DESCARTADA INTEIRA");
+  });
+});

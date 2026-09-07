@@ -98,6 +98,8 @@ const ensureOracleDecisions = vi.fn(async () => ({
   decisions: oracleDecisions, decided: 0, skipped: true, reason: "dublê", model: null,
 }));
 vi.mock("./specOracles.js", () => ({
+  // GAP-25: o orçamento é FONTE ÚNICA em specOracles (o veto julga e o prompt anuncia o MESMO número).
+  ORACLE_GROWTH_BUDGET: 2000,
   oracleRegistryEnabled: () => oracleRegistryOn,
   loadOracleDecisions: vi.fn(async () => oracleDecisions),
   ensureOracleDecisions: (...a: unknown[]) => ensureOracleDecisions(...(a as [])),

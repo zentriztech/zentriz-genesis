@@ -146,8 +146,15 @@ export type SpecEditApplyFailure =
   | { code: "MARKER_IN_REPLACE"; message: string; index: number }
   | { code: "SHRUNK"; message: string };
 
+/** Bloco recusado individualmente (GAP-26) — não impede os demais. */
+export interface SpecEditSkipped {
+  index: number;
+  code: SpecEditApplyFailure["code"];
+  message: string;
+}
+
 export type SpecEditApplyResult =
-  | { ok: true; content: string; applied: number; dropped: number }
+  | { ok: true; content: string; applied: number; dropped: number; skipped: SpecEditSkipped[] }
   | ({ ok: false } & SpecEditApplyFailure);
 
 /** Quantas vezes `needle` aparece em `hay` (busca literal, sem regex). */
@@ -191,6 +198,23 @@ function label(s: string): string {
  *
  * A unicidade é verificada no conteúdo **corrente** (já com os blocos anteriores aplicados), que é o
  * que o agente vê acontecer ao editar de cima para baixo — e é determinístico.
+ *
+ * ## GAP-26 (2026-09-07) — o veto é POR BLOCO, não da rodada inteira
+ *
+ * MEDIDO em prod na run `875b2324` (NVX LastMile): `observabilidade-operacao.md`, 69.598 chars, uma
+ * chamada de Opus 5 inteira perdida com
+ * `Edição 20: o trecho a substituir não existe no arquivo` — as 19 edições ancoradas foram jogadas
+ * fora junto. Isso contradizia a política que este próprio módulo já adota para TRUNCAMENTO
+ * (cabeçalho: "o bloco cortado é jogado fora, os completos valem"): cada bloco é uma edição
+ * AUTOCONTIDA, então um bloco imprestável não torna os outros inválidos.
+ *
+ * Passa a valer: bloco com defeito PRÓPRIO (âncora inexistente, ambígua, SEARCH vazio, marcador no
+ * REPLACE) é RECUSADO e registrado em `skipped`; os demais são aplicados. Continuam fatais os vetos
+ * que falam do RESULTADO, não de um bloco: `NO_BLOCKS` e `SHRUNK`. E se NENHUM bloco aplicar, a
+ * rodada falha com o motivo do primeiro — o comportamento anterior para o caso "nada funcionou".
+ *
+ * Isto NÃO afrouxa a proteção contra corrupção: nenhum bloco duvidoso é adivinhado ou "consertado";
+ * o GAP que ele tentava resolver simplesmente continua aberto para a rodada seguinte.
  */
 export function applySpecEditBlocks(
   baseContent: string,
@@ -202,12 +226,19 @@ export function applySpecEditBlocks(
   if (blocks.length === 0) {
     return { ok: false, code: "NO_BLOCKS", message: "A resposta não trouxe nenhum bloco de edição completo." };
   }
+  const skipped: SpecEditSkipped[] = [];
+  const firstFailure: SpecEditApplyFailure[] = [];
+  const skip = (f: SpecEditApplyFailure & { index: number }) => {
+    skipped.push({ index: f.index, code: f.code, message: f.message });
+    if (firstFailure.length === 0) firstFailure.push(f);
+  };
   let current = baseContent.replace(/\r\n/g, "\n");
   for (let i = 0; i < blocks.length; i += 1) {
     const b = blocks[i];
     const search = b.search.replace(/\r\n/g, "\n");
     if (!search.trim()) {
-      return { ok: false, code: "EMPTY_SEARCH", index: i, message: `Edição ${i + 1}: bloco SEARCH vazio.` };
+      skip({ code: "EMPTY_SEARCH", index: i, message: `Edição ${i + 1}: bloco SEARCH vazio.` });
+      continue;
     }
     // GAP-9 (invariante, não heurística): nenhuma substituição pode INTRODUZIR uma linha de marcador
     // no arquivo. Gravar `=======` numa spec normativa é corrupção — o validador a lê como conflito de
@@ -216,10 +247,11 @@ export function applySpecEditBlocks(
     const badLine = b.replace.replace(/\r\n/g, "\n").split("\n")
       .find((l) => { const s = l.trim(); return RE_START.test(s) || RE_MID.test(s) || RE_END.test(s); });
     if (badLine !== undefined) {
-      return {
-        ok: false, code: "MARKER_IN_REPLACE", index: i,
+      skip({
+        code: "MARKER_IN_REPLACE", index: i,
         message: `Edição ${i + 1}: o texto novo contém uma linha de marcador de edição ("${badLine.trim().slice(0, 20)}") — recusado para não gravar conflito de merge na spec. Reemita o bloco; se a linha for mesmo conteúdo, use cabeçalho ATX (\`# Título\`) em vez de sublinhado.`,
-      };
+      });
+      continue;
     }
     let hits = countOccurrences(current, search);
     let effective = search;
@@ -235,27 +267,32 @@ export function applySpecEditBlocks(
       }
     }
     if (hits === 0) {
-      return {
-        ok: false, code: "SEARCH_NOT_FOUND", index: i,
+      skip({
+        code: "SEARCH_NOT_FOUND", index: i,
         message: `Edição ${i + 1}: o trecho a substituir não existe no arquivo — âncora: "${label(search)}".`,
-      };
+      });
+      continue;
     }
     if (hits > 1) {
-      return {
-        ok: false, code: "SEARCH_AMBIGUOUS", index: i,
+      skip({
+        code: "SEARCH_AMBIGUOUS", index: i,
         message: `Edição ${i + 1}: o trecho a substituir aparece ${hits}× no arquivo (âncora ambígua) — "${label(search)}". Inclua mais linhas de contexto.`,
-      };
+      });
+      continue;
     }
     const at = current.indexOf(effective);
     current = current.slice(0, at) + b.replace.replace(/\r\n/g, "\n") + current.slice(at + effective.length);
   }
+  const applied = blocks.length - skipped.length;
+  // Nenhum bloco aplicou: a rodada é a mesma falha de antes, com o motivo do PRIMEIRO bloco recusado.
+  if (applied === 0) return { ok: false, ...firstFailure[0] };
   if (current.length < Math.floor(baseContent.length * minRatio)) {
     return {
       ok: false, code: "SHRUNK",
       message: `As edições encolheriam o arquivo de ${baseContent.length} para ${current.length} caracteres — recusado (possível remoção de conteúdo válido).`,
     };
   }
-  return { ok: true, content: current, applied: blocks.length, dropped };
+  return { ok: true, content: current, applied, dropped, skipped };
 }
 
 /**

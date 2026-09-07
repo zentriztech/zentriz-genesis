@@ -822,8 +822,10 @@ async function ensureOracles(
  * Não é zero porque a mesma rodada resolve outros GAPs do arquivo (uma seção que faltava é crescimento
  * legítimo). É pequeno porque a patologia medida é justamente "acrescentar um parágrafo normativo em vez
  * de remover a redeclaração": num arquivo de 100k, 1% de tolerância seria toothless.
+ *
+ * GAP-25: o valor vive em `specOracles` porque o MESMO número é ANUNCIADO ao agente no prompt. Definir
+ * duas vezes faria o critério julgado divergir do critério comunicado — o pior tipo de bug de agente.
  */
-const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "2000");
 
 /**
  * GAP-22 — veto de consolidação. Devolve o MOTIVO da recusa, ou `null` se pode aplicar.
@@ -834,7 +836,9 @@ const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "20
 async function consolidationVeto(
   db: Db, projectId: string, target: string, before: string, after: string,
 ): Promise<string | null> {
-  const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled } = await import("./specOracles.js");
+  const {
+    loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled, ORACLE_GROWTH_BUDGET,
+  } = await import("./specOracles.js");
   if (!oracleRegistryEnabled()) return null;
   const decisions = await loadOracleDecisions(db, projectId);
   if (decisions.length === 0) return null;

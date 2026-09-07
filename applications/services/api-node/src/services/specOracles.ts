@@ -69,6 +69,15 @@ const ORACLE_TIMEOUT_MS = Number(process.env.SPEC_ORACLE_TIMEOUT_MS ?? "90000");
 const ORACLE_MAX_TOKENS = Number(process.env.SPEC_ORACLE_MAX_TOKENS ?? "8000");
 
 /**
+ * Orçamento de crescimento de uma rodada de CONSOLIDAÇÃO — FONTE ÚNICA (GAP-25).
+ *
+ * Mora aqui, e não no laço, porque agora tem DOIS consumidores: o veto que descarta a revisão
+ * (`consolidationVeto`) e o número ANUNCIADO ao agente no prompt. Duas constantes divergiriam no
+ * primeiro ajuste e o modelo passaria a receber um critério de aceitação diferente do que o julga.
+ */
+export const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "2000");
+
+/**
  * Kill-switch. Nasce LIGADO porque o comportamento sem ele está PROVADO insuficiente (a contradição
  * migra de arquivo indefinidamente). `SPEC_ORACLE_REGISTRY=off` volta ao anterior sem deploy.
  */
@@ -466,7 +475,16 @@ export function oracleRoleForFile(decisions: OracleDecision[], targetPath: strin
  * Não diz o que escrever: diz QUEM É O ORÁCULO (fato persistido) e qual é a forma de consolidar
  * (citar em vez de redeclarar). A escolha das palavras, da âncora e do recorte segue sendo do agente.
  */
-export function oracleFactBlock(decisions: OracleDecision[], targetPath: string): string {
+export function oracleFactBlock(
+  decisions: OracleDecision[],
+  targetPath: string,
+  /**
+   * GAP-25 — tamanho ATUAL do arquivo, quando o chamador é o caminho que de fato VETA o crescimento.
+   * Presente ⇒ o bloco anuncia o critério de aceitação em NÚMERO. Ausente ⇒ só a forma qualitativa
+   * (o botão humano não passa por `consolidationVeto`; prometer descarte ali seria mentira).
+   */
+  fileChars?: number,
+): string {
   const { owns, restates } = oracleRoleForFile(decisions, targetPath);
   if (owns.length === 0 && restates.length === 0) return "";
   const lines: string[] = [
@@ -492,8 +510,22 @@ export function oracleFactBlock(decisions: OracleDecision[], targetPath: string)
   lines.push(
     "Consolidar é REMOVER a redeclaração e deixar a citação: nestas correções o arquivo deve ENCOLHER,"
     + " não crescer. Use blocos SEARCH/REPLACE ancorados no texto que sai.",
-    "--- FIM DA FONTE ÚNICA ---",
-    "",
   );
+  // GAP-25: o critério de aceitação vira NÚMERO no pedido. Medido em prod na estreia do registro: das
+  // 5 primeiras rodadas, 2 foram descartadas por crescer (+7.837 e +2.786 chars) — o agente não tinha
+  // como saber onde estava a linha, porque o bloco só dizia "deve encolher". Orçamento de saída como
+  // CONTRATO, não como retórica (G1 de genesis-gaps-sistemicos-agenticos).
+  if (restates.length > 0 && typeof fileChars === "number" && fileChars > 0) {
+    const ceiling = fileChars + ORACLE_GROWTH_BUDGET;
+    lines.push(
+      `CONTRATO DE SAÍDA (verificado por código, não é retórica): este arquivo tem hoje ${fileChars}`
+      + ` caracteres. Se a revisão passar de ${ceiling}, ela é DESCARTADA INTEIRA — nada é escrito, os`
+      + ` GAPs continuam abertos e a rodada é perdida. O resultado esperado destas ${restates.length}`
+      + ` consolidação(ões) é FICAR ABAIXO de ${fileChars}. Se você precisa acrescentar texto para`
+      + " resolver outro GAP do mesmo arquivo, compense removendo as redeclarações acima — é para isso"
+      + " que elas estão listadas.",
+    );
+  }
+  lines.push("--- FIM DA FONTE ÚNICA ---", "");
   return lines.join("\n");
 }

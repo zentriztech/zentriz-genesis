@@ -217,3 +217,83 @@ describe("applySpecEditResponse (o caminho que o job usa)", () => {
     expect(r.content).not.toContain("\r");
   });
 });
+
+// ── GAP-26: um bloco imprestável não derruba a rodada ─────────────────────────
+//
+// Medido em prod (run 875b2324, `observabilidade-operacao.md` de 69.598 chars): uma chamada de Opus 5
+// inteira perdida por `Edição 20: o trecho a substituir não existe` — as 19 ancoradas foram embora
+// junto. Cada bloco é autocontido; a política de truncamento deste módulo já dizia isso.
+describe("GAP-26 — veto POR BLOCO", () => {
+  it("âncora inexistente recusa SÓ o bloco ruim e aplica os bons", () => {
+    const raw = [
+      block("Os dados são retidos.", "Os dados são retidos por 5 anos."),
+      block("Uma frase que nunca existiu neste arquivo.", "qualquer coisa"),
+      block("O titular pode solicitar exclusão.", "O titular pode solicitar exclusão em 15 dias."),
+    ].join("\n");
+    const r = applySpecEditResponse(BASE, raw);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.applied).toBe(2);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].code).toBe("SEARCH_NOT_FOUND");
+    expect(r.skipped[0].index).toBe(1);
+    expect(r.content).toContain("por 5 anos");
+    expect(r.content).toContain("em 15 dias");
+  });
+
+  it("âncora AMBÍGUA também é recusada só nela (não se adivinha qual era)", () => {
+    const base = "linha repetida\ntexto\nlinha repetida\n## Fim\nOs dados são retidos.\n";
+    const raw = [
+      block("linha repetida", "outra coisa"),
+      block("Os dados são retidos.", "Os dados são retidos por 5 anos."),
+    ].join("\n");
+    const r = applySpecEditResponse(base, raw);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.applied).toBe(1);
+    expect(r.skipped[0].code).toBe("SEARCH_AMBIGUOUS");
+    expect(r.content).toContain("por 5 anos");
+    // O bloco ambíguo NÃO foi aplicado em lugar nenhum.
+    expect(r.content).not.toContain("outra coisa");
+  });
+
+  it("marcador no REPLACE é recusado só nele — a spec não recebe conflito de merge", () => {
+    const r = applySpecEditBlocks(BASE, [
+      { search: "Os dados são retidos.", replace: "Título\n=======\ntexto" },
+      { search: "O titular pode solicitar exclusão.", replace: "O titular pode solicitar exclusão em 15 dias." },
+    ]);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.applied).toBe(1);
+    expect(r.content).not.toContain("=======");
+  });
+
+  it("NENHUM bloco aplicável → a rodada falha com o motivo do primeiro (comportamento anterior)", () => {
+    const raw = [
+      block("não existe A", "x"),
+      block("não existe B", "y"),
+    ].join("\n");
+    const r = applySpecEditResponse(BASE, raw);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("SEARCH_NOT_FOUND");
+    expect(r.message).toContain("Edição 1");
+  });
+
+  it("SHRUNK continua FATAL: o veto fala do RESULTADO, não de um bloco", () => {
+    const r = applySpecEditBlocks(BASE, [
+      { search: BASE.slice(0, Math.floor(BASE.length * 0.8)), replace: "" },
+      { search: "não existe", replace: "x" },
+    ]);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("SHRUNK");
+  });
+
+  it("tudo aplicado → `skipped` vazio (nada a declarar)", () => {
+    const r = applySpecEditResponse(BASE, block("Os dados são retidos.", "Os dados são retidos por 5 anos."));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.skipped).toEqual([]);
+  });
+});
