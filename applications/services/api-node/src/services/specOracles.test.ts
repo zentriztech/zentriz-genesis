@@ -22,7 +22,7 @@ vi.mock("fs/promises", () => ({
 
 const {
   crossFileFindings, parseOracleResponse, oracleRegistryEnabled, oracleRoleForFile, oracleFactBlock,
-  ensureOracleDecisions, dropContradictoryPairs, loadOracleDecisions, _resetOracleMemo,
+  ensureOracleDecisions, dropImpossibleDecisions, loadOracleDecisions, _resetOracleMemo,
 } = await import("./specOracles.js");
 
 type Decision = import("./specOracles.js").OracleDecision;
@@ -337,46 +337,82 @@ describe("GAP-23 — corrida de decisão (medida em prod: 27 contratos + 13 no M
   });
 });
 
-// ── GAP-24: par mutuamente inverso não vira fato ──────────────────────────────
+// ── GAP-24 → GAP-27: só a decisão IMPOSSÍVEL é suprimida ─────────────────────
 
-describe("dropContradictoryPairs — GAP-24 (medido em prod no par METRICS_TOKEN)", () => {
-  it("suprime OS DOIS lados quando o oráculo de um redeclara o do outro", () => {
-    const out = dropContradictoryPairs([
-      D({ contractKey: "metrics-token-boot", oraclePath: "observabilidade-operacao.md", restatedIn: ["infraestrutura-deploy.md"] }),
-      D({ contractKey: "obrigatoriedade-metrics-token", oraclePath: "infraestrutura-deploy.md", restatedIn: ["observabilidade-operacao.md"] }),
+describe("dropImpossibleDecisions — GAP-24/27", () => {
+  it("suprime a decisão AUTO-INVERSA (o oráculo constava como redeclarador de si mesmo)", () => {
+    const out = dropImpossibleDecisions([
+      D({ contractKey: "paginacao", oraclePath: "contratos-erros.md", restatedIn: ["modelo-dados.md", "contratos-erros.md"] }),
+      D({ contractKey: "colunas-users", oraclePath: "modelo-dados.md", restatedIn: ["privacidade-lgpd.md"] }),
+    ]);
+    expect(out.map((d) => d.contractKey)).toEqual(["colunas-users"]);
+  });
+
+  it("suprime OS DOIS lados quando o MESMO contrato aparece com dois donos", () => {
+    const out = dropImpossibleDecisions([
       D({ contractKey: "paginacao", oraclePath: "contratos-erros.md", restatedIn: ["modelo-dados.md"] }),
+      D({ contractKey: "paginacao", oraclePath: "modelo-dados.md", restatedIn: ["contratos-erros.md"] }),
+      D({ contractKey: "colunas-users", oraclePath: "modelo-dados.md", restatedIn: ["privacidade-lgpd.md"] }),
     ]);
     // Nenhum vencedor escolhido por código: escolher seria julgamento, e julgamento é do agente.
-    expect(out.map((d) => d.contractKey)).toEqual(["paginacao"]);
+    expect(out.map((d) => d.contractKey)).toEqual(["colunas-users"]);
   });
 
-  it("contratos DIFERENTES com donos diferentes sobrevivem (não é contradição)", () => {
+  it("GAP-27: contratos DIFERENTES que se redeclaram mutuamente SOBREVIVEM (é o caso normal)", () => {
+    // Medido em prod na run b344e699: a regra anterior derrubou 38 de 40 decisões (vigentes=2) porque
+    // "A é oráculo do tema dele e redeclara o tema de B" é exatamente como a spec dividida funciona.
     const decisions = [
-      D({ contractKey: "paginacao", oraclePath: "contratos-erros.md", restatedIn: ["modelo-dados.md"] }),
-      D({ contractKey: "colunas-users", oraclePath: "modelo-dados.md", restatedIn: ["privacidade-lgpd.md"] }),
+      D({ contractKey: "catalogo-erros", oraclePath: "contratos-erros.md", restatedIn: ["api-entregas-entregadores.md"] }),
+      D({ contractKey: "limites-string-campos", oraclePath: "api-entregas-entregadores.md", restatedIn: ["contratos-erros.md"] }),
     ];
-    expect(dropContradictoryPairs(decisions)).toHaveLength(2);
+    expect(dropImpossibleDecisions(decisions)).toHaveLength(2);
   });
 
-  it("o mesmo oráculo em dois contratos não é par inverso", () => {
+  it("o par de assuntos iguais com CHAVES diferentes não é decidido por código (fica para o agente)", () => {
+    // O par METRICS_TOKEN medido em prod: para o código são dois contratos distintos. Quem sabe que é o
+    // mesmo assunto é o agente — a cura vive no prompt de decisão, não numa heurística de string.
+    const decisions = [
+      D({ contractKey: "metrics-token-boot", oraclePath: "observabilidade-operacao.md", restatedIn: ["infraestrutura-deploy.md"] }),
+      D({ contractKey: "obrigatoriedade-metrics-token", oraclePath: "infraestrutura-deploy.md", restatedIn: ["observabilidade-operacao.md"] }),
+    ];
+    expect(dropImpossibleDecisions(decisions)).toHaveLength(2);
+  });
+
+  it("o mesmo oráculo em dois contratos é normal", () => {
     const decisions = [
       D({ contractKey: "a", oraclePath: "modelo-dados.md", restatedIn: ["x.md"] }),
       D({ contractKey: "b", oraclePath: "modelo-dados.md", restatedIn: ["x.md"] }),
     ];
-    expect(dropContradictoryPairs(decisions)).toHaveLength(2);
+    expect(dropImpossibleDecisions(decisions)).toHaveLength(2);
   });
 
-  it("o par contraditório também não chega ao prompt do CTO", async () => {
+  it("a decisão impossível também não chega ao prompt do CTO", async () => {
     const { db } = fakeDb({
       files: ["observabilidade-operacao.md", "infraestrutura-deploy.md"],
       rows: [
-        { contract_key: "metrics-token-boot", oracle_path: "observabilidade-operacao.md", rule_summary: "r", restated_in: ["infraestrutura-deploy.md"], spec_hash: "h1", decided_by_model: "m" },
-        { contract_key: "obrigatoriedade-metrics-token", oracle_path: "infraestrutura-deploy.md", rule_summary: "r", restated_in: ["observabilidade-operacao.md"], spec_hash: "h1", decided_by_model: "m" },
+        { contract_key: "metrics-token-boot", oracle_path: "observabilidade-operacao.md", rule_summary: "r", restated_in: ["observabilidade-operacao.md"], spec_hash: "h1", decided_by_model: "m" },
       ],
     });
     const vigentes = await loadOracleDecisions(db, "p1");
     expect(vigentes).toHaveLength(0);
     expect(oracleFactBlock(vigentes, "infraestrutura-deploy.md")).toBe("");
+  });
+
+  it("GAP-27 ao vivo: a árvore inteira de contratos cruzados continua chegando ao prompt", async () => {
+    const { db } = fakeDb({
+      files: ["contratos-erros.md", "api-entregas-entregadores.md", "modelo-dados.md"],
+      rows: [
+        { contract_key: "catalogo-erros", oracle_path: "contratos-erros.md", rule_summary: "r1", restated_in: ["api-entregas-entregadores.md", "modelo-dados.md"], spec_hash: "h1", decided_by_model: "m" },
+        { contract_key: "limites-string-campos", oracle_path: "api-entregas-entregadores.md", rule_summary: "r2", restated_in: ["contratos-erros.md"], spec_hash: "h1", decided_by_model: "m" },
+        { contract_key: "inventario-rotas", oracle_path: "modelo-dados.md", rule_summary: "r3", restated_in: ["api-entregas-entregadores.md"], spec_hash: "h1", decided_by_model: "m" },
+      ],
+    });
+    const vigentes = await loadOracleDecisions(db, "p1");
+    expect(vigentes).toHaveLength(3);
+    const bloco = oracleFactBlock(vigentes, "api-entregas-entregadores.md");
+    expect(bloco).toContain("limites-string-campos");
+    expect(bloco).toContain("catalogo-erros");
+    expect(bloco).toContain("inventario-rotas");
   });
 });
 
