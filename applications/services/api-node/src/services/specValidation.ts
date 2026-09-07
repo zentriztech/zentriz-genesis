@@ -391,6 +391,12 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
   const deadline = Date.now() + VALIDATION_DEADLINE_MIN * 60_000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 8_000));
+    // GAP-66 (migração 104): sinal de vida ANTES do poll. É o único jeito de o coletor distinguir
+    // "esperador vivo" de "esperador morto por restart da api" sem virar um segundo escritor da linha.
+    // Falha aqui é irrelevante para a validação: o pior efeito é a run ser adotada pelo coletor, que
+    // faz exatamente o mesmo trabalho.
+    await pool.query("UPDATE spec_validation_runs SET stage_b_polled_at = now() WHERE id = $1", [runId])
+      .catch(() => undefined);
     const poll = await httpJson(`${base}/invoke/spec_validator/status/${jobId}`, "GET", undefined, 30_000)
       .catch(() => ({ status: 0, data: {} as Record<string, unknown> }));
     // 404 = agents reiniciou e perdeu o job em memória → interrupted (NUNCA insistir 11min).
@@ -862,6 +868,15 @@ export async function autoValidateDirtySpecs(pool: Pool): Promise<void> {
 /** Teto DURO depois do deadline: passado isto, desistimos do job e a run para de segurar o laço. */
 const STAGE_B_COLLECT_GRACE_MIN = parseInt(process.env.SPEC_VALIDATION_COLLECT_GRACE_MIN ?? "15", 10);
 
+/**
+ * GAP-66 — idade do sinal de vida a partir da qual uma run `pending`/`running` é considerada ÓRFÃ.
+ *
+ * Pior caso LEGÍTIMO de intervalo entre dois heartbeats de `runStageB`: 8 s de espera + 30 s de
+ * timeout do HTTP ≈ 38 s. O default de 120 s dá fator ~3 sobre isso, então um esperador vivo mas
+ * lento nunca é confundido com um morto — e ainda assim troca ~20 min de espera morta por ~2 min.
+ */
+const STAGE_B_LEASE_SEC = parseInt(process.env.SPEC_VALIDATION_STAGEB_LEASE_SEC ?? "120", 10);
+
 export type StageBProbe = (jobId: string) => Promise<
   { status: string; result?: Record<string, unknown>; error?: string } | "not_found"
 >;
@@ -888,23 +903,44 @@ async function defaultStageBProbe(jobId: string): ReturnType<StageBProbe> {
  * contou a rodada como "sem medição de GAPs". Mesma família do defeito do chat da Bancada.
  *
  * Molde: `collectSpecChatJobsTick` / `collectSpecSplitsTick` (probe injetável, nunca lança).
- * Só toca runs `error`/`interrupted` COM `agents_job_id` e ainda não coletadas.
+ * Só toca runs COM `agents_job_id` e ainda não coletadas.
+ *
+ * ## GAP-66 (2026-09-07) — run ÓRFÃ também é coletável, e o critério é heartbeat, não status
+ *
+ * A varredura original exigia `status IN ('error','interrupted')`, ou seja, só olhava run já MORTA.
+ * Uma validação orfanada por restart da api continua `running` até `expireOverdueValidationRuns`
+ * virá-la `error` **no deadline** — então o laço autônomo esperava ~20 min por um resultado que já
+ * estava recuperável no instante seguinte ao restart (medido em prod: o resultado veio, 22 findings,
+ * `stage_b_ran = true`; o defeito não é perda, é LATÊNCIA).
+ *
+ * Incluir `running` às cegas seria pior: `runStageB` tem um esperador EM PROCESSO pollando o mesmo
+ * job a cada 8 s, e dois escritores na mesma linha é corrupção. O que caracteriza a órfã não é o
+ * status, é o esperador estar MORTO — fato que só se conhece por sinal de vida. Daí o lease:
+ * `pending`/`running` só entra quando `COALESCE(stage_b_polled_at, started_at)` está mais velho que
+ * `STAGE_B_LEASE_SEC`. Vale com N réplicas, porque o critério é da LINHA, não do processo.
  */
 export async function collectStageBResults(
   pool: Pool,
   probe: StageBProbe = defaultStageBProbe,
 ): Promise<{ scanned: number; collected: number; lost: number; givenUp: number }> {
   const out = { scanned: 0, collected: 0, lost: 0, givenUp: 0 };
-  let rows: Array<{ id: string; project_id: string | null; spec_hash: string; agents_job_id: string; findings: unknown; deadline_at: string | null; stage_b_coverage: unknown }>;
+  let rows: Array<{ id: string; project_id: string | null; spec_hash: string; agents_job_id: string; findings: unknown; deadline_at: string | null; stage_b_coverage: unknown; status: string }>;
   try {
     rows = (await pool.query(
-      `SELECT id, project_id, spec_hash, agents_job_id, findings, deadline_at, stage_b_coverage
+      `SELECT id, project_id, spec_hash, agents_job_id, findings, deadline_at, stage_b_coverage, status
          FROM spec_validation_runs
         WHERE agents_job_id IS NOT NULL
           AND stage_b_collected_at IS NULL
-          AND status IN ('error', 'interrupted')
+          AND (
+            status IN ('error', 'interrupted')
+            OR (
+              status IN ('pending', 'running')
+              AND COALESCE(stage_b_polled_at, started_at) < now() - ($1 || ' seconds')::interval
+            )
+          )
         ORDER BY finished_at ASC NULLS FIRST
         LIMIT 5`,
+      [String(Math.max(30, STAGE_B_LEASE_SEC))],
     )).rows as typeof rows;
   } catch (e) {
     // Coluna ausente (migração 100 não aplicada) não pode derrubar o tick do worker.
@@ -914,6 +950,11 @@ export async function collectStageBResults(
   out.scanned = rows.length;
   for (const r of rows) {
     const short = String(r.id).slice(0, 8);
+    // GAP-66: adoção de órfã é fato operacional — o log tem de dizer que o esperador em processo
+    // morreu, senão a recuperação parece mágica e ninguém liga o ponto ao restart que a causou.
+    if (r.status === "pending" || r.status === "running") {
+      console.log(`[spec-validation] run ${short}: status '${r.status}' sem sinal de vida há mais de ${STAGE_B_LEASE_SEC}s — o esperador em processo morreu (restart da api). Adotando a coleta em vez de esperar o deadline.`);
+    }
     let res: Awaited<ReturnType<StageBProbe>>;
     try {
       res = await probe(String(r.agents_job_id));
