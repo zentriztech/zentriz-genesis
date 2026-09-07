@@ -875,7 +875,9 @@ async function gapSiblingBlock(
  *
  * Best-effort: sem registro (ou com a flag desligada) a rodada segue como antes.
  */
-async function gapOracleBlock(projectId: string, filePath: string, fileChars?: number): Promise<string> {
+async function gapOracleBlock(
+  projectId: string, filePath: string, fileChars?: number, growthBudget?: number,
+): Promise<string> {
   try {
     const { loadOracleDecisions, oracleFactBlock, oracleRegistryEnabled } = await import("../services/specOracles.js");
     if (!oracleRegistryEnabled()) return "";
@@ -883,7 +885,9 @@ async function gapOracleBlock(projectId: string, filePath: string, fileChars?: n
     if (decisions.length === 0) return "";
     // GAP-25: `fileChars` é o tamanho do arquivo INTEIRO (não do recorte) — o veto compara arquivo
     // inteiro contra arquivo inteiro, então o número anunciado tem de ser o mesmo que será julgado.
-    const block = oracleFactBlock(decisions, filePath, fileChars);
+    // GAP-28: `growthBudget` é o que SOBROU do orçamento deste passe (só o laço sabe). Ausente no
+    // botão humano — ali o bloco cai no orçamento cheio, que é o que aquele caminho de fato enfrenta.
+    const block = oracleFactBlock(decisions, filePath, fileChars, growthBudget);
     if (block) {
       console.log(`[SpecChat] oráculos aplicados projeto=${projectId.slice(0, 8)} alvo=${filePath} contratos=${decisions.length} chars=${block.length}`);
     }
@@ -1216,6 +1220,8 @@ export async function dispatchGapFileJob(opts: {
   userMessage: string;
   agentsUrl: string;
   llm: Record<string, unknown>;
+  /** GAP-28: margem de crescimento que resta no passe. Só o laço autônomo informa. */
+  growthBudget?: number;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1241,7 +1247,7 @@ export async function dispatchGapFileJob(opts: {
   // GAP-22: o irmão só-leitura diz O QUE o outro arquivo normatiza; o registro de oráculos diz QUEM
   // MANDA — e é isso que faltava para a contradição ser CONSOLIDADA em vez de migrar de arquivo (24
   // dos 26 blockers do NVX eram desta família, com o mesmo contrato reaparecendo em 5 rodadas).
-  const oracles = await gapOracleBlock(opts.projectId, opts.filePath, opts.fileContent.length);
+  const oracles = await gapOracleBlock(opts.projectId, opts.filePath, opts.fileContent.length, opts.growthBudget);
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),

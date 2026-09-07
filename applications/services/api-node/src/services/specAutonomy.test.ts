@@ -61,7 +61,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
-  isTerminalAutonomyStatus, assessRevisionIntegrity, type AutonomyStatus,
+  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, type AutonomyStatus,
 } from "./specAutonomy.js";
 
 // ── banco falso: uma linha de spec_autonomy_runs em memória ───────────────────
@@ -797,5 +797,56 @@ describe("autonomyEnabled (G4 — fail-closed)", () => {
     expect(autonomyEnabled()).toBe(true);
     process.env.SPEC_AUTONOMY = "off";
     expect(autonomyEnabled()).toBe(false);
+  });
+});
+
+// ── 7. GAP-28 — o orçamento de crescimento é do PASSE, não de cada arquivo ────
+//
+// Medido na run `889af4f3`, passe 2: 8 de 11 rodadas descartadas INTEIRAS pelo veto de crescimento,
+// cada uma uma chamada de Opus 5 já paga. O objetivo verdadeiro nunca foi "nenhum arquivo cresce" —
+// é a SPEC não inflar. Quem encolheu financia quem precisa crescer; o saldo é propriedade do passe.
+
+const R = (p: Partial<{ round: number; pass: number; applied: boolean; deltaChars: number | null }>) => ({
+  round: p.round ?? 1, pass: p.pass ?? 0, startedAt: "2026-09-07T00:00:00.000Z",
+  ...(p.applied === undefined ? {} : { applied: p.applied }),
+  ...(p.deltaChars === undefined ? {} : { deltaChars: p.deltaChars }),
+});
+
+describe("passGrowthUsed (GAP-28)", () => {
+  it("soma só as rodadas APLICADAS do passe corrente", () => {
+    const used = passGrowthUsed({
+      passes: 1,
+      rounds: [
+        R({ round: 1, pass: 0, applied: true, deltaChars: 9_999 }),   // passe anterior: já pago lá
+        R({ round: 2, pass: 1, applied: true, deltaChars: 1_200 }),
+        R({ round: 3, pass: 1, applied: false, deltaChars: 8_000 }),  // vetada: não saiu do disco
+        R({ round: 4, pass: 1, applied: true, deltaChars: 300 }),
+      ] as never,
+    });
+    expect(used).toBe(1_500);
+  });
+
+  it("o arquivo que ENCOLHEU devolve margem para o próximo (é isso que muda o rendimento)", () => {
+    const used = passGrowthUsed({
+      passes: 2,
+      rounds: [
+        R({ round: 1, pass: 2, applied: true, deltaChars: -6_300 }),
+        R({ round: 2, pass: 2, applied: true, deltaChars: 1_800 }),
+      ] as never,
+    });
+    expect(used).toBe(-4_500); // saldo NEGATIVO ⇒ `passGrowthBudget` devolve orçamento cheio
+  });
+
+  it("rodada antiga SEM `deltaChars` conta como 0 — não inventa gasto retroativo", () => {
+    const used = passGrowthUsed({
+      passes: 0,
+      rounds: [R({ round: 1, pass: 0, applied: true }), R({ round: 2, pass: 0, applied: true, deltaChars: 700 })] as never,
+    });
+    expect(used).toBe(700);
+  });
+
+  it("passe sem nenhuma rodada aplicada não consumiu nada", () => {
+    expect(passGrowthUsed({ passes: 3, rounds: [R({ pass: 3, applied: false, deltaChars: 5_000 })] as never })).toBe(0);
+    expect(passGrowthUsed({ passes: 0, rounds: [] as never })).toBe(0);
   });
 });

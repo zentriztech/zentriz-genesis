@@ -480,3 +480,36 @@ describe("oracleFactBlock — GAP-25: orçamento de saída como contrato", () =>
     expect(block).not.toContain("DESCARTADA INTEIRA");
   });
 });
+
+// ── GAP-28: a margem anunciada é a que RESTA do passe ─────────────────────────
+//
+// Medido na run `889af4f3`, passe 2: 8 de 11 rodadas descartadas inteiras pelo veto de crescimento,
+// cada uma uma chamada de Opus 5 já paga. O orçamento é do PASSE (a spec não pode inflar), não de
+// cada arquivo isolado — quem encolhe financia quem precisa crescer. O laço informa o saldo.
+describe("oracleFactBlock — GAP-28: margem restante do passe", () => {
+  it("anuncia o SALDO informado pelo laço, não o orçamento cheio", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 50_000, 500);
+    expect(block).toContain("50500"); // teto = 50.000 + 500 restantes
+    expect(block).toContain("Você tem 500 caracteres de margem");
+    expect(block).not.toContain("52000");
+  });
+
+  it("saldo ZERO é dito como zero — não vira o orçamento cheio por omissão", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 50_000, 0);
+    expect(block).toContain("Se a revisão passar de 50000");
+    expect(block).toContain("NÃO pode crescer nem um caractere");
+    expect(block).not.toContain("caracteres de margem");
+  });
+
+  it("saldo negativo (o passe já estourou) é tratado como zero, nunca como crédito", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 50_000, -3_000);
+    expect(block).toContain("Se a revisão passar de 50000");
+    expect(block).toContain("NÃO pode crescer nem um caractere");
+    expect(block).not.toContain("-3000");
+  });
+
+  it("sem saldo informado (botão humano) mantém o orçamento cheio do GAP-25", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md", 50_000);
+    expect(block).toContain("52000");
+  });
+});

@@ -227,6 +227,12 @@ export interface AutonomyRoundLog {
   warnings?: number | null;
   applied?: boolean;
   specChars?: number | null;
+  /**
+   * GAP-28: quanto ESTA rodada acrescentou (+) ou removeu (−) de caracteres. É o que permite ao passe
+   * ter um orçamento de crescimento único em vez de um teto por arquivo. Ausente em rodadas antigas ⇒
+   * conta como 0 (não inventa gasto retroativo).
+   */
+  deltaChars?: number | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -765,6 +771,27 @@ function appliedInPass(run: AutonomyRun): number {
 }
 
 /**
+ * GAP-28 — quanto o passe corrente JÁ cresceu, somando só as rodadas escritas (as recusadas não
+ * gastaram nada, porque nada foi para o disco). Encolhimento devolve margem, e é esse o ponto: quem
+ * consolidou paga o arquivo que precisa acrescentar.
+ */
+export function passGrowthUsed(run: Pick<AutonomyRun, "rounds" | "passes">): number {
+  return run.rounds
+    .filter((r) => (r.pass ?? 0) === run.passes && r.applied === true)
+    .reduce((sum, r) => sum + (typeof r.deltaChars === "number" ? r.deltaChars : 0), 0);
+}
+
+/**
+ * GAP-28 — margem que resta ao passe. Nunca negativa: se o passe já estourou, a margem é ZERO (o
+ * arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
+ */
+async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
+  const { ORACLE_GROWTH_BUDGET } = await import("./specOracles.js");
+  const fresh = (await getAutonomyRun(db, run.id)) ?? run;
+  return Math.max(0, ORACLE_GROWTH_BUDGET - passGrowthUsed(fresh));
+}
+
+/**
  * Fecha o arquivo corrente SEM aplicar e devolve o laço para a fila. Não é falha do laço: outro
  * arquivo pode ser revisado com sucesso no mesmo passe. `failure` conta para o `MAX_FILE_FAILURES`
  * (duas seguidas = o problema é o modelo/serviço, não o arquivo).
@@ -832,13 +859,23 @@ async function ensureOracles(
  *
  * Só age sobre arquivo que redeclara contrato COM oráculo já decidido (fora disso não existe "o que
  * consolidar" e nada muda em relação ao comportamento anterior).
+ *
+ * ## GAP-28 (2026-09-07) — o orçamento é do PASSE, não de cada arquivo
+ *
+ * MEDIDO na run `889af4f3`, passe 2: **8 de 11 rodadas descartadas inteiras** por este veto, cada uma
+ * uma chamada de Opus 5 já paga. O teto de +2.000 chars POR ARQUIVO é impossível de respeitar quando a
+ * mesma rodada também resolve 2 a 6 GAPs daquele arquivo — e o descarte total é o mesmo anti-padrão que
+ * o GAP-26 acabou de matar um nível abaixo (jogar fora o trabalho bom por causa de um limite local).
+ *
+ * O objetivo verdadeiro nunca foi "nenhum arquivo cresce": é **a spec não inflar**. Isso é propriedade
+ * do PASSE. Então o orçamento passa a ser um só para o passe inteiro, e quem consolidou devolve margem
+ * para quem precisa acrescentar. O número que sobra é o mesmo que o prompt ANUNCIA (GAP-25) — o laço
+ * calcula e informa, o veto julga contra ele.
  */
 async function consolidationVeto(
-  db: Db, projectId: string, target: string, before: string, after: string,
+  db: Db, projectId: string, target: string, before: string, after: string, budget: number,
 ): Promise<string | null> {
-  const {
-    loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled, ORACLE_GROWTH_BUDGET,
-  } = await import("./specOracles.js");
+  const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled } = await import("./specOracles.js");
   if (!oracleRegistryEnabled()) return null;
   const decisions = await loadOracleDecisions(db, projectId);
   if (decisions.length === 0) return null;
@@ -847,10 +884,10 @@ async function consolidationVeto(
 
   const delta = after.length - before.length;
   const contracts = restates.map((d) => `\`${d.contractKey}\` → \`${d.oraclePath}\``).join(", ");
-  if (delta > ORACLE_GROWTH_BUDGET) {
+  if (delta > budget) {
     return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida era`
       + ` REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
-      + ` (orçamento: ${ORACLE_GROWTH_BUDGET}). Nada foi escrito.`;
+      + ` e a margem que restava nesta revisão da spec era ${budget}. Nada foi escrito.`;
   }
   // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
   // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
@@ -999,10 +1036,12 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   });
 
   const { dispatchGapFileJob } = await import("../routes/specChat.js");
+  // GAP-28: a margem ANUNCIADA é a que sobrou do passe — a mesma que o veto vai julgar no apply.
+  const growthBudget = await passGrowthBudget(db, run);
   try {
     const res = await dispatchGapFileJob({
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
-      filePath: target, fileContent: file.content, findings: fileFindings, agentsUrl, llm,
+      filePath: target, fileContent: file.content, findings: fileFindings, agentsUrl, llm, growthBudget,
       userMessage: `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
     });
     if (!res.ok) {
@@ -1264,7 +1303,9 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // O código não julga o conteúdo: mede DELTA DE TAMANHO e CITAÇÃO LITERAL do path do oráculo — dois
   // fatos. Recusar não é falha de arquivo (`failure: false`): é o laço se negando a pagar crescimento
   // como se fosse correção, deixando o disco intacto e seguindo para o próximo arquivo.
-  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised);
+  const oracleVeto = await consolidationVeto(
+    db, run.projectId, target, file.content, revised, await passGrowthBudget(db, run),
+  );
   if (oracleVeto) {
     return skipFileAndContinue(db, run, target, oracleVeto, { failure: false, fromStatus: "applying" });
   }
@@ -1289,7 +1330,10 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
 
   await patchLastRound(db, run, {
+    // GAP-28: `deltaChars` é o que ESTA rodada gastou (+) ou devolveu (−) do orçamento do passe.
+    // Só a rodada APLICADA conta — o que foi vetado não saiu do disco, logo não consumiu margem.
     applied: true, filePath: target, specChars: revised.length,
+    deltaChars: revised.length - file.content.length,
     note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`,
   });
   const claim = await db.query(

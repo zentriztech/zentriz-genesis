@@ -514,6 +514,12 @@ export function oracleFactBlock(
    * (o botão humano não passa por `consolidationVeto`; prometer descarte ali seria mentira).
    */
   fileChars?: number,
+  /**
+   * GAP-28 — orçamento que SOBROU no passe. Ausente ⇒ o orçamento cheio (`ORACLE_GROWTH_BUDGET`).
+   * O número anunciado tem de ser o MESMO que `consolidationVeto` vai julgar; quem sabe quanto o passe
+   * já gastou é o laço, então ele informa.
+   */
+  budget?: number,
 ): string {
   const { owns, restates } = oracleRoleForFile(decisions, targetPath);
   if (owns.length === 0 && restates.length === 0) return "";
@@ -546,14 +552,21 @@ export function oracleFactBlock(
   // como saber onde estava a linha, porque o bloco só dizia "deve encolher". Orçamento de saída como
   // CONTRATO, não como retórica (G1 de genesis-gaps-sistemicos-agenticos).
   if (restates.length > 0 && typeof fileChars === "number" && fileChars > 0) {
-    const ceiling = fileChars + ORACLE_GROWTH_BUDGET;
+    const allowance = Math.max(0, typeof budget === "number" ? budget : ORACLE_GROWTH_BUDGET);
+    const ceiling = fileChars + allowance;
     lines.push(
       `CONTRATO DE SAÍDA (verificado por código, não é retórica): este arquivo tem hoje ${fileChars}`
       + ` caracteres. Se a revisão passar de ${ceiling}, ela é DESCARTADA INTEIRA — nada é escrito, os`
       + ` GAPs continuam abertos e a rodada é perdida. O resultado esperado destas ${restates.length}`
-      + ` consolidação(ões) é FICAR ABAIXO de ${fileChars}. Se você precisa acrescentar texto para`
-      + " resolver outro GAP do mesmo arquivo, compense removendo as redeclarações acima — é para isso"
-      + " que elas estão listadas.",
+      + ` consolidação(ões) é FICAR ABAIXO de ${fileChars}.`
+      + (allowance === 0
+        ? " A margem de crescimento desta revisão da spec já foi consumida por outros arquivos: aqui o"
+          + " arquivo NÃO pode crescer nem um caractere. Toda linha nova precisa ser paga com a remoção"
+          + " de uma redeclaração listada acima."
+        : ` Você tem ${allowance} caracteres de margem — é o que resta do orçamento desta revisão da`
+          + " spec, já descontado o que os arquivos anteriores gastaram. Se precisa acrescentar texto"
+          + " para resolver outro GAP do mesmo arquivo, compense removendo as redeclarações acima: é"
+          + " para isso que elas estão listadas."),
     );
   }
   lines.push("--- FIM DA FONTE ÚNICA ---", "");
