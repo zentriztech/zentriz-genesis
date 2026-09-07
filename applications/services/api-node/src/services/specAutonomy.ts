@@ -256,6 +256,13 @@ export interface AutonomyRoundLog {
    */
   announcedBudget?: number | null;
   /**
+   * 🔴 GAP-64: chars que a rodada passou da margem e o laço decidiu PAGAR em vez de descartar a rodada
+   * inteira (quase-conformidade). Presente só quando > 0. O contrário do `rejectedDelta`: ali a margem
+   * foi estourada e nada foi escrito; aqui foi estourada por pouco, o texto foi escrito e a dívida
+   * aparece automaticamente como margem menor nas rodadas seguintes (`growthAllowance`).
+   */
+  toleratedOverflow?: number | null;
+  /**
    * GAP-41: a diferença finding-a-finding do PASSE — quantos GAPs saíram e quantos entraram. O
    * agregado (`gapsBefore`/`gapsAfter`) pode ficar parado com o laço fechando e abrindo a mesma
    * quantidade; foi exatamente o que aconteceu em prod, e sem estes dois números não havia como
@@ -1114,6 +1121,12 @@ async function ensureOracles(
  * mesmo desperdício que o GAP-28 veio matar, reaparecendo por granularidade. Nada justifica ser mais
  * rígido no passe 4 porque o passe 1 gastou primeiro: "não inflar" é propriedade do LAÇO.
  */
+/**
+ * Veredito do veto de consolidação. `veto` = motivo da recusa (`null` = pode aplicar);
+ * `toleratedOverflow` = chars que passaram da margem e o laço decidiu PAGAR (GAP-64).
+ */
+type ConsolidationVerdict = { veto: string | null; toleratedOverflow: number };
+
 async function consolidationVeto(
   db: Db, projectId: string, target: string, before: string, after: string, budget: number,
   /**
@@ -1121,17 +1134,19 @@ async function consolidationVeto(
    * sobre a causa (ver o texto abaixo).
    */
   gapsDispatched = 0,
-): Promise<string | null> {
-  const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled } = await import("./specOracles.js");
-  if (!oracleRegistryEnabled()) return null;
+): Promise<ConsolidationVerdict> {
+  const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled, growthOverflowTolerance } = await import("./specOracles.js");
+  if (!oracleRegistryEnabled()) return { veto: null, toleratedOverflow: 0 };
   const decisions = await loadOracleDecisions(db, projectId);
-  if (decisions.length === 0) return null;
+  if (decisions.length === 0) return { veto: null, toleratedOverflow: 0 };
   const { restates } = oracleRoleForFile(decisions, target);
-  if (restates.length === 0) return null;
+  if (restates.length === 0) return { veto: null, toleratedOverflow: 0 };
 
   const delta = after.length - before.length;
   const contracts = restates.map((d) => `\`${d.contractKey}\` → \`${d.oraclePath}\``).join(", ");
-  if (delta > budget) {
+  // GAP-64: quase-conformidade é COBRADA, não descartada. Ver `growthOverflowTolerance`.
+  const tolerance = growthOverflowTolerance(budget);
+  if (delta > budget + tolerance) {
     // 🔴 GAP-37 (2026-09-07) — a recusa dizia "a correção pedida era REMOVER a redeclaração", e isso é
     // FALSO numa rodada do laço: o mesmo pedido mandou resolver os GAPs do arquivo (medido na run
     // `6d407460`: `privacidade-lgpd.md` recebeu 🔴 5 + 🟡 2). Este texto é o `rejectedReason` que o
@@ -1145,9 +1160,14 @@ async function consolidationVeto(
         + " redeclarações acima. Nenhuma das duas foi abandonada pelo veto — o que estourou foi o"
         + " TAMANHO do resultado; a remoção das redeclarações é o que paga o texto novo dos GAPs."
       : "";
-    return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida`
-      + ` incluía REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
-      + ` e a margem de crescimento que restava ao laço era ${budget}. Nada foi escrito.${alsoAsked}`;
+    return {
+      veto: `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida`
+        + ` incluía REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
+        + ` e a margem de crescimento que restava ao laço era ${budget}`
+        + (tolerance > 0 ? ` (com a tolerância de ${tolerance}, o limite desta rodada era ${budget + tolerance})` : "")
+        + `. Nada foi escrito.${alsoAsked}`,
+      toleratedOverflow: 0,
+    };
   }
   // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
   // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
@@ -1158,10 +1178,15 @@ async function consolidationVeto(
     return hay.includes(p) || hay.includes(base);
   });
   if (!cites && delta >= 0) {
-    return `consolidação recusada: a revisão não cita o oráculo (${contracts}) nem encolheu o arquivo`
-      + ` (${delta >= 0 ? "+" : ""}${delta} chars) — não houve consolidação a aplicar. Nada foi escrito.`;
+    return {
+      veto: `consolidação recusada: a revisão não cita o oráculo (${contracts}) nem encolheu o arquivo`
+        + ` (${delta >= 0 ? "+" : ""}${delta} chars) — não houve consolidação a aplicar. Nada foi escrito.`,
+      toleratedOverflow: 0,
+    };
   }
-  return null;
+  // GAP-64: passou. Se passou DENTRO da tolerância, o excesso é fato de log — o orçamento do laço já o
+  // cobra na rodada seguinte (`growthAllowance` desconta tudo o que a run escreveu).
+  return { veto: null, toleratedOverflow: delta > budget ? delta - budget : 0 };
 }
 
 /**
@@ -1575,7 +1600,9 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const dispatched = lastRound?.round === run.round
     ? (lastRound.blockers ?? 0) + (lastRound.warnings ?? 0)
     : 0;
-  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised, passBudget, dispatched);
+  const { veto: oracleVeto, toleratedOverflow } = await consolidationVeto(
+    db, run.projectId, target, file.content, revised, passBudget, dispatched,
+  );
   if (oracleVeto) {
     // GAP-29: o TAMANHO da tentativa recusada vai para o log — é o único jeito de a próxima
     // tentativa deste arquivo não ser uma repetição paga da mesma resposta reprovada.
@@ -1615,7 +1642,14 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // Só a rodada APLICADA conta — o que foi vetado não saiu do disco, logo não consumiu margem.
     applied: true, filePath: target, specChars: revised.length,
     deltaChars: revised.length - file.content.length,
-    note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`,
+    // GAP-64: o excesso tolerado é DECLARADO — foi decisão do laço pagar, e a próxima rodada nasce com
+    // a margem já menor. Zero não polui o log.
+    ...(toleratedOverflow > 0 ? { toleratedOverflow } : {}),
+    note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`
+      + (toleratedOverflow > 0
+        ? ` A revisão passou ${toleratedOverflow} chars da margem de ${passBudget} e o laço PAGOU o excesso`
+          + " (dentro da tolerância) em vez de descartar a rodada — a margem das rodadas seguintes já desconta isto."
+        : ""),
   });
   const claim = await db.query(
     `UPDATE spec_autonomy_runs

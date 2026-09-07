@@ -150,6 +150,42 @@ export function growthMarginIsNoise(allowance: number, fileChars: number): boole
   return allowance < Math.max(500, Math.round(fileChars * 0.01));
 }
 
+/**
+ * 🔴 GAP-64 (2026-09-07) — o veto é um PENHASCO: passar por 17 caracteres custa a rodada inteira.
+ *
+ * ## Medido em prod (run `f4855b9a`, NVX LastMile, rodada 10 do passe 1)
+ *
+ * `observabilidade-operacao.md` (106.565 chars) voltou com **+3.906** contra margem **3.889**. A rodada
+ * resolvia 🔴 3 + 🟡 3 e foi descartada INTEIRA por **0,44%** de excesso — uma chamada de Opus 5 paga,
+ * disco intacto, contagem de GAPs parada em 38. E a retentativa só acontece no passe SEGUINTE, com o
+ * orçamento do laço ainda menor: pelo GAP-29 já se mediu que o agente devolve praticamente a MESMA
+ * resposta, então o arquivo entra em inanição determinística.
+ *
+ * É o anti-padrão que o GAP-26/28/33 vinham matando um nível acima (jogar fora trabalho bom por causa
+ * de um limite local), reaparecendo por *granularidade de decisão*: o orçamento já é do laço, mas a
+ * comparação é binária.
+ *
+ * ## O que muda — e por que NÃO ressuscita o GAP-8
+ *
+ * A quase-conformidade é aceita e o excesso é COBRADO: `growthAllowance` desconta tudo o que a run
+ * escreveu, então a rodada seguinte nasce com a margem já reduzida. Como a tolerância é uma FRAÇÃO da
+ * margem que resta, ela se extingue sozinha — quando a margem chega a zero, a tolerância é zero. O
+ * crescimento total do laço fica provadamente limitado a `orçamento × (1 + TOLERÂNCIA)`, não a
+ * `orçamento + N × tolerância`. Excesso grande continua recusado: os casos do GAP-38 (+1.431 contra
+ * 447, +2.827 contra 680) estão 2× a 6× acima e seguem vetados.
+ *
+ * Não é permissão anunciada ao agente: o despacho continua anunciando a margem REAL (GAP-25/38). É
+ * decisão de CONTABILIDADE do laço, e fica declarada no log da rodada (`toleratedOverflow`).
+ */
+export const ORACLE_GROWTH_TOLERANCE = Number(process.env.SPEC_ORACLE_GROWTH_TOLERANCE ?? "0.05");
+
+/** Quantos chars além da margem o laço aceita PAGAR nesta rodada (0 quando não há margem). */
+export function growthOverflowTolerance(allowance: number): number {
+  if (!Number.isFinite(allowance) || allowance <= 0) return 0;
+  if (!Number.isFinite(ORACLE_GROWTH_TOLERANCE) || ORACLE_GROWTH_TOLERANCE <= 0) return 0;
+  return Math.floor(allowance * ORACLE_GROWTH_TOLERANCE);
+}
+
 export function proportionalGrowthBudget(specBytes: number): number {
   if (!Number.isFinite(specBytes) || specBytes <= 0) return 0;
   if (!Number.isFinite(ORACLE_GROWTH_RATIO) || ORACLE_GROWTH_RATIO <= 0) return 0;

@@ -23,6 +23,8 @@ vi.mock("fs/promises", () => ({
 const {
   crossFileFindings, parseOracleResponse, oracleRegistryEnabled, oracleRoleForFile, oracleFactBlock,
   growthMarginIsNoise,
+  growthOverflowTolerance,
+  ORACLE_GROWTH_TOLERANCE,
   ensureOracleDecisions, dropImpossibleDecisions, loadOracleDecisions, decidedContractsBlock,
   _resetOracleMemo,
 } = await import("./specOracles.js");
@@ -649,5 +651,38 @@ describe("oracleFactBlock — GAP-38: margem irrisória é dita como impossibili
     expect(growthMarginIsNoise(-100, 68_590)).toBe(false);
     expect(growthMarginIsNoise(447, 0)).toBe(false);
     expect(growthMarginIsNoise(Number.NaN, 68_590)).toBe(false);
+  });
+});
+
+describe("growthOverflowTolerance — GAP-64: quase-conformidade é cobrada, não descartada", () => {
+  it("é uma FRAÇÃO da margem que resta (o caso medido em prod deixa de ser descartado)", () => {
+    // Run `f4855b9a`, rodada 10: +3.906 contra margem 3.889 — 17 chars, 0,44%.
+    const margem = 3_889;
+    const tol = growthOverflowTolerance(margem);
+    expect(tol).toBe(Math.floor(margem * ORACLE_GROWTH_TOLERANCE));
+    expect(3_906).toBeLessThanOrEqual(margem + tol);
+  });
+
+  it("SEM margem não há tolerância — é o que impede a banda de virar orçamento novo", () => {
+    expect(growthOverflowTolerance(0)).toBe(0);
+    expect(growthOverflowTolerance(-500)).toBe(0);
+    expect(growthOverflowTolerance(Number.NaN)).toBe(0);
+  });
+
+  it("🔴 o crescimento do LAÇO fica limitado a orçamento × (1 + tolerância), não a N × tolerância", () => {
+    // A prova que separa esta correção de "afrouxar o teto" (o que ressuscitaria o GAP-8): a margem é
+    // sempre `max(0, orçamento − já escrito)`, e a tolerância é fração DELA. Simular 50 rodadas em que
+    // toda rodada estoura o máximo tolerado mostra que a dívida se autolimita.
+    const orcamento = 19_723;   // o do NVX LastMile medido no GAP-36
+    let escrito = 0;
+    for (let i = 0; i < 50; i++) {
+      const margem = Math.max(0, orcamento - escrito);
+      const limite = margem + growthOverflowTolerance(margem);
+      if (limite <= 0) break;
+      escrito += limite;        // pior caso: a rodada entrega exatamente o limite
+    }
+    expect(escrito).toBeLessThanOrEqual(Math.ceil(orcamento * (1 + ORACLE_GROWTH_TOLERANCE)));
+    // e não a soma ingênua de 50 tolerâncias, que dobraria o orçamento
+    expect(escrito).toBeLessThan(orcamento * 1.5);
   });
 });

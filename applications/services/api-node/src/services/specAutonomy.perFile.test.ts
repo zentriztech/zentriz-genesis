@@ -106,6 +106,10 @@ vi.mock("./specOracles.js", () => ({
   // irrisório e o piso de 2.000 continua vencendo — é o que mantém estes casos medindo o VETO em vez da
   // calibração do orçamento (essa é medida em `specAutonomy.test.ts`).
   proportionalGrowthBudget: (bytes: number) => (bytes > 0 ? Math.ceil(bytes * 0.02) : 0),
+  // GAP-64: tolerância de quase-conformidade — fração da margem que RESTA, por isso se extingue com
+  // ela. Reimplementada aqui (é lógica pura, testada em `specOracles.test.ts`); com o piso de 2.000 do
+  // dublê, a banda destes casos é de 100 chars.
+  growthOverflowTolerance: (allowance: number) => (allowance > 0 ? Math.floor(allowance * 0.05) : 0),
   oracleRegistryEnabled: () => oracleRegistryOn,
   loadOracleDecisions: vi.fn(async () => oracleDecisions),
   ensureOracleDecisions: (...a: unknown[]) => ensureOracleDecisions(...(a as [])),
@@ -868,6 +872,45 @@ describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", ()
     expect(run!.status).toBe("pending");                      // não é falha do laço
     expect(run!.file_failures).toBe(0);                       // nem falha DO ARQUIVO
     expect(run!.files_done).toContain("backend/01-api.md");   // sai da fila deste passe
+  });
+
+  // ── 🔴 GAP-64: quase-conformidade é COBRADA, não descartada ──────────────────────────────────
+  /** Conteúdo que CITA o oráculo (senão o veto recusa por "não consolidou") com delta EXATO. */
+  const citacao = "\nver `00-indice.md` — fonte única deste contrato.\n";
+  const cresceExatamente = (delta: number): string => `${API}${citacao}${"x".repeat(delta - citacao.length)}`;
+
+  it("🔴 GAP-64 — passou da margem por POUCO (dentro da tolerância) → APLICA e declara o excesso", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // Margem 2.000, tolerância 100. Medido em prod (run `f4855b9a`): +3.906 contra 3.889 — 0,44% de
+    // excesso descartava a rodada INTEIRA, com 🔴 3 + 🟡 3 resolvidos e uma chamada de Opus 5 paga.
+    const quaseConforme = cresceExatamente(2_050);
+    await ctoReturns(r.id, quaseConforme);
+    expect(onDisk("backend/01-api.md")).toBe(quaseConforme);   // o trabalho bom NÃO é jogado fora
+    expect(run!.last_error).toBeFalsy();
+    const round = (run!.rounds as { applied?: boolean; deltaChars?: number; toleratedOverflow?: number; note?: string }[]).at(-1)!;
+    expect(round.applied).toBe(true);
+    expect(round.deltaChars).toBe(2_050);
+    // o excesso é DECLARADO: foi decisão do laço pagar, e a margem seguinte já desconta os 2.050
+    expect(round.toleratedOverflow).toBe(50);
+    expect(round.note).toContain("PAGOU o excesso");
+  });
+
+  it("🔴 GAP-64 — excesso ACIMA da tolerância continua vetado, e a recusa diz qual era o limite", async () => {
+    decideOraculo();
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    // 2.101 = margem 2.000 + tolerância 100 + 1. A banda resgata quase-conformidade, não negociação:
+    // os casos do GAP-38 (+1.431 contra 447, +2.827 contra 680) estão 2× a 6× acima e seguem recusados.
+    await ctoReturns(r.id, cresceExatamente(2_101));
+    expect(onDisk("backend/01-api.md")).toBe(API);             // disco INTACTO
+    expect(String(run!.last_error)).toContain("consolidação recusada");
+    expect(String(run!.last_error)).toContain("CRESCEU 2101 chars");
+    expect(String(run!.last_error)).toContain("com a tolerância de 100, o limite desta rodada era 2100");
+    const round = (run!.rounds as { applied?: boolean; toleratedOverflow?: number }[]).at(-1)!;
+    expect(round.applied).toBe(false);
+    expect(round.toleratedOverflow).toBeUndefined();
   });
 
   it("arquivo que REDECLARA, encolhe e cita o oráculo → aplica normalmente", async () => {
