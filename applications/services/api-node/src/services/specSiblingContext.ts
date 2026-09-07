@@ -31,7 +31,10 @@
  * o GAP coloca em disputa. Mesmo orçamento, mais irmãos e sinal melhor.
  */
 import { readFile } from "node:fs/promises";
-import { splitSections, clipSection, headingOutline } from "../lib/markdownSections.js";
+import {
+  splitSections, clipSection, headingOutline, buildAnchorIndex, locateSectionIndex, sectionWindow,
+  citedSectionRefs,
+} from "../lib/markdownSections.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 /** Orçamento total do bloco de irmãos. ~21k tokens: cabe com o arquivo (≤120k chars) na janela. */
@@ -42,6 +45,12 @@ export const SIBLING_FILE_BUDGET = 12_000;
 export const SIBLING_FILE_FULL_MAX = 8_000;
 /** Teto de uma seção dentro do resumo, para uma seção quilométrica não virar o resumo todo. */
 export const SIBLING_SECTION_BUDGET = 3_000;
+/**
+ * 🔴 GAP-75 — teto de UMA janela de seção citada do irmão (paridade com o GAP-74 no lado do alvo).
+ * Menor que o teto de seção: a janela existe para a seção que não caberia inteira, e uma janela grande
+ * recriaria o problema que ela resolve.
+ */
+export const SIBLING_WINDOW_BUDGET = 2_000;
 
 export interface SiblingRef {
   path: string;
@@ -57,6 +66,12 @@ export interface SiblingContext {
   used: string[];
   /** Paths citados que NÃO couberam no orçamento (o modelo é avisado no bloco). */
   omitted: string[];
+  /** 🔴 GAP-75 — seções de irmão citadas pelos GAPs que chegaram (`arquivo.md §3.3`), inteiras ou em janela. */
+  citedUsed: string[];
+  /** Citadas que NÃO foram transcritas (não couberam ou não foram localizadas) — declaradas no bloco. */
+  citedDropped: string[];
+  /** Citadas que não caberiam inteiras e vieram RECORTADAS (subconjunto de `citedUsed`). */
+  citedWindowed: string[];
 }
 
 /** Texto onde procurar citações: título + motivo + âncora de cada GAP. */
@@ -110,19 +125,87 @@ export function disputedTerms(findings: ValidationFinding[]): string[] {
 const sections = splitSections;
 const clip = clipSection;
 
+interface SiblingExcerpt {
+  text: string;
+  /** Refs citadas deste irmão que foram transcritas (inteiras ou em janela). */
+  usedRefs: string[];
+  /** Refs citadas que não foram transcritas — declaradas no próprio bloco. */
+  droppedRefs: string[];
+  /** Refs transcritas em JANELA (subconjunto de `usedRefs`). */
+  windowedRefs: string[];
+}
+
+/**
+ * 🔴 GAP-75 — as seções deste irmão que os GAPs citam NOMEANDO o arquivo, reservadas ANTES da
+ * relevância. Mesma ordem do lado do alvo (GAP-72/73): a MENOR primeiro, para caber o máximo de
+ * citações acionáveis; empate pela ordem do arquivo (determinístico).
+ */
+function citedPicks(
+  secs: ReturnType<typeof sections>,
+  cited: string[],
+): { picks: Array<{ i: number; refs: string[]; body: string }>; unlocatable: string[] } {
+  const index = buildAnchorIndex(secs);
+  const byIndex = new Map<number, string[]>();
+  const unlocatable: string[] = [];
+  for (const ref of cited) {
+    const i = locateSectionIndex(index, ref);
+    if (i === null) { unlocatable.push(ref); continue; }
+    const cur = byIndex.get(i);
+    if (cur) { if (!cur.includes(ref)) cur.push(ref); continue; }
+    byIndex.set(i, [ref]);
+  }
+  const picks = [...byIndex.entries()]
+    .map(([i, refs]) => ({ i, refs, body: clip(secs[i].body, SIBLING_SECTION_BUDGET) }))
+    .sort((a, b) => a.body.length - b.body.length || a.i - b.i);
+  return { picks, unlocatable };
+}
+
 /**
  * Recorte de UM irmão. Arquivo pequeno vai inteiro; grande vira RESUMO DIRIGIDO: o sumário completo
- * de cabeçalhos (para o modelo saber o que existe) + só as seções que mencionam os termos em disputa.
+ * de cabeçalhos (para o modelo saber o que existe), as seções que os GAPs CITAM deste irmão
+ * (🔴 GAP-75, reservadas) e, com o que sobrar, as seções que mencionam os termos em disputa.
  *
- * O aviso é obrigatório nos dois casos de corte: sem ele o modelo concluiria "o irmão não define
- * isso" e escreveria a regra de novo no arquivo errado — trocaria uma divergência por uma duplicação
+ * O aviso é obrigatório nos casos de corte: sem ele o modelo concluiria "o irmão não define isso" e
+ * escreveria a regra de novo no arquivo errado — trocaria uma divergência por uma duplicação
  * normativa, que é o mesmo defeito com outro nome.
  */
-function excerpt(path: string, content: string, terms: string[]): { text: string; truncated: boolean } {
-  if (content.length <= SIBLING_FILE_FULL_MAX) return { text: content, truncated: false };
+function excerpt(path: string, content: string, terms: string[], cited: string[]): SiblingExcerpt {
+  if (content.length <= SIBLING_FILE_FULL_MAX) {
+    return { text: content, usedRefs: [...cited], droppedRefs: [], windowedRefs: [] };
+  }
 
   const secs = sections(content);
   const outline = headingOutline(secs);
+  let spent = outline.length;
+  const chosenIdx = new Set<number>();
+  const chosen: Array<{ i: number; body: string }> = [];
+  const usedRefs: string[] = [];
+  const windowedRefs: string[] = [];
+
+  // 🔴 GAP-75 — reserva das seções CITADAS antes da relevância. Medido em prod: as citadas ausentes
+  // tinham 127, 1.069, 2.061, 2.854 e 3.214 chars com o bloco em 49k de 60k — cabiam de sobra. Era
+  // ORDEM, não orçamento, exatamente como no lado do alvo (GAP-72/73).
+  const { picks, unlocatable } = citedPicks(secs, cited);
+  const droppedRefs: string[] = [...unlocatable];
+  for (const p of picks) {
+    if (spent + p.body.length <= SIBLING_FILE_BUDGET) {
+      spent += p.body.length;
+      chosenIdx.add(p.i);
+      chosen.push({ i: p.i, body: p.body });
+      usedRefs.push(...p.refs);
+      continue;
+    }
+    // Paridade com o GAP-74: seção citada grande demais vem RECORTADA em vez de não vir.
+    const room = Math.min(SIBLING_WINDOW_BUDGET, SIBLING_FILE_BUDGET - spent);
+    const win = room > 0 ? sectionWindow(secs[p.i].body, [...terms, ...p.refs], room) : null;
+    if (win === null) { droppedRefs.push(...p.refs); continue; }
+    spent += win.length;
+    chosenIdx.add(p.i);
+    chosen.push({ i: p.i, body: win });
+    usedRefs.push(...p.refs);
+    windowedRefs.push(...p.refs);
+  }
+
   const scored = secs
     .map((s, i) => {
       const hay = s.body.toLowerCase();
@@ -130,46 +213,74 @@ function excerpt(path: string, content: string, terms: string[]): { text: string
       for (const t of terms) if (t && hay.includes(t)) hits += 1;
       return { i, s, hits };
     })
-    .filter((x) => x.hits > 0)
+    .filter((x) => x.hits > 0 && !chosenIdx.has(x.i))
     .sort((a, b) => b.hits - a.hits || a.i - b.i);
-
-  if (scored.length > 0) {
-    const parts: string[] = [];
-    let spent = outline.length;
-    // Ordem de LEITURA (i crescente) depois de escolher por relevância: o arquivo continua fazendo
-    // sentido de cima para baixo, o que importa quando as seções se referenciam entre si.
-    const chosen: typeof scored = [];
-    for (const x of scored) {
-      const body = clip(x.s.body, SIBLING_SECTION_BUDGET);
-      if (spent + body.length > SIBLING_FILE_BUDGET) continue;
-      spent += body.length;
-      chosen.push(x);
-    }
-    if (chosen.length > 0) {
-      for (const x of chosen.sort((a, b) => a.i - b.i)) parts.push(clip(x.s.body, SIBLING_SECTION_BUDGET));
-      return {
-        text: [
-          `[RESUMO DIRIGIDO de \`${path}\` (${content.length} chars) — abaixo, o SUMÁRIO COMPLETO de seções e,`,
-          "em seguida, apenas as seções que mencionam o que o GAP disputa. Uma regra pode existir numa seção",
-          "NÃO transcrita: o sumário diz o que existe, então não conclua que o irmão "
-            + "silencia sobre um assunto listado ali.]",
-          "",
-          "SUMÁRIO DE SEÇÕES:",
-          outline,
-          "",
-          "SEÇÕES RELEVANTES:",
-          parts.join("\n\n"),
-        ].join("\n"),
-        truncated: true,
-      };
-    }
+  for (const x of scored) {
+    const body = clip(x.s.body, SIBLING_SECTION_BUDGET);
+    if (spent + body.length > SIBLING_FILE_BUDGET) continue;
+    spent += body.length;
+    chosenIdx.add(x.i);
+    chosen.push({ i: x.i, body });
   }
 
-  // Nenhum termo casou (ou nada caberia): volta ao head-truncate, que ao menos preserva o começo.
+  if (chosen.length > 0) {
+    // Ordem de LEITURA (i crescente) depois de escolher: o arquivo continua fazendo sentido de cima
+    // para baixo, o que importa quando as seções se referenciam entre si.
+    const parts = chosen.sort((a, b) => a.i - b.i).map((x) => x.body);
+    return {
+      text: [
+        `[RESUMO DIRIGIDO de \`${path}\` (${content.length} chars) — abaixo, o SUMÁRIO COMPLETO de seções e,`,
+        "em seguida, as seções que os GAPs citam deste arquivo e as que mencionam o que eles disputam. Uma",
+        "regra pode existir numa seção NÃO transcrita: o sumário diz o que existe, então",
+        "não conclua que o irmão silencia sobre um assunto listado ali.]",
+        ...(windowedRefs.length > 0
+          ? [`[JANELA: ${windowedRefs.join(", ")} não caberia(m) inteira(s) e vem/vêm RECORTADA(S) — cada`,
+             " `[… trecho omitido da mesma seção …]` marca texto que EXISTE no irmão e não está aqui.]"]
+          : []),
+        ...(droppedRefs.length > 0
+          ? [`[ATENÇÃO: ${droppedRefs.join(", ")} — citada(s) pelos GAPs neste irmão — NÃO foi/foram`,
+             " transcrita(s) neste recorte. Para esses GAPs, DECLARE na linha final que o trecho do irmão",
+             " não veio; não afirme o que ele diz nem o que ele deixa de dizer.]"]
+          : []),
+        "",
+        "SUMÁRIO DE SEÇÕES:",
+        outline,
+        "",
+        "SEÇÕES RELEVANTES:",
+        parts.join("\n\n"),
+      ].join("\n"),
+      usedRefs,
+      droppedRefs,
+      windowedRefs,
+    };
+  }
+
+  // Nenhuma seção citada nem termo casou (ou nada caberia): volta ao head-truncate, que ao menos
+  // preserva o começo. As citadas viram declaração — o modelo não pode ler ausência como inexistência.
   return {
     text: `${content.slice(0, SIBLING_FILE_BUDGET)}\n\n[… \`${path}\` truncado aqui (${content.length} chars no total) — a ausência de um trecho neste recorte NÃO significa que ele não exista no arquivo …]`,
-    truncated: true,
+    usedRefs: [],
+    droppedRefs: [...new Set([...droppedRefs, ...picks.flatMap((p) => p.refs)])],
+    windowedRefs: [],
   };
+}
+
+/**
+ * 🔴 GAP-75 — os endereços de seção que os GAPs citam NOMEANDO este irmão.
+ *
+ * Complemento exato do `citedRefs` do lado do alvo (GAP-73), pela MESMA régua (`citedSectionRefs`): lá
+ * a citação com nome de outro arquivo é descartada; aqui é justamente ela que interessa. Medido em
+ * prod: 14 de 20 GAPs são cross-file, e 7 das 14 seções citadas nunca chegavam ao prompt.
+ */
+function siblingCitedRefs(findings: ValidationFinding[], ref: SiblingRef): string[] {
+  const names = new Set([ref.path.toLowerCase(), ref.filename.toLowerCase()].filter(Boolean));
+  const out = new Set<string>();
+  for (const f of findings) {
+    for (const text of [String(f.title ?? ""), String(f.rationale ?? "")]) {
+      for (const c of citedSectionRefs(text)) if (c.file && names.has(c.file)) out.add(c.ref);
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -200,19 +311,33 @@ export async function buildSiblingContext(
   const parts: string[] = [];
   const used: string[] = [];
   const omitted: string[] = [];
+  const citedUsed: string[] = [];
+  const citedDropped: string[] = [];
+  const citedWindowed: string[] = [];
   let spent = 0;
   for (const ref of queue) {
     const raw = await readFile(ref.filePath, "utf-8").catch(() => null);
     if (raw === null) continue;
-    const { text: body } = excerpt(ref.path, raw, terms);
-    if (spent + body.length > budget) { omitted.push(ref.path); continue; }
+    const refsHere = siblingCitedRefs(findings, ref);
+    const ex = excerpt(ref.path, raw, terms, refsHere);
+    const body = ex.text;
+    if (spent + body.length > budget) {
+      omitted.push(ref.path);
+      // O irmão inteiro ficou fora: as seções que os GAPs citam dele também não vieram, e isso tem de
+      // aparecer na medição — senão o log conta como coberta uma citação que nunca chegou.
+      citedDropped.push(...refsHere.map((r) => `${ref.path} ${r}`));
+      continue;
+    }
     spent += body.length;
     used.push(ref.path);
+    citedUsed.push(...ex.usedRefs.map((r) => `${ref.path} ${r}`));
+    citedDropped.push(...ex.droppedRefs.map((r) => `${ref.path} ${r}`));
+    citedWindowed.push(...ex.windowedRefs.map((r) => `${ref.path} ${r}`));
     parts.push(`─── IRMÃO SÓ LEITURA: \`${ref.path}\`${ref.isPrimary ? " (índice da spec)" : ""} ───\n${body}`);
   }
-  if (parts.length === 0) return { block: "", used, omitted };
+  if (parts.length === 0) return { block: "", used, omitted, citedUsed, citedDropped, citedWindowed };
   const warn = omitted.length
     ? `\n[… ${omitted.length} outro(s) arquivo(s) citado(s) não couberam nesta rodada: ${omitted.join(", ")} …]`
     : "";
-  return { block: `${parts.join("\n\n")}${warn}`, used, omitted };
+  return { block: `${parts.join("\n\n")}${warn}`, used, omitted, citedUsed, citedDropped, citedWindowed };
 }

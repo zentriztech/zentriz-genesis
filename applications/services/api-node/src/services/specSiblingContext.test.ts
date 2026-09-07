@@ -194,3 +194,113 @@ describe("buildSiblingContext — A5.6 resumo dirigido", () => {
     expect(ctx.block).not.toContain("RESUMO DIRIGIDO");
   });
 });
+
+/**
+ * 🔴 GAP-75 — a seção do irmão que o GAP cita POR NÚMERO não chegava ao prompt.
+ *
+ * Medido em prod (validação `9edcb54e`, NVX LastMile): **14 dos 20 GAPs são cross-file** e, das 11
+ * seções de irmão citadas com `§`, **só 5 chegavam** — as ausentes tinham 127, 1.069, 2.061, 2.854 e
+ * 3.214 chars, com o bloco em 49k de 60k. Ou seja: ORDEM, não orçamento, exatamente o defeito que o
+ * GAP-72/73 corrigiu no lado do ALVO e que continuava intacto no lado do IRMÃO. Uma seção decisiva de
+ * 127 chars perdia para a seção genérica que menciona tudo — e sem ela o agente só pode delegar a regra
+ * ("a forma é do arquivo X"), que é a errata do GAP-71 com outro nome e não fecha GAP nenhum.
+ *
+ * Cada teste abaixo trava uma parte da reserva. O fixture é desenhado para REPROVAR o algoritmo
+ * anterior: a seção citada não contém NENHUM termo em disputa, logo a relevância a pontuava com zero e
+ * ela nunca era escolhida — verificado desligando a reserva.
+ */
+describe("buildSiblingContext — seção do irmão citada pelos GAPs (GAP-75)", () => {
+  const filler = (tag: string, n: number) => `${`${tag} `.repeat(n)}\n`;
+  const linhas = (tag: string, n: number) =>
+    Array.from({ length: n }, (_, k) => `${tag} linha ${k}: ${"detalhe ".repeat(6)}`).join("\n");
+
+  beforeAll(async () => {
+    await put("retencao-irmao.md", [
+      "# Retenção e expurgo",
+      "## Convenções gerais",
+      // Superset dos termos em disputa: é a seção que a relevância premia (a patologia de prod).
+      `Aqui aparecem todos: \`retention_job\` e \`refresh_tokens\`. ${filler("generico", 900)}`,
+      // A seção CITADA. Minúscula e sem NENHUM termo em disputa — pela relevância vale zero.
+      "### 4. Variáveis de Ambiente",
+      "A coluna 'default' desta tabela é a fonte declarada do prazo.",
+      "## 99. Apêndice",
+      filler("cauda", 400),
+    ].join("\n"));
+    // Quatro seções citadas que, somadas, não cabem no teto por irmão: a última entra em JANELA.
+    await put("citadas-grandes.md", [
+      "# Muitas citadas",
+      "### 31. Primeira",
+      linhas("um", 60),
+      "O `retention_job` roda de madrugada nesta etapa.",
+      "### 32. Segunda",
+      linhas("dois", 62),
+      "O `retention_job` também é citado aqui.",
+      "### 33. Terceira",
+      linhas("tres", 64),
+      "O `retention_job` aparece na terceira.",
+      "### 34. Quarta",
+      linhas("quatro", 66),
+      "O `retention_job` fecha o ciclo na quarta.",
+    ].join("\n"));
+  });
+
+  it("a seção citada do irmão entra mesmo sem conter nenhum termo em disputa", async () => {
+    const ctx = await buildSiblingContext([...files, ref("retencao-irmao.md")], "definicao-de-pronto.md", [
+      gap("Default de retenção divergente", "O prazo default vem de `retencao-irmao.md` §4, mas o `retention_job` usa outro."),
+    ]);
+    expect(ctx.used).toContain("retencao-irmao.md");
+    expect(ctx.block).toContain("RESUMO DIRIGIDO");
+    // No algoritmo anterior esta linha NUNCA aparecia: a seção tem zero acertos de relevância.
+    expect(ctx.block).toContain("A coluna 'default' desta tabela é a fonte declarada do prazo.");
+    expect(ctx.citedUsed).toEqual(["retencao-irmao.md §4"]);
+    expect(ctx.citedDropped).toEqual([]);
+    expect(ctx.citedWindowed).toEqual([]);
+  });
+
+  it("citação que nomeia o ARQUIVO ALVO não puxa a seção homônima do irmão", async () => {
+    const ctx = await buildSiblingContext([...files, ref("retencao-irmao.md")], "definicao-de-pronto.md", [
+      // O `§4` aqui é do próprio alvo (quem cuida dele é o GAP-73); o irmão entra por citação do nome.
+      gap("Prazo", "O default de `definicao-de-pronto.md` §4 conflita com o `retention_job` de retencao-irmao.md."),
+    ]);
+    expect(ctx.used).toContain("retencao-irmao.md");
+    expect(ctx.citedUsed).toEqual([]);
+    expect(ctx.block).not.toContain("A coluna 'default' desta tabela é a fonte declarada do prazo.");
+  });
+
+  it("citada que não cabe inteira vem em JANELA verbatim, com o salto marcado", async () => {
+    const ctx = await buildSiblingContext([...files, ref("citadas-grandes.md")], "definicao-de-pronto.md", [
+      gap("Ciclo do job", "O `retention_job` é descrito em citadas-grandes.md §31, §32, §33 e §34 de formas diferentes."),
+    ]);
+    expect(ctx.citedUsed).toHaveLength(4);
+    expect(ctx.citedWindowed).toEqual(["citadas-grandes.md §34"]);
+    expect(ctx.citedDropped).toEqual([]);
+    expect(ctx.block).toContain("[… trecho omitido da mesma seção …]");
+    // O literal da seção janelada chega verbatim — é o que permite ao agente citá-lo sem inventar.
+    expect(ctx.block).toContain("O `retention_job` fecha o ciclo na quarta.");
+    // …e a janela não trouxe a seção inteira.
+    expect(ctx.block).not.toContain("quatro linha 0:");
+  });
+
+  it("citada que o código não localiza é DECLARADA (nunca omitida em silêncio)", async () => {
+    const ctx = await buildSiblingContext([...files, ref("retencao-irmao.md")], "definicao-de-pronto.md", [
+      gap("Prazo", "O `retention_job` está em `retencao-irmao.md` §77.7, que ninguém escreveu."),
+    ]);
+    expect(ctx.citedDropped).toEqual(["retencao-irmao.md §77.7"]);
+    expect(ctx.citedUsed).toEqual([]);
+    expect(ctx.block).toContain("NÃO foi/foram");
+    expect(ctx.block).toContain("não afirme o que ele diz");
+  });
+
+  it("irmão que nem entrou no orçamento total leva as citações dele para FORA, declaradas", async () => {
+    const ctx = await buildSiblingContext(
+      [...files, ref("retencao-irmao.md")],
+      "definicao-de-pronto.md",
+      [gap("Prazo", "api-entregas-entregadores.md e `retencao-irmao.md` §4 divergem sobre `retention_job`.")],
+      { totalBudget: 200 },
+    );
+    expect(ctx.omitted).toContain("retencao-irmao.md");
+    // Sem isto o log contaria como coberta uma citação que nunca chegou ao prompt.
+    expect(ctx.citedDropped).toContain("retencao-irmao.md §4");
+    expect(ctx.citedUsed).toEqual([]);
+  });
+});
