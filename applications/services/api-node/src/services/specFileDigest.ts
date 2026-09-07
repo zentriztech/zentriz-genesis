@@ -34,7 +34,9 @@
  * arquivo MUTILADO — perda de dados. Com `SPEC_GAP_FILE_EDIT_FORMAT=whole` o teto volta a valer e a
  * recusa por tamanho continua sendo o comportamento correto.
  */
-import { splitSections, clipSection, headingOutline, scoreSections } from "../lib/markdownSections.js";
+import {
+  splitSections, clipSection, headingOutline, scoreSections, buildAnchorIndex, locateSectionIndex,
+} from "../lib/markdownSections.js";
 import { disputedTerms } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -51,6 +53,14 @@ export interface FileDigest {
   /** Seções transcritas / total de seções do arquivo — vai para o log da rodada. */
   used: number;
   total: number;
+  /** 🔴 GAP-72 — quantas das seções transcritas são as ENDEREÇADAS pelas âncoras dos GAPs. */
+  anchored: number;
+  /** Âncoras dos GAPs desta rodada que o código conseguiu endereçar a uma seção. */
+  anchorsLocated: number;
+  /** Âncoras endereçadas cuja seção NÃO caberia no orçamento — declaradas, nunca omitidas em silêncio. */
+  anchorsDropped: string[];
+  /** Âncoras que o código não endereçou a nenhuma seção (IDs cunhados pelo juiz, p.ex.). */
+  anchorsUnlocatable: string[];
 }
 
 /**
@@ -69,9 +79,67 @@ function targetTerms(findings: ValidationFinding[]): string[] {
   return [...terms];
 }
 
+function severityRank(sev: unknown): number {
+  const s = String(sev ?? "").toLowerCase();
+  if (s === "blocker") return 0;
+  if (s === "warning") return 1;
+  return 2;
+}
+
+interface AnchoredSection {
+  i: number;
+  /** Corpo já recortado pelo teto de seção — é o custo real no orçamento. */
+  body: string;
+  anchors: string[];
+  /** Peso do GAP mais grave que aponta esta seção. */
+  rank: number;
+}
+
+/**
+ * 🔴 GAP-72 — as seções que os GAPs desta rodada ENDEREÇAM, pela mesma régua que mede se o trecho foi
+ * tocado (`locateSectionIndex`). Uma seção pode ser apontada por vários GAPs: entra uma vez, com o peso
+ * do mais grave.
+ */
+function anchoredSections(secs: ReturnType<typeof splitSections>, findings: ValidationFinding[]): {
+  picks: AnchoredSection[];
+  unlocatable: string[];
+} {
+  const index = buildAnchorIndex(secs);
+  const byIndex = new Map<number, AnchoredSection>();
+  const unlocatable: string[] = [];
+  const seen = new Set<string>();
+  for (const f of findings) {
+    const anchor = String((f as { anchor?: string | null }).anchor ?? "").trim();
+    if (!anchor || seen.has(anchor)) continue;
+    seen.add(anchor);
+    const i = locateSectionIndex(index, anchor);
+    if (i === null) { unlocatable.push(anchor); continue; }
+    const rank = severityRank((f as { severity?: unknown }).severity);
+    const cur = byIndex.get(i);
+    if (cur) { cur.anchors.push(anchor); cur.rank = Math.min(cur.rank, rank); continue; }
+    byIndex.set(i, { i, body: clipSection(secs[i].body, TARGET_SECTION_BUDGET), anchors: [anchor], rank });
+  }
+  return { picks: [...byIndex.values()], unlocatable };
+}
+
 /**
  * Recorta o arquivo ALVO quando ele não cabe no teto de entrada. Abaixo do teto nada muda —
  * recortar um arquivo que cabe só criaria risco de o modelo não ver o trecho que precisa mudar.
+ *
+ * ## 🔴 GAP-72 — a ordem de seleção mandava o CTO corrigir o que ele não estava vendo
+ *
+ * MEDIDO em prod (run `95ba8636`, `modelo-dados.md`, 215.168 chars / 57 seções, 11 GAPs ancorados):
+ * a seleção era só `scoreSections` — número de termos distintos que a seção menciona. Isso premia
+ * seção GRANDE e GENÉRICA: `## Convenções gerais` (31.012 chars, 71 hits) sozinha comeu 34% do
+ * orçamento, e 5 seções consumiram 89.789 dos 90.000. Resultado: **8 das 11 seções endereçadas pelos
+ * GAPs nunca entraram no prompt** — e são exatamente as **8 âncoras que ficaram byte-a-byte intocadas**
+ * na rodada (correlação 11/11 com a medição do GAP-71). O CTO não estava se recusando a corrigir: não
+ * tinha o texto. E o orçamento nunca foi o limite — as 8 seções somam **35.413 chars**, cabem folgadas
+ * nos 90.000; o defeito era de ORDEM.
+ *
+ * Agora as seções ENDEREÇADAS pelas âncoras são reservadas ANTES do preenchimento por relevância, e o
+ * que não couber é DECLARADO ao modelo (nome da âncora) em vez de desaparecer. Continua sendo transporte
+ * de fato — "o juiz disse que o defeito está neste endereço" —, não julgamento de conteúdo.
  */
 export function buildFileDigest(
   filePath: string,
@@ -80,19 +148,40 @@ export function buildFileDigest(
   cap: number,
 ): FileDigest {
   const secs = splitSections(content);
-  if (content.length <= cap) return { text: content, digested: false, used: secs.length, total: secs.length };
+  if (content.length <= cap) {
+    return {
+      text: content, digested: false, used: secs.length, total: secs.length,
+      anchored: 0, anchorsLocated: 0, anchorsDropped: [], anchorsUnlocatable: [],
+    };
+  }
 
   const budget = Math.floor(cap * TARGET_DIGEST_FRACTION);
   const outline = headingOutline(secs);
-  const scored = scoreSections(secs, targetTerms(findings));
-
-  const chosen: typeof scored = [];
   let spent = outline.length;
-  for (const x of scored) {
+  const chosenIdx = new Set<number>();
+  const chosen: Array<{ i: number; body: string }> = [];
+
+  // 1) COBERTURA GARANTIDA: as seções que os GAPs endereçam. Blocker antes de warning; dentro do mesmo
+  //    peso, a MENOR primeiro (cabem mais GAPs acionáveis na rodada); empate pela ordem do arquivo.
+  const { picks, unlocatable } = anchoredSections(secs, findings);
+  picks.sort((a, b) => a.rank - b.rank || a.body.length - b.body.length || a.i - b.i);
+  const dropped: string[] = [];
+  for (const p of picks) {
+    if (spent + p.body.length > budget) { dropped.push(...p.anchors); continue; }
+    spent += p.body.length;
+    chosenIdx.add(p.i);
+    chosen.push({ i: p.i, body: p.body });
+  }
+  const anchored = chosen.length;
+
+  // 2) O que sobrou do orçamento vai para o contexto por relevância (comportamento anterior).
+  for (const x of scoreSections(secs, targetTerms(findings))) {
+    if (chosenIdx.has(x.i)) continue;
     const body = clipSection(x.section.body, TARGET_SECTION_BUDGET);
     if (spent + body.length > budget) continue;
     spent += body.length;
-    chosen.push(x);
+    chosenIdx.add(x.i);
+    chosen.push({ i: x.i, body });
   }
 
   if (chosen.length === 0) {
@@ -116,25 +205,34 @@ export function buildFileDigest(
       digested: true,
       used: 0,
       total: secs.length,
+      anchored: 0,
+      anchorsLocated: picks.length,
+      anchorsDropped: dropped,
+      anchorsUnlocatable: unlocatable,
     };
   }
 
-  // Ordem de LEITURA depois de escolher por relevância: o arquivo continua fazendo sentido de cima
-  // para baixo, o que importa quando uma seção referencia a outra.
-  const parts = chosen
-    .sort((a, b) => a.i - b.i)
-    .map((x) => clipSection(x.section.body, TARGET_SECTION_BUDGET));
+  // Ordem de LEITURA depois de escolher: o arquivo continua fazendo sentido de cima para baixo, o que
+  // importa quando uma seção referencia a outra.
+  const parts = chosen.sort((a, b) => a.i - b.i).map((x) => x.body);
 
   return {
     text: [
       `[RESUMO DIRIGIDO de \`${filePath}\` — o arquivo tem ${content.length} chars e NÃO cabe inteiro nesta`,
-      `rodada. Abaixo, o SUMÁRIO COMPLETO de seções e, VERBATIM, as ${parts.length} seção(ões) que os GAPs`,
-      "apontam. REGRAS desta rodada:",
+      `rodada. Abaixo, o SUMÁRIO COMPLETO de seções e, VERBATIM, as ${parts.length} seção(ões) selecionadas —`,
+      `${anchored} delas é/são a(s) seção(ões) que os GAPs desta rodada ENDEREÇAM. REGRAS desta rodada:`,
       "  • cada bloco SEARCH deve copiar texto que você está VENDO aqui — é byte a byte igual ao arquivo;",
       "  • NÃO recrie uma seção que aparece no sumário e não foi transcrita: ela EXISTE no arquivo e",
       "    duplicá-la troca um GAP por uma contradição interna;",
       "  • se um GAP só puder ser resolvido numa seção que não está aqui, diga isso na linha final em vez",
       "    de adivinhar o conteúdo dela.]",
+      // 🔴 GAP-72: âncora cuja seção não caberia sai DECLARADA. Sem esta linha o modelo lê a ausência
+      // como "o trecho não existe" e responde com errata — a patologia do GAP-71 causada pelo recorte.
+      ...(dropped.length > 0
+        ? [`[ATENÇÃO: a(s) seção(ões) endereçada(s) por ${dropped.join(", ")} NÃO caberam no orçamento desta`,
+           " rodada. Para esses GAPs, DECLARE na linha final que o trecho não veio — não improvise o conteúdo",
+           " e não anule o trecho por errata.]"]
+        : []),
       "",
       "SUMÁRIO DE SEÇÕES:",
       outline,
@@ -145,5 +243,9 @@ export function buildFileDigest(
     digested: true,
     used: parts.length,
     total: secs.length,
+    anchored,
+    anchorsLocated: picks.length,
+    anchorsDropped: dropped,
+    anchorsUnlocatable: unlocatable,
   };
 }

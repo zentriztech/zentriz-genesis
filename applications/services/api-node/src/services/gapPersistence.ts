@@ -47,7 +47,7 @@
  * Nenhuma das duas decide conteúdo (Lei: Genesis é 100% LLM). Elas dizem ao agente a única coisa que
  * ele não pode deduzir do arquivo que recebe: que a resposta que ele já deu ali NÃO funcionou.
  */
-import { splitSections } from "../lib/markdownSections.js";
+import { splitSections, buildAnchorIndex, locateSectionIndex, anchorSearchKey } from "../lib/markdownSections.js";
 import { findingFingerprint, effectiveFingerprints, judgedFilesOf } from "./findingTriage.js";
 import type { PersistentGapRef } from "./gapContinuity.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -64,70 +64,13 @@ export interface PastValidation {
 }
 
 /**
- * Normalização de âncora para BUSCA NO TEXTO (não para identidade — isso é `normalizeAnchor`).
- *
- * O juiz escreve `§8.6 (c)`, `§9.1 item 0-bis`, `CLI-ANON-01`; o arquivo escreve `## 8.6 Visibilidade`,
- * `**§8.6**`, `REQ CLI-ANON-01`. Então a busca casa por uma CHAVE mínima e estável: minúsculas, sem
- * `§`, sem pontuação de enfeite, espaços colapsados. Dígitos são PRESERVADOS (`8.6` ≠ `8.7`) pela
- * mesma razão do `normalizeAnchor`.
+ * A régua de âncora (`anchorSearchKey`, `locateSectionIndex`) MUDOU DE CASA no GAP-72: vive em
+ * `lib/markdownSections.ts`, ao lado do `splitSections`, porque quem MEDE se o trecho foi tocado (aqui)
+ * e quem DECIDE qual trecho o CTO vê (`specFileDigest`) têm de usar a MESMA. Duas cópias fariam o laço
+ * afirmar "seção intocada" sobre uma seção que ele nunca mostrou — foi exatamente o par de defeitos
+ * medido em prod. Reexportado para não quebrar quem já importava daqui.
  */
-export function anchorSearchKey(anchor: string): string {
-  return (anchor ?? "")
-    .normalize("NFD").replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/§/g, " ")
-    .replace(/[^a-z0-9.\-\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
- * Tokens comparáveis de um texto. Pontuação de borda cai (`8.6.` no fim de frase é o mesmo `8.6` do
- * cabeçalho) — sem isso a âncora deixaria de casar por causa de um ponto final.
- */
-function tokensOf(s: string): string[] {
-  return anchorSearchKey(s)
-    .split(" ")
-    .map((t) => t.replace(/^[.-]+/, "").replace(/[.-]+$/, ""))
-    .filter(Boolean);
-}
-
-interface Section {
-  body: string;
-  tokens: Set<string>;
-  headingTokens: Set<string>;
-}
-
-/**
- * Localiza a seção de uma âncora.
- *
- * ⚠️ Por que NÃO é `body.includes(anchor)`: a primeira versão disto casava a chave da âncora como
- * substring contígua e falhava em TODAS as âncoras reais medidas em prod — `§8.6 (c)` vira a chave
- * `8.6 c`, mas no arquivo o `8.6` e o `(c)` estão separados pelo título da seção
- * (`## 8.6 Visibilidade` … `(c) A consulta anônima…`). O resultado seria `unlocatable` para tudo, e o
- * fato do GAP-71 nunca seria afirmado — falha silenciosa, a pior espécie.
- *
- * Regra: o PRIMEIRO token é o localizador (`8.6`, `11.3`, `cli-anon-01`); os demais só desempatam.
- * Seção cujo CABEÇALHO contém o localizador vence qualquer seção que só o mencione no corpo — uma
- * referência cruzada (`ver §8.6`) não é a seção §8.6. Empate mantém a ordem do arquivo (determinístico).
- */
-function locateSection(sections: Section[], anchor: string): Section | null {
-  const toks = tokensOf(anchor);
-  if (toks.length === 0) return null;
-  const head = toks[0];
-  const rest = toks.slice(1);
-  const cands = sections.filter((s) => s.tokens.has(head));
-  if (cands.length === 0) return null;
-  const byHeading = cands.filter((s) => s.headingTokens.has(head));
-  const pool = byHeading.length > 0 ? byHeading : cands;
-  let best = pool[0];
-  let bestScore = -1;
-  for (const s of pool) {
-    const score = rest.reduce((n, t) => n + (s.tokens.has(t) ? 1 : 0), 0);
-    if (score > bestScore) { bestScore = score; best = s; }
-  }
-  return best;
-}
+export { anchorSearchKey };
 
 export interface AnchorTouchReport {
   /** Âncoras que o código conseguiu LOCALIZAR no texto de antes (as únicas mensuráveis). */
@@ -159,21 +102,18 @@ export function untouchedAnchors(before: string, after: string, anchors: Array<s
   const untouched: string[] = [];
   const unlocatable: string[] = [];
   if (!before || !after) return { measured, untouched, unlocatable };
-  const sections: Section[] = splitSections(before).map((s) => ({
-    body: s.body,
-    tokens: new Set(tokensOf(s.body)),
-    headingTokens: new Set(s.heading.startsWith("#") ? tokensOf(s.heading) : []),
-  }));
+  const sections = splitSections(before);
+  const index = buildAnchorIndex(sections);
   const seen = new Set<string>();
   for (const raw of anchors) {
     const anchor = (raw ?? "").trim();
     if (!anchor || seen.has(anchor)) continue;
     seen.add(anchor);
     if (!anchorSearchKey(anchor)) continue;
-    const sec = locateSection(sections, anchor);
-    if (!sec) { unlocatable.push(anchor); continue; }
+    const i = locateSectionIndex(index, anchor);
+    if (i === null) { unlocatable.push(anchor); continue; }
     measured.push(anchor);
-    if (after.includes(sec.body)) untouched.push(anchor);
+    if (after.includes(sections[i].body)) untouched.push(anchor);
   }
   return { measured, untouched, unlocatable };
 }
