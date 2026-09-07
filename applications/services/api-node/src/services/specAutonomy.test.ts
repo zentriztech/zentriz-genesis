@@ -64,6 +64,7 @@ import {
   isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastRejectedAttempt, runGrowthUsed, growthAllowance,
   type AutonomyStatus,
 } from "./specAutonomy.js";
+import { proportionalGrowthBudget } from "./specOracles.js";
 
 // ── banco falso: uma linha de spec_autonomy_runs em memória ───────────────────
 interface FakeRow { [k: string]: unknown }
@@ -901,6 +902,77 @@ describe("runGrowthUsed + growthAllowance (GAP-33)", () => {
   it("laço sem rodada nenhuma tem exatamente o orçamento do primeiro passe", () => {
     expect(growthAllowance({ passes: 0, rounds: [] as never }, 2_000)).toBe(2_000);
     expect(runGrowthUsed({ rounds: [] as never })).toBe(0);
+  });
+});
+
+// ── 7b. GAP-36 — o orçamento é uma FRAÇÃO da massa da spec, não um absoluto ────
+//
+// Medido na run `6d407460` (NVX LastMile, ~950 mil chars): as DUAS primeiras rodadas do laço foram
+// descartadas com a margem CHEIA — `privacidade-lgpd.md` +4.492 e `modelo-dados.md` +5.404 contra
+// 2.000 —, com 16 e 6 edições ancoradas já aplicadas. Recusa não gasta margem, então a parede de
+// 2.000 seria a mesma em toda rodada do passe: o passe inteiro caminhava para `stalled`.
+
+describe("growthAllowance + proportionalGrowthBudget (GAP-36)", () => {
+  const NVX_BYTES = 950_000;
+
+  it("a parcela proporcional é RATIO × massa (2% do NVX ≈ 19.000)", () => {
+    expect(proportionalGrowthBudget(NVX_BYTES)).toBe(19_000);
+  });
+
+  it("massa ausente, zero ou inválida ⇒ só o piso (regra do GAP-33 intacta)", () => {
+    expect(proportionalGrowthBudget(0)).toBe(0);
+    expect(proportionalGrowthBudget(-1)).toBe(0);
+    expect(proportionalGrowthBudget(Number.NaN)).toBe(0);
+    expect(growthAllowance({ passes: 0, rounds: [] as never }, 2_000, 0)).toBe(2_000);
+    expect(growthAllowance({ passes: 3, rounds: [] as never }, 2_000)).toBe(8_000);
+  });
+
+  it("as duas rodadas MEDIDAS da run 6d407460 passam a caber", () => {
+    // Passe 0, nada aplicado: antes a margem era 2.000 e as duas morriam.
+    const allowance = growthAllowance(
+      { passes: 0, rounds: [] as never }, 2_000, proportionalGrowthBudget(NVX_BYTES),
+    );
+    expect(allowance).toBe(19_000);
+    expect(4_492).toBeLessThanOrEqual(allowance);
+    expect(5_404).toBeLessThanOrEqual(allowance);
+    // …e o gasto das duas juntas ainda deixa margem para o resto do passe.
+    const after = growthAllowance(
+      {
+        passes: 0,
+        rounds: [
+          R({ round: 1, pass: 0, applied: true, deltaChars: 4_492 }),
+          R({ round: 2, pass: 0, applied: true, deltaChars: 5_404 }),
+        ] as never,
+      },
+      2_000, proportionalGrowthBudget(NVX_BYTES),
+    );
+    expect(after).toBe(9_104);
+  });
+
+  it("a doença do GAP-8 continua RECUSADA de saída (+22.651 numa rodada)", () => {
+    const allowance = growthAllowance(
+      { passes: 0, rounds: [] as never }, 2_000, proportionalGrowthBudget(NVX_BYTES),
+    );
+    expect(22_651).toBeGreaterThan(allowance);
+    // Mesmo no último passe do laço a conta cumulativa não alcança a inflação de UMA rodada do GAP-8.
+    expect(22_651).toBeGreaterThan(
+      growthAllowance({ passes: 4, rounds: [] as never }, 2_000, proportionalGrowthBudget(NVX_BYTES)),
+    );
+  });
+
+  it("é MONÓTONO: spec pequena não fica mais restrita do que já era", () => {
+    // Landpage de 5.000 bytes: 2% = 100 ⇒ o piso do GAP-33 vence e o comportamento é o de hoje.
+    expect(proportionalGrowthBudget(5_000)).toBe(100);
+    expect(growthAllowance({ passes: 0, rounds: [] as never }, 2_000, proportionalGrowthBudget(5_000)))
+      .toBe(2_000);
+    expect(growthAllowance({ passes: 4, rounds: [] as never }, 2_000, proportionalGrowthBudget(5_000)))
+      .toBe(10_000);
+  });
+
+  it("o crédito por encolhimento (GAP-33) segue valendo sobre o teto proporcional", () => {
+    const rounds = [R({ round: 1, pass: 0, applied: true, deltaChars: -4_332 })] as never;
+    expect(growthAllowance({ passes: 0, rounds }, 2_000, proportionalGrowthBudget(NVX_BYTES)))
+      .toBe(23_332);
   });
 });
 

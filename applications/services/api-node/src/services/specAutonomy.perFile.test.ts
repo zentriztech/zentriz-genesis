@@ -100,6 +100,10 @@ const ensureOracleDecisions = vi.fn(async () => ({
 vi.mock("./specOracles.js", () => ({
   // GAP-25: o orçamento é FONTE ÚNICA em specOracles (o veto julga e o prompt anuncia o MESMO número).
   ORACLE_GROWTH_BUDGET: 2000,
+  // GAP-36: parcela proporcional à massa da spec. Nos dublês os arquivos têm poucos KB, então 2% é
+  // irrisório e o piso de 2.000 continua vencendo — é o que mantém estes casos medindo o VETO em vez da
+  // calibração do orçamento (essa é medida em `specAutonomy.test.ts`).
+  proportionalGrowthBudget: (bytes: number) => (bytes > 0 ? Math.ceil(bytes * 0.02) : 0),
   oracleRegistryEnabled: () => oracleRegistryOn,
   loadOracleDecisions: vi.fn(async () => oracleDecisions),
   ensureOracleDecisions: (...a: unknown[]) => ensureOracleDecisions(...(a as [])),
@@ -190,6 +194,8 @@ const db = {
         created_at: nowIso(), updated_at: nowIso(), finished_at: null,
         // migração 095
         mode: values[7], passes: 0, current_file: null, files_done: [], file_failures: 0,
+        // migração 103 (GAP-36): massa da spec medida na criação — denominador FIXO do orçamento.
+        spec_bytes: values[8],
       };
       return { rows: [], rowCount: 1 };
     }
@@ -839,6 +845,12 @@ describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", ()
     expect(onDisk("backend/01-api.md")).toBe(API);            // disco INTACTO
     expect(String(run!.last_error)).toContain("consolidação recusada");
     expect(String(run!.last_error)).toContain("`paginacao` → `00-indice.md`");
+    // GAP-37: a recusa é lida de volta pelo agente (`priorRejectionFactBlock`), então ela não pode
+    // descrever o pedido errado. A rodada pediu resolver os GAPs do arquivo E consolidar — dizer que a
+    // correção "era REMOVER a redeclaração" faria a próxima tentativa ABANDONAR os blockers p/ caber.
+    expect(String(run!.last_error)).toContain("incluía REMOVER a redeclaração");
+    expect(String(run!.last_error)).toContain("A rodada pediu DUAS coisas");
+    expect(String(run!.last_error)).toContain("Nenhuma das duas foi abandonada pelo veto");
     expect(run!.status).toBe("pending");                      // não é falha do laço
     expect(run!.file_failures).toBe(0);                       // nem falha DO ARQUIVO
     expect(run!.files_done).toContain("backend/01-api.md");   // sai da fila deste passe

@@ -1,0 +1,16 @@
+-- GAP-36 (2026-09-07) — massa da spec no INÍCIO do laço, para o orçamento de crescimento.
+--
+-- O orçamento de consolidação era um número ABSOLUTO (2.000 chars) e portanto cego ao tamanho da
+-- spec: no NVX LastMile (~950.000 chars) isso é 0,21% da massa, menos do que uma rodada honesta
+-- consome ao fechar 5 blockers. Medido na run 6d407460: as DUAS primeiras rodadas do laço foram
+-- descartadas com a margem CHEIA (+4.492 e +5.404 contra 2.000), com 16 e 6 edições ancoradas já
+-- aplicadas — duas chamadas de Opus 5 no lixo, e recusa não gasta margem, então a parede seria a
+-- mesma em toda rodada do passe.
+--
+-- A massa é medida UMA VEZ, na criação do laço, e é essa a graça de persistir: o denominador fica
+-- FIXO. Se fosse remedido a cada rodada, cada crescimento aplicado aumentaria o próprio orçamento
+-- da rodada seguinte — um laço de inflação que se auto-autoriza (exatamente o motor do GAP-8).
+--
+-- Laço anterior à migração fica com NULL ⇒ o cálculo cai no piso por passe (regra do GAP-28/GAP-33),
+-- que é o comportamento de hoje. Nada regride.
+ALTER TABLE spec_autonomy_runs ADD COLUMN IF NOT EXISTS spec_bytes integer;

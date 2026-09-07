@@ -278,6 +278,12 @@ export interface AutonomyRun {
   filesDone: string[];
   /** Falhas consecutivas em nível de arquivo (2 param o laço). */
   fileFailures: number;
+  /**
+   * GAP-36 — massa da spec em bytes NO INÍCIO do laço: denominador do orçamento de crescimento
+   * (`proportionalGrowthBudget`). Fixo de propósito; `null` em laço anterior à migração 103, e aí o
+   * orçamento cai no piso por passe. Ver `specTotalBytes`.
+   */
+  specBytes: number | null;
   maxRounds: number;
   chatJobId: string | null;
   validationRunId: string | null;
@@ -296,7 +302,7 @@ export interface AutonomyRun {
 const COLS =
   "id, project_id, tenant_id, owner_user_id, status, round, max_rounds, chat_job_id, validation_run_id, " +
   "base_spec_sha, gaps_initial, gaps_current, no_progress_streak, rounds, last_error, deadline_at, " +
-  "created_at, updated_at, finished_at, mode, passes, current_file, files_done, file_failures";
+  "created_at, updated_at, finished_at, mode, passes, current_file, files_done, file_failures, spec_bytes";
 
 function rowToRun(r: Record<string, unknown>): AutonomyRun {
   return {
@@ -311,6 +317,7 @@ function rowToRun(r: Record<string, unknown>): AutonomyRun {
     currentFile: (r.current_file as string | null) ?? null,
     filesDone: Array.isArray(r.files_done) ? (r.files_done as unknown[]).map((x) => String(x)) : [],
     fileFailures: Number(r.file_failures ?? 0),
+    specBytes: r.spec_bytes == null ? null : Number(r.spec_bytes),
     round: Number(r.round ?? 0),
     maxRounds: Number(r.max_rounds ?? AUTONOMY_MAX_ROUNDS),
     chatJobId: (r.chat_job_id as string | null) ?? null,
@@ -570,14 +577,18 @@ export async function startAutonomyRun(db: Db, opts: {
   // ele entra na linha só para a Bancada já desenhar o laço certo desde o primeiro poll.
   const fileCount = await specFileCount(db, opts.projectId).catch(() => 1);
   const mode: AutonomyMode = fileCount > 1 ? "per_file" : "whole";
+  // GAP-36: a massa da spec é medida AQUI e só aqui — é o denominador FIXO do orçamento de
+  // crescimento do laço (ver `specTotalBytes`). Falhar em medir não impede o laço: sem o número o
+  // orçamento cai no piso por passe, que é a regra anterior.
+  const specBytes = await specTotalBytes(db, opts.projectId).catch(() => 0);
 
   const id = randomUUID();
   try {
     await db.query(
       `INSERT INTO spec_autonomy_runs
-         (id, project_id, tenant_id, owner_user_id, status, round, max_rounds, gaps_initial, gaps_current, deadline_at, mode)
-       VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $6, now() + ($7 || ' milliseconds')::interval, $8)`,
-      [id, opts.projectId, opts.tenantId, opts.ownerUserId, maxRounds, gaps.important, String(AUTONOMY_DEADLINE_MS), mode],
+         (id, project_id, tenant_id, owner_user_id, status, round, max_rounds, gaps_initial, gaps_current, deadline_at, mode, spec_bytes)
+       VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $6, now() + ($7 || ' milliseconds')::interval, $8, $9)`,
+      [id, opts.projectId, opts.tenantId, opts.ownerUserId, maxRounds, gaps.important, String(AUTONOMY_DEADLINE_MS), mode, specBytes],
     );
   } catch (e) {
     // 23505 = índice único parcial → já existe laço ativo neste projeto.
@@ -885,14 +896,51 @@ export function lastRejectedAttempt(
  * A conta é cumulativa (GAP-33): `ORÇAMENTO × (passes concluídos + 1) − tudo o que a run já
  * escreveu`. Relê a run FRESCA do banco porque a rodada anterior acabou de gravar o `deltaChars`.
  */
-export function growthAllowance(run: Pick<AutonomyRun, "rounds" | "passes">, budgetPerPass: number): number {
-  return Math.max(0, budgetPerPass * (run.passes + 1) - runGrowthUsed(run));
+export function growthAllowance(
+  run: Pick<AutonomyRun, "rounds" | "passes">,
+  budgetPerPass: number,
+  /**
+   * GAP-36 — parcela PROPORCIONAL à massa da spec (`proportionalGrowthBudget`). O orçamento do laço é
+   * o MAIOR entre ela e o piso por passe: nenhum projeto fica mais restrito do que já era, e spec
+   * grande deixa de ser estrangulada por um número absoluto. Ausente/0 ⇒ só o piso (regra do GAP-33).
+   */
+  proportional = 0,
+): number {
+  const floor = budgetPerPass * (run.passes + 1);
+  return Math.max(0, Math.max(floor, proportional) - runGrowthUsed(run));
+}
+
+/**
+ * GAP-36 — massa da spec em bytes, somando os arquivos da árvore legíveis no disco.
+ *
+ * `project_spec_files` NÃO guarda o conteúdo (só `file_path`/`content_sha256`), então a massa vem de
+ * `stat`: uma syscall por arquivo, sem ler bytes. Arquivo ilegível conta 0 em vez de derrubar o laço —
+ * orçamento é guarda-corpo, não pré-condição de escrita.
+ *
+ * Chamada UMA vez, na criação do laço (`spec_bytes`), e nunca dentro da rodada. São duas razões:
+ *  • o denominador tem de ser FIXO — remedir a cada rodada faria cada crescimento aplicado ampliar o
+ *    orçamento da rodada seguinte, um laço que se auto-autoriza a inflar (o motor do GAP-8);
+ *  • o caminho da rodada não ganha `await` novo. `startAutonomyRun` agenda um advance de FUNDO em
+ *    `setImmediate`, e ele corre com o advance do request — cada `await` a mais no meio muda quem vence
+ *    o CLAIM. É inócuo em produção (o claim serializa e o perdedor vira no-op), mas é a diferença entre
+ *    um teste determinístico e um teste que passa por sorte.
+ */
+async function specTotalBytes(db: Db, projectId: string): Promise<number> {
+  const { loadSpecFiles } = await import("./specGapScope.js");
+  const { stat } = await import("node:fs/promises");
+  const refs = await loadSpecFiles(db, projectId);
+  const sizes = await Promise.all(
+    refs.map((r) => stat(r.filePath).then((s) => s.size).catch(() => 0)),
+  );
+  return sizes.reduce((a, b) => a + b, 0);
 }
 
 async function passGrowthBudget(db: Db, run: AutonomyRun): Promise<number> {
-  const { ORACLE_GROWTH_BUDGET } = await import("./specOracles.js");
+  const { ORACLE_GROWTH_BUDGET, proportionalGrowthBudget } = await import("./specOracles.js");
   const fresh = (await getAutonomyRun(db, run.id)) ?? run;
-  return growthAllowance(fresh, ORACLE_GROWTH_BUDGET);
+  // GAP-36: `specBytes` foi medido na criação do laço. Laço criado antes da migração 103 vem `null` ⇒
+  // parcela proporcional 0 ⇒ vale o piso por passe (comportamento do GAP-33, sem regressão).
+  return growthAllowance(fresh, ORACLE_GROWTH_BUDGET, proportionalGrowthBudget(fresh.specBytes ?? 0));
 }
 
 /**
@@ -990,6 +1038,11 @@ async function ensureOracles(
  */
 async function consolidationVeto(
   db: Db, projectId: string, target: string, before: string, after: string, budget: number,
+  /**
+   * GAP-37 — quantos GAPs a rodada TAMBÉM pediu para resolver neste arquivo. Sem isto a recusa mentia
+   * sobre a causa (ver o texto abaixo).
+   */
+  gapsDispatched = 0,
 ): Promise<string | null> {
   const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled } = await import("./specOracles.js");
   if (!oracleRegistryEnabled()) return null;
@@ -1001,9 +1054,22 @@ async function consolidationVeto(
   const delta = after.length - before.length;
   const contracts = restates.map((d) => `\`${d.contractKey}\` → \`${d.oraclePath}\``).join(", ");
   if (delta > budget) {
-    return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida era`
-      + ` REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
-      + ` e a margem de crescimento que restava ao laço era ${budget}. Nada foi escrito.`;
+    // 🔴 GAP-37 (2026-09-07) — a recusa dizia "a correção pedida era REMOVER a redeclaração", e isso é
+    // FALSO numa rodada do laço: o mesmo pedido mandou resolver os GAPs do arquivo (medido na run
+    // `6d407460`: `privacidade-lgpd.md` recebeu 🔴 5 + 🟡 2). Este texto é o `rejectedReason` que o
+    // GAP-31 entrega de volta ao agente na retentativa — dizer-lhe que o pedido era só consolidar faz
+    // a próxima tentativa ABANDONAR os blockers para caber na margem, e o laço "converge" sem fechar
+    // nada. O código continua não escolhendo a estratégia (cortar, dividir, insistir): ele apenas
+    // para de descrever o pedido errado (mesma lei do GAP-31,
+    // ver feedback-genesis-100-llm-nunca-automacao-fixa).
+    const alsoAsked = gapsDispatched > 0
+      ? ` A rodada pediu DUAS coisas: resolver ${gapsDispatched} GAP(s) deste arquivo E consolidar as`
+        + " redeclarações acima. Nenhuma das duas foi abandonada pelo veto — o que estourou foi o"
+        + " TAMANHO do resultado; a remoção das redeclarações é o que paga o texto novo dos GAPs."
+      : "";
+    return `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida`
+      + ` incluía REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
+      + ` e a margem de crescimento que restava ao laço era ${budget}. Nada foi escrito.${alsoAsked}`;
   }
   // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
   // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
@@ -1423,7 +1489,12 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // fatos. Recusar não é falha de arquivo (`failure: false`): é o laço se negando a pagar crescimento
   // como se fosse correção, deixando o disco intacto e seguindo para o próximo arquivo.
   const passBudget = await passGrowthBudget(db, run);
-  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised, passBudget);
+  // GAP-37: quantos GAPs esta rodada pediu — o log do despacho é a fonte (o escopo já não está em
+  // memória neste tick). Sem o número, a recusa descreveria o pedido errado ao agente.
+  const dispatched = lastRound?.round === run.round
+    ? (lastRound.blockers ?? 0) + (lastRound.warnings ?? 0)
+    : 0;
+  const oracleVeto = await consolidationVeto(db, run.projectId, target, file.content, revised, passBudget, dispatched);
   if (oracleVeto) {
     // GAP-29: o TAMANHO da tentativa recusada vai para o log — é o único jeito de a próxima
     // tentativa deste arquivo não ser uma repetição paga da mesma resposta reprovada.

@@ -78,6 +78,52 @@ const ORACLE_MAX_TOKENS = Number(process.env.SPEC_ORACLE_MAX_TOKENS ?? "8000");
 export const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "2000");
 
 /**
+ * GAP-36 (2026-09-07) — o orçamento é uma fração da MASSA da spec, não um número absoluto.
+ *
+ * ## O que estava errado (MEDIDO em prod, run `6d407460`, projeto NVX LastMile)
+ *
+ * As DUAS primeiras rodadas do laço foram descartadas inteiras pelo `consolidationVeto`, com a margem
+ * CHEIA (passe 0, nada gasto): `privacidade-lgpd.md` entregou **+4.492** e `modelo-dados.md`
+ * **+5.404** contra um orçamento de **2.000**. Duas chamadas de Opus 5 (uma sobre 80.989 chars, outra
+ * sobre 169.740), **16 e 6 edições ancoradas já aplicadas**, jogadas no lixo — e o laço não gastou um
+ * caractere de margem, então a terceira rodada bateria na MESMA parede de 2.000. O `stalled` por
+ * "nenhum arquivo pôde ser revisado neste passe" era o destino provável do passe inteiro.
+ *
+ * A constante 2.000 foi calibrada contra a doença do GAP-8 (**+18% por rodada**, +22.651 chars numa
+ * só). Mas ela é CEGA ao tamanho da spec: os mesmos 2.000 valem para uma landpage de 5.000 chars e
+ * para o NVX de ~950.000 — onde 2.000 é **0,21%** da massa, menos do que uma única rodada honesta
+ * consome ao fechar 5 blockers. O objetivo declarado sempre foi "a spec não INFLAR"; inflação é
+ * proporção, e o código estava medindo em unidade absoluta.
+ *
+ * ## O que muda
+ *
+ * O orçamento passa a ser `max(piso, RATIO × massa da spec)`, com o piso sendo exatamente a regra de
+ * hoje (`ORACLE_GROWTH_BUDGET × (passes+1)`, GAP-28/GAP-33). É **monótono**: nenhum caso fica mais
+ * restrito do que já era — só deixa de estrangular spec grande. Com 2% e a massa do NVX o laço inteiro
+ * ganha ~19.000 chars; o laço anterior (`d7acccb8`) usou **6.836 em 30 rodadas (0,72%)**, e a doença
+ * do GAP-8 (+22.651 numa rodada, 2,4%) continua sendo **recusada de saída**.
+ *
+ * A `RATIO` não afrouxa o NORTE de "texto simples → spec completa": esse caminho não passa por aqui —
+ * o veto só existe quando o registro de oráculos JÁ tem decisão e o arquivo REDECLARA contrato de
+ * outro, o que pressupõe uma spec dividida e com contradição entre arquivos.
+ */
+export const ORACLE_GROWTH_RATIO = Number(process.env.SPEC_ORACLE_GROWTH_RATIO ?? "0.02");
+
+/**
+ * GAP-36 — a parcela PROPORCIONAL do orçamento de crescimento do laço. Quem soma o piso por passe e
+ * desconta o já gasto é o laço (`growthAllowance`), que é dono do log de rodadas.
+ *
+ * A massa é medida em BYTES do disco: em UTF-8 com acentuação, bytes ≥ chars, então o orçamento sai
+ * uma fração generoso. É deliberado — a guarda é de ORDEM DE GRANDEZA (2% contra os 18%/rodada do
+ * GAP-8), não uma contabilidade de caracteres.
+ */
+export function proportionalGrowthBudget(specBytes: number): number {
+  if (!Number.isFinite(specBytes) || specBytes <= 0) return 0;
+  if (!Number.isFinite(ORACLE_GROWTH_RATIO) || ORACLE_GROWTH_RATIO <= 0) return 0;
+  return Math.ceil(specBytes * ORACLE_GROWTH_RATIO);
+}
+
+/**
  * Kill-switch. Nasce LIGADO porque o comportamento sem ele está PROVADO insuficiente (a contradição
  * migra de arquivo indefinidamente). `SPEC_ORACLE_REGISTRY=off` volta ao anterior sem deploy.
  */
