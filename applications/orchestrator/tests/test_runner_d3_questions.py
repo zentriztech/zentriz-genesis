@@ -44,3 +44,86 @@ def test_raise_spec_questions_asked_capped_unavailable(monkeypatch):
     assert runner._raise_spec_questions("p1", "charter", ["x"], "rid") == "unavailable"
     assert runner._raise_spec_questions(None, "charter", ["x"], "rid") == "unavailable"
     assert runner._raise_spec_questions("p1", "charter", [], "rid") == "unavailable"
+
+
+# ── GAP-62 / GAP-63 ────────────────────────────────────────────────────────────────────────
+
+def test_extract_questions_nao_trunca_o_teto_fica_no_envio():
+    """GAP-63: o teto de 12 saiu daqui (era `out[:12]` silencioso) para quem pode DECLARAR o corte."""
+    r = {"status": "NEEDS_INFO", "next_actions": {"questions": [f"P{i}?" for i in range(20)]}}
+    assert len(runner._extract_questions(r)) == 20
+
+
+def test_raise_spec_questions_declara_corte_de_12_e_de_1000_chars(monkeypatch):
+    """GAP-63: cortar continua certo; sumir com a pergunta em silêncio, não."""
+    steps: list[str] = []
+    sent: list[dict] = []
+    monkeypatch.setattr(runner, "_post_step", lambda msg, rid: steps.append(msg))
+    monkeypatch.setattr(runner, "_api_post", lambda path, body: (sent.append(body) or ({"questionId": "q1", "round": 1}, 201)))
+
+    qs = [f"Pergunta {i}?" for i in range(15)]
+    qs[0] = "L" * 1500 + "?"
+    assert runner._raise_spec_questions("p1", "spec_review", qs, "rid") == "asked"
+    # só as 12 primeiras vão para a API…
+    assert len(sent[0]["questions"]) == runner.QUESTIONS_PER_ROUND_CAP
+    # …e as 3 que sobraram são DECLARADAS, junto do enunciado cortado
+    assert any("15 perguntas" in s and "3 ficaram para a próxima" in s for s in steps), steps
+    assert any("1.000 caracteres" in s for s in steps), steps
+
+
+def test_raise_spec_questions_faz_retry_so_no_transitorio(monkeypatch):
+    """GAP-62: api reiniciando devolve (None, 0) — insistir resolve. 404 é definitivo: não insiste."""
+    monkeypatch.setattr(runner, "_post_step", lambda msg, rid: None)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+
+    tentativas = {"n": 0}
+
+    def flaky(path, body):
+        tentativas["n"] += 1
+        return (None, 0) if tentativas["n"] == 1 else ({"questionId": "q1", "round": 1}, 201)
+
+    monkeypatch.setattr(runner, "_api_post", flaky)
+    assert runner._raise_spec_questions("p1", "spec_review", ["Qual o SLA?"], "rid") == "asked"
+    assert tentativas["n"] == 2, "deveria ter repetido a falha de rede exatamente uma vez"
+
+    # 5xx também é transitório → 3 tentativas e desiste
+    quinhentos = {"n": 0}
+
+    def sempre_500(path, body):
+        quinhentos["n"] += 1
+        return (None, 503)
+
+    monkeypatch.setattr(runner, "_api_post", sempre_500)
+    assert runner._raise_spec_questions("p1", "spec_review", ["x"], "rid") == "unavailable"
+    assert quinhentos["n"] == 3
+
+    # 404 (rota ausente) é definitivo: UMA tentativa
+    quatro04 = {"n": 0}
+
+    def sempre_404(path, body):
+        quatro04["n"] += 1
+        return (None, 404)
+
+    monkeypatch.setattr(runner, "_api_post", sempre_404)
+    assert runner._raise_spec_questions("p1", "spec_review", ["x"], "rid") == "unavailable"
+    assert quatro04["n"] == 1
+
+
+def test_block_for_unregistered_questions_para_a_fabrica(monkeypatch):
+    """GAP-62 (o defeito): sem canal para a pergunta, a fábrica PARA — não deixa outro LLM responder."""
+    steps: list[str] = []
+    patches: list[dict] = []
+    monkeypatch.setattr(runner, "_post_step", lambda msg, rid: steps.append(msg))
+    monkeypatch.setattr(runner, "_patch_project", lambda body: patches.append(body) or True)
+
+    ok = runner._block_for_unregistered_questions("p1", "charter", ["Qual o SLA?", "Multi-tenant?"], "rid")
+    assert ok is True
+    assert patches and patches[0]["status"] == "blocked_structural_gate"
+    assert "não inventar requisito" in patches[0]["blocked_reason"]
+    assert "Qual o SLA?" in patches[0]["blocked_reason"]
+    # o humano vê as perguntas MESMO sem o canal de notificação da API ter funcionado
+    assert any("BLOCKED" in s for s in steps) and any("Qual o SLA?" in s for s in steps)
+
+    # sem projeto na Bancada não existe canal D3 por desenho → não bloqueia nada
+    assert runner._block_for_unregistered_questions(None, "charter", ["x"], "rid") is False
+    assert runner._block_for_unregistered_questions("p1", "charter", [], "rid") is False

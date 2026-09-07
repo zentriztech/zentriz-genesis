@@ -29,23 +29,40 @@ export const SPEC_QUESTION_TTL_HOURS = Math.max(1, parseInt(process.env.SPEC_QUE
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type RaiseResult =
-  | { ok: true; questionId: string; round: number }
+  | { ok: true; questionId: string; round: number; accepted: number; dropped: number; truncated: number }
   | { ok: false; code: "NOT_FOUND" | "INVALID" | "QUESTION_ROUNDS_EXCEEDED" | "QUESTION_ALREADY_OPEN"; round?: number; questionId?: string };
 
 export type AnswerResult =
   | { ok: true; questionId: string; round: number }
   | { ok: false; code: "NOT_FOUND" | "INVALID" | "NO_OPEN_QUESTION" | "WRONG_STATUS"; status?: string };
 
-function cleanQuestions(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
+export const QUESTION_MAX_LEN = 1000;
+export const QUESTIONS_PER_ROUND_CAP = 12;
+
+/**
+ * Normaliza a lista de perguntas e CONTA o que foi cortado.
+ *
+ * GAP-63: antes o corte era silencioso (`slice(0, 1000)` por pergunta, `break` no 12º) — a 13ª
+ * pergunta bloqueante do CTO desaparecia e ninguém sabia; com o teto de 2 rodadas ela podia nunca
+ * mais ser feita. Cortar continua correto (o humano não responde 40 perguntas de uma vez); o que
+ * mudou é que agora o corte é DECLARADO ao humano na notificação e no e-mail.
+ */
+function cleanQuestions(raw: unknown): { questions: string[]; dropped: number; truncated: number } {
+  if (!Array.isArray(raw)) return { questions: [], dropped: 0, truncated: 0 };
+  const valid: Array<{ text: string; cut: boolean }> = [];
   for (const q of raw) {
     const text = typeof q === "string" ? q : (q && typeof q === "object" ? String((q as Record<string, unknown>).question ?? (q as Record<string, unknown>).text ?? "") : "");
-    const t = text.trim().slice(0, 1000);
-    if (t) out.push(t);
-    if (out.length >= 12) break;
+    const full = text.trim();
+    if (!full) continue;
+    valid.push({ text: full.slice(0, QUESTION_MAX_LEN), cut: full.length > QUESTION_MAX_LEN });
   }
-  return out;
+  const kept = valid.slice(0, QUESTIONS_PER_ROUND_CAP);
+  return {
+    questions: kept.map((k) => k.text),
+    dropped: valid.length - kept.length,
+    // Só conta o corte de enunciado das perguntas que de fato ENTRARAM nesta rodada.
+    truncated: kept.filter((k) => k.cut).length,
+  };
 }
 
 function esc(s: unknown): string {
@@ -56,7 +73,7 @@ function esc(s: unknown): string {
 export async function raiseSpecQuestions(pool: Pool, args: {
   projectId: string; stage?: string; questions: unknown; askedBy?: string; requestId?: string | null;
 }): Promise<RaiseResult> {
-  const questions = cleanQuestions(args.questions);
+  const { questions, dropped, truncated } = cleanQuestions(args.questions);
   if (!UUID_RE.test(args.projectId) || questions.length === 0) return { ok: false, code: "INVALID" };
   const stage = (args.stage ?? "spec_review").slice(0, 40);
   const proj = (await pool.query(
@@ -86,10 +103,16 @@ export async function raiseSpecQuestions(pool: Pool, args: {
     [args.projectId],
   );
 
+  // GAP-63: o corte (12 por rodada / 1.000 chars por pergunta) é DECLARADO ao humano — antes
+  // desaparecia em silêncio. Uma linha, no fim, tanto no in-app quanto no e-mail.
+  const cutNote = cutDeclaration(dropped, truncated);
+  if (cutNote) console.warn(`[spec-questions] corte declarado projeto=${args.projectId} dropped=${dropped} truncated=${truncated}`);
+
   // In-app (best-effort): um aviso por usuário do tenant.
   if (proj.tenant_id) {
     const title = `A fábrica tem ${questions.length} pergunta${questions.length > 1 ? "s" : ""} sobre "${proj.title ?? "seu projeto"}"`;
-    const body = questions.slice(0, 3).map((q, i) => `${i + 1}. ${q}`).join("\n") + (questions.length > 3 ? `\n… (+${questions.length - 3})` : "");
+    const body = questions.slice(0, 3).map((q, i) => `${i + 1}. ${q}`).join("\n") + (questions.length > 3 ? `\n… (+${questions.length - 3})` : "")
+      + (cutNote ? `\n\n${cutNote}` : "");
     await pool.query(
       `INSERT INTO notifications (tenant_id, user_id, project_id, type, title, body)
        SELECT $1, u.id, $2, 'spec_question', $3, $4 FROM users u
@@ -99,14 +122,36 @@ export async function raiseSpecQuestions(pool: Pool, args: {
   }
   // E-mail (fire-and-forget).
   setImmediate(() => {
-    notifySpecQuestionsEmail(pool, { projectId: args.projectId, tenantId: proj.tenant_id, title: proj.title, questions, round, questionId })
+    notifySpecQuestionsEmail(pool, { projectId: args.projectId, tenantId: proj.tenant_id, title: proj.title, questions, round, questionId, cutNote })
       .catch((e) => console.warn("[spec-questions] e-mail falhou:", e instanceof Error ? e.message : e));
   });
-  return { ok: true, questionId, round };
+  return { ok: true, questionId, round, accepted: questions.length, dropped, truncated };
+}
+
+/** Frase única que declara o corte de perguntas ao humano. `null` quando nada foi cortado. */
+export function cutDeclaration(dropped: number, truncated: number): string | null {
+  const parts: string[] = [];
+  if (dropped > 0) {
+    parts.push(
+      `⚠️ O CTO fez ${dropped + QUESTIONS_PER_ROUND_CAP} perguntas: as ${QUESTIONS_PER_ROUND_CAP} primeiras entraram nesta rodada e ` +
+      `${dropped} ficaram para a próxima. Se alguma delas for decisiva, inclua a informação na sua resposta.`,
+    );
+  }
+  if (truncated > 0) {
+    parts.push(
+      `⚠️ ${truncated} pergunta${truncated > 1 ? "s" : ""} passava${truncated > 1 ? "m" : ""} de ` +
+      // Separador de milhar fixo: `toLocaleString` depende de ICU completo no container.
+      `${QUESTION_MAX_LEN.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".")} caracteres e ` +
+      `${truncated > 1 ? "tiveram" : "teve"} o enunciado cortado. ` +
+      "Se ficou incompleto, responda o que entendeu e diga isso.",
+    );
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 export async function notifySpecQuestionsEmail(pool: Pool, a: {
   projectId: string; tenantId: string | null; title: string | null; questions: string[]; round: number; questionId: string;
+  cutNote?: string | null;
 }): Promise<boolean> {
   if (!a.tenantId || !isSesConfigured()) return false;
   const t = (await pool.query("SELECT name, responsible_name, responsible_email, email FROM tenants WHERE id = $1", [a.tenantId])).rows[0] as
@@ -128,13 +173,15 @@ export async function notifySpecQuestionsEmail(pool: Pool, a: {
     e encontrou ${a.questions.length} ponto${a.questions.length > 1 ? "s" : ""} que só você pode decidir (rodada ${a.round} de ${SPEC_QUESTION_MAX_ROUNDS}). O pipeline está <b style="color:#f0b866;">pausado</b> e retoma exatamente de onde parou assim que você responder.</p></td></tr>
   <tr><td style="padding:16px 32px 4px 32px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#13253c; border-left:4px solid #17b3a3; border-radius:0 10px 10px 0;"><tr><td style="padding:16px 20px;">
     <div style="color:#17b3a3; font-size:12px; letter-spacing:1px; text-transform:uppercase; font-weight:bold; margin-bottom:10px;">Perguntas</div>
-    <ol style="margin:0; padding-left:20px;">${items}</ol></td></tr></table></td></tr>
+    <ol style="margin:0; padding-left:20px;">${items}</ol>${a.cutNote ? `
+    <p style="color:#f0b866; font-size:13px; line-height:1.55; margin:12px 0 0 0;">${esc(a.cutNote)}</p>` : ""}</td></tr></table></td></tr>
   <tr><td style="padding:20px 32px 26px 32px;" align="left">
     <a href="${link}" style="display:inline-block; background:#17b3a3; color:#062a26; font-weight:bold; font-size:14px; text-decoration:none; padding:12px 20px; border-radius:8px;">Responder na Bancada</a>
     <p style="color:#7a889b; font-size:12px; line-height:1.5; margin:14px 0 0 0;">Sem resposta em ${SPEC_QUESTION_TTL_HOURS}h a equipe Zentriz é avisada para ajudar. Link direto: <a href="${link}" style="color:#8fa6bd;">${link}</a></p></td></tr>
 </table></td></tr></table></body></html>`;
   const text = `Zentriz Genesis — a fábrica tem perguntas sobre "${a.title ?? "seu projeto"}" (rodada ${a.round}/${SPEC_QUESTION_MAX_ROUNDS}).\n\n` +
-    a.questions.map((q, i) => `${i + 1}. ${q}`).join("\n") + `\n\nResponda na Bancada: ${link}\nSem resposta em ${SPEC_QUESTION_TTL_HOURS}h a equipe Zentriz é avisada.`;
+    a.questions.map((q, i) => `${i + 1}. ${q}`).join("\n") + (a.cutNote ? `\n\n${a.cutNote}` : "") +
+    `\n\nResponda na Bancada: ${link}\nSem resposta em ${SPEC_QUESTION_TTL_HOURS}h a equipe Zentriz é avisada.`;
   const r = await sendEmail({ to, subject, html, text });
   if (r.delivered) {
     await pool.query("UPDATE project_questions SET notified_at = now() WHERE id = $1", [a.questionId]).catch(() => {});

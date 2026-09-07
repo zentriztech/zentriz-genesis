@@ -1,5 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
-import { raiseSpecQuestions, answerSpecQuestion, SPEC_QUESTION_MAX_ROUNDS } from "./specQuestions.js";
+
+/** Captura o que o SES receberia — o e-mail é onde a declaração de corte (GAP-63) tem de aparecer. */
+const enviados: Array<{ html: string; text?: string }> = [];
+vi.mock("./emailSender.js", () => ({
+  isSesConfigured: () => true,
+  sendEmail: async (m: { html: string; text?: string }) => { enviados.push(m); return { delivered: true }; },
+}));
+
+import {
+  raiseSpecQuestions, answerSpecQuestion, notifySpecQuestionsEmail, cutDeclaration,
+  SPEC_QUESTION_MAX_ROUNDS, QUESTION_MAX_LEN, QUESTIONS_PER_ROUND_CAP,
+} from "./specQuestions.js";
 
 const PID = "11111111-1111-4111-8111-111111111111";
 const TID = "22222222-2222-4222-8222-222222222222";
@@ -25,7 +36,7 @@ describe("specQuestions (D3)", () => {
       [/INSERT INTO project_questions/, () => ({ rows: [{ id: QID }] })],
     ]);
     const r = await raiseSpecQuestions(db as never, { projectId: PID, stage: "spec_review", questions: [" Qual o SLA? ", { question: "Multi-tenant?" }, ""] });
-    expect(r).toEqual({ ok: true, questionId: QID, round: 1 });
+    expect(r).toEqual({ ok: true, questionId: QID, round: 1, accepted: 2, dropped: 0, truncated: 0 });
     const sqls = db.calls.map((c) => c.sql);
     expect(sqls.some((s) => /status = 'needs_spec_input', stopped_by = 'human_question'/.test(s))).toBe(true);
     const ins = db.calls.find((c) => /INSERT INTO project_questions/.test(c.sql))!;
@@ -80,5 +91,72 @@ describe("specQuestions (D3)", () => {
     const none = fakePool([[/SELECT id, status FROM projects/, () => ({ rows: [{ id: PID, status: "needs_spec_input" }] })]]);
     expect(await answerSpecQuestion(none as never, { projectId: PID, answer: "x", userId: UID })).toEqual({ ok: false, code: "NO_OPEN_QUESTION" });
     expect(await answerSpecQuestion(none as never, { projectId: PID, answer: "   ", userId: UID })).toEqual({ ok: false, code: "INVALID" });
+  });
+
+  // ── GAP-63: o corte (12 por rodada / 1.000 chars) precisa ser DECLARADO ────────────────
+  it("raise: corta em 12 perguntas e em 1.000 chars, e DECLARA o corte na notificação", async () => {
+    const db = fakePool([
+      [/SELECT id, tenant_id, title, status FROM projects/, () => ({ rows: [{ id: PID, tenant_id: TID, title: "CF", status: "running" }] })],
+      [/count\(\*\)::int AS n FROM project_questions/, () => ({ rows: [{ n: 0 }] })],
+      [/INSERT INTO project_questions/, () => ({ rows: [{ id: QID }] })],
+    ]);
+    const qs = Array.from({ length: 15 }, (_v, i) => `Pergunta ${i}?`);
+    qs[0] = "L".repeat(1500) + "?";
+    const r = await raiseSpecQuestions(db as never, { projectId: PID, questions: qs });
+    expect(r).toMatchObject({ ok: true, accepted: QUESTIONS_PER_ROUND_CAP, dropped: 3, truncated: 1 });
+
+    // o banco recebe só as 12, cada uma no máximo com QUESTION_MAX_LEN chars
+    const ins = db.calls.find((c) => /INSERT INTO project_questions/.test(c.sql))!;
+    const gravadas = JSON.parse(ins.params[3] as string) as string[];
+    expect(gravadas).toHaveLength(QUESTIONS_PER_ROUND_CAP);
+    expect(gravadas[0]).toHaveLength(QUESTION_MAX_LEN);
+
+    // …e o humano é AVISADO do que ficou de fora (era silencioso antes do GAP-63)
+    const notif = db.calls.find((c) => /INSERT INTO notifications/.test(c.sql))!;
+    const corpo = notif.params[3] as string;
+    expect(corpo).toContain("15 perguntas");
+    expect(corpo).toContain("3 ficaram para a próxima");
+    expect(corpo).toContain("1.000 caracteres");
+  });
+
+  it("raise: nada cortado → nenhuma declaração de corte no corpo da notificação", async () => {
+    const db = fakePool([
+      [/SELECT id, tenant_id, title, status FROM projects/, () => ({ rows: [{ id: PID, tenant_id: TID, title: "CF", status: "running" }] })],
+      [/count\(\*\)::int AS n FROM project_questions/, () => ({ rows: [{ n: 0 }] })],
+      [/INSERT INTO project_questions/, () => ({ rows: [{ id: QID }] })],
+    ]);
+    const r = await raiseSpecQuestions(db as never, { projectId: PID, questions: ["Qual o SLA?", "Multi-tenant?"] });
+    expect(r).toMatchObject({ ok: true, accepted: 2, dropped: 0, truncated: 0 });
+    const notif = db.calls.find((c) => /INSERT INTO notifications/.test(c.sql))!;
+    expect(notif.params[3] as string).not.toContain("⚠️");
+  });
+
+  it("cutDeclaration: só fala quando houve corte; pluraliza os dois eixos", () => {
+    expect(cutDeclaration(0, 0)).toBeNull();
+    const um = cutDeclaration(0, 1)!;
+    expect(um).toContain("1 pergunta passava");
+    expect(um).toContain("teve o enunciado cortado");
+    const varias = cutDeclaration(0, 3)!;
+    expect(varias).toContain("3 perguntas passavam");
+    expect(varias).toContain("tiveram o enunciado cortado");
+    // o total anunciado é o que o CTO realmente perguntou (cortadas + as que entraram)
+    expect(cutDeclaration(5, 0)!).toContain(`${5 + QUESTIONS_PER_ROUND_CAP} perguntas`);
+  });
+
+  it("e-mail: a declaração de corte aparece no HTML e no texto, sobre fundo escuro", async () => {
+    const db = fakePool([
+      [/FROM tenants WHERE id/, () => ({ rows: [{ name: "T", responsible_email: "dono@exemplo.com" }] })],
+    ]);
+    enviados.length = 0;
+    const ok = await notifySpecQuestionsEmail(db as never, {
+      projectId: PID, tenantId: TID, title: "CF", questions: ["Qual o SLA?"], round: 1, questionId: QID,
+      cutNote: "⚠️ O CTO fez 15 perguntas: as 12 primeiras entraram nesta rodada e 3 ficaram para a próxima.",
+    });
+    expect(ok).toBe(true);
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0].html).toContain("3 ficaram para a próxima");
+    // regra de ouro §8.1: texto claro (âmbar) só sobre o card escuro
+    expect(enviados[0].html).toMatch(/color:#f0b866[^"]*"[^>]*>⚠️ O CTO fez 15 perguntas/);
+    expect(enviados[0].text).toContain("3 ficaram para a próxima");
   });
 });

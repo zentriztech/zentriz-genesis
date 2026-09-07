@@ -737,8 +737,19 @@ def _evolution_existing_artifacts(pipeline_ctx) -> list:
     return list(arts) if isinstance(arts, list) else []
 
 
+#: Teto de perguntas registradas por rodada. GAP-63: fica em UM lugar só
+#: (`_raise_spec_questions`, que é quem envia e portanto quem pode DECLARAR o
+#: corte). Antes `_extract_questions` truncava em silêncio e a 13ª pergunta
+#: bloqueante do CTO desaparecia sem ninguém saber. Mesmo teto do lado Node.
+QUESTIONS_PER_ROUND_CAP = 12
+
+
 def _extract_questions(response: dict | None) -> list[str]:
-    """Perguntas de um NEEDS_INFO (envelope: `next_actions.questions`, strings ou {question}). [] se não há."""
+    """Perguntas de um NEEDS_INFO (envelope: `next_actions.questions`, strings ou {question}). [] se não há.
+
+    Devolve TODAS as perguntas válidas — o teto por rodada é aplicado (e declarado)
+    em `_raise_spec_questions`.
+    """
     if not isinstance(response, dict):
         return []
     if str(response.get("status") or "").upper() != "NEEDS_INFO":
@@ -753,7 +764,7 @@ def _extract_questions(response: dict | None) -> list[str]:
             text = q.get("question") or q.get("text") or q.get("q")
             if isinstance(text, str) and text.strip():
                 out.append(text.strip())
-    return out[:12]
+    return out
 
 
 def _human_answers_block(proj_data: dict | None) -> str:
@@ -782,28 +793,93 @@ def _raise_spec_questions(project_id: str | None, stage: str, questions: list[st
     POST /api/projects/{id}/questions (a API grava project_questions, seta `needs_spec_input`, notifica o
     tenant in-app + e-mail e aplica o teto de rodadas). Retorna 'asked' | 'capped' | 'unavailable'.
     - capped: teto SPEC_QUESTION_MAX_ROUNDS atingido → chamador bloqueia com razão explícita.
-    - unavailable: API não aceitou (rota ausente/erro) → chamador segue o comportamento antigo.
+    - unavailable: NÃO foi possível registrar a pergunta → o chamador PARA a fábrica
+      (`_block_for_unregistered_questions`). GAP-62: aqui já se tentou de novo o que é
+      transitório; seguir adiante deixaria outro LLM responder o que era do humano.
+
+    Retry (GAP-62): só no que é TRANSITÓRIO — `status <= 0` (falha de rede/timeout de 15 s do
+    `_api_request`, o caso de api reiniciando) ou `>= 500`. O POST é idempotente pelo lado da
+    API (`QUESTION_ALREADY_OPEN` → 'asked'), então repetir é seguro. 404 (rota ausente) e 4xx
+    de contrato NÃO têm retry — insistir não muda a resposta.
     """
     if not project_id or not questions:
         return "unavailable"
-    data, status = _api_post(f"/api/projects/{project_id}/questions", {
-        "stage": stage, "questions": questions, "askedBy": "cto", "requestId": request_id,
-    })
+    asked = questions[:QUESTIONS_PER_ROUND_CAP]
+    dropped = len(questions) - len(asked)
+    data: dict | list | None = None
+    status = 0
+    for attempt in range(3):
+        data, status = _api_post(f"/api/projects/{project_id}/questions", {
+            "stage": stage, "questions": asked, "askedBy": "cto", "requestId": request_id,
+        })
+        if status > 0 and status < 500:
+            break
+        if attempt < 2:
+            logger.warning("[D3] Falha transitória ao registrar perguntas (status=%s) — tentativa %d/3.", status, attempt + 1)
+            time.sleep(2 if attempt == 0 else 5)
     if status == 409 and isinstance(data, dict) and data.get("code") == "QUESTION_ROUNDS_EXCEEDED":
         return "capped"
     if status == 409 and isinstance(data, dict) and data.get("code") == "QUESTION_ALREADY_OPEN":
         return "asked"  # idempotente: já há pergunta aberta (retry) — o projeto JÁ está em needs_spec_input
     if status not in (200, 201, 202) or not isinstance(data, dict):
-        logger.warning("[D3] API não aceitou as perguntas (status=%s) — seguindo sem parar.", status)
+        logger.error("[D3] API não aceitou as perguntas (status=%s) — a fábrica vai PARAR (fail-closed).", status)
         return "unavailable"
     _post_step(
-        "A fábrica tem PERGUNTAS para você antes de continuar (" + str(len(questions)) + "). "
+        "A fábrica tem PERGUNTAS para você antes de continuar (" + str(len(asked)) + "). "
         "Responda na Bancada (Meus apps → projeto → Perguntas da fábrica) e o pipeline retoma do ponto onde parou.",
         request_id,
     )
-    for q in questions:
+    for q in asked:
         _post_step(f"❓ {q}", request_id)
+    # GAP-63: o corte é DECLARADO — antes a 13ª pergunta simplesmente desaparecia.
+    if dropped > 0:
+        _post_step(
+            f"⚠️ O CTO fez {len(questions)} perguntas; as {len(asked)} primeiras foram registradas nesta rodada "
+            f"e {dropped} ficaram para a próxima. Se alguma delas for decisiva, inclua a informação na resposta.",
+            request_id,
+        )
+        logger.warning("[D3] %d pergunta(s) além do teto de %d por rodada — declarado ao humano.", dropped, QUESTIONS_PER_ROUND_CAP)
+    truncated = [q for q in asked if len(q) > 1000]
+    if truncated:
+        _post_step(
+            f"⚠️ {len(truncated)} pergunta(s) do CTO passavam de 1.000 caracteres e foram cortadas ao registrar — "
+            "se o enunciado ficou incompleto, responda o que entendeu e diga isso na resposta.",
+            request_id,
+        )
     return "asked"
+
+
+def _block_for_unregistered_questions(project_id: str | None, stage: str, questions: list[str], request_id: str) -> bool:
+    """GAP-62 (fail-CLOSED): não foi possível registrar as perguntas do CTO → PARA a fábrica.
+
+    Antes, `unavailable` deixava o pipeline seguir "como antes": no Charter isso caía em
+    "O CTO enviou questionamentos ao Engineer. Nova rodada." — ou seja, **outro LLM respondia a
+    pergunta que era do humano**, que é exatamente a regressão que a D3 existe para matar
+    (auditoria adversarial R2 §3.3). Uma falha de rede de 15 s bastava, e nada denunciava:
+    o run terminava com "sucesso", sem e-mail, sem in-app, sem escalada do watchdog.
+
+    Aqui a fábrica para e o motivo vai para o diálogo E para `blocked_reason` — as perguntas
+    aparecem para o humano mesmo sem o canal de notificação da API ter funcionado.
+
+    Devolve True se bloqueou (o chamador deve encerrar o run). SEM `project_id` (execução local
+    de CLI, sem projeto na Bancada) não existe canal D3 por desenho — não há o que bloquear nem
+    a quem avisar, então devolve False e o chamador segue como antes.
+    """
+    if not project_id or not questions:
+        return False
+    shown = questions[:QUESTIONS_PER_ROUND_CAP]
+    _post_step(
+        "BLOCKED — o CTO tem perguntas bloqueantes e a fábrica NÃO conseguiu registrá-las para você "
+        "(canal de perguntas indisponível). O pipeline parou de propósito: nenhum outro agente vai "
+        "responder no seu lugar. As perguntas estão abaixo — responda na spec, na Bancada, e reenvie.",
+        request_id,
+    )
+    for q in shown:
+        _post_step(f"❓ {q}", request_id)
+    reason = (f"Perguntas bloqueantes do CTO ({stage}) não puderam ser registradas (canal indisponível); "
+              "a fábrica parou para não inventar requisito: " + " | ".join(shown))[:2000]
+    _patch_project({"status": "blocked_structural_gate", "blocked_reason": reason})
+    return True
 
 
 class ConnectDeclarationGateError(RuntimeError):
@@ -5395,7 +5471,8 @@ def main() -> int:
             _audit_log("cto", request_id, cto_spec_response)
             # D3 — o CTO PERGUNTOU (NEEDS_INFO com next_actions.questions): PARA e devolve ao humano.
             # Antes, o status era IGNORADO aqui (o texto das perguntas virava "spec revisada") —
-            # adversarial R3. Teto de rodadas → bloqueio explícito; API indisponível → segue como antes.
+            # adversarial R3. Teto de rodadas → bloqueio explícito; canal de perguntas indisponível
+            # → GAP-62: bloqueia TAMBÉM (fail-closed), nunca segue deixando outro LLM responder.
             _q_spec = _extract_questions(cto_spec_response)
             if _q_spec:
                 _asked = _raise_spec_questions(project_id, "spec_review", _q_spec, request_id)
@@ -5415,7 +5492,13 @@ def main() -> int:
                         try: _run_log.stop_run(reason="blocked_structural_gate")
                         except Exception: pass
                     return
-                logger.warning("[D3] Perguntas do CTO não puderam ser registradas — seguindo (comportamento anterior).")
+                # GAP-62: fail-CLOSED. Seguir daqui era deixar o Engineer/PM responder a pergunta
+                # do humano — a regressão que a D3 existe para matar.
+                if _block_for_unregistered_questions(project_id, "spec_review", _q_spec, request_id):
+                    if _run_log:
+                        try: _run_log.stop_run(reason="blocked_structural_gate")
+                        except Exception: pass
+                    return
             spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
             for art in cto_spec_response.get("artifacts", []):
                 if isinstance(art, dict) and art.get("content"):
@@ -5586,6 +5669,14 @@ def main() -> int:
                         _post_step("BLOCKED — a fábrica esgotou as rodadas de perguntas no Charter. "
                                    "Revise a spec na Bancada e reenvie.", request_id)
                         _patch_project({"status": "blocked_structural_gate", "blocked_reason": _reason_qc})
+                        if _run_log:
+                            try: _run_log.stop_run(reason="blocked_structural_gate")
+                            except Exception: pass
+                        return
+                    # GAP-62: fail-CLOSED. Antes o `unavailable` caía adiante e, como NEEDS_INFO não é
+                    # "OK", o laço imprimia "O CTO enviou questionamentos ao Engineer. Nova rodada." —
+                    # outro LLM respondendo a pergunta do humano, exatamente o que a D3 proíbe.
+                    if _block_for_unregistered_questions(project_id, "charter", _q_charter, request_id):
                         if _run_log:
                             try: _run_log.stop_run(reason="blocked_structural_gate")
                             except Exception: pass

@@ -56,7 +56,12 @@ export async function specQuestionRoutes(app: FastifyInstance): Promise<void> {
         }
         return reply.status(r.code === "NOT_FOUND" ? 404 : 400).send({ code: r.code });
       }
-      return reply.status(201).send({ questionId: r.questionId, round: r.round, maxRounds: SPEC_QUESTION_MAX_ROUNDS, status: "needs_spec_input" });
+      // GAP-63: `accepted`/`dropped`/`truncated` deixam o runner declarar o corte no diálogo —
+      // o teto continua (o humano não responde 40 perguntas de uma vez), mas agora é declarado.
+      return reply.status(201).send({
+        questionId: r.questionId, round: r.round, maxRounds: SPEC_QUESTION_MAX_ROUNDS, status: "needs_spec_input",
+        accepted: r.accepted, dropped: r.dropped, truncated: r.truncated,
+      });
     },
   );
 
