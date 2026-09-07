@@ -264,6 +264,13 @@ export interface AutonomyRoundLog {
    */
   toleratedOverflow?: number | null;
   /**
+   * 🔴 GAP-70: a parcela do `toleratedOverflow` que só passou porque a rodada **consolidou** (citou o
+   * oráculo) e o laço lhe EMPRESTOU chars do pool do passe. Separada do `toleratedOverflow` porque é
+   * ela que consome o pool: se a tolerância comum do GAP-64 também o consumisse, um estouro sem
+   * nenhuma relação com consolidação esgotaria a graça de quem realmente removeu redeclaração.
+   */
+  consolidationGrace?: number | null;
+  /**
    * GAP-41: a diferença finding-a-finding do PASSE — quantos GAPs saíram e quantos entraram. O
    * agregado (`gapsBefore`/`gapsAfter`) pode ficar parado com o laço fechando e abrindo a mesma
    * quantidade; foi exatamente o que aconteceu em prod, e sem estes dois números não havia como
@@ -942,6 +949,34 @@ export function runGrowthUsed(run: Pick<AutonomyRun, "rounds">): number {
 }
 
 /**
+ * 🔴 GAP-70 — quanto da graça de consolidação a run já tomou emprestado. Lê o log da rodada
+ * (`consolidationGrace`), que o GAP-64 já ensinou a declarar — nada de coluna nova.
+ */
+export function runConsolidationGraceUsed(run: Pick<AutonomyRun, "rounds">): number {
+  if (!Array.isArray(run.rounds)) return 0;
+  return run.rounds.reduce(
+    (sum, r) => sum + (typeof r?.consolidationGrace === "number" && r.consolidationGrace > 0 ? r.consolidationGrace : 0),
+    0,
+  );
+}
+
+/**
+ * 🔴 GAP-70 — a graça que AINDA resta ao laço. Pool por PASSE (`pool × (passes + 1)`) e não por
+ * rodada: com 12 arquivos, uma graça por rodada seria um segundo orçamento pela porta dos fundos.
+ *
+ * Nunca negativa: se a run já tomou mais do que o pool (log de run antiga, pool reduzido por env no
+ * meio da run), a graça acabou — não vira dívida que proibiria o encolhimento.
+ */
+export function consolidationGraceLeft(
+  run: Pick<AutonomyRun, "rounds" | "passes">,
+  pool: number,
+): number {
+  if (!Number.isFinite(pool) || pool <= 0) return 0;
+  const total = pool * ((run.passes ?? 0) + 1);
+  return Math.max(0, total - runConsolidationGraceUsed(run));
+}
+
+/**
  * GAP-28 — margem que resta ao passe. Nunca negativa: se o passe já estourou, a margem é ZERO (o
  * arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
  */
@@ -1261,7 +1296,11 @@ async function skipFileAndContinue(
         SET status = 'pending', chat_job_id = NULL, current_file = NULL, file_failures = $2,
             files_done = files_done || $3::jsonb, last_error = $4, updated_at = now()
       WHERE id = $1 AND status = $5`,
-    [run.id, failures, JSON.stringify([path]), note.slice(0, 500), opts.fromStatus],
+    // 🔴 GAP-70: era 500, e a coluna é TEXT — o corte era auto-imposto. O veto de consolidação já
+    // tinha ~530 chars com a explicação do GAP-37 ("a rodada pediu DUAS coisas"), então a parte
+    // ACIONÁVEL da recusa vinha sendo truncada no único lugar onde o humano a lê. Descoberto porque a
+    // nota da graça empurrou o texto para fora do limite e o teste mostrou a frase cortada no meio.
+    [run.id, failures, JSON.stringify([path]), note.slice(0, 1200), opts.fromStatus],
   );
   return true;
 }
@@ -1331,7 +1370,7 @@ async function ensureOracles(
  * Veredito do veto de consolidação. `veto` = motivo da recusa (`null` = pode aplicar);
  * `toleratedOverflow` = chars que passaram da margem e o laço decidiu PAGAR (GAP-64).
  */
-type ConsolidationVerdict = { veto: string | null; toleratedOverflow: number };
+type ConsolidationVerdict = { veto: string | null; toleratedOverflow: number; consolidationGrace: number };
 
 async function consolidationVeto(
   db: Db, projectId: string, target: string, before: string, after: string, budget: number,
@@ -1340,19 +1379,41 @@ async function consolidationVeto(
    * sobre a causa (ver o texto abaixo).
    */
   gapsDispatched = 0,
+  /**
+   * 🔴 GAP-70 — a graça de consolidação. `left` = chars que o laço ainda pode EMPRESTAR a uma rodada
+   * que provadamente consolidou; `pool` = o teto por passe.
+   *
+   * São DOIS números porque a recusa tem de dizer a verdade: `left === 0` com `pool > 0` é "a graça
+   * deste passe acabou", e `pool === 0` é "a graça está DESLIGADA" (kill-switch). Com um número só, o
+   * kill-switch faria a recusa acusar rodadas anteriores de ter gasto uma graça que nunca existiu.
+   */
+  grace: { pool: number; left: number } = { pool: 0, left: 0 },
 ): Promise<ConsolidationVerdict> {
+  const NADA: ConsolidationVerdict = { veto: null, toleratedOverflow: 0, consolidationGrace: 0 };
   const { loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled, growthOverflowTolerance } = await import("./specOracles.js");
-  if (!oracleRegistryEnabled()) return { veto: null, toleratedOverflow: 0 };
+  if (!oracleRegistryEnabled()) return NADA;
   const decisions = await loadOracleDecisions(db, projectId);
-  if (decisions.length === 0) return { veto: null, toleratedOverflow: 0 };
+  if (decisions.length === 0) return NADA;
   const { restates } = oracleRoleForFile(decisions, target);
-  if (restates.length === 0) return { veto: null, toleratedOverflow: 0 };
+  if (restates.length === 0) return NADA;
 
   const delta = after.length - before.length;
   const contracts = restates.map((d) => `\`${d.contractKey}\` → \`${d.oraclePath}\``).join(", ");
   // GAP-64: quase-conformidade é COBRADA, não descartada. Ver `growthOverflowTolerance`.
   const tolerance = growthOverflowTolerance(budget);
-  if (delta > budget + tolerance) {
+  // 🔴 GAP-70: o fato mecânico "consolidou" é medido ANTES do teto de tamanho. Era medido DEPOIS, e por
+  // isso a rodada 10 da run `f101303f` — que removeu 9 redeclarações e fechou 4 GAPs — foi descartada
+  // por +692 chars sem que ninguém olhasse se ela havia consolidado.
+  const cites = restates.some((d) => {
+    const p = d.oraclePath.toLowerCase();
+    const base = p.split("/").pop() ?? p;
+    const hay = after.toLowerCase();
+    return hay.includes(p) || hay.includes(base);
+  });
+  const gracePool = Number.isFinite(grace.pool) ? Math.max(0, grace.pool) : 0;
+  const graceLeft = gracePool > 0 && Number.isFinite(grace.left) ? Math.max(0, grace.left) : 0;
+  const graceHere = cites ? graceLeft : 0;
+  if (delta > budget + tolerance + graceHere) {
     // 🔴 GAP-37 (2026-09-07) — a recusa dizia "a correção pedida era REMOVER a redeclaração", e isso é
     // FALSO numa rodada do laço: o mesmo pedido mandou resolver os GAPs do arquivo (medido na run
     // `6d407460`: `privacidade-lgpd.md` recebeu 🔴 5 + 🟡 2). Este texto é o `rejectedReason` que o
@@ -1366,33 +1427,49 @@ async function consolidationVeto(
         + " redeclarações acima. Nenhuma das duas foi abandonada pelo veto — o que estourou foi o"
         + " TAMANHO do resultado; a remoção das redeclarações é o que paga o texto novo dos GAPs."
       : "";
+    // 🔴 GAP-70: a recusa tem de dizer QUAL limite valeu e por quê. "Cite o oráculo e o laço te
+    // empresta chars" é a única instrução que empurra o agente para a REMOÇÃO em vez da reescrita —
+    // e mentir sobre o limite (GAP-31/37) faz a retentativa otimizar a coisa errada.
+    const graceNote = gracePool <= 0
+      // Graça DESLIGADA (kill-switch): a recusa não pode inventar um empréstimo que não existe.
+      ? ""
+      : cites
+        ? (graceHere > 0
+          ? ` O laço reconheceu a consolidação (o arquivo passa a citar o oráculo) e EMPRESTOU ${graceHere} chars`
+            + ` de graça, mesmo assim o resultado passou: o limite desta rodada era ${budget + tolerance + graceHere}.`
+          : " O laço reconheceu a consolidação (o arquivo cita o oráculo), mas a graça de consolidação deste"
+            + " passe já foi toda emprestada a rodadas anteriores — não há mais chars para emprestar.")
+        : " A graça de consolidação NÃO se aplica: ela só vale quando o arquivo passa a CITAR o oráculo em"
+          + " vez de redeclarar a regra, e esta revisão não cita nenhum dos oráculos acima.";
     return {
       veto: `consolidação recusada: este arquivo redeclara contrato de outro (${contracts}) e a correção pedida`
         + ` incluía REMOVER a redeclaração deixando a citação do oráculo — a revisão CRESCEU ${delta} chars`
         + ` e a margem de crescimento que restava ao laço era ${budget}`
         + (tolerance > 0 ? ` (com a tolerância de ${tolerance}, o limite desta rodada era ${budget + tolerance})` : "")
-        + `. Nada foi escrito.${alsoAsked}`,
+        + `. Nada foi escrito.${graceNote}${alsoAsked}`,
       toleratedOverflow: 0,
+      consolidationGrace: 0,
     };
   }
   // Fato de transporte, não julgamento: consolidar deixa rastro — ou o path do oráculo aparece
   // (citação), ou o arquivo encolheu (a redeclaração saiu). Nenhum dos dois = a rodada não consolidou.
-  const cites = restates.some((d) => {
-    const p = d.oraclePath.toLowerCase();
-    const base = p.split("/").pop() ?? p;
-    const hay = after.toLowerCase();
-    return hay.includes(p) || hay.includes(base);
-  });
   if (!cites && delta >= 0) {
     return {
       veto: `consolidação recusada: a revisão não cita o oráculo (${contracts}) nem encolheu o arquivo`
         + ` (${delta >= 0 ? "+" : ""}${delta} chars) — não houve consolidação a aplicar. Nada foi escrito.`,
       toleratedOverflow: 0,
+      consolidationGrace: 0,
     };
   }
   // GAP-64: passou. Se passou DENTRO da tolerância, o excesso é fato de log — o orçamento do laço já o
   // cobra na rodada seguinte (`growthAllowance` desconta tudo o que a run escreveu).
-  return { veto: null, toleratedOverflow: delta > budget ? delta - budget : 0 };
+  // GAP-70: e o que passou ALÉM da tolerância só passou porque foi EMPRESTADO do pool do passe —
+  // contabilizado à parte para que o pool seja consumido por quem consolidou, não por quem só estourou.
+  return {
+    veto: null,
+    toleratedOverflow: delta > budget ? delta - budget : 0,
+    consolidationGrace: delta > budget + tolerance ? delta - (budget + tolerance) : 0,
+  };
 }
 
 /**
@@ -1815,8 +1892,13 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const dispatched = lastRound?.round === run.round
     ? (lastRound.blockers ?? 0) + (lastRound.warnings ?? 0)
     : 0;
-  const { veto: oracleVeto, toleratedOverflow } = await consolidationVeto(
+  // 🔴 GAP-70: quanto o laço ainda pode emprestar a uma rodada que consolidou. Lido do log da run —
+  // pool por PASSE, não por rodada (ver `consolidationGraceLeft`).
+  const { ORACLE_CONSOLIDATION_GRACE } = await import("./specOracles.js");
+  const graceLeft = consolidationGraceLeft(run, ORACLE_CONSOLIDATION_GRACE);
+  const { veto: oracleVeto, toleratedOverflow, consolidationGrace } = await consolidationVeto(
     db, run.projectId, target, file.content, revised, passBudget, dispatched,
+    { pool: ORACLE_CONSOLIDATION_GRACE, left: graceLeft },
   );
   if (oracleVeto) {
     // GAP-29: o TAMANHO da tentativa recusada vai para o log — é o único jeito de a próxima
@@ -1860,10 +1942,18 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // GAP-64: o excesso tolerado é DECLARADO — foi decisão do laço pagar, e a próxima rodada nasce com
     // a margem já menor. Zero não polui o log.
     ...(toleratedOverflow > 0 ? { toleratedOverflow } : {}),
+    // GAP-70: a parcela EMPRESTADA do pool do passe, separada — é ela que esgota a graça.
+    ...(consolidationGrace > 0 ? { consolidationGrace } : {}),
     note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`
       + (toleratedOverflow > 0
         ? ` A revisão passou ${toleratedOverflow} chars da margem de ${passBudget} e o laço PAGOU o excesso`
           + " (dentro da tolerância) em vez de descartar a rodada — a margem das rodadas seguintes já desconta isto."
+        : "")
+      + (consolidationGrace > 0
+        ? ` Deste excesso, ${consolidationGrace} chars foram EMPRESTADOS da graça de consolidação (GAP-70):`
+          + " a rodada removeu redeclaração e passou a citar o oráculo, então o laço preferiu escrever a"
+          + ` remoção a descartar a rodada inteira. Restam ${Math.max(0, graceLeft - consolidationGrace)} chars`
+          + " de graça neste passe."
         : ""),
   });
   const claim = await db.query(
