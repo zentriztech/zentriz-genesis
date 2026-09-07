@@ -28,7 +28,10 @@
  *
  * **(b) Só depois de trabalho feito.** `SPEC_VERDICT_MIN_GAPS_RESOLVED` (0 = desligado) exige GAPs
  * fechados **de verdade** — só conta fechamento RECONCILIADO (GAP-67), porque "fechado" cru inclui o
- * rebatismo de âncora que o laço fabrica sozinho.
+ * rebatismo de âncora que o laço fabrica sozinho. 🔴 **GAP-82:** essa não é a única prova admissível.
+ * Um laço que gastou o orçamento INTEIRO (passes, edição aplicada, foco individual pago, números
+ * reconciliados) e fechou zero também provou trabalho — provou justamente que não consegue fechar. Ver
+ * `proveWork`; sem a segunda prova, a spec do NVX LastMile ficava presa em loop eterno.
  *
  * **(c) A autoridade não pode baixar a qualidade da entrega.** As guardas:
  *  - GAP sem `file` ou sem `anchor` **nunca** é candidato (veredicto é por GAP, com endereço);
@@ -75,6 +78,11 @@ export interface VerdictConfig {
   maxPerRun: number;
   /** Teto acumulado de veredictos `nao_impeditivo` vivos por projeto. */
   maxPerSpec: number;
+  /**
+   * 🔴 GAP-82 — passes de validação COMPLETOS exigidos para o esgotamento do laço valer como prova de
+   * trabalho. Um laço que morre no 1º passe não gastou o orçamento; ele não provou nada.
+   */
+  minPasses: number;
 }
 
 export function verdictConfig(): VerdictConfig {
@@ -94,6 +102,95 @@ export function verdictConfig(): VerdictConfig {
     minFocusRounds: n("SPEC_VERDICT_MIN_FOCUS_ROUNDS", 2),
     maxPerRun: n("SPEC_VERDICT_MAX_PER_RUN", 3),
     maxPerSpec: n("SPEC_VERDICT_MAX_PER_SPEC", 8),
+    minPasses: n("SPEC_VERDICT_MIN_PASSES", 2),
+  };
+}
+
+/**
+ * 🔴 GAP-82 — o que o laço gastou nesta run, para decidir se o limite (b) do Jean está satisfeito.
+ *
+ * Todos os números vêm do log de rodadas da PRÓPRIA run: nada de somar esforço de outras runs, senão
+ * "trabalho feito" viraria histórico acumulado e a porta abriria numa run que não fez nada.
+ */
+export interface LoopWork {
+  /** GAPs fechados e RECONCILIADOS (GAP-67) nesta run. */
+  gapsResolved: number;
+  /** Como o laço terminou. Só os dois fins de laço chegam aqui. */
+  endReason: "exhausted" | "stalled";
+  /** Passes de validação concluídos. */
+  passes: number;
+  /** Rodadas cuja edição foi de fato APLICADA no disco. */
+  appliedRounds: number;
+  /** Validações em que o reconciliador rodou — é o que faz o `0 fechado` ser um zero medido. */
+  reconciledValidations: number;
+  /** Rodadas de foco INDIVIDUAL (`focusLevel = 2`, GAP-81) desta run. */
+  focusRounds: number;
+}
+
+export interface WorkProof {
+  proven: boolean;
+  /** `resolved` = fechou GAPs; `exhausted` = gastou o orçamento inteiro sem conseguir. */
+  kind: "resolved" | "exhausted" | "none";
+  /** A frase que vai ao log e ao parecer — os números crus, inclusive o `0 fechado`. */
+  detail: string;
+}
+
+/**
+ * 🔴 GAP-82 — as DUAS provas de trabalho que satisfazem o limite (b) do Jean.
+ *
+ * ## O achado que obrigou a segunda prova
+ *
+ * A primeira versão aceitava só uma prova: `gapsResolved >= minGapsResolved` (3 GAPs fechados e
+ * reconciliados). Medido em prod na run `88339651` (NVX LastMile, 21 rodadas, 5 passes, ~1h, toda
+ * rodada com `applied: true`): **`gapsClosed = 0` nas QUATRO validações**, todas com o reconciliador
+ * do GAP-67 tendo rodado (`gapsPersisted = 0`, então não é rebatismo de âncora — é zero de verdade).
+ * Resultado: `verdictCandidates: 0`, `verdictImpeditive: 21`, `promotable: false`, com a nota
+ * "0 de 3 GAP(s) fechado(s) e reconciliado(s) exigidos".
+ *
+ * Enquanto isso, no MESMO projeto, `§1.1`, `CLI-ANON-01` e `PRIV-ETAPAS-01` acumulavam 7, 7 e 5
+ * rodadas DEDICADAS (`focusLevel = 2`) e reapareciam em 7–8 das últimas 8 validações competentes. Isto
+ * é exatamente o gatilho que o Jean descreveu — "focamos neles individualmente algumas vezes, se
+ * insistir a reaparecer ai sim o juiz usa o novo poder" — e o juiz seguia barrado por uma condição que
+ * mede OUTRO tipo de trabalho: fechamento. Um laço que não consegue fechar nada nunca abriria a porta
+ * do veredicto, e o produto ficaria preso para sempre (verbatim do Jean, 2026-09-07: "executar uma
+ * avaliacao focada para nao ficarmos em loop de eterno").
+ *
+ * ## Por que o esgotamento NÃO é uma porta mais frouxa
+ *
+ * É mais caro de fabricar do que fechamento: exige o orçamento inteiro de passes, edição aplicada,
+ * números reconciliados e foco individual pago. E **nenhuma guarda por GAP muda** — cobertura
+ * competente (GAP-20), âncora intocada descartada (GAP-71), reincidência mínima em validações
+ * competentes, trecho verbatim obrigatório, acusação concreta, tetos, `file_sha_at`, fail-CLOSED.
+ * O esgotamento abre a PORTA; a barra continua onde estava. E o `detail` diz o número de fechados em
+ * voz alta (inclusive `0`), porque o humano tem de ler que o laço não fechou nada.
+ */
+export function proveWork(w: LoopWork, cfg?: VerdictConfig): WorkProof {
+  const c = cfg ?? verdictConfig();
+  if (c.minGapsResolved === 0) {
+    return { proven: false, kind: "none", detail: "veredicto de promovibilidade desligado (SPEC_VERDICT_MIN_GAPS_RESOLVED=0)" };
+  }
+  if (w.gapsResolved >= c.minGapsResolved) {
+    return {
+      proven: true, kind: "resolved",
+      detail: `${w.gapsResolved} GAP(s) fechado(s) e reconciliado(s) nesta run (mínimo ${c.minGapsResolved})`,
+    };
+  }
+  // Prova por esgotamento: o laço gastou o orçamento e não conseguiu. Cada degrau que falta é dito.
+  const falta: string[] = [];
+  if (w.passes < c.minPasses) falta.push(`${w.passes} de ${c.minPasses} passe(s) de validação concluído(s)`);
+  if (w.appliedRounds < 1) falta.push("nenhuma edição chegou ao disco");
+  if (w.reconciledValidations < 1) falta.push("nenhuma validação teve os números reconciliados (o 'zero fechado' não foi medido)");
+  if (w.focusRounds < 1) falta.push("nenhuma rodada de foco INDIVIDUAL foi paga");
+  const base = `${w.gapsResolved} de ${c.minGapsResolved} GAP(s) fechado(s) e reconciliado(s) exigidos antes de o juiz poder julgar promovibilidade`;
+  if (falta.length > 0) {
+    return { proven: false, kind: "none", detail: `${base}; e o laço não provou trabalho por esgotamento (${falta.join("; ")})` };
+  }
+  return {
+    proven: true, kind: "exhausted",
+    detail: `laço ESGOTADO (${w.endReason}) com ${w.gapsResolved} GAP(s) fechado(s): ` +
+      `${w.passes} passe(s) de validação, ${w.appliedRounds} rodada(s) aplicada(s), ` +
+      `${w.focusRounds} rodada(s) de foco INDIVIDUAL paga(s), ` +
+      `${w.reconciledValidations} validação(ões) com números reconciliados`,
   };
 }
 
@@ -231,6 +328,12 @@ export function selectVerdictCandidates(args: {
   untouched: Set<string>;
   sections: Map<string, string>;
   gapsResolved: number;
+  /**
+   * 🔴 GAP-82 — a prova de trabalho já apurada pelo chamador (`proveWork`). Ausente, só o caminho
+   * antigo vale: `gapsResolved >= minGapsResolved`. Nunca é derivada aqui, porque o esgotamento do
+   * laço é um fato do log da run, e este módulo não lê o log.
+   */
+  work?: WorkProof;
   cfg?: VerdictConfig;
 }): CandidateGate {
   const cfg = args.cfg ?? verdictConfig();
@@ -240,9 +343,15 @@ export function selectVerdictCandidates(args: {
   }
   // Limite (b) do Jean: o poder só existe DEPOIS de trabalho feito. Sem isso o juiz aprovaria a spec
   // original — e o laço teria um atalho para não rodar.
-  if (args.gapsResolved < cfg.minGapsResolved) {
-    return { candidates: [], rejected, enabled: false,
-      reason: `veredicto indisponível: ${args.gapsResolved} de ${cfg.minGapsResolved} GAP(s) fechado(s) e reconciliado(s) exigidos antes de o juiz poder julgar promovibilidade` };
+  // 🔴 GAP-82: "trabalho feito" tem DUAS provas admissíveis (ver `proveWork`) — fechar GAPs, ou gastar
+  // o orçamento inteiro do laço sem conseguir fechá-los. Medido em prod: com uma só prova, um laço que
+  // fecha zero nunca abre a porta, e o produto fica preso em loop eterno.
+  const work = args.work ?? proveWork(
+    { gapsResolved: args.gapsResolved, endReason: "stalled", passes: 0, appliedRounds: 0, reconciledValidations: 0, focusRounds: 0 },
+    cfg,
+  );
+  if (!work.proven) {
+    return { candidates: [], rejected, enabled: false, reason: `veredicto indisponível: ${work.detail}` };
   }
   // Cobertura competente (GAP-20): sem saber o que a validação julgou por INTEIRO, nada é elegível.
   if (!args.judged) {
@@ -313,9 +422,11 @@ export function selectVerdictCandidates(args: {
     candidates: candidates.slice(0, MAX_CANDIDATES),
     rejected,
     enabled: true,
-    reason: candidates.length === 0
+    // 🔴 GAP-82: a prova de trabalho aparece na razão — o parecer tem de dizer POR QUE a porta abriu,
+    // e "esgotamento com 0 fechado" é uma informação que o humano precisa ler junto do veredicto.
+    reason: (candidates.length === 0
       ? "nenhum GAP passou nas guardas de elegibilidade (reincidência medida, foco pago, cobertura competente, âncora tocada)"
-      : `${candidates.length} GAP(s) elegível(is) a veredicto`,
+      : `${candidates.length} GAP(s) elegível(is) a veredicto`) + ` [prova de trabalho: ${work.detail}]`,
   };
 }
 

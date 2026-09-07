@@ -61,7 +61,9 @@ import {
 // fatos de elegibilidade; quem julga é agente. Só o TIPO entra aqui: o módulo alcança
 // `routes/specs.js` → `db/client.js` e é carregado por `import()` dinâmico nos DOIS fins de laço em que
 // o veredicto existe — o caminho comum não paga por ele (mesma disciplina do `specGapScope`).
-import type { CandidateGate, VerdictRound, PromotabilityReport } from "./gapPromotionVerdict.js";
+import type {
+  CandidateGate, VerdictRound, PromotabilityReport, WorkProof, LoopWork,
+} from "./gapPromotionVerdict.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
@@ -314,6 +316,17 @@ export interface AutonomyRoundLog {
   verdictImpeditive?: number | null;
   promotable?: boolean | null;
   verdictRejected?: string[] | null;
+  /**
+   * 🔴 GAP-82 — QUAL prova de trabalho abriu a porta do veredicto, e os números que a sustentam.
+   *
+   * `workProof` é `resolved` (fechou GAPs) ou `exhausted` (gastou o orçamento inteiro e fechou zero).
+   * `gapsClosedTotal` é o total fechado E reconciliado na run — vai gravado inclusive quando é `0`,
+   * porque é essa a informação que impede o parecer de parecer aprovação de trabalho que não houve.
+   */
+  workProof?: "resolved" | "exhausted" | "none" | null;
+  verdictWork?: string | null;
+  gapsClosedTotal?: number | null;
+  verdictFocusRounds?: number | null;
   /**
    * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
    *
@@ -690,19 +703,33 @@ async function patchLastRound(
    */
   opts: { keepNote?: boolean } = {},
 ): Promise<void> {
-  const rounds = [...run.rounds];
+  const rounds = run.rounds;
   if (rounds.length === 0) return;
   const prevNote = rounds[rounds.length - 1]?.note;
   const note = opts.keepNote && prevNote && patch.note && !prevNote.includes(patch.note)
     ? `${prevNote} ⟶ ${patch.note}`
     : patch.note;
-  rounds[rounds.length - 1] = {
-    ...rounds[rounds.length - 1], ...patch,
+  const merged: Partial<AutonomyRoundLog> = {
+    ...patch,
     ...(note === undefined ? {} : { note }),
     finishedAt: new Date().toISOString(),
   };
-  await db.query("UPDATE spec_autonomy_runs SET rounds = $2::jsonb, updated_at = now() WHERE id = $1",
-    [run.id, JSON.stringify(rounds)]);
+  // 🔴 GAP-83 — a gravação é MERGE no banco (`jsonb_set`), nunca reescrita do array em memória.
+  //
+  // MEDIDO em prod na run `88339651` (rodada 21, a terminal): a validação gravou `gapsAfter`,
+  // `gapsClosed`, `gapsComparableBefore/Now/Same` e `comparableFiles`; poucos milissegundos depois, no
+  // MESMO tick, o veredicto do GAP-77 gravou os campos dele — e os oito campos da validação
+  // DESAPARECERAM, junto com a nota "Validação exhausted: …". Causa: as duas chamadas partiam do MESMO
+  // snapshot `run.rounds`; a segunda reescrevia o array inteiro e apagava o que a primeira havia
+  // escrito (lost update dentro do próprio processo). Consequência prática: em TODA run que termina
+  // pelo caminho do veredicto, a rodada terminal ficava sem a medição comparável do GAP-76 — ou seja,
+  // o parecer de promovibilidade era auditável contra nada. É a mesma lição do GAP-71b
+  // (`mergeIntoLastRound`), que aqui faltava aplicar.
+  //
+  // O snapshot em memória é sincronizado depois da gravação, para que a próxima chamada no mesmo tick
+  // veja a nota e os campos já escritos (é o que preserva a semântica do `keepNote` do GAP-30).
+  await mergeIntoLastRound(db, run.id, merged);
+  rounds[rounds.length - 1] = { ...rounds[rounds.length - 1], ...merged };
 }
 
 const FINAL_LABEL: Record<string, string> = {
@@ -1282,14 +1309,17 @@ export async function stableRecurrenceFor(
  * Falha em qualquer degrau devolve `null` e o laço encerra com a mensagem antiga: fail-CLOSED.
  */
 async function promotionVerdictFor(
-  db: Db, run: AutonomyRun, ctx: { coverage: unknown; unjudged: string[] },
+  db: Db, run: AutonomyRun,
+  ctx: { coverage: unknown; unjudged: string[]; endReason: "exhausted" | "stalled" },
 ): Promise<{
   gate: CandidateGate; round: VerdictRound | null; report: PromotabilityReport; saved: number;
+  work: WorkProof; loop: LoopWork;
 } | null> {
   try {
     const {
       verdictConfig, selectVerdictCandidates, runVerdictRound, saveVerdicts, livePromotionVerdicts,
       specFileShas, promotabilityReport, focusRoundsByFile, focusRoundsByAnchor, anchoredSection,
+      proveWork,
     } = await import("./gapPromotionVerdict.js");
     const cfg = verdictConfig();
     // `SPEC_VERDICT_MIN_GAPS_RESOLVED=0` desliga o recurso sem deploy: o laço encerra com a mensagem
@@ -1301,6 +1331,17 @@ async function promotionVerdictFor(
     // reconciliador do GAP-67 rodou naquela rodada — sem ela, "fechado" inclui rebatismo de âncora.
     const gapsResolved = run.rounds.reduce(
       (acc, r) => acc + (r.gapsPersisted === null || r.gapsPersisted === undefined ? 0 : (r.gapsClosed ?? 0)), 0);
+    // 🔴 GAP-82 — a segunda prova de trabalho: o que ESTA run gastou. Tudo medido no log da própria
+    // run (nunca somando esforço de outras runs, senão "trabalho feito" viraria histórico do projeto).
+    const loop: LoopWork = {
+      gapsResolved,
+      endReason: ctx.endReason,
+      passes: run.passes,
+      appliedRounds: run.rounds.filter((r) => r.applied === true).length,
+      reconciledValidations: run.rounds.filter((r) => r.gapsPersisted !== null && r.gapsPersisted !== undefined).length,
+      focusRounds: run.rounds.filter((r) => r.focusLevel === 2).length,
+    };
+    const work = proveWork(loop, cfg);
     const judged = judgedFilesOf(ctx.coverage);
     const important = state.findings.filter((f) => !f.triage && (f.severity === "blocker" || f.severity === "warning"));
     // Trechos VERBATIM só dos arquivos que esta validação julgou por inteiro — os únicos elegíveis, e
@@ -1336,7 +1377,7 @@ async function promotionVerdictFor(
       coverage: r.stage_b_coverage,
     }));
     const gate = selectVerdictCandidates({
-      findings: important, runs: past, judged, untouched, sections, gapsResolved, cfg,
+      findings: important, runs: past, judged, untouched, sections, gapsResolved, work, cfg,
       focusByFile: await focusRoundsByFile(db, run.projectId).catch(() => new Map<string, number>()),
       // 🔴 GAP-81: a guarda do foco pago é por ÂNCORA e conta só rodada DEDICADA. Falha de leitura cai
       // em mapa vazio ⇒ ninguém é elegível: fail-CLOSED, como todo degrau deste recurso.
@@ -1366,9 +1407,10 @@ async function promotionVerdictFor(
     });
     console.info(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s), ` +
-      `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s), promovível=${report.promotable}`,
+      `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s), promovível=${report.promotable}` +
+      ` — prova de trabalho ${work.kind}: ${work.detail}`,
     );
-    return { gate, round, report, saved };
+    return { gate, round, report, saved, work, loop };
   } catch (e) {
     console.warn(`[SpecAutonomy] run=${run.id} veredicto de promovibilidade indisponível (${msg(e)}) — todos os GAPs seguem impeditivos.`);
     return null;
@@ -1383,9 +1425,14 @@ async function promotionVerdictFor(
  */
 function verdictNote(v: NonNullable<Awaited<ReturnType<typeof promotionVerdictFor>>>): string {
   if (!v.gate.enabled) return ` ${v.gate.reason}.`;
+  // 🔴 GAP-82: quando a porta abriu por ESGOTAMENTO, o parecer diz isso primeiro e com os números —
+  // "o laço gastou tudo e fechou zero" é premissa da decisão, não rodapé.
+  const prova = v.work.kind === "exhausted"
+    ? ` ⚠️ O juiz só pôde julgar porque o **laço esgotou o orçamento sem fechar GAP**: ${v.work.detail}.`
+    : "";
   const head = v.round?.ran
-    ? ` **Rodada adversarial de promovibilidade** (${v.gate.candidates.length} GAP(s) reincidente(s) elegível(is), com foco individual já pago): ${v.round.reason}.`
-    : ` **Veredicto de promovibilidade não rodou**: ${v.round?.reason ?? v.gate.reason} — todos os GAPs seguem impeditivos.`;
+    ? `${prova} **Rodada adversarial de promovibilidade** (${v.gate.candidates.length} GAP(s) reincidente(s) elegível(is), com foco individual já pago): ${v.round.reason}.`
+    : `${prova} **Veredicto de promovibilidade não rodou**: ${v.round?.reason ?? v.gate.reason} — todos os GAPs seguem impeditivos.`;
   const liberados = (v.round?.verdicts ?? []).filter((x) => x.impact === "nao_impeditivo");
   const lista = liberados.length > 0
     ? ` Declarado(s) NÃO impeditivo(s) — a severidade 🔴/🟡 **não muda**, isto é parecer paralelo e auditável: ` +
@@ -2852,13 +2899,24 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 GAP-77 — antes de mandar o humano "tratar à mão", o juiz julga os REINCIDENTES. É o fim de
     // laço que o Jean descreveu: o defeito voltou depois de foco individual pago, então cabe decidir
     // se ele impede a entrega — em vez de o laço empatar para sempre num número que oscila (GAP-76).
-    const v = await promotionVerdictFor(db, run, { coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [] });
+    const v = await promotionVerdictFor(db, run, {
+      coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [],
+      // 🔴 GAP-82: qual dos dois fins de laço chegou aqui — é o fato que sustenta a prova por
+      // esgotamento. `atCap` = teto de passes/rodadas; senão, streak de não-progresso.
+      endReason: atCap ? "exhausted" : "stalled",
+    });
     if (v) {
       await patchLastRound(db, run, {
         verdictCandidates: v.gate.candidates.length,
         verdictReleased: v.round?.released ?? 0,
         verdictImpeditive: v.report.impeditive,
         promotable: v.report.promotable,
+        // 🔴 GAP-82 — a prova de trabalho gravada com os números, inclusive `gapsClosedTotal: 0`. Sem
+        // isto o log mostraria um veredicto sem dizer por que o juiz teve autoridade para dá-lo.
+        workProof: v.work.kind,
+        verdictWork: v.work.detail,
+        gapsClosedTotal: v.loop.gapsResolved,
+        verdictFocusRounds: v.loop.focusRounds,
         // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
         // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.
         verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),
