@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage } from "./specValidation.js";
+import { runStageA, parseStageBFindings, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -335,5 +335,48 @@ describe("canReusePassedRun / pendingCoverage (GAP-19)", () => {
       expect(canReusePassedRun([], raw)).toBe(true);
       expect(canReusePassedRun(["b.md"], raw)).toBe(false);
     }
+  });
+});
+
+/**
+ * 🔴 GAP-39 — o juiz não sabia com que anchor ele mesmo tinha nomeado o defeito na validação anterior.
+ *
+ * `knownFindingsForJudge` monta a lista de continuidade que viaja no prompt do refutador. Regra dura:
+ * só entra finding que o juiz DESTA rodada pode reencontrar — arquivo lido por INTEIRO (`full`). Um
+ * anchor de arquivo que ele só viu em outline convidaria a repetir o item sem evidência.
+ */
+describe("GAP-39 — lista de continuidade de anchor para o refutador", () => {
+  const cov = ["modelo-dados.md", "visao-escopo.md"];
+  it("só findings ativos, com anchor, de arquivo lido por INTEIRO; ordena blocker → warning → info", () => {
+    const out = knownFindingsForJudge([
+      { file: "modelo-dados.md", anchor: "Convenções gerais", title: "blocos de merge", severity: "warning" },
+      { file: "visao-escopo.md", anchor: "§1.5.1", title: "envelope de erro", severity: "blocker" },
+      { file: "privacidade-lgpd.md", anchor: "§3.3", title: "fora da cobertura", severity: "blocker" },
+      { file: "modelo-dados.md", anchor: "", title: "sem anchor → sem identidade", severity: "blocker" },
+      { file: "", anchor: "no_readme", title: "finding global do estágio A", severity: "warning" },
+      { file: "visao-escopo.md", anchor: "§1.4.2", title: "triado pelo humano", severity: "blocker", triage: { state: "ignored" } },
+    ], cov);
+    expect(out.map((f) => f.anchor)).toEqual(["§1.5.1", "Convenções gerais"]);
+  });
+
+  it("deduplica file+anchor (case-insensitive) e respeita o teto", () => {
+    const dup = [
+      { file: "modelo-dados.md", anchor: "Convenções gerais", title: "a", severity: "warning" },
+      { file: "modelo-dados.md", anchor: "convenções GERAIS", title: "b", severity: "blocker" },
+    ];
+    expect(knownFindingsForJudge(dup, cov)).toHaveLength(1);
+    const muitos = Array.from({ length: 50 }, (_, i) => ({ file: "modelo-dados.md", anchor: `a${i}`, title: "t", severity: "info" }));
+    expect(knownFindingsForJudge(muitos, cov, 10)).toHaveLength(10);
+  });
+
+  it("nada elegível → lista vazia (o prompt do refutador volta a ser exatamente o de antes)", () => {
+    expect(knownFindingsForJudge([{ file: "outro.md", anchor: "x", title: "t", severity: "blocker" }], cov)).toEqual([]);
+    expect(knownFindingsForJudge([], [])).toEqual([]);
+  });
+
+  it("trunca anchor e título (o prompt não é canal de payload)", () => {
+    const [f] = knownFindingsForJudge([{ file: "modelo-dados.md", anchor: "x".repeat(400), title: "y".repeat(400), severity: "info" }], cov);
+    expect(f.anchor).toHaveLength(160);
+    expect(f.title).toHaveLength(200);
   });
 });

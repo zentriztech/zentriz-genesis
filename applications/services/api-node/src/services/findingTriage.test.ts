@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   normalizeText, normalizeCategory, findingFingerprint, findingTitleFingerprint, jaccard, isTriageable, matchTriage,
   enrichFindings, countFindings, deriveResolved, checkTriagePolicy, applyTriage, registerRecurrences, type TriageRow,
-  surveyFindings, judgedFilesOf, projectFindingsState, unionFindingsByCoverage,
+  surveyFindings, judgedFilesOf, projectFindingsState, unionFindingsByCoverage, gapDelta, gapDeltaSinceLastRun,
 } from "./findingTriage.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -426,5 +426,76 @@ describe("findingTriage — GAP-21: união por cobertura para o gate", () => {
       { id: "r1", created_at: "1", findings: [gA, gB] },
     ]);
     expect(out.map((f) => f.title).sort()).toEqual(["GAP de A", "GAP de B"]);
+  });
+});
+
+/**
+ * 🔴 GAP-41 — o laço só sabia comparar o AGREGADO ("26 → 36 GAPs").
+ *
+ * Medido em prod (NVX LastMile, 14 runs, 4 janelas de 10): 11–17 GAPs saem e 11–25 entram por passe,
+ * com `openedOnNewSurface = 0` em TODAS as janelas — a rotação de cobertura explicava zero. Sem o diff
+ * finding-a-finding, um total parado é indistinguível de "nada aconteceu".
+ */
+describe("findingTriage — GAP-41: diff finding-a-finding entre validações", () => {
+  const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+  const R = (id: string, findings: ValidationFinding[], ...full: string[]) => ({ id, created_at: id, findings, coverage: cov(...full) });
+
+  it("GAP corrigido de verdade: sai da conta como FECHADO e nada entra", () => {
+    const gA = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+    // r3 rejulgou `a.md` por inteiro e não achou nada → o finding saiu do conjunto ativo.
+    const d = gapDelta([R("r3", [], "a.md"), R("r2", [gA], "a.md"), R("r1", [gA], "a.md")], null, 2);
+    expect(d.closed.map((f) => f.title)).toEqual(["GAP de A"]);
+    expect(d.opened).toEqual([]);
+    expect(d.openedOnNewSurface).toBe(0);
+  });
+
+  it("🔴 o defeito que o GAP-39 ataca: MESMO problema com anchor reescrito = 1 fechado + 1 novo (par real de prod)", () => {
+    // Par literal da run 3cfd4cc0 do NVX: o juiz reencontrou o mesmo bloco de merge no DDL e anexou o
+    // raciocínio ao anchor. O total não se move; o diff mostra que o laço apenas trocou seis por meia dúzia.
+    const antes = F({ file: "modelo-dados.md", title: "Blocos de merge não resolvidos no DDL", anchor: "Convenções gerais", category: "missing_data_model" });
+    const depois = F({ file: "modelo-dados.md", title: "Blocos de merge não resolvidos no DDL", anchor: "Convenções gerais (bloco com marcadores =======)", category: "stack_inconsistent" });
+    const d = gapDelta([R("r3", [depois], "modelo-dados.md"), R("r2", [antes], "modelo-dados.md"), R("r1", [antes], "modelo-dados.md")], null, 2);
+    expect(d.closed.map((f) => f.anchor)).toEqual(["Convenções gerais"]);
+    expect(d.opened.map((f) => f.anchor)).toEqual(["Convenções gerais (bloco com marcadores =======)"]);
+    expect(d.openedOnNewSurface).toBe(0); // mesmo arquivo, já julgado antes → não é descoberta
+  });
+
+  it("separa DESCOBERTA de REGRESSÃO: só arquivo inédito na janela anterior conta como superfície nova", () => {
+    const novoEmA = F({ file: "a.md", title: "regressão em A", anchor: "a9" });
+    const novoEmC = F({ file: "c.md", title: "achado em C", anchor: "c1" });
+    const d = gapDelta([R("r3", [novoEmA, novoEmC], "a.md", "c.md"), R("r2", [], "a.md"), R("r1", [], "a.md")], null, 2);
+    expect(d.opened.map((f) => f.title).sort()).toEqual(["achado em C", "regressão em A"]);
+    expect(d.openedOnNewSurface).toBe(1); // `c.md` nunca foi julgado por inteiro antes; `a.md` já era
+  });
+
+  it("🔴 revisão adversarial da própria correção: sair da janela por IDADE não é fechar", () => {
+    // `gA` só apareceu na run mais antiga e NENHUMA run posterior julgou `a.md` — logo ninguém disse que
+    // ele sumiu. Deslocar a janela o expulsa; contar isso como "fechado" seria a mesma mentira do GAP-18.
+    const gA = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+    const d = gapDelta([R("r3", [], "b.md"), R("r2", [], "b.md"), R("r1", [gA], "a.md")], null, 2);
+    expect(d.closed).toEqual([]);
+    expect(d.opened).toEqual([]);
+  });
+
+  it("menos de duas validações: não há o que comparar (zeros, nunca um palpite)", () => {
+    expect(gapDelta([], null)).toEqual({ closed: [], opened: [], openedOnNewSurface: 0 });
+    expect(gapDelta([{ id: "r1", created_at: "1", findings: [F({ anchor: "x" })] }], null))
+      .toEqual({ closed: [], opened: [], openedOnNewSurface: 0 });
+  });
+
+  it("gapDeltaSinceLastRun: uma query, janela W+1, só runs terminais", async () => {
+    const gA = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+    const db = { query: vi.fn(async (q: string, p: unknown[]) => {
+      expect(q).toContain("FROM spec_validation_runs");
+      expect(q).toContain("status IN ('passed','failed')"); // run em voo não é evidência
+      expect(p[1]).toBe(11);                                // RESOLVED_WINDOW_RUNS + 1
+      return { rows: [
+        { id: "r2", created_at: "2", findings: [], stage_b_coverage: cov("a.md") },
+        { id: "r1", created_at: "1", findings: [gA], stage_b_coverage: cov("a.md") },
+      ] };
+    }) };
+    const d = await gapDeltaSinceLastRun(db as never, "p1", ["a.md"]);
+    expect(db.query).toHaveBeenCalledTimes(1);
+    expect(d.closed.map((f) => f.title)).toEqual(["GAP de A"]);
   });
 });

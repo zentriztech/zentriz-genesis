@@ -55,6 +55,8 @@ let findings: F[] = [];
 let latestRunId: string | null = "run-0";
 vi.mock("./findingTriage.js", () => ({
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
+  // GAP-41: aqui o diff não é o objeto de teste (tem suíte própria) — vazio = comportamento legado.
+  gapDeltaSinceLastRun: vi.fn(async () => ({ closed: [], opened: [], openedOnNewSurface: 0 })),
 }));
 
 // `specGapScope` real alcança `routes/specs.js` → `db/client.js` (pool de verdade). Aqui ele é
@@ -308,10 +310,11 @@ async function start(maxRounds?: number) {
   return res.run;
 }
 /** Argumentos da última chamada ao CTO-editor (o transporte por arquivo). */
-function fileCalls(): Array<{ filePath: string; findings: F[]; fileContent: string; userMessage: string }> {
+type FileCall = { filePath: string; findings: F[]; fileContent: string; userMessage: string; growthBudget?: number };
+function fileCalls(): FileCall[] {
   return dispatchGapFileJob.mock.calls.map((c) => (c as unknown as unknown[])[0] as never);
 }
-function lastFileCall(): { filePath: string; findings: F[]; fileContent: string; userMessage: string } {
+function lastFileCall(): FileCall {
   return fileCalls().at(-1)!;
 }
 /** Fecha a rodada do arquivo corrente com uma revisão do CTO (ou uma falha). */

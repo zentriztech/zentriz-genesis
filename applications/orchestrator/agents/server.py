@@ -733,8 +733,13 @@ def _run_spec_validator_async(job_id: str, body: dict) -> None:
             raise ValueError("spec_text é obrigatório")
         from orchestrator.spec_validator import validate_spec
         llm_cfg = body.get("llm_config") if isinstance(body.get("llm_config"), dict) else None
+        # GAP-39: `known_findings` (findings hoje em aberto) é OPCIONAL — sem ele o refutador é o de
+        # sempre. Com ele, o juiz pode REUTILIZAR o anchor do defeito que reencontrar, e só então a
+        # contagem de GAPs de duas validações seguidas fala da mesma coisa.
+        known = body.get("known_findings")
         result = validate_spec(spec_text, usage_project_id=(body.get("originProjectId") or None),
-                               model_id=(body.get("model_id") or None), llm_cfg=llm_cfg)
+                               model_id=(body.get("model_id") or None), llm_cfg=llm_cfg,
+                               known_findings=known if isinstance(known, list) else None)
         with _jobs_lock:
             if job_id in _async_jobs:
                 _async_jobs[job_id]["status"] = "done"

@@ -28,8 +28,12 @@ const OWNER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 // ── dublês dos colaboradores ──────────────────────────────────────────────────
 let findings: Array<{ severity: string; triage?: unknown }> = [];
 let latestRunId: string | null = "run-0";
+// GAP-41: o diff finding-a-finding entre as duas últimas validações. `null` reproduz o caso em que
+// não há duas validações para comparar (ou a consulta falhou) — o laço volta a olhar só o agregado.
+let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number } | null = null;
 vi.mock("./findingTriage.js", () => ({
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
+  gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0 }),
 }));
 
 const startValidation = vi.fn(async () => ({ ok: true as const, runId: "vr-1", reused: false }));
@@ -199,6 +203,7 @@ beforeEach(() => {
   stageBCoverage = null;
   prevCoverage = null;
   coberturaAcumulada = null;
+  delta = null;
   insertFails23505 = false;
   snapshotFails = false;
   sqlLog.length = 0;
@@ -608,6 +613,52 @@ describe("validação dentro do laço", () => {
       expect(run!.status).toBe("pending");
       expect(run!.no_progress_streak).toBe(1);
       expect(JSON.stringify(run!.rounds)).not.toContain("Superfície medida MUDOU");
+    });
+  });
+
+  /**
+   * 🔴 GAP-41 — o laço só sabia comparar o AGREGADO. Medido em prod (NVX LastMile, 4 janelas de 10
+   * runs): 11–17 GAPs saem e 11–25 entram por passe, `openedOnNewSurface = 0` em todas. Um total
+   * parado era indistinguível de "nada aconteceu" — e a pergunta do Jean ("a contagem tem de CAIR")
+   * ficava sem resposta.
+   */
+  describe("GAP-41 — diferença finding-a-finding no log e no chat", () => {
+    it("registra fechados/novos na rodada e diz em voz alta que é REGRESSÃO, não descoberta", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}, {}], openedOnNewSurface: 0 };
+      await advanceAutonomyRun(db, r.id);
+      const rounds = run!.rounds as Array<Record<string, unknown>>;
+      expect(rounds.at(-1)).toMatchObject({ gapsClosed: 1, gapsOpened: 2 });
+      const note = JSON.stringify(run!.rounds);
+      expect(note).toContain("1 fechado(s), 2 novo(s)");
+      expect(note).toContain("REGRESSÃO/reformulação, não descoberta");
+    });
+
+    it("saldo FAVORÁVEL conta como progresso mesmo com o agregado parado (sobrevive à rotação)", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0 };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.gaps_current).toBe(2);            // agregado idêntico ao do passe anterior
+      expect(run!.no_progress_streak).toBe(0);      // …mas saíram 3 e entrou 1
+    });
+
+    it("🔴 fechar 1 e abrir 25 NÃO é progresso: o freio de gasto continua vivo", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: Array.from({ length: 25 }, () => ({})), openedOnNewSurface: 0 };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.no_progress_streak).toBe(1);
+      await advanceAutonomyRun(db, r.id);           // dispara rodada 2
+      job = { status: "done", specMarkdown: BASE_SPEC + "\n\noutra tentativa do CTO.", error: null };
+      await advanceAutonomyRun(db, r.id);
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("stalled");          // 2 passes sem saldo → para de gastar LLM
+    });
+
+    it("parcela de DESCOBERTA aparece separada quando o arquivo é inédito", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [], opened: [{}, {}], openedOnNewSurface: 2 };
+      await advanceAutonomyRun(db, r.id);
+      expect(JSON.stringify(run!.rounds)).toContain("2 em arquivo julgado por INTEIRO pela 1ª vez");
     });
   });
 

@@ -145,7 +145,11 @@ def test_contracts_require_category_and_anchor():
     assert '"category"' in REFUTER_SYSTEM and '"anchor"' in REFUTER_SYSTEM
     assert "security_gap" in REFUTER_SYSTEM and "connect_declaration_gap" in REFUTER_SYSTEM
     assert '"category"' in CONSOLIDATE_SYSTEM and '"anchor"' in CONSOLIDATE_SYSTEM
-    assert "mesma \"category\" + mesmo \"anchor\"" in CONSOLIDATE_SYSTEM
+    # GAP-40: a chave de agrupamento é file+anchor. "category" é INTERPRETAÇÃO do mesmo defeito, não
+    # identidade — medido na run 3cfd4cc0 (NVX), onde o MESMO bloco de merge no DDL sobreviveu como
+    # dois findings só porque um voto disse `missing_data_model` e o outro `stack_inconsistent`.
+    assert 'mesmo "file" + mesmo "anchor"' in CONSOLIDATE_SYSTEM
+    assert '"category" é INTERPRETAÇÃO' in CONSOLIDATE_SYSTEM
 
 
 def test_normalize_findings_taxonomy_and_prompt_injection():
@@ -167,7 +171,18 @@ def test_finding_key_ignores_title_but_keeps_digits_in_anchor():
     assert _finding_key(a) != _finding_key(c)          # FR-03 ≠ FR-04 (dígitos preservados)
     assert _norm_anchor("## Modelo de Dados (v2)") == "modelo de dados v2"
     # sem anchor → título normalizado
-    assert _finding_key({"file": "s.md", "category": "other", "title": "Rotas sem auth"}) == "s.md|other|t:rotas sem auth"
+    assert _finding_key({"file": "s.md", "category": "other", "title": "Rotas sem auth"}) == "s.md|t:rotas sem auth"
+
+
+def test_finding_key_ignores_category_gap40():
+    """GAP-40 (run 3cfd4cc0, NVX LastMile): o resgate de blockers re-adicionava o que a consolidação
+    tinha unido, porque a chave incluía `category` — e dois votos discordando da taxonomia do MESMO
+    defeito (mesmo file, MESMO anchor) viravam dois GAPs. Categoria é leitura, não identidade."""
+    base = {"file": "modelo-dados.md", "anchor": "Convenções gerais", "title": "blocos de merge no DDL"}
+    assert _finding_key({**base, "category": "missing_data_model"}) == _finding_key({**base, "category": "stack_inconsistent"})
+    # o que continua separando: arquivo e anchor
+    assert _finding_key(base) != _finding_key({**base, "file": "visao-escopo.md"})
+    assert _finding_key(base) != _finding_key({**base, "anchor": "Convenções gerais (bloco =====)"})
 
 
 def test_multivote_blocker_union_uses_identity_key_not_title(monkeypatch):
@@ -233,3 +248,76 @@ def test_retry_failure_without_salvageable_content_still_raises():
 
     with pytest.raises(Exception):
         validate_spec("spec", llm_fn=llm)
+
+
+# ── GAP-39: continuidade de anchor entre validações ──────────────────────────
+
+from spec_validator import _known_block, _KNOWN_OPEN, _KNOWN_CLOSE  # noqa: E402
+
+
+def test_known_block_only_items_with_anchor_ordered_by_severity():
+    out = _known_block([
+        {"file": "modelo-dados.md", "anchor": "Convenções gerais", "title": "merge no DDL", "severity": "warning"},
+        {"file": "visao-escopo.md", "anchor": "§1.5.1", "title": "envelope de erro", "severity": "blocker"},
+        {"file": "x.md", "anchor": "", "title": "sem anchor → sem identidade", "severity": "blocker"},
+        "lixo",
+        None,
+    ])
+    assert out.startswith(_KNOWN_OPEN) and out.rstrip().endswith(_KNOWN_CLOSE)
+    linhas = [l for l in out.splitlines() if l.startswith("- ")]
+    assert len(linhas) == 2                       # o item sem anchor ficou fora
+    assert "§1.5.1" in linhas[0]                  # blocker primeiro
+    assert "Convenções gerais" in linhas[1]
+    assert "sem anchor" not in out
+
+
+def test_known_block_empty_means_prompt_identical_to_before():
+    """Nenhum finding elegível → string vazia → o usuário do refutador é EXATAMENTE o de antes."""
+    assert _known_block([]) == ""
+    assert _known_block(None) == ""
+    assert _known_block([{"anchor": "  ", "title": "t"}]) == ""
+
+
+def test_known_block_caps_at_80_and_truncates():
+    out = _known_block([{"file": "a.md", "anchor": f"§{i}", "title": "t", "severity": "info"} for i in range(200)])
+    assert len([l for l in out.splitlines() if l.startswith("- ")]) == 80
+    longo = _known_block([{"file": "a.md", "anchor": "x" * 400, "title": "y" * 400, "severity": "info"}])
+    assert "x" * 160 in longo and "x" * 161 not in longo
+
+
+def test_continuity_reaches_refuter_but_not_triage(monkeypatch):
+    """O bloco viaja SÓ no refutador: a triagem ("isto é uma spec?") não julga findings, então mandar
+    a lista para ela seria custo sem efeito. E o contrato anti-injection continua valendo."""
+    monkeypatch.setenv("SPEC_VALIDATOR_TRIAGE_MODEL", "haiku-fake")
+    calls = []
+
+    def llm(system, user, model_id, **kw):
+        calls.append({"system": system, "user": user, "model": model_id})
+        if model_id == "haiku-fake":
+            return '{"is_spec": true, "summary": "s", "modules": []}'
+        return '{"findings":[]}'
+
+    validate_spec("corpo da spec", llm_fn=llm,
+                  known_findings=[{"file": "modelo-dados.md", "anchor": "Convenções gerais", "title": "t", "severity": "blocker"}])
+    triagem = [c for c in calls if c["model"] == "haiku-fake"][0]
+    refutador = [c for c in calls if c["model"] != "haiku-fake"][0]
+    assert _KNOWN_OPEN not in triagem["user"]
+    assert _KNOWN_OPEN in refutador["user"] and "Convenções gerais" in refutador["user"]
+    assert refutador["user"].startswith(_FENCE_OPEN)      # a spec segue cercada
+    assert "CONTINUIDADE" in REFUTER_SYSTEM               # e o system explica que a lista é DADO
+    assert "NÃO é evidência de que o problema persista" in REFUTER_SYSTEM
+
+
+def test_without_known_findings_prompt_is_byte_identical(monkeypatch):
+    monkeypatch.delenv("SPEC_VALIDATOR_TRIAGE_MODEL", raising=False)
+    a, b = [], []
+    validate_spec("corpo", llm_fn=make_llm('{"findings":[]}', a))
+    validate_spec("corpo", llm_fn=make_llm('{"findings":[]}', b), known_findings=[])
+    assert a[0]["user"] == b[0]["user"]
+    assert _KNOWN_OPEN not in a[0]["user"]
+
+
+def test_refuter_system_forbids_commentary_in_anchor():
+    """GAP-39: o anchor é IDENTIDADE. Os exemplos ERRADO/CERTO vêm de pares medidos em prod."""
+    assert "É um ID, NÃO uma descrição" in REFUTER_SYSTEM
+    assert "letra por letra" in REFUTER_SYSTEM

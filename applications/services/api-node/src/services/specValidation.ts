@@ -27,7 +27,7 @@ import { checkTenantBudget, budgetExceededMessage } from "./tenantCostCap.js";
 import { UUID_RE } from "../lib/tenantScope.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
-import { normalizeCategory, enrichRunFindings, registerRecurrences, judgedFilesOf, unionFindingsByCoverage } from "./findingTriage.js";
+import { normalizeCategory, enrichRunFindings, registerRecurrences, judgedFilesOf, unionFindingsByCoverage, projectFindingsState } from "./findingTriage.js";
 import { parseFrontmatter } from "../lib/frontmatter.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
@@ -290,7 +290,52 @@ async function markStageBCollected(pool: Pool, runId: string): Promise<void> {
   ).catch((e) => console.warn(`[spec-validation] run ${runId}: stage_b_collected_at não gravado (${e instanceof Error ? e.message : String(e)}).`));
 }
 
-async function runStageB(pool: Pool, runId: string, projectId: string, specText: string): Promise<{ findings: ValidationFinding[]; error?: string }> {
+/**
+ * 🔴 GAP-39 — CONTINUIDADE da identidade dos findings entre validações.
+ *
+ * A identidade de um finding é `file|source|category|anchor` (RFC-0005) e o `anchor` é texto LIVRE do
+ * juiz. Como cada validação é uma conversa NOVA sobre um arquivo REESCRITO, o juiz não tinha como
+ * saber que anchor ele mesmo usou antes — e reescrevia. Medido em prod (NVX LastMile, run 3cfd4cc0
+ * contra a anterior): 16 GAPs "fechados" e 25 "abertos" nos MESMOS arquivos, sendo os pares o MESMO
+ * defeito com o anchor reescrito ("Convenções gerais" → "Convenções gerais (bloco com marcadores
+ * =======)"; "§7.2 regra 1" → "§7.2 regra 1 (SYSTEM_ACTOR_USER_ID)"; um "§5.4-bis Etapa D" virou
+ * três). Efeito: a contagem de GAPs não pode cair, e "descoberta de superfície nova" — a hipótese
+ * anterior — foi MEDIDA em ZERO (nenhum finding novo veio de arquivo inédito). Heurística de
+ * casamento (título por Jaccard, contenção de anchor) foi testada sobre os dados reais de prod e
+ * REFUTADA: 0 de 16 pares com Jaccard ≥ 0,5 e a contenção de anchor funde defeitos distintos
+ * (`privacy_requests` ⊃ `privacy_requests.requester_contact`).
+ *
+ * Então quem decide se é o MESMO defeito é o JUIZ (Lei do Jean: julgamento é do LLM, o código só
+ * transporta). Aqui o código transporta os findings ATIVOS: `file · anchor · título`, só dos
+ * arquivos que ESTA validação vai ler por INTEIRO — num arquivo que entra só como sumário o juiz não
+ * tem como confirmar nada, e listá-lo convidaria a reemitir sem evidência (fail-open). Findings já
+ * triados (ignorados/refutados) ficam fora: pedir para reencontrá-los é pedir para reabrir decisão
+ * do humano.
+ */
+export function knownFindingsForJudge(
+  findings: Array<{ file?: string | null; anchor?: string | null; title?: string; severity?: string; triage?: unknown }>,
+  fullFiles: string[],
+  max = 80,
+): Array<{ file: string; anchor: string; title: string; severity: string }> {
+  const full = new Set(fullFiles.map((p) => p.toLowerCase()));
+  const rank: Record<string, number> = { blocker: 0, warning: 1, info: 2 };
+  const seen = new Set<string>();
+  const out: Array<{ file: string; anchor: string; title: string; severity: string }> = [];
+  for (const f of findings) {
+    if (f.triage) continue;
+    const anchor = String(f.anchor ?? "").trim();
+    const file = String(f.file ?? "").trim();
+    if (!anchor || !file || !full.has(file.toLowerCase())) continue;
+    const k = `${file.toLowerCase()}|${anchor.toLowerCase()}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ file, anchor: anchor.slice(0, 160), title: String(f.title ?? "").slice(0, 200), severity: String(f.severity ?? "") });
+  }
+  out.sort((a, b) => (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3) || a.file.localeCompare(b.file) || a.anchor.localeCompare(b.anchor));
+  return out.slice(0, max);
+}
+
+async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<{ findings: ValidationFinding[]; error?: string }> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
   const base = agentsUrl.replace(/\/$/, "");
@@ -302,6 +347,8 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
     // ausente". Quem monta (e declara) o recorte agora é `buildValidationInput`, no chamador.
     spec_text: specText,
     originProjectId: projectId, // débito de usage no orçamento do tenant (F6)
+    // GAP-39: lista de continuidade. Vazia → o refutador é exatamente o de antes (nada no prompt).
+    ...(knownFindings.length ? { known_findings: knownFindings } : {}),
     ...llm,
   }, 30_000).catch((e) => ({ status: 0, data: { error: String(e) } as Record<string, unknown> }));
   const jobId = String(start.data.jobId ?? "");
@@ -619,7 +666,17 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       // um `slice` silencioso e o sintoma chegava como blocker falso de "arquivo ausente".
       console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${input.totalChars} chars > teto de janela (${input.cap}) — ${input.full.length} arquivo(s) integrais, ${input.outlineOnly.length} só em sumário: ${input.outlineOnly.join(", ")}`);
     }
-    const b = await runStageB(pool, runId, projectId, input.text);
+    // GAP-39: os GAPs hoje ATIVOS, restritos aos arquivos que esta validação lê por INTEIRO, viajam
+    // com a spec para que o juiz reutilize o anchor do defeito que reencontrar. Falha aqui não pode
+    // derrubar a validação — sem a lista o comportamento é o anterior (identidade por redação).
+    const known = await projectFindingsState(pool, projectId, { currentFiles: candidates.map((c) => c.path) })
+      .then((st) => knownFindingsForJudge(st.findings, input.full))
+      .catch((e) => {
+        console.warn(`[spec-validation] run ${runId}: lista de continuidade não montada (${e instanceof Error ? e.message : String(e)}) — juiz sem anchors anteriores.`);
+        return [] as Array<{ file: string; anchor: string; title: string; severity: string }>;
+      });
+    if (known.length) console.log(`[spec-validation] run ${runId}: ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
+    const b = await runStageB(pool, runId, projectId, input.text, known);
     findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
     stageBError = b.error;
     stageBRan = !b.error;

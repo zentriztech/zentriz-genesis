@@ -53,7 +53,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Pool } from "pg";
 import { sha256Hex } from "../lib/specTreeHash.js";
-import { projectFindingsState, type EnrichedFinding } from "./findingTriage.js";
+import { projectFindingsState, gapDeltaSinceLastRun, type EnrichedFinding } from "./findingTriage.js";
 import { startValidation, unjudgedSpecFiles } from "./specValidation.js";
 import { getSpecChatJob } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
@@ -255,6 +255,14 @@ export interface AutonomyRoundLog {
    * pedido × entrega é aritmética — foi assim que se mediu que 447 anunciados voltaram como +1.431.
    */
   announcedBudget?: number | null;
+  /**
+   * GAP-41: a diferença finding-a-finding do PASSE — quantos GAPs saíram e quantos entraram. O
+   * agregado (`gapsBefore`/`gapsAfter`) pode ficar parado com o laço fechando e abrindo a mesma
+   * quantidade; foi exatamente o que aconteceu em prod, e sem estes dois números não havia como
+   * distinguir "não fez nada" de "fez e a reformulação comeu o resultado".
+   */
+  gapsClosed?: number | null;
+  gapsOpened?: number | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -1837,7 +1845,18 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
 
   const gaps = await currentGaps(db, run.projectId);
   const before = run.gapsCurrent ?? gaps.important;
-  const progressed = gaps.important < before;
+  // 🔴 GAP-41: o total pode ficar PARADO com o laço fechando e abrindo a mesma quantidade — medido em
+  // prod (NVX LastMile): 10–16 GAPs saindo e 11–25 entrando por passe, nos MESMOS arquivos. A pergunta
+  // do Jean ("a contagem tem de CAIR") só é respondível pela diferença finding-a-finding, então ela
+  // entra no log e no chat. Falha aqui não derruba o passe: sem diff, o laço volta a decidir só pelo
+  // agregado, como antes.
+  const delta = await gapDeltaSinceLastRun(db, run.projectId).catch(() => null);
+  // ⚠️ Revisão adversarial da própria correção: aceitar `closed > 0` como progresso premiaria justamente
+  // o comportamento medido no NVX (1 fecha, 25 entram) e o laço queimaria os 5 passes sem convergir —
+  // matando a função do `no_progress_streak`, que é cortar gasto de LLM que não anda. Progresso é SALDO:
+  // ou o agregado caiu, ou saíram mais GAPs do que entraram (o caminho que sobrevive à rotação de
+  // cobertura, quando o agregado não é comparável).
+  const progressed = gaps.important < before || (!!delta && delta.closed.length > delta.opened.length);
   // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
   // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
   // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
@@ -1857,17 +1876,28 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     ? ` Cobertura desta validação: ${cov.full.length} de ${cov.full.length + cov.outlineOnly.length} arquivo(s) julgado(s) por INTEIRO (os demais entraram só como sumário).` +
       (cobertura ? ` Acumulado da spec: ${cobertura.judged}/${cobertura.total} arquivo(s) já julgado(s) neste conteúdo.` : "")
     : "";
+  // GAP-41: a diferença finding-a-finding dita em voz alta. `openedOnNewSurface` separa a parcela de
+  // DESCOBERTA (arquivo inédito) da de REGRESSÃO (arquivo já julgado antes) — medida em ZERO nos dados
+  // de prod, o que refuta a hipótese de que a rotação de cobertura explicava a subida do total.
+  const deltaNote = delta
+    ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
+      (delta.openedOnNewSurface > 0
+        ? ` (${delta.openedOnNewSurface} em arquivo julgado por INTEIRO pela 1ª vez — descoberta, não regressão).`
+        : ` — todos em arquivo já julgado antes, ou seja REGRESSÃO/reformulação, não descoberta.`)
+    : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
   await patchLastRound(db, run, {
     gapsAfter: gaps.important, blockers: gaps.blockers, warnings: gaps.warnings,
     validationRunId: run.validationRunId,
-    note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — as duas contagens não são comparáveis." : ""}`,
+    gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
+    note: `Validação ${st}: ${before} → ${gaps.important} GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings} · ℹ️ ${gaps.info}).${covNote}${deltaNote}${surfaceChanged ? " Superfície medida MUDOU (rotação de cobertura) — o AGREGADO das duas não é comparável (a diferença acima é)." : ""}`,
   }, { keepNote: true });
   const cycleLabel = perFile
     ? `**Passe ${run.passes}/${run.maxRounds} concluído** (${appliedInPass({ ...run, passes: run.passes - 1 })} arquivo(s) revisado(s))`
     : `**Rodada ${run.round}/${run.maxRounds} concluída**`;
   await postChatNote(db, run,
-    `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).${covNote}`);
+    `🤖 ${cycleLabel} — validação **${st}**: GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).${covNote}` +
+    (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior${delta.openedOnNewSurface > 0 ? `, ${delta.openedOnNewSurface} deles em arquivo julgado por inteiro pela primeira vez` : ""}.` : ""));
 
   if (gaps.important === 0) {
     // 🔴 GAP-19: "zero GAPs" só é sucesso se o juiz LEU a spec inteira. Medido em prod 2026-09-06

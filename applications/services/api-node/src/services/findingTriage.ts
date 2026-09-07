@@ -353,6 +353,74 @@ export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding
   return out;
 }
 
+/**
+ * 🔴 GAP-41 — a diferença finding-a-finding entre esta validação e a anterior.
+ *
+ * O laço autônomo só sabia comparar o AGREGADO ("26 → 36 GAPs") e, quando a cobertura girava, dizia
+ * "as duas contagens não são comparáveis" — atribuindo à rotação um efeito que a medição sobre os
+ * dados reais de prod (NVX LastMile, 4 janelas de 10 runs) mostrou ser ZERO: nenhum finding novo veio
+ * de arquivo INÉDITO. O que existia era 10–16 GAPs saindo e 11–25 entrando nos MESMOS arquivos por
+ * passe. Sem esta diferença não há como responder a única pergunta que importa — a spec melhorou? —,
+ * porque o total pode ficar parado com o laço fechando e abrindo a mesma quantidade.
+ *
+ * Contrato: `now` = janela das W runs mais recentes; `before` = a MESMA janela deslocada uma run
+ * (tamanho igual, para o limite antigo da janela não fabricar diferença). `openedOnNewSurface` conta
+ * os que entraram em arquivo que a janela anterior NUNCA julgou por inteiro — é a parcela honesta de
+ * "descoberta", separada da parcela de regressão.
+ *
+ * ⚠️ Revisão adversarial da PRÓPRIA correção: deslocar a janela também EXPULSA a run mais antiga, e um
+ * finding cuja última aparição era exatamente ali sairia de `before.active` sem que juiz nenhum tenha
+ * dito que ele sumiu — "fechado" por envelhecimento, o mesmo tipo de mentira que este GAP existe para
+ * matar. Por isso só conta como fechado o fingerprint que AINDA aparece em alguma run da janela nova
+ * (logo, uma run mais recente rejulgou o alvo e não o encontrou); quem apenas envelheceu fica de fora.
+ */
+export interface GapDelta { closed: ValidationFinding[]; opened: ValidationFinding[]; openedOnNewSurface: number }
+
+export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS): GapDelta {
+  if (runs.length < 2) return { closed: [], opened: [], openedOnNewSurface: 0 };
+  const now = surveyFindings(runs.slice(0, window), currentFiles);
+  const before = surveyFindings(runs.slice(1, window + 1), currentFiles);
+  const fpOf = (fs: ValidationFinding[]) => {
+    const fps = effectiveFingerprints(fs);
+    return new Map(fs.map((f, i) => [fps[i], f]));
+  };
+  const a = fpOf(now.active), b = fpOf(before.active);
+  const judgedBefore = new Set<string>();
+  for (const r of runs.slice(1, window + 1)) {
+    const j = judgedFilesOf(r.coverage);
+    if (j) for (const p of j) judgedBefore.add(p);
+  }
+  // Fingerprints que a janela NOVA ainda vê (ativos, limbo ou resolvidos) — sem isto, sair da janela
+  // por idade viraria "fechado".
+  const nowSeen = new Set<string>();
+  for (const r of runs.slice(0, window)) for (const fp of effectiveFingerprints(r.findings ?? [])) nowSeen.add(fp);
+  const closed: ValidationFinding[] = [], opened: ValidationFinding[] = [];
+  for (const [k, f] of b) if (!a.has(k) && nowSeen.has(k)) closed.push(f);
+  let onNew = 0;
+  for (const [k, f] of a) {
+    if (b.has(k)) continue;
+    opened.push(f);
+    const file = String(f.file ?? "").toLowerCase();
+    if (file && !judgedBefore.has(file) && ![...judgedBefore].some((p) => baseName(p) === baseName(file))) onNew++;
+  }
+  return { closed, opened, openedOnNewSurface: onNew };
+}
+
+/** `gapDelta` sobre as runs do projeto (uma query; janela W+1 para que "antes" tenha o mesmo tamanho). */
+export async function gapDeltaSinceLastRun(db: Db, projectId: string, currentFiles?: string[] | null): Promise<GapDelta> {
+  const rows = (await db.query(
+    `SELECT id, created_at, findings, stage_b_coverage FROM spec_validation_runs
+      WHERE project_id = $1 AND status IN ('passed','failed')
+      ORDER BY created_at DESC LIMIT $2`,
+    [projectId, RESOLVED_WINDOW_RUNS + 1],
+  )).rows as unknown as Array<{ id: string; created_at: string; findings: ValidationFinding[]; stage_b_coverage?: unknown }>;
+  const files = currentFiles ? new Set(currentFiles.map((p) => p.toLowerCase())) : null;
+  return gapDelta(
+    rows.map((r) => ({ id: r.id, created_at: r.created_at, coverage: r.stage_b_coverage, findings: Array.isArray(r.findings) ? r.findings : [] })),
+    files,
+  );
+}
+
 export async function projectFindingsState(db: Db, projectId: string, opts: { currentFiles?: string[] | null } = {}): Promise<ProjectFindingsState> {
   const runs = (await db.query(
     // 🔴 GAP-20: `stage_b_coverage` entra aqui porque é ele que diz se a ausência de um finding é prova
