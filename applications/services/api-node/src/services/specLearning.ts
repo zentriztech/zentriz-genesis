@@ -67,10 +67,17 @@ export interface LearningEpisode {
   run: Pick<AutonomyRun,
     "id" | "status" | "mode" | "round" | "passes" | "maxRounds" | "gapsInitial" | "gapsCurrent" |
     "rounds" | "lastError" | "createdAt" | "finishedAt">;
-  /** GAPs da primeira validação do episódio (o que o validador apontou ANTES do laço). */
+  /** GAPs da validação que ORIGINOU o laço (a última concluída antes de ele começar). */
   gapsBefore: LearningFinding[];
-  /** GAPs da última validação (o que sobrou). */
+  /** GAPs da última validação concluída DENTRO do laço (o que sobrou). */
   gapsAfter: LearningFinding[];
+  /**
+   * 🔴 GAP-56: houve validação DEPOIS do laço? Sem isto, `gapsAfter` vazio era escrito no material
+   * como *"nenhum — todos foram resolvidos"*, e a ausência de MEDIÇÃO virava prova de sucesso. É a
+   * pior forma do defeito, porque a lição resultante é global: ensina a outros produtos que um laço
+   * que não mediu nada "resolveu tudo".
+   */
+  afterMeasured?: boolean;
   /** Caminhos reais dos arquivos tocados — usados só para ROTULAR (nunca vão no material). */
   filePaths: string[];
 }
@@ -124,6 +131,31 @@ export function forbiddenTermsFor(opts: {
   return [...terms].filter((t) => !isGeneric(t));
 }
 
+/**
+ * 🔴 GAP-58 — ROTULA os nomes reais de arquivo que aparecem em TEXTO LIVRE.
+ *
+ * MEDIDO em prod 2026-09-07: o material ia com os campos `file`/`filePath` rotulados, mas
+ * `note` e `last_error` são frases geradas pelo laço e passavam CRUAS — ex.:
+ * *"`modelo-dados.md` salvo no disco (183918 → 191852 chars)"* e
+ * *"último: `nvx-lastmile-backend.md` — CTO não entregou revisão"* (esse último carrega o nome do
+ * PRODUTO DO CLIENTE). O corpus é global e `stack_key: "generic"`, então o custo é duplo: ou a
+ * lição sai contaminada, ou ela cita o termo e o veto de `forbidden_terms` a DESCARTA — perdendo o
+ * aprendizado do episódio. Substituição literal (transporte), não julgamento de conteúdo.
+ */
+export function labelFreeText(text: string, labels: Map<string, string>): string {
+  let out = text;
+  // Mais longos primeiro: `a/b/modelo-dados.md` antes de `modelo-dados.md`.
+  const entries = [...labels.entries()].sort((a, b) => b[0].length - a[0].length);
+  for (const [path, label] of entries) {
+    const base = path.split("/").pop() ?? path;
+    for (const needle of [path, base, base.replace(/\.[a-z0-9]+$/i, "")]) {
+      if (needle.length < 4 || !out.includes(needle)) continue;
+      out = out.split(needle).join(label);
+    }
+  }
+  return out;
+}
+
 function findingLine(f: LearningFinding, labels: Map<string, string>): string {
   const sev = (f.severity ?? "info").toString();
   const icon = sev === "blocker" ? "🔴" : sev === "warning" ? "🟡" : "⚪";
@@ -141,7 +173,8 @@ function roundLine(r: AutonomyRoundLog, labels: Map<string, string>): string {
   const sev = r.blockers !== null && r.blockers !== undefined ? ` (🔴 ${r.blockers} · 🟡 ${r.warnings ?? 0})` : "";
   const applied = r.applied ? "revisão aplicada" : "nada aplicado";
   const chars = r.specChars ? ` · ${r.specChars} chars` : "";
-  const note = r.note ? ` · ${r.note.replace(/\s+/g, " ").slice(0, 240)}` : "";
+  // GAP-58: `note` é frase livre do laço e cita o arquivo pelo nome REAL — rotular antes de cortar.
+  const note = r.note ? ` · ${labelFreeText(r.note, labels).replace(/\s+/g, " ").slice(0, 240)}` : "";
   return `- rodada ${r.round} (passe ${r.pass ?? 0}, ${target}): ${delta}${sev} · ${applied}${chars}${note}`;
 }
 
@@ -163,7 +196,10 @@ export function buildLearningMaterial(ep: LearningEpisode): string {
     `Progresso: ${progress}`,
     `GAPs importantes: ${run.gapsInitial ?? "?"} no início → ${run.gapsCurrent ?? "?"} no fim`,
     `Arquivos na spec: ${Math.max(1, labels.size)}`,
-    run.lastError ? `Motivo do encerramento: ${run.lastError.replace(/\s+/g, " ").slice(0, 400)}` : "",
+    run.lastError
+      // GAP-58: `last_error` já trouxe `nvx-lastmile-backend.md` (nome do produto do cliente) em prod.
+      ? `Motivo do encerramento: ${labelFreeText(run.lastError, labels).replace(/\s+/g, " ").slice(0, 400)}`
+      : "",
   ].filter(Boolean).join("\n"));
 
   if (ep.gapsBefore.length) {
@@ -173,8 +209,20 @@ export function buildLearningMaterial(ep: LearningEpisode): string {
   if (ep.gapsAfter.length) {
     parts.push(`## GAPs que CONTINUAVAM depois do laço (${ep.gapsAfter.length}) — resistiram às revisões\n` +
       ep.gapsAfter.slice(0, MAX_FINDINGS_PER_SIDE).map((f) => findingLine(f, labels)).join("\n"));
-  } else if (ep.gapsBefore.length) {
+  } else if (ep.afterMeasured === true && ep.gapsBefore.length) {
     parts.push("## GAPs que CONTINUAVAM depois do laço: nenhum — todos foram resolvidos");
+  } else {
+    // 🔴 GAP-56: sem validação depois do laço não se sabe NADA sobre o resultado — dizer
+    // "todos foram resolvidos" aqui é inventar o desfecho do episódio (e era o que acontecia:
+    // medido em prod, runs `stopped` com 41 → 41 GAPs entravam com essa frase). A afirmação de
+    // sucesso exige `afterMeasured === true`: **fail-closed**, porque quem esquecer de informar a
+    // medição não pode ganhar o crédito por ela.
+    parts.push([
+      "## GAPs depois do laço: **NÃO MEDIDOS**",
+      "O laço terminou sem uma nova validação adversarial concluída, então NÃO se sabe quais GAPs",
+      "foram resolvidos. Não trate as revisões deste episódio como bem-sucedidas: use apenas o que",
+      "os GAPs de ANTES e o histórico das rodadas mostram.",
+    ].join("\n"));
   }
   if (run.rounds.length) {
     parts.push(`## O que cada rodada fez\n${run.rounds.map((r) => roundLine(r, labels)).join("\n")}`);
@@ -207,25 +255,50 @@ function parseFindings(raw: unknown): LearningFinding[] {
 }
 
 /**
- * GAPs do começo e do fim do episódio. Fonte: as validações do PROJETO na janela do laço — a
- * primeira delas é a que originou o laço (o `startAutonomyRun` exige uma validação anterior).
+ * GAPs do começo e do fim DESTE episódio.
+ *
+ * 🔴 GAP-55 (medido em prod 2026-09-07) — a janela era do PROJETO, não da RUN: começava
+ * `created_at - 12 HORAS` e pegava `ORDER BY created_at ASC LIMIT 12`. No NVX LastMile havia
+ * **30 validações** nessa janela contra **1** dentro do laço, então:
+ *   • `before` = a validação MAIS ANTIGA das 12h (06/09 19:45, de OUTRO episódio);
+ *   • `after`  = a **12ª mais antiga** (06/09 22:30) — anterior até ao INÍCIO do laço (07/09 07:22).
+ * O relatório então ensinava ao corpus *"o laço levou 19 GAPs → 15"* enquanto a própria run
+ * registrava **41 → 41** (nada resolvido). Duas mentiras somadas: material internamente
+ * contraditório e crédito por melhora de outro episódio. Como o corpus é GLOBAL, o erro se
+ * propaga para os próximos produtos — é o oposto do G7.
+ *
+ * Escopo correto (e o mesmo que o laço usou de fato):
+ *   • `before` = ÚLTIMA validação concluída **até** o início do laço — exatamente a que
+ *     `startAutonomyRun` leu para calcular `gaps_initial`;
+ *   • `after`  = ÚLTIMA validação concluída **dentro** do laço; se não houve nenhuma,
+ *     `afterMeasured = false` (ver GAP-56 — ausência de medição não é sucesso).
  */
 export async function loadEpisodeFindings(
   db: Db, projectId: string, createdAt: string, finishedAt: string | null,
-): Promise<{ before: LearningFinding[]; after: LearningFinding[] }> {
-  const rows = (await db.query(
-    `SELECT findings, created_at FROM spec_validation_runs
-       WHERE project_id = $1
+): Promise<{ before: LearningFinding[]; after: LearningFinding[]; afterMeasured: boolean }> {
+  // A validação que ORIGINOU o laço. `+ 30s` cobre a corrida entre o fim da validação e o clique
+  // que cria a run (o laço parte da última validação conhecida naquele instante).
+  const beforeRow = (await db.query(
+    `SELECT findings FROM spec_validation_runs
+       WHERE project_id = $1 AND status IN ('passed', 'failed')
+         AND created_at <= $2::timestamptz + interval '30 seconds'
+       ORDER BY created_at DESC LIMIT 1`,
+    [projectId, createdAt],
+  )).rows[0] as Record<string, unknown> | undefined;
+  // A última validação concluída DENTRO do laço (estritamente depois do início dele).
+  const afterRow = (await db.query(
+    `SELECT findings FROM spec_validation_runs
+       WHERE project_id = $1 AND status IN ('passed', 'failed')
+         AND created_at > $2::timestamptz + interval '30 seconds'
          AND created_at <= COALESCE($3::timestamptz, now()) + interval '5 minutes'
-         AND created_at >= $2::timestamptz - interval '12 hours'
-         AND status IN ('passed', 'failed')
-       ORDER BY created_at ASC LIMIT 12`,
+       ORDER BY created_at DESC LIMIT 1`,
     [projectId, createdAt, finishedAt],
-  )).rows as Array<Record<string, unknown>>;
-  if (rows.length === 0) return { before: [], after: [] };
-  const before = parseFindings(rows[0].findings);
-  const after = rows.length > 1 ? parseFindings(rows[rows.length - 1].findings) : [];
-  return { before, after };
+  )).rows[0] as Record<string, unknown> | undefined;
+  return {
+    before: beforeRow ? parseFindings(beforeRow.findings) : [],
+    after: afterRow ? parseFindings(afterRow.findings) : [],
+    afterMeasured: Boolean(afterRow),
+  };
 }
 
 interface ProjectIdentity { projectTitle: string | null; tenantName: string | null }
@@ -368,9 +441,13 @@ export async function collectBancadaLessonsTick(
     try {
       const identity = await loadIdentity(db, run.projectId);
       const filePaths = await loadFilePaths(db, run.projectId);
-      const { before, after } = await loadEpisodeFindings(db, run.projectId, run.createdAt, run.finishedAt)
-        .catch((e) => { console.warn(`[SpecLearning] GAPs do episódio ${run.id}: ${msg(e)}`); return { before: [], after: [] }; });
-      const material = buildLearningMaterial({ run, gapsBefore: before, gapsAfter: after, filePaths });
+      const { before, after, afterMeasured } = await loadEpisodeFindings(db, run.projectId, run.createdAt, run.finishedAt)
+        .catch((e) => {
+          console.warn(`[SpecLearning] GAPs do episódio ${run.id}: ${msg(e)}`);
+          // Falhar em LER a medição não autoriza dizer que o laço resolveu tudo (GAP-56).
+          return { before: [], after: [], afterMeasured: false };
+        });
+      const material = buildLearningMaterial({ run, gapsBefore: before, gapsAfter: after, afterMeasured, filePaths });
       const llm = await resolveWorkbenchLlm({ projectId: run.projectId, tenantId: run.tenantId }).catch(() => null);
       const body = JSON.stringify({
         material,
@@ -386,10 +463,23 @@ export async function collectBancadaLessonsTick(
       });
       const started = JSON.parse(await post(`${base}/invoke/lesson_extract/async`, body, 30_000)) as { jobId?: string };
       if (!started.jobId) throw new Error("agents /invoke/lesson_extract/async não retornou jobId");
-      await db.query(
-        "UPDATE spec_autonomy_runs SET learning_job_id = $2, updated_at = now() WHERE id = $1",
+      // 🔴 GAP-57: `learning_result = NULL` é OBRIGATÓRIO aqui. Quando o 1º kick falha (retry do
+      // `MAX_KICK_ATTEMPTS`), o erro fica gravado em `learning_result`; se o retry der certo e o
+      // erro permanecer, a fase 2 — que seleciona `learning_result IS NULL` — **nunca** faz poll:
+      // o episódio guarda para sempre o erro antigo. Medido em prod: a run 013ca0e5 exibia
+      // `{"error":"connect ECONNREFUSED …","attempts":1}` enquanto o agents havia persistido
+      // **4 lições** às 07:43:29 para esse mesmo job. É o defeito que o G7 nasceu para matar:
+      // a telemetria do aprendizado mentindo — e mentindo no sentido pessimista, o que faz
+      // parecer que a Bancada não aprende.
+      const saved = await db.query(
+        "UPDATE spec_autonomy_runs SET learning_job_id = $2, learning_result = NULL, updated_at = now() WHERE id = $1",
         [run.id, started.jobId],
-      ).catch(() => {});
+      ).catch((e) => { console.warn(`[SpecLearning] job ${started.jobId} do episódio ${run.id} não persistido: ${msg(e)}`); return null; });
+      if (!saved) {
+        // Sem jobId gravado o episódio fica invisível (reclamado, sem poll e sem resultado):
+        // registrar é o mínimo honesto — a lição pode até existir no corpus.
+        await recordResult(db, run.id, { error: "jobId não persistido — resultado desconhecido", jobId: started.jobId });
+      }
       out.kicked += 1;
       console.info(`[SpecLearning] episódio ${run.id} (${run.status}) → job ${started.jobId}, material ${material.length} chars`);
     } catch (e) {

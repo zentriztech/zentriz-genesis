@@ -54,6 +54,8 @@ interface FakeOpts {
   claimRowCount?: number;
   identityFails?: boolean;
   validations?: Row[];
+  validationsBefore?: Row[];
+  validationsAfter?: Row[];
   scanThrows?: Error;
 }
 
@@ -86,7 +88,12 @@ function fakeDb(opts: FakeOpts = {}) {
         };
       }
       if (/FROM spec_validation_runs/.test(sql)) {
-        return { rows: opts.validations ?? [], rowCount: (opts.validations ?? []).length };
+        // GAP-55: são DUAS leituras distintas — a validação que originou o laço (`created_at <=`)
+        // e a última concluída DENTRO dele (`created_at >`). Um fake que devolve a mesma linha para
+        // as duas esconderia justamente o defeito medido em prod.
+        const isAfter = /created_at > \$2/.test(sql);
+        const rows = isAfter ? (opts.validationsAfter ?? []) : (opts.validationsBefore ?? opts.validations ?? []);
+        return { rows, rowCount: rows.length };
       }
       return { rows: [], rowCount: 1 };
     },
@@ -162,8 +169,57 @@ describe("buildLearningMaterial", () => {
   });
 
   it("diz explicitamente quando todos os GAPs foram resolvidos (o episódio de sucesso ensina tanto quanto o de falha)", () => {
-    const md = buildLearningMaterial({ run: episodeRun(), gapsBefore: [FINDING], gapsAfter: [], filePaths: [] });
+    const md = buildLearningMaterial({
+      run: episodeRun(), gapsBefore: [FINDING], gapsAfter: [], afterMeasured: true, filePaths: [],
+    });
     expect(md).toContain("nenhum — todos foram resolvidos");
+  });
+
+  it("🔴 GAP-56: sem validação DEPOIS do laço não declara sucesso — declara NÃO MEDIDO", () => {
+    // Medido em prod 2026-09-07: runs `stopped` com 41 → 41 GAPs (nada resolvido) e ZERO validações
+    // dentro do laço recebiam a frase "todos foram resolvidos". A lição é global: isso ensinaria a
+    // outros produtos que um laço que não mediu nada teve sucesso.
+    const md = buildLearningMaterial({
+      run: episodeRun({ status: "stopped", gapsInitial: 41, gapsCurrent: 41 }),
+      gapsBefore: [FINDING], gapsAfter: [], afterMeasured: false, filePaths: [],
+    });
+    expect(md).toContain("NÃO MEDIDOS");
+    expect(md).not.toContain("todos foram resolvidos");
+    expect(md).toContain("Não trate as revisões deste episódio como bem-sucedidas");
+  });
+
+  it("🔴 GAP-56: fail-closed — quem não informa a medição não ganha o crédito por ela", () => {
+    const md = buildLearningMaterial({ run: episodeRun(), gapsBefore: [FINDING], gapsAfter: [], filePaths: [] });
+    expect(md).not.toContain("todos foram resolvidos");
+    expect(md).toContain("NÃO MEDIDOS");
+  });
+
+  it("🔴 GAP-58: nome real de arquivo em TEXTO LIVRE (`note`) também é rotulado", () => {
+    // Frase real de prod: "`modelo-dados.md` salvo no disco (183918 → 191852 chars)".
+    const md = buildLearningMaterial({
+      run: episodeRun({
+        rounds: [roundLog({ filePath: "tecnico/dados.md", note: "`dados.md` salvo no disco (183918 → 191852 chars)." })],
+      }),
+      gapsBefore: [], gapsAfter: [], afterMeasured: true, filePaths: ["PRODUCT_SPEC.md", "tecnico/dados.md"],
+    });
+    expect(md).not.toContain("dados.md");
+    expect(md).toContain("salvo no disco");
+    expect(md).toMatch(/arquivo [AB]/);
+  });
+
+  it("🔴 GAP-58: nome real de arquivo no motivo do encerramento também é rotulado", () => {
+    // Frase real de prod: "último: `nvx-lastmile-backend.md` — CTO não entregou revisão".
+    const md = buildLearningMaterial({
+      run: episodeRun({
+        status: "stalled",
+        lastError: "2 arquivos seguidos sem revisão aplicável (último: `nvx-lastmile-backend.md` — CTO não entregou revisão)",
+      }),
+      gapsBefore: [], gapsAfter: [], afterMeasured: true,
+      filePaths: ["nvx-lastmile-backend.md", "tecnico/dados.md"],
+    });
+    expect(md).not.toContain("nvx-lastmile-backend");
+    expect(md).not.toContain("lastmile");
+    expect(md).toContain("sem revisão aplicável");
   });
 
   it("respeita o teto de chars", () => {
@@ -212,22 +268,40 @@ describe("fileLabels / forbiddenTermsFor", () => {
 // ── leitura dos GAPs do episódio ──────────────────────────────────────────────
 
 describe("loadEpisodeFindings", () => {
-  it("pega a PRIMEIRA e a ÚLTIMA validação da janela e descarta `info`", async () => {
+  it("pega a validação que ORIGINOU o laço e a última DENTRO dele, e descarta `info`", async () => {
     const { db } = fakeDb({
-      validations: [
-        { findings: [FINDING, { ...FINDING, severity: "info", title: "nota" }], created_at: "2026-09-05T10:00:00Z" },
-        { findings: [{ ...FINDING, severity: "warning" }], created_at: "2026-09-05T10:30:00Z" },
-      ],
+      validationsBefore: [{ findings: [FINDING, { ...FINDING, severity: "info", title: "nota" }], created_at: "2026-09-05T09:58:00Z" }],
+      validationsAfter: [{ findings: [{ ...FINDING, severity: "warning" }], created_at: "2026-09-05T10:30:00Z" }],
     });
     const out = await loadEpisodeFindings(db, PROJECT, "2026-09-05T10:00:00Z", "2026-09-05T10:40:00Z");
     expect(out.before).toHaveLength(1);
     expect(out.before[0]?.title).toBe(FINDING.title);
     expect(out.after).toHaveLength(1);
     expect(out.after[0]?.severity).toBe("warning");
+    expect(out.afterMeasured).toBe(true);
+  });
+
+  it("🔴 GAP-55: a janela é da RUN — validação ANTERIOR ao laço não pode virar o 'depois'", async () => {
+    // Medido em prod 2026-09-07: a janela era do PROJETO com `- 12 horas` e `ASC LIMIT 12`; no NVX
+    // havia 30 validações nela contra 1 dentro do laço, então o "depois" era a 12ª mais antiga —
+    // de 06/09 22:30, ANTERIOR ao início do laço (07/09 07:22). O relatório ensinava "19 → 15"
+    // enquanto a run registrava 41 → 41.
+    const { db, find } = fakeDb({
+      validationsBefore: [{ findings: [FINDING], created_at: "2026-09-06T22:30:00Z" }],
+      validationsAfter: [],
+    });
+    const out = await loadEpisodeFindings(db, PROJECT, "2026-09-07T07:22:00Z", "2026-09-07T07:42:00Z");
+    expect(out.after).toEqual([]);
+    expect(out.afterMeasured).toBe(false);
+    // e nenhuma das duas leituras pode abrir janela retroativa de horas
+    for (const c of find(/FROM spec_validation_runs/)) {
+      expect(c.sql).not.toContain("12 hours");
+      expect(c.sql).toContain("ORDER BY created_at DESC LIMIT 1");
+    }
   });
 
   it("aceita findings vindos como texto JSON (driver sem parse)", async () => {
-    const { db } = fakeDb({ validations: [{ findings: JSON.stringify([FINDING]), created_at: "x" }] });
+    const { db } = fakeDb({ validationsBefore: [{ findings: JSON.stringify([FINDING]), created_at: "x" }] });
     const out = await loadEpisodeFindings(db, PROJECT, "2026-09-05T10:00:00Z", null);
     expect(out.before).toHaveLength(1);
     expect(out.after).toEqual([]);
@@ -235,7 +309,9 @@ describe("loadEpisodeFindings", () => {
 
   it("sem validação na janela devolve vazio (sem lançar)", async () => {
     const { db } = fakeDb({ validations: [] });
-    await expect(loadEpisodeFindings(db, PROJECT, "x", null)).resolves.toEqual({ before: [], after: [] });
+    await expect(loadEpisodeFindings(db, PROJECT, "x", null)).resolves.toEqual({
+      before: [], after: [], afterMeasured: false,
+    });
   });
 });
 
@@ -315,6 +391,38 @@ describe("collectBancadaLessonsTick", () => {
     expect(find(/SET learning_kicked_at = NULL/)).toHaveLength(1);
   });
 
+  it("🔴 GAP-57: kick que dá certo no retry LIMPA o erro anterior — senão a fase 2 nunca faz poll", async () => {
+    // Medido em prod 2026-09-07: a run 013ca0e5 ficou com
+    // `{"error":"connect ECONNREFUSED …","attempts":1}` para sempre, enquanto o agents havia
+    // persistido 4 lições às 07:43:29 para o job disparado no retry. A fase 2 seleciona
+    // `learning_result IS NULL`, então o episódio nunca era coletado e a telemetria do G7 mentia —
+    // no sentido pessimista, fazendo parecer que a Bancada não aprende.
+    const { db, find } = fakeDb({ pending: [pendingRow({ learning_result: { error: "connect ECONNREFUSED", attempts: 1 } })] });
+    const tp = transport();
+    const out = await collectBancadaLessonsTick(db, tp);
+    expect(out.kicked).toBe(1);
+    const save = find(/SET learning_job_id = \$2/)[0];
+    expect(save?.params[1]).toBe("le-abc123");
+    expect(save?.sql).toContain("learning_result = NULL");
+  });
+
+  it("🔴 GAP-57: jobId que não persiste é registrado (episódio não fica invisível)", async () => {
+    const calls: Call[] = [];
+    const db = {
+      query: async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (/learning_kicked_at IS NULL AND finished_at IS NOT NULL/.test(sql)) return { rows: [pendingRow()], rowCount: 1 };
+        if (/SET learning_kicked_at = now\(\)/.test(sql)) return { rows: [], rowCount: 1 };
+        if (/SET learning_job_id = \$2/.test(sql)) throw new Error("deadlock detected");
+        if (/FROM projects p/.test(sql)) return { rows: [{ title: "P", tenant_name: "T" }], rowCount: 1 };
+        return { rows: [], rowCount: 1 };
+      },
+    } as never;
+    await collectBancadaLessonsTick(db, transport());
+    const rec = calls.filter((c) => /SET learning_result = \$2::jsonb/.test(c.sql))[0];
+    expect(String(rec?.params[1])).toContain("jobId não persistido");
+  });
+
   it("depois de MAX_KICK_ATTEMPTS a run para de voltar à fila", async () => {
     const { db, find } = fakeDb({ pending: [pendingRow({ learning_result: { error: "x", attempts: 2 } })] });
     const tp = transport({ post: async () => { throw new Error("HTTP 404: Not Found"); } });
@@ -335,9 +443,11 @@ describe("collectBancadaLessonsTick", () => {
     });
     const tp = transport();
     await collectBancadaLessonsTick(db, tp);
-    const vq = calls.find((c) => /FROM spec_validation_runs/.test(c.sql))!;
-    expect(vq.params[1]).toBe("2026-09-05T12:00:00.000Z");
-    expect(vq.params[2]).toBe("2026-09-05T12:40:00.000Z");
+    // GAP-55: são duas leituras — o início do laço vai nas duas, o fim só na do "depois".
+    const [antes, depois] = calls.filter((c) => /FROM spec_validation_runs/.test(c.sql));
+    expect(antes?.params[1]).toBe("2026-09-05T12:00:00.000Z");
+    expect(depois?.params[1]).toBe("2026-09-05T12:00:00.000Z");
+    expect(depois?.params[2]).toBe("2026-09-05T12:40:00.000Z");
     expect(String(tp.posts[0]?.body.material)).toContain("Contrato do webhook sem idempotência");
   });
 
