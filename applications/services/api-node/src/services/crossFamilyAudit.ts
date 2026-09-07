@@ -41,9 +41,10 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import { httpPost } from "../routes/specs.js";
-import { anchoredSection } from "./gapPromotionVerdict.js";
 import { findingFingerprint, type Db } from "./findingTriage.js";
-import { loadSpecFiles, resolveFindingPath } from "./specGapScope.js";
+import { buildFileDigest } from "./specFileDigest.js";
+import { loadSpecFiles, resolveFindingPath, type SpecFileRef } from "./specGapScope.js";
+import { buildSiblingContext } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 /**
@@ -56,8 +57,24 @@ const AUDIT_MODEL = (process.env.SPEC_CROSS_AUDIT_MODEL ?? "amazon.nova-pro-v1:0
 const AUDIT_TIMEOUT_MS = num(process.env.SPEC_CROSS_AUDIT_TIMEOUT_MS, 90_000);
 /** Teto por validação. Auditar 25 findings custa centavos, mas teto explícito > surpresa na fatura. */
 const AUDIT_MAX_PER_RUN = num(process.env.SPEC_CROSS_AUDIT_MAX, 40);
-/** Quantos chars do trecho ancorado vão ao auditor. Recorte curto foi o defeito do GAP-72/74. */
-const SECTION_CHARS = num(process.env.SPEC_CROSS_AUDIT_SECTION_CHARS, 14_000);
+/**
+ * Teto do ARQUIVO ACUSADO no dossiê do auditor.
+ *
+ * 🔴 MEDIDO EM PROD (run `2eafbd95`, 2026-09-07, a primeira auditoria cross-family ao vivo): com
+ * apenas a seção ancorada, **8 de 10** vereditos foram `indecidivel`, e o motivo que o auditor
+ * escreveu foi sempre o mesmo — *"a acusação depende de conteúdo de outro arquivo / de outras seções
+ * não incluídas no trecho"*. As seções enviadas tinham 1.148–4.021 chars: o recorte, não o auditor,
+ * era o limite. Um instrumento que responde "não sei" em 80% dos casos não mede nada — não confirma
+ * a falha grave nem mata o GAP eterno, que são as DUAS pernas do equilíbrio que o Jean exigiu.
+ *
+ * A regra que fecha isso: **o auditor não pode ser mais cego que o escritor.** Ele recebe o MESMO
+ * dossiê que o CTO-editor recebe para editar — `buildFileDigest` (seção ancorada + a OUTRA PONTA da
+ * contradição, GAP-73, + janelas do GAP-74/79) e `buildSiblingContext` (os irmãos que a própria
+ * acusação cita, GAP-75). Nenhum julgamento novo: é transporte do fato "a acusação cita este arquivo".
+ */
+const TARGET_CHARS = num(process.env.SPEC_CROSS_AUDIT_TARGET_CHARS, 40_000);
+/** Teto do bloco de irmãos citados. Sem ele o `indecidivel` por falta da outra ponta volta. */
+const SIBLING_CHARS = num(process.env.SPEC_CROSS_AUDIT_SIBLING_CHARS, 40_000);
 const AUDIT_MAX_TOKENS = num(process.env.SPEC_CROSS_AUDIT_MAX_TOKENS, 900);
 
 function num(raw: string | undefined, fallback: number): number {
@@ -129,6 +146,10 @@ REGRAS INVIOLÁVEIS:
 6. Se o próprio texto da acusação declara que não há divergência / que está conforme / que é
    reportado só "para preservar continuidade", isso é "ausente" por confissão do acusador.
 7. Uma acusação escrita com segurança não é prova de nada. Confira o literal você mesmo.
+8. O TRECHO é um DOSSIÊ: traz o arquivo acusado (sumário completo de cabeçalhos + as seções
+   endereçadas e as citadas, VERBATIM) e, quando a acusação cita outros arquivos, o trecho deles.
+   Contradição ENTRE arquivos do dossiê é verificável — julgue-a. Só é "indecidivel" o que depende de
+   material que o dossiê declara ter deixado FORA, ou que não está em nenhuma parte dele.
 
 GRAVIDADE (só quando o veredicto é "presente"). A régua é a CONSEQUÊNCIA PARA QUEM VAI CONSTRUIR o
 software a partir desta spec — não é gosto de redação:
@@ -210,6 +231,41 @@ export function normalizeGravity(g: string | undefined, verdict: AuditVerdict): 
   return "grave";
 }
 
+/**
+ * O DOSSIÊ que vai ao auditor: arquivo acusado + a outra ponta da contradição + o que ficou fora.
+ *
+ * Reusa as MESMAS máquinas do CTO-editor de propósito. Se o auditor visse menos que o escritor,
+ * `indecidivel` viraria o veredicto padrão (medido: 8/10 na run `2eafbd95`) e a auditoria não mediria
+ * nada; se visse mais, ele julgaria um texto que ninguém está editando.
+ *
+ * A lista "FORA DESTE DOSSIÊ" não é enfeite: é o que autoriza o `indecidivel` honesto (regra 8) e é a
+ * disciplina do A5.7 aplicada aqui — **cortar é aceitável, mentir sobre o corte não é.**
+ */
+export async function buildAuditDossier(
+  refs: SpecFileRef[], targetPath: string, content: string, f: ValidationFinding,
+): Promise<{ text: string; cuts: string[] }> {
+  const one = [f];
+  const digest = buildFileDigest(targetPath, content, one, TARGET_CHARS);
+  const sib = await buildSiblingContext(refs, targetPath, one, { totalBudget: SIBLING_CHARS })
+    .catch(() => null);
+
+  const cuts: string[] = [];
+  for (const a of digest.anchorsDropped) cuts.push(`${targetPath} ${a} (seção endereçada não caberia)`);
+  for (const c of digest.citedDropped) cuts.push(`${targetPath} ${c} (seção citada não caberia)`);
+  for (const a of digest.anchorsUnlocatable) cuts.push(`${targetPath} ${a} (âncora não localizada no arquivo)`);
+  for (const p of sib?.omitted ?? []) cuts.push(`${p} (arquivo irmão citado, não caberia)`);
+  for (const c of sib?.citedDropped ?? []) cuts.push(`${c} (seção de irmão citada, não transcrita)`);
+
+  const parts = [
+    `=== ARQUIVO ACUSADO: ${targetPath} ===`,
+    digest.text,
+  ];
+  if (sib?.block) parts.push("", "=== ARQUIVOS IRMÃOS CITADOS PELA ACUSAÇÃO (só leitura) ===", sib.block);
+  parts.push("", "=== FORA DESTE DOSSIÊ (declarado, não omitido) ===",
+    cuts.length ? cuts.map((c) => `- ${c}`).join("\n") : "- nada: o dossiê traz tudo que a acusação nomeia.");
+  return { text: parts.join("\n"), cuts };
+}
+
 /** Monta a mensagem do auditor. Trecho primeiro, acusação depois — a ordem que o gold set validou. */
 export function buildAuditMessage(f: ValidationFinding, section: string): string {
   return [
@@ -279,11 +335,12 @@ export async function auditFindings(db: Db, args: {
   for (const f of alvo.slice(0, AUDIT_MAX_PER_RUN)) {
     const canon = resolveFindingPath(f.file ?? "", refs.map((r) => r.path));
     const file = canon ? await loadFile(canon.toLowerCase()) : null;
-    if (!file) { extraSkipped++; continue; }
+    if (!canon || !file) { extraSkipped++; continue; }
 
-    const section = anchoredSection(file.content, f.anchor ?? "").slice(0, SECTION_CHARS);
-    // Sem trecho não há auditoria possível: âncora que o recorte não alcança é problema de outro GAP
-    // (72/73/74/75). Absolver aqui transformaria cegueira do recorte em "defeito inexistente".
+    const dossier = await buildAuditDossier(refs, canon, file.content, f).catch(() => null);
+    const section = dossier?.text ?? "";
+    // Sem dossiê não há auditoria possível. Absolver aqui transformaria cegueira do recorte em
+    // "defeito inexistente" — e a cegueira do recorte é problema dos GAP-72/73/74/75, não inocência.
     if (!section.trim()) { extraSkipped++; continue; }
 
     let raw = "";

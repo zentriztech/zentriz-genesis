@@ -1,7 +1,11 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, it, expect } from "vitest";
 import {
-  AUDIT_SYSTEM, buildAuditMessage, evidenceIsVerbatim, normalizeGravity, normalizeVerdict,
-  parseAuditJson, tally, type FindingAudit,
+  AUDIT_SYSTEM, buildAuditDossier, buildAuditMessage, evidenceIsVerbatim, normalizeGravity,
+  normalizeVerdict, parseAuditJson, tally, type FindingAudit,
 } from "./crossFamilyAudit.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -139,6 +143,54 @@ describe("buildAuditMessage", () => {
   it("finding sem âncora ainda produz mensagem legível (não quebra o prompt)", () => {
     const msg = buildAuditMessage(f({ title: "t", anchor: null }), "S");
     expect(msg).toContain("(sem âncora)");
+  });
+});
+
+// ── 4b. o dossiê: o auditor não pode ser mais cego que o escritor ────────────
+
+describe("buildAuditDossier", () => {
+  /**
+   * 🔴 MEDIDO EM PROD (run `2eafbd95`, primeira auditoria cross-family ao vivo): mandando só a seção
+   * ancorada, **8 de 10** vereditos foram `indecidivel`, sempre com o mesmo motivo escrito pelo
+   * auditor — *"a acusação depende de conteúdo de outro arquivo / de outras seções não incluídas"*.
+   *
+   * Isso não é o auditor falhando: é o RECORTE. E um instrumento que diz "não sei" em 80% dos casos
+   * não serve a nenhuma das duas pernas do equilíbrio — nem confirma a falha grave, nem mata o GAP
+   * eterno. O dossiê dá ao auditor exatamente o que o CTO-editor já recebe.
+   */
+  const tmp = mkdtempSync(join(tmpdir(), "audit-dossier-"));
+  const irmao = join(tmp, "definicao-de-pronto.md");
+  const alvo = join(tmp, "api-entregas.md");
+  writeFileSync(irmao, "# Definição de pronto\n\n## §9 Erros\n\nErro de validação responde `400`.\n");
+  writeFileSync(alvo, "# API\n\n## §3.1 Erros\n\nErro de validação responde `422`.\n");
+
+  const refs = [
+    { path: "api-entregas.md", filename: "api-entregas.md", relDir: "", filePath: alvo, isPrimary: true },
+    { path: "definicao-de-pronto.md", filename: "definicao-de-pronto.md", relDir: "", filePath: irmao, isPrimary: false },
+  ];
+
+  it("🔴 traz a OUTRA PONTA da contradição quando a acusação cita o irmão", async () => {
+    const finding = f({
+      file: "api-entregas.md", anchor: "§3.1", title: "Status HTTP divergente",
+      rationale: "O arquivo definicao-de-pronto.md §9 define 400 para erro de validação, aqui é 422.",
+    });
+    const d = await buildAuditDossier(refs, "api-entregas.md", readFileSync(alvo, "utf8"), finding);
+    expect(d.text).toContain("=== ARQUIVO ACUSADO: api-entregas.md ===");
+    expect(d.text).toContain("422");
+    // Sem esta linha o auditor responde `indecidivel` — foi literalmente o que 8 de 10 fizeram.
+    expect(d.text).toContain("definicao-de-pronto.md");
+    expect(d.text).toContain("400");
+  });
+
+  it("declara o que ficou de fora — cortar é aceitável, mentir sobre o corte não", async () => {
+    const d = await buildAuditDossier(refs, "api-entregas.md", readFileSync(alvo, "utf8"), f({ title: "t" }));
+    expect(d.text).toContain("=== FORA DESTE DOSSIÊ (declarado, não omitido) ===");
+  });
+
+  it("arquivo pequeno e sem citação: nada é cortado, e isso é dito", async () => {
+    const d = await buildAuditDossier([refs[0]], "api-entregas.md", readFileSync(alvo, "utf8"), f({ title: "t" }));
+    expect(d.cuts).toEqual([]);
+    expect(d.text).toContain("nada: o dossiê traz tudo que a acusação nomeia");
   });
 });
 
