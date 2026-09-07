@@ -915,21 +915,43 @@ async function gapOracleBlock(
  * IDÊNTICO nas três, porque nada dizia ao agente que a tentativa anterior tinha existido. Aqui o
  * código só transporta o número; a estratégia (consolidar primeiro, entregar em partes, ou insistir
  * porque o acréscimo é indispensável) é decisão do agente.
+ *
+ * GAP-31 — o veto que descarta a rodada tem DUAS causas (estourar a margem do passe **ou** não
+ * consolidar nada: nem citar o oráculo nem encolher). A primeira versão deste bloco falava sempre em
+ * tamanho, então uma recusa por "não consolidou" com delta pequeno viraria "você entregou +50
+ * caracteres contra margem de 2.000" — números certos, causa errada, e o agente sairia encolhendo o
+ * arquivo em vez de citar o oráculo. Agora o MOTIVO registrado pelo laço vai literal, e a orientação
+ * de "pagar o crescimento removendo redeclaração" só aparece quando a recusa foi de fato por margem.
  */
-export function priorRejectionFactBlock(prior: { delta: number; budget: number; pass: number } | null | undefined): string {
-  if (!prior || prior.delta <= 0) return "";
-  return [
+export function priorRejectionFactBlock(
+  prior: { delta: number; budget: number; pass: number; reason?: string | null } | null | undefined,
+): string {
+  if (!prior) return "";
+  const reason = prior.reason?.trim();
+  // Sem motivo gravado (rodada anterior ao GAP-31), só o número positivo é fato interpretável.
+  if (!reason && prior.delta <= 0) return "";
+  const overBudget = prior.delta > prior.budget;
+  const sign = prior.delta >= 0 ? "+" : "";
+  const lines = [
     "--- TENTATIVA ANTERIOR NESTE ARQUIVO (fato registrado pelo laço) ---",
-    `No passe ${prior.pass} a sua revisão deste arquivo foi DESCARTADA INTEIRA: ela entregou`
-    + ` +${prior.delta} caracteres e a margem de crescimento disponível era ${prior.budget}. Nada dela`
-    + " foi salvo — o conteúdo acima é o de ANTES dela e os GAPs seguem abertos.",
-    "NÃO repita a mesma tentativa: entregar de novo um crescimento desse tamanho gasta a rodada e não"
-    + " fecha GAP nenhum. Se o conserto exige texto novo, PAGUE-O removendo as redeclarações que o"
-    + " bloco de fonte única aponta; se ainda não couber, resolva nesta rodada os GAPs que CABEM na"
-    + " margem, deixando o arquivo coerente, e deixe os demais para a próxima — GAP fechado em parte é"
-    + " progresso, rodada descartada não é.",
+    `No passe ${prior.pass} a sua revisão deste arquivo foi DESCARTADA INTEIRA. Ela entregou`
+    + ` ${sign}${prior.delta} caracteres e a margem de crescimento que o passe tinha era ${prior.budget}.`
+    + " Nada dela foi salvo — o conteúdo acima é o de ANTES dela e os GAPs seguem abertos.",
+  ];
+  if (reason) lines.push(`MOTIVO EXATO registrado pelo laço: ${reason}`);
+  lines.push(
+    overBudget
+      ? "NÃO repita a mesma tentativa: entregar de novo um crescimento desse tamanho gasta a rodada e não"
+        + " fecha GAP nenhum. Se o conserto exige texto novo, PAGUE-O removendo as redeclarações que o"
+        + " bloco de fonte única aponta; se ainda não couber, resolva nesta rodada os GAPs que CABEM na"
+        + " margem, deixando o arquivo coerente, e deixe os demais para a próxima — GAP fechado em parte é"
+        + " progresso, rodada descartada não é."
+      : "NÃO repita a mesma tentativa: ela já foi recusada pelo motivo acima. Ataque o motivo — se o que"
+        + " falta é apontar a fonte única, cite o caminho do arquivo-oráculo no lugar da redeclaração e"
+        + " remova o texto redundante; entregar o mesmo conteúdo de novo gasta a rodada sem fechar GAP.",
     "--- FIM DA TENTATIVA ANTERIOR ---",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 // Remove cerca de código envolvente (```md … ```) SE o modelo tiver desobedecido e cercado
@@ -1257,10 +1279,11 @@ export async function dispatchGapFileJob(opts: {
   /** GAP-28: margem de crescimento que resta no passe. Só o laço autônomo informa. */
   growthBudget?: number;
   /**
-   * GAP-29: a tentativa anterior neste arquivo foi DESCARTADA por estourar a margem (tamanho que ela
-   * entregou × margem que havia). Só o laço autônomo tem esse histórico; o botão humano não retenta.
+   * GAP-29/GAP-31: a tentativa anterior neste arquivo foi DESCARTADA pelo veto de consolidação —
+   * tamanho que ela entregou, margem que havia e o MOTIVO exato. Só o laço autônomo tem esse
+   * histórico; o botão humano não retenta.
    */
-  priorRejection?: { delta: number; budget: number; pass: number } | null;
+  priorRejection?: { delta: number; budget: number; pass: number; reason?: string | null } | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };

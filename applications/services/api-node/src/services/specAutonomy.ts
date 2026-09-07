@@ -234,13 +234,20 @@ export interface AutonomyRoundLog {
    */
   deltaChars?: number | null;
   /**
-   * GAP-29: a rodada foi DESCARTADA por estourar a margem de crescimento do passe — e este é o
-   * tamanho que ela tinha entregado, com a margem que havia. Serve à tentativa SEGUINTE deste
-   * arquivo: sem este fato, o laço repete uma tentativa já reprovada ao preço cheio de Opus 5
-   * (medido: `autenticacao-sessao.md` entregou +2.661 e depois +2.740 contra margens de 580 e 1.143).
+   * GAP-29: a rodada foi DESCARTADA pelo veto de consolidação — aqui fica o tamanho que ela tinha
+   * entregado e a margem que havia. Serve à tentativa SEGUINTE deste arquivo: sem este fato, o laço
+   * repete uma tentativa já reprovada ao preço cheio de Opus 5 (medido: `autenticacao-sessao.md`
+   * entregou +2.661 e depois +2.740 contra margens de 580 e 1.143 — quase a MESMA resposta, 3 vezes).
+   *
+   * GAP-31: o MOTIVO textual também é gravado, porque o veto tem DUAS causas (estourar a margem do
+   * passe **ou** não consolidar nada — nem citar o oráculo nem encolher). Sem `rejectedReason` o fato
+   * devolvido ao agente atribuía toda recusa a tamanho: numa recusa por "não consolidou" com delta
+   * pequeno, o laço diria "você entregou +50 chars contra margem de 2.000" — verdadeiro nos números e
+   * MENTIROSO na causa, mandando o agente encolher quando o pedido era citar o oráculo.
    */
   rejectedDelta?: number | null;
   rejectedBudget?: number | null;
+  rejectedReason?: string | null;
   note?: string;
   /**
    * A5.3/GAP-5: esta rodada é a CRIAÇÃO do manifesto (e não a edição de um `README.md` que já
@@ -814,7 +821,7 @@ export function passGrowthUsed(run: Pick<AutonomyRun, "rounds" | "passes">): num
  * arquivo não pode crescer), não uma dívida que proibiria até o encolhimento.
  */
 /**
- * GAP-29 — a ÚLTIMA tentativa deste arquivo que foi descartada por estourar a margem, se houver.
+ * GAP-29 — a ÚLTIMA tentativa deste arquivo que o veto de consolidação descartou, se houver.
  *
  * MEDIDO na run `d7acccb8`: `autenticacao-sessao.md` foi descartado 3 vezes entregando +2.661,
  * +2.740 e +2.740 chars contra margens de 580 e 1.143 — praticamente a MESMA resposta, paga em
@@ -824,16 +831,24 @@ export function passGrowthUsed(run: Pick<AutonomyRun, "rounds" | "passes">): num
  *
  * Procura de trás para frente, em TODO o log da run (a retentativa é no passe seguinte, não no
  * mesmo), e devolve só a mais recente — as anteriores são história, não instrução.
+ *
+ * GAP-31: devolve também o MOTIVO gravado. Rodada antiga (anterior ao GAP-31) não tem motivo ⇒
+ * `reason: null`, e quem monta o texto entrega só os números em vez de inventar a causa.
  */
-export function lastGrowthRejection(
+export function lastRejectedAttempt(
   run: Pick<AutonomyRun, "rounds">, filePath: string,
-): { delta: number; budget: number; pass: number } | null {
+): { delta: number; budget: number; pass: number; reason: string | null } | null {
   const norm = (p: string) => p.trim().toLowerCase();
   for (let i = run.rounds.length - 1; i >= 0; i--) {
     const r = run.rounds[i];
     if (norm(r.filePath ?? "") !== norm(filePath)) continue;
     if (typeof r.rejectedDelta !== "number") continue;
-    return { delta: r.rejectedDelta, budget: typeof r.rejectedBudget === "number" ? r.rejectedBudget : 0, pass: (r.pass ?? 0) + 1 };
+    return {
+      delta: r.rejectedDelta,
+      budget: typeof r.rejectedBudget === "number" ? r.rejectedBudget : 0,
+      pass: (r.pass ?? 0) + 1,
+      reason: typeof r.rejectedReason === "string" && r.rejectedReason.trim() ? r.rejectedReason.trim() : null,
+    };
   }
   return null;
 }
@@ -1097,7 +1112,7 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-28: a margem ANUNCIADA é a que sobrou do passe — a mesma que o veto vai julgar no apply.
   const growthBudget = await passGrowthBudget(db, run);
   // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
-  const priorRejection = lastGrowthRejection(run, target);
+  const priorRejection = lastRejectedAttempt(run, target);
   try {
     const res = await dispatchGapFileJob({
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
@@ -1369,9 +1384,15 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (oracleVeto) {
     // GAP-29: o TAMANHO da tentativa recusada vai para o log — é o único jeito de a próxima
     // tentativa deste arquivo não ser uma repetição paga da mesma resposta reprovada.
+    // GAP-31: e o MOTIVO vai junto, porque este veto recusa por duas razões diferentes e mandar o
+    // agente encolher quando o problema era não citar o oráculo é pior que não dizer nada.
     return skipFileAndContinue(db, run, target, oracleVeto, {
       failure: false, fromStatus: "applying",
-      patch: { rejectedDelta: revised.length - file.content.length, rejectedBudget: passBudget },
+      patch: {
+        rejectedDelta: revised.length - file.content.length,
+        rejectedBudget: passBudget,
+        rejectedReason: oracleVeto,
+      },
     });
   }
   if (removedNote) {

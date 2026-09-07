@@ -61,7 +61,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   tallyGaps, autonomyEnabled, AUTONOMY_MAX_ROUNDS, startAutonomyRun, advanceAutonomyRun,
-  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastGrowthRejection,
+  isTerminalAutonomyStatus, assessRevisionIntegrity, passGrowthUsed, lastRejectedAttempt,
   type AutonomyStatus,
 } from "./specAutonomy.js";
 
@@ -860,37 +860,50 @@ describe("passGrowthUsed (GAP-28)", () => {
 // +2.740 chars contra margens de 580 e 1.143. O pedido era IDÊNTICO nas três — o laço pagava Opus 5
 // para repetir uma resposta que ele já sabia que ia recusar.
 
-const REJ = (p: { round: number; pass?: number; filePath: string; rejectedDelta?: number; rejectedBudget?: number; applied?: boolean }) => ({
+const REJ = (p: {
+  round: number; pass?: number; filePath: string;
+  rejectedDelta?: number; rejectedBudget?: number; rejectedReason?: string; applied?: boolean;
+}) => ({
   round: p.round, pass: p.pass ?? 0, startedAt: "2026-09-07T00:00:00.000Z", filePath: p.filePath,
   ...(p.applied === undefined ? {} : { applied: p.applied }),
   ...(p.rejectedDelta === undefined ? {} : { rejectedDelta: p.rejectedDelta }),
   ...(p.rejectedBudget === undefined ? {} : { rejectedBudget: p.rejectedBudget }),
+  ...(p.rejectedReason === undefined ? {} : { rejectedReason: p.rejectedReason }),
 });
 
-describe("lastGrowthRejection (GAP-29)", () => {
+describe("lastRejectedAttempt (GAP-29/GAP-31)", () => {
   it("devolve a recusa MAIS RECENTE do arquivo, atravessando passes", () => {
-    const got = lastGrowthRejection({
+    const got = lastRejectedAttempt({
       rounds: [
         REJ({ round: 8, pass: 0, filePath: "autenticacao-sessao.md", rejectedDelta: 2_661, rejectedBudget: 580 }),
         REJ({ round: 11, pass: 1, filePath: "modelo-dados.md", applied: true }),
-        REJ({ round: 14, pass: 1, filePath: "autenticacao-sessao.md", rejectedDelta: 2_740, rejectedBudget: 1_143 }),
+        REJ({
+          round: 14, pass: 1, filePath: "autenticacao-sessao.md",
+          rejectedDelta: 2_740, rejectedBudget: 1_143, rejectedReason: "consolidação recusada: cresceu 2740",
+        }),
       ] as never,
     }, "autenticacao-sessao.md");
-    expect(got).toEqual({ delta: 2_740, budget: 1_143, pass: 2 });
+    expect(got).toEqual({ delta: 2_740, budget: 1_143, pass: 2, reason: "consolidação recusada: cresceu 2740" });
   });
 
   it("não confunde arquivos — a recusa de um não instrui o outro", () => {
     const rounds = [REJ({ round: 8, filePath: "autenticacao-sessao.md", rejectedDelta: 2_661, rejectedBudget: 580 })] as never;
-    expect(lastGrowthRejection({ rounds }, "modelo-dados.md")).toBeNull();
-    expect(lastGrowthRejection({ rounds }, "AUTENTICACAO-SESSAO.MD")).not.toBeNull(); // caminho é comparado sem caixa
+    expect(lastRejectedAttempt({ rounds }, "modelo-dados.md")).toBeNull();
+    expect(lastRejectedAttempt({ rounds }, "AUTENTICACAO-SESSAO.MD")).not.toBeNull(); // caminho é comparado sem caixa
   });
 
   it("rodada que falhou por OUTRO motivo (sem `rejectedDelta`) não vira instrução de tamanho", () => {
     const rounds = [REJ({ round: 3, filePath: "visao-escopo.md", applied: false })] as never;
-    expect(lastGrowthRejection({ rounds }, "visao-escopo.md")).toBeNull();
+    expect(lastRejectedAttempt({ rounds }, "visao-escopo.md")).toBeNull();
   });
 
   it("primeira tentativa não recebe fato nenhum", () => {
-    expect(lastGrowthRejection({ rounds: [] as never }, "modelo-dados.md")).toBeNull();
+    expect(lastRejectedAttempt({ rounds: [] as never }, "modelo-dados.md")).toBeNull();
+  });
+
+  // GAP-31: rodada gravada ANTES do motivo existir não pode virar uma causa inventada.
+  it("recusa antiga sem motivo gravado devolve `reason: null`", () => {
+    const rounds = [REJ({ round: 8, filePath: "README.md", rejectedDelta: 4_675, rejectedBudget: 2_000 })] as never;
+    expect(lastRejectedAttempt({ rounds }, "README.md")).toEqual({ delta: 4_675, budget: 2_000, pass: 1, reason: null });
   });
 });

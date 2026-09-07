@@ -938,6 +938,30 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(priorRejectionFactBlock({ delta: -500, budget: 2_000, pass: 1 })).toBe("");
   });
 
+  /**
+   * GAP-31 — o veto de consolidação recusa por DUAS causas. Atribuir toda recusa a tamanho é
+   * mentira útil ao contrário: manda o agente encolher quando o pedido era citar o oráculo.
+   */
+  it("priorRejectionFactBlock: recusa por NÃO-CONSOLIDAÇÃO não vira ordem de encolher", async () => {
+    const { priorRejectionFactBlock } = await import("./specChat.js");
+    const reason = "consolidação recusada: a revisão não cita o oráculo (`catalogo-erros` → `contratos-erros.md`)"
+      + " nem encolheu o arquivo (+50 chars) — não houve consolidação a aplicar. Nada foi escrito.";
+    const block = priorRejectionFactBlock({ delta: 50, budget: 2_000, pass: 3, reason });
+    expect(block).toContain("MOTIVO EXATO registrado pelo laço");
+    expect(block).toContain("não cita o oráculo");
+    expect(block).toContain("Ataque o motivo");
+    // A orientação de tamanho NÃO aparece: a recusa não foi por margem (50 < 2.000).
+    expect(block).not.toContain("crescimento desse tamanho");
+    // Recusa POR MARGEM continua recebendo a orientação de pagar o crescimento consolidando.
+    const overBudget = priorRejectionFactBlock({ delta: 4_675, budget: 2_000, pass: 3, reason: "consolidação recusada: cresceu 4675" });
+    expect(overBudget).toContain("crescimento desse tamanho");
+    expect(overBudget).toContain("consolidação recusada: cresceu 4675");
+    // Recusa antiga (sem motivo gravado) segue entregando só os números, sem inventar causa.
+    const legacy = priorRejectionFactBlock({ delta: 4_675, budget: 2_000, pass: 1, reason: null });
+    expect(legacy).toContain("+4675");
+    expect(legacy).not.toContain("MOTIVO EXATO");
+  });
+
   it("rawMaxTokensFor: piso de 8k, cresce com o arquivo, teto de 32k (guard do SDK)", async () => {
     const { rawMaxTokensFor } = await import("./specChat.js");
     expect(rawMaxTokensFor(0)).toBe(8_000);
