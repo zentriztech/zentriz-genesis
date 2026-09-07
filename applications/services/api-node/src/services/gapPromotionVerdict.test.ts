@@ -33,8 +33,9 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
-  focusRoundsByFile, saveVerdicts, livePromotionVerdicts, promotabilityReport,
+  focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
 } = await import("./gapPromotionVerdict.js");
+const { anchorSearchKey } = await import("./gapPersistence.js");
 
 type Candidate = import("./gapPromotionVerdict.js").Candidate;
 type LiveVerdict = import("./gapPromotionVerdict.js").LiveVerdict;
@@ -60,7 +61,12 @@ const base = (o: Partial<Parameters<typeof selectVerdictCandidates>[0]> = {}): P
   findings: [F()],
   runs: [V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], [F()])],
   judged: new Set(["modelo-dados.md"]),
+  // 🔴 GAP-81: são duas contas DIFERENTES e a distinção é a guarda. `focusByFile` é quantas rodadas o
+  // arquivo levou no total (contexto do parecer); `focusByAnchor` é quantas rodadas DEDICADAS (nível 2)
+  // atacaram só ESTE defeito — é o gatilho que o Jean exigiu ("focamos neles individualmente algumas
+  // vezes"). A chave é normalizada por `anchorSearchKey` porque a grafia do juiz ≠ a grafia do arquivo.
   focusByFile: new Map([["modelo-dados.md", 4]]),
+  focusByAnchor: new Map([[anchorSearchKey("## 4. Autenticação"), 2]]),
   untouched: new Set<string>(),
   sections: sections(),
   gapsResolved: 5,
@@ -75,6 +81,7 @@ const C = (o: Partial<Candidate> = {}): Candidate => ({
   anchor: "## 4. Autenticação",
   times: 4,
   focusRounds: 3,
+  fileRounds: 5,
   section: SECTION,
   ...o,
 });
@@ -153,7 +160,9 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
     expect(gate.rejected).toEqual([]);
     expect(gate.candidates).toHaveLength(1);
     expect(gate.candidates[0]).toMatchObject({
-      file: "modelo-dados.md", anchor: "## 4. Autenticação", times: 3, focusRounds: 4, section: SECTION,
+      file: "modelo-dados.md", anchor: "## 4. Autenticação", times: 3, section: SECTION,
+      // `focusRounds` vem da conta POR ÂNCORA (rodadas dedicadas); `fileRounds` é só o contexto.
+      focusRounds: 2, fileRounds: 4,
     });
   });
 
@@ -198,9 +207,35 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
   });
 
   it("foco individual insuficiente descarta — é o gatilho que o Jean exigiu", () => {
-    const gate = selectVerdictCandidates(base({ focusByFile: new Map([["modelo-dados.md", 1]]) }));
+    const gate = selectVerdictCandidates(base({ focusByAnchor: new Map([[anchorSearchKey("## 4. Autenticação"), 1]]) }));
     expect(gate.candidates).toEqual([]);
     expect(gate.rejected[0].why).toMatch(/foco individual insuficiente: 1 rodada/);
+  });
+
+  /**
+   * 🔴 GAP-81 — a guarda que quase virou carimbo. Contar RODADAS DO ARQUIVO como "foco individual" dava
+   * o gatilho de graça: `modelo-dados.md` já tinha 4+ rodadas normais em prod, logo TODO defeito dele
+   * nasceria elegível ao veredicto sem que uma única rodada tivesse sido dedicada a ele. A conta que
+   * vale é a das rodadas de nível 2 sobre AQUELA âncora.
+   */
+  it("arquivo com muitas rodadas, mas ZERO dedicadas a este defeito, não é elegível", () => {
+    const gate = selectVerdictCandidates(base({
+      focusByFile: new Map([["modelo-dados.md", 9]]),
+      focusByAnchor: new Map(),
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/0 rodada\(s\) DEDICADA\(S\)/);
+    // O parecer precisa mostrar as DUAS contas, senão o humano não distingue "não tentado" de "insistente".
+    expect(gate.rejected[0].why).toMatch(/o arquivo teve 9 rodada/);
+  });
+
+  it("rodada dedicada casa por âncora NORMALIZADA (a grafia do juiz não é a do arquivo)", () => {
+    // O log da rodada gravou `§4. AUTENTICAÇÃO`; o finding chega como `## 4. Autenticação`.
+    const gate = selectVerdictCandidates(base({
+      focusByAnchor: new Map([[anchorSearchKey("§4. AUTENTICAÇÃO"), 2]]),
+    }));
+    expect(gate.rejected).toEqual([]);
+    expect(gate.candidates).toHaveLength(1);
   });
 
   it("âncora não localizável descarta: o juiz decidiria sobre um resumo", () => {
@@ -229,6 +264,7 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
       findings: many,
       runs,
       sections: new Map(many.map((f) => [String(f.anchor), SECTION])),
+      focusByAnchor: new Map(many.map((f) => [anchorSearchKey(String(f.anchor)), 2])),
     }));
     expect(gate.candidates).toHaveLength(8);
     expect(gate.candidates[0].times).toBeGreaterThanOrEqual(gate.candidates[7].times);
@@ -422,6 +458,40 @@ describe("focusRoundsByFile", () => {
     expect(map.get("visao-escopo.md")).toBe(2);
     expect(map.size).toBe(2);
     expect(db.calls[0].text).toContain("spec_autonomy_runs");
+  });
+
+  it("lê `filePath`, que é a chave real do log — `file` não existe e daria zero em tudo", () => {
+    // 🔴 O bug que fazia o gatilho do GAP-77 nunca abrir: a consulta pedia `r->>'file'`, chave que o
+    // `AutonomyRoundLog` nunca gravou, então TODO arquivo tinha 0 rodadas e nenhum GAP era elegível.
+    const db = fakeDb();
+    return focusRoundsByFile(db as never, "p1").then(() => {
+      expect(db.calls[0].text).toContain("filePath");
+      expect(db.calls[0].text).not.toMatch(/->>'file'/);
+    });
+  });
+});
+
+/**
+ * 🔴 GAP-81 — a conta que o gatilho do Jean exige: rodadas DEDICADAS (nível 2) por defeito, não por
+ * arquivo. Um arquivo com 9 rodadas normais não pagou foco individual em nenhum dos seus defeitos.
+ */
+describe("focusRoundsByAnchor", () => {
+  it("conta só rodadas de nível 2 e agrega por âncora normalizada", async () => {
+    const db = fakeDb([{ anchor: "§8.6 (c)", n: 2 }, { anchor: "8.6 c", n: 1 }, { anchor: "§9.1", n: 3 }]);
+    const map = await focusRoundsByAnchor(db as never, "p1");
+    // As duas grafias da MESMA âncora somam — senão o defeito "trocaria de nome" e perderia o foco pago.
+    expect(map.get(anchorSearchKey("§8.6 (c)"))).toBe(3);
+    expect(map.get(anchorSearchKey("§9.1"))).toBe(3);
+    expect(map.size).toBe(2);
+    expect(db.calls[0].text).toContain("focusLevel");
+    expect(db.calls[0].text).toContain("focusAnchors");
+  });
+
+  it("âncora vazia/nula é ignorada e a falha de consulta devolve mapa vazio (nunca elegibilidade grátis)", async () => {
+    const db = fakeDb([{ anchor: null, n: 5 }, { anchor: "§§ ()", n: 4 }]);
+    expect((await focusRoundsByAnchor(db as never, "p1")).size).toBe(0);
+    const broken = { query: vi.fn(async () => { throw new Error("coluna não existe"); }) };
+    expect((await focusRoundsByAnchor(broken as never, "p1")).size).toBe(0);
   });
 });
 

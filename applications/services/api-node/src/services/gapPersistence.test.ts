@@ -92,6 +92,67 @@ describe("untouchedAnchors", () => {
     expect(untouchedAnchors("", "x", ["§8.6"]).measured).toEqual([]);
     expect(untouchedAnchors("x", "", ["§8.6"]).measured).toEqual([]);
   });
+
+  /**
+   * 🔴 GAP-79 — quando o cabeçalho endereçado é um TOCO, o texto em disputa mora nas subseções, e é a
+   * subárvore inteira que precisa ser medida. Medido em prod: `visao-escopo.md §1.3` tem 415 chars de
+   * corpo próprio contra 21.839 de subárvore (1,9%) e responde por 15 dos 62 eventos "intocada" em 8
+   * runs — o CTO corrigia a tabela no filho e era acusado de não ter tocado a seção.
+   */
+  describe("cabeçalho-toco (GAP-79)", () => {
+    const comFilhos = [
+      "# Visão e escopo",
+      "",
+      "### 1.3 Serviços",
+      "",
+      "Os serviços do produto são:",
+      "",
+      "#### Serviço api",
+      "",
+      "`ServiceManifest.interfaces[]` é a tabela abaixo: rest.",
+      "",
+      "### 1.4 Fora de escopo",
+      "",
+      "Nada aqui.",
+    ].join("\n");
+
+    it("edição no FILHO já conta como tocou a seção do pai", () => {
+      const after = comFilhos.replace("é a tabela abaixo: rest.", "é a tabela abaixo: rest, grpc.");
+      const r = untouchedAnchors(comFilhos, after, ["§1.3"]);
+      expect(r.measured).toEqual(["§1.3"]);
+      expect(r.untouched).toEqual([]);
+    });
+
+    it("declara o pai como TOCO, para o prompt dizer onde o texto realmente mora", () => {
+      expect(untouchedAnchors(comFilhos, `${comFilhos}\nerrata\n`, ["§1.3"]).stubParents).toEqual(["§1.3"]);
+    });
+
+    it("subárvore idêntica ⇒ segue intocada (a absolvição não pode virar automática)", () => {
+      const r = untouchedAnchors(comFilhos, `${comFilhos}\n\n## 12 Erratas\n\nD-24: §1.3 é errata nula.\n`, ["§1.3"]);
+      expect(r.untouched).toEqual(["§1.3"]);
+    });
+
+    it("pai com corpo próprio SUBSTANCIAL não é TOCO, mas a medição segue sendo a subárvore", () => {
+      // A razão de 2,5× decide só o AVISO do prompt ("o texto mora nas subseções"), nunca a absolvição:
+      // a medição é sempre a subárvore, e a assimetria é deliberada — a acusação falsa é irrecuperável
+      // (o prompt manda corrigir um trecho já corrigido, rodada após rodada), enquanto a absolvição
+      // frouxa é pega na validação seguinte, onde o GAP reaparece e a reincidência sobe.
+      const gordo = [
+        "### 6. Sessões",
+        "",
+        "detalhe ".repeat(400),
+        "",
+        "#### 6.1 Refresh",
+        "",
+        "Rotação a cada 90 dias.",
+      ].join("\n");
+      const after = gordo.replace("Rotação a cada 90 dias.", "Rotação a cada 30 dias.");
+      const r = untouchedAnchors(gordo, after, ["§6"]);
+      expect(r.stubParents).toEqual([]);
+      expect(r.measured).toEqual(["§6"]);
+      expect(r.untouched).toEqual([]);
+    });
+  });
 });
 
 describe("stableRecurrenceRefs", () => {

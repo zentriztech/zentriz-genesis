@@ -47,6 +47,8 @@ import { MANIFEST_PATH } from "../services/specManifest.js";
 // GAP-68: `import type` de propósito — `gapContinuity` importa `httpPost` de `routes/specs.js`, e um
 // import de valor fecharia um ciclo entre os dois arquivos de rota no carregamento do módulo.
 import type { PersistentGapRef } from "../services/gapContinuity.js";
+import { focusFactBlock } from "../services/gapFocus.js";
+import type { FocusPlan } from "../services/gapFocus.js";
 import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatalog.js";
 
 interface ChatMessage {
@@ -806,6 +808,12 @@ function buildGapFileRequest(
    * reincidente conhecido (ou a reconciliação do GAP-67 não rodou — e aí o laço não afirma nada).
    */
   persistentGapBlock = "",
+  /**
+   * 🔴 GAP-81: a rodada é DEDICADA e a lista de GAPs abaixo está restrita. Vazio = rodada normal (todos
+   * os GAPs do arquivo). Entregar a lista curta SEM este bloco seria pior que não focar: o modelo leria
+   * "o arquivo só tem estes defeitos" e removeria como redundante o que ficou de fora.
+   */
+  focusBlock = "",
 ): Record<string, unknown> {
   const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
   const edits = gapFileEditsEnabled();
@@ -837,7 +845,13 @@ function buildGapFileRequest(
     content,
     digested ? "--- FIM DO RECORTE ---" : "--- FIM DO CONTEÚDO ---",
     "",
-    `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
+    // 🔴 GAP-81: o aviso da rodada dedicada vem COLADO na lista, e antes dela — é o enquadramento da
+    // lista, não uma observação geral. O rótulo muda junto: "GAPs deste arquivo" seria falso quando a
+    // lista está restrita, e a falsidade no rótulo é o que faria o modelo consolidar o que ficou fora.
+    focusBlock,
+    focusBlock
+      ? `--- GAPs A RESOLVER NESTA RODADA (${findings.length} — lista RESTRINGIDA; o arquivo tem outros) ---`
+      : `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
     gaps,
     "--- FIM DOS GAPs ---",
     "",
@@ -1457,6 +1471,12 @@ export async function dispatchGapFileJob(opts: {
    * histórico (o botão humano não encadeia rodadas).
    */
   persistentGaps?: PersistentGapRef[] | null;
+  /**
+   * 🔴 GAP-81: esta rodada é DEDICADA (a lista de `findings` já vem restrita aos teimosos, ou a um só).
+   * Só o laço autônomo escala assim; o botão humano manda sempre a lista inteira do arquivo. Sem este
+   * fato o modelo leria a lista curta como "o arquivo só tem estes defeitos" e consolidaria o resto.
+   */
+  focus?: FocusPlan | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1498,6 +1518,16 @@ export async function dispatchGapFileJob(opts: {
       + ` pior=${Math.max(...pg.map((r) => r.times))}ª chars=${persistentBlock.length}`,
     );
   }
+  // 🔴 GAP-81: o fato da rodada dedicada. Logado porque o prompt não é persistido — sem esta linha,
+  // "o agente soube que a rodada era só para o teimoso" seria indemonstrável em prod, e o degrau da
+  // escalada não poderia ser auditado contra a reincidência que ele deveria ter quebrado.
+  const focusBlock = opts.focus ? focusFactBlock(opts.focus) : "";
+  if (opts.focus && opts.focus.level > 0) {
+    console.log(
+      `[SpecChat] rodada DEDICADA alvo=${opts.filePath} nivel=${opts.focus.level}`
+      + ` gaps=${opts.findings.length} adiados=${opts.focus.deferred} ancoras=${opts.focus.anchors.join(", ")}`,
+    );
+  }
   const priorBlock = priorRejectionFactBlock(opts.priorRejection);
   if (priorBlock) {
     const p = opts.priorRejection!;
@@ -1523,7 +1553,7 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorBlock, persistentBlock,
+        priorBlock, persistentBlock, focusBlock,
       ),
       ...opts.llm,
     },

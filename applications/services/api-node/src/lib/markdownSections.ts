@@ -16,20 +16,108 @@ export interface MdSection {
   heading: string;
   /** Corpo VERBATIM, incluindo a própria linha de cabeçalho. */
   body: string;
+  /** Nível do cabeçalho ATX (1–6); `0` no preâmbulo. É o que define quem é filho de quem. */
+  level: number;
+}
+
+const ATX_RE = /^#{1,6}\s+\S/;
+/** Abre/fecha cerca de código: 3+ backticks ou 3+ tis, com indentação opcional. */
+const FENCE_RE = /^\s*(`{3,}|~{3,})/;
+
+/**
+ * 🔴 GAP-78 — linhas dentro de cerca de código NÃO são cabeçalhos.
+ *
+ * MEDIDO em prod (NVX LastMile, 12 arquivos): **25 cabeçalhos falsos em 2 arquivos**. Em
+ * `definicao-de-pronto.md` o comentário `# 3) paridade do catálogo…` na linha 21, dentro de uma cerca
+ * ```bash aberta na linha 13, é lido como `<h1>` — e essa "seção" fantasma engole **96,6% do arquivo**
+ * (94.132 de 97.416 chars, 29 subseções). Em `infraestrutura-deploy.md` são 22 comentários de `.env`
+ * (`# Servidor`, `# Banco de dados`) que reparentam toda a árvore a partir da linha 267. Com o mapa de
+ * seções corrompido, TUDO que depende dele erra junto: o sumário mostrado ao juiz, o recorte do alvo, o
+ * recorte do irmão e a medida de trecho intocado.
+ *
+ * Devolve os intervalos `[abre, fecha]` das cercas FECHADAS. **Cerca que nunca fecha é descartada** — na
+ * dúvida, preferir o comportamento antigo (mais cabeçalhos) a engolir em silêncio o resto do arquivo.
+ * Fechamento exige o MESMO caractere e comprimento ≥ o da abertura (CommonMark), e nada além do marcador
+ * na linha: `` ```ts `` abre, `` ``` `` fecha.
+ */
+function fencedRanges(lines: string[]): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let open: { at: number; mark: string } | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(FENCE_RE);
+    if (!m) continue;
+    if (open === null) { open = { at: i, mark: m[1] }; continue; }
+    const closes = m[1][0] === open.mark[0]
+      && m[1].length >= open.mark.length
+      && lines[i].trim() === m[1].trim();
+    if (closes) { out.push([open.at, i]); open = null; }
+  }
+  return out;
 }
 
 /** Quebra o Markdown em seções por cabeçalho ATX, preservando o cabeçalho em cada pedaço. */
 export function splitSections(content: string): MdSection[] {
   const out: MdSection[] = [];
+  const lines = content.split("\n");
+  const fenced = fencedRanges(lines);
+  let fence = 0;
   let heading = "(topo do arquivo)";
+  let level = 0;
   let buf: string[] = [];
-  const flush = (): void => { if (buf.join("\n").trim()) out.push({ heading, body: buf.join("\n") }); };
-  for (const line of content.split("\n")) {
-    if (/^#{1,6}\s+\S/.test(line)) { flush(); heading = line.trim(); buf = [line]; }
-    else buf.push(line);
+  const flush = (): void => { if (buf.join("\n").trim()) out.push({ heading, body: buf.join("\n"), level }); };
+  for (let i = 0; i < lines.length; i += 1) {
+    while (fence < fenced.length && fenced[fence][1] < i) fence += 1;
+    const inFence = fence < fenced.length && i > fenced[fence][0] && i < fenced[fence][1];
+    if (!inFence && ATX_RE.test(lines[i])) {
+      flush();
+      heading = lines[i].trim();
+      level = (lines[i].match(/^#+/)?.[0].length ?? 0);
+      buf = [lines[i]];
+      continue;
+    }
+    buf.push(lines[i]);
   }
   flush();
   return out;
+}
+
+/**
+ * 🔴 GAP-79 — a âncora endereça a SUBÁRVORE, não o preâmbulo do cabeçalho.
+ *
+ * MEDIDO em prod: `visao-escopo.md §1.3` é a âncora nº 1 dos GAPs eternos — **15 dos 62 eventos** de
+ * "trecho ficou byte a byte intocado", em 8 runs diferentes. O corpo PRÓPRIO de `### 1.3 Serviços e
+ * Interfaces` tem **415 chars**; a subárvore (`#### Serviço api`, `#### 1.3.0`, `#### 1.3.1`,
+ * `#### Serviço worker`) tem **21.839** — o preâmbulo é 1,9% do que a âncora endereça. E o GAP real fala
+ * da *"tabela abaixo"* de interfaces, que mora no FILHO. Ou seja: o CTO reescrevia a tabela certa e o
+ * laço o acusava de não ter tocado no trecho, rodada após rodada, exigindo edição num preâmbulo onde não
+ * havia nada errado. Pior: pela guarda 3 do GAP-77, âncora intocada NÃO é candidata a veredicto — então
+ * o defeito não podia nem ser corrigido nem ser absolvido. Trava eterna.
+ *
+ * A subárvore é `i` mais todas as seções seguintes de nível MAIOR (positional, não pela numeração do
+ * título: em `modelo-dados.md` a `§2.3` aparece depois da `§2.3.2`, e agrupar por número juntaria trechos
+ * que não são vizinhos). O corpo devolvido é a concatenação dos corpos, que é **verbatim**: as seções são
+ * fatias contíguas do arquivo (só o preâmbulo pode ser descartado, e ele vem antes de tudo).
+ */
+export interface MdSubtree {
+  /** Corpo VERBATIM do cabeçalho `i` até o fim dos descendentes. */
+  body: string;
+  /** Índice da primeira seção depois da subárvore (exclusivo). */
+  to: number;
+  /** Quantas seções descendentes entraram além da própria. */
+  children: number;
+}
+
+export function sectionSubtree(secs: MdSection[], i: number): MdSubtree {
+  if (i < 0 || i >= secs.length) return { body: "", to: i, children: 0 };
+  const lv = secs[i].level;
+  let to = i + 1;
+  // Nível 0 só existe no preâmbulo (índice 0), que não tem cabeçalho e portanto não tem descendentes.
+  if (lv > 0) while (to < secs.length && secs[to].level > lv) to += 1;
+  return {
+    body: secs.slice(i, to).map((s) => s.body).join("\n"),
+    to,
+    children: to - i - 1,
+  };
 }
 
 /** Sumário só com os cabeçalhos reais (o preâmbulo não tem cabeçalho para listar). */

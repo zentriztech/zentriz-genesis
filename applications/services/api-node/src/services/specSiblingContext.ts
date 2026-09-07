@@ -33,7 +33,7 @@
 import { readFile } from "node:fs/promises";
 import {
   splitSections, clipSection, headingOutline, buildAnchorIndex, locateSectionIndex, sectionWindow,
-  citedSectionRefs,
+  citedSectionRefs, sectionSubtree,
 } from "../lib/markdownSections.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -143,7 +143,7 @@ interface SiblingExcerpt {
 function citedPicks(
   secs: ReturnType<typeof sections>,
   cited: string[],
-): { picks: Array<{ i: number; refs: string[]; body: string }>; unlocatable: string[] } {
+): { picks: Array<{ i: number; refs: string[]; body: string; subtree: string }>; unlocatable: string[] } {
   const index = buildAnchorIndex(secs);
   const byIndex = new Map<number, string[]>();
   const unlocatable: string[] = [];
@@ -154,8 +154,17 @@ function citedPicks(
     if (cur) { if (!cur.includes(ref)) cur.push(ref); continue; }
     byIndex.set(i, [ref]);
   }
+  // 🔴 GAP-79 — a citação `§1.3` endereça a SUBÁRVORE do cabeçalho, não o preâmbulo dele: em
+  // `visao-escopo.md` o corpo próprio da §1.3 é 415 de 21.839 chars. Mostrar o toco ao lado do alvo faria
+  // o modelo concluir que o irmão "não define" o que ele de fato define — a duplicação normativa que o
+  // GAP-75 existe para evitar. A subárvore só entra quando cabe no teto de seção; acima disso fica o
+  // corpo próprio (nunca pior que antes) e a janela é aberta sobre a subárvore.
   const picks = [...byIndex.entries()]
-    .map(([i, refs]) => ({ i, refs, body: clip(secs[i].body, SIBLING_SECTION_BUDGET) }))
+    .map(([i, refs]) => {
+      const sub = sectionSubtree(secs, i);
+      const fits = sub.children > 0 && sub.body.length <= SIBLING_SECTION_BUDGET;
+      return { i, refs, body: fits ? sub.body : clip(secs[i].body, SIBLING_SECTION_BUDGET), subtree: sub.body };
+    })
     .sort((a, b) => a.body.length - b.body.length || a.i - b.i);
   return { picks, unlocatable };
 }
@@ -197,7 +206,7 @@ function excerpt(path: string, content: string, terms: string[], cited: string[]
     }
     // Paridade com o GAP-74: seção citada grande demais vem RECORTADA em vez de não vir.
     const room = Math.min(SIBLING_WINDOW_BUDGET, SIBLING_FILE_BUDGET - spent);
-    const win = room > 0 ? sectionWindow(secs[p.i].body, [...terms, ...p.refs], room) : null;
+    const win = room > 0 ? sectionWindow(p.subtree, [...terms, ...p.refs], room) : null;
     if (win === null) { droppedRefs.push(...p.refs); continue; }
     spent += win.length;
     chosenIdx.add(p.i);
