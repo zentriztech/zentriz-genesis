@@ -34,6 +34,7 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
+  proveWork,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -42,7 +43,7 @@ type LiveVerdict = import("./gapPromotionVerdict.js").LiveVerdict;
 type VerdictConfig = import("./gapPromotionVerdict.js").VerdictConfig;
 
 /** Config explícita em todo teste: o default vem do ambiente e não pode decidir o resultado da suíte. */
-const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 };
+const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 };
 
 const F = (o: Partial<EnrichedFinding> = {}): EnrichedFinding => ({
   file: "modelo-dados.md", line: null, severity: "blocker", title: "contrato ambíguo", rationale: "",
@@ -114,7 +115,7 @@ afterEach(() => {
 
 describe("verdictConfig", () => {
   it("liga por padrão com barra alta e aceita override por env", () => {
-    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 });
+    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 });
     process.env.SPEC_VERDICT_MIN_RECURRENCE = "5";
     process.env.SPEC_VERDICT_MAX_PER_RUN = "1";
     expect(verdictConfig().minRecurrence).toBe(5);
@@ -150,6 +151,92 @@ describe("selectVerdictCandidates — limite (b): só depois de trabalho feito",
     const gate = selectVerdictCandidates(base({ judged: null }));
     expect(gate.enabled).toBe(false);
     expect(gate.reason).toMatch(/não registrou cobertura/);
+  });
+});
+
+/**
+ * 🔴 GAP-82 — a segunda prova de trabalho. Medido em prod (run `88339651`): 21 rodadas, 5 passes,
+ * `gapsClosed = 0` nas quatro validações reconciliadas ⇒ com uma só prova, o juiz nunca teria
+ * autoridade e a spec ficaria presa em loop eterno. O que estes testes travam é o EQUILÍBRIO: a porta
+ * abre pelo esgotamento, mas só com o orçamento realmente gasto — e o "zero fechado" vai dito.
+ */
+describe("proveWork — GAP-82: fechar GAPs OU esgotar o laço", () => {
+  const LOOP = (o: Partial<import("./gapPromotionVerdict.js").LoopWork> = {}): import("./gapPromotionVerdict.js").LoopWork => ({
+    gapsResolved: 0, endReason: "exhausted", passes: 5, appliedRounds: 21,
+    reconciledValidations: 4, focusRounds: 21, ...o,
+  });
+
+  it("fechamento reconciliado suficiente prova trabalho pelo caminho antigo", () => {
+    const w = proveWork(LOOP({ gapsResolved: 3, passes: 0, appliedRounds: 0, reconciledValidations: 0, focusRounds: 0 }), CFG);
+    expect(w.proven).toBe(true);
+    expect(w.kind).toBe("resolved");
+  });
+
+  it("laço esgotado com ZERO fechado prova trabalho — e o zero vai no texto", () => {
+    const w = proveWork(LOOP(), CFG);
+    expect(w.proven).toBe(true);
+    expect(w.kind).toBe("exhausted");
+    expect(w.detail).toMatch(/0 GAP\(s\) fechado\(s\)/);
+    expect(w.detail).toMatch(/5 passe\(s\)/);
+    expect(w.detail).toMatch(/foco INDIVIDUAL/);
+  });
+
+  it("laço que morre no 1º passe NÃO prova nada (não gastou o orçamento)", () => {
+    const w = proveWork(LOOP({ passes: 1 }), CFG);
+    expect(w.proven).toBe(false);
+    expect(w.detail).toMatch(/1 de 2 passe/);
+  });
+
+  it("sem foco individual pago o esgotamento não vale — é o gatilho do Jean", () => {
+    const w = proveWork(LOOP({ focusRounds: 0 }), CFG);
+    expect(w.proven).toBe(false);
+    expect(w.detail).toMatch(/foco INDIVIDUAL/);
+  });
+
+  it("sem reconciliação, o 'zero fechado' não foi medido e não sustenta a porta", () => {
+    const w = proveWork(LOOP({ reconciledValidations: 0 }), CFG);
+    expect(w.proven).toBe(false);
+    expect(w.detail).toMatch(/reconciliad/);
+  });
+
+  it("sem edição aplicada o laço não trabalhou", () => {
+    const w = proveWork(LOOP({ appliedRounds: 0 }), CFG);
+    expect(w.proven).toBe(false);
+    expect(w.detail).toMatch(/disco/);
+  });
+
+  it("`minGapsResolved = 0` continua desligando tudo, inclusive o esgotamento", () => {
+    const w = proveWork(LOOP(), { ...CFG, minGapsResolved: 0 });
+    expect(w.proven).toBe(false);
+    expect(w.detail).toMatch(/desligado/);
+  });
+
+  it("a porta aberta por esgotamento NÃO relaxa nenhuma guarda por GAP", () => {
+    const work = proveWork(LOOP(), CFG);
+    // Mesmo com trabalho provado, âncora intocada, cobertura por sumário e reincidência curta seguem
+    // descartando o candidato — o esgotamento abre a porta, não baixa a barra.
+    const intocada = selectVerdictCandidates(base({ gapsResolved: 0, work, untouched: new Set(["## 4. Autenticação"]) }));
+    expect(intocada.enabled).toBe(true);
+    expect(intocada.candidates).toEqual([]);
+    expect(JSON.stringify(intocada.rejected)).toMatch(/NÃO-TENTADO/);
+    const sumario = selectVerdictCandidates(base({ gapsResolved: 0, work, judged: new Set(["outro.md"]) }));
+    expect(sumario.candidates).toEqual([]);
+    expect(JSON.stringify(sumario.rejected)).toMatch(/SUMÁRIO/);
+  });
+
+  it("com esgotamento provado, o candidato reincidente e focado passa — e a razão declara a prova", () => {
+    const work = proveWork(LOOP(), CFG);
+    const gate = selectVerdictCandidates(base({ gapsResolved: 0, work }));
+    expect(gate.enabled).toBe(true);
+    expect(gate.candidates).toHaveLength(1);
+    expect(gate.reason).toMatch(/prova de trabalho: laço ESGOTADO/);
+    expect(gate.reason).toMatch(/0 GAP\(s\) fechado\(s\)/);
+  });
+
+  it("sem `work`, o comportamento antigo é preservado (só fechamento abre a porta)", () => {
+    const gate = selectVerdictCandidates(base({ gapsResolved: 0 }));
+    expect(gate.enabled).toBe(false);
+    expect(gate.reason).toMatch(/0 de 3 GAP/);
   });
 });
 

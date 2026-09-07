@@ -60,12 +60,20 @@ let verdict: {
   candidates: number; released: number; impeditive: number; promotable: boolean;
   rejected?: Array<{ file: string; anchor: string; why: string }>;
 } | null = null;
+/** 🔴 GAP-82 — quando `true`, a prova de trabalho dublada é a de ESGOTAMENTO (0 fechado). */
+let provaEsgotamento = false;
 vi.mock("./gapPromotionVerdict.js", () => ({
   verdictConfig: vi.fn(() => ({ minGapsResolved: verdict ? 3 : 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
   focusRoundsByFile: vi.fn(async () => new Map<string, number>([["produto.md", 4]])),
   // 🔴 GAP-81: rodadas DEDICADAS por âncora — conta separada da de arquivo, e é ela que abre o gatilho.
   focusRoundsByAnchor: vi.fn(async () => new Map<string, number>([["4 autenticacao", 2]])),
   anchoredSection: vi.fn(() => "## 4. Autenticação\ntexto\n"),
+  // 🔴 GAP-82: a prova de trabalho entra dublada — por padrão PROVADA por fechamento, que é o
+  // comportamento antigo. `provaEsgotamento` troca para a prova por esgotamento do laço, e a lógica das
+  // duas provas tem suíte própria (`gapPromotionVerdict.test.ts`).
+  proveWork: vi.fn(() => provaEsgotamento
+    ? { proven: true, kind: "exhausted", detail: "laço ESGOTADO (exhausted) com 0 GAP(s) fechado(s): 5 passe(s) de validação, 21 rodada(s) aplicada(s), 21 rodada(s) de foco INDIVIDUAL paga(s), 4 validação(ões) com números reconciliados" }
+    : { proven: true, kind: "resolved", detail: "3 GAP(s) fechado(s) e reconciliado(s) nesta run (mínimo 3)" }),
   specFileShas: vi.fn(async () => new Map<string, string>()),
   selectVerdictCandidates: vi.fn(() => ({
     candidates: Array.from({ length: verdict?.candidates ?? 0 }, (_, i) => ({
@@ -297,6 +305,7 @@ beforeEach(() => {
   prevCoverage = null;
   comparable = null;
   verdict = null;
+  provaEsgotamento = false;
   coberturaAcumulada = null;
   delta = null;
   continuity = { persisted: 0, reconciled: false, reason: "dublê" };
@@ -596,6 +605,51 @@ describe("validação dentro do laço", () => {
       const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
       expect(JSON.stringify(last.verdictRejected)).toContain("NÃO-TENTADO");
       expect(last).toMatchObject({ verdictCandidates: 0, verdictReleased: 0 });
+    });
+
+    /**
+     * 🔴 GAP-83 — a rodada terminal tem de sair do tick com AS DUAS gravações: a medição da validação
+     * (GAP-76) e o parecer do juiz (GAP-77).
+     *
+     * MEDIDO em prod na run `88339651`, rodada 21: `gapsAfter`, `gapsClosed`, `gapsComparableBefore/Now/
+     * Same` e `comparableFiles` foram gravados pela validação e DESAPARECERAM quando o veredicto gravou
+     * os campos dele, no mesmo tick — porque `patchLastRound` reescrevia o array inteiro a partir do
+     * mesmo snapshot em memória (lost update dentro do próprio processo). Consequência: em TODA run que
+     * termina pelo caminho do veredicto, o parecer de promovibilidade ficava sem a única medição de
+     * nível auditável, e a nota da validação desaparecia do log.
+     */
+    it("GAP-83: o veredicto NÃO apaga a medição da validação da mesma rodada", async () => {
+      verdict = { candidates: 2, released: 1, impeditive: 1, promotable: false };
+      comparable = { files: ["produto.md"], before: 3, now: 2, same: 2 };
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+      // Os dois conjuntos convivem na MESMA rodada.
+      expect(last).toMatchObject({
+        gapsComparableBefore: 3, gapsComparableNow: 2, gapsComparableSame: 2, comparableFiles: 1,
+        verdictCandidates: 2, verdictImpeditive: 1, promotable: false,
+      });
+      expect(last.gapsAfter).toBe(2);
+      // E a nota carrega as duas leituras, na ordem em que foram escritas.
+      expect(String(last.note)).toContain("Nível COMPARÁVEL");
+      expect(String(last.note)).toContain("promovibilidade");
+    });
+
+    /**
+     * 🔴 GAP-82 — o poder do juiz também abre por ESGOTAMENTO do laço, e o log tem de dizer isso com os
+     * números: um parecer dado depois de "0 fechado" não pode parecer um parecer dado depois de trabalho
+     * bem-sucedido.
+     */
+    it("GAP-82: prova por esgotamento vai gravada e declarada na mensagem final", async () => {
+      verdict = { candidates: 2, released: 1, impeditive: 1, promotable: false };
+      provaEsgotamento = true;
+      const r = await reachValidating(1);
+      await advanceAutonomyRun(db, r.id);
+      const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+      expect(last.workProof).toBe("exhausted");
+      expect(last.gapsClosedTotal).toBe(0);
+      expect(String(last.verdictWork)).toContain("0 GAP(s) fechado(s)");
+      expect(String(run!.last_error)).toContain("laço esgotou o orçamento sem fechar GAP");
     });
 
     it("veredicto desligado → mensagem antiga, sem campo de parecer no log (fail-CLOSED)", async () => {
