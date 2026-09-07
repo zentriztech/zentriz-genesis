@@ -146,6 +146,48 @@ export async function readPrimarySpecFile(db: Db, projectId: string): Promise<Pr
   };
 }
 
+/**
+ * 🔴 GAP-47 — os nomes que a divisão NÃO pode usar: os de arquivos que JÁ EXISTEM na árvore.
+ *
+ * O divisor lê **só o arquivo primário**. Se ele propõe um nome que já é de outro arquivo da spec, o
+ * `apply` substituía o conteúdo daquele arquivo por uma FATIA do primário — sem snapshot (só o
+ * primário é snapshotado). Reachable hoje: `startSplit` só exige `count < SPEC_TREE_MAX_FILES`, então
+ * numa spec de 12 arquivos (NVX LastMile) basta o divisor propor `modelo-dados.md` — nome óbvio para a
+ * seção de dados de um backend, e o MESMO que a divisão anterior usou — para 177k de conteúdo que ele
+ * nunca leu virarem uma fatia de 54k, irrecuperáveis.
+ *
+ * Isto é corrupção de TRANSPORTE, não decisão de arquitetura: o agente não leu o arquivo que estaria
+ * destruindo, logo não é qualificado a decidir substituí-lo. Por isso o código VETA (Lei do Jean: o
+ * código só transporta e veta corrupção) em vez de sobrescrever ou perguntar.
+ *
+ * O primário é EXCLUÍDO da checagem: ele é sobrescrito pelo índice por desenho, e com snapshot.
+ * Falha de leitura ⇒ lista vazia ⇒ nenhum veto aqui (o `apply` refaz a checagem antes de escrever).
+ */
+export async function collidingSplitNames(
+  db: Db, projectId: string, names: string[], primaryRelDir: string, primaryCanonical: string,
+): Promise<string[]> {
+  const rows = (await db.query(
+    "SELECT filename, rel_dir FROM project_spec_files WHERE project_id = $1", [projectId],
+  ).catch(() => ({ rows: [] }))).rows as unknown as Array<{ filename: string; rel_dir: string | null }>;
+  const existing = new Set(
+    rows.map((r) => {
+      const rel = (r.rel_dir ?? "").replace(/^\/+|\/+$/g, "");
+      return (rel ? `${rel}/${r.filename}` : r.filename).toLowerCase();
+    }),
+  );
+  existing.delete(primaryCanonical.toLowerCase());
+  const hits: string[] = [];
+  for (const name of names) {
+    const parsed = parseSpecPath(name);
+    if (!parsed) continue; // forma inválida já é reprovada pela guarda de nome
+    // MESMA composição do `apply`: o `rel_dir` do primário é a base da árvore.
+    const rel = [primaryRelDir, parsed.relDir].filter(Boolean).join("/");
+    const canonical = rel ? `${rel}/${parsed.filename}` : parsed.filename;
+    if (existing.has(canonical.toLowerCase())) hits.push(canonical);
+  }
+  return hits;
+}
+
 // ── consultas ────────────────────────────────────────────────────────────────────────────────
 
 export async function getSplitProposal(
@@ -220,6 +262,25 @@ export async function finishSplit(db: Db, id: string, result: AgentsSplitResult)
   if (bad.length) {
     await failSplit(db, id, `Arquivos inaceitáveis para a árvore de spec: ${bad.slice(0, 5).join(", ")}`);
     return;
+  }
+  // 🔴 GAP-47: reprovar AQUI, antes de o humano ver a proposta — um nome que já é de outro arquivo da
+  // spec faria o `apply` substituir aquele arquivo por uma fatia do primário, sem snapshot.
+  const owner = (await db.query("SELECT project_id FROM project_spec_splits WHERE id = $1", [id])
+    .catch(() => ({ rows: [] }))).rows[0] as { project_id?: string } | undefined;
+  if (owner?.project_id) {
+    const primary = await readPrimarySpecFile(db, owner.project_id).catch(() => null);
+    const canonical = primary ? (primary.relDir ? `${primary.relDir}/${primary.filename}` : primary.filename) : "";
+    const colisoes = primary
+      ? await collidingSplitNames(db, owner.project_id, names, primary.relDir, canonical)
+      : [];
+    if (colisoes.length) {
+      await failSplit(db, id,
+        `A divisão propôs nome(s) de arquivo que JÁ EXISTEM na spec: ${colisoes.slice(0, 5).join(", ")}. ` +
+        "Aplicar substituiria o conteúdo desses arquivos por uma fatia do arquivo primário — que é o " +
+        "único que o divisor leu. Gere a divisão novamente pedindo nomes novos, ou divida um arquivo " +
+        "que ainda não foi dividido.");
+      return;
+    }
   }
   const payload: SpecSplitPayload = {
     plan, index: result.index, files, coverage: Array.isArray(result.coverage) ? result.coverage : [],
@@ -437,6 +498,20 @@ export async function applySplitProposal(
     };
   }
 
+  // 🔴 GAP-47 (2ª barreira): o `finishSplit` já reprovou colisão, mas um arquivo pode ter NASCIDO entre
+  // a proposta e o apply (outro split, PUT manual, laço autônomo). A checagem vem ANTES de qualquer
+  // escrita, então uma colisão aborta com a árvore e o disco INTACTOS.
+  const primaryCanonical = primary.relDir ? `${primary.relDir}/${primary.filename}` : primary.filename;
+  const colisoes = await collidingSplitNames(db, proposal.projectId, names, primary.relDir, primaryCanonical);
+  if (colisoes.length) {
+    return {
+      ok: false, status: 409, code: "NAME_COLLISION",
+      message: `Esta divisão usaria nome(s) de arquivo que já existem na spec: ${colisoes.slice(0, 5).join(", ")}. ` +
+        "Nada foi escrito. Descarte a proposta e gere outra — o divisor leu apenas o arquivo primário, " +
+        "então substituir esses arquivos apagaria conteúdo que ele nunca viu.",
+    };
+  }
+
   // (2) Rede de segurança G2 — OBRIGATÓRIA: a spec inteira está a um writeFile de ser substituída.
   const saved = await snapshotSpecFile(db as Pool, {
     projectId: proposal.projectId, filePath: primary.filePath, content: primary.content,
@@ -469,14 +544,17 @@ export async function applySplitProposal(
       );
     } catch (e) {
       if ((e as { code?: string }).code === "23505") {
-        // Já existe: o conteúdo novo é o que vale (a proposta é a fonte aprovada pelo humano).
-        await db.query(
-          "UPDATE project_spec_files SET content_sha256=$1, file_path=$2 WHERE project_id=$3 AND rel_dir=$4 AND filename=$5",
-          [sha, physical, proposal.projectId, relDir, parsed.filename],
-        );
-      } else {
-        return { ok: false, status: 500, code: "WRITE_FAILED", message: `Falha ao registrar ${name}: ${msg(e)}` };
+        // 🔴 GAP-47: aqui isto NÃO é "já existe, o novo vale" — é CORRIDA com quem criou o arquivo depois
+        // da checagem acima. O código anterior fazia UPDATE + writeFile e destruía o conteúdo do arquivo
+        // alheio SEM snapshot (só o primário é snapshotado). Abortar é o erro seguro; nada é sobrescrito.
+        return {
+          ok: false, status: 409, code: "NAME_COLLISION",
+          message: `O arquivo ${name} passou a existir enquanto esta divisão era aplicada — nada foi ` +
+            "sobrescrito. Descarte a proposta e gere outra." +
+            (created.length ? ` Já haviam sido criados: ${created.join(", ")}.` : ""),
+        };
       }
+      return { ok: false, status: 500, code: "WRITE_FAILED", message: `Falha ao registrar ${name}: ${msg(e)}` };
     }
     await mkdir(path.dirname(physical), { recursive: true });
     await writeFile(physical, content, "utf-8");

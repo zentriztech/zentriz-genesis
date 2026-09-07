@@ -42,6 +42,8 @@ interface FakeOpts {
   fileCount?: number;
   snapshotFails?: boolean;
   projectStatus?: string;
+  /** GAP-47: a árvore de spec como ela está HOJE, para a checagem de colisão de nomes. */
+  treeFiles?: Array<{ filename: string; rel_dir: string | null }>;
 }
 
 function fakeDb(opts: FakeOpts = {}) {
@@ -59,6 +61,9 @@ function fakeDb(opts: FakeOpts = {}) {
         return opts.primaryFile
           ? { rows: [{ file_path: opts.primaryFile, rel_dir: "", filename: path.basename(opts.primaryFile) }], rowCount: 1 }
           : { rows: [], rowCount: 0 };
+      }
+      if (/SELECT filename, rel_dir FROM project_spec_files/.test(sql)) {
+        return { rows: [...(opts.treeFiles ?? [])], rowCount: (opts.treeFiles ?? []).length };
       }
       if (/count\(\*\)::int AS n FROM project_spec_files/.test(sql)) {
         return { rows: [{ n: opts.fileCount ?? 1 }], rowCount: 1 };
@@ -138,6 +143,40 @@ describe("finishSplit", () => {
     const { db, sqlOf } = fakeDb();
     await finishSplit(db, "split-1", { index: "# x", files: {} });
     expect(String(sqlOf(/SET status='error'/)!.params[1])).toContain("plano");
+  });
+
+  /**
+   * 🔴 GAP-47 — o divisor lê APENAS o arquivo primário. Se ele propõe um nome que já é de outro
+   * arquivo da spec, aplicar substituiria aquele arquivo por uma fatia do primário. No NVX LastMile
+   * isto é alcançável hoje: 12 arquivos na árvore, primário de ~54k, e `modelo-dados.md` (177k) é o
+   * nome óbvio para a seção de dados — e foi o nome que uma divisão anterior já usou.
+   */
+  it("recusa nome que JÁ EXISTE na árvore de spec (o divisor só leu o primário)", async () => {
+    const p = await primaryOnDisk();
+    const { db, sqlOf } = fakeDb({
+      split: { id: "split-1", project_id: "proj-1" }, primaryFile: p,
+      treeFiles: [
+        { filename: path.basename(p), rel_dir: "" },
+        { filename: "dados.md", rel_dir: "tecnico" },
+      ],
+    });
+    await finishSplit(db, "split-1", PAYLOAD);
+    const fail = sqlOf(/SET status='error'/);
+    expect(fail).toBeDefined();
+    expect(String(fail!.params[1])).toContain("tecnico/dados.md");
+    expect(String(fail!.params[1])).toContain("JÁ EXISTEM");
+    expect(sqlOf(/SET status='done'/)).toBeUndefined();
+  });
+
+  it("o PRIMÁRIO não conta como colisão (ele vira o índice, por desenho e com snapshot)", async () => {
+    const p = await primaryOnDisk();
+    const { db, sqlOf } = fakeDb({
+      split: { id: "split-1", project_id: "proj-1" }, primaryFile: p,
+      treeFiles: [{ filename: path.basename(p), rel_dir: "" }],
+    });
+    await finishSplit(db, "split-1", { ...PAYLOAD, files: { ...PAYLOAD.files, "PRODUCT_SPEC.md": "# x\n" } });
+    expect(sqlOf(/SET status='error'/)).toBeUndefined();
+    expect(sqlOf(/SET status='done'/)).toBeDefined();
   });
 });
 
@@ -241,9 +280,22 @@ describe("applySplitProposal", () => {
     expect(res.code).toBe("TOO_MANY_FILES");
   });
 
-  it("arquivo já existente na árvore é ATUALIZADO (a proposta aprovada é a fonte)", async () => {
+  /**
+   * 🔴 GAP-47 — este teste travava o comportamento DEFEITUOSO. Ele afirmava que "arquivo já existente
+   * na árvore é ATUALIZADO (a proposta aprovada é a fonte)", e o código fazia
+   * `UPDATE project_spec_files SET content_sha256=$1, file_path=$2` + `writeFile` no arquivo alheio.
+   * A premissa era falsa em dois pontos: (a) a proposta NÃO é fonte para aquele arquivo — o divisor
+   * leu somente o primário, logo escreve ali uma fatia de um conteúdo que não é o daquele arquivo;
+   * (b) só o primário é snapshotado (G2), então a substituição era IRRECUPERÁVEL. Medido no NVX
+   * LastMile: primário de ~54k, `modelo-dados.md` de 177k na mesma árvore.
+   * O contrato correto é ABORTAR: nomes que colidem são reprovados no `finishSplit`, e uma corrida
+   * (arquivo nasce entre a proposta e o apply) devolve 409 sem sobrescrever nada.
+   */
+  it("CORRIDA no INSERT (23505) ABORTA com 409 — nada do arquivo alheio é sobrescrito", async () => {
     const p = await primaryOnDisk();
     await mkdir(path.join(dir, "tecnico"), { recursive: true });
+    const alheio = path.join(dir, "objetivo.md");
+    await writeFile(alheio, "# Conteúdo de OUTRO arquivo, que o divisor nunca leu\n", "utf-8");
     const calls: Call[] = [];
     const db = {
       query: async (sql: string, params: unknown[] = []) => {
@@ -252,6 +304,8 @@ describe("applySplitProposal", () => {
         if (/SELECT file_path, rel_dir, filename FROM project_spec_files/.test(sql)) {
           return { rows: [{ file_path: p, rel_dir: "", filename: "PRODUCT_SPEC.md" }], rowCount: 1 };
         }
+        // a checagem de colisão não vê o arquivo: ele "nasce" só na hora do INSERT (a corrida)
+        if (/SELECT filename, rel_dir FROM project_spec_files/.test(sql)) return { rows: [], rowCount: 0 };
         if (/count\(\*\)::int AS n/.test(sql)) return { rows: [{ n: 1 }], rowCount: 1 };
         if (/SELECT content_sha256 FROM project_spec_snapshots/.test(sql)) return { rows: [], rowCount: 0 };
         if (/INSERT INTO project_spec_files/.test(sql)) throw Object.assign(new Error("dup"), { code: "23505" });
@@ -259,10 +313,36 @@ describe("applySplitProposal", () => {
       },
     } as unknown as never;
     const res = await applySplitProposal(db, "split-1", "user-1");
-    expect(res.ok).toBe(true);
-    const updates = calls.filter((c) => /UPDATE project_spec_files SET content_sha256=\$1, file_path/.test(c.sql));
-    expect(updates.length).toBe(2);
-    expect(await readFile(path.join(dir, "objetivo.md"), "utf-8")).toContain("# Objetivo");
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(409);
+    expect(res.code).toBe("NAME_COLLISION");
+    // o arquivo alheio segue intacto, e o primário NÃO virou índice
+    expect(await readFile(alheio, "utf-8")).toContain("que o divisor nunca leu");
+    expect(await readFile(p, "utf-8")).toBe(SPEC);
+    expect(calls.some((c) => /UPDATE project_spec_files SET content_sha256=\$1, file_path/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => /SET status='applied'/.test(c.sql))).toBe(false);
+  });
+
+  it("409 NAME_COLLISION ANTES de qualquer escrita quando o nome já está na árvore", async () => {
+    const p = await primaryOnDisk();
+    const alheio = path.join(dir, "objetivo.md");
+    await writeFile(alheio, "# Outro arquivo, 177k de modelo de dados na vida real\n", "utf-8");
+    const { db, calls } = fakeDb({
+      split: doneRow(p), primaryFile: p,
+      treeFiles: [{ filename: "PRODUCT_SPEC.md", rel_dir: "" }, { filename: "objetivo.md", rel_dir: null }],
+    });
+    const res = await applySplitProposal(db, "split-1", "user-1");
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.status).toBe(409);
+    expect(res.code).toBe("NAME_COLLISION");
+    expect(res.message).toContain("objetivo.md");
+    // NADA foi escrito — nem o snapshot foi pedido, porque a checagem vem antes dele
+    expect(calls.some((c) => /INSERT INTO project_spec_snapshots/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => /INSERT INTO project_spec_files/.test(c.sql))).toBe(false);
+    expect(await readFile(alheio, "utf-8")).toContain("177k de modelo de dados");
+    expect(await readFile(p, "utf-8")).toBe(SPEC);
   });
 });
 
