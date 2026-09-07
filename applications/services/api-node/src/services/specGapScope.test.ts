@@ -126,6 +126,51 @@ describe("groupActiveFindings", () => {
     expect(g.byPath.get("frontend/01-web.md")).toEqual([f]);
     expect(g.routesUsed).toEqual({});
   });
+
+  /**
+   * 🔴 J1 — medido em prod 2026-09-06 (NVX LastMile): depois da divisão o primário MANTÉM o nome da
+   * spec monolítica e fica só com o índice, mas os findings da validação anterior citam aquele nome →
+   * casavam por nome exato, `unrouted` ficava vazio, o roteador LLM nunca era chamado e a fila
+   * colapsava em 1 item (o índice) com 16 GAPs de seções que ele não contém mais.
+   */
+  describe("J1: nome que virou ÍNDICE deixa de valer como casamento", () => {
+    const stale = new Set(["00-indice.md"]);
+
+    it("finding que cita o índice vai para o roteador (código não escolhe substituto)", () => {
+      const f = F({ file: "00-indice.md", severity: "blocker" });
+      const g = groupActiveFindings(files, [f], {}, stale);
+      expect(g.unrouted).toEqual([f]);
+      expect(g.byPath.get("00-indice.md")).toBeUndefined();
+      expect(g.staleNameMatches).toBe(1);
+    });
+
+    it("os OUTROS arquivos seguem casando por nome — o desvio é só do que virou índice", () => {
+      const ok = F({ file: "backend/01-api.md" });
+      const g = groupActiveFindings(files, [ok], {}, stale);
+      expect(g.byPath.get("backend/01-api.md")).toEqual([ok]);
+      expect(g.staleNameMatches).toBe(0);
+    });
+
+    /**
+     * Rota persistida é decisão EXPLÍCITA de agente ("GAP transversal → índice" está no
+     * ROUTER_SYSTEM). Recusá-la faria o roteador ser chamado a cada refresh da Bancada só para
+     * reafirmar a mesma escolha — LLM queimado em loop.
+     */
+    it("rota já gravada apontando para o índice CONTINUA valendo", () => {
+      const f = F({ file: "00-indice.md" });
+      const g = groupActiveFindings(files, [f], { [f.fingerprint]: "00-indice.md" }, stale);
+      expect(g.byPath.get("00-indice.md")).toEqual([f]);
+      expect(g.unrouted).toEqual([]);
+      expect(g.routesUsed).toEqual({ [f.fingerprint]: "00-indice.md" });
+      expect(g.staleNameMatches).toBe(1); // o desvio aconteceu; quem resolveu foi a rota
+    });
+
+    it("sem o fato (conjunto vazio) o comportamento é exatamente o de antes", () => {
+      const f = F({ file: "00-indice.md" });
+      expect(groupActiveFindings(files, [f]).byPath.get("00-indice.md")).toEqual([f]);
+      expect(groupActiveFindings(files, [f]).staleNameMatches).toBe(0);
+    });
+  });
 });
 
 describe("buckets / gapQueue / toWire", () => {
@@ -170,13 +215,19 @@ describe("buckets / gapQueue / toWire", () => {
 
 // ── Leitura do banco + roteador ───────────────────────────────────────────────
 
-const fakeDb = (files: Array<{ filename: string; rel_dir: string | null; is_primary: boolean }>, routes: Record<string, string> | null = null) => {
+const fakeDb = (
+  files: Array<{ filename: string; rel_dir: string | null; is_primary: boolean }>,
+  routes: Record<string, string> | null = null,
+  /** J1: divisões `applied` DEPOIS da run atual — o `source_path` é o caminho físico do primário. */
+  splits: Array<{ source_path: string }> = [],
+) => {
   const updates: Array<{ text: string; values: unknown[] }> = [];
   const db = {
     query: vi.fn(async (text: string, values?: unknown[]) => {
       if (text.includes("FROM project_spec_files")) {
         return { rows: files.map((f) => ({ ...f, file_path: `/shared/uploads/p/${f.rel_dir ? `${f.rel_dir}/` : ""}${f.filename}` })) as unknown as Record<string, unknown>[] };
       }
+      if (text.includes("FROM project_spec_splits")) return { rows: splits as unknown as Record<string, unknown>[] };
       if (text.includes("SELECT finding_routes")) return { rows: routes ? [{ finding_routes: routes }] : [{}] };
       if (text.includes("UPDATE spec_validation_runs")) { updates.push({ text, values: values ?? [] }); return { rows: [] }; }
       return { rows: [] };
@@ -231,6 +282,72 @@ describe("loadSpecFiles / gapScopeForProject", () => {
     });
     const scope = await gapScopeForProject(db, "p1");
     expect(scope.unrouted).toHaveLength(1);
+  });
+
+  /**
+   * 🔴 J1 no caminho REAL: o fato ("divisão aplicada depois desta validação") vem do banco. A regra é
+   * temporal de propósito — revalidar fecha a janela sozinho, porque a run nova nasce depois do split.
+   */
+  describe("J1: divisão aplicada depois da validação invalida o nome do primário", () => {
+    const tree = [
+      { filename: "nvx-lastmile-backend.md", rel_dir: null, is_primary: true },
+      { filename: "modelo-dados.md", rel_dir: null, is_primary: false },
+      { filename: "privacidade-lgpd.md", rel_dir: null, is_primary: false },
+    ];
+    const PRIMARIO = "/shared/uploads/p/nvx-lastmile-backend.md";
+
+    it("GAP que citava o monolito vira `unrouted` e o fato é DECLARADO no wire", async () => {
+      const velho = F({ file: "nvx-lastmile-backend.md", severity: "blocker", title: "LGPD sem base legal" });
+      projectFindingsState.mockResolvedValue({ latestRunId: "run9", findings: [velho], resolved: [], counts: {} });
+      const { db } = fakeDb(tree, null, [{ source_path: PRIMARIO }]);
+      const scope = await gapScopeForProject(db, "p1");
+      expect(scope.unrouted).toEqual([velho]);
+      expect(scope.byPath.size).toBe(0);
+      const wire = toWire(scope);
+      expect(wire.stalePaths).toEqual(["nvx-lastmile-backend.md"]);
+      expect(wire.staleNameMatches).toBe(1);
+      expect(wire.queue).toEqual([]); // a fila NÃO finge que o índice tem o GAP
+    });
+
+    it("sem divisão posterior, o nome do primário vale (nenhuma regressão)", async () => {
+      const f = F({ file: "nvx-lastmile-backend.md" });
+      projectFindingsState.mockResolvedValue({ latestRunId: "run9", findings: [f], resolved: [], counts: {} });
+      const { db } = fakeDb(tree, null, []);
+      const scope = await gapScopeForProject(db, "p1");
+      expect(scope.byPath.get("nvx-lastmile-backend.md")).toEqual([f]);
+      expect(toWire(scope).staleNameMatches).toBe(0);
+    });
+
+    it("tabela `project_spec_splits` ausente (093 não aplicada) não derruba a Bancada", async () => {
+      const f = F({ file: "nvx-lastmile-backend.md" });
+      projectFindingsState.mockResolvedValue({ latestRunId: "run9", findings: [f], resolved: [], counts: {} });
+      const { db } = fakeDb(tree, null, []);
+      const real = db.query.getMockImplementation()!;
+      db.query.mockImplementation(async (text: string, values?: unknown[]) => {
+        if (text.includes("FROM project_spec_splits")) throw new Error('relation "project_spec_splits" does not exist');
+        return real(text, values);
+      });
+      const scope = await gapScopeForProject(db, "p1");
+      expect(scope.byPath.get("nvx-lastmile-backend.md")).toEqual([f]);
+      expect(scope.stalePaths).toEqual([]);
+    });
+
+    it("o roteador LLM passa a SER CHAMADO — antes o escopo dizia 'nada a rotear'", async () => {
+      const velho = F({ file: "nvx-lastmile-backend.md", severity: "blocker", title: "LGPD sem base legal" });
+      projectFindingsState.mockResolvedValue({ latestRunId: "run9", findings: [velho], resolved: [], counts: {} });
+      const { db, updates } = fakeDb(tree, null, [{ source_path: PRIMARIO }]);
+      httpPost.mockResolvedValue(rawOk([{ id: "g1", file: "privacidade-lgpd.md" }]));
+      const antes = process.env.API_AGENTS_URL;
+      process.env.API_AGENTS_URL = "http://agents:8000";
+      try {
+        const r = await routeUnroutedFindings(db, "p1");
+        expect(r).toMatchObject({ routed: 1, stillUnrouted: 0, skipped: false });
+        expect(JSON.parse(updates[0].values[1] as string)).toEqual({ [velho.fingerprint]: "privacidade-lgpd.md" });
+      } finally {
+        if (antes === undefined) delete process.env.API_AGENTS_URL;
+        else process.env.API_AGENTS_URL = antes;
+      }
+    });
   });
 });
 

@@ -709,6 +709,10 @@ type GapScopeWire = {
   files: Array<{ path: string; isPrimary: boolean; active: number; blockers: number; warnings: number; routed: number }>;
   /** Ordem sugerida de trabalho (mais blockers primeiro) — a mesma fila do laço autônomo. */
   queue: string[];
+  /** J1: arquivos que viraram índice depois desta validação — o nome citado nos GAPs não vale mais. */
+  stalePaths?: string[];
+  /** J1: GAPs desviados ao roteador por causa disso (estão AGUARDANDO rota, não sem rota). */
+  staleNameMatches?: number;
 };
 
 /** Rótulo PT-BR do estado do laço + severidade para o Alert (o usuário precisa saber se acabou). */
@@ -1258,7 +1262,7 @@ function SpecChatPanel({
    * conseguiu atribuir a um arquivo (`unrouted`) não apareciam em lugar nenhum. Esta linha
    * reconcilia o total com o que está visível por arquivo.
    */
-  gapReconcile?: { total: number; unrouted: number; fileCount: number } | null;
+  gapReconcile?: { total: number; unrouted: number; fileCount: number; stale?: number } | null;
   // T4.3 — contexto por-arquivo + fluxo de aplicação com confirmação (opcionais:
   // quando ausentes, o painel opera no modo clássico de spec inteira).
   activeFilePath?: string | null;
@@ -1572,9 +1576,11 @@ function SpecChatPanel({
             nada dizia por quê: os GAPs que o roteador não conseguiu atribuir a um arquivo
             (`unrouted`) eram invisíveis — e o botão por-arquivo nunca os alcança. */}
         {gapReconcile && gapReconcile.fileCount > 1 && gapReconcile.total > 0 && (
-          <Tooltip title={gapReconcile.unrouted > 0
-            ? "GAPs \"sem arquivo\" são os que o roteador não conseguiu atribuir (afetam a spec como um todo). O botão por-arquivo não os alcança — use o modo autônomo, que percorre a spec inteira."
-            : "Todos os GAPs ativos estão atribuídos a um arquivo — a soma dos badges da lista fecha com o total."}>
+          <Tooltip title={(gapReconcile.stale ?? 0) > 0
+            ? `${gapReconcile.stale} GAP(s) citam um arquivo que virou ÍNDICE depois desta validação (a spec foi dividida): o nome não vale mais e um agente vai escolher o arquivo certo na próxima rodada. Revalidar a spec resolve de vez.`
+            : gapReconcile.unrouted > 0
+              ? "GAPs \"sem arquivo\" são os que o roteador não conseguiu atribuir (afetam a spec como um todo). O botão por-arquivo não os alcança — use o modo autônomo, que percorre a spec inteira."
+              : "Todos os GAPs ativos estão atribuídos a um arquivo — a soma dos badges da lista fecha com o total."}>
             <Typography variant="caption" color="text.secondary"
               sx={{ display: "block", mb: 0.5, fontSize: "0.64rem", lineHeight: 1.4 }}>
               {gapReconcile.total} GAP(s) ativo(s) na spec
@@ -1582,6 +1588,7 @@ function SpecChatPanel({
               {gapReconcile.unrouted > 0
                 ? ` · ${gapReconcile.unrouted} sem arquivo atribuído`
                 : " · todos atribuídos a um arquivo"}
+              {(gapReconcile.stale ?? 0) > 0 ? ` (${gapReconcile.stale} aguardando roteamento após a divisão)` : ""}
             </Typography>
           </Tooltip>
         )}
@@ -2903,7 +2910,14 @@ export default function SpecPage() {
    */
   const gapReconcile = useMemo(() => {
     if (!gapScope) return null;
-    return { total: gapScope.totalActive, unrouted: gapScope.unrouted, fileCount: gapScope.fileCount };
+    return {
+      total: gapScope.totalActive,
+      unrouted: gapScope.unrouted,
+      fileCount: gapScope.fileCount,
+      // J1: parte do `unrouted` não é "o roteador falhou" — é "o arquivo citado virou índice depois
+      // desta validação". Sem distinguir, a mensagem culpa o roteador por trabalho que ele ainda vai fazer.
+      stale: gapScope.staleNameMatches ?? 0,
+    };
   }, [gapScope]);
 
   const handleResolveFileGaps = useCallback(async () => {

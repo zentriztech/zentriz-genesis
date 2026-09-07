@@ -62,6 +62,10 @@ export interface GapGroups {
   totalActive: number;
   /** Rotas persistidas que foram efetivamente usadas (fingerprint → path). */
   routesUsed: Record<string, string>;
+  /** J1: paths cujo casamento por NOME está obsoleto (viraram índice depois da validação). */
+  stalePaths?: string[];
+  /** J1: quantos findings foram desviados para o roteador por causa disso. */
+  staleNameMatches?: number;
 }
 
 /** Contrato de saída para a UI e para o laço autônomo (JSON-serializável). */
@@ -73,6 +77,10 @@ export interface GapScopeWire {
   files: GapFileBucket[];
   /** Fila sugerida para o PR-5: arquivos com GAP ativo, mais blockers primeiro. */
   queue: string[];
+  /** J1: paths que deixaram de aceitar casamento por nome (divisão aplicada após a validação). */
+  stalePaths?: string[];
+  /** J1: findings desviados ao roteador por nome obsoleto — a UI precisa poder dizer isso. */
+  staleNameMatches?: number;
 }
 
 // ── Transporte: casar a string reportada com a árvore real ───────────────────
@@ -152,6 +160,57 @@ async function loadFindingRoutes(db: Db, runId: string | null): Promise<Record<s
   }
 }
 
+/**
+ * 🔴 J1 — o GAP ficava PRESO ao arquivo que virou ÍNDICE.
+ *
+ * Na divisão (PR-3) o primário **mantém o nome** da spec monolítica e passa a conter só o índice: o
+ * conteúdo migra para os arquivos temáticos. Só que todo finding da validação ANTERIOR aponta aquele
+ * nome, então `resolveFindingPath` casa por nome EXATO, `unrouted` fica vazio e o roteador LLM nunca é
+ * chamado. Medido em prod 2026-09-06 no NVX LastMile: `gap-scope` com `fileCount: 11` e **fila de 1
+ * item só, o índice**, carregando 16 GAPs de LGPD/dados/contratos — seções que aquele arquivo não
+ * contém mais. O CTO recebia esses GAPs para "corrigir" num arquivo sem o texto correspondente:
+ * rodada paga que só podia inflar o índice (combustível do GAP-8).
+ *
+ * O que o código constata aqui é FATO, não julgamento: existe divisão `applied` cujo `applied_at` é
+ * POSTERIOR ao nascimento da run de validação mais nova ⇒ **todo** finding em jogo foi escrito antes
+ * de o arquivo perder o conteúdo, logo o nome que ele cita não vale mais. Quem escolhe o arquivo novo
+ * é o roteador LLM (`routeUnroutedFindings`) — o código apenas para de aceitar o nome obsoleto.
+ * Revalidar fecha a janela sozinho: a run nova nasce depois do split e a regra deixa de disparar.
+ *
+ * Rota já PERSISTIDA continua valendo mesmo apontando para o índice: ela é decisão explícita de um
+ * agente (e "GAP transversal → índice" está no `ROUTER_SYSTEM`). Recusá-la faria o roteador ser
+ * chamado de novo a cada refresh da Bancada, queimando LLM em loop para reafirmar a mesma escolha.
+ */
+async function loadStaleIndexPaths(
+  db: Db,
+  projectId: string,
+  latestRunId: string | null,
+  files: SpecFileRef[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  // Sem run não há finding; com 1 arquivo só não há decisão a tomar (e o índice é o único destino).
+  if (!latestRunId || files.length < 2) return out;
+  try {
+    const rows = (await db.query(
+      `SELECT source_path FROM project_spec_splits
+        WHERE project_id = $1 AND status = 'applied' AND applied_at IS NOT NULL
+          AND applied_at > (SELECT created_at FROM spec_validation_runs WHERE id = $2)`,
+      [projectId, latestRunId],
+    )).rows as unknown as Array<{ source_path: string | null }>;
+    // `source_path` é o caminho FÍSICO do primário; a árvore é a verdade para virar path canônico.
+    const canonical = new Map(files.map((f) => [f.filePath, f.path]));
+    for (const r of rows) {
+      const p = canonical.get(String(r.source_path ?? ""));
+      if (p) out.add(p);
+    }
+  } catch {
+    // Tabela ausente (migração 093 não aplicada) não pode derrubar a Bancada: sem o fato, o
+    // comportamento é o de antes — casa por nome.
+    return new Set();
+  }
+  return out;
+}
+
 async function saveFindingRoutes(db: Db, runId: string, routes: Record<string, string>, model: string | null): Promise<void> {
   await db.query(
     `UPDATE spec_validation_runs
@@ -172,15 +231,23 @@ export function groupActiveFindings(
   files: SpecFileRef[],
   findings: EnrichedFinding[],
   routes: Record<string, string> = {},
-): Pick<GapGroups, "byPath" | "unrouted" | "totalActive" | "routesUsed"> {
+  stalePaths: Set<string> = new Set(),
+): Pick<GapGroups, "byPath" | "unrouted" | "totalActive" | "routesUsed"> & { staleNameMatches: number } {
   const paths = files.map((f) => f.path);
   const byPath = new Map<string, EnrichedFinding[]>();
   const unrouted: EnrichedFinding[] = [];
   const routesUsed: Record<string, string> = {};
   const active = findings.filter((f) => !f.triage);
+  let staleNameMatches = 0;
 
   for (const f of active) {
     let target = resolveFindingPath(f.file, paths);
+    // J1: o nome casou, mas aquele arquivo virou índice DEPOIS desta validação (loadStaleIndexPaths).
+    // O código não escolhe substituto — devolve o finding ao roteador LLM.
+    if (target && stalePaths.has(target)) {
+      target = null;
+      staleNameMatches++;
+    }
     if (!target && routes[f.fingerprint]) {
       target = resolveFindingPath(routes[f.fingerprint], paths);
       if (target) routesUsed[f.fingerprint] = target;
@@ -195,7 +262,7 @@ export function groupActiveFindings(
       unrouted.push(f);
     }
   }
-  return { byPath, unrouted, totalActive: active.length, routesUsed };
+  return { byPath, unrouted, totalActive: active.length, routesUsed, staleNameMatches };
 }
 
 export function buckets(groups: GapGroups): GapFileBucket[] {
@@ -230,6 +297,8 @@ export function toWire(groups: GapGroups): GapScopeWire {
     unrouted: groups.unrouted.length,
     files: list,
     queue: gapQueue(list),
+    stalePaths: groups.stalePaths ?? [],
+    staleNameMatches: groups.staleNameMatches ?? 0,
   };
 }
 
@@ -239,7 +308,13 @@ export async function gapScopeForProject(db: Db, projectId: string): Promise<Gap
   const files = await loadSpecFiles(db, projectId);
   const state = await projectFindingsState(db, projectId, { currentFiles: files.map((f) => f.path) });
   const routes = await loadFindingRoutes(db, state.latestRunId);
-  return { latestRunId: state.latestRunId, files, ...groupActiveFindings(files, state.findings, routes) };
+  const stale = await loadStaleIndexPaths(db, projectId, state.latestRunId, files);
+  return {
+    latestRunId: state.latestRunId,
+    files,
+    stalePaths: [...stale],
+    ...groupActiveFindings(files, state.findings, routes, stale),
+  };
 }
 
 /** Findings ATIVOS de UM arquivo (o que o "Resolver GAPs deste arquivo" manda ao CTO-editor). */
