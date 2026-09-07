@@ -180,21 +180,64 @@ function rowToDecision(r: Record<string, unknown>): OracleDecision {
 }
 
 /**
+ * GAP-24 — pares MUTUAMENTE INVERSOS não podem virar fato.
+ *
+ * MEDIDO em prod 2026-09-07, na primeira run com o registro ligado (projeto e2a1988c): duas decisões
+ * concorrentes (GAP-23, corrigido abaixo) nomearam o MESMO contrato com dois slugs e oráculos OPOSTOS:
+ *
+ * ```
+ * metrics-token-boot            oráculo=observabilidade-operacao.md  redeclara=[infraestrutura-deploy.md]
+ * obrigatoriedade-metrics-token oráculo=infraestrutura-deploy.md     redeclara=[observabilidade-operacao.md]
+ * ```
+ *
+ * Transportar as duas ao CTO é injetar no prompt exatamente a doença que o registro existe para curar:
+ * cada arquivo lê "você é o oráculo" E "o oráculo é o outro". Não é preciso julgar semântica para ver o
+ * defeito — a inversão é FACTUAL (o oráculo de A redeclara B e o de B redeclara A). Então o código faz o
+ * que lhe cabe: **veta a corrupção** (suprime o par dos dois lados e loga), sem escolher vencedor — isso
+ * seria julgamento, e julgamento é do agente (ver feedback-genesis-100-llm-nunca-automacao-fixa).
+ */
+export function dropContradictoryPairs(decisions: OracleDecision[]): OracleDecision[] {
+  const norm = (p: string) => p.trim().toLowerCase();
+  const bad = new Set<string>();
+  for (let i = 0; i < decisions.length; i++) {
+    for (let j = i + 1; j < decisions.length; j++) {
+      const a = decisions[i];
+      const b = decisions[j];
+      if (norm(a.oraclePath) === norm(b.oraclePath)) continue;
+      const aRestatesB = a.restatedIn.some((p) => norm(p) === norm(b.oraclePath));
+      const bRestatesA = b.restatedIn.some((p) => norm(p) === norm(a.oraclePath));
+      if (aRestatesB && bRestatesA) {
+        bad.add(a.contractKey);
+        bad.add(b.contractKey);
+        console.warn(
+          `[specOracles] decisões mutuamente inversas SUPRIMIDAS (nenhuma vira fato): `
+          + `\`${a.contractKey}\`→${a.oraclePath} vs \`${b.contractKey}\`→${b.oraclePath}`,
+        );
+      }
+    }
+  }
+  return bad.size === 0 ? decisions : decisions.filter((d) => !bad.has(d.contractKey));
+}
+
+/**
  * Decisões VIGENTES: a mais recente de cada contrato, de QUALQUER spec_hash.
  *
  * De propósito não filtra por hash: a durabilidade entre rodadas é o mecanismo. Uma decisão que
  * morresse a cada edição da spec devolveria a oscilação medida em prod na rodada seguinte.
+ *
+ * Filtra o marcador de decisão em curso (GAP-23) e pares contraditórios (GAP-24) — o que sai daqui é
+ * fato transportável para o prompt e para o veto.
  */
 export async function loadOracleDecisions(db: Db, projectId: string): Promise<OracleDecision[]> {
   const rows = (await db.query(
     `SELECT DISTINCT ON (contract_key)
             contract_key, oracle_path, rule_summary, restated_in, spec_hash, decided_by_model
        FROM spec_oracle_decisions
-      WHERE project_id = $1
+      WHERE project_id = $1 AND contract_key <> $2
       ORDER BY contract_key, created_at DESC`,
-    [projectId],
+    [projectId, DECISION_LOCK_KEY],
   )).rows as Record<string, unknown>[];
-  return rows.map(rowToDecision);
+  return dropContradictoryPairs(rows.map(rowToDecision));
 }
 
 /**
@@ -203,6 +246,52 @@ export async function loadOracleDecisions(db: Db, projectId: string): Promise<Or
  * a api só custa UMA pergunta a mais.
  */
 const asked = new Set<string>();
+
+/**
+ * GAP-23 — chamadas CONCORRENTES pelo mesmo conteúdo. Duas decisões ao mesmo tempo é o pior dos mundos:
+ * paga LLM duas vezes E grava dois slugs para o mesmo contrato (a segunda chamada não vê as decisões da
+ * primeira, que ainda não existiam quando o prompt foi montado).
+ *
+ * MEDIDO em prod na estreia do registro: `27 contrato(s) … decidido` seguido de `13 contrato(s) …`
+ * para o MESMO hash `721cb185` — porque `startAutonomyRun` agenda um `setImmediate(advance)` e o tick
+ * seguinte entra em `startFileRound` de novo; o CLAIM que protege o dispatch do CTO só acontece DEPOIS
+ * do registro, então as duas passagens atravessaram o guard `SELECT 1 … spec_hash` antes de qualquer
+ * INSERT. Resultado: `limites-campos`→modelo-dados vs `limites-string-campos`→api-entregas (o mesmo
+ * contrato com dois donos) e o par inverso de `METRICS_TOKEN`.
+ *
+ * Duas camadas, porque o problema tem duas escalas:
+ *  - `inflight`: dentro do processo, quem chega depois AGUARDA o resultado do primeiro (nem repete o
+ *    trabalho, nem devolve um estado que ignora a decisão em curso);
+ *  - marcador no banco (`DECISION_LOCK_KEY` + índice único `sod_one_per_hash`): entre processos/réplicas,
+ *    a reserva é ATÔMICA. Quem perde o INSERT não chama o LLM. Liberado se a decisão falhar, para não
+ *    congelar o conteúdo num estado "decidido" que nunca decidiu nada.
+ */
+const inflight = new Map<string, Promise<EnsureOracleResult>>();
+
+/** `contract_key` reservado: marcador de decisão em curso, nunca um contrato. Filtrado na leitura. */
+const DECISION_LOCK_KEY = "__decision_lock__";
+
+async function claimDecision(db: Db, projectId: string, specHash: string): Promise<boolean> {
+  const res = await db.query(
+    `INSERT INTO spec_oracle_decisions
+       (project_id, spec_hash, contract_key, oracle_path, rule_summary, restated_in, decided_by_model)
+     VALUES ($1, $2, $3, '-', 'marcador de decisao em curso (nao e contrato)', '[]'::jsonb, NULL)
+     ON CONFLICT (project_id, spec_hash, contract_key) DO NOTHING`,
+    [projectId, specHash, DECISION_LOCK_KEY],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+async function releaseDecision(db: Db, projectId: string, specHash: string): Promise<void> {
+  try {
+    await db.query(
+      "DELETE FROM spec_oracle_decisions WHERE project_id = $1 AND spec_hash = $2 AND contract_key = $3",
+      [projectId, specHash, DECISION_LOCK_KEY],
+    );
+  } catch (e) {
+    console.warn(`[specOracles] falha ao liberar marcador de decisão: ${(e as Error).message}`);
+  }
+}
 
 export interface EnsureOracleResult {
   decisions: OracleDecision[];
@@ -221,6 +310,19 @@ export interface EnsureOracleResult {
  * inventada por código.
  */
 export async function ensureOracleDecisions(
+  db: Db,
+  projectId: string,
+  opts: { specHash: string; findings: EnrichedFinding[]; llm?: Record<string, unknown> },
+): Promise<EnsureOracleResult> {
+  const memo = `${projectId}:${opts.specHash}`;
+  const running = inflight.get(memo);
+  if (running) return running;
+  const p = decideOracles(db, projectId, opts).finally(() => inflight.delete(memo));
+  inflight.set(memo, p);
+  return p;
+}
+
+async function decideOracles(
   db: Db,
   projectId: string,
   opts: { specHash: string; findings: EnrichedFinding[]; llm?: Record<string, unknown> },
@@ -253,6 +355,13 @@ export async function ensureOracleDecisions(
   if (candidates.length === 0) {
     asked.add(memo);
     return { decisions: existing, decided: 0, skipped: true, reason: "nenhum GAP cita outro arquivo", model: null };
+  }
+
+  // GAP-23: reserva ATÔMICA antes de gastar LLM. Quem perde não decide nada — a decisão do vencedor
+  // é o que vale, e não existem dois donos para o mesmo contrato por corrida.
+  if (!await claimDecision(db, projectId, opts.specHash)) {
+    asked.add(memo);
+    return { decisions: existing, decided: 0, skipped: true, reason: "decisão já em curso neste conteúdo", model: null };
   }
 
   const menu = await buildFileMenu(files);
@@ -293,17 +402,21 @@ export async function ensureOracleDecisions(
     model = data.model_used ?? (llmFields.model_id ? String(llmFields.model_id) : null);
   } catch (err) {
     console.warn(`[specOracles] decisão de oráculos falhou (segue sem ela): ${String(err).slice(0, 200)}`);
+    // Sem resposta não houve decisão: devolver a reserva para a rodada seguinte poder tentar.
+    await releaseDecision(db, projectId, opts.specHash);
     return { decisions: existing, decided: 0, skipped: true, reason: "LLM indisponível", model: null };
   }
 
   const parsed = parseOracleResponse(text);
   if (!parsed) {
     console.warn("[specOracles] resposta não-JSON — nenhuma decisão gravada");
+    await releaseDecision(db, projectId, opts.specHash);
     return { decisions: existing, decided: 0, skipped: true, reason: "resposta não-JSON", model };
   }
 
   let decided = 0;
   for (const c of parsed) {
+    if (c.key === DECISION_LOCK_KEY) continue; // chave reservada do marcador — não é contrato
     const oracle = resolveFindingPath(c.oracle, paths);
     if (!oracle) continue; // path inexistente → não grava lixo
     const restated = [...new Set(
@@ -325,9 +438,10 @@ export async function ensureOracleDecisions(
   return { decisions: await loadOracleDecisions(db, projectId), decided, skipped: false, model };
 }
 
-/** Só para teste: esquece a memória de "já perguntei". */
+/** Só para teste: esquece a memória de "já perguntei" e as decisões em curso. */
 export function _resetOracleMemo(): void {
   asked.clear();
+  inflight.clear();
 }
 
 export interface OracleRoleForFile {
