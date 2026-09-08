@@ -114,7 +114,26 @@ export function policyGateConfig() {
      */
     deriveTokens: num(process.env.SPEC_POLICY_DERIVE_TOKENS, 24_000),
     verdictTokens: num(process.env.SPEC_POLICY_VERDICT_TOKENS, 12_000),
+    /**
+     * Milissegundos de PRAZO por token de saída pedido. Medido em prod, na terceira ocorrência da
+     * mesma família num só dia: `timeoutMs` fixo de 180s cobria 6.000 tokens, cobriu a raspas 24.000
+     * (150s) e estourou quando o prompt cresceu — `Socket timeout after 180s`. Prazo fixo para
+     * orçamento variável é medir uma coisa pela outra (GAP-61). O prazo agora ACOMPANHA o pedido.
+     */
+    msPerToken: num(process.env.SPEC_POLICY_MS_PER_TOKEN, 30),
+    /** Teto do prazo: nem o pedido mais caro trava um worker para sempre. */
+    maxTimeoutMs: num(process.env.SPEC_POLICY_MAX_TIMEOUT_MS, 900_000),
   };
+}
+
+/**
+ * Prazo de uma chamada, derivado do orçamento de saída que ela pede.
+ *
+ * `timeoutMs` é PISO (chamada curta não espera menos que isso) e `maxTimeoutMs` é TETO.
+ */
+export function agentDeadlineMs(outputTokens: number, cfg = policyGateConfig()): number {
+  const escalado = Math.trunc(Math.max(0, outputTokens) * cfg.msPerToken);
+  return Math.min(cfg.maxTimeoutMs, Math.max(cfg.timeoutMs, escalado));
 }
 
 /**
@@ -752,7 +771,7 @@ export async function callPolicyAgent(args: {
       temperature: 0,
       ...(args.modelId ? { model_id: args.modelId } : {}),
       ...(args.llm ?? {}),
-    }), cfg.timeoutMs);
+    }), agentDeadlineMs(budget, cfg));
     const data = JSON.parse(body) as { response?: string; truncated?: boolean; model?: string };
     if (data.truncated === true) {
       const why = `parecer CORTADO em ${budget} tokens de saída (prompt ${args.user.length} chars)`;
@@ -763,7 +782,8 @@ export async function callPolicyAgent(args: {
     if (!text.trim()) return { ok: false, why: `resposta vazia (prompt ${args.user.length} chars)` };
     return { ok: true, text, model: args.modelId ?? String(data.model ?? "") };
   } catch (err) {
-    const why = `chamada falhou: ${String(err).slice(0, 200)} (prompt ${args.user.length} chars)`;
+    const why = `chamada falhou: ${String(err).slice(0, 200)} (prompt ${args.user.length} chars, `
+      + `orçamento ${budget} tokens, prazo ${Math.round(agentDeadlineMs(budget, cfg) / 1000)}s)`;
     console.warn(`[specPolicyGate] ${why}`);
     return { ok: false, why };
   }
