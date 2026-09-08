@@ -966,6 +966,35 @@ def _spec_input_cap() -> int:
         return 145_000
 
 
+def _spec_read_cap() -> int:
+    """Orçamento de LEITURA da spec: para quem NÃO a reemite, o teto é a JANELA, não `max_output`.
+
+    GAP-54/GAP-61. O `_spec_input_cap()` acima é o orçamento de quem REEMITE a spec em
+    `artifacts[].content` — ele deriva de `max_output`, e por isso vale ~145.000 chars. Numa revisão
+    por arquivo, o agente devolve `edits`/achados e NÃO reemite nada: o limite real passa a ser a
+    janela de entrada do modelo (~499.200 chars no Opus 5). Medido no NVX LastMile: com o teto de
+    escrita chegavam 2 de 12 arquivos (10,2%) da árvore de 1.098.849 chars.
+
+    A conta vem do MESMO `_prompt_budget` que o runtime vai aplicar, com o modelo que o runtime vai
+    resolver para o CTO — assim o dossiê é dimensionado pelo cap real em vez de um número mágico.
+    """
+    _env = os.environ.get("SPEC_READ_CHARS", "").strip()
+    if _env.isdigit() and int(_env) > 0:
+        return int(_env)
+    try:
+        from orchestrator.agents.runtime import _get_model_for_role, _prompt_budget
+        cap = _prompt_budget(_get_model_for_role("CTO"), reemits_spec=False).get("spec_raw", 0)
+        return max(int(cap), _spec_input_cap())
+    except Exception as exc:  # noqa: BLE001 — sem o cap real, o de escrita é o piso seguro
+        logger.warning("[spec] orçamento de leitura indisponível (%s); usando o de escrita", exc)
+        return _spec_input_cap()
+
+
+def _spec_per_file_review_enabled() -> bool:
+    """`SPEC_REVIEW_PER_FILE=off` volta ao comportamento byte a byte de antes do GAP-54."""
+    return os.environ.get("SPEC_REVIEW_PER_FILE", "on").strip().lower() not in ("0", "off", "false", "no")
+
+
 # Fronteira de arquivo produzida por `load_spec_all` ("---\n# [caminho/arquivo.md]\n\n").
 _SPEC_BLOCK_RE = re.compile(r"(?:^|\n)---\n# \[([^\]\n]+)\]\n\n")
 
@@ -1202,6 +1231,8 @@ def call_cto(
     extra_instruction: str = "",
     force_mode: str = "",
     spec_approved: bool = False,
+    spec_readonly: bool = False,
+    spec_focus: str = "",
 ) -> dict:
     if force_mode:
         mode = force_mode
@@ -1213,6 +1244,11 @@ def call_cto(
         mode = "spec_intake_and_normalize"
 
     _cap = int(os.environ.get("AGENT_INPUT_CHARS", "40000"))
+    # GAP-54/61: `spec_readonly` é o chamador AFIRMANDO que esta chamada não reemite a spec (revisão
+    # por arquivo, saída `edits`/achados). Só então o teto da spec passa a ser o de LEITURA — a flag é
+    # explícita de propósito: inferir "readonly" pelo modo abriria a porta para o Sub-modo C que
+    # REEMITE receber mais texto do que consegue devolver, que é a parede da saída do GAP-54.
+    _scap_for_spec = _spec_read_cap() if spec_readonly else _spec_input_cap()
     if pipeline_ctx:
         inputs = pipeline_ctx.build_inputs_for_cto(mode, backlog_summary, validate_backlog_only)
         if engineer_proposal:
@@ -1220,9 +1256,8 @@ def call_cto(
         if spec_content:
             # GAP-53: a spec usa o orçamento DELA (`SPEC_INPUT_CHARS`), não o dos artefatos
             # intermediários — com `_cap` o CTO via 40.000 de 1.065.930 chars (6 de 22 FRs).
-            _scap = _spec_input_cap()
-            inputs["spec_raw"] = spec_content[:_scap]
-            inputs["product_spec"] = spec_content[:_scap]
+            inputs["spec_raw"] = spec_content[:_scap_for_spec]
+            inputs["product_spec"] = spec_content[:_scap_for_spec]
         if spec_template:
             inputs["spec_template"] = spec_template[:_cap]
         if backlog_summary:
@@ -1238,8 +1273,8 @@ def call_cto(
             inputs["engineer_stack_proposal"] = engineer_proposal
         if spec_content:
             # GAP-53: idem no montador sem pipeline_ctx (era 20.000).
-            inputs["spec_raw"] = spec_content[:_spec_input_cap()]
-            inputs["product_spec"] = spec_content[:_spec_input_cap()]
+            inputs["spec_raw"] = spec_content[:_scap_for_spec]
+            inputs["product_spec"] = spec_content[:_scap_for_spec]
         if spec_template:
             inputs["spec_template"] = spec_template[:15000]
         if backlog_summary:
@@ -1248,16 +1283,124 @@ def call_cto(
             inputs["validate_backlog_only"] = True
     if extra_instruction:
         inputs["extra_instruction"] = extra_instruction
+    if spec_readonly:
+        # Em `inputs` para o PROMPT do CTO (Sub-modo C, cláusula 2-bis) e no topo da mensagem para o
+        # `build_user_message`, que é quem escolhe entre o cap de leitura e o de escrita.
+        inputs["spec_readonly"] = True
+        if spec_focus:
+            inputs["focus_file"] = spec_focus
     message = _build_message_envelope(
         request_id, "CTO", "generic", mode, task_id=None, task="",
         inputs=inputs, existing_artifacts=_evolution_existing_artifacts(pipeline_ctx), limits={"max_rounds": 3, "timeout_sec": int(os.environ.get("AGENT_TIMEOUT_CTO", "600"))},
     )
+    if spec_readonly:
+        message["spec_readonly"] = True
     if os.environ.get("API_AGENTS_URL"):
         from orchestrator.agents.client_http import run_agent_http
         return run_agent_http("cto", message)
     from orchestrator.agents.runtime import run_agent
     cto_prompt = _agents_root() / "cto" / "SYSTEM_PROMPT.md"
     return run_agent(system_prompt_path=cto_prompt, message=message, role="CTO")
+
+
+def _review_spec_with_cto(
+    spec_content: str,
+    *,
+    spec_ref: str,
+    request_id: str,
+    spec_template_content: str = "",
+    pipeline_ctx: "PipelineContext | None" = None,
+    spec_approved: bool = False,
+    human_answers: str = "",
+    project_id: str = "",
+) -> dict:
+    """Revisão da spec pelo CTO: UMA chamada quando a spec cabe, N passes por arquivo quando não.
+
+    🔴 GAP-54. Medido em prod (projeto `e2a1988c`, NVX LastMile — Backend, 2026-09-08): a árvore tem
+    1.098.849 chars em 12 arquivos e **2 arquivos chegavam ao CTO — 10,2% da spec**. Não era um número
+    mal escolhido: era a FORMA da chamada (uma só), com duas paredes independentes — a entrada
+    derivada de `max_output` (GAP-61) e o Sub-modo C mandando REEMITIR a spec inteira.
+
+    Aqui a leitura passa a ser repartida, e cada passe recebe um DOSSIÊ: o MAPA de todos os arquivos
+    (cabeçalhos verbatim, sempre cabem) + o TEXTO ÍNTEGRO do subconjunto do passe + a lista NOMEADA do
+    que ficou fora. Quem decide o foco é o plano derivado do que cabe, não uma heurística de
+    relevância — relevância é decisão de agente (⚖️ LEI do Jean), e este caminho não escolhe conteúdo.
+
+    Devolve `{"response", "questions", "per_file", "review"}`. `response` é a resposta de um passe que
+    deu certo (a do primeiro, quando há), para que o resto do pipeline siga lendo o mesmo formato de
+    sempre; `review` é a contabilidade de cobertura, e é ela que o oráculo executável precisa checar
+    antes de transformar falha de build em GAP da spec: numa spec truncada, toda "lacuna de contrato"
+    é consequência do truncamento.
+
+    Spec que cabe numa chamada gasta exatamente 1 chamada — projeto pequeno não paga nada a mais.
+    `SPEC_REVIEW_PER_FILE=off` volta ao caminho único, byte a byte.
+    """
+    def _single() -> dict:
+        resp = call_cto(
+            spec_ref, request_id, engineer_proposal="",
+            spec_content=spec_content, spec_template=spec_template_content,
+            pipeline_ctx=pipeline_ctx,
+            spec_approved=spec_approved,  # SPEC-APPROVED: aciona Sub-modo C do CTO (validar)
+            extra_instruction=human_answers,  # D3: respostas humanas anteriores (se houver)
+        )
+        return {"response": resp, "questions": _extract_questions(resp), "per_file": False, "review": None}
+
+    if not _spec_per_file_review_enabled():
+        return _single()
+
+    from orchestrator.spec_dossier import parse_spec_blocks
+    from orchestrator.spec_review import review_spec_per_file
+
+    _budget = _spec_read_cap()
+    _files = parse_spec_blocks(spec_content)
+    if len(_files) <= 1 or len(spec_content) <= _budget:
+        # Cabe (ou é arquivo único): a chamada de sempre. O dossiê não acrescentaria informação
+        # nenhuma aqui, e trocar o formato do prompt sem necessidade é risco sem ganho.
+        return _single()
+
+    _total_passes = {"n": 0}
+
+    def _review_fn(focus: str, dossier_text: str, dossier) -> dict:
+        _total_passes["n"] += 1
+        _post_step(
+            f"O CTO está lendo a spec por arquivo (passe {_total_passes['n']}): "
+            + (f"foco em {focus}" if focus else f"{len(dossier.included)} de {dossier.files} arquivo(s)"),
+            request_id,
+        )
+        return call_cto(
+            spec_ref, request_id, engineer_proposal="",
+            spec_content=dossier_text, spec_template=spec_template_content,
+            pipeline_ctx=pipeline_ctx, spec_approved=spec_approved,
+            extra_instruction=human_answers,
+            spec_readonly=True, spec_focus=focus,
+        )
+
+    result = review_spec_per_file(
+        spec_content, budget=_budget, review_fn=_review_fn, extract_questions=_extract_questions
+    )
+    logger.info(
+        "[Pipeline] Revisão da spec por arquivo: %d passe(s), %d/%d arquivo(s) lidos verbatim "
+        "(%.1f%%), parciais=%s, não lidos=%s, falhas=%d",
+        len(result.passes), len(result.covered), result.total_files,
+        result.text_coverage * 100, result.partial or "-", result.uncovered or "-", len(result.failures),
+    )
+    if not result.complete:
+        # Cortar é aceitável; mentir sobre o corte não é (A5.7/GAP-45). O humano vê o que a Fábrica
+        # NÃO leu, com nome e sobrenome — em vez dos 10,2% silenciosos de antes.
+        _post_step(
+            "⚠️ A Fábrica não conseguiu ler a spec inteira: "
+            f"{len(result.covered)}/{result.total_files} arquivo(s) verbatim. "
+            f"Parcial: {', '.join(result.partial) or '-'}. Não lido: {', '.join(result.uncovered) or '-'}."
+            + (f" Falhas de chamada: {len(result.failures)}." if result.failures else ""),
+            request_id,
+        )
+    _first_ok = next((p.response for p in result.passes if p.ok), None)
+    return {
+        "response": _first_ok or {},
+        "questions": result.questions,
+        "per_file": True,
+        "review": result,
+    }
 
 
 def _parse_squads_yaml(text: str) -> list[dict]:
@@ -5461,19 +5604,22 @@ def main() -> int:
             )
             _post_agent_working("cto", "O CTO está revisando e convertendo a spec para o modelo aceitável.", request_id)
             logger.info("[Pipeline] Chamando CTO para revisão da spec (com template)...")
-            cto_spec_response = call_cto(
-                spec_ref, request_id, engineer_proposal="",
-                spec_content=spec_content, spec_template=spec_template_content,
-                pipeline_ctx=pipeline_ctx,
-                spec_approved=_spec_approved,  # SPEC-APPROVED: aciona Sub-modo C do CTO (validar)
-                extra_instruction=_human_answers,  # D3: respostas humanas anteriores (se houver)
+            _spec_review = _review_spec_with_cto(
+                spec_content,
+                spec_ref=spec_ref, request_id=request_id,
+                spec_template_content=spec_template_content,
+                pipeline_ctx=pipeline_ctx, spec_approved=_spec_approved,
+                human_answers=_human_answers, project_id=project_id,
             )
+            cto_spec_response = _spec_review["response"]
             _audit_log("cto", request_id, cto_spec_response)
             # D3 — o CTO PERGUNTOU (NEEDS_INFO com next_actions.questions): PARA e devolve ao humano.
             # Antes, o status era IGNORADO aqui (o texto das perguntas virava "spec revisada") —
             # adversarial R3. Teto de rodadas → bloqueio explícito; canal de perguntas indisponível
             # → GAP-62: bloqueia TAMBÉM (fail-closed), nunca segue deixando outro LLM responder.
-            _q_spec = _extract_questions(cto_spec_response)
+            # As perguntas vêm AGREGADAS de todos os passes: numa revisão por arquivo, a dúvida
+            # bloqueante pode nascer no passe 7 e engoli-la seria o GAP-62 pela porta de trás.
+            _q_spec = _spec_review["questions"]
             if _q_spec:
                 _asked = _raise_spec_questions(project_id, "spec_review", _q_spec, request_id)
                 if _asked == "asked":
@@ -5499,11 +5645,20 @@ def main() -> int:
                         try: _run_log.stop_run(reason="blocked_structural_gate")
                         except Exception: pass
                     return
-            spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
-            for art in cto_spec_response.get("artifacts", []):
-                if isinstance(art, dict) and art.get("content"):
-                    spec_understood = art.get("content", "").strip() or spec_understood
-                    break
+            if _spec_review["per_file"]:
+                # 🔴 GAP-54 (parede da SAÍDA). Aqui o `spec_understood` era SUBSTITUÍDO por
+                # `artifacts[0].content` — a spec REEMITIDA pelo CTO. Numa árvore de 1.098.849 chars
+                # isso é fisicamente impossível (`max_output` de 64k tokens ≈ 145.600 chars), então o
+                # `product_spec` de que TODO agente a jusante deriva era uma fração do produto.
+                # Na revisão por arquivo a SPEC DA BANCADA é o contrato: o CTO valida e devolve
+                # achados/`edits`, não um documento novo.
+                spec_understood = spec_content
+            else:
+                spec_understood = _content_for_doc(cto_spec_response) or cto_spec_response.get("summary", "") or spec_content
+                for art in cto_spec_response.get("artifacts", []):
+                    if isinstance(art, dict) and art.get("content"):
+                        spec_understood = art.get("content", "").strip() or spec_understood
+                        break
             if project_id and storage and storage.is_enabled():
                 storage.write_doc(project_id, "cto", "spec_review", spec_understood, title="Spec revisada pelo CTO")
                 try:
@@ -5514,8 +5669,41 @@ def main() -> int:
                     )
                 except Exception as _e:
                     logger.warning("[Pipeline] Falha ao gravar CTO spec response JSON: %s", _e)
+                # GAP-54: a cobertura de leitura é ARTEFATO, não só log. É o gate que o oráculo
+                # executável consulta antes de virar falha de build em GAP da spec — sem isto ele
+                # realimentaria como "lacuna de contrato" o que é só arquivo que ninguém leu.
+                _rv = _spec_review["review"]
+                if _rv is not None:
+                    try:
+                        storage.write_doc_by_path(
+                            project_id, "cto", "cto/spec_read_coverage.json",
+                            json.dumps({
+                                "passes": len(_rv.passes),
+                                "total_files": _rv.total_files,
+                                "total_chars": _rv.total_chars,
+                                "covered": _rv.covered,
+                                "partial": _rv.partial,
+                                "uncovered": _rv.uncovered,
+                                "failures": _rv.failures,
+                                "text_coverage": round(_rv.text_coverage, 4),
+                                "complete": _rv.complete,
+                            }, ensure_ascii=False, indent=2),
+                            title="Cobertura de leitura da spec (GAP-54)",
+                        )
+                    except Exception as _e:
+                        logger.warning("[Pipeline] Falha ao gravar cobertura de leitura da spec: %s", _e)
             if pipeline_ctx:
-                pipeline_ctx.set_product_spec(spec_understood)
+                _for_ctx = spec_understood
+                if _spec_review["per_file"] and len(spec_understood) > _spec_input_cap():
+                    # `set_product_spec` recorta cego em `_SPEC_CAP` — e recorte cego no meio de uma
+                    # frase é exatamente o que o GAP-53 matou. Os agentes a jusante ESCREVEM (o teto
+                    # deles segue sendo o de escrita, e isso está certo), mas o que chega a eles tem de
+                    # ser fronteira de ARQUIVO com o corte DECLARADO. A leitura íntegra da árvore fica
+                    # no doc `spec_review` gravado acima; a Fábrica por arquivo a jusante é o próximo
+                    # passo, não este.
+                    # `fit_spec_to_budget` já embute o aviso do corte no texto que devolve.
+                    _for_ctx, _, _ = fit_spec_to_budget(spec_understood, _spec_input_cap())
+                pipeline_ctx.set_product_spec(_for_ctx)
                 pipeline_ctx.current_step = 1
                 pipeline_ctx.save_checkpoint(STATE_DIR)
             _post_step("O CTO concluiu a revisão da spec. Iniciando alinhamento com o Engineer.", request_id)

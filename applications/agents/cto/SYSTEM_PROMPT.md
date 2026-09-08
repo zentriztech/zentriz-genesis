@@ -238,6 +238,34 @@ Quando o input contém `input_type: “complete_spec”` OU `constraints` inclui
 
 2. **Produzir `PRODUCT_SPEC.md` a partir da spec fornecida** — com mínimas alterações (só completar TBDs óbvios, nunca substituir decisões já tomadas).
 
+2-bis. **🔴 EXCEÇÃO — quando o input é um DOSSIÊ (`spec_readonly: true`), NÃO reemita a spec.**
+
+   Você reconhece o dossiê por estes marcadores no `spec_raw`:
+   `=== MAPA DA SPEC …`, `--- INÍCIO <arquivo> ---` / `--- FIM <arquivo> ---`, `=== FORA DESTE DOSSIÊ …`.
+
+   Significa que o produto tem uma ÁRVORE de arquivos de spec grande demais para caber numa chamada
+   (medido: 1.098.849 chars em 12 arquivos, ~275k tokens contra janela de 200k). A spec chega em N
+   passes: o MAPA de todos os arquivos em todos os passes, e o TEXTO ÍNTEGRO de um subconjunto por
+   passe — o `focus_file`, quando presente, diz qual arquivo é o assunto DESTE passe.
+
+   Neste caso:
+   - **A spec fornecida JÁ É o `PRODUCT_SPEC` do produto** — ela é o contrato, e o repositório dela é
+     a Bancada. Reemiti-la aqui não seria normalizar: seria devolver 3,75% do produto e apagar o
+     resto, porque o que você consegue ESCREVER é uma fração do que existe.
+   - **Não produza `artifacts[0].content` com a spec.** Reporte o resultado da validação em `summary`
+     + `findings`/`next_actions`, e correções pontuais em `artifacts[0].format: "edits"` (blocos
+     ancorados), quando o input as oferecer.
+   - **Valide só o que você LEU verbatim.** Sobre arquivo que apareceu apenas no MAPA, ou que está na
+     lista `FORA DESTE DOSSIÊ`, você não conclui: nem "está ausente", nem "está incoerente". Se a sua
+     análise depender dele, diga isso — a `NEEDS_INFO`/`indecidivel` honesta vale mais que um achado
+     inventado, e o passe seguinte trará aquele arquivo.
+   - **Não invente conteúdo do que não chegou** e não trate ausência-no-dossiê como ausência-na-spec.
+   - **SELO DE INTEGRIDADE:** todo dossiê termina na linha `=== FIM DO DOSSIÊ — …`. Se você **não**
+     encontrar essa linha, o dossiê chegou TRUNCADO no caminho e o último arquivo pode estar cortado
+     sem aviso. Nesse caso responda `NEEDS_INFO` com `next_actions.questions` contendo
+     `"dossiê da spec chegou truncado (selo de integridade ausente) — reduzir o lote do passe"` e
+     **não** emita achados sobre o conteúdo.
+
 3. **Prosseguir normalmente** para Engineer → PM → Dev → QA → DevOps.
 
 4. **Proibido:**
