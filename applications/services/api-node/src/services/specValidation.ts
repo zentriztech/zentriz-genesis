@@ -761,12 +761,36 @@ async function mergeRecoveredCoverage(pool: Pool, runId: string, cov: StageBCove
   ).catch((e) => console.warn(`[spec-validation] run ${String(runId).slice(0, 8)}: cobertura do lote recuperado não regravada (${e instanceof Error ? e.message : String(e)}).`));
 }
 
+/**
+ * 🔴 C2 — grava a auditoria do colapso de duplicata. `true` = está no banco.
+ *
+ * O chamador só encolhe a lista de findings quando isto devolve `true`: fusão sem registro é
+ * indistinguível de perda silenciosa. `jsonb_set` com `coalesce` porque uma validação em que o
+ * estágio B não rodou não tem `stage_b_coverage`, e o registro do C2 vale igual.
+ */
+async function gravaAuditoriaColapso(pool: Pool, runId: string, audit: unknown): Promise<boolean> {
+  try {
+    await pool.query(
+      `UPDATE spec_validation_runs
+          SET stage_b_coverage = jsonb_set(coalesce(stage_b_coverage, '{}'::jsonb), '{duplicateCollapse}', $2::jsonb, true)
+        WHERE id = $1`,
+      [runId, JSON.stringify(audit)],
+    );
+    return true;
+  } catch (e) {
+    console.warn(`[spec-validation] run ${String(runId).slice(0, 8)}: auditoria do C2 não gravada (${e instanceof Error ? e.message : String(e)}).`);
+    return false;
+  }
+}
+
 async function processValidationRun(pool: Pool, runId: string, projectId: string, startHash: string): Promise<void> {
   const current = await computeCurrentSpecHash(pool, projectId);
   const files = current?.files ?? [];
   const extraRow = (await pool.query("SELECT extra FROM projects WHERE id = $1", [projectId])).rows[0] as { extra?: Record<string, unknown> | null } | undefined;
   const isEvolution = extraRow?.extra?.evolution === true;
-  const findings: ValidationFinding[] = runStageA(files, { evolution: isEvolution });
+  // `let` por causa do C2: o colapso de duplicata substitui a lista inteira (nunca muta em lugar,
+  // para que a lista CRUA continue sendo o valor de fallback quando o agente não responde).
+  let findings: ValidationFinding[] = runStageA(files, { evolution: isEvolution });
 
   // Estágio B só quando o A não achou blocker estrutural (economiza LLM em spec quebrada)
   const hasStageABlocker = findings.some((f) => f.severity === "blocker");
@@ -921,6 +945,38 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
     console.warn(`[spec-validation] run ${runId}: findings do oráculo não carregados (${e instanceof Error ? e.message : String(e)}) — validação segue só com os estágios A e B.`);
   }
 
+  // ── C2: o MESMO defeito contado 3× na MESMA validação ─────────────────────────────────────────
+  // Roda sobre a UNIÃO completa (estágio A + todos os lotes do B + oráculo) porque é o único ponto
+  // que vê duplicata cross-lote. Quem decide identidade é o AGENTE (`collapseDuplicateFindings`); o
+  // código só transporta e veta corrupção. Falhar aqui deixa a lista CRUA — duplicata infla a
+  // contagem, perder finding é pior. Ver [[genesis-diagnostico-laco-nao-fecha-cobertura-monopolizada-2026-09-08]].
+  let colapso: { collapsed: unknown[]; vetoed: unknown[]; model: string | null; ran: boolean; reason?: string } | null = null;
+  if (findings.length >= 2) {
+    try {
+      const { collapseDuplicateFindings } = await import("./gapContinuity.js");
+      const llmC2 = agentsLlmFields(await resolveWorkbenchLlm({ projectId }));
+      const r = await collapseDuplicateFindings(findings, { llm: llmC2 });
+      colapso = { collapsed: r.collapsed, vetoed: r.vetoed, model: r.model, ran: r.ran, reason: r.reason };
+      if (r.ran && r.collapsed.length > 0) {
+        // 🔴 A ordem importa: a auditoria é gravada ANTES de a lista encolher. Se o registro não
+        // entrar no banco, o colapso NÃO é aplicado — fusão sem prova é indistinguível de perda
+        // silenciosa, que é exatamente o fechamento fake que este trabalho existe para matar.
+        const auditada = await gravaAuditoriaColapso(pool, runId, colapso);
+        if (auditada) {
+          console.log(`[spec-validation] run ${runId}: C2 colapsou ${r.collapsed.length} duplicata(s) — ${findings.length} → ${r.findings.length} finding(s). Fusões: ${r.collapsed.map((c) => `"${c.dropped.title}" (${c.dropped.anchor ?? "sem âncora"}) → "${c.kept.title}" (${c.kept.anchor ?? "sem âncora"}): ${c.why}`).join(" | ")}`);
+          findings = r.findings;
+        } else {
+          console.warn(`[spec-validation] run ${runId}: C2 achou ${r.collapsed.length} duplicata(s) mas a auditoria não foi gravada — colapso NÃO aplicado, a lista segue CRUA (com duplicata).`);
+        }
+        colapso = null; // já gravado (ou desistido) aqui; não regravar depois
+      } else if (!r.ran) {
+        console.warn(`[spec-validation] run ${runId}: C2 NÃO rodou (${r.reason}) — a contagem desta validação pode conter o mesmo defeito mais de uma vez.`);
+      }
+    } catch (e) {
+      console.warn(`[spec-validation] run ${runId}: C2 indisponível (${e instanceof Error ? e.message : String(e)}) — lista de findings segue CRUA.`);
+    }
+  }
+
   // TOCTOU: recomputa o hash ao FINAL — editou durante a validação → superseded (não é erro)
   const after = await computeCurrentSpecHash(pool, projectId);
   const finalStatus = stageBError
@@ -935,6 +991,9 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       WHERE id = $3 AND status = 'running'`,
     [finalStatus, JSON.stringify(findings), runId, stageBRan],
   );
+  // Nada foi colapsado (zero duplicata, ou o agente não respondeu): o registro do C2 vale igual, é o
+  // que distingue "não havia duplicata" de "ninguém procurou".
+  if (colapso) await gravaAuditoriaColapso(pool, runId, colapso);
   if (!stageBRan && finalStatus === "failed") {
     // GAP-13: o log diz em voz alta o que a coluna guarda — esta contagem NÃO é comparável.
     console.log(`[spec-validation] run ${runId}: estágio B não rodou (blocker estrutural do A) — ${findings.length} finding(s) sobre superfície PARCIAL.`);
