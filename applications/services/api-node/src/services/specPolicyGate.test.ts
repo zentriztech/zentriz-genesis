@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  agentDeadlineMs, applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
+  agentDeadlineMs, agentModelUsed, applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
   DERIVE_SYSTEM, normalizeConstraints, normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw,
   policyGateConfig, policyNote, policyTally, VERDICT_SYSTEM,
   type PolicyVerdict, type SpecConstraint,
@@ -431,6 +431,22 @@ describe("policyTally / policyNote — a contagem tem de poder CAIR (GAP-42/43)"
     });
   });
 
+  /**
+   * 🔴 GAP-89 — MEDIDO na 1ª prova ao vivo do oráculo: 12 de 12 constraints voltaram `indecidivel`
+   * (resposta CORRETA — nenhum teste da suíte tocava aquelas constraints). Só que `indecidivel` não
+   * aparecia na nota e o `pending` substituído sumia: a nota ia de "0/0 julgadas, 119 pendentes" para
+   * "119/119 julgadas, 0 violações impeditivas". Quem lê a nota é o juiz de PROMOVIBILIDADE.
+   */
+  it("medir e NÃO decidir aparece na nota — senão o oráculo destrava a spec sem verificar nada", () => {
+    const t = policyTally(Array.from({ length: 119 }, (_, i) =>
+      v({ constraintKey: `c${i}`, status: "indecidivel", reason: "no_test_exercises" })));
+    const nota = policyNote(t);
+    expect(nota).toContain("119 sem decisão possível com a prova disponível");
+    // A cobertura continua sendo dita, mas não pode ser a ÚNICA coisa dita.
+    expect(nota).toContain("119/119");
+    expect(nota).not.toContain("119 cumprida");
+  });
+
   it("gate 100% verde por construção é impossível: not_judged e evidence_not_found aparecem", () => {
     const t = policyTally([
       v({ status: "indecidivel", reason: "not_judged" }),
@@ -536,6 +552,40 @@ describe("orçamento de saída e motivo da falha (medido em prod)", () => {
     expect(cfg.maxDerivePasses * cfg.specChars).toBeGreaterThanOrEqual(1_068_255);
     // O teto por passe é de PROMPT; o global é de fatura. Um não pode anular o outro.
     expect(cfg.maxConstraintsTotal).toBeGreaterThan(cfg.maxConstraints);
+  });
+
+  /**
+   * 🔴 GAP-88 — MEDIDO EM PROD: **157 de 157** veredictos com `model = 'desconhecido'` e **199**
+   * constraints com `declared_by_model` vazio. O `/invoke/raw` publica `model_used`; esta camada lia
+   * `data.model`, que o endpoint nunca teve (todo o resto da api já lia `model_used`).
+   *
+   * Não é cosmético: o índice único é `(project_id, spec_hash, constraint_key, model)` — é ele que
+   * deixa o juiz de spec e o oráculo coexistirem. Com todos gravando `desconhecido`, o revisor
+   * cross-family SOBRESCREVERIA o juiz em vez de somar, matando a medição que ele existe para fazer.
+   */
+  it("registra o modelo REALMENTE usado, não o campo que o endpoint nunca teve", () => {
+    expect(agentModelUsed({ model_used: "us.anthropic.claude-sonnet-4-6" }))
+      .toBe("us.anthropic.claude-sonnet-4-6");
+    // Compatibilidade: se algum dia o endpoint publicar `model`, continua valendo.
+    expect(agentModelUsed({ model: "nova-pro" })).toBe("nova-pro");
+  });
+
+  it("DECLARA o rebaixamento de família — foi o que aconteceu calado na 1ª prova do oráculo", () => {
+    // opus-4-8 deu 403 na conta e a cascata caiu para sonnet-4-6; o veredicto não dizia nada.
+    const m = agentModelUsed(
+      { model_used: "us.anthropic.claude-sonnet-4-6", model_requested: "us.anthropic.claude-opus-4-8" },
+      "us.anthropic.claude-opus-4-8",
+    );
+    expect(m).toBe("us.anthropic.claude-sonnet-4-6 (pedido us.anthropic.claude-opus-4-8)");
+  });
+
+  it("NÃO grava o modelo PEDIDO como se fosse o usado", () => {
+    // Antes: `model: args.modelId ?? …` — pedir opus e receber sonnet gravava opus.
+    expect(agentModelUsed({ model_used: "sonnet" }, "opus")).toBe("sonnet (pedido opus)");
+    // Sem informação nenhuma, o pedido é o melhor fato disponível — e nunca vira vazio.
+    expect(agentModelUsed({}, "opus")).toBe("opus");
+    expect(agentModelUsed({})).toBe("desconhecido");
+    expect(agentModelUsed({ model_used: "   " })).toBe("desconhecido");
   });
 
   it("falha do agente sempre NOMEIA o motivo — 'indisponível' sozinho é log mentiroso (GAP-45/46)", async () => {

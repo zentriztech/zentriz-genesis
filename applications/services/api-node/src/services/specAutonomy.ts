@@ -342,6 +342,14 @@ export interface AutonomyRoundLog {
   policySatisfied?: number | null;
   policyBlocking?: number | null;
   policyPending?: number | null;
+  /**
+   * 🔴 GAP-89 — `policyIndecidivel` é o que a EXECUÇÃO REAL mediu e ainda assim não decidiu, e
+   * `policyOracleApplied` é quantas saíram do `pending` por causa dela. Sem os dois, uma constraint
+   * que virou `indecidivel` pelo oráculo fica indistinguível de constraint verificada: `pending` cai,
+   * `judged` sobe e o log parece progresso. Medido: 12 de 12 `indecidivel` na 1ª prova ao vivo.
+   */
+  policyIndecidivel?: number | null;
+  policyOracleApplied?: number | null;
   policyNote?: string | null;
   /**
    * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
@@ -3019,6 +3027,10 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         policySatisfied: v.policy?.tally.satisfied ?? null,
         policyBlocking: v.policy?.tally.blocking ?? null,
         policyPending: v.policy?.tally.pending ?? null,
+        // GAP-89: sem este campo, `pending` virando `indecidivel` pela execução real seria
+        // indistinguível de constraint verificada no log da rodada.
+        policyIndecidivel: v.policy?.tally.indecidivel ?? null,
+        policyOracleApplied: v.policy?.oracleApplied ?? null,
         policyNote: v.policy ? (await import("./specPolicyGate.js")).policyNote(v.policy.tally) : null,
         // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
         // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.

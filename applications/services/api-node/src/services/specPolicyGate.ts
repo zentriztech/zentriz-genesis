@@ -636,6 +636,15 @@ export function policyNote(t: PolicyTally): string {
     `${t.blocking} violação(ões) impeditiva(s)`,
   ];
   if (t.violated > t.blocking) partes.push(`${t.violated - t.blocking} violação(ões) sem poder de bloquear`);
+  // 🔴 GAP-89 — MEDIDO na 1ª prova do oráculo: o juiz da execução real devolveu **12 de 12
+  // `indecidivel`** (resposta CORRETA: nenhum teste da suíte tocava aquelas constraints). Só que
+  // `indecidivel` não aparecia nesta nota e `pending` desaparecia ao ser substituído — a nota ia de
+  // "0/0 julgadas, 119 pendentes" para "119/119 julgadas, 0 violações impeditivas".
+  //
+  // Isso é anistia: quem lê a nota é o JUIZ DE PROMOVIBILIDADE (specAutonomy.ts), e ele veria
+  // cobertura total com zero informação ganha. Medir e não decidir é um resultado — e tem de ser dito
+  // com o nome que tem, senão o oráculo "destrava" a spec sem ter verificado nada.
+  if (t.indecidivel) partes.push(`${t.indecidivel} sem decisão possível com a prova disponível`);
   if (t.pending) partes.push(`${t.pending} pendente(s) de build/runtime`);
   if (t.notJudged) partes.push(`${t.notJudged} sem veredicto`);
   if (t.evidenceNotFound) partes.push(`${t.evidenceNotFound} com evidência não conferida`);
@@ -763,6 +772,37 @@ export type PolicyAgentOutcome =
   | { ok: true; text: string; model: string }
   | { ok: false; why: string };
 
+/**
+ * GAP-88 — QUEM julgou, medido em prod: 157 de 157 veredictos gravados com `model='desconhecido'`
+ * e 199 constraints com `declared_by_model` vazio.
+ *
+ * Duas causas, ambas nesta função:
+ *
+ *  1. o `/invoke/raw` publica **`model_used`** (e `model_requested`); esta camada lia `data.model`,
+ *     campo que o endpoint nunca teve. Todo o resto da api já lia `model_used` — só o Policy Gate não.
+ *  2. quando o chamador pedia um modelo, gravava-se o **pedido** e não o usado. Foi exatamente o caso
+ *     da primeira prova do oráculo: `opus-4-8` deu 403, a cascata caiu para `sonnet-4-6` e o veredicto
+ *     não registrou nada disso.
+ *
+ * Por que importa além da estética: o índice único é `(project_id, spec_hash, constraint_key, model)`.
+ * É ele que deixa o juiz de spec e o oráculo coexistirem na mesma linha de constraint. Com todo mundo
+ * gravando `desconhecido`, um segundo juiz (o revisor cross-family) **sobrescreveria** o primeiro em
+ * vez de somar — a medição que a frente cross-family existe para fazer morreria calada.
+ *
+ * O fallback é DECLARADO no próprio valor (`usado (pedido X)`): rebaixar de família é fato de
+ * auditoria, não detalhe de infra.
+ */
+export function agentModelUsed(
+  data: { model_used?: string; model_requested?: string; model?: string },
+  requested?: string,
+): string {
+  const usado = String(data.model_used ?? data.model ?? "").trim();
+  const pedido = String(data.model_requested ?? requested ?? "").trim();
+  if (!usado) return pedido || "desconhecido";
+  if (pedido && pedido !== usado) return `${usado} (pedido ${pedido})`;
+  return usado;
+}
+
 export async function callPolicyAgent(args: {
   system: string; user: string; maxTokens?: number; modelId?: string;
   llm?: Record<string, unknown> | null;
@@ -781,7 +821,10 @@ export async function callPolicyAgent(args: {
       ...(args.modelId ? { model_id: args.modelId } : {}),
       ...(args.llm ?? {}),
     }), agentDeadlineMs(budget, cfg));
-    const data = JSON.parse(body) as { response?: string; truncated?: boolean; model?: string };
+    const data = JSON.parse(body) as {
+      response?: string; truncated?: boolean; model?: string;
+      model_used?: string; model_requested?: string;
+    };
     if (data.truncated === true) {
       const why = `parecer CORTADO em ${budget} tokens de saída (prompt ${args.user.length} chars)`;
       console.warn(`[specPolicyGate] ${why}`);
@@ -789,7 +832,7 @@ export async function callPolicyAgent(args: {
     }
     const text = data.response ?? "";
     if (!text.trim()) return { ok: false, why: `resposta vazia (prompt ${args.user.length} chars)` };
-    return { ok: true, text, model: args.modelId ?? String(data.model ?? "") };
+    return { ok: true, text, model: agentModelUsed(data, args.modelId) };
   } catch (err) {
     const why = `chamada falhou: ${String(err).slice(0, 200)} (prompt ${args.user.length} chars, `
       + `orçamento ${budget} tokens, prazo ${Math.round(agentDeadlineMs(budget, cfg) / 1000)}s)`;
