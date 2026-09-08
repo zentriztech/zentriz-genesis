@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 
 import {
   applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
-  normalizeConstraints, normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw,
-  policyGateConfig, policyNote, policyTally,
+  DERIVE_SYSTEM, normalizeConstraints, normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw,
+  policyGateConfig, policyNote, policyTally, VERDICT_SYSTEM,
   type PolicyVerdict, type SpecConstraint,
 } from "./specPolicyGate.js";
 
@@ -484,6 +484,26 @@ describe("orçamento de saída e motivo da falha (medido em prod)", () => {
     // Teto de constraints e orçamento não podem andar separados: 40 constraints ancoradas não
     // cabem em 6k tokens, e foi assim que o gate morreu calado.
     expect(cfg.deriveTokens / cfg.maxConstraints).toBeGreaterThanOrEqual(300);
+  });
+
+  /**
+   * 🔴 MEDIDO AO VIVO na spec do NVX LastMile: 40 constraints derivadas, 37 `build` + 3 `runtime`,
+   * ZERO julgáveis. O gate rodou e acrescentou ZERO impedimento — honesto (nada de verde falso), mas
+   * inerte na Bancada, onde o único artefato é a PRÓPRIA spec. A classe que a Bancada PODE conferir
+   * hoje é a coerência interna (GAP-73/74/75: a mesma regra reafirmada com valor diferente).
+   *
+   * Revisão adversarial cross-family da mudança (Nova Pro + Mistral Large 3): o risco não é deixar
+   * passar, é o OPOSTO — acusar variação de REDAÇÃO como divergência, o que não fecha nunca. Por isso
+   * o prompt manda enunciar a SUBSTÂNCIA e o juiz precisa citar as DUAS ocorrências.
+   */
+  it("o derivador nomeia a coerência interna como julgável e proíbe comparar PALAVRA em vez de substância", () => {
+    expect(DERIVE_SYSTEM).toMatch(/COERÊNCIA INTERNA/);
+    expect(DERIVE_SYSTEM).toMatch(/NUNCA "os dois textos são iguais"/);
+    // Mistral #2: "está no arquivo irmão" é dica inútil numa spec de 12 arquivos.
+    expect(DERIVE_SYSTEM).toMatch(/NOMEIA o arquivo\/seção IRMÃO/);
+    // Nova #1 + Mistral #1 no lado do juiz: uma citação só não prova divergência.
+    expect(VERDICT_SYSTEM).toMatch(/DUAS ocorrências verbatim/);
+    expect(VERDICT_SYSTEM).toMatch(/divergência apenas de REDAÇÃO/);
   });
 
   it("falha do agente sempre NOMEIA o motivo — 'indisponível' sozinho é log mentiroso (GAP-45/46)", async () => {
