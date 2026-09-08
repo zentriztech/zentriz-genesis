@@ -4837,6 +4837,9 @@ Execute agora sem pedir confirmação.
                     # Tentar executar Claude Code Agent automaticamente via subprocess no host
                     _ft_executed = False
                     _ft_result_text = ""
+                    # GAP-85: o veredicto ESTRUTURADO do agente era logado e jogado fora, e a decisão
+                    # saía de substring na prosa. Agora ele sobrevive até a decisão.
+                    _ft_resp: dict = {}
                     _claude_bin = os.environ.get("CLAUDE_BIN", "").strip()
                     if not _claude_bin:
                         # Tentar paths comuns
@@ -4879,7 +4882,9 @@ Execute agora sem pedir confirmação.
                                 "project/full-test-prompt.md", timeout=660)
                             if _ft_status != 200:
                                 raise RuntimeError(f"/run-full-test retornou {_ft_status}: {_ft_text[:300]}")
-                            _ft_resp = _json.loads(_ft_text)
+                            _ft_resp = _json.loads(_ft_text) or {}
+                            if not isinstance(_ft_resp, dict):
+                                _ft_resp = {}
                             _ft_result_text = _ft_resp.get("output", "")
                             _ft_executed = True
                             logger.info("[TASK-FULL-TEST] Server respondeu: status=%s approved=%s",
@@ -4895,35 +4900,120 @@ Execute agora sem pedir confirmação.
                                 _ft_report.parent.mkdir(parents=True, exist_ok=True)
                                 _ft_report.write_text(f"# TASK-FULL-TEST — Relatório Claude Code Agent\n\n{_ft_result_text}", encoding="utf-8")
                             except Exception: pass
-                        _approved = any(w in _ft_result_text.upper() for w in ["APROVADO", "PASSED", "QA_PASS", "ALL CHECKS"])
-                        # Bloco 3 F3b — PASS_TO_PASS determinístico em evolução: roda a suíte de novo e compara
-                        # com a baseline (teste que passava e agora falha/sumiu = regressão → QA_FAIL).
+                        # 🔴 GAP-85 (MEDIDO) — a decisão desta porta era SUBSTRING na prosa do agente:
+                        #     any(w in texto.upper() for w in ["APROVADO", "PASSED", "QA_PASS", ...])
+                        # "NÃO APROVADO" contém "APROVADO"; "0 PASSED" contém "PASSED". Ou seja: um
+                        # relatório que REPROVAVA fechava a task como DONE. Pior, o full-test-server
+                        # devolve um campo ESTRUTURADO `approved` — que era apenas logado e descartado.
+                        # A decisão continua 100% do agente (Lei do Jean): o que muda é que ela vem do
+                        # campo que ele preenche, e não de uma busca de palavra que inverte negação.
+                        _approved_field = _ft_resp.get("approved")
+                        if isinstance(_approved_field, bool):
+                            _approved = _approved_field
+                            _approved_why = "veredicto estruturado do agente"
+                        elif isinstance(_approved_field, str) and _approved_field.strip():
+                            _approved = _approved_field.strip().lower() in ("true", "yes", "y", "1", "approved", "aprovado", "pass", "qa_pass")
+                            _approved_why = f"veredicto estruturado do agente (`approved`={_approved_field.strip()[:40]})"
+                        else:
+                            # Sem veredicto estruturado NÃO se presume aprovação: era exatamente aqui
+                            # que a substring inventava um "sim" que ninguém disse. Fail-CLOSED.
+                            _approved = False
+                            _approved_why = "o agente não devolveu veredicto estruturado (`approved` ausente) — fail-CLOSED"
+                        # 🔴 GAP-86 (MEDIDO) — a suíte só rodava quando existia baseline de EVOLUÇÃO.
+                        # Em PRIMEIRO build (Bancada → Fábrica) o produto entregue NUNCA era executado:
+                        # a última porta de QA era prosa de agente sobre código que ninguém rodou.
+                        # Agora a execução é INCONDICIONAL (mesma flag de desligamento de sempre); a
+                        # COMPARAÇÃO de regressão é que segue exigindo baseline — que é o que ela sempre
+                        # exigiu de fato.
                         _p2p_regressions: list[str] = []
+                        _final: dict | None = None
                         try:
                             _bl0 = getattr(pipeline_ctx, "evolution_baseline", None) if pipeline_ctx is not None else None
-                            if (_bl0 and not _bl0.get("no_tests") and _bl0.get("status") != "error"
-                                    and os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and _proj_container_dir):
+                            if os.environ.get("EVOLUTION_P2P_MODE", "final").lower() != "off" and _proj_container_dir:
                                 _final = _evo_run_tests(project_id or "", _proj_container_dir, timeout=int(os.environ.get("EVOLUTION_P2P_TIMEOUT", "900")))
-                                if _final is not None:
-                                    _p2p_regressions = _evo_regressions(_bl0, _final)
-                                    _bl0["final"] = {"passed": _final.get("passed"), "failed": _final.get("failed"), "status": _final.get("status"),
-                                                     "regressions": _p2p_regressions[:50], "measured_at": datetime.now(timezone.utc).isoformat()}
+                            _tem_baseline = bool(_bl0) and not (_bl0 or {}).get("no_tests") and (_bl0 or {}).get("status") != "error"
+                            if _final is not None and _tem_baseline and _bl0 is not None:
+                                _p2p_regressions = _evo_regressions(_bl0, _final)
+                                _bl0["final"] = {"passed": _final.get("passed"), "failed": _final.get("failed"), "status": _final.get("status"),
+                                                 "regressions": _p2p_regressions[:50], "measured_at": datetime.now(timezone.utc).isoformat()}
+                                if pipeline_ctx is not None:
                                     pipeline_ctx.save_checkpoint(STATE_DIR)
-                                    if _p2p_regressions:
-                                        _post_step(f"⛔ Não-regressão: {len(_p2p_regressions)} teste(s) da versão anterior deixaram de passar — " + "; ".join(_p2p_regressions[:5]), request_id)
-                                    else:
-                                        _post_step(f"✅ Não-regressão: suíte legada continua verde ({_final.get('passed', 0)} passando).", request_id)
+                                if _p2p_regressions:
+                                    _post_step(f"⛔ Não-regressão: {len(_p2p_regressions)} teste(s) da versão anterior deixaram de passar — " + "; ".join(_p2p_regressions[:5]), request_id)
+                                else:
+                                    _post_step(f"✅ Não-regressão: suíte legada continua verde ({_final.get('passed', 0)} passando).", request_id)
+                            elif _final is not None:
+                                # Primeiro build: não há com o que comparar, mas o FATO existe — e é a
+                                # primeira vez que ele existe nesta porta. Declarar é o mínimo.
+                                if _final.get("no_tests"):
+                                    _post_step("⚠️ Execução real: o produto entregue NÃO tem suíte executável — nenhuma constraint de build/runtime pôde ser medida.", request_id)
+                                elif _final.get("status") == "error":
+                                    _post_step(f"⚠️ Execução real: não foi possível medir ({str(_final.get('error'))[:160]}).", request_id)
+                                else:
+                                    _post_step(
+                                        f"🧪 Execução real do produto: `{_final.get('cmd', '?')}` → exit {_final.get('exit_code')}, "
+                                        f"{_final.get('passed', 0)} passando, {_final.get('failed', 0)} falhando.", request_id)
                         except Exception as _e_p2p:
-                            logger.warning("[F3b] comparação PASS_TO_PASS falhou (não crítico): %s", _e_p2p)
-                        _ft_final_status = "DONE" if (_approved and not _p2p_regressions) else "QA_FAIL"
+                            logger.warning("[F3b] execução/comparação da suíte falhou (não crítico): %s", _e_p2p)
+                        # Falha MEDIDA reprova sozinha. Executor indisponível (`None`), sem suíte
+                        # (`no_tests`) ou erro de medição NÃO reprovam: ausência de medição não é
+                        # evidência de defeito — mas também não é aprovação, e é por isso que ela vai
+                        # DECLARADA no passo acima em vez de virar silêncio.
+                        _medida_falhou = bool(
+                            _final is not None and not _final.get("no_tests") and _final.get("status") != "error"
+                            and (int(_final.get("failed") or 0) > 0 or int(_final.get("exit_code") or 0) != 0)
+                        )
+                        # 🔴 F3 (item 3A do Jean) — a execução REAL volta à Bancada e vira veredicto das
+                        # constraints declaradas que o juiz de spec não tem como julgar (medido na spec
+                        # do NVX LastMile: 0 de 119 são julgáveis no texto; 62 são `build`, 57 `runtime`).
+                        # Falha real volta como GAP na spec. Este POST não gateia nada aqui: envia FATO.
+                        if _final is not None and project_id:
+                            try:
+                                try:
+                                    from orchestrator import executor_bridge as _eb2
+                                except ImportError:
+                                    import executor_bridge as _eb2  # type: ignore[no-redef]
+                                _oracle_payload = dict(_final)
+                                _oracle_payload["executor"] = _eb2.executor_url()
+                                _ora_body, _ora_st = _api_post(f"/api/projects/{project_id}/oracle", {"result": _oracle_payload})
+                                # 202 = fato ACEITO; julgar as constraints custa N passes de LLM e roda
+                                # em segundo plano na api (por isso não se espera contagem aqui). 400 =
+                                # payload que não prova execução — e o motivo vem dito.
+                                if _ora_st == 202 and isinstance(_ora_body, dict):
+                                    logger.info("[F3/oracle] execução real aceita para julgamento (outcome=%s, env=%s, spec=%s)",
+                                                _ora_body.get("outcome"), str(_ora_body.get("envSha"))[:8], str(_ora_body.get("specHash"))[:12])
+                                    _post_step(
+                                        "🧭 Oráculo executável: a execução real do produto foi enviada à Bancada para julgar as "
+                                        "constraints declaradas na spec (violação medida volta como GAP).", request_id)
+                                elif _ora_st == 200 and isinstance(_ora_body, dict) and not _ora_body.get("ran"):
+                                    logger.info("[F3/oracle] não julgado: %s", _ora_body.get("reason"))
+                                else:
+                                    logger.warning("[F3/oracle] api respondeu %s (%s) — nenhuma constraint decidida",
+                                                   _ora_st, (_ora_body or {}).get("message") if isinstance(_ora_body, dict) else "")
+                            except Exception as _e_ora:
+                                logger.warning("[F3/oracle] envio da execução real falhou (não crítico): %s", _e_ora)
+                        _ft_final_status = "DONE" if (_approved and not _p2p_regressions and not _medida_falhou) else "QA_FAIL"
+                        logger.info("[TASK-FULL-TEST] veredicto=%s (aprovado=%s por %s; regressões=%d; falha medida=%s)",
+                                    _ft_final_status, _approved, _approved_why, len(_p2p_regressions), _medida_falhou)
                         _update_task(project_id, "TSK-FULL-TEST", status=_ft_final_status)
                         # Persistir TSK-FULL-TEST no TaskState para sobreviver a restarts do runner
                         if _task_state:
                             _task_state.set_status("TSK-FULL-TEST", _ft_final_status)
                             _task_state.save()
+                        # O passo dizia "aprovada" olhando só `_approved` — com regressão ou falha
+                        # medida a task virava QA_FAIL e o cliente lia "aprovada" (família GAP-45/46,
+                        # log mentiroso). Agora o passo diz o VEREDICTO e por que ele saiu assim.
+                        _ft_motivos = []
+                        if not _approved:
+                            _ft_motivos.append(_approved_why)
+                        if _p2p_regressions:
+                            _ft_motivos.append(f"{len(_p2p_regressions)} regressão(ões) medida(s)")
+                        if _medida_falhou:
+                            _ft_motivos.append(f"suíte falhou na execução real ({_final.get('failed', 0) if _final else 0} teste(s), exit {_final.get('exit_code') if _final else '?'})")
                         _post_step(
-                            f"{'✅' if _approved else '⚠️'} TASK-FULL-TEST (Claude Code): "
-                            f"{'aprovada' if _approved else 'issues encontradas — ver QA_REPORT_TSK-FULL-TEST.md'}",
+                            f"{'✅' if _ft_final_status == 'DONE' else '⚠️'} TASK-FULL-TEST (Claude Code): "
+                            + ("aprovada" if _ft_final_status == "DONE"
+                               else "REPROVADA — " + "; ".join(_ft_motivos) + " — ver QA_REPORT_TSK-FULL-TEST.md"),
                             request_id,
                         )
                     else:

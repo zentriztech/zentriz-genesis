@@ -189,6 +189,84 @@ export async function pipelineRoutes(app: FastifyInstance) {
     }
   });
 
+  // ── POST /api/projects/:id/oracle — 🔴 F3: o ORÁCULO EXECUTÁVEL (item 3A) ────────────────────
+  //
+  // A Fábrica constrói o produto, o executor isolado (Host B, `/run-tests`) RODA a suíte, e o
+  // resultado REAL volta por aqui para decidir as constraints declaradas que o juiz de spec não tem
+  // como julgar. Medido na spec do NVX LastMile: das 119 constraints derivadas, **0 são `spec`** —
+  // 62 são `build` e 57 `runtime`. Sem esta rota, 119 de 119 ficam `pending` para sempre, e uma
+  // constraint pendente eternamente é uma política que nunca foi cobrada.
+  //
+  // Quem julga é o AGENTE, recebendo a saída verbatim (Lei do Jean: nada de automação fixa). Esta
+  // rota só transporta o fato, e recusa payload que não prova execução. Direção única: veredicto de
+  // oráculo só ACRESCENTA impedimento — nenhum caminho aqui torna promovível o que os GAPs barravam.
+  app.post<{ Params: { id: string } }>("/api/projects/:id/oracle", async (request, reply) => {
+    const user = getUser(request);
+    const { id: projectId } = request.params;
+    const body = (request.body ?? {}) as { result?: unknown; spec_hash?: string; validation_run_id?: string };
+    const client = await pool.connect();
+    try {
+      const allowed = await checkProjectAccess(client, projectId, user);
+      if (!allowed) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+      const { oracleEnabled, runSpecOracle, normalizeOracleRun, oracleOutcome, oracleEnvSha } =
+        await import("../services/specOracle.js");
+      if (!oracleEnabled()) {
+        return reply.send({ ok: true, ran: false, reason: "SPEC_ORACLE != on" });
+      }
+      // A spec contra a qual medir é a que TEM constraints derivadas — é a única que o oráculo pode
+      // decidir. O runner não conhece esse hash, então quem resolve é a api (e o hash volta na
+      // resposta: medição sem dizer o que foi medido é a família do log mentiroso, GAP-45/46).
+      const informado = String(body.spec_hash ?? "").trim();
+      const specHash = informado || String((await client.query(
+        "SELECT spec_hash FROM spec_constraints WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+        [projectId],
+      )).rows[0]?.spec_hash ?? "");
+      if (!specHash) {
+        return reply.send({ ok: true, ran: false, reason: "nenhuma constraint declarada para este projeto — o Policy Gate não rodou ainda" });
+      }
+      // Payload que não prova execução é recusado NA CARA, com o motivo — 200 mudo aqui viraria
+      // "medi e não achei nada" no log do runner, que é a família do log mentiroso (GAP-45/46).
+      const norm = normalizeOracleRun(body.result ?? request.body);
+      if (!norm.ok) {
+        return reply.status(400).send({ code: "ORACLE_PAYLOAD_INVALID", message: norm.why });
+      }
+      const files = (await client.query(
+        "SELECT rel_dir, filename FROM project_spec_files WHERE project_id = $1 ORDER BY created_at ASC", [projectId],
+      )).rows.map((r) => {
+        const row = r as { rel_dir?: unknown; filename?: unknown };
+        const dir = String(row.rel_dir ?? "").trim();
+        return `${dir ? dir + "/" : ""}${String(row.filename ?? "")}`;
+      }).filter((f) => f && f !== "/");
+      // Julgar 119 constraints custa N passes de LLM (minutos). Prender o runner nisso o faria bater
+      // no timeout de 15s do cliente e registrar FALHA num julgamento que estava dando certo. Então:
+      // o fato é ACEITO aqui e julgado em segundo plano. Os veredictos vão para `spec_policy_verdicts`
+      // e os GAPs para `spec_oracle_runs.findings` — de onde a validação seguinte os une (estágio O).
+      void runSpecOracle(pool, {
+        projectId, specHash, raw: body.result ?? request.body, specFiles: files,
+        validationRunId: String(body.validation_run_id ?? "") || null,
+      }).then((res) => {
+        request.log.info(
+          { projectId, specHash: specHash.slice(0, 12), ran: res.ran, outcome: res.outcome,
+            judged: res.judged, pending: res.pending, blocking: res.tally.blocking,
+            findings: res.findings.length, note: res.note },
+          "[Pipeline/oracle] execução real julgada contra as constraints declaradas",
+        );
+      }).catch((err) => {
+        request.log.error({ err, projectId }, "[Pipeline/oracle] julgamento em segundo plano falhou");
+      });
+      return reply.code(202).send({
+        ok: true, accepted: true, specHash, outcome: oracleOutcome(norm.run),
+        envSha: oracleEnvSha(norm.run), specFiles: files.length,
+      });
+    } catch (err) {
+      request.log.error({ err, projectId }, "[Pipeline/oracle] falha ao julgar a execução real");
+      // Fail-CLOSED: oráculo que não roda não muda nada, e o motivo é DECLARADO ao chamador.
+      return reply.status(500).send({ code: "ORACLE_FAILED", message: "Falha ao julgar a execução real contra as constraints." });
+    } finally {
+      client.release();
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/api/projects/:id/run", async (request, reply) => {
     const user = getUser(request);
     const { id: projectId } = request.params;

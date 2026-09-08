@@ -1352,7 +1352,10 @@ async function policyGateFor(
     const { policyNote } = await import("./specPolicyGate.js");
     console.info(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} policy gate: ${res.ran ? policyNote(res.tally) : `NÃO rodou (${res.reason})`}`
-      + `${res.rejected.length ? ` — ${res.rejected.length} constraint(s) recusada(s) na derivação` : ""}`,
+      + `${res.rejected.length ? ` — ${res.rejected.length} constraint(s) recusada(s) na derivação` : ""}`
+      // F3: sem esta linha, "119 pendentes porque ninguém rodou o produto" e "119 pendentes porque o
+      // oráculo rodou e não decidiu nada" ficariam indistinguíveis no log (família GAP-45/46).
+      + `${res.oracleApplied ? ` — ${res.oracleApplied} decidida(s) pela EXECUÇÃO REAL (oráculo)` : ""}`,
     );
     return res.ran ? res : null;
   } catch (e) {

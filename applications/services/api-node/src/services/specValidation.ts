@@ -53,7 +53,8 @@ export interface ValidationFinding {
   severity: "blocker" | "warning" | "info";
   title: string;
   rationale: string;
-  source: "stage_a" | "stage_b";
+  /** `oracle` = F3: o GAP nasceu da EXECUÇÃO REAL do produto no executor isolado, não da leitura da spec. */
+  source: "stage_a" | "stage_b" | "oracle";
   /** RFC-0005: taxonomia fechada (lentes do validador; Stage A = `structural`) — parte do fingerprint. */
   category?: string | null;
   /** RFC-0005: o que o finding aponta (FR-NN, heading, entidade; Stage A = id da regra) — parte do fingerprint. */
@@ -780,6 +781,23 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
     // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
     // (GAP-11): resultado pago que chega depois também cobre esses arquivos.
     if (stageBRan) await markFilesJudged(pool, projectId, fullShas);
+  }
+
+  // ── Estágio O (F3, item 3A): o que a EXECUÇÃO REAL do produto já provou ───────────────────────
+  // Os estágios A e B leem a spec. Nenhum dos dois pode decidir uma constraint de `build`/`runtime`
+  // — e na spec real do NVX LastMile as 119 constraints declaradas são exatamente destas (0 `spec`).
+  // Quando a Fábrica constrói e o executor isolado RODA o produto, a falha medida volta como GAP aqui.
+  // UNIÃO pura, como o estágio B: o oráculo só ADICIONA, e falhar em carregá-lo deixa tudo como antes.
+  try {
+    const { loadOracleFindings } = await import("./specOracle.js");
+    const vivos = files.map((f) => `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`);
+    const doOraculo = await loadOracleFindings(pool, projectId, startHash, vivos);
+    if (doOraculo.length > 0) {
+      findings.push(...doOraculo);
+      console.log(`[spec-validation] run ${runId}: ${doOraculo.length} finding(s) da EXECUÇÃO REAL do produto (estágio O) unidos aos estágios A/B.`);
+    }
+  } catch (e) {
+    console.warn(`[spec-validation] run ${runId}: findings do oráculo não carregados (${e instanceof Error ? e.message : String(e)}) — validação segue só com os estágios A e B.`);
   }
 
   // TOCTOU: recomputa o hash ao FINAL — editou durante a validação → superseded (não é erro)

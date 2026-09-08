@@ -815,6 +815,12 @@ export interface PolicyGateResult {
   derivePasses: number;
   derivePassesFailed: number;
   partialArtifacts: string[];
+  /**
+   * F3: quantas constraints `pending` (build/runtime) saíram do limbo porque a EXECUÇÃO REAL do
+   * produto no executor isolado já as decidiu. `0` significa que ninguém rodou o produto ainda —
+   * e a spec do NVX LastMile tem 119 constraints das quais 119 são exatamente destas.
+   */
+  oracleApplied: number;
 }
 
 const inflight = new Map<string, Promise<PolicyGateResult>>();
@@ -841,7 +847,7 @@ export async function runPolicyGate(db: Db, args: {
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
     judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
-    partialArtifacts: [], ...extra,
+    partialArtifacts: [], oracleApplied: 0, ...extra,
   });
   if (!policyGateEnabled()) return empty("SPEC_POLICY_GATE != on");
   if (!args.specHash) return empty("spec sem hash");
@@ -867,7 +873,7 @@ async function policyGateOnce(
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
     judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
-    partialArtifacts: [], ...extra,
+    partialArtifacts: [], oracleApplied: 0, ...extra,
   });
 
   // ── 1. derivação (idempotente por spec+arquétipo) ──────────────────────────
@@ -1033,17 +1039,38 @@ async function policyGateOnce(
     }).filter((a) => a.constraintKey);
   }
 
-  const verdicts = applyPolicyDecisions(base, {
+  const decididos = applyPolicyDecisions(base, {
     waivers, audits, partialArtifacts: naoLidos, coverageIncomplete: passesFailed > 0,
   });
+
+  // ── 5. F3: o que só a EXECUÇÃO REAL sabe ───────────────────────────────────
+  // A spec real do NVX LastMile deu 119 constraints: 0 `spec`, 62 `build`, 57 `runtime`. O juiz de
+  // spec não tem o que julgar porque o objeto do julgamento ainda não existe — as 119 ficam `pending`
+  // por natureza, não por falha. Aqui elas recebem o veredicto que o produto RODANDO já produziu.
+  // Direção única: só substitui `pending`, e o `import` é dinâmico porque o oráculo importa este
+  // módulo (ciclo estático quebraria o boot da api).
+  let verdicts = decididos;
+  let oracleApplied = 0;
+  try {
+    const { loadOracleVerdicts, applyOracleVerdicts } = await import("./specOracle.js");
+    const oracle = await loadOracleVerdicts(db, args.projectId, args.specHash);
+    if (oracle.size > 0) {
+      verdicts = applyOracleVerdicts(decididos, oracle);
+      oracleApplied = verdicts.filter((v, i) => decididos[i]?.status === "pending" && v.status !== "pending").length;
+    }
+  } catch (err) {
+    // Oráculo ilegível NÃO muda nada: o gate segue com o que o juiz de spec decidiu (fail-CLOSED).
+    console.warn(`[specPolicyGate] veredictos do oráculo indisponíveis: ${String(err).slice(0, 200)}`);
+  }
+
   const tally = { ...policyTally(verdicts, constraints), judged };
   await persistVerdicts(db, {
     projectId: args.projectId, specHash: args.specHash, model: judgeModel || "desconhecido",
-    autonomyRunId: args.autonomyRunId, validationRunId: args.validationRunId, verdicts,
+    autonomyRunId: args.autonomyRunId, validationRunId: args.validationRunId, verdicts: decididos,
   });
   return {
     ran: true, constraints, rejected, verdicts, tally, unknownKeys, model: judgeModel, derived,
     judgePasses: batches.length, passesFailed, derivePasses, derivePassesFailed,
-    partialArtifacts: naoLidos,
+    partialArtifacts: naoLidos, oracleApplied,
   };
 }
