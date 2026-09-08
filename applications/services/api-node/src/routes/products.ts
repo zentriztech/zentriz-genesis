@@ -10,6 +10,8 @@
  * POST   /api/products/:id/projects/:projectId   — adicionar projeto ao produto
  * DELETE /api/products/:id/projects/:projectId   — remover projeto do produto
  *
+ * GET    /api/products/:id/traceability          — mapeamento da construção (resumido/completo/misto)
+ *
  * PATCH  /api/projects/:id/product               — associar projeto a produto (pós-criação)
  *
  * GET    /api/projects/:id/triggers              — listar gatilhos de um projeto
@@ -49,6 +51,9 @@ import {
   buildPromotionPlan, debitPromotionPlannerUsage, PromotionPlanError, type PromotionPlan,
 } from "../services/promotionPlanner.js";
 import { recomputeProductLifecycle } from "../services/productLifecycle.js";
+import {
+  buildTraceabilityReport, isTraceabilityProfile, TRACEABILITY_PROFILES,
+} from "../services/productTraceability.js";
 import { randomUUID } from "node:crypto";
 
 function getUser(r: FastifyRequest): AuthUser {
@@ -1059,6 +1064,42 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       });
     } finally { client.release(); }
   });
+
+  // ── GET /api/products/:id/traceability?profile=summary|full|mixed ──────────────
+  //
+  // Pedido do Jean (2026-09-07): três relatórios (resumido / completo / misto) com o "mapeamento
+  // completo da construção" do produto — spec E código — para fortalecer a rastreabilidade, em PDF
+  // com download. Esta rota entrega os **FATOS** em JSON; o PDF é desenhado no cliente (Bancada e
+  // Fábrica), porque os desenhos Mermaid da arquitetura só viram figura dentro de um browser e o
+  // portal já os renderiza — gerar PDF aqui exigiria Chromium na imagem da api para redesenhar o
+  // mesmo SVG que o browser do usuário já desenha. Ver `services/productTraceability.ts`.
+  //
+  // Leitura pura: nenhuma LLM, nenhuma validação disparada, nada gravado. O escopo de tenant é o
+  // mesmo do GET /api/products/:id (404 em vez de 403, para não vazar existência).
+  app.get<{ Params: { id: string }; Querystring: { profile?: string } }>(
+    "/api/products/:id/traceability",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      if (!UUID_RE.test(id)) return reply.status(400).send({ code: "INVALID_PRODUCT_ID" });
+      const profile = request.query.profile ?? "summary";
+      if (!isTraceabilityProfile(profile)) {
+        return reply.status(400).send({ code: "INVALID_PROFILE", allowed: TRACEABILITY_PROFILES });
+      }
+      const client = await pool.connect();
+      try {
+        const prod = await client.query("SELECT id, tenant_id FROM products WHERE id = $1", [id]);
+        const prow = prod.rows[0];
+        if (!prow) return reply.status(404).send({ code: "NOT_FOUND" });
+        if (user.role !== "zentriz_admin" && prow.tenant_id !== user.tenantId) {
+          return reply.status(404).send({ code: "NOT_FOUND" });
+        }
+        const report = await buildTraceabilityReport(client, { productId: id, profile });
+        if (!report) return reply.status(404).send({ code: "NOT_FOUND" });
+        return reply.send(report);
+      } finally { client.release(); }
+    },
+  );
 
   // ── POST /api/products/:id/promote — o PRODUTO TODO entra na fábrica, NA ORDEM, SEM iniciar ──
   //
