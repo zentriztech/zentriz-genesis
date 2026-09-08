@@ -2224,6 +2224,91 @@ def preferred_model(model_id: str, fallback_model: str, scope: str | None = None
     return model_id
 
 
+def _looks_anthropic(model_id: str) -> bool:
+    """O `model_id` pertence à família Claude (dialeto do SDK `anthropic`)?
+
+    Cobre as três grafias que circulam no Genesis: id puro (`anthropic.claude-…`), id com
+    inference profile regional (`us.anthropic.claude-…`) e o apelido curto do Foundry
+    (`claude-opus-5`). Qualquer outra coisa é cross-family e vai pela Converse API.
+    """
+    ml = (model_id or "").strip().lower()
+    return (not ml) or ("anthropic" in ml) or ("claude" in ml)
+
+
+def _aws_creds_for(llm_cfg: dict | None) -> tuple[str, str, str, str]:
+    """(access_key, secret_key, session_token, region) efetivos — tenant (BYOC) vence o env.
+
+    Mesma precedência do caminho Anthropic: credencial do `llm_config` do tenant tem
+    prioridade sobre o env do container, para a Bancada usar a MESMA identidade/conta da
+    fábrica. Nunca loga a credencial (ver `model_identity_scope`).
+    """
+    cfg = llm_cfg or {}
+    ak = str(cfg.get("aws_access_key_id") or "").strip()
+    sk = str(cfg.get("aws_secret_access_key") or "").strip()
+    if ak and sk:
+        token = ""
+    else:
+        ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+        sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+        token = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+    region = (str(cfg.get("aws_region") or "").strip()
+              or os.environ.get("GENESIS_AWS_REGION")
+              or os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or "us-east-1")
+    return ak, sk, token, region
+
+
+def _call_converse(system: str, user: str, model_id: str, max_tokens: int, temperature: float,
+                   usage_project_id: str | None, usage_agent: str, llm_cfg: dict | None,
+                   t0: float) -> str:
+    """Chamada Bedrock pela **Converse API** (boto3) — caminho dos modelos NÃO-Claude.
+
+    Por que uma função separada em vez de generalizar a de cima: o caminho Claude carrega
+    thinking, cascata de entitlement, streaming e as guardas de `temperature` do SDK
+    `anthropic`. Misturar os dois arriscaria o pipeline inteiro para servir o revisor
+    cross-family. Aqui só existe o essencial — e **sem fallback burro**: se a chamada falha,
+    o chamador registra "indecidível" e a crítica original continua de pé
+    (ver `feedback-genesis-100-llm-nunca-automacao-fixa`).
+
+    `stopReason` da Converse usa o MESMO literal `max_tokens` do Anthropic, então o
+    `truncated` que o `/invoke/raw` publica continua correto sem tradução.
+    """
+    import boto3  # dep declarada em agents/requirements.txt (boto3==1.43.87)
+
+    ak, sk, token, region = _aws_creds_for(llm_cfg)
+    os.environ.pop("AWS_PROFILE", None)
+    os.environ.pop("AWS_DEFAULT_PROFILE", None)
+    kwargs: dict = {"region_name": region}
+    if ak and sk:
+        kwargs["aws_access_key_id"] = ak
+        kwargs["aws_secret_access_key"] = sk
+        if token:
+            kwargs["aws_session_token"] = token
+    client = boto3.client("bedrock-runtime", **kwargs)
+
+    resp = client.converse(
+        modelId=model_id,
+        system=[{"text": system}],
+        messages=[{"role": "user", "content": [{"text": user}]}],
+        inferenceConfig={"maxTokens": int(max_tokens), "temperature": float(temperature)},
+    )
+    blocks = ((resp.get("output") or {}).get("message") or {}).get("content") or []
+    text = "".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict))
+    usage = resp.get("usage") or {}
+    in_tok = int(usage.get("inputTokens") or 0)
+    out_tok = int(usage.get("outputTokens") or 0)
+    stop = resp.get("stopReason")
+    logger.info("[_call_converse] %s agent=%s stop_reason=%s in=%d out=%d max_tokens=%d",
+                model_id, usage_agent, stop, in_tok, out_tok, max_tokens)
+    _report_direct_usage(usage_project_id, usage_agent, model_id, in_tok, out_tok,
+                         int((time.time() - t0) * 1000))
+    _sink_usage(in_tok, out_tok, model_id)
+    _record_call_outcome(in_tok, out_tok, stop)
+    LAST_EFFECTIVE_MODEL.set(model_id)
+    return text
+
+
 def call_bedrock_direct(system: str, user: str, model_id: str,
                         max_tokens: int = 8000, temperature: float = 0.2,
                         usage_project_id: str | None = None,
@@ -2317,6 +2402,24 @@ def call_bedrock_direct(system: str, user: str, model_id: str,
             if t:
                 parts.append(t)
         return "".join(parts)
+
+    # ── REVISOR CROSS-FAMILY (2026-09-07) ───────────────────────────────────────────────────
+    # `arXiv:2609.04270` mede que auto-revisão da MESMA família de modelo NÃO ganha nada (zero
+    # p.p. de acurácia) e rejeita 35% do que estava certo, enquanto um revisor CROSS-FAMILY
+    # mid-tier ganha +12 p.p. com 2% de falso-rejeite. O Genesis inteiro (CTO-editor, refutador,
+    # juiz de promovibilidade) é Claude — literalmente a configuração medida como inútil.
+    #
+    # Um modelo não-Claude (Nova, Mistral, Llama, Qwen, DeepSeek) NÃO fala o dialeto do SDK
+    # `anthropic`: `AnthropicBedrock.messages.create` monta um corpo `anthropic_version` que a
+    # rota do provedor recusa. O caminho portável é a **Converse API** do Bedrock (boto3), que
+    # normaliza system + messages + inferenceConfig para todos os provedores.
+    #
+    # Roteamento por `model_id`, sem flag nova: quem pedir um modelo não-Anthropic recebe
+    # Converse; todo o resto segue exatamente pelo caminho antigo (risco zero para o pipeline).
+    if not _looks_anthropic(model_id):
+        return _call_converse(system=system, user=user, model_id=model_id, max_tokens=max_tokens,
+                              temperature=temperature, usage_project_id=usage_project_id,
+                              usage_agent=usage_agent, llm_cfg=llm_cfg, t0=_t0)
 
     try:
         from anthropic import AnthropicBedrock

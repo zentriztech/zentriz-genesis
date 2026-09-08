@@ -805,9 +805,49 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   if (finalStatus === "passed" || finalStatus === "failed") {
     await registerRecurrences(pool, projectId, findings).catch((e) =>
       console.warn(`[spec-validation] run ${runId}: registerRecurrences falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`));
+    await auditCrossFamily(pool, projectId, runId, findings);
   }
   if (stageBError) {
     console.warn(`[spec-validation] run ${runId}: estágio B falhou (${stageBError}) — run marcada 'error'.`);
+  }
+}
+
+/**
+ * REVISOR CROSS-FAMILY (2026-09-07) — mede o NOSSO juiz com um modelo de outra família.
+ *
+ * Por que aqui: é o único ponto onde os findings da validação já estão gravados e ainda sabemos
+ * qual conteúdo foi julgado. `SPEC_CROSS_AUDIT=on` desliga/liga sem deploy, e nesta primeira
+ * versão a auditoria **só registra** — nenhuma decisão do laço muda. Medir antes de gatear: liberar
+ * GAP com base em número que ainda não existe seria a anistia que o Jean proibiu.
+ *
+ * Best-effort por desenho: a auditoria é ACESSÓRIA à validação. Se o modelo de outra família
+ * estiver fora do ar, a validação Claude vale integralmente e a crítica original continua de pé.
+ */
+async function auditCrossFamily(
+  pool: Pool, projectId: string, runId: string, findings: ValidationFinding[],
+): Promise<void> {
+  try {
+    const { auditFindings, tally } = await import("./crossFamilyAudit.js");
+    const res = await auditFindings(pool as unknown as Parameters<typeof auditFindings>[0], {
+      projectId, findings, validationRunId: runId,
+    });
+    if (!res.ran) {
+      if (res.reason && res.reason !== "SPEC_CROSS_AUDIT != on") {
+        console.log(`[spec-validation] run ${runId}: auditoria cross-family não rodou — ${res.reason}.`);
+      }
+      return;
+    }
+    const t = tally(res.audits);
+    // O log declara os DOIS lados do equilíbrio na mesma linha: quanto do que chamamos de
+    // importante uma segunda família confirma como GRAVE, e quanto ela diz que não existe no texto.
+    console.log(
+      `[spec-validation] run ${runId}: auditoria cross-family (${res.model}) — ${t.total} auditado(s), ` +
+      `presente=${t.presente} (grave=${t.grave} moderada=${t.moderada} cosmetica=${t.cosmetica}), ` +
+      `ausente=${t.ausente} (com prova verbatim=${t.ausenteComProva}), indecidivel=${t.indecidivel}, ` +
+      `pulado=${res.skipped}, falha=${res.failed}. NADA foi liberado: esta versão só MEDE.`,
+    );
+  } catch (e) {
+    console.warn(`[spec-validation] run ${runId}: auditoria cross-family falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -996,6 +1036,7 @@ export async function collectStageBResults(
       if (!superseded) {
         await registerRecurrences(pool, String(r.project_id), findings).catch((e) =>
           console.warn(`[spec-validation] run ${short}: registerRecurrences falhou (não crítico): ${e instanceof Error ? e.message : String(e)}`));
+        await auditCrossFamily(pool, String(r.project_id), String(r.id), findings);
       }
       // GAP-18: o resultado recuperado julgou os MESMOS arquivos que a run mandou — a cobertura conta
       // (o sha guardado é o do texto julgado, então arquivo editado no meio não é marcado como visto).
