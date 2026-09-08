@@ -822,6 +822,27 @@ const FINAL_LABEL: Record<string, string> = {
   stopped: "⏹️ Modo autônomo interrompido pelo usuário",
 };
 
+/**
+ * 🔴 GAP-127 (segunda ponta, descoberta ao acrescentar a declaração de inanição): o desfecho da run é o
+ * RELATÓRIO final — motivo do encerramento + parecer do juiz + o que ficou fora + o fato do desenho — e
+ * vinha cortado em **800 chars SEM dizer que cortou**. Como o corte é no fim, quem morre é sempre a
+ * frase mais NOVA: a declaração de inanição (≈160 chars) foi suficiente para evictar *"E a arquitetura
+ * foi DESENHADA: `arquitetura-diagramas.md`…"*, ou seja o corte apagava a PROVA do trabalho mais
+ * recente e o leitor não tinha como saber. A coluna é `TEXT` (sem limite de banco) e o teto só existe
+ * para não gravar stack trace inteiro. Sobe para 2.000 e, se ainda estourar, o corte é DECLARADO —
+ * mesma lei do GAP-63/123: cortar é ok, mentir sobre o corte não.
+ */
+export const FINISH_NOTE_MAX = 2000;
+/** Corte de texto que se DECLARA. `o quê` entra na frase para o leitor saber o que ficou incompleto. */
+export function cutDeclared(text: string, max: number, oQue = "desfecho"): string {
+  if (text.length <= max) return text;
+  const aviso = ` … ⚠️ (${oQue} CORTADO no teto de ${max} chars — veja o log das rodadas)`;
+  return `${text.slice(0, max - aviso.length)}${aviso}`;
+}
+export function finishNote(note: string): string {
+  return cutDeclared(note, FINISH_NOTE_MAX);
+}
+
 async function finishRun(
   db: Db, run: AutonomyRun, status: AutonomyStatus, note: string, extra: { gaps?: GapTally | null } = {},
 ): Promise<void> {
@@ -830,7 +851,7 @@ async function finishRun(
         SET status = $2, last_error = $3, gaps_current = COALESCE($4, gaps_current),
             finished_at = now(), updated_at = now()
       WHERE id = $1 AND status = ANY($5::text[])`,
-    [run.id, status, note.slice(0, 800), extra.gaps ? extra.gaps.important : null, ACTIVE_STATUSES],
+    [run.id, status, finishNote(note), extra.gaps ? extra.gaps.important : null, ACTIVE_STATUSES],
   );
   if ((r.rowCount ?? 0) === 0) return; // outra transição já encerrou (claim perdido)
   const tally = extra.gaps
@@ -1104,6 +1125,64 @@ function importantFileQueue(list: GapFileBucket[]): string[] {
       || (b.blockers + b.warnings) - (a.blockers + a.warnings)
       || a.path.localeCompare(b.path))
     .map((b) => b.path);
+}
+
+/** Arquivos que RECEBERAM rodada num passe (inclusive rodada que falhou — tentativa é tentativa). */
+function attemptedInPass(run: AutonomyRun, pass: number): Set<string> {
+  const out = new Set<string>();
+  for (const r of run.rounds) {
+    if ((r.pass ?? 0) !== pass) continue;
+    const p = String(r.filePath ?? "").toLowerCase();
+    if (p) out.add(p);
+  }
+  return out;
+}
+
+/**
+ * 🔴 GAP-127 — MEDIDO na run `a52b5e1b` (NVX LastMile): a spec tem **13** arquivos com GAP importante e
+ * o teto do passe é **12** (`AUTONOMY_MAX_FILE_ROUNDS`). A fila é reconstruída IDÊNTICA a cada passe
+ * (`files_done` zera na virada e a régua é a mesma: blockers ↓, total ↓, path ↑) ⇒ o corte do teto cai
+ * SEMPRE na mesma cauda, e `arquitetura-modelo.md` (1 🟡, último em todas as chaves de ordenação) não
+ * recebeu UMA tentativa em nenhum dos passes. Não é teto de custo: é **inanição**. GAP que nunca é
+ * tentado não pode fechar ⇒ a contagem ganha um piso estrutural e "zerar de forma legal" fica
+ * impossível por construção — a run encerra `exhausted` com um GAP que o laço nunca olhou.
+ *
+ * Régua: quem ficou SEM TENTATIVA no passe anterior vai na FRENTE; dentro de cada grupo, a régua de
+ * sempre (o `importantFileQueue` já ordenou). Rodada que FALHOU conta como tentativa — senão um arquivo
+ * que não processa monopolizaria a frente da fila a cada passe (troca de inanição por bloqueio).
+ * Isto é transporte, não decisão: quem escolhe o CONTEÚDO segue sendo o agente.
+ */
+function rotateStarved(queue: string[], run: AutonomyRun): string[] {
+  if (run.passes === 0 || queue.length === 0) return queue;
+  const attempted = attemptedInPass(run, run.passes - 1);
+  if (attempted.size === 0) return queue;
+  const starved = queue.filter((p) => !attempted.has(p.toLowerCase()));
+  if (starved.length === 0 || starved.length === queue.length) return queue;
+  return [...starved, ...queue.filter((p) => attempted.has(p.toLowerCase()))];
+}
+
+/**
+ * 🔴 GAP-127 — arquivos com GAP importante que ficaram SEM tentativa (num passe, ou no laço inteiro
+ * quando `pass` é `null`). Custo ZERO de LLM: `gapScopeForProject` só lê o banco (rotas já persistidas),
+ * ao contrário do `ensureGapScope({ route: true })`. Serve à declaração do corte: cortar é ok, não
+ * nomear o corte é o GAP-63 de novo.
+ */
+async function starvedFiles(db: Db, run: AutonomyRun, pass: number | null): Promise<string[]> {
+  const { gapScopeForProject, buckets } = await import("./specGapScope.js");
+  const scope = await gapScopeForProject(db, run.projectId);
+  const attempted = pass === null
+    ? new Set([...run.rounds].map((r) => String(r.filePath ?? "").toLowerCase()).filter(Boolean))
+    : attemptedInPass(run, pass);
+  return importantFileQueue(buckets(scope)).filter((p) => !attempted.has(p.toLowerCase()));
+}
+
+/** Frase do corte por inanição (GAP-127). Vazia quando ninguém ficou de fora. */
+function starvedNote(files: string[], escopo: "passe" | "laço"): string {
+  if (files.length === 0) return "";
+  const nomes = files.slice(0, 5).map((f) => `\`${f}\``).join(", ");
+  return ` ⚠️ ${files.length} arquivo(s) com GAP importante ficaram SEM NENHUMA tentativa neste ${escopo}`
+    + ` (${nomes}${files.length > 5 ? `, +${files.length - 5}` : ""})`
+    + (escopo === "passe" ? " — vão na FRENTE da fila no próximo passe." : " — os GAPs deles não foram sequer olhados pelo laço.");
 }
 
 /**
@@ -2028,8 +2107,13 @@ async function skipFileAndContinue(
     // 🔴 GAP-119: o texto leva QUANDO aconteceu. `last_error` é o canal que a tela lê, e ele não é
     // limpo por rodada boa: na run `74f54cce` a recusa do arquivo 1 seguiu no campo por NOVE rodadas
     // aplicadas com sucesso — quem olhasse (ou monitorasse) leria um laço são como quebrado.
+    //
+    // 🔴 GAP-127: e o corte passa a ser DECLARADO. O teto de 1.200 chegou perto de acontecer de novo
+    // (recusa do veto + nota da graça + âncoras intocadas) e o corte é no FIM: cortava justamente a
+    // parte mais nova do diagnóstico, sem sinal nenhum de que havia mais texto.
     [run.id, failures, JSON.stringify([path]),
-      `arquivo ${fresh.round} (passe ${fresh.passes + 1}): ${note}`.slice(0, 1200), opts.fromStatus],
+      cutDeclared(`arquivo ${fresh.round} (passe ${fresh.passes + 1}): ${note}`, 1200, "diagnóstico da rodada"),
+      opts.fromStatus],
   );
   return true;
 }
@@ -2247,8 +2331,13 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // contagem final passar por retrato do disco. Cortar é ok; mentir sobre o corte não.
     // 🔴 GAP-125: o texto é montado ANTES do desenho porque ele é o desfecho da run com ou sem figura.
     const naoMedidas = appliedInPass(run);
+    // 🔴 GAP-127: fim de laço é o último lugar onde a inanição pode ser dita — aqui o escopo é o LAÇO
+    // INTEIRO (arquivo que não recebeu tentativa em NENHUM passe). Sem esta frase o desfecho apresenta
+    // GAPs "que resistiram" quando parte deles nunca foi sequer tentada.
+    const nuncaTentados = await starvedFiles(db, run, null).catch(() => [] as string[]);
     const desfecho =
       `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${v.note}`
+      + starvedNote(nuncaTentados, "laço")
       + (naoMedidas > 0
         ? ` ⚠️ ${naoMedidas} arquivo(s) salvo(s) no último passe NÃO entraram nesta contagem (o orçamento de`
           + ` passes acabou antes da validação que os mediria) — rode Validar para ver o número do disco.`
@@ -2292,12 +2381,16 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // `passes >= maxRounds` acima já garante que existe passe para fechar.
     // Sem nada aplicado no passe, validar mediria a MESMA spec e queimaria uma das 4 validações/h
     // (mesma razão do `applied === 0` na fila vazia) ⇒ aí o desfecho é o de antes.
+    // 🔴 GAP-127: o teto corta a CAUDA da fila, e a cauda é sempre a mesma — dizer QUEM ficou sem
+    // tentativa é o que transforma inanição silenciosa em corte declarado (custo zero: só banco).
+    const semTentativa = await starvedFiles(db, run, perPass ? run.passes : null).catch(() => [] as string[]);
     const appliedThisPass = appliedInPass(run);
     if (appliedThisPass > 0) {
       return closePassWithValidation(db, run, gaps?.important ?? 0, appliedThisPass,
-        perPass
+        (perPass
           ? `teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivo(s) por passe atingido`
-          : `teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivo(s) no laço atingido — medindo o passe antes de encerrar`);
+          : `teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivo(s) no laço atingido — medindo o passe antes de encerrar`)
+        + starvedNote(semTentativa, perPass ? "passe" : "laço"));
     }
     // 🔴 GAP-115: era ESTE o desfecho da run `10b1a4e1` (30 arquivos, 44 GAPs) — o laço gastou tudo e
     // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.
@@ -2308,6 +2401,7 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       (perPass
         ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo).`
         : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido.`)
+      + starvedNote(semTentativa, perPass ? "passe" : "laço")
       + `${v.note} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`;
     // 🔴 GAP-116: promovível pelo parecer = arquitetura fechada, e é o gatilho dos desenhos.
     if (v.promotable && gaps
@@ -2360,8 +2454,10 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const manifestTarget = manifestGapFindings(scope).length > 0
     && !run.filesDone.includes(MANIFEST_PATH)
     && !scope.files.some((f) => f.path.toLowerCase() === MANIFEST_PATH.toLowerCase());
+  // 🔴 GAP-127: a rotação vem ANTES do manifesto — o índice segue por último (A5.3), mas quem o teto do
+  // passe anterior deixou sem tentativa entra na frente dos que já foram revisados.
   const queue = [
-    ...importantFileQueue(buckets(scope)),
+    ...rotateStarved(importantFileQueue(buckets(scope)), run),
     ...(manifestTarget ? [MANIFEST_PATH] : []),
   ].filter((p) => !run.filesDone.includes(p));
 

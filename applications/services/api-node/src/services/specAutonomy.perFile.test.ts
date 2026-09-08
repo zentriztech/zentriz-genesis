@@ -115,7 +115,17 @@ vi.mock("./specGapScope.js", () => ({
   loadSpecFiles: vi.fn(async () => tree),
   // 🔴 GAP-115: o veredicto de fim de laço lê os GAPs SEM arquivo por aqui. Vazio = todos roteados,
   // que é a premissa desta suíte (a fila só existe porque cada GAP tem arquivo).
-  gapScopeForProject: vi.fn(async () => ({ unrouted: [] as F[] })),
+  // 🔴 GAP-127: a declaração da inanição também entra por aqui (leitura de banco, SEM roteador), então
+  // o dublê devolve a árvore e os GAPs por arquivo — é o mesmo escopo do `ensureGapScope`, sem rotear.
+  gapScopeForProject: vi.fn(async () => {
+    const byPath = new Map<string, F[]>();
+    for (const f of findings) {
+      if (!tree.some((t) => t.path === f.file)) continue;
+      const list = byPath.get(f.file);
+      if (list) list.push(f); else byPath.set(f.file, [f]);
+    }
+    return { latestRunId, files: tree, byPath, unrouted: [] as F[], totalActive: findings.length, routesUsed: {} };
+  }),
   buckets: vi.fn((groups: { files: TreeFile[]; byPath: Map<string, F[]> }) => groups.files.map((f) => {
     const list = groups.byPath.get(f.path) ?? [];
     return {
@@ -243,7 +253,7 @@ vi.mock("./projectStatus.js", () => ({ SPEC_EDITABLE_STATUSES: new Set(["draft",
 
 import {
   startAutonomyRun, advanceAutonomyRun, isTerminalAutonomyStatus,
-  AUTONOMY_MAX_FILE_ROUNDS, AUTONOMY_MAX_TOTAL_FILE_ROUNDS, type AutonomyStatus,
+  AUTONOMY_MAX_FILE_ROUNDS, AUTONOMY_MAX_TOTAL_FILE_ROUNDS, FINISH_NOTE_MAX, finishNote, cutDeclared, type AutonomyStatus,
 } from "./specAutonomy.js";
 
 // ── banco falso (uma linha de spec_autonomy_runs em memória) ───────────────────
@@ -944,6 +954,123 @@ describe("tetos do laço por arquivo", () => {
       await advanceAutonomyRun(db, r.id);
       expect(fileCalls().length).toBe(antes + 1);             // o passe 2 recebeu seu arquivo
       expect(lastFileCall().filePath).toBe("frontend/01-web.md");
+    });
+  });
+
+  /**
+   * 🔴 GAP-127 — MEDIDO em prod (run `a52b5e1b`, NVX LastMile, 2026-09-08): a spec tem **13** arquivos
+   * com GAP importante e o teto do passe é **12**. A fila é reconstruída IDÊNTICA a cada passe
+   * (`files_done` zera na virada, mesma régua de ordenação) ⇒ o corte cai SEMPRE na mesma cauda e
+   * `arquitetura-modelo.md` (1 🟡, último em todas as chaves) não recebeu UMA tentativa em nenhum passe.
+   * GAP que nunca é tentado não pode fechar: a contagem ganha piso e "zerar de forma legal" fica
+   * impossível por construção — e a run encerra apresentando esse GAP como "resistente".
+   */
+  describe("🔴 GAP-127 — o teto do passe não pode matar SEMPRE o mesmo arquivo de fome", () => {
+    /** As notas que o laço escreveu no chat da Bancada. */
+    function notasChat(): string[] {
+      return sqlLog
+        .filter((q) => q.sql.startsWith("INSERT INTO spec_chat_messages"))
+        .map((q) => String((q.params as unknown[])[2]));
+    }
+
+    it("quem ficou SEM TENTATIVA no passe anterior vai na FRENTE da fila", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);                    // passe 0 começa pelo api (2 blockers)
+      expect(lastFileCall().filePath).toBe("backend/01-api.md");
+      // O passe 0 fecha tendo tentado só o `api` — o `web` (1 🟡, cauda da fila) ficou de fome.
+      run!.passes = 1;
+      run!.rounds = [{ round: 1, pass: 0, applied: true, filePath: "backend/01-api.md" }];
+      run!.status = "pending";
+      run!.current_file = null;
+      run!.files_done = [];
+      await advanceAutonomyRun(db, r.id);
+      // Sem a rotação isto seria `backend/01-api.md` de novo (2 blockers > 1 warning), para sempre.
+      expect(lastFileCall().filePath).toBe("frontend/01-web.md");
+    });
+
+    it("rodada que FALHOU conta como tentativa — arquivo que não processa não monopoliza a frente", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.passes = 1;
+      // As DUAS foram tentadas no passe 0 (a do web falhou) ⇒ ninguém passou fome ⇒ régua normal.
+      run!.rounds = [
+        { round: 1, pass: 0, applied: true, filePath: "backend/01-api.md" },
+        { round: 2, pass: 0, applied: false, filePath: "frontend/01-web.md" },
+      ];
+      run!.status = "pending";
+      run!.current_file = null;
+      run!.files_done = [];
+      await advanceAutonomyRun(db, r.id);
+      expect(lastFileCall().filePath).toBe("backend/01-api.md");
+    });
+
+    it("o passe fechado pelo teto DECLARA quem ficou sem nenhuma tentativa", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      // Teto batido tendo tentado só o `api`: o `web` tem 🟡 ativo e não recebeu rodada.
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({
+        round: i + 1, pass: 0, applied: true, filePath: "backend/01-api.md",
+      }));
+      run!.status = "pending";
+      run!.current_file = null;
+      run!.files_done = [];
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("validating");
+      const nota = notasChat().at(-1)!;
+      expect(nota).toContain("SEM NENHUMA tentativa neste passe");
+      expect(nota).toContain("frontend/01-web.md");
+      expect(nota).toContain("vão na FRENTE da fila no próximo passe");
+      expect(nota).not.toContain("backend/01-api.md");       // esse foi tentado 12 vezes
+    });
+
+    it("passe em que TODOS foram tentados não declara inanição nenhuma", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({
+        round: i + 1, pass: 0, applied: true,
+        filePath: i === 0 ? "backend/01-api.md" : "frontend/01-web.md",
+      }));
+      run!.status = "pending";
+      run!.current_file = null;
+      run!.files_done = [];
+      await advanceAutonomyRun(db, r.id);
+      expect(notasChat().at(-1)!).not.toContain("SEM NENHUMA tentativa");
+    });
+
+    /**
+     * 🔴 GAP-127, segunda ponta: o desfecho vinha cortado em 800 chars SEM dizer que cortou, e o corte é
+     * no FIM — quem morria era a frase mais nova. Foi assim que a declaração de inanição (≈160 chars)
+     * apagou *"E a arquitetura foi DESENHADA…"* da mensagem final (os dois casos do GAP-125 acima
+     * viraram vermelhos e é essa a prova). Cortar é ok; não dizer que cortou não é.
+     */
+    it("o teto do desfecho cabe o relatório inteiro e, se estourar, DECLARA o corte", () => {
+      expect(FINISH_NOTE_MAX).toBeGreaterThanOrEqual(2000);
+      const curto = "desfecho normal";
+      expect(finishNote(curto)).toBe(curto);                 // nada de aviso quando não corta
+      const cortado = finishNote("x".repeat(FINISH_NOTE_MAX + 500));
+      expect(cortado.length).toBe(FINISH_NOTE_MAX);
+      expect(cortado).toContain("desfecho CORTADO no teto");
+      // O outro escritor de `last_error` (diagnóstico da rodada, teto de 1.200 do GAP-70) usa a MESMA
+      // régua: o leitor é o mesmo campo da mesma tela, e cortar sem dizer é o defeito, não o teto.
+      const diag = cutDeclared("y".repeat(1500), 1200, "diagnóstico da rodada");
+      expect(diag.length).toBe(1200);
+      expect(diag).toContain("diagnóstico da rodada CORTADO no teto de 1200 chars");
+      expect(cutDeclared("curto", 1200, "diagnóstico da rodada")).toBe("curto");
+    });
+
+    it("fim de laço declara o arquivo que o laço INTEIRO nunca olhou", async () => {
+      const r = await start(1);
+      await advanceAutonomyRun(db, r.id);
+      run!.passes = 1;                                        // orçamento de passes esgotado
+      run!.rounds = [{ round: 1, pass: 0, applied: true, filePath: "backend/01-api.md" }];
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      const fim = String(run!.last_error);
+      expect(fim).toContain("SEM NENHUMA tentativa neste laço");
+      expect(fim).toContain("frontend/01-web.md");
+      expect(fim).toContain("não foram sequer olhados pelo laço");
     });
   });
 

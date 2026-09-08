@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
 # 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
 # 1.5.0: + GAP-125 (o último artefato não redefine o veredicto do trabalho)
-SCHEMA_VERSION = "1.6.0"  # 1.6.0: + GAP-126 ("novo" não quer dizer que o seu trabalho causou)
+SCHEMA_VERSION = "1.7.0"  # 1.7.0: + GAP-127 (item que a fila nunca tentou não é item que resistiu)
+# 1.6.0: + GAP-126 ("novo" não quer dizer que o seu trabalho causou)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -228,6 +229,25 @@ ARCHETYPES: list[dict[str, Any]] = [
             "relatório dizia '1 fechado × 7 novos' afirmando uma causalidade que os shas negam."
         ),
     },
+    {
+        "slug": "arch.gap127.o-que-nunca-foi-tentado-nao-resistiu",
+        "title": "Item que a fila nunca tentou não é item que resistiu",
+        "rule": (
+            "Fila com teto corta a CAUDA, e uma fila reconstruída pela mesma régua corta SEMPRE a mesma "
+            "cauda: o item do fim nunca é tentado e o defeito dele nunca fecha. Quem ficou de fora vai "
+            "na FRENTE no ciclo seguinte e é NOMEADO no relatório — e nunca apresente como 'resistente' "
+            "o que não recebeu uma tentativa. Vale para o texto do desfecho: corte no fim come a prova "
+            "mais nova."
+        ),
+        "evidence": (
+            "Bancada GAP-127 (2026-09-08): a spec da NVX LastMile tem 13 arquivos com GAP importante e o "
+            "teto do passe é 12; `files_done` zera na virada do passe e a régua de ordenação é a mesma, "
+            "então `arquitetura-modelo.md` (1 warning, último em todas as chaves) não recebeu UMA rodada "
+            "em nenhum passe — o GAP dele não podia fechar e a contagem tinha piso. Na mesma correção "
+            "apareceu a outra ponta: o desfecho da run era cortado em 800 chars sem dizer que cortou, e "
+            "a declaração nova apagou do texto o fato de a arquitetura ter sido DESENHADA."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -270,7 +290,8 @@ ROLE_FOCUS: dict[str, str] = {
         "Do mesmo jeito, um artefato extra entregue no fim (diagrama, resumo, README) não muda o "
         "status do ciclo: relate o desfecho que a MEDIÇÃO deu, não o do último passo. E defeito que "
         "aparece em alvo NÃO ALTERADO (mesmo hash) não é regressão do ciclo — separe a parcela "
-        "atribuível antes de dizer que o trabalho piorou o produto."
+        "atribuível antes de dizer que o trabalho piorou o produto. E item que a fila NUNCA tentou "
+        "(teto, corte, fila) não é item que resistiu: nomeie quem ficou de fora."
     ),
     "devops": (
         "Como isto aparece para você: manifesto/compose gerado a partir de contexto parcial "
