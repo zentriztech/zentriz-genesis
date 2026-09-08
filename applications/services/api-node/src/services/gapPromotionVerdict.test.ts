@@ -34,7 +34,7 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
-  proveWork,
+  proveWork, anchorHistories,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -579,6 +579,76 @@ describe("focusRoundsByAnchor", () => {
     expect((await focusRoundsByAnchor(db as never, "p1")).size).toBe(0);
     const broken = { query: vi.fn(async () => { throw new Error("coluna não existe"); }) };
     expect((await focusRoundsByAnchor(broken as never, "p1")).size).toBe(0);
+  });
+});
+
+/**
+ * 🔴 GAP-112 — a CADEIA. Rastreando `PRIV-ETAPAS-01` em 33 validações, cada elo do defeito nasceu da
+ * correção do elo anterior, e a pergunta original ("o job tem 3 ou 4 etapas?") nunca foi decidida. O
+ * agente via um elo por vez. Esta consulta entrega a cadeia — crua, sem rótulo.
+ */
+describe("anchorHistories", () => {
+  /** Duas consultas com respostas diferentes: rodadas dedicadas (nível 2) e títulos por âncora. */
+  const dbCom = (dedicadas: Record<string, unknown>[], titulos: Record<string, unknown>[]) => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    return {
+      calls,
+      query: vi.fn(async (text: string, values?: unknown[]) => {
+        calls.push({ text, values: values ?? [] });
+        return { rows: text.includes("focusAnchors") ? dedicadas : titulos };
+      }),
+    };
+  };
+
+  it("junta rodadas dedicadas e títulos, em ordem cronológica, por âncora normalizada", async () => {
+    const db = dbCom(
+      [{ anchor: "PRIV-ETAPAS-01", n: 3 }],
+      [
+        { anchor: "PRIV-ETAPAS-01", title: "conflito de cardinalidade das etapas" },
+        { anchor: "priv-etapas-01", title: "a cláusula se declara oráculo único" },
+        { anchor: "§7.1", title: "outro defeito, outra âncora" },
+      ],
+    );
+    const map = await anchorHistories(db as never, "p1", "privacidade-lgpd.md");
+    const h = map.get(anchorSearchKey("PRIV-ETAPAS-01"))!;
+    expect(h.dedicatedRounds).toBe(3);
+    expect(h.reportedTitles).toEqual([
+      "conflito de cardinalidade das etapas",
+      "a cláusula se declara oráculo único",
+    ]);
+    // A outra âncora existe, mas com zero rodada dedicada — o fato é diferente, não ausente.
+    expect(map.get(anchorSearchKey("§7.1"))).toEqual({
+      dedicatedRounds: 0, reportedTitles: ["outro defeito, outra âncora"],
+    });
+    // Só as validações CONCLUÍDAS e só o arquivo pedido — findings de uma validação em voo não são fato.
+    expect(db.calls[1].text).toMatch(/status IN \('passed', 'failed'\)/);
+    expect(db.calls[1].values).toEqual(["p1", "privacidade-lgpd.md"]);
+  });
+
+  it("repetição CONSECUTIVA colapsa numa linha com a contagem — a cadeia fica legível e a conta visível", async () => {
+    // 33 validações reportando o mesmo título produziriam 33 linhas idênticas no prompt. Colapsar sem
+    // dizer quantas vezes esconderia um fato: "voltou 12 vezes igual" ≠ "voltou 1 vez".
+    const db = dbCom([], [
+      { anchor: "§3.2", title: "par (code, HTTP) divergente" },
+      { anchor: "§3.2", title: "PAR (CODE, HTTP) DIVERGENTE" },
+      { anchor: "§3.2", title: "par (code, HTTP) divergente" },
+      { anchor: "§3.2", title: "gate comportamental exige semear privacy_requests" },
+      { anchor: "§3.2", title: "par (code, HTTP) divergente" },
+    ]);
+    const h = (await anchorHistories(db as never, "p1", "f.md")).get(anchorSearchKey("§3.2"))!;
+    expect(h.reportedTitles).toEqual([
+      "par (code, HTTP) divergente (reportado 3× seguidas)",
+      "gate comportamental exige semear privacy_requests",
+      // Voltou DEPOIS do outro elo: é reaparição, não repetição — vira linha própria.
+      "par (code, HTTP) divergente",
+    ]);
+  });
+
+  it("âncora ou título vazio é ignorado, e falha de consulta devolve mapa vazio (nunca derruba a rodada)", async () => {
+    const db = dbCom([], [{ anchor: null, title: "sem endereço" }, { anchor: "§1", title: "   " }]);
+    expect((await anchorHistories(db as never, "p1", "f.md")).size).toBe(0);
+    const broken = { query: vi.fn(async () => { throw new Error("relation não existe"); }) };
+    expect((await anchorHistories(broken as never, "p1", "f.md")).size).toBe(0);
   });
 });
 

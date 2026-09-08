@@ -292,6 +292,62 @@ export async function focusRoundsByAnchor(db: Db, projectId: string): Promise<Ma
 }
 
 /**
+ * 🔴 GAP-112 — o histórico CRU de cada âncora de um arquivo: rodadas dedicadas pagas + os títulos que
+ * o juiz reportou nela, em ordem cronológica.
+ *
+ * Existe porque a causa mais funda medida nesta frente não é agendamento, é a **cadeia**: rastreando
+ * `PRIV-ETAPAS-01` em 33 validações, cada elo do defeito nasceu da correção do elo anterior
+ * ("conflito de cardinalidade" → "a cláusula se declara oráculo único" → "o oráculo só é verificável
+ * por artefato" → …), e a pergunta original nunca foi decidida. O agente via um defeito por vez, sem
+ * nunca ver a cadeia que ele próprio estava construindo. Isto entrega a cadeia.
+ *
+ * Duas escolhas declaradas, ambas de TRANSPORTE (o código não interpreta a cadeia — `gapFocus` monta
+ * o bloco só com fato cru):
+ *
+ *  • repetições CONSECUTIVAS do mesmo título colapsam numa linha com a contagem (`… (reportado 12×
+ *    seguidas)`). Sem isso, 33 validações produzem 33 linhas idênticas e a cadeia fica ilegível — mas
+ *    a contagem fica visível, porque "voltou 12 vezes igual" é um fato diferente de "voltou 1 vez";
+ *  • só as âncoras deste ARQUIVO entram, pelo `file` do finding (a mesma chave que o estágio B grava).
+ */
+export async function anchorHistories(
+  db: Db, projectId: string, filePath: string,
+): Promise<Map<string, { dedicatedRounds: number; reportedTitles: string[] }>> {
+  const dedicadas = await focusRoundsByAnchor(db, projectId).catch(() => new Map<string, number>());
+  const rows = (await db.query(
+    `SELECT f->>'anchor' AS anchor, f->>'title' AS title
+       FROM spec_validation_runs v, jsonb_array_elements(v.findings) f
+      WHERE v.project_id = $1 AND v.status IN ('passed', 'failed')
+        AND lower(coalesce(f->>'file', '')) = lower($2)
+        AND coalesce(f->>'anchor', '') <> ''
+      ORDER BY v.created_at ASC`,
+    [projectId, filePath],
+  ).catch(() => ({ rows: [] as Array<{ anchor: string | null; title: string | null }> }))).rows as unknown as
+    Array<{ anchor: string | null; title: string | null }>;
+
+  const titulos = new Map<string, Array<{ title: string; times: number }>>();
+  for (const r of rows) {
+    const k = anchorSearchKey(r.anchor ?? "");
+    const t = (r.title ?? "").trim();
+    if (!k || !t) continue;
+    const lista = titulos.get(k) ?? [];
+    const ultimo = lista[lista.length - 1];
+    if (ultimo && ultimo.title.toLowerCase() === t.toLowerCase()) ultimo.times += 1;
+    else lista.push({ title: t, times: 1 });
+    titulos.set(k, lista);
+  }
+
+  const out = new Map<string, { dedicatedRounds: number; reportedTitles: string[] }>();
+  for (const k of new Set([...dedicadas.keys(), ...titulos.keys()])) {
+    const lista = titulos.get(k) ?? [];
+    out.set(k, {
+      dedicatedRounds: dedicadas.get(k) ?? 0,
+      reportedTitles: lista.map((e) => (e.times > 1 ? `${e.title} (reportado ${e.times}× seguidas)` : e.title)),
+    });
+  }
+  return out;
+}
+
+/**
  * Trecho ancorado verbatim, pela MESMA régua que mede se o trecho foi tocado (GAP-72: régua única).
  *
  * 🔴 GAP-79 — é a SUBÁRVORE do cabeçalho. O promotor precisa ver o texto que o GAP acusa: com o corpo

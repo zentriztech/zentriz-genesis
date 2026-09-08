@@ -11,10 +11,13 @@
  *    "consolidaria" o resto, que é a família do GAP-73.
  */
 import { describe, it, expect } from "vitest";
-import { planFocus, focusFactBlock, FOCUS_MIN_RECURRENCE, FOCUS_INDIVIDUAL_AFTER } from "./gapFocus.js";
-import type { FocusFinding } from "./gapFocus.js";
+import {
+  planFocus, focusFactBlock, FOCUS_MIN_RECURRENCE, FOCUS_INDIVIDUAL_AFTER, FOCUS_HISTORY_TITLES,
+} from "./gapFocus.js";
+import type { FocusFinding, AnchorHistory } from "./gapFocus.js";
 import type { PersistentGapRef } from "./gapContinuity.js";
 import { findingFingerprint } from "./findingTriage.js";
+import { anchorSearchKey } from "../lib/markdownSections.js";
 
 const F = (anchor: string | null, title = `t ${anchor}`): FocusFinding =>
   ({ file: "observabilidade-operacao.md", source: "stage_b", title, category: "other", anchor });
@@ -155,6 +158,141 @@ describe("planFocus — degrau 2 (foco individual)", () => {
   });
 });
 
+describe("planFocus — degrau 2 sem tampão (🔴 GAP-111)", () => {
+  // O defeito medido: `privacidade-lgpd.md` tem 12 GAPs, recebeu 4 rodadas em 24, e a MESMA âncora
+  // (`PRIV-ETAPAS-01`) foi o foco em 3 delas — escreveu nas 3, fechou 0, e os outros 11 nunca foram
+  // pedidos. `ordenados[0]` é sempre o mais reincidente, e quem não fecha só fica MAIS reincidente.
+  // A chave é a âncora NORMALIZADA — é assim que `anchorHistories` entrega o mapa, porque o juiz
+  // reescreve a grafia entre validações (GAP-39/41).
+  const HIST = (pares: Array<[string, number]>): Map<string, AnchorHistory> =>
+    new Map(pares.map(([k, n]) => [anchorSearchKey(k), { dedicatedRounds: n, reportedTitles: [] }]));
+
+  it("o mais teimoso que JÁ teve rodada dedicada cede a vez a quem nunca teve", () => {
+    const a = F("§1.2"), b = F("§4.1");
+    const p = planFocus({
+      findings: [a, b],
+      // `b` é MUITO mais teimoso — e é justamente ele que já monopolizou 3 rodadas dedicadas.
+      refs: [REF(a, { times: 3 }), REF(b, { times: 9 })],
+      fileRounds: FOCUS_INDIVIDUAL_AFTER,
+      history: HIST([["§4.1", 3]]),
+    });
+    expect(p.level).toBe(2);
+    expect(p.findings).toEqual([a]);
+    expect(p.reason).toMatch(/0 rodada\(s\) dedicada\(s\) a ele até aqui/);
+    expect(p.reason).toMatch(/1 teimoso\(s\) deste arquivo ainda sem nenhuma/);
+  });
+
+  it("empate em rodadas dedicadas ⇒ a teimosia continua desempatando (a ordem antiga sobrevive)", () => {
+    const a = F("§1.2"), b = F("§4.1");
+    const p = planFocus({
+      findings: [a, b],
+      refs: [REF(a, { times: 3 }), REF(b, { times: 9 })],
+      fileRounds: FOCUS_INDIVIDUAL_AFTER,
+      history: HIST([["§1.2", 2], ["§4.1", 2]]),
+    });
+    expect(p.findings).toEqual([b]);
+  });
+
+  it("sem histórico (ou banco indisponível) o comportamento é o de antes: o mais teimoso primeiro", () => {
+    const a = F("§1.2"), b = F("§4.1");
+    const args = { findings: [a, b], refs: [REF(a, { times: 3 }), REF(b, { times: 9 })], fileRounds: FOCUS_INDIVIDUAL_AFTER };
+    expect(planFocus(args).findings).toEqual([b]);
+    expect(planFocus({ ...args, history: new Map() }).findings).toEqual([b]);
+  });
+
+  it("todos já pagos: o de MENOS rodadas volta — rodízio, nunca paralisia", () => {
+    const a = F("§1.2"), b = F("§4.1"), c = F("§7.1");
+    const p = planFocus({
+      findings: [a, b, c],
+      refs: [REF(a, { times: 9 }), REF(b, { times: 9 }), REF(c, { times: 9 })],
+      fileRounds: FOCUS_INDIVIDUAL_AFTER,
+      history: HIST([["§1.2", 4], ["§4.1", 2], ["§7.1", 3]]),
+    });
+    expect(p.findings).toEqual([b]);
+  });
+
+  it("a âncora do histórico casa por grafia NORMALIZADA — o juiz reescreve a âncora (GAP-39/41)", () => {
+    const a = F("## 1.2 Métricas"), b = F("§4.1");
+    const p = planFocus({
+      findings: [a, b],
+      refs: [REF(a, { times: 9 }), REF(b, { times: 3 })],
+      fileRounds: FOCUS_INDIVIDUAL_AFTER,
+      // Grafia diferente, mesma seção: se não normalizasse, `a` apareceria com 0 pagas e venceria.
+      history: HIST([["§1.2 metricas", 5]]),
+    });
+    expect(p.findings).toEqual([b]);
+  });
+});
+
+describe("focusFactBlock — a cadeia crua (🔴 GAP-112)", () => {
+  const CADEIA: AnchorHistory = {
+    dedicatedRounds: 3,
+    reportedTitles: [
+      "conflito de cardinalidade das etapas do job",
+      "a cláusula declara-se oráculo único do inventário",
+      "o oráculo só é verificável por artefato",
+    ],
+  };
+
+  const bloco = (h: AnchorHistory) => {
+    const a = F("§1.2");
+    return focusFactBlock(planFocus({
+      findings: [a, F("§4.1")],
+      refs: [REF(a)],
+      fileRounds: FOCUS_INDIVIDUAL_AFTER,
+      history: new Map([[anchorSearchKey("§1.2"), h]]),
+    }));
+  };
+
+  it("entrega os títulos anteriores em ordem, com a conta de rodadas dedicadas", () => {
+    const b = bloco(CADEIA);
+    expect(b).toMatch(/HISTÓRICO DESTA ÂNCORA/);
+    expect(b).toMatch(/rodadas dedicadas só a ela até aqui: 3/);
+    for (const t of CADEIA.reportedTitles) expect(b).toContain(t);
+    // A ORDEM é o que revela a cadeia: o 1º elo tem de vir antes do último.
+    expect(b.indexOf(CADEIA.reportedTitles[0])).toBeLessThan(b.indexOf(CADEIA.reportedTitles[2]));
+  });
+
+  it("o código NÃO interpreta a cadeia — quem lê é o agente", () => {
+    // Blocker do revisor cross-family (DeepSeek): a versão anterior AFIRMAVA "o que foi tentado até
+    // aqui não funcionou". O código não sabe isso — pode ter sido rebatismo (GAP-67) ou duplicata
+    // dentro da mesma validação (medido: o mesmo defeito 3× numa validação). Afirmar é decidir
+    // conteúdo, e conteúdo é do agente (Lei: 100% LLM).
+    const b = bloco(CADEIA);
+    expect(b).not.toMatch(/não funcionou/i);
+    expect(b).toMatch(/decida você o que ele significa/);
+  });
+
+  it("declara que DECIDIR POR REDUÇÃO é desfecho legítimo (D7: corrigir por adição gera o elo seguinte)", () => {
+    const b = bloco(CADEIA);
+    expect(b).toMatch(/REDUÇÃO/);
+    expect(b).toMatch(/REMOVER ou SUBORDINAR/);
+    // E que remover não é perda: o mecanismo do GAP-12 exige o bloco ancorado completo.
+    expect(b).toMatch(/bloco\s*\n?ancorado completo/);
+  });
+
+  it(`leva no máximo ${FOCUS_HISTORY_TITLES} títulos, e são os MAIS RECENTES (o fim da cadeia)`, () => {
+    const muitos = Array.from({ length: FOCUS_HISTORY_TITLES + 4 }, (_, i) => `elo ${i}`);
+    const b = bloco({ dedicatedRounds: 9, reportedTitles: muitos });
+    expect(b).not.toContain("elo 0");
+    expect(b).toContain(`elo ${muitos.length - 1}`);
+    expect(b.match(/^ {2}\d+\. elo /gm) ?? []).toHaveLength(FOCUS_HISTORY_TITLES);
+  });
+
+  it("sem histórico nenhum, o bloco não inventa seção vazia", () => {
+    const a = F("§1.2");
+    const b = focusFactBlock(planFocus({ findings: [a, F("§4.1")], refs: [REF(a)], fileRounds: FOCUS_INDIVIDUAL_AFTER }));
+    expect(b).not.toMatch(/HISTÓRICO DESTA ÂNCORA/);
+    expect(b).toMatch(/UM único defeito/);
+  });
+
+  it("âncora sem título anterior, mas com rodada paga, ainda declara a rodada", () => {
+    const b = bloco({ dedicatedRounds: 2, reportedTitles: [] });
+    expect(b).toMatch(/rodadas dedicadas só a ela até aqui: 2/);
+    expect(b).not.toMatch(/títulos que o juiz reportou/);
+  });
+});
+
 describe("focusFactBlock", () => {
   it("rodada normal não gasta prompt com bloco nenhum", () => {
     expect(focusFactBlock({ level: 0, findings: [], anchors: [], deferred: 0, reason: "" })).toBe("");
@@ -168,7 +306,8 @@ describe("focusFactBlock", () => {
     // (2) …os outros seguem ATIVOS e voltam (senão ele tenta resolvê-los mesmo assim)…
     expect(bloco).toMatch(/1 outro\(s\) GAP\(s\)/);
     expect(bloco).toMatch(/seguem ATIVOS/);
-    // (3) …e o que ele fez antes NÃO funcionou — inclusive a errata nula do GAP-71.
+    // (3) …e o FATO de que os defeitos voltaram — inclusive que a errata nula do GAP-71 já falhou.
+    // O que o bloco NÃO faz mais é concluir por ele que "não funcionou" (GAP-112).
     expect(bloco).toMatch(/VOLTARAM/);
     expect(bloco).toMatch(/errata em outra seção/);
   });

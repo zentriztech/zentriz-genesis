@@ -65,6 +65,22 @@ export const FOCUS_INDIVIDUAL_AFTER = 3;
  */
 export type FocusFinding = Parameters<typeof findingFingerprint>[0] & { anchor?: string | null };
 
+/**
+ * 🔴 GAP-111/112 — o histórico CRU de uma âncora, para o degrau 2.
+ *
+ * `dedicatedRounds` é quantas rodadas de foco INDIVIDUAL esta âncora já recebeu no projeto (a mesma
+ * conta que `gapPromotionVerdict.focusRoundsByAnchor` produz — medida única, não uma segunda régua).
+ * `reportedTitles` são os títulos que o juiz reportou NESTA âncora, em ordem cronológica.
+ *
+ * Os dois campos são FATO, sem rótulo: nada aqui diz "isto não funcionou" nem "a spec está crescendo".
+ * Interpretar a cadeia é decisão de conteúdo e é do agente (Lei: 100% LLM). O revisor cross-family
+ * derrubou a primeira versão deste bloco justamente por interpretar em nome do agente.
+ */
+export interface AnchorHistory {
+  dedicatedRounds: number;
+  reportedTitles: string[];
+}
+
 export interface FocusPlan {
   /** 0 = rodada normal · 1 = só os teimosos · 2 = um defeito só. */
   level: 0 | 1 | 2;
@@ -76,6 +92,36 @@ export interface FocusPlan {
   deferred: number;
   /** Frase para o log da rodada e para o chat. Em `level 0`, vazia. */
   reason: string;
+  /**
+   * 🔴 GAP-112 — o histórico cru das âncoras EM FOCO, já resolvido, para o prompt não precisar do banco.
+   * Viaja dentro do plano (e não como parâmetro novo da rota) porque quem tem o `db` é o despacho e
+   * quem monta o bloco é o `specChat` — e um array simples sobrevive a serialização, um `Map` não.
+   */
+  anchorHistory?: Array<AnchorHistory & { anchor: string }>;
+}
+
+/**
+ * Quantos títulos por âncora vão ao prompt. `6` porque a cadeia medida em `PRIV-ETAPAS-01` tinha 7
+ * elos e 6 já mostram a forma dela, e porque isto é orçamento de transporte — a única coisa que o
+ * código pode limitar sem decidir conteúdo.
+ */
+export const FOCUS_HISTORY_TITLES = 6;
+
+/** Os N títulos MAIS RECENTES da âncora, na ordem cronológica original (o fim da cadeia é o que importa). */
+function historyFor(
+  anchors: string[],
+  history?: Map<string, AnchorHistory>,
+): Array<AnchorHistory & { anchor: string }> | undefined {
+  if (!history || history.size === 0) return undefined;
+  const out: Array<AnchorHistory & { anchor: string }> = [];
+  for (const anchor of anchors) {
+    const h = history.get(anchorSearchKey(anchor));
+    if (!h) continue;
+    const titulos = h.reportedTitles.filter((t) => (t ?? "").trim().length > 0);
+    if (h.dedicatedRounds === 0 && titulos.length === 0) continue;
+    out.push({ anchor, dedicatedRounds: h.dedicatedRounds, reportedTitles: titulos.slice(-FOCUS_HISTORY_TITLES) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Reincidência conhecida por fingerprint e por âncora normalizada (a ref pode ter só a âncora). */
@@ -127,6 +173,12 @@ export function planFocus(args: {
   findings: FocusFinding[];
   refs: PersistentGapRef[];
   fileRounds: number;
+  /**
+   * Histórico por âncora normalizada (`anchorSearchKey`), de `focusRoundsByAnchor` +
+   * `reportedTitlesByAnchor`. Ausente ⇒ o degrau 2 se comporta como antes (o mais teimoso primeiro),
+   * que é o que os testes anteriores a este GAP descrevem.
+   */
+  history?: Map<string, AnchorHistory>;
 }): FocusPlan {
   const todos = args.findings;
   const nada: FocusPlan = { level: 0, findings: todos, anchors: [], deferred: 0, reason: "" };
@@ -149,22 +201,46 @@ export function planFocus(args: {
     || todos.indexOf(a) - todos.indexOf(b));
 
   if (args.fileRounds >= FOCUS_INDIVIDUAL_AFTER) {
-    const um = ordenados[0];
+    // 🔴 GAP-111 — o mais teimoso TAMPONAVA o arquivo. Medido em `privacidade-lgpd.md` (12 GAPs):
+    // 4 rodadas em 24, todas em nível 2, e a MESMA âncora (`PRIV-ETAPAS-01`) foi o foco em 3 delas —
+    // escreveu nas 3, fechou 0, e os outros 11 GAPs nunca foram pedidos em 24 rodadas. `ordenados[0]`
+    // é sempre o mais reincidente, e quem não fecha só fica MAIS reincidente ⇒ o pódio é dele para
+    // sempre. A premissa que este módulo declarava ("os que ficam de fora voltam em outra rodada")
+    // era FALSA por construção.
+    //
+    // A ordenação primária passa a ser rodadas dedicadas já pagas, crescente: um teimoso só recebe a
+    // 2ª rodada dedicada depois que todos os outros receberam a 1ª. Como o `sort` do V8 é estável e
+    // `ordenados` já vem por teimosia, a teimosia continua valendo como desempate — o que muda é só
+    // que ela não pode mais monopolizar. Isso não decide conteúdo: é a mesma natureza de decisão que
+    // a fila de arquivos já toma, e nenhum GAP é fechado nem descartado por causa dela.
+    const dedicadas = (f: FocusFinding): number => {
+      const k = anchorSearchKey(f.anchor ?? "");
+      if (!k) return 0;
+      return args.history?.get(k)?.dedicatedRounds ?? 0;
+    };
+    const fila = ordenados.slice().sort((a, b) => dedicadas(a) - dedicadas(b));
+    const um = fila[0];
+    const alvo = (um.anchor ?? "").trim();
+    const pagas = dedicadas(um);
+    const virgens = fila.filter((f) => dedicadas(f) === 0).length;
     return {
       level: 2,
       findings: [um],
-      anchors: [(um.anchor ?? "").trim()],
+      anchors: [alvo],
       deferred: todos.length - 1,
-      reason: `foco INDIVIDUAL: ${args.fileRounds} rodada(s) já pagas neste arquivo e o defeito voltou — esta rodada trata SÓ \`${(um.anchor ?? "").trim()}\``,
+      reason: `foco INDIVIDUAL: ${args.fileRounds} rodada(s) já pagas neste arquivo e o defeito voltou — esta rodada trata SÓ \`${alvo}\` (${pagas} rodada(s) dedicada(s) a ele até aqui; ${virgens} teimoso(s) deste arquivo ainda sem nenhuma)`,
+      anchorHistory: historyFor([alvo], args.history),
     };
   }
   if (ordenados.length < todos.length) {
+    const alvos = ordenados.map((f) => (f.anchor ?? "").trim());
     return {
       level: 1,
       findings: ordenados,
-      anchors: ordenados.map((f) => (f.anchor ?? "").trim()),
+      anchors: alvos,
       deferred: todos.length - ordenados.length,
       reason: `foco: ${ordenados.length} de ${todos.length} GAP(s) deste arquivo são REINCIDENTES — esta rodada trata só eles`,
+      anchorHistory: historyFor(alvos, args.history),
     };
   }
   return nada;
@@ -174,25 +250,62 @@ export function planFocus(args: {
  * O FATO da rodada dedicada, para o prompt.
  *
  * Precisa dizer três coisas, e todas por um motivo medido: (1) que a lista está restrita — senão o
- * modelo conclui que o arquivo só tem esses defeitos e "consolida" o resto; (2) que os outros seguem
- * ativos e voltam — senão ele tenta resolvê-los de qualquer jeito, que é o comportamento que o foco
- * existe para impedir; (3) que estes já voltaram N vezes e o que ele fez antes NÃO funcionou — o
- * mesmo fato do GAP-71, aqui com o peso de ser o único assunto da rodada.
+ * modelo conclui que o arquivo só tem esses defeitos e "consolida" o resto; (2) que os outros voltam,
+ * e agora isso é verdade por construção (o GAP-111 fez o foco rodar) — senão ele tenta resolvê-los de
+ * qualquer jeito, que é o comportamento que o foco existe para impedir; (3) o HISTÓRICO CRU desta
+ * âncora: quantas rodadas dedicadas ela já teve e os títulos que o juiz reportou nela, em ordem.
+ *
+ * 🔴 GAP-112 — o bloco NÃO interpreta a cadeia. A versão anterior afirmava "o que foi tentado até
+ * aqui não funcionou", e o revisor cross-family (DeepSeek, blocker) apontou que isso é o CÓDIGO
+ * decidindo conteúdo: o código não sabe se a correção falhou, se o juiz rebatizou o defeito (GAP-67)
+ * ou se ele duplicou dentro da mesma validação (medido: o mesmo defeito 3× numa validação). Agora ele
+ * entrega a cadeia literal e a leitura é do agente (Lei: 100% LLM).
+ *
+ * O que a cadeia revelou, e é o motivo de ela ir ao prompt: rastreando `PRIV-ETAPAS-01` em 33
+ * validações, o defeito MUTA em cadeia, e cada elo nasce da correção do elo anterior — a pergunta
+ * original ("o job tem 3 ou 4 etapas?") nunca foi decidida, foi cercada de maquinaria normativa, e
+ * cada adição amplia a superfície verificável e portanto a de defeito. Por isso o bloco declara que
+ * DECIDIR POR REDUÇÃO é desfecho legítimo: o mecanismo de remoção já é seguro (GAP-12 exige o bloco
+ * ancorado completo, então remoção é decisão declarada, nunca perda silenciosa). Declarar que a saída
+ * existe não é escolhê-la — proibir adição ou contar aparato é que seria automação fixa.
  */
 export function focusFactBlock(plan: FocusPlan): string {
   if (plan.level === 0) return "";
   const alvo = plan.level === 2 ? "UM único defeito" : `${plan.findings.length} defeito(s) REINCIDENTE(S)`;
-  return [
+  const linhas = [
     "--- RODADA DEDICADA (leia antes de editar) ---",
     `Esta rodada é dedicada a ${alvo}. A lista de GAPs abaixo foi RESTRINGIDA de propósito:`,
     `${plan.deferred} outro(s) GAP(s) deste arquivo ficaram FORA desta rodada — eles seguem ATIVOS e`,
     "voltam em outra rodada. NÃO os resolva agora e NÃO conclua que o arquivo não os tem.",
     "Estes defeitos já foram apontados em validações anteriores, você já editou este arquivo antes, e",
-    "eles VOLTARAM. O que foi tentado até aqui não funcionou: não repita a mesma correção. Se a",
-    "correção exige mexer no trecho ancorado, mexa NO TRECHO — errata em outra seção declarando o",
+    "eles VOLTARAM.",
+  ];
+
+  // O histórico entra CRU, um título por linha, na ordem em que o juiz os reportou. Sem rótulo, sem
+  // contagem interpretada, sem conclusão: é o material que permite ao agente ver se está diante do
+  // mesmo defeito, de um rebatismo ou de uma cadeia que ele próprio criou.
+  for (const h of plan.anchorHistory ?? []) {
+    linhas.push("");
+    linhas.push(`HISTÓRICO DESTA ÂNCORA — \`${h.anchor}\``);
+    linhas.push(`rodadas dedicadas só a ela até aqui: ${h.dedicatedRounds}`);
+    if (h.reportedTitles.length > 0) {
+      linhas.push("títulos que o juiz reportou nesta âncora, na ordem em que apareceram:");
+      for (const [i, t] of h.reportedTitles.entries()) linhas.push(`  ${i + 1}. ${t.trim()}`);
+    }
+  }
+
+  linhas.push(
+    "",
+    "Leia o histórico acima antes de escrever e decida você o que ele significa.",
+    "Se a correção exige mexer no trecho ancorado, mexa NO TRECHO — errata em outra seção declarando o",
     "trecho nulo já foi tentada e o defeito reapareceu.",
+    "DECIDIR POR REDUÇÃO é desfecho legítimo e às vezes é o único: se o defeito é uma contradição,",
+    "escolher um valor normativo e REMOVER ou SUBORDINAR o outro fecha o defeito. Remover exige o bloco",
+    "ancorado completo, então a remoção fica declarada e auditável — não é perda. Adicionar cláusula",
+    "nova para explicar a contradição não a resolve se os dois lados continuarem valendo.",
     "Gaste o orçamento desta rodada AQUI. Uma correção que de fato resolve vale mais que várias parciais.",
     "--- FIM DA RODADA DEDICADA ---",
     "",
-  ].join("\n");
+  );
+  return linhas.join("\n");
 }
