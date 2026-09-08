@@ -831,6 +831,17 @@ function buildGapFileRequest(
    * arquivo, ou nenhum desfecho relevante. Ver `priorOutcomeFactBlock`.
    */
   priorOutcomeBlock = "",
+  /**
+   * 🔴 GAP-121: esta rodada é de CONSOLIDAÇÃO PURA — o laço mediu que NÃO há margem de crescimento para
+   * este arquivo, então o pedido é só REMOVER redeclaração (delta ≤ 0). Vazio = rodada normal.
+   *
+   * Quando presente, o pedido muda de natureza e três coisas mudam junto, ou o pedido fica incoerente:
+   * o rótulo da lista de GAPs (eles são CONTEXTO do que remover, não a tarefa), a prestação de contas
+   * por GAP (pedir desfecho de GAP que não se pediu para consertar produziria `nao_declarado` em massa,
+   * e pelo A1 isso é dívida do agente) e a instrução final ("resolva TODOS os GAPs" seria justamente o
+   * crescimento que o veto vai descartar).
+   */
+  consolidationBlock = "",
 ): Record<string, unknown> {
   // A1: o corte do orçamento é DECLARADO. Antes, a lista era fatiada no meio de um item e o modelo
   // recebia um GAP pela metade sem saber que havia mais — e com a prestação de contas por número, um
@@ -881,9 +892,15 @@ function buildGapFileRequest(
     // lista, não uma observação geral. O rótulo muda junto: "GAPs deste arquivo" seria falso quando a
     // lista está restrita, e a falsidade no rótulo é o que faria o modelo consolidar o que ficou fora.
     focusBlock,
-    focusBlock
-      ? `--- GAPs A RESOLVER NESTA RODADA (${findings.length} — lista RESTRINGIDA; o arquivo tem outros) ---`
-      : `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
+    // 🔴 GAP-121: na consolidação pura o aviso vem ANTES da lista pelo mesmo motivo do GAP-81 — é o
+    // enquadramento dela. E o rótulo muda: "GAPs A RESOLVER" seria um pedido que o veto de consolidação
+    // vai descartar por tamanho, e o agente gastaria a rodada obedecendo ao rótulo errado.
+    consolidationBlock,
+    consolidationBlock
+      ? `--- GAPs ABERTOS DESTE ARQUIVO (${findings.length} — CONTEXTO desta rodada, NÃO a tarefa; seguem ATIVOS) ---`
+      : focusBlock
+        ? `--- GAPs A RESOLVER NESTA RODADA (${findings.length} — lista RESTRINGIDA; o arquivo tem outros) ---`
+        : `--- GAPs A RESOLVER NESTE ARQUIVO (${findings.length}) ---`,
     gaps,
     "--- FIM DOS GAPs ---",
     "",
@@ -901,12 +918,23 @@ function buildGapFileRequest(
     // duas coisas que o modelo tem de produzir ficam juntas, e o número que ele declara é o da lista
     // que acabou de ler. `gapsFit.length` (não `findings.length`): pedir desfecho de um GAP que o
     // orçamento cortou seria pedir declaração sobre o que ele não viu.
-    gapOutcomeInstruction(gapsFit.length),
-    edits
-      // A instrução final repete o formato porque é a última coisa que o modelo lê antes de gerar —
-      // e o hábito de reemitir o documento inteiro é justamente o que causou 4 truncamentos em prod.
-      ? "Resolva TODOS os GAPs acima e devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE. Não reemita o arquivo."
-      : "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
+    // 🔴 GAP-121: na consolidação pura NÃO se pede prestação de contas por GAP. Pelo A1 o desfecho
+    // ausente é dívida do agente; cobrar desfecho de conserto que esta rodada não pediu produziria uma
+    // leva inteira de `nao_declarado` — o laço registraria como omissão do agente o que foi decisão do
+    // próprio laço.
+    consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length),
+    consolidationBlock
+      ? (edits
+        ? "Devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE que REMOVEM a"
+          + " redeclaração, deixando no lugar a citação do arquivo-oráculo. O arquivo tem de ENCOLHER"
+          + " nesta rodada. Não reemita o arquivo e não acrescente texto novo além da citação."
+        : "Devolva agora o conteúdo final completo do arquivo APENAS com as redeclarações removidas e"
+          + " substituídas pela citação do arquivo-oráculo. O arquivo tem de ENCOLHER nesta rodada.")
+      : edits
+        // A instrução final repete o formato porque é a última coisa que o modelo lê antes de gerar —
+        // e o hábito de reemitir o documento inteiro é justamente o que causou 4 truncamentos em prod.
+        ? "Resolva TODOS os GAPs acima e devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE. Não reemita o arquivo."
+        : "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
   ].join("\n");
   return {
     prompt_override: edits ? GAP_FILE_EDITS_SYSTEM : GAP_FILE_SYSTEM,
@@ -1077,6 +1105,58 @@ export function priorRejectionFactBlock(
     "--- FIM DA TENTATIVA ANTERIOR ---",
   );
   return lines.join("\n");
+}
+
+/**
+ * 🔴 GAP-121 — o FATO de que esta rodada pede SÓ REMOÇÃO, porque não há margem para o arquivo crescer.
+ *
+ * MEDIDO em prod 2026-09-08 (NVX LastMile, run `3660bcf2`): a margem anunciada caiu 2.000 → 1.095 →
+ * 216 → **0** e ficou em 0 pelas rodadas 4 a 12; **9 das 24 rodadas não escreveram nada**, sempre nos
+ * MESMOS 4–5 arquivos que redeclaram contrato de oráculo. O agente não é o problema — ele reduziu o
+ * próprio delta de +2.547 para +324 entre passes. O problema é o PEDIDO: "conserte estes N GAPs **e**
+ * consolide as redeclarações" cresce antes de encolher, e o veto do GAP-22 julga o delta LÍQUIDO
+ * tudo-ou-nada ⇒ a rodada inteira é descartada e os GAPs voltam idênticos no passe seguinte (47 → 48).
+ *
+ * A cura é de ORDEM, não de teto: subir o teto reabriria o GAP-8 (a spec só crescia) e ratear o
+ * orçamento entre 12 arquivos daria ~167 chars por arquivo, menos do que uma errata precisa — ninguém
+ * escreveria. Então, quando a aritmética diz que não cabe, pede-se PRIMEIRO só a remoção: delta ≤ 0
+ * passa o veto, é aplicada, e o encolhimento credita `growthAllowance` (`runGrowthUsed` soma os deltas
+ * aplicados) financiando a errata na rodada seguinte.
+ *
+ * O bloco não escolhe o que remover nem o que citar — isso é decisão do agente (Lei: 100% LLM). Ele
+ * entrega os dois fatos que o agente não podia deduzir do texto que recebe: quantos contratos deste
+ * arquivo têm oráculo em outro lugar, e que a margem de hoje não paga texto novo. E diz explicitamente
+ * que os GAPs seguem ATIVOS: sem isso o modelo leria a lista como "resolvido por omissão" e, pior,
+ * poderia apagar a seção do GAP para "fechá-lo" encolhendo — perda de spec disfarçada de progresso.
+ */
+export function consolidationOnlyFactBlock(
+  info: { reason: string; affordable: number; restates: number; shrinkFloor?: number } | null | undefined,
+): string {
+  if (!info) return "";
+  return [
+    "--- ESTA RODADA É DE CONSOLIDAÇÃO PURA (decisão do laço, com o motivo medido) ---",
+    `O laço mediu que ${info.restates} contrato(s) reafirmado(s) neste arquivo têm fonte única em OUTRO`
+    + ` arquivo (o bloco de fonte única acima diz quais) e que ${info.reason}.`,
+    "Por isso o pedido de HOJE é só um: REMOVER a redeclaração e deixar no lugar a citação do"
+    + " arquivo-oráculo. O arquivo tem de ENCOLHER — uma rodada que entregue crescimento será"
+    + " DESCARTADA INTEIRA pelo veto de consolidação, como já aconteceu com este arquivo.",
+    "Os GAPs listados abaixo NÃO são a tarefa desta rodada: eles seguem ATIVOS e o laço NÃO os cobrará"
+    + " de você agora. Não os declare como resolvidos e, sobretudo, NÃO apague a seção que um GAP"
+    + " aponta para fazer o arquivo encolher — remover o assunto não é consertar o defeito. Eles estão"
+    + " aqui como CONTEXTO: mostram onde o texto vai precisar de espaço, e é esse espaço que a remoção"
+    + " de hoje abre.",
+    "O que você encolher agora vira margem de crescimento nas próximas rodadas deste laço — é assim que"
+    + " a errata que falta passa a caber.",
+    // O laço veta perda de spec acima de 30% do arquivo (`MIN_SHRINK_RATIO`) e nesse caso NADA é escrito.
+    // O piso é fato, não conselho: sem ele, "encolha" convida ao corte que mata a própria rodada.
+    typeof info.shrinkFloor === "number" && info.shrinkFloor > 0
+      ? `LIMITE: o arquivo não pode terminar esta rodada com menos de ${info.shrinkFloor} caracteres — o`
+        + " laço trata perda maior que isso como spec destruída, VETA a rodada e nada é escrito. Se houver"
+        + " mais redeclaração do que cabe neste corte, remova a parte que couber e deixe o resto para a"
+        + " próxima rodada."
+      : "",
+    "--- FIM DO AVISO DE CONSOLIDAÇÃO PURA ---",
+  ].filter(Boolean).join("\n");
 }
 
 /**
@@ -1566,6 +1646,12 @@ export async function dispatchGapFileJob(opts: {
    * do arquivo ou nada relevante a devolver.
    */
   priorOutcomes?: GapOutcome[] | null;
+  /**
+   * 🔴 GAP-121: o laço mediu que não há margem para este arquivo crescer e despachou uma rodada de
+   * CONSOLIDAÇÃO PURA — remoção de redeclaração, sem pedir o texto novo dos GAPs (que seguem ativos).
+   * Só o laço autônomo sabe disso (é a aritmética do orçamento da run); o botão humano nunca manda.
+   */
+  consolidationOnly?: { reason: string; affordable: number; restates: number; shrinkFloor?: number } | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1637,6 +1723,18 @@ export async function dispatchGapFileJob(opts: {
       + ` passe=${p.pass} motivo=${p.reason ? "gravado" : "ausente(rodada antiga)"} chars=${priorBlock.length}`,
     );
   }
+  // 🔴 GAP-121: o prompt não é persistido (só o `reply`), então sem esta linha "o agente foi avisado de
+  // que a rodada era só de remoção" seria indemonstrável em prod — e a auditoria não poderia separar
+  // "encolheu porque foi pedido" de "encolheu por conta própria".
+  const consolidationBlock = consolidationOnlyFactBlock(opts.consolidationOnly);
+  if (consolidationBlock) {
+    const c = opts.consolidationOnly!;
+    console.log(
+      `[SpecChat] rodada de CONSOLIDAÇÃO PURA alvo=${opts.filePath} redeclarações=${c.restates}`
+      + ` margem=${c.affordable} gaps_como_contexto=${opts.findings.length} chars=${consolidationBlock.length}`
+      + ` motivo=${c.reason}`,
+    );
+  }
 
   _chatJobs.set(opts.jobId, {
     id: opts.jobId, status: "pending", createdAt: Date.now(),
@@ -1654,19 +1752,25 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorBlock, persistentBlock, focusBlock, priorOutcomeBlock,
+        priorBlock, persistentBlock, focusBlock, priorOutcomeBlock, consolidationBlock,
       ),
       ...opts.llm,
     },
     opts.agentsUrl,
-    `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
+    consolidationBlock
+      ? `Consolidação de \`${opts.filePath}\` pronta (remoção de redeclaração; os ${opts.findings.length} GAP(s) seguem abertos).`
+      : `Revisão dos ${opts.findings.length} GAP(s) de \`${opts.filePath}\` pronta.`,
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
     // continua comparando a mesma impressão.
     gapFileEditsEnabled() ? opts.fileContent : null,
     // 🔴 A1: a MESMA lista, na MESMA ordem, é o que dá sentido ao número que o agente declara. Passar
     // outra lista (ou reordenada) faria o desfecho apontar para o GAP errado — daí ela viajar junto
     // com o pedido em vez de ser recuperada depois.
-    opts.findings,
+    // 🔴 GAP-121: `null` na consolidação pura. A prestação de contas é lida da resposta e o que falta
+    // vira `nao_declarado` — cobrar desfecho de conserto que ESTE pedido não fez gravaria em
+    // `gap_outcomes` uma leva de omissões que são decisão do laço, e o A1 as devolveria ao agente na
+    // rodada seguinte como dívida dele. Rodada que não pede conserto não cobra conta.
+    consolidationBlock ? null : opts.findings,
   );
   return { ok: true, gaps: opts.findings.length };
 }

@@ -962,6 +962,34 @@ describe("POST /api/spec-chat — PR-4: Resolver GAPs por arquivo", () => {
     expect(legacy).not.toContain("MOTIVO EXATO");
   });
 
+  /**
+   * 🔴 GAP-121 — medido na run `3660bcf2` (NVX LastMile): 9 das 24 rodadas não escreveram NADA, todas
+   * com margem 0 e todas com o pedido combinado ("resolva os GAPs E consolide"). Consolidar encolhe,
+   * resolver GAP cresce, e o veto julga o delta LÍQUIDO tudo-ou-nada. O bloco troca o PEDIDO, e o que
+   * ele não pode fazer é convidar ao fechamento falso: os GAPs seguem ativos e a seção deles não sai.
+   */
+  it("consolidationOnlyFactBlock: pede remoção, declara os GAPs ATIVOS e proíbe apagar a seção", async () => {
+    const { consolidationOnlyFactBlock } = await import("./specChat.js");
+    const block = consolidationOnlyFactBlock({
+      reason: "a margem de crescimento do laço é 0 chars (abaixo do piso de 200 em que uma errata de GAP caberia)",
+      affordable: 0, restates: 60, shrinkFloor: 42_000,
+    });
+    expect(block).toContain("CONSOLIDAÇÃO PURA");
+    expect(block).toContain("60 contrato(s)");
+    expect(block).toContain("a margem de crescimento do laço é 0 chars");
+    expect(block).toContain("ENCOLHER");
+    // O anti-fechamento-falso: o GAP não se fecha por omissão nem por remoção do assunto.
+    expect(block).toContain("seguem ATIVOS");
+    expect(block).toContain("NÃO apague a seção");
+    // O piso do `MIN_SHRINK_RATIO` é FATO: sem ele, "encolha" convida ao corte que veta a própria rodada.
+    expect(block).toContain("42000 caracteres");
+    // Rodada normal não recebe aviso nenhum.
+    expect(consolidationOnlyFactBlock(null)).toBe("");
+    expect(consolidationOnlyFactBlock(undefined)).toBe("");
+    // Piso ausente (chamador antigo) não imprime "undefined caracteres" no prompt.
+    expect(consolidationOnlyFactBlock({ reason: "x", affordable: 0, restates: 2 })).not.toContain("undefined");
+  });
+
   it("rawMaxTokensFor: piso de 8k, cresce com o arquivo, teto de 32k (guard do SDK)", async () => {
     const { rawMaxTokensFor } = await import("./specChat.js");
     expect(rawMaxTokensFor(0)).toBe(8_000);

@@ -301,6 +301,14 @@ export interface AutonomyRoundLog {
    */
   consolidationGrace?: number | null;
   /**
+   * 🔴 GAP-121: esta rodada foi despachada como CONSOLIDAÇÃO PURA — o laço mediu que não havia margem
+   * para o arquivo crescer, então NÃO pediu o texto novo dos GAPs (eles seguem ativos), só a remoção
+   * das redeclarações deixando a citação do oráculo. Presente só quando `true`, e é o que impede duas
+   * leituras falsas do log: "a rodada não fechou nenhum GAP" (não foi pedido) e as âncoras
+   * `intocadas` (não foram pedidas — por isso a rodada nem as registra).
+   */
+  consolidationOnly?: boolean | null;
+  /**
    * GAP-41: a diferença finding-a-finding do PASSE — quantos GAPs saíram e quantos entraram. O
    * agregado (`gapsBefore`/`gapsAfter`) pode ficar parado com o laço fechando e abrindo a mesma
    * quantidade; foi exatamente o que aconteceu em prod, e sem estes dois números não havia como
@@ -1165,6 +1173,119 @@ export function consolidationGraceLeft(
   if (!Number.isFinite(pool) || pool <= 0) return 0;
   const total = pool * ((run.passes ?? 0) + 1);
   return Math.max(0, total - runConsolidationGraceUsed(run));
+}
+
+/**
+ * 🔴 GAP-121 — piso abaixo do qual PEDIR crescimento é desperdício certo.
+ *
+ * Medido na run `3660bcf2` (NVX LastMile): as rodadas que o laço APLICOU cresceram 58, 85, 306, 485,
+ * 719, 767, 879, 905 e 1.346 chars. Nenhuma delas caberia em 200 chars: a errata precisa da citação do
+ * oráculo mais a frase normativa. Abaixo desse piso a rodada nasce condenada ao veto — e cada veto é
+ * uma chamada de Opus 5 já paga, descartada inteira.
+ *
+ * Ajustável por env porque é um número medido numa spec (1,02 M chars, 12 arquivos) e a próxima pode ter
+ * outra escala. Com `0` o gatilho por piso passa a valer só para margem ZERO (ou negativa) — o caso em
+ * que crescer é aritmeticamente impossível, não uma estimativa.
+ */
+export const CONSOLIDATION_ONLY_FLOOR = Math.max(0, Number(process.env.SPEC_CONSOLIDATION_ONLY_FLOOR ?? "200") || 0);
+
+/**
+ * 🔴 GAP-121 — kill-switch do pedido de consolidação pura.
+ *
+ * Existe porque isto muda o que o laço PEDE ao LLM em produção: se a remoção sozinha se revelar pior
+ * que o pedido combinado, `SPEC_CONSOLIDATION_ONLY=off` volta ao comportamento de semanas sem deploy.
+ * Ligado por padrão — o comportamento anterior está medido como incapaz de escrever (margem 0).
+ */
+export function consolidationOnlyEnabled(): boolean {
+  return (process.env.SPEC_CONSOLIDATION_ONLY ?? "on").trim().toLowerCase() !== "off";
+}
+
+/**
+ * 🔴 GAP-121 (2026-09-08) — o laço pedia CRESCIMENTO com margem ZERO, e o mesmo arquivo era descartado
+ * passe após passe.
+ *
+ * ## O que estava errado (MEDIDO em prod, run `3660bcf2`, projeto `e2a1988c`)
+ *
+ * **9 das 24 rodadas não escreveram NADA.** Em todas, o `announcedBudget` era **0** e o pedido da
+ * rodada era o combinado de sempre: "resolva os N GAPs deste arquivo **E** consolide as redeclarações".
+ * Consolidar é o que ENCOLHE; resolver GAP é o que CRESCE — e o veto do GAP-22 julga o DELTA LÍQUIDO,
+ * tudo-ou-nada. Resultado: os 4 arquivos que redeclaram mais contrato (`contratos-erros.md`,
+ * `infraestrutura-deploy.md`, `definicao-de-pronto.md`, `visao-escopo.md`) foram vetados nos DOIS
+ * passes, e a contagem de GAPs subiu 47 → 48.
+ *
+ * O agente não é o problema: entre o passe 0 e o 1 ele reduziu a entrega de +2.547 para +324 chars
+ * (aprendeu com o `rejectedReason` do GAP-31). O teto é que havia ido a zero — o piso do GAP-69
+ * (`ORÇAMENTO × (passes + 1)` = 2.000/passe) foi consumido pelos 3 PRIMEIROS arquivos da fila, numa
+ * spec de 1,02 milhão de chars com 47 GAPs abertos. Os 9 arquivos seguintes recebiam margem 0.
+ *
+ * ## Por que não é "subir o teto"
+ *
+ * Subir o teto é reabrir o GAP-8 (a spec inflando 15% em 8 h com a contagem SUBINDO) e desfazer o
+ * GAP-69 — o orçamento voltaria a ser meta de gasto. Repartir o teto por arquivo (fair-share) também
+ * não resolve: 2.000/12 = 167 chars por arquivo é MENOS que o piso acima, e converteria "3 escrevem, 9
+ * não" em "nenhum escreve".
+ *
+ * O crédito que falta já existe na própria spec: `definicao-de-pronto.md` redeclara **60** contratos de
+ * outros arquivos. Remover redeclaração LIBERA milhares de chars. O defeito é de ORDEM: o laço nunca
+ * pede a remoção SOZINHA, então ela nunca acontece, então o crédito nunca nasce.
+ *
+ * ## O que muda
+ *
+ * Quando o arquivo redeclara oráculo e a aritmética diz que crescer é impossível, a rodada é
+ * despachada como CONSOLIDAÇÃO PURA: só a remoção, com os GAPs listados como CONTEXTO e declarados
+ * ATIVOS. Delta esperado ≤ 0 ⇒ passa o veto ⇒ o encolhimento credita `growthAllowance` e financia as
+ * rodadas seguintes. O código não escolhe o que remover, nem como citar, nem qual contrato vence
+ * (isso é do registro de oráculos e do agente) — ele só para de pedir o que não pode pagar. Mesma lei
+ * do GAP-31/GAP-37 (não descrever o pedido errado) e do GAP-81 (rodada dedicada).
+ *
+ * Devolve o MOTIVO (que vai ao prompt e ao log) ou `null` quando a rodada normal pode acontecer.
+ */
+export function consolidationOnlyReason(
+  /** Quantos contratos de OUTRO arquivo este arquivo redeclara (`oracleRoleForFile().restates`). */
+  restates: number,
+  /** Margem + tolerância + graça que esta rodada teria para crescer. */
+  affordable: number,
+  /** GAP-29: o delta que a ÚLTIMA tentativa deste arquivo entregou e o veto descartou. */
+  priorRejectedDelta: number | null,
+): string | null {
+  // Sem redeclaração não existe "o que consolidar": pedir só remoção seria pedir o vazio.
+  if (restates <= 0) return null;
+  if (!Number.isFinite(affordable) || affordable <= CONSOLIDATION_ONLY_FLOOR) {
+    return `a margem de crescimento do laço é ${Math.max(0, Math.trunc(affordable) || 0)} chars`
+      + ` (abaixo do piso de ${CONSOLIDATION_ONLY_FLOOR} em que uma errata de GAP caberia)`;
+  }
+  // O caso com margem: só é desperdício certo se o próprio arquivo JÁ entregou mais do que cabe hoje.
+  // É fato medido (`rejectedDelta` do log), não previsão sobre o que o agente vai escrever.
+  if (typeof priorRejectedDelta === "number" && priorRejectedDelta > affordable) {
+    return `a tentativa anterior deste arquivo entregou +${priorRejectedDelta} chars e a margem de hoje`
+      + ` é ${Math.trunc(affordable)}`;
+  }
+  return null;
+}
+
+/**
+ * 🔴 GAP-121 — a consolidação pura deste arquivo JÁ foi pedida e não liberou nada?
+ *
+ * A guarda existe porque o gatilho é auto-alimentado: enquanto a margem for zero e o arquivo redeclarar
+ * oráculo, TODA rodada dele seria de consolidação. Se a primeira não encolher (o agente não achou o que
+ * remover, as edições não ancoraram, o apply recusou), repetir o mesmo pedido queima o laço num arquivo
+ * que já respondeu — e os GAPs dele nunca voltariam a ser pedidos. Uma tentativa por arquivo por PASSE:
+ * o passe seguinte pode ter fatos novos (outro arquivo encolheu, o registro de oráculos mudou).
+ *
+ * Só conta como "já tentada" a rodada TERMINAL: uma consolidação ainda em voo (sem `applied`) não é
+ * fracasso — é a rodada corrente, e tratá-la como fracasso mataria o pedido que está sendo respondido.
+ */
+export function consolidationOnlyExhausted(
+  run: Pick<AutonomyRun, "rounds" | "passes">, filePath: string,
+): boolean {
+  if (!Array.isArray(run.rounds)) return false;
+  return run.rounds.some((r) => (
+    r?.consolidationOnly === true
+    && r?.filePath === filePath
+    && r?.pass === run.passes
+    // Terminal e sem crédito: aplicada sem encolher, ou encerrada sem aplicar nada.
+    && (r?.applied === false || (r?.applied === true && (typeof r?.deltaChars === "number" ? r.deltaChars : 0) >= 0))
+  ));
 }
 
 /**
@@ -2242,6 +2363,44 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // GAP-38: calculada ANTES do log da rodada, porque agora ela também é registrada (auditoria do
   // contrato de saída: pedido × entrega). O CLAIM já aconteceu acima, então nada aqui compete.
   const growthBudget = await passGrowthBudget(db, run);
+  // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
+  // 🔴 GAP-121: lido ANTES do log da rodada porque agora ele também decide QUAL pedido sai.
+  const priorRejection = lastRejectedAttempt(run, target);
+  // 🔴 GAP-121 — a rodada pode PEDIR crescimento? Ver `consolidationOnlyReason`. Best-effort: qualquer
+  // falha ao ler o registro de oráculos degrada para a rodada normal (fail-OPEN aqui é o certo — o
+  // pedido combinado é o comportamento que rodou por semanas; o que não pode é a leitura derrubar a
+  // rodada que ia escrever o arquivo).
+  const consolidationOnly = await (async () => {
+    try {
+      const {
+        loadOracleDecisions, oracleRoleForFile, oracleRegistryEnabled, growthOverflowTolerance,
+        ORACLE_CONSOLIDATION_GRACE,
+      } = await import("./specOracles.js");
+      if (!oracleRegistryEnabled() || !consolidationOnlyEnabled()) return null;
+      // 🔴 GAP-121: já pedimos a remoção deste arquivo neste passe e ela não liberou nada — não repetir.
+      if (consolidationOnlyExhausted(run, target)) {
+        console.log(
+          `[SpecAutonomy] GAP-121 consolidação pura já tentada sem crédito neste passe`
+          + ` run=${run.id.slice(0, 8)} arquivo=${target} passe=${run.passes} → rodada normal`,
+        );
+        return null;
+      }
+      const decisions = await loadOracleDecisions(db, run.projectId);
+      if (decisions.length === 0) return null;
+      const { restates } = oracleRoleForFile(decisions, target);
+      // A MESMA aritmética que o veto vai aplicar no apply (margem + tolerância + graça do passe) —
+      // se as duas contas divergissem, o laço pediria o que ele mesmo vetaria.
+      const affordable = growthBudget + growthOverflowTolerance(growthBudget)
+        + consolidationGraceLeft(run, ORACLE_CONSOLIDATION_GRACE);
+      const reason = consolidationOnlyReason(restates.length, affordable, priorRejection?.delta ?? null);
+      // 🔴 GAP-121: o PISO de encolhimento vai junto. Pedir "encolha" sem dizer até onde é armar a
+      // recusa do `MIN_SHRINK_RATIO`: um corte de 35% neste arquivo seria vetado como perda de spec e a
+      // rodada inteira (paga) morreria — exatamente o desperdício que este GAP veio matar. O número sai
+      // da MESMA constante que veta no apply; duas contas divergiriam no primeiro ajuste (lição do GAP-31).
+      const shrinkFloor = Math.ceil(file.content.length * MIN_SHRINK_RATIO);
+      return reason ? { reason, affordable, restates: restates.length, shrinkFloor } : null;
+    } catch { return null; }
+  })();
 
   await appendRoundLog(db, run.id, {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
@@ -2249,13 +2408,19 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     specChars: file.content.length, announcedBudget: growthBudget,
     // GAP-71: as âncoras vão para o log AQUI porque só o despacho as tem; a medição "o trecho ficou
     // intocado?" acontece no apply, num tick em que o escopo já não existe.
-    gapAnchors: gapAnchorsOf(fileFindings),
-    note: `\`${target}\` enviado ao CTO (${fileFindings.length} GAP(s) deste arquivo).`,
+    // 🔴 GAP-121: numa rodada de consolidação pura as âncoras NÃO vão ao log — medir "o trecho ficou
+    // idêntico?" sobre um trecho que a rodada não pediu para editar produziria acusação sem pedido
+    // (o falso positivo que o GAP-71 existe para não cometer).
+    ...(consolidationOnly ? { consolidationOnly: true } : { gapAnchors: gapAnchorsOf(fileFindings) }),
+    note: consolidationOnly
+      ? `\`${target}\` enviado ao CTO — rodada de CONSOLIDAÇÃO PURA (${consolidationOnly.reason}):`
+        + ` remover as ${consolidationOnly.restates} redeclaração(ões) deixando a citação do oráculo.`
+        + ` Os ${fileFindings.length} GAP(s) deste arquivo seguem ATIVOS e voltam quando houver margem —`
+        + " o que esta rodada liberar é o que financia a errata deles."
+      : `\`${target}\` enviado ao CTO (${fileFindings.length} GAP(s) deste arquivo).`,
   });
 
   const { dispatchGapFileJob } = await import("../routes/specChat.js");
-  // GAP-29: se a tentativa anterior neste arquivo foi descartada por tamanho, o agente recebe o FATO.
-  const priorRejection = lastRejectedAttempt(run, target);
   // 🔴 GAP-68: e se algum destes GAPs já foi entregue antes e SOBREVIVEU à edição, o agente recebe
   // esse fato também — é a única coisa que ele não pode deduzir do texto do arquivo.
   const knownRefs = await knownPersistentGaps(db, run);
@@ -2338,7 +2503,13 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       // fingerprint, não por semelhança de título). Devolver o relato de um GAP que saiu da lista
       // seria pedir trabalho sobre defeito que o juiz já não vê.
       priorOutcomes: selectPriorOutcomes(priorOutcomesAll, dispatched),
-      userMessage: focus.level > 0
+      // 🔴 GAP-121: o pedido desta rodada é a REMOÇÃO, não a errata. Os GAPs continuam indo (o agente
+      // precisa saber quais seções importam), mas rotulados como contexto ativo — ver
+      // `consolidationOnlyFactBlock`.
+      consolidationOnly,
+      userMessage: consolidationOnly
+        ? `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: rodada de CONSOLIDAÇÃO PURA em \`${target}\` — ${consolidationOnly.reason}. Remover redeclaração e citar o oráculo; os ${fileFindings.length} GAP(s) do arquivo seguem ATIVOS.`
+        : focus.level > 0
         ? `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: rodada DEDICADA em \`${target}\` — ${dispatched.length} GAP(s) reincidente(s) de ${fileFindings.length} (${focus.deferred} adiado(s), seguem ativos).`
         : `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
     });
@@ -2773,7 +2944,10 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const passBudget = await passGrowthBudget(db, run);
   // GAP-37: quantos GAPs esta rodada pediu — o log do despacho é a fonte (o escopo já não está em
   // memória neste tick). Sem o número, a recusa descreveria o pedido errado ao agente.
-  const dispatched = lastRound?.round === run.round
+  // 🔴 GAP-121: numa rodada de consolidação pura o laço NÃO pediu a errata dos GAPs — contá-los aqui
+  // faria a recusa afirmar "a rodada pediu DUAS coisas" (o texto do GAP-37) sobre um pedido que pediu
+  // UMA, e a retentativa otimizaria a coisa errada. Mesma lei do GAP-31: não descrever o pedido errado.
+  const dispatched = lastRound?.round === run.round && lastRound.consolidationOnly !== true
     ? (lastRound.blockers ?? 0) + (lastRound.warnings ?? 0)
     : 0;
   // 🔴 GAP-70: quanto o laço ainda pode emprestar a uma rodada que consolidou. Lido do log da run —
