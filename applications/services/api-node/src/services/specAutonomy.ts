@@ -1577,6 +1577,73 @@ function verdictNote(v: NonNullable<Awaited<ReturnType<typeof promotionVerdictFo
 }
 
 /**
+ * 🔴 GAP-115 — o fim de laço é UM só: onde o orçamento acaba com GAPs importantes em aberto, o juiz
+ * julga os reincidentes.
+ *
+ * MEDIDO em prod (run `10b1a4e1`, 30 rodadas, 2 passes, 44 → 44 GAPs): o veredicto de promovibilidade
+ * só era chamado no tick `validating`, nos dois fins de laço dali (teto de passes e streak de
+ * não-progresso). Esta run acabou por um TERCEIRO fim, em `startFileRound` — o **teto de arquivos do
+ * laço** — que nunca chamou o juiz. Ou seja: a run com mais trabalho pago encerrou sem veredicto
+ * nenhum, e a única saída LEGAL do laço (o juiz decidindo se o GAP impede promover, decisão do Jean de
+ * 2026-09-07) era inalcançável por construção sempre que o teto de arquivos chegasse antes.
+ *
+ * Devolve o parecer em prosa (`""` quando o recurso está desligado ou o veredicto não pôde rodar) e
+ * grava os números na última rodada — o MESMO bloco que o tick `validating` já gravava, agora em um
+ * lugar só, para que nenhum fim de laço futuro nasça sem ele.
+ */
+async function verdictAtLoopEnd(
+  db: Db, run: AutonomyRun, endReason: "exhausted" | "stalled",
+  ctx?: { coverage: unknown; unjudged: string[] },
+): Promise<string> {
+  let coverage = ctx?.coverage;
+  let unjudged = ctx?.unjudged;
+  if (!ctx) {
+    // Sem validação em mão (fim de laço vindo de `startFileRound`): a cobertura é a da última
+    // validação terminal, a MESMA fonte que o `coberturaAcumulada` usa. Falha de leitura ⇒ `undefined`
+    // e o gate trata como "não sei quais arquivos foram julgados", que já é o caminho conservador.
+    coverage = (await db.query(
+      `SELECT stage_b_coverage FROM spec_validation_runs
+        WHERE project_id = $1 AND status IN ('passed','failed') AND stage_b_coverage IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1`,
+      [run.projectId],
+    ).catch(() => ({ rows: [] as Array<{ stage_b_coverage?: unknown }> }))).rows[0]?.stage_b_coverage;
+    const cob = await coberturaAcumulada(db, run.projectId).catch(() => null);
+    unjudged = cob ? [...cob.pendentes, ...cob.grandes] : [];
+  }
+  const v = await promotionVerdictFor(db, run, { coverage, unjudged: unjudged ?? [], endReason });
+  if (!v) return "";
+  await patchLastRound(db, run, {
+    verdictCandidates: v.gate.candidates.length,
+    verdictReleased: v.round?.released ?? 0,
+    verdictImpeditive: v.report.impeditive,
+    promotable: v.report.promotable,
+    // 🔴 GAP-82 — a prova de trabalho gravada com os números, inclusive `gapsClosedTotal: 0`. Sem
+    // isto o log mostraria um veredicto sem dizer por que o juiz teve autoridade para dá-lo.
+    workProof: v.work.kind,
+    verdictWork: v.work.detail,
+    gapsClosedTotal: v.loop.gapsResolved,
+    verdictFocusRounds: v.loop.focusRounds,
+    // 🔴 F2 — gravado só quando o gate rodou. `null` diz "não rodou", que é diferente de zero.
+    policyConstraints: v.policy?.constraints.length ?? null,
+    policyJudged: v.policy?.tally.judged ?? null,
+    policyJudgeable: v.policy?.tally.judgeable ?? null,
+    policySatisfied: v.policy?.tally.satisfied ?? null,
+    policyBlocking: v.policy?.tally.blocking ?? null,
+    policyPending: v.policy?.tally.pending ?? null,
+    // GAP-89: sem este campo, `pending` virando `indecidivel` pela execução real seria
+    // indistinguível de constraint verificada no log da rodada.
+    policyIndecidivel: v.policy?.tally.indecidivel ?? null,
+    policyOracleApplied: v.policy?.oracleApplied ?? null,
+    policyNote: v.policy ? (await import("./specPolicyGate.js")).policyNote(v.policy.tally) : null,
+    // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
+    // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.
+    verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),
+    note: verdictNote(v).trim(),
+  }, { keepNote: true });
+  return verdictNote(v);
+}
+
+/**
  * 🔴 GAP-43 — quantas vezes esta run já terminou um passe SEM medição?
  *
  * Deriva do log (nada de coluna nova): a rodada que fecha um passe não medido leva a marca
@@ -1964,8 +2031,10 @@ async function consolidationVeto(
 async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (run.passes >= run.maxRounds) {
     const gaps = await currentGaps(db, run.projectId).catch(() => null);
+    // 🔴 GAP-115: fim de laço com GAPs em aberto ⇒ o juiz julga os reincidentes aqui também.
+    const verdicto = (gaps?.important ?? 0) > 0 ? await verdictAtLoopEnd(db, run, "exhausted") : "";
     await finishRun(db, run, "exhausted",
-      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)). Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
+      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${verdicto} Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
     return true;
   }
   // GAP-3: o teto de arquivos é do PASSE (o do laço inteiro é o `TOTAL`). Sem isto, uma spec com mais
@@ -1974,10 +2043,14 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS || run.round >= AUTONOMY_MAX_TOTAL_FILE_ROUNDS) {
     const gaps = await currentGaps(db, run.projectId).catch(() => null);
     const perPass = roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS;
+    // 🔴 GAP-115: era ESTE o desfecho da run `10b1a4e1` (30 arquivos, 44 GAPs) — o laço gastou tudo e
+    // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.
+    const verdicto = (gaps?.important ?? 0) > 0 ? await verdictAtLoopEnd(db, run, "exhausted") : "";
     await finishRun(db, run, "exhausted",
-      perPass
-        ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo). Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`
-        : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido. Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
+      (perPass
+        ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo).`
+        : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido.`)
+      + `${verdicto} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
       { gaps });
     return true;
   }
@@ -3322,43 +3395,13 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 GAP-77 — antes de mandar o humano "tratar à mão", o juiz julga os REINCIDENTES. É o fim de
     // laço que o Jean descreveu: o defeito voltou depois de foco individual pago, então cabe decidir
     // se ele impede a entrega — em vez de o laço empatar para sempre num número que oscila (GAP-76).
-    const v = await promotionVerdictFor(db, run, {
+    // 🔴 GAP-82: qual dos dois fins de laço chegou aqui — é o fato que sustenta a prova por
+    // esgotamento. `atCap` = teto de passes/rodadas; senão, streak de não-progresso.
+    // 🔴 GAP-115: o corpo do veredicto vive em `verdictAtLoopEnd`, porque agora há mais de um fim de
+    // laço que precisa dele (o teto de arquivos de `startFileRound` não tinha nenhum).
+    const verdicto = await verdictAtLoopEnd(db, run, atCap ? "exhausted" : "stalled", {
       coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [],
-      // 🔴 GAP-82: qual dos dois fins de laço chegou aqui — é o fato que sustenta a prova por
-      // esgotamento. `atCap` = teto de passes/rodadas; senão, streak de não-progresso.
-      endReason: atCap ? "exhausted" : "stalled",
     });
-    if (v) {
-      await patchLastRound(db, run, {
-        verdictCandidates: v.gate.candidates.length,
-        verdictReleased: v.round?.released ?? 0,
-        verdictImpeditive: v.report.impeditive,
-        promotable: v.report.promotable,
-        // 🔴 GAP-82 — a prova de trabalho gravada com os números, inclusive `gapsClosedTotal: 0`. Sem
-        // isto o log mostraria um veredicto sem dizer por que o juiz teve autoridade para dá-lo.
-        workProof: v.work.kind,
-        verdictWork: v.work.detail,
-        gapsClosedTotal: v.loop.gapsResolved,
-        verdictFocusRounds: v.loop.focusRounds,
-        // 🔴 F2 — gravado só quando o gate rodou. `null` diz "não rodou", que é diferente de zero.
-        policyConstraints: v.policy?.constraints.length ?? null,
-        policyJudged: v.policy?.tally.judged ?? null,
-        policyJudgeable: v.policy?.tally.judgeable ?? null,
-        policySatisfied: v.policy?.tally.satisfied ?? null,
-        policyBlocking: v.policy?.tally.blocking ?? null,
-        policyPending: v.policy?.tally.pending ?? null,
-        // GAP-89: sem este campo, `pending` virando `indecidivel` pela execução real seria
-        // indistinguível de constraint verificada no log da rodada.
-        policyIndecidivel: v.policy?.tally.indecidivel ?? null,
-        policyOracleApplied: v.policy?.oracleApplied ?? null,
-        policyNote: v.policy ? (await import("./specPolicyGate.js")).policyNote(v.policy.tally) : null,
-        // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
-        // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.
-        verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),
-        note: verdictNote(v).trim(),
-      }, { keepNote: true });
-    }
-    const verdicto = v ? verdictNote(v) : "";
     if (atCap) {
       await finishRun(db, run, "exhausted",
         `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${verdicto} Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });

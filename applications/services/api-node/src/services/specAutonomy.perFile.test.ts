@@ -67,17 +67,41 @@ vi.mock("./findingTriage.js", async (importOriginal) => ({
   comparableTallySinceLastRun: vi.fn(async () => null),
 }));
 
-// GAP-77: neste arquivo o veredicto fica DESLIGADO (`minGapsResolved: 0`) — o objeto de teste é a fila
-// do modo por arquivo, e o parecer do juiz tem suíte própria (`gapPromotionVerdict.test.ts`) mais os
-// testes de fim de laço em `specAutonomy.test.ts`.
+// GAP-77: neste arquivo o veredicto fica DESLIGADO por padrão (`minGapsResolved: 0`) — o objeto de
+// teste é a fila do modo por arquivo, e o parecer do juiz tem suíte própria
+// (`gapPromotionVerdict.test.ts`) mais os testes de fim de laço em `specAutonomy.test.ts`.
+// 🔴 GAP-115: os fins de laço DESTE modo (tetos de `startFileRound`) não chamavam o juiz, então o
+// dublê passou a ser LIGÁVEL (`veredicto = {...}`) só para provar essa chamada.
+let veredicto: { candidates: number; released: number; impeditive: number; promotable: boolean } | null = null;
 vi.mock("./gapPromotionVerdict.js", () => ({
-  verdictConfig: vi.fn(() => ({ minGapsResolved: 0, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8 })),
+  verdictConfig: vi.fn(() => ({ minGapsResolved: veredicto ? 3 : 0, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8 })),
   // 🔴 GAP-81: `startFileRound` lê as rodadas já pagas neste arquivo para decidir o degrau de foco.
   // Vazio por padrão = nenhuma escalada (o resto da suíte mede o comportamento normal); os casos de
   // foco enchem `rodadasPagas`. A lógica do planejador tem suíte própria (`gapFocus.test.ts`).
   focusRoundsByFile: vi.fn(async () => rodadasPagas),
   focusRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
   attackedRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
+  anchoredSection: vi.fn(() => "## 1. Seção 1\ntexto\n"),
+  proveWork: vi.fn(() => ({ proven: true, kind: "exhausted", detail: "laço ESGOTADO (exhausted) com 0 GAP(s) fechado(s)" })),
+  specFileShas: vi.fn(async () => new Map<string, string>()),
+  selectVerdictCandidates: vi.fn(() => ({
+    candidates: Array.from({ length: veredicto?.candidates ?? 0 }, (_, i) => ({
+      finding: { severity: "blocker", title: `t${i}` }, fingerprint: `fp${i}`, file: "backend/01-api.md",
+      anchor: `## ${i}`, times: 4, focusRounds: 0, attackedRounds: 3, section: "trecho",
+    })),
+    rejected: [], enabled: true, reason: `${veredicto?.candidates ?? 0} GAP(s) elegível(is) a veredicto`,
+  })),
+  runVerdictRound: vi.fn(async () => ({
+    verdicts: [], ran: true, reason: `${veredicto?.released ?? 0} declarado(s) não-impeditivo(s)`,
+    released: veredicto?.released ?? 0, model: "dublê",
+  })),
+  saveVerdicts: vi.fn(async () => 0),
+  livePromotionVerdicts: vi.fn(async () => []),
+  promotabilityReport: vi.fn(() => ({
+    impeditive: veredicto?.impeditive ?? 0, released: veredicto?.released ?? 0,
+    promotable: veredicto?.promotable ?? false,
+    blockers: veredicto?.promotable ? [] : [`${veredicto?.impeditive ?? 0} GAP(s) importante(s) seguem impeditivos`],
+  })),
 }));
 let rodadasPagas = new Map<string, number>();
 
@@ -86,6 +110,9 @@ let rodadasPagas = new Map<string, number>();
 let unroutedFindings: F[] = [];
 vi.mock("./specGapScope.js", () => ({
   loadSpecFiles: vi.fn(async () => tree),
+  // 🔴 GAP-115: o veredicto de fim de laço lê os GAPs SEM arquivo por aqui. Vazio = todos roteados,
+  // que é a premissa desta suíte (a fila só existe porque cada GAP tem arquivo).
+  gapScopeForProject: vi.fn(async () => ({ unrouted: [] as F[] })),
   buckets: vi.fn((groups: { files: TreeFile[]; byPath: Map<string, F[]> }) => groups.files.map((f) => {
     const list = groups.byPath.get(f.path) ?? [];
     return {
@@ -365,6 +392,7 @@ beforeEach(() => {
   coberturaDaUltimaRun = null;
   validacoesPassadas = [];
   rodadasPagas = new Map();
+  veredicto = null;          // GAP-115: veredicto desligado por padrão neste arquivo
   snapshotFails = false;
   sqlLog.length = 0;
   unroutedFindings = [];
@@ -696,6 +724,78 @@ describe("tetos do laço por arquivo", () => {
     await advanceAutonomyRun(db, r.id);
     expect(run!.status).toBe("exhausted");
     expect(String(run!.last_error)).toContain("neste passe");
+  });
+
+  /**
+   * 🔴 GAP-115 — MEDIDO em prod (run `10b1a4e1`: 30 rodadas, 2 passes, 44 → 44 GAPs). O veredicto de
+   * promovibilidade só era chamado no tick `validating`. Esta run acabou pelo TETO DE ARQUIVOS, aqui em
+   * `startFileRound`, e encerrou SEM veredicto nenhum — a run com mais trabalho pago do projeto. Ou
+   * seja: a única saída LEGAL do laço (o juiz decidindo se o GAP impede promover) era inalcançável por
+   * construção sempre que o teto de arquivos chegasse antes do teto de passes.
+   */
+  describe("🔴 GAP-115 — o fim de laço por TETO DE ARQUIVOS também chama o juiz", () => {
+    it("teto do passe com GAPs em aberto: o parecer entra na mensagem final e no log", async () => {
+      veredicto = { candidates: 2, released: 0, impeditive: 2, promotable: false };
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("neste passe");
+      expect(String(run!.last_error)).toContain("promovibilidade");
+      expect(String(run!.last_error)).toContain("NÃO promovível");
+      // O fato que sustenta a autoridade do juiz (GAP-82) vai declarado, não subentendido.
+      expect(String(run!.last_error)).toContain("laço esgotou o orçamento sem fechar GAP");
+      expect((run!.rounds as Array<Record<string, unknown>>).at(-1)).toMatchObject({
+        verdictCandidates: 2, verdictImpeditive: 2, promotable: false,
+      });
+    });
+
+    it("teto do LAÇO (30 arquivos) — o desfecho exato da run `10b1a4e1` — também julga", async () => {
+      veredicto = { candidates: 1, released: 0, impeditive: 1, promotable: false };
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = [];                                    // nada gasto NESTE passe: o teto é o do laço
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("neste laço atingido");
+      expect(String(run!.last_error)).toContain("promovibilidade");
+      // A mensagem de "rode de novo para continuar" continua lá: o parecer se soma, não substitui.
+      expect(String(run!.last_error)).toContain("continuar de onde parou");
+    });
+
+    it("ZERO GAP importante no teto → nenhum veredicto (não há reincidente a julgar)", async () => {
+      veredicto = { candidates: 2, released: 0, impeditive: 2, promotable: false };
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      findings = [];                                       // spec sem GAP importante
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = [];
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).not.toContain("promovibilidade");
+    });
+
+    it("veredicto desligado no teto → mensagem antiga, sem parecer (fail-CLOSED)", async () => {
+      veredicto = null;
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = [];
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).not.toContain("promovibilidade");
+      expect(String(run!.last_error)).toContain("continuar de onde parou");
+    });
   });
 });
 
