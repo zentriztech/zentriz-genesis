@@ -182,6 +182,10 @@ def coverage_row(role: str, dossier: Dossier | None, *, budget: int) -> dict:
         "partial": list(dossier.partial),
         "omitted": list(dossier.omitted),
         "map_coverage": round(dossier.map_coverage, 4),
+        # Medido em prod (2026-09-08): com 40.000 de orçamento o mapa do Dev indexava 7 de 12 e os
+        # outros 5 saíam sem sequer serem NOMEADOS — omissão indistinguível de inexistência. O piso
+        # de nomeação fechou isso, e este número é a prova (lido do texto, não da intenção).
+        "name_coverage": round(dossier.name_coverage, 4),
         "text_coverage": round(dossier.text_coverage, 4),
         "chars_used": dossier.used,
         "chars_total": dossier.total,

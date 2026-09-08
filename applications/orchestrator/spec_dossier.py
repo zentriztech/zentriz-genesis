@@ -114,6 +114,19 @@ class Dossier:
         return 1.0 if self.files == 0 else len(self.mapped) / self.files
 
     @property
+    def name_coverage(self) -> float:
+        """Fração dos arquivos que aparecem NOMEADOS no texto entregue (piso de nomeação).
+
+        Medida no TEXTO, não na intenção: procura cada rótulo dentro de `text`. Assim ela não é 1,0
+        por construção — se o piso de nomeação de `build_outline` quebrar, este número cai, que é a
+        única forma de a garantia "nenhum arquivo desaparece calado" ser falsificável.
+        """
+        labels = [l for l in (self.included + self.omitted) if l]
+        if not labels:
+            return 1.0
+        return sum(1 for l in labels if l in self.text) / len(labels)
+
+    @property
     def text_coverage(self) -> float:
         """Fração dos CHARS da spec que chegaram verbatim."""
         return 1.0 if self.total <= 0 else self.used / self.total
@@ -159,13 +172,25 @@ def build_outline(files: list[SpecFile], *, cap: int = OUTLINE_CAP) -> tuple[str
             lines.append(f"  {'  ' * (len(level) - 1)}{'#' * len(level)} {title}")
         chunks.append((sf.label, "\n".join(lines)))
 
+    # 🔴 PISO DE NOMEAÇÃO (medido em prod 2026-09-08, GAP-54b). Com o orçamento do Dev/QA (40.000 →
+    # mapa de 13.333) a árvore do NVX indexava 7 de 12 arquivos e os outros 5 saíam do dossiê SEM
+    # SEQUER SEREM NOMEADOS: `map_coverage` 0,5833. Um arquivo que não é nomeado é indistinguível de
+    # um arquivo que não existe — o agente não tem como dizer "isto está na spec e eu não recebi", e
+    # a omissão volta a ser silenciosa, que é o defeito que este módulo existe para matar. A linha de
+    # identidade custa ~60 chars: cabe SEMPRE. A disciplina "todos os cabeçalhos ou nenhum" continua
+    # valendo — o que muda é que "nenhum" passa a ser dito em voz alta, com nome e tamanho.
+    ident = {label: chunk.split("\n", 1)[0] for label, chunk in chunks}
+    floor = sum(len(v) + 1 for v in ident.values())
+
     out: list[str] = []
     mapped: list[str] = []
     used = 0
     truncated = False
     for label, chunk in chunks:
         add = len(chunk) + (1 if out else 0)
-        if used + add > cap:
+        # O piso reservado é o dos arquivos que AINDA não foram decididos, exceto este.
+        reserve = sum(len(ident[l]) + 1 for l, _ in chunks if l not in mapped and l != label)
+        if used + add + reserve > cap:
             truncated = True
             continue
         out.append(chunk)
@@ -173,8 +198,16 @@ def build_outline(files: list[SpecFile], *, cap: int = OUTLINE_CAP) -> tuple[str
         used += add
     text = "\n".join(out)
     if truncated:
-        missing = len(chunks) - len(mapped)
-        text += f"\n… (MAPA CORTADO no orçamento: {missing} arquivo(s) não foram nem indexados)"
+        faltantes = [l for l, _ in chunks if l not in mapped]
+        text += (
+            f"\n\n… ÍNDICE DE SEÇÕES NÃO COUBE para {len(faltantes)} arquivo(s) — eles EXISTEM na "
+            "spec e estão nomeados abaixo. Se precisar de um deles, DIGA que faltou; não conclua "
+            "que não existe:\n" + "\n".join(ident[l] + " — sem índice de seções neste orçamento" for l in faltantes)
+        )
+    if floor > cap:
+        # Caso degenerado: nem os nomes cabem. Aí o mapa é só a lista de nomes, e o texto acima
+        # já a contém — mas registramos que o próprio piso foi rompido em vez de fingir que não.
+        text += "\n… (o orçamento do mapa não cabe nem a lista de nomes)"
     return text, mapped, truncated
 
 
