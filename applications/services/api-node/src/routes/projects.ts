@@ -3170,6 +3170,41 @@ export async function projectRoutes(app: FastifyInstance) {
     }
   );
 
+  // GET /api/projects/:id/spec-oracles — 🔴 GAP-54b: a tabela de FONTE ÚNICA de cada contrato.
+  //
+  // A Bancada decide, por AGENTE, qual arquivo é normativo para cada contrato em disputa (GAP-22,
+  // `spec_oracle_decisions`) e essa decisão morria aqui: a jusante, o Dev recebia dois arquivos que
+  // dizem coisas diferentes sobre paginação e escolhia sozinho — reabrindo a contradição que a
+  // Bancada havia FECHADO. Esta rota é transporte puro de fato já decidido: read-only, sem LLM.
+  app.get<{ Params: { id: string } }>(
+    "/api/projects/:id/spec-oracles",
+    async (request, reply) => {
+      const user = getUser(request);
+      const { id } = request.params;
+      const client = await pool.connect();
+      try {
+        const row = (await client.query(
+          "SELECT tenant_id, created_by FROM projects WHERE id = $1", [id]
+        )).rows[0];
+        if (!row) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
+        if (!canAccessProjectRow(user, row)) {
+          return reply.status(403).send({ code: "FORBIDDEN", message: "Sem permissão" });
+        }
+        const { loadOracleDecisions, oracleRegistryEnabled } = await import("../services/specOracles.js");
+        if (!oracleRegistryEnabled()) return reply.send([]);
+        const decisions = await loadOracleDecisions(client, id);
+        return reply.send(decisions);
+      } catch (err) {
+        // Oráculo é CONTEXTO para a fábrica, não pré-requisito: uma falha aqui não pode derrubar a
+        // run. Devolve lista vazia (o dossiê sai sem a tabela) e registra.
+        request.log.warn({ err, projectId: id }, "[GAP-54b] falha ao carregar oráculos da spec");
+        return reply.send([]);
+      } finally {
+        client.release();
+      }
+    }
+  );
+
   // PATCH /api/projects/:id/spec-content — atualiza spec existente (sem criar novo projeto)
   app.patch<{ Params: { id: string }; Body: { specMarkdown: string; title?: string; startNow?: boolean; baseSha?: string } }>(
     "/api/projects/:id/spec-content",

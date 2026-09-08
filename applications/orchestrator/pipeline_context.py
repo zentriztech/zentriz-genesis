@@ -191,6 +191,21 @@ class PipelineContext:
         self.spec_raw = ""
         self.product_spec = ""
         self.product_spec_template = ""
+        # 🔴 GAP-54b — a árvore ÍNTEGRA da spec, para o dossiê dos papéis a JUSANTE.
+        # `spec_raw`/`product_spec` já nascem cortados em `_SPEC_CAP` (145.000), então nenhum dos dois
+        # serve de fonte para recortar por arquivo depois: o recorte já aconteceu. A árvore inteira
+        # (1.067.990 chars no NVX) fica em cache de PROCESSO e NÃO entra no checkpoint — persistir 1 MB
+        # a cada `save_checkpoint` seria pagar em disco por algo que `load_spec_all` recarrega de graça.
+        # O que persiste é a CONTABILIDADE (chars/arquivos), que é o número falsificável.
+        self._spec_tree: "list[Any] | None" = None
+        self.spec_tree_chars: int = 0
+        self.spec_tree_files: int = 0
+        # Tabela de oráculos da Bancada (`specOracles`, GAP-22): qual arquivo é a fonte ÚNICA de cada
+        # contrato. Decisão de AGENTE, já tomada e persistida lá — aqui só viaja como FATO para quem
+        # constrói. Sem ela o Dev reabre a contradição que a Bancada fechou.
+        self.spec_oracles: list[dict[str, Any]] = []
+        # Cobertura do dossiê por papel (observabilidade — `coverage_row` de `spec_focus`).
+        self.spec_dossier_coverage: list[dict[str, Any]] = []
         self.engineer_proposal = ""
         self.charter = ""
         self.backlog = ""
@@ -245,6 +260,81 @@ class PipelineContext:
 
     def set_product_spec_template(self, value: str) -> None:
         self.product_spec_template = (value or "")[: self._CTX_CAP]
+
+    # ── GAP-54b: a spec ÍNTEGRA como fonte do dossiê a jusante ────────────────────────────────
+
+    def set_spec_tree(self, spec_content: str) -> None:
+        """Registra a árvore ÍNTEGRA da spec (saída de `load_spec_all`), SEM corte.
+
+        Chamado pelo runner com o texto completo, ANTES de qualquer `fit_spec_to_budget`. É o único
+        ponto do contexto que vê a spec inteira — e é de propósito: recortar aqui reintroduziria o
+        defeito do GAP-54 (a fonte do recorte já vinha recortada, então o recorte por arquivo lá
+        embaixo escolhia entre migalhas).
+        """
+        from orchestrator.spec_dossier import parse_spec_blocks
+
+        text = spec_content or ""
+        self._spec_tree = parse_spec_blocks(text) if text else None
+        self.spec_tree_chars = len(text)
+        self.spec_tree_files = len(self._spec_tree or [])
+
+    def set_spec_oracles(self, oracles: "list[dict[str, Any]] | None") -> None:
+        """Tabela de oráculos decidida na Bancada. Cap de 60 = o teto que a própria decisão usa."""
+        self.spec_oracles = [o for o in (oracles or []) if isinstance(o, dict)][:60]
+
+    def _spec_read_cap(self) -> int:
+        """Teto FÍSICO de leitura de spec do modelo em uso — fim da escala dos orçamentos por papel."""
+        try:
+            from orchestrator.agents.runtime import _get_model_for_role, _prompt_budget
+
+            return int(_prompt_budget(_get_model_for_role("DEV"), reemits_spec=False).get("product_spec", 0))
+        except Exception as exc:  # pragma: no cover — ambiente sem runtime resolvido
+            logger.debug("[GAP-54b] teto de leitura indisponível (%s); usando o cap da spec", exc)
+            return self._SPEC_CAP
+
+    def spec_dossier_for(self, role: str, focus_texts: "list[str] | None" = None) -> str:
+        """Dossiê da spec para um papel a jusante. `""` = nada a emitir (mantém o caminho antigo).
+
+        Registra a cobertura em `spec_dossier_coverage` a CADA emissão — inclusive quando não emite,
+        porque "não emitiu" é justamente o que precisa ser visível (cauda muda é o defeito).
+        """
+        from orchestrator import spec_focus
+
+        if not self._spec_tree:
+            # Cauda MUDA é o defeito, não a ausência do dossiê: se a contabilidade diz que havia
+            # árvore (checkpoint restaurado noutro processo) e ela não está aqui, isso tem de virar
+            # linha — senão PM/Dev/QA voltam ao "nada" de antes do GAP-54b sem ninguém notar.
+            if self.spec_tree_files:
+                logger.warning(
+                    "[GAP-54b] %s sem dossiê: o checkpoint diz %d arquivo(s)/%d chars de spec, mas a "
+                    "árvore não está neste processo (falta `set_spec_tree`).",
+                    role.upper(), self.spec_tree_files, self.spec_tree_chars,
+                )
+                self._record_dossier_row({
+                    "role": role.upper(), "emitted": False, "reason": "spec_tree_missing_in_process",
+                    "spec_tree_files": self.spec_tree_files,
+                })
+            return ""
+        read_cap = self._spec_read_cap()
+        text, dossier = spec_focus.build_role_dossier(
+            role,
+            self._spec_tree,
+            read_cap=read_cap,
+            focus_texts=focus_texts or [],
+            oracles=self.spec_oracles,
+        )
+        row = spec_focus.coverage_row(role.upper(), dossier, budget=spec_focus.role_budget(role, read_cap))
+        self._record_dossier_row(row)
+        return text
+
+    def _record_dossier_row(self, row: dict[str, Any]) -> None:
+        """Uma linha por papel: a última emissão é a que vale.
+
+        O Dev é chamado uma vez POR TASK — acumular todas encheria o checkpoint com o mesmo dado e
+        faria o artefato crescer sem informação nova.
+        """
+        self.spec_dossier_coverage = [r for r in self.spec_dossier_coverage if r.get("role") != row.get("role")]
+        self.spec_dossier_coverage.append(row)
 
     def set_engineer_proposal(self, value: str) -> None:
         self.engineer_proposal = (value or "")[: self._CTX_CAP]
@@ -308,6 +398,13 @@ class PipelineContext:
             "product_spec": self.product_spec,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        # 🔴 GAP-54b: o Engineer deriva a ARQUITETURA do produto a partir de 9,1% dele. Ele é chamado
+        # UMA vez e não reemite a spec (devolve proposta de stack), então o teto certo é o de LEITURA e
+        # o formato certo é o dossiê — mapa de 100% dos arquivos + texto do que couber + o resto NOMEADO.
+        _dossier = self.spec_dossier_for("ENGINEER")
+        if _dossier:
+            inputs["product_spec"] = _dossier
+            inputs["spec_readonly"] = True
         if self.project_type:
             inputs["project_type"] = self.project_type
         # T-02: policy é obrigatória — Engineer deriva arquitetura obedecendo required_routes.strict
@@ -328,6 +425,13 @@ class PipelineContext:
             "module": self.current_module,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        # 🔴 GAP-54b: o PM não recebia a spec — NEM CORTADA. Ele decompunha o produto a partir do
+        # `charter` (≤40.000), que é um resumo derivado dela. O foco vem do módulo e do charter: os
+        # arquivos de spec que ELES citam literalmente (transporte, `cited_paths`).
+        _dossier = self.spec_dossier_for("PM", [str(self.current_module or ""), self.charter or ""])
+        if _dossier:
+            inputs["product_spec"] = _dossier
+            inputs["spec_readonly"] = True
         if self.project_type:
             inputs["project_type"] = self.project_type
         # T-02: policy — PM seed backlog cobrindo required_routes.strict + required_components
@@ -363,6 +467,30 @@ class PipelineContext:
             out["evolution_scope_violations"] = list(self.evolution_violations[task_id])[-10:]
         return out
 
+    @staticmethod
+    def _task_focus_texts(task: "dict | None", task_description: str = "") -> list[str]:
+        """Textos da task onde um nome de arquivo de spec pode aparecer CITADO.
+
+        `spec_refs` vem primeiro porque é a citação EXPLÍCITA (o PM dizendo de qual arquivo a task
+        deriva); os demais campos são o mesmo conjunto que o GAP-73 provou necessário — 8 de 25
+        literais citados apareciam só na descrição, e ficar de fora fazia o agente inventar.
+        """
+        t = task if isinstance(task, dict) else {}
+
+        def _join(value: Any) -> str:
+            if isinstance(value, (list, tuple)):
+                return "\n".join(str(x) for x in value)
+            return str(value or "")
+
+        return [
+            _join(t.get("spec_refs") or t.get("specRefs")),
+            str(t.get("title") or ""),
+            str(t.get("description") or ""),
+            _join(t.get("requirements")),
+            _join(t.get("acceptance_criteria") or t.get("acceptanceCriteria")),
+            task_description or "",
+        ]
+
     def build_inputs_for_dev(
         self,
         task: dict,
@@ -378,6 +506,15 @@ class PipelineContext:
             "backlog_summary": self.backlog,
             "constraints": ["spec-driven", "paths-resilient", "no-invent"],
         }
+        # 🔴 GAP-54b: o Dev escrevia código sem NUNCA ter visto o contrato — só `charter` + `backlog`,
+        # dois resumos em série. O foco sai do que a TASK cita literalmente (`spec_refs` quando o PM os
+        # declara, senão título/descrição/critérios): o Dev de UMA task não precisa dos 12 arquivos, e
+        # dar-lhe o teto de leitura por task multiplicaria a conta do projeto (ataque de custo do
+        # adversarial cross-família, 2026-09-08). O orçamento do papel é `SPEC_DOSSIER_DEV_CHARS`.
+        _dossier = self.spec_dossier_for("DEV", self._task_focus_texts(task, task_description))
+        if _dossier:
+            inputs["product_spec"] = _dossier
+            inputs["spec_readonly"] = True
         if self.project_type:
             inputs["project_type"] = self.project_type
         # T-02: policy — Wave 1 (T-07) codifica precedência nos Dev prompts;
@@ -570,6 +707,15 @@ class PipelineContext:
             "spec_raw": self.spec_raw,
             "product_spec": self.product_spec,
             "product_spec_template": self.product_spec_template,
+            # 🔴 GAP-54b — a ÁRVORE não entra aqui (1 MB por checkpoint, e `load_spec_all` a
+            # recarrega de graça a cada run). O que entra é a CONTABILIDADE: quantos chars/arquivos
+            # a spec tinha e o que cada papel REALMENTE recebeu. Um checkpoint restaurado sem
+            # `set_spec_tree` volta a emitir dossiê vazio — e é justamente `spec_tree_files` > 0 com
+            # `spec_dossier_coverage` vazio que denuncia isso, em vez de a cauda ficar muda.
+            "spec_tree_chars": self.spec_tree_chars,
+            "spec_tree_files": self.spec_tree_files,
+            "spec_oracles": self.spec_oracles,
+            "spec_dossier_coverage": self.spec_dossier_coverage,
             "engineer_proposal": self.engineer_proposal,
             "charter": self.charter,
             "backlog": self.backlog,
@@ -621,6 +767,12 @@ class PipelineContext:
         ctx.spec_raw = data.get("spec_raw", "")
         ctx.product_spec = data.get("product_spec", "")
         ctx.product_spec_template = data.get("product_spec_template", "")
+        # GAP-54b: contabilidade da spec sobrevive ao restart; a árvore é reidratada pelo runner com
+        # `set_spec_tree(load_spec_all(...))` logo depois desta restauração.
+        ctx.spec_tree_chars = int(data.get("spec_tree_chars") or 0)
+        ctx.spec_tree_files = int(data.get("spec_tree_files") or 0)
+        ctx.spec_oracles = [o for o in (data.get("spec_oracles") or []) if isinstance(o, dict)]
+        ctx.spec_dossier_coverage = [r for r in (data.get("spec_dossier_coverage") or []) if isinstance(r, dict)]
         ctx.engineer_proposal = data.get("engineer_proposal", "")
         ctx.charter = data.get("charter", "")
         ctx.backlog = data.get("backlog", "")

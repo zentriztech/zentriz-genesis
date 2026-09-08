@@ -995,6 +995,100 @@ def _spec_per_file_review_enabled() -> bool:
     return os.environ.get("SPEC_REVIEW_PER_FILE", "on").strip().lower() not in ("0", "off", "false", "no")
 
 
+def _default_product_spec_cap(role: str) -> int:
+    """Teto de `product_spec` que o runtime aplicaria SEM `spec_readonly`, com o modelo deste papel.
+
+    É a linha de corte para decidir se vale levantar o orçamento (ver `_attach_spec_dossier`). A
+    conta sai do MESMO `_prompt_budget` que o runtime vai aplicar — número mágico aqui reintroduziria
+    o defeito do GAP-61, em que o teto que mordia era invisível. Sem a conta, devolvemos 0: assume-se
+    que morde, e o caminho conservador é o levantamento explícito.
+    """
+    try:
+        from orchestrator.agents.runtime import _get_model_for_role, _prompt_budget
+
+        return int(_prompt_budget(_get_model_for_role(role), reemits_spec=True).get("product_spec", 0))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[GAP-54b] teto default de product_spec indisponível (%s)", exc)
+        return 0
+
+
+def _attach_spec_dossier(
+    inputs: dict,
+    pipeline_ctx: "PipelineContext | None",
+    role: str,
+    focus_texts: list[str] | None = None,
+) -> bool:
+    """🔴 GAP-54b — troca o `product_spec` RECORTADO pelo DOSSIÊ do papel. Devolve se emitiu.
+
+    Tem de morar AQUI, e não só em `PipelineContext.build_inputs_for_*`, porque são as funções
+    `call_*` que montam o envelope de verdade — e duas delas passavam por cima do que o contexto
+    havia preparado:
+
+      • `call_engineer` sobrescrevia `inputs["product_spec"]` com `spec_content[:_spec_input_cap()]`
+        DEPOIS de `build_inputs_for_engineer`;
+      • `call_dev` e `call_qa` **nunca chamam** `build_inputs_for_dev` — montam `inputs` do zero.
+
+    Ou seja: mexer só no `PipelineContext` seria um no-op silencioso, a mesma classe de defeito do
+    `sibling_files_context` (chegava em `inputs` e nunca era emitido) e do Estágio B pulado do
+    GAP-13. Falha em obter o dossiê NÃO degrada nada: o caminho anterior segue de pé.
+    """
+    if pipeline_ctx is None:
+        return False
+    try:
+        dossier = pipeline_ctx.spec_dossier_for(role, focus_texts or [])
+    except Exception as exc:  # noqa: BLE001 — dossiê é contexto, não pré-requisito
+        logger.warning("[GAP-54b] dossiê de %s indisponível (%s); mantendo a spec recortada.", role, exc)
+        return False
+    if not dossier:
+        return False
+    inputs["product_spec"] = dossier
+    # 🔴 `spec_readonly` SÓ quando o dossiê não caberia no orçamento default — achado na revisão
+    # adversarial desta própria implementação (2026-09-08). A afirmação "este papel não reemite a
+    # spec" é verdadeira para os quatro (o Engineer devolve proposta, o PM backlog, o Dev código, o
+    # QA veredicto), mas em `_prompt_budget` ela também levanta o teto GLOBAL do prompt de 280.000
+    # para 499.200 — e o Dev/QA são chamados UMA VEZ POR TASK. Ligá-la sem necessidade liberaria
+    # ~219.000 chars de artefatos que o global vinha cortando, na chamada mais frequente do sistema:
+    # o mesmo ataque de custo que o adversarial cross-família levantou, entrando por outra porta.
+    # Com o dossiê do Dev/QA em 40.000 (< 97.066 de `product_spec` no default), o teto não morde e o
+    # orçamento deles fica IDÊNTICO ao de antes; o Engineer e o PM, que pedem mais que o default,
+    # continuam recebendo o levantamento — que é exatamente o conserto do GAP-61.
+    if len(dossier) > _default_product_spec_cap(role):
+        inputs["spec_readonly"] = True
+    # `spec_raw` é o MESMO documento cortado no orçamento de ESCRITA. Ao lado do dossiê ele gastaria o
+    # orçamento duas vezes e entregaria duas versões da spec cortadas em pontos diferentes — e a dedup
+    # do D3 no runtime NÃO pega este caso, porque o dossiê não é prefixo da spec crua.
+    inputs.pop("spec_raw", None)
+    logger.info("[GAP-54b] Dossiê da spec entregue a %s: %d chars.", role.upper(), len(dossier))
+    return True
+
+
+def _write_spec_dossier_coverage(project_id: str, pipeline_ctx: "PipelineContext | None", storage) -> None:
+    """Cobertura POR PAPEL como artefato — o número falsificável do que cada um recebeu.
+
+    Espelha `cto/spec_read_coverage.json` (GAP-54) para a jusante. Sem isto, "o Dev recebeu o
+    contrato" seria afirmação sem prova: aqui fica `text_coverage` por papel, com `omitted` NOMEADO.
+    `storage` vem por parâmetro porque no runner ele é LOCAL da run (`_project_storage()`).
+    """
+    if not project_id or pipeline_ctx is None or storage is None or not storage.is_enabled():
+        return
+    rows = list(getattr(pipeline_ctx, "spec_dossier_coverage", []) or [])
+    if not rows:
+        return
+    try:
+        storage.write_doc_by_path(
+            project_id, "cto", "cto/spec_dossier_coverage.json",
+            json.dumps({
+                "spec_tree_chars": pipeline_ctx.spec_tree_chars,
+                "spec_tree_files": pipeline_ctx.spec_tree_files,
+                "oracles": len(getattr(pipeline_ctx, "spec_oracles", []) or []),
+                "roles": rows,
+            }, ensure_ascii=False, indent=2),
+            title="Cobertura da spec por papel da Fábrica (GAP-54b)",
+        )
+    except Exception as exc:  # noqa: BLE001 — observabilidade não bloqueia a run
+        logger.warning("[GAP-54b] falha ao gravar cobertura por papel: %s", exc)
+
+
 # Fronteira de arquivo produzida por `load_spec_all` ("---\n# [caminho/arquivo.md]\n\n").
 _SPEC_BLOCK_RE = re.compile(r"(?:^|\n)---\n# \[([^\]\n]+)\]\n\n")
 
@@ -1189,6 +1283,9 @@ def call_engineer(
             # GAP-53: era `[:15000]` — no NVX LastMile (1.065.930 chars) isso entregava 1,41% da
             # spec e ZERO dos 22 FRs ao Engineer, que então propõe stack para um produto que não viu.
             inputs["product_spec"] = spec_content[:_spec_input_cap()]
+        # 🔴 GAP-54b: e a linha acima passava por cima do dossiê que `build_inputs_for_engineer` já
+        # havia montado — 9,1% do produto sobrescrevendo a leitura íntegra. O dossiê vem DEPOIS.
+        _attach_spec_dossier(inputs, pipeline_ctx, "ENGINEER")
     else:
         inputs = {
             "spec_ref": spec_ref,
@@ -2069,6 +2166,9 @@ def call_pm(
         if charter_summary:
             inputs["charter"] = charter_summary[:_cap_pm]
             inputs["charter_summary"] = charter_summary[:_cap_pm]
+        # 🔴 GAP-54b: o PM decompunha o produto sem NUNCA ter visto a spec — só o `charter` (≤40.000),
+        # que é um resumo dela. O foco vem do módulo e do charter (arquivos CITADOS literalmente).
+        _attach_spec_dossier(inputs, pipeline_ctx, "PM", [module, charter_summary or ""])
     else:
         inputs = {
             "spec_ref": spec_ref,
@@ -2187,6 +2287,10 @@ def call_dev(
         # Contexto enriquecido de projetos linkados (api_contract.md, curl_examples.sh, RUNBOOK.md)
         if getattr(pipeline_ctx, "linked_projects_context", ""):
             inputs["linked_projects_context"] = pipeline_ctx.linked_projects_context
+        # 🔴 GAP-54b: o Dev escrevia código sem NUNCA ter visto o contrato — só `charter` + `backlog`,
+        # dois resumos em série. O foco sai do que a TASK cita literalmente; o orçamento é o do papel
+        # (`SPEC_DOSSIER_DEV_CHARS`), porque o Dev é chamado uma vez POR TASK.
+        _attach_spec_dossier(inputs, pipeline_ctx, "DEV", pipeline_ctx._task_focus_texts(task_dict, task))
     # Route to correct skill path based on variant and detected stack
     _pid = (pipeline_ctx.project_id if pipeline_ctx else None) or os.environ.get("PROJECT_ID")
     _web_skill = _infer_web_skill_path(charter_summary + " " + backlog_summary, project_id=_pid)
@@ -2282,6 +2386,8 @@ def call_qa(
     rework_attempt: int = 0,
     task_delivered_files: list | None = None,  # SOMENTE arquivos entregues por esta task
     evolution_scope: list | None = None,       # Evoluir E4: globs do RFC (QA valida ACs + não-regressão dentro do escopo)
+    pipeline_ctx: "PipelineContext | None" = None,  # GAP-54b: fonte do dossiê da spec
+    task_dict: dict | None = None,                  # GAP-54b: foco do dossiê (o que a task CITA)
 ) -> dict:
     inputs = {
         "spec_ref": spec_ref,
@@ -2315,6 +2421,17 @@ def call_qa(
             f"ESCOPO DE VALIDAÇÃO: valide SOMENTE os {len(task_delivered_files)} arquivo(s) listados em "
             f"'task_files'. NÃO reprove por ausência de arquivos de outras tasks ou EPICs futuros. "
             f"Use 'existing_artifacts' apenas como contexto de interfaces e tipos — nunca como escopo de reprovação."
+        )
+    # 🔴 GAP-54b: o QA REPROVAVA/APROVAVA contra `charter_summary` + `backlog_summary` — dois resumos —
+    # sem nunca ter lido o contrato que ele deveria estar medindo. É o papel em que a lacuna dói mais:
+    # um veredicto de conformidade emitido sem o documento de referência não é verificação, é opinião.
+    if pipeline_ctx is not None and _attach_spec_dossier(
+        inputs, pipeline_ctx, "QA", pipeline_ctx._task_focus_texts(task_dict, task)
+    ):
+        inputs["spec_scope_instruction"] = (
+            "O campo `product_spec` é o CONTRATO do produto (dossiê só-leitura). Meça a entrega contra "
+            "ELE, e não contra o resumo do charter/backlog. Se o critério de que você precisa está "
+            "apenas no MAPA (sem texto íntegro), diga que faltou — não reprove por lacuna sua."
         )
     message = _build_message_envelope(
         request_id, "QA", "backend", "validate_task",
@@ -3880,8 +3997,13 @@ def _run_monitor_loop(
                         rework_attempt=_qa_rework,
                         task_delivered_files=_task_files,
                         evolution_scope=getattr(pipeline_ctx, "evolution_scope", None) if pipeline_ctx else None,
+                        pipeline_ctx=pipeline_ctx,   # GAP-54b: o QA mede contra o CONTRATO, não contra o resumo
+                        task_dict=task,
                     )
                     _audit_log("qa", request_id, qa_response, task_id=tid, round_num=_qa_rework + 1)
+                    # GAP-54b: Dev e QA desta task acabaram de receber o dossiê — atualiza o artefato de
+                    # cobertura (uma linha por papel; a última emissão é a que vale).
+                    _write_spec_dossier_coverage(project_id, pipeline_ctx, storage)
                     _qa_summary = qa_response.get("summary", "")
                     qa_status = qa_response.get("status", "?")
 
@@ -4923,6 +5045,11 @@ def main() -> int:
     # "1.065.930 chars, 12 arquivo(s)" e passava a impressão de que tudo entrou. Aqui o corte
     # (quando houver) cai em fronteira de arquivo, vai DECLARADO no prompt e é dito ao humano.
     _spec_full_len = len(spec_content)
+    # 🔴 GAP-54b: a única referência à spec ÍNTEGRA em toda a run. Daqui para baixo `spec_content`
+    # já é a versão recortada no orçamento de ESCRITA, e é dela que `product_spec` deriva — então
+    # recortar por arquivo mais tarde a partir dela escolheria entre migalhas. O dossiê dos papéis a
+    # jusante (Engineer/PM/Dev/QA) é montado desta variável, não daquela.
+    _spec_tree_src = spec_content
     _spec_cap = _spec_input_cap()
     spec_content, _spec_dropped, _spec_partial = fit_spec_to_budget(spec_content, _spec_cap)
     if _spec_dropped or _spec_partial:
@@ -4960,6 +5087,28 @@ def main() -> int:
             pipeline_ctx.set_spec_raw(spec_content)
             if spec_template_content:
                 pipeline_ctx.set_product_spec_template(spec_template_content)
+        # 🔴 GAP-54b — a árvore ÍNTEGRA vai para o contexto nos DOIS caminhos (novo e restaurado).
+        # Fica FORA do `else` de propósito: a árvore não é persistida no checkpoint (1 MB por save),
+        # então uma run retomada sem esta linha entregaria dossiê vazio a PM/Dev/QA em silêncio —
+        # exatamente a classe de defeito do GAP-13 (o Estágio B pulado nasceu num `if`).
+        pipeline_ctx.set_spec_tree(_spec_tree_src)
+        if pipeline_ctx.spec_tree_files > 1:
+            logger.info(
+                "[GAP-54b] Árvore da spec no contexto: %d chars / %d arquivo(s) — dossiê por papel ativo.",
+                pipeline_ctx.spec_tree_chars, pipeline_ctx.spec_tree_files,
+            )
+        if project_id:
+            try:
+                _orc_data, _orc_status = _api_get(f"/api/projects/{project_id}/spec-oracles")
+                if _orc_status == 200 and isinstance(_orc_data, list):
+                    pipeline_ctx.set_spec_oracles(_orc_data)
+                    if pipeline_ctx.spec_oracles:
+                        logger.info(
+                            "[GAP-54b] %d contrato(s) com fonte única decidida na Bancada viajam no dossiê.",
+                            len(pipeline_ctx.spec_oracles),
+                        )
+            except Exception as _orc_exc:  # pragma: no cover — oráculo é contexto, não pré-requisito
+                logger.debug("[GAP-54b] tabela de oráculos indisponível (%s)", _orc_exc)
     except ImportError:
         pipeline_ctx = None
 
@@ -6323,6 +6472,9 @@ def main() -> int:
                     )
                 pipeline_ctx.current_step = 3
                 pipeline_ctx.save_checkpoint(STATE_DIR)
+                # GAP-54b: Engineer e PM já leram — a cobertura de cada um vira artefato aqui, antes de
+                # a run entrar no Monitor Loop (onde Dev/QA acrescentam as próprias linhas).
+                _write_spec_dossier_coverage(project_id, pipeline_ctx, storage)
         _post_step(
             f"O PM concluiu a geração do backlog. O módulo está planejado com tarefas e prioridades. Status: {pm_status}.",
             request_id,
@@ -6575,6 +6727,7 @@ def main() -> int:
                 qa_response = call_qa(
                     spec_ref, charter_summary, backlog_summary, dev_summary, request_id,
                     task_id=None, task="", code_refs=dev_code_refs, existing_artifacts=dev_artifacts,
+                    pipeline_ctx=pipeline_ctx,   # GAP-54b
                 )
                 qa_summary = qa_response.get("summary", "")
                 qa_status = qa_response.get("status", "?")
