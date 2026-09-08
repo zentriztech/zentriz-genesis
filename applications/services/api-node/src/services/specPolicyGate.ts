@@ -256,6 +256,19 @@ REGRAS INVIOLÁVEIS:
    - "build": exige o código/arquivo produzido (ex.: o endpoint existe e valida o campo).
    - "runtime": exige executar (ex.: a resposta volta em menos de 200ms).
    Seja honesto: marcar "spec" o que só é conferível executando produz veredicto falso.
+3b. COERÊNCIA INTERNA é conferível AGORA, em "spec", e é a classe que mais defeito real produziu
+   nesta plataforma: a MESMA regra reafirmada em mais de um arquivo ou seção com valor, limite,
+   literal, nome de coluna, código de erro ou estado DIFERENTE. Quando a spec reafirma algo,
+   declare a constraint de coerência:
+   - a "assertion" enuncia a SUBSTÂNCIA que tem de ser a mesma (o valor, o limite, o literal, a
+     transição), NUNCA "os dois textos são iguais". Redação diferente para a MESMA substância é
+     coerente — acusar variação de palavra é falso positivo, e falso positivo aqui vira loop eterno;
+   - "source_anchor" é UMA das ocorrências, verbatim;
+   - "evidence_hint" NOMEIA o arquivo/seção IRMÃO onde está a outra ocorrência e o trecho que a
+     localiza. "está no arquivo irmão" não serve: numa spec de 12 arquivos ninguém acha;
+   - "applies_to" lista os arquivos/seções envolvidos, separados por vírgula;
+   - "severity": "blocker" só se a divergência muda o PRODUTO construído (valores incompatíveis,
+     estados contraditórios). Reafirmação que só está redigida de outro jeito é "warning".
 4. "constraint_key" é um slug curto e ESTÁVEL em inglês (ex.: "error-envelope-declared"). Se a lista
    de chaves já existentes trouxer a MESMA constraint, REUSE a chave idêntica — a contagem entre
    rodadas só tem sentido se a identidade for estável.
@@ -288,6 +301,11 @@ REGRAS INVIOLÁVEIS:
    constraint de pé e é preferível a um veredicto inventado nos dois sentidos.
 5. Uma constraint escrita com segurança não é prova de nada, e um artefato longo não é evidência.
    Confira o literal você mesmo.
+6. Constraint de COERÊNCIA (a mesma regra reafirmada em dois lugares tem de dizer a mesma coisa):
+   "violated" exige citar em "evidence" as DUAS ocorrências verbatim, uma após a outra, e dizer em
+   que ponto divergem. Uma só citação não prova divergência. E divergência apenas de REDAÇÃO, com a
+   mesma substância (mesmo valor, mesmo limite, mesmo literal, mesmo estado), é "satisfied", não
+   "violated" — acusar sinônimo é falso positivo e falso positivo aqui não fecha nunca.
 
 Responda APENAS JSON, sem cercas de código:
 {"verdicts":[{"constraint_key":"...","status":"satisfied|violated|indecidivel","artifact":"<nome exato do artefato>","evidence":"<citação verbatim do artefato>","why":"<uma frase>"}]}`;
