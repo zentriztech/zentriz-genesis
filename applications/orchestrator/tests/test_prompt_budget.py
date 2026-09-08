@@ -375,3 +375,58 @@ def test_corte_registra_warning_estruturado(caplog):
         _clip("x" * 100, 10, "spec_raw", OPUS5)
     assert any("CORTADO" in r.getMessage() and "spec_raw" in r.getMessage()
                for r in caplog.records)
+
+
+# ── GAP-61/GAP-54: o teto de LEITURA não é o teto de ESCRITA ──────────────────
+#
+# O comentário do próprio `_prompt_budget` dizia a causa em voz alta: *"no modo
+# `spec_intake_and_normalize` o agente REEMITE a spec inteira em `artifacts[].content`, então o teto
+# útil da entrada é o que ele consegue DEVOLVER"*. Estava certo — para quem reemite. O preço de
+# aplicar isso a QUEM NÃO REEMITE foi medido em prod (NVX LastMile, 2026-09-08): a árvore tem
+# 1.098.849 chars em 12 arquivos e chegavam **2 arquivos, 10,2% da spec**.
+
+def test_leitura_sem_reemissao_usa_a_janela_e_nao_o_max_output():
+    escreve = _prompt_budget(OPUS5)
+    le = _prompt_budget(OPUS5, reemits_spec=False)
+    # (200.000 - 8.000) * 4 * 0,65 = 499.200 contra os 145.600 derivados de `max_output`.
+    assert le["spec_raw"] == 499_200
+    assert le["spec_raw"] > escreve["spec_raw"] * 3
+
+
+def test_o_ganho_vai_so_para_a_spec_nunca_para_os_artefatos_intermediarios():
+    # 🔴 Erro simétrico do GAP-53: lá o teto dos artefatos foi aplicado à spec. Inflar charter,
+    # backlog e proposta do Engineer junto seria repetir a confusão pela outra ponta.
+    escreve = _prompt_budget(OPUS5)
+    le = _prompt_budget(OPUS5, reemits_spec=False)
+    for field in ("engineer_proposal", "charter", "backlog", "validation_report", "product_map"):
+        assert le[field] == escreve[field], field
+
+
+def test_o_global_acompanha_senao_o_teto_que_morde_fica_invisivel():
+    le = _prompt_budget(OPUS5, reemits_spec=False)
+    # Sem isto o campo subiria para 499.200 e a soma continuaria travada em 280.000: o corte
+    # aconteceria de novo, só que num lugar que ninguém está olhando.
+    assert le["_total"] >= le["spec_raw"]
+
+
+def test_reemitir_continua_sendo_o_default_byte_a_byte():
+    assert _prompt_budget(OPUS5) == _prompt_budget(OPUS5, reemits_spec=True)
+
+
+@pytest.mark.parametrize("model", ["", "modelo-que-nao-existe", "anthropic.claude-haiku-4-5"])
+def test_modo_leitura_nunca_regride_em_relacao_a_escrita(model):
+    escreve = _prompt_budget(model)
+    le = _prompt_budget(model, reemits_spec=False)
+    for field in escreve:
+        assert le[field] >= escreve[field], field
+
+
+def test_spec_readonly_no_envelope_liga_o_orcamento_de_leitura():
+    grande = "S" * 300_000
+    sem = build_user_message({"task": "t", "inputs": {"spec_raw": grande}}, model=OPUS5)
+    com = build_user_message(
+        {"task": "t", "inputs": {"spec_raw": grande, "spec_readonly": True}}, model=OPUS5
+    )
+    assert "[CORTE DE CONTEXTO]" in sem
+    assert "[CORTE DE CONTEXTO]" not in com
+    assert len(com) > len(sem)

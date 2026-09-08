@@ -257,8 +257,19 @@ def _model_limits_for(model: str) -> dict[str, int]:
     return _DEFAULT_LIMITS
 
 
-def _prompt_budget(model: str = "") -> dict[str, int]:
-    """Caps por campo + `_total` (orçamento global), derivados de `max_output`. Pisos garantidos."""
+def _prompt_budget(model: str = "", *, reemits_spec: bool = True) -> dict[str, int]:
+    """Caps por campo + `_total` (orçamento global). Pisos garantidos.
+
+    `reemits_spec` (GAP-61/GAP-54 — 2026-09-08): a fórmula acima deriva o teto de LEITURA de
+    `max_output` porque o Sub-modo C do CTO REEMITE a spec inteira. Quando o agente NÃO reemite —
+    revisão por arquivo devolvendo `edits`, ou qualquer leitor a jusante que só consulta a spec — o
+    limite real é a JANELA DE ENTRADA, e amarrar a leitura à escrita cobra um preço medido: na
+    árvore do NVX LastMile (1.098.849 chars em 12 arquivos) chegavam **2 de 12 arquivos, 10,2%**.
+
+    Não é anistia de orçamento: é usar o limite CERTO para cada tipo de chamada. Quem reemite
+    continua exatamente como antes — o caminho antigo é o default, e `reemits_spec=False` é uma
+    afirmação que o chamador faz sobre o formato de saída que ele mesmo pediu.
+    """
     limits = _model_limits_for(model)
     spec_cap = int((limits["max_output"] - _PROMPT_OUTPUT_RESERVE_TOKENS) * 4 * _PROMPT_SAFETY_FACTOR)
     _env_spec = os.environ.get("AGENT_PROMPT_SPEC_CHARS", "").strip()
@@ -268,6 +279,16 @@ def _prompt_budget(model: str = "") -> dict[str, int]:
     k = spec_cap / _PROMPT_FIELD_FLOORS["spec_raw"]
     caps = {field: max(floor, int(floor * k)) for field, floor in _PROMPT_FIELD_FLOORS.items()}
     total = min(int(limits["context"] * 4 * _PROMPT_GLOBAL_SHARE), _PROMPT_GLOBAL_ABS_MAX)
+    if not reemits_spec:
+        # O ganho vai SÓ para os campos de spec. Escalar todos por `k` inflaria charter, backlog e
+        # proposta do Engineer junto — artefatos intermediários cujo teto nunca teve nada a ver com
+        # `max_output` (é o erro simétrico do GAP-53, que aplicou à spec o orçamento dos artefatos).
+        _read_cap = int((limits["context"] - _PROMPT_OUTPUT_RESERVE_TOKENS) * 4 * _PROMPT_SAFETY_FACTOR)
+        for _field in ("spec_raw", "product_spec"):
+            caps[_field] = max(caps[_field], _read_cap)
+        # O global tem de acompanhar, senão o campo sobe e a soma continua travando em 280k — e o
+        # teto que morde volta a ser invisível, que é o defeito do GAP-61, não o conserto dele.
+        total = max(total, _read_cap)
     _env_total = os.environ.get("AGENT_PROMPT_TOTAL_CHARS", "").strip()
     if _env_total.isdigit() and int(_env_total) > 0:
         total = int(_env_total)
@@ -385,7 +406,13 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     # Orçamento de contexto (D1–D4). Com a flag off, `_budget is None` e cada campo cai no PISO
     # histórico → prompt byte-idêntico ao de antes. Prioridade do gasto global:
     # spec_raw > product_spec > charter > backlog > engineer.
-    _budget = _prompt_budget(model) if _prompt_budget_enabled() else None
+    # GAP-54/61: `spec_readonly` é o chamador AFIRMANDO que esta chamada não reemite a spec (revisão
+    # por arquivo com saída `edits`, ou leitor a jusante que só consulta). Aí o teto de leitura passa
+    # a ser a janela de entrada em vez de `max_output`. Ausente → comportamento de antes, byte a byte.
+    _readonly_spec = bool(envelope.get("spec_readonly") or message.get("spec_readonly"))
+    _budget = (
+        _prompt_budget(model, reemits_spec=not _readonly_spec) if _prompt_budget_enabled() else None
+    )
     _spent = 0
     # F1: quem foi CORTADO. O formato `edits` só pode ser OFERECIDO para um documento que o modelo
     # viu INTEIRO — um `search` escrito sobre um trecho é aplicado contra o documento completo.
