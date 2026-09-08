@@ -386,6 +386,54 @@ describe("recallNote / recallLimitations — nenhum limite fica escondido", () =
     expect(lim).not.toContain("MESMA família do casador");
   });
 
+  it("GAP-101: discordância que é SÓ silêncio é declarada como silêncio, não como desacordo", () => {
+    // Medido em prod na 2ª prova: "100% de discordância sobre 3" sem dizer de que tipo. Silêncio do
+    // terceiro casador e opinião contrária têm significados opostos; somados, o número não é legível.
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "us.anthropic.claude-opus-5",
+      matchModel: "amazon.nova-pro-v1:0", auditModel: "mistral.mistral-large-3-675b-instruct",
+      matcherDisagreement: 1, matcherNoOpinion: 1, auditSample: 3, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("NÃO OPINANDO");
+    expect(lim).toContain("GAP-101");
+  });
+
+  it("GAP-101: silêncio PARCIAL diz que a incerteza sobe, e o recall não", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j",
+      matchModel: "amazon.nova-pro-v1:0", matcherDisagreement: 0.6, matcherNoOpinion: 0.2,
+      auditSample: 5, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("20% da amostra ficou sem parecer");
+    expect(lim).toContain("nunca o recall");
+  });
+
+  it("GAP-101: sem silêncio nenhum, a ressalva não aparece (não inventa ruído)", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j",
+      matchModel: "amazon.nova-pro-v1:0", matcherDisagreement: 0.4, matcherNoOpinion: 0,
+      auditSample: 5, rejected: 0,
+    }).join(" | ");
+    expect(lim).not.toContain("GAP-101");
+  });
+
+  it("GAP-102: defeito que perdeu o finding para outro por ORDEM da lista é contado e declarado", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",
+      matcherDisagreement: null, auditSample: 0, rejected: 0, priorClaim: 1,
+    }).join(" | ");
+    expect(lim).toContain("1 defeito(s) recusado(s) porque outro reivindicou o MESMO finding antes");
+    expect(lim).toContain("GAP-102");
+  });
+
+  it("GAP-102: sem disputa de finding, nada é declarado", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",
+      matcherDisagreement: null, auditSample: 0, rejected: 0, priorClaim: 0,
+    }).join(" | ");
+    expect(lim).not.toContain("GAP-102");
+  });
+
   it("sem amostra recasada, a nota diz que o erro do casador entra SEM estimativa", () => {
     const lim = recallLimitations({
       tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",

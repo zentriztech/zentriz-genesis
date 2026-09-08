@@ -64,8 +64,11 @@
  *
  * ## O que a PRIMEIRA medição em prod descobriu sobre si mesma (2026-09-08)
  *
- * O número saiu — **recall entre 14% e 29%**, abaixo da mediana publicada de 47% — e a leitura da prova
- * abriu três defeitos NA MEDIÇÃO, todos da mesma linhagem: declarar a intenção no lugar do fato.
+ * O número saiu — **recall entre 14% e 29%** — e a leitura da prova abriu três defeitos NA MEDIÇÃO, todos
+ * da mesma linhagem: declarar a intenção no lugar do fato. **Aquele número está MORTO: era auto-revisão**
+ * (GAP-98). Depois do fix, a segunda prova mediu **43% a 57%** — os 14% eram artefato do instrumento, não
+ * cegueira do juiz. Fica registrado porque é a lição: número publicado sobre instrumento não conferido
+ * mede o instrumento.
  *
  *  * **GAP-98 (grave)** — `callPolicyAgent` montava `model_id` ANTES de espalhar `llm`, então o modelo do
  *    tenant sobrescrevia o explícito: o casador pedido em `amazon.nova-pro-v1:0` rodou em
@@ -79,6 +82,24 @@
  *  * **GAP-100 (médio)** — 7 elegíveis × 0,3 = amostra de 2, que devolveu "50% de discordância". Isso é
  *    uma moeda, não uma estimativa. ⇒ piso de amostra (`AUDIT_MIN_SAMPLE`) e, abaixo dele, o número vai
  *    declarado como INDICAÇÃO. Auditor da mesma família do casador também passa a ser declarado.
+ *
+ * ## O que a SEGUNDA medição (a primeira cross-family de verdade) descobriu sobre si mesma
+ *
+ * Recall **43%..57%** — em cima da mediana publicada de 47%, não abaixo dela. E os estratos mostram que a
+ * cegueira do juiz não é uniforme: `obvia` **100%**, `sutil` **20%..40%**, `fora_do_vocabulario` **0%**.
+ * Ler essa prova abriu dois defeitos novos, ambos de LEGIBILIDADE do número:
+ *
+ *  * **GAP-101 (médio)** — a auditoria devolveu "100% de discordância sobre 3" sem dizer de que tipo:
+ *    `auditMatches` contava igual o terceiro casador dizendo o CONTRÁRIO e o terceiro casador não dizendo
+ *    NADA (ausente, ou `indecidivel` por `sem_parecer`). Silêncio e desacordo significam coisas opostas —
+ *    um mede incerteza do instrumento, o outro mede desacordo real entre famílias. É o GAP-89/GAP-63 num
+ *    lugar novo. ⇒ `noOpinion` é medido, gravado e declarado SEPARADO; a discordância continua incluindo
+ *    o silêncio (a incerteza sobe, o recall nunca).
+ *  * **GAP-102 (baixo, declarado)** — um finding só pode ser o achado de UM defeito, senão o casador fecha
+ *    dois com uma frase e o recall infla. Mas quem fica com ele é decidido pela ORDEM da lista do casador,
+ *    não pela força da evidência: D06 perdeu para D03 o finding do payload `delivery.created` e virou
+ *    `nao_encontrado` sem contagem própria. A regra FICA (deprime o recall, nunca infla); o que não fica é
+ *    o número sem nome. ⇒ limitação declarada, com contagem.
  */
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import { FINDING_CATEGORIES, type Db } from "./findingTriage.js";
@@ -518,9 +539,13 @@ export function recallLimitations(args: {
   judgeModel: string;
   matchModel: string;
   matcherDisagreement: number | null;
+  /** GAP-101: fração da amostra em que o terceiro casador não opinou (silêncio ≠ discordância). */
+  matcherNoOpinion?: number | null;
   auditSample: number;
   auditModel?: string;
   rejected: number;
+  /** GAP-102: defeitos recusados porque outro defeito reivindicou o finding primeiro. */
+  priorClaim?: number;
 }): string[] {
   const t = args.tally;
   const out: string[] = [];
@@ -546,12 +571,24 @@ export function recallLimitations(args: {
       ? ` — amostra de ${args.auditSample} está ABAIXO do piso de ${AUDIT_MIN_SAMPLE}: é indicação, não estimativa (GAP-100)`
       : "";
     out.push(`erro do casador estimado em ${pct(args.matcherDisagreement)} de discordância sobre ${args.auditSample} defeito(s) recasado(s) — a banda do recall NÃO inclui essa incerteza${magro}`);
+    // GAP-101: "100% de discordância" lido sem isto parece opinião contrária; pode ser SILÊNCIO.
+    const calado = args.matcherNoOpinion ?? null;
+    if (calado !== null && calado > 0) {
+      out.push(calado >= (args.matcherDisagreement ?? 0)
+        ? `dessa discordância, ${pct(calado)} é o terceiro casador NÃO OPINANDO, não opinando o contrário — silêncio não mede desacordo entre famílias (GAP-101)`
+        : `${pct(calado)} da amostra ficou sem parecer do terceiro casador e entrou como discordância — silêncio empurra a incerteza para CIMA, nunca o recall (GAP-101)`);
+    }
     // O auditor da mesma família do casador não é uma segunda opinião: mede a consistência de um modelo
     // consigo mesmo e chama isso de discordância entre casadores (a ponta de GAP-98 no terceiro modelo).
     if (args.auditModel && sameFamily(args.auditModel, args.matchModel)) {
       out.push(`terceiro casador (${args.auditModel}) da MESMA família do casador (${args.matchModel}) — a discordância mede consistência de uma família consigo mesma, não erro entre famílias (GAP-98/93)`);
     }
   }
+  // GAP-102: um finding só pode ser o achado de UM defeito (senão o casador fecha dois defeitos com uma
+  // frase), mas quem fica com ele é decidido pela ORDEM da lista do casador, não pela força da evidência.
+  // Medido em prod: D06 perdeu para D03 o finding do payload `delivery.created` e ficou `nao_encontrado`.
+  // A direção do erro é a desenhada (para baixo), mas o número perdido não pode ficar sem nome.
+  if ((args.priorClaim ?? 0) > 0) out.push(`${args.priorClaim} defeito(s) recusado(s) porque outro reivindicou o MESMO finding antes — o critério é a ORDEM da lista do casador, não a força da evidência; deprime o recall (GAP-102)`);
   if (t.uncovered > 0) out.push(`${t.uncovered} defeito(s) fora da cobertura do juiz — falha de COBERTURA do harness, fora do denominador do recall (GAP-97)`);
   if (args.rejected > 0) out.push(`${args.rejected} injeção(ões) recusada(s) por não serem verbatim — o gold set é menor do que o injetor propôs`);
   out.push("mutação só em memória: nada aqui mede defeito que dependa de persistência, de link entre arquivos gravados ou de estado do sistema");
@@ -614,7 +651,7 @@ export async function auditMatches(args: {
   model: string;
   llm?: Record<string, unknown> | null;
   cfg?: ReturnType<typeof recallConfig>;
-}): Promise<{ sample: number; disagreement: number | null; why: string; modelUsed: string }> {
+}): Promise<{ sample: number; disagreement: number | null; noOpinion: number | null; why: string; modelUsed: string }> {
   const cfg = args.cfg ?? recallConfig();
   const elegiveis = args.items.filter((i) => i.covered);
   // GAP-100: a fração sozinha produziu amostra de 2 na primeira medição em prod — e "50% de
@@ -622,7 +659,7 @@ export async function auditMatches(args: {
   // nem ele cabe (gold set minúsculo), a limitação declara que o número é INDICATIVO, não estimativa.
   const n = Math.min(elegiveis.length, Math.max(cfg.auditMin, Math.round(elegiveis.length * cfg.auditFraction)));
   if (!args.model || cfg.auditFraction <= 0 || n === 0) {
-    return { sample: 0, disagreement: null, why: "auditoria do casador desligada", modelUsed: "" };
+    return { sample: 0, disagreement: null, noOpinion: null, why: "auditoria do casador desligada", modelUsed: "" };
   }
   // Amostra determinística por ordem do gold set: reprodutível na mesma versão, e a versão está no hash.
   const amostra = elegiveis.slice(0, n);
@@ -632,21 +669,32 @@ export async function auditMatches(args: {
     user: matchUserMessage(amostra.map((i) => porId.get(i.defectId)).filter((d): d is GoldDefect => !!d), args.findings),
     maxTokens: cfg.matchTokens, modelId: args.model, llm: args.llm,
   });
-  if (!res.ok) return { sample: 0, disagreement: null, why: `terceiro casador indisponível: ${res.why}`, modelUsed: "" };
+  if (!res.ok) return { sample: 0, disagreement: null, noOpinion: null, why: `terceiro casador indisponível: ${res.why}`, modelUsed: "" };
   const modelUsed = res.modelUsedRaw || args.model;
   const parsed = parseListResponse(res.text, "matches");
-  if (!parsed || parsed.length === 0) return { sample: 0, disagreement: null, why: "terceiro casador sem JSON legível", modelUsed };
+  if (!parsed || parsed.length === 0) return { sample: 0, disagreement: null, noOpinion: null, why: "terceiro casador sem JSON legível", modelUsed };
   const segundos = normalizeMatches(
     parsed, amostra.map((i) => porId.get(i.defectId)).filter((d): d is GoldDefect => !!d),
     args.findings, args.judgedFiles,
   );
-  const porIdSegundo = new Map(segundos.map((s) => [s.defectId, s.verdict]));
+  // GAP-101: SILÊNCIO não é discordância. `normalizeMatches` preenche todo defeito sem parecer com
+  // `indecidivel`/`sem_parecer` — se contássemos isso como "o outro modelo discordou", o auditor que
+  // simplesmente não opinou viraria evidência de que a medição está errada. Medido em prod: a primeira
+  // auditoria cross-family devolveu "100% de discordância sobre 3" sem dizer de que tipo. É a mesma
+  // família do GAP-89 (o `indecidivel` que desaparecia da nota) e do GAP-63 (corte silencioso).
+  const porIdSegundo = new Map(segundos.map((s) => [s.defectId, s] as const));
   let divergentes = 0;
+  let calados = 0;
   for (const i of amostra) {
-    const v = porIdSegundo.get(i.defectId);
-    if (v === undefined || v !== i.verdict) divergentes++;
+    const s = porIdSegundo.get(i.defectId);
+    if (!s) { calados++; divergentes++; continue; }
+    if (s.verdict === "indecidivel" && s.reason === "sem_parecer") { calados++; divergentes++; continue; }
+    if (s.verdict !== i.verdict) divergentes++;
   }
-  return { sample: amostra.length, disagreement: divergentes / amostra.length, why: "", modelUsed };
+  return {
+    sample: amostra.length, disagreement: divergentes / amostra.length,
+    noOpinion: calados / amostra.length, why: "", modelUsed,
+  };
 }
 
 /** O que o casador lê: os defeitos injetados e TODOS os findings do juiz, verbatim. */
@@ -755,6 +803,8 @@ export interface JudgeRecallResult {
   sameFamily: boolean;
   matcherSample: number;
   matcherDisagreement: number | null;
+  /** GAP-101: quanto da discordância é SILÊNCIO do terceiro casador, não opinião contrária. */
+  matcherNoOpinion: number | null;
   limitations: string[];
   note: string;
 }
@@ -787,7 +837,7 @@ export async function runJudgeRecall(db: Db, args: {
     ran: false, reason, goldSetVersion: "", defects: [], rejectedInjections: [], items: [],
     tally: emptyTally(), findingsCount: 0, judgedFiles: [], judgeModel: "", matchModel: cfg.matchModel,
     auditModel: "", sameFamily: false, matcherSample: 0, matcherDisagreement: null,
-    limitations: [], note: reason,
+    matcherNoOpinion: null, limitations: [], note: reason,
     ...extra,
   });
   if (!judgeRecallEnabled()) return empty("SPEC_JUDGE_RECALL != on");
@@ -850,12 +900,13 @@ export async function runJudgeRecall(db: Db, args: {
   const auditoria = await auditMatches({
     items, defects: usados, findings: juiz.findings, judgedFiles: input.full,
     model: cfg.auditModel, llm: args.llm, cfg,
-  }).catch((e) => ({ sample: 0, disagreement: null as number | null, why: String(e).slice(0, 200), modelUsed: "" }));
+  }).catch((e) => ({ sample: 0, disagreement: null as number | null, noOpinion: null as number | null, why: String(e).slice(0, 200), modelUsed: "" }));
 
   const limitations = recallLimitations({
     tally, sameFamily: familia, judgeModel, matchModel,
-    matcherDisagreement: auditoria.disagreement, auditSample: auditoria.sample,
-    auditModel: auditoria.modelUsed, rejected: recusados.length,
+    matcherDisagreement: auditoria.disagreement, matcherNoOpinion: auditoria.noOpinion,
+    auditSample: auditoria.sample, auditModel: auditoria.modelUsed, rejected: recusados.length,
+    priorClaim: items.filter((i) => i.reason === "finding já casado com outro defeito").length,
   });
   if (!cas.ok) limitations.unshift(`casador indisponível (${cas.why}) — todos os defeitos ficaram sem casamento conferido, o que DEPRIME o recall`);
 
@@ -865,6 +916,7 @@ export async function runJudgeRecall(db: Db, args: {
     judgeModel: judgeModel || "modelo do tenant", matchModel: cas.ok ? cas.model : cfg.matchModel,
     auditModel: auditoria.modelUsed,
     sameFamily: familia, matcherSample: auditoria.sample, matcherDisagreement: auditoria.disagreement,
+    matcherNoOpinion: auditoria.noOpinion,
     limitations, note: "",
   };
   res.note = recallNote(tally, limitations);
@@ -875,11 +927,11 @@ export async function runJudgeRecall(db: Db, args: {
          (project_id, spec_hash, gold_set_version, judge_model, match_model, same_family,
           injected, eligible, found, partial_matches, missed, undecided, uncovered,
           recall_min, recall_max, findings_count, matcher_sample, matcher_disagreement,
-          note, limitations, defects, items, strata, autonomy_run_id, audit_model)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25)
+          note, limitations, defects, items, strata, autonomy_run_id, audit_model, matcher_no_opinion)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26)
        ON CONFLICT (project_id, spec_hash, gold_set_version, judge_model) DO UPDATE SET
          match_model = EXCLUDED.match_model, same_family = EXCLUDED.same_family,
-         audit_model = EXCLUDED.audit_model,
+         audit_model = EXCLUDED.audit_model, matcher_no_opinion = EXCLUDED.matcher_no_opinion,
          injected = EXCLUDED.injected, eligible = EXCLUDED.eligible, found = EXCLUDED.found,
          partial_matches = EXCLUDED.partial_matches, missed = EXCLUDED.missed,
          undecided = EXCLUDED.undecided, uncovered = EXCLUDED.uncovered,
@@ -897,7 +949,7 @@ export async function runJudgeRecall(db: Db, args: {
          byClass: tally.byClass, byDifficulty: tally.byDifficulty, byPosition: tally.byPosition,
          byScope: tally.byScope, byVocabulary: tally.byVocabulary,
        }),
-       args.autonomyRunId ?? null, res.auditModel],
+       args.autonomyRunId ?? null, res.auditModel, auditoria.noOpinion],
     ).catch((err) => {
       // Gravar é ACESSÓRIO à medição: nunca derruba o número que acabou de ser produzido.
       console.warn(`[specJudgeRecall] persistência falhou: ${String(err).slice(0, 300)}`);
