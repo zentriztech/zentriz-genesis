@@ -100,6 +100,24 @@
  *    não pela força da evidência: D06 perdeu para D03 o finding do payload `delivery.created` e virou
  *    `nao_encontrado` sem contagem própria. A regra FICA (deprime o recall, nunca infla); o que não fica é
  *    o número sem nome. ⇒ limitação declarada, com contagem.
+ *
+ * ## O que a TERCEIRA medição descobriu — e por que ela para a caçada (GAP-103)
+ *
+ * A prova 3 respondeu o GAP-101 com dado: `noOpinion = 0` ⇒ os 33% de discordância entre casadores são
+ * desacordo REAL entre famílias, não silêncio. Mas ela deu **14%..43%** onde a prova 2 (mesma spec, mesmo
+ * juiz, mesmo casador) deu **43%..57%** — e `obvia` foi de **100%** para **0%**.
+ *
+ *  * **GAP-103 (médio)** — a banda `[recallMin, recallMax]` mede só a ambiguidade do CASAMENTO; ela não
+ *    sabe que `n = 7`. Com sete defeitos, um acerto a mais move o piso 14 pontos, então duas rodadas
+ *    parecem duas leituras do juiz quando são duas amostras. ⇒ intervalo de **Wilson 95%** calculado e
+ *    publicado junto (`ciLow`/`ciHigh`), e limitação declarada abaixo de `RECALL_MIN_ELIGIBLE`.
+ *
+ * **E aqui a medição PARA de crescer, de propósito.** Subir `n` custa uma validação inteira do estágio B
+ * por rodada (~5 min e a spec toda de entrada); perseguir um intervalo estreito seria o loop infinito de
+ * perfeição. O que o F4 entrega é o que o F4 prometia: existe um instrumento que mede o recall do juiz,
+ * ele é honesto sobre a própria incerteza, e o que ele mostra é ESTRUTURAL e estável nas três provas —
+ * `fora_do_vocabulario` **0%**, `corpo_sem_titulo` sempre o lado fraco, e a cegueira concentrada onde o
+ * juiz não tem palavra para o defeito. É isso que a Fábrica e o Auto Care precisam aprender, não o número.
  */
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import { FINDING_CATEGORIES, type Db } from "./findingTriage.js";
@@ -122,6 +140,15 @@ export function judgeRecallEnabled(): boolean {
  * como tal. Medido em prod: 7 defeitos elegíveis × 0,3 = amostra de 2, que devolveu "50%".
  */
 export const AUDIT_MIN_SAMPLE = 3;
+
+/**
+ * GAP-103: abaixo disto o intervalo de Wilson 95% do recall é mais largo que a banda do casamento, e
+ * comparar duas rodadas mede a AMOSTRA, não o juiz. Medido em prod: três medições sobre a MESMA spec com
+ * o MESMO juiz deram 14%..29% (essa com o casador quebrado, GAP-98), 43%..57% e 14%..43%. Não é piso de
+ * BLOQUEIO — subir `n` custa uma validação inteira por defeito e o laço não pode parar por isso. É piso
+ * de DECLARAÇÃO: abaixo dele o número vai com o intervalo de amostragem colado.
+ */
+export const RECALL_MIN_ELIGIBLE = 20;
 
 export function recallConfig() {
   return {
@@ -462,6 +489,14 @@ export interface RecallStratum {
   recallMin: number;
   /** Teto: `encontrado` + tudo que ficou em dúvida. O recall verdadeiro vive nesta banda. */
   recallMax: number;
+  /**
+   * GAP-103: incerteza de AMOSTRAGEM do piso (Wilson 95%). A banda `[recallMin, recallMax]` mede só a
+   * ambiguidade do CASAMENTO; ela não sabe que `n` é pequeno. Com `n = 7`, um acerto a mais move o piso
+   * 14 pontos — e três medições sobre a MESMA spec e o MESMO juiz deram 14%..29%, 43%..57% e 14%..43%.
+   * Sem este intervalo, comparar duas rodadas parece medir o juiz quando mede a amostra.
+   */
+  ciLow: number;
+  ciHigh: number;
 }
 
 export interface RecallTally extends RecallStratum {
@@ -474,6 +509,26 @@ export interface RecallTally extends RecallStratum {
   byVocabulary: Record<string, RecallStratum>;
 }
 
+/**
+ * Intervalo de Wilson 95% para uma proporção — GAP-103.
+ *
+ * Wilson e não a aproximação normal porque `n` aqui é da ordem de 7 e a proporção encosta em 0 e em 1
+ * (`obvia` deu 0% numa medição e 100% na anterior). A aproximação normal produz limite negativo nesse
+ * regime, e um limite impossível publicado é pior que nenhum: parece precisão.
+ */
+export function wilson95(successes: number, n: number): { low: number; high: number } {
+  if (n <= 0) return { low: 0, high: 0 };
+  const z = 1.96;
+  const p = successes / n;
+  const d = 1 + (z * z) / n;
+  const centro = p + (z * z) / (2 * n);
+  const margem = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return {
+    low: Math.max(0, (centro - margem) / d),
+    high: Math.min(1, (centro + margem) / d),
+  };
+}
+
 function stratum(items: RecallItem[]): RecallStratum {
   const uncovered = items.filter((i) => !i.covered).length;
   const elegiveis = items.filter((i) => i.covered);
@@ -482,10 +537,12 @@ function stratum(items: RecallItem[]): RecallStratum {
   const missed = elegiveis.filter((i) => i.verdict === "nao_encontrado").length;
   const undecided = elegiveis.filter((i) => i.verdict === "indecidivel").length;
   const n = elegiveis.length;
+  const ic = wilson95(found, n);
   return {
     eligible: n, found, partial, missed, undecided, uncovered,
     recallMin: n > 0 ? found / n : 0,
     recallMax: n > 0 ? (found + partial + undecided) / n : 0,
+    ciLow: ic.low, ciHigh: ic.high,
   };
 }
 
@@ -589,6 +646,12 @@ export function recallLimitations(args: {
   // Medido em prod: D06 perdeu para D03 o finding do payload `delivery.created` e ficou `nao_encontrado`.
   // A direção do erro é a desenhada (para baixo), mas o número perdido não pode ficar sem nome.
   if ((args.priorClaim ?? 0) > 0) out.push(`${args.priorClaim} defeito(s) recusado(s) porque outro reivindicou o MESMO finding antes — o critério é a ORDEM da lista do casador, não a força da evidência; deprime o recall (GAP-102)`);
+  // GAP-103: a banda [min, max] mede a ambiguidade do CASAMENTO e nada mais — ela não sabe que `n` é 7.
+  // Sem esta linha, duas rodadas com gold sets diferentes parecem duas medições do mesmo juiz, quando são
+  // duas amostras de tamanho 7. É o mesmo erro do GAP-76 (agregado comparado com superfície rotacionada).
+  if (t.eligible > 0 && t.eligible < RECALL_MIN_ELIGIBLE) {
+    out.push(`amostra de ${t.eligible} defeito(s) elegível(is): o IC95 (Wilson) do piso é ${pct(t.ciLow)}..${pct(t.ciHigh)}, MAIS LARGO que a banda do casamento — comparar este recall com o de outro gold set compara AMOSTRAS, não juízes (GAP-103)`);
+  }
   if (t.uncovered > 0) out.push(`${t.uncovered} defeito(s) fora da cobertura do juiz — falha de COBERTURA do harness, fora do denominador do recall (GAP-97)`);
   if (args.rejected > 0) out.push(`${args.rejected} injeção(ões) recusada(s) por não serem verbatim — o gold set é menor do que o injetor propôs`);
   out.push("mutação só em memória: nada aqui mede defeito que dependa de persistência, de link entre arquivos gravados ou de estado do sistema");
@@ -605,6 +668,7 @@ export function recallNote(t: RecallTally, limits: string[] = []): string {
   const partes = [
     `recall do juiz entre ${pct(t.recallMin)} e ${pct(t.recallMax)} (${t.found} de ${t.eligible} defeito(s) elegível(is) encontrado(s))`,
     `${t.missed} perdido(s)`,
+    `IC95 do piso ${pct(t.ciLow)}..${pct(t.ciHigh)} para n = ${t.eligible} (GAP-103)`,
   ];
   if (t.partial) partes.push(`${t.partial} parcial(is)`);
   if (t.undecided) partes.push(`${t.undecided} sem casamento conferido`);

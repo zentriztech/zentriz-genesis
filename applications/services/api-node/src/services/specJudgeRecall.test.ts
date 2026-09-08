@@ -13,7 +13,8 @@
 import { describe, expect, it } from "vitest";
 import {
   applyInjections, AUDIT_MIN_SAMPLE, goldSetVersion, modelFamily, normalizeMatches, parseInjections,
-  recallConfig, recallLimitations, recallNote, recallTally, sameFamily, type GoldDefect,
+  recallConfig, recallLimitations, RECALL_MIN_ELIGIBLE, recallNote, recallTally, sameFamily, wilson95,
+  type GoldDefect,
 } from "./specJudgeRecall.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -441,6 +442,63 @@ describe("recallNote / recallLimitations — nenhum limite fica escondido", () =
     });
     expect(lim.join(" | ")).toContain("sem estimativa");
     expect(lim.join(" | ")).toContain("2 injeção(ões) recusada(s)");
+  });
+});
+
+describe("wilson95 / GAP-103 — a banda do casamento não sabe que `n` é 7", () => {
+  it("nunca devolve limite impossível, mesmo com proporção em 0 ou em 1", () => {
+    const zero = wilson95(0, 7);
+    expect(zero.low).toBe(0);
+    expect(zero.high).toBeGreaterThan(0);
+    const cheio = wilson95(7, 7);
+    expect(cheio.high).toBe(1);
+    expect(cheio.low).toBeLessThan(1);
+  });
+
+  it("aperta quando `n` cresce com a MESMA proporção — é isso que a declaração compra", () => {
+    const pequeno = wilson95(1, 7);
+    const grande = wilson95(20, 140);
+    expect(grande.high - grande.low).toBeLessThan(pequeno.high - pequeno.low);
+  });
+
+  it("amostra vazia não vira intervalo inventado", () => {
+    expect(wilson95(0, 0)).toEqual({ low: 0, high: 0 });
+  });
+
+  it("GAP-103: amostra pequena declara que comparar rodadas compara AMOSTRAS", () => {
+    // Medido em prod: três medições sobre a MESMA spec e o MESMO juiz deram 14%..29% (casador quebrado),
+    // 43%..57% e 14%..43%. Com n = 7, um acerto a mais move o piso 14 pontos.
+    const t = recallTally(Array.from({ length: 7 }, (_, k) => ({
+      defectId: `D${k}`, file: "f", anchor: "a", defectClass: "ambiguous_fr", inVocabulary: true,
+      difficulty: "sutil" as const, position: "corpo_sem_titulo" as const, scope: "local" as const,
+      covered: true, verdict: (k === 0 ? "encontrado" : "nao_encontrado") as "encontrado" | "nao_encontrado",
+      findingRef: "", citation: "", citationVerbatim: true, classAgreed: true, reason: "",
+    })));
+    expect(t.eligible).toBe(7);
+    expect(t.recallMin).toBeCloseTo(1 / 7);
+    // O IC95 é MAIS LARGO que a banda do casamento (aqui a banda é degenerada: min = max).
+    expect(t.ciHigh - t.ciLow).toBeGreaterThan(t.recallMax - t.recallMin);
+    const lim = recallLimitations({
+      tally: t, sameFamily: false, judgeModel: "j", matchModel: "amazon.nova-pro-v1:0",
+      matcherDisagreement: null, auditSample: 0, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("GAP-103");
+    expect(lim).toContain("MAIS LARGO");
+    expect(recallNote(t)).toContain("IC95 do piso");
+  });
+
+  it("GAP-103: amostra no piso de declaração não ganha a ressalva", () => {
+    const t = recallTally(Array.from({ length: RECALL_MIN_ELIGIBLE }, (_, k) => ({
+      defectId: `D${k}`, file: "f", anchor: "a", defectClass: "ambiguous_fr", inVocabulary: true,
+      difficulty: "sutil" as const, position: "corpo_sem_titulo" as const, scope: "local" as const,
+      covered: true, verdict: "encontrado" as const, findingRef: "", citation: "",
+      citationVerbatim: true, classAgreed: true, reason: "",
+    })));
+    const lim = recallLimitations({
+      tally: t, sameFamily: false, judgeModel: "j", matchModel: "amazon.nova-pro-v1:0",
+      matcherDisagreement: null, auditSample: 0, rejected: 0,
+    }).join(" | ");
+    expect(lim).not.toContain("GAP-103");
   });
 });
 
