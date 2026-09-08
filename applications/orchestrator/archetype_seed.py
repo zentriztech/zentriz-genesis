@@ -1,5 +1,5 @@
 """
-archetype_seed.py — ensina à FÁBRICA os arquétipos aprendidos na Bancada (GAP-69→75).
+archetype_seed.py — ensina à FÁBRICA os arquétipos aprendidos na Bancada (GAP-69→75, 121, 122).
 
 Popula `context_cache` (CAG) com, para cada papel da fábrica:
   • uma linha `category='package'`   → `systemPromptPrefix`, o texto do arquétipo (parágrafos);
@@ -30,7 +30,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"  # 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -38,7 +38,7 @@ ROLES = ("dev", "cto", "engineer", "pm", "qa", "monitor", "devops")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — os 7 arquétipos, medidos em produção na Bancada (2026-09-07)
+# Catálogo — os 9 arquétipos, medidos em produção na Bancada (2026-09-07; 121/122 em 2026-09-08)
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARCHETYPES: list[dict[str, Any]] = [
@@ -124,6 +124,37 @@ ARCHETYPES: list[dict[str, Any]] = [
             "(+15,3% em 7h46)."
         ),
     },
+    {
+        "slug": "arch.gap121.pedido-impossivel-separa-se",
+        "title": "Pedido que exige crescer E encolher, julgado pelo líquido, é impossível com margem zero",
+        "rule": (
+            "Tarefa que ACRESCENTA e REMOVE ao mesmo tempo, julgada pelo delta líquido tudo-ou-nada: "
+            "faça a REMOÇÃO SOZINHA primeiro — ela cabe em qualquer orçamento e o espaço liberado "
+            "financia o acréscimo depois. Não podendo separar, declare o pedido inexequível com esse "
+            "orçamento em vez de entregar o que nasce condenado. Na remoção o defeito segue ABERTO: "
+            "apagar a seção que fala dele não é conserto."
+        ),
+        "evidence": (
+            "Bancada GAP-121 (2026-09-08): margem de crescimento ficou em ZERO da rodada 4 à 12 e 9 "
+            "de 24 rodadas não escreveram NADA — sempre nos mesmos arquivos. Pedir a remoção sozinha "
+            "devolveu −1.334 chars de margem, 8 de 11 rodadas voltaram a escrever e a contagem caiu "
+            "48 → 43 em 11 rodadas (antes: 24 rodadas para ficar em 48)."
+        ),
+    },
+    {
+        "slug": "arch.gap122.artefato-novo-entra-no-indice",
+        "title": "Arquivo novo que não entra no índice não existe para quem lê depois",
+        "rule": (
+            "Ao CRIAR membro de um conjunto (arquivo de spec, módulo, serviço do manifesto) — e ao "
+            "EDITAR o índice dele — confira que o índice cita todos. A forma do índice é sua decisão; "
+            "a completude não é. Sem a lista do conjunto, diga isso em vez de supor índice completo."
+        ),
+        "evidence": (
+            "Bancada GAP-122 (2026-09-08): `arquitetura-modelo.md` foi criado e NÃO entrou no "
+            "`README.md`, e o chat reescreveu o README depois sem indexá-lo. O inventário do juiz "
+            "listava a árvore, mas cruzar 12 nomes contra o texto do índice à mão nunca aconteceu."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -171,9 +202,9 @@ ROLE_FOCUS: dict[str, str] = {
 def _prefix_for(role: str) -> str:
     """Texto injetado no topo do SYSTEM_PROMPT (`category='package'`)."""
     lines = [
-        "### Arquétipos de contexto (aprendidos em produção — Bancada de Specs, GAP-69→75)",
+        "### Arquétipos de contexto (aprendidos em produção — Bancada de Specs, GAP-69→75 · 121 · 122)",
         "",
-        "Estes sete defeitos foram MEDIDOS na Bancada e são de CONTEXTO, não de linguagem: "
+        "Estes nove defeitos foram MEDIDOS na Bancada e são de CONTEXTO, não de linguagem: "
         "aparecem igual em spec, em código e em manifesto. Cortar contexto é aceitável; "
         "**mentir sobre o corte não**.",
         "",
