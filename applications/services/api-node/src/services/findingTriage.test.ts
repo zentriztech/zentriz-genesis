@@ -513,10 +513,74 @@ describe("findingTriage — GAP-41: diff finding-a-finding entre validações", 
     expect(d.opened.map((f) => f.anchor)).toEqual(["§3.4"]);
   });
 
+  /**
+   * 🔴 GAP-126 — MEDIDO em prod 2026-09-08 (NVX LastMile, `9e5ea585` → `e231e5ea`): 3 dos 9 findings que
+   * entraram estavam em `visao-escopo.md`, cujo sha é IDÊNTICO nas duas coberturas e que nenhuma das 21
+   * rodadas aplicadas no intervalo tocou. `openedOnNewSurface` não pega isso (o arquivo era velho
+   * conhecido), então os 3 entravam no saldo `closed > opened` como se o laço os tivesse causado.
+   */
+  describe("🔴 GAP-126 — novo em arquivo de sha IDÊNTICO não é regressão desta edição", () => {
+    const covS = (shas: Record<string, string>) =>
+      ({ full: Object.keys(shas), fullShas: shas, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+    const RS = (id: string, findings: ValidationFinding[], shas: Record<string, string>) =>
+      ({ id, created_at: id, findings, coverage: covS(shas) });
+
+    it("o caso literal de prod: mesmo sha nas duas ⇒ conta no balde de texto INVARIANTE, não em descoberta", () => {
+      const novo = F({ file: "visao-escopo.md", title: "§1.5 contradiz a matriz", anchor: "§1.5" });
+      const d = gapDelta([
+        RS("r3", [novo], { "visao-escopo.md": "sha-4545" }),
+        RS("r2", [], { "visao-escopo.md": "sha-4545" }),
+        RS("r1", [], { "visao-escopo.md": "sha-4545" }),
+      ], null, 2);
+      expect(d.opened).toHaveLength(1);
+      expect(d.openedOnUnchangedText).toBe(1);
+      expect(d.openedOnNewSurface).toBe(0); // o arquivo já era julgado antes — não é descoberta
+    });
+
+    it("sha DIFERENTE ⇒ o texto mudou e o finding é atribuível à edição", () => {
+      const novo = F({ file: "contratos-erros.md", title: "§4.3 sem desfecho", anchor: "§4.3" });
+      const d = gapDelta([
+        RS("r3", [novo], { "contratos-erros.md": "sha-depois" }),
+        RS("r2", [], { "contratos-erros.md": "sha-antes" }),
+      ], null, 2);
+      expect(d.openedOnUnchangedText).toBe(0);
+    });
+
+    it("cobertura SEM `fullShas` (legado) ⇒ balde ZERO: não invento invariância que não medi", () => {
+      const novo = F({ file: "a.md", title: "novo em A", anchor: "a9" });
+      const d = gapDelta([R("r3", [novo], "a.md"), R("r2", [], "a.md"), R("r1", [], "a.md")], null, 2);
+      expect(d.opened).toHaveLength(1);
+      expect(d.openedOnUnchangedText).toBe(0);
+    });
+
+    it("🔴 revisão adversarial: a medição anterior MAIS RECENTE decide — sha velho igual não ressuscita invariância", () => {
+      // O arquivo foi editado em r2 (sha-y) e voltou ao conteúdo antigo em r3? Não: r3 traz `sha-x` de
+      // volta, mas entre r2 e r3 o texto MUDOU duas vezes. Deixar r1 (sha-x, mais velho) responder pela
+      // comparação absolveria a edição de r3 — por isso o laço para no primeiro sha anterior que achar.
+      const novo = F({ file: "a.md", title: "novo em A", anchor: "a9" });
+      const d = gapDelta([
+        RS("r3", [novo], { "a.md": "sha-x" }),
+        RS("r2", [], { "a.md": "sha-y" }),
+        RS("r1", [], { "a.md": "sha-x" }),
+      ], null, 2);
+      expect(d.opened).toHaveLength(1);
+      expect(d.openedOnUnchangedText).toBe(0);
+    });
+
+    it("basename ambíguo não fala pelo outro arquivo (mesma régua do `fileJudgedIn`)", () => {
+      const novo = F({ file: "README.md", title: "índice incompleto", anchor: "GATE-01" });
+      const d = gapDelta([
+        RS("r3", [novo], { "web/README.md": "sha-1", "api/README.md": "sha-2" }),
+        RS("r2", [], { "web/README.md": "sha-1", "api/README.md": "sha-2" }),
+      ], null, 2);
+      expect(d.openedOnUnchangedText).toBe(0); // dois candidatos ⇒ nenhum responde por `README.md`
+    });
+  });
+
   it("menos de duas validações: não há o que comparar (zeros, nunca um palpite)", () => {
-    expect(gapDelta([], null)).toEqual({ closed: [], opened: [], openedOnNewSurface: 0 });
+    expect(gapDelta([], null)).toEqual({ closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 });
     expect(gapDelta([{ id: "r1", created_at: "1", findings: [F({ anchor: "x" })] }], null))
-      .toEqual({ closed: [], opened: [], openedOnNewSurface: 0 });
+      .toEqual({ closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 });
   });
 
   it("gapDeltaSinceLastRun: uma query, janela W+1, só runs terminais", async () => {

@@ -224,6 +224,21 @@ export function judgedFilesOf(coverage: unknown): Set<string> | null {
   return new Set(full.map((p) => String(p).toLowerCase()));
 }
 
+/**
+ * 🔴 GAP-126 — os SHAs dos arquivos que esta run julgou por inteiro (`stage_b_coverage.fullShas`).
+ * `null` = a run não registrou sha (cobertura legada) e nada pode ser afirmado sobre mudança de texto.
+ */
+export function judgedShasOf(coverage: unknown): Map<string, string> | null {
+  if (!coverage || typeof coverage !== "object") return null;
+  const shas = (coverage as { fullShas?: unknown }).fullShas;
+  if (!shas || typeof shas !== "object" || Array.isArray(shas)) return null;
+  const out = new Map<string, string>();
+  for (const [k, v] of Object.entries(shas as Record<string, unknown>)) {
+    if (typeof v === "string" && v) out.set(String(k).toLowerCase(), v);
+  }
+  return out.size > 0 ? out : null;
+}
+
 /** Só o basename, minúsculo — tolera `file` sem `rel_dir` (o validador às vezes devolve o nome puro). */
 function baseName(p: string): string {
   const s = p.toLowerCase();
@@ -273,6 +288,21 @@ export function fileJudgedIn(file: string, judged: Set<string>): boolean {
   let hits = 0;
   for (const p of judged) if (baseName(p) === b) hits++;
   return hits === 1;
+}
+
+/**
+ * 🔴 GAP-126 — o sha do arquivo neste mapa, pela MESMA régua do `fileJudgedIn` (exato, ou basename sem
+ * ambiguidade). `null` = a run não julgou este arquivo por inteiro, ou o nome é ambíguo.
+ */
+export function shaJudgedIn(file: string, shas: Map<string, string> | null): string | null {
+  if (!shas) return null;
+  const f = file.toLowerCase();
+  const direct = shas.get(f);
+  if (direct) return direct;
+  const b = baseName(f);
+  let hit: string | null = null, hits = 0;
+  for (const [p, sha] of shas) if (baseName(p) === b) { hits++; hit = sha; }
+  return hits === 1 ? hit : null;
 }
 
 export interface FindingsSurvey {
@@ -412,10 +442,34 @@ export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding
  * matar. Por isso só conta como fechado o fingerprint que AINDA aparece em alguma run da janela nova
  * (logo, uma run mais recente rejulgou o alvo e não o encontrou); quem apenas envelheceu fica de fora.
  */
-export interface GapDelta { closed: ValidationFinding[]; opened: ValidationFinding[]; openedOnNewSurface: number }
+/**
+ * 🔴 GAP-126 — "novo desde a validação anterior" afirma que ALGO MUDOU no alvo. Nem sempre é verdade.
+ *
+ * MEDIDO em prod 2026-09-08 (NVX LastMile, validações `9e5ea585` → `e231e5ea`): dos 9 findings que
+ * entraram, **3 estão em `visao-escopo.md`, cujo `fullShas` é BYTE A BYTE o mesmo nas duas** — o arquivo
+ * foi julgado por inteiro nas duas e nenhuma das 21 rodadas aplicadas no intervalo o tocou. O texto da
+ * âncora não mudou: ou o juiz não tinha visto o defeito antes, ou ele vem da CONTRAPARTE editada (os 3
+ * são de coerência cross-file). Em nenhuma das duas leituras houve regressão DAQUELE texto.
+ *
+ * Isso não era só relato torto: `opened` entra no saldo `closed > opened` que zera o `no_progress_streak`
+ * (`specAutonomy`), então variância do juiz sobre texto invariante avançava o streak e podia MATAR um
+ * laço que estava convergindo. `openedOnNewSurface` não pega este caso — ele cobre arquivo INÉDITO, e
+ * aqui o arquivo era velho conhecido.
+ *
+ * Régua conservadora: só conta quem tem sha na run MAIS NOVA (a que produziu o finding) e sha IGUAL na
+ * medição anterior mais recente de OUTRA run — as janelas se sobrepõem e comparar uma run consigo mesma
+ * fabricaria "texto invariante" de graça. Sem sha registrado (cobertura legada) o balde fica em 0.
+ */
+export interface GapDelta {
+  closed: ValidationFinding[];
+  opened: ValidationFinding[];
+  openedOnNewSurface: number;
+  /** Entraram em arquivo julgado antes E com sha IDÊNTICO agora — o texto do alvo não mudou. */
+  openedOnUnchangedText: number;
+}
 
 export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS): GapDelta {
-  if (runs.length < 2) return { closed: [], opened: [], openedOnNewSurface: 0 };
+  if (runs.length < 2) return { closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 };
   const now = surveyFindings(runs.slice(0, window), currentFiles);
   const before = surveyFindings(runs.slice(1, window + 1), currentFiles);
   const fpOf = (fs: ValidationFinding[]) => {
@@ -434,14 +488,25 @@ export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null,
   for (const r of runs.slice(0, window)) for (const fp of effectiveFingerprints(r.findings ?? [])) nowSeen.add(fp);
   const closed: ValidationFinding[] = [], opened: ValidationFinding[] = [];
   for (const [k, f] of b) if (!a.has(k) && nowSeen.has(k)) closed.push(f);
-  let onNew = 0;
+  // GAP-126: shas da run MAIS NOVA (a que produziu o finding novo) e a medição anterior mais recente.
+  const shasNow = judgedShasOf(runs[0]?.coverage);
+  let onNew = 0, onUnchanged = 0;
   for (const [k, f] of a) {
     if (b.has(k)) continue;
     opened.push(f);
     const file = String(f.file ?? "").toLowerCase();
-    if (file && !judgedBefore.has(file) && ![...judgedBefore].some((p) => baseName(p) === baseName(file))) onNew++;
+    if (!file) continue;
+    if (!judgedBefore.has(file) && ![...judgedBefore].some((p) => baseName(p) === baseName(file))) { onNew++; continue; }
+    const shaNow = shaJudgedIn(file, shasNow);
+    if (!shaNow) continue;
+    for (const r of runs.slice(1, window + 1)) {
+      const shaBefore = shaJudgedIn(file, judgedShasOf(r.coverage));
+      if (!shaBefore) continue;
+      if (shaBefore === shaNow) onUnchanged++;
+      break; // a medição anterior MAIS RECENTE decide; as mais velhas não falam por ela
+    }
   }
-  return { closed, opened, openedOnNewSurface: onNew };
+  return { closed, opened, openedOnNewSurface: onNew, openedOnUnchangedText: onUnchanged };
 }
 
 /** `gapDelta` sobre as runs do projeto (uma query; janela W+1 para que "antes" tenha o mesmo tamanho). */

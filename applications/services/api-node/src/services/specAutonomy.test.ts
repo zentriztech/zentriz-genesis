@@ -30,7 +30,7 @@ let findings: Array<{ severity: string; triage?: unknown }> = [];
 let latestRunId: string | null = "run-0";
 // GAP-41: o diff finding-a-finding entre as duas últimas validações. `null` reproduz o caso em que
 // não há duas validações para comparar (ou a consulta falhou) — o laço volta a olhar só o agregado.
-let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number } | null = null;
+let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number; openedOnUnchangedText?: number } | null = null;
 /**
  * 🔴 GAP-76: o NÍVEL de GAPs no subconjunto que as DUAS últimas validações julgaram por inteiro.
  * `null` reproduz "não foi possível medir" (cobertura ausente em algum dos lados) — e aí o laço volta a
@@ -46,7 +46,7 @@ let comparable: { files: string[]; before: number; now: number; same: number } |
 vi.mock("./findingTriage.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./findingTriage.js")>()),
   projectFindingsState: vi.fn(async () => ({ latestRunId, findings, resolved: [], counts: {} })),
-  gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0 }),
+  gapDeltaSinceLastRun: vi.fn(async () => delta ?? { closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 }),
   comparableTallySinceLastRun: vi.fn(async () => comparable),
 }));
 
@@ -1080,6 +1080,64 @@ describe("validação dentro do laço", () => {
       delta = { closed: [], opened: [{}, {}], openedOnNewSurface: 2 };
       await advanceAutonomyRun(db, r.id);
       expect(JSON.stringify(run!.rounds)).toContain("2 em arquivo julgado por INTEIRO pela 1ª vez");
+    });
+
+    /**
+     * 🔴 GAP-126 — MEDIDO em prod (`9e5ea585` → `e231e5ea`): 3 dos 9 novos estavam em `visao-escopo.md`
+     * com sha IDÊNTICO nas duas coberturas e sem uma única rodada tocando o arquivo. Eles entravam no
+     * saldo `closed > opened` como regressão do laço e avançavam o `no_progress_streak` — o freio que
+     * MATA a run. E o chat dizia "1 fechado × 7 novos" afirmando uma causalidade que os shas negam.
+     */
+    it("🔴 GAP-126: novo em arquivo de sha IDÊNTICO não punie o saldo — a run que fechou 1 progrediu", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}, {}, {}], openedOnNewSurface: 0, openedOnUnchangedText: 3 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.no_progress_streak).toBe(0);   // 1 fechado × 0 atribuível
+      const rounds = JSON.stringify(run!.rounds);
+      expect(rounds).toContain("3 NÃO são regressão desta edição");
+      expect(rounds).toContain("sha IDÊNTICO");
+      expect(rounds).toContain("Parcela atribuível a esta edição: 0");
+      expect(rounds).not.toContain("REGRESSÃO/reformulação, não descoberta");
+    });
+
+    it("🔴 GAP-126 não inventa progresso: zero fechado segue sem progresso mesmo com todos os novos não-atribuíveis", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [], opened: [{}, {}, {}], openedOnNewSurface: 1, openedOnUnchangedText: 2 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.no_progress_streak).toBe(1);   // `0 > 0` é falso — o freio de gasto continua vivo
+      expect(JSON.stringify(run!.rounds)).toContain("Parcela atribuível a esta edição: 0");
+    });
+
+    it("🔴 GAP-126: os baldes somados nunca passam do total de novos (nem com reconciliação cortando)", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}, {}], openedOnNewSurface: 2, openedOnUnchangedText: 2 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      expect(JSON.stringify(run!.rounds)).toContain("Parcela atribuível a esta edição: 0");
+      expect(JSON.stringify(run!.rounds)).not.toContain("-2");
+    });
+
+    it("🔴 GAP-126: ZERO novos não é caracterizado como regressão (afirmação sobre conjunto vazio)", async () => {
+      // A nota do passe 1 da run `a52b5e1b` (prod, 2026-09-08) saiu com "8 fechado(s), 0 novo(s) — todos
+      // em arquivo já julgado antes, ou seja REGRESSÃO": não havia nenhum para caracterizar.
+      const r = await reachValidating(5);
+      delta = { closed: [{}, {}], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      const rounds = JSON.stringify(run!.rounds);
+      expect(rounds).toContain("2 fechado(s), 0 novo(s)");
+      expect(rounds).not.toContain("REGRESSÃO/reformulação");
+    });
+
+    it("🔴 GAP-126: regressão de verdade (sha mudou) continua sendo relatada como regressão e punindo o saldo", async () => {
+      const r = await reachValidating(5);
+      delta = { closed: [{}], opened: [{}, {}], openedOnNewSurface: 0, openedOnUnchangedText: 0 };
+      continuity = { persisted: 0, reconciled: true };
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.no_progress_streak).toBe(1);   // 1 fechado × 2 atribuíveis
+      expect(JSON.stringify(run!.rounds)).toContain("REGRESSÃO/reformulação, não descoberta");
     });
   });
 

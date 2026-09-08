@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 # 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
 # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
 # 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
-SCHEMA_VERSION = "1.5.0"  # 1.5.0: + GAP-125 (o último artefato não redefine o veredicto do trabalho)
+# 1.5.0: + GAP-125 (o último artefato não redefine o veredicto do trabalho)
+SCHEMA_VERSION = "1.6.0"  # 1.6.0: + GAP-126 ("novo" não quer dizer que o seu trabalho causou)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -210,6 +211,23 @@ ARCHETYPES: list[dict[str, Any]] = [
             "desenho e não o ENCERRAMENTO — foi esse ponto cego que sustentou o defeito."
         ),
     },
+    {
+        "slug": "arch.gap126.novo-nao-quer-dizer-que-voce-causou",
+        "title": "Defeito NOVO no relatório não quer dizer que o seu trabalho o causou",
+        "rule": (
+            "Antes de contar um defeito NOVO como regressão do seu trabalho, veja se o alvo mudou: alvo "
+            "de hash IDÊNTICO significa defeito que já existia (ou que vem da contraparte editada). "
+            "Progresso medido por saldo (fechados − novos) tem de separar a parcela ATRIBUÍVEL; sem isso "
+            "a variância de quem revisa mata um ciclo que estava convergindo."
+        ),
+        "evidence": (
+            "Bancada GAP-126 (2026-09-08): dos 9 findings que entraram entre duas validações, 3 estavam "
+            "em `visao-escopo.md` — `fullShas` BYTE A BYTE idêntico nas duas e nenhuma das 21 rodadas "
+            "aplicadas no intervalo tocou o arquivo. Os 3 entravam no saldo `fechados > novos` que zera o "
+            "freio de gasto, então variância do juiz sobre texto invariante podia MATAR o laço, e o "
+            "relatório dizia '1 fechado × 7 novos' afirmando uma causalidade que os shas negam."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -242,14 +260,17 @@ ROLE_FOCUS: dict[str, str] = {
         "ausência de arquivo que nunca foi entregue ao Dev (marca de CORTE/NÃO ENTREGUE no "
         "contexto dele) — isso é falta de contexto, e o veredito correto é apontar o arquivo "
         "faltante, não pedir reescrita integral. E o seu veredito vale sobre o TRECHO que você "
-        "leu: não reabra o que já aprovou porque outra parte do mesmo arquivo mudou."
+        "leu: não reabra o que já aprovou porque outra parte do mesmo arquivo mudou. Ao reprovar por "
+        "defeito em arquivo que a task NÃO alterou, diga isso — é achado, não regressão da task."
     ),
     "monitor": (
         "Como isto aparece para você: 'N tasks concluídas' não é prova. Verifique identidade do "
         "item (task/arquivo), não só a contagem — rotação de itens parece progresso. E confira "
         "QUANDO a contagem foi apurada: número anterior às últimas entregas não é o estado atual. "
         "Do mesmo jeito, um artefato extra entregue no fim (diagrama, resumo, README) não muda o "
-        "status do ciclo: relate o desfecho que a MEDIÇÃO deu, não o do último passo."
+        "status do ciclo: relate o desfecho que a MEDIÇÃO deu, não o do último passo. E defeito que "
+        "aparece em alvo NÃO ALTERADO (mesmo hash) não é regressão do ciclo — separe a parcela "
+        "atribuível antes de dizer que o trabalho piorou o produto."
     ),
     "devops": (
         "Como isto aparece para você: manifesto/compose gerado a partir de contexto parcial "

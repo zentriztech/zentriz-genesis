@@ -317,6 +317,13 @@ export interface AutonomyRoundLog {
   gapsClosed?: number | null;
   gapsOpened?: number | null;
   /**
+   * 🔴 GAP-126 — de `gapsOpened`, a parcela que o laço NÃO causou: arquivo julgado por inteiro pela 1ª
+   * vez (descoberta) ou de sha IDÊNTICO ao da validação anterior (o texto do alvo não mudou). Medido em
+   * prod: 3 de 9. É esta parcela que sai do saldo `closed > opened` que zera o `no_progress_streak`.
+   */
+  gapsOpenedUnchangedText?: number | null;
+  gapsOpenedAttributable?: number | null;
+  /**
    * 🔴 GAP-76 — o NÍVEL de GAPs no subconjunto que ESTA validação e a anterior julgaram por inteiro.
    *
    * `gapsBefore`/`gapsAfter` são agregados do PROJETO, e o agregado sobe e desce sozinho por rotação de
@@ -3617,6 +3624,9 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         openedOnNewSurface: cont?.reconciled
           ? Math.min(rawDelta.openedOnNewSurface, cont.opened.length)
           : rawDelta.openedOnNewSurface,
+        openedOnUnchangedText: cont?.reconciled
+          ? Math.min(rawDelta.openedOnUnchangedText ?? 0, cont.opened.length)
+          : (rawDelta.openedOnUnchangedText ?? 0),
       }
     : null;
   const persisted = cont?.reconciled ? cont.persisted.length : 0;
@@ -3645,8 +3655,20 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
   // quem responde "melhorou?" é o NÍVEL comparável ou o saldo reconciliado do GAP-67.
   const aggregateFell = gaps.important < before && !surfaceChanged;
   const comparableFell = !!comp && comp.files.length > 0 && comp.now < comp.before;
+  // 🔴 GAP-126: o saldo `closed > opened` responsabiliza o laço por TODO finding que entrou — inclusive
+  // os que entraram em arquivo cujo sha não mudou (texto do alvo intocado) e em arquivo julgado por
+  // inteiro pela 1ª vez. Nenhum dos dois é regressão desta edição, e MEDIDO em prod eles eram 3 de 9.
+  // Punir por eles avança o `no_progress_streak` e mata laço que está convergindo. O saldo passa a ser
+  // sobre a parcela ATRIBUÍVEL — e continua exigindo reconciliação por agente (GAP-67) e `closed > 0`,
+  // então isto nunca inventa progresso: com zero fechado, `0 > 0` segue falso.
+  // `?? 0` de propósito: balde que não veio medido conta como ATRIBUÍVEL — o degrau seguro é punir o
+  // laço, nunca absolvê-lo por um campo ausente.
+  const openedNaoAtribuivel = delta
+    ? Math.min(delta.opened.length, (delta.openedOnNewSurface ?? 0) + (delta.openedOnUnchangedText ?? 0))
+    : 0;
+  const openedAtribuivel = delta ? delta.opened.length - openedNaoAtribuivel : 0;
   const progressed = aggregateFell || comparableFell
-    || (!!delta && !!cont?.reconciled && delta.closed.length > delta.opened.length);
+    || (!!delta && !!cont?.reconciled && delta.closed.length > openedAtribuivel);
   // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
   // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
   // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
@@ -3688,11 +3710,23 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         (comp.now > 0 && comp.same === comp.now && comp.same === comp.before
           ? ` — as MESMAS ${comp.same} âncoras, zero fechado.`
           : ` (${comp.same} âncora(s) idêntica(s) nas duas).`);
+  // 🔴 GAP-126: "novo" não é sinônimo de "o laço causou". Os dois baldes não-atribuíveis são ditos por
+  // extenso, e a frase "todos em arquivo já julgado antes = REGRESSÃO" só sai quando é verdade.
+  const naoAtribuivelNote = delta && openedNaoAtribuivel > 0
+    ? ` Desses, ${openedNaoAtribuivel} NÃO são regressão desta edição` +
+      (delta.openedOnNewSurface > 0 ? ` — ${delta.openedOnNewSurface} em arquivo julgado por INTEIRO pela 1ª vez (descoberta)` : "") +
+      (delta.openedOnUnchangedText > 0 ? `${delta.openedOnNewSurface > 0 ? " e" : " —"} ${delta.openedOnUnchangedText} em arquivo com sha IDÊNTICO ao da validação anterior (o texto do alvo não mudou: defeito que já existia ou vindo da contraparte editada)` : "") +
+      `. Parcela atribuível a esta edição: ${openedAtribuivel}.`
+    : "";
   const deltaNote = delta
     ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
-      (delta.openedOnNewSurface > 0
-        ? ` (${delta.openedOnNewSurface} em arquivo julgado por INTEIRO pela 1ª vez — descoberta, não regressão).`
-        : ` — todos em arquivo já julgado antes, ou seja REGRESSÃO/reformulação, não descoberta.`) +
+      (delta.opened.length === 0
+        // GAP-126: caracterizar um conjunto VAZIO ("todos são regressão") é afirmação sobre nada —
+        // a nota do passe 1 da run `a52b5e1b` saiu com "0 novos … ou seja REGRESSÃO".
+        ? `.`
+        : openedNaoAtribuivel > 0
+          ? `.${naoAtribuivelNote}`
+          : ` — todos em arquivo já julgado antes e com texto MUDADO, ou seja REGRESSÃO/reformulação, não descoberta.`) +
       contNote
     : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
@@ -3708,6 +3742,8 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     gapsAfter: gaps.important, passBlockers: gaps.blockers, passWarnings: gaps.warnings,
     validationRunId: run.validationRunId,
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
+    gapsOpenedUnchangedText: delta?.openedOnUnchangedText ?? null,
+    gapsOpenedAttributable: delta ? openedAtribuivel : null,
     gapsPersisted: cont?.reconciled ? persisted : null,
     persistedGaps: persistedRefs,
     gapsComparableBefore: comp?.before ?? null, gapsComparableNow: comp?.now ?? null,
@@ -3723,7 +3759,13 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       ? `**${gaps.important}** GAP(s) importante(s) (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada) — ⚠️ **não comparáveis** com os ${before} da validação anterior, que julgou outro conjunto de arquivos por inteiro.`
       : `GAPs importantes ${before} → **${gaps.important}** (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}; ℹ️ ${gaps.info} de baixo risco não sustentam nova rodada).`) +
     covNote + compNote +
-    (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior${delta.openedOnNewSurface > 0 ? `, ${delta.openedOnNewSurface} deles em arquivo julgado por inteiro pela primeira vez` : ""}.` : "") +
+    (delta ? ` **${delta.closed.length} GAP(s) fechado(s)** e ${delta.opened.length} novo(s) desde a validação anterior` +
+      (openedNaoAtribuivel > 0
+        ? ` — mas **${openedNaoAtribuivel} não são regressão desta edição** (${[
+            delta.openedOnUnchangedText > 0 ? `${delta.openedOnUnchangedText} em arquivo de **sha idêntico**, texto do alvo intocado` : null,
+            delta.openedOnNewSurface > 0 ? `${delta.openedOnNewSurface} em arquivo julgado por inteiro pela 1ª vez` : null,
+          ].filter(Boolean).join("; ")}), sobrando **${openedAtribuivel}** atribuível(is).`
+        : ".") : "") +
     // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
     // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.
     (persisted > 0 ? ` ⚠️ **${persisted} defeito(s) apenas REBATIZADO(s)** pela edição (seção renumerada/movida): continuam abertos e não entram em nenhuma das duas contagens.` : "") +
