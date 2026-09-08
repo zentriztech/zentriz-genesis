@@ -605,6 +605,25 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
         c = envelope["constraints"]
         parts.append("## Restrições\n" + "\n".join(f"- {x}" for x in (c if isinstance(c, list) else [c])))
 
+    # ── 🔴 GAP-54c: REGRAS DE ESCOPO que o runner acreditava estar mandando ────────────────────────
+    # Achado ao fiar o GAP-54b: os quatro campos abaixo são preenchidos por `runner.call_qa`
+    # (`task_scope_instruction`, `evolution_qa_instruction`) e por
+    # `PipelineContext.evolution_scope_inputs` (`evolution_scope_instruction`) e NUNCA eram emitidos
+    # aqui — nenhum `envelope.get(...)` os mencionava. Mesma classe do `sibling_files_context` da
+    # Fase 1: o dado atravessava o envelope inteiro e morria no montador do prompt. O efeito medível é
+    # perverso, porque o texto que morria era justamente o que RESTRINGE: o QA recebia `task_files` sem
+    # a regra "valide SOMENTE estes arquivos" e reprovava por ausência de arquivos de outras tasks; o
+    # Dev recebia `evolution_scope` sem a regra que explica que o gate descarta o que sai do escopo.
+    for _instr_field, _instr_title in (
+        ("evolution_scope_instruction", "Escopo desta evolução"),
+        ("task_scope_instruction", "Escopo desta validação"),
+        ("evolution_qa_instruction", "Escopo da validação nesta evolução"),
+        ("spec_scope_instruction", "Contra o que medir a entrega"),
+    ):
+        _instr_value = envelope.get(_instr_field)
+        if isinstance(_instr_value, str) and _instr_value.strip():
+            parts.append(f"## {_instr_title}\n{_instr_value.strip()}")
+
     round_info = limits.get("round", 1)
     max_rounds = limits.get("max_rounds", 3)
     parts.append(f"## Limites\n- Rodada atual: {round_info}/{max_rounds}")

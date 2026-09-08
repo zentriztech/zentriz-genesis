@@ -126,6 +126,38 @@ describe("API integration (auth, projects, specs)", () => {
     expect(list.some((e: { fromAgent: string }) => e.fromAgent === "cto")).toBe(true);
   });
 
+  // 🔴 GAP-54b: a Bancada decide QUEM é a fonte única de cada contrato (`spec_oracle_decisions`,
+  // GAP-22) e essa decisão nunca chegava a jusante — o Dev reabria a contradição ao escrever
+  // código. Esta rota é o transporte dessa decisão até o dossiê do runner: read-only, sem LLM.
+  // Sem registro de oráculo o corpo é `[]` — nunca 404/500, porque ausência de oráculo é um
+  // estado NORMAL e derrubar a run por isso transformaria contexto em pré-requisito.
+  it("GET /api/projects/:id/spec-oracles returns array (empty when nothing decided)", async () => {
+    if (!dbAvailable || !app || !token || !projectId) return;
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/spec-oracles`,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(Array.isArray(JSON.parse(res.body))).toBe(true);
+  });
+
+  it("GET /api/projects/:id/spec-oracles without token returns 401", async () => {
+    if (!dbAvailable || !app || !projectId) return;
+    const res = await app.inject({ method: "GET", url: `/api/projects/${projectId}/spec-oracles` });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("GET /api/projects/:id/spec-oracles on unknown project returns 404", async () => {
+    if (!dbAvailable || !app || !token) return;
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/projects/00000000-0000-0000-0000-000000000000/spec-oracles",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
   it("GET /api/projects/:id/tasks returns array", async () => {
     if (!dbAvailable || !app || !token || !projectId) return;
     const res = await app.inject({
