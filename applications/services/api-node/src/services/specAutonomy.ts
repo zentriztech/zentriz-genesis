@@ -2222,8 +2222,18 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 GAP-116: o juiz declarou a spec promovível ⇒ a arquitetura FECHOU, mesmo com GAPs abertos
     // (todos julgados não-impeditivos). É aqui que a feature dos desenhos passa a ser alcançável.
     if (v.promotable && gaps && await startDiagramsRound(db, run, gaps, "pending")) return true;
+    // 🔴 GAP-123 — aqui o orçamento de passes ACABOU: não há validação a pagar, e é justamente por isso
+    // que o resto tem de ser DECLARADO. Rodada aplicada no passe corrente é, por construção, rodada que
+    // nenhuma validação mediu (a medição fecha o passe) ⇒ dizer só "N arquivo(s) revisado(s)" deixaria a
+    // contagem final passar por retrato do disco. Cortar é ok; mentir sobre o corte não.
+    const naoMedidas = appliedInPass(run);
     await finishRun(db, run, "exhausted",
-      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${v.note} Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
+      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${v.note}`
+      + (naoMedidas > 0
+        ? ` ⚠️ ${naoMedidas} arquivo(s) salvo(s) no último passe NÃO entraram nesta contagem (o orçamento de`
+          + ` passes acabou antes da validação que os mediria) — rode Validar para ver o número do disco.`
+        : "")
+      + ` Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
     return true;
   }
   // GAP-3: o teto de arquivos é do PASSE (o do laço inteiro é o `TOTAL`). Sem isto, uma spec com mais
@@ -2243,12 +2253,26 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // fazia o contrário. Então: fila cheia + teto batido ⇒ fecha o passe e valida (custa 1 validação,
     // não outras 12 rodadas de CTO). Quem limita o laço continua sendo `maxRounds` (passes) e o teto
     // TOTAL de arquivos, checados à parte.
+    // 🔴 GAP-123 — MEDIDO na run `731c58ce` (NVX LastMile): o teto TOTAL encerrava o laço na hora, com
+    // **5 rodadas APLICADAS ainda NÃO medidas** no passe corrente (rodadas 23/24/25/28/30, +1071 chars,
+    // escritas entre 22:08:37 e 22:18:06) enquanto a última validação havia fechado às 22:06:31. Três
+    // consequências, todas do mesmo defeito — decidir sobre fatos que já não descreviam o disco:
+    //  (1) a run reportou `gaps_current = 47` como estado FINAL: é o número de 22:06, não o do disco;
+    //  (2) uma das 5 era exatamente a rodada que FECHOU o GAP-122 (índice do `README.md`) ⇒ o laço
+    //      jogou fora a prova do próprio trabalho e o relatório sugere regressão (43 → 47);
+    //  (3) o veredicto de promovibilidade (GAP-77/115) julgou achados dessa validação vencida.
+    // E havia orçamento sobrando: `passes = 2` de `max_rounds = 5`. É o arquétipo do GAP-117, que
+    // consertou isto no teto POR PASSE e deixou o teto TOTAL com o comportamento antigo — o teto diz
+    // "pare de revisar arquivos", não "encerre sem medir o que escreveu". Custa UMA validação, e o
+    // `passes >= maxRounds` acima já garante que existe passe para fechar.
     // Sem nada aplicado no passe, validar mediria a MESMA spec e queimaria uma das 4 validações/h
     // (mesma razão do `applied === 0` na fila vazia) ⇒ aí o desfecho é o de antes.
     const appliedThisPass = appliedInPass(run);
-    if (perPass && appliedThisPass > 0) {
+    if (appliedThisPass > 0) {
       return closePassWithValidation(db, run, gaps?.important ?? 0, appliedThisPass,
-        `teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivo(s) por passe atingido`);
+        perPass
+          ? `teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivo(s) por passe atingido`
+          : `teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivo(s) no laço atingido — medindo o passe antes de encerrar`);
     }
     // 🔴 GAP-115: era ESTE o desfecho da run `10b1a4e1` (30 arquivos, 44 GAPs) — o laço gastou tudo e
     // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.

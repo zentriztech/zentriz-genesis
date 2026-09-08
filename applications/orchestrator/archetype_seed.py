@@ -30,7 +30,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.2.0"  # 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
+# 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
+SCHEMA_VERSION = "1.3.0"  # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -155,6 +156,22 @@ ARCHETYPES: list[dict[str, Any]] = [
             "listava a árvore, mas cruzar 12 nomes contra o texto do índice à mão nunca aconteceu."
         ),
     },
+    {
+        "slug": "arch.gap123.teto-para-de-produzir-nao-de-medir",
+        "title": "Teto de custo pára de PRODUZIR, não de MEDIR — número sem medição é retrato vencido",
+        "rule": (
+            "Ao encerrar por teto/orçamento: pare de gerar trabalho novo, mas MEÇA o que já entregou "
+            "antes de fechar a conta. Número apurado antes das últimas entregas descreve um estado que "
+            "não existe mais — e faz o próprio trabalho parecer regressão. Não podendo medir, DECLARE "
+            "quantas entregas ficaram fora da contagem em vez de apresentá-la como retrato do estado."
+        ),
+        "evidence": (
+            "Bancada GAP-123 (2026-09-08): a run `731c58ce` bateu o teto de 30 rodadas e encerrou com "
+            "5 rodadas APLICADAS (+1.071 chars, 22:08→22:18) que nenhuma validação mediu — a última "
+            "fechara 22:06:31. Reportou 47 (número de 22:06) com 3 de 5 passes ainda no orçamento, e "
+            "uma das 5 era justo a rodada que FECHOU o GAP-122: o laço jogou fora a prova do trabalho."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -190,7 +207,8 @@ ROLE_FOCUS: dict[str, str] = {
     ),
     "monitor": (
         "Como isto aparece para você: 'N tasks concluídas' não é prova. Verifique identidade do "
-        "item (task/arquivo), não só a contagem — rotação de itens parece progresso."
+        "item (task/arquivo), não só a contagem — rotação de itens parece progresso. E confira "
+        "QUANDO a contagem foi apurada: número anterior às últimas entregas não é o estado atual."
     ),
     "devops": (
         "Como isto aparece para você: manifesto/compose gerado a partir de contexto parcial "

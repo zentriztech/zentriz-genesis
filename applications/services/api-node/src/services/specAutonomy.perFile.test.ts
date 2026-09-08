@@ -835,16 +835,94 @@ describe("tetos do laço por arquivo", () => {
       expect(run!.passes).toBe(0);
     });
 
-    it("teto do LAÇO continua encerrando, mesmo com trabalho aplicado (é o teto de custo real)", async () => {
+    /**
+     * 🔴 GAP-123 — este teste afirmava o DEFEITO ("continua encerrando, mesmo com trabalho aplicado").
+     * MEDIDO na run `731c58ce` (NVX LastMile, 2026-09-08): o teto do laço encerrou com 5 rodadas
+     * APLICADAS que nenhuma validação mediu (+1071 chars escritos das 22:08:37 às 22:18:06; a última
+     * validação fechou às 22:06:31) e com `passes = 2` de `max_rounds = 5` — orçamento sobrando. A run
+     * então reportou `47` como estado final (o número de 22:06) e o veredicto de promovibilidade julgou
+     * achados dessa validação vencida. Uma das 5 era a rodada que FECHOU o GAP-122.
+     *
+     * O teto do laço continua sendo o freio de CUSTO — ele impede rodada nova de CTO, que é o que custa.
+     * Medir o que já foi escrito custa UMA validação e é a única forma de a contagem final ser o disco.
+     */
+    it("teto do LAÇO com trabalho aplicado → MEDE o passe antes de encerrar (não joga o trabalho fora)", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      const antes = fileCalls().length;
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("validating");
+      expect(isTerminalAutonomyStatus(run!.status as AutonomyStatus)).toBe(false);
+      expect(run!.passes).toBe(1);                            // o passe FOI contado
+      expect(fileCalls().length).toBe(antes);                 // e NENHUM arquivo novo foi ao CTO
+      const nota = notas().at(-1)!;
+      expect(nota).toContain(`teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivo(s) no laço atingido`);
+      expect(nota).toContain("Validando a spec inteira");
+    });
+
+    it("GAP-123: medido o passe, a volta ao teto do LAÇO encerra — uma validação, não um laço infinito", async () => {
       const r = await start(3);
       await advanceAutonomyRun(db, r.id);
       run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
       run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
       run!.status = "pending";
       run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);                     // teto do laço → valida o passe
+      expect(run!.status).toBe("validating");
+      findings = [gap("frontend/01-web.md", "blocker", "sem estado de erro")];
+      await advanceAutonomyRun(db, r.id);                     // validação medida → passe 2
+      expect(run!.status).toBe("pending");
+      const chamadas = fileCalls().length;
+      await advanceAutonomyRun(db, r.id);                     // teto do laço de novo, agora sem nada a medir
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("neste laço atingido");
+      expect(fileCalls().length).toBe(chamadas);              // o teto de CUSTO seguiu valendo
+    });
+
+    it("teto do LAÇO SEM nada aplicado no passe → encerra (validar mediria a MESMA spec)", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: false }));
+      run!.status = "pending";
+      run!.current_file = null;
       await advanceAutonomyRun(db, r.id);
       expect(run!.status).toBe("exhausted");
       expect(String(run!.last_error)).toContain("neste laço atingido");
+      expect(run!.passes).toBe(0);
+    });
+
+    /**
+     * 🔴 GAP-123, a outra ponta: quando o orçamento de PASSES acabou não há validação a pagar — e é aí
+     * que o resto tem de ser declarado. Cortar é ok; mentir sobre o corte não.
+     */
+    it("teto de PASSES com rodada aplicada não medida → a mensagem final DECLARA o que ficou fora", async () => {
+      const r = await start(1);
+      await advanceAutonomyRun(db, r.id);
+      run!.passes = 1;                                        // orçamento de passes esgotado
+      run!.rounds = [{ round: 1, pass: 1, applied: true }, { round: 2, pass: 1, applied: true }];
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("2 arquivo(s) salvo(s) no último passe NÃO entraram nesta contagem");
+      expect(String(run!.last_error)).toContain("rode Validar");
+    });
+
+    it("teto de PASSES sem rodada aplicada → nada a declarar (mensagem limpa)", async () => {
+      const r = await start(1);
+      await advanceAutonomyRun(db, r.id);
+      run!.passes = 1;
+      run!.rounds = [{ round: 1, pass: 1, applied: false }];
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).not.toContain("NÃO entraram nesta contagem");
     });
 
     it("o passe fechado pelo teto vira PASSE 2 de verdade: o laço volta a revisar arquivos", async () => {
