@@ -555,6 +555,26 @@ describe("orçamento de saída e motivo da falha (medido em prod)", () => {
   });
 
   /**
+   * 🔴 MEDIDO EM PROD (2026-09-08): a spec do NVX LastMile parou em **119 de 120** constraints. Teto
+   * que encosta mede o TETO, não o objeto — o relatório mostrava como "a política desta spec" um
+   * número que era o limite de fatura (mesma família do GAP-61). Decisão do Jean: subir o número E
+   * fazer o agente declarar quantas a spec ainda sustenta, para que o próximo encosto apareça.
+   */
+  it("o teto global cabe a spec REAL medida e o derivador é obrigado a declarar o próprio corte", () => {
+    const cfg = policyGateConfig();
+    // A guarda que importa: o teto GLOBAL não pode esgotar antes de o último LOTE ser derivado, senão
+    // ele decide quantos arquivos entram na política — e decide isso em silêncio, com `break`.
+    const lotesDaSpecMedida = Math.ceil(1_068_255 / cfg.specChars);
+    expect(cfg.maxConstraintsTotal).toBeGreaterThanOrEqual(lotesDaSpecMedida * cfg.maxConstraints);
+    // E o teto global tem de ser alcançável em passes: teto que nem os passes atingem é decorativo.
+    expect(cfg.maxDerivePasses * cfg.maxConstraints).toBeGreaterThanOrEqual(cfg.maxConstraintsTotal);
+    // A declaração é OBRIGATÓRIA no contrato do prompt, e o envelope de resposta a exibe.
+    expect(DERIVE_SYSTEM).toMatch(/TETO DE ORÇAMENTO, não a sua avaliação/);
+    expect(DERIVE_SYSTEM).toMatch(/"constraints_needed"/);
+    expect(DERIVE_SYSTEM).toMatch(/Chutar para cima é tão errado/);
+  });
+
+  /**
    * 🔴 GAP-88 — MEDIDO EM PROD: **157 de 157** veredictos com `model = 'desconhecido'` e **199**
    * constraints com `declared_by_model` vazio. O `/invoke/raw` publica `model_used`; esta camada lia
    * `data.model`, que o endpoint nunca teve (todo o resto da api já lia `model_used`).

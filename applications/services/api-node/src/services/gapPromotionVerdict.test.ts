@@ -34,7 +34,7 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
-  proveWork, anchorHistories, focusKey, attackedRoundsByAnchor,
+  proveWork, anchorHistories, focusKey, attackedRoundsByAnchor, parseCountField,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -117,7 +117,7 @@ afterEach(() => {
 
 describe("verdictConfig", () => {
   it("liga por padrão com barra alta e aceita override por env", () => {
-    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 });
+    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 24, minPasses: 2 });
     process.env.SPEC_VERDICT_MIN_RECURRENCE = "5";
     process.env.SPEC_VERDICT_MAX_PER_RUN = "1";
     expect(verdictConfig().minRecurrence).toBe(5);
@@ -128,7 +128,7 @@ describe("verdictConfig", () => {
     process.env.SPEC_VERDICT_MIN_RECURRENCE = "muitas";
     process.env.SPEC_VERDICT_MAX_PER_SPEC = "-3";
     expect(verdictConfig().minRecurrence).toBe(3);
-    expect(verdictConfig().maxPerSpec).toBe(8);
+    expect(verdictConfig().maxPerSpec).toBe(24);
   });
 
   it("SPEC_VERDICT_MIN_GAPS_RESOLVED=0 desliga o recurso sem deploy", () => {
@@ -573,6 +573,24 @@ describe("parseListResponse", () => {
     expect(parseListResponse('{"outra":[]}', "claims")).toBeNull();
     expect(parseListResponse("sem json aqui", "claims")).toBeNull();
     expect(parseListResponse("", "claims")).toBeNull();
+  });
+});
+
+describe("parseCountField — a DECLARAÇÃO do agente sobre o próprio corte", () => {
+  it("lê o inteiro irmão da lista, inclusive vindo como string", () => {
+    expect(parseCountField('{"constraints":[],"constraints_needed":17}', "constraints_needed")).toBe(17);
+    expect(parseCountField('```json\n{"constraints_needed":"9"}\n```', "constraints_needed")).toBe(9);
+    expect(parseCountField('{"constraints_needed":4.7}', "constraints_needed")).toBe(4);
+  });
+
+  it("ausente, negativo ou ilegível é null — e null NÃO é zero", () => {
+    // "não declarei" e "declarei que devolvi tudo" são respostas diferentes: a segunda é uma
+    // afirmação e conta como declaração; a primeira é silêncio e é contada à parte.
+    expect(parseCountField('{"constraints":[]}', "constraints_needed")).toBeNull();
+    expect(parseCountField('{"constraints_needed":-2}', "constraints_needed")).toBeNull();
+    expect(parseCountField('{"constraints_needed":"muitas"}', "constraints_needed")).toBeNull();
+    expect(parseCountField("", "constraints_needed")).toBeNull();
+    expect(parseCountField('{"constraints_needed":0}', "constraints_needed")).toBe(0);
   });
 });
 

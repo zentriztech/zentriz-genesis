@@ -108,7 +108,13 @@ export function verdictConfig(): VerdictConfig {
     minFocusRounds: n("SPEC_VERDICT_MIN_FOCUS_ROUNDS", 2),
     minAttackRounds: n("SPEC_VERDICT_MIN_ATTACK_ROUNDS", 3),
     maxPerRun: n("SPEC_VERDICT_MAX_PER_RUN", 3),
-    maxPerSpec: n("SPEC_VERDICT_MAX_PER_SPEC", 8),
+    // 🔴 MEDIDO EM PROD (2026-09-08): a spec do NVX LastMile fecha com 44 GAPs importantes abertos em
+    // 12 arquivos. Um teto acumulado de 8 dá MENOS de uma liberação por arquivo — ou seja, mesmo que
+    // o juiz julgasse corretamente todos os 44, o laço não teria como convergir, e o veto "excedeu o
+    // teto ⇒ nenhuma vale" transformaria acerto em bloqueio. 24 = duas por arquivo. O que continua
+    // segurando a anistia em massa é o `maxPerRun` (3 por rodada de veredicto): chegar a 24 exige 8
+    // rodadas de veredicto, cada uma com a prova de trabalho do GAP-82/114 conferida de novo.
+    maxPerSpec: n("SPEC_VERDICT_MAX_PER_SPEC", 24),
     minPasses: n("SPEC_VERDICT_MIN_PASSES", 2),
   };
 }
@@ -661,8 +667,8 @@ function describeCandidate(id: string, c: Candidate): string {
   ].join("\n");
 }
 
-/** Extrai `{<key>:[...]}` de uma resposta possivelmente cercada por prosa. Espelha `parsePairs`. */
-export function parseListResponse(text: string, key: string): Array<Record<string, unknown>> | null {
+/** Extrai o OBJETO de uma resposta possivelmente cercada por prosa ou cercas de código. */
+export function parseEnvelope(text: string): Record<string, unknown> | null {
   if (!text) return null;
   const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
   let obj: unknown = null;
@@ -675,9 +681,26 @@ export function parseListResponse(text: string, key: string): Array<Record<strin
       try { obj = JSON.parse(cleaned.slice(s, e + 1)); } catch { return null; }
     }
   }
-  const arr = (obj as Record<string, unknown> | null)?.[key];
+  return obj && typeof obj === "object" && !Array.isArray(obj) ? (obj as Record<string, unknown>) : null;
+}
+
+/** Extrai `{<key>:[...]}` de uma resposta possivelmente cercada por prosa. Espelha `parsePairs`. */
+export function parseListResponse(text: string, key: string): Array<Record<string, unknown>> | null {
+  const arr = parseEnvelope(text)?.[key];
   if (!Array.isArray(arr)) return null;
   return arr.filter((x): x is Record<string, unknown> => !!x && typeof x === "object");
+}
+
+/**
+ * Extrai um INTEIRO irmão da lista no mesmo envelope (ex.: quantas o agente diz que ainda faltam).
+ *
+ * Devolve `null` quando o campo não veio ou não é número finito — ausência não vira zero, porque
+ * "não declarou" e "declarou zero" são respostas diferentes e a segunda é uma afirmação.
+ */
+export function parseCountField(text: string, key: string): number | null {
+  const raw = parseEnvelope(text)?.[key];
+  const v = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw.trim()) : NaN;
+  return Number.isFinite(v) && v >= 0 ? Math.trunc(v) : null;
 }
 
 export interface GapVerdict {

@@ -63,7 +63,7 @@ import { createHash } from "node:crypto";
 import type { Archetype } from "./archetypeCatalog.js";
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import type { Db } from "./findingTriage.js";
-import { parseListResponse } from "./gapPromotionVerdict.js";
+import { parseCountField, parseListResponse } from "./gapPromotionVerdict.js";
 
 /** Onde a constraint é verificável. `spec` é o único julgável na Bancada (Mistral B2). */
 export type VerifiableAt = "spec" | "build" | "runtime";
@@ -130,8 +130,29 @@ export function policyGateConfig() {
      * INTEIROS, então a classe de coerência interna era invisível por construção.
      */
     maxDerivePasses: num(process.env.SPEC_POLICY_MAX_DERIVE_PASSES, 10),
-    /** Teto GLOBAL de constraints por spec (o `maxConstraints` é por PASSE). Trava de fatura. */
-    maxConstraintsTotal: num(process.env.SPEC_POLICY_MAX_CONSTRAINTS_TOTAL, 120),
+    /**
+     * Teto GLOBAL de constraints por spec (o `maxConstraints` é por PASSE). Trava de fatura.
+     *
+     * 🔴 MEDIDO EM PROD (2026-09-08): a spec do NVX LastMile encostou no teto — o número que o
+     * relatório mostrava como "a política desta spec" era o TETO, não a política (mesma família do
+     * GAP-61: medir uma coisa pela outra). E o efeito era pior que cosmético: a spec tem 1.068k chars
+     * ⇒ **9 lotes** de 120k; com 40 constraints por passe, o teto de 120 se esgotava no 3º lote e o
+     * laço fazia `break` — **6 dos 9 lotes nunca tiveram constraint derivada**, em silêncio. É
+     * literalmente o GAP-54/61 outra vez: declarar política sobre um terço do texto e chamar isso de
+     * política da spec.
+     *
+     * Subido a **360 = 9 lotes × 40** por decisão do Jean, para que o teto pare de decidir QUANTOS
+     * ARQUIVOS entram na política; ele volta a ser só a trava de fatura de uma spec absurda (mais de
+     * 9 lotes). O custo é medido e limitado: a derivação é memoizada por
+     * `(projectId, specHash, archetypeHash)`, então isto é ~9 chamadas de ≤24k tokens de saída UMA
+     * vez por spec+arquétipo, em vez de 3 — a latência por chamada não muda (`agentDeadlineMs`
+     * depende só do orçamento pedido, que continua `deriveTokens`).
+     *
+     * Junto vem a regra 8 do `DERIVE_SYSTEM`: o derivador declara quantas constraints a spec ainda
+     * sustenta além das que devolveu (`declaredNeeded`), então o próximo encosto aparece no log em vez
+     * de desaparecer.
+     */
+    maxConstraintsTotal: num(process.env.SPEC_POLICY_MAX_CONSTRAINTS_TOTAL, 360),
   };
 }
 
@@ -307,9 +328,14 @@ REGRAS INVIOLÁVEIS:
    o que faltar.
 7. "severity": "blocker" se a violação faz o produto estar errado ou impossível de construir;
    "warning" se sobra risco real de engenharia.
+8. O número máximo de constraints pedido é um TETO DE ORÇAMENTO, não a sua avaliação do que a spec
+   exige. Declare em "constraints_needed" quantas constraints verificáveis este lote AINDA sustenta
+   ALÉM das que você devolveu (0 se devolveu todas). Declarar não corta e não acrescenta nada: é a
+   única forma de o teto aparecer no relatório em vez de desaparecer. Chutar para cima é tão errado
+   quanto omitir — o número tem de ser o que você de fato viu e não teve espaço para escrever.
 
 Responda APENAS JSON, sem cercas de código:
-{"constraints":[{"constraint_key":"...","applies_to":"<arquivo ou seção da spec, ou *>","assertion":"<a afirmação verificável, em português>","evidence_hint":"<que artefato prova>","verifiable_at":"spec|build|runtime","severity":"blocker|warning","source_anchor":"<trecho VERBATIM da spec>","supersedes_key":null}]}`;
+{"constraints":[{"constraint_key":"...","applies_to":"<arquivo ou seção da spec, ou *>","assertion":"<a afirmação verificável, em português>","evidence_hint":"<que artefato prova>","verifiable_at":"spec|build|runtime","severity":"blocker|warning","source_anchor":"<trecho VERBATIM da spec>","supersedes_key":null}],"constraints_needed":0}`;
 
 export const VERDICT_SYSTEM = `Você é o POLICY GATE: verifica, uma por uma, se as CONSTRAINTS declaradas estão cumpridas nos ARTEFATOS entregues.
 
@@ -875,6 +901,16 @@ export interface PolicyGateResult {
    * e a spec do NVX LastMile tem 119 constraints das quais 119 são exatamente destas.
    */
   oracleApplied: number;
+  /**
+   * Quantas constraints o DERIVADOR declarou que a spec ainda sustenta além das que ele devolveu
+   * (soma dos passes; ver regra 8 do `DERIVE_SYSTEM`). É a declaração do agente sobre o tamanho do
+   * seu próprio corte — o teto de orçamento passa a aparecer no relatório em vez de desaparecer.
+   * `0` = ele declarou que devolveu tudo. Aqui `0` e "não declarou" são a MESMA coisa de propósito:
+   * o número é advisory, não porta; quem declara ou não é o agente, e `declaredNeededMissing` conta
+   * os passes que ficaram calados.
+   */
+  declaredNeeded: number;
+  declaredNeededMissing: number;
 }
 
 const inflight = new Map<string, Promise<PolicyGateResult>>();
@@ -901,7 +937,7 @@ export async function runPolicyGate(db: Db, args: {
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
     judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
-    partialArtifacts: [], oracleApplied: 0, ...extra,
+    partialArtifacts: [], oracleApplied: 0, declaredNeeded: 0, declaredNeededMissing: 0, ...extra,
   });
   if (!policyGateEnabled()) return empty("SPEC_POLICY_GATE != on");
   if (!args.specHash) return empty("spec sem hash");
@@ -927,7 +963,7 @@ async function policyGateOnce(
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
     judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
-    partialArtifacts: [], oracleApplied: 0, ...extra,
+    partialArtifacts: [], oracleApplied: 0, declaredNeeded: 0, declaredNeededMissing: 0, ...extra,
   });
 
   // ── 1. derivação (idempotente por spec+arquétipo) ──────────────────────────
@@ -937,6 +973,10 @@ async function policyGateOnce(
   let derived = 0;
   let derivePasses = 0;
   let derivePassesFailed = 0;
+  // A DECLARAÇÃO do agente sobre o próprio corte (regra 8 do `DERIVE_SYSTEM`). Advisory: não abre
+  // nem fecha porta nenhuma — existe para o teto de orçamento aparecer no relatório.
+  let declaredNeeded = 0;
+  let declaredNeededMissing = 0;
   const deriveWhy: string[] = [];
   if (constraints.length === 0) {
     const conhecidas = await knownConstraints(db, args.projectId).catch(() => []);
@@ -983,6 +1023,8 @@ async function policyGateOnce(
       if (!res.ok) { derivePassesFailed++; deriveWhy.push(`passe ${i + 1}: ${res.why}`); continue; }
       const raw = parseListResponse(res.text, "constraints");
       if (!raw) { derivePassesFailed++; deriveWhy.push(`passe ${i + 1}: sem JSON legível`); continue; }
+      const faltam = parseCountField(res.text, "constraints_needed");
+      if (faltam === null) declaredNeededMissing++; else declaredNeeded += faltam;
       // A âncora é conferida contra o LOTE, não contra a spec inteira: citar trecho de arquivo que
       // este passe não recebeu é exatamente a alucinação que o guard existe para pegar.
       const norm = normalizeConstraints(raw, {
@@ -998,12 +1040,21 @@ async function policyGateOnce(
         ? `derivador indisponível em ${derivePassesFailed} de ${derivePasses} passe(s) — ${deriveWhy.join(" | ")}`
         : `nenhuma constraint aceita na derivação (${derivePasses} passe(s))`;
       return empty(motivo, { rejected: recusadas, derivePasses, derivePassesFailed,
-        partialArtifacts: [...partial, ...dropped] });
+        partialArtifacts: [...partial, ...dropped], declaredNeeded, declaredNeededMissing });
     }
     constraints = acumuladas;
     rejected = recusadas;
     derived = await persistConstraints(db, args.projectId, args.specHash, archHash, constraints);
     if (deriveWhy.length) console.warn(`[specPolicyGate] derivação parcial: ${deriveWhy.join(" | ")}`);
+    // O teto de orçamento deixa de ser invisível: o agente diz quantas ficaram de fora, e isso vai
+    // ao log e ao resultado. Continua sendo decisão do Jean subir o teto — o número é a evidência.
+    if (declaredNeeded > 0 || declaredNeededMissing > 0) {
+      console.warn(
+        `[specPolicyGate] o derivador declarou ${declaredNeeded} constraint(s) que a spec ainda sustenta ` +
+        `além das ${constraints.length} devolvidas (teto por passe ${cfg.maxConstraints}, teto global ` +
+        `${cfg.maxConstraintsTotal}); ${declaredNeededMissing} de ${derivePasses} passe(s) não declararam`,
+      );
+    }
   }
 
   // ── 2. veredicto por constraint (só as de `spec` são julgáveis aqui) ───────
@@ -1125,6 +1176,6 @@ async function policyGateOnce(
   return {
     ran: true, constraints, rejected, verdicts, tally, unknownKeys, model: judgeModel, derived,
     judgePasses: batches.length, passesFailed, derivePasses, derivePassesFailed,
-    partialArtifacts: naoLidos, oracleApplied,
+    partialArtifacts: naoLidos, oracleApplied, declaredNeeded, declaredNeededMissing,
   };
 }
