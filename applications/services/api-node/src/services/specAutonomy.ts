@@ -1590,11 +1590,17 @@ function verdictNote(v: NonNullable<Awaited<ReturnType<typeof promotionVerdictFo
  * Devolve o parecer em prosa (`""` quando o recurso está desligado ou o veredicto não pôde rodar) e
  * grava os números na última rodada — o MESMO bloco que o tick `validating` já gravava, agora em um
  * lugar só, para que nenhum fim de laço futuro nasça sem ele.
+ *
+ * 🔴 GAP-116 — devolve também `promotable`, porque a decisão do Jean de 2026-09-07 ("o laço fecha por
+ * VEREDICTO, não por contagem") tem uma consequência que ficou de fora: o instante em que **a
+ * arquitetura fecha** também é o veredicto, não a contagem zero. A feature dos DESENHOS só disparava
+ * em `gaps.important === 0`, que nenhuma spec real alcança (a do NVX fecha com 44) — ou seja, o
+ * arquivo de diagramas que o Jean pediu era inalcançável pelo mesmo motivo que o veredicto era.
  */
 async function verdictAtLoopEnd(
   db: Db, run: AutonomyRun, endReason: "exhausted" | "stalled",
   ctx?: { coverage: unknown; unjudged: string[] },
-): Promise<string> {
+): Promise<{ note: string; promotable: boolean }> {
   let coverage = ctx?.coverage;
   let unjudged = ctx?.unjudged;
   if (!ctx) {
@@ -1611,7 +1617,7 @@ async function verdictAtLoopEnd(
     unjudged = cob ? [...cob.pendentes, ...cob.grandes] : [];
   }
   const v = await promotionVerdictFor(db, run, { coverage, unjudged: unjudged ?? [], endReason });
-  if (!v) return "";
+  if (!v) return { note: "", promotable: false };
   await patchLastRound(db, run, {
     verdictCandidates: v.gate.candidates.length,
     verdictReleased: v.round?.released ?? 0,
@@ -1640,7 +1646,7 @@ async function verdictAtLoopEnd(
     verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),
     note: verdictNote(v).trim(),
   }, { keepNote: true });
-  return verdictNote(v);
+  return { note: verdictNote(v), promotable: v.report.promotable === true };
 }
 
 /**
@@ -2032,9 +2038,13 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   if (run.passes >= run.maxRounds) {
     const gaps = await currentGaps(db, run.projectId).catch(() => null);
     // 🔴 GAP-115: fim de laço com GAPs em aberto ⇒ o juiz julga os reincidentes aqui também.
-    const verdicto = (gaps?.important ?? 0) > 0 ? await verdictAtLoopEnd(db, run, "exhausted") : "";
+    const v = (gaps?.important ?? 0) > 0
+      ? await verdictAtLoopEnd(db, run, "exhausted") : { note: "", promotable: false };
+    // 🔴 GAP-116: o juiz declarou a spec promovível ⇒ a arquitetura FECHOU, mesmo com GAPs abertos
+    // (todos julgados não-impeditivos). É aqui que a feature dos desenhos passa a ser alcançável.
+    if (v.promotable && gaps && await startDiagramsRound(db, run, gaps, "pending")) return true;
     await finishRun(db, run, "exhausted",
-      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${verdicto} Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
+      `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${v.note} Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
     return true;
   }
   // GAP-3: o teto de arquivos é do PASSE (o do laço inteiro é o `TOTAL`). Sem isto, uma spec com mais
@@ -2045,12 +2055,15 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     const perPass = roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS;
     // 🔴 GAP-115: era ESTE o desfecho da run `10b1a4e1` (30 arquivos, 44 GAPs) — o laço gastou tudo e
     // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.
-    const verdicto = (gaps?.important ?? 0) > 0 ? await verdictAtLoopEnd(db, run, "exhausted") : "";
+    const v = (gaps?.important ?? 0) > 0
+      ? await verdictAtLoopEnd(db, run, "exhausted") : { note: "", promotable: false };
+    // 🔴 GAP-116: promovível pelo parecer = arquitetura fechada, e é o gatilho dos desenhos.
+    if (v.promotable && gaps && await startDiagramsRound(db, run, gaps, "pending")) return true;
     await finishRun(db, run, "exhausted",
       (perPass
         ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo).`
         : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido.`)
-      + `${verdicto} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
+      + `${v.note} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
       { gaps });
     return true;
   }
@@ -2440,9 +2453,14 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
  * > mermaid de arquiteturas, ex: modelo global, APIs, infra; o objetivo é que usuario tenha desenhos
  * > que facilite o entendimento de como será na pratica suas aplicacoes e infra."*
  *
- * QUANDO: nos dois pontos em que a arquitetura FECHA — zero GAP importante ativo, com a cobertura
- * completa quando ela é medível. Antes disso o desenho retrataria uma arquitetura que ainda estava
- * mudando, e cada rodada seguinte o invalidaria.
+ * QUANDO: nos pontos em que a arquitetura FECHA. São DOIS, não um (🔴 GAP-116): zero GAP importante
+ * ativo com a cobertura completa quando ela é medível — o caso raro —, **ou** o juiz declarando a spec
+ * promovível ao fim do laço, que é o caso real. Escrever só a primeira condição tornou a feature
+ * inalcançável: a spec do NVX LastMile fecha com 44 GAPs importantes, nenhum impeditivo, e a contagem
+ * nunca chega a zero porque cada rodada legítima também abre GAP novo. Antes de fechar o desenho
+ * retrataria uma arquitetura ainda em movimento, e a rodada seguinte o invalidaria; depois de o juiz
+ * dizer "promovível", o que sobrou não muda o desenho — é exatamente o que a decisão do Jean de
+ * 2026-09-07 ("o laço fecha por VEREDICTO, não por contagem") já valia para o veredicto.
  *
  * DEVOLVE `false` quando não há o que fazer (já existe, já foi tentado nesta run, modo `whole`, sem
  * agentes, spec ilegível) — e aí o chamador ENCERRA a run como encerraria antes: um desenho que não
@@ -2455,6 +2473,11 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
 async function startDiagramsRound(
   db: Db, run: AutonomyRun, gaps: GapTally, fromStatus: "pending" | "validating",
 ): Promise<boolean> {
+  // 🔴 GAP-116: há DOIS fechamentos de arquitetura, e o log tem de dizer qual foi. Contagem zero é o
+  // caso raro; o caso real é o juiz declarar promovível com GAPs abertos e todos não-impeditivos.
+  const porque = gaps.important === 0
+    ? "0 GAP importante"
+    : `${gaps.important} GAP(s) importante(s) em aberto, todos julgados NÃO-impeditivos pelo juiz`;
   // Modo `whole` é spec de UM arquivo só (comportamento legado da 090): criar um segundo arquivo ali
   // trocaria o alvo de todas as outras ações da run. A feature vive no modo por arquivo, que é o modo
   // da Bancada em produção.
@@ -2506,7 +2529,7 @@ async function startDiagramsRound(
   await appendRoundLog(db, run.id, {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
     filePath: DIAGRAMS_PATH, diagramsCreation: true, gapsBefore: gaps.important, specChars: 0,
-    note: `Arquitetura fechada (0 GAP importante) — pedindo ao arquiteto os diagramas Mermaid em \`${DIAGRAMS_PATH}\` (${insumo.files} arquivo(s) da spec como insumo).`,
+    note: `Arquitetura fechada (${porque}) — pedindo ao arquiteto os diagramas Mermaid em \`${DIAGRAMS_PATH}\` (${insumo.files} arquivo(s) da spec como insumo).`,
   });
 
   const { dispatchDiagramsJob } = await import("../routes/specChat.js");
@@ -3399,16 +3422,19 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // esgotamento. `atCap` = teto de passes/rodadas; senão, streak de não-progresso.
     // 🔴 GAP-115: o corpo do veredicto vive em `verdictAtLoopEnd`, porque agora há mais de um fim de
     // laço que precisa dele (o teto de arquivos de `startFileRound` não tinha nenhum).
-    const verdicto = await verdictAtLoopEnd(db, run, atCap ? "exhausted" : "stalled", {
+    const v = await verdictAtLoopEnd(db, run, atCap ? "exhausted" : "stalled", {
       coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [],
     });
+    // 🔴 GAP-116: promovível pelo parecer é a arquitetura FECHADA — o mesmo gatilho dos desenhos que
+    // até aqui só existia em `gaps.important === 0`, patamar que nenhuma spec real alcança.
+    if (v.promotable && await startDiagramsRound(db, run, gaps, "validating")) return true;
     if (atCap) {
       await finishRun(db, run, "exhausted",
-        `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${verdicto} Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });
+        `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${v.note} Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });
       return true;
     }
     await finishRun(db, { ...run, noProgressStreak: streak }, "stalled",
-      `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto).${verdicto} Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`, { gaps });
+      `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto).${v.note} Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`, { gaps });
     return true;
   }
   await db.query(

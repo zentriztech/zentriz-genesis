@@ -1539,6 +1539,126 @@ describe("feature dos DESENHOS — arquitetura fechada vira diagramas Mermaid", 
 });
 
 /**
+ * 🔴 GAP-116 — a arquitetura fecha por VEREDICTO, não por contagem zero.
+ *
+ * MEDIDO: a feature dos desenhos foi para produção em `f865bc6` e NUNCA disparou uma vez. O gatilho
+ * único era `gaps.important === 0`, e a spec do NVX LastMile fecha com 44 GAPs importantes — nenhum
+ * impeditivo. Ou seja: o desenho que o Jean pediu era inalcançável exatamente pelo motivo que o
+ * GAP-115 já tinha corrigido para o veredicto, e por isso a correção é a mesma — quem diz que a
+ * arquitetura fechou é o juiz declarando a spec promovível, nos TRÊS fins de laço.
+ *
+ * O que estes casos travam:
+ *   • promovível nos três fins (teto de passes na validação, teto de arquivos do passe, teto do laço)
+ *     → desenha, e a run segue viva em vez de encerrar;
+ *   • NÃO promovível → não desenha nada e o desfecho é o de antes (a barra não caiu: quem decide é o
+ *     juiz, não a ausência de GAP);
+ *   • o log DECLARA qual dos dois fechamentos ocorreu — dizer "0 GAP importante" com 44 em aberto
+ *     seria o fechamento fake que o Jean proibiu.
+ */
+describe("🔴 GAP-116 — arquitetura promovível pelo juiz também vira desenho", () => {
+  const DIAGRAMAS = "arquitetura-diagramas.md";
+
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;
+    dispatchDiagramsJob.mockClear().mockResolvedValue({ ok: true as const });
+    especLegivel = true;
+    // O juiz declara PROMOVÍVEL com GAP importante em aberto: é o desfecho real da spec do NVX.
+    veredicto = { candidates: 2, released: 1, impeditive: 0, promotable: true };
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  /** Roda o passe inteiro até a validação (cópia local do helper dos tetos). */
+  async function drainPass(runId: string) {
+    for (let i = 0; i < 12; i++) {
+      await advanceAutonomyRun(db, runId);
+      if (run!.status === "cto_running") {
+        const target = String(run!.current_file);
+        await ctoReturns(runId, `${onDisk(target)}\n## 99. Ajuste ${i}\nconteúdo novo do CTO.\n`);
+      }
+      if (run!.status === "validating" || isTerminalAutonomyStatus(run!.status as AutonomyStatus)) return;
+    }
+    throw new Error(`passe não terminou (status ${String(run!.status)})`);
+  }
+
+  /** Leva o laço ao teto de arquivos dentro de `startFileRound` (o fim de laço do GAP-115). */
+  async function tetoDeArquivos(qual: "passe" | "laco") {
+    const r = await start(3);
+    await advanceAutonomyRun(db, r.id);
+    if (qual === "passe") {
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+    } else {
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = [];
+    }
+    run!.status = "pending";
+    run!.current_file = null;
+    await advanceAutonomyRun(db, r.id);
+    return r;
+  }
+
+  it("teto de PASSES na validação + parecer promovível → desenha em vez de encerrar", async () => {
+    const r = await start(1);
+    await drainPass(r.id);
+    expect(run!.status).toBe("validating");
+    await advanceAutonomyRun(db, r.id);                       // mediu: GAPs em aberto, teto atingido
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("cto_running");                  // a run NÃO encerrou: está desenhando
+    expect(run!.current_file).toBe(DIAGRAMAS);
+    expect(isTerminalAutonomyStatus(run!.status as AutonomyStatus)).toBe(false);
+    expect(r.id).toBeTruthy();
+  });
+
+  it("🔴 mesmo teto, parecer NÃO promovível → não desenha e encerra como antes (a barra não caiu)", async () => {
+    veredicto = { candidates: 2, released: 0, impeditive: 2, promotable: false };
+    const r = await start(1);
+    await drainPass(r.id);
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("exhausted");
+    expect(String(run!.last_error)).toContain("NÃO promovível");
+    expect(r.id).toBeTruthy();
+  });
+
+  it("teto de ARQUIVOS do passe + parecer promovível → desenha", async () => {
+    await tetoDeArquivos("passe");
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("cto_running");
+    expect(run!.current_file).toBe(DIAGRAMAS);
+  });
+
+  it("teto do LAÇO (o desfecho da run `10b1a4e1`) + parecer promovível → desenha", async () => {
+    await tetoDeArquivos("laco");
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("cto_running");
+  });
+
+  it("🔴 teto de arquivos com parecer NÃO promovível → encerra `exhausted`, sem desenho", async () => {
+    veredicto = { candidates: 1, released: 0, impeditive: 1, promotable: false };
+    await tetoDeArquivos("laco");
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("exhausted");
+  });
+
+  it("🔴 o log declara QUAL fechamento ocorreu — nunca \"0 GAP importante\" com GAPs em aberto", async () => {
+    await tetoDeArquivos("laco");
+    const round = (run!.rounds as Record<string, unknown>[]).at(-1)!;
+    expect(round.diagramsCreation).toBe(true);
+    const nota = String(round.note);
+    expect(nota).toContain("Arquitetura fechada");
+    expect(nota).toContain("julgados NÃO-impeditivos pelo juiz");
+    expect(nota).not.toContain("0 GAP importante");
+    expect(Number(round.gapsBefore)).toBeGreaterThan(0);      // e a contagem real vai no log
+  });
+
+  it("veredicto desligado (fail-CLOSED) no teto → nada de desenho por contagem", async () => {
+    veredicto = null;
+    await tetoDeArquivos("laco");
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("exhausted");
+  });
+});
+
+/**
  * 🔴 C4 (D5) — "zero GAP" só pode ser dito sobre 100% da spec, em QUALQUER ponto de saída do laço.
  *
  * O tick `validating` aplica esta regra desde o GAP-19. Os ticks `pending` (fila por arquivo) e `whole`
