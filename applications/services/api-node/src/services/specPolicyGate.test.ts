@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  applyPolicyDecisions, archetypeHash, assertionSha, normalizeConstraints, normalizeKey,
-  normalizeVerdicts, parseWaivers, policyNote, policyTally, type PolicyVerdict, type SpecConstraint,
+  applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, normalizeConstraints,
+  normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw, policyNote, policyTally,
+  type PolicyVerdict, type SpecConstraint,
 } from "./specPolicyGate.js";
 
 /**
@@ -310,6 +311,101 @@ describe("applyPolicyDecisions — as DUAS pernas do equilíbrio", () => {
     });
     expect(v.status).toBe("satisfied");
     expect(v.blocking).toBe(false);
+  });
+});
+
+/**
+ * 🔴 O TETO ESTRUTURAL — o mesmo defeito do GAP-54/61, agora no gate.
+ *
+ * A spec do NVX tem 1.067.990 chars (~275k tokens). Se o juiz recebesse "todos os artefatos" numa
+ * chamada, a chamada devolveria 400 e o gate viveria `ran: false` para SEMPRE em toda spec grande —
+ * calado, porque `ran: false` é o comportamento correto de um gate que não pôde rodar. Foi exatamente
+ * assim que 2 de 12 arquivos chegavam à Fábrica sem ninguém notar.
+ */
+describe("batchArtifacts — a spec inteira não cabe numa chamada, e o corte é DECLARADO", () => {
+  const A = (name: string, n: number) => ({ name, content: "x".repeat(n) });
+
+  it("agrupa artefatos pequenos até o teto, sem estourar o lote", () => {
+    const { batches, partial, dropped } = batchArtifacts([A("a", 60), A("b", 60), A("c", 60)], 100, 12);
+    expect(batches.map((b) => b.map((x) => x.name))).toEqual([["a"], ["b"], ["c"]]);
+    expect(partial).toEqual([]);
+    expect(dropped).toEqual([]);
+  });
+
+  it("artefato maior que o teto vai SOZINHO, recortado, e o nome volta em `partial`", () => {
+    const { batches, partial } = batchArtifacts([A("gigante", 500), A("pequeno", 10)], 100, 12);
+    expect(batches[0]).toHaveLength(1);
+    expect(batches[0][0]).toMatchObject({ name: "gigante", cutFrom: 500 });
+    expect(batches[0][0].content).toHaveLength(100);
+    expect(partial).toEqual(["gigante"]);
+  });
+
+  it("acima do teto de passes o excedente é `dropped` — trava de custo que NÃO é silenciosa", () => {
+    const { batches, dropped } = batchArtifacts([A("a", 90), A("b", 90), A("c", 90)], 100, 2);
+    expect(batches).toHaveLength(2);
+    expect(dropped).toEqual(["c"]);
+  });
+
+  it("lista vazia não gera lote fantasma", () => {
+    expect(batchArtifacts([], 100, 12)).toEqual({ batches: [], partial: [], dropped: [] });
+  });
+});
+
+describe("pickBestRaw — dividir em lotes NÃO pode fabricar violação em massa", () => {
+  const arts = [{ name: "api.md", content: SPEC }];
+
+  it("prova verbatim de cumprimento vence a acusação vinda do lote que não viu o artefato", () => {
+    const best = pickBestRaw([
+      { constraint_key: "error-envelope-declared", status: "violated", artifact: "api.md", evidence: "não achei" },
+      { constraint_key: "error-envelope-declared", status: "satisfied", artifact: "api.md",
+        evidence: "devolve o envelope {code, message, traceId}" },
+    ], arts);
+    expect(best).toHaveLength(1);
+    expect(best[0].status).toBe("satisfied");
+  });
+
+  it("acusação com artefato conhecido vence `indecidivel` — quem viu decide", () => {
+    const best = pickBestRaw([
+      { constraint_key: "k", status: "indecidivel", artifact: "", evidence: "" },
+      { constraint_key: "k", status: "violated", artifact: "api.md", evidence: "falta traceId" },
+    ], arts);
+    expect(best[0].status).toBe("violated");
+  });
+
+  it("`satisfied` SEM citação verbatim perde para a acusação conferível — ordem é prova, não status", () => {
+    const best = pickBestRaw([
+      { constraint_key: "k", status: "satisfied", artifact: "api.md", evidence: "está tudo adequado" },
+      { constraint_key: "k", status: "violated", artifact: "api.md", evidence: "falta traceId" },
+    ], arts);
+    expect(best[0].status).toBe("violated");
+  });
+});
+
+describe("applyPolicyDecisions — acusação sem chance de defesa não barra a promoção", () => {
+  const violada: PolicyVerdict = {
+    constraintKey: "k", status: "violated", evidence: "falta", evidenceVerbatim: true,
+    artifact: "gigante.md", reason: "", waiverKind: "", auditVerdict: "", blocking: true,
+  };
+
+  it("artefato lido pela METADE ⇒ a violação FICA registrada mas não bloqueia", () => {
+    const [v] = applyPolicyDecisions([violada], { partialArtifacts: ["gigante.md"] });
+    expect(v.status).toBe("violated");
+    expect(v.blocking).toBe(false);
+    expect(v.reason).toBe("artifact_partial");
+    // e o fato aparece na conta — 0 impeditiva com o juiz cego não pode parecer 0 impeditiva de fato.
+    expect(policyTally([v]).artifactPartial).toBe(1);
+    expect(policyNote(policyTally([v]))).toMatch(/não leu o artefato por inteiro/);
+  });
+
+  it("passe do juiz que falhou ⇒ nenhuma acusação daquele conjunto bloqueia", () => {
+    const [v] = applyPolicyDecisions([violada], { coverageIncomplete: true });
+    expect(v.blocking).toBe(false);
+    expect(v.reason).toBe("judge_coverage_incomplete");
+  });
+
+  it("artefato lido por INTEIRO e todos os passes de pé ⇒ a violação bloqueia (o gate serve para algo)", () => {
+    const [v] = applyPolicyDecisions([violada], { partialArtifacts: ["outro.md"], coverageIncomplete: false });
+    expect(v.blocking).toBe(true);
   });
 });
 
