@@ -147,7 +147,12 @@ let job: {
   /** GAP-12 (migração 098): nº de blocos ancorados que geraram `specMarkdown`. */
   editsApplied?: number | null;
 } | null = null;
-vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
+/** 🔴 GAP-119: `true` = SELECT rodou e não há linha do job; `null` = leitura falhou (indecidível). */
+let jobRowMissing: boolean | null = true;
+vi.mock("./specChatJobs.js", () => ({
+  getSpecChatJob: vi.fn(async () => job),
+  specChatJobMissing: vi.fn(async () => jobRowMissing),
+}));
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
 vi.mock("../routes/specChat.js", () => ({
@@ -305,6 +310,7 @@ const BASE_SPEC = "# Spec\n\n" + "conteúdo relevante da spec do produto. ".repe
 beforeEach(() => {
   run = null;
   job = null;
+  jobRowMissing = true;
   projectStatus = "draft";
   latestRunId = "run-0";
   validationStatus = "passed";

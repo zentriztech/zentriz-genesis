@@ -286,6 +286,25 @@ export async function getSpecChatJob(db: Db, id: string): Promise<SpecChatJob | 
 }
 
 /**
+ * 🔴 GAP-119 — "a linha não existe" e "não consegui olhar" são fatos OPOSTOS, e `getSpecChatJob`
+ * devolve `null` para os dois (o `catch` engole o erro de banco). Quem decide o destino de uma
+ * rodada com base nessa ausência precisa da diferença: `true` = o SELECT rodou e não há linha;
+ * `false` = a linha está lá; `null` = **indecidível** (a leitura falhou), e então nada pode ser
+ * concluído — quem chama espera o próximo tick em vez de dar a rodada por perdida.
+ *
+ * Propositalmente NÃO traz colunas: é uma prova de existência, e `spec_markdown` tem ~200 KB.
+ */
+export async function specChatJobMissing(db: Db, id: string): Promise<boolean | null> {
+  try {
+    const r = await db.query("SELECT 1 FROM spec_chat_jobs WHERE id = $1", [id]);
+    return (r.rowCount ?? 0) === 0;
+  } catch (e) {
+    console.warn(`[SpecChatJobs] specChatJobMissing falhou (ausência INDECIDÍVEL): ${msg(e)}`);
+    return null;
+  }
+}
+
+/**
  * Job a rehidratar: o mais recente vivo, concluído-e-ainda-não-coletado OU **reprovado mas com
  * revisão recuperável** do escopo (projeto + arquivo + DONO). O binding de dono é o invariante S3
  * da RFC-0004 Onda 0 — o in-flight NÃO pode revogá-lo por omissão. `spec_markdown` fica fora de

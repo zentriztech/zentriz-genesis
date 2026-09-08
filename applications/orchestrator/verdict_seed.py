@@ -9,7 +9,7 @@ A mesma decisão foi tomada no Connect: `ReviewVerdictRecord` nasceu como contra
 vez de esticar `ReflectionRecord`, porque auto-avaliação (ganho ZERO) e revisão de outra
 família (+12 p.p.) não podem compartilhar o mesmo registro (ADR-014).
 
-A frase única que resume as doze regras:
+A frase única que resume as treze regras:
 
     "não encontrei" e "não sei procurar" NÃO são a mesma resposta.
 
@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.4.0"
+SCHEMA_VERSION = "1.5.0"
 STACK_KEY = "generic"  # o defeito é de AFIRMAÇÃO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -65,7 +65,7 @@ NO_OPINION_REASONS = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — doze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
+# Catálogo — treze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
 # O da ÂNCORA (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial
 # cross-family de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o
 # GAP-39/49 aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a
@@ -263,6 +263,26 @@ VERDICT_ARCHETYPES: list[dict[str, Any]] = [
             "rodada sem julgamento, todos sob o rótulo agregado 'sem acusação concreta'. A única "
             "voz capaz de absolver era exatamente a que nunca chegava a ser ouvida, e defeito de "
             "redação seguia impedindo a entrega em todas as rodadas seguintes."
+        ),
+    },
+    {
+        "slug": "verd.gap119.ausencia-que-voce-nao-provou-nao-e-fato",
+        "title": "“Não vi” não é “não existe”: ausência é uma AFIRMAÇÃO, e ela também precisa de prova",
+        "rule": (
+            "Antes de condenar um trabalho por algo que FALTA, prove a falta e diga desde quando: "
+            "leitura que devolve o mesmo valor para “não achei” e “não consegui olhar” não sustenta "
+            "sentença nenhuma. Escrita em transação fica invisível até o commit, e erro de leitura "
+            "virando vazio é ausência FALSA. Dê carência à espera e mate a espera, nunca o "
+            "trabalho — e ao declarar a falta, declare quanto esperou."
+        ),
+        "evidence": (
+            "Bancada GAP-119 (run 74f54cce, 2026-09-08): o laço deu a rodada 1 por perdida com “o "
+            "job do CTO não existe no banco” 20 s depois de despachá-la — mas a linha existia desde "
+            "300 ms (a transação de criação ainda não estava commitada para aquele tick) e 31 s "
+            "depois o job ENTREGOU 3 edições, 218.479 → 219.556 chars, com 77.862 tokens de entrada "
+            "e 2.939 de saída já debitados. O arquivo foi marcado como feito sem revisão, somou "
+            "falha de arquivo e o trabalho pago foi jogado fora. Nenhum erro de banco apareceu no "
+            "log: a ausência era só a leitura chegando antes do commit."
         ),
     },
 ]

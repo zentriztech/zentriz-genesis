@@ -74,7 +74,7 @@ import {
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
 import { planFocus } from "./gapFocus.js";
 import { startValidation, unjudgedSpecFiles, type ValidationFinding } from "./specValidation.js";
-import { getSpecChatJob } from "./specChatJobs.js";
+import { getSpecChatJob, specChatJobMissing } from "./specChatJobs.js";
 import { snapshotSpecFile } from "./specSnapshots.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 // Só o TIPO: o módulo em si é carregado por `import()` dinâmico apenas no modo por arquivo (ele
@@ -123,6 +123,17 @@ export const AUTONOMY_MAX_FILE_ROUNDS = 12;
 export const AUTONOMY_MAX_TOTAL_FILE_ROUNDS = 30;
 /** Duas falhas SEGUIDAS em nível de arquivo = o problema é o modelo/serviço, não o arquivo. */
 const MAX_FILE_FAILURES = 2;
+/**
+ * 🔴 GAP-119 — carência para a LINHA do job do CTO aparecer no banco antes de o laço dar a rodada
+ * por perdida. Não é teto de trabalho: o job já tem o seu (`FILE_JOB_DEADLINE_MS`, 12 min) e a
+ * rodada só é abandonada se a linha continuar ausente DE FATO passada a carência.
+ *
+ * 120 s vem do que foi medido em prod (run `74f54cce`): o tick de 20 s chegou antes de a transação
+ * de `createSpecChatJob` ficar visível e matou uma rodada que entregou 31 s depois. Um número
+ * pequeno aqui é uma sentença por corrida; um número grande custa apenas espera, e a espera é
+ * exatamente o que o desenho manda expirar em lugar do trabalho.
+ */
+const JOB_ROW_GRACE_MS = 120_000;
 
 /**
  * Kill-switch sem redeploy. **Nasce DESLIGADO** (G4, 2026-09-05): a feature escreve na spec do
@@ -1857,7 +1868,12 @@ async function skipFileAndContinue(
     // tinha ~530 chars com a explicação do GAP-37 ("a rodada pediu DUAS coisas"), então a parte
     // ACIONÁVEL da recusa vinha sendo truncada no único lugar onde o humano a lê. Descoberto porque a
     // nota da graça empurrou o texto para fora do limite e o teste mostrou a frase cortada no meio.
-    [run.id, failures, JSON.stringify([path]), note.slice(0, 1200), opts.fromStatus],
+    //
+    // 🔴 GAP-119: o texto leva QUANDO aconteceu. `last_error` é o canal que a tela lê, e ele não é
+    // limpo por rodada boa: na run `74f54cce` a recusa do arquivo 1 seguiu no campo por NOVE rodadas
+    // aplicadas com sucesso — quem olhasse (ou monitorasse) leria um laço são como quebrado.
+    [run.id, failures, JSON.stringify([path]),
+      `arquivo ${fresh.round} (passe ${fresh.passes + 1}): ${note}`.slice(0, 1200), opts.fromStatus],
   );
   return true;
 }
@@ -2893,9 +2909,40 @@ async function checkCto(db: Db, run: AutonomyRun): Promise<boolean> {
   if (!job) {
     // A escrita do job pode ter falhado (createSpecChatJob é best-effort). Sem linha não há o que
     // coletar: dá a rodada por perdida em vez de esperar para sempre.
+    //
+    // 🔴 GAP-119 (medido em prod, run `74f54cce`, 2026-09-08): esta era uma sentença IMEDIATA, e a
+    // ausência que a disparava era MENTIRA. A rodada 1 (`modelo-dados.md`) foi dada por perdida às
+    // 15:55:58 com "o job do CTO deste arquivo não existe no banco" — enquanto o job `b4c16a2e`
+    // existia desde 15:55:38.918 e às 15:56:09 ENTREGOU (3 edições aplicadas, 218.479 → 219.556
+    // chars, in=77.862/out=2.939 já debitados). O arquivo foi para `files_done` sem revisão, somou
+    // `file_failures` e o trabalho pago foi jogado fora — exatamente o que o cabeçalho de
+    // `specChatJobs.ts` condena: **expira a ESPERA, nunca o TRABALHO.**
+    //
+    // Duas coisas explicam a ausência falsa e nenhuma é "o job não existe": (a) `createSpecChatJob`
+    // é uma TRANSAÇÃO (job + turno do usuário) — antes do COMMIT a linha é invisível para este tick,
+    // e a espera por conexão do pool ou por lock cabe folgadamente nos 20 s do tick; (b) um erro de
+    // leitura vira `null` dentro de `getSpecChatJob`. Daí a decisão pedir DOIS fatos: uma prova de
+    // ausência que sabe dizer "indecidível" (`specChatJobMissing`) e a IDADE da rodada. Nada é
+    // liberado nem aplicado por esperar — o teto real do job (`deadline_at`, 12 min no por-arquivo)
+    // e o `MAX_FILE_FAILURES` seguem valendo.
+    const missing = await specChatJobMissing(db, run.chatJobId);
+    const startedMs = lastRound?.startedAt ? Date.parse(lastRound.startedAt) : NaN;
+    const ageMs = Number.isFinite(startedMs) ? Date.now() - startedMs : Number.POSITIVE_INFINITY;
+    if (missing !== true || ageMs < JOB_ROW_GRACE_MS) {
+      const porque = missing === null
+        ? "a leitura do banco falhou (ausência INDECIDÍVEL)"
+        : missing === false
+          ? "a linha está no banco — a leitura anterior é que não a viu"
+          : `${Math.round(ageMs / 1000)}s de carência de ${Math.round(JOB_ROW_GRACE_MS / 1000)}s`;
+      console.warn(
+        `[SpecAutonomy] run=${run.id} job=${run.chatJobId} ainda não visível (${porque}) — sigo esperando, não dou a rodada por perdida.`,
+      );
+      return false;
+    }
+    const semLinha = `o job do CTO deste arquivo não existe no banco depois de ${Math.round(JOB_ROW_GRACE_MS / 1000)}s de carência`;
     if (desenhando) return encerraSemDesenho("o job do arquiteto não existe no banco");
     if (perFile) {
-      return skipFileAndContinue(db, run, run.currentFile!, "o job do CTO deste arquivo não existe no banco",
+      return skipFileAndContinue(db, run, run.currentFile!, semLinha,
         { failure: true, fromStatus: "cto_running" });
     }
     await finishRun(db, run, "failed", "O job do CTO desta rodada não existe mais no banco — laço encerrado sem alterar a spec.");
@@ -2944,6 +2991,19 @@ async function applyAndValidate(db: Db, run: AutonomyRun): Promise<boolean> {
     return true;
   }
   const job = await getSpecChatJob(db, run.chatJobId);
+  // 🔴 GAP-119: aqui a confusão entre "não existe" e "não consegui ler" era ainda mais cara — um blip
+  // de banco encerrava a run INTEIRA ("desapareceu"), com a revisão sã no banco. Sem linha provada
+  // ausente, o tick apenas volta: o estado `applying` é durável e a próxima passada reencontra o job.
+  if (!job) {
+    const missing = await specChatJobMissing(db, run.chatJobId);
+    if (missing !== true) {
+      console.warn(
+        `[SpecAutonomy] run=${run.id} job=${run.chatJobId} não lido no apply`
+        + ` (${missing === null ? "leitura indecidível" : "a linha ESTÁ no banco"}) — não encerro a run, tento no próximo tick.`,
+      );
+      return false;
+    }
+  }
   const revised = job?.specMarkdown ?? null;
   if (!revised) {
     await finishRun(db, run, "failed", "A revisão do CTO desapareceu antes de ser aplicada.");

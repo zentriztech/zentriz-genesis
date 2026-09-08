@@ -210,7 +210,16 @@ vi.mock("./specValidation.js", () => ({
 let especLegivel = true;
 
 let job: { status: string; specMarkdown: string | null; error: string | null; truncated?: boolean } | null = null;
-vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
+/**
+ * 🔴 GAP-119: prova de ausência da LINHA do job, separada da leitura do job. `true` = o SELECT rodou
+ * e não há linha; `false` = a linha está lá (a leitura anterior é que não a viu); `null` = a leitura
+ * falhou, ausência INDECIDÍVEL.
+ */
+let jobRowMissing: boolean | null = true;
+vi.mock("./specChatJobs.js", () => ({
+  getSpecChatJob: vi.fn(async () => job),
+  specChatJobMissing: vi.fn(async () => jobRowMissing),
+}));
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
 const dispatchGapFileJob = vi.fn(async () => ({ ok: true as const, gaps: 2 }) as unknown);
@@ -385,6 +394,7 @@ function gap(file: string, severity: string, title: string): F {
 beforeEach(() => {
   run = null;
   job = null;
+  jobRowMissing = true;
   projectStatus = "draft";
   latestRunId = "run-0";
   validationStatus = "passed";
@@ -485,6 +495,93 @@ describe("modo derivado da árvore", () => {
     const paths = fileCalls().map((c) => c.filePath);
     expect(paths).toEqual(["backend/01-api.md", "frontend/01-web.md"]);
     expect(paths).not.toContain("00-indice.md");
+  });
+});
+
+// ── 1.1 GAP-119: ausência da LINHA do job não é rodada perdida ────────────────
+
+/**
+ * 🔴 GAP-119 — medido em prod (run `74f54cce`, 2026-09-08): a rodada 1 (`modelo-dados.md`) foi dada
+ * por perdida com "o job do CTO deste arquivo não existe no banco" 20 s depois do despacho, enquanto o
+ * job existia no banco desde 300 ms e 31 s depois ENTREGOU (3 edições, 218.479 → 219.556 chars, com
+ * in=77.862/out=2.939 já debitados). O arquivo foi para `files_done` sem revisão e o trabalho pago foi
+ * jogado fora. A ausência era MENTIRA: `createSpecChatJob` é transação (invisível antes do COMMIT) e um
+ * erro de leitura virava `null` dentro de `getSpecChatJob`.
+ *
+ * O que estes testes travam: sem prova de ausência + carência vencida, o laço ESPERA — e quando as duas
+ * coisas se confirmam ele descarta como antes, dizendo no texto que esperou.
+ */
+describe("🔴 GAP-119 — o laço não mata a rodada por ausência que não provou", () => {
+  /** Envelhece a rodada corrente para além da carência (a carência real é de 120 s). */
+  function envelheceRodada(minutos: number): void {
+    const rounds = run!.rounds as Array<Record<string, unknown>>;
+    rounds[rounds.length - 1].startedAt = new Date(Date.now() - minutos * 60_000).toISOString();
+  }
+
+  it("job ainda invisível numa rodada RECENTE → espera, não descarta o arquivo", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("cto_running");
+    job = null;                                            // o tick não vê o job (transação em voo)
+    jobRowMissing = true;                                  // e a prova diz "não há linha" AGORA
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("cto_running");               // a rodada continua viva
+    expect(run!.files_done).toEqual([]);                   // o arquivo NÃO foi consumido
+    expect(run!.file_failures).toBe(0);
+    expect(run!.chat_job_id).toBeTruthy();
+  });
+
+  it("ausência INDECIDÍVEL (leitura falhou) → espera mesmo com a carência vencida", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    job = null;
+    jobRowMissing = null;                                  // o SELECT de prova também falhou
+    envelheceRodada(10);
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("cto_running");
+    expect(run!.files_done).toEqual([]);
+    expect(run!.file_failures).toBe(0);
+  });
+
+  it("a linha ESTÁ no banco (só a leitura anterior não a viu) → espera", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    job = null;
+    jobRowMissing = false;
+    envelheceRodada(10);
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("cto_running");
+    expect(run!.files_done).toEqual([]);
+  });
+
+  it("ausência PROVADA + carência vencida → descarta o arquivo dizendo que esperou", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    job = null;
+    jobRowMissing = true;
+    envelheceRodada(10);
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("pending");                   // volta para a fila (comportamento antigo)
+    expect(run!.files_done).toEqual(["backend/01-api.md"]);
+    expect(run!.file_failures).toBe(1);
+    expect(String(run!.last_error)).toContain("não existe no banco");
+    expect(String(run!.last_error)).toContain("carência");
+    // GAP-119 (2ª parte): `last_error` diz QUANDO — o campo não é limpo por rodada boa, e sem a
+    // procedência uma recusa do arquivo 1 seguia sendo lida como falha do laço nove rodadas depois.
+    expect(String(run!.last_error)).toContain("arquivo 1 (passe 1)");
+  });
+
+  it("job que aparece DEPOIS da espera é aplicado normalmente — o trabalho pago não se perde", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    job = null;
+    await advanceAutonomyRun(db, r.id);                    // tick que antes matava a rodada
+    expect(run!.status).toBe("cto_running");
+    const revised = `${API}\n## 6. Segurança\nauthz por escopo.\n`;
+    await ctoReturns(r.id, revised);                       // o job commitou e entregou
+    expect(onDisk("backend/01-api.md")).toBe(revised);
+    expect(run!.files_done).toEqual(["backend/01-api.md"]);
+    expect(run!.file_failures).toBe(0);
   });
 });
 
