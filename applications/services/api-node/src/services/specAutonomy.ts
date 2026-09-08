@@ -2030,6 +2030,35 @@ async function consolidationVeto(
 }
 
 /**
+ * Fecha o PASSE e manda UMA validação adversarial medir o que ele escreveu.
+ *
+ * Existe como função porque há DOIS jeitos de um passe terminar — a fila esvaziou, ou o teto de
+ * arquivos por passe mordeu (🔴 GAP-117) — e os dois têm de terminar do mesmo jeito. Duas
+ * implementações de "fechar o passe" seria o risco A1 de novo: uma delas esqueceria de zerar
+ * `files_done` ou de incrementar `passes`, e o laço mediria o passe errado.
+ *
+ * `motivo` entra na nota do chat: o usuário tem direito de saber se o passe fechou por ter acabado
+ * o serviço ou por ter batido no teto.
+ */
+async function closePassWithValidation(
+  db: Db, run: AutonomyRun, gapsImportant: number, applied: number, motivo: string,
+): Promise<boolean> {
+  const claim = await db.query(
+    `UPDATE spec_autonomy_runs
+        SET status = 'validating', passes = passes + 1, files_done = '[]'::jsonb, current_file = NULL,
+            validation_run_id = NULL, gaps_current = $2, updated_at = now()
+      WHERE id = $1 AND status = 'pending'`,
+    [run.id, gapsImportant],
+  );
+  if ((claim.rowCount ?? 0) === 0) return false;
+  await postChatNote(db, run,
+    `🤖 **Passe ${run.passes + 1}/${run.maxRounds} — ${motivo}** (${applied} arquivo(s) revisado(s) e salvo(s)). Validando a spec inteira para medir o resultado.`);
+  const fresh = (await getAutonomyRun(db, run.id))!;
+  await kickValidation(db, fresh);
+  return true;
+}
+
+/**
  * pending (spec DIVIDIDA) → uma rodada = UM arquivo. Ordem de decisões (cada uma fecha um modo de
  * falha real): teto de passes → teto de custo → spec ainda editável → GAPs restantes → escopo
  * (quem é de quem, via specGapScope/094) → oráculos (GAP-22) → fila → despacho do CTO-EDITOR.
@@ -2052,7 +2081,25 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const roundsInPass = run.rounds.filter((r) => (r.pass ?? 0) === run.passes).length;
   if (roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS || run.round >= AUTONOMY_MAX_TOTAL_FILE_ROUNDS) {
     const gaps = await currentGaps(db, run.projectId).catch(() => null);
-    const perPass = roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS;
+    const perPass = roundsInPass >= AUTONOMY_MAX_FILE_ROUNDS && run.round < AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+    // 🔴 GAP-117: MEDIDO ao vivo na run `f55ac180` (NVX LastMile, 12 arquivos, 12 = o teto por passe):
+    // o laço revisou os 12 arquivos e MORREU aqui, um tick antes da validação que fecharia o passe —
+    // `passes=0`, e por isso o veredicto saiu "indisponível: 0 de 2 passe(s) de validação concluído(s)".
+    // Toda spec com fila >= 12 arquivos ficava assim: o passe nunca fechava, a prova de trabalho do
+    // GAP-82/114 era inalcançável e, com ela, o veredicto (GAP-115) e os desenhos (GAP-116) — o mesmo
+    // arquétipo de gatilho impossível, agora vindo do teto de CUSTO.
+    // O teto por passe é teto DO PASSE: ele diz "pare de revisar arquivos", não "encerre o laço". O
+    // próprio comentário do GAP-3 acima dizia que o objetivo era CHEGAR à 2ª validação — e o código
+    // fazia o contrário. Então: fila cheia + teto batido ⇒ fecha o passe e valida (custa 1 validação,
+    // não outras 12 rodadas de CTO). Quem limita o laço continua sendo `maxRounds` (passes) e o teto
+    // TOTAL de arquivos, checados à parte.
+    // Sem nada aplicado no passe, validar mediria a MESMA spec e queimaria uma das 4 validações/h
+    // (mesma razão do `applied === 0` na fila vazia) ⇒ aí o desfecho é o de antes.
+    const appliedThisPass = appliedInPass(run);
+    if (perPass && appliedThisPass > 0) {
+      return closePassWithValidation(db, run, gaps?.important ?? 0, appliedThisPass,
+        `teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivo(s) por passe atingido`);
+    }
     // 🔴 GAP-115: era ESTE o desfecho da run `10b1a4e1` (30 arquivos, 44 GAPs) — o laço gastou tudo e
     // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.
     const v = (gaps?.important ?? 0) > 0
@@ -2130,19 +2177,8 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       return true;
     }
     // Fila esvaziada com trabalho aplicado → UMA validação adversarial para medir o passe inteiro.
-    const claim = await db.query(
-      `UPDATE spec_autonomy_runs
-          SET status = 'validating', passes = passes + 1, files_done = '[]'::jsonb, current_file = NULL,
-              validation_run_id = NULL, gaps_current = $2, updated_at = now()
-        WHERE id = $1 AND status = 'pending'`,
-      [run.id, gaps.important],
-    );
-    if ((claim.rowCount ?? 0) === 0) return false;
-    await postChatNote(db, run,
-      `🤖 **Passe ${run.passes + 1}/${run.maxRounds} — fila de arquivos concluída** (${applied} arquivo(s) revisado(s) e salvo(s)). Validando a spec inteira para medir o resultado.`);
-    const fresh = (await getAutonomyRun(db, run.id))!;
-    await kickValidation(db, fresh);
-    return true;
+    // 🔴 GAP-117: mesmo caminho do teto por passe — fechar o passe é UMA implementação só.
+    return closePassWithValidation(db, run, gaps.important, applied, "fila de arquivos concluída");
   }
 
   const target = queue[0];

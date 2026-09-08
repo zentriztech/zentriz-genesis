@@ -689,6 +689,86 @@ describe("tetos do laço por arquivo", () => {
     expect(run!.round).toBe(3);                            // 3º arquivo revisado no laço
   });
 
+  /**
+   * 🔴 GAP-117 — MEDIDO ao vivo em prod (run `f55ac180`, NVX LastMile, 2026-09-08): a spec tem 12
+   * arquivos e o teto por passe é 12. O laço revisou os 12, voltou ao `startFileRound` e MORREU no
+   * teto — `passes = 0`, um tick antes da validação que fecharia o passe. O `last_error` provou a
+   * consequência: *"veredicto indisponível: … 0 de 2 passe(s) de validação concluído(s)"*. Ou seja:
+   * para QUALQUER spec com 12+ arquivos na fila, o passe nunca fechava, a prova de trabalho do
+   * GAP-82/114 era inalcançável e, com ela, o veredicto (GAP-115) e os desenhos (GAP-116).
+   *
+   * A cura não é um número maior (com 13 arquivos quebraria de novo): o teto por passe é teto DO
+   * PASSE — "pare de revisar arquivos", não "encerre o laço". Fecha o passe e paga UMA validação.
+   */
+  describe("🔴 GAP-117 — o teto POR PASSE fecha o passe; quem encerra o laço é o teto do LAÇO", () => {
+    /** As notas que o laço escreveu no chat da Bancada. */
+    function notas(): string[] {
+      return sqlLog
+        .filter((q) => q.sql.startsWith("INSERT INTO spec_chat_messages"))
+        .map((q) => String((q.params as unknown[])[2]));
+    }
+
+    it("teto do passe COM trabalho aplicado → valida o passe (não encerra), e diz o motivo", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      run!.status = "pending";
+      run!.current_file = null;
+      run!.files_done = ["backend/01-api.md"];
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("validating");
+      expect(run!.passes).toBe(1);                            // o passe FOI contado
+      expect(run!.files_done).toEqual([]);                    // e a fila do passe seguinte recomeça
+      expect(isTerminalAutonomyStatus(run!.status as AutonomyStatus)).toBe(false);
+      // Honestidade: o usuário vê que o passe fechou por TETO, não por ter acabado o serviço.
+      const nota = notas().at(-1)!;
+      expect(nota).toContain(`teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivo(s) por passe atingido`);
+      expect(nota).toContain("Validando a spec inteira");
+    });
+
+    it("teto do passe SEM nada aplicado → encerra (validar mediria a MESMA spec)", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: false }));
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("neste passe");
+      expect(run!.passes).toBe(0);
+    });
+
+    it("teto do LAÇO continua encerrando, mesmo com trabalho aplicado (é o teto de custo real)", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);
+      expect(run!.status).toBe("exhausted");
+      expect(String(run!.last_error)).toContain("neste laço atingido");
+    });
+
+    it("o passe fechado pelo teto vira PASSE 2 de verdade: o laço volta a revisar arquivos", async () => {
+      const r = await start(3);
+      await advanceAutonomyRun(db, r.id);
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      run!.status = "pending";
+      run!.current_file = null;
+      await advanceAutonomyRun(db, r.id);                     // teto → validando
+      expect(run!.status).toBe("validating");
+      findings = [gap("frontend/01-web.md", "blocker", "sem estado de erro")];
+      await advanceAutonomyRun(db, r.id);                     // validação medida → passe 2
+      expect(run!.status).toBe("pending");
+      expect(run!.passes).toBe(1);
+      const antes = fileCalls().length;
+      await advanceAutonomyRun(db, r.id);
+      expect(fileCalls().length).toBe(antes + 1);             // o passe 2 recebeu seu arquivo
+      expect(lastFileCall().filePath).toBe("frontend/01-web.md");
+    });
+  });
+
   it("teto de arquivos do laço existe e é maior que o de passes", () => {
     expect(AUTONOMY_MAX_FILE_ROUNDS).toBeGreaterThan(5);
     // GAP-3: o teto por passe não pode ser o teto do laço — senão uma spec com mais arquivos que o
@@ -717,13 +797,16 @@ describe("tetos do laço por arquivo", () => {
   it("GAP-3: dentro do MESMO passe o teto continua valendo (trava de custo)", async () => {
     const r = await start(3);
     await advanceAutonomyRun(db, r.id);
-    // 12 rodadas já gastas NESTE passe → a próxima não sai, e a mensagem diz "neste passe".
+    // 12 rodadas já gastas NESTE passe → nenhum arquivo novo vai ao CTO.
     run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
     run!.status = "pending";
     run!.current_file = null;
+    const antes = fileCalls().length;
     await advanceAutonomyRun(db, r.id);
-    expect(run!.status).toBe("exhausted");
-    expect(String(run!.last_error)).toContain("neste passe");
+    expect(fileCalls().length).toBe(antes);                 // a trava de custo funcionou
+    // 🔴 GAP-117: …mas o passe fechou e vai ser MEDIDO (antes o laço morria aqui, com `passes=0`).
+    expect(run!.status).toBe("validating");
+    expect(run!.passes).toBe(1);
   });
 
   /**
@@ -738,7 +821,10 @@ describe("tetos do laço por arquivo", () => {
       veredicto = { candidates: 2, released: 0, impeditive: 2, promotable: false };
       const r = await start(3);
       await advanceAutonomyRun(db, r.id);
-      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      // 🔴 GAP-117: com trabalho aplicado o teto do passe agora FECHA O PASSE (valida). O fim de laço
+      // aqui é o caso em que o passe gastou as 12 rodadas sem escrever nada — validar mediria a mesma
+      // spec e queimaria uma das 4 validações/h.
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: false }));
       run!.status = "pending";
       run!.current_file = null;
       await advanceAutonomyRun(db, r.id);
@@ -1585,7 +1671,9 @@ describe("🔴 GAP-116 — arquitetura promovível pelo juiz também vira desenh
     const r = await start(3);
     await advanceAutonomyRun(db, r.id);
     if (qual === "passe") {
-      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: true }));
+      // 🔴 GAP-117: `applied: false` é o que mantém este teto como FIM DE LAÇO (com trabalho aplicado
+      // ele fecha o passe e valida) — é neste desfecho que a arquitetura pode fechar por veredicto.
+      run!.rounds = Array.from({ length: AUTONOMY_MAX_FILE_ROUNDS }, (_, i) => ({ round: i + 1, pass: 0, applied: false }));
     } else {
       run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
       run!.rounds = [];
