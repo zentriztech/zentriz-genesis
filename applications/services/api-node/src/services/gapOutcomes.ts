@@ -36,7 +36,7 @@
  * falsos positivos".
  */
 import type { ValidationFinding } from "./specValidation.js";
-import { findingFingerprint } from "./findingTriage.js";
+import { effectiveFingerprints, findingTitleFingerprint } from "./findingTriage.js";
 
 /**
  * Vocabulário FECHADO. Fechado porque desfecho é o que o laço LÊ para decidir a rodada seguinte:
@@ -54,12 +54,26 @@ export interface GapOutcome {
   title: string;
   severity: string;
   /**
-   * Identidade do GAP pela MESMA função que todo o resto do sistema usa (`findingFingerprint`,
-   * âncora normalizada com fallback de título — GAP-49). Gravada no desfecho porque é o que permite,
-   * na rodada seguinte, devolver o relato ao agente SEM comparar títulos por semelhança: ou o GAP
-   * despachado agora tem o mesmo fingerprint, ou o relato antigo não fala dele.
+   * Identidade do GAP pela MESMA função que o resto do sistema usa para decidir o que está ativo:
+   * `effectiveFingerprints` (âncora normalizada, GAP-49, com desempate por título SÓ para os que
+   * colidem). Gravada no desfecho porque é o que permite, na rodada seguinte, devolver o relato ao
+   * agente SEM comparar títulos por semelhança.
+   *
+   * 🔴 Por que EFETIVO e não `findingFingerprint` cru: o primário é `file|source|anchor`, e dois
+   * defeitos DISTINTOS sob a mesma seção têm o mesmo primário. Medido em prod 2026-09-08 numa
+   * varredura das 98 últimas validações: **17 delas** têm ao menos um par colidido (ex.: run
+   * `bcb1ada3`, `modelo-dados.md §11.3` — "job de retenção depende de infraestrutura" e "Etapa C
+   * referencia 'o ADMIN corrente'" são dois GAPs diferentes com o mesmo primário). Com o primário
+   * cru, o relato do GAP A voltaria ao agente colado no GAP B: falso positivo, exatamente o que não
+   * podemos criar.
    */
   fingerprint: string;
+  /**
+   * Fingerprint de TÍTULO do mesmo GAP. Segundo degrau do casamento, para o caso em que a colisão
+   * existe numa rodada e não na outra (aí o efetivo muda de valor sem o GAP mudar). Só é usado quando
+   * é ÚNICO nos dois lados — título repetido (o caso `(sem título)` do GAP-50) não casa nada.
+   */
+  titleFingerprint: string;
   /** `nao_declarado` NUNCA vem do agente: é o código dizendo que ninguém falou deste GAP. */
   verb: GapOutcomeVerb | "nao_declarado";
   /** O que o agente tentou / por que não fechou / onde deveria ser corrigido. Cru, do agente. */
@@ -151,13 +165,16 @@ export function parseGapOutcomes(
   dispatched: ValidationFinding[],
   opts: { appliedEdits: number },
 ): GapOutcomeParse {
+  // Identidade calculada sobre a lista DESPACHADA inteira: é ela que define quem colide com quem.
+  const effFps = effectiveFingerprints(dispatched);
   const base = (f: ValidationFinding, i: number): GapOutcome => ({
     index: i + 1,
     file: f.file,
     anchor: (f as { anchor?: string | null }).anchor ?? null,
     title: f.title,
     severity: f.severity ?? "info",
-    fingerprint: findingFingerprint(f),
+    fingerprint: effFps[i],
+    titleFingerprint: findingTitleFingerprint(f),
     verb: "nao_declarado",
     note: "",
     contested: null,
@@ -214,18 +231,36 @@ export function summarizeOutcomes(outcomes: GapOutcome[]): Record<string, number
 /**
  * Dos desfechos de uma rodada anterior, quais falam de um GAP que ESTE despacho está mandando.
  *
- * O casamento é por `fingerprint` — identidade, não semelhança. Um desfecho cujo GAP não está mais
- * na lista NÃO volta ao agente: falar de um defeito que o juiz já não vê seria pedir trabalho sobre
- * o que não existe (e é assim que a spec engorda, GAP-8). Desfecho antigo sem `fingerprint` (gravado
- * antes deste campo existir) é ignorado em vez de casado por título.
+ * O casamento é por IDENTIDADE, não semelhança, em dois degraus e com VETO DE AMBIGUIDADE:
+ *
+ *  1. fingerprint efetivo igual (os dois lados calculados por `effectiveFingerprints`);
+ *  2. fingerprint de título igual — cobre a colisão que existe numa rodada e não na outra;
+ *
+ * e em ambos: se mais de um candidato casar, NADA é devolvido. Um relato colado no GAP errado é pior
+ * que relato nenhum — o agente receberia como FATO ("você declarou que permanece aberto") algo que
+ * disse sobre outro defeito. Perder o relato só custa uma rodada; inventá-lo cria falso positivo.
+ *
+ * Desfecho antigo sem `fingerprint` (gravado antes deste campo existir) é ignorado em vez de casado
+ * por título por semelhança.
  */
 export function selectPriorOutcomes(
   prior: GapOutcome[] | null | undefined,
   dispatched: ValidationFinding[],
 ): GapOutcome[] {
-  if (!prior || prior.length === 0) return [];
-  const alvo = new Set(dispatched.map((f) => findingFingerprint(f)));
-  return prior.filter((o) => typeof o.fingerprint === "string" && o.fingerprint.length > 0 && alvo.has(o.fingerprint));
+  if (!prior || prior.length === 0 || dispatched.length === 0) return [];
+  const eff = effectiveFingerprints(dispatched);
+  const titles = dispatched.map((f) => findingTitleFingerprint(f));
+  const out = new Set<GapOutcome>();
+  for (let i = 0; i < dispatched.length; i += 1) {
+    const porFp = prior.filter((o) => typeof o.fingerprint === "string" && o.fingerprint.length > 0 && o.fingerprint === eff[i]);
+    if (porFp.length === 1) { out.add(porFp[0]); continue; }
+    if (porFp.length > 1) continue; // ambíguo do lado do relato ⇒ o laço não afirma nada
+    // Degrau 2: só quando o título identifica UM GAP de cada lado.
+    if (titles.filter((t) => t === titles[i]).length > 1) continue;
+    const porTitulo = prior.filter((o) => typeof o.titleFingerprint === "string" && o.titleFingerprint.length > 0 && o.titleFingerprint === titles[i]);
+    if (porTitulo.length === 1) out.add(porTitulo[0]);
+  }
+  return [...out];
 }
 
 /**

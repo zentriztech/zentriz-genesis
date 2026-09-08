@@ -159,9 +159,30 @@ describe("A1 — selectPriorOutcomes + priorOutcomeFactBlock", () => {
     expect(sel[0].verb).toBe("permanece_aberto");
   });
 
-  it("desfecho sem fingerprint (gravado antes do campo existir) é IGNORADO, não casado por título", () => {
-    const legado = prior.map((o) => ({ ...o, fingerprint: "" })) as GapOutcome[];
+  it("desfecho sem fingerprint algum (gravado antes dos campos existirem) é IGNORADO", () => {
+    const legado = prior.map((o) => ({ ...o, fingerprint: "", titleFingerprint: "" })) as GapOutcome[];
     expect(selectPriorOutcomes(legado, TRES)).toEqual([]);
+  });
+
+  it("colisão de âncora: dois GAPs distintos na MESMA seção recebem identidades DIFERENTES", () => {
+    // Medido em prod (17 de 98 runs): `file|source|anchor` é o mesmo para defeitos distintos da mesma
+    // seção. Se a identidade colidisse, o relato de um voltaria colado no outro.
+    const colididos = [
+      f({ anchor: "§11.3", title: "Job de retenção depende de infraestrutura inexistente" }),
+      f({ anchor: "§11.3", title: "Etapa C referencia 'o ADMIN corrente' como requester" }),
+    ];
+    const r = parseGapOutcomes(bloco("1) permanece_aberto: falta o worker", "2) nao_e_deste_arquivo: vai em contratos.md"), colididos, { appliedEdits: 0 });
+    expect(new Set(r.outcomes.map((o) => o.fingerprint)).size).toBe(2);
+    // E o relato volta para o GAP certo, não para o vizinho.
+    const sel = selectPriorOutcomes(r.outcomes, colididos);
+    expect(sel).toHaveLength(2);
+    expect(priorOutcomeFactBlock(selectPriorOutcomes(r.outcomes, [colididos[0]]))).toContain("Job de retenção");
+  });
+
+  it("relato AMBÍGUO (dois desfechos casando o mesmo GAP) não volta — relato errado é pior que nenhum", () => {
+    const um = parseGapOutcomes(bloco("1) permanece_aberto: tentativa A"), [TRES[0]], { appliedEdits: 0 }).outcomes;
+    const dois = parseGapOutcomes(bloco("1) nao_e_defeito: argumento B"), [TRES[0]], { appliedEdits: 0 }).outcomes;
+    expect(selectPriorOutcomes([...um, ...dois], [TRES[0]])).toEqual([]);
   });
 
   it("o bloco entrega `permanece_aberto`, `nao_e_defeito` e `corrigido` CONTESTADO — e nada mais", () => {
