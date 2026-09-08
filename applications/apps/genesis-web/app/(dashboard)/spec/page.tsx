@@ -1164,7 +1164,11 @@ function SpecEditor({
       return (
         <Box sx={{ height: areaH, width: "100%", minWidth: 0, overflow: "auto", p: 1.5, bgcolor: "background.default", overflowWrap: "anywhere", wordBreak: "break-word" }}>
           {projectId
-            ? <SpecValidationPanel projectId={projectId} isAdmin={isAdmin} reloadSignal={validationReloadSignal} onFindingsChange={onValidationChange} />
+            ? <SpecValidationPanel projectId={projectId} isAdmin={isAdmin} reloadSignal={validationReloadSignal}
+                onFindingsChange={onValidationChange}
+                /* 🗂️ Jean 2026-09-08 — arquivo escolhido na árvore filtra as listas de GAPs; pasta do
+                   produto (`activeFilePath = null`, "spec inteira") mostra todos. */
+                activeFilePath={activeFilePath} />
             : null}
         </Box>
       );
@@ -2433,6 +2437,18 @@ export default function SpecPage() {
 
   // Clique num arquivo da árvore. Outro projeto → navega (o arquivo viaja na URL, `?file=`, e é
   // aberto pelo efeito de baixo depois que o novo projeto carrega); mesmo projeto → abre direto.
+  /**
+   * 🗂️ Clique numa PASTA da árvore (Jean, 2026-09-08: "quando clicar na pasta do produto exibir
+   * todos") — volta ao modo "spec inteira" (`activeFile = null`), que é o que a aba GAPs lê para
+   * tirar o filtro por arquivo. Pasta de OUTRO projeto navega para ele sem `?file=`.
+   */
+  const handleOpenTreeFolder = useCallback((projId: string) => {
+    if (projId === editProjectId) { handleFileSelected(null); setOpenFile(null); return; }
+    const q = new URLSearchParams({ editProjectId: projId });
+    if (treeProductId) q.set("productId", treeProductId);
+    router.replace(`/spec?${q.toString()}`);
+  }, [editProjectId, handleFileSelected, treeProductId, router]);
+
   const handleOpenTreeFile = useCallback((projId: string, specPath: string) => {
     if (projId === editProjectId) { void openSpecFile(specPath); return; }
     const q = new URLSearchParams({ editProjectId: projId, file: specPath });
@@ -3581,6 +3597,7 @@ export default function SpecPage() {
     currentProjectId: editProjectId,
     currentFilePath: activeFile?.path ?? null,
     onOpen: handleOpenTreeFile,
+    onOpenFolder: handleOpenTreeFolder,
     gapsByPath,
     // UI/UX 2026-09-06 (item 2) — o que NÃO está nos badges, dito no cabeçalho da lista.
     gapsUnrouted: gapScope?.unrouted ?? null,
@@ -3656,8 +3673,9 @@ export default function SpecPage() {
                 <ProductFolderNav {...treeNavProps}
                   onOpen={(projId, specPath) => { setFsPane("editor"); handleOpenTreeFile(projId, specPath); }} height="100%" />
               </Box>
-              {/* Divisória arrastável árvore↔editor (duplo-clique reseta a 240px). */}
-              <Box sx={{ display: { xs: "none", md: "block" }, alignSelf: "stretch" }}>
+              {/* Divisória arrastável árvore↔editor (duplo-clique reseta a 240px). Invólucro FLEX
+                  pelo mesmo motivo do rail normal: em `block` a barra ficava com altura zero. */}
+              <Box sx={{ display: { xs: "none", md: "flex" }, alignItems: "stretch", alignSelf: "stretch" }}>
                 <ResizeHandle ariaLabel="Redimensionar árvore e editor" onResize={growTree} onReset={() => setTreeWidth(240)} />
               </Box>
             </>
@@ -3895,8 +3913,12 @@ export default function SpecPage() {
               <Box sx={{ width: `${treeWidth}px`, flexShrink: 0, display: { xs: "none", lg: "flex" }, flexDirection: "column", border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
                 <ProductFolderNav {...treeNavProps} height="100%" />
               </Box>
-              {/* Divisória arrastável árvore↔editor (só ≥lg; duplo-clique reseta a 240px). */}
-              <Box sx={{ display: { xs: "none", lg: "block" }, alignSelf: "stretch" }}>
+              {/* Divisória arrastável árvore↔editor (só ≥lg; duplo-clique reseta a 240px).
+                  ⚠️ O invólucro é FLEX com `alignItems: stretch`: a barra recebe altura do pai (ela
+                  se estica por `alignSelf`). Com o invólucro em `display: block` a barra nascia com
+                  ALTURA ZERO — existia no DOM, invisível e impossível de arrastar (era o que o Jean
+                  via: nenhuma divisória entre "Pasta do produto · N arquivo(s)" e a área das abas). */}
+              <Box sx={{ display: { xs: "none", lg: "flex" }, alignItems: "stretch", alignSelf: "stretch" }}>
                 <ResizeHandle ariaLabel="Redimensionar árvore e editor" onResize={growTree} onReset={() => setTreeWidth(240)} />
               </Box>
             </>

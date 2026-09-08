@@ -117,9 +117,14 @@ export async function getLanguageExtension(ext: string) {
 
 // ── Tree node component ───────────────────────────────────────────────────────
 export function TreeItem({
-  node, depth, selected, onSelect, filterActive = false, renderAdornment,
+  node, depth, selected, onSelect, onSelectDir, filterActive = false, renderAdornment,
 }: {
   node: TreeNode; depth: number; selected: string | null; onSelect: (path: string) => void;
+  /**
+   * 🗂️ Clique numa PASTA, além de abrir/fechar (Jean, 2026-09-08: clicar na pasta do produto mostra
+   * os GAPs de todos os arquivos). Ausente → pasta só abre/fecha, como sempre foi na aba "Código".
+   */
+  onSelectDir?: (path: string) => void;
   filterActive?: boolean;
   // Adorno opcional à direita de cada ARQUIVO (badge de GAPs, botões excluir/dividir…).
   // A aba "Código" da fábrica não passa nada → comportamento idêntico ao anterior.
@@ -136,7 +141,7 @@ export function TreeItem({
     return (
       <Box>
         <Box
-          onClick={() => setOpen((o) => !o)}
+          onClick={() => { setOpen((o) => !o); onSelectDir?.(node.fullPath); }}
           sx={{
             display: "flex", alignItems: "center", gap: 0.5,
             pl: depth * 1.5 + 0.5, pr: 1, py: 0.3, cursor: "pointer",
@@ -151,7 +156,8 @@ export function TreeItem({
           <Typography variant="caption" sx={{ color: "#E6EDF3", fontSize: "0.75rem" }}>{node.name}</Typography>
         </Box>
         {effectiveOpen && node.children?.map((child) => (
-          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect} filterActive={filterActive} renderAdornment={renderAdornment} />
+          <TreeItem key={child.fullPath} node={child} depth={depth + 1} selected={selected} onSelect={onSelect}
+            onSelectDir={onSelectDir} filterActive={filterActive} renderAdornment={renderAdornment} />
         ))}
       </Box>
     );

@@ -77,6 +77,17 @@ interface ValidationState {
       stale: boolean; createdAt: string;
     }>;
   } | null;
+  /**
+   * 🗂️ Filtro por ARQUIVO (pedido do Jean, 2026-09-08) — vem do MESMO roteamento que o laço autônomo
+   * usa (`specGapScope.byPath`), não do `file` cru que o validador escreveu: inclui rota decidida por
+   * agente e recusa nome obsoleto pós-divisão. Ausente (servidor antigo) ⇒ nenhum filtro por arquivo.
+   */
+  routing?: {
+    files: string[];
+    byFingerprint: Record<string, string>;
+    /** GAPs ativos sem arquivo: com o filtro ligado eles NÃO aparecem — e a UI declara isso. */
+    unrouted: string[];
+  } | null;
 }
 
 const STATUS_META: Record<string, { label: string; color: "default" | "success" | "error" | "warning" | "info" }> = {
@@ -116,12 +127,20 @@ type TabKey = "active" | "ignored" | "resolved" | "refuted";
 
 interface TriageDraft { state: TriageState; fingerprints: string[]; titles: string[]; hasBlocker: boolean }
 
-export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, onFindingsChange }: {
+export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, onFindingsChange, activeFilePath = null }: {
   projectId: string; isAdmin?: boolean; reloadSignal?: number;
   // Onda 3 / RFC-0005 — avisa o pai do nº de GAPs ATIVOS (ignorados/refutados não contam) sempre que o
   // estado recarrega. null = nunca validada. Mantém o badge da aba GAPs e o gate "Promover à Fábrica"
   // SINCRONIZADOS quando a validação/triagem roda DENTRO da aba.
   onFindingsChange?: (count: number | null) => void;
+  /**
+   * 🗂️ Arquivo aberto na árvore (pedido do Jean, 2026-09-08): com arquivo escolhido, as listas
+   * mostram só os GAPs DELE; clicar na pasta do produto (`null` = spec inteira) mostra todos.
+   *
+   * O filtro é VISUAL: o badge da aba, o gate de promoção e o `onFindingsChange` continuam medindo a
+   * spec INTEIRA — esconder GAP não pode virar "GAP resolvido".
+   */
+  activeFilePath?: string | null;
 }) {
   const [state, setState] = useState<ValidationState | null>(null);
   const [busy, setBusy] = useState<"validate" | "ack" | "triage" | null>(null);
@@ -230,7 +249,48 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
   const active = useMemo(() => all.filter((f) => !f.triage), [all]);
   const ignored = useMemo(() => all.filter((f) => f.triage?.state === "ignored"), [all]);
   const refuted = useMemo(() => all.filter((f) => f.triage?.state === "refuted"), [all]);
-  const resolved = state?.resolved ?? [];
+  // `useMemo`: `?? []` cria array novo a cada render e o filtro por arquivo (abaixo) depende dele.
+  const resolved = useMemo(() => state?.resolved ?? [], [state]);
+
+  // ── 🗂️ Filtro por ARQUIVO da árvore (Jean, 2026-09-08) ──────────────────────────────────────
+  // Ligado por padrão sempre que há arquivo aberto; o chip "toda a spec" desliga sem trocar de
+  // arquivo no editor. Trocar de arquivo religa (é o gesto que pede o filtro).
+  const [fileFilterOff, setFileFilterOff] = useState(false);
+  useEffect(() => { setFileFilterOff(false); }, [activeFilePath]);
+  const filterPath = activeFilePath && !fileFilterOff ? activeFilePath : null;
+  const routing = state?.routing ?? null;
+  /**
+   * "Este GAP é deste arquivo?" — a resposta é do SERVIDOR (o mesmo roteamento do laço autônomo).
+   * Só cai no nome do arquivo quando o roteamento não fala daquele finding: `byPath` roteia apenas
+   * os ATIVOS, então triados/refutados/resolvidos chegam aqui sem rota. Se o servidor disse
+   * `unrouted`, o GAP não é de arquivo nenhum — não inventamos um dono por semelhança de nome.
+   */
+  const unroutedSet = useMemo(() => new Set(routing?.unrouted ?? []), [routing]);
+  const belongsToFile = useCallback((f: { file: string; fingerprint?: string }, path: string) => {
+    if (routing && f.fingerprint) {
+      const routed = routing.byFingerprint[f.fingerprint];
+      if (routed) return routed === path;
+      if (unroutedSet.has(f.fingerprint)) return false;
+    }
+    const reported = String(f.file ?? "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").toLowerCase();
+    if (!reported) return false;
+    const want = path.toLowerCase();
+    return reported === want || reported.split("/").pop() === want.split("/").pop();
+  }, [routing, unroutedSet]);
+  const inView = useCallback(<T extends { file: string; fingerprint?: string }>(list: T[]) => (
+    filterPath ? list.filter((f) => belongsToFile(f, filterPath)) : list
+  ), [filterPath, belongsToFile]);
+  // Listas EXIBIDAS. As globais (acima) seguem valendo para gate/ack/badge — o filtro é da vista.
+  const vActive = useMemo(() => inView(active), [inView, active]);
+  const vIgnored = useMemo(() => inView(ignored), [inView, ignored]);
+  const vRefuted = useMemo(() => inView(refuted), [inView, refuted]);
+  const vResolved = useMemo(() => inView(resolved), [inView, resolved]);
+  // O que o filtro DEIXA DE FORA, dito em número (cortar é ok; calar o corte não é).
+  const hiddenActive = active.length - vActive.length;
+  const unroutedActive = useMemo(
+    () => (routing ? active.filter((f) => f.fingerprint && unroutedSet.has(f.fingerprint)).length : 0),
+    [routing, active, unroutedSet],
+  );
 
   if (!state) return null;
   const meta = STATUS_META[state.derivedStatus] ?? { label: state.derivedStatus, color: "default" as const };
@@ -240,11 +300,13 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
   const showFindings = ["validated", "failed", "failed_triaged", "stale"].includes(state.derivedStatus) && (all.length > 0 || resolved.length > 0);
   const canAck = run && ["validated", "failed", "failed_triaged"].includes(state.derivedStatus) && !acked &&
     ((hasWarningActive && !hasBlockerActive) || (hasBlockerActive && isAdmin));
-  const activeWarnings = active.filter((f) => f.severity === "warning" && f.triageable !== false && f.fingerprint);
+  // Lote de "ignorar warnings" age sobre o que está À VISTA — com filtro por arquivo ligado, o botão
+  // que diz "todos" não pode triar GAP de arquivo que o usuário nem está olhando.
+  const activeWarnings = vActive.filter((f) => f.severity === "warning" && f.triageable !== false && f.fingerprint);
   const canTriage = (f: Finding) => f.triageable !== false && !!f.fingerprint && role !== "zentriz_admin";
   const blockerHint = (f: Finding) => f.severity === "blocker" && !isTenantAdmin ? "Blocker: só o administrador do tenant pode ignorar/refutar (com motivo)." : null;
 
-  const list: Finding[] = tab === "active" ? active : tab === "ignored" ? ignored : tab === "refuted" ? refuted : [];
+  const list: Finding[] = tab === "active" ? vActive : tab === "ignored" ? vIgnored : tab === "refuted" ? vRefuted : [];
 
   return (
     <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1.5, p: 1.5, mb: 2 }}>
@@ -328,17 +390,41 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
 
       {showFindings && (
         <Box sx={{ mt: 1.5 }}>
+          {/* 🗂️ Escopo da vista: arquivo escolhido na árvore vs. spec inteira. Sem declarar o corte, a
+              aba diria "3 Ativos" enquanto o badge diz 47 — e ninguém saberia por quê. */}
+          {filterPath && (
+            <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
+              <Tooltip title={`Mostrando só os GAPs de ${filterPath}. Clique na pasta do produto na árvore (ou no ✕ deste chip) para ver a spec inteira.`}>
+                <Chip size="small" color="primary" variant="outlined" label={`só ${filterPath}`}
+                  onDelete={() => setFileFilterOff(true)}
+                  sx={{ height: 20, "& .MuiChip-label": { fontFamily: "monospace", fontSize: "0.63rem" } }} />
+              </Tooltip>
+              <Typography variant="caption" color="text.secondary">
+                {vActive.length} de {active.length} GAP(s) ativo(s) da spec
+                {hiddenActive > 0 ? ` · ${hiddenActive} de outro(s) arquivo(s) fora desta vista` : ""}
+                {unroutedActive > 0 ? ` · ${unroutedActive} sem arquivo atribuído (nunca aparece(m) no filtro)` : ""}
+              </Typography>
+            </Stack>
+          )}
+          {activeFilePath && fileFilterOff && (
+            <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.75 }}>
+              <Chip size="small" variant="outlined" label="toda a spec" sx={{ height: 20, fontSize: "0.63rem" }} />
+              <Button size="small" variant="text" onClick={() => setFileFilterOff(false)} sx={{ fontSize: "0.68rem", textTransform: "none" }}>
+                filtrar só {activeFilePath.split("/").pop()}
+              </Button>
+            </Stack>
+          )}
           <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 0.5 }}>
             <Tabs value={tab} onChange={(_, v) => setTab(v as TabKey)} variant="scrollable" scrollButtons="auto" sx={{ minHeight: 34, flex: 1, "& .MuiTab-root": { minHeight: 34, py: 0, fontSize: "0.75rem", textTransform: "none" } }}>
-              <Tab value="active" label={`Ativos (${active.length})`} />
-              <Tab value="ignored" label={`Ignorados (${ignored.length})`} />
-              <Tab value="resolved" label={`Resolvidos (${resolved.length})`} />
-              <Tab value="refuted" label={`Refutados (${refuted.length})`} />
+              <Tab value="active" label={`Ativos (${vActive.length})`} />
+              <Tab value="ignored" label={`Ignorados (${vIgnored.length})`} />
+              <Tab value="resolved" label={`Resolvidos (${vResolved.length})`} />
+              <Tab value="refuted" label={`Refutados (${vRefuted.length})`} />
             </Tabs>
             {tab === "active" && activeWarnings.length > 1 && role !== "zentriz_admin" && (
-              <Tooltip title="Cria uma triagem 'Ignorado' para cada warning ativo, com um único motivo (D-G4). Diferente de 'Reconhecer avisos', sobrevive a novas validações.">
+              <Tooltip title="Cria uma triagem 'Ignorado' para cada warning ativo À VISTA, com um único motivo (D-G4). Diferente de 'Reconhecer avisos', sobrevive a novas validações.">
                 <Button size="small" variant="text" disabled={busy !== null} onClick={() => openDraft("ignored", activeWarnings)} sx={{ fontSize: "0.7rem", textTransform: "none" }}>
-                  Ignorar todos os warnings ativos ({activeWarnings.length})
+                  Ignorar {filterPath ? "os warnings ativos deste arquivo" : "todos os warnings ativos"} ({activeWarnings.length})
                 </Button>
               </Tooltip>
             )}
@@ -346,7 +432,11 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
 
           {tab !== "resolved" && list.length === 0 && (
             <Typography variant="caption" color="text.secondary" sx={{ display: "block", py: 1 }}>
-              {tab === "active" ? (ignored.length + refuted.length > 0 ? "Sem GAPs ativos — os demais foram triados." : "Sem GAPs nesta validação.") : "Nada aqui."}
+              {tab === "active"
+                ? filterPath
+                  ? `Nenhum GAP ativo em ${filterPath}${active.length > 0 ? ` — a spec tem ${active.length} em outros arquivos.` : "."}`
+                  : (ignored.length + refuted.length > 0 ? "Sem GAPs ativos — os demais foram triados." : "Sem GAPs nesta validação.")
+                : filterPath ? "Nada aqui para este arquivo." : "Nada aqui."}
             </Typography>
           )}
 
@@ -389,12 +479,16 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
           )}
 
           {tab === "resolved" && (
-            resolved.length === 0 ? (
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", py: 1 }}>Nenhum GAP resolvido ainda (um GAP conta como resolvido quando some em duas validações seguidas).</Typography>
+            vResolved.length === 0 ? (
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", py: 1 }}>
+                {filterPath
+                  ? `Nenhum GAP resolvido em ${filterPath}${resolved.length > 0 ? ` — a spec tem ${resolved.length} resolvido(s) em outros arquivos.` : "."}`
+                  : "Nenhum GAP resolvido ainda (um GAP conta como resolvido quando some em duas validações seguidas)."}
+              </Typography>
             ) : (
               <Stack spacing={0.5}>
-                {resolved.length > 50 && <Typography variant="caption" color="text.secondary">Mostrando 50 de {resolved.length} resolvidos (mais recentes primeiro).</Typography>}
-                {resolved.slice(0, 50).map((r) => (
+                {vResolved.length > 50 && <Typography variant="caption" color="text.secondary">Mostrando 50 de {vResolved.length} resolvidos (mais recentes primeiro).</Typography>}
+                {vResolved.slice(0, 50).map((r) => (
                   <Alert key={r.fingerprint} severity="success" icon={false} sx={{ py: 0.25, "& .MuiAlert-message": { py: 0.5 } }}>
                     <Typography variant="body2" sx={{ fontWeight: 600, textDecoration: "line-through", opacity: 0.8 }}>
                       {r.title}{r.file ? <Typography component="span" variant="caption" sx={{ fontFamily: "monospace", ml: 1 }}>({r.file})</Typography> : null}

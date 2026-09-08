@@ -88,6 +88,25 @@ describe("GET /api/specs/:id/gap-scope", () => {
   });
 });
 
+describe("GET /api/specs/:id/validation — 🗂️ `routing` para o filtro por arquivo da aba GAPs", () => {
+  it("diz a QUE arquivo cada GAP ativo pertence (e quais não têm arquivo) usando o roteamento do servidor", async () => {
+    const res = await app.inject({ method: "GET", url: `/api/specs/${PROJ}/validation` });
+    expect(res.statusCode).toBe(200);
+    const b = JSON.parse(res.body);
+    // A UI não pode filtrar pelo `file` cru do validador: quem decide é este mapa (o MESMO do laço).
+    expect(b.routing).toBeTruthy();
+    expect(b.routing.files).toEqual(["00-indice.md", "backend/01-api.md", "frontend/01-web.md"]);
+    const paths = Object.values(b.routing.byFingerprint as Record<string, string>);
+    expect(paths.filter((p) => p === "backend/01-api.md")).toHaveLength(2);
+    expect(paths.filter((p) => p === "frontend/01-web.md")).toHaveLength(1);
+    // O global do Stage A não tem arquivo — a aba tem de poder DIZER que ele fica fora do filtro.
+    expect(b.routing.unrouted).toHaveLength(1);
+    expect(Object.keys(b.routing.byFingerprint)).not.toContain(b.routing.unrouted[0]);
+    // Guarda: continua um GET grátis — nenhuma rota é decidida/gravada aqui.
+    expect(captured.some((s) => s.includes("UPDATE spec_validation_runs"))).toBe(false);
+  });
+});
+
 describe("POST /api/specs/:id/gap-routes", () => {
   it("sem agents configurado: devolve o mapa + routing.skipped e NÃO inventa rota", async () => {
     const res = await app.inject({ method: "POST", url: `/api/specs/${PROJ}/gap-routes` });

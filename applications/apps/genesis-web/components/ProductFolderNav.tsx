@@ -71,7 +71,7 @@ function buildFolderLabels(projects: ProductSpecProject[]): Map<string, string> 
 }
 
 export default function ProductFolderNav({
-  productId, currentProjectId, currentFilePath = null, onOpen, height = 560,
+  productId, currentProjectId, currentFilePath = null, onOpen, onOpenFolder, height = 560,
   gapsByPath = null, gapsUnrouted = null, editable = false, onDeleteFile, headerActions = null, onProjectMeta,
   reloadSignal = 0,
 }: {
@@ -83,6 +83,11 @@ export default function ProductFolderNav({
   currentFilePath?: string | null;
   /** Clique num arquivo: navega o editor para o projeto dono (projectId) + caminho. */
   onOpen: (projectId: string, specPath: string) => void;
+  /**
+   * 🗂️ Clique numa PASTA (Jean, 2026-09-08): volta ao escopo "spec inteira" do projeto dono daquela
+   * pasta — é o gesto que TIRA o filtro por arquivo da aba GAPs. Ausente → pasta só abre/fecha.
+   */
+  onOpenFolder?: (projectId: string) => void;
   height?: number | string;
   /**
    * GAPs ATIVOS por caminho de arquivo (`/api/specs/:id/gap-scope`) do projeto ABERTO. Sem isto,
@@ -211,6 +216,20 @@ export default function ProductFolderNav({
     if (ref) onOpen(ref.projectId, ref.specPath);
   };
 
+  /**
+   * 🗂️ Pasta clicada → projeto dono. No modo produto a pasta de topo É o projeto; numa subpasta o
+   * dono é o mesmo dos arquivos abaixo dela. Sem arquivo debaixo (não deveria existir) não há dono e
+   * nada acontece — melhor que adivinhar um projeto.
+   */
+  const handleSelectDir = useCallback((treePath: string) => {
+    if (!onOpenFolder) return;
+    const prefix = `${treePath}/`;
+    // `Array.from`: o tsconfig do web não liga `downlevelIteration` (iterar Map direto dá TS2802).
+    for (const [path, ref] of Array.from(index.entries())) {
+      if (path.startsWith(prefix)) { onOpenFolder(ref.projectId); return; }
+    }
+  }, [index, onOpenFolder]);
+
   // Adornos à direita de cada arquivo: nº de GAPs ativos, marca do primário e excluir.
   // Só para os arquivos do projeto ABERTO (ver docblock: GAPs e escrita são por projeto).
   const renderAdornment = useCallback((node: TreeNode) => {
@@ -295,7 +314,8 @@ export default function ProductFolderNav({
         ) : (
           tree.map((node) => (
             <TreeItem key={node.fullPath} node={node} depth={0} selected={selectedTreePath}
-              onSelect={handleSelect} renderAdornment={renderAdornment} />
+              onSelect={handleSelect} onSelectDir={onOpenFolder ? handleSelectDir : undefined}
+              renderAdornment={renderAdornment} />
           ))
         )}
       </Box>

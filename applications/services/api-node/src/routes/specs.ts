@@ -997,6 +997,33 @@ export async function specRoutes(app: FastifyInstance) {
     // 🔴/🟡 e o `gate` acima segue exigindo zero blocker ATIVO. Isto é o parecer auditável que o humano
     // lê antes de promover — quem quiser cruzar liga `verdicts[].fingerprint` com o do finding.
     // Best-effort: falha no parecer não pode derrubar a aba, e ausência de parecer = tudo impeditivo.
+    // 🗂️ Filtro da aba GAPs por ARQUIVO (pedido do Jean, 2026-09-08: clicar num arquivo da árvore
+    // mostra só os GAPs dele; clicar na pasta do produto mostra todos).
+    //
+    // A UI NÃO pode filtrar pelo `finding.file` cru: a verdade de "este GAP é deste arquivo" é o
+    // ROTEAMENTO do servidor (`byPath`), o mesmo que o laço autônomo usa — ele inclui as rotas
+    // decididas por agente (findings globais do Stage A) e RECUSA nome obsoleto de arquivo que virou
+    // índice (J1). Filtrar pelo campo cru esconderia GAP roteado e mostraria GAP preso a um nome que
+    // não vale mais — filtro que mente é pior que filtro nenhum. GRÁTIS: só lê o que já está gravado
+    // (um GET nunca chama modelo).
+    const { gapScopeForProject } = await import("../services/specGapScope.js");
+    const scope = await gapScopeForProject(pool, id).catch((err) => {
+      request.log.warn({ err, projectId: id }, "escopo de GAPs indisponível; aba GAPs sem filtro por arquivo");
+      return null;
+    });
+    const routing = scope
+      ? {
+          files: scope.files.map((f) => f.path),
+          /** fingerprint → arquivo dono do GAP ATIVO (triados/resolvidos não são roteados). */
+          byFingerprint: Object.fromEntries(
+            [...scope.byPath.entries()].flatMap(([path, list]) =>
+              list.map((f) => [f.fingerprint, path] as [string, string]),
+            ),
+          ),
+          /** GAPs ativos SEM arquivo: com filtro ligado a UI tem de dizer que eles ficaram de fora. */
+          unrouted: scope.unrouted.map((f) => f.fingerprint),
+        }
+      : null;
     let promotion: unknown;
     try {
       const { verdictConfig, specFileShas, livePromotionVerdicts, promotabilityReport } =
@@ -1005,8 +1032,6 @@ export async function specRoutes(app: FastifyInstance) {
       if (cfg.minGapsResolved > 0 && triage) {
         const verdicts = await livePromotionVerdicts(pool, id, await specFileShas(pool, id));
         if (verdicts.length > 0) {
-          const { gapScopeForProject } = await import("../services/specGapScope.js");
-          const scope = await gapScopeForProject(pool, id).catch(() => null);
           promotion = {
             ...promotabilityReport({
               findings: triage.findings,
@@ -1027,6 +1052,7 @@ export async function specRoutes(app: FastifyInstance) {
     return reply.send({
       ...(factoryCertificateEnabled() ? { factoryCertificate } : {}),
       ...(promotion ? { promotion } : {}),
+      ...(routing ? { routing } : {}),
       projectId: id,
       currentSpecHash: current?.specHash ?? null,
       derivedStatus: derived,
