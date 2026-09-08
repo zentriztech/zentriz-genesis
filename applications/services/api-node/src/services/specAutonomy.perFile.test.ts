@@ -77,6 +77,7 @@ vi.mock("./gapPromotionVerdict.js", () => ({
   // foco enchem `rodadasPagas`. A lógica do planejador tem suíte própria (`gapFocus.test.ts`).
   focusRoundsByFile: vi.fn(async () => rodadasPagas),
   focusRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
+  attackedRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
 }));
 let rodadasPagas = new Map<string, number>();
 

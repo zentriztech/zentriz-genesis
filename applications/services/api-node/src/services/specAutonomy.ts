@@ -1425,7 +1425,7 @@ async function promotionVerdictFor(
     const {
       verdictConfig, selectVerdictCandidates, runVerdictRound, saveVerdicts, livePromotionVerdicts,
       specFileShas, promotabilityReport, focusRoundsByFile, focusRoundsByAnchor, anchoredSection,
-      proveWork,
+      proveWork, attackedRoundsByAnchor,
     } = await import("./gapPromotionVerdict.js");
     const cfg = verdictConfig();
     // `SPEC_VERDICT_MIN_GAPS_RESOLVED=0` desliga o recurso sem deploy: o laço encerra com a mensagem
@@ -1488,6 +1488,10 @@ async function promotionVerdictFor(
       // 🔴 GAP-81: a guarda do foco pago é por ÂNCORA e conta só rodada DEDICADA. Falha de leitura cai
       // em mapa vazio ⇒ ninguém é elegível: fail-CLOSED, como todo degrau deste recurso.
       focusByAnchor: await focusRoundsByAnchor(db, run.projectId).catch(() => new Map<string, number>()),
+      // 🔴 GAP-114: a SEGUNDA prova admissível do mesmo fato — rodadas em que a âncora foi despachada
+      // e o trecho ancorado foi de fato REESCRITO. Mesmo fail-CLOSED: mapa vazio ⇒ só a rodada
+      // dedicada vale (comportamento anterior), nunca uma anistia.
+      attackedByAnchor: await attackedRoundsByAnchor(db, run.projectId).catch(() => new Map<string, number>()),
     });
     let round: VerdictRound | null = null;
     let saved = 0;

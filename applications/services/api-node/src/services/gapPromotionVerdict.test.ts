@@ -34,7 +34,7 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
-  proveWork, anchorHistories,
+  proveWork, anchorHistories, focusKey, attackedRoundsByAnchor,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -43,7 +43,7 @@ type LiveVerdict = import("./gapPromotionVerdict.js").LiveVerdict;
 type VerdictConfig = import("./gapPromotionVerdict.js").VerdictConfig;
 
 /** Config explícita em todo teste: o default vem do ambiente e não pode decidir o resultado da suíte. */
-const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 };
+const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 };
 
 const F = (o: Partial<EnrichedFinding> = {}): EnrichedFinding => ({
   file: "modelo-dados.md", line: null, severity: "blocker", title: "contrato ambíguo", rationale: "",
@@ -66,8 +66,9 @@ const base = (o: Partial<Parameters<typeof selectVerdictCandidates>[0]> = {}): P
   // arquivo levou no total (contexto do parecer); `focusByAnchor` é quantas rodadas DEDICADAS (nível 2)
   // atacaram só ESTE defeito — é o gatilho que o Jean exigiu ("focamos neles individualmente algumas
   // vezes"). A chave é normalizada por `anchorSearchKey` porque a grafia do juiz ≠ a grafia do arquivo.
+  // 🔴 GAP-113: e é `(arquivo, âncora)` — `§1.1` existe em quase toda spec.
   focusByFile: new Map([["modelo-dados.md", 4]]),
-  focusByAnchor: new Map([[anchorSearchKey("## 4. Autenticação"), 2]]),
+  focusByAnchor: new Map([[focusKey("modelo-dados.md", "## 4. Autenticação"), 2]]),
   untouched: new Set<string>(),
   sections: sections(),
   gapsResolved: 5,
@@ -82,6 +83,7 @@ const C = (o: Partial<Candidate> = {}): Candidate => ({
   anchor: "## 4. Autenticação",
   times: 4,
   focusRounds: 3,
+  attackedRounds: 0,
   fileRounds: 5,
   section: SECTION,
   ...o,
@@ -100,7 +102,7 @@ const fakeDb = (rows: Record<string, unknown>[] = []) => {
 
 const ENV_KEYS = [
   "SPEC_VERDICT_MIN_GAPS_RESOLVED", "SPEC_VERDICT_MIN_RECURRENCE", "SPEC_VERDICT_MIN_FOCUS_ROUNDS",
-  "SPEC_VERDICT_MAX_PER_RUN", "SPEC_VERDICT_MAX_PER_SPEC", "SPEC_VERDICT_MODEL",
+  "SPEC_VERDICT_MIN_ATTACK_ROUNDS", "SPEC_VERDICT_MAX_PER_RUN", "SPEC_VERDICT_MAX_PER_SPEC", "SPEC_VERDICT_MODEL",
 ];
 const saved: Record<string, string | undefined> = {};
 
@@ -115,7 +117,7 @@ afterEach(() => {
 
 describe("verdictConfig", () => {
   it("liga por padrão com barra alta e aceita override por env", () => {
-    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 });
+    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 });
     process.env.SPEC_VERDICT_MIN_RECURRENCE = "5";
     process.env.SPEC_VERDICT_MAX_PER_RUN = "1";
     expect(verdictConfig().minRecurrence).toBe(5);
@@ -294,9 +296,61 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
   });
 
   it("foco individual insuficiente descarta — é o gatilho que o Jean exigiu", () => {
-    const gate = selectVerdictCandidates(base({ focusByAnchor: new Map([[anchorSearchKey("## 4. Autenticação"), 1]]) }));
+    const gate = selectVerdictCandidates(base({ focusByAnchor: new Map([[focusKey("modelo-dados.md", "## 4. Autenticação"), 1]]) }));
     expect(gate.candidates).toEqual([]);
-    expect(gate.rejected[0].why).toMatch(/foco individual insuficiente: 1 rodada/);
+    expect(gate.rejected[0].why).toMatch(/trabalho insuficiente NESTE defeito: 1 rodada\(s\) DEDICADA\(S\)/);
+  });
+
+  /**
+   * 🔴 GAP-113 — MEDIDO em prod: `§1.1` foi âncora de foco de nível 2 em 11 rodadas repartidas entre
+   * DOIS arquivos (`visao-escopo.md` 9 e `nvx-lastmile-backend.md` 2), e 25 âncoras dos findings do juiz
+   * se repetem em 2 a 4 arquivos diferentes. Contar a âncora sozinha dava por PAGO um foco que OUTRO
+   * arquivo pagou — falso positivo, exatamente o que o limite (c) do Jean proíbe.
+   */
+  it("foco pago por OUTRO arquivo na mesma âncora não conta", () => {
+    const gate = selectVerdictCandidates(base({
+      focusByAnchor: new Map([[focusKey("visao-escopo.md", "## 4. Autenticação"), 9]]),
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/0 rodada\(s\) DEDICADA\(S\)/);
+  });
+
+  /**
+   * 🔴 GAP-114 — MEDIDO em `privacidade-lgpd.md` após 74 rodadas do arquivo: `§7.1` apareceu em 49
+   * validações, teve 0 rodada DEDICADA, 18 despachos e 11 rodadas em que o trecho ancorado foi de fato
+   * REESCRITO. O gate rejeitava com "0 rodada(s) DEDICADA(S)" as âncoras MAIS insistentes justamente
+   * porque o escalonador nunca dedicou rodada a elas: um impasse por construção. A cura não é anistia —
+   * são duas provas admissíveis do MESMO fato, na forma do `proveWork`.
+   */
+  it("sem rodada dedicada, 3 rodadas em que o trecho foi REESCRITO abrem a porta", () => {
+    const gate = selectVerdictCandidates(base({
+      focusByAnchor: new Map(),
+      attackedByAnchor: new Map([[focusKey("modelo-dados.md", "## 4. Autenticação"), 3]]),
+    }));
+    expect(gate.rejected).toEqual([]);
+    expect(gate.candidates).toHaveLength(1);
+    expect(gate.candidates[0].attackedRounds).toBe(3);
+    expect(gate.candidates[0].focusRounds).toBe(0);
+  });
+
+  it("1 dedicada + 0 reescritas continua REJEITADO: a barra não caiu", () => {
+    // É o caso `modelo-dados.md §7.2` medido em prod: 1 rodada dedicada, 8 despachos, ZERO reescritas
+    // do trecho ancorado ⇒ NÃO-TENTADO (a guarda do GAP-71), e a régua nova o desqualifica também.
+    const gate = selectVerdictCandidates(base({
+      focusByAnchor: new Map([[focusKey("modelo-dados.md", "## 4. Autenticação"), 1]]),
+      attackedByAnchor: new Map(),
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/0 rodada\(s\) em que o trecho ancorado foi de fato REESCRITO/);
+  });
+
+  it("2 reescritas ainda não bastam — a prova mais fraca exige mais rodadas", () => {
+    const gate = selectVerdictCandidates(base({
+      focusByAnchor: new Map(),
+      attackedByAnchor: new Map([[focusKey("modelo-dados.md", "## 4. Autenticação"), 2]]),
+    }));
+    expect(gate.candidates).toEqual([]);
+    expect(gate.rejected[0].why).toMatch(/2 rodada\(s\) em que o trecho ancorado foi de fato REESCRITO \(mínimo 3\)/);
   });
 
   /**
@@ -319,7 +373,7 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
   it("rodada dedicada casa por âncora NORMALIZADA (a grafia do juiz não é a do arquivo)", () => {
     // O log da rodada gravou `§4. AUTENTICAÇÃO`; o finding chega como `## 4. Autenticação`.
     const gate = selectVerdictCandidates(base({
-      focusByAnchor: new Map([[anchorSearchKey("§4. AUTENTICAÇÃO"), 2]]),
+      focusByAnchor: new Map([[focusKey("modelo-dados.md", "§4. AUTENTICAÇÃO"), 2]]),
     }));
     expect(gate.rejected).toEqual([]);
     expect(gate.candidates).toHaveLength(1);
@@ -351,7 +405,7 @@ describe("selectVerdictCandidates — limite (c): as guardas de qualidade", () =
       findings: many,
       runs,
       sections: new Map(many.map((f) => [String(f.anchor), SECTION])),
-      focusByAnchor: new Map(many.map((f) => [anchorSearchKey(String(f.anchor)), 2])),
+      focusByAnchor: new Map(many.map((f) => [focusKey("modelo-dados.md", String(f.anchor)), 2])),
     }));
     expect(gate.candidates).toHaveLength(8);
     expect(gate.candidates[0].times).toBeGreaterThanOrEqual(gate.candidates[7].times);
@@ -563,22 +617,72 @@ describe("focusRoundsByFile", () => {
  * arquivo. Um arquivo com 9 rodadas normais não pagou foco individual em nenhum dos seus defeitos.
  */
 describe("focusRoundsByAnchor", () => {
-  it("conta só rodadas de nível 2 e agrega por âncora normalizada", async () => {
-    const db = fakeDb([{ anchor: "§8.6 (c)", n: 2 }, { anchor: "8.6 c", n: 1 }, { anchor: "§9.1", n: 3 }]);
+  it("conta só rodadas de nível 2 e agrega por (arquivo, âncora) normalizada", async () => {
+    const db = fakeDb([
+      { f: "modelo-dados.md", anchor: "§8.6 (c)", n: 2 }, { f: "modelo-dados.md", anchor: "8.6 c", n: 1 },
+      { f: "modelo-dados.md", anchor: "§9.1", n: 3 },
+    ]);
     const map = await focusRoundsByAnchor(db as never, "p1");
     // As duas grafias da MESMA âncora somam — senão o defeito "trocaria de nome" e perderia o foco pago.
-    expect(map.get(anchorSearchKey("§8.6 (c)"))).toBe(3);
-    expect(map.get(anchorSearchKey("§9.1"))).toBe(3);
+    expect(map.get(focusKey("modelo-dados.md", "§8.6 (c)"))).toBe(3);
+    expect(map.get(focusKey("modelo-dados.md", "§9.1"))).toBe(3);
     expect(map.size).toBe(2);
     expect(db.calls[0].text).toContain("focusLevel");
     expect(db.calls[0].text).toContain("focusAnchors");
+    expect(db.calls[0].text).toContain("filePath");
   });
 
-  it("âncora vazia/nula é ignorada e a falha de consulta devolve mapa vazio (nunca elegibilidade grátis)", async () => {
-    const db = fakeDb([{ anchor: null, n: 5 }, { anchor: "§§ ()", n: 4 }]);
+  /** 🔴 GAP-113: a MESMA âncora em arquivos diferentes são DOIS defeitos; somar era falso positivo. */
+  it("a mesma âncora em arquivos diferentes não soma", async () => {
+    const db = fakeDb([
+      { f: "visao-escopo.md", anchor: "§1.1", n: 9 }, { f: "nvx-lastmile-backend.md", anchor: "§1.1", n: 2 },
+    ]);
+    const map = await focusRoundsByAnchor(db as never, "p1");
+    expect(map.get(focusKey("visao-escopo.md", "§1.1"))).toBe(9);
+    expect(map.get(focusKey("nvx-lastmile-backend.md", "§1.1"))).toBe(2);
+    expect(map.size).toBe(2);
+  });
+
+  it("âncora/arquivo vazio é ignorado e a falha de consulta devolve mapa vazio (nunca elegibilidade grátis)", async () => {
+    const db = fakeDb([
+      { f: "f.md", anchor: null, n: 5 }, { f: "f.md", anchor: "§§ ()", n: 4 }, { f: null, anchor: "§1", n: 7 },
+    ]);
     expect((await focusRoundsByAnchor(db as never, "p1")).size).toBe(0);
     const broken = { query: vi.fn(async () => { throw new Error("coluna não existe"); }) };
     expect((await focusRoundsByAnchor(broken as never, "p1")).size).toBe(0);
+  });
+});
+
+/**
+ * 🔴 GAP-114 — a segunda prova admissível. "Atacada" é medida em BYTES: a âncora estava no
+ * `gapAnchors` da rodada, a rodada aplicou (`applied`), e a âncora NÃO está no `anchorsUntouched`
+ * daquela rodada (campo presente em 167/167 rodadas aplicadas em prod).
+ */
+describe("attackedRoundsByAnchor", () => {
+  it("conta uma vez por (run, rodada, arquivo, âncora), agregando grafias", async () => {
+    const db = fakeDb([
+      { run_id: "r1", round_idx: "3", f: "privacidade-lgpd.md", anchor: "§7.1" },
+      // A MESMA rodada com a âncora repetida em outra grafia é UMA rodada, não duas.
+      { run_id: "r1", round_idx: "3", f: "privacidade-lgpd.md", anchor: "7.1" },
+      { run_id: "r1", round_idx: "5", f: "privacidade-lgpd.md", anchor: "§7.1" },
+      { run_id: "r2", round_idx: "3", f: "privacidade-lgpd.md", anchor: "§7.1" },
+    ]);
+    const map = await attackedRoundsByAnchor(db as never, "p1");
+    expect(map.get(focusKey("privacidade-lgpd.md", "§7.1"))).toBe(3);
+    expect(map.size).toBe(1);
+  });
+
+  it("a consulta exige rodada aplicada e EXCLUI a âncora intocada — senão contaria não-trabalho", async () => {
+    const db = fakeDb();
+    await attackedRoundsByAnchor(db as never, "p1");
+    expect(db.calls[0].text).toContain("'applied' = 'true'");
+    expect(db.calls[0].text).toContain("anchorsUntouched");
+    expect(db.calls[0].text).toContain("gapAnchors");
+  });
+
+  it("falha de consulta devolve mapa vazio: fail-CLOSED, só a rodada dedicada vale", async () => {
+    const broken = { query: vi.fn(async () => { throw new Error("coluna não existe"); }) };
+    expect((await attackedRoundsByAnchor(broken as never, "p1")).size).toBe(0);
   });
 });
 
@@ -602,7 +706,7 @@ describe("anchorHistories", () => {
 
   it("junta rodadas dedicadas e títulos, em ordem cronológica, por âncora normalizada", async () => {
     const db = dbCom(
-      [{ anchor: "PRIV-ETAPAS-01", n: 3 }],
+      [{ f: "privacidade-lgpd.md", anchor: "PRIV-ETAPAS-01", n: 3 }],
       [
         { anchor: "PRIV-ETAPAS-01", title: "conflito de cardinalidade das etapas" },
         { anchor: "priv-etapas-01", title: "a cláusula se declara oráculo único" },
@@ -642,6 +746,21 @@ describe("anchorHistories", () => {
       // Voltou DEPOIS do outro elo: é reaparição, não repetição — vira linha própria.
       "par (code, HTTP) divergente",
     ]);
+  });
+
+  /**
+   * 🔴 GAP-113 — este bloco já prometia "só as âncoras deste ARQUIVO entram", mas isso valia apenas
+   * para os títulos: a contagem de rodadas dedicadas vinha do mapa do PROJETO, cego ao arquivo. Com
+   * `§1.1` medido em 11 rodadas repartidas entre dois arquivos, o `planFocus` recebia um histórico
+   * inflado e mandava a âncora virgem para o fim da fila.
+   */
+  it("rodada dedicada de OUTRO arquivo não entra no histórico deste", async () => {
+    const db = dbCom(
+      [{ f: "visao-escopo.md", anchor: "§1.1", n: 9 }, { f: "nvx-lastmile-backend.md", anchor: "§1.1", n: 2 }],
+      [{ anchor: "§1.1", title: "escopo do piloto contradiz o MVP" }],
+    );
+    const map = await anchorHistories(db as never, "p1", "nvx-lastmile-backend.md");
+    expect(map.get(anchorSearchKey("§1.1"))!.dedicatedRounds).toBe(2);
   });
 
   it("âncora ou título vazio é ignorado, e falha de consulta devolve mapa vazio (nunca derruba a rodada)", async () => {

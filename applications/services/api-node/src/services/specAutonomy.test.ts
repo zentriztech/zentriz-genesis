@@ -67,6 +67,7 @@ vi.mock("./gapPromotionVerdict.js", () => ({
   focusRoundsByFile: vi.fn(async () => new Map<string, number>([["produto.md", 4]])),
   // 🔴 GAP-81: rodadas DEDICADAS por âncora — conta separada da de arquivo, e é ela que abre o gatilho.
   focusRoundsByAnchor: vi.fn(async () => new Map<string, number>([["4 autenticacao", 2]])),
+  attackedRoundsByAnchor: vi.fn(async () => new Map<string, number>()),
   anchoredSection: vi.fn(() => "## 4. Autenticação\ntexto\n"),
   // 🔴 GAP-82: a prova de trabalho entra dublada — por padrão PROVADA por fechamento, que é o
   // comportamento antigo. `provaEsgotamento` troca para a prova por esgotamento do laço, e a lógica das

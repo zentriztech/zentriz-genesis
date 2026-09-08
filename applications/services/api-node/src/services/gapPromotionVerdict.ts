@@ -74,6 +74,12 @@ export interface VerdictConfig {
   minRecurrence: number;
   /** Rodadas de foco já pagas neste arquivo. */
   minFocusRounds: number;
+  /**
+   * 🔴 GAP-114 — a SEGUNDA prova admissível de trabalho no defeito: rodadas em que a âncora foi
+   * despachada ao CTO-editor e o trecho ancorado foi de fato REESCRITO (ver `attackedRoundsByAnchor`).
+   * Mais alta que `minFocusRounds` de propósito: a rodada dedicada é prova mais forte por rodada.
+   */
+  minAttackRounds: number;
   /** Teto de GAPs que UMA rodada de veredicto pode declarar não-impeditivos. */
   maxPerRun: number;
   /** Teto acumulado de veredictos `nao_impeditivo` vivos por projeto. */
@@ -100,6 +106,7 @@ export function verdictConfig(): VerdictConfig {
     minGapsResolved: n("SPEC_VERDICT_MIN_GAPS_RESOLVED", 3),
     minRecurrence: n("SPEC_VERDICT_MIN_RECURRENCE", 3),
     minFocusRounds: n("SPEC_VERDICT_MIN_FOCUS_ROUNDS", 2),
+    minAttackRounds: n("SPEC_VERDICT_MIN_ATTACK_ROUNDS", 3),
     maxPerRun: n("SPEC_VERDICT_MAX_PER_RUN", 3),
     maxPerSpec: n("SPEC_VERDICT_MAX_PER_SPEC", 8),
     minPasses: n("SPEC_VERDICT_MIN_PASSES", 2),
@@ -213,8 +220,10 @@ export interface Candidate {
   anchor: string;
   /** Validações COMPETENTES (que julgaram o arquivo por inteiro) em que este defeito reapareceu. */
   times: number;
-  /** 🔴 GAP-81 — rodadas DEDICADAS a este defeito (`focusLevel = 2`). É o que a guarda exige. */
+  /** 🔴 GAP-81 — rodadas DEDICADAS a este defeito (`focusLevel = 2`). */
   focusRounds: number;
+  /** 🔴 GAP-114 — rodadas em que a âncora foi despachada e o trecho ancorado foi de fato REESCRITO. */
+  attackedRounds: number;
   /** Rodadas de autonomia que já despacharam este arquivo ao CTO-editor (contexto, não guarda). */
   fileRounds: number;
   /** Trecho ancorado, verbatim. Vazio = âncora não localizável no arquivo. */
@@ -260,6 +269,29 @@ export async function focusRoundsByFile(db: Db, projectId: string): Promise<Map<
 }
 
 /**
+ * 🔴 GAP-113 — a chave do "foco pago" é o par **(arquivo, âncora)**, nunca a âncora sozinha.
+ *
+ * Medido em prod (projeto `e2a1988c`, 2026-09-08): a âncora `§1.1` foi o alvo de **11 rodadas
+ * dedicadas repartidas entre DOIS arquivos** — `visao-escopo.md` (9) e `nvx-lastmile-backend.md` (2).
+ * Com a chave só pela âncora, o portão do veredicto lia 11 para os dois, e nos findings do juiz há 25
+ * grafias de âncora repetidas em 2 a 4 arquivos diferentes (`§5.5` em 3, `§2.4` em 4, `FR-07` em 2,
+ * `privacy_requests.requester_contact` em 2). Número de seção não é identidade global: quase toda spec
+ * tem um `§1.1`.
+ *
+ * As duas consequências eram opostas e ambas erradas: o portão dava por PAGO um foco que outro arquivo
+ * pagou (falso positivo, exatamente o que o limite (c) do Jean proíbe), e o agendador do GAP-111 —
+ * que ordena por rodadas dedicadas crescente — punha no fim da fila uma âncora que nunca teve nenhuma.
+ *
+ * `\u0000` como separador porque não pode aparecer em caminho de arquivo nem em âncora de markdown.
+ */
+export function focusKey(file: string, anchor: string): string {
+  const a = anchorSearchKey(anchor ?? "");
+  const f = String(file ?? "").trim().toLowerCase();
+  if (!a || !f) return "";
+  return `${f}\u0000${a}`;
+}
+
+/**
  * 🔴 GAP-81 — quantas rodadas de foco **INDIVIDUAL** cada âncora já recebeu, neste projeto.
  *
  * É esta a medida que o gatilho do Jean pede. `focusRoundsByFile` conta rodadas do ARQUIVO, e rodada
@@ -273,20 +305,88 @@ export async function focusRoundsByFile(db: Db, projectId: string): Promise<Map<
  */
 export async function focusRoundsByAnchor(db: Db, projectId: string): Promise<Map<string, number>> {
   const rows = (await db.query(
-    `SELECT a.anchor AS anchor, count(*)::int AS n
+    `SELECT lower(r->>'filePath') AS f, a.anchor AS anchor, count(*)::int AS n
        FROM spec_autonomy_runs,
             jsonb_array_elements(rounds) r,
             jsonb_array_elements_text(r->'focusAnchors') a(anchor)
-      WHERE project_id = $1 AND (r->>'focusLevel')::int = 2
-      GROUP BY 1`,
+      WHERE project_id = $1 AND (r->>'focusLevel')::int = 2 AND r->>'filePath' IS NOT NULL
+      GROUP BY 1, 2`,
     [projectId],
-  ).catch(() => ({ rows: [] as Array<{ anchor: string | null; n: number }> }))).rows as unknown as
-    Array<{ anchor: string | null; n: number }>;
+  ).catch(() => ({ rows: [] as Array<{ f: string | null; anchor: string | null; n: number }> }))).rows as unknown as
+    Array<{ f: string | null; anchor: string | null; n: number }>;
   const out = new Map<string, number>();
   for (const r of rows) {
-    const k = anchorSearchKey(r.anchor ?? "");
+    const k = focusKey(r.f ?? "", r.anchor ?? "");
     if (!k) continue;
     out.set(k, (out.get(k) ?? 0) + Number(r.n ?? 0));
+  }
+  return out;
+}
+
+/**
+ * 🔴 GAP-114 — quantas rodadas ATACARAM cada defeito: a âncora foi despachada ao CTO-editor numa
+ * rodada cuja edição foi APLICADA, e o trecho ancorado **não** sobreviveu byte a byte.
+ *
+ * ## Por que a régua anterior travava o laço por construção
+ *
+ * `focusRoundsByAnchor` conta só a rodada DEDICADA (`focusLevel = 2`), e o portão exigia 2 delas. Medido
+ * em prod (NVX LastMile, projeto `e2a1988c`, 2026-09-08), `privacidade-lgpd.md` depois de 74 rodadas:
+ *
+ * ```
+ * âncora           validações  dedicadas  ATACADAS  despachos
+ * §7.1                    49          0        11         18
+ * §3.2-bis                47          0        11         18
+ * §4.2 passo 0            32          0        18         18
+ * PRIV-DEP-01.1           39          0        18         18
+ * §3.3                    40          0        14         14
+ * PRIV-ETAPAS-01          36         10        21         21
+ * ```
+ *
+ * Os defeitos MAIS insistentes do arquivo — `§7.1` em 49 validações — nunca receberam uma rodada
+ * dedicada, e o portão os recusava com "0 rodada(s) DEDICADA(S) …, mínimo 2". Mas o agente foi
+ * chamado a eles 18 vezes e reescreveu o trecho em 11 dessas — trabalho pago, medido byte a byte, que a
+ * régua não via. Resultado ao vivo: `verdictCandidates 3, verdictReleased 0, verdictImpeditive 31` em
+ * duas runs seguidas, e nenhum caminho para o juiz decidir sobre o que mais volta.
+ *
+ * ## Por que isto NÃO é afrouxar a barra
+ *
+ * A régua nova também RETIRA elegibilidade: `modelo-dados.md §7.2` tem 1 rodada dedicada e **0
+ * atacadas** em 8 despachos — o trecho nunca mudou, então o defeito é NÃO-TENTADO, e é justamente o que
+ * a guarda do GAP-71 diz que não pode virar candidato. O que ela mede é a única coisa que interessa ao
+ * limite (c) do Jean: *este defeito específico recebeu trabalho de verdade e voltou mesmo assim?*
+ *
+ * Duas provas admissíveis para o MESMO fato — a mesma forma do `proveWork` (GAP-82), não uma segunda
+ * régua: dedicada ≥ `minFocusRounds` **ou** atacada ≥ `minAttackRounds` (mais alta, porque a rodada
+ * dedicada é prova mais forte por rodada).
+ *
+ * A desduplicação por rodada é feita em JS de propósito: duas grafias da mesma âncora (`§8.6 (c)` e
+ * `8.6 c`) podem coexistir no `gapAnchors` de UMA rodada, e somar as duas contaria trabalho que não
+ * houve. `anchorSearchKey` só existe do lado do Node, então a chave só pode ser formada aqui.
+ *
+ * Falha de consulta ⇒ mapa vazio ⇒ menos elegibilidade (fail-CLOSED, como todo degrau deste recurso).
+ */
+export async function attackedRoundsByAnchor(db: Db, projectId: string): Promise<Map<string, number>> {
+  const rows = (await db.query(
+    `SELECT s.id AS run_id, r->>'round' AS round_idx, lower(r->>'filePath') AS f, a.anchor AS anchor
+       FROM spec_autonomy_runs s,
+            jsonb_array_elements(s.rounds) r,
+            jsonb_array_elements_text(r->'gapAnchors') a(anchor)
+      WHERE s.project_id = $1
+        AND r->>'applied' = 'true'
+        AND r->>'filePath' IS NOT NULL
+        AND NOT coalesce(r->'anchorsUntouched' @> to_jsonb(a.anchor), false)`,
+    [projectId],
+  ).catch(() => ({ rows: [] as Array<{ run_id: string; round_idx: string | null; f: string | null; anchor: string | null }> }))).rows as unknown as
+    Array<{ run_id: string; round_idx: string | null; f: string | null; anchor: string | null }>;
+  const vistos = new Set<string>();
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const k = focusKey(r.f ?? "", r.anchor ?? "");
+    if (!k) continue;
+    const rodada = `${r.run_id}#${r.round_idx ?? ""}#${k}`;
+    if (vistos.has(rodada)) continue;
+    vistos.add(rodada);
+    out.set(k, (out.get(k) ?? 0) + 1);
   }
   return out;
 }
@@ -312,7 +412,14 @@ export async function focusRoundsByAnchor(db: Db, projectId: string): Promise<Ma
 export async function anchorHistories(
   db: Db, projectId: string, filePath: string,
 ): Promise<Map<string, { dedicatedRounds: number; reportedTitles: string[] }>> {
-  const dedicadas = await focusRoundsByAnchor(db, projectId).catch(() => new Map<string, number>());
+  // 🔴 GAP-113: `focusRoundsByAnchor` devolve a chave `(arquivo, âncora)`. Este mapa é POR ARQUIVO
+  // (o `gapFocus` consulta por `anchorSearchKey`), então o prefixo do arquivo é retirado aqui — e com
+  // isso a promessa que este bloco já fazia ("só as âncoras deste ARQUIVO entram") passa a valer também
+  // para as rodadas dedicadas, não só para os títulos.
+  const todas = await focusRoundsByAnchor(db, projectId).catch(() => new Map<string, number>());
+  const prefixo = `${filePath.trim().toLowerCase()}\u0000`;
+  const dedicadas = new Map<string, number>();
+  for (const [k, n] of todas) if (k.startsWith(prefixo)) dedicadas.set(k.slice(prefixo.length), n);
   const rows = (await db.query(
     `SELECT f->>'anchor' AS anchor, f->>'title' AS title
        FROM spec_validation_runs v, jsonb_array_elements(v.findings) f
@@ -381,6 +488,12 @@ export function selectVerdictCandidates(args: {
    * medida que abre a porta do veredicto; `focusByFile` fica só como contexto para o promotor e o juiz.
    */
   focusByAnchor: Map<string, number>;
+  /**
+   * 🔴 GAP-114 — rodadas em que o defeito foi ATACADO (`attackedRoundsByAnchor`), pela chave
+   * `focusKey`. Ausente ⇒ só a prova por rodada DEDICADA vale, que é o comportamento anterior a este
+   * GAP (e é o que os testes de antes descrevem).
+   */
+  attackedByAnchor?: Map<string, number>;
   untouched: Set<string>;
   sections: Map<string, string>;
   gapsResolved: number;
@@ -459,10 +572,16 @@ export function selectVerdictCandidates(args: {
     // arquivo. Rodada de arquivo manda todos os GAPs de uma vez e o teimoso perde a triagem interna do
     // agente — chamar isso de "foco individual pago" seria dar ao juiz um poder que o Jean condicionou
     // a trabalho que ainda não aconteceu.
+    // 🔴 GAP-113: a chave é (arquivo, âncora) — `§1.1` existe em quase toda spec, e contar a âncora
+    // sozinha dava por PAGO um foco que outro arquivo pagou.
+    // 🔴 GAP-114: duas provas admissíveis do MESMO fato ("este defeito recebeu trabalho e voltou"),
+    // na forma do `proveWork`: rodada DEDICADA, ou rodada em que o trecho ancorado foi REESCRITO.
     const focusFile = args.focusByFile.get(file.toLowerCase()) ?? 0;
-    const focus = args.focusByAnchor.get(anchorSearchKey(anchor)) ?? 0;
-    if (focus < cfg.minFocusRounds) {
-      rejected.push({ file, anchor, why: `foco individual insuficiente: ${focus} rodada(s) DEDICADA(S) a este defeito (o arquivo teve ${focusFile} rodada(s) no total), mínimo ${cfg.minFocusRounds}` });
+    const chave = focusKey(file, anchor);
+    const focus = args.focusByAnchor.get(chave) ?? 0;
+    const attacked = args.attackedByAnchor?.get(chave) ?? 0;
+    if (focus < cfg.minFocusRounds && attacked < cfg.minAttackRounds) {
+      rejected.push({ file, anchor, why: `trabalho insuficiente NESTE defeito: ${focus} rodada(s) DEDICADA(S) (mínimo ${cfg.minFocusRounds}) e ${attacked} rodada(s) em que o trecho ancorado foi de fato REESCRITO (mínimo ${cfg.minAttackRounds}); o arquivo teve ${focusFile} rodada(s) no total` });
       continue;
     }
     const section = args.sections.get(anchor) ?? "";
@@ -470,10 +589,11 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: "âncora não localizável no arquivo: sem o trecho verbatim o juiz decidiria sobre um resumo" });
       continue;
     }
-    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, fileRounds: focusFile, section });
+    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section });
   }
-  // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente.
-  candidates.sort((a, b) => b.times - a.times || b.focusRounds - a.focusRounds);
+  // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente. Empate desce para o
+  // trabalho medido — primeiro a rodada dedicada, depois o trecho reescrito (GAP-114).
+  candidates.sort((a, b) => b.times - a.times || b.focusRounds - a.focusRounds || b.attackedRounds - a.attackedRounds);
   return {
     candidates: candidates.slice(0, MAX_CANDIDATES),
     rejected,
@@ -533,7 +653,7 @@ function describeCandidate(id: string, c: Candidate): string {
   return [
     `### ${id} [${c.finding.severity}] arquivo=${c.file} âncora=${c.anchor}`,
     `defeito: ${String(c.finding.title ?? "").slice(0, TITLE_SLICE)}${rationale ? ` — ${rationale}` : ""}`,
-    `reincidência: reapareceu em ${c.times} validação(ões) competente(s); ${c.focusRounds} rodada(s) DEDICADA(S) só a este defeito, ${c.fileRounds} rodada(s) neste arquivo no total`,
+    `reincidência: reapareceu em ${c.times} validação(ões) competente(s); ${c.focusRounds} rodada(s) DEDICADA(S) só a este defeito, ${c.attackedRounds} rodada(s) em que o trecho ancorado foi de fato REESCRITO, ${c.fileRounds} rodada(s) neste arquivo no total`,
     "trecho da spec, VERBATIM:",
     "```",
     c.section,
