@@ -475,6 +475,16 @@ export interface AutonomyRoundLog {
    */
   diagramsCreation?: boolean;
   /**
+   * 🔴 GAP-125: o DESFECHO que a run teria tido se a rodada de desenhos não existisse — o texto que o
+   * chamador ia passar ao `finishRun` e o status que ele ia usar. Gravados aqui porque quem pede o
+   * desenho conhece o estado (veredicto do juiz, teto batido, contagem) e quem ENCERRA, uma rodada
+   * depois, não conhece nada disso: sem estes dois campos a run fechava com um texto fixo de "0 GAP
+   * ATIVO" e status `succeeded` em caminhos onde havia dezenas de GAPs abertos e o laço tinha
+   * esgotado. Um desenho não muda o veredicto da spec — nem para melhor, nem para pior.
+   */
+  diagramsClosing?: string | null;
+  diagramsEndStatus?: "succeeded" | "exhausted" | "stalled" | null;
+  /**
    * 🔴 GAP-43: o passe terminou e a validação que devia medi-lo NÃO mediu (`error`/`superseded`). Isso
    * é diferente de "o passe não progrediu": não se sabe se progrediu. O fato fica no log porque é o que
    * permite ao passe seguinte distinguir uma falha ISOLADA de medição (perdoável uma vez) de um
@@ -2224,21 +2234,24 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 GAP-115: fim de laço com GAPs em aberto ⇒ o juiz julga os reincidentes aqui também.
     const v = (gaps?.important ?? 0) > 0
       ? await verdictAtLoopEnd(db, run, "exhausted") : { note: "", promotable: false };
-    // 🔴 GAP-116: o juiz declarou a spec promovível ⇒ a arquitetura FECHOU, mesmo com GAPs abertos
-    // (todos julgados não-impeditivos). É aqui que a feature dos desenhos passa a ser alcançável.
-    if (v.promotable && gaps && await startDiagramsRound(db, run, gaps, "pending")) return true;
     // 🔴 GAP-123 — aqui o orçamento de passes ACABOU: não há validação a pagar, e é justamente por isso
     // que o resto tem de ser DECLARADO. Rodada aplicada no passe corrente é, por construção, rodada que
     // nenhuma validação mediu (a medição fecha o passe) ⇒ dizer só "N arquivo(s) revisado(s)" deixaria a
     // contagem final passar por retrato do disco. Cortar é ok; mentir sobre o corte não.
+    // 🔴 GAP-125: o texto é montado ANTES do desenho porque ele é o desfecho da run com ou sem figura.
     const naoMedidas = appliedInPass(run);
-    await finishRun(db, run, "exhausted",
+    const desfecho =
       `Limite de ${run.maxRounds} passe(s) de validação atingido (${run.round} arquivo(s) revisado(s)).${v.note}`
       + (naoMedidas > 0
         ? ` ⚠️ ${naoMedidas} arquivo(s) salvo(s) no último passe NÃO entraram nesta contagem (o orçamento de`
           + ` passes acabou antes da validação que os mediria) — rode Validar para ver o número do disco.`
         : "")
-      + ` Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`, { gaps });
+      + ` Revise os GAPs restantes na aba GAPs e triagem o que for risco aceito.`;
+    // 🔴 GAP-116: o juiz declarou a spec promovível ⇒ a arquitetura FECHOU, mesmo com GAPs abertos
+    // (todos julgados não-impeditivos). É aqui que a feature dos desenhos passa a ser alcançável.
+    if (v.promotable && gaps
+      && await startDiagramsRound(db, run, gaps, "pending", { status: "exhausted", text: desfecho })) return true;
+    await finishRun(db, run, "exhausted", desfecho, { gaps });
     return true;
   }
   // GAP-3: o teto de arquivos é do PASSE (o do laço inteiro é o `TOTAL`). Sem isto, uma spec com mais
@@ -2283,14 +2296,16 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // encerrava sem que o juiz pudesse decidir se algum dos reincidentes impede promover.
     const v = (gaps?.important ?? 0) > 0
       ? await verdictAtLoopEnd(db, run, "exhausted") : { note: "", promotable: false };
-    // 🔴 GAP-116: promovível pelo parecer = arquitetura fechada, e é o gatilho dos desenhos.
-    if (v.promotable && gaps && await startDiagramsRound(db, run, gaps, "pending")) return true;
-    await finishRun(db, run, "exhausted",
+    // 🔴 GAP-125: desfecho montado antes do desenho — é o mesmo com figura ou sem.
+    const desfechoTeto =
       (perPass
         ? `Teto de ${AUTONOMY_MAX_FILE_ROUNDS} arquivos revisados neste passe atingido (${run.round} no laço todo).`
         : `Teto de ${AUTONOMY_MAX_TOTAL_FILE_ROUNDS} arquivos revisados neste laço atingido.`)
-      + `${v.note} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`,
-      { gaps });
+      + `${v.note} Tudo o que foi revisado está salvo — rode o modo autônomo de novo para continuar de onde parou.`;
+    // 🔴 GAP-116: promovível pelo parecer = arquitetura fechada, e é o gatilho dos desenhos.
+    if (v.promotable && gaps
+      && await startDiagramsRound(db, run, gaps, "pending", { status: "exhausted", text: desfechoTeto })) return true;
+    await finishRun(db, run, "exhausted", desfechoTeto, { gaps });
     return true;
   }
   const editable = await specEditable(db, run.projectId);
@@ -2306,9 +2321,10 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     // Feature dos DESENHOS (Jean, 2026-09-08): zero GAP importante é o instante em que "o modelo de
     // arquitetura fechou". Se o documento de diagramas ainda não existe, o laço paga UMA rodada para
     // criá-lo antes de encerrar — desenhar antes seria desenhar uma arquitetura que ainda mudava.
-    if (await startDiagramsRound(db, run, gaps, "pending")) return true;
-    await finishRun(db, run, "succeeded",
-      `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`, { gaps });
+    const desfechoLimpo =
+      `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`;
+    if (await startDiagramsRound(db, run, gaps, "pending", { status: "succeeded", text: desfechoLimpo })) return true;
+    await finishRun(db, run, "succeeded", desfechoLimpo, { gaps });
     return true;
   }
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
@@ -2734,9 +2750,15 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
  * UMA tentativa por run, de propósito: `run.rounds` é a memória durável disso. Se o veto recusar o
  * documento, a run termina com o motivo declarado e a próxima convergência tenta de novo — insistir
  * aqui gastaria LLM num laço cujo trabalho principal já acabou.
+ *
+ * 🔴 GAP-125 — `close` é o desfecho que o chamador ia dar à run AGORA (status + texto). Ele viaja no
+ * log da rodada até o `applyDiagramsRound`, porque o estado que autorizou o desenho (veredicto do
+ * juiz, teto batido, quantos GAPs seguem abertos) só é conhecido AQUI. Sem isso o encerramento da run
+ * saía com texto fixo — e nos três caminhos que o GAP-116 abriu esse texto é falso por construção.
  */
 async function startDiagramsRound(
   db: Db, run: AutonomyRun, gaps: GapTally, fromStatus: "pending" | "validating",
+  close?: { status: "succeeded" | "exhausted" | "stalled"; text: string },
 ): Promise<boolean> {
   // 🔴 GAP-116: há DOIS fechamentos de arquitetura, e o log tem de dizer qual foi. Contagem zero é o
   // caso raro; o caso real é o juiz declarar promovível com GAPs abertos e todos não-impeditivos.
@@ -2794,6 +2816,8 @@ async function startDiagramsRound(
   await appendRoundLog(db, run.id, {
     round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
     filePath: DIAGRAMS_PATH, diagramsCreation: true, gapsBefore: gaps.important, specChars: 0,
+    // 🔴 GAP-125: o desfecho viaja com a rodada. `?? null` para gravar a AUSÊNCIA de forma explícita.
+    diagramsClosing: close?.text ?? null, diagramsEndStatus: close?.status ?? null,
     note: `Arquitetura fechada (${porque}) — pedindo ao arquiteto os diagramas Mermaid em \`${DIAGRAMS_PATH}\` (${insumo.files} arquivo(s) da spec como insumo).`,
   });
 
@@ -2830,20 +2854,43 @@ async function startDiagramsRound(
  * applying (diagramas) → CRIA o documento se o veto aprovar, e ENCERRA a run.
  *
  * A run que chega aqui já convergiu (foi por isso que os diagramas foram pedidos), então nenhum
- * desfecho desta rodada pode piorar o veredicto: aprovado ou recusado, a run termina em `succeeded` e
- * o texto diz o que aconteceu com o desenho. Contar isto como "falha de arquivo" (que é o que
- * `skipFileAndContinue` faria) transformaria uma spec convergida em `stalled` por causa de uma figura.
+ * desfecho desta rodada pode MUDAR o veredicto: aprovado ou recusado, a run termina com o status que
+ * o chamador do desenho já tinha decidido e o texto diz o que aconteceu com o desenho. Contar isto
+ * como "falha de arquivo" (que é o que `skipFileAndContinue` faria) transformaria uma spec convergida
+ * em `stalled` por causa de uma figura.
+ *
+ * 🔴 GAP-125 — e o contrário também não vale: até aqui o encerramento era `succeeded` com o texto fixo
+ * *"Nenhum GAP vermelho ou amarelo ATIVO restante"*. Isso é verdade em UM dos cinco gatilhos (o
+ * fechamento limpo). Nos três que o GAP-116 abriu — juiz declarando a spec promovível com GAPs
+ * abertos, teto de passes, teto de arquivos — o laço chega aqui com `gaps.important > 0` **por
+ * construção** (o caminho de contagem zero já retornou antes), e o veredicto do juiz e o motivo do
+ * esgotamento eram simplesmente descartados. Uma figura promovia `exhausted` a `succeeded` e afirmava
+ * zero GAP sobre uma spec com dezenas: o arquétipo do log mentiroso (GAP-45/46) em cima justamente da
+ * feature que o Jean pediu. Agora o desfecho vem do `diagramsClosing`/`diagramsEndStatus` gravados no
+ * pedido, e o estado é sempre MEDIDO na hora do encerramento — nunca afirmado por texto fixo.
  */
 async function applyDiagramsRound(db: Db, run: AutonomyRun, revised: string, truncated: boolean): Promise<boolean> {
   const gaps = await currentGaps(db, run.projectId).catch(() => null);
+  const pedido = [...run.rounds].reverse().find((r) => r.diagramsCreation === true);
+  // Fallback (rodada de desenho anterior ao GAP-125, ou pedido sem desfecho gravado): o estado sai da
+  // MEDIÇÃO desta hora, não de um texto fixo. Zero GAP medido ⇒ fechamento limpo; qualquer outro
+  // número ⇒ declara o número e não promete convergência que ninguém verificou.
+  const fechamento = (pedido?.diagramsClosing ?? "").trim() || (
+    gaps == null
+      ? "Não consegui medir os GAPs no encerramento — a contagem final não é retrato do disco."
+      : gaps.important === 0
+        ? `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`
+        : `${gaps.important} GAP(s) importante(s) seguem em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}) — a arquitetura foi considerada fechada pelo parecer, não pela contagem.`
+  );
+  const status = pedido?.diagramsEndStatus ?? (gaps?.important === 0 ? "succeeded" : "exhausted");
   const encerra = async (note: string): Promise<boolean> => {
-    await finishRun(db, run, "succeeded", note, { gaps });
+    await finishRun(db, run, status, note, { gaps });
     return true;
   };
   const recusa = async (motivo: string): Promise<boolean> => {
     await patchLastRound(db, run, { applied: false, filePath: DIAGRAMS_PATH, note: motivo });
     return encerra(
-      `Spec convergida (0 GAP vermelho ou amarelo ATIVO). Os diagramas de arquitetura NÃO foram criados: ${motivo}. `
+      `${fechamento} Os diagramas de arquitetura NÃO foram criados: ${motivo}. `
       + "A spec no disco está íntegra — o próximo laço tenta desenhar de novo.");
   };
   if (truncated) return recusa("o documento voltou truncado (teto de saída) e desenho pela metade não desenha");
@@ -2864,7 +2911,7 @@ async function applyDiagramsRound(db: Db, run: AutonomyRun, revised: string, tru
     note: `\`${DIAGRAMS_PATH}\` CRIADO — ${verdict.diagrams} diagrama(s) Mermaid (${verdict.kinds.join(", ")}), ${verdict.content.length} chars.`,
   });
   return encerra(
-    `Nenhum GAP vermelho ou amarelo ATIVO restante — e a arquitetura foi DESENHADA: \`${DIAGRAMS_PATH}\` com `
+    `${fechamento} E a arquitetura foi DESENHADA: \`${DIAGRAMS_PATH}\` com `
     + `${verdict.diagrams} diagrama(s) Mermaid (${verdict.kinds.join(", ")}). Abra a aba Spec para vê-los renderizados.`);
 }
 
@@ -3696,9 +3743,10 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       // Feature dos DESENHOS: este é o fechamento LIMPO da spec (zero GAP importante e todo arquivo
       // julgado por inteiro) — o momento exato que o Jean descreveu. É o caminho normal de chegada,
       // porque o laço quase sempre fecha aqui e não no tick `pending`.
-      if (await startDiagramsRound(db, run, gaps, "validating")) return true;
-      await finishRun(db, run, "succeeded",
-        `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cobertura ? ` — e o estágio adversarial julgou os ${cobertura.total} arquivo(s) da spec por INTEIRO` : ""}.`, { gaps });
+      const desfechoLimpo =
+        `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cobertura ? ` — e o estágio adversarial julgou os ${cobertura.total} arquivo(s) da spec por INTEIRO` : ""}.`;
+      if (await startDiagramsRound(db, run, gaps, "validating", { status: "succeeded", text: desfechoLimpo })) return true;
+      await finishRun(db, run, "succeeded", desfechoLimpo, { gaps });
       return true;
     }
     const grandes = pendentes.filter((p) => (cov?.oversized ?? []).includes(p));
@@ -3737,16 +3785,21 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     const v = await verdictAtLoopEnd(db, run, atCap ? "exhausted" : "stalled", {
       coverage: vr.stage_b_coverage, unjudged: cobertura?.unjudged ?? [],
     });
+    // 🔴 GAP-125: o desfecho de CADA um dos dois fins de laço é montado antes, e é ele que viaja com o
+    // pedido do desenho. Antes, uma figura apagava tanto o `v.note` (o parecer do juiz) quanto o motivo
+    // do esgotamento e fechava a run como se a contagem fosse zero.
+    const desfecho = atCap
+      ? `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${v.note} Trate na aba GAPs ou rode o modo autônomo de novo.`
+      : `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto).${v.note} Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`;
     // 🔴 GAP-116: promovível pelo parecer é a arquitetura FECHADA — o mesmo gatilho dos desenhos que
     // até aqui só existia em `gaps.important === 0`, patamar que nenhuma spec real alcança.
-    if (v.promotable && await startDiagramsRound(db, run, gaps, "validating")) return true;
+    if (v.promotable && await startDiagramsRound(db, run, gaps, "validating",
+      { status: atCap ? "exhausted" : "stalled", text: desfecho })) return true;
     if (atCap) {
-      await finishRun(db, run, "exhausted",
-        `Limite de ${run.maxRounds} ${perFile ? "passe(s) de validação" : "rodada(s)"} atingido com ${gaps.important} GAP(s) importante(s) em aberto (🔴 ${gaps.blockers} · 🟡 ${gaps.warnings}).${v.note} Trate na aba GAPs ou rode o modo autônomo de novo.`, { gaps });
+      await finishRun(db, run, "exhausted", desfecho, { gaps });
       return true;
     }
-    await finishRun(db, { ...run, noProgressStreak: streak }, "stalled",
-      `Dois ${perFile ? "passes" : "rodadas"} seguidos sem derrubar GAP importante (${gaps.important} em aberto).${v.note} Parei para não gastar mais LLM em um laço que não converge — trate os GAPs restantes à mão ou triagem o que for risco aceito.`, { gaps });
+    await finishRun(db, { ...run, noProgressStreak: streak }, "stalled", desfecho, { gaps });
     return true;
   }
   await db.query(

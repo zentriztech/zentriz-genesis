@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 # 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
 # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
-SCHEMA_VERSION = "1.4.0"  # 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
+# 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
+SCHEMA_VERSION = "1.5.0"  # 1.5.0: + GAP-125 (o último artefato não redefine o veredicto do trabalho)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -40,7 +41,10 @@ ROLES = ("dev", "cto", "engineer", "pm", "qa", "monitor", "devops")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — os 9 arquétipos, medidos em produção na Bancada (2026-09-07; 121/122 em 2026-09-08)
+# Catálogo — arquétipos MEDIDOS em produção na Bancada (GAP-69→75 em 2026-09-07; 121→125 em
+# 2026-09-08). A contagem NÃO é escrita à mão em nenhum lugar: quem exibe usa `len(ARCHETYPES)`,
+# senão o próprio arquivo que ensina "contagem não é prova" mentiria sobre a sua (dizia "nove"
+# com doze no catálogo).
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARCHETYPES: list[dict[str, Any]] = [
@@ -189,6 +193,23 @@ ARCHETYPES: list[dict[str, Any]] = [
             "feature dos diagramas (gatilho `promotable`) inalcançável — o arquétipo do gatilho impossível."
         ),
     },
+    {
+        "slug": "arch.gap125.ultimo-artefato-nao-redefine-o-veredicto",
+        "title": "O último artefato entregue não redefine o veredicto do trabalho",
+        "rule": (
+            "Ao FECHAR uma tarefa depois de um passo extra (diagrama, README, resumo): status e motivo "
+            "continuam sendo os de quem MEDIU o estado, não os do passo extra. Quem encerra sem receber "
+            "esse estado repete um texto fixo — e texto fixo sobre estado variável é mentira em parte dos "
+            "caminhos. Carregue o desfecho com a tarefa; sem ele, MEÇA de novo em vez de afirmar."
+        ),
+        "evidence": (
+            "Bancada GAP-125 (2026-09-08): a rodada de desenhos encerrava a run em `succeeded` dizendo "
+            "'nenhum GAP ativo restante' — verdade em 1 dos 5 gatilhos. Nos 3 abertos pelo GAP-116 o laço "
+            "chega ali com GAPs abertos POR CONSTRUÇÃO, e o parecer do juiz e o motivo do esgotamento eram "
+            "descartados: uma figura promovia `exhausted` a sucesso. Os testes cobriam o DESPACHO do "
+            "desenho e não o ENCERRAMENTO — foi esse ponto cego que sustentou o defeito."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -226,7 +247,9 @@ ROLE_FOCUS: dict[str, str] = {
     "monitor": (
         "Como isto aparece para você: 'N tasks concluídas' não é prova. Verifique identidade do "
         "item (task/arquivo), não só a contagem — rotação de itens parece progresso. E confira "
-        "QUANDO a contagem foi apurada: número anterior às últimas entregas não é o estado atual."
+        "QUANDO a contagem foi apurada: número anterior às últimas entregas não é o estado atual. "
+        "Do mesmo jeito, um artefato extra entregue no fim (diagrama, resumo, README) não muda o "
+        "status do ciclo: relate o desfecho que a MEDIÇÃO deu, não o do último passo."
     ),
     "devops": (
         "Como isto aparece para você: manifesto/compose gerado a partir de contexto parcial "
@@ -238,10 +261,10 @@ ROLE_FOCUS: dict[str, str] = {
 def _prefix_for(role: str) -> str:
     """Texto injetado no topo do SYSTEM_PROMPT (`category='package'`)."""
     lines = [
-        "### Arquétipos de contexto (aprendidos em produção — Bancada de Specs, GAP-69→75 · 121 · 122)",
+        "### Arquétipos de contexto (aprendidos em produção — Bancada de Specs, GAP-69→75 · 121→125)",
         "",
-        "Estes nove defeitos foram MEDIDOS na Bancada e são de CONTEXTO, não de linguagem: "
-        "aparecem igual em spec, em código e em manifesto. Cortar contexto é aceitável; "
+        f"Estes {len(ARCHETYPES)} defeitos foram MEDIDOS na Bancada e são de CONTEXTO, não de "
+        "linguagem: aparecem igual em spec, em código e em manifesto. Cortar contexto é aceitável; "
         "**mentir sobre o corte não**.",
         "",
     ]

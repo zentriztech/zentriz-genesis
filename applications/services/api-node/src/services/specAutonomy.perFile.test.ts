@@ -1925,6 +1925,99 @@ describe("🔴 GAP-116 — arquitetura promovível pelo juiz também vira desenh
 });
 
 /**
+ * 🔴 GAP-125 — o DESENHO não muda o veredicto da run: nem o status, nem o texto.
+ *
+ * O GAP-116 abriu três gatilhos novos para a rodada de desenhos (juiz declarando promovível nos três
+ * fins de laço), e todos chegam ao `applyDiagramsRound` com `gaps.important > 0` **por construção** —
+ * o caminho de contagem zero já retornou antes. Mas o encerramento era fixo: `succeeded` com o texto
+ * *"Nenhum GAP vermelho ou amarelo ATIVO restante"*. Ou seja, bastava a figura existir para uma run
+ * `exhausted` com 44 GAPs abertos virar sucesso afirmando zero — e o parecer do juiz (`v.note`) e o
+ * motivo do esgotamento eram descartados no caminho. O log mentiroso do GAP-45/46 em cima da feature
+ * que o Jean pediu, e invisível até aqui porque o GAP-124 mantinha o gatilho inalcançável.
+ *
+ * A suíte do GAP-116 acima cobria o DESPACHO e não o ENCERRAMENTO: era o ponto cego que sustentou o
+ * defeito. Estes casos travam o encerramento nos dois desfechos (desenho aprovado e recusado).
+ */
+describe("🔴 GAP-125 — o desenho não promove `exhausted` a `succeeded` nem afirma zero GAP", () => {
+  const DIAGRAMAS = "arquitetura-diagramas.md";
+  const ZERO_GAP = "Nenhum GAP vermelho ou amarelo ATIVO restante";
+  const DESENHOS = [
+    "# Arquitetura — desenhos", "",
+    "## Modelo global", "", "```mermaid", "flowchart LR", '  A["App"] --> B["API"]', "```", "",
+    "## APIs", "", "```mermaid", "sequenceDiagram", "  participant App", "  App->>API: POST /x", "```", "",
+    "## Infraestrutura", "", "```mermaid", "graph TD", '  ALB["ALB"] --> ECS["ECS"]', "```", "",
+  ].join("\n");
+  /** Dois desenhos: o veto recusa por não cumprir o mínimo pedido pelo Jean. */
+  const SO_DOIS = DESENHOS.split("## Infraestrutura")[0];
+
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;
+    dispatchDiagramsJob.mockClear().mockResolvedValue({ ok: true as const });
+    especLegivel = true;
+    veredicto = { candidates: 2, released: 1, impeditive: 0, promotable: true };
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  /** Teto TOTAL de arquivos com parecer promovível — o fim de laço da run `10b1a4e1`. */
+  async function desenhaPeloTeto(): Promise<{ id: string }> {
+    const r = await start(3);
+    await advanceAutonomyRun(db, r.id);
+    run!.round = AUTONOMY_MAX_TOTAL_FILE_ROUNDS;
+    run!.rounds = [];
+    run!.status = "pending";
+    run!.current_file = null;
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.current_file).toBe(DIAGRAMAS);
+    return r;
+  }
+
+  it("o pedido carrega o DESFECHO da run (status + texto), não só o fato de estar desenhando", async () => {
+    await desenhaPeloTeto();
+    const round = (run!.rounds as Record<string, unknown>[]).at(-1)!;
+    expect(round.diagramsEndStatus).toBe("exhausted");
+    expect(String(round.diagramsClosing)).toContain("Teto de");
+    expect(String(round.diagramsClosing)).toContain("PROMOVÍVEL");
+    expect(String(round.diagramsClosing)).not.toContain(ZERO_GAP);
+  });
+
+  it("desenho APROVADO com GAPs em aberto → run `exhausted`, e o texto NÃO afirma zero GAP", async () => {
+    const r = await desenhaPeloTeto();
+    await ctoReturns(r.id, DESENHOS);
+    expect(readFileSync(join(root, PROJECT, DIAGRAMAS), "utf-8")).toContain("```mermaid");
+    // O desenho existe E o veredicto da run é o que era: nada de sucesso por figura.
+    expect(run!.status).toBe("exhausted");
+    expect(String(run!.last_error)).toContain("arquitetura foi DESENHADA");
+    expect(String(run!.last_error)).toContain("Teto de");
+    expect(String(run!.last_error)).toContain("PROMOVÍVEL");   // o parecer do juiz sobrevive
+    expect(String(run!.last_error)).not.toContain(ZERO_GAP);
+  });
+
+  it("desenho RECUSADO pelo veto → mesmo status e mesmo texto de estado, com o motivo declarado", async () => {
+    const r = await desenhaPeloTeto();
+    await ctoReturns(r.id, SO_DOIS);
+    expect(() => readFileSync(join(root, PROJECT, DIAGRAMAS), "utf-8")).toThrow();
+    expect(run!.status).toBe("exhausted");
+    expect(run!.file_failures).toBe(0);                        // recusa de figura não é falha de arquivo
+    expect(String(run!.last_error)).toContain("TOO_FEW");
+    expect(String(run!.last_error)).toContain("Teto de");
+    expect(String(run!.last_error)).not.toContain(ZERO_GAP);
+  });
+
+  it("pedido SEM desfecho gravado (rodada anterior ao GAP-125) → o estado sai da MEDIÇÃO, não de texto fixo", async () => {
+    const r = await desenhaPeloTeto();
+    // Simula o log de uma run que já estava em voo quando o conserto subiu.
+    const rounds = run!.rounds as Record<string, unknown>[];
+    delete rounds.at(-1)!.diagramsClosing;
+    delete rounds.at(-1)!.diagramsEndStatus;
+    await ctoReturns(r.id, DESENHOS);
+    expect(run!.status).toBe("exhausted");                     // GAPs medidos > 0 ⇒ nunca `succeeded`
+    expect(String(run!.last_error)).toContain("seguem em aberto");
+    expect(String(run!.last_error)).not.toContain(ZERO_GAP);
+  });
+});
+
+/**
  * 🔴 C4 (D5) — "zero GAP" só pode ser dito sobre 100% da spec, em QUALQUER ponto de saída do laço.
  *
  * O tick `validating` aplica esta regra desde o GAP-19. Os ticks `pending` (fila por arquivo) e `whole`
