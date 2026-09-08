@@ -9,7 +9,7 @@ A mesma decisão foi tomada no Connect: `ReviewVerdictRecord` nasceu como contra
 vez de esticar `ReflectionRecord`, porque auto-avaliação (ganho ZERO) e revisão de outra
 família (+12 p.p.) não podem compartilhar o mesmo registro (ADR-014).
 
-A frase única que resume as onze regras:
+A frase única que resume as doze regras:
 
     "não encontrei" e "não sei procurar" NÃO são a mesma resposta.
 
@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.3.0"
+SCHEMA_VERSION = "1.4.0"
 STACK_KEY = "generic"  # o defeito é de AFIRMAÇÃO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -65,7 +65,7 @@ NO_OPINION_REASONS = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — onze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
+# Catálogo — doze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
 # O da ÂNCORA (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial
 # cross-family de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o
 # GAP-39/49 aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a
@@ -75,6 +75,9 @@ NO_OPINION_REASONS = (
 # Os DOIS ÚLTIMOS vieram da medição de 2026-09-08 que provou o veredicto INALCANÇÁVEL: a âncora
 # sozinha não endereça artefato nenhum (GAP-113) e a única prova de trabalho exigida era uma que
 # o escalonador nunca produzia para as âncoras mais insistentes (GAP-114) — impasse por construção.
+# O ÚLTIMO (GAP-118) é o mesmo impasse na forma da RESPOSTA, não da prova: o promotor era mandado
+# calar quando não havia dano, e o código descartava esse silêncio sem levá-lo ao juiz — 5 de 8
+# candidatos elegíveis nunca foram julgados. Portão que só aceita a resposta que retém não julga.
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERDICT_ARCHETYPES: list[dict[str, Any]] = [
@@ -241,6 +244,25 @@ VERDICT_ARCHETYPES: list[dict[str, Any]] = [
             "rodadas em que o trecho foi de fato reescrito — o portão rejeitava justamente os mais "
             "insistentes. E o veredicto não era nem chamado quando o laço acabava pelo teto de "
             "arquivos: 30 rodadas, 44 GAPs, nenhum parecer."
+        ),
+    },
+    {
+        "slug": "verd.gap118.a-resposta-que-libera-tambem-tem-de-caber",
+        "title": "Se só uma das respostas cabe na sua planilha, o portão não julga — ele decide sozinho",
+        "rule": (
+            "Ao pedir julgamento com duas saídas, aceite AS DUAS em forma sustentada: quem afirma "
+            "dano nomeia o artefato que sairia errado; quem NEGA o dano diz o que construiria de "
+            "certo e cita o trecho. Manter o ônus do lado de quem libera é legítimo; descartar em "
+            "SILÊNCIO a resposta que liberaria é impasse, não rigor. E conte cada descarte pelo "
+            "motivo: 'não respondeu' e 'disse que não há dano' são opostos."
+        ),
+        "evidence": (
+            "Bancada GAP-118 (run 185d738a, 2026-09-08): o promotor era instruído a deixar o "
+            "artefato VAZIO quando construiria a coisa certa mesmo com o defeito, e o código "
+            "descartava esse candidato sem levá-lo ao juiz — 5 de 8 candidatos elegíveis saíram da "
+            "rodada sem julgamento, todos sob o rótulo agregado 'sem acusação concreta'. A única "
+            "voz capaz de absolver era exatamente a que nunca chegava a ser ouvida, e defeito de "
+            "redação seguia impedindo a entrega em todas as rodadas seguintes."
         ),
     },
 ]
