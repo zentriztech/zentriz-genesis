@@ -20,11 +20,11 @@ import json
 from pathlib import Path
 
 
-def test_catalogo_cobre_os_oito_arquetipos_de_veredicto():
+def test_catalogo_cobre_os_nove_arquetipos_de_veredicto():
     from orchestrator.verdict_seed import VERDICT_ARCHETYPES
     slugs = [a["slug"] for a in VERDICT_ARCHETYPES]
     assert len(slugs) == len(set(slugs)), "slug é identidade — não pode repetir"
-    assert len(slugs) == 8
+    assert len(slugs) == 9
     for a in VERDICT_ARCHETYPES:
         assert a["title"].strip() and a["rule"].strip() and a["evidence"].strip()
         assert len(a["rule"]) <= 400, "regra é uma linha de checklist, não um ensaio"

@@ -9,7 +9,7 @@ A mesma decisão foi tomada no Connect: `ReviewVerdictRecord` nasceu como contra
 vez de esticar `ReflectionRecord`, porque auto-avaliação (ganho ZERO) e revisão de outra
 família (+12 p.p.) não podem compartilhar o mesmo registro (ADR-014).
 
-A frase única que resume as oito regras:
+A frase única que resume as nove regras:
 
     "não encontrei" e "não sei procurar" NÃO são a mesma resposta.
 
@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 STACK_KEY = "generic"  # o defeito é de AFIRMAÇÃO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -65,11 +65,13 @@ NO_OPINION_REASONS = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — oito arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
-# O 8º (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial cross-family
-# de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o GAP-39/49
-# aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a âncora.
-# Ou seja: o material justificava com um defeito que não ensinava a evitar.
+# Catálogo — nove arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
+# O da ÂNCORA (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial
+# cross-family de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o
+# GAP-39/49 aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a
+# âncora. Ou seja: o material justificava com um defeito que não ensinava a evitar.
+# O ÚLTIMO (`verd.a2.declarar-corrigido-nao-e-ter-corrigido`) é o achado A2 da Bancada: declarar
+# "corrigido" com edição aplicada e o defeito continuar na MESMA âncora — 5 de 10 casos medidos.
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERDICT_ARCHETYPES: list[dict[str, Any]] = [
@@ -187,6 +189,23 @@ VERDICT_ARCHETYPES: list[dict[str, Any]] = [
         "evidence": (
             "Literatura cs.SE (arXiv:2609.04167): 34% dos patches que PASSAM nos testes violam "
             "constraints declaradas. Na Bancada isso virou gate próprio (migration 107)."
+        ),
+    },
+    {
+        "slug": "verd.a2.declarar-corrigido-nao-e-ter-corrigido",
+        "title": "Editar o trecho não é fechar o defeito — e o sintoma não é a causa",
+        "rule": (
+            "Ao declarar CORRIGIDO, diga qual CONTRADIÇÃO deixou de existir, não qual trecho você "
+            "reescreveu: apagar a frase que nomeia o conflito só troca a redação com que ele volta. "
+            "Se a causa mora em artefato que você não pode editar, o desfecho é 'não é deste "
+            "arquivo', com o artefato apontado. Se o defeito voltou na MESMA âncora, a via anterior "
+            "falhou: escolha outra ou conteste com argumento."
+        ),
+        "evidence": (
+            "Bancada 2026-09-08 (run 10b1a4e1, passe 1): dos 10 GAPs declarados 'corrigido' — "
+            "todos com edição ancorada de fato aplicada — 5 continuavam na MESMA âncora na "
+            "validação seguinte, com o título reescrito pelo juiz (semelhança 0,03..0,30). Como o "
+            "título mudava, cada rodada parecia progresso e a contagem não caía."
         ),
     },
 ]
