@@ -108,9 +108,15 @@ def test_mapa_cortado_derruba_a_cobertura_de_mapa_e_diz_quantos_faltam():
     text, mapped, cut = build_outline(files, cap=300)
     assert cut is True
     assert len(mapped) < 12
-    assert "MAPA CORTADO" in text
+    # GAP-54b (2026-09-08): o aviso mudou de "MAPA CORTADO" para dizer o que de fato foi cortado —
+    # o ÍNDICE DE SEÇÕES —, porque os nomes passaram a ter piso e não saem mais. A propriedade
+    # testada é a mesma: o corte é DECLARADO e a cobertura de mapa CAI.
+    assert "ÍNDICE DE SEÇÕES NÃO COUBE" in text
+    for sf in files:
+        assert sf.label in text, "o piso de nomeação vale mesmo com o mapa em 300 chars"
     d = build_dossier(files, budget=5_000, outline_cap=300)
     assert d.map_coverage < 1.0
+    assert d.name_coverage == 1.0
 
 
 def test_mapa_corta_por_arquivo_inteiro_nunca_meio_indice():

@@ -167,6 +167,34 @@ def test_cobertura_do_dev_cai_porque_o_orcamento_morde(ctx):
     assert len(row["omitted"]) + row["files_verbatim"] + len(row["partial"]) == row["files_total"] == 12
 
 
+def test_nenhum_arquivo_desaparece_calado_nem_no_orcamento_do_dev(ctx):
+    """🔴 Medido ao provar o GAP-54b AO VIVO em prod (2026-09-08), antes deste conserto.
+
+    Com o orçamento do Dev/QA (40.000 → mapa de 13.333) a árvore do NVX indexava **7 de 12**
+    arquivos e os outros 5 saíam do dossiê **sem sequer serem nomeados**: `map_coverage` 0,5833. Um
+    arquivo que não é nomeado é indistinguível de um arquivo que NÃO EXISTE — o agente não tem como
+    dizer "isto está na spec e eu não recebi", e a omissão volta a ser silenciosa. `map_coverage`
+    pode cair (o índice de seções é caro); `name_coverage` NÃO pode.
+    """
+    text = ctx.spec_dossier_for("DEV")
+    row = [r for r in ctx.spec_dossier_coverage if r["role"] == "DEV"][0]
+    assert row["name_coverage"] == 1.0, "todo arquivo da spec tem de vir NOMEADO no dossiê do Dev"
+    for name, _size in NVX_TREE:
+        assert name in text, f"{name} desapareceu calado do dossiê do Dev"
+    if row["map_coverage"] < 1.0:
+        assert "ÍNDICE DE SEÇÕES NÃO COUBE" in text, "índice cortado tem de ser DECLARADO"
+        assert "não conclua que não existe" in text
+
+
+def test_piso_de_nomeacao_vale_no_orcamento_minimo(monkeypatch, ctx):
+    """No pior orçamento aceitável, o mapa degrada para lista de nomes — nunca perde nomes."""
+    monkeypatch.setenv("SPEC_DOSSIER_DEV_CHARS", str(spec_focus.MIN_USEFUL_BUDGET))
+    text = ctx.spec_dossier_for("DEV")
+    assert text
+    for name, _size in NVX_TREE:
+        assert name in text, f"{name} desapareceu no orçamento mínimo"
+
+
 def test_uma_linha_por_papel_mesmo_chamado_muitas_vezes(ctx):
     for i in range(5):
         ctx.spec_dossier_for("DEV", [f"task {i}"])
