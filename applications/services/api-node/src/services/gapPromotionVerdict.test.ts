@@ -699,4 +699,45 @@ describe("promotabilityReport — o que o humano lê antes de promover", () => {
     });
     expect(rep).toMatchObject({ impeditive: 0, promotable: true });
   });
+
+  /**
+   * 🔴 F2 — o Policy Gate entra por AQUI, e só numa direção.
+   *
+   * `arXiv:2609.04167` mede que 34% dos patches que passam nos testes violam constraints declaradas na
+   * revisão: zero GAP importante não é o mesmo que "cumpriu o que foi pedido". Mas o gate não pode
+   * virar rota de anistia — daí os dois testes espelhados abaixo.
+   */
+  it("constraint declarada violada BLOQUEIA uma spec que os GAPs já liberavam (buraco dos 34%)", () => {
+    const rep = promotabilityReport({
+      findings: [], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+      policyViolations: 2, policyNote: "5/6 constraint(s) julgada(s) na spec, 3 cumprida(s)",
+    });
+    expect(rep.promotable).toBe(false);
+    expect(rep.policyViolations).toBe(2);
+    expect(rep.blockers[0]).toMatch(/2 constraint\(s\) declarada\(s\) violada\(s\) no Policy Gate/);
+    // a nota do gate vai junto: dizer "2 violadas" sem a cobertura seria número sem premissa.
+    expect(rep.blockers[0]).toMatch(/5\/6 constraint/);
+  });
+
+  it("🔴 o gate NUNCA libera: com GAP impeditivo de pé, zero violação de policy não promove", () => {
+    const rep = promotabilityReport({
+      findings: [F()], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+      policyViolations: 0,
+    });
+    expect(rep.promotable).toBe(false);
+    expect(rep.blockers[0]).toMatch(/GAP\(s\) importante\(s\) seguem impeditivos/);
+    expect(rep.blockers.some((b) => /Policy Gate/.test(b))).toBe(false);
+  });
+
+  it("gate ausente (desligado ou incapaz de rodar) devolve o relatório EXATAMENTE de antes de F2", () => {
+    const base = { findings: [], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG };
+    expect(promotabilityReport(base)).toEqual({ ...promotabilityReport({ ...base, policyViolations: 0 }) });
+    expect(promotabilityReport(base)).toMatchObject({ promotable: true, policyViolations: 0 });
+  });
+
+  it("valor negativo ou fracionário não vira bloqueio fantasma nem libera nada", () => {
+    const base = { findings: [], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG };
+    expect(promotabilityReport({ ...base, policyViolations: -3 })).toMatchObject({ promotable: true, policyViolations: 0 });
+    expect(promotabilityReport({ ...base, policyViolations: 1.7 })).toMatchObject({ promotable: false, policyViolations: 1 });
+  });
 });
