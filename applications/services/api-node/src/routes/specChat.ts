@@ -44,6 +44,7 @@ import type { ValidationFinding } from "../services/specValidation.js";
 import { productScopeEnabled, buildProductMap, selectSiblingBodies } from "../services/productContext.js";
 import { applySpecEditResponse, looksLikeEdits } from "../services/specFileEdits.js";
 import { MANIFEST_PATH } from "../services/specManifest.js";
+import { DIAGRAMS_PATH, MIN_DIAGRAMS } from "../services/specDiagrams.js";
 // GAP-68: `import type` de propósito — `gapContinuity` importa `httpPost` de `routes/specs.js`, e um
 // import de valor fecharia um ciclo entre os dois arquivos de rota no carregamento do módulo.
 import type { PersistentGapRef } from "../services/gapContinuity.js";
@@ -1685,6 +1686,117 @@ export async function dispatchManifestJob(opts: {
     { ...buildManifestRequest({ ...opts, scopeProjectId: opts.projectId }), ...opts.llm },
     opts.agentsUrl,
     `Manifesto \`${MANIFEST_PATH}\` proposto — confira antes de aplicar.`,
+    // Arquivo NOVO: não existe base para ancorar edições; a resposta é o arquivo inteiro.
+    null,
+  );
+  return { ok: true };
+}
+
+// ── Diagramas da arquitetura (feature do Jean, 2026-09-08) ───────────────────
+//
+// POR QUE ESTE CAMINHO EXISTE: a spec fechada descreve a arquitetura em prosa normativa, e o usuário
+// pediu para VER. O portal já renderiza ```mermaid como SVG na aba Spec, então um arquivo de spec com
+// cercas mermaid é o entregável — sem nenhum trabalho de UI. Mesma mecânica de CRIAÇÃO do manifesto
+// (A5.3), porque é o único caminho da Bancada que sabe escrever arquivo que ainda não existe.
+//
+// O conteúdo é decisão do AGENTE (Lei: 100% LLM): quais recortes o produto precisa, o que entra em
+// cada desenho e que tipo de diagrama serve. O código entrega os FATOS (a spec inteira, declarando o
+// que não caberá) e veta só o que não desenha (`services/specDiagrams.ts`).
+const DIAGRAMS_SYSTEM = [
+  "Você é o arquiteto responsável por DESENHAR a arquitetura que a especificação deste produto já decidiu.",
+  `Escreva um documento Markdown com NO MÍNIMO ${MIN_DIAGRAMS} diagramas Mermaid dessa arquitetura.`,
+  "O objetivo é o leitor ENTENDER na prática como ficam as aplicações e a infraestrutura — não é um índice",
+  "nem um resumo em prosa: o valor está nos desenhos.",
+  "FORMATO (obrigatório):",
+  "1) `# <título>` na primeira linha, seguido de UM parágrafo dizendo o que o documento mostra.",
+  "2) Para CADA diagrama: um cabeçalho `## <nome do recorte>`, o diagrama numa cerca ```mermaid e, depois",
+  "   da cerca, um parágrafo curto explicando o que ele mostra e o que fica DE FORA dele.",
+  "REGRAS (invioláveis):",
+  "a) Desenhe apenas o que a especificação determina. Se a spec não decide um componente, ele NÃO entra no",
+  "   desenho — inventar caixinha aqui é decidir arquitetura por fora da spec.",
+  `b) Os ${MIN_DIAGRAMS}+ diagramas são RECORTES DIFERENTES do mesmo sistema, não a mesma figura repetida.`,
+  "   Recortes que quase todo produto precisa: visão global (atores, aplicações e dependências), APIs e",
+  "   fluxos entre serviços, e infraestrutura/implantação. Se o produto pede outro recorte (sequência de",
+  "   autenticação, máquina de estados de um pedido, modelo de dados, topologia multi-tenant), use-o —",
+  "   a escolha é sua, os exemplos acima não são gabarito.",
+  "c) Cada bloco começa com o tipo de diagrama Mermaid na primeira linha (`flowchart TD`, `graph LR`,",
+  "   `sequenceDiagram`, `erDiagram`, `stateDiagram-v2`, `C4Context`, …). Sintaxe inválida não vira desenho:",
+  "   o leitor recebe código cru, e aí o documento não serve para nada.",
+  "d) Rótulo com espaço, acento, parêntese, dois-pontos, barra ou hífen vai SEMPRE entre aspas dentro dos",
+  '   colchetes — `A["API de pedidos (v2)"]`, nunca `A[API de pedidos (v2)]`. Identificadores dos nós em',
+  "   inglês, curtos e sem acento; os RÓTULOS em português.",
+  "e) Não use `<br>`, HTML, `click`, `%%{init}%%` nem imagens externas. Nada de frontmatter YAML no arquivo.",
+  "f) Nomeie no desenho os componentes com os MESMOS nomes que a spec usa — o leitor precisa achar cada",
+  "   caixa no texto normativo.",
+  "Devolva SOMENTE o conteúdo final do arquivo, começando em `# `, sem preâmbulo e sem cerca em volta do",
+  "documento (as cercas ```mermaid dos diagramas, sim).",
+].join(" ");
+
+/** Orçamento de saída dos desenhos: é um documento de figuras, não uma spec. Teto ≠ gasto. */
+const DIAGRAMS_MAX_TOKENS = 16_000;
+
+/**
+ * Pedido dos diagramas. O insumo é a spec MONTADA pelo chamador (`buildValidationInput`) — o mesmo
+ * assembler da validação, que declara no inventário o que entrou integral e o que entrou só como
+ * sumário. É a lição do GAP-54: quem desenha a arquitetura tem de RECEBER a arquitetura, e um recorte
+ * silencioso faria o agente desenhar o produto que ele conseguiu ler.
+ */
+function buildDiagramsRequest(opts: {
+  projectTitle: string;
+  archetype: Archetype | null;
+  specText: string;
+  scopeProjectId: string | null;
+}): Record<string, unknown> {
+  const userMessage = [
+    `PROJETO: ${opts.projectTitle}`,
+    ...(opts.archetype ? [`ARQUÉTIPO: ${opts.archetype.id} — ${opts.archetype.description}`] : []),
+    "",
+    "--- ESPECIFICAÇÃO (só leitura; é a arquitetura que você vai desenhar) ---",
+    opts.specText,
+    "--- FIM DA ESPECIFICAÇÃO ---",
+    "",
+    `Escreva agora o documento completo com os diagramas Mermaid da arquitetura deste produto (mínimo ${MIN_DIAGRAMS}).`,
+  ].join("\n");
+  return {
+    prompt_override: DIAGRAMS_SYSTEM,
+    user_message: userMessage,
+    max_tokens: DIAGRAMS_MAX_TOKENS,
+    ...cagBlock(opts.scopeProjectId, `diagramas de arquitetura ${opts.projectTitle}`),
+  };
+}
+
+/**
+ * Enfileira o job que ESCREVE o documento de diagramas. Idêntico em mecânica ao do manifesto: job
+ * durável `kind: "file"` com `baseSha` do vazio (a pré-condição é "o arquivo continua não existindo").
+ */
+export async function dispatchDiagramsJob(opts: {
+  jobId: string;
+  projectId: string;
+  tenantId: string | null;
+  ownerUserId: string;
+  projectTitle: string;
+  archetype: Archetype | null;
+  specText: string;
+  userMessage: string;
+  agentsUrl: string;
+  llm: Record<string, unknown>;
+}): Promise<{ ok: true }> {
+  const emptySha = sha256("");
+  _chatJobs.set(opts.jobId, {
+    id: opts.jobId, status: "pending", createdAt: Date.now(),
+    projectId: opts.projectId, ownerUserId: opts.ownerUserId,
+    sentFilePath: DIAGRAMS_PATH, sentBaseSha: emptySha,
+  });
+  await createSpecChatJob(pool, {
+    id: opts.jobId, projectId: opts.projectId, tenantId: opts.tenantId, ownerUserId: opts.ownerUserId,
+    kind: "file", filePath: DIAGRAMS_PATH, baseSha: emptySha, baseSpecSha: emptySha,
+    userMessage: opts.userMessage,
+  });
+  runFileChatJob(
+    opts.jobId,
+    { ...buildDiagramsRequest({ ...opts, scopeProjectId: opts.projectId }), ...opts.llm },
+    opts.agentsUrl,
+    `Diagramas da arquitetura (\`${DIAGRAMS_PATH}\`) propostos — confira antes de aplicar.`,
     // Arquivo NOVO: não existe base para ancorar edições; a resposta é o arquivo inteiro.
     null,
   );

@@ -161,7 +161,21 @@ let coberturaAcumulada: { unjudged: string[]; judged: number; total: number } | 
 vi.mock("./specValidation.js", () => ({
   startValidation: (...a: unknown[]) => startValidation(...(a as [])),
   unjudgedSpecFiles: async () => coberturaAcumulada,
+  // Feature dos DESENHOS: a rodada dos diagramas manda a spec INTEIRA ao arquiteto, e é daqui que ela
+  // sai (o mesmo assembler da validação). `especLegivel = false` reproduz "spec ilegível no disco",
+  // que é a guarda que faz a run encerrar sem desenhar em vez de falhar.
+  computeCurrentSpecHash: vi.fn(async () => (especLegivel
+    ? {
+      specHash: "hash-da-arvore",
+      files: tree.map((f) => ({
+        filename: f.path.includes("/") ? f.path.slice(f.path.lastIndexOf("/") + 1) : f.path,
+        rel_dir: f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "",
+        file_path: f.filePath, content: readFileSync(f.filePath, "utf-8"), contentSha256: "sha",
+      })),
+    }
+    : null)),
 }));
+let especLegivel = true;
 
 let job: { status: string; specMarkdown: string | null; error: string | null; truncated?: boolean } | null = null;
 vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
@@ -169,10 +183,12 @@ vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }))
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
 const dispatchGapFileJob = vi.fn(async () => ({ ok: true as const, gaps: 2 }) as unknown);
 const dispatchManifestJob = vi.fn(async () => ({ ok: true as const }));
+const dispatchDiagramsJob = vi.fn(async () => ({ ok: true as const }));
 vi.mock("../routes/specChat.js", () => ({
   dispatchResolveGapsJob: (...a: unknown[]) => dispatchResolveGapsJob(...(a as [])),
   dispatchGapFileJob: (...a: unknown[]) => dispatchGapFileJob(...(a as [])),
   dispatchManifestJob: (...a: unknown[]) => dispatchManifestJob(...(a as [])),
+  dispatchDiagramsJob: (...a: unknown[]) => dispatchDiagramsJob(...(a as [])),
 }));
 
 vi.mock("./tenantLlmConfig.js", () => ({
@@ -212,6 +228,8 @@ const db = {
       return { rows: primary ? [{ file_path: primary.filePath }] : [], rowCount: primary ? 1 : 0 };
     }
     if (s.startsWith("SELECT status FROM projects")) return { rows: [{ status: projectStatus }], rowCount: 1 };
+    // Título e arquétipo do projeto: quem lê são os despachos de CRIAÇÃO (manifesto e diagramas).
+    if (s.startsWith("SELECT title, extra FROM projects")) return { rows: [{ title: TITULO, extra: null }], rowCount: 1 };
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
     if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
     if (s.startsWith("SELECT status, stage_b_ran, stage_b_coverage FROM spec_validation_runs")) {
@@ -313,6 +331,7 @@ let validationStatus = "passed";
 /** Validações anteriores do projeto (para a reincidência de âncora estável do GAP-71). */
 let validacoesPassadas: FakeRow[] = [];
 
+const TITULO = "NVX LastMile";
 const INDEX = body("Índice", 2);
 const API = body("Backend API", 5);
 const WEB = body("Frontend Web", 4);
@@ -1193,5 +1212,212 @@ describe("GAP-22 — consolidar é ENCOLHER: crescimento não é correção", ()
     const crescido = `${API}\n## 6. Fonte única\n${"texto normativo. ".repeat(300)}\n`;
     await ctoReturns(r.id, crescido);
     expect(onDisk("backend/01-api.md")).toBe(crescido);
+  });
+});
+
+// ── 8. feature dos DESENHOS: a arquitetura fechada vira diagramas Mermaid ─────
+
+/**
+ * Feature pedida pelo Jean em 2026-09-08, verbatim: *"depois que fechar o modelo de arquitetura
+ * devemos criar um arquivo md com no minimo 3 desenhos mermaid de arquiteturas, ex: modelo global,
+ * APIs, infra; o objetivo é que usuario tenha desenhos que facilite o entendimento de como será na
+ * pratica suas aplicacoes e infra."*
+ *
+ * O que estes casos travam:
+ *   • QUANDO desenha: só nos dois instantes em que a arquitetura FECHA (zero GAP importante) — antes
+ *     disso o desenho retrataria uma arquitetura que ainda mudava;
+ *   • COM O QUE desenha: a spec INTEIRA montada pelo assembler da validação (é a lição do GAP-54:
+ *     quem desenha a arquitetura tem de RECEBER a arquitetura);
+ *   • o desfecho NUNCA piora o veredicto de uma spec que convergiu — veto, truncamento ou CTO calado
+ *     terminam a run em `succeeded` com o motivo declarado, e não somam `file_failures` (que é o que
+ *     transformaria uma spec fechada em `stalled` por causa de uma figura);
+ *   • UMA tentativa por run; arquivo que já existe não é recriado (GAP-5).
+ */
+describe("feature dos DESENHOS — arquitetura fechada vira diagramas Mermaid", () => {
+  const DIAGRAMAS = "arquitetura-diagramas.md";
+  /** Três recortes diferentes, três tipos diferentes: o que o veto de `specDiagrams` aprova. */
+  const DESENHOS = [
+    "# Arquitetura do NVX LastMile — desenhos", "",
+    "## Modelo global", "",
+    "```mermaid", "flowchart LR", '  APP["App"] --> API["API"]', "```", "",
+    "## APIs", "",
+    "```mermaid", "sequenceDiagram", "  participant App", "  App->>API: POST /entregas", "```", "",
+    "## Infraestrutura", "",
+    "```mermaid", "graph TD", '  ALB["ALB"] --> ECS["ECS"]', "```", "",
+  ].join("\n");
+  /** Dois desenhos: cumpre a forma e não cumpre o mínimo que o Jean pediu. */
+  const SO_DOIS = DESENHOS.split("## Infraestrutura")[0];
+
+  function diagramsCall(): { specText: string; projectTitle: string; userMessage: string } {
+    return (dispatchDiagramsJob.mock.calls[0] as unknown as unknown[])[0] as never;
+  }
+  function desenhosNoDisco(): string {
+    return readFileSync(join(root, PROJECT, DIAGRAMAS), "utf-8");
+  }
+
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;             // o laço cria o arquivo DE VERDADE
+    dispatchDiagramsJob.mockClear().mockResolvedValue({ ok: true as const });
+    especLegivel = true;
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  /** Fecha a arquitetura pelo tick da FILA: um arquivo revisado e nenhum GAP importante sobrando. */
+  async function fechaPelaFila(): Promise<{ id: string }> {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);                          // 1º arquivo da fila
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz por escopo.\n`);
+    findings = [];                                              // o CTO fechou o que havia
+    await advanceAutonomyRun(db, r.id);                         // tick da fila: 0 GAP importante
+    return r;
+  }
+  /** Fecha pela VALIDAÇÃO — o caminho normal de chegada em prod (a fila esvazia e o passe valida). */
+  async function fechaPelaValidacao(): Promise<{ id: string }> {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz.\n`);
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${WEB}\n## 5. Aceite\nCritérios objetivos.\n`);
+    await advanceAutonomyRun(db, r.id);                         // fila vazia → valida o passe
+    expect(run!.status).toBe("validating");
+    findings = [];                                              // a validação não achou GAP importante
+    latestRunId = "run-1";
+    await advanceAutonomyRun(db, r.id);                         // colhe a validação
+    return r;
+  }
+
+  it("a arquitetura fechou → pede os desenhos com a spec INTEIRA como insumo", async () => {
+    const r = await fechaPelaFila();
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("cto_running");
+    expect(run!.current_file).toBe(DIAGRAMAS);
+    const arg = diagramsCall();
+    expect(arg.projectTitle).toBe(TITULO);
+    // GAP-54: o inventário declara os 3 arquivos e o conteúdo vai integral — não um recorte silencioso.
+    expect(arg.specText).toContain("[INVENTÁRIO DA SPEC — 3 arquivo(s)");
+    expect(arg.specText).toContain("backend/01-api.md");
+    expect(arg.specText).toContain("frontend/01-web.md");
+    expect(arg.specText).toContain("Frontend Web conteúdo 1.");
+    expect(arg.userMessage).toContain(DIAGRAMAS);
+    const round = (run!.rounds as Record<string, unknown>[]).at(-1)!;
+    expect(round.diagramsCreation).toBe(true);
+    expect(round.filePath).toBe(DIAGRAMAS);
+    expect(String(round.note)).toContain("Arquitetura fechada");
+    expect(r.id).toBeTruthy();
+  });
+
+  it("o caminho NORMAL (fecha na validação do passe) também desenha", async () => {
+    await fechaPelaValidacao();
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("cto_running");
+    expect(String(JSON.stringify(run!.rounds))).toContain("\"diagramsCreation\":true");
+  });
+
+  it("aprovado pelo veto → arquivo CRIADO, registrado na árvore e a run encerra em SUCESSO", async () => {
+    const r = await fechaPelaFila();
+    await ctoReturns(r.id, DESENHOS);
+    expect(desenhosNoDisco()).toContain("```mermaid");
+    expect(desenhosNoDisco().match(/```mermaid/g)).toHaveLength(3);
+    expect(sqlLog.some((q) => q.sql.startsWith("INSERT INTO project_spec_files")
+      && (q.params as unknown[])[1] === DIAGRAMAS)).toBe(true);
+    expect(run!.status).toBe("succeeded");
+    expect(String(run!.last_error)).toContain("arquitetura foi DESENHADA");
+    expect(String(run!.last_error)).toContain("flowchart, sequenceDiagram, graph");
+    const round = (run!.rounds as Record<string, unknown>[]).at(-1)!;
+    expect(round.applied).toBe(true);
+    expect(String(round.note)).toContain("CRIADO");
+    // os arquivos da spec ficam byte a byte intactos: a rodada dos desenhos não edita spec.
+    expect(onDisk("frontend/01-web.md")).toBe(WEB);
+    expect(onDisk("00-indice.md")).toBe(INDEX);
+  });
+
+  it("🔴 veto (2 desenhos) → NÃO cria o arquivo, e a spec convergida continua SUCESSO", async () => {
+    const r = await fechaPelaFila();
+    await ctoReturns(r.id, SO_DOIS);
+    expect(() => desenhosNoDisco()).toThrow();                  // nada escrito
+    expect(run!.status).toBe("succeeded");                      // o veredicto da spec não piora
+    expect(run!.file_failures).toBe(0);                         // e não é "falha de arquivo"
+    expect(String(run!.last_error)).toContain("TOO_FEW");
+    expect(String(run!.last_error)).toContain("A spec no disco está íntegra");
+    expect(String(JSON.stringify(run!.rounds))).toContain("TOO_FEW");
+  });
+
+  it("🔴 documento truncado no teto de saída → recusa declarada, run em SUCESSO", async () => {
+    const r = await fechaPelaFila();
+    await ctoReturns(r.id, `${DESENHOS}\n## Quarto`, { truncated: true });
+    expect(() => desenhosNoDisco()).toThrow();
+    expect(run!.status).toBe("succeeded");
+    expect(String(run!.last_error)).toContain("truncado");
+  });
+
+  it("🔴 o arquiteto não entregou (erro do job) → SUCESSO com o motivo, nunca `stalled`", async () => {
+    const r = await fechaPelaFila();
+    await ctoReturns(r.id, null, { status: "error", error: "429 do provedor" });
+    expect(run!.status).toBe("succeeded");                      // não é falha de arquivo
+    expect(run!.file_failures).toBe(0);
+    expect(String(run!.last_error)).toContain("429 do provedor");
+    expect(String(run!.last_error)).toContain("NÃO foram criados");
+  });
+
+  it("o arquivo de desenhos que JÁ existe não é recriado (GAP-5) — zero regressão", async () => {
+    makeTree([
+      { path: "00-indice.md", content: INDEX, isPrimary: true },
+      { path: "backend/01-api.md", content: API },
+      { path: DIAGRAMAS, content: DESENHOS },
+    ]);
+    process.env.UPLOAD_DIR = root;
+    findings = [gap("backend/01-api.md", "blocker", "sem authz")];
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz.\n`);
+    findings = [];
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("succeeded");
+    expect(String(run!.last_error)).toContain("Nenhum GAP vermelho ou amarelo ATIVO restante");
+    expect(r.id).toBeTruthy();
+  });
+
+  it("UMA tentativa por run: se o PEDIDO falhar, o próximo tick encerra sem pedir de novo", async () => {
+    dispatchDiagramsJob.mockRejectedValueOnce(new Error("agents fora do ar"));
+    const r = await fechaPelaFila();
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+    expect(run!.status).toBe("pending");                        // voltou de onde saiu
+    expect(String(JSON.stringify(run!.rounds))).toContain("não pedi os diagramas");
+    await advanceAutonomyRun(db, r.id);                         // 2º tick com 0 GAP importante
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);       // NÃO tenta de novo
+    expect(run!.status).toBe("succeeded");
+  });
+
+  it("spec ilegível no disco → encerra como encerrava antes, sem desenhar", async () => {
+    especLegivel = false;
+    await fechaPelaFila();
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("succeeded");
+  });
+
+  it("sem `API_AGENTS_URL` o laço não desenha (e não trava a run convergida)", async () => {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz.\n`);
+    findings = [];
+    delete process.env.API_AGENTS_URL;
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+    expect(run!.status).toBe("succeeded");
+    expect(r.id).toBeTruthy();
+  });
+
+  it("modo `whole` (spec de 1 arquivo) nunca desenha — a feature é do modo por arquivo", async () => {
+    makeTree([{ path: "PRODUCT_SPEC.md", content: API, isPrimary: true }]);
+    process.env.UPLOAD_DIR = root;
+    findings = [gap("PRODUCT_SPEC.md", "blocker", "sem authz")];
+    const r = await start();
+    expect(r.mode).toBe("whole");
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz.\n`);
+    findings = [];
+    await advanceAutonomyRun(db, r.id);
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled();
   });
 });

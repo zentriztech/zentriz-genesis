@@ -76,6 +76,7 @@ import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 // alcança `routes/specs.js` → `db/client.js`, que o modo `whole` não precisa pagar).
 import type { GapFileBucket, GapGroups } from "./specGapScope.js";
 import { MANIFEST_PATH, assessManifest, expectedArchetype } from "./specManifest.js";
+import { DIAGRAMS_PATH, MIN_DIAGRAMS, assessDiagrams } from "./specDiagrams.js";
 
 type Db = Pick<Pool, "query" | "connect">;
 
@@ -433,6 +434,13 @@ export interface AutonomyRoundLog {
    * recusá-la com "o manifesto passou a existir" (medido no run `75b3cf5d`, passe 2, rodada 11).
    */
   manifestCreation?: boolean;
+  /**
+   * Feature dos DESENHOS (2026-09-08): esta rodada é a CRIAÇÃO do documento de diagramas Mermaid, que
+   * acontece UMA vez por projeto, quando a arquitetura fecha (zero GAP importante). Mesmo motivo do
+   * `manifestCreation` para não discriminar pelo caminho: depois de criado, o arquivo entra na árvore
+   * da spec e volta à fila como arquivo normal — aí a rodada dele é EDIÇÃO, com todas as guardas.
+   */
+  diagramsCreation?: boolean;
   /**
    * 🔴 GAP-43: o passe terminou e a validação que devia medi-lo NÃO mediu (`error`/`superseded`). Isso
    * é diferente de "o passe não progrediu": não se sabe se progrediu. O fato fica no log porque é o que
@@ -1959,6 +1967,10 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
   const gaps = await currentGaps(db, run.projectId);
   if (gaps.important === 0) {
+    // Feature dos DESENHOS (Jean, 2026-09-08): zero GAP importante é o instante em que "o modelo de
+    // arquitetura fechou". Se o documento de diagramas ainda não existe, o laço paga UMA rodada para
+    // criá-lo antes de encerrar — desenhar antes seria desenhar uma arquitetura que ainda mudava.
+    if (await startDiagramsRound(db, run, gaps, "pending")) return true;
     await finishRun(db, run, "succeeded",
       `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`, { gaps });
     return true;
@@ -2095,7 +2107,16 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       return (await focusRoundsByFile(db, run.projectId)).get(target.toLowerCase()) ?? 0;
     } catch { return 0; }
   })();
-  const focus = planFocus({ findings: fileFindings, refs: persistentGaps, fileRounds });
+  // 🔴 GAP-111/112 — o histórico por âncora serve a DOIS propósitos e é lido uma vez só: escolher o
+  // alvo sem tampão (quem tem menos rodadas dedicadas vai primeiro) e mostrar ao agente a cadeia crua
+  // do defeito. Mesmo `catch` do `fileRounds`, pelo mesmo motivo: nada disto pode derrubar a rodada.
+  const anchorHistory = await (async () => {
+    try {
+      const { anchorHistories } = await import("./gapPromotionVerdict.js");
+      return await anchorHistories(db, run.projectId, target);
+    } catch { return undefined; }
+  })();
+  const focus = planFocus({ findings: fileFindings, refs: persistentGaps, fileRounds, history: anchorHistory });
   const dispatched = focus.level === 0 ? fileFindings : (focus.findings as EnrichedFinding[]);
   // As refs de reincidência acompanham a lista restrita: mandar o fato de um GAP que NÃO está na lista
   // faria o agente trabalhar fora do foco, que é exatamente o que esta rodada existe para evitar.
@@ -2223,22 +2244,29 @@ async function startManifestRound(
 }
 
 /**
- * A5.3 — escreve o manifesto APROVADO no disco e registra o arquivo novo na árvore.
+ * A5.3 — escreve no disco um arquivo de spec que NÃO existia e o registra na árvore.
  *
  * Ordem: disco → linha em `project_spec_files` → `spec_dirty_at`. Não há snapshot porque não há
  * conteúdo anterior a preservar; a pré-condição (`ON CONFLICT DO NOTHING` + checagem do chamador) é
- * "não existia". `is_primary` fica FALSO: o primário atual continua sendo o primário — o manifesto é
- * a porta de entrada, e mudar o primário no meio de um laço trocaria o alvo de todas as outras ações.
+ * "não existia". `is_primary` fica FALSO: o primário atual continua sendo o primário — mudar o
+ * primário no meio de um laço trocaria o alvo de todas as outras ações.
+ *
+ * Serve o manifesto (A5.3) e o documento de diagramas (2026-09-08): a criação é a MESMA operação, e
+ * duplicá-la deixaria dois lugares para esquecer o `spec_dirty_at` (que é o que faz a spec ser
+ * revalidada) ou o `content_sha256` (que é o que o `computeCurrentSpecHash` compara).
  */
-async function createManifestFile(db: Db, projectId: string, content: string): Promise<string> {
+async function createNewSpecFile(db: Db, projectId: string, relPath: string, content: string): Promise<string> {
   const uploadDir = (process.env.UPLOAD_DIR ?? "/shared/uploads").trim();
-  const physical = path.resolve(uploadDir, projectId, MANIFEST_PATH);
+  const physical = path.resolve(uploadDir, projectId, relPath);
+  const i = relPath.lastIndexOf("/");
+  const relDir = i >= 0 ? relPath.slice(0, i) : "";
+  const filename = i >= 0 ? relPath.slice(i + 1) : relPath;
   await mkdir(path.dirname(physical), { recursive: true });
   await writeFile(physical, content, "utf-8");
   await db.query(
     `INSERT INTO project_spec_files (project_id, filename, file_path, mime_type, rel_dir, is_primary, content_sha256)
-     VALUES ($1, $2, $3, 'text/markdown', '', false, $4) ON CONFLICT DO NOTHING`,
-    [projectId, MANIFEST_PATH, physical, sha256Hex(Buffer.from(content, "utf-8"))],
+     VALUES ($1, $2, $3, 'text/markdown', $5, false, $4) ON CONFLICT DO NOTHING`,
+    [projectId, filename, physical, sha256Hex(Buffer.from(content, "utf-8")), relDir],
   );
   await db.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [projectId]);
   return physical;
@@ -2276,7 +2304,7 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
       { failure: true, fromStatus: "applying" });
   }
   try {
-    await createManifestFile(db, run.projectId, verdict.content);
+    await createNewSpecFile(db, run.projectId, MANIFEST_PATH, verdict.content);
   } catch (e) {
     await patchLastRound(db, run, { applied: false, filePath: MANIFEST_PATH, note: `criação abortada: ${msg(e)}` });
     await finishRun(db, run, "stalled",
@@ -2298,6 +2326,153 @@ async function applyManifestRound(db: Db, run: AutonomyRun, revised: string, tru
   await postChatNote(db, run,
     `🤖 **Arquivo ${run.round} do passe ${run.passes + 1}** — \`${MANIFEST_PATH}\`: manifesto do projeto **criado** (${verdict.content.length} chars, arquétipo \`${verdict.archetypeId}\`). Era o GAP que nenhuma ação da Bancada sabia resolver.`);
   return true;
+}
+
+/**
+ * Feature dos DESENHOS (Jean, 2026-09-08) — a rodada que CRIA o documento de diagramas Mermaid.
+ *
+ * > *"depois que fechar o modelo de arquitetura devemos criar um arquivo md com no minimo 3 desenhos
+ * > mermaid de arquiteturas, ex: modelo global, APIs, infra; o objetivo é que usuario tenha desenhos
+ * > que facilite o entendimento de como será na pratica suas aplicacoes e infra."*
+ *
+ * QUANDO: nos dois pontos em que a arquitetura FECHA — zero GAP importante ativo, com a cobertura
+ * completa quando ela é medível. Antes disso o desenho retrataria uma arquitetura que ainda estava
+ * mudando, e cada rodada seguinte o invalidaria.
+ *
+ * DEVOLVE `false` quando não há o que fazer (já existe, já foi tentado nesta run, modo `whole`, sem
+ * agentes, spec ilegível) — e aí o chamador ENCERRA a run como encerraria antes: um desenho que não
+ * pôde ser feito não é motivo para mudar o veredicto de uma spec que convergiu.
+ *
+ * UMA tentativa por run, de propósito: `run.rounds` é a memória durável disso. Se o veto recusar o
+ * documento, a run termina com o motivo declarado e a próxima convergência tenta de novo — insistir
+ * aqui gastaria LLM num laço cujo trabalho principal já acabou.
+ */
+async function startDiagramsRound(
+  db: Db, run: AutonomyRun, gaps: GapTally, fromStatus: "pending" | "validating",
+): Promise<boolean> {
+  // Modo `whole` é spec de UM arquivo só (comportamento legado da 090): criar um segundo arquivo ali
+  // trocaria o alvo de todas as outras ações da run. A feature vive no modo por arquivo, que é o modo
+  // da Bancada em produção.
+  if (run.mode !== "per_file") return false;
+  if (run.rounds.some((r) => r.diagramsCreation === true)) return false;
+  if (run.filesDone.includes(DIAGRAMS_PATH)) return false;
+  const already = await readSpecFileAt(db, run.projectId, DIAGRAMS_PATH).catch(() => null);
+  if (already) return false;
+  const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
+  if (!agentsUrl) return false;
+
+  // O insumo é a spec INTEIRA montada pelo assembler da validação: ele declara no inventário o que
+  // entrou integral e o que entrou só como sumário (GAP-54 — quem desenha a arquitetura tem de
+  // receber a arquitetura; um recorte silencioso faria o agente desenhar o que conseguiu ler).
+  // O `try` cobre o import inteiro pelo mesmo motivo do `fileRounds`: nada aqui pode derrubar uma run
+  // que já convergiu — sem insumo, não há desenho, e a run encerra como encerraria antes.
+  const insumo = await (async () => {
+    try {
+      const [{ computeCurrentSpecHash }, { buildValidationInput }] = await Promise.all([
+        import("./specValidation.js"), import("./specValidationInput.js"),
+      ]);
+      const current = await computeCurrentSpecHash(db, run.projectId);
+      if (!current || current.files.length === 0) return null;
+      const text = buildValidationInput(current.files.map((f) => ({
+        path: `${f.rel_dir ? f.rel_dir + "/" : ""}${f.filename}`, content: f.content,
+      }))).text;
+      return { text, files: current.files.length };
+    } catch (e) {
+      console.warn(`[SpecAutonomy] run=${run.id} spec indisponível para os diagramas (segue sem desenhar): ${msg(e).slice(0, 200)}`);
+      return null;
+    }
+  })();
+  if (!insumo) return false;
+
+  const row = (await db.query("SELECT title, extra FROM projects WHERE id = $1", [run.projectId])).rows[0] as
+    { title?: string; extra?: unknown } | undefined;
+  const nextRound = run.round + 1;
+  const jobId = randomUUID();
+  const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId: run.projectId, tenantId: run.tenantId }));
+  const claim = await db.query(
+    `UPDATE spec_autonomy_runs
+        SET status = 'cto_running', mode = 'per_file', round = $2, chat_job_id = $3, base_spec_sha = $4,
+            current_file = $5, gaps_current = $6, validation_run_id = NULL, updated_at = now()
+      WHERE id = $1 AND status = $8 AND round = $7`,
+    [run.id, nextRound, jobId, EMPTY_SHA, DIAGRAMS_PATH, gaps.important, run.round, fromStatus],
+  );
+  if ((claim.rowCount ?? 0) === 0) return false;
+
+  await appendRoundLog(db, run.id, {
+    round: nextRound, pass: run.passes, startedAt: new Date().toISOString(), chatJobId: jobId,
+    filePath: DIAGRAMS_PATH, diagramsCreation: true, gapsBefore: gaps.important, specChars: 0,
+    note: `Arquitetura fechada (0 GAP importante) — pedindo ao arquiteto os diagramas Mermaid em \`${DIAGRAMS_PATH}\` (${insumo.files} arquivo(s) da spec como insumo).`,
+  });
+
+  const { dispatchDiagramsJob } = await import("../routes/specChat.js");
+  try {
+    await dispatchDiagramsJob({
+      jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
+      projectTitle: (row?.title ?? "").trim() || "projeto sem título",
+      archetype: expectedArchetype(row?.extra ?? null),
+      specText: insumo.text, agentsUrl, llm,
+      userMessage: `🤖 Modo autônomo — a arquitetura fechou: desenhar a arquitetura em \`${DIAGRAMS_PATH}\` (mínimo ${MIN_DIAGRAMS} diagramas Mermaid).`,
+    });
+    console.info(`[SpecAutonomy] run=${run.id} arquitetura fechada → diagramas (${DIAGRAMS_PATH}, CRIAÇÃO) job=${jobId}`);
+    return true;
+  } catch (e) {
+    // Falhar o PEDIDO não pode falhar a run: ela convergiu. Volta ao estado de onde saiu, com o
+    // motivo no log, e o chamador do próximo tick encerra normalmente (a guarda de `run.rounds`
+    // impede uma segunda tentativa).
+    const fresh = (await getAutonomyRun(db, run.id)) ?? run;
+    await patchLastRound(db, fresh, {
+      applied: false, filePath: DIAGRAMS_PATH,
+      note: `não pedi os diagramas: ${msg(e).slice(0, 300)}`,
+    });
+    await db.query(
+      `UPDATE spec_autonomy_runs SET status = $2, chat_job_id = NULL, current_file = NULL, updated_at = now()
+        WHERE id = $1 AND status = 'cto_running'`,
+      [run.id, fromStatus],
+    );
+    return true;
+  }
+}
+
+/**
+ * applying (diagramas) → CRIA o documento se o veto aprovar, e ENCERRA a run.
+ *
+ * A run que chega aqui já convergiu (foi por isso que os diagramas foram pedidos), então nenhum
+ * desfecho desta rodada pode piorar o veredicto: aprovado ou recusado, a run termina em `succeeded` e
+ * o texto diz o que aconteceu com o desenho. Contar isto como "falha de arquivo" (que é o que
+ * `skipFileAndContinue` faria) transformaria uma spec convergida em `stalled` por causa de uma figura.
+ */
+async function applyDiagramsRound(db: Db, run: AutonomyRun, revised: string, truncated: boolean): Promise<boolean> {
+  const gaps = await currentGaps(db, run.projectId).catch(() => null);
+  const encerra = async (note: string): Promise<boolean> => {
+    await finishRun(db, run, "succeeded", note, { gaps });
+    return true;
+  };
+  const recusa = async (motivo: string): Promise<boolean> => {
+    await patchLastRound(db, run, { applied: false, filePath: DIAGRAMS_PATH, note: motivo });
+    return encerra(
+      `Spec convergida (0 GAP vermelho ou amarelo ATIVO). Os diagramas de arquitetura NÃO foram criados: ${motivo}. `
+      + "A spec no disco está íntegra — o próximo laço tenta desenhar de novo.");
+  };
+  if (truncated) return recusa("o documento voltou truncado (teto de saída) e desenho pela metade não desenha");
+  const editable = await specEditable(db, run.projectId);
+  if (!editable.ok) return recusa(`a spec deixou de ser editável (projeto em '${editable.status}')`);
+  // Criação concorrente: alguém criou o arquivo durante a rodada ⇒ não sobrescrevo.
+  const already = await readSpecFileAt(db, run.projectId, DIAGRAMS_PATH).catch(() => null);
+  if (already) return recusa("o arquivo passou a existir durante a rodada — não sobrescrevi");
+  const verdict = assessDiagrams(revised);
+  if (!verdict.ok) return recusa(`${verdict.code} — ${verdict.message}`);
+  try {
+    await createNewSpecFile(db, run.projectId, DIAGRAMS_PATH, verdict.content);
+  } catch (e) {
+    return recusa(`falha ao escrever o arquivo: ${msg(e).slice(0, 200)}`);
+  }
+  await patchLastRound(db, run, {
+    applied: true, filePath: DIAGRAMS_PATH, specChars: verdict.content.length,
+    note: `\`${DIAGRAMS_PATH}\` CRIADO — ${verdict.diagrams} diagrama(s) Mermaid (${verdict.kinds.join(", ")}), ${verdict.content.length} chars.`,
+  });
+  return encerra(
+    `Nenhum GAP vermelho ou amarelo ATIVO restante — e a arquitetura foi DESENHADA: \`${DIAGRAMS_PATH}\` com `
+    + `${verdict.diagrams} diagrama(s) Mermaid (${verdict.kinds.join(", ")}). Abra a aba Spec para vê-los renderizados.`);
 }
 
 /**
@@ -2325,6 +2500,11 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   const lastRound = run.rounds[run.rounds.length - 1];
   if (lastRound?.manifestCreation === true && lastRound.round === run.round) {
     return applyManifestRound(db, run, revised, job?.truncated === true);
+  }
+  // Feature dos DESENHOS: mesma razão do manifesto para chavear pela RODADA e não pelo caminho — o
+  // arquivo de diagramas, depois de criado, volta à fila como arquivo normal e aí a rodada é edição.
+  if (lastRound?.diagramsCreation === true && lastRound.round === run.round) {
+    return applyDiagramsRound(db, run, revised, job?.truncated === true);
   }
   const file = await readSpecFileAt(db, run.projectId, target);
   if (!file) {
@@ -2522,10 +2702,26 @@ async function checkCto(db: Db, run: AutonomyRun): Promise<boolean> {
     return true;
   }
   const perFile = run.mode === "per_file" && !!run.currentFile;
+  // Feature dos DESENHOS: a run que pediu os diagramas JÁ convergiu — foi o zero GAP importante que
+  // disparou a rodada. Se o arquiteto não entregar, o desfecho honesto é "convergiu e não desenhou",
+  // nunca uma falha de arquivo: `skipFileAndContinue` somaria `file_failures` e poderia encerrar em
+  // `stalled` uma spec que fechou (é o mesmo motivo pelo qual `applyDiagramsRound` não usa aquele
+  // caminho). Chaveia pela RODADA registrada, como o manifesto — nunca pelo nome do arquivo (GAP-5).
+  const lastRound = run.rounds[run.rounds.length - 1];
+  const desenhando = lastRound?.diagramsCreation === true && lastRound.round === run.round;
+  const encerraSemDesenho = async (motivo: string): Promise<boolean> => {
+    await patchLastRound(db, run, { applied: false, filePath: DIAGRAMS_PATH, note: motivo });
+    await finishRun(db, run, "succeeded",
+      `Spec convergida (0 GAP vermelho ou amarelo ATIVO). Os diagramas de arquitetura NÃO foram criados: ${motivo}. `
+      + "A spec no disco está íntegra — o próximo laço tenta desenhar de novo.",
+      { gaps: await currentGaps(db, run.projectId).catch(() => null) });
+    return true;
+  };
   const job = await getSpecChatJob(db, run.chatJobId);
   if (!job) {
     // A escrita do job pode ter falhado (createSpecChatJob é best-effort). Sem linha não há o que
     // coletar: dá a rodada por perdida em vez de esperar para sempre.
+    if (desenhando) return encerraSemDesenho("o job do arquiteto não existe no banco");
     if (perFile) {
       return skipFileAndContinue(db, run, run.currentFile!, "o job do CTO deste arquivo não existe no banco",
         { failure: true, fromStatus: "cto_running" });
@@ -2550,6 +2746,7 @@ async function checkCto(db: Db, run: AutonomyRun): Promise<boolean> {
   // error | interrupted | lost — inclui o gate H4 (BLOCKED/FAIL do envelope do CTO).
   // Por arquivo: a falha é DAQUELE arquivo (429, arquivo difícil, BLOCKED do envelope) — o laço
   // segue na fila e só para com `MAX_FILE_FAILURES` seguidas.
+  if (desenhando) return encerraSemDesenho(`o arquiteto não entregou os diagramas (${job.error ?? job.status})`);
   if (perFile) {
     return skipFileAndContinue(db, run, run.currentFile!, `CTO não entregou revisão: ${job.error ?? job.status}`,
       { failure: true, fromStatus: "cto_running" });
@@ -2969,6 +3166,10 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // zero GAP importante encerra em sucesso, como antes da migração 101.
     const pendentes = cobertura?.unjudged ?? [];
     if (pendentes.length === 0) {
+      // Feature dos DESENHOS: este é o fechamento LIMPO da spec (zero GAP importante e todo arquivo
+      // julgado por inteiro) — o momento exato que o Jean descreveu. É o caminho normal de chegada,
+      // porque o laço quase sempre fecha aqui e não no tick `pending`.
+      if (await startDiagramsRound(db, run, gaps, "validating")) return true;
       await finishRun(db, run, "succeeded",
         `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}${cobertura ? ` — e o estágio adversarial julgou os ${cobertura.total} arquivo(s) da spec por INTEIRO` : ""}.`, { gaps });
       return true;

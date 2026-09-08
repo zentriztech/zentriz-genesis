@@ -134,6 +134,10 @@ let coberturaAcumulada: { unjudged: string[]; judged: number; total: number } | 
 vi.mock("./specValidation.js", () => ({
   startValidation: (...a: unknown[]) => startValidation(...(a as [])),
   unjudgedSpecFiles: async () => coberturaAcumulada,
+  // Feature dos DESENHOS: esta suíte é do modo `whole`, onde o documento de diagramas NÃO é criado (a
+  // spec é um arquivo só). O dublê existe porque mock de módulo substitui o módulo inteiro — sem esta
+  // chave, um caminho que chegasse aqui quebraria com TypeError em vez de seguir sem desenhar.
+  computeCurrentSpecHash: vi.fn(async () => null),
 }));
 
 // `truncated` (T1) chega do runtime via `spec_chat_jobs.truncated` — é o sinal que o laço consulta.
@@ -145,7 +149,11 @@ let job: {
 vi.mock("./specChatJobs.js", () => ({ getSpecChatJob: vi.fn(async () => job) }));
 
 const dispatchResolveGapsJob = vi.fn(async () => ({ ok: true as const, gaps: 3 }));
-vi.mock("../routes/specChat.js", () => ({ dispatchResolveGapsJob: (...a: unknown[]) => dispatchResolveGapsJob(...(a as [])) }));
+vi.mock("../routes/specChat.js", () => ({
+  dispatchResolveGapsJob: (...a: unknown[]) => dispatchResolveGapsJob(...(a as [])),
+  // Idem: no modo `whole` este caminho não é usado, mas o mock tem de EXISTIR (o módulo é substituído).
+  dispatchDiagramsJob: vi.fn(async () => ({ ok: true as const })),
+}));
 
 vi.mock("./tenantLlmConfig.js", () => ({
   resolveWorkbenchLlm: vi.fn(async () => ({})),
