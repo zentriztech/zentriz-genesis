@@ -9,7 +9,7 @@ A mesma decisão foi tomada no Connect: `ReviewVerdictRecord` nasceu como contra
 vez de esticar `ReflectionRecord`, porque auto-avaliação (ganho ZERO) e revisão de outra
 família (+12 p.p.) não podem compartilhar o mesmo registro (ADR-014).
 
-A frase única que resume as nove regras:
+A frase única que resume as onze regras:
 
     "não encontrei" e "não sei procurar" NÃO são a mesma resposta.
 
@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3.0"
 STACK_KEY = "generic"  # o defeito é de AFIRMAÇÃO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -65,13 +65,16 @@ NO_OPINION_REASONS = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — nove arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
+# Catálogo — onze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
 # O da ÂNCORA (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial
 # cross-family de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o
 # GAP-39/49 aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a
 # âncora. Ou seja: o material justificava com um defeito que não ensinava a evitar.
-# O ÚLTIMO (`verd.a2.declarar-corrigido-nao-e-ter-corrigido`) é o achado A2 da Bancada: declarar
+# O do A2 (`verd.a2.declarar-corrigido-nao-e-ter-corrigido`) é o achado A2 da Bancada: declarar
 # "corrigido" com edição aplicada e o defeito continuar na MESMA âncora — 5 de 10 casos medidos.
+# Os DOIS ÚLTIMOS vieram da medição de 2026-09-08 que provou o veredicto INALCANÇÁVEL: a âncora
+# sozinha não endereça artefato nenhum (GAP-113) e a única prova de trabalho exigida era uma que
+# o escalonador nunca produzia para as âncoras mais insistentes (GAP-114) — impasse por construção.
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERDICT_ARCHETYPES: list[dict[str, Any]] = [
@@ -206,6 +209,38 @@ VERDICT_ARCHETYPES: list[dict[str, Any]] = [
             "todos com edição ancorada de fato aplicada — 5 continuavam na MESMA âncora na "
             "validação seguinte, com o título reescrito pelo juiz (semelhança 0,03..0,30). Como o "
             "título mudava, cada rodada parecia progresso e a contagem não caía."
+        ),
+    },
+    {
+        "slug": "verd.gap113.ancora-sem-endereco-nao-e-identidade",
+        "title": "A âncora sozinha não endereça nada — identidade é (artefato, âncora)",
+        "rule": (
+            "Ao citar, contar ou comparar um achado, carregue SEMPRE o artefato junto da âncora: "
+            "`§1.1`, `FR-07` e nomes de campo existem em vários arquivos ao mesmo tempo. Trabalho "
+            "feito em `A §1.1` não é trabalho feito em `B §1.1`, e somar os dois é inventar esforço "
+            "que ninguém pagou."
+        ),
+        "evidence": (
+            "Bancada GAP-113: `§1.1` foi âncora de foco em 11 rodadas repartidas entre DOIS "
+            "arquivos, e 25 âncoras dos achados se repetiam em 2 a 4 arquivos (`§2.4` em 4, `§5.5` "
+            "em 3). O gate dava por pago um foco que outro arquivo pagou e, ao mesmo tempo, jogava "
+            "para o fim da fila a âncora que nunca recebeu rodada nenhuma."
+        ),
+    },
+    {
+        "slug": "verd.gap114.prova-de-trabalho-tem-mais-de-uma-forma",
+        "title": "Prova de trabalho tem mais de uma forma — e um portão que ninguém alcança é impasse",
+        "rule": (
+            "Antes de exigir uma prova, verifique se ela pode SER produzida: se o único formato "
+            "aceito nunca é gerado para os casos que mais importam, o portão é impasse, não rigor. "
+            "Aceite formatos alternativos do MESMO fato (com barra mais alta para o mais fraco) e "
+            "meça a tentativa real, não a cerimônia."
+        ),
+        "evidence": (
+            "Bancada GAP-114/115: `§7.1` voltou em 49 validações com 0 rodada DEDICADA e 11 "
+            "rodadas em que o trecho foi de fato reescrito — o portão rejeitava justamente os mais "
+            "insistentes. E o veredicto não era nem chamado quando o laço acabava pelo teto de "
+            "arquivos: 30 rodadas, 44 GAPs, nenhum parecer."
         ),
     },
 ]
