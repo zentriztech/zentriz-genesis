@@ -998,27 +998,39 @@ export async function saveVerdicts(db: Db, args: {
   validationRunId: string | null;
   verdicts: GapVerdict[];
   shaByFile: Map<string, string>;
+  /**
+   * 🔴 GAP-124 — o conteúdo em que o parecer foi dado, para carimbar o sha do TRECHO ancorado. Ausente
+   * (chamador antigo) grava `anchor_sha_at = NULL` e o parecer segue obsolescendo pelo arquivo inteiro:
+   * o comportamento de antes, nunca uma anistia mais longa por omissão.
+   */
+  snapshots?: SpecSnapshot;
   model: string | null;
 }): Promise<number> {
   let n = 0;
   for (const v of args.verdicts) {
-    const sha = args.shaByFile.get(v.file.toLowerCase()) ?? "";
+    const key = v.file.toLowerCase();
+    const sha = args.shaByFile.get(key) ?? "";
+    const content = args.snapshots?.get(key)?.content ?? null;
+    // Âncora que não se localiza no conteúdo devolve "" ⇒ grava NULL e cai na regra do arquivo.
+    const anchorSha = content && v.anchor ? (anchorShaAt(content, v.anchor) || null) : null;
     await db.query(
       `INSERT INTO spec_gap_promotion_verdicts
          (project_id, fingerprint, file_path, anchor, severity_at, title, impact, reason,
           factory_artifact, accusation, recurrence_times, focus_rounds, file_sha_at,
-          validation_run_id, autonomy_run_id, decided_by_model, stance, defense)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+          validation_run_id, autonomy_run_id, decided_by_model, stance, defense, anchor_sha_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        ON CONFLICT (project_id, fingerprint, file_sha_at) DO UPDATE
          SET impact = EXCLUDED.impact, reason = EXCLUDED.reason,
              factory_artifact = EXCLUDED.factory_artifact, accusation = EXCLUDED.accusation,
              recurrence_times = EXCLUDED.recurrence_times, focus_rounds = EXCLUDED.focus_rounds,
              validation_run_id = EXCLUDED.validation_run_id, autonomy_run_id = EXCLUDED.autonomy_run_id,
              decided_by_model = EXCLUDED.decided_by_model, stance = EXCLUDED.stance,
-             defense = EXCLUDED.defense, revoked_at = NULL, created_at = now()`,
+             defense = EXCLUDED.defense, anchor_sha_at = EXCLUDED.anchor_sha_at,
+             revoked_at = NULL, created_at = now()`,
       [args.projectId, v.fingerprint, v.file, v.anchor || null, v.severity, v.title, v.impact,
         v.reason, v.factoryArtifact, v.accusation, v.times, v.focusRounds, sha,
-        args.validationRunId, args.autonomyRunId, args.model, v.stance ?? "acusacao", v.defense ?? ""],
+        args.validationRunId, args.autonomyRunId, args.model, v.stance ?? "acusacao", v.defense ?? "",
+        anchorSha],
     );
     n++;
   }
@@ -1035,21 +1047,35 @@ export interface LiveVerdict {
   /** 🔴 GAP-118 — sobre que peça o juiz decidiu: acusação de dano, ou defesa de quem vai construir. */
   stance: VerdictStance;
   defense: string;
-  /** `true` = o arquivo mudou desde o parecer: ele NÃO vale mais (nem conta no teto acumulado). */
+  /** `true` = o TRECHO julgado mudou (ou sumiu) desde o parecer: ele NÃO vale mais (nem no teto). */
   stale: boolean;
   createdAt: string;
 }
 
 /**
- * Os pareceres do projeto, com `stale` calculado contra o conteúdo ATUAL de cada arquivo.
+ * Os pareceres do projeto, com `stale` calculado contra o conteúdo ATUAL do trecho julgado.
  *
- * O parecer foi sobre um texto específico. Quando o arquivo é reescrito, o defeito pode ter mudado de
+ * O parecer foi sobre um texto específico. Quando esse texto é reescrito, o defeito pode ter mudado de
  * forma — manter a liberação valendo seria deixar uma anistia sobreviver à sua própria premissa.
+ *
+ * 🔴 GAP-124 — mas "esse texto" é o TRECHO ANCORADO, não o arquivo inteiro. Medir pelo arquivo fazia o
+ * parecer morrer por edição em seção que ninguém julgou, e o laço reescreve todos os arquivos da spec a
+ * cada passe: MEDIDO em prod (NVX LastMile, 2026-09-08) 13 liberações acumuladas em 3 runs de veredicto
+ * e **zero** valendo, com `released: 0`, `promotable: false` por construção e os desenhos Mermaid
+ * (gatilho `promotable`) inalcançáveis. Ordem de decisão, toda ela fail-CLOSED:
+ *  1. arquivo ausente do snapshot ⇒ obsoleto (nada a afirmar);
+ *  2. `anchor_sha_at` gravado ⇒ compara o sha do trecho ancorado ATUAL; âncora que sumiu dá `""` ≠ sha;
+ *  3. sem `anchor_sha_at` (parecer anterior a este GAP, ou GAP sem âncora) ⇒ regra do arquivo inteiro.
+ * O teto acumulado por spec (`maxPerSpec`) continua sendo a trava real — e agora ele de fato trava,
+ * porque as liberações finalmente acumulam.
  */
-export async function livePromotionVerdicts(db: Db, projectId: string, shaByFile: Map<string, string>): Promise<LiveVerdict[]> {
+export async function livePromotionVerdicts(
+  db: Db, projectId: string, snapshots: SpecSnapshot | Map<string, string>,
+): Promise<LiveVerdict[]> {
   const rows = (await db.query(
     `SELECT fingerprint, file_path, anchor, impact, reason, factory_artifact, file_sha_at, created_at,
-            COALESCE(stance, 'acusacao') AS stance, COALESCE(defense, '') AS defense
+            COALESCE(stance, 'acusacao') AS stance, COALESCE(defense, '') AS defense,
+            anchor_sha_at
        FROM spec_gap_promotion_verdicts
       WHERE project_id = $1 AND revoked_at IS NULL
       ORDER BY created_at DESC`,
@@ -1057,38 +1083,70 @@ export async function livePromotionVerdicts(db: Db, projectId: string, shaByFile
   )).rows as unknown as Array<{
     fingerprint: string; file_path: string; anchor: string | null; impact: string; reason: string;
     factory_artifact: string; file_sha_at: string; created_at: string;
-    stance?: string | null; defense?: string | null;
+    stance?: string | null; defense?: string | null; anchor_sha_at?: string | null;
   }>;
   const seen = new Set<string>();
   const out: LiveVerdict[] = [];
   for (const r of rows) {
     if (seen.has(r.fingerprint)) continue; // o mais recente por defeito
     seen.add(r.fingerprint);
-    const cur = shaByFile.get(String(r.file_path).toLowerCase());
+    const cur = snapshots.get(String(r.file_path).toLowerCase());
+    const curSha = typeof cur === "string" ? cur : cur?.sha;
+    const curContent = typeof cur === "string" ? null : cur?.content ?? null;
+    const anchorShaWas = String(r.anchor_sha_at ?? "").trim();
     out.push({
       fingerprint: r.fingerprint, file: r.file_path, anchor: r.anchor,
       impact: r.impact === "nao_impeditivo" ? "nao_impeditivo" : "impeditivo",
       reason: r.reason, factoryArtifact: r.factory_artifact,
       stance: String(r.stance ?? "") === "defesa" ? "defesa" : "acusacao",
       defense: String(r.defense ?? ""),
-      // Sem sha atual (arquivo removido/não lido) o parecer também não pode ser afirmado.
-      stale: !cur || !r.file_sha_at || cur !== r.file_sha_at,
+      // Sem conteúdo atual (arquivo removido/não lido) o parecer também não pode ser afirmado.
+      stale: !curSha
+        ? true
+        // 🔴 GAP-124: com o sha da âncora gravado, é a SEÇÃO julgada que decide (âncora que sumiu ⇒ "").
+        : anchorShaWas && r.anchor && curContent !== null
+          ? anchorShaAt(curContent, r.anchor) !== anchorShaWas
+          : (!r.file_sha_at || curSha !== r.file_sha_at),
       createdAt: String(r.created_at),
     });
   }
   return out;
 }
 
-/** SHA atual de cada arquivo da spec, minúsculo pelo path canônico. Chave de obsolescência. */
-export async function specFileShas(db: Db, projectId: string): Promise<Map<string, string>> {
+/**
+ * 🔴 GAP-124 — o conteúdo ATUAL de cada arquivo da spec, com o seu sha, pelo path canônico minúsculo.
+ *
+ * O sha do arquivo continua aqui (é a chave de obsolescência dos pareceres antigos e a chave única da
+ * tabela), mas o conteúdo é o que permite medir obsolescência onde ela de fato mora: no TRECHO
+ * ancorado que o juiz leu. Uma leitura, dois usos — o laço já pagava esta leitura.
+ */
+export type SpecSnapshot = Map<string, { sha: string; content: string }>;
+
+export async function specFileSnapshots(db: Db, projectId: string): Promise<SpecSnapshot> {
   const { loadSpecFiles } = await import("./specGapScope.js");
   const refs = await loadSpecFiles(db, projectId).catch(() => []);
-  const out = new Map<string, string>();
+  const out: SpecSnapshot = new Map();
   for (const ref of refs) {
     const buf = await readFile(ref.filePath).catch(() => null);
-    if (buf) out.set(ref.path.toLowerCase(), sha256Hex(buf));
+    if (buf) out.set(ref.path.toLowerCase(), { sha: sha256Hex(buf), content: buf.toString("utf8") });
   }
   return out;
+}
+
+/** SHA atual de cada arquivo da spec, minúsculo pelo path canônico. Chave única da tabela. */
+export async function specFileShas(db: Db, projectId: string): Promise<Map<string, string>> {
+  const snap = await specFileSnapshots(db, projectId);
+  return new Map([...snap].map(([p, v]) => [p, v.sha]));
+}
+
+/**
+ * 🔴 GAP-124 — o sha do trecho ancorado, pela MESMA extração que o juiz recebeu (`anchoredSection`,
+ * já recortada em `SECTION_SLICE`). Âncora ausente do conteúdo devolve `""`, e quem lê trata isso
+ * como parecer obsoleto: se o endereço do defeito desapareceu, não há o que afirmar sobre ele.
+ */
+export function anchorShaAt(content: string, anchor: string): string {
+  const sec = anchoredSection(content, anchor);
+  return sec ? sha256Hex(Buffer.from(sec, "utf8")) : "";
 }
 
 export interface PromotabilityReport {

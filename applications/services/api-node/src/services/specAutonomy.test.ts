@@ -76,6 +76,9 @@ vi.mock("./gapPromotionVerdict.js", () => ({
     ? { proven: true, kind: "exhausted", detail: "laço ESGOTADO (exhausted) com 0 GAP(s) fechado(s): 5 passe(s) de validação, 21 rodada(s) aplicada(s), 21 rodada(s) de foco INDIVIDUAL paga(s), 4 validação(ões) com números reconciliados" }
     : { proven: true, kind: "resolved", detail: "3 GAP(s) fechado(s) e reconciliado(s) nesta run (mínimo 3)" }),
   specFileShas: vi.fn(async () => new Map<string, string>()),
+  // 🔴 GAP-124: o laço passou a ler o snapshot (sha + conteúdo) para medir obsolescência pela
+  // SEÇÃO ancorada. `vi.mock` troca o módulo inteiro, então export novo tem de aparecer aqui.
+  specFileSnapshots: vi.fn(async () => new Map<string, { sha: string; content: string }>()),
   selectVerdictCandidates: vi.fn(() => ({
     candidates: Array.from({ length: verdict?.candidates ?? 0 }, (_, i) => ({
       finding: { severity: "blocker", title: `t${i}` }, fingerprint: `fp${i}`, file: "produto.md",

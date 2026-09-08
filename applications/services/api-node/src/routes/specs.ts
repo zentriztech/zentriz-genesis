@@ -1026,11 +1026,13 @@ export async function specRoutes(app: FastifyInstance) {
       : null;
     let promotion: unknown;
     try {
-      const { verdictConfig, specFileShas, livePromotionVerdicts, promotabilityReport } =
+      const { verdictConfig, specFileSnapshots, livePromotionVerdicts, promotabilityReport } =
         await import("../services/gapPromotionVerdict.js");
       const cfg = verdictConfig();
       if (cfg.minGapsResolved > 0 && triage) {
-        const verdicts = await livePromotionVerdicts(pool, id, await specFileShas(pool, id));
+        // 🔴 GAP-124: a UI lê a MESMA obsolescência do laço (por trecho ancorado), senão o painel
+        // mostraria liberação viva que o laço já descartou — ou o contrário.
+        const verdicts = await livePromotionVerdicts(pool, id, await specFileSnapshots(pool, id));
         if (verdicts.length > 0) {
           promotion = {
             ...promotabilityReport({

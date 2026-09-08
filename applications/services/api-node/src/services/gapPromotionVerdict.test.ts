@@ -34,7 +34,7 @@ vi.mock("../routes/specs.js", () => ({ httpPost: (...a: [string, string, number]
 const {
   verdictConfig, selectVerdictCandidates, runVerdictRound, parseListResponse, anchoredSection,
   focusRoundsByFile, focusRoundsByAnchor, saveVerdicts, livePromotionVerdicts, promotabilityReport,
-  proveWork, anchorHistories, focusKey, attackedRoundsByAnchor, parseCountField,
+  proveWork, anchorHistories, focusKey, attackedRoundsByAnchor, parseCountField, anchorShaAt,
 } = await import("./gapPromotionVerdict.js");
 const { anchorSearchKey } = await import("./gapPersistence.js");
 
@@ -966,6 +966,91 @@ describe("livePromotionVerdicts", () => {
     const live = await livePromotionVerdicts(db as never, "p1", new Map([["modelo-dados.md", "sha-abc"]]));
     expect(live).toHaveLength(1);
     expect(live[0].impact).toBe("impeditivo");
+  });
+
+  /**
+   * 🔴 GAP-124 — a obsolescência é do TRECHO julgado, não do arquivo.
+   *
+   * MEDIDO em prod (NVX LastMile, 2026-09-08): 15 pareceres vivos, 13 liberações acumuladas em 3 runs
+   * de veredicto, e NENHUM `file_sha_at` batia com o sha atual — o laço reescreve os 12 arquivos da spec
+   * a cada passe, então editar qualquer seção matava o parecer sobre seções que ninguém tocou. Efeito:
+   * `released` sempre 0, teto acumulado de 24 decorativo, `promotable` falso por construção e os
+   * desenhos Mermaid (gatilho `promotable`) inalcançáveis — o arquétipo do gatilho impossível.
+   */
+  describe("🔴 GAP-124 — obsolescência pela SEÇÃO ancorada, não pelo arquivo", () => {
+    const spec = (body: string) => `# Doc\n\n## 4 Modelo\n\n${body}\n\n## 5 Outra\n\ntexto qualquer.\n`;
+    const snap = (content: string, sha = "sha-novo") =>
+      new Map([["modelo-dados.md", { sha, content }]]);
+
+    it("editar OUTRA seção não mata o parecer (arquivo mudou, o trecho julgado não)", async () => {
+      const antes = spec("o defeito julgado.");
+      const anchorSha = anchorShaAt(antes, "## 4");
+      expect(anchorSha).not.toBe("");
+      const db = fakeDb([row({ file_sha_at: "sha-velho", anchor_sha_at: anchorSha })]);
+      // Mesma §4, §5 reescrita ⇒ sha do ARQUIVO diferente, sha da SEÇÃO igual.
+      const depois = antes.replace("texto qualquer.", "outro texto, bem maior, escrito no passe seguinte.");
+      const live = await livePromotionVerdicts(db as never, "p1", snap(depois));
+      expect(live[0].stale).toBe(false);
+    });
+
+    it("reescrever a PRÓPRIA seção julgada obsolesce o parecer", async () => {
+      const antes = spec("o defeito julgado.");
+      const db = fakeDb([row({ file_sha_at: "sha-velho", anchor_sha_at: anchorShaAt(antes, "## 4") })]);
+      const live = await livePromotionVerdicts(db as never, "p1", snap(spec("o defeito, agora reescrito.")));
+      expect(live[0].stale).toBe(true);
+    });
+
+    it("âncora que DESAPARECEU do arquivo obsolesce o parecer (fail-CLOSED)", async () => {
+      const antes = spec("o defeito julgado.");
+      const db = fakeDb([row({ file_sha_at: "sha-velho", anchor_sha_at: anchorShaAt(antes, "## 4") })]);
+      const live = await livePromotionVerdicts(db as never, "p1", snap("# Doc\n\n## 5 Outra\n\ntexto.\n"));
+      expect(live[0].stale).toBe(true);
+    });
+
+    it("parecer SEM `anchor_sha_at` (anterior a este GAP) segue pela regra do arquivo — nada retroativo", async () => {
+      const db = fakeDb([row({ file_sha_at: "sha-velho", anchor_sha_at: null })]);
+      const live = await livePromotionVerdicts(db as never, "p1", snap(spec("qualquer coisa")));
+      expect(live[0].stale).toBe(true);
+    });
+
+    it("arquivo fora do snapshot obsolesce mesmo com sha de âncora gravado", async () => {
+      const antes = spec("o defeito julgado.");
+      const db = fakeDb([row({ anchor_sha_at: anchorShaAt(antes, "## 4") })]);
+      const live = await livePromotionVerdicts(db as never, "p1", new Map());
+      expect(live[0].stale).toBe(true);
+    });
+
+    it("`saveVerdicts` carimba o sha da seção quando recebe o snapshot", async () => {
+      const content = spec("o defeito julgado.");
+      const db = fakeDb([]);
+      const n = await saveVerdicts(db as never, {
+        projectId: "p1", autonomyRunId: "r1", validationRunId: "v1", model: "m",
+        verdicts: [{
+          fingerprint: "fp1", file: "modelo-dados.md", anchor: "## 4", severity: "blocker", title: "t",
+          impact: "nao_impeditivo", reason: "motivo", factoryArtifact: "POST /x", accusation: "dano",
+          stance: "acusacao", defense: "", times: 4, focusRounds: 3,
+        }],
+        shaByFile: new Map([["modelo-dados.md", "sha-abc"]]),
+        snapshots: new Map([["modelo-dados.md", { sha: "sha-abc", content }]]),
+      });
+      expect(n).toBe(1);
+      expect(db.calls[0].text).toContain("anchor_sha_at");
+      expect(db.calls[0].values).toContain(anchorShaAt(content, "## 4"));
+    });
+
+    it("sem snapshot, `saveVerdicts` grava NULL — o parecer obsolesce como antes", async () => {
+      const db = fakeDb([]);
+      await saveVerdicts(db as never, {
+        projectId: "p1", autonomyRunId: "r1", validationRunId: "v1", model: "m",
+        verdicts: [{
+          fingerprint: "fp1", file: "modelo-dados.md", anchor: "## 4", severity: "blocker", title: "t",
+          impact: "nao_impeditivo", reason: "motivo", factoryArtifact: "POST /x", accusation: "dano",
+          stance: "acusacao", defense: "", times: 4, focusRounds: 3,
+        }],
+        shaByFile: new Map([["modelo-dados.md", "sha-abc"]]),
+      });
+      expect(db.calls[0].values[18]).toBeNull();
+    });
   });
 });
 

@@ -31,7 +31,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # 1.2.0: + GAP-121 (pedido combinado sob orçamento) e GAP-122 (índice do conjunto)
-SCHEMA_VERSION = "1.3.0"  # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
+# 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
+SCHEMA_VERSION = "1.4.0"  # 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -172,6 +173,22 @@ ARCHETYPES: list[dict[str, Any]] = [
             "uma das 5 era justo a rodada que FECHOU o GAP-122: o laço jogou fora a prova do trabalho."
         ),
     },
+    {
+        "slug": "arch.gap124.validade-e-do-trecho-julgado",
+        "title": "A validade de um parecer é do TRECHO julgado, não do arquivo que o contém",
+        "rule": (
+            "Aprovação, dispensa ou parecer valem sobre o TRECHO que você leu — amarre-os a esse trecho, "
+            "não ao arquivo inteiro. Invalidar por mudança em outra parte do mesmo arquivo destrói "
+            "trabalho legítimo e, num laço que reescreve tudo a cada passe, nada acumula: o gatilho que "
+            "depende do acúmulo fica inalcançável. Se o trecho mudou ou desapareceu, o parecer morre."
+        ),
+        "evidence": (
+            "Bancada GAP-124 (2026-09-08): 13 liberações do juiz acumuladas em 3 runs e ZERO valendo — "
+            "nenhum sha de arquivo batia, porque o laço reescreve os 12 arquivos por passe. Resultado: "
+            "`released` sempre 0, teto acumulado de 24 decorativo, `promotable` falso por construção e a "
+            "feature dos diagramas (gatilho `promotable`) inalcançável — o arquétipo do gatilho impossível."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -203,7 +220,8 @@ ROLE_FOCUS: dict[str, str] = {
         "Como isto aparece para você: você recebe artefatos completos. Não reprove uma task por "
         "ausência de arquivo que nunca foi entregue ao Dev (marca de CORTE/NÃO ENTREGUE no "
         "contexto dele) — isso é falta de contexto, e o veredito correto é apontar o arquivo "
-        "faltante, não pedir reescrita integral."
+        "faltante, não pedir reescrita integral. E o seu veredito vale sobre o TRECHO que você "
+        "leu: não reabra o que já aprovou porque outra parte do mesmo arquivo mudou."
     ),
     "monitor": (
         "Como isto aparece para você: 'N tasks concluídas' não é prova. Verifique identidade do "

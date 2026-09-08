@@ -1556,7 +1556,7 @@ async function promotionVerdictFor(
   try {
     const {
       verdictConfig, selectVerdictCandidates, runVerdictRound, saveVerdicts, livePromotionVerdicts,
-      specFileShas, promotabilityReport, focusRoundsByFile, focusRoundsByAnchor, anchoredSection,
+      specFileSnapshots, promotabilityReport, focusRoundsByFile, focusRoundsByAnchor, anchoredSection,
       proveWork, attackedRoundsByAnchor,
     } = await import("./gapPromotionVerdict.js");
     const cfg = verdictConfig();
@@ -1627,7 +1627,12 @@ async function promotionVerdictFor(
     });
     let round: VerdictRound | null = null;
     let saved = 0;
-    const shaByFile = await specFileShas(db, run.projectId).catch(() => new Map<string, string>());
+    // 🔴 GAP-124: uma leitura só, dois usos — o sha do arquivo (chave única da tabela) e o conteúdo,
+    // que é o que permite carimbar/medir o sha do TRECHO ancorado. Falha de leitura ⇒ snapshot vazio
+    // ⇒ todo parecer obsoleto (fail-CLOSED), exatamente como o `catch` de antes.
+    const snapshots = await specFileSnapshots(db, run.projectId).catch(
+      () => new Map() as import("./gapPromotionVerdict.js").SpecSnapshot);
+    const shaByFile = new Map([...snapshots].map(([p, v]) => [p, v.sha]));
     // 🔴 GAP-120 — o orçamento desta rodada é o que RESTA do teto acumulado por spec (`maxPerSpec`,
     // decidido pelo Jean: 24 = duas por arquivo), medido nos pareceres VIVOS e não-obsoletos. O
     // `maxPerRun` volta ao papel de tamanho de lote por chamada ao juiz. Sem isso, como a rodada de
@@ -1637,7 +1642,7 @@ async function promotionVerdictFor(
     // `catch` devolve o orçamento mínimo (o lote), nunca o teto inteiro.
     // O piso NÃO pode ser o lote: passar de `maxPerSpec` faz o relatório invalidar TODAS as liberações
     // ("excedeu o teto ⇒ nenhuma vale"), então liberar a mais é pior que liberar a menos.
-    const liveAntes = await livePromotionVerdicts(db, run.projectId, shaByFile).catch(() => null);
+    const liveAntes = await livePromotionVerdicts(db, run.projectId, snapshots).catch(() => null);
     const budget = liveAntes === null
       ? cfg.maxPerRun // leitura falhou: mantém exatamente o teto de antes, sem inventar orçamento
       : Math.max(0, cfg.maxPerSpec - liveAntes.filter((v) => v.impact === "nao_impeditivo" && !v.stale).length);
@@ -1646,7 +1651,7 @@ async function promotionVerdictFor(
       if (round.verdicts.length > 0) {
         saved = await saveVerdicts(db, {
           projectId: run.projectId, autonomyRunId: run.id, validationRunId: run.validationRunId,
-          verdicts: round.verdicts, shaByFile, model: round.model,
+          verdicts: round.verdicts, shaByFile, snapshots, model: round.model,
         });
       }
     }
@@ -1661,7 +1666,7 @@ async function promotionVerdictFor(
     const { policyNote } = await import("./specPolicyGate.js");
     const report = promotabilityReport({
       findings: state.findings,
-      verdicts: await livePromotionVerdicts(db, run.projectId, shaByFile),
+      verdicts: await livePromotionVerdicts(db, run.projectId, snapshots),
       unroutedImportant: scope
         ? scope.unrouted.filter((f) => f.severity === "blocker" || f.severity === "warning").length
         : 0,
