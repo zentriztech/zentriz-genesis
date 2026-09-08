@@ -435,6 +435,28 @@ describe("recallNote / recallLimitations — nenhum limite fica escondido", () =
     expect(lim).not.toContain("GAP-102");
   });
 
+  it("GAP-104: 'terceiro casador respondeu lixo' não pode virar a frase de 'auditoria desligada'", () => {
+    // Medido na prova 4 em prod: o Mistral FOI chamado, respondeu, e o que voltou não era JSON legível.
+    // A limitação dizia só "nenhuma amostra recasada", indistinguível de auditoria desligada.
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",
+      matcherDisagreement: null, auditSample: 0, rejected: 0,
+      matcherWhy: "terceiro casador (mistral.mistral-large-3-675b-instruct) respondeu, mas sem JSON legível — foi CHAMADO, não estava desligado",
+    }).join(" | ");
+    expect(lim).toContain("sem JSON legível");
+    expect(lim).toContain("foi CHAMADO");
+    expect(lim).toContain("GAP-104");
+  });
+
+  it("GAP-104: sem motivo conhecido, a frase antiga fica inteira e sem invenção", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",
+      matcherDisagreement: null, auditSample: 0, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("sem estimativa (GAP-93)");
+    expect(lim).not.toContain("GAP-104");
+  });
+
   it("sem amostra recasada, a nota diz que o erro do casador entra SEM estimativa", () => {
     const lim = recallLimitations({
       tally: recallTally([base()]), sameFamily: false, judgeModel: "j", matchModel: "m",

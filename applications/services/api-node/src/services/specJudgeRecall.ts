@@ -118,6 +118,19 @@
  * ele é honesto sobre a própria incerteza, e o que ele mostra é ESTRUTURAL e estável nas três provas —
  * `fora_do_vocabulario` **0%**, `corpo_sem_titulo` sempre o lado fraco, e a cegueira concentrada onde o
  * juiz não tem palavra para o defeito. É isso que a Fábrica e o Auto Care precisam aprender, não o número.
+ *
+ * ## GAP-104, o último desta linhagem — e a prova de que o GAP-103 funciona
+ *
+ * A prova 4 publicou o intervalo: **IC95 10%..70% para n = 6**. As três provas anteriores (14%..43%,
+ * 43%..57%, 33%) caem TODAS dentro dele ⇒ elas nunca discordaram entre si; o instrumento é que afirmava
+ * precisão que não tinha. E `fora_do_vocabulario` deu **0%** pela quarta vez: o achado estrutural resiste.
+ *
+ *  * **GAP-104 (baixo, corrigido)** — a auditoria do casador não saiu e a limitação publicada disse apenas
+ *    "nenhuma amostra recasada por terceiro modelo", como se estivesse DESLIGADA. O que houve foi outro
+ *    fato: o Mistral **foi chamado, respondeu, e o que voltou não era JSON legível**. `auditMatches` já
+ *    computava esse motivo em `why` — e o `why` era jogado fora antes de chegar ao relatório. Três causas
+ *    com consequências diferentes (escolha, infra, modelo inadequado ao papel) tinham a mesma frase.
+ *    ⇒ o motivo vai na limitação.
  */
 import { evidenceIsVerbatim } from "./crossFamilyAudit.js";
 import { FINDING_CATEGORIES, type Db } from "./findingTriage.js";
@@ -600,6 +613,8 @@ export function recallLimitations(args: {
   matcherNoOpinion?: number | null;
   auditSample: number;
   auditModel?: string;
+  /** GAP-104: POR QUE a auditoria não produziu número. "Desligada" e "respondeu lixo" não são o mesmo fato. */
+  matcherWhy?: string;
   rejected: number;
   /** GAP-102: defeitos recusados porque outro defeito reivindicou o finding primeiro. */
   priorClaim?: number;
@@ -622,7 +637,15 @@ export function recallLimitations(args: {
   // Não saber a família do juiz não é o mesmo que saber que são diferentes. Sem esta linha, `sameFamily
   // = false` por ignorância pareceria a garantia cross-family que a frente inteira depende de ter.
   else if (modelFamily(args.judgeModel) === "desconhecida") out.push(`modelo do juiz não declarado nesta chamada (a Bancada usou o padrão do tenant) — o casador é ${args.matchModel || "?"}, mas NÃO se pode afirmar que é de outra família (GAP-93)`);
-  if (args.matcherDisagreement === null) out.push("nenhuma amostra recasada por terceiro modelo — o erro do casador entra no recall sem estimativa (GAP-93)");
+  // GAP-104: medido na prova 4 em prod. A auditoria não saiu e a limitação disse apenas "nenhuma amostra
+  // recasada", como se estivesse desligada — quando o terceiro casador FOI CHAMADO, respondeu, e o que
+  // voltou não era JSON legível. `auditMatches` já computava esse motivo e ele era JOGADO FORA. São três
+  // fatos diferentes com consequências diferentes (desligada = escolha; indisponível = infra; ilegível =
+  // o modelo não serve para este papel) e todos apareciam como a mesma frase.
+  if (args.matcherDisagreement === null) {
+    const porque = (args.matcherWhy ?? "").trim();
+    out.push(`nenhuma amostra recasada por terceiro modelo — o erro do casador entra no recall sem estimativa (GAP-93)${porque ? ` · motivo: ${porque} (GAP-104)` : ""}`);
+  }
   else {
     const magro = args.auditSample < AUDIT_MIN_SAMPLE
       ? ` — amostra de ${args.auditSample} está ABAIXO do piso de ${AUDIT_MIN_SAMPLE}: é indicação, não estimativa (GAP-100)`
@@ -723,7 +746,7 @@ export async function auditMatches(args: {
   // nem ele cabe (gold set minúsculo), a limitação declara que o número é INDICATIVO, não estimativa.
   const n = Math.min(elegiveis.length, Math.max(cfg.auditMin, Math.round(elegiveis.length * cfg.auditFraction)));
   if (!args.model || cfg.auditFraction <= 0 || n === 0) {
-    return { sample: 0, disagreement: null, noOpinion: null, why: "auditoria do casador desligada", modelUsed: "" };
+    return { sample: 0, disagreement: null, noOpinion: null, why: "auditoria do casador desligada por configuração (sem modelo, fração <= 0 ou amostra vazia)", modelUsed: "" };
   }
   // Amostra determinística por ordem do gold set: reprodutível na mesma versão, e a versão está no hash.
   const amostra = elegiveis.slice(0, n);
@@ -736,7 +759,7 @@ export async function auditMatches(args: {
   if (!res.ok) return { sample: 0, disagreement: null, noOpinion: null, why: `terceiro casador indisponível: ${res.why}`, modelUsed: "" };
   const modelUsed = res.modelUsedRaw || args.model;
   const parsed = parseListResponse(res.text, "matches");
-  if (!parsed || parsed.length === 0) return { sample: 0, disagreement: null, noOpinion: null, why: "terceiro casador sem JSON legível", modelUsed };
+  if (!parsed || parsed.length === 0) return { sample: 0, disagreement: null, noOpinion: null, why: `terceiro casador (${modelUsed}) respondeu, mas sem JSON legível — foi CHAMADO, não estava desligado`, modelUsed };
   const segundos = normalizeMatches(
     parsed, amostra.map((i) => porId.get(i.defectId)).filter((d): d is GoldDefect => !!d),
     args.findings, args.judgedFiles,
@@ -969,7 +992,8 @@ export async function runJudgeRecall(db: Db, args: {
   const limitations = recallLimitations({
     tally, sameFamily: familia, judgeModel, matchModel,
     matcherDisagreement: auditoria.disagreement, matcherNoOpinion: auditoria.noOpinion,
-    auditSample: auditoria.sample, auditModel: auditoria.modelUsed, rejected: recusados.length,
+    auditSample: auditoria.sample, auditModel: auditoria.modelUsed, matcherWhy: auditoria.why,
+    rejected: recusados.length,
     priorClaim: items.filter((i) => i.reason === "finding já casado com outro defeito").length,
   });
   if (!cas.ok) limitations.unshift(`casador indisponível (${cas.why}) — todos os defeitos ficaram sem casamento conferido, o que DEPRIME o recall`);
