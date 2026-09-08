@@ -320,6 +320,73 @@ describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
     expect(marcas[1].params).toEqual(["proj-1", "docs", "x.md", "sha-x"]);
   });
 
+  /**
+   * 🔴 C3/C7 — com a validação em LOTES, o que está devido ao coletor é só o lote PENDENTE.
+   *
+   * Os lotes que voltaram já foram marcados em processo (`markFilesJudged` por lote). Se a recuperação
+   * usasse `fullShas` (a união do que a run mediu), ela marcaria como julgados também os arquivos de
+   * lotes que falharam de forma DEFINITIVA — inventando cobertura que ninguém leu, que é exatamente o
+   * que o GAP-21 proíbe.
+   */
+  it("🔴 C3: lote pendente recuperado marca SÓ os arquivos DELE (`pendingFullShas`)", async () => {
+    const { row, files } = await pendingRun({
+      stage_b_coverage: {
+        full: ["README.md"], outlineOnly: ["docs/x.md", "docs/y.md"], batches: 3,
+        fullShas: { "README.md": "sha-lote-1" },
+        pendingFullShas: { "docs/x.md": "sha-lote-2" },
+        notMeasured: [
+          { file: "docs/x.md", reason: "timeout do estágio adversarial (resultado pendente de coleta)" },
+          { file: "docs/y.md", reason: "lote não despachado: o lote 2/3 anterior ficou pendente de coleta" },
+        ],
+      },
+    });
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+
+    const marcas = queries.filter((q) => q.sql.includes("UPDATE project_spec_files") && q.sql.includes("stage_b_full_sha = $4"));
+    expect(marcas).toHaveLength(1);
+    expect(marcas[0].params).toEqual(["proj-1", "docs", "x.md", "sha-lote-2"]);
+
+    // A cobertura é REESCRITA: o lote recuperado passa de `nao_medido` a medido, e o lote que nunca foi
+    // despachado CONTINUA declarado como não medido (nem fechado, nem trabalhado).
+    const regrava = queries.find((q) => q.sql.includes("SET stage_b_coverage = $2::jsonb"))!;
+    expect(regrava).toBeTruthy();
+    const cov = JSON.parse(String(regrava.params[1])) as Record<string, unknown>;
+    expect(cov.full).toEqual(["README.md", "docs/x.md"]);
+    expect(cov.outlineOnly).toEqual(["docs/y.md"]);
+    expect(cov.fullShas).toEqual({ "README.md": "sha-lote-1", "docs/x.md": "sha-lote-2" });
+    expect(cov.pendingFullShas).toBeUndefined();
+    expect(cov.notMeasured).toEqual([
+      { file: "docs/y.md", reason: "lote não despachado: o lote 2/3 anterior ficou pendente de coleta" },
+    ]);
+  });
+
+  it("C3: sem `pendingFullShas` (uma chamada só) nada é reescrito — comportamento anterior intacto", async () => {
+    const { row, files } = await pendingRun({
+      stage_b_coverage: { full: ["README.md"], fullShas: { "README.md": "sha-a" } },
+    });
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+    expect(queries.some((q) => q.sql.includes("SET stage_b_coverage = $2::jsonb"))).toBe(false);
+    const marcas = queries.filter((q) => q.sql.includes("stage_b_full_sha = $4"));
+    expect(marcas.map((m) => m.params[2])).toEqual(["README.md"]);
+  });
+
+  it("C7: `notMeasured` sem lote pendente NÃO gera recuperação (não há resultado devido)", async () => {
+    // Lote que falhou de forma definitiva (ex.: 500 do agents): o arquivo fica pendente no acumulado e
+    // a validação SEGUINTE o pega. Recuperar aqui seria marcar como lido o que ninguém leu.
+    const { row, files } = await pendingRun({
+      stage_b_coverage: {
+        full: [], outlineOnly: ["README.md"], batches: 2, fullShas: {},
+        notMeasured: [{ file: "README.md", reason: "agents 500" }],
+      },
+    });
+    const { pool, queries } = db(row, files);
+    await collectStageBResults(pool, async () => ({ status: "done", result: { findings: [] } }));
+    expect(queries.some((q) => q.sql.includes("stage_b_full_sha = $4"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("SET stage_b_coverage = $2::jsonb"))).toBe(false);
+  });
+
   it("run sem cobertura (anterior à migração 101) → coleta normal, nenhuma marca inventada", async () => {
     const { row, files } = await pendingRun({ stage_b_coverage: null });
     const { pool, queries } = db(row, files);

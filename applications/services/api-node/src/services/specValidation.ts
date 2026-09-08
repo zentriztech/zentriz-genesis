@@ -363,7 +363,14 @@ export function knownFindingsForJudge(
   return out.slice(0, max);
 }
 
-async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<{ findings: ValidationFinding[]; error?: string }> {
+/**
+ * Uma leitura adversarial. `pending: true` é o único desfecho que deixa trabalho PAGO para trás (o job
+ * pode estar vivo no agents) — quem chama tem de preservar `stage_b_collected_at` NULL e parar de
+ * despachar lotes novos, senão o `collectStageBResults` nunca volta para buscá-lo (GAP-11).
+ */
+interface StageBOutcome { findings: ValidationFinding[]; error?: string; pending?: true }
+
+async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
   const base = agentsUrl.replace(/\/$/, "");
@@ -402,25 +409,25 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
       .catch(() => ({ status: 0, data: {} as Record<string, unknown> }));
     // 404 = agents reiniciou e perdeu o job em memória → interrupted (NUNCA insistir 11min).
     if (poll.status === 404) {
-      await markStageBCollected(pool, runId); // não há o que recuperar: o job não existe mais
+      // Nada a recuperar: o job não existe mais. Quem marca `stage_b_collected_at` é o chamador, DEPOIS
+      // do último lote — marcar aqui encerraria o assunto da run inteira e um lote seguinte que
+      // estourasse a espera ficaria invisível ao coletor (o filtro dele é `collected_at IS NULL`).
       return { findings: [], error: "agents reiniciou durante a validação (job perdido)" };
     }
     if (poll.status !== 200) continue;
     const st = String(poll.data.status ?? "");
     if (st === "done") {
       const result = (poll.data.result ?? {}) as Record<string, unknown>;
-      await markStageBCollected(pool, runId); // esta espera COLHEU o resultado — nada pendente
       return { findings: parseStageBFindings(result.findings) };
     }
     if (st === "error") {
-      await markStageBCollected(pool, runId); // o job falhou do outro lado: recuperar não traz nada
       return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300) };
     }
   }
   // Único caminho que deixa `stage_b_collected_at` NULL de propósito: o job pode estar VIVO no
   // agents e o `collectStageBResults` (tick do worker) volta para buscá-lo.
   console.log(`[spec-validation] run ${runId}: espera do estágio B expirou (${VALIDATION_DEADLINE_MIN} min) — job ${jobId} fica PENDENTE de coleta (GAP-11).`);
-  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)" };
+  return { findings: [], error: "timeout do estágio adversarial (resultado pendente de coleta)", pending: true };
 }
 
 // ── ciclo de vida da run ──────────────────────────────────────────────────────
@@ -712,6 +719,48 @@ async function markFilesJudged(pool: Pool, projectId: string, fullShas: Record<s
   }
 }
 
+/**
+ * A forma de `spec_validation_runs.stage_b_coverage`. `pendingFullShas`/`notMeasured`/`batches` são de
+ * C3/C7 e podem faltar (coberturas gravadas antes, e o caminho de uma chamada só, não os têm).
+ */
+interface StageBCoverage {
+  full?: string[];
+  outlineOnly?: string[];
+  oversized?: string[];
+  totalChars?: number;
+  cap?: number;
+  batches?: number;
+  fullShas?: Record<string, string>;
+  pendingFullShas?: Record<string, string>;
+  notMeasured?: Array<{ file: string; reason: string }>;
+}
+
+/**
+ * C3: um lote pendente cujo resultado o coletor recuperou passa de `nao_medido` a MEDIDO. Reescreve a
+ * cobertura da run: `full`/`fullShas` ganham os arquivos do lote, `notMeasured` perde exatamente esses,
+ * e `pendingFullShas` sai (não há mais nada devido). Best-effort: falhar aqui não desfaz a recuperação
+ * dos findings — só deixa a coluna conservadora (dizendo que menos foi lido do que foi).
+ */
+async function mergeRecoveredCoverage(pool: Pool, runId: string, cov: StageBCoverage): Promise<void> {
+  const pend = cov.pendingFullShas ?? {};
+  const paths = Object.keys(pend);
+  if (paths.length === 0) return;
+  const full = [...new Set([...(cov.full ?? []), ...paths])];
+  const novo: StageBCoverage = {
+    ...cov,
+    full,
+    outlineOnly: (cov.outlineOnly ?? []).filter((p) => !paths.includes(p)),
+    fullShas: { ...(cov.fullShas ?? {}), ...pend },
+    notMeasured: (cov.notMeasured ?? []).filter((n) => !paths.includes(n.file)),
+  };
+  delete novo.pendingFullShas;
+  if ((novo.notMeasured ?? []).length === 0) delete novo.notMeasured;
+  await pool.query(
+    "UPDATE spec_validation_runs SET stage_b_coverage = $2::jsonb WHERE id = $1",
+    [runId, JSON.stringify(novo)],
+  ).catch((e) => console.warn(`[spec-validation] run ${String(runId).slice(0, 8)}: cobertura do lote recuperado não regravada (${e instanceof Error ? e.message : String(e)}).`));
+}
+
 async function processValidationRun(pool: Pool, runId: string, projectId: string, startHash: string): Promise<void> {
   const current = await computeCurrentSpecHash(pool, projectId);
   const files = current?.files ?? [];
@@ -726,8 +775,14 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   // medida — e quem compara contagens entre validações (o modo autônomo) precisa saber disso. Zero
   // findings de B não distingue "B não rodou" de "B rodou e não achou nada": o fato tem de ser dito.
   let stageBRan = false;
+  /**
+   * 🔴 C7 — arquivo que ENTROU num lote do estágio B e cuja leitura NÃO voltou. É o estado `nao_medido`
+   * da §3 do plano: não é fechado, não é "trabalhado", e não pode virar ausência silenciosa. Vai para
+   * `stage_b_coverage.notMeasured` com o motivo, e o arquivo continua pendente no acumulado.
+   */
+  const naoMedido: Array<{ file: string; reason: string }> = [];
   if (!hasStageABlocker && files.length > 0) {
-    const { buildValidationInput } = await import("./specValidationInput.js");
+    const { partitionValidationInput } = await import("./specValidationInput.js");
     const judged = await loadJudgedShas(pool, projectId);
     const lastWrite = await loadLastWrites(pool, projectId);
     const candidates = files
@@ -741,46 +796,112 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
           pendingSince: lastWrite.get(path) ?? null,
         };
       });
-    const input = buildValidationInput(candidates);
+    // 🔴 C3 (D4): a spec vira N LOTES que cabem INTEIROS, em vez de uma janela só que encolhia
+    // conforme a spec crescia (medido: `full` 3→3→2→2 de 12 arquivos). Spec que cabe numa chamada
+    // continua sendo UMA chamada — `partitionValidationInput` devolve um lote só nesse caso.
+    const lotes = partitionValidationInput(candidates);
+    const primeiro = lotes[0];
     const shaOf = new Map(candidates.map((c) => [c.path, c.sha]));
-    const fullShas: Record<string, string> = {};
-    for (const p of input.full) fullShas[p] = shaOf.get(p) ?? "";
+    const shasDe = (paths: string[]): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const p of paths) out[p] = shaOf.get(p) ?? "";
+      return out;
+    };
+    /** União dos arquivos que ALGUM lote leva integral (o que esta validação se propõe a cobrir). */
+    const planejados = [...new Set(lotes.flatMap((l) => l.full))];
     // 🔴 GAP-17/GAP-18: aqui existia um finding SINTÉTICO ("spec maior que a janela"). Ele contava
     // como GAP 🟡 ATIVO — sustentava rodada nova do modo autônomo —, nascia com `file: ""` e por isso
     // ia ao roteador LLM em TODA validação (medido em prod: uma chamada `opus-5` por rodada só para
     // apontá-lo ao arquivo primário), onde o CTO-editor não tinha como resolvê-lo: não é defeito da
     // spec, é propriedade da MEDIÇÃO. Com ele na lista, "GAPs = 0" era inalcançável por construção.
     // Fato de medição vira METADADO da run (como o `stage_b_ran` do GAP-13), não achado.
-    const coverage = {
-      full: input.full, outlineOnly: input.outlineOnly, oversized: input.oversized,
-      totalChars: input.totalChars, cap: input.cap, fullShas,
+    const gravaCobertura = async (cov: Record<string, unknown>): Promise<void> => {
+      await pool.query(
+        "UPDATE spec_validation_runs SET stage_b_coverage = $2::jsonb WHERE id = $1",
+        [runId, JSON.stringify(cov)],
+      ).catch((e) => console.warn(`[spec-validation] run ${runId}: stage_b_coverage não gravada (${e instanceof Error ? e.message : String(e)}) — o laço autônomo tratará a cobertura como desconhecida.`));
     };
-    await pool.query(
-      "UPDATE spec_validation_runs SET stage_b_coverage = $2::jsonb WHERE id = $1",
-      [runId, JSON.stringify(coverage)],
-    ).catch((e) => console.warn(`[spec-validation] run ${runId}: stage_b_coverage não gravada (${e instanceof Error ? e.message : String(e)}) — o laço autônomo tratará a cobertura como desconhecida.`));
-    if (input.outlineOnly.length > 0) {
+    const base = {
+      oversized: primeiro.oversized, totalChars: primeiro.totalChars, cap: primeiro.cap,
+      batches: lotes.length,
+    };
+    // A cobertura PLANEJADA é gravada antes de gastar LLM (como antes deste GAP): se a api morrer no
+    // meio, a linha já diz o que esta run se propôs a ler. O que vale como "julgado" nunca vem daqui —
+    // vem de `markFilesJudged`, que só roda com resultado na mão.
+    await gravaCobertura({
+      ...base, full: planejados,
+      outlineOnly: candidates.map((c) => c.path).filter((p) => !planejados.includes(p)),
+      fullShas: shasDe(planejados),
+    });
+    const foraDeTodos = candidates.map((c) => c.path).filter((p) => !planejados.includes(p));
+    if (foraDeTodos.length > 0) {
       // GAP-10: o humano tem de VER que a spec passou do que cabe numa validação — antes isso era
       // um `slice` silencioso e o sintoma chegava como blocker falso de "arquivo ausente".
-      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${input.totalChars} chars > teto de janela (${input.cap}) — ${input.full.length} arquivo(s) integrais, ${input.outlineOnly.length} só em sumário: ${input.outlineOnly.join(", ")}`);
+      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${primeiro.totalChars} chars e teto de janela ${primeiro.cap} — ${lotes.length} lote(s) cobrem ${planejados.length} arquivo(s) integrais; ${foraDeTodos.length} fora de todos os lotes: ${foraDeTodos.join(", ")}`);
+    } else if (lotes.length > 1) {
+      console.log(`[spec-validation] ${projectId.slice(0, 8)}: spec com ${primeiro.totalChars} chars > teto de janela (${primeiro.cap}) — ${lotes.length} lote(s) de estágio B cobrem os ${planejados.length} arquivo(s) por INTEIRO nesta validação (C3).`);
     }
-    // GAP-39: os GAPs hoje ATIVOS, restritos aos arquivos que esta validação lê por INTEIRO, viajam
-    // com a spec para que o juiz reutilize o anchor do defeito que reencontrar. Falha aqui não pode
-    // derrubar a validação — sem a lista o comportamento é o anterior (identidade por redação).
-    const known = await projectFindingsState(pool, projectId, { currentFiles: candidates.map((c) => c.path) })
-      .then((st) => knownFindingsForJudge(st.findings, input.full))
+    // GAP-39: os GAPs hoje ATIVOS, restritos aos arquivos que o LOTE lê por INTEIRO, viajam com a spec
+    // para que o juiz reutilize o anchor do defeito que reencontrar. Falha aqui não pode derrubar a
+    // validação — sem a lista o comportamento é o anterior (identidade por redação).
+    const ativos = await projectFindingsState(pool, projectId, { currentFiles: candidates.map((c) => c.path) })
+      .then((st) => st.findings)
       .catch((e) => {
         console.warn(`[spec-validation] run ${runId}: lista de continuidade não montada (${e instanceof Error ? e.message : String(e)}) — juiz sem anchors anteriores.`);
-        return [] as Array<{ file: string; anchor: string; title: string; severity: string }>;
+        return [] as Awaited<ReturnType<typeof projectFindingsState>>["findings"];
       });
-    if (known.length) console.log(`[spec-validation] run ${runId}: ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
-    const b = await runStageB(pool, runId, projectId, input.text, known);
-    findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
-    stageBError = b.error;
-    stageBRan = !b.error;
-    // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
-    // (GAP-11): resultado pago que chega depois também cobre esses arquivos.
-    if (stageBRan) await markFilesJudged(pool, projectId, fullShas);
+
+    const medidos: string[] = [];
+    let pendente: { erro: string; shas: Record<string, string> } | null = null;
+    let primeiroErro: string | undefined;
+    for (const [i, lote] of lotes.entries()) {
+      const rotulo = lotes.length > 1 ? ` lote ${i + 1}/${lotes.length}` : "";
+      // 🔴 C7 — um lote que ficou PENDENTE de coleta interrompe o despacho: `agents_job_id` é uma
+      // coluna só, e sobrescrevê-la jogaria no lixo uma leitura adversarial JÁ PAGA (é o GAP-11).
+      // Os arquivos dos lotes que não foram despachados ficam `nao_medido` VISÍVEL — nunca ausência
+      // silenciosa. Eles seguem pendentes no acumulado, então a validação seguinte os pega.
+      if (pendente) {
+        for (const p of lote.full) naoMedido.push({ file: p, reason: `lote não despachado: o${rotulo} anterior ficou pendente de coleta` });
+        continue;
+      }
+      const known = knownFindingsForJudge(ativos, lote.full);
+      if (known.length) console.log(`[spec-validation] run ${runId}:${rotulo} ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
+      const b = await runStageB(pool, runId, projectId, lote.text, known);
+      if (b.error) {
+        primeiroErro ??= b.error;
+        // C7: a falha é do LOTE, e ela nomeia os arquivos que ficaram sem medição neste conteúdo.
+        for (const p of lote.full) naoMedido.push({ file: p, reason: b.error });
+        if (b.pending) pendente = { erro: b.error, shas: shasDe(lote.full) };
+        console.warn(`[spec-validation] run ${runId}:${rotulo} estágio B não mediu ${lote.full.length} arquivo(s) (${b.error}).`);
+        continue;
+      }
+      findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
+      stageBRan = true;
+      medidos.push(...lote.full);
+      // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
+      // (GAP-11): resultado pago que chega depois também cobre esses arquivos.
+      await markFilesJudged(pool, projectId, shasDe(lote.full));
+    }
+
+    // 🔴 C7 — o que a run pode dizer de si: `error` só quando NENHUM lote mediu (aí a validação não
+    // aconteceu) ou quando há resultado PENDENTE (aí o coletor precisa reencontrar a run, e o filtro
+    // dele é o status). Lote que falhou de forma definitiva com outros medidos NÃO derruba a
+    // validação — ele aparece como `notMeasured`, que é o estado honesto: nem fechado, nem trabalhado.
+    stageBError = pendente ? pendente.erro : stageBRan ? undefined : primeiroErro;
+    await gravaCobertura({
+      ...base, full: medidos,
+      outlineOnly: candidates.map((c) => c.path).filter((p) => !medidos.includes(p)),
+      fullShas: shasDe(medidos),
+      // Só o coletor consome: são os arquivos cujo resultado ainda pode chegar. Sem separar isto de
+      // `fullShas`, uma recuperação marcaria como julgados também os arquivos de lotes que falharam.
+      ...(pendente ? { pendingFullShas: pendente.shas } : {}),
+      ...(naoMedido.length ? { notMeasured: naoMedido } : {}),
+    });
+    // O assunto do estágio B só se encerra quando não há nada pendente de coleta (GAP-11).
+    if (!pendente) await markStageBCollected(pool, runId);
+    if (naoMedido.length > 0) {
+      console.log(`[spec-validation] run ${runId}: ${naoMedido.length} arquivo(s) NÃO MEDIDOS nesta validação — ${naoMedido.map((n) => n.file).join(", ")}. Eles seguem pendentes no acumulado (não contam como julgados nem como fechados).`);
+    }
   }
 
   // ── Estágio O (F3, item 3A): o que a EXECUÇÃO REAL do produto já provou ───────────────────────
@@ -1058,9 +1179,19 @@ export async function collectStageBResults(
       }
       // GAP-18: o resultado recuperado julgou os MESMOS arquivos que a run mandou — a cobertura conta
       // (o sha guardado é o do texto julgado, então arquivo editado no meio não é marcado como visto).
-      const cov = (r.stage_b_coverage ?? null) as { fullShas?: Record<string, string> } | null;
-      if (r.project_id && cov?.fullShas && Object.keys(cov.fullShas).length > 0) {
-        await markFilesJudged(pool, String(r.project_id), cov.fullShas);
+      //
+      // 🔴 C3: com a spec em LOTES, o `agents_job_id` pendente é de UM lote — e só os arquivos DELE
+      // podem ser marcados como julgados por este resultado. `pendingFullShas` é exatamente esse
+      // recorte; sem ele, recuperar um lote marcaria como julgados também os arquivos dos lotes que
+      // falharam. Cobertura antiga (uma chamada só) não tem o campo e continua caindo em `fullShas`.
+      const cov = (r.stage_b_coverage ?? null) as { fullShas?: Record<string, string>; pendingFullShas?: Record<string, string> } | null;
+      const devidos = cov?.pendingFullShas ?? cov?.fullShas;
+      if (r.project_id && devidos && Object.keys(devidos).length > 0) {
+        await markFilesJudged(pool, String(r.project_id), devidos);
+        // C3: o lote recuperado passa a contar como MEDIDO na cobertura da run — é o que faz
+        // `unionFindingsByCoverage` saber que estes arquivos foram olhados nesta run (GAP-20) e o que
+        // tira estes arquivos de `notMeasured`. Sem isto a coluna diria que ninguém os leu.
+        if (cov?.pendingFullShas) await mergeRecoveredCoverage(pool, r.id, cov as StageBCoverage);
       }
       out.collected += 1;
       // A CAUSA da recuperação muda o diagnóstico: órfã adotada aponta para restart da api;

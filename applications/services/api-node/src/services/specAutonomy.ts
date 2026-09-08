@@ -983,6 +983,9 @@ async function startWholeRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
   const gaps = await currentGaps(db, run.projectId);
   if (gaps.important === 0) {
+    // 🔴 C4: mesma regra do tick por arquivo. No modo `whole` a spec é um arquivo só, então o caso
+    // comum é a cobertura já fechar — o que este freio pega é o arquivo que o juiz nunca leu inteiro.
+    if (await freiaZeroSemCobertura(db, run, gaps, false)) return true;
     await finishRun(db, run, "succeeded",
       `Nenhum GAP vermelho ou amarelo ATIVO restante${gaps.info ? ` (${gaps.info} item(ns) de baixo risco seguem em aberto, por desenho)` : ""}.`, { gaps });
     return true;
@@ -1967,6 +1970,9 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   }
   const gaps = await currentGaps(db, run.projectId);
   if (gaps.important === 0) {
+    // 🔴 C4: antes de qualquer desfecho de sucesso, a cobertura tem de fechar. Zero sobre parte da
+    // spec não é zero — é desconhecido. (O tick `validating` já fazia isso desde o GAP-19.)
+    if (await freiaZeroSemCobertura(db, run, gaps, true)) return true;
     // Feature dos DESENHOS (Jean, 2026-09-08): zero GAP importante é o instante em que "o modelo de
     // arquitetura fechou". Se o documento de diagramas ainda não existe, o laço paga UMA rodada para
     // criá-lo antes de encerrar — desenhar antes seria desenhar uma arquitetura que ainda mudava.
@@ -2903,6 +2909,85 @@ export function readStageBCoverage(raw: unknown): StageBCoverage | null {
   if (!Array.isArray(o.full) && !Array.isArray(o.outlineOnly)) return null;
   const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
   return { full: arr(o.full), outlineOnly: arr(o.outlineOnly), oversized: arr(o.oversized) };
+}
+
+/**
+ * 🔴 C4 (D5) — "zero GAP" só pode ser dito sobre 100% da spec, em QUALQUER ponto do laço.
+ *
+ * O tick `validating` já aplicava esta regra desde o GAP-19. Os ticks `pending` (fila por arquivo) e
+ * `whole` não: eles declaravam `succeeded` no instante em que `gaps.important === 0`, sem olhar a
+ * cobertura acumulada. É a mesma família do GAP-19 vista de outro ponto de entrada — e como o laço
+ * pode chegar ao `pending` logo depois de uma validação de cobertura PARCIAL, "zero" ali significaria
+ * "zero no pedaço que alguém olhou".
+ *
+ * `null` = cobertura não rastreada neste projeto (`trackedCoverageState`, regra do GAP-21) ⇒ quem
+ * chama mantém o comportamento legado. Não invento cobertura que não medi.
+ */
+async function coberturaAcumulada(
+  db: Db, projectId: string,
+): Promise<{ pendentes: string[]; grandes: string[]; judged: number; total: number } | null> {
+  const { trackedCoverageState } = await import("./specValidation.js");
+  const estado = await trackedCoverageState(db, projectId).catch(() => null);
+  if (!estado) return null;
+  const row = (await db.query(
+    `SELECT stage_b_coverage FROM spec_validation_runs
+      WHERE project_id = $1 AND stage_b_coverage IS NOT NULL
+      ORDER BY created_at DESC LIMIT 1`,
+    [projectId],
+  ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }))).rows[0] as { stage_b_coverage?: unknown } | undefined;
+  const over = readStageBCoverage(row?.stage_b_coverage)?.oversized ?? [];
+  return {
+    pendentes: estado.unjudged.filter((p) => !over.includes(p)),
+    grandes: estado.unjudged.filter((p) => over.includes(p)),
+    judged: estado.judged, total: estado.total,
+  };
+}
+
+/**
+ * 🔴 C4 — o freio de "zero" antes de encerrar por 0 GAP importante nos ticks `pending`/`whole`.
+ *
+ * `true` = a cobertura NÃO fecha e este tick já tratou o assunto (mandou validar o que falta antes de
+ * qualquer desfecho). `false` = pode seguir para o desfecho de sucesso — e, quando o que falta é
+ * arquivo que não cabe numa janela nem sozinho, seguir é legítimo mas o fato vai DECLARADO no chat.
+ *
+ * Revalidar é o desfecho certo porque, com o estágio B em LOTES (C3), uma validação cobre a spec
+ * inteira: o que antes exigia N validações em rotação agora fecha em uma. E o contador de passe/rodada
+ * é incrementado aqui de propósito — sem isso o laço poderia revalidar para sempre; com ele, o teto
+ * do Jean (`maxRounds`) continua sendo o freio, e o tick `validating` cuida do `exhausted`.
+ */
+async function freiaZeroSemCobertura(
+  db: Db, run: AutonomyRun, gaps: GapTally, perFile: boolean,
+): Promise<boolean> {
+  const cob = await coberturaAcumulada(db, run.projectId);
+  if (!cob || cob.pendentes.length === 0) {
+    if (cob && cob.grandes.length > 0) {
+      // Não cabe nem sozinho: rotação nenhuma resolve, e a decisão de dividir é do humano. Declarar o
+      // fato é obrigatório — encerrar em silêncio aqui seria dizer "spec sem GAP" sobre parte dela.
+      await postChatNote(db, run,
+        `⚠️ ${cob.grandes.length} arquivo(s) da spec nunca foram julgados por inteiro porque não cabem numa janela de validação nem sozinhos: ${cob.grandes.map((p) => `\`${p}\``).join(", ")}. O zero de GAPs vale para os ${cob.judged} arquivo(s) medidos — use a ação **Dividir** da Bancada para que o resto também seja julgado.`);
+    }
+    return false;
+  }
+  // Por que NÃO existe aqui um caminho de `exhausted` por teto: os dois ticks que chamam este freio já
+  // checaram `passes`/`round` contra `maxRounds` na PRIMEIRA linha, e nesse caso encerram `exhausted`
+  // sem passar por aqui. Duplicar a checagem seria um ramo inalcançável fingindo proteger algo. O que
+  // garante a TERMINAÇÃO é o incremento abaixo: cada freio gasta um passe/rodada, então o teto do Jean
+  // chega — e o desfecho por teto nunca é `succeeded`.
+  const claim = await db.query(
+    `UPDATE spec_autonomy_runs
+        SET status = 'validating', validation_run_id = NULL, gaps_current = $2,
+            ${perFile ? "passes = passes + 1, files_done = '[]'::jsonb, current_file = NULL," : "round = round + 1,"}
+            updated_at = now()
+      WHERE id = $1 AND status = 'pending'`,
+    [run.id, gaps.important],
+  );
+  if ((claim.rowCount ?? 0) === 0) return true; // outro tick assumiu; nada a fazer aqui
+  await postChatNote(db, run,
+    `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — mas ${cob.pendentes.length} de ${cob.total} arquivo(s) da spec ainda não passaram por um juiz neste conteúdo. **Não declaro a spec validada com base em parte dela**: vou validar o que falta (${cob.pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${cob.pendentes.length > 4 ? " e os demais" : ""}) antes de encerrar.`);
+  console.info(`[SpecAutonomy] run=${run.id} 0 GAP importante mas cobertura ACUMULADA incompleta (${cob.pendentes.length}/${cob.total} nunca julgados) — validando antes de declarar sucesso (C4).`);
+  const fresh = (await getAutonomyRun(db, run.id))!;
+  await kickValidation(db, fresh);
+  return true;
 }
 
 /** Cobertura da validação ANTERIOR do mesmo projeto — para saber se a superfície medida MUDOU. */

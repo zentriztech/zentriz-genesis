@@ -57,6 +57,24 @@ export const VALIDATION_INPUT_CAP = (() => {
 /** Teto do sumário de UM arquivo, para um arquivo com centenas de seções não comer o inventário. */
 export const VALIDATION_OUTLINE_CAP = 6_000;
 
+/**
+ * 🔴 C3 — quantas chamadas de estágio B UMA validação pode gastar para cobrir a spec.
+ *
+ * Existe porque cobertura completa não pode custar ilimitado: com `cap` de 400.000 chars e ~70.000 de
+ * moldura (inventário + todos os sumários), cada lote leva ~330.000 chars integrais, então 6 lotes
+ * cobrem ~2 milhões — cinco vezes a spec medida do NVX LastMile (950.965 chars em 12 arquivos, 3 lotes).
+ * Spec maior que isso não é coberta numa validação só: os arquivos que sobram ficam `outlineOnly` e
+ * **seguem pendentes** no acumulado (`stage_b_full_sha`), então a validação seguinte os pega — é o
+ * mesmo mecanismo de rotação do GAP-18, agora como exceção em vez de regra.
+ *
+ * `SPEC_STAGE_B_MAX_BATCHES=1` reproduz exatamente o comportamento anterior a este GAP (uma chamada só),
+ * que é o botão de rollback sem deploy.
+ */
+export const STAGE_B_MAX_BATCHES = (() => {
+  const raw = parseInt((process.env.SPEC_STAGE_B_MAX_BATCHES ?? "").trim(), 10);
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(raw, 24) : 6;
+})();
+
 export interface ValidationInputFile {
   /** Caminho relativo como o validador deve citá-lo (`rel_dir/filename`). */
   path: string;
@@ -178,6 +196,14 @@ function inventory(
 export function buildValidationInput(
   files: ValidationInputFile[],
   cap: number = VALIDATION_INPUT_CAP,
+  /**
+   * 🔴 C3 — quais arquivos podem ser promovidos a INTEGRAL nesta chamada. Ausente = todos (o
+   * comportamento de sempre, byte-idêntico). É o único parâmetro que o `partitionValidationInput`
+   * precisa para fatiar a spec em lotes sem duplicar a aritmética de orçamento: cada lote é esta
+   * mesma função com um conjunto elegível diferente, então inventário, molduras, regras anti-fantasma
+   * e teto continuam sendo os mesmos, medidos no mesmo lugar.
+   */
+  eligible?: ReadonlySet<string>,
 ): ValidationInput {
   const totalChars = files.reduce((n, f) => n + f.content.length, 0);
   const outlines = new Map(files.map((f) => [f.path, outlineOf(f.content)]));
@@ -209,8 +235,9 @@ export function buildValidationInput(
     if (pb) return 1;
     return bySize(a, b);
   };
-  const naoJulgados = files.filter((f) => f.judged !== true).sort(byPendingThenSize);
-  const jaJulgados = files.filter((f) => f.judged === true).sort(bySize);
+  const promovivel = (f: ValidationInputFile) => !eligible || eligible.has(f.path);
+  const naoJulgados = files.filter((f) => f.judged !== true && promovivel(f)).sort(byPendingThenSize);
+  const jaJulgados = files.filter((f) => f.judged === true && promovivel(f)).sort(bySize);
   for (const f of [...naoJulgados, ...jaJulgados]) {
     const delta = frame(f, true).length - frame(f, false).length;
     if (spent + delta > cap) continue;
@@ -232,4 +259,54 @@ export function buildValidationInput(
     cap,
     oversized,
   };
+}
+
+/**
+ * 🔴 C3 (D4) — a cobertura do juiz ENCOLHIA conforme a spec crescia. Uma validação passa a ser N
+ * chamadas, cada uma com um LOTE de arquivos integrais, até a spec inteira ter sido lida por inteiro.
+ *
+ * ## O que foi medido (NVX LastMile, prod, 4 validações da run `b78d0c88`)
+ *
+ * Spec de 950.965 chars em 12 arquivos contra um teto de 400.000. Os arquivos que o laço reescreve em
+ * todo passe voltam para a frente da fila de medição (correto isoladamente, é o GAP-42) e consomem
+ * 333k dos 400k ⇒ `stage_b_coverage.full` foi **3 → 3 → 2 → 2 de 12**. Consequência: 10 arquivos só em
+ * sumário, e **GAP de arquivo não lido não fecha nem confirma** — fica ativo para sempre, o que sozinho
+ * explica por que a contagem de GAPs não caía em 24 rodadas.
+ *
+ * ## A regra
+ *
+ * Uma chamada por LOTE que caiba INTEIRO (a Fábrica já lê a spec assim desde o GAP-54): o 1º lote é
+ * exatamente o que a função de sempre escolheria — logo, **spec que cabe numa chamada continua sendo
+ * uma chamada, byte a byte** — e cada lote seguinte só torna elegíveis os arquivos que nenhum lote
+ * anterior levou integral. Todos os lotes carregam o inventário COMPLETO e as regras anti-fantasma, então
+ * nenhum lote pode concluir que um arquivo "não existe" por não estar integral ali.
+ *
+ * O que este particionador NÃO faz: escolher o que é relevante, dividir arquivo, ou decidir severidade.
+ * Ele reparte por FATO (tamanho e teto). Preço declarado: N chamadas de LLM em vez de 1 — medido e
+ * declarado no `stage_b_coverage` (`batches`), limitado por `STAGE_B_MAX_BATCHES`.
+ *
+ * `oversized` (arquivo que não cabe nem sozinho) fica fora de todos os lotes: promovê-lo é
+ * impossível por construção e insistir seria laço infinito. Quem resolve é a divisão do arquivo.
+ */
+export function partitionValidationInput(
+  files: ValidationInputFile[],
+  cap: number = VALIDATION_INPUT_CAP,
+  maxBatches: number = STAGE_B_MAX_BATCHES,
+): ValidationInput[] {
+  const primeiro = buildValidationInput(files, cap);
+  // Cabe tudo (ou o que não cabe não cabe nem sozinho): uma chamada, idêntica à de antes deste GAP.
+  const faltando = primeiro.outlineOnly.filter((p) => !primeiro.oversized.includes(p));
+  if (faltando.length === 0 || maxBatches <= 1) return [primeiro];
+
+  const lotes = [primeiro];
+  let restantes = faltando;
+  while (restantes.length > 0 && lotes.length < maxBatches) {
+    const lote = buildValidationInput(files, cap, new Set(restantes));
+    // Nada promovível: sem isto um arquivo que só cabe junto com a moldura de outro laçaria para sempre.
+    if (lote.full.length === 0) break;
+    lotes.push(lote);
+    const feitos = new Set(lote.full);
+    restantes = restantes.filter((p) => !feitos.has(p));
+  }
+  return lotes;
 }

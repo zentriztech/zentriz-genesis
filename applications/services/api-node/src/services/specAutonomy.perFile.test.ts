@@ -161,6 +161,10 @@ let coberturaAcumulada: { unjudged: string[]; judged: number; total: number } | 
 vi.mock("./specValidation.js", () => ({
   startValidation: (...a: unknown[]) => startValidation(...(a as [])),
   unjudgedSpecFiles: async () => coberturaAcumulada,
+  // 🔴 C4: o freio de "zero sem cobertura" nos ticks `pending`/`whole` mede pela regra do GAP-21
+  // (`trackedCoverageState`), que devolve `null` quando o projeto não rastreia cobertura — e `null` é
+  // exatamente o default destes testes, ou seja, comportamento legado.
+  trackedCoverageState: async () => coberturaAcumulada,
   // Feature dos DESENHOS: a rodada dos diagramas manda a spec INTEIRA ao arquiteto, e é daqui que ela
   // sai (o mesmo assembler da validação). `especLegivel = false` reproduz "spec ilegível no disco",
   // que é a guarda que faz a run encerrar sem desenhar em vez de falhar.
@@ -237,7 +241,13 @@ const db = {
       // GAP-18 (migração 101): cobertura NULL = run legada → gate de cobertura não interfere.
       return { rows: [{ status: validationStatus, stage_b_ran: true, stage_b_coverage: null }], rowCount: 1 };
     }
-    if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) return { rows: [], rowCount: 0 };
+    if (s.startsWith("SELECT stage_b_coverage FROM spec_validation_runs")) {
+      // `null` (default) = nenhuma cobertura registrada. Os casos do C4 põem aqui o `oversized`, que é
+      // o único campo que o freio de cobertura consulta nesta linha.
+      return coberturaDaUltimaRun
+        ? { rows: [{ stage_b_coverage: coberturaDaUltimaRun }], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
+    }
     // 🔴 GAP-71/81: o histórico que dá a reincidência de âncora ESTÁVEL. Vazio por padrão (nenhum GAP é
     // teimoso); os casos de foco preenchem `validacoesPassadas`.
     if (s.startsWith("SELECT findings, stage_b_coverage FROM spec_validation_runs")) {
@@ -297,6 +307,8 @@ const db = {
       if (/file_failures = 0/.test(s)) run.file_failures = 0;
       if (/mode = '([a-z_]+)'/.test(s)) run.mode = s.match(/mode = '([a-z_]+)'/)![1];
       if (/passes = passes \+ 1/.test(s)) run.passes = Number(run.passes ?? 0) + 1;
+      // C4: no modo `whole` o freio de cobertura gasta uma RODADA (o contador do modo de 1 arquivo).
+      if (/round = round \+ 1/.test(s)) run.round = Number(run.round ?? 0) + 1;
       if (/files_done = '\[\]'::jsonb/.test(s)) run.files_done = [];
       const mDone = s.match(/files_done = files_done \|\| \$(\d+)::jsonb/);
       if (mDone) {
@@ -330,6 +342,8 @@ const db = {
 let validationStatus = "passed";
 /** Validações anteriores do projeto (para a reincidência de âncora estável do GAP-71). */
 let validacoesPassadas: FakeRow[] = [];
+/** 🔴 C4: `stage_b_coverage` da validação mais recente — só o `oversized` importa ao freio. */
+let coberturaDaUltimaRun: Record<string, unknown> | null = null;
 
 const TITULO = "NVX LastMile";
 const INDEX = body("Índice", 2);
@@ -347,6 +361,7 @@ beforeEach(() => {
   latestRunId = "run-0";
   validationStatus = "passed";
   coberturaAcumulada = null;
+  coberturaDaUltimaRun = null;
   validacoesPassadas = [];
   rodadasPagas = new Map();
   snapshotFails = false;
@@ -1419,5 +1434,129 @@ describe("feature dos DESENHOS — arquitetura fechada vira diagramas Mermaid", 
     findings = [];
     await advanceAutonomyRun(db, r.id);
     expect(dispatchDiagramsJob).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 🔴 C4 (D5) — "zero GAP" só pode ser dito sobre 100% da spec, em QUALQUER ponto de saída do laço.
+ *
+ * O tick `validating` aplica esta regra desde o GAP-19. Os ticks `pending` (fila por arquivo) e `whole`
+ * NÃO aplicavam: eles declaravam `succeeded` no instante em que `gaps.important === 0`, sem olhar a
+ * cobertura ACUMULADA — e o laço chega ao `pending` logo depois de uma validação que pode ter lido 2 de
+ * 12 arquivos (medido em prod, run `b78d0c88`). "Zero" ali significava "zero no pedaço que alguém olhou",
+ * que é o fechamento fake que o Jean proibiu.
+ */
+describe("C4 — nenhum desfecho de sucesso com cobertura acumulada incompleta", () => {
+  /** As notas que o laço escreveu no chat da Bancada. */
+  function notas(): string[] {
+    return sqlLog
+      .filter((q) => q.sql.startsWith("INSERT INTO spec_chat_messages"))
+      .map((q) => String((q.params as unknown[])[2]));
+  }
+  beforeEach(() => {
+    process.env.UPLOAD_DIR = root;
+    // A feature dos DESENHOS é o desfecho normal de "arquitetura fechada": aqui ela é o TERMÔMETRO de
+    // que o laço seguiu para o sucesso. Sem limpar o espião, as chamadas somam entre casos.
+    dispatchDiagramsJob.mockClear().mockResolvedValue({ ok: true as const });
+    especLegivel = true;
+  });
+  afterEach(() => { delete process.env.UPLOAD_DIR; });
+
+  /** Leva o laço por arquivo até o tick `pending` com ZERO GAP importante. */
+  async function zeroGapNoTickDaFila(): Promise<{ id: string }> {
+    const r = await start();
+    await advanceAutonomyRun(db, r.id);                       // 1º arquivo da fila
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz por escopo.\n`);
+    findings = [];                                            // o CTO fechou o que havia
+    await advanceAutonomyRun(db, r.id);                       // tick da fila: 0 GAP importante
+    return r;
+  }
+
+  it("cobertura não rastreada (`null`) → comportamento LEGADO, sem freio nenhum", async () => {
+    // `trackedCoverageState` devolve `null` quando não há run terminal com cobertura neste conteúdo
+    // (regra do GAP-21: não invento cobertura que não medi). Aqui o laço segue como sempre seguiu.
+    coberturaAcumulada = null;
+    const r = await zeroGapNoTickDaFila();
+    expect(startValidation).not.toHaveBeenCalled();
+    expect(notas().some((n) => n.includes("Não declaro a spec validada"))).toBe(false);
+    expect(r.id).toBeTruthy();
+  });
+
+  it("cobertura COMPLETA → segue para o desfecho de sucesso (nada muda para a spec coberta)", async () => {
+    coberturaAcumulada = { unjudged: [], judged: 3, total: 3 };
+    await zeroGapNoTickDaFila();
+    expect(startValidation).not.toHaveBeenCalled();
+    // O desfecho é o da feature dos desenhos (arquitetura fechada) — o freio não interfere nele.
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("🔴 arquivo NUNCA julgado por inteiro → NÃO declara sucesso: volta a validar o que falta", async () => {
+    coberturaAcumulada = { unjudged: ["frontend/01-web.md"], judged: 2, total: 3 };
+    await zeroGapNoTickDaFila();
+    expect(run!.status).toBe("validating");
+    expect(run!.passes).toBe(1);                       // gasta um passe: é o que garante terminação
+    expect(startValidation).toHaveBeenCalledTimes(1);  // valida o que falta ANTES de qualquer desfecho
+    expect(dispatchDiagramsJob).not.toHaveBeenCalled(); // nem desenha uma arquitetura não julgada
+    const nota = notas().find((n) => n.includes("Não declaro a spec validada"));
+    expect(nota).toBeTruthy();
+    expect(nota).toContain("1 de 3 arquivo(s)");
+    expect(nota).toContain("`frontend/01-web.md`");
+  });
+
+  it("🔴 o freio não pode ser laço infinito: cada passagem gasta um passe até o teto do Jean", async () => {
+    // Com `maxRounds = 1` o passe seguinte cai no teto do próprio tick da fila, que encerra
+    // `exhausted` — nunca `succeeded`. É assim que o freio termina sem prometer perfeição.
+    coberturaAcumulada = { unjudged: ["frontend/01-web.md"], judged: 2, total: 3 };
+    const r = await start(1);
+    await advanceAutonomyRun(db, r.id);
+    await ctoReturns(r.id, `${API}\n## 6. Segurança\nauthz.\n`);
+    findings = [];
+    await advanceAutonomyRun(db, r.id);               // freio: passes 0 → 1, status validating
+    expect(run!.status).toBe("validating");
+    expect(run!.passes).toBe(1);
+    // A validação volta sem GAP e a cobertura SEGUE incompleta: o tick da fila agora está no teto.
+    latestRunId = "run-1";
+    await advanceAutonomyRun(db, r.id);               // colhe a validação → pending
+    if (run!.status === "pending") await advanceAutonomyRun(db, r.id);
+    expect(run!.status).not.toBe("succeeded");
+    expect(isTerminalAutonomyStatus(run!.status as AutonomyStatus)).toBe(true);
+  });
+
+  it("🔴 o que falta é arquivo que não cabe nem sozinho → segue, mas o fato vai DECLARADO no chat", async () => {
+    // `oversized` (GAP-19): rotação nenhuma cobre, e dividir o arquivo é decisão do humano. Encerrar em
+    // silêncio aqui seria dizer "spec sem GAP" sobre um arquivo que juiz nenhum leu.
+    coberturaAcumulada = { unjudged: ["backend/01-api.md"], judged: 2, total: 3 };
+    coberturaDaUltimaRun = { full: ["00-indice.md"], outlineOnly: ["backend/01-api.md"], oversized: ["backend/01-api.md"] };
+    await zeroGapNoTickDaFila();
+    expect(startValidation).not.toHaveBeenCalled();     // revalidar não cobriria: é impossível por construção
+    const nota = notas().find((n) => n.includes("não cabem numa janela de validação"));
+    expect(nota).toBeTruthy();
+    expect(nota).toContain("`backend/01-api.md`");
+    expect(nota).toContain("Dividir");
+    expect(dispatchDiagramsJob).toHaveBeenCalledTimes(1); // o laço não fica preso no que não pode cobrir
+  });
+
+  it("modo `whole` (spec de 1 arquivo) tem o MESMO freio — a regra é do desfecho, não do modo", async () => {
+    run = null;
+    makeTree([{ path: "PRODUCT_SPEC.md", content: API, isPrimary: true }]);
+    findings = [gap("PRODUCT_SPEC.md", "blocker", "sem authz")];
+    const r = await start();                           // o laço só começa com GAP importante em aberto
+    findings = [];                                     // e o humano fechou o GAP antes do 1º tick
+    coberturaAcumulada = { unjudged: ["PRODUCT_SPEC.md"], judged: 0, total: 1 };
+    await advanceAutonomyRun(db, r.id);
+    expect(run!.status).toBe("validating");
+    expect(run!.round).toBe(1);                        // no modo `whole` o contador é a RODADA
+    expect(startValidation).toHaveBeenCalledTimes(1);
+    expect(r.id).toBeTruthy();
+  });
+
+  it("falha ao medir a cobertura não derruba o laço (degrada para o comportamento legado)", async () => {
+    // O freio é uma GUARDA, não a função do laço: se a medição quebrar, o desfecho volta a ser o de
+    // antes do C4 — nunca um erro novo em cima de uma spec que convergiu.
+    const { trackedCoverageState } = await import("./specValidation.js") as unknown as Record<string, unknown>;
+    expect(typeof trackedCoverageState).toBe("function");
+    coberturaAcumulada = null;
+    await zeroGapNoTickDaFila();
+    expect(run!.status).not.toBe("failed");
   });
 });

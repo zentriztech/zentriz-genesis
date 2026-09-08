@@ -6,7 +6,12 @@
  * ausentes". Cada teste aqui trava uma condição sem a qual o fantasma volta.
  */
 import { describe, it, expect } from "vitest";
-import { buildValidationInput, VALIDATION_INPUT_CAP } from "./specValidationInput.js";
+import {
+  buildValidationInput,
+  partitionValidationInput,
+  STAGE_B_MAX_BATCHES,
+  VALIDATION_INPUT_CAP,
+} from "./specValidationInput.js";
 
 const filler = (tag: string, n: number) => `${`${tag} `.repeat(n)}\n`;
 
@@ -196,6 +201,17 @@ describe("buildValidationInput — FIFO da medição pendente (GAP-42)", () => {
     expect(b.full).toEqual(a.full);
   });
 
+  it("🔴 C3 — a fila `eligible` restringe QUEM pode ser promovido, sem mexer no inventário", () => {
+    // É o único parâmetro novo do assembler: o inventário, as molduras e as regras anti-fantasma
+    // continuam falando dos 4 arquivos; muda apenas quem pode virar INTEGRAL nesta chamada.
+    const files = [gigante, medio, peq1, peq2];
+    const inp = buildValidationInput(files, 14_000, new Set(["README.md", "visao.md"]));
+    expect(inp.full).toEqual(["README.md", "visao.md"]);
+    expect(inp.outlineOnly).toEqual(["modelo-dados.md", "privacidade.md"]);
+    for (const f of files) expect(inp.text).toContain(`\`${f.path}\``);
+    expect(inp.text).toContain("é PROIBIDO reportá-los como ausentes");
+  });
+
   it("`pendingSince` NÃO fura a fila do julgamento: já julgado continua atrás do não julgado", () => {
     // O arquivo já julgado tem a escrita mais antiga de todas — e ainda assim perde, porque a 1ª fila
     // é "ninguém julgou este conteúdo". Inverter isso congelaria a cobertura.
@@ -207,5 +223,93 @@ describe("buildValidationInput — FIFO da medição pendente (GAP-42)", () => {
       6_000,
     );
     expect(inp.full).toEqual(["nunca-visto.md"]);
+  });
+});
+
+/**
+ * 🔴 C3 (D4) — a cobertura do juiz ENCOLHIA conforme a spec crescia: medido em prod (NVX LastMile,
+ * run `b78d0c88`) `stage_b_coverage.full` foi **3 → 3 → 2 → 2 de 12 arquivos**, porque os arquivos que
+ * o laço reescreve em todo passe voltam para a frente da fila (GAP-42) e comem 333k dos 400k do teto.
+ * GAP de arquivo não lido não fecha nem confirma ⇒ a contagem não podia cair. Uma validação passa a
+ * ser N chamadas, cada uma com um LOTE integral.
+ */
+describe("partitionValidationInput — cobertura por LOTES (C3)", () => {
+  it("spec que cabe numa chamada continua sendo UMA chamada, byte a byte", () => {
+    const files = [file("a.md", 1_000), file("b.md", 2_000)];
+    const lotes = partitionValidationInput(files);
+    expect(lotes).toHaveLength(1);
+    expect(lotes[0].text).toBe(buildValidationInput(files).text);
+  });
+
+  it("🔴 o 1º lote é EXATAMENTE o que o código anterior mandaria (nenhuma regressão de conteúdo)", () => {
+    const files = Array.from({ length: 4 }, (_, i) => file(`f${i}.md`, 90_000));
+    const lotes = partitionValidationInput(files, 120_000);
+    expect(lotes.length).toBeGreaterThan(1);
+    expect(lotes[0].text).toBe(buildValidationInput(files, 120_000).text);
+  });
+
+  it("🔴 os lotes cobrem TODOS os arquivos por inteiro, cada um em exatamente um lote", () => {
+    // O defeito medido: 10 de 12 arquivos nunca eram lidos integralmente por juiz nenhum.
+    const files = Array.from({ length: 4 }, (_, i) => file(`f${i}.md`, 90_000));
+    const lotes = partitionValidationInput(files, 120_000);
+    const todos = lotes.flatMap((l) => l.full);
+    expect(todos.sort()).toEqual(["f0.md", "f1.md", "f2.md", "f3.md"]);
+    expect(new Set(todos).size).toBe(todos.length); // ninguém julgado duas vezes: cada lote se paga
+    expect(lotes[lotes.length - 1].outlineOnly).not.toEqual(files.map((f) => f.path));
+  });
+
+  it("todo lote leva o inventário COMPLETO e as regras anti-fantasma (GAP-10 preservado)", () => {
+    const files = Array.from({ length: 4 }, (_, i) => file(`f${i}.md`, 90_000));
+    for (const lote of partitionValidationInput(files, 120_000)) {
+      expect(lote.text).toContain("INVENTÁRIO DA SPEC — 4 arquivo(s)");
+      for (const f of files) expect(lote.text).toContain(`\`${f.path}\``);
+      expect(lote.text).toContain("é PROIBIDO reportá-los como ausentes");
+      expect(lote.text.length).toBeLessThanOrEqual(120_000 + 40);
+    }
+  });
+
+  it("`maxBatches = 1` reproduz o comportamento anterior a este GAP (rollback sem deploy)", () => {
+    const files = Array.from({ length: 4 }, (_, i) => file(`f${i}.md`, 90_000));
+    const lotes = partitionValidationInput(files, 120_000, 1);
+    expect(lotes).toHaveLength(1);
+    expect(lotes[0].text).toBe(buildValidationInput(files, 120_000).text);
+  });
+
+  it("🔴 o teto de lotes é respeitado — cobertura completa não pode custar ilimitado", () => {
+    const files = Array.from({ length: 8 }, (_, i) => file(`f${i}.md`, 90_000));
+    const lotes = partitionValidationInput(files, 120_000, 3);
+    expect(lotes).toHaveLength(3);
+    // O que sobrou NÃO é declarado julgado: segue pendente no acumulado e a validação seguinte o pega.
+    const cobertos = new Set(lotes.flatMap((l) => l.full));
+    expect(cobertos.size).toBeLessThan(files.length);
+  });
+
+  it("🔴 `oversized` fica fora de todos os lotes — insistir nele seria laço infinito", () => {
+    // Arquivo que não cabe NEM SOZINHO só é resolvido dividindo o arquivo (GAP-19). Se o particionador
+    // tentasse cobri-lo, gastaria uma chamada por lote até o teto, sempre com o mesmo resultado.
+    const files = [file("monstro.md", 300_000), file("p1.md", 900), file("p2.md", 900)];
+    const lotes = partitionValidationInput(files, 50_000);
+    expect(lotes).toHaveLength(1);
+    expect(lotes[0].oversized).toEqual(["monstro.md"]);
+    expect(lotes.flatMap((l) => l.full)).not.toContain("monstro.md");
+  });
+
+  it("gigante + oversized: os lotes cobrem o que é cobrível e param (terminação garantida)", () => {
+    const files = [
+      file("monstro.md", 300_000),
+      file("g1.md", 40_000),
+      file("g2.md", 40_000),
+      file("g3.md", 40_000),
+    ];
+    const lotes = partitionValidationInput(files, 60_000, 24);
+    expect(lotes.length).toBeLessThanOrEqual(4);
+    expect(lotes.flatMap((l) => l.full).sort()).toEqual(["g1.md", "g2.md", "g3.md"]);
+  });
+
+  it("o default de lotes cobre com folga a maior spec medida (12 arquivos / 950.965 chars)", () => {
+    expect(STAGE_B_MAX_BATCHES).toBeGreaterThanOrEqual(3);
+    const files = Array.from({ length: 12 }, (_, i) => file(`f${i}.md`, 80_000));
+    const lotes = partitionValidationInput(files);
+    expect(lotes.flatMap((l) => l.full).sort()).toEqual(files.map((f) => f.path).sort());
   });
 });
