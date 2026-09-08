@@ -769,7 +769,10 @@ export async function persistVerdicts(
  * `null` mudo faz as três parecerem a mesma coisa. Foi exatamente o que custou uma prova em prod.
  */
 export type PolicyAgentOutcome =
-  | { ok: true; text: string; model: string }
+  // `model` é a frase para humano ("usado (pedido X)"); `modelUsedRaw` é o id NU do modelo que de fato
+  // respondeu. GAP-98: quem afirma "outra família" precisa comparar com o que RODOU, não com o pedido —
+  // um pedido silenciosamente ignorado é exatamente como a garantia cross-family se perde sem aviso.
+  | { ok: true; text: string; model: string; modelUsedRaw: string }
   | { ok: false; why: string };
 
 /**
@@ -818,8 +821,13 @@ export async function callPolicyAgent(args: {
       user_message: args.user,
       max_tokens: budget,
       temperature: 0,
-      ...(args.modelId ? { model_id: args.modelId } : {}),
       ...(args.llm ?? {}),
+      // GAP-98: `model_id` EXPLÍCITO vence o do tenant, e por isso vem DEPOIS do spread de `llm`.
+      // Medido em prod (F4, 2026-09-08): com a ordem invertida, o casador pedido em outra família
+      // (`amazon.nova-pro-v1:0`) rodava em `us.anthropic.claude-opus-5` — o modelo do PRÓPRIO juiz.
+      // A medição virava auto-revisão (que a pesquisa mede como ZERO ganho) sem nada avisar. O
+      // `llm_config` do tenant continua valendo: só o modelo é trocado, não as credenciais.
+      ...(args.modelId ? { model_id: args.modelId } : {}),
     }), agentDeadlineMs(budget, cfg));
     const data = JSON.parse(body) as {
       response?: string; truncated?: boolean; model?: string;
@@ -832,7 +840,10 @@ export async function callPolicyAgent(args: {
     }
     const text = data.response ?? "";
     if (!text.trim()) return { ok: false, why: `resposta vazia (prompt ${args.user.length} chars)` };
-    return { ok: true, text, model: agentModelUsed(data, args.modelId) };
+    return {
+      ok: true, text, model: agentModelUsed(data, args.modelId),
+      modelUsedRaw: String(data.model_used ?? data.model ?? "").trim(),
+    };
   } catch (err) {
     const why = `chamada falhou: ${String(err).slice(0, 200)} (prompt ${args.user.length} chars, `
       + `orçamento ${budget} tokens, prazo ${Math.round(agentDeadlineMs(budget, cfg) / 1000)}s)`;

@@ -12,8 +12,8 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  applyInjections, goldSetVersion, modelFamily, normalizeMatches, parseInjections, recallLimitations,
-  recallNote, recallTally, sameFamily, type GoldDefect,
+  applyInjections, AUDIT_MIN_SAMPLE, goldSetVersion, modelFamily, normalizeMatches, parseInjections,
+  recallConfig, recallLimitations, recallNote, recallTally, sameFamily, type GoldDefect,
 } from "./specJudgeRecall.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -314,6 +314,76 @@ describe("recallNote / recallLimitations — nenhum limite fica escondido", () =
     });
     expect(lim.join(" | ")).toContain("MESMA família");
     expect(lim.join(" | ")).toContain("20% de discordância");
+  });
+
+  it("GAP-93: juiz de modelo desconhecido NÃO vira garantia de cross-family", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "", matchModel: "amazon.nova-pro-v1:0",
+      matcherDisagreement: 0.1, auditSample: 2, rejected: 0,
+    });
+    expect(lim.join(" | ")).toContain("NÃO se pode afirmar que é de outra família");
+    expect(lim.join(" | ")).not.toContain("MESMA família");
+  });
+
+  it("GAP-99: gold set inteiro em `corpo_sem_titulo` declara que o número é PISO do lado difícil", () => {
+    // Medido em prod: os 7 defeitos caíram todos no corpo sem título e a checagem, de um lado só,
+    // não declarou nada — 14% foi publicado como se descrevesse o juiz em qualquer posição.
+    const t = recallTally([base({ position: "corpo_sem_titulo", verdict: "nao_encontrado" })]);
+    const lim = recallLimitations({
+      tally: t, sameFamily: false, judgeModel: "us.anthropic.claude-opus-5",
+      matchModel: "amazon.nova-pro-v1:0", matcherDisagreement: null, auditSample: 0, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("sem defeito em `secao_nomeada`");
+    expect(lim).toContain("GAP-99");
+    expect(lim).not.toContain("GAP-90");
+  });
+
+  it("GAP-99: faixa de escopo e de dificuldade também declaram o lado que falta", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base({ scope: "distribuido", difficulty: "sutil", inVocabulary: false })]),
+      sameFamily: false, judgeModel: "j", matchModel: "m", matcherDisagreement: null,
+      auditSample: 0, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("só com defeito distribuído");
+    expect(lim).toContain("só com defeito `sutil`");
+    expect(lim).toContain("inteiro FORA do vocabulário");
+  });
+
+  it("GAP-100: discordância sobre amostra abaixo do piso é INDICAÇÃO, não estimativa", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j",
+      matchModel: "amazon.nova-pro-v1:0", matcherDisagreement: 0.5, auditSample: 2, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("50% de discordância");
+    expect(lim).toContain("ABAIXO do piso");
+    expect(lim).toContain("GAP-100");
+  });
+
+  it("GAP-100: amostra no piso é estimativa e não ganha a ressalva", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "j",
+      matchModel: "amazon.nova-pro-v1:0", matcherDisagreement: 0.5, auditSample: AUDIT_MIN_SAMPLE,
+      rejected: 0,
+    }).join(" | ");
+    expect(lim).not.toContain("ABAIXO do piso");
+  });
+
+  it("GAP-98: terceiro casador da MESMA família do casador é declarado", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "us.anthropic.claude-opus-5",
+      matchModel: "amazon.nova-pro-v1:0", auditModel: "amazon.nova-lite-v1:0",
+      matcherDisagreement: 0.1, auditSample: 3, rejected: 0,
+    }).join(" | ");
+    expect(lim).toContain("MESMA família do casador");
+  });
+
+  it("GAP-98: auditor de outra família não gera a ressalva do auditor", () => {
+    const lim = recallLimitations({
+      tally: recallTally([base()]), sameFamily: false, judgeModel: "us.anthropic.claude-opus-5",
+      matchModel: "amazon.nova-pro-v1:0", auditModel: "mistral.mistral-large-3-675b-instruct",
+      matcherDisagreement: 0.1, auditSample: 3, rejected: 0,
+    }).join(" | ");
+    expect(lim).not.toContain("MESMA família do casador");
   });
 
   it("sem amostra recasada, a nota diz que o erro do casador entra SEM estimativa", () => {
