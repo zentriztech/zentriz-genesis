@@ -328,6 +328,22 @@ export interface AutonomyRoundLog {
   gapsClosedTotal?: number | null;
   verdictFocusRounds?: number | null;
   /**
+   * 🔴 F2 — o POLICY GATE no log, com a COBERTURA junto do resultado.
+   *
+   * `policyBlocking` é o único número que pesou no veredicto; `policyJudged`/`policyJudgeable` estão do
+   * lado dele porque sem eles um `policyBlocking: 0` seria indistinguível de "o juiz não olhou nada" —
+   * é exatamente a confusão que fez `21 → 1 GAP` passar por progresso no GAP-13. `policyPending` são
+   * as constraints de build/runtime, que a Bancada não pode decidir e a frente F3 vai executar.
+   * Todos `null` ⇒ o gate não rodou, e nenhuma constraint pesou (fail-CLOSED, comportamento antigo).
+   */
+  policyConstraints?: number | null;
+  policyJudged?: number | null;
+  policyJudgeable?: number | null;
+  policySatisfied?: number | null;
+  policyBlocking?: number | null;
+  policyPending?: number | null;
+  policyNote?: string | null;
+  /**
    * 🔴 GAP-67 — quantos daqueles "fechado + novo" eram O MESMO defeito com âncora nova.
    *
    * Sem este número, `gapsClosed`/`gapsOpened` não são auditáveis: em prod (run `b1bc1195`, passe 1)
@@ -1294,6 +1310,59 @@ export async function stableRecurrenceFor(
 }
 
 /**
+ * 🔴 F2 — o POLICY GATE no fim do laço: as constraints DECLARADAS da spec, uma por uma.
+ *
+ * Por que aqui e não num estágio próprio por rodada: `arXiv:2609.04167` mede que **34% dos patches que
+ * passam nos testes violam constraints declaradas na revisão** — o buraco é no momento de ENTREGAR,
+ * não em cada iteração. E rodar por task multiplicaria a conta do projeto (o Dev/QA rodam por task).
+ * Então o gate roda no MESMO ponto do veredicto de promovibilidade: uma vez por candidato.
+ *
+ * O que ele acrescenta ao juiz de GAP: caçar GAP é busca em espaço ABERTO (a superfície medida
+ * rotaciona — GAP-76 — e a cada rodada nascem GAPs novos). Constraint declarada é espaço FECHADO e
+ * ENUMERÁVEL: N constraints, cada uma satisfeita/violada/indecidível/pendente/dispensada. É o critério
+ * de parada que a caça a GAP nunca deu.
+ *
+ * Fail-CLOSED e unidirecional: qualquer falha devolve `null`, e `null` não muda nada — o relatório de
+ * promovibilidade fica idêntico ao de antes desta frente. **Não existe caminho pelo qual este gate
+ * torne promovível um candidato que os GAPs já barravam.**
+ */
+async function policyGateFor(
+  db: Db, run: AutonomyRun, specHash: string,
+): Promise<import("./specPolicyGate.js").PolicyGateResult | null> {
+  try {
+    const { runPolicyGate, policyGateEnabled } = await import("./specPolicyGate.js");
+    if (!policyGateEnabled() || !specHash) return null;
+    const { loadSpecFiles } = await import("./specGapScope.js");
+    const refs = await loadSpecFiles(db, run.projectId);
+    const artifacts: Array<{ name: string; content: string }> = [];
+    for (const ref of refs) {
+      const buf = await readFile(ref.filePath, "utf8").catch(() => null);
+      if (buf) artifacts.push({ name: ref.path, content: buf });
+    }
+    // Sem artefato não há o que conferir — e "nada a conferir" jamais pode virar "tudo cumprido".
+    if (artifacts.length === 0) return null;
+    const { expectedArchetype } = await import("./specManifest.js");
+    const extra = (await db.query("SELECT extra FROM projects WHERE id = $1", [run.projectId]))
+      .rows[0] as { extra?: unknown } | undefined;
+    const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId: run.projectId, tenantId: run.tenantId }));
+    const res = await runPolicyGate(db, {
+      projectId: run.projectId, specHash, archetype: expectedArchetype(extra?.extra ?? null),
+      artifacts, autonomyRunId: run.id, validationRunId: run.validationRunId, llm,
+    });
+    const { policyNote } = await import("./specPolicyGate.js");
+    console.info(
+      `[SpecAutonomy] run=${run.id.slice(0, 8)} policy gate: ${res.ran ? policyNote(res.tally) : `NÃO rodou (${res.reason})`}`
+      + `${res.rejected.length ? ` — ${res.rejected.length} constraint(s) recusada(s) na derivação` : ""}`,
+    );
+    return res.ran ? res : null;
+  } catch (e) {
+    // Igual a todo degrau deste laço: gate indisponível = nada liberado, e o motivo é DECLARADO.
+    console.warn(`[SpecAutonomy] run=${run.id} policy gate indisponível (${msg(e)}) — nenhuma constraint pesa no veredicto.`);
+    return null;
+  }
+}
+
+/**
  * 🔴 GAP-77 — a rodada adversarial de PROMOVIBILIDADE, montada com o que só o laço tem em mão.
  *
  * O Jean deu ao juiz autoridade para dizer se um GAP realmente impede promover à Fábrica, com um
@@ -1314,6 +1383,7 @@ async function promotionVerdictFor(
 ): Promise<{
   gate: CandidateGate; round: VerdictRound | null; report: PromotabilityReport; saved: number;
   work: WorkProof; loop: LoopWork;
+  policy: import("./specPolicyGate.js").PolicyGateResult | null;
 } | null> {
   try {
     const {
@@ -1397,6 +1467,13 @@ async function promotionVerdictFor(
     }
     const { gapScopeForProject } = await import("./specGapScope.js");
     const scope = await gapScopeForProject(db, run.projectId).catch(() => null);
+    // 🔴 F2 — o mesmo `spec_hash` do veredicto de GAP: é o conteúdo em que tudo foi medido, e amarrar
+    // as duas contas ao mesmo hash é o que impede um gate sobre spec A virar aval sobre a spec B.
+    const specHash = String((await db.query(
+      "SELECT spec_hash FROM spec_validation_runs WHERE id = $1", [run.validationRunId],
+    ).catch(() => ({ rows: [] as Array<{ spec_hash?: string }> }))).rows[0]?.spec_hash ?? "");
+    const policy = await policyGateFor(db, run, specHash);
+    const { policyNote } = await import("./specPolicyGate.js");
     const report = promotabilityReport({
       findings: state.findings,
       verdicts: await livePromotionVerdicts(db, run.projectId, shaByFile),
@@ -1404,13 +1481,17 @@ async function promotionVerdictFor(
         ? scope.unrouted.filter((f) => f.severity === "blocker" || f.severity === "warning").length
         : 0,
       unjudgedFiles: ctx.unjudged, cfg,
+      // Só o `blocking` pesa: violação dispensada por INAPLICABILIDADE, ou que a outra família chamou
+      // de vaga, fica no relatório sem bloquear — as duas pernas do equilíbrio pedido pelo Jean.
+      policyViolations: policy?.tally.blocking ?? 0,
+      policyNote: policy ? policyNote(policy.tally) : undefined,
     });
     console.info(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s), ` +
       `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s), promovível=${report.promotable}` +
       ` — prova de trabalho ${work.kind}: ${work.detail}`,
     );
-    return { gate, round, report, saved, work, loop };
+    return { gate, round, report, saved, work, loop, policy };
   } catch (e) {
     console.warn(`[SpecAutonomy] run=${run.id} veredicto de promovibilidade indisponível (${msg(e)}) — todos os GAPs seguem impeditivos.`);
     return null;
@@ -1438,10 +1519,21 @@ function verdictNote(v: NonNullable<Awaited<ReturnType<typeof promotionVerdictFo
     ? ` Declarado(s) NÃO impeditivo(s) — a severidade 🔴/🟡 **não muda**, isto é parecer paralelo e auditável: ` +
       liberados.map((x) => `\`${x.file}\` ${x.anchor} (${x.reason})`).join("; ") + "."
     : "";
+  // 🔴 F2 — o Policy Gate entra no parecer com a COBERTURA na frente: um gate que julgou 3 de 20
+  // constraints não é um gate verde, é um gate cego (foi assim que o Estágio B do GAP-13 passou por
+  // progresso). Quando ele não roda, a linha DIZ que não rodou em vez de sumir.
+  const policy = v.policy
+    ? ` 🧾 **Policy Gate** (constraints declaradas da spec, o buraco dos 34% de `
+      + `\`arXiv:2609.04167\`): ${v.policy.constraints.length} constraint(s) — `
+      + `${(() => { const { tally } = v.policy; return [
+        `${tally.judged}/${tally.judgeable} julgada(s)`, `${tally.satisfied} cumprida(s)`,
+        `${tally.blocking} violação(ões) impeditiva(s)`,
+      ].join(", "); })()}.`
+    : "";
   const veredito = v.report.promotable
     ? ` ✅ **Spec PROMOVÍVEL à Fábrica** pelo parecer do juiz: nenhum GAP importante impeditivo, nenhum sem arquivo, nenhum arquivo pendente de julgamento. A promoção continua sendo sua (ato humano com confirmação).`
     : ` 🚫 **Spec NÃO promovível**: ${v.report.blockers.join("; ")}.`;
-  return head + lista + veredito;
+  return head + lista + policy + veredito;
 }
 
 /**
@@ -2917,6 +3009,14 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         verdictWork: v.work.detail,
         gapsClosedTotal: v.loop.gapsResolved,
         verdictFocusRounds: v.loop.focusRounds,
+        // 🔴 F2 — gravado só quando o gate rodou. `null` diz "não rodou", que é diferente de zero.
+        policyConstraints: v.policy?.constraints.length ?? null,
+        policyJudged: v.policy?.tally.judged ?? null,
+        policyJudgeable: v.policy?.tally.judgeable ?? null,
+        policySatisfied: v.policy?.tally.satisfied ?? null,
+        policyBlocking: v.policy?.tally.blocking ?? null,
+        policyPending: v.policy?.tally.pending ?? null,
+        policyNote: v.policy ? (await import("./specPolicyGate.js")).policyNote(v.policy.tally) : null,
         // As RECUSAS de elegibilidade vão no log: é a auditoria da guarda (c) do Jean — dá para
         // conferir, GAP por GAP, por que o juiz não pôde julgá-lo.
         verdictRejected: v.gate.rejected.slice(0, 12).map((r) => `${r.file} ${r.anchor}: ${r.why}`),

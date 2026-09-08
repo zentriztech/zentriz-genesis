@@ -749,6 +749,8 @@ export interface PromotabilityReport {
   promotable: boolean;
   /** Motivos que impedem a promoção, na ordem em que devem ser lidos. */
   blockers: string[];
+  /** F2 — violações impeditivas de constraint declarada que entraram nesta conta (0 = gate não pesou). */
+  policyViolations: number;
 }
 
 /**
@@ -764,6 +766,17 @@ export function promotabilityReport(args: {
   unroutedImportant: number;
   unjudgedFiles: string[];
   cfg?: VerdictConfig;
+  /**
+   * F2 — violações IMPEDITIVAS de constraint declarada (Policy Gate). Default 0 porque o gate é
+   * opt-in: com ele desligado, ou incapaz de rodar, o relatório é exatamente o de antes.
+   *
+   * Este argumento só pode ACRESCENTAR bloqueio. Não existe valor dele que torne promovível um
+   * candidato que os GAPs já barravam — o Policy Gate fecha o buraco dos 34% (`arXiv:2609.04167`:
+   * patch que passa nos testes e viola a constraint declarada) sem virar rota de anistia.
+   */
+  policyViolations?: number;
+  /** A nota do gate, para o bloqueio dizer POR QUE, e não só quantos. */
+  policyNote?: string;
 }): PromotabilityReport {
   const cfg = args.cfg ?? verdictConfig();
   const releasedFps = new Set(
@@ -779,5 +792,12 @@ export function promotabilityReport(args: {
   if (capped) blockers.push(`teto acumulado de ${cfg.maxPerSpec} liberação(ões) por spec foi excedido (${releasedFps.size}) — nenhuma vale`);
   if (args.unroutedImportant > 0) blockers.push(`${args.unroutedImportant} GAP(s) importante(s) sem arquivo atribuído`);
   if (args.unjudgedFiles.length > 0) blockers.push(`${args.unjudgedFiles.length} arquivo(s) da spec nunca julgado(s) por inteiro neste conteúdo`);
-  return { impeditive, released: capped ? 0 : releasedFps.size, promotable: blockers.length === 0, blockers };
+  const policy = Math.max(0, Math.trunc(args.policyViolations ?? 0));
+  if (policy > 0) {
+    blockers.push(`${policy} constraint(s) declarada(s) violada(s) no Policy Gate${args.policyNote ? ` (${args.policyNote})` : ""}`);
+  }
+  return {
+    impeditive, released: capped ? 0 : releasedFps.size,
+    promotable: blockers.length === 0, blockers, policyViolations: policy,
+  };
 }
