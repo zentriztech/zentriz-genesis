@@ -58,6 +58,9 @@ import {
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
 } from "@/components/PromotionPlanDialog";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+// Rastreabilidade (Jean, 2026-09-07): três relatórios em PDF do mapeamento da construção. O MESMO
+// controle usado na Bancada — produto da Bancada e da Fábrica são o mesmo objeto.
+import { TraceabilityReportsButton } from "@/components/TraceabilityReports";
 // Padronização 2026-09-06: rótulo/tooltip/texto de resultado das ações de fábrica vêm de UM módulo.
 import {
   FACTORY_LABEL, FACTORY_TOOLTIP, promoteConfirmBody, promotedProductNotice,
@@ -377,7 +380,7 @@ function ProductsPageInner() {
                 {/* Promover produto inteiro — só quando ainda na Bancada (draft). Operação: master OK.
                     Excluir virou ícone no topo do card (canto superior direito, junto ao título). */}
                 {p.lifecycle_status === "draft" && (
-                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                  <Box sx={{ px: 2, pb: 1, pt: 0 }}>
                     <Tooltip title={FACTORY_TOOLTIP.promoteProduct}>
                       <span>
                         <Button
@@ -400,7 +403,7 @@ function ProductsPageInner() {
                     mais baixa — então o botão abre a ORDEM e o início acontece lá dentro, com o
                     número da onda no rótulo. Um clique a mais em troca de nunca iniciar às cegas. */}
                 {p.lifecycle_status === "promoted" && (
-                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                  <Box sx={{ px: 2, pb: 1, pt: 0 }}>
                     <Tooltip title={FACTORY_TOOLTIP.openPlanAndStart}>
                       <span>
                         <Button
@@ -427,7 +430,7 @@ function ProductsPageInner() {
                 )}
                 {/* Produto já em fábrica: a ordem gravada continua consultável (leitura). */}
                 {p.lifecycle_status !== "draft" && p.lifecycle_status !== "promoted" && (
-                  <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                  <Box sx={{ px: 2, pb: 1, pt: 0 }}>
                     <Button size="small" fullWidth variant="text" color="inherit" disabled={busy}
                       startIcon={<AccountTreeOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
                       onClick={() => openPlan(p)} sx={{ fontSize: "0.68rem" }}>
@@ -435,6 +438,12 @@ function ProductsPageInner() {
                     </Button>
                   </Box>
                 )}
+                {/* Rastreabilidade em PDF — existe em QUALQUER estado do ciclo de vida: o valor do
+                    relatório é justamente contar a construção (spec, GAPs, vereditos, fábrica),
+                    inclusive de um produto que ainda está na Bancada. */}
+                <Box sx={{ px: 2, pb: 2, pt: 0 }}>
+                  <TraceabilityReportsButton productId={p.id} productName={p.name} fullWidth />
+                </Box>
               </Card>
             );
           })}

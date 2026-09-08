@@ -73,6 +73,9 @@ import SpecSplitPanel from "@/components/SpecSplitPanel";
 import SpecCodeEditor from "@/components/SpecCodeEditor";
 import SpecVersionsPanel from "@/components/SpecVersionsPanel";
 import ProductFolderNav from "@/components/ProductFolderNav";
+// Rastreabilidade (Jean, 2026-09-07): os três relatórios em PDF. O produto é o DONO da spec aberta
+// (`ownerProduct`, fonte autoritativa) — o mesmo objeto que a Fábrica reporta em /products.
+import { TraceabilityReportsButton } from "@/components/TraceabilityReports";
 import {
   PromotionPlanDialog, describeStartResult,
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
@@ -3966,6 +3969,9 @@ export default function SpecPage() {
                   />
                 </Stack>
                 <Stack direction="row" spacing={1}>
+                  {/* Relatórios de rastreabilidade do PRODUTO dono desta spec. Só aparece quando a
+                      spec pertence a um produto de verdade (não ao inbox de rascunhos). */}
+                  <TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />
                   <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
                     Descartar
                   </Button>

@@ -25,6 +25,7 @@
     "@xyflow/react": "^12.10.2",
     "d3-force": "^3.0.0",
     "framer-motion": "^12.34.1",
+    "jspdf": "^4.2.1",
     "mermaid": "^11.14.0",
     "mobx": "^6.15.0",
     "mobx-react-lite": "^4.1.1",
@@ -35,6 +36,7 @@
     "react-force-graph-3d": "^1.29.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "svg2pdf.js": "^2.8.1",
     "three": "^0.185.1"
   },
   "devDependencies": {
