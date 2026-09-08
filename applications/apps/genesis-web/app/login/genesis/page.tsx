@@ -4,13 +4,13 @@ import { observer } from "mobx-react-lite";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { motion } from "framer-motion";
-import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
+import ZentrizAuthShell from "@/components/brand/ZentrizAuthShell";
 import { authStore } from "@/stores/authStore";
 
 const cardMotion = {
@@ -37,16 +37,9 @@ function LoginGenesisPageInner() {
   };
 
   return (
-    <Box
-      sx={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        bgcolor: "grey.100",
-      }}
-    >
-      <MotionCard sx={{ maxWidth: 400, width: "100%" }} {...cardMotion}>
+    // Identidade Zentriz no fundo (Genesis › Connect › Auto Care) — ver ZentrizAuthShell.
+    <ZentrizAuthShell>
+      <MotionCard sx={{ width: "100%" }} {...cardMotion}>
         <CardContent sx={{ p: 3 }}>
           <Typography variant="h5" gutterBottom>
             Portal Genesis
@@ -90,7 +83,7 @@ function LoginGenesisPageInner() {
           </form>
         </CardContent>
       </MotionCard>
-    </Box>
+    </ZentrizAuthShell>
   );
 }
 
