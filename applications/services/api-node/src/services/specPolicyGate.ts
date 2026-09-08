@@ -107,10 +107,11 @@ export function policyGateConfig() {
     /**
      * Orçamento de SAÍDA da derivação e do veredicto, separados do `maxTokens` genérico.
      *
-     * Medido em prod: com 6.000 tokens o derivador PEDIA 40 constraints com trecho ancorado verbatim
-     * e o parecer vinha CORTADO ⇒ `truncated` ⇒ `null` ⇒ "derivador indisponível" para sempre. Pedir
-     * N itens com um orçamento que não cabe N itens é a mesma família do GAP-61: medir o teto de
-     * LEITURA pela ESCRITA. O orçamento tem de caber o que o prompt pede.
+     * Pedir N itens com um orçamento que não cabe N itens é a família do GAP-61 (medir uma coisa
+     * pela outra): 40 constraints com trecho ancorado verbatim não cabem em 6.000 tokens, e o guard
+     * de `truncated` recusaria o parecer inteiro — corretamente, porque parecer cortado é parecer sem
+     * conclusão. O orçamento tem de caber o que o prompt pede, e o PRAZO tem de caber o orçamento
+     * (ver `msPerToken`, que é onde a falha realmente se manifestou em prod).
      */
     deriveTokens: num(process.env.SPEC_POLICY_DERIVE_TOKENS, 24_000),
     verdictTokens: num(process.env.SPEC_POLICY_VERDICT_TOKENS, 12_000),
@@ -123,6 +124,14 @@ export function policyGateConfig() {
     msPerToken: num(process.env.SPEC_POLICY_MS_PER_TOKEN, 30),
     /** Teto do prazo: nem o pedido mais caro trava um worker para sempre. */
     maxTimeoutMs: num(process.env.SPEC_POLICY_MAX_TIMEOUT_MS, 900_000),
+    /**
+     * Passes de DERIVAÇÃO. O derivador tem o mesmo teto do juiz: 120k chars por chamada. Numa spec
+     * de 1,07M chars uma chamada só lhe dava 12% do texto — e ele nunca recebia dois arquivos
+     * INTEIROS, então a classe de coerência interna era invisível por construção.
+     */
+    maxDerivePasses: num(process.env.SPEC_POLICY_MAX_DERIVE_PASSES, 10),
+    /** Teto GLOBAL de constraints por spec (o `maxConstraints` é por PASSE). Trava de fatura. */
+    maxConstraintsTotal: num(process.env.SPEC_POLICY_MAX_CONSTRAINTS_TOTAL, 120),
   };
 }
 
@@ -802,6 +811,9 @@ export interface PolicyGateResult {
   /** Passes do juiz que rodaram / falharam, e o que ele nunca leu por inteiro. Fatos do log. */
   judgePasses: number;
   passesFailed: number;
+  /** Passes de DERIVAÇÃO que rodaram / falharam. `0` com constraints = derivação veio do banco. */
+  derivePasses: number;
+  derivePassesFailed: number;
   partialArtifacts: string[];
 }
 
@@ -828,7 +840,8 @@ export async function runPolicyGate(db: Db, args: {
   const empty = (reason: string, extra: Partial<PolicyGateResult> = {}): PolicyGateResult => ({
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
-    judgePasses: 0, passesFailed: 0, partialArtifacts: [], ...extra,
+    judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
+    partialArtifacts: [], ...extra,
   });
   if (!policyGateEnabled()) return empty("SPEC_POLICY_GATE != on");
   if (!args.specHash) return empty("spec sem hash");
@@ -853,7 +866,8 @@ async function policyGateOnce(
   const empty = (reason: string, extra: Partial<PolicyGateResult> = {}): PolicyGateResult => ({
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
     tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
-    judgePasses: 0, passesFailed: 0, partialArtifacts: [], ...extra,
+    judgePasses: 0, passesFailed: 0, derivePasses: 0, derivePassesFailed: 0,
+    partialArtifacts: [], ...extra,
   });
 
   // ── 1. derivação (idempotente por spec+arquétipo) ──────────────────────────
@@ -861,39 +875,75 @@ async function policyGateOnce(
   let rejected: Array<{ key: string; reason: string }> = [];
   let model = constraints[0]?.declaredByModel ?? "";
   let derived = 0;
+  let derivePasses = 0;
+  let derivePassesFailed = 0;
+  const deriveWhy: string[] = [];
   if (constraints.length === 0) {
-    const previous = await knownConstraints(db, args.projectId).catch(() => []);
+    const conhecidas = await knownConstraints(db, args.projectId).catch(() => []);
     const seed = (args.archetype?.checklist ?? []).map((c) => `- ${c}`).join("\n");
-    const user = [
-      "ESPECIFICAÇÃO (verbatim, arquivo por arquivo):",
-      "<<<INICIO>>>",
-      specText.slice(0, cfg.specChars),
-      "<<<FIM>>>",
-      specText.length > cfg.specChars
-        ? `\n(ATENÇÃO: a especificação tem ${specText.length} chars e ${cfg.specChars} couberam. NÃO declare constraint sobre o que não veio — o trecho ancorado tem de existir no texto acima.)`
-        : "",
-      "",
-      seed ? `SEMENTE — checklist do arquétipo "${args.archetype?.id}" (adote, reescreva ou descarte):\n${seed}` : "",
-      "",
-      previous.length
-        ? `CHAVES JÁ EXISTENTES neste projeto (REUSE a chave quando a constraint for a MESMA):\n${previous.map((c) => `- ${c.constraintKey}: ${c.assertion.slice(0, 200)}`).join("\n")}`
-        : "",
-      "",
-      "Derive as constraints verificáveis desta especificação.",
-    ].filter(Boolean).join("\n");
+    // 🔴 MEDIDO EM PROD: com UMA chamada o derivador recebia `specText.slice(0, 120_000)` — 12% de
+    // uma spec de 1,07M chars. Ele declarava constraint só do que viu e, pior, NÃO conseguia ver a
+    // classe de coerência interna (a mesma regra reafirmada em outro arquivo), porque nunca recebia
+    // dois arquivos INTEIROS. É o teto do GAP-54/61 na DERIVAÇÃO: o gate declarava política para um
+    // oitavo da spec e chamava isso de política da spec.
+    const { batches, partial, dropped } = batchArtifacts(args.artifacts, cfg.specChars, cfg.maxDerivePasses);
+    const acumuladas: SpecConstraint[] = [];
+    const recusadas: Array<{ key: string; reason: string }> = [];
+    for (const [i, lote] of batches.entries()) {
+      const restante = cfg.maxConstraintsTotal - acumuladas.length;
+      if (restante <= 0) {
+        deriveWhy.push(`passe ${i + 1}: teto global de ${cfg.maxConstraintsTotal} constraints já atingido`);
+        break;
+      }
+      const loteTexto = lote
+        .map((a) => `--- ${a.name}${a.cutFrom ? ` (RECORTADO: ${cfg.specChars} de ${a.cutFrom} chars)` : ""} ---\n${a.content}`)
+        .join("\n\n");
+      // As chaves já aceitas nos passes anteriores entram como "existentes": é assim que a MESMA
+      // constraint vista em dois lotes reusa a chave em vez de virar duas identidades (GAP-49/50).
+      const previous = [...conhecidas, ...acumuladas];
+      const user = [
+        batches.length > 1
+          ? `LOTE ${i + 1} de ${batches.length} dos arquivos da especificação. Declare constraint APENAS do que está neste lote — o trecho ancorado tem de existir no texto abaixo. Os outros lotes são derivados em passes próprios.`
+          : "ESPECIFICAÇÃO (verbatim, arquivo por arquivo):",
+        "<<<INICIO>>>",
+        loteTexto,
+        "<<<FIM>>>",
+        "",
+        seed ? `SEMENTE — checklist do arquétipo "${args.archetype?.id}" (adote, reescreva ou descarte):\n${seed}` : "",
+        "",
+        previous.length
+          ? `CHAVES JÁ EXISTENTES neste projeto (REUSE a chave quando a constraint for a MESMA):\n${previous.map((c) => `- ${c.constraintKey}: ${c.assertion.slice(0, 200)}`).join("\n")}`
+          : "",
+        "",
+        `Derive as constraints verificáveis destes arquivos (no máximo ${Math.min(cfg.maxConstraints, restante)}).`,
+      ].filter(Boolean).join("\n");
 
-    const res = await callPolicyAgent({ system: DERIVE_SYSTEM, user, maxTokens: cfg.deriveTokens, llm: args.llm });
-    if (!res.ok) return empty(`derivador indisponível: ${res.why}`);
-    const raw = parseListResponse(res.text, "constraints");
-    if (!raw) return empty("derivador não devolveu JSON legível");
-    const norm = normalizeConstraints(raw, { specText, model: res.model, previous, max: cfg.maxConstraints });
-    if (norm.accepted.length === 0) {
-      return empty("nenhuma constraint aceita na derivação", { rejected: norm.rejected });
+      derivePasses++;
+      const res = await callPolicyAgent({ system: DERIVE_SYSTEM, user, maxTokens: cfg.deriveTokens, llm: args.llm });
+      if (!res.ok) { derivePassesFailed++; deriveWhy.push(`passe ${i + 1}: ${res.why}`); continue; }
+      const raw = parseListResponse(res.text, "constraints");
+      if (!raw) { derivePassesFailed++; deriveWhy.push(`passe ${i + 1}: sem JSON legível`); continue; }
+      // A âncora é conferida contra o LOTE, não contra a spec inteira: citar trecho de arquivo que
+      // este passe não recebeu é exatamente a alucinação que o guard existe para pegar.
+      const norm = normalizeConstraints(raw, {
+        specText: loteTexto, model: res.model, previous,
+        max: Math.min(cfg.maxConstraints, restante),
+      });
+      acumuladas.push(...norm.accepted);
+      recusadas.push(...norm.rejected);
+      if (norm.accepted.length > 0) model = res.model;
     }
-    constraints = norm.accepted;
-    rejected = norm.rejected;
-    model = res.model;
+    if (acumuladas.length === 0) {
+      const motivo = derivePassesFailed >= derivePasses && derivePasses > 0
+        ? `derivador indisponível em ${derivePassesFailed} de ${derivePasses} passe(s) — ${deriveWhy.join(" | ")}`
+        : `nenhuma constraint aceita na derivação (${derivePasses} passe(s))`;
+      return empty(motivo, { rejected: recusadas, derivePasses, derivePassesFailed,
+        partialArtifacts: [...partial, ...dropped] });
+    }
+    constraints = acumuladas;
+    rejected = recusadas;
     derived = await persistConstraints(db, args.projectId, args.specHash, archHash, constraints);
+    if (deriveWhy.length) console.warn(`[specPolicyGate] derivação parcial: ${deriveWhy.join(" | ")}`);
   }
 
   // ── 2. veredicto por constraint (só as de `spec` são julgáveis aqui) ───────
@@ -934,7 +984,8 @@ async function policyGateOnce(
     if (verdictRaw.length === 0) {
       return empty(
         `juiz de policy indisponível (${passesFailed} de ${batches.length} passe(s) falharam) — ${passWhy.join(" | ")}`,
-        { constraints, rejected, judgePasses: batches.length, passesFailed, partialArtifacts: [...partial, ...dropped] },
+        { constraints, rejected, judgePasses: batches.length, passesFailed, derivePasses,
+          derivePassesFailed, partialArtifacts: [...partial, ...dropped] },
       );
     }
     verdictRaw = pickBestRaw(verdictRaw, args.artifacts);
@@ -992,6 +1043,7 @@ async function policyGateOnce(
   });
   return {
     ran: true, constraints, rejected, verdicts, tally, unknownKeys, model: judgeModel, derived,
-    judgePasses: batches.length, passesFailed, partialArtifacts: naoLidos,
+    judgePasses: batches.length, passesFailed, derivePasses, derivePassesFailed,
+    partialArtifacts: naoLidos,
   };
 }
