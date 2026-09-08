@@ -49,6 +49,11 @@ import { DIAGRAMS_PATH, MIN_DIAGRAMS } from "../services/specDiagrams.js";
 // import de valor fecharia um ciclo entre os dois arquivos de rota no carregamento do módulo.
 import type { PersistentGapRef } from "../services/gapContinuity.js";
 import { focusFactBlock } from "../services/gapFocus.js";
+// 🔴 A1: prestação de contas por GAP — instrução no pedido, leitura vetada na resposta.
+import {
+  gapOutcomeInstruction, parseGapOutcomes, priorOutcomeFactBlock, summarizeOutcomes,
+  type GapOutcome,
+} from "../services/gapOutcomes.js";
 import type { FocusPlan } from "../services/gapFocus.js";
 import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatalog.js";
 
@@ -745,11 +750,16 @@ export function gapSiblingContextEnabled(): boolean {
   return (process.env.SPEC_GAP_SIBLING_CONTEXT ?? "on").trim().toLowerCase() !== "off";
 }
 
-function fmtGapForFile(f: ValidationFinding): string {
+/**
+ * A1: a lista vai NUMERADA porque o número é a chave do desfecho que o agente devolve
+ * (`gapOutcomes`). Sem numeração, a prestação de contas só poderia referenciar o GAP pelo título —
+ * e casar título por semelhança de texto é exatamente a automação fixa que a Lei proíbe.
+ */
+function fmtGapForFile(f: ValidationFinding, i: number): string {
   const sev = (f.severity || "info").toUpperCase();
   const anchor = (f as { anchor?: string | null }).anchor;
   const loc = anchor ? ` (em: ${anchor})` : f.line ? ` (linha ~${f.line})` : "";
-  return `- [${sev}]${loc} ${f.title}${f.rationale ? `\n  motivo: ${f.rationale}` : ""}`;
+  return `${i + 1}) [${sev}]${loc} ${f.title}${f.rationale ? `\n   motivo: ${f.rationale}` : ""}`;
 }
 
 /**
@@ -815,8 +825,29 @@ function buildGapFileRequest(
    * "o arquivo só tem estes defeitos" e removeria como redundante o que ficou de fora.
    */
   focusBlock = "",
+  /**
+   * 🔴 A1: o que o agente DECLAROU sobre estes GAPs na rodada anterior deste arquivo (o que tentou,
+   * o que faltou, o argumento de "não é defeito" que o juiz não aceitou). Vazio = primeira rodada do
+   * arquivo, ou nenhum desfecho relevante. Ver `priorOutcomeFactBlock`.
+   */
+  priorOutcomeBlock = "",
 ): Record<string, unknown> {
-  const gaps = findings.map(fmtGapForFile).join("\n").slice(0, FINDINGS_BUDGET);
+  // A1: o corte do orçamento é DECLARADO. Antes, a lista era fatiada no meio de um item e o modelo
+  // recebia um GAP pela metade sem saber que havia mais — e com a prestação de contas por número, um
+  // item invisível voltaria como `nao_declarado` sem ninguém saber por quê. Corta por ITEM INTEIRO.
+  const gapsAll = findings.map(fmtGapForFile);
+  const gapsFit: string[] = [];
+  let gapsLen = 0;
+  for (const g of gapsAll) {
+    if (gapsLen + g.length + 1 > FINDINGS_BUDGET) break;
+    gapsFit.push(g);
+    gapsLen += g.length + 1;
+  }
+  const gapsOmitted = gapsAll.length - gapsFit.length;
+  const gaps = gapsFit.join("\n")
+    + (gapsOmitted > 0
+      ? `\n…(${gapsOmitted} GAP(s) deste arquivo NÃO couberam nesta rodada e continuam ATIVOS — não os declare)…`
+      : "");
   const edits = gapFileEditsEnabled();
   // Mapa do produto (Fase 1) como contexto só-leitura: o arquivo é uma PARTE de um todo, e sem saber
   // onde ele vive o CTO-editor duplica o que já está no irmão.
@@ -862,6 +893,15 @@ function buildGapFileRequest(
     // GAP-29: vem por ÚLTIMO, antes só da instrução de formato, porque é a correção de rota — o
     // modelo lê o pedido inteiro e só então descobre que a resposta óbvia já foi reprovada.
     priorRejectionBlock,
+    // 🔴 A1: o relato que o PRÓPRIO agente deu destes GAPs na rodada anterior deste arquivo. Vem
+    // depois da recusa por tamanho porque é da mesma natureza (correção de rota) e mais específico:
+    // não diz "sua resposta era grande", diz "você mesmo disse que não conseguiu, e por quê".
+    priorOutcomeBlock,
+    // 🔴 A1: o contrato de prestação de contas fecha o pedido, colado na instrução de formato — as
+    // duas coisas que o modelo tem de produzir ficam juntas, e o número que ele declara é o da lista
+    // que acabou de ler. `gapsFit.length` (não `findings.length`): pedir desfecho de um GAP que o
+    // orçamento cortou seria pedir declaração sobre o que ele não viu.
+    gapOutcomeInstruction(gapsFit.length),
     edits
       // A instrução final repete o formato porque é a última coisa que o modelo lê antes de gerar —
       // e o hábito de reemitir o documento inteiro é justamente o que causou 4 truncamentos em prod.
@@ -1152,7 +1192,7 @@ function stripOuterFence(s: string): string {
  */
 function settleJob(
   jobId: string,
-  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null; truncated?: boolean | null; editsApplied?: number | null },
+  patch: { status: Exclude<SpecChatJobStatus, "pending" | "running">; specMarkdown?: string | null; reply?: string | null; error?: string | null; modelUsed?: string | null; truncated?: boolean | null; editsApplied?: number | null; gapOutcomes?: GapOutcome[] | null },
 ): void {
   const j = _chatJobs.get(jobId);
   if (j) {
@@ -1180,6 +1220,12 @@ function runFileChatJob(
    * `null` = a resposta é o arquivo inteiro (comportamento histórico, intocado).
    */
   editsBase: string | null = null,
+  /**
+   * 🔴 A1 — a lista EXATA de GAPs que este pedido despachou, na ordem em que foi numerada no prompt.
+   * Presente só no caminho "Resolver GAPs por arquivo". `null` = a rodada não pediu prestação de
+   * contas (chat livre, criação de arquivo) e nada é gravado em `gap_outcomes`.
+   */
+  outcomeGaps: ValidationFinding[] | null = null,
 ): void {
   const job = _chatJobs.get(jobId);
   if (!job) return;
@@ -1253,17 +1299,53 @@ function runFileChatJob(
         if (applied.skipped.length > 0) {
           console.warn(`[SpecChat] job=${jobId} ${applied.applied} edição(ões) aplicada(s), ${applied.skipped.length} recusada(s): ${applied.skipped.map((s) => `${s.index + 1}/${s.code}`).join(", ")}`);
         }
+        // 🔴 A1: a prestação de contas é lida AQUI porque este é o único ponto que tem as três coisas
+        // ao mesmo tempo: a lista despachada, o texto cru da resposta e quantas edições ANCORADAS o
+        // aplicador realmente gravou (o único veto de contradição que é fato). Lida depois do apply,
+        // nunca antes — declarar `corrigido` só é contraditório em face do que o arquivo recebeu.
+        const contas = outcomeGaps && outcomeGaps.length > 0
+          ? parseGapOutcomes(data.response ?? "", outcomeGaps, { appliedEdits: applied.applied })
+          : null;
+        // A1: o que o agente declarou vai TAMBÉM para o chat — o humano na Bancada precisa ver "3
+        // fechados, 2 que ele não conseguiu e 1 que ele contesta" sem abrir o banco. Só os verbos que
+        // pedem atenção; `corrigido` limpo já está no "N edição(ões) aplicada(s)".
+        const contasNota = (() => {
+          if (!contas) return "";
+          const abertos = contas.outcomes.filter((o) => o.verb === "permanece_aberto");
+          const contestados = contas.outcomes.filter((o) => o.contested);
+          const naoDefeito = contas.outcomes.filter((o) => o.verb === "nao_e_defeito");
+          const outroArquivo = contas.outcomes.filter((o) => o.verb === "nao_e_deste_arquivo");
+          const calados = contas.outcomes.filter((o) => o.verb === "nao_declarado");
+          const partes: string[] = [];
+          if (abertos.length > 0) partes.push(`${abertos.length} que a IA declarou que NÃO conseguiu fechar`);
+          if (naoDefeito.length > 0) partes.push(`${naoDefeito.length} que ela considera que não são defeito (o juiz decide na próxima validação)`);
+          if (outroArquivo.length > 0) partes.push(`${outroArquivo.length} que pertencem a outro arquivo`);
+          if (contestados.length > 0) partes.push(`${contestados.length} declarado(s) como corrigido(s) SEM edição aplicada`);
+          if (calados.length > 0) partes.push(`${calados.length} sem desfecho declarado`);
+          return partes.length > 0 ? `\n\n📋 Prestação de contas da IA: ${partes.join(" · ")}.` : "";
+        })();
+        if (contas) {
+          const resumo = summarizeOutcomes(contas.outcomes);
+          console.log(
+            `[SpecChat] job=${jobId} DESFECHO ${contas.ran ? "declarado" : "AUSENTE"} — ${JSON.stringify(resumo)}`
+            + (contas.rejected.length > 0 ? ` · ${contas.rejected.length} linha(s) RECUSADA(S): ${contas.rejected.slice(0, 3).map((r) => r.why).join(" · ")}` : ""),
+          );
+        }
         settleJob(jobId, {
           status: "done",
           specMarkdown: applied.content,
           modelUsed: data.model_used ?? null,
+          // A1: grava SEMPRE que a rodada pediu contas — inclusive o bloco ausente (todos
+          // `nao_declarado`). É a diferença entre "o agente calou" e "ninguém perguntou", e sem ela o
+          // laço não pode cobrar na rodada seguinte o que ele mesmo não registrou ter pedido.
+          gapOutcomes: contas ? contas.outcomes : null,
           // GAP-12 (migração 098): o FATO de que este conteúdo saiu de N blocos ANCORADOS. Quem
           // consome é o modo autônomo, noutro processo e noutro tick: sem persistir, ele só sabe o
           // que PEDIU (edições) e não o que RECEBEU — e o modelo pode reemitir o arquivo inteiro.
           editsApplied: applied.applied,
           reply: (partial
             ? `${doneReply}\n\n⚠️ A resposta bateu no teto de saída: ${applied.applied} edição(ões) aplicada(s) e ${applied.dropped} incompleta(s) descartada(s). O que faltou continua nos GAPs — rode de novo para o restante.`
-            : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`) + refused,
+            : `${doneReply}\n\n${applied.applied} edição(ões) aplicada(s) ao arquivo.`) + refused + contasNota,
         });
         console.log(
           `[SpecChat] ✓ job=${jobId} DONE (edits) — ${applied.applied} aplicadas, ${applied.dropped} descartadas, ` +
@@ -1478,6 +1560,12 @@ export async function dispatchGapFileJob(opts: {
    * fato o modelo leria a lista curta como "o arquivo só tem estes defeitos" e consolidaria o resto.
    */
   focus?: FocusPlan | null;
+  /**
+   * 🔴 A1: os desfechos que o agente DECLAROU na rodada anterior deste arquivo (do job anterior).
+   * Só o laço autônomo os tem (o botão humano não encadeia rodadas). Ausente/vazio = primeira rodada
+   * do arquivo ou nada relevante a devolver.
+   */
+  priorOutcomes?: GapOutcome[] | null;
 }): Promise<{ ok: true; gaps: number } | { ok: false; code: "NO_GAPS_IN_FILE" | "FILE_TOO_LARGE"; message: string }> {
   if (opts.findings.length === 0) {
     return { ok: false, code: "NO_GAPS_IN_FILE", message: `Nenhum GAP ativo atribuído a ${opts.filePath}.` };
@@ -1529,6 +1617,18 @@ export async function dispatchGapFileJob(opts: {
       + ` gaps=${opts.findings.length} adiados=${opts.focus.deferred} ancoras=${opts.focus.anchors.join(", ")}`,
     );
   }
+  // 🔴 A1: o relato anterior DO PRÓPRIO AGENTE. Logado pelo mesmo motivo dos outros fatos — o prompt
+  // não é persistido, só o `reply`, então sem esta linha "o agente recebeu o próprio relato" seria
+  // indemonstrável em prod. `entregues=0` com desfechos presentes é o sintoma de relato INERTE
+  // (todos `corrigido` limpos ou `nao_declarado` — nada que mude a rodada).
+  const priorOutcomeBlock = priorOutcomeFactBlock(opts.priorOutcomes);
+  if ((opts.priorOutcomes ?? []).length > 0) {
+    console.log(
+      `[SpecChat] relato anterior entregue alvo=${opts.filePath}`
+      + ` desfechos=${opts.priorOutcomes!.length} chars=${priorOutcomeBlock.length}`
+      + ` resumo=${JSON.stringify(summarizeOutcomes(opts.priorOutcomes!))}`,
+    );
+  }
   const priorBlock = priorRejectionFactBlock(opts.priorRejection);
   if (priorBlock) {
     const p = opts.priorRejection!;
@@ -1554,7 +1654,7 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorBlock, persistentBlock, focusBlock,
+        priorBlock, persistentBlock, focusBlock, priorOutcomeBlock,
       ),
       ...opts.llm,
     },
@@ -1563,6 +1663,10 @@ export async function dispatchGapFileJob(opts: {
     // A base das edições é EXATAMENTE o conteúdo cujo sha virou `baseSha` — o apply com If-Match
     // continua comparando a mesma impressão.
     gapFileEditsEnabled() ? opts.fileContent : null,
+    // 🔴 A1: a MESMA lista, na MESMA ordem, é o que dá sentido ao número que o agente declara. Passar
+    // outra lista (ou reordenada) faria o desfecho apontar para o GAP errado — daí ela viajar junto
+    // com o pedido em vez de ser recuperada depois.
+    opts.findings,
   );
   return { ok: true, gaps: opts.findings.length };
 }

@@ -27,6 +27,7 @@
  * antigo (job só em memória), nunca derruba o chat.
  */
 import type { Pool } from "pg";
+import type { GapOutcome } from "./gapOutcomes.js";
 
 type Db = Pick<Pool, "query" | "connect">;
 
@@ -63,6 +64,13 @@ export interface SpecChatJob {
    * heurística de "seções desaparecidas" só faz sentido no formato de arquivo inteiro.
    */
   editsApplied: number | null;
+  /**
+   * A1 (migração 112): o desfecho que o agente declarou para cada GAP que ESTE job despachou.
+   * `null` = a rodada não pediu prestação de contas (job anterior à migração, ou caminho que não é
+   * o "Resolver GAPs por arquivo"). Ausência de desfecho POR GAP é `verb: "nao_declarado"` — a
+   * diferença entre "não perguntamos" e "o agente calou" é o que torna o número auditável.
+   */
+  gapOutcomes: GapOutcome[] | null;
   createdAt: string;
   finishedAt: string | null;
   collectedAt: string | null;
@@ -73,7 +81,7 @@ export interface SpecChatJob {
  *  a cada mount da tela só para desenhar um banner. */
 const SCALAR_COLS =
   "id, project_id, tenant_id, owner_user_id, agents_job_id, kind, file_path, base_sha, base_spec_sha, " +
-  "status, reply, error, truncated, edits_applied, created_at, finished_at, collected_at, deadline_at, " +
+  "status, reply, error, truncated, edits_applied, gap_outcomes, created_at, finished_at, collected_at, deadline_at, " +
   "(spec_markdown IS NOT NULL) AS has_spec";
 
 function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null): SpecChatJob {
@@ -94,6 +102,9 @@ function rowToJob(r: Record<string, unknown>, specMarkdown: string | null = null
     error: (r.error as string | null) ?? null,
     truncated: r.truncated === true,
     editsApplied: r.edits_applied == null ? null : Number(r.edits_applied),
+    // A1: a coluna é JSONB — o `pg` já devolve objeto. Um valor que não seja array é tratado como
+    // ausente (não vale arriscar quebrar o laço por causa de uma linha escrita à mão no banco).
+    gapOutcomes: Array.isArray(r.gap_outcomes) ? (r.gap_outcomes as GapOutcome[]) : null,
     createdAt: String(r.created_at ?? new Date().toISOString()),
     finishedAt: (r.finished_at as string | null) ?? null,
     collectedAt: (r.collected_at as string | null) ?? null,
@@ -207,6 +218,12 @@ export interface FinishPatch {
   truncated?: boolean | null;
   /** GAP-12 / migração 098: nº de blocos ancorados aplicados. `undefined`/`null` preserva o atual. */
   editsApplied?: number | null;
+  /**
+   * A1 / migração 112: o desfecho que o AGENTE declarou para cada GAP despachado neste job.
+   * `undefined`/`null` preserva o atual — e `null` na coluna significa "esta rodada não pediu
+   * prestação de contas", nunca "o agente ficou calado" (isso é `verb: "nao_declarado"`).
+   */
+  gapOutcomes?: GapOutcome[] | null;
 }
 
 /**
@@ -224,11 +241,16 @@ export async function finishSpecChatJob(db: Db, id: string, patch: FinishPatch):
               error = COALESCE($5, error), model_used = COALESCE($6, model_used),
               truncated = COALESCE($7::boolean, truncated),
               edits_applied = COALESCE($8::integer, edits_applied),
+              gap_outcomes = COALESCE($9::jsonb, gap_outcomes),
               finished_at = now(), updated_at = now()
         WHERE id = $1 AND status IN ('pending','running')`,
       [id, patch.status, patch.specMarkdown ?? null, patch.reply ?? null,
         patch.error ? patch.error.slice(0, 500) : null, patch.modelUsed ?? null,
-        patch.truncated ?? null, patch.editsApplied ?? null],
+        patch.truncated ?? null, patch.editsApplied ?? null,
+        // A1: gravado na MESMA transação do desfecho do job. Fora dela, um restart entre o
+        // `finish` e o `update` deixaria o job `done` com o desfecho perdido — e a rodada seguinte
+        // leria "o agente não declarou nada", que é a afirmação oposta à verdade.
+        patch.gapOutcomes ? JSON.stringify(patch.gapOutcomes) : null],
     );
     const won = (r.rowCount ?? 0) > 0;
     if (won && patch.status === "done" && patch.reply) {

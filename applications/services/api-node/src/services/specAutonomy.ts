@@ -65,6 +65,11 @@ import type {
   CandidateGate, VerdictRound, PromotabilityReport, WorkProof, LoopWork,
 } from "./gapPromotionVerdict.js";
 import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from "./gapContinuity.js";
+// 🔴 A1: o desfecho que o agente declarou por GAP — lido do job anterior deste arquivo e devolvido a
+// ele no despacho, e registrado no log da rodada para ser auditável fora do banco de jobs.
+import {
+  lastDeclaredOutcomes, selectPriorOutcomes, summarizeOutcomes, type GapOutcome,
+} from "./gapOutcomes.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
 import { planFocus } from "./gapFocus.js";
@@ -379,6 +384,15 @@ export interface AutonomyRoundLog {
    * roteamento de GAPs, que custa LLM.
    */
   gapAnchors?: string[] | null;
+  /**
+   * 🔴 A1 — o DESFECHO que o agente declarou para cada GAP que esta rodada despachou.
+   *
+   * Vive TAMBÉM aqui (e não só em `spec_chat_jobs.gap_outcomes`) porque o log da rodada é o que o
+   * veredicto de promovibilidade (GAP-77), o chat e qualquer auditoria leem — e porque um job pode ser
+   * varrido/expirar enquanto o log da run permanece. Ausente = a rodada não pediu contas; presente com
+   * `verb: "nao_declarado"` = pediu e o agente não respondeu por aquele GAP. A diferença importa.
+   */
+  gapOutcomes?: GapOutcome[] | null;
   /**
    * 🔴 GAP-71 — destas âncoras, quais tiveram o trecho ancorado INALTERADO (byte-a-byte) pela rodada
    * que acabou de ser APLICADA. Ver `untouchedAnchors`.
@@ -2123,6 +2137,10 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     } catch { return undefined; }
   })();
   const focus = planFocus({ findings: fileFindings, refs: persistentGaps, fileRounds, history: anchorHistory });
+  // 🔴 A1: o relato que o agente deu na ÚLTIMA rodada deste arquivo. Mesmo `catch` implícito de
+  // `fileRounds`/`anchorHistory` (a função já degrada para `null`): entregar o relato é um AJUSTE do
+  // pedido, e nenhuma falha ao lê-lo pode derrubar a rodada que ia escrever o arquivo.
+  const priorOutcomesAll = await lastDeclaredOutcomes(db, run.projectId, target);
   const dispatched = focus.level === 0 ? fileFindings : (focus.findings as EnrichedFinding[]);
   // As refs de reincidência acompanham a lista restrita: mandar o fato de um GAP que NÃO está na lista
   // faria o agente trabalhar fora do foco, que é exatamente o que esta rodada existe para evitar.
@@ -2161,6 +2179,10 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       jobId, projectId: run.projectId, tenantId: run.tenantId, ownerUserId: run.ownerUserId,
       filePath: target, fileContent: file.content, findings: dispatched, agentsUrl, llm, growthBudget,
       priorRejection, persistentGaps: dispatchGaps, focus,
+      // 🔴 A1: só os desfechos que falam de um GAP QUE ESTA RODADA ESTÁ MANDANDO (casamento por
+      // fingerprint, não por semelhança de título). Devolver o relato de um GAP que saiu da lista
+      // seria pedir trabalho sobre defeito que o juiz já não vê.
+      priorOutcomes: selectPriorOutcomes(priorOutcomesAll, dispatched),
       userMessage: focus.level > 0
         ? `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: rodada DEDICADA em \`${target}\` — ${dispatched.length} GAP(s) reincidente(s) de ${fileFindings.length} (${focus.deferred} adiado(s), seguem ativos).`
         : `🤖 Modo autônomo — passe ${run.passes + 1}/${run.maxRounds}, arquivo ${nextRound}: resolver ${fileFindings.length} GAP(s) de \`${target}\` (🔴 ${fileBlockers} · 🟡 ${fileFindings.length - fileBlockers}).`,
@@ -2663,6 +2685,11 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
     ...(toleratedOverflow > 0 ? { toleratedOverflow } : {}),
     // GAP-70: a parcela EMPRESTADA do pool do passe, separada — é ela que esgota a graça.
     ...(consolidationGrace > 0 ? { consolidationGrace } : {}),
+    // 🔴 A1: o relato do agente entra no log da rodada APLICADA — é o único ponto em que ele pode ser
+    // lido ao lado do que o arquivo de fato recebeu (`anchorsUntouched`, `editsApplied`). Sem isto, a
+    // declaração viveria só na tabela de jobs e o veredicto (GAP-77) continuaria decidindo sem saber
+    // o que o próprio escritor disse ter conseguido.
+    ...(job?.gapOutcomes ? { gapOutcomes: job.gapOutcomes } : {}),
     note: `\`${target}\` salvo no disco (${file.content.length} → ${revised.length} chars).${removedNote}`
       + (toleratedOverflow > 0
         ? ` A revisão passou ${toleratedOverflow} chars da margem de ${passBudget} e o laço PAGOU o excesso`
@@ -2686,7 +2713,10 @@ async function applyFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       + (touch.stubParents.length > 0
         ? ` ℹ️ ${touch.stubParents.slice(0, 4).join(", ")}: o corpo próprio do cabeçalho é preâmbulo — o`
           + " texto endereçado mora nas SUBSEÇÕES, e é a subárvore inteira que foi medida (GAP-79)."
-        : ""),
+        : "")
+      // 🔴 A1: o relato em prosa, para o humano que pergunta "por que a contagem não cai" ler a
+      // resposta do próprio escritor em vez de deduzi-la da contagem.
+      + (job?.gapOutcomes ? ` 📋 Desfecho declarado pelo agente: ${JSON.stringify(summarizeOutcomes(job.gapOutcomes))}.` : ""),
   });
   const claim = await db.query(
     `UPDATE spec_autonomy_runs
