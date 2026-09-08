@@ -35,6 +35,7 @@
  * transporta fatos (existe / tamanho / cabeçalhos) e o julgamento continua 100% do agente.
  */
 import { splitSections, headingOutline } from "../lib/markdownSections.js";
+import { indexCoverageValidationFact } from "./specIndexCoverage.js";
 
 /**
  * Teto de entrada do estágio B (era um `slice` mudo dentro do `runStageB`).
@@ -132,11 +133,16 @@ function inventory(
     const mark = fullSet.has(f.path) ? "INTEGRAL" : "SÓ SUMÁRIO";
     return `  • \`${f.path}\` — ${f.content.length} chars — ${mark}`;
   });
+  // 🔴 GAP-122: o inventário lista a árvore, mas cruzar 12 nomes contra o texto do manifesto à mão é
+  // cobrança que o juiz nunca fez em nenhuma run — e foi assim que `arquitetura-modelo.md` ficou fora do
+  // índice do `README.md` sem que ninguém apontasse. A MEDIÇÃO vai pronta; o veredicto continua do juiz.
+  const orfaos = indexCoverageValidationFact(files);
   const head = [
     `[INVENTÁRIO DA SPEC — ${files.length} arquivo(s), ${totalChars} chars no total.`,
     "Todos os arquivos listados abaixo EXISTEM no repositório da spec.]",
     "",
     ...lines,
+    ...(orfaos ? ["", orfaos] : []),
   ];
   if (!cut) return head.join("\n");
   return [

@@ -788,6 +788,38 @@ export function manifestFactBlock(filePath: string): string {
   ].join("\n");
 }
 
+/**
+ * 🔴 GAP-122 — FATOS DO ÍNDICE para quando o arquivo em edição é o manifesto: a árvore ATUAL da spec e,
+ * dela, o que este README não cita. Vazio para qualquer outro arquivo (ou se a árvore não puder ser
+ * lida — o laço não afirma o que não mediu).
+ *
+ * Existe porque `arquitetura-modelo.md` foi criado e ficou fora do índice, inclusive depois de o chat
+ * REESCREVER o README: o pedido de edição entregava o catálogo de arquétipos e as regras do frontmatter,
+ * mas não a árvore, então "existe um arquivo novo" era informação que o editor não tinha.
+ */
+async function gapIndexBlock(projectId: string, filePath: string, fileContent: string): Promise<string> {
+  if (filePath.trim().toLowerCase() !== MANIFEST_PATH.toLowerCase()) return "";
+  try {
+    const [{ loadSpecFiles }, { unindexedFiles, indexCoverageFactBlock }] = await Promise.all([
+      import("../services/specGapScope.js"),
+      import("../services/specIndexCoverage.js"),
+    ]);
+    const files = await loadSpecFiles(pool, projectId);
+    if (files.length < 2) return ""; // spec de arquivo único não tem índice a cobrar
+    const paths = files.map((f) => f.path);
+    const orphans = unindexedFiles(fileContent, paths);
+    const block = indexCoverageFactBlock(paths, orphans);
+    console.log(
+      `[SpecChat] fatos do índice entregues projeto=${projectId.slice(0, 8)} arquivos=${paths.length}`
+      + ` fora_do_indice=${orphans.length}${orphans.length ? ` [${orphans.join(", ")}]` : ""} chars=${block.length}`,
+    );
+    return block;
+  } catch (e) {
+    console.warn(`[SpecChat] fatos do índice indisponíveis (segue sem eles): ${(e as Error).message}`);
+    return "";
+  }
+}
+
 function buildGapFileRequest(
   content: string,
   filePath: string,
@@ -842,6 +874,11 @@ function buildGapFileRequest(
    * crescimento que o veto vai descartar).
    */
   consolidationBlock = "",
+  /**
+   * 🔴 GAP-122: a árvore ATUAL da spec e o que o índice deste README não cita. Só o manifesto recebe
+   * (ver `gapIndexBlock`); vazio = outro arquivo, ou árvore não medida.
+   */
+  indexBlock = "",
 ): Record<string, unknown> {
   // A1: o corte do orçamento é DECLARADO. Antes, a lista era fatiada no meio de um item e o modelo
   // recebia um GAP pela metade sem saber que havia mais — e com a prestação de contas por número, um
@@ -882,6 +919,10 @@ function buildGapFileRequest(
     // `backend_api` (fora do catálogo) e rebaixou a spec a BLOCKER estrutural. O código não escolhe o
     // conteúdo: entrega o FATO (o catálogo fechado) para a decisão do agente ser informada.
     manifestFactBlock(filePath),
+    // 🔴 GAP-122: colado nos fatos do manifesto porque é da mesma natureza (o que a máquina lê e o que
+    // o índice precisa cobrir) e vem ANTES do conteúdo: o editor chega ao README já sabendo quais
+    // arquivos existem hoje, em vez de indexar de memória a árvore de quando o arquivo foi escrito.
+    indexBlock,
     digested
       ? "--- RECORTE DIRIGIDO DO ARQUIVO (NÃO é o arquivo inteiro; leia as REGRAS dentro do bloco) ---"
       : "--- CONTEÚDO ATUAL DO ARQUIVO ---",
@@ -1726,6 +1767,9 @@ export async function dispatchGapFileJob(opts: {
   // 🔴 GAP-121: o prompt não é persistido (só o `reply`), então sem esta linha "o agente foi avisado de
   // que a rodada era só de remoção" seria indemonstrável em prod — e a auditoria não poderia separar
   // "encolheu porque foi pedido" de "encolheu por conta própria".
+  // 🔴 GAP-122: os fatos do índice, só quando o alvo é o manifesto. Vem com log próprio porque o prompt
+  // não é persistido: sem ele, "o editor soube do arquivo novo" seria indemonstrável em prod.
+  const indexBlock = await gapIndexBlock(opts.projectId, opts.filePath, opts.fileContent);
   const consolidationBlock = consolidationOnlyFactBlock(opts.consolidationOnly);
   if (consolidationBlock) {
     const c = opts.consolidationOnly!;
@@ -1752,7 +1796,7 @@ export async function dispatchGapFileJob(opts: {
     {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
-        priorBlock, persistentBlock, focusBlock, priorOutcomeBlock, consolidationBlock,
+        priorBlock, persistentBlock, focusBlock, priorOutcomeBlock, consolidationBlock, indexBlock,
       ),
       ...opts.llm,
     },
