@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, normalizeConstraints,
-  normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw, policyNote, policyTally,
+  applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
+  normalizeConstraints, normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw,
+  policyGateConfig, policyNote, policyTally,
   type PolicyVerdict, type SpecConstraint,
 } from "./specPolicyGate.js";
 
@@ -466,5 +467,35 @@ describe("policyTally / policyNote — a contagem tem de poder CAIR (GAP-42/43)"
     const t = policyTally([]);
     expect(t).toMatchObject({ total: 0, blocking: 0, judged: 0, judgeable: 0 });
     expect(policyNote(t)).toMatch(/^0\/0 constraint/);
+  });
+});
+
+/**
+ * 🔴 MEDIDO EM PROD, na primeira prova ao vivo: o gate devolveu `derivador indisponível` e nada
+ * mais. Três causas com correções OPOSTAS ficam indistinguíveis nesse `null` mudo — rede caída,
+ * prompt recusado e parecer CORTADO. A causa real era a terceira: 6.000 tokens de saída para um
+ * prompt que pede 40 constraints com trecho ancorado verbatim.
+ */
+describe("orçamento de saída e motivo da falha (medido em prod)", () => {
+  it("a derivação tem orçamento próprio e MAIOR que o genérico — pedir N itens exige caber N itens", () => {
+    const cfg = policyGateConfig();
+    expect(cfg.deriveTokens).toBeGreaterThan(cfg.maxTokens);
+    expect(cfg.verdictTokens).toBeGreaterThan(cfg.maxTokens);
+    // Teto de constraints e orçamento não podem andar separados: 40 constraints ancoradas não
+    // cabem em 6k tokens, e foi assim que o gate morreu calado.
+    expect(cfg.deriveTokens / cfg.maxConstraints).toBeGreaterThanOrEqual(300);
+  });
+
+  it("falha do agente sempre NOMEIA o motivo — 'indisponível' sozinho é log mentiroso (GAP-45/46)", async () => {
+    const antes = process.env.API_AGENTS_URL;
+    process.env.API_AGENTS_URL = "";
+    try {
+      const res = await callPolicyAgent({ system: "s", user: "u" });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.why).toMatch(/API_AGENTS_URL/);
+    } finally {
+      if (antes === undefined) delete process.env.API_AGENTS_URL;
+      else process.env.API_AGENTS_URL = antes;
+    }
   });
 });

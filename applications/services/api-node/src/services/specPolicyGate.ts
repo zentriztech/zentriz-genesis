@@ -104,6 +104,16 @@ export function policyGateConfig() {
     artifactChars: num(process.env.SPEC_POLICY_ARTIFACT_CHARS, 120_000),
     /** Teto de passes do juiz. Trava de custo: spec absurda não vira fatura ilimitada. */
     maxJudgePasses: num(process.env.SPEC_POLICY_MAX_PASSES, 12),
+    /**
+     * Orçamento de SAÍDA da derivação e do veredicto, separados do `maxTokens` genérico.
+     *
+     * Medido em prod: com 6.000 tokens o derivador PEDIA 40 constraints com trecho ancorado verbatim
+     * e o parecer vinha CORTADO ⇒ `truncated` ⇒ `null` ⇒ "derivador indisponível" para sempre. Pedir
+     * N itens com um orçamento que não cabe N itens é a mesma família do GAP-61: medir o teto de
+     * LEITURA pela ESCRITA. O orçamento tem de caber o que o prompt pede.
+     */
+    deriveTokens: num(process.env.SPEC_POLICY_DERIVE_TOKENS, 24_000),
+    verdictTokens: num(process.env.SPEC_POLICY_VERDICT_TOKENS, 12_000),
   };
 }
 
@@ -696,31 +706,48 @@ export async function persistVerdicts(
   return n;
 }
 
-/** Uma chamada ao agente. Parecer CORTADO é parecer sem conclusão ⇒ `null` (família T1/T2). */
+/**
+ * Uma chamada ao agente. Parecer CORTADO é parecer sem conclusão ⇒ falha (família T1/T2).
+ *
+ * Devolve SEMPRE o motivo da falha. "Indisponível" sem motivo é a família do GAP-45/46 (log
+ * mentiroso): rede caída, 400 por prompt grande e parecer truncado exigem correções OPOSTAS, e um
+ * `null` mudo faz as três parecerem a mesma coisa. Foi exatamente o que custou uma prova em prod.
+ */
+export type PolicyAgentOutcome =
+  | { ok: true; text: string; model: string }
+  | { ok: false; why: string };
+
 export async function callPolicyAgent(args: {
   system: string; user: string; maxTokens?: number; modelId?: string;
   llm?: Record<string, unknown> | null;
-}): Promise<{ text: string; model: string } | null> {
+}): Promise<PolicyAgentOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim().replace(/\/$/, "");
-  if (!agentsUrl) return null;
+  if (!agentsUrl) return { ok: false, why: "API_AGENTS_URL vazia" };
   const cfg = policyGateConfig();
+  const budget = args.maxTokens ?? cfg.maxTokens;
   try {
     const { httpPost } = await import("../routes/specs.js");
     const body = await httpPost(`${agentsUrl}/invoke/raw`, JSON.stringify({
       prompt_override: args.system,
       user_message: args.user,
-      max_tokens: args.maxTokens ?? cfg.maxTokens,
+      max_tokens: budget,
       temperature: 0,
       ...(args.modelId ? { model_id: args.modelId } : {}),
       ...(args.llm ?? {}),
     }), cfg.timeoutMs);
     const data = JSON.parse(body) as { response?: string; truncated?: boolean; model?: string };
-    if (data.truncated === true) return null;
+    if (data.truncated === true) {
+      const why = `parecer CORTADO em ${budget} tokens de saída (prompt ${args.user.length} chars)`;
+      console.warn(`[specPolicyGate] ${why}`);
+      return { ok: false, why };
+    }
     const text = data.response ?? "";
-    return text.trim() ? { text, model: args.modelId ?? String(data.model ?? "") } : null;
+    if (!text.trim()) return { ok: false, why: `resposta vazia (prompt ${args.user.length} chars)` };
+    return { ok: true, text, model: args.modelId ?? String(data.model ?? "") };
   } catch (err) {
-    console.warn(`[specPolicyGate] agente falhou: ${String(err).slice(0, 300)}`);
-    return null;
+    const why = `chamada falhou: ${String(err).slice(0, 200)} (prompt ${args.user.length} chars)`;
+    console.warn(`[specPolicyGate] ${why}`);
+    return { ok: false, why };
   }
 }
 
@@ -817,8 +844,8 @@ async function policyGateOnce(
       "Derive as constraints verificáveis desta especificação.",
     ].filter(Boolean).join("\n");
 
-    const res = await callPolicyAgent({ system: DERIVE_SYSTEM, user, llm: args.llm });
-    if (!res) return empty("derivador indisponível");
+    const res = await callPolicyAgent({ system: DERIVE_SYSTEM, user, maxTokens: cfg.deriveTokens, llm: args.llm });
+    if (!res.ok) return empty(`derivador indisponível: ${res.why}`);
     const raw = parseListResponse(res.text, "constraints");
     if (!raw) return empty("derivador não devolveu JSON legível");
     const norm = normalizeConstraints(raw, { specText, model: res.model, previous, max: cfg.maxConstraints });
@@ -840,6 +867,7 @@ async function policyGateOnce(
   // estrutural do GAP-54/61, e igualmente invisível.
   const { batches, partial, dropped } = batchArtifacts(args.artifacts, cfg.artifactChars, cfg.maxJudgePasses);
   let passesFailed = 0;
+  const passWhy: string[] = [];
   if (judgeable.length > 0) {
     const lista = judgeable.map((c) => `- ${c.constraintKey}: ${c.assertion} [prova esperada: ${c.evidenceHint}]`);
     for (const [i, lote] of batches.entries()) {
@@ -854,18 +882,22 @@ async function policyGateOnce(
         "",
         "Verifique cada constraint contra os artefatos acima.",
       ].join("\n");
-      const res = await callPolicyAgent({ system: VERDICT_SYSTEM, user, llm: args.llm });
-      if (!res) { passesFailed++; continue; }
+      const res = await callPolicyAgent({ system: VERDICT_SYSTEM, user, maxTokens: cfg.verdictTokens, llm: args.llm });
+      if (!res.ok) { passesFailed++; passWhy.push(`lote ${i + 1}: ${res.why}`); continue; }
       const raw = parseListResponse(res.text, "verdicts");
-      if (!raw || raw.length === 0) { passesFailed++; continue; }
+      if (!raw || raw.length === 0) {
+        passesFailed++; passWhy.push(`lote ${i + 1}: parecer sem JSON legível`); continue;
+      }
       verdictRaw.push(...raw);
       judgeModel = res.model || judgeModel;
     }
     // Sem NENHUM passe o gate não roda: inventar "satisfeito" seria anistia silenciosa e inventar
     // "violado" seria o GAP eterno. Fail-CLOSED devolve o laço ao caminho antigo, mais estrito.
     if (verdictRaw.length === 0) {
-      return empty(`juiz de policy indisponível (${passesFailed} de ${batches.length} passe(s) falharam)`,
-        { constraints, rejected });
+      return empty(
+        `juiz de policy indisponível (${passesFailed} de ${batches.length} passe(s) falharam) — ${passWhy.join(" | ")}`,
+        { constraints, rejected, judgePasses: batches.length, passesFailed, partialArtifacts: [...partial, ...dropped] },
+      );
     }
     verdictRaw = pickBestRaw(verdictRaw, args.artifacts);
   }
@@ -883,7 +915,7 @@ async function policyGateOnce(
       user: pedidos.map((w) => `- ${w.constraintKey}: ${w.reason}`).join("\n"),
       maxTokens: 1_500, llm: args.llm,
     });
-    const raw = res ? parseListResponse(res.text, "waivers") ?? [] : [];
+    const raw = res.ok ? parseListResponse(res.text, "waivers") ?? [] : [];
     // Waiver que o classificador não conseguiu ler NÃO dispensa: `postponement` é o lado seguro.
     const kindByKey = new Map(raw.map((r) => [normalizeKey(r.constraint_key ?? r.constraintKey),
       String(r.kind ?? "").trim().toLowerCase() === "inapplicable" ? "inapplicable" : "postponement"] as [string, WaiverKind]));
@@ -900,7 +932,7 @@ async function policyGateOnce(
       user: alvo.map((c) => `- ${c.constraintKey}: ${c.assertion}\n  prova esperada: ${c.evidenceHint}\n  trecho da spec: ${c.sourceAnchor}`).join("\n\n"),
       maxTokens: 2_000, modelId: cfg.auditModel,
     });
-    const raw = res ? parseListResponse(res.text, "audits") ?? [] : [];
+    const raw = res.ok ? parseListResponse(res.text, "audits") ?? [] : [];
     // Auditor ausente NÃO absolve e NÃO condena: sem parecer a constraint segue com poder de
     // bloquear, que é o estado anterior a esta frente.
     audits = raw.map((r) => {
