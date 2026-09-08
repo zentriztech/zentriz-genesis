@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
+  agentDeadlineMs, applyPolicyDecisions, archetypeHash, assertionSha, batchArtifacts, callPolicyAgent,
   DERIVE_SYSTEM, normalizeConstraints, normalizeKey, normalizeVerdicts, parseWaivers, pickBestRaw,
   policyGateConfig, policyNote, policyTally, VERDICT_SYSTEM,
   type PolicyVerdict, type SpecConstraint,
@@ -504,6 +504,25 @@ describe("orçamento de saída e motivo da falha (medido em prod)", () => {
     // Nova #1 + Mistral #1 no lado do juiz: uma citação só não prova divergência.
     expect(VERDICT_SYSTEM).toMatch(/DUAS ocorrências verbatim/);
     expect(VERDICT_SYSTEM).toMatch(/divergência apenas de REDAÇÃO/);
+  });
+
+  /**
+   * 🔴 MEDIDO EM PROD, três vezes no mesmo dia, sempre a mesma família (GAP-61 — medir uma coisa pela
+   * outra): `timeoutMs` FIXO de 180s cobria 6.000 tokens de saída, cobriu 24.000 a raspas (150s) e
+   * estourou quando o prompt cresceu (`Socket timeout after 180s`, prompt de 128.581 chars). Prazo
+   * fixo com orçamento variável é uma bomba de relógio: a mesma chamada passa e falha sem que nada
+   * relevante mude.
+   */
+  it("o prazo da chamada ACOMPANHA o orçamento pedido, com piso e teto", () => {
+    const cfg = policyGateConfig();
+    // Chamada barata não espera menos que o piso.
+    expect(agentDeadlineMs(1_000, cfg)).toBe(cfg.timeoutMs);
+    // Orçamento grande estica o prazo — o caso que estourou em prod.
+    expect(agentDeadlineMs(cfg.deriveTokens, cfg)).toBeGreaterThan(cfg.timeoutMs);
+    expect(agentDeadlineMs(cfg.deriveTokens, cfg)).toBe(cfg.deriveTokens * cfg.msPerToken);
+    // Pedido absurdo não trava um worker para sempre.
+    expect(agentDeadlineMs(10_000_000, cfg)).toBe(cfg.maxTimeoutMs);
+    expect(agentDeadlineMs(-5, cfg)).toBe(cfg.timeoutMs);
   });
 
   it("falha do agente sempre NOMEIA o motivo — 'indisponível' sozinho é log mentiroso (GAP-45/46)", async () => {
