@@ -1244,7 +1244,7 @@ function SpecChatPanel({
   isEvolution = false, onEvolvePlan,
   recovered = null, onApplyRecovered, onDiscardRecovered,
   autonomyOn = false, onAutonomyToggle, autonomy = null, autonomyError = null,
-  autonomyStarting = false, onStopAutonomy, onShowAutonomy, onStartAutonomy,
+  autonomyStarting = false, onStopAutonomy, onShowAutonomy,
 }: {
   // Evoluir E2/E6 — em projeto de evolução, botão que pede ao arquiteto os artefatos
   // (RFC/ADR/CHANGELOG/connect.yaml) a partir do pedido (ou do texto digitado no chat).
@@ -1307,14 +1307,9 @@ function SpecChatPanel({
   onStopAutonomy?: () => void;
   /** UI/UX 2026-09-06 — leva o usuário à aba "Autonomia" do editor (fecha overlays do mobile). */
   onShowAutonomy?: () => void;
-  /**
-   * UI/UX 2026-09-06 (Jean: "no arquivo principal existe o `Ativar modo autônomo`, por que os
-   * demais não têm essa opção?"). Inicia o laço autônomo DIRETO, sem passar pelo turno único da
-   * spec inteira — é o que o escopo de arquivo precisa: o laço é POR PROJETO e, com spec dividida,
-   * ele já roda em modo `per_file` (percorre arquivo a arquivo). Antes o controle só existia no
-   * arquivo primário, escondendo justamente o caminho correto de uma spec grande.
-   */
-  onStartAutonomy?: () => void;
+  // UI/UX 2026-09-08 (Jean) — `onStartAutonomy` foi REMOVIDO deste painel: o gesto que dispara o
+  // laço em TODOS os arquivos passou a viver no cabeçalho da página, junto de "Relatórios (PDF)" e
+  // atrás de uma confirmação com o ID do produto digitado (era clicável por acidente aqui).
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -3505,8 +3500,8 @@ export default function SpecPage() {
     autonomyStarting,
     onStopAutonomy: handleStopAutonomy,
     onShowAutonomy: handleShowAutonomy,
-    // UI/UX 2026-09-06 — inicia o laço a partir de QUALQUER arquivo (o laço é do projeto).
-    onStartAutonomy: handleStartAutonomy,
+    // UI/UX 2026-09-08 (Jean) — o gatilho do laço autônomo saiu do chat/rail e virou botão de
+    // CABEÇALHO, ao lado de "Relatórios (PDF)", com confirmação pelo ID do produto digitado.
   };
 
   // ── Árvore única (UI/UX 2026-09-06) ────────────────────────────────────────────────────────
