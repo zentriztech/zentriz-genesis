@@ -93,7 +93,84 @@ export function policyGateConfig() {
     auditModel: (process.env.SPEC_POLICY_AUDIT_MODEL ?? "amazon.nova-pro-v1:0").trim(),
     /** Teto do texto de spec que vai ao derivador. O dossiê já garante mapa de 100% dos arquivos. */
     specChars: num(process.env.SPEC_POLICY_SPEC_CHARS, 120_000),
+    /**
+     * Teto de artefato POR PASSE do juiz — o mesmo teto estrutural do GAP-54/61.
+     *
+     * A spec do NVX tem 1.067.990 chars (~275k tokens): mandar "todos os artefatos" numa chamada é
+     * impossível, e a chamada não falharia num erro claro — ela devolveria 400 e o gate viveria
+     * `ran: false` para sempre em toda spec grande, sem ninguém notar. Então o juiz roda em N passes
+     * por lote de artefato, e o que não caber é DECLARADO (nunca cortado em silêncio).
+     */
+    artifactChars: num(process.env.SPEC_POLICY_ARTIFACT_CHARS, 120_000),
+    /** Teto de passes do juiz. Trava de custo: spec absurda não vira fatura ilimitada. */
+    maxJudgePasses: num(process.env.SPEC_POLICY_MAX_PASSES, 12),
   };
+}
+
+/**
+ * Divide os artefatos em lotes que CABEM numa chamada, e diz o que não caberá por inteiro.
+ *
+ * Artefato maior que o teto vai sozinho no lote e entra RECORTADO — com o corte anunciado ao agente e
+ * o nome devolvido em `partial`. É a regra de sempre: cortar é aceitável, mentir sobre o corte não.
+ * O que `partial` compra é concreto: uma acusação contra artefato que o juiz nunca viu por inteiro
+ * NÃO pode bloquear a promoção.
+ */
+export function batchArtifacts(
+  artifacts: Array<{ name: string; content: string }>, maxChars: number, maxBatches: number,
+): { batches: Array<Array<{ name: string; content: string; cutFrom?: number }>>; partial: string[]; dropped: string[] } {
+  const batches: Array<Array<{ name: string; content: string; cutFrom?: number }>> = [];
+  const partial: string[] = [];
+  const dropped: string[] = [];
+  let cur: Array<{ name: string; content: string; cutFrom?: number }> = [];
+  let size = 0;
+  for (const a of artifacts) {
+    if (a.content.length > maxChars) {
+      if (cur.length) { batches.push(cur); cur = []; size = 0; }
+      batches.push([{ name: a.name, content: a.content.slice(0, maxChars), cutFrom: a.content.length }]);
+      partial.push(a.name);
+      continue;
+    }
+    if (size + a.content.length > maxChars && cur.length) { batches.push(cur); cur = []; size = 0; }
+    cur.push({ name: a.name, content: a.content });
+    size += a.content.length;
+  }
+  if (cur.length) batches.push(cur);
+  if (batches.length > maxBatches) {
+    for (const b of batches.slice(maxBatches)) for (const a of b) dropped.push(a.name);
+    return { batches: batches.slice(0, maxBatches), partial, dropped };
+  }
+  return { batches, partial, dropped };
+}
+
+/**
+ * Escolhe, entre os veredictos de VÁRIOS passes, o que vale por chave.
+ *
+ * A ordem não é arbitrária: um `satisfied` com citação verbatim é PROVA de cumprimento e vale sobre
+ * qualquer acusação vinda de um passe que não viu o artefato onde a prova estava. Acusação sem
+ * artefato conhecido perde para qualquer coisa. Sem esta precedência, dividir em lotes criaria
+ * violações falsas em massa — cada passe acusaria o que não estava no lote dele.
+ */
+export function pickBestRaw(
+  raws: Array<Record<string, unknown>>, artifacts: Array<{ name: string; content: string }>,
+): Array<Record<string, unknown>> {
+  const byName = new Map(artifacts.map((a) => [a.name.toLowerCase(), a.content]));
+  const rank = (r: Record<string, unknown>): number => {
+    const status = String(r.status ?? "").trim().toLowerCase();
+    const content = byName.get(String(r.artifact ?? "").trim().toLowerCase()) ?? "";
+    if (status === "satisfied" && content && evidenceIsVerbatim(String(r.evidence ?? ""), content)) return 0;
+    if (status === "violated" && content) return 1;
+    if (status === "satisfied") return 2;
+    return 3;
+  };
+  const best = new Map<string, { r: Record<string, unknown>; rank: number }>();
+  for (const r of raws) {
+    const k = normalizeKey(r.constraint_key ?? r.constraintKey);
+    if (!k) continue;
+    const cur = best.get(k);
+    const rk = rank(r);
+    if (!cur || rk < cur.rank) best.set(k, { r, rank: rk });
+  }
+  return [...best.values()].map((x) => x.r);
 }
 
 export interface SpecConstraint {
@@ -411,10 +488,15 @@ export function applyPolicyDecisions(
   opts: {
     waivers?: Array<{ constraintKey: string; kind: WaiverKind }>;
     audits?: Array<{ constraintKey: string; verdict: ConstraintAudit }>;
+    /** Artefatos que o juiz NUNCA viu por inteiro (recortados ou fora dos lotes que rodaram). */
+    partialArtifacts?: string[];
+    /** Algum passe do juiz falhou ⇒ a acusação não teve chance contra a spec toda. */
+    coverageIncomplete?: boolean;
   },
 ): PolicyVerdict[] {
   const waiverByKey = new Map((opts.waivers ?? []).map((w) => [w.constraintKey, w.kind]));
   const auditByKey = new Map((opts.audits ?? []).map((a) => [a.constraintKey, a.verdict]));
+  const parcial = new Set((opts.partialArtifacts ?? []).map((n) => n.toLowerCase()));
   return verdicts.map((v) => {
     const out = { ...v, auditVerdict: auditByKey.get(v.constraintKey) ?? "" as ConstraintAudit };
     const kind = waiverByKey.get(v.constraintKey) ?? "";
@@ -424,6 +506,16 @@ export function applyPolicyDecisions(
     }
     if (out.status === "violated" && (out.auditVerdict === "vaga" || out.auditVerdict === "irrelevante")) {
       return { ...out, blocking: false, reason: `cross_family_${out.auditVerdict}` };
+    }
+    // 🔴 Teto estrutural do GAP-54/61 aplicado ao gate: acusar um artefato que o juiz leu pela metade,
+    // ou parar de bloquear porque um passe caiu, é acusação sem chance de defesa. A violação FICA
+    // registrada (não é anistia) — só perde o poder de barrar a promoção. O gate degrada para o
+    // comportamento antigo, que é a única direção segura, porque ele só existe para ACRESCENTAR.
+    if (out.status === "violated" && parcial.has(out.artifact.toLowerCase())) {
+      return { ...out, blocking: false, reason: "artifact_partial" };
+    }
+    if (out.status === "violated" && opts.coverageIncomplete) {
+      return { ...out, blocking: false, reason: "judge_coverage_incomplete" };
     }
     return out;
   });
@@ -446,6 +538,8 @@ export interface PolicyTally {
   postponements: number;
   vagas: number;
   drift: number;
+  /** Violações sem poder de bloquear porque o juiz não leu o artefato por inteiro (teto GAP-54/61). */
+  artifactPartial: number;
 }
 
 /** A contabilidade tem de poder CAIR — métrica que dá 100% por construção é o GAP-42/43. */
@@ -453,7 +547,7 @@ export function policyTally(verdicts: PolicyVerdict[], constraints: SpecConstrai
   const t: PolicyTally = {
     total: verdicts.length, satisfied: 0, violated: 0, indecidivel: 0, pending: 0, waived: 0,
     blocking: 0, judged: 0, judgeable: 0, notJudged: 0, evidenceNotFound: 0, postponements: 0,
-    vagas: 0, drift: constraints.filter((c) => c.drift).length,
+    vagas: 0, drift: constraints.filter((c) => c.drift).length, artifactPartial: 0,
   };
   for (const v of verdicts) {
     if (v.status === "satisfied") t.satisfied++;
@@ -467,6 +561,7 @@ export function policyTally(verdicts: PolicyVerdict[], constraints: SpecConstrai
     if (v.reason === "evidence_not_found" || v.reason === "artifact_not_found") t.evidenceNotFound++;
     if (v.waiverKind === "postponement") t.postponements++;
     if (v.auditVerdict === "vaga" || v.auditVerdict === "irrelevante") t.vagas++;
+    if (v.reason === "artifact_partial" || v.reason === "judge_coverage_incomplete") t.artifactPartial++;
     if (v.blocking) t.blocking++;
   }
   return t;
@@ -492,6 +587,8 @@ export function policyNote(t: PolicyTally): string {
   if (t.postponements) partes.push(`${t.postponements} pedido(s) de adiamento RECUSADO(s)`);
   if (t.vagas) partes.push(`${t.vagas} declarada(s) vaga(s) pela outra família`);
   if (t.drift) partes.push(`${t.drift} com significado trocado sem declarar`);
+  // Sem esta linha, "0 violação impeditiva" e "o juiz leu metade do arquivo" ficariam indistinguíveis.
+  if (t.artifactPartial) partes.push(`${t.artifactPartial} acusação(ões) sem poder de barrar porque o juiz não leu o artefato por inteiro`);
   return partes.join(", ");
 }
 
@@ -637,6 +734,10 @@ export interface PolicyGateResult {
   unknownKeys: string[];
   model: string;
   derived: number;
+  /** Passes do juiz que rodaram / falharam, e o que ele nunca leu por inteiro. Fatos do log. */
+  judgePasses: number;
+  passesFailed: number;
+  partialArtifacts: string[];
 }
 
 const inflight = new Map<string, Promise<PolicyGateResult>>();
@@ -661,7 +762,8 @@ export async function runPolicyGate(db: Db, args: {
 }): Promise<PolicyGateResult> {
   const empty = (reason: string, extra: Partial<PolicyGateResult> = {}): PolicyGateResult => ({
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
-    tally: policyTally([]), unknownKeys: [], model: "", derived: 0, ...extra,
+    tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
+    judgePasses: 0, passesFailed: 0, partialArtifacts: [], ...extra,
   });
   if (!policyGateEnabled()) return empty("SPEC_POLICY_GATE != on");
   if (!args.specHash) return empty("spec sem hash");
@@ -685,7 +787,8 @@ async function policyGateOnce(
   const specText = args.artifacts.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n");
   const empty = (reason: string, extra: Partial<PolicyGateResult> = {}): PolicyGateResult => ({
     ran: false, reason, constraints: [], rejected: [], verdicts: [],
-    tally: policyTally([]), unknownKeys: [], model: "", derived: 0, ...extra,
+    tally: policyTally([]), unknownKeys: [], model: "", derived: 0,
+    judgePasses: 0, passesFailed: 0, partialArtifacts: [], ...extra,
   });
 
   // ── 1. derivação (idempotente por spec+arquétipo) ──────────────────────────
@@ -732,25 +835,44 @@ async function policyGateOnce(
   const judgeable = constraints.filter((c) => c.verifiableAt === "spec");
   let verdictRaw: Array<Record<string, unknown>> = [];
   let judgeModel = model;
+  // 🔴 N passes por LOTE de artefato: a spec inteira não cabe numa chamada (1,07M chars ≈ 275k tokens
+  // no NVX). Numa só chamada o gate viveria `ran: false` para sempre nas specs grandes — o mesmo teto
+  // estrutural do GAP-54/61, e igualmente invisível.
+  const { batches, partial, dropped } = batchArtifacts(args.artifacts, cfg.artifactChars, cfg.maxJudgePasses);
+  let passesFailed = 0;
   if (judgeable.length > 0) {
-    const user = [
-      "ARTEFATOS ENTREGUES (verbatim):",
-      ...args.artifacts.map((a) => `\n=== ARTEFATO: ${a.name} ===\n${a.content}`),
-      "",
-      "CONSTRAINTS A VERIFICAR (uma linha de resposta para CADA constraint_key):",
-      ...judgeable.map((c) => `- ${c.constraintKey}: ${c.assertion} [prova esperada: ${c.evidenceHint}]`),
-      "",
-      "Verifique cada constraint contra os artefatos acima.",
-    ].join("\n");
-    const res = await callPolicyAgent({ system: VERDICT_SYSTEM, user, llm: args.llm });
-    // Sem juiz o gate NÃO roda: inventar "satisfeito" seria a anistia silenciosa; inventar "violado"
-    // seria o GAP eterno. Fail-CLOSED devolve o laço ao caminho antigo, que já bloqueia tudo.
-    if (!res) return empty("juiz de policy indisponível", { constraints, rejected });
-    verdictRaw = parseListResponse(res.text, "verdicts") ?? [];
-    judgeModel = res.model || model;
-    if (verdictRaw.length === 0) return empty("juiz de policy não devolveu JSON legível", { constraints, rejected });
+    const lista = judgeable.map((c) => `- ${c.constraintKey}: ${c.assertion} [prova esperada: ${c.evidenceHint}]`);
+    for (const [i, lote] of batches.entries()) {
+      const user = [
+        batches.length > 1
+          ? `LOTE ${i + 1} de ${batches.length} dos artefatos entregues. Julgue com o que está AQUI: se a prova de uma constraint estaria em artefato que não veio neste lote, responda "indecidivel" — outro lote a verificará.`
+          : "ARTEFATOS ENTREGUES (verbatim):",
+        ...lote.map((a) => `\n=== ARTEFATO: ${a.name}${a.cutFrom ? ` (RECORTADO: ${cfg.artifactChars} de ${a.cutFrom} chars)` : ""} ===\n${a.content}`),
+        "",
+        "CONSTRAINTS A VERIFICAR (uma linha de resposta para CADA constraint_key):",
+        ...lista,
+        "",
+        "Verifique cada constraint contra os artefatos acima.",
+      ].join("\n");
+      const res = await callPolicyAgent({ system: VERDICT_SYSTEM, user, llm: args.llm });
+      if (!res) { passesFailed++; continue; }
+      const raw = parseListResponse(res.text, "verdicts");
+      if (!raw || raw.length === 0) { passesFailed++; continue; }
+      verdictRaw.push(...raw);
+      judgeModel = res.model || judgeModel;
+    }
+    // Sem NENHUM passe o gate não roda: inventar "satisfeito" seria anistia silenciosa e inventar
+    // "violado" seria o GAP eterno. Fail-CLOSED devolve o laço ao caminho antigo, mais estrito.
+    if (verdictRaw.length === 0) {
+      return empty(`juiz de policy indisponível (${passesFailed} de ${batches.length} passe(s) falharam)`,
+        { constraints, rejected });
+    }
+    verdictRaw = pickBestRaw(verdictRaw, args.artifacts);
   }
-  const { verdicts: base, unknownKeys, judged } = normalizeVerdicts(verdictRaw, constraints, args.artifacts);
+  const { verdicts: base0, unknownKeys, judged } = normalizeVerdicts(verdictRaw, constraints, args.artifacts);
+  // Tudo que o juiz não pôde ler por inteiro perde poder de BLOQUEAR — e é nomeado no log.
+  const naoLidos = [...partial, ...dropped];
+  const base = applyPolicyDecisions(base0, { partialArtifacts: naoLidos, coverageIncomplete: passesFailed > 0 });
 
   // ── 3. waivers ancorados na spec, CLASSIFICADOS por agente ────────────────
   const pedidos = parseWaivers(specText).filter((w) => constraints.some((c) => c.constraintKey === w.constraintKey));
@@ -790,11 +912,16 @@ async function policyGateOnce(
     }).filter((a) => a.constraintKey);
   }
 
-  const verdicts = applyPolicyDecisions(base, { waivers, audits });
+  const verdicts = applyPolicyDecisions(base, {
+    waivers, audits, partialArtifacts: naoLidos, coverageIncomplete: passesFailed > 0,
+  });
   const tally = { ...policyTally(verdicts, constraints), judged };
   await persistVerdicts(db, {
     projectId: args.projectId, specHash: args.specHash, model: judgeModel || "desconhecido",
     autonomyRunId: args.autonomyRunId, validationRunId: args.validationRunId, verdicts,
   });
-  return { ran: true, constraints, rejected, verdicts, tally, unknownKeys, model: judgeModel, derived };
+  return {
+    ran: true, constraints, rejected, verdicts, tally, unknownKeys, model: judgeModel, derived,
+    judgePasses: batches.length, passesFailed, partialArtifacts: naoLidos,
+  };
 }
