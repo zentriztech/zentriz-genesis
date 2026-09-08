@@ -525,6 +525,19 @@ describe("orçamento de saída e motivo da falha (medido em prod)", () => {
     expect(agentDeadlineMs(-5, cfg)).toBe(cfg.timeoutMs);
   });
 
+  /**
+   * 🔴 MEDIDO AO VIVO, duas derivações completas na spec do NVX: 40 constraints, ZERO julgáveis nas
+   * duas. A causa não era o prompt — era que o derivador recebia `slice(0, 120_000)` de 1.068.255
+   * chars, **12% da spec**, e nunca dois arquivos INTEIROS. Declarar política sobre um oitavo do
+   * texto e chamar isso de política da spec é o mesmo teto do GAP-54/61, agora na DERIVAÇÃO.
+   */
+  it("os passes de derivação × o teto por passe cobrem uma spec do tamanho REAL medido", () => {
+    const cfg = policyGateConfig();
+    expect(cfg.maxDerivePasses * cfg.specChars).toBeGreaterThanOrEqual(1_068_255);
+    // O teto por passe é de PROMPT; o global é de fatura. Um não pode anular o outro.
+    expect(cfg.maxConstraintsTotal).toBeGreaterThan(cfg.maxConstraints);
+  });
+
   it("falha do agente sempre NOMEIA o motivo — 'indisponível' sozinho é log mentiroso (GAP-45/46)", async () => {
     const antes = process.env.API_AGENTS_URL;
     process.env.API_AGENTS_URL = "";
