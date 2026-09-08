@@ -83,6 +83,21 @@ export interface GapOutcome {
    * contradição verificável. Não anula o desfecho (não é papel do código) — fica ao lado dele.
    */
   contested: string | null;
+  /**
+   * 🔴 A2 — `corrigido` DESMENTIDO pela revalidação. Não é persistido: é derivado na LEITURA
+   * (`lastDeclaredOutcomes`) e só vale se uma validação rodou DEPOIS da declaração e o GAP continua
+   * na lista que o juiz devolveu.
+   *
+   * MEDIDO em prod 2026-09-08 (run `10b1a4e1`, passe 1): dos 10 GAPs declarados `corrigido` — todos
+   * com edição ancorada aplicada, nenhum contestado — **5 continuavam na MESMA âncora** na validação
+   * seguinte, com o título reescrito pelo juiz (jaccard 0,03..0,30). O agente corrige o SINTOMA
+   * nomeado no título, não a contradição; e como o título muda, cada rodada parece progresso.
+   *
+   * Sem este campo o relato do A1 escondia exatamente o fato mais útil: `priorOutcomeFactBlock` só
+   * devolvia `permanece_aberto`/`nao_e_defeito`/`corrigido` contestado — um `corrigido` "limpo" que
+   * NÃO fechou não voltava ao agente, então ele repetia a mesma via.
+   */
+  refutedByJudge?: boolean;
 }
 
 export interface GapOutcomeParse {
@@ -268,23 +283,30 @@ export function selectPriorOutcomes(
  * rodada anterior deste arquivo.
  *
  * Só entra o que muda a decisão desta rodada — `permanece_aberto` (com o que faltou),
- * `nao_e_defeito` (o argumento ainda não convenceu o juiz) e `corrigido` CONTESTADO (declarou e
- * nada foi aplicado). `corrigido` limpo e `nao_declarado` ficam fora: o primeiro já foi medido pela
- * revalidação, o segundo não afirma nada.
+ * `nao_e_defeito` (o argumento ainda não convenceu o juiz), `corrigido` CONTESTADO (declarou e nada
+ * foi aplicado) e, 🔴 A2, `corrigido` DESMENTIDO (a edição foi aplicada e o juiz, relendo depois,
+ * manteve o defeito na mesma âncora — 5 de 10 casos medidos em prod). `nao_declarado` e o
+ * `corrigido` que de fato fechou ficam fora: o primeiro não afirma nada e o segundo já saiu da lista.
  *
  * `""` quando não há nada a dizer — bloco vazio no prompt seria ruído pago.
  */
 export function priorOutcomeFactBlock(prior: GapOutcome[] | null | undefined): string {
   if (!prior || prior.length === 0) return "";
   const relevantes = prior.filter(
-    (o) => o.verb === "permanece_aberto" || o.verb === "nao_e_defeito" || (o.verb === "corrigido" && o.contested),
+    (o) => o.verb === "permanece_aberto" || o.verb === "nao_e_defeito"
+      || (o.verb === "corrigido" && (o.contested || o.refutedByJudge)),
   );
   if (relevantes.length === 0) return "";
   const linhas = relevantes.slice(0, 20).map((o) => {
     const onde = o.anchor ? ` (em: ${o.anchor})` : "";
     const nota = o.note ? ` — você disse: “${o.note.slice(0, 300)}”` : " — sem justificativa registrada";
-    if (o.verb === "corrigido") {
+    if (o.verb === "corrigido" && o.contested) {
       return `• ${o.title}${onde}: você declarou CORRIGIDO na rodada anterior, mas NENHUMA edição foi aplicada${nota}.`;
+    }
+    if (o.verb === "corrigido") {
+      // A2: a edição FOI aplicada, o juiz releu o arquivo DEPOIS dela e o defeito continua nesta
+      // âncora. É o fato que o agente não tem como deduzir do texto: a via que ele escolheu falhou.
+      return `• ${o.title}${onde}: você declarou CORRIGIDO na rodada anterior e a edição FOI aplicada, mas o juiz releu o arquivo depois disso e o defeito CONTINUA nesta âncora${nota}. Não repita esta via.`;
     }
     if (o.verb === "nao_e_defeito") {
       return `• ${o.title}${onde}: você declarou que NÃO É DEFEITO${nota}. O juiz releu o arquivo e manteve o GAP.`;
@@ -320,14 +342,27 @@ export async function lastDeclaredOutcomes(
 ): Promise<GapOutcome[] | null> {
   try {
     const r = (await db.query(
-      `SELECT gap_outcomes FROM spec_chat_jobs
-        WHERE project_id = $1 AND lower(file_path) = lower($2)
-          AND gap_outcomes IS NOT NULL AND status = 'done'
-        ORDER BY created_at DESC LIMIT 1`,
+      // 🔴 A2: `judged_after` = uma validação com findings rodou DEPOIS desta declaração. Sem isso,
+      // duas rodadas do mesmo arquivo no MESMO passe (sem revalidação entre elas) fariam todo
+      // `corrigido` parecer desmentido — o GAP ainda estaria na lista por ser a MESMA medição.
+      `SELECT j.gap_outcomes,
+              EXISTS (SELECT 1 FROM spec_validation_runs v
+                       WHERE v.project_id = $1 AND v.findings IS NOT NULL
+                         AND v.created_at > j.created_at) AS judged_after
+         FROM spec_chat_jobs j
+        WHERE j.project_id = $1 AND lower(j.file_path) = lower($2)
+          AND j.gap_outcomes IS NOT NULL AND j.status = 'done'
+        ORDER BY j.created_at DESC LIMIT 1`,
       [projectId, filePath],
-    )).rows[0] as { gap_outcomes?: unknown } | undefined;
+    )).rows[0] as { gap_outcomes?: unknown; judged_after?: boolean } | undefined;
     const raw = r?.gap_outcomes;
-    return Array.isArray(raw) ? (raw as GapOutcome[]) : null;
+    if (!Array.isArray(raw)) return null;
+    const outcomes = raw as GapOutcome[];
+    // O desmentido é DERIVADO aqui e não gravado: quem chama só recebe `refutedByJudge` nos
+    // `corrigido` cuja edição foi aplicada (sem `contested`) e que o juiz reviu depois. Quem decide
+    // se o GAP casa com o despacho de agora continua sendo `selectPriorOutcomes`.
+    if (!r?.judged_after) return outcomes;
+    return outcomes.map((o) => (o.verb === "corrigido" && !o.contested ? { ...o, refutedByJudge: true } : o));
   } catch (e) {
     // Ler o relato é um AJUSTE do pedido: nenhuma falha aqui pode derrubar a rodada que ia escrever
     // o arquivo (mesma lei do `fileRounds`/`anchorHistory`).

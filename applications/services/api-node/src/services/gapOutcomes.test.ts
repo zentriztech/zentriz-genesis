@@ -194,6 +194,16 @@ describe("A1 — selectPriorOutcomes + priorOutcomeFactBlock", () => {
     expect(txt).toContain("tente uma DIFERENTE");
   });
 
+  it("A2: `corrigido` DESMENTIDO pelo juiz volta ao agente com a via que falhou", () => {
+    const limpos = parseGapOutcomes(bloco("3) corrigido: removi o critério (iii)"), TRES, { appliedEdits: 2 }).outcomes;
+    const desmentido = limpos.map((o) => (o.verb === "corrigido" ? { ...o, refutedByJudge: true } : o));
+    const txt = priorOutcomeFactBlock(desmentido);
+    expect(txt).toContain("a edição FOI aplicada");
+    expect(txt).toContain("CONTINUA nesta âncora");
+    expect(txt).toContain("removi o critério (iii)");
+    expect(txt).not.toContain("NENHUMA edição foi aplicada");
+  });
+
   it("`corrigido` limpo e `nao_declarado` não geram bloco (nada a cobrar ⇒ nenhum token pago)", () => {
     const limpos = parseGapOutcomes(bloco("3) corrigido: fechei"), TRES, { appliedEdits: 2 }).outcomes;
     expect(priorOutcomeFactBlock(limpos)).toBe("");
@@ -214,16 +224,31 @@ describe("A1 — gapOutcomeInstruction", () => {
 });
 
 describe("A1 — lastDeclaredOutcomes", () => {
+  it("A2: `corrigido` limpo vira DESMENTIDO só quando uma validação rodou depois da declaração", async () => {
+    const outs = [
+      { index: 1, verb: "corrigido", contested: null },
+      { index: 2, verb: "corrigido", contested: "declarou sem edição" },
+      { index: 3, verb: "permanece_aberto", contested: null },
+    ];
+    const depois = { query: vi.fn().mockResolvedValue({ rows: [{ gap_outcomes: outs, judged_after: true }] }) };
+    const r1 = (await lastDeclaredOutcomes(depois, "p", "a.md"))!;
+    expect(r1.map((o) => o.refutedByJudge)).toEqual([true, undefined, undefined]);
+    // Duas rodadas no MESMO passe (sem revalidação entre elas) ⇒ ninguém foi desmentido.
+    const antes = { query: vi.fn().mockResolvedValue({ rows: [{ gap_outcomes: outs, judged_after: false }] }) };
+    const r2 = (await lastDeclaredOutcomes(antes, "p", "a.md"))!;
+    expect(r2.every((o) => !o.refutedByJudge)).toBe(true);
+  });
+
   it("devolve o array do último job que pediu contas neste arquivo", async () => {
-    const rows = [{ gap_outcomes: [{ index: 1, verb: "permanece_aberto" }] }];
+    const rows = [{ gap_outcomes: [{ index: 1, verb: "permanece_aberto" }], judged_after: false }];
     const db = { query: vi.fn().mockResolvedValue({ rows }) };
     const r = await lastDeclaredOutcomes(db, "p1", "privacidade-lgpd.md");
     expect(r).toHaveLength(1);
     const sql = db.query.mock.calls[0][0] as string;
     // Case-insensitive no path e o mais RECENTE primeiro: o relato é o da última rodada, não o de uma
     // rodada qualquer do histórico.
-    expect(sql).toMatch(/lower\(file_path\) = lower\(\$2\)/);
-    expect(sql).toMatch(/ORDER BY created_at DESC/);
+    expect(sql).toMatch(/lower\(j\.file_path\) = lower\(\$2\)/);
+    expect(sql).toMatch(/ORDER BY j\.created_at DESC/);
   });
 
   it("nenhum job / valor não-array / falha de banco ⇒ null (o laço não afirma nada ao agente)", async () => {
