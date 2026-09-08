@@ -1507,8 +1507,21 @@ async function promotionVerdictFor(
     let round: VerdictRound | null = null;
     let saved = 0;
     const shaByFile = await specFileShas(db, run.projectId).catch(() => new Map<string, string>());
+    // 🔴 GAP-120 — o orçamento desta rodada é o que RESTA do teto acumulado por spec (`maxPerSpec`,
+    // decidido pelo Jean: 24 = duas por arquivo), medido nos pareceres VIVOS e não-obsoletos. O
+    // `maxPerRun` volta ao papel de tamanho de lote por chamada ao juiz. Sem isso, como a rodada de
+    // veredicto roda UMA vez por run, o teto por chamada era o teto da spec: em prod o juiz absolveu
+    // 5 de 8 e só 3 valeram, com os outros dois gravados como impeditivos carregando o texto que os
+    // absolvia. Falha de leitura ⇒ lista vazia ⇒ orçamento CHEIO seria anistia por erro, então o
+    // `catch` devolve o orçamento mínimo (o lote), nunca o teto inteiro.
+    // O piso NÃO pode ser o lote: passar de `maxPerSpec` faz o relatório invalidar TODAS as liberações
+    // ("excedeu o teto ⇒ nenhuma vale"), então liberar a mais é pior que liberar a menos.
+    const liveAntes = await livePromotionVerdicts(db, run.projectId, shaByFile).catch(() => null);
+    const budget = liveAntes === null
+      ? cfg.maxPerRun // leitura falhou: mantém exatamente o teto de antes, sem inventar orçamento
+      : Math.max(0, cfg.maxPerSpec - liveAntes.filter((v) => v.impact === "nao_impeditivo" && !v.stale).length);
     if (gate.candidates.length > 0) {
-      round = await runVerdictRound(gate.candidates, { maxRelease: cfg.maxPerRun });
+      round = await runVerdictRound(gate.candidates, { maxRelease: cfg.maxPerRun, budget });
       if (round.verdicts.length > 0) {
         saved = await saveVerdicts(db, {
           projectId: run.projectId, autonomyRunId: run.id, validationRunId: run.validationRunId,

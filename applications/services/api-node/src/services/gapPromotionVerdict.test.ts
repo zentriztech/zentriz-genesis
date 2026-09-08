@@ -523,7 +523,7 @@ describe("runVerdictRound — a rodada adversarial, fail-CLOSED em cada degrau",
       .mockRejectedValueOnce(new Error("500"));
     const r = await runVerdictRound([C()], { maxRelease: 3 });
     expect(r).toMatchObject({ ran: false, released: 0, verdicts: [] });
-    expect(r.reason).toMatch(/juiz não respondeu/);
+    expect(r.reason).toMatch(/o juiz não sustentou nenhum parecer/);
   });
 
   it("nao_impeditivo com motivo suficiente é liberado, com a acusação anexada ao parecer", async () => {
@@ -570,9 +570,93 @@ describe("runVerdictRound — a rodada adversarial, fail-CLOSED em cada degrau",
         }),
       }));
     const r = await runVerdictRound(cands, { maxRelease: 1 });
+    // 🔴 GAP-120: `maxRelease` é o LOTE. Com orçamento 1 (default = o lote), o primeiro lote gasta o
+    // orçamento e o segundo candidato nem chega ao juiz — e isso é DECLARADO, não gravado como parecer.
     expect(r.released).toBe(1);
-    expect(r.verdicts.filter((v) => v.impact === "impeditivo")).toHaveLength(1);
-    expect(r.reason).toMatch(/teto de 1 por rodada/);
+    expect(r.verdicts).toHaveLength(1);
+    expect(r.reason).toMatch(/não chegaram ao juiz \(teto acumulado de 1 esgotado\)/);
+  });
+
+  /**
+   * 🔴 GAP-120 — o teto por chamada tinha virado o teto da spec inteira porque a rodada de veredicto
+   * roda UMA vez por run. Estes testes fixam as três consequências: o laço julga em LOTES até o
+   * orçamento acumulado; o que o teto retém diz que foi o teto (a linha não pode absolver e condenar
+   * ao mesmo tempo); e lote perdido não apaga lote julgado.
+   */
+  describe("🔴 GAP-120 — lotes, orçamento acumulado e teto que não se disfarça de julgamento", () => {
+    const cand = (n: number) => C({ anchor: `## ${n}. Seção`, fingerprint: `fp${n}` });
+    const claims = (n: number) => JSON.stringify({
+      response: JSON.stringify({ claims: Array.from({ length: n }, (_, i) => claim(`g${i + 1}`)) }),
+    });
+    const libera = (ids: string[]) => JSON.stringify({
+      response: JSON.stringify({
+        verdicts: ids.map((id) => ({
+          id, impact: "nao_impeditivo",
+          reason: "redundância consistente: os dois trechos declaram o mesmo contrato, a fábrica constrói igual",
+        })),
+      }),
+    });
+
+    it("orçamento maior que o lote ⇒ mais de uma chamada ao juiz, e todos os julgados valem", async () => {
+      httpPost
+        .mockResolvedValueOnce(claims(4))
+        .mockResolvedValueOnce(libera(["g1", "g2"]))
+        .mockResolvedValueOnce(libera(["g3", "g4"]));
+      const r = await runVerdictRound([cand(1), cand(2), cand(3), cand(4)], { maxRelease: 2, budget: 4 });
+      expect(r.released).toBe(4);
+      expect(r.verdicts).toHaveLength(4);
+      // 1 chamada de promotor + 2 de juiz: o lote de 2 não podia julgar 4 numa resposta só.
+      expect(httpPost).toHaveBeenCalledTimes(3);
+      expect(r.reason).toMatch(/2 chamada\(s\) de lote 2/);
+    });
+
+    it("retido pelo teto acumulado: a linha gravada DIZ que foi o teto, com o parecer do juiz preservado", async () => {
+      httpPost
+        .mockResolvedValueOnce(claims(2))
+        .mockResolvedValueOnce(libera(["g1", "g2"]));
+      const r = await runVerdictRound([cand(1), cand(2)], { maxRelease: 2, budget: 1 });
+      expect(r.released).toBe(1);
+      const retido = r.verdicts.find((v) => v.impact === "impeditivo");
+      expect(retido).toBeDefined();
+      expect(retido!.reason).toMatch(/^⚠️ liberação RETIDA pelo teto acumulado de 1 por spec/);
+      expect(retido!.reason).toMatch(/o JUIZ havia declarado NÃO impeditivo/);
+      // O parecer do juiz continua legível na mesma linha — nada de condenar com o texto que absolve.
+      expect(retido!.reason).toMatch(/a fábrica constrói igual/);
+      expect(r.reason).toMatch(/liberação RETIDA pelo teto acumulado/);
+    });
+
+    it("orçamento zerado (teto da spec já gasto) ⇒ ninguém chega ao juiz e nada é liberado", async () => {
+      httpPost.mockResolvedValueOnce(claims(2));
+      const r = await runVerdictRound([cand(1), cand(2)], { maxRelease: 2, budget: 0 });
+      expect(r).toMatchObject({ ran: false, released: 0, verdicts: [] });
+      expect(httpPost).toHaveBeenCalledTimes(1); // só o promotor
+      expect(r.reason).toMatch(/não julgou nenhum candidato/);
+    });
+
+    it("lote perdido no juiz NÃO apaga o lote já julgado (a lição do GAP-119)", async () => {
+      httpPost
+        .mockResolvedValueOnce(claims(4))
+        .mockResolvedValueOnce(libera(["g1", "g2"]))
+        .mockRejectedValueOnce(new Error("500"));
+      const r = await runVerdictRound([cand(1), cand(2), cand(3), cand(4)], { maxRelease: 2, budget: 4 });
+      expect(r.ran).toBe(true);
+      expect(r.released).toBe(2);
+      expect(r.verdicts).toHaveLength(2);
+      expect(r.reason).toMatch(/lote\(s\) perdido\(s\) no juiz/);
+    });
+
+    it("parecer sobre candidato que não estava no bloco enviado é descartado", async () => {
+      httpPost
+        .mockResolvedValueOnce(claims(2))
+        // O lote 1 recebeu só g1, mas o juiz responde sobre g2 (cujo trecho ele não viu).
+        .mockResolvedValueOnce(libera(["g1", "g2"]))
+        .mockResolvedValueOnce(libera(["g2"]));
+      const r = await runVerdictRound([cand(1), cand(2)], { maxRelease: 1, budget: 2 });
+      expect(r.released).toBe(2);
+      expect(r.verdicts).toHaveLength(2);
+      // g2 só entrou no SEU lote: duas chamadas ao juiz, não uma.
+      expect(httpPost).toHaveBeenCalledTimes(3);
+    });
   });
 
   it("id inventado e id repetido são ignorados", async () => {

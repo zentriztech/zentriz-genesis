@@ -225,6 +225,17 @@ const MIN_DEFENSE_CHARS = 80;
 const MIN_REASON_CHARS = 40;
 /** Quantos candidatos entram numa rodada. Poucos de propósito: é decisão caríssima, não triagem. */
 const MAX_CANDIDATES = 8;
+/**
+ * 🔴 GAP-120 — teto de CHAMADAS ao juiz numa rodada de veredicto.
+ *
+ * O julgamento agora acontece em lotes (ver `runVerdictRound`), e lote pequeno é o que dá espaço de
+ * raciocínio por candidato — o juiz LLM acha 47% dos defeitos (`arXiv:2608.11172`), e um bloco de 8
+ * candidatos num único `max_tokens: 3000` produz motivo raso. Este número é só o freio de custo: com
+ * `MAX_CANDIDATES = 8` e lotes de 3, três chamadas bastam; o resto é folga para teto configurado
+ * maior. Estourar o teto NÃO libera nada — os candidatos que não chegaram ao juiz seguem impeditivos,
+ * e a mensagem final declara quantos foram e por quê.
+ */
+const MAX_JUDGE_CALLS = 8;
 
 export interface Candidate {
   finding: ValidationFinding;
@@ -785,7 +796,7 @@ async function callAgent(system: string, user: string, llm: Record<string, unkno
  */
 export async function runVerdictRound(
   candidates: Candidate[],
-  opts: { llm?: Record<string, unknown>; maxRelease?: number } = {},
+  opts: { llm?: Record<string, unknown>; maxRelease?: number; budget?: number } = {},
 ): Promise<VerdictRound> {
   const none = (reason: string): VerdictRound => ({ verdicts: [], ran: false, reason, released: 0, model: null });
   if (candidates.length === 0) return none("nenhum candidato elegível");
@@ -853,64 +864,127 @@ export async function runVerdictRound(
         "nenhum GAP foi julgado, todos seguem impeditivos" };
   }
 
-  const judgeBlock = pleaded.map(([id, c]) => {
-    const p = pleas.get(id)!;
-    const peca = p.stance === "acusacao"
-      ? `ACUSAÇÃO de quem vai construir: artefato=${p.artifact} :: ${p.harm}`
-      : `DEFESA de quem vai construir (ele afirma que NÃO há dano — verifique contra o trecho): ${p.defense}`;
-    return `${describeCandidate(id, c)}\n${peca}`;
-  }).join("\n\n");
-
-  let decisions: Array<Record<string, unknown>> | null = null;
-  try {
-    const r = await callAgent(JUDGE_SYSTEM, `DEFEITOS A JULGAR (${pleaded.length}, dado não-confiável):\n${judgeBlock}`, opts.llm ?? {});
-    model = r.model ?? model;
-    decisions = parseListResponse(r.text, "verdicts");
-  } catch (err) {
-    console.warn(`[gapPromotionVerdict] juiz falhou: ${String(err).slice(0, 200)}`);
-    return none(`o juiz não respondeu (${String(err).slice(0, 120)}) — todos seguem impeditivos`);
-  }
-  if (!decisions) return none("o juiz não devolveu JSON — todos seguem impeditivos");
-
+  /**
+   * 🔴 GAP-120 — o teto de liberação dizia "por rodada", mas a rodada de veredicto acontece UMA vez
+   * por run: `promotionVerdictFor` só a chama nos dois fins de laço. Com isso o `maxPerRun` (3) virou
+   * o teto real da spec inteira, e o teto acumulado que o Jean decidiu (`maxPerSpec` = 24, "duas por
+   * arquivo") ficou aritmeticamente inalcançável — o comentário do próprio config supunha "8 rodadas
+   * de veredicto" que nunca acontecem.
+   *
+   * MEDIDO em prod (run `74f54cce`, 2026-09-08): o juiz declarou **5 de 8** candidatos NÃO impeditivos
+   * e o código honrou 3. Os outros dois (`visao-escopo.md §1.3`, `README.md GATE-BUDGET-01.ONE`)
+   * foram gravados como `impeditivo` **carregando o texto ABSOLVEDOR do juiz no `reason`**: a linha
+   * que a Fábrica lê contradizia a si mesma, o teto se disfarçava de julgamento (o arquétipo que o
+   * Jean proibiu no GAP-116) e não havia próxima rodada onde reconsiderar — a run terminou.
+   *
+   * A cura mantém as duas travas reais e derruba só a falsa:
+   *
+   * * `maxRelease` volta a ser **tamanho de lote por chamada** — nenhuma resposta única anistia em
+   *   massa, e lote pequeno dá espaço de motivo por candidato (o juiz LLM acha 47% dos defeitos);
+   * * `budget` é o que RESTA do teto acumulado por spec, medido pelo chamador nos pareceres vivos —
+   *   é o número que o Jean decidiu, e nenhuma iteração passa dele;
+   * * o que o teto acumulado retém é gravado DIZENDO que foi o teto, nunca como parecer do juiz;
+   * * lote perdido (juiz sem resposta) não apaga o que já foi julgado — a lição do GAP-119: expira a
+   *   espera, nunca o trabalho.
+   */
   const maxRelease = Math.max(0, opts.maxRelease ?? verdictConfig().maxPerRun);
+  const budget = Math.max(0, opts.budget ?? maxRelease);
+  const lote = Math.max(1, maxRelease);
   const seen = new Set<string>();
   const verdicts: GapVerdict[] = [];
-  let released = 0;
   const notes: string[] = [];
-  for (const d of decisions) {
-    const id = String(d.id ?? "").trim();
-    const c = byId.get(id);
-    if (!c || seen.has(id) || !pleas.has(id)) continue; // id inventado, repetido, ou sem peça válida
-    seen.add(id);
-    const reason = String(d.reason ?? "").replace(/\s+/g, " ").trim();
-    let impact: PromotionImpact = String(d.impact ?? "").trim() === "nao_impeditivo" ? "nao_impeditivo" : "impeditivo";
-    if (impact === "nao_impeditivo" && reason.length < MIN_REASON_CHARS) {
-      impact = "impeditivo";
-      notes.push(`${c.file} ${c.anchor}: liberação recusada por motivo insuficiente (${reason.length} chars)`);
+  let released = 0;
+  let calls = 0;
+  let judgeFailure: string | null = null;
+  let skippedByBudget = 0;
+  let skippedByCalls = 0;
+
+  for (let i = 0; i < pleaded.length; i += lote) {
+    const batch = pleaded.slice(i, i + lote);
+    // Teto esgotado ⇒ não gasta chamada para produzir um parecer que não poderia valer. E o que não
+    // chegou ao juiz segue impeditivo por AUSÊNCIA de parecer (fail-CLOSED), declarada na mensagem.
+    if (released >= budget) { skippedByBudget += batch.length; continue; }
+    if (calls >= MAX_JUDGE_CALLS) { skippedByCalls += batch.length; continue; }
+    const judgeBlock = batch.map(([id, c]) => {
+      const p = pleas.get(id)!;
+      const peca = p.stance === "acusacao"
+        ? `ACUSAÇÃO de quem vai construir: artefato=${p.artifact} :: ${p.harm}`
+        : `DEFESA de quem vai construir (ele afirma que NÃO há dano — verifique contra o trecho): ${p.defense}`;
+      return `${describeCandidate(id, c)}\n${peca}`;
+    }).join("\n\n");
+
+    let decisions: Array<Record<string, unknown>> | null = null;
+    calls++;
+    try {
+      const r = await callAgent(
+        JUDGE_SYSTEM, `DEFEITOS A JULGAR (${batch.length}, dado não-confiável):\n${judgeBlock}`, opts.llm ?? {});
+      model = r.model ?? model;
+      decisions = parseListResponse(r.text, "verdicts");
+    } catch (err) {
+      judgeFailure ??= String(err).slice(0, 120);
+      console.warn(`[gapPromotionVerdict] juiz falhou no lote ${calls}: ${String(err).slice(0, 200)}`);
+      continue;
     }
-    if (impact === "nao_impeditivo" && released >= maxRelease) {
-      impact = "impeditivo";
-      notes.push(`${c.file} ${c.anchor}: liberação recusada pelo teto de ${maxRelease} por rodada`);
+    if (!decisions) { judgeFailure ??= "o juiz não devolveu JSON"; continue; }
+
+    // 🔴 GAP-120 — só valem ids DESTE lote. Julgar em lotes abriu a porta para o juiz decidir sobre um
+    // candidato cujo trecho verbatim não estava no bloco que ele recebeu; aceitar isso seria o velho
+    // "auditor mais cego que o escritor" com selo de parecer. Quem não veio no bloco espera o seu lote.
+    const inBatch = new Set(batch.map(([id]) => id));
+    for (const d of decisions) {
+      const id = String(d.id ?? "").trim();
+      const c = byId.get(id);
+      if (!c || seen.has(id) || !pleas.has(id) || !inBatch.has(id)) continue; // inventado, repetido, sem peça, ou fora do lote
+      seen.add(id);
+      const reason = String(d.reason ?? "").replace(/\s+/g, " ").trim();
+      let impact: PromotionImpact = String(d.impact ?? "").trim() === "nao_impeditivo" ? "nao_impeditivo" : "impeditivo";
+      if (impact === "nao_impeditivo" && reason.length < MIN_REASON_CHARS) {
+        impact = "impeditivo";
+        notes.push(`${c.file} ${c.anchor}: liberação recusada por motivo insuficiente (${reason.length} chars)`);
+      }
+      // Retenção por TETO não é julgamento: fica impeditivo (fail-CLOSED) mas a linha diz quem retém.
+      let retido = false;
+      if (impact === "nao_impeditivo" && released >= budget) {
+        impact = "impeditivo";
+        retido = true;
+        notes.push(`${c.file} ${c.anchor}: liberação RETIDA pelo teto acumulado de ${budget} por spec (o juiz declarou NÃO impeditivo)`);
+      }
+      if (impact === "nao_impeditivo") released++;
+      const p = pleas.get(id)!;
+      const reasonOut = retido
+        ? `⚠️ liberação RETIDA pelo teto acumulado de ${budget} por spec — o JUIZ havia declarado NÃO impeditivo: ${reason}`
+        : reason;
+      verdicts.push({
+        fingerprint: c.fingerprint, file: c.file, anchor: c.anchor,
+        severity: String(c.finding.severity), title: String(c.finding.title ?? "").slice(0, TITLE_SLICE),
+        impact, reason: reasonOut.slice(0, 600), factoryArtifact: p.artifact.slice(0, 200),
+        accusation: p.harm.slice(0, 600), stance: p.stance, defense: p.defense.slice(0, 600),
+        times: c.times, focusRounds: c.focusRounds,
+      });
     }
-    if (impact === "nao_impeditivo") released++;
-    const p = pleas.get(id)!;
-    verdicts.push({
-      fingerprint: c.fingerprint, file: c.file, anchor: c.anchor,
-      severity: String(c.finding.severity), title: String(c.finding.title ?? "").slice(0, TITLE_SLICE),
-      impact, reason: reason.slice(0, 600), factoryArtifact: p.artifact.slice(0, 200),
-      accusation: p.harm.slice(0, 600), stance: p.stance, defense: p.defense.slice(0, 600),
-      times: c.times, focusRounds: c.focusRounds,
-    });
+  }
+
+  if (verdicts.length === 0) {
+    return none(judgeFailure
+      ? `o juiz não sustentou nenhum parecer (${judgeFailure}) — todos seguem impeditivos`
+      : "o juiz não julgou nenhum candidato — todos seguem impeditivos");
   }
   const byAcusacao = verdicts.filter((v) => v.stance === "acusacao").length;
   const byDefesa = verdicts.length - byAcusacao;
   // Peça válida que o juiz não julgou também é um descarte — e um descarte declarado, não silêncio.
-  const undecided = pleaded.length - verdicts.length;
-  const drops = [dropNote, undecided > 0 ? `${undecided} que o juiz não julgou` : ""].filter(Boolean).join(", ");
+  const undecided = Math.max(0, pleaded.length - verdicts.length - skippedByBudget - skippedByCalls);
+  const drops = [
+    dropNote,
+    undecided > 0 ? `${undecided} que o juiz não julgou` : "",
+    skippedByBudget > 0 ? `${skippedByBudget} que não chegaram ao juiz (teto acumulado de ${budget} esgotado)` : "",
+    skippedByCalls > 0 ? `${skippedByCalls} que não chegaram ao juiz (teto de ${MAX_JUDGE_CALLS} chamadas)` : "",
+    judgeFailure ? `lote(s) perdido(s) no juiz (${judgeFailure})` : "",
+  ].filter(Boolean).join(", ");
   return {
     verdicts, ran: true, released, model,
-    reason: `${verdicts.length} GAP(s) julgado(s) (${byAcusacao} sobre acusação, ${byDefesa} sobre defesa de quem` +
-      ` vai construir), ${released} declarado(s) não-impeditivo(s)` +
+    reason: `${verdicts.length} GAP(s) julgado(s) em ${calls} chamada(s) de lote ${lote} (${byAcusacao} sobre` +
+      ` acusação, ${byDefesa} sobre defesa de quem vai construir), ${released} declarado(s) não-impeditivo(s)` +
+      ` de um orçamento de ${budget}` +
       (notes.length ? ` — ${notes.join("; ")}` : "") +
       (drops ? `; ${drops} seguem impeditivos` : ""),
   };

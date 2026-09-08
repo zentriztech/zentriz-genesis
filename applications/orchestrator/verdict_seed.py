@@ -9,7 +9,7 @@ A mesma decisão foi tomada no Connect: `ReviewVerdictRecord` nasceu como contra
 vez de esticar `ReflectionRecord`, porque auto-avaliação (ganho ZERO) e revisão de outra
 família (+12 p.p.) não podem compartilhar o mesmo registro (ADR-014).
 
-A frase única que resume as treze regras:
+A frase única que resume as quatorze regras:
 
     "não encontrei" e "não sei procurar" NÃO são a mesma resposta.
 
@@ -44,7 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "1.5.0"
+SCHEMA_VERSION = "1.6.0"
 STACK_KEY = "generic"  # o defeito é de AFIRMAÇÃO, não de linguagem
 
 # Papéis que consomem CAG no pipeline (o loader recebe o papel em minúsculas).
@@ -65,7 +65,7 @@ NO_OPINION_REASONS = (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Catálogo — treze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
+# Catálogo — quatorze arquétipos de veredicto, todos MEDIDOS (ou citados com fonte)
 # O da ÂNCORA (`verd.gap39.ancora-literal-e-identidade`) entrou na revisão adversarial
 # cross-family de 2026-09-08: 3 de 3 revisores de outra família apontaram a MESMA lacuna — o
 # GAP-39/49 aparecia só como EVIDÊNCIA de outra regra, e nenhuma regra proibia reescrever a
@@ -283,6 +283,24 @@ VERDICT_ARCHETYPES: list[dict[str, Any]] = [
             "e 2.939 de saída já debitados. O arquivo foi marcado como feito sem revisão, somou "
             "falha de arquivo e o trabalho pago foi jogado fora. Nenhum erro de banco apareceu no "
             "log: a ausência era só a leitura chegando antes do commit."
+        ),
+    },
+    {
+        "slug": "verd.gap120.teto-de-orcamento-nao-e-veredicto",
+        "title": "Teto é conta de gasto, não sentença: o que o limite retém tem de dizer que foi o limite",
+        "rule": (
+            "Teto de orçamento diz quanto você pode GASTAR, nunca se o trabalho presta. Ao esbarrar num "
+            "limite, declare o limite e o que ficou pendente — não converta o excedente em reprovação, e não "
+            "gaste chamada para produzir parecer que já não poderia valer. Quem grava a decisão jamais junta "
+            "condenação ao texto que absolvia: a linha tem de dizer QUEM retém, o teto ou o juiz."
+        ),
+        "evidence": (
+            "Bancada GAP-120 (run 74f54cce, 2026-09-08): o teto de 3 liberações era documentado como “por "
+            "rodada de veredicto”, supondo 8 rodadas — mas a rodada acontece UMA vez por run, no fim do laço, "
+            "então o teto por chamada era o teto da spec inteira. O juiz declarou 5 de 8 candidatos NÃO "
+            "impeditivos e só 3 valeram; os outros dois foram gravados como “impeditivo” carregando o texto "
+            "do próprio juiz que os absolvia, e a run terminou sem próxima rodada onde reconsiderar. O teto "
+            "acumulado decidido (24 = duas por arquivo) era aritmeticamente inalcançável."
         ),
     },
 ]
