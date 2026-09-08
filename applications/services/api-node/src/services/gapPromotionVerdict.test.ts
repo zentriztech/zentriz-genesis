@@ -439,12 +439,61 @@ describe("runVerdictRound — a rodada adversarial, fail-CLOSED em cada degrau",
     expect(r.reason).toMatch(/não devolveu JSON/);
   });
 
-  it("falha em ACUSAR não é inocência: sem artefato concreto o juiz nem é chamado", async () => {
+  it("falha em ACUSAR não é inocência: sem artefato E sem defesa sustentada o juiz nem é chamado", async () => {
     httpPost.mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "", harm: "nenhum dano real" }] }) }));
     const r = await runVerdictRound([C()], { maxRelease: 3 });
     expect(httpPost).toHaveBeenCalledTimes(1);
     expect(r).toMatchObject({ ran: true, released: 0, verdicts: [] });
-    expect(r.reason).toMatch(/não sustentou nenhuma acusação concreta/);
+    expect(r.reason).toMatch(/não sustentou peça nenhuma/);
+    // 🔴 GAP-118: o motivo diz QUAL descarte foi — "não respondeu" e "respondeu que não há dano"
+    // são informações opostas, e o log antigo chamava as duas de "sem acusação concreta".
+    expect(r.reason).toMatch(/1 com defesa não sustentada/);
+  });
+
+  // 🔴 GAP-118 — a voz que absolveria era a única emudecida: o prompt do promotor MANDA deixar o
+  // artefato vazio quando ele construiria a coisa certa, e o código descartava esse candidato em
+  // silêncio. Agora a defesa sustentada vira PEÇA e o candidato é julgado.
+  it("defesa SUSTENTADA (artefato vazio + defesa citando o trecho) leva o candidato ao juiz", async () => {
+    const defense = "eu construiria a tabela shipments com created_at TIMESTAMPTZ, exatamente como §3.2 declara verbatim, e o parágrafo repetido diz o mesmo com outras palavras";
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "", harm: "", defense }] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: ok("nao_impeditivo"), model_used: "m1" }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    const judgeBody = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+    expect(judgeBody.user_message).toContain("DEFESA de quem vai construir");
+    expect(judgeBody.user_message).toContain(defense);
+    expect(r.released).toBe(1);
+    expect(r.verdicts[0]).toMatchObject({ stance: "defesa", defense, factoryArtifact: "" });
+    expect(r.reason).toMatch(/1 sobre defesa de quem vai construir/);
+  });
+
+  it("defesa NÃO libera por si: o juiz decide contra o trecho e pode mantê-la impeditiva", async () => {
+    const defense = "eu construiria do jeito certo mesmo assim porque o trecho §3.2 já diz qual é o formato do campo e não há escolha ambígua";
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "", harm: "", defense }] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: ok("impeditivo"), model_used: "m1" }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(r.released).toBe(0);
+    expect(r.verdicts[0]).toMatchObject({ stance: "defesa", impact: "impeditivo" });
+  });
+
+  it("defesa RASA (curta ou genérica) descarta o candidato — não é absolvição", async () => {
+    httpPost.mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "", harm: "", defense: "é só redação" }] }) }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    expect(httpPost).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ ran: true, released: 0, verdicts: [] });
+  });
+
+  it("acusação vence defesa quando o promotor manda as duas — a leitura é a que RETÉM", async () => {
+    const defense = "eu construiria certo do mesmo jeito, o trecho §3.2 é claro o suficiente para não haver ambiguidade nenhuma aqui";
+    httpPost
+      .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ ...claim("g1"), defense }] }) }))
+      .mockResolvedValueOnce(JSON.stringify({ response: ok("impeditivo"), model_used: "m1" }));
+    const r = await runVerdictRound([C()], { maxRelease: 3 });
+    const judgeBody = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+    expect(judgeBody.user_message).toContain("ACUSAÇÃO de quem vai construir");
+    expect(judgeBody.user_message).not.toContain("DEFESA de quem vai construir");
+    expect(r.verdicts[0].stance).toBe("acusacao");
   });
 
   it("acusação genérica (curta) também descarta o candidato", async () => {
@@ -465,7 +514,7 @@ describe("runVerdictRound — a rodada adversarial, fail-CLOSED em cada degrau",
     expect(judgeBody.user_message).not.toContain("### g1 ");
     expect(r.verdicts).toHaveLength(1);
     expect(r.verdicts[0].anchor).toBe("## 5. Erros");
-    expect(r.reason).toMatch(/1 sem acusação concreta seguem impeditivos/);
+    expect(r.reason).toMatch(/1 sem resposta do promotor seguem impeditivos/);
   });
 
   it("juiz indisponível → nada liberado", async () => {
@@ -797,7 +846,7 @@ describe("saveVerdicts", () => {
       verdicts: [{
         fingerprint: "fp1", file: "Modelo-Dados.md", anchor: "## 4", severity: "blocker", title: "t",
         impact: "nao_impeditivo", reason: "motivo", factoryArtifact: "POST /x", accusation: "dano",
-        times: 4, focusRounds: 3,
+        stance: "acusacao", defense: "", times: 4, focusRounds: 3,
       }],
       shaByFile: new Map([["modelo-dados.md", "sha-abc"]]),
       model: "opus",
@@ -839,7 +888,8 @@ describe("livePromotionVerdicts", () => {
 describe("promotabilityReport — o que o humano lê antes de promover", () => {
   const LV = (o: Partial<LiveVerdict> = {}): LiveVerdict => ({
     fingerprint: "x", file: "modelo-dados.md", anchor: "## 4", impact: "nao_impeditivo",
-    reason: "r", factoryArtifact: "a", stale: false, createdAt: "2026-09-07T12:00:00Z", ...o,
+    reason: "r", factoryArtifact: "a", stance: "acusacao", defense: "", stale: false,
+    createdAt: "2026-09-07T12:00:00Z", ...o,
   });
 
   it("GAP liberado sai da conta de impeditivos e a spec fica promovível", () => {

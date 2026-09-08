@@ -71,6 +71,8 @@ interface ValidationState {
     verdicts: Array<{
       fingerprint: string; file: string; anchor: string | null;
       impact: "impeditivo" | "nao_impeditivo"; reason: string; factoryArtifact: string;
+      /** 🔴 GAP-118 — sobre que peça o juiz decidiu: acusação de dano ou defesa de quem vai construir. */
+      stance?: "acusacao" | "defesa"; defense?: string;
       /** `true` = o arquivo mudou depois do parecer: ele não vale mais. */
       stale: boolean; createdAt: string;
     }>;
@@ -300,6 +302,13 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
                 <li key={v.fingerprint}>
                   <code>{v.file}</code>{v.anchor ? ` ${v.anchor}` : ""} — declarado NÃO impeditivo
                   {v.factoryArtifact ? ` (artefato analisado: ${v.factoryArtifact})` : ""}: {v.reason}
+                  {/* 🔴 GAP-118: quando a peça foi DEFESA, quem constrói afirmou que não há dano —
+                      o humano precisa ler a afirmação que o juiz aceitou, não só o veredicto. */}
+                  {v.stance === "defesa" && v.defense
+                    ? <Typography variant="caption" sx={{ display: "block" }}>
+                        Defesa de quem vai construir: {v.defense}
+                      </Typography>
+                    : null}
                 </li>
               ))}
             </Box>
