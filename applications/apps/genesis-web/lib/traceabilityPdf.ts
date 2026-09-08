@@ -126,17 +126,40 @@ class Writer {
 
   get width(): number { return A4.w - M.left - M.right; }
 
+  /** Fundo da caixa útil: nenhuma linha de texto pode ter a base abaixo daqui (a faixa do rodapé
+   *  vive em `A4.h - 24`, portanto FORA desta caixa). */
+  get bottomLimit(): number { return A4.h - M.bottom; }
+
   need(h: number): void {
-    if (this.y + h <= A4.h - M.bottom) return;
+    if (this.y + h <= this.bottomLimit) return;
+    this.newPage();
+  }
+
+  newPage(): void {
     this.doc.addPage();
     this.page += 1;
     this.y = M.top;
     this.pageHeader();
   }
 
+  /**
+   * Layout 2026-09-08 (Jean: "alguns textos ficam fora da página") — último recurso quando a quebra
+   * do jsPDF não vence o token (hash de 64 chars, URL sem espaço, âncora colada): CORTA e marca com
+   * "…". Cortar à vista é honesto; deixar o glifo atravessar a margem direita não é.
+   * Mede com a fonte ATUAL — quem chama precisa tê-la escolhido antes.
+   */
+  clip(line: string, maxW: number): string {
+    if (maxW <= 0) return "";
+    if (this.doc.getTextWidth(line) <= maxW) return line;
+    let s = line;
+    while (s.length > 1 && this.doc.getTextWidth(`${s}…`) > maxW) s = s.slice(0, -1);
+    return `${s}…`;
+  }
+
   pageHeader(): void {
     this.doc.setFont("helvetica", "normal").setFontSize(7.5).setTextColor(...COLOR.soft);
-    this.doc.text(this.header, M.left, M.top - 22);
+    // Nome de produto longo transbordava o cabeçalho pela direita: fica só a 1ª linha, cortada na caixa.
+    this.doc.text(this.clip(ascii(this.header), this.width), M.left, M.top - 22);
     this.doc.setDrawColor(...COLOR.rule).setLineWidth(0.5);
     this.doc.line(M.left, M.top - 16, A4.w - M.right, M.top - 16);
   }
@@ -151,21 +174,32 @@ class Writer {
     }
   }
 
+  /**
+   * Título. Layout 2026-09-08 (Jean): título longo (nome de produto grande, rótulo de diagrama vindo
+   * do Mermaid) era desenhado numa linha só e ATRAVESSAVA a margem direita. Agora QUEBRA em linhas.
+   */
+  private heading(text: string, size: number, lineH: number): string[] {
+    this.doc.setFont("helvetica", "bold").setFontSize(size).setTextColor(...COLOR.ink);
+    const lines = this.doc.splitTextToSize(ascii(text), this.width) as string[];
+    this.need(lines.length * lineH + 14);
+    for (const line of lines) {
+      this.doc.setFont("helvetica", "bold").setFontSize(size).setTextColor(...COLOR.ink);
+      this.doc.text(this.clip(line, this.width), M.left, this.y);
+      this.y += lineH;
+    }
+    return lines;
+  }
+
   h1(text: string): void {
-    this.need(40);
-    this.doc.setFont("helvetica", "bold").setFontSize(15).setTextColor(...COLOR.ink);
-    this.doc.text(ascii(text), M.left, this.y);
-    this.y += 8;
+    this.heading(text, 15, 18);
+    this.y -= 10;
     this.doc.setDrawColor(...COLOR.accent).setLineWidth(1.2);
     this.doc.line(M.left, this.y, M.left + 70, this.y);
     this.y += 16;
   }
 
   h2(text: string): void {
-    this.need(30);
-    this.doc.setFont("helvetica", "bold").setFontSize(10.5).setTextColor(...COLOR.ink);
-    this.doc.text(ascii(text), M.left, this.y);
-    this.y += 13;
+    this.heading(text, 10.5, 13);
   }
 
   p(text: string, opts: { size?: number; color?: [number, number, number]; italic?: boolean } = {}): void {
@@ -175,58 +209,106 @@ class Writer {
     const lines = this.doc.splitTextToSize(ascii(text), this.width) as string[];
     for (const line of lines) {
       this.need(size + 3.4);
-      this.doc.text(line, M.left, this.y);
+      // `need` pode ter trocado de página, e o cabeçalho da nova redefine a fonte: reafirmar aqui,
+      // senão o resto do parágrafo saía em 7,5 pt cinza (medido com uma fonte, desenhado com outra).
+      this.doc.setFont("helvetica", opts.italic ? "italic" : "normal").setFontSize(size)
+        .setTextColor(...(opts.color ?? COLOR.ink));
+      this.doc.text(this.clip(line, this.width), M.left, this.y);
       this.y += size + 3.4;
     }
     this.y += 3;
   }
 
-  /** Grade de rótulo→valor em duas colunas (identidade, certificado, hashes). */
+  /**
+   * Grade de rótulo→valor em duas colunas (identidade, certificado, hashes).
+   *
+   * Layout 2026-09-08 (Jean) — antes só a PRIMEIRA linha do valor ia ao papel (`val[0]`): um id de
+   * produto (36 chars) ou um hash não caberia em 153 pt e o resto DESAPARECIA sem aviso. Agora o par
+   * cresce em altura e imprime o valor inteiro; o que nem a quebra vence sai cortado com "…".
+   */
   kv(pairs: Array<[string, string]>): void {
     const colW = this.width / 2;
     const labelW = 96;
+    const valW = colW - labelW - 8;
+    const lineH = 11;
     for (let i = 0; i < pairs.length; i += 2) {
-      this.need(16);
+      const cells = [pairs[i], pairs[i + 1]].map((pair) => {
+        if (!pair) return null;
+        this.doc.setFont("helvetica", "bold").setFontSize(8.4);
+        const raw = ascii(pair[1]) || "—";
+        const lines = this.doc.splitTextToSize(raw, Math.max(valW, 20)) as string[];
+        return { label: pair[0], lines: lines.map((l) => this.clip(l, valW)) };
+      });
+      const rowLines = Math.max(1, ...cells.map((c) => c?.lines.length ?? 1));
+      this.need(rowLines * lineH + 6);
       for (let c = 0; c < 2; c++) {
-        const pair = pairs[i + c];
-        if (!pair) continue;
+        const cell = cells[c];
+        if (!cell) continue;
         const x = M.left + c * colW;
         this.doc.setFont("helvetica", "normal").setFontSize(7.6).setTextColor(...COLOR.soft);
-        this.doc.text(ascii(pair[0]), x, this.y);
+        this.doc.text(this.clip(ascii(cell.label), labelW - 4), x, this.y);
         this.doc.setFont("helvetica", "bold").setFontSize(8.4).setTextColor(...COLOR.ink);
-        const val = this.doc.splitTextToSize(ascii(pair[1]), colW - labelW - 8) as string[];
-        this.doc.text(val[0] ?? "—", x + labelW, this.y);
+        cell.lines.forEach((l, li) => this.doc.text(l, x + labelW, this.y + li * lineH));
       }
-      this.y += 15;
+      this.y += rowLines * lineH + 4;
     }
     this.y += 4;
   }
 
-  /** Tabela simples: larguras em fração da largura útil. Quebra de página repete o cabeçalho. */
+  /**
+   * Tabela simples: larguras em fração da largura útil. Quebra de página repete o cabeçalho.
+   *
+   * Layout 2026-09-08 (Jean) — duas vazões corrigidas:
+   *  • fração somando mais de 1 jogava a última coluna FORA da folha ⇒ as frações são normalizadas
+   *    pela soma (a tabela cabe na caixa útil, sempre);
+   *  • linha mais alta que a página inteira (asserção de constraint, motivo do juiz) transbordava o
+   *    rodapé porque `need()` só troca de página UMA vez ⇒ a linha agora CONTINUA na página
+   *    seguinte, com o cabeçalho repetido, em vez de vazar.
+   */
   table(cols: Array<{ head: string; frac: number }>, rows: string[][], opts: { size?: number } = {}): void {
     const size = opts.size ?? 7.4;
-    const widths = cols.map((c) => c.frac * this.width);
+    const lineH = size + 2.2;
+    const fracTotal = cols.reduce((s, c) => s + Math.max(c.frac, 0), 0) || 1;
+    const widths = cols.map((c) => (Math.max(c.frac, 0) / fracTotal) * this.width);
     const drawHead = () => {
       this.need(18);
       this.doc.setFillColor(244, 246, 248);
       this.doc.rect(M.left, this.y - 8, this.width, 14, "F");
       this.doc.setFont("helvetica", "bold").setFontSize(size).setTextColor(...COLOR.soft);
       let x = M.left + 3;
-      cols.forEach((c, i) => { this.doc.text(ascii(c.head), x, this.y); x += widths[i]; });
+      cols.forEach((c, i) => { this.doc.text(this.clip(ascii(c.head), widths[i] - 6), x, this.y); x += widths[i]; });
       this.y += 12;
     };
     drawHead();
     for (const row of rows) {
-      const cells = row.map((cell, i) => this.doc.splitTextToSize(ascii(cell), widths[i] - 6) as string[]);
-      const h = Math.max(...cells.map((c) => c.length)) * (size + 2.2) + 3;
-      if (this.y + h > A4.h - M.bottom) { this.need(h); drawHead(); }
-      this.doc.setFont("helvetica", "normal").setFontSize(size).setTextColor(...COLOR.ink);
-      let x = M.left + 3;
-      cells.forEach((lines, i) => {
-        lines.forEach((line, li) => this.doc.text(line, x, this.y + li * (size + 2.2)));
-        x += widths[i];
+      // Medir com a MESMA fonte com que se desenha (antes media em negrito, herdado do cabeçalho).
+      this.doc.setFont("helvetica", "normal").setFontSize(size);
+      const cells = cols.map((_, i) => {
+        const cellW = Math.max(widths[i] - 6, 12);
+        const raw = ascii(row[i] ?? "");
+        const lines = raw ? (this.doc.splitTextToSize(raw, cellW) as string[]) : [""];
+        return lines.map((l) => this.clip(l, cellW));
       });
-      this.y += h;
+      const maxLines = Math.max(1, ...cells.map((c) => c.length));
+      let li = 0;
+      while (li < maxLines) {
+        const fit = Math.floor((this.bottomLimit - this.y) / lineH);
+        if (fit < 1) { this.newPage(); drawHead(); continue; }
+        const take = Math.min(fit, maxLines - li);
+        this.doc.setFont("helvetica", "normal").setFontSize(size).setTextColor(...COLOR.ink);
+        let x = M.left + 3;
+        cells.forEach((lines, i) => {
+          for (let k = 0; k < take; k++) {
+            const line = lines[li + k];
+            if (line) this.doc.text(line, x, this.y + k * lineH);
+          }
+          x += widths[i];
+        });
+        this.y += take * lineH;
+        li += take;
+        if (li < maxLines) { this.newPage(); drawHead(); }
+      }
+      this.y += 3;
       this.doc.setDrawColor(...COLOR.rule).setLineWidth(0.3);
       this.doc.line(M.left, this.y - 3, A4.w - M.right, this.y - 3);
     }
@@ -282,7 +364,9 @@ async function drawDiagram(w: Writer, d: Diagram, index: number): Promise<void> 
     const scale = Math.min(w.width / natW, 1);
     const drawW = natW * scale;
     let drawH = natH * scale;
-    const maxH = A4.h - M.top - M.bottom;
+    // −14: o `need(drawH + 10)` abaixo tem de CABER numa página nova; com a altura útil cheia ele
+    // pedia uma página que já estava em branco e o desenho ainda encostava no rodapé.
+    const maxH = A4.h - M.top - M.bottom - 14;
     let finalW = drawW;
     if (drawH > maxH) { finalW = drawW * (maxH / drawH); drawH = maxH; }
     w.need(drawH + 10);
@@ -303,7 +387,9 @@ async function drawDiagram(w: Writer, d: Diagram, index: number): Promise<void> 
   for (const line of d.code.split(/\r?\n/)) {
     for (const piece of w.doc.splitTextToSize(line, w.width) as string[]) {
       w.need(10);
-      w.doc.text(piece, M.left, w.y);
+      // O courier volta a ser a fonte corrente após a troca de página feita pelo `need`.
+      w.doc.setFont("courier", "normal").setFontSize(7).setTextColor(...COLOR.ink);
+      w.doc.text(w.clip(piece, w.width), M.left, w.y);
       w.y += 9;
     }
   }

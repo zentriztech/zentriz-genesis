@@ -192,10 +192,18 @@ export default function SpecTreePanel({ projectId, onFileSelected, onDirtyChange
                       primary={f.path.split("/").pop()}
                       primaryTypographyProps={{ fontSize: "0.82rem", fontFamily: "monospace" }}
                     />
-                    {(gapsByPath?.[f.path]?.active ?? 0) > 0 && (
-                      <Tooltip title={`${gapsByPath![f.path].active} GAP(s) ativo(s) neste arquivo${gapsByPath![f.path].blockers ? ` — ${gapsByPath![f.path].blockers} bloqueador(es)` : ""}`}>
-                        <Chip size="small" color={gapsByPath![f.path].blockers > 0 ? "error" : "warning"}
-                          label={gapsByPath![f.path].active}
+                    {/* UI/UX 2026-09-08 (Jean): badge por NÍVEL — `4` em vermelho quando só 1 dos 4 é
+                        bloqueador dizia o número certo com a cor errada. Vermelho = bloqueador, âmbar = resto. */}
+                    {(gapsByPath?.[f.path]?.blockers ?? 0) > 0 && (
+                      <Tooltip title={`${gapsByPath![f.path].blockers} GAP(s) BLOQUEADOR(es) neste arquivo (de ${gapsByPath![f.path].active} ativo(s))`}>
+                        <Chip size="small" color="error" label={gapsByPath![f.path].blockers}
+                          sx={{ height: 18, fontSize: "0.62rem", mr: 0.5 }} />
+                      </Tooltip>
+                    )}
+                    {gapsByPath?.[f.path] && gapsByPath[f.path].active - gapsByPath[f.path].blockers > 0 && (
+                      <Tooltip title={`${gapsByPath[f.path].active - gapsByPath[f.path].blockers} GAP(s) ativo(s) NÃO bloqueador(es) neste arquivo`}>
+                        <Chip size="small" color="warning"
+                          label={gapsByPath[f.path].active - gapsByPath[f.path].blockers}
                           sx={{ height: 18, fontSize: "0.62rem", mr: 0.5 }} />
                       </Tooltip>
                     )}

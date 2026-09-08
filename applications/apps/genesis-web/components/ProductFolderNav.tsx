@@ -238,13 +238,25 @@ export default function ProductFolderNav({
     const gaps = gapsByPath?.[ref.specPath];
     return (
       <>
-        {gaps && gaps.active > 0 && (
-          <Tooltip title={`${gaps.active} GAP(s) ativo(s) neste arquivo${gaps.blockers ? ` — ${gaps.blockers} bloqueador(es)` : ""}`}>
+        {/* UI/UX 2026-09-08 (Jean): UM badge com o total MENTE por omissão — `infraestrutura-deploy.md`
+            tem 4 GAPs, só 1 bloqueador, e o badge dizia `4` em VERMELHO. Agora o nível é separado:
+            `(1)` vermelho = bloqueador, `(3)` âmbar = o resto. A soma continua sendo `active`. */}
+        {gaps && gaps.blockers > 0 && (
+          <Tooltip title={`${gaps.blockers} GAP(s) BLOQUEADOR(es) neste arquivo (de ${gaps.active} ativo(s))`}>
             <Box component="span" sx={{
               px: 0.5, minWidth: 15, height: 15, borderRadius: "8px", display: "inline-flex",
               alignItems: "center", justifyContent: "center", fontSize: "0.58rem", fontWeight: 700,
-              lineHeight: 1, color: "#0D1117", bgcolor: gaps.blockers > 0 ? "#F85149" : "#F59E0B",
-            }}>{gaps.active}</Box>
+              lineHeight: 1, color: "#0D1117", bgcolor: "#F85149",
+            }}>{gaps.blockers}</Box>
+          </Tooltip>
+        )}
+        {gaps && gaps.active - gaps.blockers > 0 && (
+          <Tooltip title={`${gaps.active - gaps.blockers} GAP(s) ativo(s) NÃO bloqueador(es) neste arquivo${gaps.blockers ? ` (de ${gaps.active} ativo(s))` : ""}`}>
+            <Box component="span" sx={{
+              px: 0.5, minWidth: 15, height: 15, borderRadius: "8px", display: "inline-flex",
+              alignItems: "center", justifyContent: "center", fontSize: "0.58rem", fontWeight: 700,
+              lineHeight: 1, color: "#0D1117", bgcolor: "#F59E0B",
+            }}>{gaps.active - gaps.blockers}</Box>
           </Tooltip>
         )}
         {ref.isPrimary && (

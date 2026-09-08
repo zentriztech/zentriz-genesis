@@ -151,6 +151,13 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
   const [reasonCode, setReasonCode] = useState("");
   const [reason, setReason] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
+  /**
+   * UI/UX 2026-09-08 (Jean): Ignorar e Refutar FECHAM GAP sem consertar nada — e o de lote fecha
+   * todos os warnings à vista de uma vez. Um clique num item de menu era barato demais para uma
+   * decisão que sai da contagem, do gate e do "Resolver GAPs". Agora exige a palavra digitada.
+   */
+  const [confirmWord, setConfirmWord] = useState("");
+  const confirmOk = confirmWord.trim().toLowerCase() === "confirmar";
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onFindingsChangeRef = useRef(onFindingsChange);
   onFindingsChangeRef.current = onFindingsChange;
@@ -210,6 +217,7 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
   const openDraft = (st: TriageState, findings: Finding[]) => {
     setDraft({ state: st, fingerprints: findings.map((f) => f.fingerprint!).filter(Boolean), titles: findings.map((f) => f.title), hasBlocker: findings.some((f) => f.severity === "blocker") });
     setReasonCode(st === "refuted" ? "false_positive" : "accepted_risk"); setReason(""); setExpiresAt("");
+    setConfirmWord("");
     setMenu(null);
   };
 
@@ -536,10 +544,17 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
               inputProps={{ min: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10) }}
               helperText="Ao vencer (fim do dia), o GAP volta a Ativo automaticamente." />
           )}
+          {/* UI/UX 2026-09-08 (Jean): confirmação POR ESCRITO. Fechar GAP sem conserto é decisão, não
+              clique — e em lote atinge todos os warnings à vista de uma vez. */}
+          <TextField fullWidth size="small" label="Digite “confirmar” para prosseguir" value={confirmWord}
+            onChange={(e) => setConfirmWord(e.target.value)} error={confirmWord.length > 0 && !confirmOk}
+            helperText={draft && draft.fingerprints.length > 1
+              ? `Esta ação ${draft.state === "ignored" ? "ignora" : "refuta"} ${draft.fingerprints.length} GAP(s) de uma vez, sem consertá-los.`
+              : "A palavra confirma que o GAP sai da contagem ativa sem ter sido corrigido."} />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDraft(null)} disabled={busy === "triage"}>Cancelar</Button>
-          <Button variant="contained" color={draft?.state === "ignored" ? "warning" : "primary"} disabled={busy === "triage" || !reasonCode || (!!draft?.hasBlocker && reason.trim().length < 20)} onClick={() => void submitDraft()}>
+          <Button variant="contained" color={draft?.state === "ignored" ? "warning" : "primary"} disabled={busy === "triage" || !reasonCode || !confirmOk || (!!draft?.hasBlocker && reason.trim().length < 20)} onClick={() => void submitDraft()}>
             {busy === "triage" ? "Aplicando…" : draft?.state === "ignored" ? "Ignorar" : "Refutar"}
           </Button>
         </DialogActions>

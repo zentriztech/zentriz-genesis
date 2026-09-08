@@ -1651,36 +1651,11 @@ function SpecChatPanel({
             </Tooltip>
           </>
         )}
-        {/* UI/UX 2026-09-06 — item 1 do Jean: "por que os demais arquivos não têm 'Ativar modo
-            autônomo'?". O laço é POR PROJETO e, em spec dividida, o servidor já o roda em modo
-            `per_file` (fila de arquivos). Esconder o controle no escopo de arquivo escondia o
-            caminho CORRETO de uma spec grande. Aqui ele é um BOTÃO, não um checkbox: no escopo de
-            arquivo não existe o turno único da spec inteira para um checkbox "modificar" — e o
-            rótulo diz o alcance real (TODOS os arquivos), para ninguém confundir com o botão
-            de um arquivo só logo abaixo. */}
-        {fileMode && onStartAutonomy && (
-          <Tooltip title={autonomy?.enabled === false
-            ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
-            : (gapCount ?? 0) > 0
-              ? `O laço percorre a spec INTEIRA — arquivo a arquivo — resolvendo, salvando e revalidando, enquanto sobrar GAP 🔴/🟡, até ${autonomy?.maxRoundsAllowed ?? 5} rodada(s). Roda no servidor: continua mesmo se você fechar esta tela.`
-              : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar"}>
-            <span>
-              <Button fullWidth size="small" variant="outlined" color="secondary"
-                startIcon={autonomyStarting
-                  ? <CircularProgress size={14} color="inherit" />
-                  : <SmartToyOutlinedIcon sx={{ fontSize: "0.9rem" }} />}
-                disabled={autonomyRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0}
-                onClick={onStartAutonomy}
-                sx={{ mb: 0.75, fontSize: "0.72rem", textTransform: "none" }}>
-                {autonomyRunning
-                  ? "Laço autônomo em andamento…"
-                  : (gapCount ?? 0) > 0
-                    ? `Modo autônomo em TODOS os arquivos (${gapCount})`
-                    : "Modo autônomo — sem GAPs em aberto"}
-              </Button>
-            </span>
-          </Tooltip>
-        )}
+        {/* UI/UX 2026-09-08 (Jean): o botão "Modo autônomo em TODOS os arquivos" SAIU daqui — ele
+            ficava colado no "Resolver GAPs deste arquivo", e um clique de mira errada disparava o laço
+            pago na spec inteira. Agora vive no cabeçalho do editor, ao lado de "Relatórios (PDF)", e
+            exige confirmação digitada com o ID do produto (ver `autonomyStartDialog` na página).
+            O controle continua acessível em QUALQUER arquivo — que era o pedido de 2026-09-06. */}
         {/* PR-4 (F2) — Resolver GAPs DESTE ARQUIVO. Aparece só com um arquivo aberto: é o caminho
             correto numa spec dividida (o botão da spec inteira reemitiria o documento todo). */}
         {fileMode && onResolveFileGaps && fileGapCount != null && (
@@ -1937,6 +1912,14 @@ export default function SpecPage() {
   // Onda 3 (b) — diálogo da promoção com confirmação por digitação quando há GAPs.
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteConfirmText, setPromoteConfirmText] = useState("");
+  /**
+   * UI/UX 2026-09-08 (Jean) — o laço autônomo é a ação mais CARA da Bancada (percorre a spec inteira,
+   * paga LLM por arquivo e continua rodando com a tela fechada). Ele estava a um clique de distância do
+   * botão de um arquivo só; agora é N2: confirmação digitada com o ID do produto, na escada do
+   * `ConfirmActionDialog` (mesma guarda da promoção com GAPs em aberto).
+   */
+  const [autonomyStartOpen, setAutonomyStartOpen] = useState(false);
+  const [autonomyStartText, setAutonomyStartText] = useState("");
   // Migração 097 — plano de promoção do PRODUTO (ordem por onda). Preenchido pelo 202 do
   // POST /api/products/:id/promote e re-lido do GET /api/products/:id/promotion depois de iniciar.
   const [planOpen, setPlanOpen] = useState(false);
@@ -3835,6 +3818,35 @@ export default function SpecPage() {
     />
   );
 
+  // ── UI/UX 2026-09-08 (Jean): N2 para INICIAR o laço autônomo em todos os arquivos ──────────────
+  // A palavra a digitar é o ID do produto dono da spec (na falta dele, o ID do projeto): ele está à
+  // vista no diálogo, mas não é digitável por acidente — que era exatamente o risco relatado.
+  const autonomyConfirmWord = ownerProduct?.id ?? editProjectId ?? "";
+  /** O laço vive no SERVIDOR: quem manda é o GET, não um timer local (ver docblock do `autonomy`). */
+  const autonomyLoopRunning = Boolean(autonomy?.run?.active);
+  const autonomyStartDialog = (
+    <ConfirmActionDialog
+      open={autonomyStartOpen}
+      title="Iniciar o modo autônomo em TODOS os arquivos?"
+      message={
+        `O laço percorre a spec INTEIRA — arquivo a arquivo — resolvendo, salvando e revalidando, `
+        + `enquanto sobrar GAP 🔴/🟡, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Ele roda no `
+        + "servidor e continua mesmo se você fechar esta tela, consumindo LLM em cada rodada.\n\n"
+        + `Escopo: ${ownerProduct?.name ? `produto ${ownerProduct.name}` : "este projeto"} · `
+        + `${gapCount ?? 0} GAP(s) em aberto.`
+      }
+      detail={`ID a digitar: ${autonomyConfirmWord}`}
+      severity="warning"
+      confirmLabel="Iniciar laço autônomo"
+      confirmWord={autonomyConfirmWord || undefined}
+      busy={autonomyStarting}
+      typed={autonomyStartText}
+      onTypedChange={setAutonomyStartText}
+      onConfirm={() => { setAutonomyStartOpen(false); setAutonomyStartText(""); void handleStartAutonomy(); }}
+      onClose={() => { setAutonomyStartOpen(false); setAutonomyStartText(""); }}
+    />
+  );
+
   // ── H2 (adversarial Onda 2): conflito no "Salvar rascunho" da spec inteira ─────────────────────
   // Renderizado UMA vez: serve o editor normal, o fullscreen e o mobile (um Alert por tela não
   // apareceria no fullscreen, que é onde a Bancada é de fato usada). Nada foi gravado quando ele
@@ -3994,6 +4006,32 @@ export default function SpecPage() {
                   {/* Relatórios de rastreabilidade do PRODUTO dono desta spec. Só aparece quando a
                       spec pertence a um produto de verdade (não ao inbox de rascunhos). */}
                   <TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />
+                  {/* UI/UX 2026-09-08 (Jean): o laço autônomo em TODOS os arquivos mora AQUI, ao lado
+                      dos relatórios — longe do "Resolver GAPs deste arquivo", que é a ação vizinha de
+                      escopo pequeno. Sempre com N2 (ID do produto digitado). */}
+                  <Tooltip title={autonomy?.enabled === false
+                    ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
+                    : autonomyLoopRunning
+                      ? "Laço autônomo em andamento — acompanhe na aba do laço"
+                      : (gapCount ?? 0) > 0
+                        ? `O laço percorre a spec INTEIRA resolvendo, salvando e revalidando, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Pede confirmação digitada.`
+                        : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar"}>
+                    <span>
+                      <Button size="small" variant="outlined" color="secondary"
+                        startIcon={autonomyStarting
+                          ? <CircularProgress size={14} color="inherit" />
+                          : <SmartToyOutlinedIcon sx={{ fontSize: "0.95rem" }} />}
+                        disabled={autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0}
+                        onClick={() => { setAutonomyStartText(""); setAutonomyStartOpen(true); }}
+                        sx={{ textTransform: "none" }}>
+                        {autonomyLoopRunning
+                          ? "Laço em andamento…"
+                          : (gapCount ?? 0) > 0
+                            ? `Modo autônomo em todos os arquivos (${gapCount})`
+                            : "Modo autônomo"}
+                      </Button>
+                    </span>
+                  </Tooltip>
                   <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
                     Descartar
                   </Button>
@@ -4065,6 +4103,7 @@ export default function SpecPage() {
 
         {editorDialog}
         {promoteDialog}
+        {autonomyStartDialog}
         {specConflictDialog}
         {/* Migração 097 — ordem de entrada na fábrica do produto promovido. `onStart` só existe
             porque o produto foi admitido AQUI: iniciar é decisão explícita do humano. */}
