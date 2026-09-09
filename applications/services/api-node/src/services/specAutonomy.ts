@@ -1868,10 +1868,23 @@ async function promotionVerdictFor(
       policyViolations: policy?.tally.blocking ?? 0,
       policyNote: policy ? policyNote(policy.tally) : undefined,
     });
+    // 🔴 GAP-165 (observabilidade): o silêncio competente sobre os MESMOS bytes é dito ao JUIZ, dentro
+    // do prompt — e prompt não vai para log (spec de cliente não vai). Resultado: o fato existia e não
+    // era observável em prod, então "o juiz soube" era afirmação sem prova. Aqui vão só os NÚMEROS.
+    const instaveis = gate.candidates.filter((c) => (c.sameBytesSilence?.silent ?? 0) > 0);
+    const silencio = instaveis.length > 0
+      ? ` — detecção INSTÁVEL em ${instaveis.length} de ${gate.candidates.length} candidato(s): `
+        + instaveis.map((c) => `${c.file}#${c.anchor}=${c.sameBytesSilence!.silent}/${c.sameBytesSilence!.observations}`)
+          .slice(0, 6).join(" ")
+      : "";
     console.info(
       `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s), ` +
-      `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s), promovível=${report.promotable}` +
-      ` — prova de trabalho ${work.kind}: ${work.detail}`,
+      // 🔴 GAP-166: `N impeditivo(s)` sozinho lê como "N julgados e reprovados". A composição medida em
+      // prod era 4 por veredicto, 4 obsoletos e 56 nunca julgados de 64 — e o log dizia só "64".
+      `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s)` +
+      ` (${report.impeditiveByVerdict} por veredicto, ${report.impeditiveStale} obsoleto(s),` +
+      ` ${report.impeditiveUnjudged} nunca julgado(s)), promovível=${report.promotable}` +
+      ` — prova de trabalho ${work.kind}: ${work.detail}${silencio}`,
     );
     return { gate, round, report, saved, work, loop, policy };
   } catch (e) {
