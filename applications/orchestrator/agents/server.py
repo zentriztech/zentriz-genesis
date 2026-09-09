@@ -989,6 +989,9 @@ def invoke_raw(body: dict):
     # classificação barata) e do planejador de evolução. Injetar em todos seria mudar prompts que
     # ninguém pediu para mudar e pagar tokens por isso — por isso opt-in, decidido pelo chamador.
     # `CAG_ENABLED=off` continua vencendo tudo (a função devolve o prompt intacto).
+    # 🔴 GAP-146: tamanho do `system` ANTES do CAG. A lição recuperada é a ÚNICA parte deste prompt que
+    # a api não conhece — sem o par (antes, depois), o censo do lado da api passaria por conta inteira.
+    _system_pre_cag = len(system_prompt)
     cag = body.get("cag") if isinstance(body.get("cag"), dict) else None
     if cag:
         try:
@@ -1005,6 +1008,21 @@ def invoke_raw(body: dict):
         except Exception as _cag_exc:
             # Aprender é acessório: nunca derruba a edição do arquivo.
             logger.warning(f"[/invoke/raw] CAG no-op ({_cag_exc}) — prompt original mantido")
+
+    # 🔴 GAP-146 — CENSO do que REALMENTE sai por este caminho, o mais caro da Bancada (`spec_cto`:
+    # 764 chamadas × 69.548 tokens de ENTRADA em 3 dias). A api mede campo a campo, na origem
+    # (`[prompt-census] origem=api-…`); aqui se mede o TOTAL enviado — inclusive a lição do CAG, que é
+    # anexada depois que a api já montou o pedido. Os dois números juntos fecham a conta; um só, não.
+    # SÓ LOG: nenhum byte do prompt muda nesta etapa (o corte vem da distribuição medida).
+    try:
+        logger.info(
+            "[prompt-census] origem=invoke-raw role=%s model=%s total=%dc system=%dc user=%dc cag=%dc",
+            str((cag or {}).get("role") or "-"), model_id,
+            len(system_prompt) + len(user_message),
+            _system_pre_cag, len(user_message), len(system_prompt) - _system_pre_cag,
+        )
+    except Exception as _censo_exc:  # pragma: no cover — instrumento NUNCA derruba a chamada medida
+        logger.warning(f"[/invoke/raw] censo falhou (segue sem medição): {_censo_exc}")
 
     # Achado #30 (2026-08-10): uma resposta VAZIA (200, response="") é uma falha real —
     # o Foundry às vezes devolve content vazio (stop precoce/streaming interrompido) sem lançar

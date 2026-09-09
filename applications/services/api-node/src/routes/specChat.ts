@@ -58,6 +58,9 @@ import {
 } from "../services/gapOutcomes.js";
 import type { FocusPlan } from "../services/gapFocus.js";
 import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatalog.js";
+// 🔴 GAP-146: censo do prompt (SÓ LOG) — o `spec_cto` é a maior conta de entrada da Bancada e o prompt
+// dele nasce AQUI, não no `agents`; sem medir campo a campo, qualquer recorte seria adivinhação.
+import { recordPromptCensus } from "../services/promptCensus.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -591,6 +594,21 @@ function buildRawFileRequest(
     "",
     "Devolva agora o conteúdo final completo do arquivo (apenas o texto do arquivo).",
   ].join("\n");
+  // 🔴 GAP-146: o chat livre por-arquivo é o MESMO endpoint e o MESMO modelo caro do laço — medir só o
+  // caminho autônomo faria a distribuição parecer menor do que a fatura. `origem` separa os dois.
+  recordPromptCensus({
+    origem: "api-rawfile",
+    role: "CTO",
+    file: filePath,
+    total: RAW_FILE_SYSTEM.length + userMessage.length,
+    fields: {
+      system: RAW_FILE_SYSTEM.length,
+      context: contextBlock.length,
+      file_content: content.length,
+      transcript: transcript.length,
+      user_request: lastUser.length,
+    },
+  });
   return {
     prompt_override: RAW_FILE_SYSTEM,
     user_message: userMessage,
@@ -822,7 +840,11 @@ async function gapIndexBlock(projectId: string, filePath: string, fileContent: s
   }
 }
 
-function buildGapFileRequest(
+/**
+ * Exportada para TESTE (🔴 GAP-146): o teste do censo tem de rodar sobre o prompt REAL. O que apodrece
+ * num censo é o bloco novo que ninguém somou — e isso só se pega medindo `outros` do prompt de verdade.
+ */
+export function buildGapFileRequest(
   content: string,
   filePath: string,
   findings: ValidationFinding[],
@@ -908,6 +930,13 @@ function buildGapFileRequest(
   // Mapa do produto (Fase 1) como contexto só-leitura: o arquivo é uma PARTE de um todo, e sem saber
   // onde ele vive o CTO-editor duplica o que já está no irmão.
   const contextBlock = (ctx.productMapBlock ?? "").slice(0, RAW_FILE_CONTEXT_BUDGET);
+  // 🔴 GAP-146: hasteados para constante porque o CENSO tem de medir o MESMO texto que foi enviado.
+  // Chamar `manifestFactBlock`/`gapOutcomeInstruction` uma vez para o prompt e outra para o censo daria
+  // dois valores independentes — e um instrumento que mede outra coisa é pior que nenhum.
+  const manifestBlock = manifestFactBlock(filePath);
+  // 🔴 GAP-121: na consolidação pura NÃO se pede prestação de contas por GAP (ver o comentário no
+  // array abaixo, onde este bloco é posicionado).
+  const outcomeContract = consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length);
   const userMessage = [
     `ARQUIVO: ${filePath}`,
     "",
@@ -926,7 +955,7 @@ function buildGapFileRequest(
     // contrato que a fábrica LÊ para rotear o projeto. Em prod o editor trocou `archetype` por
     // `backend_api` (fora do catálogo) e rebaixou a spec a BLOCKER estrutural. O código não escolhe o
     // conteúdo: entrega o FATO (o catálogo fechado) para a decisão do agente ser informada.
-    manifestFactBlock(filePath),
+    manifestBlock,
     // 🔴 GAP-122: colado nos fatos do manifesto porque é da mesma natureza (o que a máquina lê e o que
     // o índice precisa cobrir) e vem ANTES do conteúdo: o editor chega ao README já sabendo quais
     // arquivos existem hoje, em vez de indexar de memória a árvore de quando o arquivo foi escrito.
@@ -975,7 +1004,7 @@ function buildGapFileRequest(
     // ausente é dívida do agente; cobrar desfecho de conserto que esta rodada não pediu produziria uma
     // leva inteira de `nao_declarado` — o laço registraria como omissão do agente o que foi decisão do
     // próprio laço.
-    consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length),
+    outcomeContract,
     consolidationBlock
       ? (edits
         ? "Devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE que REMOVEM a"
@@ -989,8 +1018,36 @@ function buildGapFileRequest(
         ? "Resolva TODOS os GAPs acima e devolva agora SOMENTE os blocos <<<<<<< SEARCH / ======= / >>>>>>> REPLACE. Não reemita o arquivo."
         : "Resolva TODOS os GAPs acima editando o arquivo e devolva agora o conteúdo final completo dele.",
   ].join("\n");
+  const system = edits ? GAP_FILE_EDITS_SYSTEM : GAP_FILE_SYSTEM;
+  // 🔴 GAP-146: o censo do prompt que a Bancada mais paga (`spec_cto`, 69.548 tokens de entrada por
+  // chamada). SÓ LOG nesta etapa — nenhum bloco é cortado aqui; o corte vem depois, da distribuição
+  // MEDIDA. O `system` entra na conta porque o provedor cobra por ele; a lição do CAG NÃO entra, ela é
+  // anexada no `agents` (ver o censo de `/invoke/raw`) e afirmá-la daqui seria inventar tamanho.
+  recordPromptCensus({
+    origem: "api-gapfile",
+    role: "CTO",
+    file: filePath,
+    total: system.length + userMessage.length,
+    fields: {
+      system: system.length,
+      product_map: contextBlock.length,
+      siblings: siblingBlock.length,
+      oracles: oracleBlock.length,
+      manifest_facts: manifestBlock.length,
+      index_facts: indexBlock.length,
+      file_content: content.length,
+      focus: focusBlock.length,
+      consolidation: consolidationBlock.length,
+      gaps: gaps.length,
+      persistent_gaps: persistentGapBlock.length,
+      prior_rejection: priorRejectionBlock.length,
+      prior_outcome: priorOutcomeBlock.length,
+      attempt_history: attemptHistoryBlock.length,
+      outcome_contract: outcomeContract.length,
+    },
+  });
   return {
-    prompt_override: edits ? GAP_FILE_EDITS_SYSTEM : GAP_FILE_SYSTEM,
+    prompt_override: system,
     user_message: userMessage,
     // A saída CRESCE (o arquivo ganha o que faltava) — e o teto derivado do tamanho reprovou a
     // rodada 2 em prod com `out=8000 TRUNCATED`. Ver `GAP_FILE_MAX_TOKENS` (teto ≠ gasto).
