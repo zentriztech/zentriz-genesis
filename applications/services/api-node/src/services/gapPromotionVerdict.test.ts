@@ -1272,4 +1272,84 @@ describe("promotabilityReport — o que o humano lê antes de promover", () => {
     expect(promotabilityReport({ ...base, policyViolations: -3 })).toMatchObject({ promotable: true, policyViolations: 0 });
     expect(promotabilityReport({ ...base, policyViolations: 1.7 })).toMatchObject({ promotable: false, policyViolations: 1 });
   });
+
+  /**
+   * 🔴 GAP-166 — "N GAP(s) importante(s) seguem impeditivos" misturava JULGADO com NUNCA-JULGADO.
+   *
+   * MEDIDO em prod (projeto `e2a1988c`, NVX LastMile): ativos=68 · pareceres vivos=19 (10 obsoletos) ·
+   * liberados=4 · JULGADOS e impeditivos=4 · parecer OBSOLETO=4 · SEM parecer nenhum=56 ⇒ dos **64
+   * "impeditivos" reportados, só 4 vinham de VEREDICTO**. O gargalo não é reincidência (60 de 68 passam
+   * `minRecurrence >= 3`) e sim `MAX_CANDIDATES = 8`: o laço não tem como julgar 68 num passe.
+   *
+   * A cura é declarativa: o número que decide promovibilidade NÃO muda (nada de anistia por falta de
+   * juiz), mas a frase passa a dizer de que ele é feito. Ausência de julgamento deixa de se passar por
+   * julgamento — é o mesmo princípio do GAP-14 (contagem que não olhou a spec).
+   */
+  it("🔴 a composição é declarada: julgado, obsoleto e nunca-julgado aparecem separados", () => {
+    const julgado = F({ anchor: "## 1", title: "julgado" });
+    const obsoleto = F({ anchor: "## 2", title: "obsoleto" });
+    const nunca = F({ anchor: "## 3", title: "nunca" });
+    const rep = promotabilityReport({
+      findings: [julgado, obsoleto, nunca],
+      verdicts: [
+        LV({ fingerprint: findingFingerprint(julgado), impact: "impeditivo" }),
+        LV({ fingerprint: findingFingerprint(obsoleto), impact: "nao_impeditivo", stale: true }),
+      ],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    // O NÚMERO é o mesmo de antes: os 3 seguem impeditivos.
+    expect(rep).toMatchObject({
+      impeditive: 3, impeditiveByVerdict: 1, impeditiveStale: 1, impeditiveUnjudged: 1, released: 0,
+    });
+    expect(rep.blockers[0]).toBe(
+      "3 GAP(s) importante(s) seguem impeditivos — 1 por VEREDICTO, 1 com parecer obsoleto, 1 sem veredicto (nunca julgado)",
+    );
+  });
+
+  it("sem parecer nenhum, TODOS entram como `unjudged` — e a frase não inventa parecer obsoleto", () => {
+    const rep = promotabilityReport({
+      findings: [F({ anchor: "## 1" }), F({ anchor: "## 2" })],
+      verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep).toMatchObject({ impeditive: 2, impeditiveByVerdict: 0, impeditiveStale: 0, impeditiveUnjudged: 2 });
+    expect(rep.blockers[0]).toContain("0 por VEREDICTO, 2 sem veredicto (nunca julgado)");
+    expect(rep.blockers[0]).not.toContain("obsoleto");
+  });
+
+  it("teto excedido devolve os liberados à conta — e diz que eles TÊM veredicto (não são desconhecidos)", () => {
+    const many = Array.from({ length: 4 }, (_, i) => F({ anchor: `## ${i}`, title: `t${i}` }));
+    const rep = promotabilityReport({
+      findings: many,
+      // 3 liberados (anulados pelo teto) + 1 julgado impeditivo: nenhum deles é "nunca julgado".
+      verdicts: [
+        ...many.slice(0, 3).map((f) => LV({ fingerprint: findingFingerprint(f) })),
+        LV({ fingerprint: findingFingerprint(many[3]), impact: "impeditivo" }),
+      ],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: { ...CFG, maxPerSpec: 2 },
+    });
+    expect(rep).toMatchObject({ impeditive: 4, impeditiveByVerdict: 1, impeditiveStale: 0, impeditiveUnjudged: 3 });
+    expect(rep.blockers.some((b) => /teto acumulado de 2/.test(b))).toBe(true);
+  });
+
+  it("a composição SOMA o total — nenhum GAP fica fora nem é contado duas vezes", () => {
+    const fs = Array.from({ length: 6 }, (_, i) => F({ anchor: `## ${i}`, title: `t${i}` }));
+    const rep = promotabilityReport({
+      findings: fs,
+      verdicts: [
+        LV({ fingerprint: findingFingerprint(fs[0]), impact: "impeditivo" }),
+        LV({ fingerprint: findingFingerprint(fs[1]), impact: "impeditivo", stale: true }),
+        LV({ fingerprint: findingFingerprint(fs[2]) }),               // liberado: sai da conta
+      ],
+      unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep.impeditive).toBe(5);
+    expect(rep.impeditiveByVerdict + rep.impeditiveStale + rep.impeditiveUnjudged).toBe(rep.impeditive);
+  });
+
+  it("declarar a composição NÃO libera ninguém: 0 por veredicto continua bloqueando", () => {
+    const rep = promotabilityReport({
+      findings: [F()], verdicts: [], unroutedImportant: 0, unjudgedFiles: [], cfg: CFG,
+    });
+    expect(rep.promotable).toBe(false);
+  });
 });

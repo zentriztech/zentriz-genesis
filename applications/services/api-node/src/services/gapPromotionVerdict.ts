@@ -1274,6 +1274,16 @@ export function anchorShaAt(content: string, anchor: string): string {
 export interface PromotabilityReport {
   /** GAPs importantes ativos que seguem IMPEDITIVOS (é o número que decide promovibilidade). */
   impeditive: number;
+  /**
+   * 🔴 GAP-166 — de que é feito o `impeditive`. O número não muda; a PREMISSA dele passa a ser dita.
+   *
+   * `byVerdict` = um juiz leu o trecho e decidiu que impede · `stale` = houve parecer, mas o trecho
+   * julgado mudou (o parecer morreu com a premissa) · `unjudged` = ninguém julgou, o GAP está na conta
+   * por AUSÊNCIA de veredicto, não por veredicto.
+   */
+  impeditiveByVerdict: number;
+  impeditiveStale: number;
+  impeditiveUnjudged: number;
   /** Declarados não-impeditivos por parecer vivo e não-obsoleto. */
   released: number;
   /** `true` = nenhum GAP importante impeditivo, nenhum sem arquivo, nenhum arquivo pendente. */
@@ -1317,9 +1327,31 @@ export function promotabilityReport(args: {
   // um teto por rodada seria contornado por muitas rodadas.
   const capped = releasedFps.size > cfg.maxPerSpec;
   const active = args.findings.filter((f) => !f.triage && (f.severity === "blocker" || f.severity === "warning"));
-  const impeditive = capped ? active.length : active.filter((f) => !releasedFps.has(findingFingerprint(f))).length;
+  const stillImpeditive = capped ? active : active.filter((f) => !releasedFps.has(findingFingerprint(f)));
+  const impeditive = stillImpeditive.length;
+  // 🔴 GAP-166 — o mesmo número, com a premissa declarada. MEDIDO em prod (projeto `e2a1988c`): de 64
+  // "impeditivos", apenas 4 tinham VEREDICTO; 56 nunca foram julgados e 4 tinham parecer obsoleto.
+  // Dizer "64 seguem impeditivos" sem essa divisão faz ausência de julgamento parecer julgamento.
+  const judgedImpeditiveFps = new Set(
+    args.verdicts.filter((v) => v.impact === "impeditivo" && !v.stale).map((v) => v.fingerprint),
+  );
+  const staleFps = new Set(args.verdicts.filter((v) => v.stale).map((v) => v.fingerprint));
+  let impeditiveByVerdict = 0, impeditiveStale = 0;
+  for (const f of stillImpeditive) {
+    const fp = findingFingerprint(f);
+    if (judgedImpeditiveFps.has(fp)) impeditiveByVerdict++;
+    else if (staleFps.has(fp)) impeditiveStale++;
+  }
+  const impeditiveUnjudged = impeditive - impeditiveByVerdict - impeditiveStale;
   const blockers: string[] = [];
-  if (impeditive > 0) blockers.push(`${impeditive} GAP(s) importante(s) seguem impeditivos`);
+  if (impeditive > 0) {
+    const composicao = [
+      `${impeditiveByVerdict} por VEREDICTO`,
+      ...(impeditiveStale > 0 ? [`${impeditiveStale} com parecer obsoleto`] : []),
+      `${impeditiveUnjudged} sem veredicto (nunca julgado)`,
+    ].join(", ");
+    blockers.push(`${impeditive} GAP(s) importante(s) seguem impeditivos — ${composicao}`);
+  }
   if (capped) blockers.push(`teto acumulado de ${cfg.maxPerSpec} liberação(ões) por spec foi excedido (${releasedFps.size}) — nenhuma vale`);
   if (args.unroutedImportant > 0) blockers.push(`${args.unroutedImportant} GAP(s) importante(s) sem arquivo atribuído`);
   if (args.unjudgedFiles.length > 0) blockers.push(`${args.unjudgedFiles.length} arquivo(s) da spec nunca julgado(s) por inteiro neste conteúdo`);
@@ -1328,7 +1360,8 @@ export function promotabilityReport(args: {
     blockers.push(`${policy} constraint(s) declarada(s) violada(s) no Policy Gate${args.policyNote ? ` (${args.policyNote})` : ""}`);
   }
   return {
-    impeditive, released: capped ? 0 : releasedFps.size,
+    impeditive, impeditiveByVerdict, impeditiveStale, impeditiveUnjudged,
+    released: capped ? 0 : releasedFps.size,
     promotable: blockers.length === 0, blockers, policyViolations: policy,
   };
 }
