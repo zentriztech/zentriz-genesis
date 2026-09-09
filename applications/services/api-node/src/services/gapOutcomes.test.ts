@@ -315,15 +315,19 @@ describe("🔴 GAP-131 — selectAttemptHistory + attemptHistoryFactBlock", () =
     ...over,
   });
 
-  it("cadeia só volta para GAP que a rodada está mandando, e só com 2+ tentativas", () => {
+  it("cadeia só volta para GAP que a rodada está mandando, e basta UMA via já tentada (GAP-132)", () => {
     const alvo = f();
     const { outcomes } = parseGapOutcomes(bloco("1) corrigido: fechei"), [alvo], { appliedEdits: 1 });
     const fp = outcomes[0].fingerprint;
     const comDuas = cadeia({ fingerprint: fp, titleFingerprint: outcomes[0].titleFingerprint });
     expect(selectAttemptHistory([comDuas], [alvo])).toHaveLength(1);
-    // Uma tentativa só: o relato da rodada anterior (A1) já diz tudo — não paga um bloco novo.
+    // GAP-132 (MEDIDO em prod): com piso 2, 10 de 13 arquivos recebiam ZERO via, porque a rodada
+    // dedicada rotaciona entre 6–9 GAPs. Uma via refutada já é fato — o GAP está sendo despachado
+    // AGORA, logo a validação posterior àquela tentativa o manteve.
     const comUma = { ...comDuas, attempts: comDuas.attempts.slice(0, 1) };
-    expect(selectAttemptHistory([comUma], [alvo])).toEqual([]);
+    expect(selectAttemptHistory([comUma], [alvo])).toHaveLength(1);
+    // Zero via declarada: não há o que dizer (e `nao_declarado` nunca entra na cadeia).
+    expect(selectAttemptHistory([{ ...comDuas, attempts: [] }], [alvo])).toEqual([]);
     // GAP de outro arquivo/âncora não casa: cadeia colada no GAP errado seria falso positivo.
     expect(selectAttemptHistory([cadeia()], [alvo])).toEqual([]);
   });
@@ -362,7 +366,10 @@ describe("🔴 GAP-131 — selectAttemptHistory + attemptHistoryFactBlock", () =
     expect(b).toContain(`CORTADO: ${ATTEMPT_HISTORY_VIAS} de ${ATTEMPT_HISTORY_VIAS + 3} vias`);
     // Mantém as MAIS RECENTES e a numeração continua sendo a real (não reinicia em 1ª).
     expect(b).toContain(`${ATTEMPT_HISTORY_VIAS + 3}ª via`);
-    expect(b).not.toContain("1ª via");
+    // As cortadas somem de verdade: a 1ª e a 3ª via não aparecem como linha própria.
+    expect(b).not.toContain("\n    1ª via");
+    expect(b).not.toContain("\n    3ª via");
+    expect(b).toContain(`${ATTEMPT_HISTORY_VIAS + 3 - ATTEMPT_HISTORY_VIAS + 1}ª via`);
 
     const muitosGaps = Array.from({ length: ATTEMPT_HISTORY_GAPS + 2 }, (_, i) => cadeia({ fingerprint: `x${i}`, title: `GAP ${i}` }));
     const b2 = attemptHistoryFactBlock(muitosGaps);

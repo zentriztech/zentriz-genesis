@@ -348,11 +348,25 @@ type Db = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[
  * Quem decide o que fazer com isso continua sendo o agente — inclusive contestar (`nao_e_defeito`) ou
  * apontar para fora (`nao_e_deste_arquivo`).
  */
-export const ATTEMPT_HISTORY_JOBS = 8;
+/**
+ * 🔴 GAP-132 — a janela e o piso do PRÓPRIO GAP-131 escondiam a cadeia.
+ *
+ * MEDIDO em prod logo após o deploy (run `7ba39011`, 2026-09-09 01:0x): com `jobs = 8` e
+ * `minAttempts = 2`, das 4 primeiras rodadas dedicadas **só 1** recebeu o bloco de vias — as outras
+ * três tinham GAP com reincidência `pior=8ª` e ZERO via entregue. A causa é aritmética, não conceitual:
+ * a rodada dedicada RODA entre 6–9 GAPs do arquivo, então em 8 jobs cada identidade reaparece ~1×,
+ * e o piso de 2 descartava justamente a 1ª repetição. Medição por arquivo (fingerprint despachado ×
+ * vias visíveis): janela 8 ⇒ 3 de 13 arquivos com ≥2 vias; janela 24 ⇒ **12 de 13** com ≥1 via e uma
+ * cadeia de **7** (`api-entregas-entregadores.md`).
+ *
+ * Piso volta a 1 porque UMA via refutada já é fato: se o GAP está sendo despachado agora, a validação
+ * que veio depois daquela tentativa o MANTEVE — "nenhuma fechou o GAP" continua verdadeiro.
+ */
+export const ATTEMPT_HISTORY_JOBS = 24;
 /** Quantos GAPs entram no bloco (os mais teimosos primeiro). Teto de custo, DECLARADO. */
 export const ATTEMPT_HISTORY_GAPS = 6;
 /** Quantas vias por GAP. As mais RECENTES são as que importam; o corte diz quantas ficaram fora. */
-export const ATTEMPT_HISTORY_VIAS = 5;
+export const ATTEMPT_HISTORY_VIAS = 8;
 /** Teto da nota de cada via — o bloco multiplica por via × GAP. */
 export const ATTEMPT_NOTE_MAX = 220;
 
@@ -426,14 +440,15 @@ export async function declaredAttemptHistory(
 }
 
 /**
- * Das cadeias lidas, as que falam de um GAP que ESTE despacho está mandando E que já têm mais de uma
- * via tentada. Mesmo casamento por IDENTIDADE do `selectPriorOutcomes` (fingerprint efetivo, depois
- * título, com veto de ambiguidade nos dois degraus): cadeia colada no GAP errado é falso positivo.
+ * Das cadeias lidas, as que falam de um GAP que ESTE despacho está mandando E que já têm ao menos uma
+ * via tentada (GAP-132: o piso 2 escondia a 1ª repetição, que é onde o fato mais ajuda). Mesmo
+ * casamento por IDENTIDADE do `selectPriorOutcomes` (fingerprint efetivo, depois título, com veto de
+ * ambiguidade nos dois degraus): cadeia colada no GAP errado é falso positivo.
  */
 export function selectAttemptHistory(
   history: GapAttemptHistory[] | null | undefined,
   dispatched: ValidationFinding[],
-  minAttempts = 2,
+  minAttempts = 1,
 ): GapAttemptHistory[] {
   if (!history || history.length === 0 || dispatched.length === 0) return [];
   const eff = effectiveFingerprints(dispatched);
@@ -453,8 +468,9 @@ export function selectAttemptHistory(
 }
 
 /**
- * O bloco de FATO das vias já tentadas. Só entra GAP com 2+ tentativas — para o resto,
- * `priorOutcomeFactBlock` (relato da rodada anterior) já diz tudo o que há para dizer.
+ * O bloco de FATO das vias já tentadas. Entra GAP com 1+ tentativa declarada (GAP-132): o
+ * `priorOutcomeFactBlock` conta a rodada ANTERIOR do arquivo, que muitas vezes é de OUTRO GAP —
+ * só esta cadeia diz "nesta âncora, você já tentou isto".
  *
  * Não manda o agente fazer nada específico: diz o que já foi tentado e lista as SAÍDAS legítimas
  * (editar dentro do trecho ancorado, apontar para fora, ou contestar com argumento). A escolha é dele
