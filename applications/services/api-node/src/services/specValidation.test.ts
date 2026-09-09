@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { runStageA, parseStageBFindings, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
+import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -70,9 +70,12 @@ describe("parseStageBFindings (schema fechado — saída de LLM nunca entra crua
     expect(out[0].line).toBe(3);
     expect(out[0].source).toBe("stage_b");
   });
-  it("não-array → []; cap de 50 itens", () => {
+  it("não-array → []; teto de itens (GAP-129: 50 → STAGE_B_MAX_FINDINGS, e o descarte é contado)", () => {
     expect(parseStageBFindings({ hack: true })).toEqual([]);
-    expect(parseStageBFindings(Array.from({ length: 80 }, () => ({}))).length).toBe(50);
+    // 80 itens CABEM no teto novo — o teto de 50 cortava 30 achados do juiz em silêncio.
+    expect(parseStageBFindings(Array.from({ length: 80 }, () => ({}))).length).toBe(80);
+    const acima = parseStageBFindings(Array.from({ length: STAGE_B_MAX_FINDINGS + 5 }, () => ({})));
+    expect(acima.length).toBe(STAGE_B_MAX_FINDINGS);
   });
 
   it("🔴 GAP-50: sem `title` o título vem do RATIONALE, não de uma constante repetida", () => {

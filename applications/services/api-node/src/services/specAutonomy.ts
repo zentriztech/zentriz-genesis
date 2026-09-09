@@ -3493,14 +3493,19 @@ async function kickValidation(db: Db, run: AutonomyRun): Promise<void> {
 // ── GAP-18/GAP-19: cobertura do estágio adversarial ───────────────────────────
 
 /** O que a run de validação MEDIU (migração 101). Ausente/legado = `null` = cobertura desconhecida. */
-interface StageBCoverage { full: string[]; outlineOnly: string[]; oversized: string[] }
+interface StageBCoverage { full: string[]; outlineOnly: string[]; oversized: string[]; /** GAP-129: achados que o teto de INGESTÃO descartou nesta validação. */ droppedFindings?: number }
 
 export function readStageBCoverage(raw: unknown): StageBCoverage | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   if (!Array.isArray(o.full) && !Array.isArray(o.outlineOnly)) return null;
   const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-  return { full: arr(o.full), outlineOnly: arr(o.outlineOnly), oversized: arr(o.oversized) };
+  const dropped = Number(o.droppedFindings);
+  return {
+    full: arr(o.full), outlineOnly: arr(o.outlineOnly), oversized: arr(o.oversized),
+    // GAP-129: descarte por teto de ingestão é fato de MEDIÇÃO — quem declara "zero" tem de vê-lo.
+    ...(Number.isFinite(dropped) && dropped > 0 ? { droppedFindings: Math.trunc(dropped) } : {}),
+  };
 }
 
 /**
@@ -3517,7 +3522,7 @@ export function readStageBCoverage(raw: unknown): StageBCoverage | null {
  */
 async function coberturaAcumulada(
   db: Db, projectId: string,
-): Promise<{ pendentes: string[]; grandes: string[]; judged: number; total: number } | null> {
+): Promise<{ pendentes: string[]; grandes: string[]; judged: number; total: number; descartados: number } | null> {
   const { trackedCoverageState } = await import("./specValidation.js");
   const estado = await trackedCoverageState(db, projectId).catch(() => null);
   if (!estado) return null;
@@ -3527,11 +3532,15 @@ async function coberturaAcumulada(
       ORDER BY created_at DESC LIMIT 1`,
     [projectId],
   ).catch(() => ({ rows: [] as Array<Record<string, unknown>> }))).rows[0] as { stage_b_coverage?: unknown } | undefined;
-  const over = readStageBCoverage(row?.stage_b_coverage)?.oversized ?? [];
+  const cov = readStageBCoverage(row?.stage_b_coverage);
+  const over = cov?.oversized ?? [];
   return {
     pendentes: estado.unjudged.filter((p) => !over.includes(p)),
     grandes: estado.unjudged.filter((p) => over.includes(p)),
     judged: estado.judged, total: estado.total,
+    // 🔴 GAP-129: a última validação pode ter DESCARTADO achados no teto de ingestão. "Zero GAP" dito
+    // sobre uma lista cortada é o mesmo defeito do C4 visto na entrada, não na cobertura de arquivos.
+    descartados: cov?.droppedFindings ?? 0,
   };
 }
 
@@ -3551,7 +3560,12 @@ async function freiaZeroSemCobertura(
   db: Db, run: AutonomyRun, gaps: GapTally, perFile: boolean,
 ): Promise<boolean> {
   const cob = await coberturaAcumulada(db, run.projectId);
-  if (!cob || cob.pendentes.length === 0) {
+  // 🔴 GAP-129: a lista que produziu este "zero" pode ter chegado CORTADA no teto de INGESTÃO — aí não
+  // é zero, é "zero no que caber". Isso é o mesmo defeito do C4 visto na ENTRADA (e não na cobertura de
+  // arquivos): a medição está provadamente incompleta, então o desfecho não pode ser sucesso. O
+  // tratamento é o mesmo — revalidar, gastando um passe, com o teto do Jean como freio de terminação.
+  const listaCortada = !!cob && cob.descartados > 0;
+  if (!cob || (cob.pendentes.length === 0 && !listaCortada)) {
     if (cob && cob.grandes.length > 0) {
       // Não cabe nem sozinho: rotação nenhuma resolve, e a decisão de dividir é do humano. Declarar o
       // fato é obrigatório — encerrar em silêncio aqui seria dizer "spec sem GAP" sobre parte dela.
@@ -3574,9 +3588,11 @@ async function freiaZeroSemCobertura(
     [run.id, gaps.important],
   );
   if ((claim.rowCount ?? 0) === 0) return true; // outro tick assumiu; nada a fazer aqui
-  await postChatNote(db, run,
-    `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — mas ${cob.pendentes.length} de ${cob.total} arquivo(s) da spec ainda não passaram por um juiz neste conteúdo. **Não declaro a spec validada com base em parte dela**: vou validar o que falta (${cob.pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${cob.pendentes.length > 4 ? " e os demais" : ""}) antes de encerrar.`);
-  console.info(`[SpecAutonomy] run=${run.id} 0 GAP importante mas cobertura ACUMULADA incompleta (${cob.pendentes.length}/${cob.total} nunca julgados) — validando antes de declarar sucesso (C4).`);
+  const motivo = cob.pendentes.length > 0
+    ? `mas ${cob.pendentes.length} de ${cob.total} arquivo(s) da spec ainda não passaram por um juiz neste conteúdo. **Não declaro a spec validada com base em parte dela**: vou validar o que falta (${cob.pendentes.slice(0, 4).map((p) => `\`${p}\``).join(", ")}${cob.pendentes.length > 4 ? " e os demais" : ""}) antes de encerrar`
+    : `mas a última validação DESCARTOU ${cob.descartados} achado(s) do juiz no teto de INGESTÃO da lista (GAP-129) — este zero é "zero no que caber", não ausência de defeito. **Não declaro a spec validada sobre uma lista cortada**: vou validar de novo antes de encerrar`;
+  await postChatNote(db, run, `🤖 Zero GAP importante nos arquivos que o validador leu por inteiro — ${motivo}.`);
+  console.info(`[SpecAutonomy] run=${run.id} 0 GAP importante mas medição incompleta (pendentes=${cob.pendentes.length}/${cob.total}, descartados=${cob.descartados}) — validando antes de declarar sucesso (C4/GAP-129).`);
   const fresh = (await getAutonomyRun(db, run.id))!;
   await kickValidation(db, fresh);
   return true;

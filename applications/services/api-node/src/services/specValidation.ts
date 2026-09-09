@@ -259,6 +259,12 @@ async function httpJson(url: string, method: string, body: unknown, timeoutMs: n
 const STAGE_B_SEVERITIES = new Set(["blocker", "warning", "info"]);
 /** GAP-128: teto de INGESTÃO da justificativa do juiz. Armazenamento é JSONB — o teto é anti-abuso. */
 export const STAGE_B_RATIONALE_MAX = 4000;
+/**
+ * 🔴 GAP-129: teto de INGESTÃO da LISTA do juiz, por lote. Era 50 e o descarte era MUDO — a lista
+ * chegava menor e o laço media "menos GAPs" sem ninguém ter fechado nada (o mesmo dano do GAP-127,
+ * mas na camada da MEDIÇÃO). O teto continua (anti-abuso), o descarte passa a ser DECLARADO.
+ */
+export const STAGE_B_MAX_FINDINGS = 120;
 
 /**
  * 🔴 GAP-50 — título AUSENTE não pode virar uma CONSTANTE.
@@ -286,9 +292,18 @@ export function titleFromRationale(rationale: string): string {
 
 /** Valida/normaliza o JSON do LLM (schema fechado — nada além disso entra). */
 export function parseStageBFindings(raw: unknown): ValidationFinding[] {
+  return parseStageBFindingsWithDrop(raw).findings;
+}
+
+/**
+ * 🔴 GAP-129: mesma leitura, mas devolvendo QUANTOS achados o teto descartou. Quem chama tem de
+ * declarar esse número — descarte silencioso na entrada faz a contagem de GAPs mentir para baixo.
+ */
+export function parseStageBFindingsWithDrop(raw: unknown): { findings: ValidationFinding[]; dropped: number } {
   const arr = Array.isArray(raw) ? raw : [];
+  const dropped = Math.max(0, arr.length - STAGE_B_MAX_FINDINGS);
   const out: ValidationFinding[] = [];
-  for (const item of arr.slice(0, 50)) {
+  for (const item of arr.slice(0, STAGE_B_MAX_FINDINGS)) {
     const o = (item ?? {}) as Record<string, unknown>;
     const sev = String(o.severity ?? "info").toLowerCase();
     // 🔴 GAP-128: a coluna é JSONB (sem limite de banco) e este é o fato PRIMÁRIO do juiz — medido em
@@ -309,7 +324,7 @@ export function parseStageBFindings(raw: unknown): ValidationFinding[] {
       anchor: String(o.anchor ?? "").trim().slice(0, 160) || null,
     });
   }
-  return out;
+  return { findings: out, dropped };
 }
 
 /**
@@ -374,7 +389,7 @@ export function knownFindingsForJudge(
  * pode estar vivo no agents) — quem chama tem de preservar `stage_b_collected_at` NULL e parar de
  * despachar lotes novos, senão o `collectStageBResults` nunca volta para buscá-lo (GAP-11).
  */
-interface StageBOutcome { findings: ValidationFinding[]; error?: string; pending?: true }
+interface StageBOutcome { findings: ValidationFinding[]; error?: string; pending?: true; /** GAP-129: achados que o teto de ingestão descartou neste lote. */ dropped?: number }
 
 async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
@@ -424,7 +439,12 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
     const st = String(poll.data.status ?? "");
     if (st === "done") {
       const result = (poll.data.result ?? {}) as Record<string, unknown>;
-      return { findings: parseStageBFindings(result.findings) };
+      const parsed = parseStageBFindingsWithDrop(result.findings);
+      if (parsed.dropped > 0) {
+        // GAP-129: o juiz devolveu mais do que o teto de ingestão aceita. Isso NÃO é "menos GAP".
+        console.warn(`[spec-validation] run ${runId}: o juiz devolveu ${parsed.findings.length + parsed.dropped} achados e o teto de ingestão é ${STAGE_B_MAX_FINDINGS} — ${parsed.dropped} DESCARTADO(S). A contagem desta validação está INCOMPLETA por corte de entrada.`);
+      }
+      return { findings: parsed.findings, dropped: parsed.dropped };
     }
     if (st === "error") {
       return { findings: [], error: String(poll.data.error ?? "spec_validator error").slice(0, 300) };
@@ -811,6 +831,8 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
    * `stage_b_coverage.notMeasured` com o motivo, e o arquivo continua pendente no acumulado.
    */
   const naoMedido: Array<{ file: string; reason: string }> = [];
+  /** GAP-129: total de achados que o teto de ingestão descartou, somado nos lotes. */
+  let descartados = 0;
   if (!hasStageABlocker && files.length > 0) {
     const { partitionValidationInput } = await import("./specValidationInput.js");
     const judged = await loadJudgedShas(pool, projectId);
@@ -906,6 +928,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
         continue;
       }
       findings.push(...b.findings); // UNIÃO — o LLM só ADICIONA, nunca remove o estágio A
+      descartados += b.dropped ?? 0; // GAP-129: descarte por teto de ingestão NÃO é "menos GAP"
       stageBRan = true;
       medidos.push(...lote.full);
       // Só marca cobertura quando o juiz REALMENTE devolveu. Erro/timeout deixa a marca para o coletor
@@ -926,6 +949,9 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       // `fullShas`, uma recuperação marcaria como julgados também os arquivos de lotes que falharam.
       ...(pendente ? { pendingFullShas: pendente.shas } : {}),
       ...(naoMedido.length ? { notMeasured: naoMedido } : {}),
+      // 🔴 GAP-129: achados que o juiz produziu e o teto de ingestão descartou. Fica na cobertura
+      // porque é FATO DE MEDIÇÃO (como `notMeasured`): a contagem desta validação está incompleta.
+      ...(descartados > 0 ? { droppedFindings: descartados, droppedCap: STAGE_B_MAX_FINDINGS } : {}),
     });
     // O assunto do estágio B só se encerra quando não há nada pendente de coleta (GAP-11).
     if (!pendente) await markStageBCollected(pool, runId);
@@ -1219,7 +1245,19 @@ export async function collectStageBResults(
     }
     const st = String(res.status);
     if (st === "done") {
-      const stageB = parseStageBFindings((res.result ?? {}).findings);
+      const recuperado = parseStageBFindingsWithDrop((res.result ?? {}).findings);
+      const stageB = recuperado.findings;
+      if (recuperado.dropped > 0) {
+        // GAP-129: o resultado recuperado também passa pelo teto de ingestão — e o descarte é dito.
+        console.warn(`[spec-validation] run ${short}: resultado recuperado tinha ${stageB.length + recuperado.dropped} achados e o teto de ingestão é ${STAGE_B_MAX_FINDINGS} — ${recuperado.dropped} DESCARTADO(S); a contagem desta validação está incompleta.`);
+        await pool.query(
+          `UPDATE spec_validation_runs
+              SET stage_b_coverage = COALESCE(stage_b_coverage, '{}'::jsonb)
+                  || jsonb_build_object('droppedFindings', $2::int, 'droppedCap', $3::int)
+            WHERE id = $1`,
+          [r.id, recuperado.dropped, STAGE_B_MAX_FINDINGS],
+        ).catch(() => undefined);
+      }
       // O estágio A já está gravado na linha — a UNIÃO se mantém (o LLM só ADICIONA).
       const existing = Array.isArray(r.findings) ? (r.findings as ValidationFinding[]) : [];
       const findings = [...existing, ...stageB];

@@ -253,7 +253,7 @@ ARCHETYPES: list[dict[str, Any]] = [
         "slug": "arch.gap128.evidencia-cortada-em-silencio-decide-errado",
         "title": "Evidência cortada em silêncio faz decidir com meio fato",
         "rule": (
-            "Teto em texto de EVIDÊNCIA (justificativa, log, citação) é legítimo; esconder que ele "
+            "Teto em EVIDÊNCIA — texto (justificativa, log, citação) ou LISTA de achados — é legítimo; esconder que ele "
             "mordeu não é. Toda justificativa que você recebe pode vir com a marca "
             "`…⟨CORTADO: N de M chars — o fato CONTINUA⟩`: aí o fato NÃO é o que você leu. Não conclua "
             "'regra absoluta' de um texto cortado, não afirme ausência de exceção, e ao citar alguém "
@@ -265,7 +265,9 @@ ARCHETYPES: list[dict[str, Any]] = [
             "com 4 terminando no meio de uma palavra. Todos os leitores cortavam mais um pouco em "
             "silêncio: dossiê do CTO/roteador em 400, oráculo em 500, aprendizado em 320, triagem em "
             "600. Um GAP cuja exceção ('exceto quando…') vive na cauda virava regra absoluta, e o "
-            "roteador podia não ver o arquivo citado no fim e mandar o GAP para o arquivo errado."
+            "roteador podia não ver o arquivo citado no fim e mandar o GAP para o arquivo errado. "
+            "A LISTA tinha o mesmo defeito (GAP-129): o teto de ingestão descartava achados do juiz sem "
+            "dizer, então a contagem caía sem ninguém ter consertado nada."
         ),
     },
 ]

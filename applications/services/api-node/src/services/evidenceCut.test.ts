@@ -6,7 +6,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { cutEvidence, wouldCut } from "./evidenceCut.js";
-import { parseStageBFindings, STAGE_B_RATIONALE_MAX } from "./specValidation.js";
+import { parseStageBFindings, parseStageBFindingsWithDrop, STAGE_B_RATIONALE_MAX, STAGE_B_MAX_FINDINGS } from "./specValidation.js";
+import { readStageBCoverage } from "./specAutonomy.js";
 
 describe("🔴 GAP-128 — cutEvidence", () => {
   it("texto dentro do teto passa INTACTO e sem aviso", () => {
@@ -73,5 +74,55 @@ describe("🔴 GAP-128 — ingestão do estágio B", () => {
     const [f] = parseStageBFindings([{ file: "a.md", severity: "info", rationale }]);
     expect(f.title).not.toContain("CORTADO");
     expect(f.title.length).toBeLessThanOrEqual(200);
+  });
+});
+
+/**
+ * 🔴 GAP-129 — a LISTA do juiz também era cortada em silêncio (teto de ingestão por lote).
+ *
+ * Medido em prod: 2 validações com EXATAMENTE 50 findings — o teto antigo — enquanto vizinhas tinham
+ * 52/55/58. Descarte na entrada faz a contagem de GAPs mentir PARA BAIXO: parece que fechou.
+ */
+describe("🔴 GAP-129 — descarte de achados no teto de ingestão da lista", () => {
+  it("o teto por lote subiu de 50 para 120", () => {
+    expect(STAGE_B_MAX_FINDINGS).toBe(120);
+  });
+
+  it("lista dentro do teto: nada descartado", () => {
+    const raw = Array.from({ length: 60 }, (_, i) => ({ file: "a.md", severity: "warning", title: `t${i}`, rationale: "r" }));
+    const { findings, dropped } = parseStageBFindingsWithDrop(raw);
+    expect(findings.length).toBe(60);
+    expect(dropped).toBe(0);
+  });
+
+  it("lista acima do teto: o excedente é CONTADO, não desaparece", () => {
+    const raw = Array.from({ length: 135 }, (_, i) => ({ file: "a.md", severity: "blocker", title: `t${i}`, rationale: "r" }));
+    const { findings, dropped } = parseStageBFindingsWithDrop(raw);
+    expect(findings.length).toBe(STAGE_B_MAX_FINDINGS);
+    expect(dropped).toBe(15);
+  });
+
+  it("`parseStageBFindings` segue com o MESMO contrato (só a lista) para quem já a usava", () => {
+    const raw = [{ file: "a.md", severity: "info", title: "t", rationale: "r" }];
+    expect(parseStageBFindings(raw)).toEqual(parseStageBFindingsWithDrop(raw).findings);
+  });
+
+  it("entrada que não é lista não inventa descarte", () => {
+    expect(parseStageBFindingsWithDrop(null)).toEqual({ findings: [], dropped: 0 });
+    expect(parseStageBFindingsWithDrop({ findings: [] })).toEqual({ findings: [], dropped: 0 });
+  });
+});
+
+describe("🔴 GAP-129 — o laço LÊ o descarte na cobertura", () => {
+  it("cobertura com `droppedFindings` é transportada; sem ele, o campo não aparece", () => {
+    const com = readStageBCoverage({ full: ["a.md"], outlineOnly: [], oversized: [], droppedFindings: 7 });
+    expect(com?.droppedFindings).toBe(7);
+    const sem = readStageBCoverage({ full: ["a.md"], outlineOnly: [], oversized: [] });
+    expect(sem?.droppedFindings).toBeUndefined();
+  });
+
+  it("descarte zero ou inválido não vira descarte (não invento medição)", () => {
+    expect(readStageBCoverage({ full: ["a.md"], outlineOnly: [], droppedFindings: 0 })?.droppedFindings).toBeUndefined();
+    expect(readStageBCoverage({ full: ["a.md"], outlineOnly: [], droppedFindings: "muitos" })?.droppedFindings).toBeUndefined();
   });
 });
