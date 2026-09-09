@@ -602,6 +602,66 @@ describe("oracleFactBlock — GAP-151: teto declarado na regra do citante", () =
   });
 });
 
+// ── 🔴 GAP-155: a ORDEM idêntica repetida por linha ───────────────────────────
+//
+// MEDIDO em prod 2026-09-09 (api `e0f876e0`, run `2777693b`, censo do GAP-146): com o teto do GAP-151
+// já valendo, `oracles` seguiu em 35.692c de um prompt de 155.982c em `modelo-dados.md`. Abrindo o
+// bloco: 52 linhas de citante × **254 chars de texto IDÊNTICO** = 13.208 chars (37% do bloco, 8,5% do
+// prompt) só de instrução repetida — em `definicao-de-pronto.md` (70 citantes) ~17.780. A ordem não
+// varia por linha; o que varia é a identidade. Então ela é dita UMA vez, com as MESMAS palavras.
+describe("oracleFactBlock — GAP-155: a ordem é dita uma vez, não por linha", () => {
+  const muitos = (n: number) => Array.from({ length: n }, (_, i) => D({
+    contractKey: `contrato-${i}`, oraclePath: `dono-${i}.md`, ruleSummary: "regra curta",
+    restatedIn: ["definicao-de-pronto.md"],
+  }));
+
+  it("a instrução aparece UMA única vez, com 1 ou com 70 citantes", () => {
+    for (const n of [1, 70]) {
+      const block = oracleFactBlock(muitos(n), "definicao-de-pronto.md");
+      const vezes = (block.match(/SUBSTITUA a redeclaração/g) ?? []).length;
+      expect(vezes).toBe(1);
+      // e ela DECLARA a quantas linhas se aplica — sem isso "cada uma" ficaria sem referente
+      expect(block).toContain(`Nas ${n} linha(s) de CITANTE abaixo`);
+    }
+  });
+
+  it("nenhuma palavra imperativa se perdeu no caminho (a ordem é a MESMA, só não repetida)", () => {
+    const block = oracleFactBlock(muitos(3), "definicao-de-pronto.md");
+    expect(block).toContain("SUBSTITUA a redeclaração da regra por uma CITAÇÃO do oráculo");
+    expect(block).toContain("NÃO redeclare");
+    expect(block).toContain("NÃO escolha outro valor");
+    expect(block).toContain("NÃO acrescente um parágrafo dizendo que este arquivo é a fonte única");
+    expect(block).toContain("fonte única deste contrato");
+  });
+
+  it("a IDENTIDADE de cada contrato continua inteira — é ela que varia por linha", () => {
+    const block = oracleFactBlock(muitos(70), "definicao-de-pronto.md");
+    for (let i = 0; i < 70; i += 1) {
+      expect(block).toContain(`\`contrato-${i}\``);
+      expect(block).toContain(`o oráculo é \`dono-${i}.md\``);
+    }
+  });
+
+  it("massa medida: 70 citantes economizam mais de 15.000 chars contra a forma repetida", () => {
+    const decisoes = muitos(70);
+    const block = oracleFactBlock(decisoes, "definicao-de-pronto.md");
+    // A forma ANTIGA, reconstruída aqui literalmente: é o custo contra o qual a economia é medida.
+    const antigo = decisoes.map((d) =>
+      `• \`${d.contractKey}\`: o oráculo é \`${d.oraclePath}\` (regra vigente: ${d.ruleSummary}).`
+      + ` Neste arquivo, SUBSTITUA a redeclaração da regra por uma CITAÇÃO do oráculo`
+      + ` (ex.: "ver \`${d.oraclePath}\` — fonte única deste contrato"). NÃO redeclare, NÃO escolha outro`
+      + " valor e NÃO acrescente um parágrafo dizendo que este arquivo é a fonte única.").join("\n");
+    const novo = block.split("\n").filter((l) => l.startsWith("• ")).join("\n");
+    expect(antigo.length - novo.length).toBeGreaterThan(15_000);
+  });
+
+  it("arquivo que só É oráculo não recebe a ordem de citante (nem o preâmbulo dela)", () => {
+    const block = oracleFactBlock([D()], "contratos-erros.md");
+    expect(block).not.toContain("linha(s) de CITANTE abaixo");
+    expect(block).not.toContain("SUBSTITUA a redeclaração");
+  });
+});
+
 // ── GAP-25: o critério de aceitação vira NÚMERO no pedido ─────────────────────
 //
 // Nas 5 primeiras rodadas em prod com o registro ligado, 2 foram DESCARTADAS por crescer (+7.837 e

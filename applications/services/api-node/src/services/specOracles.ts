@@ -787,15 +787,27 @@ export function oracleFactBlock(
       + `${d.restatedIn.length ? ` Os arquivos ${d.restatedIn.map((p) => `\`${p}\``).join(", ")} vão passar a citá-la — não a mova daqui.` : ""}`,
     );
   }
+  // 🔴 GAP-155: a ORDEM é a MESMA para toda linha de citante — ela é dita UMA vez, aqui, com as mesmas
+  // palavras imperativas que antes eram repetidas linha a linha. Medido em prod (2026-09-09, api
+  // `e0f876e0`, `modelo-dados.md`): 52 citantes × 254 chars de texto IDÊNTICO = 13.208 chars, 37% do
+  // bloco `oracles` (35.692c) e 8,5% do prompt inteiro do CTO (155.982c). Em
+  // `definicao-de-pronto.md` (70 citantes) eram ~17.780. Repetir a instrução por item é a mesma
+  // doença que o GAP-151 tirou da REGRA: o que varia por linha é a identidade, não a ordem.
+  if (restates.length > 0) {
+    lines.push(
+      `Nas ${restates.length} linha(s) de CITANTE abaixo, para CADA uma: neste arquivo, SUBSTITUA a`
+      + " redeclaração da regra por uma CITAÇÃO do oráculo indicado (ex.: \"ver `<oráculo>` — fonte única"
+      + " deste contrato\"). NÃO redeclare, NÃO escolha outro valor e NÃO acrescente um parágrafo dizendo"
+      + " que este arquivo é a fonte única.",
+    );
+  }
   for (const d of restates) {
     // GAP-151: a linha do CITANTE leva a IDENTIDADE inteira e a regra com teto DECLARADO — reproduzir
     // aqui os 300–500 chars da regra é fazer o que a própria linha manda parar de fazer.
     const rule = cutEvidence(d.ruleSummary, ORACLE_RESTATER_RULE_CHARS);
     lines.push(
-      `• \`${d.contractKey}\`: o oráculo é \`${d.oraclePath}\`${rule ? ` (regra vigente: ${rule})` : ""}.`
-      + ` Neste arquivo, SUBSTITUA a redeclaração da regra por uma CITAÇÃO do oráculo`
-      + ` (ex.: "ver \`${d.oraclePath}\` — fonte única deste contrato"). NÃO redeclare, NÃO escolha outro`
-      + " valor e NÃO acrescente um parágrafo dizendo que este arquivo é a fonte única.",
+      // GAP-155: identidade INTEIRA (chave + oráculo) — o que sai é só a ordem repetida, dita acima.
+      `• \`${d.contractKey}\`: o oráculo é \`${d.oraclePath}\`${rule ? ` (regra vigente: ${rule})` : ""}.`,
     );
   }
   lines.push(
