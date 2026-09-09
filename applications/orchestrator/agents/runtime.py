@@ -348,6 +348,61 @@ def _artifact_cited_paths(message: dict, envelope: dict, artifacts: list) -> lis
     return cited_paths(texts, candidates)
 
 
+# 🔴 GAP-146 — INSTRUMENTO antes do corte. Medido em prod (3 dias): `spec_cto` custa **69.548
+# tokens de ENTRADA por chamada** em 764 chamadas (52,9 M) — a maior conta unitária do cérebro — e
+# NINGUÉM sabia qual campo paga essa conta. Sem esse fato, "recortar por relevância" é adivinhação, e
+# é exatamente a armadilha que o GAP-147 cobrou em dinheiro (marcar antes de medir criou gasto
+# invisível). O censo conta **caracteres emitidos por campo — nunca conteúdo** — e sai numa linha só
+# de log por construção de prompt.
+#
+# `ContextVar` (não variável global) pelo MESMO motivo de `LAST_USAGE`: o `agents` roda uma thread por
+# job, e desde o GAP-145 os lotes do estágio B são despachados em paralelo — uma global misturaria o
+# censo de dois prompts e a medição mentiria sem avisar.
+LAST_PROMPT_CENSUS: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "last_prompt_census", default=None,
+)
+
+
+def _prompt_census_record(
+    prompt: str,
+    role: str,
+    model: str,
+    fields: dict[str, int],
+    clipped: set[str],
+    budget: dict[str, int] | None,
+) -> dict:
+    """Publica o censo do prompt (tamanhos, nunca conteúdo) em `LAST_PROMPT_CENSUS` + 1 linha de log.
+
+    `outros` é o resto do prompt que NÃO vem de campo orçado (tarefa, modo, artefatos, instruções,
+    regras de formato). Ele existe para o censo FECHAR: `sum(campos) + outros == total`. Sem esse
+    termo, um campo esquecido apareceria como economia — o mesmo tipo de mentira do GAP-17/18
+    (ausência lida como cobertura).
+    """
+    total = len(prompt)
+    contados = sum(v for k, v in fields.items() if not k.endswith("_dedup"))
+    censo = {
+        "total": total,
+        "fields": dict(sorted(fields.items(), key=lambda kv: -kv[1])),
+        "outros": max(0, total - contados),
+        "clipped": sorted(clipped),
+        "role": (role or "").upper() or None,
+        "model": model or None,
+        "budget_total": (budget or {}).get("_total"),
+    }
+    try:
+        LAST_PROMPT_CENSUS.set(censo)
+    except Exception:  # pragma: no cover — ContextVar não falha, mas censo nunca derruba prompt
+        pass
+    detalhe = " ".join(f"{k}={v}c" for k, v in censo["fields"].items())
+    logger.info(
+        "[prompt-census] role=%s model=%s total=%dc orcamento=%s %s outros=%dc cortados=%s",
+        censo["role"] or "?", model or "?", total,
+        censo["budget_total"] if censo["budget_total"] is not None else "piso",
+        detalhe, censo["outros"], ",".join(censo["clipped"]) or "-",
+    )
+    return censo
+
+
 def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     """
     Monta a mensagem do usuário com TODO o contexto necessário (AGENT_LLM_COMMUNICATION_ANALYSIS).
@@ -417,6 +472,9 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
     # F1: quem foi CORTADO. O formato `edits` só pode ser OFERECIDO para um documento que o modelo
     # viu INTEIRO — um `search` escrito sobre um trecho é aplicado contra o documento completo.
     _clipped_fields: set[str] = set()
+    # GAP-146: quantos CHARACTERES cada campo orçado realmente colocou no prompt (ver
+    # `_prompt_census_record`). Só tamanho — nunca conteúdo.
+    _census: dict[str, int] = {}
 
     def _take(value: str, field: str) -> str:
         """Aplica cap do campo ∩ sobra do orçamento global, com marcador quando cortar."""
@@ -426,12 +484,15 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
         if _budget is None:
             if len(value) > _PROMPT_FIELD_FLOORS[field]:
                 _clipped_fields.add(field)
-            return value[:_PROMPT_FIELD_FLOORS[field]]
+            out = value[:_PROMPT_FIELD_FLOORS[field]]
+            _census[field] = _census.get(field, 0) + len(out)
+            return out
         cap = min(_budget[field], max(0, _budget["_total"] - _spent))
         if len(value) > cap:
             _clipped_fields.add(field)
         out = _clip(value, cap, field, model)
         _spent += min(len(value), cap)
+        _census[field] = _census.get(field, 0) + len(out)
         return out
 
     # LEI 6: conteúdo do usuário delimitado em <user_provided_content> (anti-injection)
@@ -464,6 +525,9 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
                 "## Product Spec Atual\n(É o MESMO documento da 'Spec do Projeto' acima — não "
                 "repetido aqui para não gastar contexto nem criar duas versões do mesmo texto.)"
             )
+            # GAP-146: economia que JÁ acontece precisa aparecer no censo, senão o campo "some" e a
+            # próxima leitura conclui que `product_spec` nunca custou nada (era o defeito do D3).
+            _census["product_spec_dedup"] = len(_ps) if isinstance(_ps, str) else 0
         else:
             parts.append(f"## Product Spec Atual\n{_take(_ps, 'product_spec')}")
     # ── Contexto de PRODUTO (Fase 1, 2026-09-05) — fecha o defeito C ───────────────────────────────
@@ -692,7 +756,14 @@ def build_user_message(message: dict, role: str = "", model: str = "") -> str:
         "O JSON deve ser válido (sem comentários, sem vírgula trailing)."
     )
     parts.append(f"## Instrução\n{instruction}")
-    return "\n\n".join(parts)
+    _prompt = "\n\n".join(parts)
+    # GAP-146: o censo é a ÚLTIMA coisa antes do return — assim ele mede o prompt que de fato saiu,
+    # não a intenção de quem montou (a diferença entre os dois foi o GAP-148 inteiro).
+    try:
+        _prompt_census_record(_prompt, role, model, _census, _clipped_fields, _budget)
+    except Exception as _e:  # pragma: no cover — instrumento NUNCA derruba a chamada
+        logger.warning("[prompt-census] censo falhou (segue sem medição): %s", _e)
+    return _prompt
 
 
 def build_repair_feedback_block(failed_response: dict, validation_errors: list[str]) -> str:
