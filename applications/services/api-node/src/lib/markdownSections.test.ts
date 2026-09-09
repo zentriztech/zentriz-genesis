@@ -11,7 +11,9 @@
  * como inexistência e recria a seção).
  */
 import { describe, it, expect } from "vitest";
-import { sectionWindow, splitSections, sectionSubtree, WINDOW_GAP_MARK } from "./markdownSections.js";
+import {
+  sectionWindow, splitSections, sectionSubtree, citedSectionRefs, WINDOW_GAP_MARK,
+} from "./markdownSections.js";
 
 /** Muitas linhas curtas — é a forma real de uma seção grande de spec, e janela precisa de linhas. */
 const manyLines = (tag: string, n: number): string =>
@@ -199,5 +201,55 @@ describe("sectionSubtree (GAP-79)", () => {
 
   it("índice fora da faixa devolve vazio em vez de estourar", () => {
     expect(sectionSubtree(splitSections("# Um\ncorpo"), 9).body).toBe("");
+  });
+});
+
+/**
+ * 🔴 GAP-162 — o nome do arquivo citado não pode voltar pela METADE.
+ *
+ * A janela de 48 chars mede DISTÂNCIA (o nome está perto da citação?). Ela nunca deveria recortar o
+ * NOME, mas recortava: `observabilidade-operacao.md ... §7.2` voltava como `operacao.md`. Um nome
+ * truncado não casa com arquivo nenhum, então a ponta do ALVO (GAP-73) o descarta como "de outro
+ * arquivo" e a ponta do IRMÃO (GAP-75) não o reconhece como irmão — a citação cai calada exatamente no
+ * vão que esta função existe para fechar. Medido: 13 de 932 remissões da spec do NVX (0 de 27 nos
+ * rationales de hoje — latente, não ativo).
+ */
+describe("citedSectionRefs (GAP-162)", () => {
+  it("devolve o nome INTEIRO quando o começo dele ficou antes da janela", () => {
+    const nome = "observabilidade-operacao.md";
+    const meio = " conforme descrito naquele arquivo ";
+    // O `.md` cabe na janela (por isso havia match), mas o começo do nome NÃO — era ali que truncava.
+    expect(meio.length).toBeLessThan(48);
+    expect(nome.length + meio.length).toBeGreaterThan(48);
+    expect(citedSectionRefs(`O inventário está em ${nome}${meio}§7.2`)).toEqual([
+      { ref: "§7.2", file: nome },
+    ]);
+  });
+
+  it("nome colado à citação continua sendo lido igual (a correção não muda o caso comum)", () => {
+    expect(citedSectionRefs("contradiz `privacidade-lgpd.md` §3.3 e nada mais")).toEqual([
+      { ref: "§3.3", file: "privacidade-lgpd.md" },
+    ]);
+  });
+
+  it("citação sem arquivo nomeado é do PRÓPRIO arquivo — `file` fica null", () => {
+    expect(citedSectionRefs("a regra da §8.6 contradiz a §9.1")).toEqual([
+      { ref: "§8.6", file: null },
+      { ref: "§9.1", file: null },
+    ]);
+  });
+
+  it("nome LONGE da citação não é associado — a janela ainda mede distância", () => {
+    const longe = "modelo-dados.md" + " palavras que separam os dois fatos".repeat(3);
+    expect(citedSectionRefs(`${longe} §2.7`)[0].file).toBeNull();
+  });
+
+  it("não engole a palavra anterior: a fronteira do nome é o primeiro char que não é de nome", () => {
+    expect(citedSectionRefs("ver arquivo contratos-erros.md §7.4")[0].file).toBe("contratos-erros.md");
+    expect(citedSectionRefs("(vide contratos-erros.md) §7.4")[0].file).toBe("contratos-erros.md");
+  });
+
+  it("normaliza para minúsculas — a comparação do outro lado é por nome minúsculo", () => {
+    expect(citedSectionRefs("ver Modelo-Dados.MD §2.7")[0].file).toBe("modelo-dados.md");
   });
 });

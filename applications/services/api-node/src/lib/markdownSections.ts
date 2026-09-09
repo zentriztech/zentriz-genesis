@@ -205,6 +205,8 @@ export function scoreSections(secs: MdSection[], terms: string[]): Array<{ i: nu
 const SECTION_REF_RE = /§\s?\d+(?:\.\d+)*/g;
 /** Janela de texto antes da citação onde se procura um nome de arquivo (`contratos-erros.md §2.3`). */
 const CROSS_FILE_WINDOW = 48;
+/** Caracteres que podem compor um nome de arquivo — usada para RECONSTITUIR um nome cortado pela janela. */
+const NAME_CHAR_RE = /[A-Za-z0-9._-]/;
 
 export interface CitedSectionRef {
   /** O endereço como o juiz escreveu (`§8.1`). */
@@ -221,6 +223,16 @@ export interface CitedSectionRef {
  * arquivo; o recorte do IRMÃO (`specSiblingContext`, GAP-75) aceita exatamente o que o alvo descartou.
  * Com duas réguas, a citação `privacidade-lgpd.md §3.3` cairia no vão entre elas — e foi isso que se
  * mediu em prod: 7 de 14 seções de irmão citadas pelos GAPs nunca chegavam ao prompt.
+ *
+ * 🔴 GAP-162 — a janela mede DISTÂNCIA, não recorta NOME. Enquanto o nome era buscado só dentro dos 48
+ * chars anteriores, um nome que começasse antes disso era devolvido pela METADE
+ * (`observabilidade-operacao.md` → `vabilidade-operacao.md`), porque a regex casa o fragmento que sobrou
+ * na borda da janela. Um nome truncado é pior que nome nenhum: ele não casa com arquivo algum, então a
+ * ponta do ALVO o descarta como "citação de outro arquivo" e a ponta do IRMÃO não o reconhece como irmão
+ * — a citação cai calada no vão que esta função existe para fechar. Medido na spec do NVX LastMile:
+ * 13 de 932 remissões do texto (nos rationales dos GAPs de hoje, 0 de 27 — o defeito era LATENTE).
+ * Correção: a janela continua decidindo SE há nome perto; o nome é então completado para a esquerda até a
+ * primeira fronteira real. Distância aceita não muda — só para de mentir sobre o nome.
  */
 export function citedSectionRefs(text: string): CitedSectionRef[] {
   const out: CitedSectionRef[] = [];
@@ -228,9 +240,15 @@ export function citedSectionRefs(text: string): CitedSectionRef[] {
   SECTION_REF_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = SECTION_REF_RE.exec(s)) !== null) {
-    const before = s.slice(Math.max(0, m.index - CROSS_FILE_WINDOW), m.index);
-    const fileHit = before.match(/([A-Za-z0-9._-]+\.md)[^.]*$/i);
-    out.push({ ref: m[0], file: fileHit ? fileHit[1].toLowerCase() : null });
+    const janela = Math.max(0, m.index - CROSS_FILE_WINDOW);
+    const fileHit = /([A-Za-z0-9._-]+\.md)[^.]*$/i.exec(s.slice(janela, m.index));
+    let file: string | null = null;
+    if (fileHit) {
+      let ini = janela + fileHit.index; // início do nome DENTRO do texto, não da janela
+      while (ini > 0 && NAME_CHAR_RE.test(s[ini - 1])) ini--;
+      file = s.slice(ini, janela + fileHit.index + fileHit[1].length).toLowerCase();
+    }
+    out.push({ ref: m[0], file });
   }
   return out;
 }
