@@ -54,6 +54,9 @@ import {
   gapOutcomeInstruction, parseGapOutcomes, priorOutcomeFactBlock, summarizeOutcomes,
   // 🔴 GAP-131: a cadeia de vias já tentadas (profundidade > 1).
   attemptHistoryFactBlock, type GapAttemptHistory,
+  // 🔴 GAP-157: o botão humano lê os MESMOS fatos de arquivo que o laço (relato anterior + vias
+  // tentadas). As quatro funções são por `project_id`+`file_path` e não dependem de run.
+  lastDeclaredOutcomes, selectPriorOutcomes, declaredAttemptHistory, selectAttemptHistory,
   type GapOutcome,
 } from "../services/gapOutcomes.js";
 import type { FocusPlan } from "../services/gapFocus.js";
@@ -2359,6 +2362,34 @@ export async function specChatRoutes(app: FastifyInstance) {
         // fato enfrenta.
         const humanOracles = await gapOracleBlock(projectId!, filePath!);
         const humanIndex = await gapIndexBlock(projectId!, filePath!, specMarkdown);
+        // 🔴 GAP-157: o pedido deste botão SEMPRE trouxe a instrução de PRESTAÇÃO DE CONTAS (o A1 vive
+        // dentro de `buildGapFileRequest`, e aqui `consolidationBlock` é vazio ⇒ `outcomeContract`
+        // entra), mas o despacho não passava `outcomeGaps` — então o bloco que o CTO escrevia era
+        // PARSEADO POR NINGUÉM: nada em `gap_outcomes`, nada no chat, e a contradição "declarou
+        // `corrigido` sem edição aplicada" (o sinal de fechamento fake) ficava invisível ao Jean.
+        // MEDIDO em prod (2026-09-09): dos 829 jobs `kind='file'`, os 6 que NÃO vieram do laço têm
+        // `gap_outcomes` NULO em 6 de 6 — e 2 deles aplicaram edição. Token de saída pago para um
+        // bloco descartado, e o clique seguinte no mesmo arquivo nascia AMNÉSICO.
+        //
+        // Com as contas gravadas, dois fatos que são do ARQUIVO (não do laço) passam a existir também
+        // aqui — e por isso saem dos "vazios": o relato anterior do próprio agente (A1,
+        // `lastDeclaredOutcomes` é por `project_id`+`file_path` e atravessa runs) e a cadeia de vias já
+        // tentadas (GAP-131, `declaredAttemptHistory`, idem). Sem eles, o humano que clica 3× no mesmo
+        // arquivo teimoso recebe 3× a mesma resposta — foi o defeito medido no laço (o MESMO GAP
+        // declarado `corrigido` 8× seguidas). Ler é AJUSTE do pedido: as duas funções já degradam para
+        // `null`/`[]` e nenhuma falha delas pode derrubar o despacho.
+        const humanPriorOutcome = priorOutcomeFactBlock(
+          selectPriorOutcomes(await lastDeclaredOutcomes(pool, projectId!, filePath!), fileGaps),
+        );
+        const humanAttempts = attemptHistoryFactBlock(
+          selectAttemptHistory(await declaredAttemptHistory(pool, projectId!, filePath!), fileGaps),
+        );
+        if (humanPriorOutcome || humanAttempts) {
+          console.log(
+            `[SpecChat] botão humano alvo=${filePath} relato_anterior=${humanPriorOutcome.length}c`
+            + ` vias_tentadas=${humanAttempts.length}c`,
+          );
+        }
         runFileChatJob(
           jobId,
           {
@@ -2366,18 +2397,24 @@ export async function specChatRoutes(app: FastifyInstance) {
               "tooLarge" in humanTarget ? specMarkdown : humanTarget.text, filePath!, fileGaps, ctx,
               projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps),
               !("tooLarge" in humanTarget) && humanTarget.digested, humanOracles,
-              // Os cinco vazios são ESTADO DO LAÇO, não esquecimento: recusa da rodada anterior (GAP-29),
-              // reincidência reconciliada (GAP-68), rodada dedicada (GAP-81), desfecho declarado antes
-              // (A1) e consolidação pura (GAP-121) só existem dentro de um passe autônomo. Um clique
-              // humano não tem rodada anterior, e inventar uma seria fato falso no prompt.
-              "", "", "", "", "",
+              // Os quatro vazios são ESTADO DO LAÇO, não esquecimento: recusa da rodada anterior por
+              // veto de consolidação (GAP-29), reincidência reconciliada dentro da run (GAP-68),
+              // rodada DEDICADA com escalada de foco (GAP-81) e consolidação pura (GAP-121) só
+              // existem dentro de um passe autônomo — inventá-los aqui seria fato falso no prompt.
+              "", "", "",
+              humanPriorOutcome,
+              "",
               humanIndex,
+              humanAttempts,
             ),
             ...llm,
           },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
           gapFileEditsEnabled() ? specMarkdown : null,
+          // 🔴 GAP-157: a lista despachada, para que a prestação de contas que o prompt EXIGE seja lida,
+          // mostrada ao humano e gravada. Sem este argumento o bloco era escrito e jogado fora.
+          fileGaps,
         );
       } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).

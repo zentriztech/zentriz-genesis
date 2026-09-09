@@ -72,6 +72,39 @@ describe("🔴 GAP-156 — o botão humano recebe os MESMOS fatos persistidos qu
     expect(laco.slice(0, 600)).toContain("attemptHistoryBlock");
   });
 
+  it("🔴 GAP-157 — o despacho humano passa a lista despachada como `outcomeGaps`", () => {
+    // O prompt deste caminho SEMPRE trouxe `gapOutcomeInstruction` (o A1 vive dentro de
+    // `buildGapFileRequest` e aqui `consolidationBlock` é vazio). Sem o argumento, `runFileChatJob`
+    // recebe `outcomeGaps=null` ⇒ `parseGapOutcomes` não roda ⇒ nada em `gap_outcomes`, nada no chat,
+    // e a contradição "declarou `corrigido` sem edição aplicada" fica invisível. Medido em prod:
+    // 6 de 6 jobs humanos com `gap_outcomes` NULO.
+    const src = humanDispatchSource();
+    // O 6º argumento vem DEPOIS do 5º (`editsBase`, que é o `gapFileEditsEnabled() ? … : null`).
+    const depoisDoEditsBase = src.slice(src.indexOf("gapFileEditsEnabled() ?"));
+    expect(
+      /\bfileGaps\b/.test(depoisDoEditsBase),
+      "o botão humano voltou a despachar sem `fileGaps` como 6º argumento (`outcomeGaps`): o CTO escreve"
+      + " a prestação de contas que o prompt exige e o servidor joga fora — token pago e fechamento"
+      + " fake invisível ao humano.",
+    ).toBe(true);
+  });
+
+  it("🔴 GAP-157 — o humano recebe os fatos DO ARQUIVO: relato anterior (A1) e vias tentadas (GAP-131)", () => {
+    // Ambos são por `project_id`+`file_path` e atravessam runs — não são estado de laço. Sem eles, o
+    // humano que clica 3× no mesmo arquivo teimoso recebe 3× a mesma via já refutada.
+    const src = humanDispatchSource();
+    expect(src, "`lastDeclaredOutcomes` saiu do botão humano — o clique voltou a ser amnésico (A1).")
+      .toContain("lastDeclaredOutcomes(pool");
+    expect(src, "`declaredAttemptHistory` saiu do botão humano — a cadeia de vias já tentadas (GAP-131) sumiu.")
+      .toContain("declaredAttemptHistory(pool");
+    // Casamento por identidade é obrigatório: mandar o relato de OUTRO GAP seria fato falso (o veto de
+    // ambiguidade de `selectPriorOutcomes`/`selectAttemptHistory`).
+    expect(src, "o relato tem de ser filtrado por `selectPriorOutcomes` — relato colado no GAP errado é pior que relato nenhum.")
+      .toContain("selectPriorOutcomes(");
+    expect(src, "a cadeia tem de ser filtrada por `selectAttemptHistory` (mesmo veto de ambiguidade).")
+      .toContain("selectAttemptHistory(");
+  });
+
   it("os vazios do despacho humano são DECLARADOS como estado do laço, não silenciosos", () => {
     // A regra do GAP-128 vale para o código também: cortar é legítimo, cortar sem dizer não é. Sem esta
     // âncora, um `"", "", "", "", ""` sem explicação viraria "alguém esqueceu" na próxima leitura.
