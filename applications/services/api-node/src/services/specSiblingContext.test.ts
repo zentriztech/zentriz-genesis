@@ -9,7 +9,10 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildSiblingContext, disputedTerms, siblingPathsIn, SIBLING_FILE_BUDGET, type SiblingRef } from "./specSiblingContext.js";
+import {
+  buildSiblingContext, disputedTerms, siblingPathsIn, siblingBodiesIn, SIBLING_FILE_BUDGET,
+  type SiblingRef,
+} from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 let root = "";
@@ -328,5 +331,68 @@ describe("siblingPathsIn — ida e volta com o bloco REAL", () => {
     expect(ctx.used).toContain("nvx-lastmile-backend.md");
     expect(ctx.block).toContain("(índice da spec)");
     expect(siblingPathsIn(ctx.block)).toContain("nvx-lastmile-backend.md");
+  });
+});
+
+/**
+ * 🔴 GAP-168 — "o irmão veio" ≠ "o TEXTO do irmão veio".
+ *
+ * Medido em prod (`prompt_census`, 87 chamadas de `api-gapfile`): `SIBLING_FILE_FULL_MAX` é 8.000 chars
+ * e os 11 arquivos da spec do NVX têm 51k–106k ⇒ **nenhum irmão do laço vai integral**. Ainda assim a
+ * árvore da spec (que lê `siblingPathsIn`) escrevia `corpo presente neste prompt` para todos eles, e o
+ * bloco de irmãos, alguns milhares de chars depois, se declarava resumo: o prompt do escritor se
+ * contradizia sobre o próprio conteúdo.
+ *
+ * Estes testes pinam as três coisas que fariam a distinção mentir: recorte passando por integral,
+ * integral passando por recorte, e o cabeçalho divergindo do extrator (que é o par que o GAP-160 já
+ * exigia ser a MESMA verdade).
+ */
+describe("siblingBodiesIn — GAP-168: integralidade do corpo entregue", () => {
+  it("irmão pequeno vai INTEGRAL e o cabeçalho não fala de recorte", async () => {
+    const ctx = await buildSiblingContext(
+      files, "definicao-de-pronto.md",
+      [gap("Status HTTP divergente", "aqui 400 e `api-entregas-entregadores.md` diz 422")],
+    );
+    const corpos = siblingBodiesIn(ctx.block);
+    expect(corpos.every((b) => b.integral)).toBe(true);
+    expect(ctx.partialBodies).toEqual([]);
+    expect(ctx.block).not.toContain("RECORTE (o arquivo tem");
+  });
+
+  it("🔴 irmão grande vem RECORTADO e isso é declarado no CABEÇALHO, não só no corpo", async () => {
+    // 90k chars é a ordem de grandeza REAL dos arquivos da spec medida em prod.
+    await put("grande-irmao.md", `# Grande\n## 1 Erros\nErro de validação devolve 422.\n${"z".repeat(90_000)}`);
+    const ctx = await buildSiblingContext(
+      [...files, ref("grande-irmao.md")], "definicao-de-pronto.md",
+      [gap("Status HTTP divergente", "aqui 400 e `grande-irmao.md` diz 422")],
+    );
+    expect(ctx.used).toContain("grande-irmao.md");
+    expect(ctx.partialBodies).toContain("grande-irmao.md");
+    const g = siblingBodiesIn(ctx.block).find((b) => b.path === "grande-irmao.md");
+    expect(g).toEqual({ path: "grande-irmao.md", integral: false });
+    // O tamanho REAL do arquivo vai no cabeçalho: é o que separa "recorte" de "arquivo pequeno".
+    expect(ctx.block).toMatch(/RECORTE \(o arquivo tem \d{5,} chars; abaixo NÃO é o texto integral\)/);
+  });
+
+  it("`siblingPathsIn` continua devolvendo TODOS os corpos (integrais e recortados)", async () => {
+    await put("grande-irmao.md", `# Grande\n## 1 Erros\n422 aqui.\n${"z".repeat(90_000)}`);
+    const ctx = await buildSiblingContext(
+      [...files, ref("grande-irmao.md")], "definicao-de-pronto.md",
+      [gap("x", "ver `grande-irmao.md` e `api-entregas-entregadores.md`")],
+    );
+    // A ida-e-volta do GAP-160 não pode regredir: quem veio recortado ESTÁ no prompt e não pode ser
+    // declarado ausente — só não pode ser declarado integral.
+    expect(siblingPathsIn(ctx.block).sort()).toEqual([...ctx.used].sort());
+    expect(ctx.partialBodies.every((p) => ctx.used.includes(p))).toBe(true);
+  });
+
+  it("cabeçalho de primário recortado leva os DOIS rótulos, e o path segue extraível", async () => {
+    await put("indice-grande.md", `# Índice\n## 1 Visão\ntexto\n${"w".repeat(90_000)}`);
+    const ctx = await buildSiblingContext(
+      [ref("indice-grande.md", true), ref("definicao-de-pronto.md")], "definicao-de-pronto.md",
+      [gap("x", "ver `indice-grande.md`")],
+    );
+    expect(ctx.block).toContain("(índice da spec) — RECORTE (o arquivo tem");
+    expect(siblingBodiesIn(ctx.block)).toEqual([{ path: "indice-grande.md", integral: false }]);
   });
 });

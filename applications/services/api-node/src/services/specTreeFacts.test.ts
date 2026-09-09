@@ -165,6 +165,56 @@ describe("specTreeFactBlock — GAP-161: sumário de seções dos ausentes", () 
   });
 });
 
+/**
+ * 🔴 GAP-168 — o TERCEIRO estado do corpo do irmão: recortado.
+ *
+ * O GAP-160 já havia nomeado o defeito que este bloco fecha: *"trocaríamos 'não sabe que o irmão existe'
+ * por 'acha que já leu o irmão', que é pior"*. Em prod era o caso NORMAL — irmão só vai integral com
+ * ≤8.000 chars e a spec medida tem arquivos de 51k–106k — e a árvore escrevia `corpo presente neste
+ * prompt` para todos, contradizendo o bloco de irmãos algumas milhares de chars adiante.
+ */
+describe("specTreeFactBlock — GAP-168: recorte não é corpo presente", () => {
+  const arvore = [
+    E({ path: "alvo.md", title: "Alvo" }),
+    E({ path: "integral.md", title: "Integral", bytes: 3_000 }),
+    E({ path: "recortado.md", title: "Recortado", bytes: 90_000, outline: "## R1. seção\n## R2. seção" }),
+    E({ path: "ausente.md", title: "Ausente", outline: "## A1. seção" }),
+  ];
+  const bloco = () => specTreeFactBlock(arvore, "alvo.md", ["integral.md", "recortado.md"], ["recortado.md"]);
+
+  it("declara RECORTE na linha do irmão recortado e `corpo presente` só no integral", () => {
+    const linha = (p: string) => bloco().split("\n").find((l) => l.includes(p)) ?? "";
+    expect(linha("recortado.md")).toContain("RECORTE neste prompt (NÃO é o texto integral");
+    expect(linha("recortado.md")).not.toContain("corpo presente neste prompt");
+    expect(linha("integral.md")).toContain("corpo presente neste prompt");
+  });
+
+  it("o recortado NÃO é declarado ausente — ele está no prompt, só não inteiro", () => {
+    const b = bloco();
+    expect(b).toContain("o TEXTO de 1 destes arquivos NÃO está neste prompt");
+    expect(b).toContain("ausente.md");
+    expect(b).toMatch(/de 1 destes arquivos veio um RECORTE, não o texto integral \(recortado\.md\)/);
+  });
+
+  it("o sumário do recortado não é repetido (o resumo dirigido já leva o sumário completo)", () => {
+    const b = bloco();
+    expect(b).toContain("A1. seção");     // o ausente precisa do endereço
+    expect(b).not.toContain("R1. seção"); // o recortado já traz o próprio sumário no bloco de irmãos
+  });
+
+  it("sem recorte nenhum o bloco não fala de recorte (ruído ≠ fato)", () => {
+    const b = specTreeFactBlock(arvore, "alvo.md", ["integral.md"]);
+    expect(b).not.toContain("RECORTE");
+  });
+
+  it("o ALVO nunca é declarado recortado — ele vai inteiro por construção", () => {
+    const b = specTreeFactBlock(arvore, "alvo.md", [], ["alvo.md"]);
+    const linha = b.split("\n").find((l) => l.includes("alvo.md")) ?? "";
+    expect(linha).toContain("ESTE é o arquivo que você edita agora");
+    expect(linha).not.toContain("RECORTE");
+  });
+});
+
 describe("loadSpecTree (disco real)", () => {
   const ref = (dir: string, name: string, isPrimary = false): SpecFileRef => ({
     path: name, filename: name, relDir: "", filePath: join(dir, name), isPrimary,

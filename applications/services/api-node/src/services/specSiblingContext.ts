@@ -64,6 +64,13 @@ export interface SiblingContext {
   block: string;
   /** Paths efetivamente incluídos, em ordem — vai para o log da rodada. */
   used: string[];
+  /**
+   * 🔴 GAP-168 — subconjunto de `used` cujo corpo veio RECORTADO (resumo dirigido ou head-truncate).
+   * Vai para o log porque, medido em prod, ele é `used` INTEIRO: com `SIBLING_FILE_FULL_MAX` em 8.000
+   * chars e arquivos de 51k–106k, nenhum irmão do laço chega integral. Sem este par no log, "o irmão
+   * veio" e "o texto do irmão veio" continuam indistinguíveis.
+   */
+  partialBodies: string[];
   /** Paths citados que NÃO couberam no orçamento (o modelo é avisado no bloco). */
   omitted: string[];
   /** 🔴 GAP-75 — seções de irmão citadas pelos GAPs que chegaram (`arquivo.md §3.3`), inteiras ou em janela. */
@@ -127,6 +134,13 @@ const clip = clipSection;
 
 interface SiblingExcerpt {
   text: string;
+  /**
+   * 🔴 GAP-168 — `true` só quando o texto entregue é o arquivo INTEIRO. Existe como campo (e não como
+   * inferência por tamanho) porque quem lê este fato do lado de fora é a ÁRVORE da spec, que afirma no
+   * prompt "corpo presente neste prompt": afirmar integralidade a partir de um recorte é a mentira que
+   * o GAP-160 nomeou como pior que o defeito original ("acha que já leu o irmão").
+   */
+  integral: boolean;
   /** Refs citadas deste irmão que foram transcritas (inteiras ou em janela). */
   usedRefs: string[];
   /** Refs citadas que não foram transcritas — declaradas no próprio bloco. */
@@ -180,7 +194,7 @@ function citedPicks(
  */
 function excerpt(path: string, content: string, terms: string[], cited: string[]): SiblingExcerpt {
   if (content.length <= SIBLING_FILE_FULL_MAX) {
-    return { text: content, usedRefs: [...cited], droppedRefs: [], windowedRefs: [] };
+    return { text: content, integral: true, usedRefs: [...cited], droppedRefs: [], windowedRefs: [] };
   }
 
   const secs = sections(content);
@@ -258,6 +272,7 @@ function excerpt(path: string, content: string, terms: string[], cited: string[]
         "SEÇÕES RELEVANTES:",
         parts.join("\n\n"),
       ].join("\n"),
+      integral: false,
       usedRefs,
       droppedRefs,
       windowedRefs,
@@ -268,6 +283,7 @@ function excerpt(path: string, content: string, terms: string[], cited: string[]
   // preserva o começo. As citadas viram declaração — o modelo não pode ler ausência como inexistência.
   return {
     text: `${content.slice(0, SIBLING_FILE_BUDGET)}\n\n[… \`${path}\` truncado aqui (${content.length} chars no total) — a ausência de um trecho neste recorte NÃO significa que ele não exista no arquivo …]`,
+    integral: false,
     usedRefs: [],
     droppedRefs: [...new Set([...droppedRefs, ...picks.flatMap((p) => p.refs)])],
     windowedRefs: [],
@@ -298,14 +314,38 @@ function siblingCitedRefs(findings: ValidationFinding[], ref: SiblingRef): strin
  * "o texto destes N arquivos NÃO está neste prompt", e essa afirmação só é honesta se o formato do
  * cabeçalho e o extrator dele forem a MESMA verdade (ver `siblingPathsIn` e o teste de ida-e-volta).
  */
-function siblingHeader(path: string, isPrimary: boolean): string {
-  return `─── IRMÃO SÓ LEITURA: \`${path}\`${isPrimary ? " (índice da spec)" : ""} ───`;
+function siblingHeader(path: string, isPrimary: boolean, recorte: { de: number } | null = null): string {
+  // 🔴 GAP-168: o RECORTE vai no CABEÇALHO, não só no corpo do resumo. O corpo já dizia "[RESUMO
+  // DIRIGIDO …]", mas quem lê de fora (a árvore da spec) lê o cabeçalho — e afirmava "corpo presente
+  // neste prompt" para um arquivo do qual vieram ≤12k de 90k chars.
+  return `─── IRMÃO SÓ LEITURA: \`${path}\`${isPrimary ? " (índice da spec)" : ""}`
+    + `${recorte ? ` — RECORTE (o arquivo tem ${recorte.de} chars; abaixo NÃO é o texto integral)` : ""} ───`;
 }
 
-/** Paths dos irmãos cujo CORPO está no bloco (complemento exato de `siblingHeader`). */
+/** Paths dos irmãos cujo CORPO (integral ou recortado) está no bloco — complemento de `siblingHeader`. */
 export function siblingPathsIn(block: string): string[] {
-  const out: string[] = [];
-  for (const m of block.matchAll(/^─── IRMÃO SÓ LEITURA: `([^`]+)`/gmu)) out.push(m[1]);
+  return siblingBodiesIn(block).map((b) => b.path);
+}
+
+/**
+ * 🔴 GAP-168 — os irmãos do bloco COM o veredicto de integralidade.
+ *
+ * ## O que foi medido em prod (`prompt_census`, 87 chamadas de `api-gapfile`, 2026-09-09)
+ *
+ * `SIBLING_FILE_FULL_MAX` é 8.000 chars e os 11 arquivos da spec do NVX têm 51k–106k. Ou seja: **nenhum
+ * irmão do laço vai integral** — todos são RESUMO DIRIGIDO de ≤12k. E a árvore da spec (GAP-160), que
+ * lê exatamente esta lista, escrevia na linha do irmão `corpo presente neste prompt` e o tirava da
+ * declaração de ausência. O prompt do escritor se contradizia: a árvore afirmava presença de corpo e o
+ * bloco de irmãos, alguns milhares de chars depois, dizia que aquilo era um resumo.
+ *
+ * O GAP-160 nomeou esse defeito antes de existir: *"trocaríamos 'não sabe que o irmão existe' por 'acha
+ * que já leu o irmão', que é pior"*. Aqui a distinção passa a ser TRANSPORTADA, não inferida.
+ */
+export function siblingBodiesIn(block: string): Array<{ path: string; integral: boolean }> {
+  const out: Array<{ path: string; integral: boolean }> = [];
+  for (const m of block.matchAll(/^─── IRMÃO SÓ LEITURA: `([^`]+)`([^\n]*)/gmu)) {
+    out.push({ path: m[1], integral: !m[2].includes("RECORTE (o arquivo tem") });
+  }
   return out;
 }
 
@@ -336,6 +376,7 @@ export async function buildSiblingContext(
   const terms = disputedTerms(findings);
   const parts: string[] = [];
   const used: string[] = [];
+  const partialBodies: string[] = [];
   const omitted: string[] = [];
   const citedUsed: string[] = [];
   const citedDropped: string[] = [];
@@ -359,11 +400,16 @@ export async function buildSiblingContext(
     citedUsed.push(...ex.usedRefs.map((r) => `${ref.path} ${r}`));
     citedDropped.push(...ex.droppedRefs.map((r) => `${ref.path} ${r}`));
     citedWindowed.push(...ex.windowedRefs.map((r) => `${ref.path} ${r}`));
-    parts.push(`${siblingHeader(ref.path, ref.isPrimary)}\n${body}`);
+    if (!ex.integral) partialBodies.push(ref.path);
+    parts.push(`${siblingHeader(ref.path, ref.isPrimary, ex.integral ? null : { de: raw.length })}\n${body}`);
   }
-  if (parts.length === 0) return { block: "", used, omitted, citedUsed, citedDropped, citedWindowed };
+  if (parts.length === 0) {
+    return { block: "", used, partialBodies, omitted, citedUsed, citedDropped, citedWindowed };
+  }
   const warn = omitted.length
     ? `\n[… ${omitted.length} outro(s) arquivo(s) citado(s) não couberam nesta rodada: ${omitted.join(", ")} …]`
     : "";
-  return { block: `${parts.join("\n\n")}${warn}`, used, omitted, citedUsed, citedDropped, citedWindowed };
+  return {
+    block: `${parts.join("\n\n")}${warn}`, used, partialBodies, omitted, citedUsed, citedDropped, citedWindowed,
+  };
 }

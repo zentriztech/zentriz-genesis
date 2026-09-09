@@ -69,7 +69,7 @@ import { recordPromptCensus } from "../services/promptCensus.js";
 import {
   specTreeFactBlock, deadRemissions, deadRemissionFactBlock, type SpecTreeEntry,
 } from "../services/specTreeFacts.js";
-import { siblingPathsIn } from "../services/specSiblingContext.js";
+import { siblingBodiesIn } from "../services/specSiblingContext.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -1033,7 +1033,14 @@ export function buildGapFileRequest(
   const outcomeContract = consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length);
   // 🔴 GAP-160: `siblingPathsIn` declara quais corpos de irmão realmente vieram — a árvore afirma a
   // AUSÊNCIA dos outros, e essa afirmação só é honesta se vier do bloco montado, não de suposição.
-  const treeBlock = specTreeFactBlock(ctx.specTree, filePath, siblingPathsIn(siblingBlock));
+  // 🔴 GAP-168: e o corpo do irmão quase nunca é INTEGRAL (teto de 8.000 chars, arquivos de 51k–106k) —
+  // a árvore recebe os dois conjuntos para não afirmar presença de texto onde veio um recorte.
+  const corposIrmaos = siblingBodiesIn(siblingBlock);
+  const treeBlock = specTreeFactBlock(
+    ctx.specTree, filePath,
+    corposIrmaos.map((b) => b.path),
+    corposIrmaos.filter((b) => !b.integral).map((b) => b.path),
+  );
   // 🔴 GAP-153: a CABEÇA ESTÁVEL do prompt vive num array próprio. Isto não muda a ordem nem um byte
   // (`[...cabeca, ...resto].join("\n")` produz exatamente o mesmo texto que o array único produzia):
   // serve para existir UM lugar no código que sabe onde TERMINARIA o prefixo cacheável. Daqui para
@@ -1244,11 +1251,15 @@ async function gapSiblingBlock(
     ]);
     const files = await loadSpecFiles(pool, projectId);
     if (files.length < 2) return ""; // spec de arquivo único não tem irmão a citar
-    const { block, used, omitted, citedUsed, citedDropped, citedWindowed } =
+    const { block, used, partialBodies, omitted, citedUsed, citedDropped, citedWindowed } =
       await buildSiblingContext(files, filePath, findings);
     if (used.length || omitted.length) {
       console.log(
         `[SpecChat] irmãos citados projeto=${projectId.slice(0, 8)} alvo=${filePath} usados=[${used.join(", ")}]`
+        // 🔴 GAP-168: "o irmão veio" ≠ "o TEXTO do irmão veio". Medido em prod, este número é igual a
+        // `usados` — nenhum irmão da spec do NVX cabe nos 8.000 chars que permitem ir integral.
+        + ` integrais=${used.length - partialBodies.length}/${used.length}`
+        + `${partialBodies.length ? ` recortados=[${partialBodies.join(", ")}]` : ""}`
         + `${omitted.length ? ` fora_do_orcamento=[${omitted.join(", ")}]` : ""} chars=${block.length}`
         // 🔴 GAP-75: 14 de 20 GAPs deste projeto são cross-file, e 7 das 14 seções de irmão citadas
         // NUNCA chegavam ao prompt (127 a 3.214 chars, com o bloco em 49k de 60k — era ORDEM). Sem este

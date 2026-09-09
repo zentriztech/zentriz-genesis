@@ -25,12 +25,23 @@
  * 100% LLM). O tamanho vai em **bytes** porque é o que `stat` mede; chamar de "chars" seria mentir num
  * fato que o agente pode usar para decidir o que cortar.
  *
- * ## Por que a árvore vem no TOPO do prefixo
+ * ## Por que a árvore vem no TOPO — e por que ela NÃO é ponto de cache (🔴 GAP-168, medido)
  *
- * Ela é o único bloco do prompt do laço **invariável entre arquivos** de um mesmo passe (o `system` é
- * invariável mas tem 3.144c — abaixo do piso de 4.096 do provedor). Com as chamadas do laço a 45–60 s
- * uma da outra (medido) e TTL de cache de 5 min, um prefixo `system + árvore` é o primeiro candidato
- * REAL a ponto de cache do produto. Aqui nada é marcado: o GAP-153/159 manda medir antes.
+ * Ela vem no topo porque é o ENQUADRAMENTO ("isto é a spec; UM destes arquivos é o seu"), e isso o
+ * GAP-160 mediu. O que este módulo afirmava a mais — que ela seria "o único bloco invariável entre
+ * arquivos de um mesmo passe" e por isso "o primeiro candidato REAL a ponto de cache" — foi **REFUTADO
+ * pela medição do GAP-167** (`prompt_census`, 87 chamadas de `api-gapfile` em 6 h de prod):
+ *
+ *   maior prefixo que repetiu dentro do TTL = **4.096c**, e em apenas **2 de 87 chamadas (2,3%)**;
+ *   cabeça média 50.281c; 0 chamadas com a cabeça inteira repetida.
+ *
+ * A árvore não pode ser invariável por duas razões que são de PROJETO, não de descuido: (a) ela é
+ * medida agora no disco, e o laço ESCREVE nos arquivos entre duas chamadas do mesmo passe (bytes,
+ * título e sumário do irmão já editado mudam); (b) ela carrega marcas por arquivo (o alvo, o corpo
+ * recortado/presente) porque são fatos sobre ESTE prompt. ⇒ Marcar ponto de cache aqui pagaria **1,25×
+ * de escrita em 97,7% das chamadas** para ler 0,1× em 2,3%: é regressão, e a frente está FECHADA com
+ * número. A economia de token do escritor não está no cache — está na composição medida do prompt
+ * (`file_content` 59%, irmãos 13%, oráculos 11%, árvore 10%).
  */
 import { open, readFile, stat } from "node:fs/promises";
 import {
@@ -147,26 +158,45 @@ const human = (bytes: number | null) =>
  * a ausência é a metade que importa: sem ela o agente lê 14 nomes e supõe ter visto 14 arquivos —
  * trocaríamos "não sabe que o irmão existe" por "acha que já leu o irmão", que é pior.
  *
+ * 🔴 GAP-168 — `bodiesPartial` é o terceiro estado, e em prod ele é a REGRA: irmão só vai integral com
+ * ≤8.000 chars (`SIBLING_FILE_FULL_MAX`) e os arquivos da spec medida têm 51k–106k. Sem essa distinção
+ * a árvore escrevia "corpo presente neste prompt" para um resumo dirigido de ≤12k — exatamente o "acha
+ * que já leu o irmão" que o parágrafo acima proíbe, e em contradição com o próprio bloco de irmãos, que
+ * alguns milhares de chars depois se declara resumo. O recortado NÃO entra no sumário de seções: o
+ * resumo dirigido já carrega o sumário COMPLETO do irmão, e repeti-lo seria pagar duas vezes.
+ *
  * Spec de arquivo único devolve `""` (não há árvore a informar), pela mesma régua do `gapIndexBlock`.
  */
 export function specTreeFactBlock(
   entries: readonly SpecTreeEntry[],
   targetPath: string,
   bodiesPresent: readonly string[] = [],
+  bodiesPartial: readonly string[] = [],
 ): string {
   if (entries.length < 2) return "";
   const present = new Set(bodiesPresent.map(norm));
+  const parcial = new Set(bodiesPartial.map(norm));
   const alvo = norm(targetPath);
   present.add(alvo); // o alvo vai inteiro por construção
+  parcial.delete(alvo);
   const ausentes: string[] = [];
+  const recortados: string[] = [];
   const linhas = entries.map((e) => {
+    const p = norm(e.path);
+    // 🔴 GAP-168: três estados, não dois. `corpo presente` só para quem veio INTEGRAL — o irmão que veio
+    // como resumo dirigido é declarado RECORTE aqui também, senão a árvore contradiz o bloco de irmãos.
+    const corpo = p === alvo ? ""
+      : parcial.has(p) ? "RECORTE neste prompt (NÃO é o texto integral deste arquivo)"
+      : present.has(p) ? "corpo presente neste prompt"
+      : "";
     const marcas = [
-      norm(e.path) === alvo ? "⟵ ESTE é o arquivo que você edita agora" : "",
+      p === alvo ? "⟵ ESTE é o arquivo que você edita agora" : "",
       e.isManifest ? "manifesto/índice de entrada" : "",
       e.isPrimary ? "documento primário da spec" : "",
-      norm(e.path) !== alvo && present.has(norm(e.path)) ? "corpo presente neste prompt" : "",
+      corpo,
     ].filter(Boolean);
-    if (norm(e.path) !== alvo && !present.has(norm(e.path))) ausentes.push(e.path);
+    if (p !== alvo && parcial.has(p)) recortados.push(e.path);
+    else if (p !== alvo && !present.has(p)) ausentes.push(e.path);
     return `  • \`${e.path}\` — ${human(e.bytes)}${e.title ? ` — “${e.title}”` : ""}`
       + (marcas.length ? ` [${marcas.join("; ")}]` : "");
   });
@@ -175,6 +205,15 @@ export function specTreeFactBlock(
     "A spec é o CONJUNTO abaixo. Você edita UM arquivo; os outros existem, têm dono e continuam valendo.",
     ...linhas,
   ];
+  if (recortados.length) {
+    // Medido em prod: com irmãos de 51k–106k chars e teto de 8.000 para ir integral, este ramo é o caso
+    // NORMAL do laço — e era exatamente ele que a árvore declarava como "corpo presente".
+    out.push(
+      `MEDIDO: de ${recortados.length} destes arquivos veio um RECORTE, não o texto integral`
+      + ` (${recortados.join(", ")}). O que não foi transcrito CONTINUA no arquivo: trate o recorte como`
+      + " endereço do que existe, não como o conteúdo completo daquele irmão.",
+    );
+  }
   if (ausentes.length) {
     out.push(
       `MEDIDO: o TEXTO de ${ausentes.length} destes arquivos NÃO está neste prompt`
