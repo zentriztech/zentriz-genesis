@@ -7,8 +7,10 @@ from spec_validator import (
     validate_spec,
     REFUTER_SYSTEM,
     CONSOLIDATE_SYSTEM,
+    TRIAGE_SYSTEM,
     _FENCE_OPEN,
     _FENCE_CLOSE,
+    _triage_digest,
 )
 
 
@@ -68,8 +70,61 @@ def test_triage_runs_when_model_configured(monkeypatch):
         return '{"findings":[]}'
 
     out = validate_spec("spec", llm_fn=llm)
-    assert out["triage"] == {"is_spec": True, "summary": "s", "modules": ["a"]}
+    # GAP-141: o veredicto agora viaja COM a declaração do corte (`input`) — quem lê `is_spec` sabe
+    # sobre quanto texto ele foi dado. O resto do contrato é o mesmo.
+    assert out["triage"]["is_spec"] is True
+    assert out["triage"]["summary"] == "s"
+    assert out["triage"]["modules"] == ["a"]
+    assert "de 4 chars" in out["triage"]["input"]
     assert calls[0] == "haiku-fake"  # triagem primeiro (barata)
+
+
+# ── 🔴 GAP-141 — a triagem custava 12% da entrada da Bancada para responder um booleano ──
+
+
+def test_triage_recebe_digesto_e_nao_a_spec_inteira():
+    """A triagem via a spec INTEIRA (medido: 118.241 tokens de entrada por chamada). O que ela precisa
+    é o INÍCIO + os TÍTULOS; o resto é leitura paga e não usada."""
+    corpo = "x" * 50_000
+    spec = f"# Produto\n{corpo}\n## Interfaces\ntexto\n## Eventos\nfim"
+    digest, decl = _triage_digest(spec)
+    assert len(digest) < len(spec) / 4                     # o corte é real, não cosmético
+    assert "# Produto" in digest and "## Eventos" in digest  # o assunto sobrevive ao corte
+    assert "OMITIDOS desta triagem" in digest               # o corte é DITO ao modelo
+    assert decl.startswith("digesto: 8000 de ")             # e é DITO ao chamador
+    assert "de 3 título(s)" in decl
+    assert digest.startswith(_FENCE_OPEN) and digest.rstrip().endswith(_FENCE_CLOSE)
+
+
+def test_triage_digesto_de_spec_pequena_nao_corta_nem_mente():
+    digest, decl = _triage_digest("# Curta\nsó isso")
+    assert "OMITIDOS" not in digest
+    assert decl == "digesto: 15 de 15 chars + 1 de 1 título(s)"
+
+
+def test_triage_tetos_calibraveis_com_piso(monkeypatch):
+    spec = "# A\n" + ("y" * 10_000) + "\n" + "\n".join(f"## S{i}" for i in range(11))
+    monkeypatch.setenv("SPEC_VALIDATOR_TRIAGE_HEAD_CHARS", "3000")
+    monkeypatch.setenv("SPEC_VALIDATOR_TRIAGE_MAX_TITLES", "10")
+    d, decl = _triage_digest(spec)
+    assert decl.startswith("digesto: 3000 de ")
+    assert "10 de 12 título(s)" in decl
+    assert "+2 título(s) omitido(s)" in d
+    # Abaixo do piso o teto é RECUSADO com aviso (teto que some não protege ninguém).
+    monkeypatch.setenv("SPEC_VALIDATOR_TRIAGE_MAX_TITLES", "1")
+    _, decl_piso = _triage_digest(spec)
+    assert "12 de 12 título(s)" in decl_piso
+    # Abaixo do piso → recusado, volta ao padrão (teto que some não protege ninguém).
+    monkeypatch.setenv("SPEC_VALIDATOR_TRIAGE_HEAD_CHARS", "10")
+    _, decl2 = _triage_digest(spec)
+    assert decl2.startswith("digesto: 8000 de ")
+
+
+def test_triage_prompt_proibe_confundir_corte_com_nao_spec():
+    """O digesto cria um risco novo: texto cortado parecer 'documento incompleto' ⇒ `is_spec: false`
+    falso. O contrato do prompt tem de dizer isso explicitamente."""
+    assert "DIGESTO" in TRIAGE_SYSTEM
+    assert "NÃO é motivo para `is_spec: false`" in TRIAGE_SYSTEM
 
 
 def test_triage_failure_does_not_block(monkeypatch):

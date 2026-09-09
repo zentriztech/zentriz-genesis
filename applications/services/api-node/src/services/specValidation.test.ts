@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, type ValidationFinding } from "./specValidation.js";
+import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, triageNote, type ValidationFinding } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
@@ -820,6 +820,40 @@ describe("GAP-140 — prova de vida do job também renova o prazo", () => {
     // Os três desfechos do lote (done, error, timeout) devolvem a contagem — nenhum a engole.
     expect(laco.match(/\.\.\.\(renewals \? \{ renewals \} : \{\}\)/g)).toHaveLength(3);
     expect(src).toMatch(/renovacoes \+= b\.renewals \?\? 0;/);
+  });
+});
+
+/**
+ * 🔴 GAP-141 (lado consumidor) — a triagem voltava no envelope do estágio B e MORRIA aqui.
+ *
+ * Medido em prod (3 dias): `spec_validator_triage` = 175 chamadas e 20.692.183 tokens de ENTRADA
+ * (12,3% de toda a entrada da Bancada) para um campo que NENHUM consumidor lia. Agora o lado Python
+ * manda um DIGESTO (ver `_triage_digest`) e o veredicto é DECLARADO no log — nunca gate, porque a
+ * triagem passou a julgar um recorte.
+ */
+describe("GAP-141 — o veredicto da triagem sai do silêncio (declarado, não gate)", () => {
+  it("envelope sem triagem não inventa nota", () => {
+    expect(triageNote(undefined)).toBeNull();
+    expect(triageNote({})).toBeNull();
+    expect(triageNote([{ is_spec: true }])).toBeNull();
+  });
+
+  it("a nota carrega o veredicto, o CORTE que ele viu, os módulos e o resumo", () => {
+    const n = triageNote({
+      is_spec: true, summary: "API de rastreamento de entregas.",
+      modules: ["tracking", "auth"], input: "digesto: 8000 de 640000 chars + 84 de 84 título(s)",
+    })!;
+    expect(n.suspect).toBe(false);
+    expect(n.line).toContain("is_spec=true");
+    expect(n.line).toContain("digesto: 8000 de 640000 chars");
+    expect(n.line).toContain("módulos: tracking, auth");
+    expect(n.line).toContain("API de rastreamento");
+  });
+
+  it("`is_spec=false` é marcado como SUSPEITO — é o que explica run com 0 achados", () => {
+    const n = triageNote({ is_spec: false, summary: "é um contrato jurídico" })!;
+    expect(n.suspect).toBe(true);
+    expect(n.line).toContain("is_spec=false");
   });
 });
 

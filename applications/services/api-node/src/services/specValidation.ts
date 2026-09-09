@@ -481,6 +481,42 @@ interface StageBOutcome {
  */
 const RENEW_ON_ALIVE_MS = 120_000;
 
+/**
+ * 🔴 GAP-141 (lado consumidor) — a triagem do validador voltava no envelope e MORRIA aqui.
+ *
+ * `validate_spec` devolve `{findings, triage}`; este arquivo lia só `findings`. Busca no repo inteiro:
+ * nenhum consumidor de `triage`/`is_spec` fora do próprio validador (o `specSemanticGate` é OUTRO
+ * caminho, no salvamento). Ou seja: o modelo podia estar dizendo "isto não é uma especificação" — o
+ * que explicaria uma run com 0 achados — e ninguém, em lugar nenhum, veria.
+ *
+ * Aqui o veredicto é só DECLARADO (log), nunca gate: a triagem passou a julgar um DIGESTO (início +
+ * títulos), então promovê-la a bloqueio criaria falso-negativo de spec grande. Declarar é o passo
+ * honesto; gate exige medição própria antes.
+ */
+export function triageNote(raw: unknown): { line: string; suspect: boolean } | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const t = raw as Record<string, unknown>;
+  if (!("is_spec" in t) && !("summary" in t) && !("modules" in t)) return null;
+  const suspect = t.is_spec === false;
+  const mods = Array.isArray(t.modules) ? t.modules.slice(0, 8).map((m) => String(m)).join(", ") : "";
+  const partes = [
+    `is_spec=${t.is_spec === undefined ? "?" : String(t.is_spec)}`,
+    typeof t.input === "string" && t.input ? t.input : null,
+    mods ? `módulos: ${mods}` : null,
+    typeof t.summary === "string" && t.summary ? `"${t.summary.slice(0, 200)}"` : null,
+  ].filter((p): p is string => !!p);
+  return { line: partes.join(" · "), suspect };
+}
+
+/** Loga a triagem do envelope do estágio B (nunca lança — é observabilidade). */
+function logTriage(runId: string, result: Record<string, unknown>): void {
+  const n = triageNote(result.triage);
+  if (!n) return;
+  const msg = `[spec-validation] run ${runId}: triagem do validador — ${n.line}`;
+  if (n.suspect) console.warn(`${msg} ⚠️ o próprio modelo NÃO reconheceu o conteúdo como especificação: leia isto antes de tratar a contagem de achados desta run como medida da spec.`);
+  else console.log(msg);
+}
+
 async function runStageB(pool: Pool, runId: string, projectId: string, specText: string, knownFindings: unknown[] = []): Promise<StageBOutcome> {
   const agentsUrl = (process.env.API_AGENTS_URL ?? "").trim();
   if (!agentsUrl) return { findings: [], error: "agents indisponível (API_AGENTS_URL ausente)" };
@@ -532,6 +568,7 @@ async function runStageB(pool: Pool, runId: string, projectId: string, specText:
     const st = String(poll.data.status ?? "");
     if (st === "done") {
       const result = (poll.data.result ?? {}) as Record<string, unknown>;
+      logTriage(runId, result); // GAP-141: o veredicto da triagem para de morrer no envelope.
       const parsed = parseStageBFindingsWithDrop(result.findings);
       if (parsed.dropped > 0) {
         // GAP-129: o juiz devolveu mais do que o teto de ingestão aceita. Isso NÃO é "menos GAP".
@@ -1404,6 +1441,7 @@ export async function collectStageBResults(
     }
     const st = String(res.status);
     if (st === "done") {
+      logTriage(short, (res.result ?? {}) as Record<string, unknown>); // GAP-141: vale também no resgate.
       const recuperado = parseStageBFindingsWithDrop((res.result ?? {}).findings);
       const stageB = recuperado.findings;
       if (recuperado.dropped > 0) {
