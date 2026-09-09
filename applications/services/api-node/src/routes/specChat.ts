@@ -561,7 +561,12 @@ function cagBlock(projectId: string | null, query: string): Record<string, unkno
   return { cag: { role: "CTO", stack_key: "generic", project_id: projectId, query: query.slice(0, 4_000) } };
 }
 
-function buildRawFileRequest(
+/**
+ * Exportada para TESTE (🔴 GAP-159): o teste que garante que os DOIS caminhos medidos entregam o censo
+ * ao mesmo destino tem de chamar os dois caminhos REAIS. Pinar só `api-gapfile` deixaria passar
+ * exatamente o defeito do GAP-156 — um chamador entrega menos que o outro e os logs parecem iguais.
+ */
+export function buildRawFileRequest(
   content: string,
   messages: ChatMessage[],
   filePath: string,

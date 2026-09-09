@@ -18,8 +18,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   PROMPT_CACHE_MIN_HEAD_CHARS, PROMPT_CACHE_TTL_MS, recordPromptCensus, resetPromptCensusHeads,
+  setPromptCensusSink, type PromptCensus,
 } from "./promptCensus.js";
-import { buildGapFileRequest } from "../routes/specChat.js";
+import { buildGapFileRequest, buildRawFileRequest } from "../routes/specChat.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 let logs: string[] = [];
@@ -195,5 +196,35 @@ describe("recordPromptCensus — GAP-153: a cabeça estável é medida antes de 
     const chars = Number(/head_chars=(\d+)c/.exec(linha)?.[1] ?? NaN);
     expect(chars).toBeGreaterThan(0);
     expect(chars).toBeLessThan(content.length);
+  });
+});
+
+// 🔴 GAP-159 — o censo só decide corte se SOBREVIVER ao deploy. O destino é um sink registrado no boot
+// (nunca por call site), e estes testes pinam as duas coisas que fariam a série mentir: um caminho
+// medido que não chega ao destino, e um destino que derruba a chamada que ele mede.
+describe("recordPromptCensus — GAP-159: o censo vai para um destino, e TODO caminho medido passa por ele", () => {
+  beforeEach(() => { resetPromptCensusHeads(); setPromptCensusSink(null); });
+  afterEach(() => { setPromptCensusSink(null); });
+
+  it("os DOIS caminhos reais do CTO entregam ao MESMO destino (não é escolha do chamador)", () => {
+    const vistos: PromptCensus[] = [];
+    setPromptCensusSink((c) => { vistos.push(c); });
+    buildGapFileRequest("# Dados\nconteúdo\n", "tecnico/dados.md", [finding()]);
+    buildRawFileRequest("# Dados\nconteúdo\n", [{ role: "user", content: "ajuste a seção 8" }], "tecnico/dados.md");
+    expect(vistos.map((c) => c.origem)).toEqual(["api-gapfile", "api-rawfile"]);
+    // O que se persiste é o mesmo fato que se loga: tamanho por bloco, nunca conteúdo.
+    expect(JSON.stringify(vistos)).not.toContain("ajuste a seção 8");
+    for (const c of vistos) expect(c.total).toBeGreaterThan(0);
+  });
+
+  it("destino que lança NÃO derruba a chamada medida (e o log já saiu antes)", () => {
+    setPromptCensusSink(() => { throw new Error("banco fora"); });
+    const c = recordPromptCensus({ origem: "t", total: 10, fields: { a: 4 } });
+    expect(c.outros).toBe(6);
+    expect(logs.join("\n")).toContain("[prompt-census] origem=t");
+  });
+
+  it("sem destino registrado o censo segue válido — persistir é adicional, não pré-condição", () => {
+    expect(recordPromptCensus({ origem: "t", total: 5, fields: {} }).total).toBe(5);
   });
 });

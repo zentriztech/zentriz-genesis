@@ -99,6 +99,13 @@ try {
     // encerramos o caso irrecuperável: rodada que morreu ENTRE o claim e o registro do job do CTO.
     const { reapAutonomyRuns } = await import("./services/specAutonomy.js");
     await reapAutonomyRuns(pool).catch((e) => console.error("[boot] reapAutonomyRuns:", e));
+    // 🔴 GAP-159 (migração 121): o censo do prompt passa a ser PERSISTIDO. Registrado aqui, uma vez, e
+    // não em cada call site: com dois caminhos medidos (`api-gapfile`, `api-rawfile`) e mais por vir,
+    // escolher por chamador é o defeito do GAP-156 — um persiste, o outro não, e os logs parecem
+    // iguais. Só o destino muda; nenhum prompt muda de um byte.
+    const { setPromptCensusSink } = await import("./services/promptCensus.js");
+    const { makePgPromptCensusSink } = await import("./services/promptCensusStore.js");
+    setPromptCensusSink(makePgPromptCensusSink(pool));
   }
   await app.listen({ port, host });
   console.log(`API listening on ${host}:${port}`);

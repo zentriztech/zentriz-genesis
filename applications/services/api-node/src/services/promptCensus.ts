@@ -83,6 +83,28 @@ export function resetPromptCensusHeads(): void {
   headSeen.clear();
 }
 
+/**
+ * 🔴 GAP-159 — para onde o censo vai DEPOIS do log.
+ *
+ * Medido no deploy do GAP-158: recriar o container da api (o fluxo de deploy canônico, várias vezes
+ * por dia) apaga todos os `[prompt-census]`. As duas "etapas 2" prometidas — cortar o prompt do CTO
+ * pela distribuição medida (GAP-146) e marcar ponto de cache pela taxa medida (GAP-153) — dependem de
+ * uma série que não sobrevivia ao próprio deploy.
+ *
+ * O destino é um SINK registrado UMA vez no boot, e não um parâmetro de quem chama, de propósito: com
+ * dois caminhos medidos (`api-gapfile` e `api-rawfile`) e mais por vir, passar o `db` em cada call
+ * site é o convite exato para o defeito do GAP-156 — um chamador persistindo e o outro não, com o log
+ * dos dois parecendo igual. Assim, quem mede não escolhe se persiste.
+ */
+export type PromptCensusSink = (censo: PromptCensus) => void;
+
+let sink: PromptCensusSink | null = null;
+
+/** Registra (ou remove, com `null`) o destino do censo. Sem sink registrado nada é persistido. */
+export function setPromptCensusSink(fn: PromptCensusSink | null): void {
+  sink = fn;
+}
+
 /** O que se sabe sobre a CABEÇA ESTÁVEL desta chamada. `null` quando o chamador não declarou uma. */
 export type PromptHeadCensus = {
   /** Identidade da cabeça (sha256 truncado). Identidade, nunca conteúdo — o texto não sai daqui. */
@@ -223,6 +245,14 @@ export function recordPromptCensus(args: {
     );
   } catch {
     // Log indisponível é irrelevante para a edição do arquivo; o censo devolvido segue válido.
+  }
+  // 🔴 GAP-159: persistir é a MESMA classe de coisa que logar — best-effort e depois do log, para que
+  // uma falha de banco não faça o censo desaparecer também do log (o fato medido tem de sair por
+  // algum lugar). O sink é `void` de propósito: quem mede não espera pelo destino.
+  try {
+    sink?.(censo);
+  } catch {
+    // Instrumento não derruba a chamada que ele mede.
   }
   return censo;
 }
