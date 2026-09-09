@@ -64,6 +64,10 @@ import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatal
 // 🔴 GAP-146: censo do prompt (SÓ LOG) — o `spec_cto` é a maior conta de entrada da Bancada e o prompt
 // dele nasce AQUI, não no `agents`; sem medir campo a campo, qualquer recorte seria adivinhação.
 import { recordPromptCensus } from "../services/promptCensus.js";
+// 🔴 GAP-160: a árvore da spec como FATO (o editor não sabia que os irmãos existiam — medido: o prompt
+// nomeava 2 de 13 arquivos). `siblingPathsIn` é o complemento honesto: declara quais corpos VIERAM.
+import { specTreeFactBlock, type SpecTreeEntry } from "../services/specTreeFacts.js";
+import { siblingPathsIn } from "../services/specSiblingContext.js";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -171,10 +175,16 @@ interface ChatContext {
    * runtime mandaria o mesmo texto duas vezes. Só liga junto com a flag.
    */
   emitV2: boolean;
+  /**
+   * 🔴 GAP-160: a árvore da PRÓPRIA spec, medida no disco. Vazia = spec de arquivo único, ou a medição
+   * falhou (best-effort). Vem como ENTRADAS, não como texto pronto, porque o bloco depende de dois
+   * fatos que só o builder conhece: qual é o arquivo alvo e quais corpos de irmão couberam no prompt.
+   */
+  specTree: SpecTreeEntry[];
 }
 const EMPTY_CTX: ChatContext = {
   siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "never_validated",
-  productMapBlock: "", contextWarnings: [], emitV2: false,
+  productMapBlock: "", contextWarnings: [], emitV2: false, specTree: [],
 };
 
 function fmtFinding(f: ValidationFinding): string {
@@ -276,9 +286,27 @@ async function loadChatContext(
       for (const w of contextWarnings) console.warn(`[SpecChat] ⚠️ contexto: ${w}`);
     }
 
+    // 🔴 GAP-160: a árvore da própria spec. Fica FORA do `if (productScopeEnabled())` de propósito — o
+    // mapa do produto é sobre PROJETOS irmãos (e sai vazio em 58/58 projetos de prod, medido); esta é a
+    // lista dos ARQUIVOS desta spec, que existe sempre que a spec tem mais de um. Best-effort: falha de
+    // disco devolve árvore vazia e o pedido segue como antes.
+    let specTree: SpecTreeEntry[] = [];
+    try {
+      const [{ loadSpecFiles }, { loadSpecTree }] = await Promise.all([
+        import("../services/specGapScope.js"),
+        import("../services/specTreeFacts.js"),
+      ]);
+      const files = await loadSpecFiles(pool, projectId);
+      if (files.length > 1) specTree = await loadSpecTree(files);
+    } catch (e) {
+      // Logado aqui (e não só empilhado): o laço de `contextWarnings` roda dentro do bloco da flag de
+      // escopo de produto, e este fato não depende dela.
+      console.warn(`[SpecChat] ⚠️ árvore da spec não medida: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     return {
       siblingsBlock, findingsBlock, findings, derivedStatus: latest?.status ?? "never_validated",
-      productMapBlock, contextWarnings, emitV2,
+      productMapBlock, contextWarnings, emitV2, specTree,
     };
   } catch (e) {
     console.warn(`[SpecChat] loadChatContext falhou (best-effort): ${e instanceof Error ? e.message : String(e)}`);
@@ -590,7 +618,13 @@ export function buildRawFileRequest(
   // 🔴 GAP-153: aqui a cabeça estável inclui o CONTEÚDO do arquivo — no chat por-arquivo o que muda de
   // um turno para o outro é só o transcript no fim. É o caso de cache mais óbvio do produto (o usuário
   // manda 5 pedidos seguidos sobre o mesmo arquivo, em minutos) e hoje paga preço cheio nos 5.
+  // 🔴 GAP-160: o MESMO fato nos dois caminhos. Aqui nenhum corpo de irmão é entregue por desenho (P4:
+  // edição pontual, teto próprio do `/invoke/raw`), então a lista de ausentes é a árvore menos o alvo —
+  // e é justamente aqui que ela mais importa: o humano pede "ajuste a seção 8" e o editor, cego para os
+  // irmãos, move a regra de lugar.
+  const treeBlock = specTreeFactBlock(ctx.specTree, filePath);
   const cabecaEstavel = [
+    treeBlock,
     `ARQUIVO: ${filePath}`,
     "",
     contextBlock
@@ -617,6 +651,7 @@ export function buildRawFileRequest(
     total: RAW_FILE_SYSTEM.length + userMessage.length,
     fields: {
       system: RAW_FILE_SYSTEM.length,
+      spec_tree: treeBlock.length,
       context: contextBlock.length,
       file_content: content.length,
       transcript: transcript.length,
@@ -952,12 +987,22 @@ export function buildGapFileRequest(
   // 🔴 GAP-121: na consolidação pura NÃO se pede prestação de contas por GAP (ver o comentário no
   // array abaixo, onde este bloco é posicionado).
   const outcomeContract = consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length);
+  // 🔴 GAP-160: `siblingPathsIn` declara quais corpos de irmão realmente vieram — a árvore afirma a
+  // AUSÊNCIA dos outros, e essa afirmação só é honesta se vier do bloco montado, não de suposição.
+  const treeBlock = specTreeFactBlock(ctx.specTree, filePath, siblingPathsIn(siblingBlock));
   // 🔴 GAP-153: a CABEÇA ESTÁVEL do prompt vive num array próprio. Isto não muda a ordem nem um byte
   // (`[...cabeca, ...resto].join("\n")` produz exatamente o mesmo texto que o array único produzia):
   // serve para existir UM lugar no código que sabe onde TERMINARIA o prefixo cacheável. Daqui para
   // baixo tudo muda a cada rodada (conteúdo do arquivo, lista de GAPs, histórico de tentativas), e
   // prefixo que muda não é cacheável — marcar ali pagaria 1,25× de escrita sem ler nada de volta.
   const cabecaEstavel = [
+    // 🔴 GAP-160: a árvore vem PRIMEIRO, antes até do nome do alvo. Duas razões, e as duas foram
+    // medidas: (a) é o enquadramento — "isto é a spec; UM destes arquivos é o seu" — e sem ela o editor
+    // trabalhava como se a spec fosse um arquivo só (o prompt nomeava 2 de 13); (b) é o ÚNICO bloco
+    // invariável entre arquivos de um mesmo passe, e o passe faz uma chamada a cada 45–60 s com TTL de
+    // cache de 5 min ⇒ é aqui que um ponto de cache teria acerto. Nada é marcado ainda (GAP-153/159:
+    // medir antes de marcar); o que esta ordem faz é tornar a medição possível.
+    treeBlock,
     `ARQUIVO: ${filePath}`,
     "",
     contextBlock
@@ -1053,6 +1098,10 @@ export function buildGapFileRequest(
     total: system.length + userMessage.length,
     fields: {
       system: system.length,
+      // 🔴 GAP-160: campo próprio porque é fato NOVO no prompt — sem ele, os ~1,5k chars da árvore
+      // apareceriam em `outros` e o teto de `outros` (que existe para pegar bloco não somado) quebraria
+      // dizendo "alguém esqueceu de somar", que é exatamente a verdade que este campo evita.
+      spec_tree: treeBlock.length,
       product_map: contextBlock.length,
       siblings: siblingBlock.length,
       oracles: oracleBlock.length,

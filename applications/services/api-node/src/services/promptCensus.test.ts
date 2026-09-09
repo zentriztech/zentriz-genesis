@@ -86,7 +86,13 @@ describe("censo do prompt REAL do CTO por-arquivo", () => {
     buildGapFileRequest(
       content, "tecnico/dados.md", [finding(), finding({ title: "Outro" })],
       { siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "validated",
-        productMapBlock: "MAPA ".repeat(200), contextWarnings: [], emitV2: true },
+        productMapBlock: "MAPA ".repeat(200), contextWarnings: [], emitV2: true,
+        // 🔴 GAP-160: a árvore da spec entra no prompt real — e no censo, com campo próprio.
+        specTree: [
+          { path: "tecnico/dados.md", bytes: 90_000, title: "Dados", isPrimary: false, isManifest: false },
+          { path: "README.md", bytes: 85_000, title: "Manifesto", isPrimary: true, isManifest: true },
+          { path: "privacidade-lgpd.md", bytes: 90_500, title: "LGPD", isPrimary: false, isManifest: false },
+        ] },
       null,
       "IRMÃO ".repeat(100),   // siblingBlock
       false,
@@ -108,6 +114,30 @@ describe("censo do prompt REAL do CTO por-arquivo", () => {
     expect(num("outros")).toBeLessThan(2_500);
     expect(num("file_content")).toBe(content.length);
     expect(num("total")).toBeGreaterThan(content.length);
+  });
+
+  // 🔴 GAP-160: no prompt REAL a árvore tem de chegar ao editor, ser somada ao censo e vir ANTES do nome
+  // do alvo (é o enquadramento — e o único prefixo invariável entre arquivos do passe).
+  it("a árvore da spec chega ao prompt real, é somada ao censo e vem ANTES de `ARQUIVO:`", () => {
+    const req = buildGapFileRequest(
+      "# Dados\nconteúdo\n", "tecnico/dados.md", [finding()],
+      { siblingsBlock: "", findingsBlock: "", findings: [], derivedStatus: "validated",
+        productMapBlock: "", contextWarnings: [], emitV2: true,
+        specTree: [
+          { path: "tecnico/dados.md", bytes: 90_000, title: "Dados", isPrimary: false, isManifest: false },
+          { path: "privacidade-lgpd.md", bytes: 90_500, title: "LGPD", isPrimary: false, isManifest: false },
+        ] },
+      null,
+      "─── IRMÃO SÓ LEITURA: `privacidade-lgpd.md` ───\ncorpo do irmão",
+    );
+    const msg = String(req.user_message);
+    expect(msg).toContain("privacidade-lgpd.md");
+    expect(msg.indexOf("ÁRVORE DA ESPECIFICAÇÃO")).toBeGreaterThanOrEqual(0);
+    expect(msg.indexOf("ÁRVORE DA ESPECIFICAÇÃO")).toBeLessThan(msg.indexOf("ARQUIVO: tecnico/dados.md"));
+    // O corpo do irmão VEIO: a árvore não pode declará-lo ausente (seria mentir sobre o próprio prompt).
+    expect(msg).not.toContain("o TEXTO de 1 destes arquivos NÃO está");
+    const linha = logs.find((l) => l.includes("origem=api-gapfile")) ?? "";
+    expect(linha).toMatch(/spec_tree=\d+c/);
   });
 
   it("mede o ENTREGUE: bloco ausente não aparece como despesa", () => {

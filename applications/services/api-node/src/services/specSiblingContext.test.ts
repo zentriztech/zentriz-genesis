@@ -9,7 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildSiblingContext, disputedTerms, SIBLING_FILE_BUDGET, type SiblingRef } from "./specSiblingContext.js";
+import { buildSiblingContext, disputedTerms, siblingPathsIn, SIBLING_FILE_BUDGET, type SiblingRef } from "./specSiblingContext.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 let root = "";
@@ -302,5 +302,31 @@ describe("buildSiblingContext — seção do irmão citada pelos GAPs (GAP-75)",
     // Sem isto o log contaria como coberta uma citação que nunca chegou ao prompt.
     expect(ctx.citedDropped).toContain("retencao-irmao.md §4");
     expect(ctx.citedUsed).toEqual([]);
+  });
+});
+
+// 🔴 GAP-160: a árvore da spec declara "o texto destes N arquivos NÃO está neste prompt". Essa
+// afirmação é montada a partir do que `siblingPathsIn` extrai do bloco — então o extrator e o
+// cabeçalho que `buildSiblingContext` escreve têm de ser a MESMA verdade. Se divergirem, o prompt
+// passa a mentir sobre si mesmo: diria que um irmão presente está ausente (ou o contrário).
+describe("siblingPathsIn — ida e volta com o bloco REAL", () => {
+  it("extrai exatamente os paths cujos corpos entraram no bloco", async () => {
+    const ctx = await buildSiblingContext(
+      files, "definicao-de-pronto.md",
+      [gap("Contradição de status", "`api-entregas-entregadores.md` diz 422 e aqui 400; ver tecnico/modelo-dados.md")],
+    );
+    expect(siblingPathsIn(ctx.block).sort()).toEqual([...ctx.used].sort());
+  });
+
+  it("bloco vazio não nomeia ninguém (ausência de irmão ≠ irmão presente)", () => {
+    expect(siblingPathsIn("")).toEqual([]);
+    expect(siblingPathsIn("texto qualquer sem cabeçalho de irmão")).toEqual([]);
+  });
+
+  it("o primário entra com o rótulo de índice e ainda assim é extraível", async () => {
+    const ctx = await buildSiblingContext(files, "tecnico/modelo-dados.md", [gap("x", "y")]);
+    expect(ctx.used).toContain("nvx-lastmile-backend.md");
+    expect(ctx.block).toContain("(índice da spec)");
+    expect(siblingPathsIn(ctx.block)).toContain("nvx-lastmile-backend.md");
   });
 });

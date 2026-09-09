@@ -293,6 +293,23 @@ function siblingCitedRefs(findings: ValidationFinding[], ref: SiblingRef): strin
 }
 
 /**
+ * Cabeçalho de cada irmão no bloco. Existe como função — em vez de template solto — porque o
+ * 🔴 GAP-160 precisa saber, do lado de fora, QUAIS corpos foram entregues: a árvore da spec declara
+ * "o texto destes N arquivos NÃO está neste prompt", e essa afirmação só é honesta se o formato do
+ * cabeçalho e o extrator dele forem a MESMA verdade (ver `siblingPathsIn` e o teste de ida-e-volta).
+ */
+function siblingHeader(path: string, isPrimary: boolean): string {
+  return `─── IRMÃO SÓ LEITURA: \`${path}\`${isPrimary ? " (índice da spec)" : ""} ───`;
+}
+
+/** Paths dos irmãos cujo CORPO está no bloco (complemento exato de `siblingHeader`). */
+export function siblingPathsIn(block: string): string[] {
+  const out: string[] = [];
+  for (const m of block.matchAll(/^─── IRMÃO SÓ LEITURA: `([^`]+)`/gmu)) out.push(m[1]);
+  return out;
+}
+
+/**
  * Monta o bloco de irmãos citados pelos GAPs deste arquivo.
  *
  * Ordem: mais citado primeiro (é o que o GAP realmente discute); o índice primário entra por último e
@@ -342,7 +359,7 @@ export async function buildSiblingContext(
     citedUsed.push(...ex.usedRefs.map((r) => `${ref.path} ${r}`));
     citedDropped.push(...ex.droppedRefs.map((r) => `${ref.path} ${r}`));
     citedWindowed.push(...ex.windowedRefs.map((r) => `${ref.path} ${r}`));
-    parts.push(`─── IRMÃO SÓ LEITURA: \`${ref.path}\`${ref.isPrimary ? " (índice da spec)" : ""} ───\n${body}`);
+    parts.push(`${siblingHeader(ref.path, ref.isPrimary)}\n${body}`);
   }
   if (parts.length === 0) return { block: "", used, omitted, citedUsed, citedDropped, citedWindowed };
   const warn = omitted.length
