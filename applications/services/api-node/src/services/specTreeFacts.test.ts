@@ -13,11 +13,14 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { firstHeading, loadSpecTree, specTreeFactBlock, type SpecTreeEntry } from "./specTreeFacts.js";
+import {
+  firstHeading, loadSpecTree, specTreeFactBlock, TREE_OUTLINE_FILE_BUDGET, TREE_OUTLINE_TOTAL_BUDGET,
+  type SpecTreeEntry,
+} from "./specTreeFacts.js";
 import type { SpecFileRef } from "./specGapScope.js";
 
 const E = (over: Partial<SpecTreeEntry> = {}): SpecTreeEntry => ({
-  path: "a.md", bytes: 1_000, title: "A", isPrimary: false, isManifest: false, ...over,
+  path: "a.md", bytes: 1_000, title: "A", isPrimary: false, isManifest: false, outline: null, ...over,
 });
 
 describe("firstHeading", () => {
@@ -95,6 +98,69 @@ describe("specTreeFactBlock", () => {
 
   it("o tamanho é declarado em BYTES (é o que `stat` mede; chamar de chars seria mentir)", () => {
     expect(specTreeFactBlock(arvore, "README.md")).toContain("96k bytes");
+  });
+});
+
+// 🔴 GAP-161 — o sumário de cabeçalhos dos irmãos AUSENTES. O que estes testes protegem:
+//   1. só entra sumário de quem NÃO teve corpo entregue (mandar o do alvo é pagar duas vezes);
+//   2. o que não cabe é DECLARADO (sumário ausente ≠ arquivo sem estrutura);
+//   3. o corte de um sumário é marcado (senão o agente supõe que o arquivo acaba ali);
+//   4. o bloco diz que o cabeçalho é ENDEREÇO, não conteúdo lido — a mentira mais fácil aqui.
+describe("specTreeFactBlock — GAP-161: sumário de seções dos ausentes", () => {
+  const outline = (n: number, tag = "S") =>
+    Array.from({ length: n }, (_, i) => `## ${tag}${i + 1}. seção número ${i + 1}`).join("\n");
+  const arvore = [
+    E({ path: "alvo.md", title: "Alvo", outline: outline(3, "A") }),
+    E({ path: "irmao-presente.md", title: "Presente", outline: outline(3, "P") }),
+    E({ path: "irmao-ausente.md", title: "Ausente", outline: outline(4, "X") }),
+    E({ path: "connect.yaml", title: null, outline: null, bytes: 9_778 }),
+  ];
+
+  it("manda o sumário do AUSENTE e não o do alvo nem o do irmão cujo corpo veio", () => {
+    const b = specTreeFactBlock(arvore, "alvo.md", ["irmao-presente.md"]);
+    expect(b).toContain("SUMÁRIO DE SEÇÕES");
+    expect(b).toContain("X1. seção número 1");
+    expect(b).not.toContain("A1. seção número 1");
+    expect(b).not.toContain("P1. seção número 1");
+  });
+
+  it("declara quantos sumários vieram de quantos ausentes (a fração é o fato)", () => {
+    const b = specTreeFactBlock(arvore, "alvo.md", ["irmao-presente.md"]);
+    // ausentes = irmao-ausente.md + connect.yaml; só o `.md` tem sumário.
+    expect(b).toContain("cujo texto NÃO veio (1 de 2)");
+  });
+
+  it("arquivo sem sumário (não-Markdown) não inventa seção nenhuma", () => {
+    const b = specTreeFactBlock([E({ path: "a.md", outline: outline(2) }), E({ path: "connect.yaml", outline: null })], "a.md");
+    expect(b).not.toContain("SUMÁRIO DE SEÇÕES");
+  });
+
+  it("sumário grande vem CORTADO com a marca — sem ela o agente supõe que o arquivo acaba ali", () => {
+    const gigante = E({ path: "gigante.md", outline: outline(400, "G") });
+    const b = specTreeFactBlock([E({ path: "alvo.md" }), gigante], "alvo.md");
+    expect(b).toContain("sumário truncado por orçamento");
+    expect(b.length).toBeLessThan(TREE_OUTLINE_FILE_BUDGET + 3_000);
+  });
+
+  it("o que não cabe no orçamento TOTAL é declarado por nome, como falta de orçamento", () => {
+    // Cada sumário ~3,4k depois do teto por arquivo; 12 deles estouram os 24k do orçamento total.
+    const muitos = Array.from({ length: 12 }, (_, i) => E({ path: `f${i}.md`, outline: outline(400, `T${i}`) }));
+    const b = specTreeFactBlock([E({ path: "alvo.md" }), ...muitos], "alvo.md");
+    expect(b).toMatch(/\[\d+ sumário\(s\) não couberam no orçamento desta chamada:/);
+    expect(b).toContain("a ausência é de orçamento, não de conteúdo");
+  });
+
+  it("diz que o cabeçalho é ENDEREÇO — nunca que o conteúdo da seção foi lido", () => {
+    const b = specTreeFactBlock(arvore, "alvo.md");
+    expect(b).toContain("o cabeçalho é o endereço");
+    expect(b).toContain("o que ele diz, você não viu");
+    expect(b.toLowerCase()).not.toContain("você já leu");
+  });
+
+  it("respeita o orçamento total declarado (o teto é o contrato, não uma intenção)", () => {
+    const muitos = Array.from({ length: 40 }, (_, i) => E({ path: `f${i}.md`, outline: outline(120, `T${i}`) }));
+    const b = specTreeFactBlock([E({ path: "alvo.md" }), ...muitos], "alvo.md");
+    expect(b.length).toBeLessThan(TREE_OUTLINE_TOTAL_BUDGET + 8_000);
   });
 });
 

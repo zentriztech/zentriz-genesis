@@ -32,7 +32,8 @@
  * uma da outra (medido) e TTL de cache de 5 min, um prefixo `system + árvore` é o primeiro candidato
  * REAL a ponto de cache do produto. Aqui nada é marcado: o GAP-153/159 manda medir antes.
  */
-import { open, stat } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
+import { splitSections, headingOutline } from "../lib/markdownSections.js";
 import type { SpecFileRef } from "./specGapScope.js";
 import { MANIFEST_PATH } from "./specManifest.js";
 
@@ -40,6 +41,15 @@ import { MANIFEST_PATH } from "./specManifest.js";
 const TITLE_PROBE_BYTES = 2_048;
 /** Teto do título transportado — título é rótulo, não resumo. */
 const TITLE_MAX_CHARS = 90;
+
+/**
+ * 🔴 GAP-161 — orçamento dos SUMÁRIOS de cabeçalhos dos irmãos ausentes. Medido na spec do NVX
+ * LastMile (1,3 MB em 14 arquivos): os sumários somam 22.665c, dos quais 18.276c são de arquivos que
+ * não vão ao prompt do editor. O teto existe para spec de 60 arquivos, não para esta.
+ */
+export const TREE_OUTLINE_TOTAL_BUDGET = 24_000;
+/** Teto de UM sumário: `autenticacao-sessao.md` tem 72 seções / 3.346c — um arquivo não come o resto. */
+export const TREE_OUTLINE_FILE_BUDGET = 3_500;
 
 export interface SpecTreeEntry {
   path: string;
@@ -49,6 +59,11 @@ export interface SpecTreeEntry {
   title: string | null;
   isPrimary: boolean;
   isManifest: boolean;
+  /**
+   * 🔴 GAP-161 — sumário de cabeçalhos (Markdown apenas), pela MESMA régua do juiz (`headingOutline`).
+   * `null` = não é `.md`, ilegível, ou sem cabeçalho nenhum.
+   */
+  outline?: string | null;
 }
 
 const norm = (s: string) => s.trim().toLowerCase();
@@ -85,8 +100,20 @@ export async function loadSpecTree(files: readonly SpecFileRef[]): Promise<SpecT
       title: null,
       isPrimary: f.isPrimary === true,
       isManifest: norm(f.path) === norm(MANIFEST_PATH) || norm(f.filename) === norm(MANIFEST_PATH),
+      outline: null,
     };
     const bytes = await stat(f.filePath).then((s) => s.size).catch(() => null);
+    // 🔴 GAP-161: em Markdown vale ler o arquivo inteiro — o sumário de cabeçalhos é o mapa que o juiz
+    // já recebe e o editor não recebia, e 1,3 MB de I/O local é ruído ao lado de uma chamada de LLM de
+    // ~40k tokens. Em NÃO-Markdown (`connect.yaml`) o `headingOutline` renderiza comentários `#` como se
+    // fossem seções — medido: 1.981c de ruído — então ali fica só a cabeça, como antes.
+    if (norm(f.path).endsWith(".md")) {
+      const raw = await readFile(f.filePath, "utf-8").catch(() => null);
+      if (raw !== null) {
+        const out = headingOutline(splitSections(raw));
+        return { ...base, bytes, title: firstHeading(raw), outline: out.length > 0 ? out : null };
+      }
+    }
     let title: string | null = null;
     const fh = await open(f.filePath, "r").catch(() => null);
     if (fh) {
@@ -100,6 +127,13 @@ export async function loadSpecTree(files: readonly SpecFileRef[]): Promise<SpecT
     return { ...base, bytes, title };
   }));
 }
+
+/**
+ * Corte de UM sumário. A marca é explícita porque um sumário truncado sem aviso diria ao agente que o
+ * arquivo acaba ali — inventaria uma fronteira que não existe.
+ */
+const clip = (s: string, max: number) =>
+  s.length <= max ? s : `${s.slice(0, max)}\n  [… sumário truncado por orçamento: há mais seções neste arquivo …]`;
 
 const human = (bytes: number | null) =>
   bytes === null ? "tamanho não medido" : bytes >= 1_000 ? `${Math.round(bytes / 1_000)}k bytes` : `${bytes} bytes`;
@@ -146,7 +180,64 @@ export function specTreeFactBlock(
       "Não presuma o conteúdo deles nem afirme que algo “não está especificado” com base nesta ausência:"
       + " se a decisão depende do que um deles diz, registre a dependência em vez de redeclarar a regra aqui.",
     );
+    out.push(...outlineBlock(entries, ausentes));
   }
   out.push("--- FIM DA ÁRVORE ---", "");
   return out.join("\n");
+}
+
+/**
+ * 🔴 GAP-161 — o SUMÁRIO DE SEÇÕES dos irmãos cujo texto não veio.
+ *
+ * ## A assimetria que isto fecha (medida em prod, 2026-09-09)
+ *
+ * O JUIZ do estágio B recebe, de todo arquivo que não cabe integral, o inventário mais o sumário
+ * COMPLETO de cabeçalhos (`buildValidationInput`: `===== path — SÓ SUMÁRIO (arquivo EXISTE, N chars)`).
+ * O EDITOR, mesmo depois do GAP-160, recebia só o NOME dos irmãos. Ou seja: o auditor podia dizer
+ * "isto contradiz a seção X de `privacidade-lgpd.md`" e o editor não tinha como saber que essa seção
+ * existe — e a instrução do GAP-160 ("registre a dependência em vez de redeclarar a regra") pede
+ * exatamente um endereço que ele não tinha. Auditor mais informado que o escritor é o defeito que a
+ * medição do revisor cross-family já havia mostrado em outra camada: quem escreve não pode ser o mais
+ * cego da mesa.
+ *
+ * Medido: os 14 sumários da spec do NVX somam 22.665c (18.276c fora do prompt do editor) — ~4,5k tokens
+ * contra as ~340k tokens que UM passe custa. Se poupar uma rodada, paga sete vezes.
+ *
+ * Ordem de alocação: o MENOR primeiro (cabe o máximo de arquivos), empate pela ordem da árvore. É
+ * transporte, não julgamento — quem escolhe o que importa é o agente, com o mapa na mão. O que não
+ * couber é DECLARADO: sumário ausente não pode passar por "arquivo sem estrutura".
+ */
+function outlineBlock(entries: readonly SpecTreeEntry[], ausentes: readonly string[]): string[] {
+  const alvos = new Set(ausentes.map(norm));
+  const comSumario = entries
+    .filter((e) => alvos.has(norm(e.path)) && typeof e.outline === "string" && e.outline.length > 0)
+    .map((e, i) => ({ e, i, texto: clip(e.outline as string, TREE_OUTLINE_FILE_BUDGET) }))
+    .sort((a, b) => a.texto.length - b.texto.length || a.i - b.i);
+  if (comSumario.length === 0) return [];
+
+  const partes: string[] = [];
+  const foraDoOrcamento: string[] = [];
+  let gasto = 0;
+  for (const { e, texto } of comSumario) {
+    if (gasto + texto.length > TREE_OUTLINE_TOTAL_BUDGET) { foraDoOrcamento.push(e.path); continue; }
+    gasto += texto.length;
+    partes.push(`  ┌ \`${e.path}\`\n${texto}`);
+  }
+  if (partes.length === 0) return [];
+
+  const out = [
+    `SUMÁRIO DE SEÇÕES dos arquivos acima cujo texto NÃO veio (${partes.length} de ${ausentes.length}) —`
+    + " só os CABEÇALHOS, medidos no disco agora; o corpo de cada seção continua fora deste prompt.",
+    "Use-o para APONTAR onde a regra mora (o cabeçalho é o endereço) e para não redeclarar aqui o que já"
+    + " tem lugar lá. Um cabeçalho listado é prova de que a seção EXISTE; o que ele diz, você não viu.",
+    ...partes,
+  ];
+  if (foraDoOrcamento.length) {
+    out.push(
+      `[${foraDoOrcamento.length} sumário(s) não couberam no orçamento desta chamada:`
+      + ` ${foraDoOrcamento.join(", ")}. A estrutura desses arquivos NÃO está aqui — a ausência é de`
+      + " orçamento, não de conteúdo.]",
+    );
+  }
+  return out;
 }
