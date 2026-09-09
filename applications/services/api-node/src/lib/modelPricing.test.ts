@@ -40,3 +40,52 @@ describe("modelPricing — fonte única", () => {
     expect(sql).not.toContain("* 75"); // preço antigo do Opus não pode voltar
   });
 });
+
+/**
+ * 🔴 GAP-147 — o cache de prompt (GAP-142) fez o medidor CEGAR. Medido ao vivo em prod (run
+ * 81ac10d9): o refutador gravou 163.941 tokens no cache, dois votos os leram, e as TRÊS linhas
+ * registraram `input_tokens = 2`. Como o custo derivava só de input+output, a validação — 54% de
+ * toda a entrada da Bancada — passou a custar ~zero no papel. Economia real não pode virar
+ * economia fictícia: cache é entrada faturada (escrita 1,25x, leitura 0,1x).
+ */
+describe("GAP-147 — cache de prompt no custo", () => {
+  it("escrita de cache custa 1,25x a entrada; leitura, 0,1x", () => {
+    // sonnet 3/MTok → escrita 3,75 · leitura 0,30
+    expect(costUsd("sonnet", 0, 0, 0, 1_000_000)).toBeCloseTo(3.75, 10);
+    expect(costUsd("sonnet", 0, 0, 1_000_000, 0)).toBeCloseTo(0.3, 10);
+    // haiku 1/MTok → escrita 1,25 · leitura 0,10
+    expect(costUsd("haiku", 0, 0, 1_000_000, 1_000_000)).toBeCloseTo(1.35, 10);
+  });
+  it("ler o cache é ~12x mais barato que reenviar a mesma entrada (o porquê do GAP-142)", () => {
+    const reenviando = costUsd("sonnet", 163_941, 0);
+    const lendoDoCache = costUsd("sonnet", 2, 0, 163_941, 0);
+    expect(lendoDoCache).toBeLessThan(reenviando / 9);
+  });
+  it("a soma dos 3 votos com cache é ~1,45x um voto — e NÃO ~zero como o medidor cego dizia", () => {
+    const umVoto = costUsd("sonnet", 163_941, 5_776);
+    const comCache = costUsd("sonnet", 2, 5_776, 0, 163_941)      // voto 1: gravou
+      + costUsd("sonnet", 2, 4_345, 163_941, 0)                   // voto 2: leu
+      + costUsd("sonnet", 2, 3_480, 163_941, 0);                  // voto 3: leu
+    const soEntrada = (n: number) => (n / 1_000_000) * 3;
+    const entradaFaturada = soEntrada(163_941) * 1.25 + soEntrada(163_941) * 0.1 * 2;
+    expect(entradaFaturada / soEntrada(163_941)).toBeCloseTo(1.45, 10);
+    // sem o GAP-147 este valor seria ~o custo de 2 tokens de entrada (subestimação de ~99%).
+    expect(comCache).toBeGreaterThan(umVoto);
+  });
+  it("linha sem cache medido (NULL→0) mantém EXATAMENTE o valor de antes do GAP-142", () => {
+    expect(costUsd("sonnet", 1_000_000, 1_000_000, 0, 0)).toBe(18);
+    expect(costUsd("sonnet", 1_000_000, 1_000_000)).toBe(18);
+  });
+  it("priceCaseSql soma cache com COALESCE em TODOS os ramos e no ELSE", () => {
+    const sql = priceCaseSql("m.");
+    // 5 ramos + ELSE = 6 ocorrências de cada coluna
+    expect(sql.match(/COALESCE\(m\.cache_write_tokens, 0\)/g)?.length).toBe(6);
+    expect(sql.match(/COALESCE\(m\.cache_read_tokens, 0\)/g)?.length).toBe(6);
+    // multiplicadores aplicados sobre o preço de ENTRADA do ramo (haiku=1, opus=5)
+    expect(sql).toContain("* 1 * 1.25");
+    expect(sql).toContain("* 5 * 0.1");
+  });
+  it("priceCaseSql sem prefixo de coluna funciona (chamadores usam \"\" e \"m.\")", () => {
+    expect(priceCaseSql("")).toContain("COALESCE(cache_read_tokens, 0)");
+  });
+});

@@ -1944,6 +1944,9 @@ export async function projectRoutes(app: FastifyInstance) {
            model,
            duration_ms,
            agent,
+           -- GAP-147: cache de prompt é entrada FATURADA; sem ele o custo some quando o cache funciona.
+           cache_read_tokens,
+           cache_write_tokens,
            created_at
          FROM project_agent_metrics
          WHERE project_id = $1
@@ -1952,17 +1955,24 @@ export async function projectRoutes(app: FastifyInstance) {
       );
       // RFC-0004 F6/T2.2: preço por modelo — FONTE ÚNICA em lib/modelPricing.ts.
       // Agregar por task_id
-      const byTask = new Map<string, { calls: number; inputTokens: number; outputTokens: number; durationMs: number; costUsd: number; agents: Set<string>; models: Set<string>; lastCallAt: Date | null }>();
+      const byTask = new Map<string, { calls: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; cacheMeasured: boolean; durationMs: number; costUsd: number; agents: Set<string>; models: Set<string>; lastCallAt: Date | null }>();
       for (const r of res.rows) {
         const tid = r.task_id as string;
         const inp = Number(r.input_tokens ?? 0);
         const out = Number(r.output_tokens ?? 0);
-        const cost = costUsd(r.model as string | null, inp, out);
+        // GAP-147: NULL = o provedor não reportou cache (linha anterior ao GAP-142) — soma 0 e o
+        // custo fica idêntico ao de antes; só quem MEDIU entra no agregado e acende `cacheMeasured`.
+        const cRead = r.cache_read_tokens === null || r.cache_read_tokens === undefined ? null : Number(r.cache_read_tokens);
+        const cWrite = r.cache_write_tokens === null || r.cache_write_tokens === undefined ? null : Number(r.cache_write_tokens);
+        const cost = costUsd(r.model as string | null, inp, out, cRead ?? 0, cWrite ?? 0);
         const existing = byTask.get(tid);
         if (existing) {
           existing.calls++;
           existing.inputTokens += inp;
           existing.outputTokens += out;
+          existing.cacheReadTokens += cRead ?? 0;
+          existing.cacheWriteTokens += cWrite ?? 0;
+          existing.cacheMeasured = existing.cacheMeasured || cRead !== null || cWrite !== null;
           existing.durationMs += Number(r.duration_ms ?? 0);
           existing.costUsd += cost;
           if (r.agent) existing.agents.add(r.agent as string);
@@ -1971,6 +1981,8 @@ export async function projectRoutes(app: FastifyInstance) {
         } else {
           byTask.set(tid, {
             calls: 1, inputTokens: inp, outputTokens: out,
+            cacheReadTokens: cRead ?? 0, cacheWriteTokens: cWrite ?? 0,
+            cacheMeasured: cRead !== null || cWrite !== null,
             durationMs: Number(r.duration_ms ?? 0), costUsd: cost,
             agents: new Set(r.agent ? [r.agent as string] : []),
             models: new Set(r.model ? [r.model as string] : []),
@@ -1984,6 +1996,9 @@ export async function projectRoutes(app: FastifyInstance) {
         inputTokens:      v.inputTokens,
         outputTokens:     v.outputTokens,
         totalTokens:      v.inputTokens + v.outputTokens,
+        // GAP-147: `null` quando NENHUMA chamada da task reportou cache — não medido ≠ zero cache.
+        cacheReadTokens:  v.cacheMeasured ? v.cacheReadTokens : null,
+        cacheWriteTokens: v.cacheMeasured ? v.cacheWriteTokens : null,
         durationMs:       v.durationMs,
         agents:           Array.from(v.agents),
         models:           Array.from(v.models),
@@ -2019,6 +2034,9 @@ export async function projectRoutes(app: FastifyInstance) {
            model,
            duration_ms,
            status,
+           -- GAP-147: cache de prompt é entrada FATURADA (escrita 1,25x, leitura 0,1x).
+           cache_read_tokens,
+           cache_write_tokens,
            created_at
          FROM project_agent_metrics
          WHERE project_id = $1
@@ -2029,7 +2047,10 @@ export async function projectRoutes(app: FastifyInstance) {
       const rows = res.rows.map((r) => {
         const inp = Number(r.input_tokens ?? 0);
         const out = Number(r.output_tokens ?? 0);
-        const cost = costUsd(r.model as string | null, inp, out);
+        // GAP-147: NULL = não medido (o provedor não reportou) → soma 0, custo idêntico ao de antes.
+        const cRead = r.cache_read_tokens === null || r.cache_read_tokens === undefined ? null : Number(r.cache_read_tokens);
+        const cWrite = r.cache_write_tokens === null || r.cache_write_tokens === undefined ? null : Number(r.cache_write_tokens);
+        const cost = costUsd(r.model as string | null, inp, out, cRead ?? 0, cWrite ?? 0);
         return {
           id:               r.id as string,
           agent:            r.agent as string,
@@ -2038,6 +2059,8 @@ export async function projectRoutes(app: FastifyInstance) {
           inputTokens:      inp,
           outputTokens:     out,
           totalTokens:      inp + out,
+          cacheReadTokens:  cRead,
+          cacheWriteTokens: cWrite,
           model:            r.model as string | null,
           isOpus:           String(r.model ?? "").includes("opus"),
           durationMs:       Number(r.duration_ms ?? 0),

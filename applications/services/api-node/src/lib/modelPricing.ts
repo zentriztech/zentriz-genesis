@@ -35,6 +35,21 @@ export const MODEL_PRICES: Array<{ match: string; price: ModelPrice }> = [
 
 export const DEFAULT_PRICE: ModelPrice = { inputPerMTok: 3, outputPerMTok: 15 };
 
+/**
+ * 🔴 GAP-147 — multiplicadores do cache de prompt sobre o preço de ENTRADA.
+ *
+ * Medido ao vivo em prod (run 81ac10d9, 2026-09-09, logo após ligar o GAP-142): com 3 votos, o 1º
+ * refutador gravou 163.941 tokens no cache e os votos 2 e 3 os LERAM — e os três registraram
+ * `input_tokens = 2`. Ou seja: no instante em que o cache passou a funcionar, o medidor de custo
+ * (fonte única) passou a ver ~0 de entrada e a subestimar a validação em ~99% — reabrindo
+ * exatamente o buraco que o RFC-0004 F6/T2.1 fechou (gasto invisível ao cost-cap do tenant,
+ * migration 068). Economia real não pode virar economia FICTÍCIA no medidor.
+ *
+ * Tabela do Bedrock/Anthropic: escrita de cache = 1,25× o preço de entrada; leitura = 0,1×.
+ */
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+export const CACHE_READ_MULTIPLIER = 0.1;
+
 export function priceForModel(model: string | null | undefined): ModelPrice {
   const m = (model ?? "").toLowerCase();
   for (const entry of MODEL_PRICES) {
@@ -43,9 +58,19 @@ export function priceForModel(model: string | null | undefined): ModelPrice {
   return DEFAULT_PRICE;
 }
 
-export function costUsd(model: string | null | undefined, inputTokens: number, outputTokens: number): number {
+export function costUsd(
+  model: string | null | undefined,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number = 0,
+  cacheWriteTokens: number = 0,
+): number {
   const p = priceForModel(model);
-  return (inputTokens / 1_000_000) * p.inputPerMTok + (outputTokens / 1_000_000) * p.outputPerMTok;
+  return (inputTokens / 1_000_000) * p.inputPerMTok
+    + (outputTokens / 1_000_000) * p.outputPerMTok
+    // GAP-147: cache é entrada FATURADA — ausente/NULL vira 0 e o cálculo antigo fica idêntico.
+    + ((cacheWriteTokens || 0) / 1_000_000) * p.inputPerMTok * CACHE_WRITE_MULTIPLIER
+    + ((cacheReadTokens || 0) / 1_000_000) * p.inputPerMTok * CACHE_READ_MULTIPLIER;
 }
 
 /**
@@ -56,10 +81,16 @@ export function priceCaseSql(col: string): string {
   const input = `${col}input_tokens`;
   const output = `${col}output_tokens`;
   const model = `${col}model`;
+  // GAP-147: a entrada faturada = input_tokens + escrita de cache (1,25x) + leitura (0,1x).
+  // COALESCE porque as colunas são NULL nas linhas anteriores ao GAP-142 (não medido) — nelas o
+  // resultado é IDÊNTICO ao de antes. Todos os chamadores agregam project_agent_metrics.
+  const cacheIn = (rate: number) =>
+    `+ (COALESCE(${col}cache_write_tokens, 0) / 1000000.0) * ${rate} * ${CACHE_WRITE_MULTIPLIER}`
+    + ` + (COALESCE(${col}cache_read_tokens, 0) / 1000000.0) * ${rate} * ${CACHE_READ_MULTIPLIER}`;
   const branches = MODEL_PRICES
-    .map((e) => `WHEN ${model} ILIKE '%${e.match}%' THEN (${input} / 1000000.0) * ${e.price.inputPerMTok} + (${output} / 1000000.0) * ${e.price.outputPerMTok}`)
+    .map((e) => `WHEN ${model} ILIKE '%${e.match}%' THEN (${input} / 1000000.0) * ${e.price.inputPerMTok} + (${output} / 1000000.0) * ${e.price.outputPerMTok} ${cacheIn(e.price.inputPerMTok)}`)
     .join("\n       ");
   return `CASE ${branches}
-       ELSE (${input} / 1000000.0) * ${DEFAULT_PRICE.inputPerMTok} + (${output} / 1000000.0) * ${DEFAULT_PRICE.outputPerMTok}
+       ELSE (${input} / 1000000.0) * ${DEFAULT_PRICE.inputPerMTok} + (${output} / 1000000.0) * ${DEFAULT_PRICE.outputPerMTok} ${cacheIn(DEFAULT_PRICE.inputPerMTok)}
   END`;
 }
