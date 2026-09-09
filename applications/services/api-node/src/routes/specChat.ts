@@ -2344,9 +2344,37 @@ export async function specChatRoutes(app: FastifyInstance) {
         // A5.7: o botão humano recorta o arquivo grande pelo MESMO caminho do laço (o guard acima já
         // garantiu que o recorte é possível) — dois recortes diferentes dariam dois resultados.
         const humanTarget = await gapFileTargetContent(filePath!, specMarkdown, fileGaps);
+        // 🔴 GAP-156: este call site parava em `digested` — o botão humano pedia ao CTO os MESMOS GAPs
+        // com MENOS fatos que o laço. MEDIDO em prod (2026-09-09, api `55675cdb`, job `b8009d2e`,
+        // `modelo-dados.md`): censo `api-gapfile` SEM o campo `oracles`, enquanto o registro tinha 114
+        // decisões vigentes e o arquivo é dono de 17 contratos e citante de 52 — 22.726 chars de "quem é
+        // a fonte única" que nunca chegaram. É a família dominante dos blockers do NVX (24 de 26), e o
+        // botão sem o registro só pode redeclarar a regra ou migrar a contradição para o irmão. Pior: o
+        // comentário de `gapOracleBlock` já DESCREVIA este caminho ("o botão humano aproveita as decisões
+        // existentes"), então o código afirmava um comportamento que não existia (família do GAP-128).
+        //
+        // `fileChars`/`budget` ficam AUSENTES de propósito (GAP-25/GAP-28): o botão humano não passa por
+        // `consolidationVeto`, e anunciar um critério numérico de descarte que ninguém vai aplicar seria
+        // mentir para o agente. Sem eles o bloco sai na forma qualitativa, que é o que este caminho de
+        // fato enfrenta.
+        const humanOracles = await gapOracleBlock(projectId!, filePath!);
+        const humanIndex = await gapIndexBlock(projectId!, filePath!, specMarkdown);
         runFileChatJob(
           jobId,
-          { ...buildGapFileRequest("tooLarge" in humanTarget ? specMarkdown : humanTarget.text, filePath!, fileGaps, ctx, projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps), !("tooLarge" in humanTarget) && humanTarget.digested), ...llm },
+          {
+            ...buildGapFileRequest(
+              "tooLarge" in humanTarget ? specMarkdown : humanTarget.text, filePath!, fileGaps, ctx,
+              projectId, await gapSiblingBlock(projectId!, filePath!, fileGaps),
+              !("tooLarge" in humanTarget) && humanTarget.digested, humanOracles,
+              // Os cinco vazios são ESTADO DO LAÇO, não esquecimento: recusa da rodada anterior (GAP-29),
+              // reincidência reconciliada (GAP-68), rodada dedicada (GAP-81), desfecho declarado antes
+              // (A1) e consolidação pura (GAP-121) só existem dentro de um passe autônomo. Um clique
+              // humano não tem rodada anterior, e inventar uma seria fato falso no prompt.
+              "", "", "", "", "",
+              humanIndex,
+            ),
+            ...llm,
+          },
           agentsUrl,
           `Revisão dos ${fileGaps.length} GAP(s) deste arquivo pronta — confira e clique em “Aplicar ao arquivo”.`,
           gapFileEditsEnabled() ? specMarkdown : null,
