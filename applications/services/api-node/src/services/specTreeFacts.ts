@@ -33,7 +33,9 @@
  * REAL a ponto de cache do produto. Aqui nada é marcado: o GAP-153/159 manda medir antes.
  */
 import { open, readFile, stat } from "node:fs/promises";
-import { splitSections, headingOutline } from "../lib/markdownSections.js";
+import {
+  splitSections, headingOutline, citedSectionRefs, buildAnchorIndex, locateSectionIndex,
+} from "../lib/markdownSections.js";
 import type { SpecFileRef } from "./specGapScope.js";
 import { MANIFEST_PATH } from "./specManifest.js";
 
@@ -240,4 +242,118 @@ function outlineBlock(entries: readonly SpecTreeEntry[], ausentes: readonly stri
     );
   }
   return out;
+}
+
+/**
+ * 🔴 GAP-163 — **remissão morta**: o arquivo manda ler `contratos-erros.md §7.4` e o localizador do laço
+ * não acha `§7.4` naquele arquivo.
+ *
+ * ## Por que isto é fato do CÉREBRO, e não só um defeito de redação
+ *
+ * O localizador é o MESMO que reserva no prompt a seção citada por um GAP (`citedSectionRefs` +
+ * `locateSectionIndex`, GAP-73 no alvo e GAP-75 no irmão). Um endereço que não casa cobra duas vezes: o
+ * humano (ou o agente) que segue a remissão não chega ao texto, e o revisor que cita aquele endereço
+ * recebe o recorte VAZIO — o defeito fica indiscutível porque o trecho em disputa nunca aparece.
+ *
+ * ## O que foi medido em prod (spec do NVX LastMile, 14 arquivos, 2026-09-09)
+ *
+ * 933 remissões cross-arquivo resolvíveis; **6 mortas** (0,64%), concentradas em dois arquivos
+ * (`definicao-de-pronto.md` → `contratos-erros.md §2.6`, `modelo-dados.md §2.7`; `modelo-dados.md` →
+ * `contratos-erros.md §7.4`, `§8.6`, `§11.5`). Nenhum instrumento do laço media isso: nem o estágio A,
+ * nem o juiz (que recebe os sumários e ainda assim não reclamou de nenhuma das 6).
+ *
+ * ## A régua é a de CORPO, e essa escolha foi medida
+ *
+ * Checar o endereço só contra os CABEÇALHOS do destino seria mais barato e daria **13** "mortas" — das
+ * quais **7 são falso positivo** (a seção existe, o número só não está no cabeçalho: `visao-escopo.md §7`,
+ * `privacidade-lgpd.md §2.3`…). 54% de falso positivo num fato que o agente vai acreditar é pior que não
+ * ter o fato. Então vale o custo do índice de âncoras do destino (medido em prod: 160–300 ms para a spec
+ * inteira; aqui só os arquivos REALMENTE citados pelo alvo são indexados).
+ *
+ * Lei 100% LLM: entrega a MEDIÇÃO e diz explicitamente que não é veredicto — reendereçar, remover a
+ * remissão ou mantê-la (porque a régua é que não casa) é decisão do agente, com o sumário do destino na
+ * mão (GAP-161).
+ */
+export interface DeadRemission {
+  /** O endereço como está escrito no arquivo de origem (`§7.4`). */
+  ref: string;
+  /** O arquivo de destino, no path da árvore. */
+  toPath: string;
+}
+
+/** Teto de remissões mortas listadas — o que passar disso é DECLARADO, não silenciado. */
+export const DEAD_REMISSION_MAX = 12;
+
+/**
+ * Mede as remissões mortas QUE SAEM do arquivo alvo. Best-effort: qualquer leitura que falhe apenas
+ * deixa de acusar (nunca acusa por não ter lido — um "morto" falso mandaria o agente reescrever o que
+ * está certo).
+ *
+ * Lê o alvo do DISCO de propósito: no laço o prompt pode levar um recorte do arquivo, e a remissão que
+ * ficou fora do recorte continua no arquivo.
+ */
+export async function deadRemissions(
+  files: readonly SpecFileRef[],
+  targetPath: string,
+): Promise<DeadRemission[]> {
+  const alvo = files.find((f) => norm(f.path) === norm(targetPath));
+  if (!alvo || files.length < 2) return [];
+  const texto = await readFile(alvo.filePath, "utf-8").catch(() => null);
+  if (texto === null) return [];
+
+  const porNome = new Map<string, SpecFileRef>();
+  for (const f of files) {
+    if (!norm(f.path).endsWith(".md")) continue;
+    porNome.set(norm(f.path), f);
+    porNome.set(norm(f.filename), f);
+  }
+
+  // Agrupa por DESTINO: um índice de âncoras por arquivo citado, não um por citação.
+  const porDestino = new Map<string, { file: SpecFileRef; refs: string[] }>();
+  for (const c of citedSectionRefs(texto)) {
+    if (!c.file) continue; // citação do próprio arquivo — não é remissão
+    const dest = porNome.get(norm(c.file));
+    if (!dest || norm(dest.path) === norm(alvo.path)) continue;
+    const acc = porDestino.get(dest.path) ?? { file: dest, refs: [] };
+    if (!acc.refs.includes(c.ref)) acc.refs.push(c.ref);
+    porDestino.set(dest.path, acc);
+  }
+
+  const mortas: DeadRemission[] = [];
+  for (const { file, refs } of porDestino.values()) {
+    const raw = await readFile(file.filePath, "utf-8").catch(() => null);
+    if (raw === null) continue; // destino ilegível: não dá para afirmar que o endereço não existe
+    const idx = buildAnchorIndex(splitSections(raw));
+    for (const ref of refs) {
+      if (locateSectionIndex(idx, ref) === null) mortas.push({ ref, toPath: file.path });
+    }
+  }
+  return mortas;
+}
+
+/**
+ * O bloco de FATOS das remissões mortas. `""` quando não há nenhuma — silêncio aqui significa "medi e
+ * não achei", e é por isso que o bloco diz que a medição foi feita AGORA.
+ */
+export function deadRemissionFactBlock(dead: readonly DeadRemission[], targetPath: string): string {
+  if (dead.length === 0) return "";
+  const listadas = dead.slice(0, DEAD_REMISSION_MAX);
+  const sobra = dead.length - listadas.length;
+  const out = [
+    `--- REMISSÕES DESTE ARQUIVO QUE NÃO CASAM NO DESTINO (${dead.length}, medidas agora no disco) ---`,
+    `\`${targetPath}\` manda ler os endereços abaixo, e o localizador do laço NÃO os encontra no arquivo`
+    + " de destino:",
+    ...listadas.map((d) => `  • \`${d.ref}\` em \`${d.toPath}\``),
+  ];
+  if (sobra > 0) out.push(`  …(${sobra} remissão(ões) além do teto desta lista, também sem casar)…`);
+  out.push(
+    "Isto é MEDIÇÃO, não veredicto: o endereço pode ter mudado de número, a seção pode ter saído, ou a"
+    + " régua é que não casa com a forma como o destino escreve o endereço. Quem decide o que fazer (ou"
+    + " não fazer) é você; o sumário de seções acima é o que o destino tem hoje.",
+    "Custa duas vezes: quem seguir a remissão não chega ao texto, e é o MESMO localizador que reserva no"
+    + " prompt a seção citada por um GAP — endereço que não casa deixa o revisor sem o trecho em disputa.",
+    "--- FIM DAS REMISSÕES ---",
+    "",
+  );
+  return out.join("\n");
 }

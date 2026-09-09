@@ -21,6 +21,7 @@ import {
   setPromptCensusSink, type PromptCensus,
 } from "./promptCensus.js";
 import { buildGapFileRequest, buildRawFileRequest } from "../routes/specChat.js";
+import { deadRemissionFactBlock } from "./specTreeFacts.js";
 import type { ValidationFinding } from "./specValidation.js";
 
 let logs: string[] = [];
@@ -140,6 +141,21 @@ describe("censo do prompt REAL do CTO por-arquivo", () => {
     expect(linha).toMatch(/spec_tree=\d+c/);
   });
 
+  // 🔴 GAP-163: a remissão morta é fato NOVO no prompt — tem de chegar ao editor nos DOIS caminhos e ser
+  // somada com nome próprio (em `outros` ela estouraria o teto que existe para acusar o não somado).
+  it("as remissões mortas chegam ao prompt do laço e são somadas com nome próprio", () => {
+    const bloco = deadRemissionFactBlock([{ ref: "§7.4", toPath: "contratos-erros.md" }], "modelo-dados.md");
+    const req = buildGapFileRequest(
+      "# Dados\nconteúdo\n", "modelo-dados.md", [finding()], undefined, null,
+      "", false, "", "", "", "", "", "", "", "", bloco,
+    );
+    const msg = String(req.user_message);
+    expect(msg).toContain("§7.4");
+    expect(msg).toContain("REMISSÕES DESTE ARQUIVO QUE NÃO CASAM");
+    const linha = logs.find((l) => l.includes("origem=api-gapfile")) ?? "";
+    expect(linha).toContain(`dead_remissions=${bloco.length}c`);
+  });
+
   it("mede o ENTREGUE: bloco ausente não aparece como despesa", () => {
     buildGapFileRequest("conteúdo curto", "tecnico/dados.md", [finding()]);
     const linha = logs.find((l) => l.includes("origem=api-gapfile")) ?? "";
@@ -245,6 +261,24 @@ describe("recordPromptCensus — GAP-159: o censo vai para um destino, e TODO ca
     // O que se persiste é o mesmo fato que se loga: tamanho por bloco, nunca conteúdo.
     expect(JSON.stringify(vistos)).not.toContain("ajuste a seção 8");
     for (const c of vistos) expect(c.total).toBeGreaterThan(0);
+  });
+
+  // 🔴 GAP-163 + lição do GAP-156: um caminho entregar o fato e o outro não é o defeito que mais custou
+  // caro nesta frente. Os dois builders REAIS são chamados com o mesmo bloco.
+  it("os DOIS caminhos põem a remissão morta no prompt e a somam com o MESMO nome", () => {
+    const vistos: PromptCensus[] = [];
+    setPromptCensusSink((c) => { vistos.push(c); });
+    const bloco = deadRemissionFactBlock([{ ref: "§2.6", toPath: "contratos-erros.md" }], "definicao-de-pronto.md");
+    const laco = buildGapFileRequest(
+      "# Pronto\nconteúdo\n", "definicao-de-pronto.md", [finding()], undefined, null,
+      "", false, "", "", "", "", "", "", "", "", bloco,
+    );
+    const humano = buildRawFileRequest(
+      "# Pronto\nconteúdo\n", [{ role: "user", content: "ajuste a seção 2" }], "definicao-de-pronto.md",
+      undefined, null, bloco,
+    );
+    for (const req of [laco, humano]) expect(String(req.user_message)).toContain("§2.6");
+    expect(vistos.map((c) => c.fields.dead_remissions)).toEqual([bloco.length, bloco.length]);
   });
 
   it("destino que lança NÃO derruba a chamada medida (e o log já saiu antes)", () => {

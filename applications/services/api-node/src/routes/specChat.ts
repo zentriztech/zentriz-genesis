@@ -66,7 +66,9 @@ import { loadArchetypeCatalog, type Archetype } from "../services/archetypeCatal
 import { recordPromptCensus } from "../services/promptCensus.js";
 // 🔴 GAP-160: a árvore da spec como FATO (o editor não sabia que os irmãos existiam — medido: o prompt
 // nomeava 2 de 13 arquivos). `siblingPathsIn` é o complemento honesto: declara quais corpos VIERAM.
-import { specTreeFactBlock, type SpecTreeEntry } from "../services/specTreeFacts.js";
+import {
+  specTreeFactBlock, deadRemissions, deadRemissionFactBlock, type SpecTreeEntry,
+} from "../services/specTreeFacts.js";
 import { siblingPathsIn } from "../services/specSiblingContext.js";
 
 interface ChatMessage {
@@ -590,6 +592,35 @@ function cagBlock(projectId: string | null, query: string): Record<string, unkno
 }
 
 /**
+ * 🔴 GAP-163 — mede as remissões MORTAS do arquivo alvo e devolve o bloco de fatos.
+ *
+ * Best-effort de verdade: qualquer falha devolve `""`. Acusar remissão morta sem ter conseguido ler o
+ * destino mandaria o agente reendereçar (ou apagar) uma remissão correta — e o custo de errar para o
+ * lado do silêncio é só continuar como antes.
+ */
+async function deadRemissionBlockFor(projectId: string | null, filePath: string): Promise<string> {
+  if (!projectId) return "";
+  try {
+    const { loadSpecFiles } = await import("../services/specGapScope.js");
+    const files = await loadSpecFiles(pool, projectId);
+    const mortas = await deadRemissions(files, filePath);
+    if (mortas.length === 0) return "";
+    // Logado porque o prompt não é persistido: sem isto, "o editor soube da remissão morta" seria
+    // indemonstrável em prod (mesma razão do log do GAP-122).
+    console.log(
+      `[SpecChat] GAP-163 remissões mortas alvo=${filePath} n=${mortas.length}`
+      + ` → ${mortas.slice(0, 8).map((d) => `${d.toPath}${d.ref}`).join(" ")}`,
+    );
+    return deadRemissionFactBlock(mortas, filePath);
+  } catch (e) {
+    console.warn(
+      `[SpecChat] ⚠️ remissões de ${filePath} não medidas: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return "";
+  }
+}
+
+/**
  * Exportada para TESTE (🔴 GAP-159): o teste que garante que os DOIS caminhos medidos entregam o censo
  * ao mesmo destino tem de chamar os dois caminhos REAIS. Pinar só `api-gapfile` deixaria passar
  * exatamente o defeito do GAP-156 — um chamador entrega menos que o outro e os logs parecem iguais.
@@ -602,6 +633,8 @@ export function buildRawFileRequest(
   ctx: ChatContext = EMPTY_CTX,
   /** Projeto REAL — escopo da recuperação de lições (G7). Ver `cagBlock`. */
   scopeProjectId: string | null = null,
+  /** 🔴 GAP-163 — remissões deste arquivo que não casam no destino. Vazio = medi e não achei. */
+  deadRemissionBlock = "",
 ): Record<string, unknown> {
   const history = messages.slice(-12);
   const lastUser = [...history].reverse().find((m) => m.role === "user")?.content?.trim() ?? "";
@@ -630,6 +663,10 @@ export function buildRawFileRequest(
     contextBlock
       ? `--- CONTEXTO SÓ-LEITURA (onde este arquivo vive; NÃO o copie para o arquivo) ---\n${contextBlock}\n--- FIM DO CONTEXTO ---\n`
       : "",
+    // 🔴 GAP-163: o MESMO fato nos dois caminhos (lição do GAP-156). No chat humano ele importa por um
+    // motivo próprio: o pedido costuma ser "ajuste a seção X", e uma remissão que já não casa é
+    // exatamente o tipo de coisa que o editor reescreve por cima sem saber que estava quebrada.
+    deadRemissionBlock,
     "--- CONTEÚDO ATUAL ---",
     content,
     "--- FIM ---",
@@ -652,6 +689,7 @@ export function buildRawFileRequest(
     fields: {
       system: RAW_FILE_SYSTEM.length,
       spec_tree: treeBlock.length,
+      dead_remissions: deadRemissionBlock.length,
       context: contextBlock.length,
       file_content: content.length,
       transcript: transcript.length,
@@ -959,6 +997,12 @@ export function buildGapFileRequest(
    * parâmetros de propósito: é fato de ROTA, e a ordem no prompt é decidida no array abaixo.
    */
   attemptHistoryBlock = "",
+  /**
+   * 🔴 GAP-163: as remissões DESTE arquivo cujo endereço o localizador do laço não acha no destino,
+   * medidas agora no disco. Vazio = medi e não achei nenhuma (ou a medição falhou — best-effort, e um
+   * "morto" que na verdade não foi medido mandaria o agente reescrever o que está certo).
+   */
+  deadRemissionBlock = "",
 ): Record<string, unknown> {
   // A1: o corte do orçamento é DECLARADO. Antes, a lista era fatiada no meio de um item e o modelo
   // recebia um GAP pela metade sem saber que havia mais — e com a prestação de contas por número, um
@@ -1025,6 +1069,11 @@ export function buildGapFileRequest(
     // o índice precisa cobrir) e vem ANTES do conteúdo: o editor chega ao README já sabendo quais
     // arquivos existem hoje, em vez de indexar de memória a árvore de quando o arquivo foi escrito.
     indexBlock,
+    // 🔴 GAP-163: colado no índice porque é da mesma natureza — fato sobre o arquivo medido FORA dele
+    // (lá, quais arquivos existem; aqui, se os endereços que este arquivo manda ler ainda existem no
+    // destino). Vem depois do sumário de seções da árvore (GAP-161) de propósito: o agente já leu o que
+    // o destino TEM quando descobre qual endereço não casa.
+    deadRemissionBlock,
     digested
       ? "--- RECORTE DIRIGIDO DO ARQUIVO (NÃO é o arquivo inteiro; leia as REGRAS dentro do bloco) ---"
       : "--- CONTEÚDO ATUAL DO ARQUIVO ---",
@@ -1107,6 +1156,9 @@ export function buildGapFileRequest(
       oracles: oracleBlock.length,
       manifest_facts: manifestBlock.length,
       index_facts: indexBlock.length,
+      // 🔴 GAP-163: campo próprio pelo mesmo motivo do `spec_tree` — bloco novo somado em `outros`
+      // dispararia o teto de `outros`, que existe para acusar exatamente o que ninguém somou.
+      dead_remissions: deadRemissionBlock.length,
       file_content: content.length,
       focus: focusBlock.length,
       consolidation: consolidationBlock.length,
@@ -1932,6 +1984,9 @@ export async function dispatchGapFileJob(opts: {
   // 🔴 GAP-122: os fatos do índice, só quando o alvo é o manifesto. Vem com log próprio porque o prompt
   // não é persistido: sem ele, "o editor soube do arquivo novo" seria indemonstrável em prod.
   const indexBlock = await gapIndexBlock(opts.projectId, opts.filePath, opts.fileContent);
+  // 🔴 GAP-163: medido do DISCO (não de `opts.fileContent`, que pode ser um recorte) e junto do índice,
+  // porque as duas medições dependem da mesma coisa: a lista de arquivos da spec.
+  const deadBlock = await deadRemissionBlockFor(opts.projectId, opts.filePath);
   const consolidationBlock = consolidationOnlyFactBlock(opts.consolidationOnly);
   if (consolidationBlock) {
     const c = opts.consolidationOnly!;
@@ -1959,7 +2014,7 @@ export async function dispatchGapFileJob(opts: {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
         priorBlock, persistentBlock, focusBlock, priorOutcomeBlock, consolidationBlock, indexBlock,
-        attemptHistoryBlock,
+        attemptHistoryBlock, deadBlock,
       ),
       ...opts.llm,
     },
@@ -2460,6 +2515,9 @@ export async function specChatRoutes(app: FastifyInstance) {
               "",
               humanIndex,
               humanAttempts,
+              // 🔴 GAP-163: o botão humano mede as MESMAS remissões. Este é fato do ARQUIVO, não do
+              // laço — por isso não entra na lista dos vazios acima.
+              await deadRemissionBlockFor(projectId, filePath!),
             ),
             ...llm,
           },
@@ -2472,7 +2530,17 @@ export async function specChatRoutes(app: FastifyInstance) {
         );
       } else if (filePath) {
         // Modo por-arquivo: edição cirúrgica via /invoke/raw (preserva o conteúdo original).
-        runFileChatJob(jobId, { ...buildRawFileRequest(specMarkdown, messages, filePath, ctx, projectId), ...llm }, agentsUrl);
+        runFileChatJob(
+          jobId,
+          {
+            ...buildRawFileRequest(
+              specMarkdown, messages, filePath, ctx, projectId,
+              await deadRemissionBlockFor(projectId, filePath),
+            ),
+            ...llm,
+          },
+          agentsUrl,
+        );
       } else {
         // Spec inteira: CTO normalizador via cto/async (regenera a PRODUCT_SPEC — correto aqui),
         // agora COM contexto dos irmãos + relatório de validação (e instrução de resolver GAPs).

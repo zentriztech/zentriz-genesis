@@ -14,7 +14,8 @@ import { mkdtemp, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  firstHeading, loadSpecTree, specTreeFactBlock, TREE_OUTLINE_FILE_BUDGET, TREE_OUTLINE_TOTAL_BUDGET,
+  firstHeading, loadSpecTree, specTreeFactBlock, deadRemissions, deadRemissionFactBlock,
+  DEAD_REMISSION_MAX, TREE_OUTLINE_FILE_BUDGET, TREE_OUTLINE_TOTAL_BUDGET,
   type SpecTreeEntry,
 } from "./specTreeFacts.js";
 import type { SpecFileRef } from "./specGapScope.js";
@@ -207,5 +208,92 @@ describe("loadSpecTree (disco real)", () => {
     expect(t[0].title).toBe("OK");
     expect(t).toHaveLength(2);
     expect(t[1].path).toBe("trancado.md");
+  });
+});
+
+/**
+ * 🔴 GAP-163 — remissão morta. O que estes testes travam:
+ *   1. só acusa o que a régua REALMENTE não localizou (acusar por não ter lido mandaria reescrever o que
+ *      está certo);
+ *   2. a régua é a de CORPO — a de cabeçalho daria 7 falso-positivos em 13 na spec medida;
+ *   3. citação sem nome de arquivo é do PRÓPRIO arquivo, não é remissão;
+ *   4. o bloco declara que é medição, não veredicto (Lei 100% LLM: quem decide é o agente).
+ */
+describe("deadRemissions / deadRemissionFactBlock (GAP-163)", () => {
+  const ref = (dir: string, name: string): SpecFileRef => ({
+    path: name, filename: name, relDir: "", filePath: join(dir, name), isPrimary: false,
+  });
+
+  const cenario = async (alvoTexto: string, destinoTexto: string) => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-dead-"));
+    await writeFile(join(dir, "alvo.md"), alvoTexto);
+    await writeFile(join(dir, "destino.md"), destinoTexto);
+    return { dir, files: [ref(dir, "alvo.md"), ref(dir, "destino.md")] };
+  };
+
+  it("acusa o endereço que não existe no destino e cala sobre o que existe", async () => {
+    const { files } = await cenario(
+      "# Alvo\nVer `destino.md` §7.4 e também `destino.md` §2.1.",
+      "# Destino\n## 2.1 Existe\ncorpo\n## 3 Outra\ncorpo",
+    );
+    expect(await deadRemissions(files, "alvo.md")).toEqual([{ ref: "§7.4", toPath: "destino.md" }]);
+  });
+
+  it("usa a régua de CORPO: endereço fora do cabeçalho, mas presente no texto, NÃO é morto", async () => {
+    // Medido em prod: a régua de cabeçalho acusaria 13 e 7 seriam falso positivo (este é o padrão deles).
+    const { files } = await cenario(
+      "# Alvo\nConforme `destino.md` §2.3.",
+      "# Destino\n## Regras de anonimização\nA regra §2.3 diz que o dado sai do log.",
+    );
+    expect(await deadRemissions(files, "alvo.md")).toEqual([]);
+  });
+
+  it("citação sem nome de arquivo é do próprio arquivo — não é remissão", async () => {
+    const { files } = await cenario("# Alvo\nA §9.9 deste arquivo manda outra coisa.", "# Destino\n## 1 Só\nx");
+    expect(await deadRemissions(files, "alvo.md")).toEqual([]);
+  });
+
+  it("destino ILEGÍVEL não gera acusação (não afirmar o que não se leu)", async () => {
+    const { dir, files } = await cenario("# Alvo\nVer `destino.md` §7.4.", "# Destino\n## 1 Só\nx");
+    const destino = join(dir, "destino.md");
+    await chmod(destino, 0o000);
+    const r = await deadRemissions(files, "alvo.md");
+    await chmod(destino, 0o600);
+    expect(r).toEqual([]);
+  });
+
+  it("o mesmo endereço citado 3× é UMA remissão morta", async () => {
+    const { files } = await cenario(
+      "# Alvo\nVer `destino.md` §7.4. Como dito em `destino.md` §7.4. E de novo `destino.md` §7.4.",
+      "# Destino\n## 1 Só\nx",
+    );
+    expect(await deadRemissions(files, "alvo.md")).toHaveLength(1);
+  });
+
+  it("spec de arquivo único não tem remissão a medir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-dead-"));
+    await writeFile(join(dir, "alvo.md"), "# Alvo\nVer `alvo.md` §1.");
+    expect(await deadRemissions([ref(dir, "alvo.md")], "alvo.md")).toEqual([]);
+  });
+
+  it("o bloco lista, diz que é MEDIÇÃO e não prescreve forma", () => {
+    const b = deadRemissionFactBlock([{ ref: "§7.4", toPath: "contratos-erros.md" }], "modelo-dados.md");
+    expect(b).toContain("§7.4");
+    expect(b).toContain("contratos-erros.md");
+    expect(b).toContain("MEDIÇÃO, não veredicto");
+    for (const proibido of ["renumere", "remova a remissão e", "crie a seção"]) {
+      expect(b.toLowerCase()).not.toContain(proibido);
+    }
+  });
+
+  it("acima do teto, o que não foi listado é DECLARADO", () => {
+    const muitas = Array.from({ length: DEAD_REMISSION_MAX + 4 }, (_, i) => ({ ref: `§${i}.1`, toPath: "d.md" }));
+    const b = deadRemissionFactBlock(muitas, "alvo.md");
+    expect(b).toContain(`(${muitas.length}, medidas agora no disco)`);
+    expect(b).toContain("…(4 remissão(ões) além do teto desta lista");
+  });
+
+  it("nenhuma remissão morta ⇒ bloco vazio (silêncio aqui é 'medi e não achei')", () => {
+    expect(deadRemissionFactBlock([], "alvo.md")).toBe("");
   });
 });
