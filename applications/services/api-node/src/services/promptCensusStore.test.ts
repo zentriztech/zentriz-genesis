@@ -66,6 +66,67 @@ describe("censusRow — o que fica gravado é o que foi medido", () => {
   });
 });
 
+/**
+ * 🔴 GAP-167 — a série que decide o ponto de cache passa a levar os CORTES de prefixo, não só a cabeça
+ * inteira. Medido em prod: 57 chamadas de `api-gapfile`, 0 com cabeça repetida — porque a cabeça
+ * declarada é por arquivo por construção. Sem os cortes no banco, a decisão "onde marcar" continuaria
+ * sem dado depois do primeiro deploy.
+ */
+describe("censusRow — GAP-167: os cortes de prefixo chegam ao banco (e o que NÃO é reconciliado)", () => {
+  it("cabeça declarada grava o maior acerto e a série inteira de cortes", () => {
+    const r = censusRow(censo({ head: "cabeça estável ".repeat(500) }), null);
+    expect(r.head_prefix_hit_chars).toBe(0);   // estreia: 0 é MEDIÇÃO (avaliou e não acertou)
+    expect(r.head_prefix_cuts).toEqual([{ chars: 4_096, seen: 1, hitWithinTtl: false }]);
+  });
+
+  it("sem cabeça declarada os cortes são NULL — ausência de medição ≠ medição de zero", () => {
+    const r = censusRow(censo(), null);
+    expect(r.head_prefix_hit_chars).toBeNull();
+    expect(r.head_prefix_cuts).toBeNull();
+  });
+
+  it("🔴 a reconciliação pelo banco NÃO inventa acerto de corte (o banco não guarda hash por corte)", () => {
+    // Este é o limite declarado da migração 122: depois de um restart o `head_hash` pode ser corrigido
+    // pelo banco, mas os cortes ficam subestimados por uma janela. Subestimar dito é aceitável;
+    // afirmar acerto que não se pode observar seria o defeito do GAP-147 de novo.
+    const r = censusRow(censo({ head: "cabeça ".repeat(1000) }), { sinceLastMs: 30_000, hitWithinTtl: true });
+    expect(r.head_source).toBe("banco");
+    expect(r.head_prefix_hit_chars).toBe(0);
+    expect(r.head_prefix_cuts!.every((c) => !c.hitWithinTtl)).toBe(true);
+  });
+
+  it("o corte que REPETIU dentro do TTL é o que fica gravado", () => {
+    const head = "prefixo comum ".repeat(1_000);   // 14.000c ⇒ cortes 4096 e 8192
+    censo({ head });
+    const r = censusRow(censo({ head }), null);
+    expect(r.head_prefix_hit_chars).toBe(8_192);
+    expect(r.head_prefix_cuts).toEqual([
+      { chars: 4_096, seen: 2, hitWithinTtl: true },
+      { chars: 8_192, seen: 2, hitWithinTtl: true },
+    ]);
+  });
+
+  it("o INSERT leva as duas colunas novas como jsonb — e nenhum byte do prefixo", async () => {
+    const db = fakeDb();
+    await persistPromptCensus(db, censo({ head: "SIGILO-DA-SPEC ".repeat(500) }));
+    const insert = db.calls.at(-1)!;
+    expect(insert.sql).toContain("head_prefix_hit_chars");
+    expect(insert.sql).toContain("head_prefix_cuts");
+    expect(insert.sql).toContain("$15::jsonb");
+    expect(insert.params).toHaveLength(15);
+    expect(insert.params).toContain(JSON.stringify([{ chars: 4_096, seen: 1, hitWithinTtl: false }]));
+    expect(JSON.stringify(insert.params)).not.toContain("SIGILO-DA-SPEC");
+  });
+
+  it("caminho sem cabeça grava NULL nas duas colunas (nada de `0` que pareceria medição)", async () => {
+    const db = fakeDb();
+    await persistPromptCensus(db, censo());
+    const params = db.calls.at(-1)!.params;
+    expect(params[13]).toBeNull();
+    expect(params[14]).toBeNull();
+  });
+});
+
 describe("reconcileHeadFromDb — só se pergunta ao banco quando o processo NÃO sabe", () => {
   it("processo já conhecia o prefixo ⇒ nenhuma query (o veredicto dele é o melhor que existe)", async () => {
     const head = "cabeça ".repeat(1000);

@@ -26,7 +26,7 @@
  *
  * Nada aqui corta bloco de prompt nem marca cache: instrumento ANTES do comportamento (GAP-148/150).
  */
-import type { PromptCensus, PromptCensusSink } from "./promptCensus.js";
+import type { PromptCensus, PromptCensusSink, PromptHeadCensus } from "./promptCensus.js";
 import { PROMPT_CACHE_TTL_MS } from "./promptCensus.js";
 
 type Db = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
@@ -52,6 +52,13 @@ export interface PromptCensusRow {
   head_since_last_ms: number | null;
   head_hit_within_ttl: boolean | null;
   head_source: HeadSource | null;
+  /**
+   * 🔴 GAP-167 — o maior corte de prefixo que repetiu dentro do TTL, e a série inteira de cortes.
+   * `0` é MEDIÇÃO (nem o piso do provedor repete ⇒ o defeito é a ordem dos blocos, não o cache);
+   * `null` é AUSÊNCIA de medição (o caminho não declarou cabeça).
+   */
+  head_prefix_hit_chars: number | null;
+  head_prefix_cuts: PromptHeadCensus["prefixCuts"] | null;
 }
 
 /**
@@ -107,6 +114,13 @@ export function censusRow(
     head_hit_within_ttl: reconciliado ? reconciliado.hitWithinTtl : (h?.hitWithinTtl ?? null),
     // Sem cabeça declarada não há veredicto e, portanto, não há fonte de veredicto (NULL != 'memoria').
     head_source: h ? (reconciliado ? "banco" : "memoria") : null,
+    // 🔴 GAP-167: os cortes NÃO são reconciliados contra o banco. A reconciliação existe para o caso do
+    // restart (o processo diz "estreia" e o banco prova que o prefixo passou), e ela é feita por
+    // `head_hash` — o banco não guarda o hash de cada corte, então afirmar acerto de corte a partir
+    // dele seria inventar. Depois de um deploy os cortes ficam subestimados por uma janela, e isso é
+    // dito aqui em vez de ser corrigido por chute.
+    head_prefix_hit_chars: h?.prefixHitChars ?? null,
+    head_prefix_cuts: h?.prefixCuts ?? null,
   };
 }
 
@@ -129,12 +143,15 @@ export async function persistPromptCensus(db: Db, censo: PromptCensus): Promise<
   await db.query(
     `INSERT INTO prompt_census
        (origem, role, file, total, fields, outros, head_hash, head_chars, head_cacheable,
-        head_seen, head_since_last_ms, head_hit_within_ttl, head_source)
-     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        head_seen, head_since_last_ms, head_hit_within_ttl, head_source,
+        head_prefix_hit_chars, head_prefix_cuts)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)`,
     [
       r.origem, r.role, r.file, r.total, JSON.stringify(r.fields), r.outros,
       r.head_hash, r.head_chars, r.head_cacheable,
       r.head_seen, r.head_since_last_ms, r.head_hit_within_ttl, r.head_source,
+      r.head_prefix_hit_chars,
+      r.head_prefix_cuts === null ? null : JSON.stringify(r.head_prefix_cuts),
     ],
   );
 }

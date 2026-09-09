@@ -72,8 +72,33 @@ export const PROMPT_CACHE_MIN_HEAD_CHARS = 4096;
  */
 export const PROMPT_CACHE_TTL_MS = 5 * 60 * 1000;
 
-/** Quantas cabeças distintas manter em memória. Teto para o instrumento não virar vazamento. */
-const HEAD_TABLE_MAX = 512;
+/**
+ * 🔴 GAP-167 — cortes de prefixo medidos, em chars.
+ *
+ * MEDIDO em prod (tabela `prompt_census`, 57 chamadas de `api-gapfile`): **0 com `head_seen > 1` e 0
+ * acerto dentro do TTL** — cabeça média de 44.604c num total de 134.992c. A conclusão fácil ("cache
+ * não paga aqui") NÃO se sustenta: a cabeça declarada por esse caminho contém `ARQUIVO: <path>` e os
+ * blocos de irmãos/manifesto/índice/remissões, todos POR ARQUIVO. Ou seja, o hash exato dela só
+ * poderia repetir numa retentativa do mesmo arquivo com tudo idêntico. O instrumento confirmou a
+ * hipótese por CONSTRUÇÃO, não por evidência — é o defeito do GAP-14 aplicado ao próprio medidor.
+ *
+ * A pergunta que decide a marcação não é "a cabeça inteira repetiu?", e sim "ATÉ QUE PONTO os
+ * primeiros bytes são os mesmos?". Estes cortes respondem isso sem guardar uma linha de texto: cada
+ * corte tem o seu próprio hash na mesma tabela do processo, e o maior corte que repetiu DENTRO do TTL
+ * é exatamente onde um ponto de cache pagaria.
+ *
+ * O primeiro corte é o piso do provedor: abaixo dele marcar é pagar 1,25× por nada.
+ */
+export const PROMPT_CACHE_PREFIX_CUTS = [4_096, 8_192, 16_384, 32_768, 65_536] as const;
+
+/**
+ * Quantas cabeças distintas manter em memória. Teto para o instrumento não virar vazamento.
+ *
+ * 🔴 GAP-167: cada chamada passou a inserir a cabeça + até 5 cortes. O teto foi subido na mesma
+ * proporção para a janela de histórico continuar cobrindo o TTL de 5 min — encolher a janela faria o
+ * instrumento relatar "estreia" para prefixo que repetiu, que é o defeito que ele veio medir.
+ */
+const HEAD_TABLE_MAX = 2_048;
 
 /** hash da cabeça → (instante da última vez, quantas vezes já foi vista). Só no processo, nunca no banco. */
 const headSeen = new Map<string, { at: number; n: number }>();
@@ -119,6 +144,14 @@ export type PromptHeadCensus = {
   sinceLastMs: number | null;
   /** `true` só quando repetiu DENTRO do TTL — é a única forma de repetição que o provedor pagaria. */
   hitWithinTtl: boolean;
+  /**
+   * 🔴 GAP-167 — o MAIOR corte de prefixo (em chars) que repetiu dentro do TTL. `0` = nenhum, nem o
+   * piso do provedor. É o número que decide onde marcar o ponto de cache: `head` inteira repetindo é
+   * suficiente, mas não é necessário.
+   */
+  prefixHitChars: number;
+  /** Cada corte medido: tamanho, quantas vezes visto e se repetiu dentro do TTL. */
+  prefixCuts: { chars: number; seen: number; hitWithinTtl: boolean }[];
 };
 
 /** Censo de um prompt: quem ocupou quantos chars do que efetivamente foi enviado. */
@@ -160,6 +193,24 @@ function medirCabeca(origem: string, head?: string): PromptHeadCensus | null {
     const agora = Date.now();
     const anterior = headSeen.get(hash);
     const sinceLastMs = anterior ? agora - anterior.at : null;
+    // 🔴 GAP-167: os cortes ANTES da cabeça inteira, cada um com hash PRÓPRIO — o tamanho do corte
+    // entra na chave, senão o prefixo de 8k colidiria com a cabeça de exatamente 8k e o número mediria
+    // outra coisa. Só cortes que CABEM: afirmar "o prefixo de 32k repetiu" numa cabeça de 20k seria
+    // medir a cabeça inteira duas vezes com dois nomes.
+    const prefixCuts: PromptHeadCensus["prefixCuts"] = [];
+    let prefixHitChars = 0;
+    for (const corte of PROMPT_CACHE_PREFIX_CUTS) {
+      if (head.length < corte) break;
+      const chave = createHash("sha256")
+        .update(`${origem} corte=${corte} ${head.slice(0, corte)}`).digest("hex").slice(0, 12);
+      const antes = headSeen.get(chave);
+      const desde = antes ? agora - antes.at : null;
+      headSeen.set(chave, { at: agora, n: (antes?.n ?? 0) + 1 });
+      const hit = desde !== null && desde <= PROMPT_CACHE_TTL_MS;
+      prefixCuts.push({ chars: corte, seen: (antes?.n ?? 0) + 1, hitWithinTtl: hit });
+      // O MAIOR corte que acertou é o que decide: cortes menores acertam por consequência.
+      if (hit) prefixHitChars = corte;
+    }
     // Expiração é REGRA, não faxina: a entrada velha é reaproveitada para contar `seen`, mas
     // `hitWithinTtl` continua falso — repetir depois de 6 min é pagar escrita duas vezes.
     const seen = (anterior?.n ?? 0) + 1;
@@ -180,6 +231,8 @@ function medirCabeca(origem: string, head?: string): PromptHeadCensus | null {
       seen,
       sinceLastMs,
       hitWithinTtl: sinceLastMs !== null && sinceLastMs <= PROMPT_CACHE_TTL_MS,
+      prefixHitChars,
+      prefixCuts,
     };
   } catch {
     // Instrumento não derruba a chamada que ele mede (mesma regra do resto do censo).
@@ -241,6 +294,13 @@ export function recordPromptCensus(args: {
             ? "estreia"
             : (h.hitWithinTtl ? `ACERTO(${Math.round(h.sinceLastMs / 1000)}s)` : "fora-do-ttl")}`
           + (h.cacheable ? "" : " NAO-CACHEAVEL")
+          // 🔴 GAP-167: o que a cabeça inteira não consegue dizer. `prefix_hit=0c` com a cabeça em
+          // "estreia" é o caso medido em prod (0 de 57): nem os primeiros 4k repetem, e aí o problema é
+          // a ORDEM dos blocos, não o cache. `prefix_hit=16384c` diria onde marcar hoje.
+          + (h.prefixCuts.length > 0
+            ? ` prefix_hit=${h.prefixHitChars}c prefix_cuts=${h.prefixCuts
+              .map((c) => `${c.chars}:${c.hitWithinTtl ? "ACERTO" : c.seen}`).join(",")}`
+            : "")
         : ""),
     );
   } catch {

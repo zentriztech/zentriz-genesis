@@ -245,6 +245,92 @@ describe("recordPromptCensus — GAP-153: a cabeça estável é medida antes de 
   });
 });
 
+/**
+ * 🔴 GAP-167 — o instrumento do GAP-153 media um prefixo que era POR ARQUIVO por CONSTRUÇÃO.
+ *
+ * MEDIDO em prod (`prompt_census`, 57 chamadas de `api-gapfile`): **0 com `head_seen > 1`, 0 acerto no
+ * TTL**, cabeça média de 44.604c num total de 134.992c. A leitura fácil ("cache não paga no escritor")
+ * não se sustenta: a cabeça declarada contém `ARQUIVO: <path>` e os blocos de irmãos/manifesto/índice/
+ * remissões, todos por arquivo — o hash exato dela só repetiria numa retentativa do MESMO arquivo com
+ * tudo idêntico. O medidor confirmou a hipótese por construção, não por evidência.
+ *
+ * A pergunta que decide a marcação passa a ser "ATÉ QUE PONTO os primeiros bytes são os mesmos?".
+ * Estes testes pinam as três coisas que fariam esse número mentir: corte que não cabe sendo afirmado,
+ * corte contado como acerto fora do TTL, e o texto do prefixo escapando para o log.
+ */
+describe("recordPromptCensus — GAP-167: cortes de prefixo (onde o ponto de cache pagaria)", () => {
+  beforeEach(() => { resetPromptCensusHeads(); setPromptCensusSink(null); });
+
+  const censo = (head?: string, origem = "t") =>
+    recordPromptCensus({ origem, total: 200_000, fields: { file_content: 90_000 }, head });
+
+  it("só cortes que CABEM na cabeça são medidos — afirmar 32k numa cabeça de 20k seria inventar", () => {
+    const c = censo("a".repeat(20_000));
+    expect(c.head!.prefixCuts.map((x) => x.chars)).toEqual([4_096, 8_192, 16_384]);
+  });
+
+  it("🔴 cabeça que NUNCA repete pode ter prefixo que repete — é o caso medido em prod", () => {
+    // Mesma cabeça de 60k nos primeiros 32k, divergindo depois (é o que acontece quando o prompt tem
+    // um prefixo comum e blocos por-arquivo no fim).
+    const comum = "P".repeat(40_000);
+    const a = censo(`${comum}arquivo-A${"x".repeat(10_000)}`);
+    const b = censo(`${comum}arquivo-B${"y".repeat(10_000)}`);
+    // A cabeça inteira NÃO repete: é exatamente o `head_seen=1` de todas as 57 chamadas de prod.
+    expect(b.head!.seen).toBe(1);
+    expect(b.head!.hash).not.toBe(a.head!.hash);
+    // …e ainda assim há 32.768 chars pagos duas vezes que um ponto de cache leria a 0,1×.
+    expect(b.head!.prefixHitChars).toBe(32_768);
+    expect(logs.at(-1)).toContain("prefix_hit=32768c");
+  });
+
+  it("prefixo que divergiu antes do piso do provedor dá `prefix_hit=0c` — aí o defeito é a ORDEM", () => {
+    const a = censo(`ARQUIVO: um.md\n${"z".repeat(60_000)}`);
+    const b = censo(`ARQUIVO: dois.md\n${"z".repeat(60_000)}`);
+    expect(a.head!.prefixHitChars).toBe(0);
+    expect(b.head!.prefixHitChars).toBe(0);
+    expect(logs.at(-1)).toContain("prefix_hit=0c");
+    // Zero é MEDIÇÃO, não ausência: os cortes foram todos avaliados e nenhum acertou.
+    expect(b.head!.prefixCuts.every((c) => !c.hitWithinTtl)).toBe(true);
+  });
+
+  it("corte fora do TTL não é acerto — o provedor já teria expirado o prefixo", () => {
+    vi.useFakeTimers();
+    try {
+      const comum = "Q".repeat(40_000);
+      censo(`${comum}A`);
+      vi.advanceTimersByTime(PROMPT_CACHE_TTL_MS + 1_000);
+      const b = censo(`${comum}B`);
+      expect(b.head!.prefixHitChars).toBe(0);
+      // `seen` sobe (o prefixo é o mesmo), e é isso que distingue "nunca repetiu" de "repetiu tarde".
+      expect(b.head!.prefixCuts.find((c) => c.chars === 32_768)).toMatchObject({ seen: 2, hitWithinTtl: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a identidade do corte é por ORIGEM e por TAMANHO — 8k de um caminho não acerta 8k do outro", () => {
+    const comum = "R".repeat(40_000);
+    censo(`${comum}A`, "api-gapfile");
+    const b = censo(`${comum}B`, "api-rawfile");
+    expect(b.head!.prefixHitChars).toBe(0);
+  });
+
+  it("cabeça abaixo do piso não tem corte nenhum — e o log não fala de cache onde marcar é proibido", () => {
+    const c = censo("m".repeat(PROMPT_CACHE_MIN_HEAD_CHARS - 1));
+    expect(c.head!.prefixCuts).toEqual([]);
+    expect(c.head!.prefixHitChars).toBe(0);
+    expect(logs.at(-1)).not.toContain("prefix_hit=");
+    expect(logs.at(-1)).toContain("NAO-CACHEAVEL");
+  });
+
+  it("o log leva TAMANHOS de corte, nunca o texto do prefixo", () => {
+    const segredo = "SEGREDO-DA-SPEC-".repeat(4_000);
+    censo(segredo);
+    expect(logs.at(-1)).not.toContain("SEGREDO-DA-SPEC");
+    expect(logs.at(-1)).toMatch(/prefix_cuts=4096:1,8192:1/);
+  });
+});
+
 // 🔴 GAP-159 — o censo só decide corte se SOBREVIVER ao deploy. O destino é um sink registrado no boot
 // (nunca por call site), e estes testes pinam as duas coisas que fariam a série mentir: um caminho
 // medido que não chega ao destino, e um destino que derruba a chamada que ele mede.
