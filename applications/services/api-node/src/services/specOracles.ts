@@ -79,6 +79,37 @@ const ORACLE_MAX_TOKENS = Number(process.env.SPEC_ORACLE_MAX_TOKENS ?? "8000");
 export const ORACLE_GROWTH_BUDGET = Number(process.env.SPEC_ORACLE_GROWTH_BUDGET ?? "2000");
 
 /**
+ * 🔴 GAP-151 (2026-09-09) — o bloco de oráculos reproduzia INTEGRALMENTE a regra que o arquivo está
+ * sendo mandado PARAR de reproduzir.
+ *
+ * ## O que o censo do GAP-146 mediu em prod (9 chamadas de CTO, NVX LastMile, run `9208c28c`)
+ *
+ * O prompt do CTO por-arquivo tem em média **145.291 chars**, dos quais `oracles` = **31.557 (21,7%)**
+ * — a segunda maior despesa, atrás só do próprio conteúdo do arquivo. A tarefa (`gaps`) são **828
+ * chars (0,57%)**.
+ *
+ * Abrindo o bloco por papel (registro do NVX: 1.556 decisões, **114 contratos vigentes**):
+ * `definicao-de-pronto.md` é **dono de 3** contratos e **citante de 70**, e essas 70 linhas de citante
+ * carregam **20.987 chars de `rule_summary`** (média 300, máx. 500) — o texto da regra que mora em
+ * OUTRO arquivo, numa linha cuja instrução é *"SUBSTITUA a redeclaração da regra por uma CITAÇÃO do
+ * oráculo"*. Pagar o texto integral da regra é fazer exatamente o que se pede para parar de fazer: a
+ * linha existe para dizer **quem é o dono**, não para reensinar a regra. Não é caso isolado —
+ * `modelo-dados.md` 15.358, `observabilidade-operacao.md` 13.325, `privacidade-lgpd.md` 12.687.
+ *
+ * ## Por que 140, e por que o corte é DECLARADO
+ *
+ * 140 é o teto que o próprio prompt de DECISÃO dos oráculos já usa (`decidedContractsBlock`), onde o
+ * agente precisa comparar ASSUNTOS entre contratos — se 140 chars bastam para julgar qual contrato é
+ * qual, bastam para reconhecer a redeclaração a remover. O que muda é só o TRANSPORTE; nada sai da
+ * lista: a identidade (`contractKey` + `oraclePath`) continua inteira em todas as linhas, e o corte do
+ * texto passa por `cutEvidence` (GAP-128) — **cortar é legítimo, mentir sobre o corte não**.
+ *
+ * A regra do DONO (`owns`) não é cortada: ali o arquivo tem de manter a definição completa, e a regra
+ * vigente é o que impede o dono de reescrever o valor por outro.
+ */
+const ORACLE_RESTATER_RULE_CHARS = Number(process.env.SPEC_ORACLE_RESTATER_RULE_CHARS ?? "140");
+
+/**
  * GAP-36 (2026-09-07) — o orçamento é uma fração da MASSA da spec, não um número absoluto.
  *
  * ## O que estava errado (MEDIDO em prod, run `6d407460`, projeto NVX LastMile)
@@ -687,7 +718,9 @@ export interface OracleRoleForFile {
 export function decidedContractsBlock(existing: OracleDecision[], ruleChars = 140): string {
   if (existing.length === 0) return "";
   const lines = existing.map((d) => {
-    const rule = d.ruleSummary.replace(/\s+/g, " ").trim().slice(0, ruleChars);
+    // GAP-151: o teto de 140 fica, o `slice` silencioso sai. Esta linha é o que o agente lê para
+    // decidir se DUAS chaves são o mesmo assunto — regra truncada em silêncio vira regra sem exceção.
+    const rule = cutEvidence(d.ruleSummary.replace(/\s+/g, " ").trim(), ruleChars);
     return `- \`${d.contractKey}\` → oráculo \`${d.oraclePath}\`; `
       + (d.restatedIn.length
         ? `redeclarado em ${d.restatedIn.map((p) => `\`${p}\``).join(", ")}`
@@ -755,8 +788,11 @@ export function oracleFactBlock(
     );
   }
   for (const d of restates) {
+    // GAP-151: a linha do CITANTE leva a IDENTIDADE inteira e a regra com teto DECLARADO — reproduzir
+    // aqui os 300–500 chars da regra é fazer o que a própria linha manda parar de fazer.
+    const rule = cutEvidence(d.ruleSummary, ORACLE_RESTATER_RULE_CHARS);
     lines.push(
-      `• \`${d.contractKey}\`: o oráculo é \`${d.oraclePath}\`${d.ruleSummary ? ` (regra vigente: ${d.ruleSummary})` : ""}.`
+      `• \`${d.contractKey}\`: o oráculo é \`${d.oraclePath}\`${rule ? ` (regra vigente: ${rule})` : ""}.`
       + ` Neste arquivo, SUBSTITUA a redeclaração da regra por uma CITAÇÃO do oráculo`
       + ` (ex.: "ver \`${d.oraclePath}\` — fonte única deste contrato"). NÃO redeclare, NÃO escolha outro`
       + " valor e NÃO acrescente um parágrafo dizendo que este arquivo é a fonte única.",

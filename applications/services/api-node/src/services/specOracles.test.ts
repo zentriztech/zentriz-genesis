@@ -516,10 +516,13 @@ describe("decidedContractsBlock (GAP-34)", () => {
     expect(block).toContain("obrigatoriedade-metrics-token");
   });
 
-  it("regra longa é truncada — o fato entra sem estourar o prompt", () => {
-    const block = decidedContractsBlock([D({ ruleSummary: "x".repeat(400) })], 50);
-    expect(block).toContain(`regra vigente: ${"x".repeat(50)}`);
-    expect(block).not.toContain("x".repeat(51));
+  // GAP-151: o teto continua, o `slice` silencioso sai. Esta é a linha que o agente lê para julgar se
+  // DUAS chaves são o mesmo assunto — regra truncada em silêncio vira regra sem exceção (GAP-128).
+  it("regra longa é truncada COM o corte declarado — o fato entra sem estourar o prompt", () => {
+    const block = decidedContractsBlock([D({ ruleSummary: "x".repeat(400) })], 200);
+    expect(block).toContain("regra vigente: xxx");
+    expect(block).toContain("de 400 chars — o fato CONTINUA");
+    expect(block).not.toContain("x".repeat(201));
   });
 });
 
@@ -541,6 +544,61 @@ describe("oracleFactBlock — o que o CTO lê", () => {
     expect(block).toContain("ESTE arquivo é o oráculo");
     expect(block).toContain("page/pageSize (1-based)");
     expect(block).not.toContain("SUBSTITUA a redeclaração");
+  });
+});
+
+// ── GAP-151: o bloco reproduzia a regra que manda PARAR de reproduzir ─────────
+//
+// Censo do GAP-146 em prod (9 chamadas de CTO, NVX LastMile): `oracles` = 31.557 de 145.291 chars
+// (21,7%), e só em `definicao-de-pronto.md` as 70 linhas de CITANTE carregavam 20.987 chars de
+// `rule_summary` — o texto integral de regras que moram em outro arquivo, numa linha cuja instrução é
+// "substitua a redeclaração por uma CITAÇÃO". O teto é o mesmo 140 do prompt de decisão, e é DECLARADO.
+describe("oracleFactBlock — GAP-151: teto declarado na regra do citante", () => {
+  const LONGA = `${"regra vigente do contrato de paginação ".repeat(20)}exceto quando o tenant é X`;
+
+  it("citante recebe a regra com teto e o corte é DECLARADO (nunca silencioso)", () => {
+    const block = oracleFactBlock([D({ ruleSummary: LONGA })], "modelo-dados.md");
+    expect(block).toContain("CORTADO:");
+    expect(block).toContain(`de ${LONGA.length} chars`);
+    expect(block).toContain("o fato CONTINUA");
+    expect(block).not.toContain("exceto quando o tenant é X");
+  });
+
+  it("a IDENTIDADE do contrato nunca é cortada — o dono continua nomeado", () => {
+    const block = oracleFactBlock([D({ ruleSummary: LONGA })], "modelo-dados.md");
+    expect(block).toContain("`paginacao`");
+    expect(block).toContain("o oráculo é `contratos-erros.md`");
+    expect(block).toContain("SUBSTITUA a redeclaração");
+  });
+
+  it("regra curta passa INTEIRA — o teto não inventa corte", () => {
+    const block = oracleFactBlock([D()], "modelo-dados.md");
+    expect(block).toContain("page/pageSize (1-based)");
+    expect(block).not.toContain("CORTADO:");
+  });
+
+  it("a regra do DONO não é cortada — ele tem de manter a definição completa", () => {
+    const block = oracleFactBlock([D({ ruleSummary: LONGA })], "contratos-erros.md");
+    expect(block).toContain("exceto quando o tenant é X");
+    expect(block).not.toContain("CORTADO:");
+  });
+
+  it("massa medida: 70 citantes de 300 chars cabem em menos da metade do que custavam", () => {
+    const regra = "r".repeat(300);
+    const decisoes = Array.from({ length: 70 }, (_, i) => D({
+      contractKey: `contrato-${i}`, oraclePath: `dono-${i}.md`, ruleSummary: regra,
+      restatedIn: ["definicao-de-pronto.md"],
+    }));
+    const block = oracleFactBlock(decisoes, "definicao-de-pronto.md");
+    const regras = (block.match(/regra vigente: [^)]+/g) ?? [])
+      .map((r) => r.slice("regra vigente: ".length));
+    expect(regras).toHaveLength(70);
+    // cada regra transportada cabe no teto (o marcador de corte é parte do teto, por construção)
+    for (const r of regras) expect(r.length).toBeLessThanOrEqual(140);
+    // o texto das regras cai de 70×300 = 21.000 para menos da metade
+    expect(regras.reduce((a, r) => a + r.length, 0)).toBeLessThan(21_000 / 2);
+    // e nenhuma identidade desapareceu no caminho
+    for (let i = 0; i < 70; i += 1) expect(block).toContain(`\`contrato-${i}\``);
   });
 });
 
