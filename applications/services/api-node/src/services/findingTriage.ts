@@ -461,16 +461,44 @@ export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding
  * medição anterior mais recente de OUTRA run — as janelas se sobrepõem e comparar uma run consigo mesma
  * fabricaria "texto invariante" de graça. Sem sha registrado (cobertura legada) o balde fica em 0.
  */
+/**
+ * 🔴 GAP-154 — a atribuição do GAP-126 era ASSIMÉTRICA, e a assimetria favorecia o laço.
+ *
+ * O GAP-126 deu ao lado "abriu" um balde de não-atribuível (`openedOnUnchangedText`: entrou num arquivo
+ * cujo texto não mudou ⇒ variância do juiz, não regressão do laço). O lado "fechou" nunca ganhou o
+ * mesmo balde — e o argumento é literalmente o mesmo, invertido: um juiz não-determinístico (o próprio
+ * código do refutador documenta **~60% de churn entre validações da MESMA spec**, motivo do
+ * `SPEC_VALIDATOR_VOTES`) também DEIXA DE RELATAR defeitos que continuam lá. GAP que "fechou" num
+ * arquivo de sha idêntico não foi consertado: ninguém tocou naquele texto.
+ *
+ * Por que isso não é detalhe: `closed > opened` é o saldo que zera o `no_progress_streak` e o mesmo
+ * saldo que a nota do chat mostra ao Jean. Com um lado auditado e o outro não, o laço se reportava com
+ * o crédito inteiro e o débito descontado. MEDIDO em 7 passes de prod com o GAP-126 no ar: 48 fechados
+ * × 47 abertos, dos quais **44 (93,6%) em texto invariante** — a assimetria não é hipotética, é o
+ * tamanho exato do balde que só existia de um lado.
+ *
+ * Régua: idêntica à do GAP-126 (sha na run MAIS NOVA + sha igual na medição anterior mais recente de
+ * OUTRA run). Sem sha registrado o balde fica em 0 — nunca se inventa invariância que não se mediu.
+ */
 export interface GapDelta {
   closed: ValidationFinding[];
   opened: ValidationFinding[];
   openedOnNewSurface: number;
   /** Entraram em arquivo julgado antes E com sha IDÊNTICO agora — o texto do alvo não mudou. */
   openedOnUnchangedText: number;
+  /**
+   * 🔴 GAP-154: saíram de arquivo com sha IDÊNTICO — ninguém editou aquele texto, então o
+   * desaparecimento é do RELATO, não do defeito. Espelho exato de `openedOnUnchangedText`.
+   */
+  closedOnUnchangedText: number;
 }
 
 export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS): GapDelta {
-  if (runs.length < 2) return { closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 };
+  if (runs.length < 2) {
+    return {
+      closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0,
+    };
+  }
   const now = surveyFindings(runs.slice(0, window), currentFiles);
   const before = surveyFindings(runs.slice(1, window + 1), currentFiles);
   const fpOf = (fs: ValidationFinding[]) => {
@@ -491,6 +519,23 @@ export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null,
   for (const [k, f] of b) if (!a.has(k) && nowSeen.has(k)) closed.push(f);
   // GAP-126: shas da run MAIS NOVA (a que produziu o finding novo) e a medição anterior mais recente.
   const shasNow = judgedShasOf(runs[0]?.coverage);
+  /**
+   * 🔴 GAP-154: a pergunta "o TEXTO deste arquivo mudou entre as duas medições?" é a MESMA nos dois
+   * lados do saldo, então virou uma função só — duplicá-la deixaria os dois baldes livres para
+   * divergir de régua com o tempo, e é a divergência de régua que produz saldo mentiroso.
+   * `null` = não se sabe (sem sha em uma das pontas) e nunca conta como invariante.
+   */
+  const textoInvariante = (file: string): boolean | null => {
+    const shaNow = shaJudgedIn(file, shasNow);
+    if (!shaNow) return null;
+    for (const r of runs.slice(1, window + 1)) {
+      const shaBefore = shaJudgedIn(file, judgedShasOf(r.coverage));
+      if (!shaBefore) continue;
+      return shaBefore === shaNow;
+      // a medição anterior MAIS RECENTE decide; as mais velhas não falam por ela
+    }
+    return null;
+  };
   let onNew = 0, onUnchanged = 0;
   for (const [k, f] of a) {
     if (b.has(k)) continue;
@@ -498,16 +543,21 @@ export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null,
     const file = String(f.file ?? "").toLowerCase();
     if (!file) continue;
     if (!judgedBefore.has(file) && ![...judgedBefore].some((p) => baseName(p) === baseName(file))) { onNew++; continue; }
-    const shaNow = shaJudgedIn(file, shasNow);
-    if (!shaNow) continue;
-    for (const r of runs.slice(1, window + 1)) {
-      const shaBefore = shaJudgedIn(file, judgedShasOf(r.coverage));
-      if (!shaBefore) continue;
-      if (shaBefore === shaNow) onUnchanged++;
-      break; // a medição anterior MAIS RECENTE decide; as mais velhas não falam por ela
-    }
+    if (textoInvariante(file) === true) onUnchanged++;
   }
-  return { closed, opened, openedOnNewSurface: onNew, openedOnUnchangedText: onUnchanged };
+  // 🔴 GAP-154: o mesmo balde do lado do CRÉDITO. Sem `openedOnNewSurface` do outro lado: um finding
+  // que fechou estava, por definição, num arquivo que a janela anterior já julgou — "superfície nova"
+  // não tem análogo aqui, e inventar um faria o espelho mentir.
+  let fechadoInvariante = 0;
+  for (const f of closed) {
+    const file = String(f.file ?? "").toLowerCase();
+    if (!file) continue;
+    if (textoInvariante(file) === true) fechadoInvariante++;
+  }
+  return {
+    closed, opened, openedOnNewSurface: onNew, openedOnUnchangedText: onUnchanged,
+    closedOnUnchangedText: fechadoInvariante,
+  };
 }
 
 /** `gapDelta` sobre as runs do projeto (uma query; janela W+1 para que "antes" tenha o mesmo tamanho). */

@@ -30,7 +30,12 @@ let findings: Array<{ severity: string; triage?: unknown }> = [];
 let latestRunId: string | null = "run-0";
 // GAP-41: o diff finding-a-finding entre as duas últimas validações. `null` reproduz o caso em que
 // não há duas validações para comparar (ou a consulta falhou) — o laço volta a olhar só o agregado.
-let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number; openedOnUnchangedText?: number } | null = null;
+// GAP-154: `closedOnUnchangedText` é OPCIONAL no dublê de propósito — é assim que a cobertura legada
+// chega ao laço (balde ausente), e o teste do saldo histórico depende de poder omiti-lo.
+let delta: { closed: unknown[]; opened: unknown[]; openedOnNewSurface: number;
+             openedOnUnchangedText?: number; closedOnUnchangedText?: number } | null = null;
+/** 🔴 GAP-154: o que o laço DIZ ao Jean no chat (o dublê de `spec_chat_messages` empilha aqui). */
+const chatNotes: string[] = [];
 /**
  * 🔴 GAP-76: o NÍVEL de GAPs no subconjunto que as DUAS últimas validações julgaram por inteiro.
  * `null` reproduz "não foi possível medir" (cobertura ausente em algum dos lados) — e aí o laço volta a
@@ -216,7 +221,12 @@ const db = {
     }
     if (s.startsWith("SELECT status FROM projects")) return { rows: [{ status: projectStatus }], rowCount: 1 };
     if (s.startsWith("UPDATE project_spec_files") || s.startsWith("UPDATE projects")) return { rows: [], rowCount: 1 };
-    if (s.startsWith("INSERT INTO spec_chat_messages")) return { rows: [], rowCount: 1 };
+    // 🔴 GAP-154: o chat é onde o Jean lê o passe (lei do GAP-67), então o dublê passou a GUARDAR o texto
+    // — antes ele era engolido e nenhum teste podia afirmar o que o laço diz em voz alta ao humano.
+    if (s.startsWith("INSERT INTO spec_chat_messages")) {
+      chatNotes.push(String(values.find((v) => typeof v === "string" && v.includes("🤖")) ?? ""));
+      return { rows: [], rowCount: 1 };
+    }
 
     if (s.startsWith("SELECT status, stage_b_ran, stage_b_coverage FROM spec_validation_runs")) {
       return { rows: [{ status: validationStatus, stage_b_ran: stageBRan, stage_b_coverage: stageBCoverage }], rowCount: 1 };
@@ -331,6 +341,7 @@ beforeEach(() => {
   snapshotFails = false;
   specTreeFiles = [];
   sqlLog.length = 0;
+  chatNotes.length = 0;
   findings = [{ severity: "blocker" }, { severity: "warning" }, { severity: "info" }];
   writeSpec(BASE_SPEC);
   process.env.API_AGENTS_URL = "http://agents:8000";
@@ -1143,6 +1154,93 @@ describe("validação dentro do laço", () => {
       await advanceAutonomyRun(db, r.id);
       expect(run!.no_progress_streak).toBe(1);   // 1 fechado × 2 atribuíveis
       expect(JSON.stringify(run!.rounds)).toContain("REGRESSÃO/reformulação, não descoberta");
+    });
+
+    /**
+     * 🔴 GAP-154 — a atribuição do GAP-126 era de UM LADO SÓ: o débito descontado, o crédito inteiro.
+     * MEDIDO em prod (7 entradas de passe do NVX): 48 fechados × 47 abertos, 44 destes em arquivo de sha
+     * IDÊNTICO. Como o refutador é não-determinístico (~60% de churn entre validações da mesma spec — a
+     * razão do `SPEC_VALIDATOR_VOTES=3`), "fechou num arquivo intocado" é o juiz parando de relatar, não
+     * conserto. E é este saldo que zera o `no_progress_streak`, o freio que decide se o laço segue gastando.
+     */
+    describe("🔴 GAP-154 — o crédito também é auditado", () => {
+      it("todos os fechados em arquivo intocado ⇒ saldo NÃO é progresso (o freio volta a morder)", async () => {
+        const r = await reachValidating(5);
+        delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0, openedOnUnchangedText: 0,
+                  closedOnUnchangedText: 3 };
+        continuity = { persisted: 0, reconciled: true };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(1);   // 0 atribuível × 1 atribuível — antes disto era 3 × 1
+        const rounds = JSON.stringify(run!.rounds);
+        expect(rounds).toContain("sha IDÊNTICO ao da validação anterior");
+        expect(rounds).toContain("Fechamento atribuível a esta edição: 0");
+        const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+        expect(last.gapsClosedUnchangedText).toBe(3);
+        expect(last.gapsClosedAttributable).toBe(0);
+      });
+
+      it("fechamento em arquivo EDITADO segue valendo: o crédito legítimo não é confiscado", async () => {
+        const r = await reachValidating(5);
+        delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0, openedOnUnchangedText: 0,
+                  closedOnUnchangedText: 1 };
+        continuity = { persisted: 0, reconciled: true };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(0);   // 2 atribuíveis × 1 atribuível
+        expect(JSON.stringify(run!.rounds)).toContain("Fechamento atribuível a esta edição: 2");
+      });
+
+      it("balde AUSENTE não desconta nada (cobertura legada mantém o saldo histórico)", async () => {
+        // Assimetria DECLARADA: sem sha para comparar, supor variância mataria por streak toda run de
+        // cobertura antiga — punição por ausência de instrumento, não por falta de progresso.
+        const r = await reachValidating(5);
+        delta = { closed: [{}, {}], opened: [{}], openedOnNewSurface: 0, openedOnUnchangedText: 0 };
+        continuity = { persisted: 0, reconciled: true };
+        await advanceAutonomyRun(db, r.id);
+        expect(run!.no_progress_streak).toBe(0);
+        expect(JSON.stringify(run!.rounds)).not.toContain("Fechamento atribuível");
+      });
+
+      it("`SPEC_GAP_CLOSED_ATTRIBUTION=off` restaura o número cheio — e DECLARA que o desconto está desligado", async () => {
+        const antes = process.env.SPEC_GAP_CLOSED_ATTRIBUTION;
+        process.env.SPEC_GAP_CLOSED_ATTRIBUTION = "off";
+        try {
+          const r = await reachValidating(5);
+          delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0, openedOnUnchangedText: 0,
+                    closedOnUnchangedText: 3 };
+          continuity = { persisted: 0, reconciled: true };
+          await advanceAutonomyRun(db, r.id);
+          expect(run!.no_progress_streak).toBe(0);   // saldo antigo: 3 fechados × 1 aberto
+          const rounds = JSON.stringify(run!.rounds);
+          // O balde continua MEDIDO e dito em voz alta: reverter o comportamento nunca apaga o fato.
+          expect(rounds).toContain("saíram de arquivo com sha IDÊNTICO");
+          expect(rounds).toContain("SPEC_GAP_CLOSED_ATTRIBUTION=off");
+        } finally {
+          if (antes === undefined) delete process.env.SPEC_GAP_CLOSED_ATTRIBUTION;
+          else process.env.SPEC_GAP_CLOSED_ATTRIBUTION = antes;
+        }
+      });
+
+      it("desconto NUNCA passa do crédito: saldo atribuível não fica negativo", async () => {
+        const r = await reachValidating(5);
+        delta = { closed: [{}], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0,
+                  closedOnUnchangedText: 5 };   // balde maior que o próprio conjunto (não deve acontecer)
+        continuity = { persisted: 0, reconciled: true };
+        await advanceAutonomyRun(db, r.id);
+        const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+        expect(Number(last.gapsClosedAttributable)).toBeGreaterThanOrEqual(0);
+        expect(JSON.stringify(run!.rounds)).not.toMatch(/Fechamento atribuível a esta edição: -/);
+      });
+
+      it("o desconto aparece no CHAT, não só no detalhe da rodada (é lá que o Jean lê o passe)", async () => {
+        const r = await reachValidating(5);
+        delta = { closed: [{}, {}, {}], opened: [{}], openedOnNewSurface: 0, openedOnUnchangedText: 0,
+                  closedOnUnchangedText: 2 };
+        continuity = { persisted: 0, reconciled: true };
+        await advanceAutonomyRun(db, r.id);
+        const chat = chatNotes.join("\n");
+        expect(chat).toContain("2 saíram de arquivo de sha idêntico");
+        expect(chat).toContain("**1** fechamento(s) atribuível(is)");
+      });
     });
   });
 

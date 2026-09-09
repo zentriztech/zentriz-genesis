@@ -577,10 +577,89 @@ describe("findingTriage — GAP-41: diff finding-a-finding entre validações", 
     });
   });
 
+  /**
+   * 🔴 GAP-154 — a atribuição do GAP-126 era de UM LADO SÓ.
+   *
+   * Medido em prod 2026-09-08/09 (NVX LastMile, 7 entradas de passe): 48 fechados × 47 abertos, e 44 dos
+   * abertos em arquivo de sha IDÊNTICO. O lado ABERTO tinha balde de não-atribuível; o lado FECHADO, não.
+   * Só que o refutador é NÃO-DETERMINÍSTICO (~60% de rotatividade entre validações da mesma spec — é a
+   * razão documentada do `SPEC_VALIDATOR_VOTES`), logo um GAP que "fechou" num arquivo de sha idêntico não
+   * foi corrigido: o juiz simplesmente parou de relatá-lo. Auditar um lado e não o outro fazia o laço se
+   * reportar com o CRÉDITO inteiro e o DÉBITO descontado — e é esse saldo que zera o `no_progress_streak`.
+   */
+  describe("🔴 GAP-154 — fechado em arquivo de sha IDÊNTICO também não é atribuível à edição", () => {
+    const covS = (shas: Record<string, string>) =>
+      ({ full: Object.keys(shas), fullShas: shas, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+    const RS = (id: string, findings: ValidationFinding[], shas: Record<string, string>) =>
+      ({ id, created_at: id, findings, coverage: covS(shas) });
+
+    it("o espelho exato do GAP-126: sumiu de arquivo intocado ⇒ variância do refutador, não correção", () => {
+      const antigo = F({ file: "visao-escopo.md", title: "§1.5 contradiz a matriz", anchor: "§1.5" });
+      const d = gapDelta([
+        RS("r3", [], { "visao-escopo.md": "sha-4545" }),
+        RS("r2", [antigo], { "visao-escopo.md": "sha-4545" }),
+        RS("r1", [antigo], { "visao-escopo.md": "sha-4545" }),
+      ], null, 2);
+      expect(d.closed).toHaveLength(1);
+      expect(d.closedOnUnchangedText).toBe(1);
+    });
+
+    it("sha DIFERENTE ⇒ o texto mudou e o fechamento É atribuível (o crédito legítimo não se perde)", () => {
+      const antigo = F({ file: "contratos-erros.md", title: "§4.3 sem desfecho", anchor: "§4.3" });
+      const d = gapDelta([
+        RS("r3", [], { "contratos-erros.md": "sha-depois" }),
+        RS("r2", [antigo], { "contratos-erros.md": "sha-antes" }),
+      ], null, 2);
+      expect(d.closed).toHaveLength(1);
+      expect(d.closedOnUnchangedText).toBe(0);
+    });
+
+    it("cobertura SEM `fullShas` (legado) ⇒ balde ZERO: sem sha não há desconto, o saldo antigo vale", () => {
+      const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+      const R2 = (id: string, findings: ValidationFinding[], ...full: string[]) =>
+        ({ id, created_at: id, findings, coverage: cov(...full) });
+      const antigo = F({ file: "a.md", title: "GAP de A", anchor: "a1" });
+      const d = gapDelta([R2("r3", [], "a.md"), R2("r2", [antigo], "a.md"), R2("r1", [antigo], "a.md")], null, 2);
+      expect(d.closed).toHaveLength(1);
+      expect(d.closedOnUnchangedText).toBe(0);
+    });
+
+    it("basename ambíguo ANTES ⇒ sem desconto: na dúvida o crédito fica com o laço, não com a variância", () => {
+      // O fechamento é reconhecido (na cobertura NOVA o `README.md` resolve para um único caminho), mas na
+      // cobertura anterior havia dois candidatos e nenhum responde por ele. Sem sha comparável, o balde
+      // fica em zero: inventar invariância que não se mediu seria descontar crédito por palpite — o
+      // mesmo erro que o GAP-126 evita do outro lado.
+      const antigo = F({ file: "README.md", title: "índice incompleto", anchor: "GATE-01" });
+      const d = gapDelta([
+        RS("r3", [], { "web/README.md": "sha-1" }),
+        RS("r2", [antigo], { "web/README.md": "sha-1", "api/README.md": "sha-2" }),
+      ], null, 2);
+      expect(d.closed).toHaveLength(1);
+      expect(d.closedOnUnchangedText).toBe(0);
+    });
+
+    it("os dois baldes convivem no MESMO delta — um não sobrescreve o outro", () => {
+      // Arquivo intocado onde o refutador trocou um achado por outro: 1 fechado E 1 aberto, ambos
+      // NÃO atribuíveis. Antes do GAP-154 este par valia "+1 fechado / 0 aberto atribuível" = progresso.
+      const saiu = F({ file: "visao-escopo.md", title: "§1.5 contradiz a matriz", anchor: "§1.5" });
+      const entrou = F({ file: "visao-escopo.md", title: "§2.2 sem dono", anchor: "§2.2" });
+      const d = gapDelta([
+        RS("r3", [entrou], { "visao-escopo.md": "sha-igual" }),
+        RS("r2", [saiu], { "visao-escopo.md": "sha-igual" }),
+      ], null, 2);
+      expect(d.closed).toHaveLength(1);
+      expect(d.opened).toHaveLength(1);
+      expect(d.closedOnUnchangedText).toBe(1);
+      expect(d.openedOnUnchangedText).toBe(1);
+    });
+  });
+
   it("menos de duas validações: não há o que comparar (zeros, nunca um palpite)", () => {
-    expect(gapDelta([], null)).toEqual({ closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 });
-    expect(gapDelta([{ id: "r1", created_at: "1", findings: [F({ anchor: "x" })] }], null))
-      .toEqual({ closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0 });
+    // 🔴 GAP-154: o balde do lado FECHADO entra aqui pelo mesmo motivo dos outros — "não medido" é 0,
+    // e 0 de desconto preserva o comportamento legado de quem não tem cobertura para comparar sha.
+    const zeros = { closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0 };
+    expect(gapDelta([], null)).toEqual(zeros);
+    expect(gapDelta([{ id: "r1", created_at: "1", findings: [F({ anchor: "x" })] }], null)).toEqual(zeros);
   });
 
   it("gapDeltaSinceLastRun: uma query, janela W+1, só runs terminais", async () => {

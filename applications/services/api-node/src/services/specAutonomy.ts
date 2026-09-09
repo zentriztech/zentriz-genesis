@@ -326,6 +326,14 @@ export interface AutonomyRoundLog {
   gapsOpenedUnchangedText?: number | null;
   gapsOpenedAttributable?: number | null;
   /**
+   * 🔴 GAP-154 — o MESMO balde do lado do crédito: de `gapsClosed`, a parcela que saiu de arquivo com
+   * sha IDÊNTICO. Ninguém editou aquele texto, então o defeito não foi consertado — o juiz apenas
+   * deixou de relatá-lo (o próprio refutador documenta ~60% de churn entre validações da mesma spec).
+   * Sem estes dois campos o laço se reportava com o crédito inteiro e o débito descontado.
+   */
+  gapsClosedUnchangedText?: number | null;
+  gapsClosedAttributable?: number | null;
+  /**
    * 🔴 GAP-76 — o NÍVEL de GAPs no subconjunto que ESTA validação e a anterior julgaram por inteiro.
    *
    * `gapsBefore`/`gapsAfter` são agregados do PROJETO, e o agregado sobe e desce sozinho por rotação de
@@ -3749,6 +3757,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         openedOnUnchangedText: cont?.reconciled
           ? Math.min(rawDelta.openedOnUnchangedText ?? 0, cont.opened.length)
           : (rawDelta.openedOnUnchangedText ?? 0),
+        // 🔴 GAP-154: mesmo teto do lado do crédito — a reconciliação (GAP-67) tira do balde de
+        // "fechados" quem era o MESMO defeito rebatizado, e o balde de variância não pode passar do
+        // que sobrou. Sem o `Math.min`, um desconto maior que o próprio crédito daria saldo NEGATIVO.
+        closedOnUnchangedText: cont?.reconciled
+          ? Math.min(rawDelta.closedOnUnchangedText ?? 0, cont.closed.length)
+          : (rawDelta.closedOnUnchangedText ?? 0),
       }
     : null;
   const persisted = cont?.reconciled ? cont.persisted.length : 0;
@@ -3789,8 +3803,21 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     ? Math.min(delta.opened.length, (delta.openedOnNewSurface ?? 0) + (delta.openedOnUnchangedText ?? 0))
     : 0;
   const openedAtribuivel = delta ? delta.opened.length - openedNaoAtribuivel : 0;
+  // 🔴 GAP-154: o mesmo desconto do lado do CRÉDITO. Um GAP que saiu de arquivo cujo sha não mudou não
+  // foi consertado — ninguém tocou naquele texto; o juiz (não-determinístico, ~60% de churn medido no
+  // próprio refutador) só deixou de relatá-lo. Auditar um lado e não o outro fazia o laço se reportar
+  // com o crédito inteiro e o débito descontado, e é esse saldo que zera o `no_progress_streak`.
+  //
+  // Assimetria DECLARADA nos defaults: balde ausente vale 0 nos dois lados, o que no lado do crédito
+  // preserva o comportamento histórico (nenhum desconto quando não há sha para medir). O alternativo
+  // — supor variância em toda run sem sha — mataria por streak toda run de cobertura legada, punindo
+  // o laço por uma ausência de instrumento. Reversível sem deploy por `SPEC_GAP_CLOSED_ATTRIBUTION`.
+  const descontarFechado = (process.env.SPEC_GAP_CLOSED_ATTRIBUTION ?? "on").trim().toLowerCase() !== "off";
+  const closedAtribuivel = delta
+    ? delta.closed.length - (descontarFechado ? (delta.closedOnUnchangedText ?? 0) : 0)
+    : 0;
   const progressed = aggregateFell || comparableFell
-    || (!!delta && !!cont?.reconciled && delta.closed.length > openedAtribuivel);
+    || (!!delta && !!cont?.reconciled && closedAtribuivel > openedAtribuivel);
   // 🔴 GAP-18: com rotação de cobertura, duas validações seguidas podem julgar CONJUNTOS DIFERENTES de
   // arquivos. Aí a contagem pode SUBIR porque um arquivo novo entrou no julgamento — não porque a spec
   // piorou. Mesma lei do GAP-13: superfície diferente = contagem não comparável. Então o streak de
@@ -3840,6 +3867,15 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       (delta.openedOnUnchangedText > 0 ? `${delta.openedOnNewSurface > 0 ? " e" : " —"} ${delta.openedOnUnchangedText} em arquivo com sha IDÊNTICO ao da validação anterior (o texto do alvo não mudou: defeito que já existia ou vindo da contraparte editada)` : "") +
       `. Parcela atribuível a esta edição: ${openedAtribuivel}.`
     : "";
+  // 🔴 GAP-154: o desconto do lado do crédito dito em voz alta, com o MOTIVO. Sem esta frase o número
+  // "N fechado(s)" da linha acima seguiria sendo lido como N consertos — e parte dele é só o juiz
+  // deixando de relatar o que continua no arquivo (sha idêntico = ninguém editou aquele texto).
+  const fechadoNaoAtribuivelNote = delta && (delta.closedOnUnchangedText ?? 0) > 0
+    ? ` ⚠️ Dos fechados, ${delta.closedOnUnchangedText} saíram de arquivo com sha IDÊNTICO ao da validação anterior:` +
+      ` ninguém editou aquele texto, então não é conserto — é o juiz deixando de relatar (variância).` +
+      ` Fechamento atribuível a esta edição: ${closedAtribuivel}.` +
+      (descontarFechado ? "" : ` (desconto DESLIGADO por \`SPEC_GAP_CLOSED_ATTRIBUTION=off\`: o saldo acima ainda usa o número cheio.)`)
+    : "";
   const deltaNote = delta
     ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
       (delta.opened.length === 0
@@ -3849,6 +3885,7 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         : openedNaoAtribuivel > 0
           ? `.${naoAtribuivelNote}`
           : ` — todos em arquivo já julgado antes e com texto MUDADO, ou seja REGRESSÃO/reformulação, não descoberta.`) +
+      fechadoNaoAtribuivelNote +
       contNote
     : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
@@ -3866,6 +3903,9 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     gapsClosed: delta?.closed.length ?? null, gapsOpened: delta?.opened.length ?? null,
     gapsOpenedUnchangedText: delta?.openedOnUnchangedText ?? null,
     gapsOpenedAttributable: delta ? openedAtribuivel : null,
+    // 🔴 GAP-154: os dois campos espelho. `null` = não medido (não "zero variância").
+    gapsClosedUnchangedText: delta?.closedOnUnchangedText ?? null,
+    gapsClosedAttributable: delta ? closedAtribuivel : null,
     gapsPersisted: cont?.reconciled ? persisted : null,
     persistedGaps: persistedRefs,
     gapsComparableBefore: comp?.before ?? null, gapsComparableNow: comp?.now ?? null,
@@ -3888,6 +3928,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
             delta.openedOnNewSurface > 0 ? `${delta.openedOnNewSurface} em arquivo julgado por inteiro pela 1ª vez` : null,
           ].filter(Boolean).join("; ")}), sobrando **${openedAtribuivel}** atribuível(is).`
         : ".") : "") +
+    // 🔴 GAP-154: pela MESMA lei do GAP-67 abaixo, o desconto do lado do CRÉDITO tem de aparecer no chat.
+    // É aqui que "**48 GAP(s) fechado(s)**" é lido como 48 consertos — e em prod 44 deles estavam em
+    // arquivo de sha idêntico. Deixar o desconto só no detalhe da rodada seria exibir o crédito cheio.
+    (delta && (delta.closedOnUnchangedText ?? 0) > 0
+      ? ` ⚠️ Mas **${delta.closedOnUnchangedText} saíram de arquivo de sha idêntico** (ninguém editou aquele texto — é o juiz deixando de relatar, não conserto), sobrando **${closedAtribuivel}** fechamento(s) atribuível(is).`
+      : "") +
     // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
     // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.
     (persisted > 0 ? ` ⚠️ **${persisted} defeito(s) apenas REBATIZADO(s)** pela edição (seção renumerada/movida): continuam abertos e não entram em nenhuma das duas contagens.` : "") +
