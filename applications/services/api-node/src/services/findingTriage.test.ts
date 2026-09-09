@@ -654,10 +654,127 @@ describe("findingTriage — GAP-41: diff finding-a-finding entre validações", 
     });
   });
 
+  /**
+   * 🔴 GAP-158 — o TERCEIRO evento: a identidade FICOU e a severidade mudou.
+   *
+   * MEDIDO em prod 2026-09-09 (NVX LastMile, `SPEC_VALIDATOR_VOTES=3`): três validações do MESMO
+   * `spec_hash` (`9b4a47ee`, a spec inteira byte a byte igual, 13/13 arquivos julgados por INTEIRO)
+   * deram 46 → 46 → 51 identidades com ZERO desaparecendo — e a severidade divergiu em 3 de 92
+   * comparações, nas duas direções: `contratos-erros.md §6.2.0` warning→blocker e `modelo-dados.md
+   * CLI-ANON-01` blocker→warning. Nenhum balde existente vê isso: `tallyGaps` soma 🔴 e 🟡 no mesmo
+   * `important`, então a contagem que decide progresso fica IDÊNTICA enquanto o badge se move.
+   */
+  describe("🔴 GAP-158 — severidade do MESMO defeito que muda sem ninguém abrir ou fechar nada", () => {
+    const covS = (shas: Record<string, string>) =>
+      ({ full: Object.keys(shas), fullShas: shas, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+    const RS = (id: string, findings: ValidationFinding[], shas: Record<string, string>) =>
+      ({ id, created_at: id, findings, coverage: covS(shas) });
+
+    it("mesma âncora, sha IDÊNTICO, warning→blocker: 0 fechado, 0 aberto, 1 flip declarado", () => {
+      const antes = F({ file: "contratos-erros.md", title: "§6.2 sem status", anchor: "§6.2.0", severity: "warning" });
+      const agora = F({ ...antes, severity: "blocker" });
+      const d = gapDelta([
+        RS("r3", [agora], { "contratos-erros.md": "sha-9b4a" }),
+        RS("r2", [antes], { "contratos-erros.md": "sha-9b4a" }),
+      ], null, 2);
+      expect(d.closed, "flip não é fechamento — contá-lo assim daria crédito por nada").toHaveLength(0);
+      expect(d.opened, "flip não é abertura — contá-lo assim puniria o laço por variância").toHaveLength(0);
+      expect(d.severityFlips).toHaveLength(1);
+      expect(d.severityFlips[0].before).toBe("warning");
+      expect(d.severityFlips[0].after).toBe("blocker");
+      expect(d.severityFlips[0].crossedBlockerLine).toBe(true);
+      expect(d.severityFlips[0].onUnchangedText).toBe(true);
+      expect(d.severityFlippedOnUnchangedText).toBe(1);
+    });
+
+    it("blocker→warning conta igual: a direção que DESBLOQUEIA promoção também é variância", () => {
+      const antes = F({ file: "modelo-dados.md", title: "anonimização sem dono", anchor: "CLI-ANON-01", severity: "blocker" });
+      const d = gapDelta([
+        RS("r3", [F({ ...antes, severity: "warning" })], { "modelo-dados.md": "sha-igual" }),
+        RS("r2", [antes], { "modelo-dados.md": "sha-igual" }),
+      ], null, 2);
+      expect(d.severityFlips[0].crossedBlockerLine).toBe(true);
+      expect(d.severityFlippedOnUnchangedText).toBe(1);
+    });
+
+    it("sha DIFERENTE: o flip é declarado mas NÃO entra no balde de invariante (a edição pode explicá-lo)", () => {
+      const antes = F({ file: "api-entregas.md", title: "FR-07 sem destino", anchor: "FR-07", severity: "warning" });
+      const d = gapDelta([
+        RS("r3", [F({ ...antes, severity: "blocker" })], { "api-entregas.md": "sha-depois" }),
+        RS("r2", [antes], { "api-entregas.md": "sha-antes" }),
+      ], null, 2);
+      expect(d.severityFlips).toHaveLength(1);
+      expect(d.severityFlips[0].onUnchangedText).toBe(false);
+      expect(d.severityFlippedOnUnchangedText).toBe(0);
+    });
+
+    it("cobertura sem `fullShas` (legado): `onUnchangedText` é null — nunca `false`, nunca `true`", () => {
+      const cov = (...full: string[]) => ({ full, outlineOnly: [], oversized: [], cap: 400000, totalChars: 1 });
+      const R2 = (id: string, findings: ValidationFinding[], ...full: string[]) =>
+        ({ id, created_at: id, findings, coverage: cov(...full) });
+      const antes = F({ file: "a.md", title: "GAP de A", anchor: "a1", severity: "warning" });
+      const d = gapDelta([
+        R2("r3", [F({ ...antes, severity: "blocker" })], "a.md"),
+        R2("r2", [antes], "a.md"),
+      ], null, 2);
+      expect(d.severityFlips[0].onUnchangedText).toBeNull();
+      expect(d.severityFlippedOnUnchangedText).toBe(0);
+    });
+
+    it("severidade ESTÁVEL não produz flip (o fato não pode aparecer onde não houve mudança)", () => {
+      const f = F({ file: "a.md", title: "GAP de A", anchor: "a1", severity: "blocker" });
+      const d = gapDelta([
+        RS("r3", [f], { "a.md": "sha-1" }),
+        RS("r2", [f], { "a.md": "sha-1" }),
+      ], null, 2);
+      expect(d.severityFlips).toHaveLength(0);
+      expect(d.severityFlippedOnUnchangedText).toBe(0);
+    });
+
+    it("info→warning é flip, mas NÃO cruza a linha do bloqueador (a distinção que muda fila e badge)", () => {
+      const antes = F({ file: "a.md", title: "GAP de A", anchor: "a1", severity: "info" });
+      const d = gapDelta([
+        RS("r3", [F({ ...antes, severity: "warning" })], { "a.md": "sha-1" }),
+        RS("r2", [antes], { "a.md": "sha-1" }),
+      ], null, 2);
+      expect(d.severityFlips).toHaveLength(1);
+      expect(d.severityFlips[0].crossedBlockerLine).toBe(false);
+    });
+
+    it("o lado ANTES pode vir de uma run mais VELHA (rotação de cobertura) e a invariância é medida NAQUELE par", () => {
+      // `r2` não julgou `a.md` por inteiro (só `b.md`), então não é evidência sobre ele: a identidade
+      // segue ATIVA com o relato de `r1` e o lado "antes" do flip é `r1`, não a run vizinha. A régua tem
+      // de comparar o sha de `r3` com o de `r1` — comparar com a vizinha seria falar de outro par.
+      const antes = F({ file: "a.md", title: "GAP de A", anchor: "a1", severity: "warning" });
+      const d = gapDelta([
+        RS("r3", [F({ ...antes, severity: "blocker" })], { "a.md": "sha-NOVO" }),
+        RS("r2", [], { "b.md": "sha-b" }),
+        RS("r1", [antes], { "a.md": "sha-VELHO" }),
+      ], null, 3);
+      expect(d.severityFlips, "o flip existe: a identidade está ativa nas duas janelas").toHaveLength(1);
+      expect(
+        d.severityFlips[0].onUnchangedText,
+        "o texto MUDOU entre r1 e r3 — dizer invariante aqui seria inventar o fato",
+      ).toBe(false);
+      // E o espelho: com o MESMO sha nas duas pontas do par, o balde conta.
+      const d2 = gapDelta([
+        RS("r3", [F({ ...antes, severity: "blocker" })], { "a.md": "sha-IGUAL" }),
+        RS("r2", [], { "b.md": "sha-b" }),
+        RS("r1", [antes], { "a.md": "sha-IGUAL" }),
+      ], null, 3);
+      expect(d2.severityFlippedOnUnchangedText).toBe(1);
+    });
+  });
+
   it("menos de duas validações: não há o que comparar (zeros, nunca um palpite)", () => {
     // 🔴 GAP-154: o balde do lado FECHADO entra aqui pelo mesmo motivo dos outros — "não medido" é 0,
     // e 0 de desconto preserva o comportamento legado de quem não tem cobertura para comparar sha.
-    const zeros = { closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0 };
+    // 🔴 GAP-158: o balde do flip de severidade entra pela MESMA regra — sem duas medições não existe
+    // "mudou de severidade", e lista vazia é a única resposta honesta.
+    const zeros = {
+      closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0,
+      severityFlips: [], severityFlippedOnUnchangedText: 0,
+    };
     expect(gapDelta([], null)).toEqual(zeros);
     expect(gapDelta([{ id: "r1", created_at: "1", findings: [F({ anchor: "x" })] }], null)).toEqual(zeros);
   });

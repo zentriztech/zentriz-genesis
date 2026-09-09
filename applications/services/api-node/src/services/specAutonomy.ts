@@ -334,6 +334,18 @@ export interface AutonomyRoundLog {
   gapsClosedUnchangedText?: number | null;
   gapsClosedAttributable?: number | null;
   /**
+   * 🔴 GAP-158 — o TERCEIRO evento, que nem `gapsClosed` nem `gapsOpened` enxergam: a identidade FICOU e
+   * a SEVERIDADE mudou. `tallyGaps` soma 🔴 e 🟡 no mesmo `important`, então `gapsBefore`/`gapsAfter` e o
+   * `aggregateFell` ficam idênticos enquanto o badge se move. MEDIDO em prod 2026-09-09: 3 de 92
+   * comparações sobre a spec inteira BYTE A BYTE igual, nas duas direções (warning→blocker e
+   * blocker→warning). `severityFlipsCrossing` é a parcela que cruza a linha do bloqueador — a que muda a
+   * ordem da fila de arquivos, o `🔴 x · 🟡 y` do chat e o rótulo que o juiz de promovibilidade lê.
+   * `null` = não medido; NUNCA "zero variância".
+   */
+  gapsSeverityFlipped?: number | null;
+  gapsSeverityFlippedUnchangedText?: number | null;
+  severityFlips?: Array<{ file: string; anchor: string | null; before: string; after: string }> | null;
+  /**
    * 🔴 GAP-76 — o NÍVEL de GAPs no subconjunto que ESTA validação e a anterior julgaram por inteiro.
    *
    * `gapsBefore`/`gapsAfter` são agregados do PROJETO, e o agregado sobe e desce sozinho por rotação de
@@ -3763,6 +3775,12 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
         closedOnUnchangedText: cont?.reconciled
           ? Math.min(rawDelta.closedOnUnchangedText ?? 0, cont.closed.length)
           : (rawDelta.closedOnUnchangedText ?? 0),
+        // 🔴 GAP-158: sem teto de reconciliação aqui, de propósito — a reconciliação (GAP-67) redistribui
+        // FECHADO×NOVO, e um flip é de identidade que ficou nas duas janelas: ela não está em nenhum dos
+        // dois lados que o reconciliador mexe. Aplicar `Math.min` com `cont.closed.length` esconderia o
+        // fato justamente quando o laço fechou pouco.
+        severityFlips: rawDelta.severityFlips ?? [],
+        severityFlippedOnUnchangedText: rawDelta.severityFlippedOnUnchangedText ?? 0,
       }
     : null;
   const persisted = cont?.reconciled ? cont.persisted.length : 0;
@@ -3876,6 +3894,21 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
       ` Fechamento atribuível a esta edição: ${closedAtribuivel}.` +
       (descontarFechado ? "" : ` (desconto DESLIGADO por \`SPEC_GAP_CLOSED_ATTRIBUTION=off\`: o saldo acima ainda usa o número cheio.)`)
     : "";
+  // 🔴 GAP-158: o flip de severidade dito por extenso, com endereço. Sem `file`/`anchor` o fato é
+  // inacionável — e sem a ressalva de texto invariante ele seria lido como reclassificação legítima.
+  const flips = delta?.severityFlips ?? [];
+  const flipsCruzando = flips.filter((f) => f.crossedBlockerLine);
+  const severityFlipNote = flips.length > 0
+    ? ` ⚠️ ${flips.length} GAP(s) que CONTINUAM abertos mudaram de severidade` +
+      (flipsCruzando.length > 0 ? ` (${flipsCruzando.length} cruzando a linha do 🔴 bloqueador)` : "") +
+      ((delta?.severityFlippedOnUnchangedText ?? 0) > 0
+        ? `, dos quais ${delta?.severityFlippedOnUnchangedText} em arquivo de sha IDÊNTICO nas duas medições` +
+          ` (ninguém editou aquele texto — a mudança é do juiz, não do defeito)`
+        : "") +
+      `: ${flips.slice(0, 5).map((f) => `${f.file}${f.anchor ? ` ${f.anchor}` : ""} ${f.before}→${f.after}`).join("; ")}` +
+      (flips.length > 5 ? ` (+${flips.length - 5} não listado(s) por teto de 5)` : "") +
+      `. A severidade NÃO foi reclassificada por código: o número acima é fato paralelo.`
+    : "";
   const deltaNote = delta
     ? ` Diferença finding-a-finding: ${delta.closed.length} fechado(s), ${delta.opened.length} novo(s)` +
       (delta.opened.length === 0
@@ -3886,6 +3919,7 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
           ? `.${naoAtribuivelNote}`
           : ` — todos em arquivo já julgado antes e com texto MUDADO, ou seja REGRESSÃO/reformulação, não descoberta.`) +
       fechadoNaoAtribuivelNote +
+      severityFlipNote +
       contNote
     : "";
   // GAP-30: `keepNote` — a nota da última rodada de ARQUIVO não é apagada pela nota do PASSE.
@@ -3906,6 +3940,13 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // 🔴 GAP-154: os dois campos espelho. `null` = não medido (não "zero variância").
     gapsClosedUnchangedText: delta?.closedOnUnchangedText ?? null,
     gapsClosedAttributable: delta ? closedAtribuivel : null,
+    // 🔴 GAP-158: o terceiro evento em campo próprio. A lista vai TRUNCADA e o teto é declarado no
+    // próprio campo (GAP-128: cortar é legítimo, cortar em silêncio não).
+    gapsSeverityFlipped: delta ? flips.length : null,
+    gapsSeverityFlippedUnchangedText: delta ? (delta.severityFlippedOnUnchangedText ?? 0) : null,
+    severityFlips: delta && flips.length > 0
+      ? flips.slice(0, 20).map((f) => ({ file: f.file, anchor: f.anchor, before: f.before, after: f.after }))
+      : null,
     gapsPersisted: cont?.reconciled ? persisted : null,
     persistedGaps: persistedRefs,
     gapsComparableBefore: comp?.before ?? null, gapsComparableNow: comp?.now ?? null,
@@ -3933,6 +3974,16 @@ async function checkValidation(db: Db, run: AutonomyRun): Promise<boolean> {
     // arquivo de sha idêntico. Deixar o desconto só no detalhe da rodada seria exibir o crédito cheio.
     (delta && (delta.closedOnUnchangedText ?? 0) > 0
       ? ` ⚠️ Mas **${delta.closedOnUnchangedText} saíram de arquivo de sha idêntico** (ninguém editou aquele texto — é o juiz deixando de relatar, não conserto), sobrando **${closedAtribuivel}** fechamento(s) atribuível(is).`
+      : "") +
+    // 🔴 GAP-158: o `🔴 x · 🟡 y` desta mesma frase se move sem que nada tenha aberto ou fechado. Se o
+    // fato ficasse só no detalhe da rodada, o Jean leria a mudança de badge como progresso (ou piora).
+    (flips.length > 0
+      ? ` ⚠️ **${flips.length} GAP(s) que seguem abertos mudaram de severidade**` +
+        (flipsCruzando.length > 0 ? ` (${flipsCruzando.length} cruzando a linha do 🔴 bloqueador)` : "") +
+        ((delta?.severityFlippedOnUnchangedText ?? 0) > 0
+          ? `, ${delta?.severityFlippedOnUnchangedText} em arquivo de **sha idêntico** — o texto não mudou, quem mudou de opinião foi o juiz`
+          : "") +
+        `: o 🔴/🟡 acima se move sem que nenhum defeito tenha sido aberto ou fechado (detalhe na rodada).`
       : "") +
     // GAP-67: o chat é onde o Jean lê o resultado do passe — a parcela rebatizada tem de aparecer AQUI,
     // não só no detalhe da rodada, senão "11 fechados" segue passando por progresso.

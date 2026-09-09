@@ -471,6 +471,13 @@ export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding
  * `SPEC_VALIDATOR_VOTES`) também DEIXA DE RELATAR defeitos que continuam lá. GAP que "fechou" num
  * arquivo de sha idêntico não foi consertado: ninguém tocou naquele texto.
  *
+ * ⚠️ ERRATA MEDIDA (2026-09-09, GAP-158): aqueles **~60%** são de ANTES do `SPEC_VALIDATOR_VOTES=3`.
+ * Com votos=3 no ar, em três validações da MESMA spec (`spec_hash 9b4a47ee`, 13/13 arquivos julgados por
+ * inteiro) NENHUMA identidade desapareceu — 46 → 46 → 51 chaves, 0 perdidas nos dois pares. A variância
+ * residual não é churn de detecção: é **recall** (chaves NOVAS aparecem: +5 no terceiro passe) e
+ * **severidade** (3 de 92, ver `SeverityFlip`). O balde deste GAP-154 continua correto e conservador —
+ * o que ficou obsoleto é o TAMANHO citado, e código que cita número velho é o GAP-128 de novo.
+ *
  * Por que isso não é detalhe: `closed > opened` é o saldo que zera o `no_progress_streak` e o mesmo
  * saldo que a nota do chat mostra ao Jean. Com um lado auditado e o outro não, o laço se reportava com
  * o crédito inteiro e o débito descontado. MEDIDO em 7 passes de prod com o GAP-126 no ar: 48 fechados
@@ -480,6 +487,44 @@ export function unionFindingsByCoverage(runs: RunForSurvey[]): ValidationFinding
  * Régua: idêntica à do GAP-126 (sha na run MAIS NOVA + sha igual na medição anterior mais recente de
  * OUTRA run). Sem sha registrado o balde fica em 0 — nunca se inventa invariância que não se mediu.
  */
+/**
+ * 🔴 GAP-158 — a SEVERIDADE do mesmo defeito é redecidida do zero a cada validação, e ninguém mede.
+ *
+ * O saldo do laço só conhece dois eventos: identidade que ENTROU e identidade que SAIU. Identidade que
+ * FICOU e mudou de severidade não é nenhum dos dois — atravessa todos os medidores em silêncio, porque
+ * `tallyGaps` soma blocker e warning no MESMO `important` (`specAutonomy.ts:614`): a contagem que o Jean
+ * lê e o `aggregateFell` que decide progresso ficam idênticos enquanto o 🔴/🟡 se move sozinho.
+ *
+ * MEDIDO em prod 2026-09-09 (NVX LastMile, `SPEC_VALIDATOR_VOTES=3`, três validações de `spec_hash`
+ * **`9b4a47ee` — a spec inteira byte a byte igual**, 13/13 arquivos julgados por INTEIRO nas três):
+ * por identidade primária (`file|source|anchor`) foram **46 → 46 → 51 chaves com ZERO desaparecendo**
+ * (0 só-em-A, 0 só-em-B, 0 só-em-B no par seguinte; 5 chaves novas apenas na terceira). Ou seja: com
+ * votos=3 a rotatividade de DETECÇÃO sobre texto invariante é **nula** — mas a severidade divergiu em
+ * **3 de 92 comparações (3,3%)**, e nas duas direções que cruzam a linha do bloqueador:
+ * `contratos-erros.md §6.2.0` warning→blocker e `modelo-dados.md CLI-ANON-01` blocker→warning.
+ *
+ * Por que não é cosmético: `blockers` decide a ORDEM DA FILA de arquivos da rodada (blockers primeiro,
+ * `specAutonomy.ts:1134`), é o `🔴 x · 🟡 y` que o laço escreve no chat como se fosse fato estável, e é
+ * o rótulo `[severity]` que o juiz de promovibilidade lê no candidato (`describeCandidate`). Uma
+ * variância de 3% reordena o trabalho e muda o rótulo do julgamento sem que nenhum régua de progresso
+ * pisque.
+ *
+ * Régua: a MESMA dos GAP-126/154 (sha na run mais nova + sha igual na medição anterior mais recente).
+ * O código NÃO reclassifica nada — severidade é decisão do juiz (LLM). Ele só declara a divergência,
+ * como campo PARALELO, na linha do `crossFamilyAudit.ts:30` e do `specs.ts:996`.
+ */
+export interface SeverityFlip {
+  fingerprint: string;
+  file: string;
+  anchor: string | null;
+  before: string;
+  after: string;
+  /** Cruzou a linha do bloqueador (em qualquer direção) — é a que muda fila, badge e rótulo do juiz. */
+  crossedBlockerLine: boolean;
+  /** O texto do arquivo era o MESMO nas duas medições. `null` = sem sha registrado, não se afirma nada. */
+  onUnchangedText: boolean | null;
+}
+
 export interface GapDelta {
   closed: ValidationFinding[];
   opened: ValidationFinding[];
@@ -491,12 +536,20 @@ export interface GapDelta {
    * desaparecimento é do RELATO, não do defeito. Espelho exato de `openedOnUnchangedText`.
    */
   closedOnUnchangedText: number;
+  /**
+   * 🔴 GAP-158: identidades que FICARAM (estão nas duas janelas) e mudaram de severidade. Lista, não
+   * só contagem: sem `file`/`anchor` o fato é inacionável — ninguém sabe qual defeito reclassificar.
+   */
+  severityFlips: SeverityFlip[];
+  /** Subconjunto de `severityFlips` sobre texto invariante — a parcela não atribuível a edição. */
+  severityFlippedOnUnchangedText: number;
 }
 
 export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null, window = RESOLVED_WINDOW_RUNS): GapDelta {
   if (runs.length < 2) {
     return {
       closed: [], opened: [], openedOnNewSurface: 0, openedOnUnchangedText: 0, closedOnUnchangedText: 0,
+      severityFlips: [], severityFlippedOnUnchangedText: 0,
     };
   }
   const now = surveyFindings(runs.slice(0, window), currentFiles);
@@ -554,9 +607,56 @@ export function gapDelta(runs: RunForSurvey[], currentFiles: Set<string> | null,
     if (!file) continue;
     if (textoInvariante(file) === true) fechadoInvariante++;
   }
+  // 🔴 GAP-158: o terceiro evento — a identidade FICOU e a severidade mudou. Não entra em `closed` nem
+  // em `opened`, então nenhum balde existente a vê. Só se olha quem está nas DUAS janelas: severidade de
+  // quem entrou ou saiu já é contada pelos outros dois baldes, e somar aqui de novo inflaria o fato.
+  //
+  // ⚠️ Revisão adversarial da própria correção: aqui a régua de texto invariante NÃO usa a
+  // `textoInvariante` genérica, que compara a run mais nova com a medição anterior MAIS RECENTE do
+  // arquivo. O lado "antes" de um flip pode vir de uma run mais VELHA quando a run do meio não julgou
+  // aquele arquivo por inteiro (rotação de cobertura ⇒ não é evidência ⇒ `surveyFindings` mantém o
+  // relato antigo ATIVO). Afirmar invariância entre duas runs que não são as comparadas seria fabricar
+  // o fato — então o par é medido nas DUAS runs exatas de onde vieram as duas severidades.
+  // (O caso "faltou no meio e voltou" NÃO chega aqui: uma ausência põe a identidade no limbo do
+  // RFC-0005 e o limbo não entra em `active` — logo não há flip a medir. A régua exata custa nada e
+  // vale por construção, sem depender desse raciocínio se a regra do limbo mudar.)
+  const idxIn = (slice: RunForSurvey[]): Map<string, number> => {
+    const m = new Map<string, number>();
+    slice.forEach((r, i) => {
+      for (const fp of effectiveFingerprints(r.findings ?? [])) if (!m.has(fp)) m.set(fp, i);
+    });
+    return m;
+  };
+  const idxNow = idxIn(runs.slice(0, window));
+  const idxBefore = idxIn(runs.slice(1, window + 1));
+  const severityFlips: SeverityFlip[] = [];
+  for (const [k, agora] of a) {
+    const antes = b.get(k);
+    if (!antes) continue;
+    const sevAntes = String(antes.severity ?? "").trim(), sevAgora = String(agora.severity ?? "").trim();
+    if (!sevAntes || !sevAgora || sevAntes === sevAgora) continue;
+    const file = String(agora.file ?? antes.file ?? "").toLowerCase();
+    // `+1` porque a janela "antes" começa em `runs[1]`.
+    const rAgora = runs[idxNow.get(k) ?? 0], rAntes = runs[(idxBefore.get(k) ?? 0) + 1];
+    const shaAgora = file && rAgora ? shaJudgedIn(file, judgedShasOf(rAgora.coverage)) : null;
+    const shaAntes = file && rAntes ? shaJudgedIn(file, judgedShasOf(rAntes.coverage)) : null;
+    severityFlips.push({
+      fingerprint: k,
+      file: String(agora.file ?? antes.file ?? ""),
+      anchor: (agora.anchor ?? antes.anchor ?? null) as string | null,
+      before: sevAntes,
+      after: sevAgora,
+      crossedBlockerLine: (sevAntes === "blocker") !== (sevAgora === "blocker"),
+      // Sem sha em uma das duas pontas nada pode ser afirmado — `null`, nunca `false` (que significaria
+      // "medimos e o texto mudou").
+      onUnchangedText: shaAgora && shaAntes ? shaAgora === shaAntes : null,
+    });
+  }
   return {
     closed, opened, openedOnNewSurface: onNew, openedOnUnchangedText: onUnchanged,
     closedOnUnchangedText: fechadoInvariante,
+    severityFlips,
+    severityFlippedOnUnchangedText: severityFlips.filter((f) => f.onUnchangedText === true).length,
   };
 }
 

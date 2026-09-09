@@ -252,6 +252,15 @@ export interface Candidate {
   fileRounds: number;
   /** Trecho ancorado, verbatim. Vazio = âncora não localizável no arquivo. */
   section: string;
+  /**
+   * 🔴 GAP-158 — as severidades DISTINTAS que este MESMO defeito recebeu nas validações competentes,
+   * da mais recente para a mais antiga. Uma só = rótulo estável. Duas ou mais = o juiz de validação
+   * mudou de opinião sobre a MESMA identidade, e medido em prod isso acontece com a spec byte a byte
+   * igual (3 de 92). O juiz de promovibilidade lê `[severity]` no cabeçalho do candidato: sem esta lista
+   * ele trata como fato estável um rótulo que oscila — e "na dúvida é IMPEDITIVO" fica calibrado por um
+   * dado que não se sustenta. O código não reclassifica nada; ele DECLARA a oscilação.
+   */
+  severityHistory?: string[];
 }
 
 export interface CandidateGate {
@@ -555,6 +564,9 @@ export function selectVerdictCandidates(args: {
   // Reincidência medida SÓ em validações competentes para o arquivo do defeito — a mesma régua do
   // `stableRecurrenceRefs`, generalizada para o projeto inteiro em vez de um arquivo.
   const competentCount = new Map<string, number>();
+  // 🔴 GAP-158: no MESMO passo, a trajetória de severidade da identidade. Custo zero (a lista de runs já
+  // está aberta) e é o único lugar do módulo que vê o histórico competente do defeito.
+  const severityTrail = new Map<string, string[]>();
   for (const r of args.runs) {
     const j = judgedFilesOf(r.coverage);
     if (!j) continue;
@@ -564,6 +576,13 @@ export function selectVerdictCandidates(args: {
       // Sem arquivo não há como afirmar competência; o candidato já é descartado por falta de `file`.
       if (!file || !fileJudgedIn(file, j)) continue;
       competentCount.set(fp, (competentCount.get(fp) ?? 0) + 1);
+      const sev = String(f?.severity ?? "").trim();
+      if (sev) {
+        const trail = severityTrail.get(fp) ?? [];
+        // Só a MUDANÇA entra: repetir "blocker" cinco vezes não é trajetória, é ruído no prompt.
+        if (trail[trail.length - 1] !== sev) trail.push(sev);
+        severityTrail.set(fp, trail);
+      }
     }
   }
 
@@ -613,7 +632,7 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: "âncora não localizável no arquivo: sem o trecho verbatim o juiz decidiria sobre um resumo" });
       continue;
     }
-    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section });
+    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section, severityHistory: severityTrail.get(fp) });
   }
   // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente. Empate desce para o
   // trabalho medido — primeiro a rodada dedicada, depois o trecho reescrito (GAP-114).
@@ -688,6 +707,13 @@ function describeCandidate(id: string, c: Candidate): string {
     `### ${id} [${c.finding.severity}] arquivo=${c.file} âncora=${c.anchor}`,
     `defeito: ${String(c.finding.title ?? "").slice(0, TITLE_SLICE)}${rationale ? ` — ${rationale}` : ""}`,
     `reincidência: reapareceu em ${c.times} validação(ões) competente(s); ${c.focusRounds} rodada(s) DEDICADA(S) só a este defeito, ${c.attackedRounds} rodada(s) em que o trecho ancorado foi de fato REESCRITO, ${c.fileRounds} rodada(s) neste arquivo no total`,
+    // 🔴 GAP-158: o rótulo `[severity]` do cabeçalho é do último relato. Quando ele OSCILOU entre
+    // validações competentes, o juiz tem de saber — senão calibra "na dúvida é impeditivo" por um dado
+    // que a própria validação não sustenta. Da mais recente para a mais antiga.
+    ...((c.severityHistory?.length ?? 0) > 1
+      ? [`⚠️ severidade INSTÁVEL para este MESMO defeito nas validações competentes: ${c.severityHistory!.join(" ← ")}`
+        + " (a mais recente primeiro). O rótulo acima é o último relato, não um fato estável: julgue pelo TRECHO."]
+      : []),
     "trecho da spec, VERBATIM:",
     "```",
     c.section,
