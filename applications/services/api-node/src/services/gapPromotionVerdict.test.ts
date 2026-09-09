@@ -44,7 +44,7 @@ type LiveVerdict = import("./gapPromotionVerdict.js").LiveVerdict;
 type VerdictConfig = import("./gapPromotionVerdict.js").VerdictConfig;
 
 /** Config explícita em todo teste: o default vem do ambiente e não pode decidir o resultado da suíte. */
-const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8, minPasses: 2 };
+const CFG: VerdictConfig = { minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 8, minPasses: 2, minSilenceObservations: 3 };
 
 const F = (o: Partial<EnrichedFinding> = {}): EnrichedFinding => ({
   file: "modelo-dados.md", line: null, severity: "blocker", title: "contrato ambíguo", rationale: "",
@@ -87,6 +87,7 @@ const C = (o: Partial<Candidate> = {}): Candidate => ({
   attackedRounds: 0,
   fileRounds: 5,
   section: SECTION,
+  eligibility: "reincidencia",
   ...o,
 });
 
@@ -104,6 +105,7 @@ const fakeDb = (rows: Record<string, unknown>[] = []) => {
 const ENV_KEYS = [
   "SPEC_VERDICT_MIN_GAPS_RESOLVED", "SPEC_VERDICT_MIN_RECURRENCE", "SPEC_VERDICT_MIN_FOCUS_ROUNDS",
   "SPEC_VERDICT_MIN_ATTACK_ROUNDS", "SPEC_VERDICT_MAX_PER_RUN", "SPEC_VERDICT_MAX_PER_SPEC", "SPEC_VERDICT_MODEL",
+  "SPEC_VERDICT_MIN_SILENCE_OBS",
 ];
 const saved: Record<string, string | undefined> = {};
 
@@ -118,11 +120,13 @@ afterEach(() => {
 
 describe("verdictConfig", () => {
   it("liga por padrão com barra alta e aceita override por env", () => {
-    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 24, minPasses: 2 });
+    expect(verdictConfig()).toEqual({ minGapsResolved: 3, minRecurrence: 3, minFocusRounds: 2, minAttackRounds: 3, maxPerRun: 3, maxPerSpec: 24, minPasses: 2, minSilenceObservations: 3 });
     process.env.SPEC_VERDICT_MIN_RECURRENCE = "5";
     process.env.SPEC_VERDICT_MAX_PER_RUN = "1";
+    process.env.SPEC_VERDICT_MIN_SILENCE_OBS = "4";
     expect(verdictConfig().minRecurrence).toBe(5);
     expect(verdictConfig().maxPerRun).toBe(1);
+    expect(verdictConfig().minSilenceObservations).toBe(4);
   });
 
   it("valor inválido cai no default (nunca vira NaN, que liberaria tudo)", () => {
@@ -464,12 +468,18 @@ describe("sameBytesSilences (GAP-165) — silêncio competente sobre bytes idên
       VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-A" }),
       VS(["modelo-dados.md"], [], { "modelo-dados.md": "sha-A" }),
     ];
+    // 🔴 GAP-171 mudou o DESFECHO deste caso (3 leituras dos mesmos bytes, 2 caladas): ele deixou de
+    // ser recusado e passou a ser elegível pela SEGUNDA porta. A recusa por reincidência com o silêncio
+    // declarado continua existindo — mas só quando o silêncio NÃO chega à barra (caso abaixo).
     const gate = selectVerdictCandidates(base({ runs }));
-    // times = 1 (só a mais nova acusou) ⇒ recusado por reincidência, mas o motivo agora DIZ o silêncio:
-    // sem isso o log não distingue defeito recém-nascido de detecção instável.
-    expect(gate.candidates).toEqual([]);
-    expect(gate.rejected[0].why).toMatch(/reincidência insuficiente/);
-    expect(gate.rejected[0].why).toMatch(/2 de 3 leitura\(s\) competente\(s\) dos MESMOS bytes NÃO acusou/);
+    expect(gate.candidates).toHaveLength(1);
+    expect(gate.candidates[0].eligibility).toBe("instabilidade");
+    // Com a barra em 4 leituras, as mesmas 3 observações não elegem nada — e aí o motivo da recusa é
+    // que precisa DIZER o silêncio, senão o log não distingue defeito recém-nascido de detecção instável.
+    const barraAlta = selectVerdictCandidates(base({ runs, cfg: { ...CFG, minSilenceObservations: 4 } }));
+    expect(barraAlta.candidates).toEqual([]);
+    expect(barraAlta.rejected[0].why).toMatch(/reincidência insuficiente/);
+    expect(barraAlta.rejected[0].why).toMatch(/2 de 3 leitura\(s\) competente\(s\) dos MESMOS bytes NÃO acusou/);
 
     // Já elegível (reincidente) ⇒ o fato viaja no candidato, para o juiz calibrar.
     const reincidente = selectVerdictCandidates(base({
@@ -478,6 +488,112 @@ describe("sameBytesSilences (GAP-165) — silêncio competente sobre bytes idên
     }));
     expect(reincidente.candidates).toHaveLength(1);
     expect(reincidente.candidates[0].sameBytesSilence).toEqual({ observations: 4, silent: 1 });
+  });
+
+  /**
+   * 🔴 GAP-171 — a SEGUNDA porta de elegibilidade.
+   *
+   * MEDIDO em prod 2026-09-09 (projeto `e2a1988c`, 57 runs): `promotable = false` em 100% delas.
+   * Não por rigor — por construção: todo GAP importante NÃO JULGADO conta como impeditivo, e o gate
+   * torna impossível julgar um GAP recém-aberto (reincidência ≥ 3 + foco pago). Como 67% das aberturas
+   * são em arquivo de sha IDÊNTICO, sempre há GAP novo e inelegível ⇒ o laço nunca teve saída positiva.
+   */
+  describe("GAP-171 — detecção instável ELEGE (a porta que faltava), e nunca absolve", () => {
+    const VS2 = (full: string[], findings: EnrichedFinding[], shas: Record<string, string>): PastValidation =>
+      ({ findings, coverage: { full, fullShas: shas } }) as unknown as PastValidation;
+    const A = { "modelo-dados.md": "sha-A" };
+    /** 3 leituras dos MESMOS bytes, só a mais nova acusou ⇒ times = 1, silêncio 2/3. */
+    const INSTAVEL = [
+      VS2(["modelo-dados.md"], [F()], A), VS2(["modelo-dados.md"], [], A), VS2(["modelo-dados.md"], [], A),
+    ];
+
+    it("elege sem reincidência E sem foco pago — a pergunta ali não é 'consertaram?'", () => {
+      const gate = selectVerdictCandidates(base({
+        runs: INSTAVEL, focusByAnchor: new Map(), focusByFile: new Map(), attackedByAnchor: new Map(),
+      }));
+      expect(gate.candidates).toHaveLength(1);
+      expect(gate.candidates[0].eligibility).toBe("instabilidade");
+      expect(gate.candidates[0].times).toBe(1);
+      expect(gate.candidates[0].focusRounds).toBe(0);
+      expect(gate.reason).toMatch(/1 por detecção INSTÁVEL/);
+    });
+
+    it("silêncio NÃO MEDIDO (sem sha) não elege — fail-CLOSED, `null` nunca é 'instável'", () => {
+      const gate = selectVerdictCandidates(base({
+        runs: [V(["modelo-dados.md"], [F()]), V(["modelo-dados.md"], []), V(["modelo-dados.md"], [])],
+        focusByAnchor: new Map(), attackedByAnchor: new Map(),
+      }));
+      expect(gate.candidates).toEqual([]);
+      expect(gate.rejected[0].why).toMatch(/silêncio sobre os mesmos bytes NÃO PÔDE ser medido/);
+    });
+
+    it("silêncio ZERO sobre os mesmos bytes não elege: o instrumento não discordou de si", () => {
+      const gate = selectVerdictCandidates(base({
+        runs: [VS2(["modelo-dados.md"], [F()], A), VS2(["modelo-dados.md"], [F()], A)],
+        focusByAnchor: new Map(), attackedByAnchor: new Map(),
+      }));
+      expect(gate.candidates).toEqual([]);
+      expect(gate.rejected[0].why).toMatch(/não é instável o bastante/);
+    });
+
+    it("`SPEC_VERDICT_MIN_SILENCE_OBS=0` desliga a porta e o gate volta a ser o de antes, sem deploy", () => {
+      const gate = selectVerdictCandidates(base({
+        runs: INSTAVEL, focusByAnchor: new Map(), attackedByAnchor: new Map(),
+        cfg: { ...CFG, minSilenceObservations: 0 },
+      }));
+      expect(gate.candidates).toEqual([]);
+    });
+
+    it("🔴 as guardas de QUALIDADE valem igual nas duas portas (limite (c) do Jean)", () => {
+      // cobertura incompetente: o juiz viu o arquivo só por sumário nesta validação.
+      expect(selectVerdictCandidates(base({ runs: INSTAVEL, judged: new Set(["outro.md"]) })).candidates).toEqual([]);
+      // âncora INTOCADA: o trecho sobreviveu byte a byte à última rodada ⇒ é NÃO-TENTADO, caso de foco.
+      expect(selectVerdictCandidates(base({
+        runs: INSTAVEL, untouched: new Set(["## 4. Autenticação"]),
+      })).candidates).toEqual([]);
+      // sem trecho verbatim o juiz decidiria sobre um resumo.
+      expect(selectVerdictCandidates(base({ runs: INSTAVEL, sections: new Map() })).candidates).toEqual([]);
+      // sem prova de trabalho do LAÇO (limite (b)) a porta sequer existe.
+      expect(selectVerdictCandidates(base({ runs: INSTAVEL, gapsResolved: 0 })).enabled).toBe(false);
+    });
+
+    it("🔴 o teto de 8 é INTERCALADO: ordenar por reincidência mataria a segunda porta inteira", () => {
+      // 9 reincidentes fortes (times alto) + 1 instável. Sem intercalar, o instável cai fora do teto e
+      // a porta nova existiria no código sem nunca produzir um candidato.
+      const outros = Array.from({ length: 9 }, (_, i) => F({ file: `f${i}.md`, anchor: `## A${i}` }));
+      const runs = [1, 2, 3].map(() => VS2(
+        ["modelo-dados.md", ...outros.map((f) => String(f.file))],
+        [...outros], { ...A, ...Object.fromEntries(outros.map((f) => [String(f.file), "sha-X"])) },
+      ));
+      const gate = selectVerdictCandidates(base({
+        findings: [...outros, F()],
+        runs: [VS2(["modelo-dados.md"], [F()], A), ...runs, VS2(["modelo-dados.md"], [], A), VS2(["modelo-dados.md"], [], A)],
+        judged: new Set(["modelo-dados.md", ...outros.map((f) => String(f.file))]),
+        focusByAnchor: new Map([
+          [focusKey("modelo-dados.md", "## 4. Autenticação"), 0],
+          ...outros.map((f) => [focusKey(String(f.file), String(f.anchor)), 2] as [string, number]),
+        ]),
+        sections: new Map([["## 4. Autenticação", SECTION], ...outros.map((f) => [String(f.anchor), SECTION] as [string, string])]),
+      }));
+      expect(gate.candidates).toHaveLength(8);
+      expect(gate.candidates.filter((c) => c.eligibility === "instabilidade")).toHaveLength(1);
+    });
+
+    it("🔴 o candidato DECLARA ao juiz que veio pela segunda porta (senão ele calibra por premissa falsa)", async () => {
+      httpPost
+        .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ claims: [{ id: "g1", artifact: "POST /x", harm: "eu criaria a rota com o verbo errado porque §2 e §9 divergem no método" }] }) }))
+        .mockResolvedValueOnce(JSON.stringify({ response: JSON.stringify({ verdicts: [{ id: "g1", impact: "impeditivo", reason: "a fábrica escolheria o verbo errado, e a divergência está no trecho" }] }), model_used: "m1" }));
+      await runVerdictRound(
+        [C({ eligibility: "instabilidade", times: 1, focusRounds: 0, sameBytesSilence: { observations: 3, silent: 2 } })],
+        { maxRelease: 3 },
+      );
+      const promotor = JSON.parse(httpPost.mock.calls[0][1]) as { user_message: string };
+      const juiz = JSON.parse(httpPost.mock.calls[1][1]) as { user_message: string };
+      expect(juiz.user_message).toContain("ELEGÍVEL POR INSTABILIDADE, NÃO POR REINCIDÊNCIA");
+      expect(juiz.user_message).toContain("NÃO é atenuante");
+      // e o PROMOTOR não recebe isso: defesa por procedimento seria liberação sem olhar o trecho.
+      expect(promotor.user_message).not.toContain("ELEGÍVEL POR INSTABILIDADE");
+    });
   });
 
   it("sem silêncio o candidato não ganha campo inventado (o fato é medido, não suposto)", () => {

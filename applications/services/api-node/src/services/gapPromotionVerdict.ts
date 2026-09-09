@@ -91,6 +91,13 @@ export interface VerdictConfig {
    * trabalho. Um laço que morre no 1º passe não gastou o orçamento; ele não provou nada.
    */
   minPasses: number;
+  /**
+   * 🔴 GAP-171 — quantas leituras COMPETENTES dos MESMOS BYTES são exigidas antes de a instabilidade
+   * de detecção poder ELEGER um defeito ao juiz (`sameBytesSilence.observations`). Abaixo disto o
+   * silêncio não tem denominador: "1 leitura calada de 2" pode ser só a segunda opinião ainda não
+   * formada. `0` desliga a segunda porta e o gate volta a ser exatamente o de antes.
+   */
+  minSilenceObservations: number;
 }
 
 export function verdictConfig(): VerdictConfig {
@@ -118,6 +125,10 @@ export function verdictConfig(): VerdictConfig {
     // rodadas de veredicto, cada uma com a prova de trabalho do GAP-82/114 conferida de novo.
     maxPerSpec: n("SPEC_VERDICT_MAX_PER_SPEC", 24),
     minPasses: n("SPEC_VERDICT_MIN_PASSES", 2),
+    // 🔴 GAP-171: 3 é a MESMA barra da reincidência (`minRecurrence`) — a segunda porta não é mais
+    // barata que a primeira, ela pergunta OUTRA coisa. Com 3 leituras dos mesmos bytes e ao menos uma
+    // calada, a discordância do instrumento consigo mesmo é um fato medido, não um acaso de 2 leituras.
+    minSilenceObservations: n("SPEC_VERDICT_MIN_SILENCE_OBS", 3),
   };
 }
 
@@ -268,6 +279,17 @@ export interface Candidate {
    * defeito. `null` = não medido (sem sha registrado numa das pontas), nunca "zero silêncio".
    */
   sameBytesSilence?: { observations: number; silent: number } | null;
+  /**
+   * 🔴 GAP-171 — por qual PORTA este candidato ficou elegível. Sem isto o juiz leria um candidato de
+   * `times = 1` como se ele tivesse resistido a trabalho pago, que é exatamente a premissa que calibra
+   * "na dúvida é IMPEDITIVO".
+   *
+   * - `reincidencia`: o caminho de sempre — reapareceu em N validações competentes E recebeu trabalho
+   *   medido no próprio defeito (rodada dedicada ou trecho reescrito). Pergunta: *consertaram?*
+   * - `instabilidade`: o instrumento discordou de si mesmo sobre os MESMOS BYTES. Não houve trabalho
+   *   pago neste defeito e o candidato NÃO afirma que houve. Pergunta: *o relato se sustenta?*
+   */
+  eligibility: "reincidencia" | "instabilidade";
 }
 
 /**
@@ -683,8 +705,38 @@ export function selectVerdictCandidates(args: {
     const silenceNote = silence && silence.silent > 0
       ? `; ${silence.silent} de ${silence.observations} leitura(s) competente(s) dos MESMOS bytes NÃO acusou este defeito`
       : "";
-    if (times < cfg.minRecurrence) {
-      rejected.push({ file, anchor, why: `reincidência insuficiente: reapareceu em ${times} validação(ões) competente(s), mínimo ${cfg.minRecurrence}${silenceNote}` });
+    // 🔴 GAP-171 — a SEGUNDA porta de elegibilidade, e a razão dela.
+    //
+    // MEDIDO em prod 2026-09-09 (projeto `e2a1988c`, 57 runs): `promotable` foi FALSO em 100% delas, e
+    // não por rigor — por construção. `promotabilityReport` conta todo GAP importante NÃO JULGADO como
+    // impeditivo, e o gate abaixo torna impossível julgar um GAP recém-aberto (reincidência ≥ 3 + foco
+    // pago). Como 67% das aberturas acontecem em arquivo de sha IDÊNTICO, sempre existe GAP novo e
+    // inelegível ⇒ `impeditiveUnjudged > 0` ⇒ nunca promovível. O laço nunca teve saída positiva.
+    //
+    // A porta de sempre pergunta "consertaram?" e por isso exige trabalho pago (limite (b) do Jean).
+    // Esta pergunta OUTRA coisa — "o relato se sustenta?" — e para ela o trabalho pago é irrelevante:
+    // quando o MESMO validador competente leu os MESMOS BYTES e ficou calado, quem está em dúvida é o
+    // instrumento, não o conserto. Exigir foco individual antes de examinar isso é pedir que o laço
+    // gaste rodadas caras consertando um defeito cuja existência ele próprio não reproduz.
+    //
+    // O que NÃO muda (limite (c) do Jean, inegociável): a severidade continua a mesma; todas as guardas
+    // de QUALIDADE valem igual nas duas portas (arquivo e âncora presentes, cobertura competente por
+    // INTEIRO, âncora não-intocada, trecho verbatim localizável); os tetos `maxPerRun`/`maxPerSpec`
+    // continuam; e quem decide segue sendo o JUIZ, com âncora e motivo — instabilidade ELEGE, nunca
+    // absolve (é a mesma régua do GAP-169: ausência elege, prova fecha).
+    //
+    // Fail-CLOSED em todas as pontas: `silence === null` é "não medido", não "instável"; `observations`
+    // abaixo do mínimo não conta; `minSilenceObservations = 0` desliga a porta e o gate volta a ser o
+    // de antes, sem deploy.
+    const unstable = cfg.minSilenceObservations > 0
+      && !!silence
+      && silence.observations >= cfg.minSilenceObservations
+      && silence.silent > 0;
+    if (times < cfg.minRecurrence && !unstable) {
+      rejected.push({ file, anchor, why: `reincidência insuficiente: reapareceu em ${times} validação(ões) competente(s), mínimo ${cfg.minRecurrence}${silenceNote}`
+        + (silence
+          ? ` — e a detecção não é instável o bastante para eleger por si (${silence.silent} silêncio(s) em ${silence.observations} leitura(s) dos mesmos bytes, mínimo ${cfg.minSilenceObservations} leitura(s) com ao menos 1 silêncio)`
+          : " — e o silêncio sobre os mesmos bytes NÃO PÔDE ser medido (sem sha registrado), então a segunda porta também não se abre") });
       continue;
     }
     // 🔴 GAP-81: a conta é de rodadas DEDICADAS a este defeito (`focusLevel = 2`), não de rodadas do
@@ -699,7 +751,13 @@ export function selectVerdictCandidates(args: {
     const chave = focusKey(file, anchor);
     const focus = args.focusByAnchor.get(chave) ?? 0;
     const attacked = args.attackedByAnchor?.get(chave) ?? 0;
-    if (focus < cfg.minFocusRounds && attacked < cfg.minAttackRounds) {
+    // 🔴 GAP-171: a prova de trabalho pago é a resposta à pergunta "consertaram?" — ela pertence à porta
+    // da REINCIDÊNCIA. Na porta da instabilidade a pergunta é outra ("o relato se sustenta?"), e exigir
+    // foco pago ali tornaria a segunda porta um no-op: um defeito que o próprio validador não reproduz
+    // nunca recebeu rodada dedicada, por construção. O que impede isto de virar anistia é que a
+    // instabilidade só ELEGE — a decisão continua sendo do juiz, contra o trecho verbatim, e o candidato
+    // chega até ele DECLARANDO que não houve trabalho pago (ver `describeCandidate`).
+    if (!unstable && focus < cfg.minFocusRounds && attacked < cfg.minAttackRounds) {
       rejected.push({ file, anchor, why: `trabalho insuficiente NESTE defeito: ${focus} rodada(s) DEDICADA(S) (mínimo ${cfg.minFocusRounds}) e ${attacked} rodada(s) em que o trecho ancorado foi de fato REESCRITO (mínimo ${cfg.minAttackRounds}); o arquivo teve ${focusFile} rodada(s) no total` });
       continue;
     }
@@ -708,20 +766,49 @@ export function selectVerdictCandidates(args: {
       rejected.push({ file, anchor, why: "âncora não localizável no arquivo: sem o trecho verbatim o juiz decidiria sobre um resumo" });
       continue;
     }
-    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section, severityHistory: severityTrail.get(fp), sameBytesSilence: silence });
+    // 🔴 GAP-171: a porta é a mais FORTE que o candidato satisfaz. Quem reincidiu com trabalho pago
+    // entra como `reincidencia` mesmo tendo silêncio medido — o silêncio, nesse caso, é só calibração
+    // (GAP-165), não a razão de ele estar aqui.
+    const porReincidencia = times >= cfg.minRecurrence
+      && (focus >= cfg.minFocusRounds || attacked >= cfg.minAttackRounds);
+    candidates.push({ finding: f, fingerprint: fp, file, anchor, times, focusRounds: focus, attackedRounds: attacked, fileRounds: focusFile, section, severityHistory: severityTrail.get(fp), sameBytesSilence: silence, eligibility: porReincidencia ? "reincidencia" : "instabilidade" });
   }
   // Mais reincidente primeiro: se algo cair pelo teto, cai o menos insistente. Empate desce para o
   // trabalho medido — primeiro a rodada dedicada, depois o trecho reescrito (GAP-114).
-  candidates.sort((a, b) => b.times - a.times || b.focusRounds - a.focusRounds || b.attackedRounds - a.attackedRounds);
+  const ordenar = (list: Candidate[]) =>
+    [...list].sort((a, b) => b.times - a.times || b.focusRounds - a.focusRounds || b.attackedRounds - a.attackedRounds);
+  const porPorta = {
+    reincidencia: ordenar(candidates.filter((c) => c.eligibility === "reincidencia")),
+    // Na porta da instabilidade, `times` alto é o pior sinal (defeito que reaparece MUITO e ainda assim
+    // tem silêncio é o mais provável de ser real): ordena pelo silêncio mais gritante primeiro.
+    instabilidade: ordenar(candidates.filter((c) => c.eligibility === "instabilidade"))
+      .sort((a, b) => (b.sameBytesSilence?.silent ?? 0) - (a.sameBytesSilence?.silent ?? 0)),
+  };
+  // 🔴 GAP-171 — o teto é intercalado, não sequencial. Ordenar tudo junto por `times` colocaria TODO
+  // candidato da segunda porta (que por definição tem `times` baixo) depois dos 8 primeiros: a porta
+  // existiria no código e nunca produziria um candidato. Intercalar dá vaga garantida às duas.
+  const escolhidos: Candidate[] = [];
+  for (let i = 0; escolhidos.length < MAX_CANDIDATES; i++) {
+    const a = porPorta.reincidencia[i];
+    const b = porPorta.instabilidade[i];
+    if (a === undefined && b === undefined) break;
+    if (a !== undefined) escolhidos.push(a);
+    if (escolhidos.length < MAX_CANDIDATES && b !== undefined) escolhidos.push(b);
+  }
+  const instaveis = escolhidos.filter((c) => c.eligibility === "instabilidade").length;
   return {
-    candidates: candidates.slice(0, MAX_CANDIDATES),
+    candidates: escolhidos,
     rejected,
     enabled: true,
     // 🔴 GAP-82: a prova de trabalho aparece na razão — o parecer tem de dizer POR QUE a porta abriu,
     // e "esgotamento com 0 fechado" é uma informação que o humano precisa ler junto do veredicto.
-    reason: (candidates.length === 0
+    // 🔴 GAP-171: e por QUAL porta cada um entrou — sem esta divisão, "8 elegíveis" leria como
+    // "8 defeitos que resistiram a trabalho pago", que é premissa de decisão, não rodapé.
+    reason: (escolhidos.length === 0
       ? "nenhum GAP passou nas guardas de elegibilidade (reincidência medida, foco pago, cobertura competente, âncora tocada)"
-      : `${candidates.length} GAP(s) elegível(is) a veredicto`) + ` [prova de trabalho: ${work.detail}]`,
+      : `${escolhidos.length} GAP(s) elegível(is) a veredicto`
+        + ` (${escolhidos.length - instaveis} por reincidência com trabalho pago, ${instaveis} por detecção INSTÁVEL sobre os mesmos bytes)`)
+      + ` [prova de trabalho: ${work.detail}]`,
   };
 }
 
@@ -802,6 +889,18 @@ function describeCandidate(id: string, c: Candidate, forJudge = false): string {
     // 🔴 GAP-165: a DETECÇÃO também oscila, e sobre os MESMOS bytes. Dito com o denominador (senão "1
     // ficou calada" não tem tamanho), com o limite da medição, e com a instrução de não ler isto como
     // inocência — a decisão continua sendo contra o trecho.
+    // 🔴 GAP-171: quando o candidato chegou pela SEGUNDA porta, isso é dito antes de tudo. A linha de
+    // reincidência acima mostraria `reapareceu em 1 validação; 0 rodada(s) DEDICADA(S)` e o juiz leria
+    // como "defeito novo que ninguém tentou consertar" — quando o fato é o oposto: o instrumento
+    // discordou de si mesmo. A instrução é explícita para os dois lados, porque a porta não é anistia.
+    ...(forJudge && c.eligibility === "instabilidade"
+      ? ["⚠️ ELEGÍVEL POR INSTABILIDADE, NÃO POR REINCIDÊNCIA: este defeito não recebeu foco individual"
+        + " pago, e o candidato NÃO afirma que recebeu. Ele chegou até você porque validações competentes"
+        + " que leram ESTES MESMOS BYTES discordaram entre si sobre a existência dele. A pergunta aqui não"
+        + " é 'consertaram e voltou?', é 'o relato se sustenta contra o TRECHO?'. Se, lendo o trecho, o"
+        + " defeito É real e impediria construir o produto, ele é IMPEDITIVO — instabilidade de detecção"
+        + " NÃO é atenuante. Se o trecho não sustenta o relato, diga isso com o motivo."]
+      : []),
     ...(forJudge && (c.sameBytesSilence?.silent ?? 0) > 0
       ? [`⚠️ DETECÇÃO INSTÁVEL: ${c.sameBytesSilence!.silent} de ${c.sameBytesSilence!.observations} validação(ões)`
         + " competente(s) que leram ESTES MESMOS BYTES por inteiro NÃO acusaram este defeito."

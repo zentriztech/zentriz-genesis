@@ -1912,8 +1912,13 @@ async function promotionVerdictFor(
         + instaveis.map((c) => `${c.file}#${c.anchor}=${c.sameBytesSilence!.silent}/${c.sameBytesSilence!.observations}`)
           .slice(0, 6).join(" ")
       : "";
+    // 🔴 GAP-171: por qual PORTA cada candidato entrou. Sem este número não há como medir em prod se a
+    // segunda porta produziu candidato nenhum (que foi exatamente o risco do desenho: ordenar por
+    // reincidência empurrava todo candidato instável para fora do teto de 8).
+    const porInstabilidade = gate.candidates.filter((c) => c.eligibility === "instabilidade").length;
     console.info(
-      `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s), ` +
+      `[SpecAutonomy] run=${run.id.slice(0, 8)} veredicto: ${gate.candidates.length} candidato(s)`
+      + ` (${gate.candidates.length - porInstabilidade} por reincidência, ${porInstabilidade} por detecção INSTÁVEL), ` +
       // 🔴 GAP-166: `N impeditivo(s)` sozinho lê como "N julgados e reprovados". A composição medida em
       // prod era 4 por veredicto, 4 obsoletos e 56 nunca julgados de 64 — e o log dizia só "64".
       `${round?.released ?? 0} liberado(s), ${report.impeditive} impeditivo(s)` +
