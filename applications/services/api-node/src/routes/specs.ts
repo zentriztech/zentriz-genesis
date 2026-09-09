@@ -1108,12 +1108,14 @@ export async function specRoutes(app: FastifyInstance) {
     if (!proj) return reply.status(404).send({ code: "NOT_FOUND", message: "Projeto não encontrado" });
     const { computeCurrentSpecHash } = await import("../services/specValidation.js");
     const current = await computeCurrentSpecHash(pool, id).catch(() => null);
-    // `judge_thinking`/`ab_paired` chegaram na migração 118: banco atrás do código não pode virar 500.
+    // `judge_thinking`/`ab_paired` chegaram na migração 118 e `ab_note` na 120: banco atrás do código
+    // não pode virar 500 (o `.catch` abaixo devolve lista vazia, que a rota já sabe narrar).
     const rows = await pool.query(
       `SELECT id, spec_hash, gold_set_version, judge_model, judge_thinking, match_model, audit_model,
               same_family, injected, eligible, found, partial_matches, missed, undecided, uncovered,
               recall_min, recall_max, findings_count, matcher_sample, matcher_disagreement,
-              matcher_no_opinion, ab_paired, note, limitations, strata, autonomy_run_id, created_at
+              matcher_no_opinion, ab_paired, ab_note, note, limitations, strata, autonomy_run_id,
+              created_at
          FROM spec_judge_recall_runs
         WHERE project_id = $1
         ORDER BY created_at DESC LIMIT 20`,
@@ -1124,10 +1126,18 @@ export async function specRoutes(app: FastifyInstance) {
       // O nome do campo diz o que ele é: a medição vale para O HASH que ela mediu, não para o de hoje.
       coversCurrentSpec: !!current && r.spec_hash === current.specHash,
     }));
+    // 🔴 GAP-152: o veredicto em PROSA do A/B (`abNote()`) era calculado e morria no processo. Agora
+    // vem do banco — e sobe ao TOPO da resposta, na medição mais recente que de fato tem um: quem lê a
+    // rota para decidir se muda o default não pode ter de varrer 20 linhas para achar a conclusão.
+    // `null` aqui é "o A/B não rodou em nenhuma das medições" (não medido), nunca "deu empate".
+    const abNoteRecente = (rows.rows as Record<string, unknown>[])
+      .map((r) => r.ab_note)
+      .find((n): n is string => typeof n === "string" && n.trim().length > 0) ?? null;
     return reply.send({
       enabled: (process.env.SPEC_JUDGE_RECALL ?? "").trim().toLowerCase() === "on",
       abEnabled: (process.env.SPEC_JUDGE_RECALL_THINKING_AB ?? "").trim().toLowerCase() === "on",
       currentSpecHash: current?.specHash ?? null,
+      abNote: abNoteRecente,
       measurements: medicoes,
       // Ausência é FATO, não erro: sem medição, o recall do juiz nesta spec é DESCONHECIDO — e é isso
       // que a tela tem de dizer, em vez de sugerir que os GAPs contados são todos os que existem.

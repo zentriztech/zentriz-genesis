@@ -10,6 +10,8 @@
  *  * GAP-97 — defeito que não chegou ao juiz sai do DENOMINADOR (é cobertura, não cegueira);
  *  * GAP-49 (nosso, refutando os revisores) — classe divergente NÃO impede o casamento.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   abNote, applyInjections, AUDIT_MIN_SAMPLE, goldSetVersion, modelFamily, normalizeMatches,
@@ -667,5 +669,55 @@ describe("GAP-149 — o instrumento ganha CHAMADOR (e não mede duas vezes a mes
     expect(dedupe.sql).toContain("project_id = $1 AND spec_hash = $2");
     expect(dedupe.params[0]).toBe("proj-1");
     delete process.env.SPEC_JUDGE_RECALL;
+  });
+});
+
+// 🔴 GAP-152: o veredicto em PROSA do A/B (`abNote`) era a ÚNICA leitura humana do experimento — e
+// era atribuída em memória, nunca gravada. Estes testes olham o INSERT de `gravar()` na fonte porque
+// é lá que o fato passa (ou não) do processo para o banco: exercitar `runJudgeRecall` inteiro exigiria
+// dois braços de LLM, e o defeito não estava no julgamento, estava no TRANSPORTE.
+describe("GAP-152 — a prosa do A/B chega ao banco (instrumento com leitor)", () => {
+  const FONTE = readFileSync(fileURLToPath(new URL("./specJudgeRecall.ts", import.meta.url)), "utf-8");
+
+  const insert = FONTE.slice(
+    FONTE.indexOf("INSERT INTO spec_judge_recall_runs"),
+    FONTE.indexOf("ON CONFLICT (project_id, spec_hash"),
+  );
+
+  it("`ab_note` está na lista de colunas do INSERT (senão a prosa morre com o processo)", () => {
+    expect(insert).toContain("ab_note");
+  });
+
+  it("colunas e placeholders batem — a classe de bug que faz o gravar falhar em SILÊNCIO", () => {
+    // `gravar()` engole o erro de propósito (persistir é acessório à medição). Logo, uma coluna a mais
+    // sem o `$N` correspondente não derrubaria nada: só apagaria a gravação. Aqui o desalinhamento
+    // aparece em teste, não em prod.
+    const colunas = insert
+      .slice(insert.indexOf("(", insert.indexOf("spec_judge_recall_runs")) + 1, insert.indexOf("VALUES"))
+      .replace(/\)\s*$/, "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    const values = insert.slice(insert.indexOf("VALUES"));
+    const maiorPlaceholder = Math.max(
+      ...(values.match(/\$\d+/g) ?? []).map((p) => Number(p.slice(1))),
+    );
+    expect(colunas).toContain("ab_note");
+    expect(maiorPlaceholder).toBe(colunas.length);
+  });
+
+  it("o UPSERT também atualiza `ab_note` (a 2ª medição da mesma spec não pode voltar a mentir)", () => {
+    const upsert = FONTE.slice(FONTE.indexOf("DO UPDATE SET"), FONTE.indexOf("created_at = now()`"));
+    expect(upsert).toContain("ab_note = EXCLUDED.ab_note");
+  });
+
+  it("a prosa vai nas DUAS linhas do par — ler só a linha do baseline é caminho normal na UI", () => {
+    const bloco = FONTE.slice(FONTE.indexOf("if (cfg.thinkingAb)"));
+    expect(bloco).toContain("res.abNote = prosa");
+    expect(bloco).toContain("braco.abNote = prosa");
+  });
+
+  it("sem A/B o valor é NULL — `null` é 'não medido', nunca 'deu empate'", () => {
+    expect(FONTE).toContain("res.abNote ?? null");
   });
 });

@@ -1150,8 +1150,8 @@ export async function runJudgeRecall(db: Db, args: {
           injected, eligible, found, partial_matches, missed, undecided, uncovered,
           recall_min, recall_max, findings_count, matcher_sample, matcher_disagreement,
           note, limitations, defects, items, strata, autonomy_run_id, audit_model, matcher_no_opinion,
-          judge_thinking, ab_paired)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28::jsonb)
+          judge_thinking, ab_paired, ab_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28::jsonb,$29)
        ON CONFLICT (project_id, spec_hash, gold_set_version, judge_model, judge_thinking) DO UPDATE SET
          match_model = EXCLUDED.match_model, same_family = EXCLUDED.same_family,
          audit_model = EXCLUDED.audit_model, matcher_no_opinion = EXCLUDED.matcher_no_opinion,
@@ -1162,7 +1162,8 @@ export async function runJudgeRecall(db: Db, args: {
          findings_count = EXCLUDED.findings_count, matcher_sample = EXCLUDED.matcher_sample,
          matcher_disagreement = EXCLUDED.matcher_disagreement, note = EXCLUDED.note,
          limitations = EXCLUDED.limitations, defects = EXCLUDED.defects, items = EXCLUDED.items,
-         strata = EXCLUDED.strata, ab_paired = EXCLUDED.ab_paired, created_at = now()`,
+         strata = EXCLUDED.strata, ab_paired = EXCLUDED.ab_paired,
+         ab_note = EXCLUDED.ab_note, created_at = now()`,
       [args.projectId, args.specHash, version, res.judgeModel, res.matchModel, res.sameFamily,
        t.injected, t.eligible, t.found, t.partial, t.missed, t.undecided,
        t.uncovered, t.recallMin, t.recallMax, res.findingsCount,
@@ -1173,7 +1174,10 @@ export async function runJudgeRecall(db: Db, args: {
          byScope: t.byScope, byVocabulary: t.byVocabulary,
        }),
        args.autonomyRunId ?? null, res.auditModel, res.matcherNoOpinion,
-       res.judgeThinking, JSON.stringify(paired ?? {})],
+       // 🔴 GAP-152: o veredicto em PROSA do A/B era atribuído em memória e morria com o processo.
+       // Vai nas DUAS linhas do par porque a conclusão é do PAR: ler a linha do baseline sozinha é um
+       // caminho normal na UI, e ali a conclusão tem de estar. NULL = A/B não rodou (não medido).
+       res.judgeThinking, JSON.stringify(paired ?? {}), res.abNote ?? null],
     ).catch((err) => {
       // Gravar é ACESSÓRIO à medição: nunca derruba o número que acabou de ser produzido.
       console.warn(`[specJudgeRecall] persistência falhou: ${String(err).slice(0, 300)}`);
