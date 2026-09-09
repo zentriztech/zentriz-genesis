@@ -1308,6 +1308,66 @@ export function consolidationGraceLeft(
 export const CONSOLIDATION_ONLY_FLOOR = Math.max(0, Number(process.env.SPEC_CONSOLIDATION_ONLY_FLOOR ?? "200") || 0);
 
 /**
+ * 🔴 GAP-164 (2026-09-09) — o piso do GAP-121 é ADIVINHADO, e a própria run já mediu o número certo.
+ *
+ * O comentário do `CONSOLIDATION_ONLY_FLOOR` diz, com os dados na mão: "as rodadas que o laço APLICOU
+ * cresceram 58, 85, 306, 485, 719, 767, 879, 905 e 1.346 chars. **Nenhuma delas caberia em 200 chars**".
+ * E o piso ficou 200. Consequência aritmética: com a graça de consolidação do GAP-70 valendo 313–773
+ * chars, `affordable` quase nunca cai abaixo de 200 ⇒ o gatilho por piso **não dispara**, e sobra só a
+ * segunda via — que exige uma rodada JÁ JOGADA FORA daquele arquivo (`rejectedDelta`).
+ *
+ * ## Medido em prod (run `acce03fb`, 22 rodadas, 2026-09-09)
+ *
+ * **5 rodadas escreveram ZERO** (10, 17, 18, 21, 22): todas com `announcedBudget = 0`,
+ * `consolidationOnly = false`, vetadas por crescer 786/1.421/940/542/448 contra limites de
+ * 372/773/773/313/313. As 4 primeiras eram a ESTREIA daquele arquivo no veto ⇒ sem `rejectedDelta` ⇒
+ * nenhuma via do gatilho podia salvá-las. A ÚNICA rodada de consolidação pura do run (19,
+ * `observabilidade-operacao.md`) só existiu porque a rodada 10 do MESMO arquivo havia sido descartada —
+ * e ela **encolheu 2.617 chars**, devolvendo margem ao pool. Ou seja: o mecanismo funciona; o gatilho é
+ * que cobra uma chamada de Opus 5 de pedágio.
+ *
+ * Custo real de uma errata NESTA run (rodadas aplicadas que cresceram): 131, 420, 448, 489, 504, 513,
+ * 538, 543, 1.589 ⇒ **mediana 504**. Com esse número no lugar do 200, as rodadas 21 e 22
+ * (`affordable = 313`) e a 10 (`372`) nasceriam como consolidação pura: **3 das 5** rodadas perdidas.
+ * As 17/18 (`affordable = 773`) não seriam salvas — dizer que seriam exigiria prever o que o agente
+ * escreve, e isso o GAP-121 já proíbe explicitamente.
+ *
+ * ## Por que a mediana, e por que isto NÃO é previsão
+ *
+ * É a régua do próprio laço sobre o que ele mesmo já escreveu: "metade das rodadas que eu apliquei
+ * custou mais que isto". Não afirma nada sobre a rodada que vem — afirma o custo HISTÓRICO de uma
+ * errata. Uma estatística mais alta (p75) pediria consolidação com mais frequência e as erratas
+ * demorariam mais a acontecer; mais baixa (mínimo) volta ao problema do 200. A mediana é o ponto em que
+ * "pedir crescimento" tem menos de 50% de chance de caber.
+ *
+ * Só entram rodadas **desta run** que (a) foram APLICADAS, (b) não eram consolidação pura, (c) pediram
+ * ao menos 1 GAP e (d) CRESCERAM. Rodada que encolheu não mede o custo de uma errata — mede o crédito
+ * de uma remoção; somá-las puxaria o custo para baixo e reabriria o defeito. Sem amostra, devolve
+ * `samples: 0` e quem chama fica com o `CONSOLIDATION_ONLY_FLOOR` — o comportamento de hoje.
+ */
+export function measuredErrataCost(
+  run: Pick<AutonomyRun, "rounds">,
+): { chars: number; samples: number } {
+  const deltas: number[] = [];
+  for (const r of run.rounds ?? []) {
+    if (r.applied !== true) continue;
+    if (r.consolidationOnly === true) continue;
+    const gaps = (r.blockers ?? 0) + (r.warnings ?? 0);
+    if (gaps <= 0) continue;
+    const d = typeof r.deltaChars === "number" ? r.deltaChars : null;
+    if (d === null || !Number.isFinite(d) || d <= 0) continue;
+    deltas.push(d);
+  }
+  if (deltas.length === 0) return { chars: 0, samples: 0 };
+  deltas.sort((a, b) => a - b);
+  const mid = deltas.length >> 1;
+  // Amostra par: a mediana baixa. Entre dois valores, o menor é o que NÃO infla o piso — inflar o piso
+  // pede consolidação onde a errata talvez caiba, e o erro caro deste GAP é o oposto.
+  const chars = deltas.length % 2 === 1 ? deltas[mid] : deltas[mid - 1];
+  return { chars: Math.trunc(chars), samples: deltas.length };
+}
+
+/**
  * 🔴 GAP-121 — kill-switch do pedido de consolidação pura.
  *
  * Existe porque isto muda o que o laço PEDE ao LLM em produção: se a remoção sozinha se revelar pior
@@ -1365,12 +1425,26 @@ export function consolidationOnlyReason(
   affordable: number,
   /** GAP-29: o delta que a ÚLTIMA tentativa deste arquivo entregou e o veto descartou. */
   priorRejectedDelta: number | null,
+  /**
+   * 🔴 GAP-164 — o custo MEDIDO de uma errata nesta run (`measuredErrataCost`). Ausente ou sem amostra
+   * ⇒ vale o `CONSOLIDATION_ONLY_FLOOR`, que é o comportamento anterior a este GAP.
+   */
+  errata?: { chars: number; samples: number } | null,
 ): string | null {
   // Sem redeclaração não existe "o que consolidar": pedir só remoção seria pedir o vazio.
   if (restates <= 0) return null;
-  if (!Number.isFinite(affordable) || affordable <= CONSOLIDATION_ONLY_FLOOR) {
+  // 🔴 GAP-164: o piso é o custo MEDIDO nesta run quando ele existe; a constante é só o fallback de
+  // quem ainda não escreveu nada. Sem isto o piso (200) fica sempre abaixo da graça do GAP-70
+  // (313–773 medidos) e o gatilho por aritmética nunca dispara.
+  const medido = errata && errata.samples > 0 && errata.chars > 0 ? errata : null;
+  const piso = medido ? Math.max(CONSOLIDATION_ONLY_FLOOR, medido.chars) : CONSOLIDATION_ONLY_FLOOR;
+  if (!Number.isFinite(affordable) || affordable <= piso) {
+    const comoMedido = medido
+      ? `o custo MEDIDO de uma errata nesta run é ${medido.chars} chars (mediana de ${medido.samples}`
+        + " rodada(s) que o laço aplicou e que cresceram)"
+      : `o piso de ${CONSOLIDATION_ONLY_FLOOR} em que uma errata de GAP caberia`;
     return `a margem de crescimento do laço é ${Math.max(0, Math.trunc(affordable) || 0)} chars`
-      + ` (abaixo do piso de ${CONSOLIDATION_ONLY_FLOOR} em que uma errata de GAP caberia)`;
+      + ` (abaixo de ${piso} — ${comoMedido})`;
   }
   // O caso com margem: só é desperdício certo se o próprio arquivo JÁ entregou mais do que cabe hoje.
   // É fato medido (`rejectedDelta` do log), não previsão sobre o que o agente vai escrever.
@@ -2562,7 +2636,15 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       // se as duas contas divergissem, o laço pediria o que ele mesmo vetaria.
       const affordable = growthBudget + growthOverflowTolerance(growthBudget)
         + consolidationGraceLeft(run, ORACLE_CONSOLIDATION_GRACE);
-      const reason = consolidationOnlyReason(restates.length, affordable, priorRejection?.delta ?? null);
+      // 🔴 GAP-164: o piso do gatilho é o custo que ESTA run já mediu para uma errata, não a constante.
+      const errata = measuredErrataCost(run);
+      const reason = consolidationOnlyReason(restates.length, affordable, priorRejection?.delta ?? null, errata);
+      if (reason) {
+        console.log(
+          `[SpecAutonomy] GAP-121/164 consolidação pura run=${run.id.slice(0, 8)} arquivo=${target}`
+          + ` affordable=${affordable} errata_medida=${errata.chars} amostras=${errata.samples} → ${reason}`,
+        );
+      }
       // 🔴 GAP-121: o PISO de encolhimento vai junto. Pedir "encolha" sem dizer até onde é armar a
       // recusa do `MIN_SHRINK_RATIO`: um corte de 35% neste arquivo seria vetado como perda de spec e a
       // rodada inteira (paga) morreria — exatamente o desperdício que este GAP veio matar. O número sai

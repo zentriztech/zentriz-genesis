@@ -13,7 +13,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CONSOLIDATION_ONLY_FLOOR, consolidationOnlyReason, consolidationOnlyExhausted,
-  consolidationOnlyEnabled,
+  consolidationOnlyEnabled, measuredErrataCost,
 } from "./specAutonomy.js";
 
 function R(over: Record<string, unknown>) {
@@ -49,6 +49,69 @@ describe("consolidationOnlyReason (GAP-121)", () => {
   it("margem corrompida (NaN/−) não vira `NaN chars` no prompt nem cancela a remoção", () => {
     expect(consolidationOnlyReason(2, Number.NaN, null)).toContain("0 chars");
     expect(consolidationOnlyReason(2, -900, null)).toContain("0 chars");
+  });
+});
+
+/**
+ * 🔴 GAP-164 — o piso do GAP-121 era ADIVINHADO (200) e a run já tinha o número medido.
+ *
+ * MEDIDO em prod (run `acce03fb`, 22 rodadas, 2026-09-09): **5 rodadas escreveram ZERO** (10, 17, 18,
+ * 21, 22), todas com `announcedBudget = 0`, `consolidationOnly = false`, vetadas por crescer
+ * 786/1.421/940/542/448 contra limites de 372/773/773/313/313 (a graça do GAP-70 drenando). Com o piso
+ * em 200, `affordable` NUNCA cai abaixo dele enquanto houver graça ⇒ o gatilho por aritmética não
+ * dispara e sobra só a via que exige uma rodada já jogada fora. O custo real de uma errata nesta run
+ * (rodadas aplicadas que cresceram: 131, 420, 448, 489, 504, 513, 538, 543, 1.589) tem **mediana 504**.
+ */
+describe("measuredErrataCost + piso medido (GAP-164)", () => {
+  const aplicada = (delta: number, over: Record<string, unknown> = {}) =>
+    R({ applied: true, deltaChars: delta, blockers: 1, warnings: 0, ...over });
+
+  it("a mediana sai das rodadas APLICADAS que cresceram — os 9 deltas reais dão 504", () => {
+    const deltas = [543, 420, 489, 504, 131, 513, 538, 448, 1_589];
+    expect(measuredErrataCost(run(deltas.map((d) => aplicada(d))))).toEqual({ chars: 504, samples: 9 });
+  });
+
+  it("rodada que ENCOLHEU não mede o custo de uma errata (mede o crédito de uma remoção)", () => {
+    const r = run([aplicada(500), aplicada(-2_617), aplicada(600)]);
+    expect(measuredErrataCost(r)).toEqual({ chars: 500, samples: 2 }); // mediana baixa de [500,600]
+  });
+
+  it("não conta rodada vetada, rodada de consolidação pura, nem rodada sem GAP pedido", () => {
+    const r = run([
+      R({ applied: false, rejectedDelta: 1_421, blockers: 3 }),                     // vetada: nada escrito
+      aplicada(900, { consolidationOnly: true }),                                    // pedido era só remover
+      aplicada(800, { blockers: 0, warnings: 0 }),                                   // nenhum GAP despachado
+      aplicada(504),
+    ]);
+    expect(measuredErrataCost(r)).toEqual({ chars: 504, samples: 1 });
+  });
+
+  it("sem amostra devolve samples 0 — e o gatilho volta a valer pelo `CONSOLIDATION_ONLY_FLOOR`", () => {
+    expect(measuredErrataCost(run([]))).toEqual({ chars: 0, samples: 0 });
+    const semAmostra = measuredErrataCost(run([R({ applied: false })]));
+    expect(consolidationOnlyReason(9, CONSOLIDATION_ONLY_FLOOR + 1, null, semAmostra)).toBeNull();
+    expect(consolidationOnlyReason(9, CONSOLIDATION_ONLY_FLOOR, null, semAmostra))
+      .toContain(String(CONSOLIDATION_ONLY_FLOOR));
+  });
+
+  it("🔴 as rodadas 21/22 (margem 313) nasceriam como CONSOLIDAÇÃO PURA, e as 17/18 (773) não", () => {
+    const errata = { chars: 504, samples: 9 };
+    // Era isto que se perdia: 313 > piso 200 ⇒ o gatilho calava e a rodada era paga para nada.
+    expect(consolidationOnlyReason(5, 313, null)).toBeNull();
+    const salvas = consolidationOnlyReason(5, 313, null, errata);
+    expect(salvas).toContain("313 chars");
+    expect(salvas).toContain("504");
+    expect(salvas).toContain("mediana de 9");
+    // 773 está ACIMA do custo medido: pedir consolidação ali seria prever o que o agente vai escrever,
+    // e o GAP-121 proíbe isso em texto. As duas rodadas seguem não-salvas — e é assim que se relata.
+    expect(consolidationOnlyReason(5, 773, null, errata)).toBeNull();
+  });
+
+  it("o piso medido NUNCA fica abaixo da constante (o fallback é piso, não teto)", () => {
+    const barato = { chars: 10, samples: 3 };
+    expect(consolidationOnlyReason(5, CONSOLIDATION_ONLY_FLOOR, null, barato))
+      .toContain(String(CONSOLIDATION_ONLY_FLOOR));
+    expect(consolidationOnlyReason(5, CONSOLIDATION_ONLY_FLOOR + 1, null, barato)).toBeNull();
   });
 });
 
