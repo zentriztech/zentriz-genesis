@@ -35,6 +35,7 @@ import type { Pool } from "pg";
 import { httpPost, httpGet } from "../routes/specs.js";
 import type { AutonomyRun, AutonomyRoundLog } from "./specAutonomy.js";
 import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 type Db = Pick<Pool, "query">;
 
@@ -202,7 +203,8 @@ function findingLine(f: LearningFinding, labels: Map<string, string>, terms: str
   const where = f.file ? ` [${labels.get(f.file) ?? "arquivo"}]` : "";
   const cat = f.category ? ` (${f.category})` : "";
   // GAP-58: `title`/`rationale` são texto do VALIDADOR e citam produto e arquivo pelo nome real.
-  const why = scrub((f.rationale ?? "").trim(), labels, terms).replace(/\s+/g, " ").slice(0, 320);
+  // 🔴 GAP-128: a lição é destilada DESTE texto — corte silencioso ensina meia verdade à Fábrica.
+  const why = cutEvidence(scrub((f.rationale ?? "").trim(), labels, terms).replace(/\s+/g, " "), 320);
   const title = scrub((f.title ?? "").trim(), labels, terms).slice(0, 200);
   return `- ${icon}${cat}${where} ${title}${why ? ` — ${why}` : ""}`;
 }

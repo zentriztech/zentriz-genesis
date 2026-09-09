@@ -29,6 +29,7 @@
 import { readFile } from "fs/promises";
 import { httpPost } from "../routes/specs.js";
 import { projectFindingsState, type Db, type EnrichedFinding } from "./findingTriage.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -389,7 +390,9 @@ export async function buildFileMenu(files: SpecFileRef[]): Promise<string> {
 }
 
 function findingLine(id: string, f: EnrichedFinding): string {
-  const rationale = (f.rationale ?? "").replace(/\s+/g, " ").slice(0, 400);
+  // 🔴 GAP-128: o teto de 400 chars fica (orçamento de prompt), mas o corte é DECLARADO — quem lê
+  // (roteador e CTO) precisa saber que a justificativa continua, senão decide com meio fato.
+  const rationale = cutEvidence((f.rationale ?? "").replace(/\s+/g, " "), 400);
   return `- ${id} [${f.severity}/${f.category ?? "other"}] ${String(f.title ?? "").slice(0, 200)}${rationale ? ` — ${rationale}` : ""}`;
 }
 

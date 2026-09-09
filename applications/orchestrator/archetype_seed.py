@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 # 1.3.0: + GAP-123 (teto pára de produzir, não de medir)
 # 1.4.0: + GAP-124 (a validade é do TRECHO julgado, não do arquivo)
 # 1.5.0: + GAP-125 (o último artefato não redefine o veredicto do trabalho)
-SCHEMA_VERSION = "1.7.0"  # 1.7.0: + GAP-127 (item que a fila nunca tentou não é item que resistiu)
+SCHEMA_VERSION = "1.8.0"  # 1.8.0: + GAP-128 (evidência cortada em silêncio faz decidir com meio fato)
+# 1.7.0: + GAP-127 (item que a fila nunca tentou não é item que resistiu)
 # 1.6.0: + GAP-126 ("novo" não quer dizer que o seu trabalho causou)
 STACK_KEY = "generic"  # vale para qualquer stack — o defeito é de CONTEXTO, não de linguagem
 
@@ -248,6 +249,25 @@ ARCHETYPES: list[dict[str, Any]] = [
             "a declaração nova apagou do texto o fato de a arquitetura ter sido DESENHADA."
         ),
     },
+    {
+        "slug": "arch.gap128.evidencia-cortada-em-silencio-decide-errado",
+        "title": "Evidência cortada em silêncio faz decidir com meio fato",
+        "rule": (
+            "Teto em texto de EVIDÊNCIA (justificativa, log, citação) é legítimo; esconder que ele "
+            "mordeu não é. Toda justificativa que você recebe pode vir com a marca "
+            "`…⟨CORTADO: N de M chars — o fato CONTINUA⟩`: aí o fato NÃO é o que você leu. Não conclua "
+            "'regra absoluta' de um texto cortado, não afirme ausência de exceção, e ao citar alguém "
+            "pela metade diga que cortou."
+        ),
+        "evidence": (
+            "Bancada GAP-128 (2026-09-09): dos 2.417 findings gravados em 3 dias, 2.066 (85%) tinham "
+            "justificativa acima de 500 chars, e 7 estavam exatamente em 1.200 — o teto de ingestão — "
+            "com 4 terminando no meio de uma palavra. Todos os leitores cortavam mais um pouco em "
+            "silêncio: dossiê do CTO/roteador em 400, oráculo em 500, aprendizado em 320, triagem em "
+            "600. Um GAP cuja exceção ('exceto quando…') vive na cauda virava regra absoluta, e o "
+            "roteador podia não ver o arquivo citado no fim e mandar o GAP para o arquivo errado."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.
@@ -263,7 +283,9 @@ ROLE_FOCUS: dict[str, str] = {
     "cto": (
         "Como isto aparece para você: a spec pode chegar incompleta (corte em fronteira de "
         "arquivo, DECLARADO no prompt). Não aprove nem reprove completude do que você não viu, e "
-        "não normalize um documento que chegou parcial como se fosse o todo."
+        "não normalize um documento que chegou parcial como se fosse o todo. A justificativa de cada "
+        "GAP também pode vir cortada, com a marca `…⟨CORTADO: N de M chars⟩`: nesse caso o defeito "
+        "pode ter condição ou exceção que você não leu — trate o trecho como parcial, não como a regra."
     ),
     "engineer": (
         "Como isto aparece para você: se a spec/contexto chegou parcial, a proposta técnica cobre "

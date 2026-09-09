@@ -37,6 +37,7 @@
  */
 import type { ValidationFinding } from "./specValidation.js";
 import { effectiveFingerprints, findingTitleFingerprint } from "./findingTriage.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 /**
  * Vocabulário FECHADO. Fechado porque desfecho é o que o laço LÊ para decidir a rodada seguinte:
@@ -299,7 +300,9 @@ export function priorOutcomeFactBlock(prior: GapOutcome[] | null | undefined): s
   if (relevantes.length === 0) return "";
   const linhas = relevantes.slice(0, 20).map((o) => {
     const onde = o.anchor ? ` (em: ${o.anchor})` : "";
-    const nota = o.note ? ` — você disse: “${o.note.slice(0, 300)}”` : " — sem justificativa registrada";
+    // 🔴 GAP-128: citar o agente pela metade sem dizer que cortou faz ele defender uma frase que
+    // não é a dele. O teto fica; o corte se declara.
+    const nota = o.note ? ` — você disse: “${cutEvidence(o.note, 300)}”` : " — sem justificativa registrada";
     if (o.verb === "corrigido" && o.contested) {
       return `• ${o.title}${onde}: você declarou CORRIGIDO na rodada anterior, mas NENHUMA edição foi aplicada${nota}.`;
     }

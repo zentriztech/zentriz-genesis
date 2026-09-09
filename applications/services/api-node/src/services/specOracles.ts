@@ -44,6 +44,7 @@
 import { httpPost } from "../routes/specs.js";
 import type { Db, EnrichedFinding } from "./findingTriage.js";
 import { buildFileMenu, loadSpecFiles, resolveFindingPath } from "./specGapScope.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 export interface OracleDecision {
   /** Slug do contrato em disputa, escolhido pelo agente (`paginacao`, `envelope-erro`…). */
@@ -287,7 +288,9 @@ export function crossFileFindings(
 }
 
 function findingLine(f: EnrichedFinding, cites: string[]): string {
-  const rationale = (f.rationale ?? "").replace(/\s+/g, " ").slice(0, 500);
+  // 🔴 GAP-128: o oráculo decide QUAL contrato existe lendo esta linha — corte não declarado aqui
+  // transforma "regra com exceção" em "regra absoluta". O teto fica; a mentira sai.
+  const rationale = cutEvidence((f.rationale ?? "").replace(/\s+/g, " "), 500);
   return `- [${f.severity}] em \`${f.file || "(sem arquivo)"}\` (cita: ${cites.join(", ")}) `
     + `${String(f.title ?? "").slice(0, 220)}${rationale ? ` — ${rationale}` : ""}`;
 }

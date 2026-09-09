@@ -29,6 +29,7 @@ import { resolveWorkbenchLlm, agentsLlmFields } from "./tenantLlmConfig.js";
 import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
 import { normalizeCategory, enrichRunFindings, registerRecurrences, judgedFilesOf, unionFindingsByCoverage, projectFindingsState } from "./findingTriage.js";
 import { parseFrontmatter } from "../lib/frontmatter.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -256,6 +257,8 @@ async function httpJson(url: string, method: string, body: unknown, timeoutMs: n
 }
 
 const STAGE_B_SEVERITIES = new Set(["blocker", "warning", "info"]);
+/** GAP-128: teto de INGESTÃO da justificativa do juiz. Armazenamento é JSONB — o teto é anti-abuso. */
+export const STAGE_B_RATIONALE_MAX = 4000;
 
 /**
  * 🔴 GAP-50 — título AUSENTE não pode virar uma CONSTANTE.
@@ -288,7 +291,10 @@ export function parseStageBFindings(raw: unknown): ValidationFinding[] {
   for (const item of arr.slice(0, 50)) {
     const o = (item ?? {}) as Record<string, unknown>;
     const sev = String(o.severity ?? "info").toLowerCase();
-    const rationale = String(o.rationale ?? "").slice(0, 1200);
+    // 🔴 GAP-128: a coluna é JSONB (sem limite de banco) e este é o fato PRIMÁRIO do juiz — medido em
+    // prod, 7 findings estavam exatamente em 1.200 chars (4 terminando no meio de uma palavra), isto é,
+    // o teto antigo já mordia e ninguém sabia. Sobe para 4.000 e, se ainda cortar, DECLARA.
+    const rationale = cutEvidence(String(o.rationale ?? ""), STAGE_B_RATIONALE_MAX);
     out.push({
       file: String(o.file ?? "").slice(0, 300),
       line: Number.isFinite(Number(o.line)) ? Math.max(1, Math.trunc(Number(o.line))) : null,

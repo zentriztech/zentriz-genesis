@@ -15,6 +15,7 @@
  */
 import { createHash } from "crypto";
 import type { ValidationFinding } from "./specValidation.js";
+import { cutEvidence } from "./evidenceCut.js";
 
 /** Estrutural: aceita Pool, PoolClient e os fakes `{ query }` dos testes/gate. */
 export type Db = { query: (text: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number | null }> };
@@ -663,7 +664,8 @@ export async function applyTriage(db: Db, args: {
   const fp = fpOverride || findingFingerprint(args.finding);
   const snapshot = {
     file: args.finding.file, source: args.finding.source, title: args.finding.title, category: normalizeCategory(args.finding.category),
-    anchor: args.finding.anchor ?? null, rationale: (args.finding.rationale ?? "").slice(0, 600), severity: args.finding.severity,
+    // 🔴 GAP-128: este `rationale` é a evidência PERSISTIDA da triagem — se cortar, declara.
+    anchor: args.finding.anchor ?? null, rationale: cutEvidence(args.finding.rationale ?? "", 600), severity: args.finding.severity,
     title_fingerprint: findingTitleFingerprint(args.finding),
   };
   await db.query("BEGIN");
