@@ -1,6 +1,6 @@
 {
   "name": "zentriz-genesis-api",
-  "version": "1.4.0-beta",
+  "version": "1.5.0",
   "description": "API Voucher — produto de exemplo Zentriz Genesis",
   "type": "module",
   "main": "dist/index.js",
