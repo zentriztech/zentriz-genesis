@@ -579,7 +579,10 @@ function buildRawFileRequest(
     ? [ctx.productMapBlock, ctx.findingsBlock ? `GAPs conhecidos desta spec:\n${ctx.findingsBlock}` : ""]
         .filter(Boolean).join("\n\n").slice(0, RAW_FILE_CONTEXT_BUDGET)
     : "";
-  const userMessage = [
+  // 🔴 GAP-153: aqui a cabeça estável inclui o CONTEÚDO do arquivo — no chat por-arquivo o que muda de
+  // um turno para o outro é só o transcript no fim. É o caso de cache mais óbvio do produto (o usuário
+  // manda 5 pedidos seguidos sobre o mesmo arquivo, em minutos) e hoje paga preço cheio nos 5.
+  const cabecaEstavel = [
     `ARQUIVO: ${filePath}`,
     "",
     contextBlock
@@ -589,6 +592,9 @@ function buildRawFileRequest(
     content,
     "--- FIM ---",
     "",
+  ];
+  const userMessage = [
+    ...cabecaEstavel,
     transcript ? `HISTÓRICO DA CONVERSA:\n${transcript}\n` : "",
     `PEDIDO: ${lastUser}`,
     "",
@@ -608,6 +614,7 @@ function buildRawFileRequest(
       transcript: transcript.length,
       user_request: lastUser.length,
     },
+    head: `${RAW_FILE_SYSTEM}\n${cabecaEstavel.join("\n")}`,
   });
   return {
     prompt_override: RAW_FILE_SYSTEM,
@@ -937,7 +944,12 @@ export function buildGapFileRequest(
   // 🔴 GAP-121: na consolidação pura NÃO se pede prestação de contas por GAP (ver o comentário no
   // array abaixo, onde este bloco é posicionado).
   const outcomeContract = consolidationBlock ? "" : gapOutcomeInstruction(gapsFit.length);
-  const userMessage = [
+  // 🔴 GAP-153: a CABEÇA ESTÁVEL do prompt vive num array próprio. Isto não muda a ordem nem um byte
+  // (`[...cabeca, ...resto].join("\n")` produz exatamente o mesmo texto que o array único produzia):
+  // serve para existir UM lugar no código que sabe onde TERMINARIA o prefixo cacheável. Daqui para
+  // baixo tudo muda a cada rodada (conteúdo do arquivo, lista de GAPs, histórico de tentativas), e
+  // prefixo que muda não é cacheável — marcar ali pagaria 1,25× de escrita sem ler nada de volta.
+  const cabecaEstavel = [
     `ARQUIVO: ${filePath}`,
     "",
     contextBlock
@@ -963,6 +975,9 @@ export function buildGapFileRequest(
     digested
       ? "--- RECORTE DIRIGIDO DO ARQUIVO (NÃO é o arquivo inteiro; leia as REGRAS dentro do bloco) ---"
       : "--- CONTEÚDO ATUAL DO ARQUIVO ---",
+  ];
+  const userMessage = [
+    ...cabecaEstavel,
     content,
     digested ? "--- FIM DO RECORTE ---" : "--- FIM DO CONTEÚDO ---",
     "",
@@ -1045,6 +1060,10 @@ export function buildGapFileRequest(
       attempt_history: attemptHistoryBlock.length,
       outcome_contract: outcomeContract.length,
     },
+    // 🔴 GAP-153: o `system` entra na cabeça porque é ele o primeiro byte que o provedor lê — o ponto
+    // de cache é do prefixo inteiro, não do `user`. A hipótese medida aqui: no laço a cabeça só repete
+    // entre RETENTATIVAS do mesmo arquivo; entre rodadas os oráculos/irmãos já mudaram.
+    head: `${system}\n${cabecaEstavel.join("\n")}`,
   });
   return {
     prompt_override: system,

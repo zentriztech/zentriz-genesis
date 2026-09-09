@@ -16,7 +16,9 @@
  *      acrescenta um bloco grande ao prompt e esquece de somá-lo ao censo (o apodrecimento esperado).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { recordPromptCensus } from "./promptCensus.js";
+import {
+  PROMPT_CACHE_MIN_HEAD_CHARS, PROMPT_CACHE_TTL_MS, recordPromptCensus, resetPromptCensusHeads,
+} from "./promptCensus.js";
 import { buildGapFileRequest } from "../routes/specChat.js";
 import type { ValidationFinding } from "./specValidation.js";
 
@@ -113,5 +115,85 @@ describe("censo do prompt REAL do CTO por-arquivo", () => {
     expect(linha).not.toContain("siblings=");
     expect(linha).not.toContain("product_map=");
     expect(linha).toContain("file_content=14c");
+  });
+});
+
+// 🔴 GAP-153 — o escritor da Bancada nunca marcou ponto de cache, e marcar às cegas é REGRESSÃO
+// (prefixo que não repete paga 1,25× de escrita e não lê nada). Antes de marcar, mede-se se a cabeça
+// estável repete byte a byte DENTRO do TTL. Estes testes pinam o que faz essa taxa ser honesta.
+describe("recordPromptCensus — GAP-153: a cabeça estável é medida antes de ser marcada", () => {
+  beforeEach(() => { resetPromptCensusHeads(); });
+
+  const censo = (head?: string, origem = "t") =>
+    recordPromptCensus({ origem, total: 10_000, fields: { file_content: 9_000 }, head });
+
+  it("cabeça não declarada é `null` — 'não declarado' ≠ 'não repete'", () => {
+    expect(censo().head).toBeNull();
+    expect(censo("").head).toBeNull();
+    expect(logs.at(-1)).not.toContain("head=");
+  });
+
+  it("primeira vez é ESTREIA, segunda dentro do TTL é ACERTO — e o contador acumula", () => {
+    const grande = "x".repeat(PROMPT_CACHE_MIN_HEAD_CHARS + 1);
+    const a = censo(grande);
+    expect(a.head).toMatchObject({ seen: 1, sinceLastMs: null, hitWithinTtl: false, cacheable: true });
+    expect(logs.at(-1)).toContain("head_repeat=estreia");
+    const b = censo(grande);
+    expect(b.head).toMatchObject({ seen: 2, hitWithinTtl: true });
+    expect(b.head!.hash).toBe(a.head!.hash);
+    expect(logs.at(-1)).toContain("head_repeat=ACERTO(0s)");
+  });
+
+  it("repetição FORA do TTL não é acerto — o prefixo já expirou e a escrita seria paga de novo", () => {
+    vi.useFakeTimers();
+    try {
+      const grande = "y".repeat(PROMPT_CACHE_MIN_HEAD_CHARS + 1);
+      censo(grande);
+      vi.advanceTimersByTime(PROMPT_CACHE_TTL_MS + 1_000);
+      const b = censo(grande);
+      // `seen` sobe (é o MESMO prefixo), mas não conta como acerto: contar contaria uma economia
+      // que o provedor não daria — exatamente o defeito que o GAP-147 mostrou no medidor.
+      expect(b.head).toMatchObject({ seen: 2, hitWithinTtl: false });
+      expect(logs.at(-1)).toContain("head_repeat=fora-do-ttl");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cabeça abaixo do piso do provedor é declarada NAO-CACHEAVEL (marcar ali é pagar por nada)", () => {
+    const c = censo("z".repeat(PROMPT_CACHE_MIN_HEAD_CHARS - 1));
+    expect(c.head!.cacheable).toBe(false);
+    expect(logs.at(-1)).toContain("NAO-CACHEAVEL");
+    const d = censo("w".repeat(PROMPT_CACHE_MIN_HEAD_CHARS));
+    expect(d.head!.cacheable).toBe(true);
+    expect(logs.at(-1)).not.toContain("NAO-CACHEAVEL");
+  });
+
+  it("a identidade é por ORIGEM: caminhos diferentes não se aproveitam do mesmo prefixo", () => {
+    const mesmo = "k".repeat(PROMPT_CACHE_MIN_HEAD_CHARS + 1);
+    const a = censo(mesmo, "api-gapfile");
+    const b = censo(mesmo, "api-rawfile");
+    expect(b.head!.hash).not.toBe(a.head!.hash);
+    expect(b.head).toMatchObject({ seen: 1, hitWithinTtl: false });
+  });
+
+  it("o log leva HASH e TAMANHO, nunca o texto da cabeça (spec de cliente não vai para log)", () => {
+    const segredo = "SEGREDO-DA-SPEC-".repeat(300);
+    const c = censo(segredo);
+    expect(c.head!.chars).toBe(segredo.length);
+    expect(logs.at(-1)).not.toContain("SEGREDO-DA-SPEC");
+    expect(logs.at(-1)).toContain(`head=${c.head!.hash}`);
+    expect(logs.at(-1)).toContain(`head_chars=${segredo.length}c`);
+  });
+
+  it("no prompt REAL do CTO a cabeça termina ANTES do conteúdo do arquivo", () => {
+    // Se a cabeça incluísse o conteúdo, ela mudaria a cada edição e a taxa medida seria sempre zero —
+    // o instrumento provaria a hipótese errada. O teto abaixo é a garantia disso no caminho real.
+    const content = "# Dados\n" + "linha de conteúdo do arquivo em edição\n".repeat(400);
+    buildGapFileRequest(content, "tecnico/dados.md", [finding()]);
+    const linha = logs.find((l) => l.includes("origem=api-gapfile")) ?? "";
+    const chars = Number(/head_chars=(\d+)c/.exec(linha)?.[1] ?? NaN);
+    expect(chars).toBeGreaterThan(0);
+    expect(chars).toBeLessThan(content.length);
   });
 });
