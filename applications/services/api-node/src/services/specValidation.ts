@@ -30,6 +30,7 @@ import { parseRfcMarkdown, RFC_DIR, RFC_FILENAME_RE } from "./evolutionGate.js";
 import { normalizeCategory, enrichRunFindings, registerRecurrences, judgedFilesOf, unionFindingsByCoverage, projectFindingsState } from "./findingTriage.js";
 import { parseFrontmatter } from "../lib/frontmatter.js";
 import { cutEvidence } from "./evidenceCut.js";
+import { VENDORED_CONNECT_VERSION } from "./connectSchema.js";
 
 // Rate-limit simples por chave (in-memory por processo — suficiente como freio de custo;
 // o createRateLimiter do repo é um preHandler por request, não serve p/ chave de domínio).
@@ -79,6 +80,8 @@ function annotateStageA(f: ValidationFinding): ValidationFinding {
     /só de testes\/docs/i.test(t) ? "rfc_tests_only_scope" :
     /sem Não-objetivos/i.test(t) ? "rfc_no_non_goals" :
     /sem `## Compatibilidade`/i.test(t) ? "rfc_no_compat" :
+    /sem declaração Connect/i.test(t) ? "no_connect_declaration" :
+    /Declaração Connect sem os campos/i.test(t) ? "connect_declaration_incomplete" :
     /sem conteúdo substantivo/i.test(t) ? "empty_spec" : "stage_a_other";
   const category = /^rfc_/.test(rule) ? (/gherkin|non_goals/.test(rule) ? "no_acceptance_criteria" : "structural") : "structural";
   return { ...f, category: f.category ?? category, anchor: f.anchor ?? rule };
@@ -229,6 +232,26 @@ export function runStageA(files: Array<SpecFileRow & { content: string }>, opts:
     if (!rfc.compat) {
       findings.push({ file: label, line: null, severity: "warning", title: "RFC sem `## Compatibilidade` (SemVer)",
         rationale: "Classifique PATCH/MINOR/MAJOR e `breaking`; define o fechamento do CHANGELOG no aceite.", source: "stage_a" });
+    }
+  }
+
+  // 🔴 GAP-133 — declaração Connect (`connect.yaml`) na raiz. Sem ela a fábrica constrói e emite
+  // SystemPassport/ServiceManifest por HEURÍSTICA sobre o código gerado, marcados como sintéticos:
+  // o produto nasce fora do Connect (tier0) sem ninguém dizer isso em lugar nenhum. Era uma pendência
+  // MUDA — 0 de 58 specs em prod tinham o arquivo e nenhuma ação do produto o criava.
+  // Warning, nunca blocker: mesma leniência do manifesto (todo o legado está sem ele).
+  const connectRow = files.find((f) => (f.rel_dir ?? "") === "" && f.filename.toLowerCase() === "connect.yaml");
+  if (!connectRow) {
+    findings.push({ file: "", line: null, severity: "warning", title: "Spec sem declaração Connect (connect.yaml)",
+      rationale: "É a INTENÇÃO de interoperabilidade (interfaces, eventos, dependências, ambientes, health) que a fábrica usa para emitir os manifests de forma determinística. Sem ela os manifests saem por heurística e MARCADOS como sintéticos. Gere pela ação 'Declaração Connect' da Bancada (ou deixe o laço autônomo gerar).", source: "stage_a" });
+  } else {
+    // Verificação TEXTUAL, declarada como tal: a API não tem parser de YAML (o schema completo só é
+    // aplicado na geração). Aqui só se confere que as chaves OBRIGATÓRIAS do schema aparecem.
+    const faltando = ["schemaVersion", "systemId", "serviceName", "responsibility", "interfaces"]
+      .filter((k) => !new RegExp(`^${k}\\s*:`, "m").test(connectRow.content));
+    if (faltando.length) {
+      findings.push({ file: "connect.yaml", line: 1, severity: "warning", title: "Declaração Connect sem os campos obrigatórios",
+        rationale: `Verificação textual (a API não parseia YAML): ausentes no topo do arquivo → ${faltando.join(", ")}. O schema Connect v${VENDORED_CONNECT_VERSION} exige todos; regere a declaração pela Bancada.`, source: "stage_a" });
     }
   }
 

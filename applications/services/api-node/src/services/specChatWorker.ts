@@ -19,6 +19,7 @@ import { collectSpecChatJobsTick, expireZombieSpecChatJobs } from "./specChatJob
 import { advanceAutonomyRunsTick } from "./specAutonomy.js";
 import { collectSpecSplitsTick } from "./specSplit.js";
 import { collectBancadaLessonsTick } from "./specLearning.js";
+import { ensureConnectDeclarationsTick } from "./connectDeclaration.js";
 import { collectStageBResults } from "./specValidation.js";
 import { extractSpecMarkdown, httpGet } from "../routes/specs.js";
 
@@ -105,6 +106,16 @@ async function tick(): Promise<void> {
   });
   if (learn.kicked || learn.finished || learn.skipped) {
     console.info(`[SpecChatWorker] aprendizado: ${learn.kicked} episódio(s) enviado(s), ${learn.finished} concluído(s), ${learn.skipped} sem rodadas.`);
+  }
+  // 🔴 GAP-133 (migração 115): a declaração Connect (`connect.yaml`) ganha DONO. Depois do laço
+  // terminar, a spec que segue sem declaração recebe uma — pelo arquiteto (LLM), não por heurística.
+  // Último, junto do aprendizado, pelo mesmo motivo: é acessório e não pode atrasar o laço.
+  const decl = await ensureConnectDeclarationsTick(pool).catch((e) => {
+    console.warn(`[SpecChatWorker] declaração Connect falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return { scanned: 0, started: 0, skipped: 0, recovered: 0 };
+  });
+  if (decl.started || decl.skipped || decl.recovered) {
+    console.info(`[SpecChatWorker] declaração Connect: ${decl.started} pedida(s), ${decl.skipped} dispensada(s), ${decl.recovered} recuperada(s) de ${decl.scanned} varrida(s).`);
   }
 }
 

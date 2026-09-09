@@ -1116,7 +1116,12 @@ describe("validação dentro do laço", () => {
       continuity = { persisted: 0, reconciled: true };
       await advanceAutonomyRun(db, r.id);
       expect(JSON.stringify(run!.rounds)).toContain("Parcela atribuível a esta edição: 0");
-      expect(JSON.stringify(run!.rounds)).not.toContain("-2");
+      // A guarda é "nenhum balde NEGATIVO", e tem de ser dita sobre o NÚMERO — `not.toContain("-2")`
+      // sobre o JSON inteiro colidia com o UUID de fixture (`11111111-2222-…`) sempre que algum ramo
+      // citava o id da run, e o teste falhava de forma intermitente por um motivo que não era o dele.
+      expect(JSON.stringify(run!.rounds)).not.toMatch(/atribuível a esta edição: -/);
+      const last = (run!.rounds as Array<Record<string, unknown>>).at(-1)!;
+      expect(Number(last.gapsOpenedAttributable)).toBeGreaterThanOrEqual(0);
     });
 
     it("🔴 GAP-126: ZERO novos não é caracterizado como regressão (afirmação sobre conjunto vazio)", async () => {

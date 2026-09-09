@@ -43,8 +43,10 @@ import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined";
 import HistoryIcon from "@mui/icons-material/History";
+import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import PreviewIcon from "@mui/icons-material/Preview";
 import RocketLaunchIcon from "@mui/icons-material/RocketLaunch";
+import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import SendIcon from "@mui/icons-material/Send";
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import StopCircleOutlinedIcon from "@mui/icons-material/StopCircleOutlined";
@@ -76,6 +78,8 @@ import ProductFolderNav from "@/components/ProductFolderNav";
 // Rastreabilidade (Jean, 2026-09-07): os três relatórios em PDF. O produto é o DONO da spec aberta
 // (`ownerProduct`, fonte autoritativa) — o mesmo objeto que a Fábrica reporta em /products.
 import { TraceabilityReportsButton } from "@/components/TraceabilityReports";
+// UI/UX 2026-09-09 (Jean): no mobile a barra de comandos colapsa em um menu de ícone.
+import ActionOverflowBar from "@/components/ActionOverflowBar";
 import {
   PromotionPlanDialog, describeStartResult,
   type PromotionPlanItem, type PromotionPlanMeta, type StartWaveResult,
@@ -1915,6 +1919,9 @@ export default function SpecPage() {
    */
   const [autonomyStartOpen, setAutonomyStartOpen] = useState(false);
   const [autonomyStartText, setAutonomyStartText] = useState("");
+  // UI/UX 2026-09-09 (Jean) — no mobile a barra de comandos colapsa em um ⋮; o item "Relatórios (PDF)"
+  // abre a lista de perfis ancorada NO ÍCONE (o item de menu desaparece junto com o menu).
+  const [reportsAnchor, setReportsAnchor] = useState<HTMLElement | null>(null);
   // Migração 097 — plano de promoção do PRODUTO (ordem por onda). Preenchido pelo 202 do
   // POST /api/products/:id/promote e re-lido do GET /api/products/:id/promotion depois de iniciar.
   const [planOpen, setPlanOpen] = useState(false);
@@ -3973,7 +3980,10 @@ export default function SpecPage() {
             )}
             {/* Item 2 — checklist Connect-ready (determinístico, do spec-tree): o que a spec já tem e o
                 que falta para chegar à fábrica no padrão Genesis › Connect › Auto Care. */}
-            <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution} />
+            {/* GAP-133: a declaração recém-gerada tem de APARECER — recarrega a árvore e abre o arquivo,
+                senão o usuário fica olhando um checklist que ainda diz "falta". */}
+            <ConnectReadyChecklist projectId={editProjectId} reloadSignal={treeReloadSignal} isEvolution={isEvolution}
+              onGenerated={(p) => { setTreeReloadSignal((n) => n + 1); void openSpecFile(p); }} />
             {/* UI/UX 2026-09-06 — aqui viviam DOIS blocos que saíram do corpo da página:
                 • `SpecTreePanel` ("Árvore da especificação"), a segunda lista de arquivos → agora é
                   a lista única (`ProductFolderNav`), no rail/painel "Arquivos"/diálogo do mobile;
@@ -3997,58 +4007,82 @@ export default function SpecPage() {
                     sx={{ minWidth: { xs: 140, sm: 260 }, flexGrow: { xs: 1, sm: 0 } }}
                   />
                 </Stack>
-                <Stack direction="row" spacing={1}>
-                  {/* Relatórios de rastreabilidade do PRODUTO dono desta spec. Só aparece quando a
-                      spec pertence a um produto de verdade (não ao inbox de rascunhos). */}
-                  <TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />
-                  {/* UI/UX 2026-09-08 (Jean): o laço autônomo em TODOS os arquivos mora AQUI, ao lado
-                      dos relatórios — longe do "Resolver GAPs deste arquivo", que é a ação vizinha de
-                      escopo pequeno. Sempre com N2 (ID do produto digitado). */}
-                  <Tooltip title={autonomy?.enabled === false
-                    ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
-                    : autonomyLoopRunning
-                      ? "Laço autônomo em andamento — acompanhe na aba do laço"
-                      : (gapCount ?? 0) > 0
-                        ? `O laço percorre a spec INTEIRA resolvendo, salvando e revalidando, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Pede confirmação digitada.`
-                        : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar"}>
-                    <span>
-                      <Button size="small" variant="outlined" color="secondary"
-                        startIcon={autonomyStarting
-                          ? <CircularProgress size={14} color="inherit" />
-                          : <SmartToyOutlinedIcon sx={{ fontSize: "0.95rem" }} />}
-                        disabled={autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0}
-                        onClick={() => { setAutonomyStartText(""); setAutonomyStartOpen(true); }}
-                        sx={{ textTransform: "none" }}>
-                        {autonomyLoopRunning
-                          ? "Laço em andamento…"
+                {/* UI/UX 2026-09-09 (Jean): no mobile os cinco comandos lado a lado QUEBRAVAM o
+                    layout — abaixo de `md` todos passam a viver no menu de ícone (⋮). Cada ação é
+                    declarada UMA vez aqui; `ActionOverflowBar` escolhe a forma (botão ou item de
+                    menu). Rótulos, tooltips e `disabled` continuam com fonte única. */}
+                <ActionOverflowBar
+                  ariaLabel="Ações da spec"
+                  /* Relatórios de rastreabilidade do PRODUTO dono desta spec. Só aparece quando a
+                     spec pertence a um produto de verdade (não ao inbox de rascunhos). */
+                  leading={<TraceabilityReportsButton productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null} />}
+                  actions={[
+                    // No mobile o gatilho dos relatórios é um item do menu; a lista dos três perfis
+                    // é a instância `hosted` abaixo, ancorada no ícone da barra.
+                    ...(ownerProduct?.id
+                      ? [{
+                        key: "reports", label: "Relatórios (PDF)", mobileOnly: true,
+                        icon: <PictureAsPdfOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+                        tooltip: "Resumido, completo ou misto — o mapeamento da construção do produto.",
+                        onClick: (el: HTMLElement) => setReportsAnchor(el),
+                      } as const]
+                      : []),
+                    // UI/UX 2026-09-08 (Jean): o laço autônomo em TODOS os arquivos mora AQUI, ao
+                    // lado dos relatórios — longe do "Resolver GAPs deste arquivo", que é a ação
+                    // vizinha de escopo pequeno. Sempre com N2 (ID do produto digitado).
+                    {
+                      key: "autonomy",
+                      label: autonomyLoopRunning
+                        ? "Laço em andamento…"
+                        : (gapCount ?? 0) > 0
+                          ? `Modo autônomo em todos os arquivos (${gapCount})`
+                          : "Modo autônomo",
+                      icon: <SmartToyOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+                      tooltip: autonomy?.enabled === false
+                        ? "Modo autônomo desligado nesta instalação (SPEC_AUTONOMY=off)"
+                        : autonomyLoopRunning
+                          ? "Laço autônomo em andamento — acompanhe na aba do laço"
                           : (gapCount ?? 0) > 0
-                            ? `Modo autônomo em todos os arquivos (${gapCount})`
-                            : "Modo autônomo"}
-                      </Button>
-                    </span>
-                  </Tooltip>
-                  <Button size="small" color="inherit" onClick={() => router.push(`/projects/${editProjectId}`)}>
-                    Descartar
-                  </Button>
-                  {/* UI/UX 2026-09-06 — o editor principal edita a spec inteira OU o arquivo
-                      escolhido na lista; o botão salva o que está aberto (PUT com If-Match no caso
-                      do arquivo, para não sobrescrever revisão da IA/laço autônomo). */}
-                  <Button size="small" variant="outlined" disabled={!!approving}
-                    startIcon={approving === "save" ? <CircularProgress size={14} color="inherit" /> : undefined}
-                    onClick={handleSaveCurrent}>
-                    {approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho"}
-                  </Button>
-                  {/* Onda 3 (b): "Salvar e Iniciar" → promoção. A spec só é admitida na fábrica por
-                      aqui; com GAPs em aberto exige confirmação por digitação. B1: o rótulo diz o
-                      escopo real (produto inteiro vs. só esta spec) — fonte única em factoryActions. */}
-                  <Tooltip title={promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct}>
-                    <Button size="small" variant="contained" color="success" disabled={!!approving}
-                      startIcon={approving === "start" ? <CircularProgress size={14} color="inherit" /> : <RocketLaunchIcon />}
-                      onClick={handlePromote}>
-                      {approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope)}
-                    </Button>
-                  </Tooltip>
-                </Stack>
+                            ? `O laço percorre a spec INTEIRA resolvendo, salvando e revalidando, até ${autonomy?.maxRoundsAllowed ?? 5} passe(s). Pede confirmação digitada.`
+                            : "Nenhum GAP em aberto na spec — rode Validar para (re)avaliar",
+                      disabled: autonomyLoopRunning || autonomyStarting || autonomy?.enabled === false || (gapCount ?? 0) === 0,
+                      busy: autonomyStarting,
+                      variant: "outlined", color: "secondary",
+                      onClick: () => { setAutonomyStartText(""); setAutonomyStartOpen(true); },
+                    },
+                    {
+                      key: "discard", label: "Descartar", color: "inherit",
+                      onClick: () => router.push(`/projects/${editProjectId}`),
+                    },
+                    // UI/UX 2026-09-06 — o editor principal edita a spec inteira OU o arquivo
+                    // escolhido na lista; o botão salva o que está aberto (PUT com If-Match no caso
+                    // do arquivo, para não sobrescrever revisão da IA/laço autônomo).
+                    {
+                      key: "save",
+                      label: approving === "save" ? "Salvando…" : activeFile ? "Salvar arquivo" : "Salvar rascunho",
+                      icon: <SaveOutlinedIcon sx={{ fontSize: "0.95rem" }} />,
+                      disabled: !!approving, busy: approving === "save", variant: "outlined",
+                      onClick: handleSaveCurrent,
+                    },
+                    // Onda 3 (b): "Salvar e Iniciar" → promoção. A spec só é admitida na fábrica por
+                    // aqui; com GAPs em aberto exige confirmação por digitação. B1: o rótulo diz o
+                    // escopo real (produto inteiro vs. só esta spec) — fonte única em factoryActions.
+                    {
+                      key: "promote",
+                      label: approving === "start" ? FACTORY_LABEL.promoting : promoteButtonLabel(promoteScope),
+                      icon: <RocketLaunchIcon sx={{ fontSize: "0.95rem" }} />,
+                      tooltip: promoteScope === "spec" ? FACTORY_TOOLTIP.promoteSpec : FACTORY_TOOLTIP.promoteProduct,
+                      disabled: !!approving, busy: approving === "start",
+                      variant: "contained", color: "success",
+                      onClick: handlePromote,
+                    },
+                  ]}
+                />
+                {/* Lista dos três perfis de relatório quando o gatilho vem do menu de ícone (mobile). */}
+                <TraceabilityReportsButton
+                  variant="hosted" hostAnchor={reportsAnchor} onHostClose={() => setReportsAnchor(null)}
+                  productId={ownerProduct?.id ?? null} productName={ownerProduct?.name ?? null}
+                />
               </Stack>
               {/* Altura preenche a viewport (plataforma profissional): em ≥lg o corpo cresce
                   (flexGrow) até o fundo do container de altura fixa — topos/fundos alinhados com o

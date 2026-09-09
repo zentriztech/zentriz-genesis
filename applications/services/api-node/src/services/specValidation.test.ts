@@ -41,6 +41,31 @@ describe("estágio A (determinístico)", () => {
     expect(f.find((x) => x.title.includes("sem conteúdo substantivo"))?.severity).toBe("blocker");
   });
 
+  // 🔴 GAP-133: enquanto a ausência da declaração Connect não era MEDIDA, ela era pendência MUDA —
+  // o checklist da Bancada acendia vermelho e nenhum laço tinha o dever de resolver.
+  it("spec SEM connect.yaml → warning (nunca blocker: toda spec legada está sem)", () => {
+    const f = runStageA([file("spec.md", RICH)]);
+    const decl = f.find((x) => x.title.includes("sem declaração Connect"));
+    expect(decl?.severity).toBe("warning");
+    expect(f.some((x) => x.severity === "blocker")).toBe(false);
+  });
+
+  it("connect.yaml incompleto → warning nomeando os campos que faltam; completo → nenhum achado de declaração", () => {
+    const incompleta = file("connect.yaml", 'systemId: "nvx-lastmile"\nserviceName: "tracking"\n');
+    const f = runStageA([file("spec.md", RICH), incompleta]);
+    const decl = f.find((x) => x.title.includes("Declaração Connect sem os campos"));
+    expect(decl?.severity).toBe("warning");
+    expect(decl?.file).toBe("connect.yaml");
+    expect(decl?.rationale).toMatch(/schemaVersion/);
+    expect(decl?.rationale).toMatch(/responsibility/);
+    expect(decl?.rationale).toMatch(/interfaces/);
+    expect(decl?.rationale).not.toMatch(/systemId/);
+
+    const completa = file("connect.yaml", 'schemaVersion: "1.3.0"\nsystemId: "nvx-lastmile"\nserviceName: "tracking"\nresponsibility: "Manter posição."\ninterfaces:\n  - name: "api"\n');
+    const ok = runStageA([file("spec.md", RICH), completa]);
+    expect(ok.some((x) => /declaração Connect|Declaração Connect/.test(x.title))).toBe(false);
+  });
+
   it("Evoluir E3: RFC vago em docs/rfc/ → blocker SÓ em evolução (produto novo: warning); nome fora do padrão idem", () => {
     const vague = file("RFC-0001-vago.md", "# RFC\n\n## Sumário\nFazer melhor.\n", "docs/rfc");
     const badName = file("rfc-1.md", "# RFC\n", "docs/rfc");

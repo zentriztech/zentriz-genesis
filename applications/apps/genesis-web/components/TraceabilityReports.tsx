@@ -32,14 +32,25 @@ interface Props {
   /** Produto sobre o qual o relatório é emitido. Sem produto não há relatório (o controle não aparece). */
   productId: string | null | undefined;
   productName?: string | null;
-  /** `icon` para caber em cabeçalho/card apertado; `button` para barra de ações. */
-  variant?: "button" | "icon";
+  /**
+   * `icon` para caber em cabeçalho/card apertado; `button` para barra de ações;
+   * `hosted` para quando o GATILHO é de outro (item do menu de ícone no mobile,
+   * `ActionOverflowBar`): aqui só vivem a lista dos três perfis e os avisos, ancorados no elemento
+   * que o hospedeiro entrega. Um MenuItem próprio dentro de outro `<Menu>` não serve — o MenuList
+   * clona o primeiro filho, e este componente devolve um Fragment.
+   */
+  variant?: "button" | "icon" | "hosted";
   size?: "small" | "medium";
   fullWidth?: boolean;
+  /** `hosted`: elemento onde a lista de perfis abre (null = fechada). */
+  hostAnchor?: HTMLElement | null;
+  /** `hosted`: pedido de fechamento (o hospedeiro zera o próprio anchor). */
+  onHostClose?: () => void;
 }
 
 export function TraceabilityReportsButton({
   productId, productName, variant = "button", size = "small", fullWidth = false,
+  hostAnchor = null, onHostClose,
 }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [busy, setBusy] = useState<TraceabilityProfile | null>(null);
@@ -50,6 +61,7 @@ export function TraceabilityReportsButton({
 
   const run = async (profile: TraceabilityProfile) => {
     setAnchor(null);
+    onHostClose?.();
     setBusy(profile);
     setError(null);
     setDone(null);
@@ -72,7 +84,7 @@ export function TraceabilityReportsButton({
 
   return (
     <>
-      {variant === "icon" ? (
+      {variant === "hosted" ? null : variant === "icon" ? (
         <Tooltip title={tip}>
           <IconButton
             size={size} aria-label="Relatórios de rastreabilidade em PDF" disabled={!!busy}
@@ -97,7 +109,9 @@ export function TraceabilityReportsButton({
       )}
 
       <Menu
-        anchorEl={anchor} open={!!anchor} onClose={() => setAnchor(null)}
+        anchorEl={variant === "hosted" ? hostAnchor : anchor}
+        open={variant === "hosted" ? !!hostAnchor : !!anchor}
+        onClose={() => { setAnchor(null); onHostClose?.(); }}
         slotProps={{ paper: { sx: { maxWidth: 380 } } }}
       >
         {PROFILES.map((p) => (
