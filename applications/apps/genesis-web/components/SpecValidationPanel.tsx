@@ -171,7 +171,12 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
       // ENQUANTO valida, a run corrente tem findings=[] — não reportar (o badge piscaria "0").
       if (s?.derivedStatus !== "validating") {
         const active = s?.counts ? s.counts.active : (s?.latestRun ? (Array.isArray(s.latestRun.findings) ? s.latestRun.findings.filter((f) => !f.triage).length : 0) : null);
-        onFindingsChangeRef.current?.(s?.latestRun ? active : null);
+        // 🔴 GAP-139 (Jean, 2026-09-09): run terminal em FALHA com zero finding não é "spec limpa" —
+        // é medição que não aconteceu. Reportar 0 pintaria a aba de VERDE ao lado de "Erro na
+        // validação". `null` = sem número (não medido); os findings de uma run em falha, se houver,
+        // continuam valendo e sendo reportados.
+        const semMedicao = (s?.latestRun?.status === "error" || s?.latestRun?.status === "interrupted") && (active ?? 0) === 0;
+        onFindingsChangeRef.current?.(s?.latestRun && !semMedicao ? active : null);
       }
       return s;
     } catch { return null; }
@@ -345,6 +350,17 @@ export default function SpecValidationPanel({ projectId, isAdmin, reloadSignal, 
       {state.derivedStatus === "stale" && (
         <Alert severity="warning" sx={{ mt: 1 }}>
           A spec foi editada depois da última validação — o resultado abaixo é da versão anterior. Revalide antes de promover.
+        </Alert>
+      )}
+      {/* 🔴 GAP-139 (Jean, 2026-09-09): "Erro na validação" + aba `GAPs (0)` era lido como spec limpa.
+          Zero finding numa run que TERMINOU EM FALHA é ausência de MEDIÇÃO. A aba fica sem número e
+          esta linha diz o que fazer — nada aqui afirma que a spec está boa. */}
+      {(state.derivedStatus === "error" || state.derivedStatus === "interrupted") && active.length === 0 && (
+        <Alert severity="error" sx={{ mt: 1 }}>
+          Esta validação <strong>não chegou a um resultado</strong>: terminou em
+          {state.derivedStatus === "error" ? " erro" : " interrupção"} sem registrar nenhum achado. Isso
+          <strong> não significa que a spec está sem GAPs</strong> — significa que ninguém mediu. A aba GAPs
+          fica sem número justamente por isso. Rode <strong>Validar</strong> novamente.
         </Alert>
       )}
       {/* GAP-21: sem isto, a aba mostrava "0 GAP ativo" e o Promover recusava — a spec estava

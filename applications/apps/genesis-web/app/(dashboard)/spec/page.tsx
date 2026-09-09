@@ -711,8 +711,12 @@ type GapScopeWire = {
   latestRunId: string | null;
   fileCount: number;
   totalActive: number;
+  /** Total de BLOQUEADORES na spec inteira (inclui os `unrouted`, que nenhum badge de arquivo mostra). */
+  totalBlockers?: number;
   /** GAPs ativos que ainda não têm arquivo definido (globais do Stage A / path obsoleto). */
   unrouted: number;
+  /** Quantos dos `unrouted` são bloqueadores. */
+  unroutedBlockers?: number;
   files: Array<{ path: string; isPrimary: boolean; active: number; blockers: number; warnings: number; routed: number }>;
   /** Ordem sugerida de trabalho (mais blockers primeiro) — a mesma fila do laço autônomo. */
   queue: string[];
@@ -2081,11 +2085,20 @@ export default function SpecPage() {
     let alive = true;
     // Zera ao trocar de projeto → sem flash da contagem do projeto anterior enquanto o fetch corre.
     setGapCount(null);
-    apiGet<{ latestRun: { findings?: Array<{ triage?: unknown }> } | null; counts?: { active: number } | null }>(`/api/specs/${editProjectId}/validation`)
+    apiGet<{ latestRun: { status?: string; findings?: Array<{ triage?: unknown }> } | null; counts?: { active: number } | null }>(`/api/specs/${editProjectId}/validation`)
       // RFC-0005: null = nunca validada (aba GAPs sem número); N = GAPs ATIVOS (ignorados/refutados não contam).
       .then((r) => {
         if (!alive) return;
         if (!r?.latestRun) { setGapCount(null); return; }
+        // 🔴 GAP-139 (Jean, 2026-09-09): `GAPs (0)` em VERDE ao lado de "Erro na validação" é a UI
+        // afirmando "spec limpa" a partir de uma medição que NÃO ACONTECEU. Run terminal em falha e
+        // zero finding = AUSÊNCIA DE MEDIÇÃO, não ausência de GAP → aba sem número (o mesmo que
+        // "nunca validada"), e o painel ao lado diz o motivo. Se a run falhou mas gravou findings,
+        // eles valem e são exibidos: o que se recusa aqui é o zero que mente.
+        if ((r.latestRun.status === "error" || r.latestRun.status === "interrupted") && (r.counts?.active ?? 0) === 0) {
+          setGapCount(null);
+          return;
+        }
         if (r.counts) { setGapCount(r.counts.active); return; }
         setGapCount(Array.isArray(r.latestRun.findings) ? r.latestRun.findings.filter((f) => !f?.triage).length : 0);
       })
@@ -3586,6 +3599,11 @@ export default function SpecPage() {
     gapsByPath,
     // UI/UX 2026-09-06 (item 2) — o que NÃO está nos badges, dito no cabeçalho da lista.
     gapsUnrouted: gapScope?.unrouted ?? null,
+    // UI/UX 2026-09-09 (Jean) — os dois badges totalizadores do cabeçalho. Vêm do SERVIDOR (a mesma
+    // fonte da aba GAPs) e não da soma dos badges da lista: os `unrouted` não aparecem em arquivo
+    // nenhum, então somar a lista daria um total MENOR que a aba — número que não fecha.
+    gapsTotalActive: gapScope?.totalActive ?? null,
+    gapsTotalBlockers: gapScope?.totalBlockers ?? null,
     editable: specEditable,
     onDeleteFile: handleDeleteSpecFile,
     headerActions: treeHeaderActions,

@@ -109,6 +109,53 @@ export function specValidationGateEnabled(): boolean {
 
 const VALIDATION_DEADLINE_MIN = parseInt(process.env.SPEC_VALIDATION_DEADLINE_MIN ?? "20", 10);
 
+/**
+ * 🔴 GAP-136 — o prazo era da RUN, mas o trabalho é POR LOTE.
+ *
+ * Medido em prod 2026-09-09 (NVX LastMile): a spec chegou a **1.158.616 chars** e o estágio B virou
+ * **4 lotes** (teto de janela 400k). Cada lote é uma leitura adversarial de 5–8 min, então a run
+ * inteira leva ~25 min — mas `deadline_at` nascia `started_at + 20 min`, um prazo dimensionado para
+ * UMA chamada. Resultado: `expireOverdueValidationRuns` virava a run `error` **no meio do lote 4**,
+ * duas validações seguidas (`89eae25b`, `8fbdfc21`) morreram assim, e a Bancada passou a mostrar
+ * "Erro na validação · GAPs (0)" para uma spec com 40 achados medidos.
+ *
+ * Prazo existe para cortar PARALISIA, não trabalho que está progredindo. Então o prazo passou a ser
+ * RENOVÁVEL por evidência de progresso: cada lote medido empurra `deadline_at` para
+ * `now() + VALIDATION_DEADLINE_MIN`, sempre limitado pelo teto DURO abaixo — que continua sendo o
+ * fim da história para uma run travada. Renovação é FATO: vai para o log e para a cobertura
+ * (`deadlineRenewals`), porque prazo que se move sem ninguém dizer é prazo que não existe.
+ */
+const VALIDATION_MAX_MIN = parseInt(process.env.SPEC_VALIDATION_MAX_MIN ?? "90", 10);
+
+/**
+ * GAP-136: empurra o prazo da run por PROGRESSO MEDIDO, respeitando o teto duro contado do início.
+ * Best-effort: falhar aqui só devolve o comportamento antigo (a run morre no prazo anterior).
+ */
+export async function renewValidationDeadline(pool: Pool, runId: string, motivo: string): Promise<boolean> {
+  try {
+    const r = await pool.query(
+      `UPDATE spec_validation_runs
+          SET deadline_at = LEAST(
+                started_at + ($2 || ' minutes')::interval,
+                now() + ($3 || ' minutes')::interval)
+        WHERE id = $1
+          AND status IN ('pending','running')
+          AND deadline_at IS NOT NULL
+          AND deadline_at < now() + ($3 || ' minutes')::interval
+          AND started_at + ($2 || ' minutes')::interval > deadline_at
+        RETURNING deadline_at`,
+      [runId, String(VALIDATION_MAX_MIN), String(VALIDATION_DEADLINE_MIN)],
+    );
+    const novo = r.rows[0]?.deadline_at;
+    if (!novo) return false;
+    console.log(`[spec-validation] run ${String(runId).slice(0, 8)}: prazo RENOVADO até ${new Date(String(novo)).toISOString()} — ${motivo} (teto duro: ${VALIDATION_MAX_MIN} min desde o início).`);
+    return true;
+  } catch (e) {
+    console.warn(`[spec-validation] run ${String(runId).slice(0, 8)}: prazo não renovado (${e instanceof Error ? e.message : String(e)}) — a run pode expirar com trabalho em curso.`);
+    return false;
+  }
+}
+
 // ── hash do estado atual (disco é a verdade) ─────────────────────────────────
 
 export interface SpecFileRow {
@@ -856,6 +903,8 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   const naoMedido: Array<{ file: string; reason: string }> = [];
   /** GAP-129: total de achados que o teto de ingestão descartou, somado nos lotes. */
   let descartados = 0;
+  /** GAP-136: quantas vezes o prazo da run foi empurrado por progresso medido (0 = nenhuma). */
+  let renovacoes = 0;
   if (!hasStageABlocker && files.length > 0) {
     const { partitionValidationInput } = await import("./specValidationInput.js");
     const judged = await loadJudgedShas(pool, projectId);
@@ -941,6 +990,11 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       }
       const known = knownFindingsForJudge(ativos, lote.full);
       if (known.length) console.log(`[spec-validation] run ${runId}:${rotulo} ${known.length} finding(s) ativo(s) enviados como continuidade de anchor (GAP-39).`);
+      // 🔴 GAP-136: o esperador deste lote tem seu PRÓPRIO teto de VALIDATION_DEADLINE_MIN. Sem
+      // empurrar o prazo da RUN aqui, o lote 2 em diante trabalha com prazo já gasto pelos anteriores
+      // e o watchdog derruba a run no meio de uma leitura que está progredindo. O teto duro
+      // (VALIDATION_MAX_MIN desde o início) é o que impede isso de virar "sem prazo".
+      if (i > 0 && await renewValidationDeadline(pool, runId, `lote ${i + 1}/${lotes.length} despachado`)) renovacoes += 1;
       const b = await runStageB(pool, runId, projectId, lote.text, known);
       if (b.error) {
         primeiroErro ??= b.error;
@@ -975,6 +1029,9 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       // 🔴 GAP-129: achados que o juiz produziu e o teto de ingestão descartou. Fica na cobertura
       // porque é FATO DE MEDIÇÃO (como `notMeasured`): a contagem desta validação está incompleta.
       ...(descartados > 0 ? { droppedFindings: descartados, droppedCap: STAGE_B_MAX_FINDINGS } : {}),
+      // 🔴 GAP-136: prazo que se move tem de aparecer. Quem lê a run depois precisa saber que ela
+      // custou mais de um prazo — e quantos.
+      ...(renovacoes > 0 ? { deadlineRenewals: renovacoes, deadlineMaxMin: VALIDATION_MAX_MIN } : {}),
     });
     // O assunto do estágio B só se encerra quando não há nada pendente de coleta (GAP-11).
     if (!pendente) await markStageBCollected(pool, runId);
@@ -1040,12 +1097,7 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
       ? "superseded"
       : findings.some((f) => f.severity === "blocker") ? "failed" : "passed";
 
-  await pool.query(
-    `UPDATE spec_validation_runs
-        SET status = $1, findings = $2::jsonb, stage_b_ran = $4::boolean, finished_at = now()
-      WHERE id = $3 AND status = 'running'`,
-    [finalStatus, JSON.stringify(findings), runId, stageBRan],
-  );
+  await writeValidationResult(pool, runId, finalStatus, findings, stageBRan, renovacoes);
   // Nada foi colapsado (zero duplicata, ou o agente não respondeu): o registro do C2 vale igual, é o
   // que distingue "não havia duplicata" de "ninguém procurou".
   if (colapso) await gravaAuditoriaColapso(pool, runId, colapso);
@@ -1063,6 +1115,58 @@ async function processValidationRun(pool: Pool, runId: string, projectId: string
   if (stageBError) {
     console.warn(`[spec-validation] run ${runId}: estágio B falhou (${stageBError}) — run marcada 'error'.`);
   }
+}
+
+/**
+ * 🔴 GAP-137 — a gravação do resultado era `WHERE status = 'running'` e o descarte era MUDO.
+ *
+ * Medido em prod 2026-09-09: a run `8fbdfc21` foi expirada pelo watchdog às 03:52:35 (GAP-136); este
+ * processo seguiu vivo, terminou os 4 lotes, colapsou duplicatas e auditou 40 findings com o revisor
+ * cross-family às 03:56:10 — e então o UPDATE final casou ZERO linhas, porque o status já não era
+ * `running`. Quatro leituras adversariais pagas, 35 achados confirmados como presentes por uma
+ * segunda família de modelo, e a linha ficou `error` com `findings = []`. A Bancada mostrou
+ * "GAPs (0)", indistinguível de spec limpa. **Perder trabalho pago é ruim; perdê-lo em silêncio é
+ * fechamento fake.**
+ *
+ * A guarda existe para não sobrescrever resultado que OUTRO escritor já gravou (o coletor do GAP-11).
+ * O discriminador correto não é o status — é "ninguém gravou achado nesta linha ainda".
+ * `error`/`interrupted` com lista VAZIA é exatamente a run que o watchdog derrubou e que este
+ * processo, o dono legítimo, ainda pode fechar. E o `rowCount` passa a ser CONFERIDO: se a escrita
+ * não pegar, o log diz quantos findings foram descartados e em que estado a linha já estava.
+ *
+ * Devolve `true` se o resultado desta execução ficou gravado.
+ */
+export async function writeValidationResult(
+  pool: Pool,
+  runId: string,
+  finalStatus: string,
+  findings: ValidationFinding[],
+  stageBRan: boolean,
+  renovacoes = 0,
+): Promise<boolean> {
+  const escrita = await pool.query(
+    `UPDATE spec_validation_runs
+        SET status = $1, findings = $2::jsonb, stage_b_ran = $4::boolean, finished_at = now()
+      WHERE id = $3
+        AND (status = 'running'
+             OR (status IN ('error','interrupted')
+                 AND COALESCE(jsonb_array_length(findings), 0) = 0))`,
+    [finalStatus, JSON.stringify(findings), runId, stageBRan],
+  );
+  if (escrita.rowCount === 0) {
+    const atual = (await pool.query(
+      "SELECT status, COALESCE(jsonb_array_length(findings), 0) AS n FROM spec_validation_runs WHERE id = $1",
+      [runId],
+    ).catch(() => ({ rows: [] as Array<{ status?: string; n?: number }> }))).rows[0];
+    console.warn(`[spec-validation] run ${runId}: resultado NÃO gravado — ${findings.length} finding(s) desta execução foram DESCARTADOS porque a linha já está em '${atual?.status ?? "?"}' com ${atual?.n ?? "?"} finding(s) (outro escritor fechou a run antes). Nada foi perdido em silêncio: esta é a linha que diz.`);
+    return false;
+  }
+  if (finalStatus !== "error") {
+    // GAP-136/137: a run passou do prazo, foi declarada morta e VOLTOU com resultado. Dizer isso é o
+    // que liga o sintoma ("Erro na validação") à causa (prazo curto para spec em N lotes).
+    console.log(`[spec-validation] run ${runId}: resultado gravado como '${finalStatus}' com ${findings.length} finding(s)${renovacoes > 0 ? ` (o prazo foi renovado ${renovacoes}× por progresso — GAP-136)` : ""}.`);
+  }
+  return true;
 }
 
 /**
@@ -1224,13 +1328,14 @@ export async function collectStageBResults(
          FROM spec_validation_runs
         WHERE agents_job_id IS NOT NULL
           AND stage_b_collected_at IS NULL
-          AND (
-            status IN ('error', 'interrupted')
-            OR (
-              status IN ('pending', 'running')
-              AND COALESCE(stage_b_polled_at, started_at) < now() - ($1 || ' seconds')::interval
-            )
-          )
+          AND status IN ('error', 'interrupted', 'pending', 'running')
+          -- 🔴 GAP-138: o lease vale para TODOS os status, não só para os em voo. Medido em prod
+          -- 2026-09-09: às 03:52:35 o watchdog virou a run 8fbdfc21 em "error" (prazo curto,
+          -- GAP-136) enquanto o esperador EM PROCESSO seguia vivo pollando o MESMO job — e o
+          -- coletor, que não pedia sinal de vida para "error", entrou como SEGUNDO escritor da
+          -- linha (logs "sigo aguardando" às 03:52:46, 03:53:06, 03:53:26, 03:53:46 vindos dos
+          -- dois). Status é opinião do watchdog; heartbeat é fato sobre quem está trabalhando.
+          AND COALESCE(stage_b_polled_at, started_at) < now() - ($1 || ' seconds')::interval
         ORDER BY finished_at ASC NULLS FIRST
         LIMIT 5`,
       [String(Math.max(30, STAGE_B_LEASE_SEC))],

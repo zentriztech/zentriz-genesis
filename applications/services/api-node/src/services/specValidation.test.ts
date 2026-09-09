@@ -2,7 +2,7 @@
  * specValidation.test.ts — RFC-0004 Onda 3: estágio A, schema do B e regras do gate.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation } from "./specValidation.js";
+import { runStageA, parseStageBFindings, STAGE_B_MAX_FINDINGS, titleFromRationale, checkSpecValidationGate, specValidationGateEnabled, autoValidateDirtySpecs, specValidationAutoEnabled, collectStageBResults, computeCurrentSpecHash, canReusePassedRun, pendingCoverage, knownFindingsForJudge, startValidation, renewValidationDeadline, writeValidationResult, type ValidationFinding } from "./specValidation.js";
 import type { Pool } from "pg";
 import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -455,7 +455,9 @@ describe("GAP-11 — coleta server-side do estágio B (migração 100)", () => {
       expect(s.sql).toContain("'pending', 'running'");
       // O critério é a IDADE do heartbeat, e `started_at` cobre a linha escrita por código antigo.
       expect(s.sql).toContain("COALESCE(stage_b_polled_at, started_at)");
-      expect(s.sql).toContain("status IN ('error', 'interrupted')");   // o caminho antigo continua
+      // O caminho antigo continua — mas agora na MESMA lista: desde o GAP-138 o lease de heartbeat
+      // vale também para `error`/`interrupted`, então não há mais um ramo por status.
+      expect(s.sql).toContain("status IN ('error', 'interrupted', 'pending', 'running')");
       expect(s.params[0]).toBe("120");                                  // lease default, em segundos
     });
 
@@ -675,5 +677,127 @@ describe("GAP-44 — one-flight devolve run em voo; `staleReuse` diz se ela mede
     expect(res.runId).toBe("vr-em-voo");
     expect(res.reused).toBe(true);
     expect(res.staleReuse).toBeUndefined();
+  });
+});
+
+/**
+ * 🔴 GAP-136 / GAP-137 / GAP-138 — o trio que fez uma spec com 40 achados medidos aparecer como
+ * "Erro na validação · GAPs (0)" na Bancada (prod, NVX LastMile, 2026-09-09).
+ *
+ * O que estes testes PROVAM, na ordem em que o defeito acontece:
+ *   136 — o prazo era de UMA chamada e a spec virou 4 lotes ⇒ o watchdog matou a run em progresso.
+ *         O prazo passa a ser RENOVÁVEL por progresso medido, sempre sob o teto duro.
+ *   137 — o dono legítimo terminou o trabalho e o UPDATE final casou ZERO linhas (o status já não
+ *         era `running`) ⇒ 4 leituras adversariais pagas descartadas EM SILÊNCIO.
+ *   138 — sem lease para `error`/`interrupted`, o coletor virava um SEGUNDO escritor da mesma linha.
+ */
+describe("GAP-136 — prazo RENOVÁVEL por progresso, sob teto duro", () => {
+  function db(rows: Array<Record<string, unknown>>, falha?: Error) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (falha) throw falha;
+        return { rows, rowCount: rows.length };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+
+  it("progresso medido empurra o prazo e o fato vai para o LOG (prazo que se move calado não existe)", async () => {
+    const novo = new Date(Date.now() + 20 * 60_000).toISOString();
+    const { pool, queries } = db([{ deadline_at: novo }]);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    try {
+      expect(await renewValidationDeadline(pool, "run-1", "lote 2/4 despachado")).toBe(true);
+      expect(logs.some((l) => /prazo RENOVADO/.test(l) && /lote 2\/4 despachado/.test(l) && /teto duro/.test(l))).toBe(true);
+    } finally { spy.mockRestore(); }
+    const q = queries[0];
+    expect(q.sql).toContain("UPDATE spec_validation_runs");
+    // O teto DURO é contado do início da run: renovar não é prazo infinito.
+    expect(q.sql).toContain("LEAST(");
+    expect(q.sql).toContain("started_at + ($2 || ' minutes')::interval");
+    // Só run VIVA é renovada — ressuscitar run terminal pelo prazo seria mentir sobre o estado.
+    expect(q.sql).toContain("status IN ('pending','running')");
+    expect(q.params).toEqual(["run-1", "90", "20"]);
+  });
+
+  it("teto duro atingido (nenhuma linha casa) → NÃO renova: run travada morre no prazo", async () => {
+    const { pool } = db([]);
+    expect(await renewValidationDeadline(pool, "run-1", "lote 4/4")).toBe(false);
+  });
+
+  it("erro de banco na renovação não derruba a validação (best-effort declarado)", async () => {
+    const { pool } = db([], new Error("deadlock detected"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await renewValidationDeadline(pool, "run-1", "lote 3/4")).toBe(false);
+      expect(warn.mock.calls.some((c) => /prazo não renovado/.test(c.join(" ")))).toBe(true);
+    } finally { warn.mockRestore(); }
+  });
+});
+
+describe("GAP-137 — resultado do dono legítimo não é descartado, e nunca em silêncio", () => {
+  const achados = [
+    { file: "README.md", line: null, severity: "blocker", title: "contradição", rationale: "x", source: "stage_b" },
+  ] as unknown as ValidationFinding[];
+
+  function db(rowCount: number, estadoAtual?: { status: string; n: number }) {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("UPDATE spec_validation_runs")) return { rows: [], rowCount };
+        return { rows: estadoAtual ? [estadoAtual] : [], rowCount: estadoAtual ? 1 : 0 };
+      },
+    } as unknown as Pool;
+    return { pool, queries };
+  }
+
+  it("a guarda passa a aceitar a run que o watchdog derrubou com lista VAZIA (o dono ainda pode fechar)", async () => {
+    const { pool, queries } = db(1);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await writeValidationResult(pool, "run-1", "failed", achados, true, 3)).toBe(true);
+      // A renovação do prazo (GAP-136) é DITA junto do resultado: liga o sintoma à causa.
+      expect(log.mock.calls.some((c) => /renovado 3×/.test(c.join(" ")))).toBe(true);
+    } finally { log.mockRestore(); }
+    const upd = queries[0];
+    expect(upd.sql).toContain("status = 'running'");
+    expect(upd.sql).toContain("status IN ('error','interrupted')");
+    // O discriminador é "ninguém gravou achado nesta linha", NÃO o status.
+    expect(upd.sql).toContain("COALESCE(jsonb_array_length(findings), 0) = 0");
+    expect(upd.params[0]).toBe("failed");
+    expect(JSON.parse(String(upd.params[1]))).toHaveLength(1);
+  });
+
+  it("outro escritor já fechou a run com achados → NÃO sobrescreve, e o descarte é DECLARADO", async () => {
+    const { pool } = db(0, { status: "failed", n: 40 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await writeValidationResult(pool, "run-1", "passed", achados, true)).toBe(false);
+      const dito = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(dito).toMatch(/resultado NÃO gravado/);
+      expect(dito).toMatch(/1 finding\(s\) desta execução foram DESCARTADOS/);
+      expect(dito).toMatch(/já está em 'failed' com 40 finding\(s\)/);
+    } finally { warn.mockRestore(); }
+  });
+});
+
+describe("GAP-138 — o lease do coletor vale para TODOS os status (um escritor por linha)", () => {
+  it("a varredura pede sinal de vida sem ramificar por status", async () => {
+    const queries: { sql: string; params: unknown[] }[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[] = []) => { queries.push({ sql, params }); return { rows: [] }; },
+    } as unknown as Pool;
+    await collectStageBResults(pool, async () => ({ status: "running" }));
+    const scan = queries.find((q) => q.sql.includes("FROM spec_validation_runs") && q.sql.includes("ORDER BY finished_at"))!;
+    expect(scan.sql).toContain("status IN ('error', 'interrupted', 'pending', 'running')");
+    // Um único `status IN` + o heartbeat como AND de topo: se o lease valesse só para os em voo,
+    // haveria um segundo `status IN` (ou um OR) e o coletor voltaria a ser 2º escritor de `error`.
+    expect(scan.sql.match(/status IN/g)).toHaveLength(1);
+    expect(scan.sql).toContain("AND COALESCE(stage_b_polled_at, started_at) < now() - ($1 || ' seconds')::interval");
+    expect(scan.sql).not.toMatch(/\bOR\b/);
   });
 });

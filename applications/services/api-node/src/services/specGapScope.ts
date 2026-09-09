@@ -74,7 +74,17 @@ export interface GapScopeWire {
   latestRunId: string | null;
   fileCount: number;
   totalActive: number;
+  /**
+   * UI/UX 2026-09-09 (Jean) — total de GAPs ativos por NÍVEL na spec INTEIRA, para os dois badges do
+   * cabeçalho da pasta do produto. Somar os badges por arquivo não dá este número: os `unrouted`
+   * (GAPs sem arquivo atribuído) ficam fora de todo badge da lista, e é justamente a diferença que
+   * fazia a soma não fechar com a aba GAPs. Amarelo é a subtração (`totalActive - totalBlockers`),
+   * então os dois badges sempre reconstituem o total — sem terceiro número escondido.
+   */
+  totalBlockers: number;
   unrouted: number;
+  /** Quantos dos `unrouted` são BLOQUEADORES (a parte do vermelho que nenhum badge de arquivo mostra). */
+  unroutedBlockers: number;
   files: GapFileBucket[];
   /** Fila sugerida para o PR-5: arquivos com GAP ativo, mais blockers primeiro. */
   queue: string[];
@@ -291,11 +301,17 @@ export function gapQueue(list: GapFileBucket[]): string[] {
 
 export function toWire(groups: GapGroups): GapScopeWire {
   const list = buckets(groups);
+  // Bloqueadores da spec INTEIRA = os roteados (soma dos badges por arquivo) + os que ficaram sem
+  // arquivo. Sem a segunda parcela o badge vermelho do cabeçalho ficaria MENOR que a aba GAPs, que é
+  // exatamente o tipo de número que não fecha e faz a UI parecer mentirosa.
+  const unroutedBlockers = groups.unrouted.filter((f) => f.severity === "blocker").length;
   return {
     latestRunId: groups.latestRunId,
     fileCount: groups.files.length,
     totalActive: groups.totalActive,
+    totalBlockers: list.reduce((acc, b) => acc + b.blockers, 0) + unroutedBlockers,
     unrouted: groups.unrouted.length,
+    unroutedBlockers,
     files: list,
     queue: gapQueue(list),
     stalePaths: groups.stalePaths ?? [],

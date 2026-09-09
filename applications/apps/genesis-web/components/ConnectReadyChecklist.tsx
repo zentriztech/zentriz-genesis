@@ -107,6 +107,12 @@ const COLOR: Record<Level, "success" | "warning" | "error"> = { ok: "success", w
 interface DeclResponse {
   ok: boolean; path: string; action: "created" | "updated";
   warnings?: string[]; truncated?: string[]; modelUsed?: string | null; interfaces?: number;
+  /**
+   * 🔴 GAP-135 — sobre O QUE a declaração foi decidida. Numa spec que não cabe na janela, quem
+   * escolhe os arquivos é o próprio arquiteto (2 passes); `spec-inteira` significa que nada ficou
+   * fora e não houve escolha a fazer.
+   */
+  read?: { files: string[]; leftOut: string[]; chosenBy: "arquiteto" | "spec-inteira"; why?: string; uncovered?: string[] };
 }
 
 export default function ConnectReadyChecklist({ projectId, reloadSignal = 0, isEvolution = false, onGenerated }: {
@@ -195,6 +201,14 @@ export default function ConnectReadyChecklist({ projectId, reloadSignal = 0, isE
             {typeof declOut.interfaces === "number" ? ` — ${declOut.interfaces} interface(s)` : ""}
             {declOut.modelUsed ? ` · ${declOut.modelUsed}` : ""}
           </Typography>
+          {/* 🔴 GAP-135: dizer QUAIS arquivos sustentam a declaração — e quem escolheu. */}
+          {declOut.read && (
+            <Typography variant="caption" sx={{ display: "block", fontSize: "0.64rem", lineHeight: 1.35 }}>
+              Lido: {declOut.read.files.length} arquivo(s)
+              {declOut.read.chosenBy === "arquiteto" ? " escolhidos pelo próprio arquiteto (a spec não cabe na janela)" : " — a spec inteira"}
+              {declOut.read.leftOut.length ? ` · FORA: ${declOut.read.leftOut.join(", ")}` : ""}
+            </Typography>
+          )}
           {[...(declOut.warnings ?? []), ...(declOut.truncated ?? [])].map((w, i) => (
             <Typography key={i} variant="caption" sx={{ display: "block", fontSize: "0.64rem", lineHeight: 1.35 }}>• {w}</Typography>
           ))}

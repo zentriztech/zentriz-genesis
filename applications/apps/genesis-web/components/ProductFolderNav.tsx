@@ -72,7 +72,8 @@ function buildFolderLabels(projects: ProductSpecProject[]): Map<string, string> 
 
 export default function ProductFolderNav({
   productId, currentProjectId, currentFilePath = null, onOpen, onOpenFolder, height = 560,
-  gapsByPath = null, gapsUnrouted = null, editable = false, onDeleteFile, headerActions = null, onProjectMeta,
+  gapsByPath = null, gapsUnrouted = null, gapsTotalActive = null, gapsTotalBlockers = null,
+  editable = false, onDeleteFile, headerActions = null, onProjectMeta,
   reloadSignal = 0,
 }: {
   /** Produto dono da spec. Vazio → modo PROJETO-ÚNICO (lê o índice do próprio projeto). */
@@ -101,6 +102,15 @@ export default function ProductFolderNav({
    * badge da aba GAPs e nada explicava a diferença. 0/null → nada no cabeçalho.
    */
   gapsUnrouted?: number | null;
+  /**
+   * UI/UX 2026-09-09 (Jean) — TOTAIS da spec do projeto aberto para os dois badges do cabeçalho:
+   * vermelho = bloqueadores, âmbar = ativos não bloqueadores (`gapsTotalActive - gapsTotalBlockers`).
+   * Vêm do SERVIDOR (mesma fonte da aba GAPs) e NÃO da soma dos badges da lista — os `gapsUnrouted`
+   * não aparecem em arquivo nenhum, então somar a lista daria um total menor que a aba. `null` =
+   * spec nunca validada ⇒ nenhum badge (0 aqui significaria "validada e limpa", que é outra coisa).
+   */
+  gapsTotalActive?: number | null;
+  gapsTotalBlockers?: number | null;
   /** Spec do projeto aberto aceita escrita (status/runner) → mostra o botão de excluir. */
   editable?: boolean;
   /** Excluir arquivo (nunca o primário). Ausente → nenhum botão de excluir. */
@@ -288,6 +298,27 @@ export default function ProductFolderNav({
           <Typography variant="caption" sx={{ flexGrow: 1, minWidth: 0, color: "#8B949E", fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em" }}>
             {projectOnly ? "Arquivos da spec" : "Pasta do produto"} · {data?.totalFiles ?? 0} arquivo(s)
           </Typography>
+          {/* 🔴🟠 UI/UX 2026-09-09 (Jean) — dois badges TOTALIZADORES por nível, na mesma linguagem
+              visual dos badges por arquivo. Reconstituem o total da aba GAPs: vermelho + âmbar =
+              `gapsTotalActive` (os sem arquivo inclusos, que a linha de aviso logo abaixo detalha). */}
+          {(gapsTotalBlockers ?? 0) > 0 && (
+            <Tooltip title={`${gapsTotalBlockers} GAP(s) BLOQUEADOR(es) na spec inteira deste projeto${gapsTotalActive != null ? ` (de ${gapsTotalActive} ativo(s))` : ""}. É o mesmo total da aba GAPs — inclui os que não estão em arquivo nenhum.`}>
+              <Box component="span" aria-label={`${gapsTotalBlockers} GAPs bloqueadores na spec`} sx={{
+                px: 0.5, minWidth: 15, height: 15, borderRadius: "8px", display: "inline-flex",
+                alignItems: "center", justifyContent: "center", fontSize: "0.58rem", fontWeight: 700,
+                lineHeight: 1, color: "#0D1117", bgcolor: "#F85149", flexShrink: 0,
+              }}>{gapsTotalBlockers}</Box>
+            </Tooltip>
+          )}
+          {(gapsTotalActive ?? 0) - (gapsTotalBlockers ?? 0) > 0 && (
+            <Tooltip title={`${(gapsTotalActive ?? 0) - (gapsTotalBlockers ?? 0)} GAP(s) ativo(s) NÃO bloqueador(es) na spec inteira deste projeto (de ${gapsTotalActive} ativo(s)).`}>
+              <Box component="span" aria-label={`${(gapsTotalActive ?? 0) - (gapsTotalBlockers ?? 0)} GAPs ativos não bloqueadores na spec`} sx={{
+                px: 0.5, minWidth: 15, height: 15, borderRadius: "8px", display: "inline-flex",
+                alignItems: "center", justifyContent: "center", fontSize: "0.58rem", fontWeight: 700,
+                lineHeight: 1, color: "#0D1117", bgcolor: "#F59E0B", flexShrink: 0,
+              }}>{(gapsTotalActive ?? 0) - (gapsTotalBlockers ?? 0)}</Box>
+            </Tooltip>
+          )}
           {/* Ações da LISTA (novo arquivo, novo RFC, dividir a spec) — ficam aqui, junto do
               excluir de cada linha, em vez de virarem cards ocupando o corpo da página. */}
           {headerActions}

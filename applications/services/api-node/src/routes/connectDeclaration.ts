@@ -59,6 +59,9 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
         return reply.send({
           ok: true, path: result.path, action: result.action,
           warnings: result.warnings, truncated: result.truncated, modelUsed: result.modelUsed,
+          // GAP-135: a tela precisa saber SOBRE O QUE a declaração foi decidida e quem escolheu a
+          // leitura — "gerado com sucesso" sem isso esconde a metade que importa numa spec grande.
+          read: result.read,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -69,6 +72,11 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
           EMPTY_RESPONSE: { code: 502, body: "O arquiteto não devolveu conteúdo. Tente novamente." },
           DECL_NOT_JSON: { code: 502, body: "O arquiteto não devolveu um objeto JSON válido. Tente novamente." },
           DECL_WITHOUT_INTERFACES: { code: 502, body: "A declaração voltou sem nenhuma interface — o schema Connect exige ao menos uma. Tente novamente." },
+          // 🔴 GAP-135: numa spec que não cabe na janela, o passe 1 (o arquiteto escolhendo o que ler)
+          // é PRÉ-REQUISITO. Sem ele não há declaração: ler pela ordem da listagem seria decidir
+          // interoperabilidade sem abrir o arquivo de interoperabilidade.
+          DECL_SELECTION_EMPTY: { code: 502, body: "O arquiteto não indicou quais arquivos precisa ler (passe 1). Nada foi gerado — tente novamente." },
+          DECL_SELECTION_UNREADABLE: { code: 502, body: "Os arquivos escolhidos pelo arquiteto não puderam ser lidos. Nada foi gerado." },
         };
         const hit = known[msg];
         if (hit) return reply.status(hit.code).send({ code: msg, message: hit.body });
@@ -77,6 +85,12 @@ export async function connectDeclarationRoutes(app: FastifyInstance) {
           return reply.status(502).send({
             code: msg, warnings,
             message: `A declaração gerada não passou no schema Connect e NÃO foi gravada: ${warnings.slice(0, 4).join(" · ")}`,
+          });
+        }
+        if (/^DECL_SELECTION_FAILED/.test(msg)) {
+          return reply.status(502).send({
+            code: "DECL_SELECTION_FAILED",
+            message: `O passe 1 (o arquiteto escolhendo o que ler nesta spec grande) falhou: ${msg.replace(/^DECL_SELECTION_FAILED:\s*/, "").slice(0, 200)}. Nada foi gravado.`,
           });
         }
         if (/^FILE_TOO_LARGE/.test(msg)) return reply.status(413).send({ code: "FILE_TOO_LARGE", message: "A declaração gerada excede o teto de tamanho de arquivo da spec." });

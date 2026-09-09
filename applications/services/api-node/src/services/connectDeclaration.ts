@@ -33,6 +33,8 @@ import { SPEC_EDITABLE_STATUSES } from "./projectStatus.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_FILE = path.resolve(__dirname, "..", "assets", "CONNECT_DECLARATION_PROMPT.md");
+/** 🔴 GAP-135 — prompt do PASSE 1: o arquiteto escolhe o que vai ler (ver `selectFilesToRead`). */
+const SELECT_PROMPT_FILE = path.resolve(__dirname, "..", "assets", "CONNECT_DECLARATION_SELECT_PROMPT.md");
 
 /** Caminho canônico da declaração — o mesmo que o manifesto e o checklist esperam (raiz do projeto). */
 export const CONNECT_DECL_PATH = "connect.yaml";
@@ -44,12 +46,34 @@ export const CONNECT_DECL_PATH = "connect.yaml";
  * declarar interoperabilidade sem ler o arquivo de interoperabilidade. Declaração é artefato ÚNICO
  * por spec (uma chamada, não um laço), então o degrau certo é pagar contexto e ler a spec inteira;
  * os tetos ficam como rede contra spec patológica, não como regra de rotina.
+ *
+ * 2026-09-09 (Jean): os três tetos são CALIBRÁVEIS por ambiente (`CONNECT_DECL_SPEC_CAP`,
+ * `CONNECT_DECL_FILE_CAP`, `CONNECT_DECL_MAX_FILES`) — o valor certo depende do tamanho das specs do
+ * tenant e do modelo em uso, e descobrir isso não pode exigir rebuild. Valor inválido ou abaixo do
+ * piso é RECUSADO com aviso (cai no padrão) em vez de virar teto absurdo silencioso.
  */
-export const CONNECT_DECL_SPEC_CAP = 240_000;
+export const CONNECT_DECL_SPEC_CAP = capFromEnv("CONNECT_DECL_SPEC_CAP", 240_000, 10_000);
 /** Teto por arquivo, para que UM arquivo grande não coma a spec inteira. */
-export const CONNECT_DECL_FILE_CAP = 40_000;
+export const CONNECT_DECL_FILE_CAP = capFromEnv("CONNECT_DECL_FILE_CAP", 40_000, 2_000);
 /** Máximo de arquivos temáticos lidos (a lista COMPLETA vai no pedido de qualquer forma). */
-export const CONNECT_DECL_MAX_FILES = 32;
+export const CONNECT_DECL_MAX_FILES = capFromEnv("CONNECT_DECL_MAX_FILES", 32, 1);
+
+export function capFromEnv(name: string, padrao: number, piso: number): number {
+  const bruto = (process.env[name] ?? "").trim();
+  if (!bruto) return padrao;
+  const n = Number.parseInt(bruto, 10);
+  if (!Number.isFinite(n) || n < piso) {
+    console.warn(`[ConnectDecl] ${name}="${bruto}" ignorado (inteiro ≥ ${piso} esperado) — usando o padrão ${padrao}.`);
+    return padrao;
+  }
+  if (n !== padrao) console.info(`[ConnectDecl] ${name}=${n} (padrão ${padrao}) — teto calibrado por ambiente.`);
+  return n;
+}
+
+/** Dimensões que a declaração precisa sustentar — usadas para medir a cobertura da ESCOLHA (GAP-135). */
+export const DECL_DIMENSIONS = ["interfaces", "dependencies", "events", "runtime", "environments", "health"] as const;
+/** Cabeçalhos (`#`/`##`) enviados por arquivo no passe 1: o suficiente para reconhecer o assunto. */
+const MAX_HEADINGS_PER_FILE = 14;
 
 type Db = Pick<Pool, "query">;
 
@@ -61,7 +85,31 @@ export function loadConnectDeclarationPrompt(): string {
   return _promptCache;
 }
 
+let _selectPromptCache: string | null = null;
+export function loadConnectSelectPrompt(): string {
+  if (_selectPromptCache === null) {
+    try { _selectPromptCache = fs.readFileSync(SELECT_PROMPT_FILE, "utf-8"); } catch { _selectPromptCache = ""; }
+  }
+  return _selectPromptCache;
+}
+
 // ── Contexto (fatos) ─────────────────────────────────────────────────────────
+
+/** Um arquivo `.md` da spec com o corpo em memória (NUNCA vai inteiro ao LLM — ver `packSpecText`). */
+export interface ReadableSpecFile { path: string; isPrimary: boolean; body: string }
+
+/**
+ * 🔴 GAP-135 — o FATO sobre um arquivo, sem o conteúdo: é o que o passe 1 recebe para escolher.
+ * Cabeçalhos em vez de nome de arquivo porque `05-anexos.md` pode ser o único que descreve endpoints.
+ */
+export interface SpecFileFact {
+  path: string;
+  isPrimary: boolean;
+  chars: number;
+  headings: string[];
+  /** Quantos cabeçalhos ficaram fora da amostra (corte declarado até aqui). */
+  headingsOmitted: number;
+}
 
 export interface ConnectDeclContext {
   projectId: string;
@@ -78,6 +126,77 @@ export interface ConnectDeclContext {
   existing: string | null;
   /** Tetos que morderam — vão para o resultado, não ficam em silêncio. */
   truncated: string[];
+  /** Parte de `truncated` que NÃO vem do empacotamento (sobrevive a uma reescolha do passe 1). */
+  truncatedBase: string[];
+  /** Fatos por arquivo legível (tamanho + cabeçalhos) — insumo do passe 1. */
+  facts: SpecFileFact[];
+  /** Corpos em memória (uso interno: nunca serializar isto num pedido). */
+  readable: ReadableSpecFile[];
+  /** Arquivos que ENTRARAM no `specText` e os que ficaram fora, sempre explícitos. */
+  readPaths: string[];
+  leftOut: string[];
+  /**
+   * A spec NÃO cabe nos tetos ⇒ alguém tem de ESCOLHER. Enquanto isto é `true`, o `specText` é
+   * apenas um provisório na ordem da listagem — usá-lo assim é exatamente o defeito do GAP-135.
+   */
+  needsSelection: boolean;
+  /** Escolha do arquiteto, quando o passe 1 rodou (fica no resultado e no cabeçalho do YAML). */
+  selection: ConnectDeclSelection | null;
+}
+
+/** Cabeçalhos `#`/`##` de um markdown, para o passe 1 reconhecer o assunto sem ler o arquivo. */
+export function extractHeadings(body: string, max = MAX_HEADINGS_PER_FILE): { headings: string[]; omitted: number } {
+  const todos: string[] = [];
+  for (const linha of String(body ?? "").split("\n")) {
+    const m = /^(#{1,2})\s+(.+?)\s*$/.exec(linha);
+    if (m) todos.push(`${m[1] === "#" ? "" : "  "}${m[2].slice(0, 120)}`);
+    if (todos.length > max + 40) break; // spec patológica: não varrer eternamente por cabeçalho
+  }
+  return { headings: todos.slice(0, max), omitted: Math.max(0, todos.length - max) };
+}
+
+/**
+ * Monta o texto da spec LENDO NA ORDEM PEDIDA e declarando tudo o que ficou fora. Quem define a
+ * ordem é quem chama: no passe 2 é a escolha do arquiteto (GAP-135), e na spec que cabe inteira é a
+ * própria listagem — aí não há escolha a fazer, só completude.
+ */
+export function packSpecText(
+  files: ReadableSpecFile[],
+  order: string[],
+  caps: { specCap: number; fileCap: number; maxFiles: number } = {
+    specCap: CONNECT_DECL_SPEC_CAP, fileCap: CONNECT_DECL_FILE_CAP, maxFiles: CONNECT_DECL_MAX_FILES,
+  },
+): { specText: string; truncated: string[]; readPaths: string[]; leftOut: string[] } {
+  const byPath = new Map(files.map((f) => [f.path, f]));
+  const truncated: string[] = [];
+  const readPaths: string[] = [];
+  const parts: string[] = [];
+  // Teto por arquivo nunca pode ser maior que o teto total, senão o 1º arquivo já o estouraria.
+  const fileCap = Math.min(caps.fileCap, caps.specCap);
+  let total = 0;
+  for (const p of order) {
+    const f = byPath.get(p);
+    if (!f || readPaths.includes(p)) continue;
+    if (readPaths.length >= caps.maxFiles) {
+      truncated.push(`spec: teto de ${caps.maxFiles} arquivo(s) lido(s) atingido — os seguintes não foram enviados`);
+      break;
+    }
+    const capped = cutEvidence(f.body, fileCap);
+    if (capped.length < f.body.length) truncated.push(`${p}: ${f.body.length} → ${fileCap} chars`);
+    if (total > 0 && total + capped.length > caps.specCap) {
+      truncated.push(`spec: teto total de ${caps.specCap} chars atingido em "${p}" — arquivos seguintes não foram enviados`);
+      break;
+    }
+    total += capped.length;
+    readPaths.push(p);
+    parts.push(`--- ARQUIVO: ${p}${f.isPrimary ? " (PRIMÁRIO)" : ""} ---\n${capped}`);
+  }
+  const lidos = new Set(readPaths);
+  const leftOut = files.map((f) => f.path).filter((p) => !lidos.has(p));
+  if (leftOut.length) {
+    truncated.push(`spec: ${readPaths.length} de ${files.length} arquivo(s) lidos — FORA: ${leftOut.join(", ")}`);
+  }
+  return { specText: parts.join("\n\n"), truncated, readPaths, leftOut };
 }
 
 export async function buildConnectDeclContext(db: Db, projectId: string): Promise<ConnectDeclContext> {
@@ -102,7 +221,8 @@ export async function buildConnectDeclContext(db: Db, projectId: string): Promis
 
   const rel = (r: { filename: string; rel_dir: string }) => (r.rel_dir ? `${r.rel_dir}/${r.filename}` : r.filename);
   const files = rows.map(rel);
-  const truncated: string[] = [];
+  /** Cortes que NÃO vêm do empacotamento (ex.: arquivo ilegível) — sobrevivem a uma reescolha. */
+  const truncatedBase: string[] = [];
 
   const declRow = rows.find((r) => rel(r).toLowerCase() === CONNECT_DECL_PATH);
   let existing: string | null = null;
@@ -110,25 +230,23 @@ export async function buildConnectDeclContext(db: Db, projectId: string): Promis
     try { existing = await fs.promises.readFile(declRow.file_path, "utf-8"); } catch { existing = null; }
   }
 
-  // Só markdown entra como texto (a declaração e binários não descrevem o domínio).
-  const readable = rows.filter((r) => /\.md$/i.test(r.filename));
-  if (readable.length > CONNECT_DECL_MAX_FILES) {
-    truncated.push(`spec: ${CONNECT_DECL_MAX_FILES} de ${readable.length} arquivos lidos (os demais aparecem na LISTA, sem conteúdo)`);
-  }
-  const parts: string[] = [];
-  let total = 0;
-  for (const r of readable.slice(0, CONNECT_DECL_MAX_FILES)) {
+  // Só markdown entra como texto (a declaração e binários não descrevem o domínio). O disco é lido
+  // por inteiro: é barato perto de uma chamada de LLM, e é o que permite MEDIR o tamanho e os
+  // cabeçalhos de cada arquivo antes de decidir o que enviar (passe 1 do GAP-135).
+  const readable: ReadableSpecFile[] = [];
+  for (const r of rows.filter((x) => /\.md$/i.test(x.filename))) {
     let body = "";
-    try { body = await fs.promises.readFile(r.file_path, "utf-8"); } catch { continue; }
-    const capped = cutEvidence(body, CONNECT_DECL_FILE_CAP);
-    if (capped.length < body.length) truncated.push(`${rel(r)}: ${body.length} → ${CONNECT_DECL_FILE_CAP} chars`);
-    if (total + capped.length > CONNECT_DECL_SPEC_CAP) {
-      truncated.push(`spec: teto total de ${CONNECT_DECL_SPEC_CAP} chars atingido em "${rel(r)}" — arquivos seguintes não foram enviados`);
-      break;
-    }
-    total += capped.length;
-    parts.push(`--- ARQUIVO: ${rel(r)}${r.is_primary ? " (PRIMÁRIO)" : ""} ---\n${capped}`);
+    try { body = await fs.promises.readFile(r.file_path, "utf-8"); }
+    catch { truncatedBase.push(`${rel(r)}: ilegível no disco — não entrou na leitura`); continue; }
+    readable.push({ path: rel(r), isPrimary: r.is_primary === true, body });
   }
+  const facts: SpecFileFact[] = readable.map((f) => {
+    const h = extractHeadings(f.body);
+    return { path: f.path, isPrimary: f.isPrimary, chars: f.body.length, headings: h.headings, headingsOmitted: h.omitted };
+  });
+  // Provisório na ordem da listagem. Se sobrar arquivo de fora, ele NÃO serve: quem escolhe é o
+  // arquiteto no passe 1 (`needsSelection`), porque ordem de listagem não é relevância.
+  const baseline = packSpecText(readable, readable.map((f) => f.path));
 
   const ids = deriveSystemService({
     productSystemId: proj.product_system_id,
@@ -146,10 +264,135 @@ export async function buildConnectDeclContext(db: Db, projectId: string): Promis
     productName: proj.product_name,
     systemId: ids.systemId,
     serviceId: ids.serviceId,
-    specText: parts.join("\n\n"),
+    specText: baseline.specText,
     files,
     existing,
-    truncated,
+    truncated: [...truncatedBase, ...baseline.truncated],
+    truncatedBase,
+    facts,
+    readable,
+    readPaths: baseline.readPaths,
+    leftOut: baseline.leftOut,
+    needsSelection: baseline.leftOut.length > 0,
+    selection: null,
+  };
+}
+
+// ── 🔴 GAP-135 · PASSE 1: quem escolhe o que ler é o ARQUITETO ────────────────
+//
+// MEDIDO em prod (2026-09-09): a spec do NVX LastMile tem ~700k chars em 13 arquivos e o teto é de
+// 240k — 7 arquivos ficavam fora, entre eles o ORÁCULO DE HEALTH, e a declaração de `healthModel`
+// saía fundada em nada. O corte era declarado (honesto), mas a ESCOLHA era cega: valia a ordem da
+// listagem (`is_primary DESC, rel_dir, filename`), que não sabe nada sobre integração. Ordenar por
+// nome/tamanho seria trocar uma automação fixa por outra — e a LEI do Jean é explícita: estrutura e
+// conteúdo de spec são decisão do AGENTE; o código transporta fatos e veta corrupção.
+//
+// Passe 1: o arquiteto recebe a LISTA com tamanho + cabeçalhos e devolve o que precisa ler, em ordem
+// de importância, mais o RISCO do que ficar de fora. Passe 2: só o escolhido, e o que sobrou fora
+// continua declarado. Sem LLM disponível a geração FALHA (`DECL_SELECTION_*`) — nunca cai no
+// provisório da listagem, porque um fallback burro devolveria o defeito com cara de resultado.
+
+export interface ConnectDeclSelection {
+  /** Caminhos a ler, na ordem de importância dada pelo arquiteto (já validados contra a lista). */
+  read: string[];
+  why: string;
+  /** O que o arquiteto diz que NÃO poderá declarar por causa do que ficou fora. */
+  riskIfMissing: string[];
+  /** Arquivo(s) que sustentam cada dimensão, na leitura do arquiteto. */
+  dimensions: Record<string, string[]>;
+  /** Dimensões sem NENHUM arquivo escolhido — declaradas, não caladas. */
+  uncovered: string[];
+  /** Caminhos devolvidos que não existem na spec (descartados) ou repetidos. */
+  invalid: string[];
+}
+
+export function buildConnectDeclSelectRequest(ctx: ConnectDeclContext): Record<string, unknown> {
+  const linhas = ctx.facts.map((f) => {
+    const cabec = f.headings.length
+      ? f.headings.map((h) => `    ${h}`).join("\n") + (f.headingsOmitted ? `\n    ⟨+${f.headingsOmitted} cabeçalho(s) não mostrados⟩` : "")
+      : "    (sem cabeçalhos `#`/`##`)";
+    const grande = f.chars > CONNECT_DECL_FILE_CAP ? ` ⚠️ maior que o teto por arquivo (${CONNECT_DECL_FILE_CAP}) — chegará CORTADO` : "";
+    return `• ${f.path}${f.isPrimary ? " (PRIMÁRIO)" : ""} — ${f.chars} chars${grande}\n${cabec}`;
+  });
+  const somaChars = ctx.facts.reduce((a, f) => a + f.chars, 0);
+  const parts = [
+    `PRODUTO/SERVIÇO: ${ctx.title}${ctx.productName ? ` (produto "${ctx.productName}")` : ""}`,
+    "",
+    `ORÇAMENTO DO PASSE 2: no máximo ${CONNECT_DECL_MAX_FILES} arquivo(s) e ${CONNECT_DECL_SPEC_CAP} chars no total`
+      + ` (teto de ${CONNECT_DECL_FILE_CAP} chars por arquivo).`,
+    `A spec tem ${ctx.facts.length} arquivo(s) legível(is) somando ${somaChars} chars — NÃO cabe inteira, por isso a escolha é sua.`,
+    "",
+    `ARQUIVOS (com tamanho e cabeçalhos):`,
+    ...linhas,
+  ];
+  if (ctx.existing) {
+    parts.push("", "Já existe um connect.yaml (você vai REVISÁ-LO no passe 2) — escolha também o que permite conferir o que ele afirma:",
+      cutEvidence(ctx.existing, 4_000));
+  }
+  parts.push("", "Devolva agora SOMENTE o objeto JSON no formato especificado.");
+  return {
+    prompt_override: loadConnectSelectPrompt(),
+    user_message: parts.join("\n"),
+    max_tokens: 2_000,
+  };
+}
+
+/** Interpreta a escolha do arquiteto. Caminho inventado é DESCARTADO e declarado, nunca "aproximado". */
+export function parseSelection(text: string, facts: SpecFileFact[]): ConnectDeclSelection {
+  const raw = extractDeclarationJson(text);
+  const porMinuscula = new Map(facts.map((f) => [f.path.toLowerCase(), f.path]));
+  const invalid: string[] = [];
+  const read: string[] = [];
+  const norm = (v: unknown): string | null => {
+    if (typeof v !== "string") return null;
+    const limpo = v.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+    return porMinuscula.get(limpo.toLowerCase()) ?? null;
+  };
+  for (const item of Array.isArray(raw.read) ? raw.read : []) {
+    const p = norm(item);
+    if (!p) { invalid.push(`inexistente: ${String(item).slice(0, 120)}`); continue; }
+    if (read.includes(p)) { invalid.push(`repetido: ${p}`); continue; }
+    read.push(p);
+  }
+  if (read.length === 0) throw new Error("DECL_SELECTION_EMPTY");
+
+  const dimensions: Record<string, string[]> = {};
+  const uncovered: string[] = [];
+  const dims = (raw.dimensions && typeof raw.dimensions === "object" && !Array.isArray(raw.dimensions)
+    ? raw.dimensions : {}) as Record<string, unknown>;
+  for (const d of DECL_DIMENSIONS) {
+    const lista = (Array.isArray(dims[d]) ? (dims[d] as unknown[]) : [])
+      .map(norm).filter((p): p is string => !!p && read.includes(p));
+    if (lista.length) dimensions[d] = Array.from(new Set(lista));
+    else uncovered.push(d);
+  }
+  const strs = (v: unknown, maxItems: number) => (Array.isArray(v) ? v : [])
+    .filter((x) => typeof x === "string" && x.trim()).map((x) => String(x).trim().slice(0, 400)).slice(0, maxItems);
+  return {
+    read,
+    why: typeof raw.why === "string" ? raw.why.trim().slice(0, 1_200) : "",
+    riskIfMissing: strs(raw.riskIfMissing, 12),
+    dimensions,
+    uncovered,
+    invalid,
+  };
+}
+
+/**
+ * Aplica a escolha: reempacota o `specText` NA ORDEM do arquiteto e substitui os cortes do provisório
+ * pelos cortes reais. Devolve um contexto novo — o provisório não sobrevive à decisão.
+ */
+export function applySelection(ctx: ConnectDeclContext, sel: ConnectDeclSelection): ConnectDeclContext {
+  const packed = packSpecText(ctx.readable, sel.read);
+  if (!packed.specText.trim()) throw new Error("DECL_SELECTION_UNREADABLE");
+  return {
+    ...ctx,
+    specText: packed.specText,
+    readPaths: packed.readPaths,
+    leftOut: packed.leftOut,
+    // Os cortes do provisório morrem com ele; só os que independem da escolha (disco) permanecem.
+    truncated: [...ctx.truncatedBase, ...packed.truncated],
+    selection: sel,
   };
 }
 
@@ -162,6 +405,22 @@ export function buildConnectDeclRequest(ctx: ConnectDeclContext): Record<string,
     "",
     `ARQUIVOS DA SPEC (${ctx.files.length}): ${ctx.files.join(", ")}`,
   ];
+  if (ctx.selection) {
+    // 🔴 GAP-135: a leitura é a que o PRÓPRIO arquiteto pediu no passe 1. Devolver a escolha a ele
+    // fecha o laço: se agora percebe que faltou algo, isso vai para `notes[]` como lacuna conhecida.
+    parts.push("", `LEITURA QUE VOCÊ PEDIU no passe 1 (${ctx.readPaths.length} de ${ctx.facts.length} arquivo(s)): ${ctx.readPaths.join(", ")}`);
+    if (ctx.selection.why) parts.push(`Seu critério: ${ctx.selection.why}`);
+    if (ctx.selection.uncovered.length) {
+      parts.push(`⚠️ Dimensões que você NÃO conseguiu apontar a nenhum arquivo: ${ctx.selection.uncovered.join(", ")}`
+        + " — declare-as só se a leitura sustentar; caso contrário, registre a lacuna em `notes[]`.");
+    }
+    if (ctx.selection.riskIfMissing.length) {
+      parts.push("⚠️ Riscos que você mesmo apontou pelo que ficou fora:", ...ctx.selection.riskIfMissing.map((r) => `• ${r}`));
+    }
+    if (ctx.selection.invalid.length) {
+      parts.push(`Caminhos descartados da sua escolha (não existem na spec): ${ctx.selection.invalid.join(" · ")}`);
+    }
+  }
   if (ctx.truncated.length) {
     // O que o arquiteto NÃO viu tem de ser dito a ele: decidir sobre spec cortada sem saber do corte
     // é o defeito GAP-128/129/130 na origem.
@@ -411,6 +670,14 @@ export interface GenerateResult {
   warnings: string[];
   truncated: string[];
   modelUsed: string | null;
+  /** 🔴 GAP-135 — a leitura EFETIVA e quem a escolheu (o resultado diz sobre o que foi decidido). */
+  read?: { files: string[]; leftOut: string[]; chosenBy: "arquiteto" | "spec-inteira"; why?: string; uncovered?: string[] };
+}
+
+/** Resposta do serviço `agents` (`/invoke/raw`): o envelope é sempre `{response, model_used}`. */
+function respostaDoAgente(bruto: string): { text: string; model: string | null } {
+  const data = JSON.parse(bruto) as { response?: string; model_used?: string };
+  return { text: String(data.response ?? ""), model: data.model_used ?? null };
 }
 
 /**
@@ -423,7 +690,7 @@ export async function generateConnectDeclaration(
   invoke: (body: Record<string, unknown>) => Promise<string>,
   opts: { overwrite?: boolean } = {},
 ): Promise<GenerateResult> {
-  const ctx = await buildConnectDeclContext(db, projectId);
+  let ctx = await buildConnectDeclContext(db, projectId);
   if (ctx.existing && !opts.overwrite) {
     return {
       path: CONNECT_DECL_PATH, action: "skipped", declaration: {},
@@ -434,21 +701,63 @@ export async function generateConnectDeclaration(
   if (!ctx.specText.trim()) throw new Error("EMPTY_SPEC");
 
   const llm = agentsLlmFields(await resolveWorkbenchLlm({ projectId }));
-  const rawResponse = await invoke({ ...buildConnectDeclRequest(ctx), ...llm });
-  const data = JSON.parse(rawResponse) as { response?: string; model_used?: string };
-  const text = String(data.response ?? "");
+  const avisosDeLeitura: string[] = [];
+  let modeloDaEscolha: string | null = null;
+
+  // 🔴 GAP-135 · PASSE 1 — a spec não cabe: quem escolhe o que ler é o arquiteto, não a listagem.
+  if (ctx.needsSelection) {
+    const brutoSel = await invoke({ ...buildConnectDeclSelectRequest(ctx), ...llm })
+      .catch((e) => { throw new Error(`DECL_SELECTION_FAILED: ${e instanceof Error ? e.message : String(e)}`); });
+    const sel0 = respostaDoAgente(brutoSel);
+    modeloDaEscolha = sel0.model;
+    if (sel0.text.trim().length < 10) throw new Error("DECL_SELECTION_EMPTY");
+    // Escolha ilegível NÃO cai no provisório da listagem: a LEI é 100% LLM, e um fallback burro
+    // devolveria a leitura cega (o defeito) com aparência de resultado. Falha → o laço tenta de novo.
+    const sel = parseSelection(sel0.text, ctx.facts);
+    ctx = applySelection(ctx, sel);
+    console.info(`[ConnectDecl] projeto=${projectId} passe 1: o arquiteto pediu ${ctx.readPaths.length} de ${ctx.facts.length} arquivo(s)`
+      + `${ctx.leftOut.length ? ` (fora: ${ctx.leftOut.length})` : ""}${sel.uncovered.length ? ` · dimensões sem fonte: ${sel.uncovered.join(",")}` : ""}`);
+    avisosDeLeitura.push(
+      `Leitura escolhida pelo arquiteto (2 passes — GAP-135): ${ctx.readPaths.length} de ${ctx.facts.length} arquivo(s).`
+      + (ctx.leftOut.length ? ` Fora: ${ctx.leftOut.join(", ")}.` : ""),
+    );
+    if (sel.uncovered.length) avisosDeLeitura.push(`Dimensões sem arquivo apontado no passe 1: ${sel.uncovered.join(", ")} — confira o que a declaração afirma sobre elas.`);
+    for (const r of sel.riskIfMissing) avisosDeLeitura.push(`Risco declarado pelo arquiteto: ${r}`);
+    if (sel.invalid.length) avisosDeLeitura.push(`Caminhos inexistentes descartados da escolha: ${sel.invalid.join(" · ")}.`);
+  }
+
+  const { text, model } = respostaDoAgente(await invoke({ ...buildConnectDeclRequest(ctx), ...llm }));
   if (text.trim().length < 20) throw new Error("EMPTY_RESPONSE");
 
-  const { declaration, warnings } = assembleDeclaration(ctx, extractDeclarationJson(text));
+  const montada = assembleDeclaration(ctx, extractDeclarationJson(text));
+  const declaration = montada.declaration;
+  const warnings = [...avisosDeLeitura, ...montada.warnings];
   const header = [
     `Declaração Connect gerada pela Bancada do Zentriz Genesis (schema Connect v${VENDORED_CONNECT_VERSION}).`,
     "Conteúdo decidido pelo arquiteto (LLM) a partir da spec; identidade (systemId/serviceId) imposta pelo sistema.",
+    ...(ctx.selection
+      ? [
+          `Leitura escolhida pelo próprio arquiteto (2 passes): ${ctx.readPaths.join(", ")}.`,
+          ...(ctx.leftOut.length ? [`NÃO lidos: ${ctx.leftOut.join(", ")}.`] : []),
+          ...(ctx.selection.why ? [`Critério: ${ctx.selection.why}`] : []),
+          ...(ctx.selection.uncovered.length ? [`Dimensões sem arquivo apontado: ${ctx.selection.uncovered.join(", ")}.`] : []),
+        ]
+      : []),
     ...(ctx.truncated.length ? [`Cortes no material lido: ${ctx.truncated.join(" · ")}`] : []),
   ];
   const yaml = declarationToYaml(declaration, header);
   const action = await upsertSpecFile(db, projectId, CONNECT_DECL_PATH, yaml, true);
   await db.query("UPDATE projects SET spec_dirty_at = now() WHERE id = $1", [projectId]).catch(() => {});
-  return { path: CONNECT_DECL_PATH, action, declaration, warnings, truncated: ctx.truncated, modelUsed: data.model_used ?? null };
+  return {
+    path: CONNECT_DECL_PATH, action, declaration, warnings, truncated: ctx.truncated,
+    modelUsed: model ?? modeloDaEscolha,
+    read: {
+      files: ctx.readPaths, leftOut: ctx.leftOut,
+      chosenBy: ctx.selection ? "arquiteto" : "spec-inteira",
+      ...(ctx.selection?.why ? { why: ctx.selection.why } : {}),
+      ...(ctx.selection?.uncovered.length ? { uncovered: ctx.selection.uncovered } : {}),
+    },
+  };
 }
 
 // ── O LAÇO como dono (migração 115) ──────────────────────────────────────────
@@ -612,6 +921,8 @@ export async function ensureConnectDeclarationsTick(
           action: res.action, path: res.path, warnings: res.warnings,
           truncated: res.truncated, model: res.modelUsed,
           interfaces: Array.isArray(res.declaration.interfaces) ? (res.declaration.interfaces as unknown[]).length : 0,
+          // GAP-135: o resultado registra SOBRE O QUE a declaração foi decidida e quem escolheu.
+          ...(res.read ? { read: res.read } : {}),
         });
         console.info(`[ConnectDecl] run=${runId} \`${res.path}\` ${res.action} (${res.warnings.length} aviso(s))`);
       })
