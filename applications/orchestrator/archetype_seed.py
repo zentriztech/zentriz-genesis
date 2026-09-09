@@ -273,6 +273,25 @@ ARCHETYPES: list[dict[str, Any]] = [
             "corte, não por cegueira do revisor."
         ),
     },
+    {
+        "slug": "arch.gap131.repetir-a-via-ja-refutada-nao-fecha-gap",
+        "title": "Repetir a via já tentada não fecha o GAP",
+        "rule": (
+            "Defeito que volta rodada após rodada não é falta de esforço: é a VIA. Leia as vias que você "
+            "já declarou neste GAP — cada uma foi seguida de revalidação que o MANTEVE — e escolha outra: "
+            "edite DENTRO do trecho ancorado, aponte onde a decisão vive, ou conteste com argumento. "
+            "Repetir a via gasta a rodada e não muda a contagem."
+        ),
+        "evidence": (
+            "Bancada GAP-131 (2026-09-09, NVX LastMile): agrupando os desfechos por identidade do GAP, o "
+            "mesmo defeito foi declarado 'corrigido' 8× seguidas (visao-escopo.md §1.3), 6× em três "
+            "outros e 3× ou mais em quinze; em modelo-dados.md §7.2, 4 de 4 rodadas terminaram com o "
+            "aviso de que o trecho apontado ficou IDÊNTICO. No mesmo período um núcleo de ~40 GAPs "
+            "importantes sobreviveu a TODAS as validações (47 = 40 herdados + 7 novos; 53 = 40 + 13). "
+            "A causa era do laço, não do agente: ele só recebia a ÚLTIMA tentativa, então podia voltar "
+            "de boa-fé a uma via já refutada. Agora a cadeia inteira volta no pedido."
+        ),
+    },
 ]
 
 # Complemento por papel — o mesmo arquétipo, na forma em que ele aparece para cada agente.

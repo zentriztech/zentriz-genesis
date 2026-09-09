@@ -331,6 +331,167 @@ export function priorOutcomeFactBlock(prior: GapOutcome[] | null | undefined): s
 type Db = { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
 
 /**
+ * 🔴 GAP-131 — a memória de tentativas tinha PROFUNDIDADE 1, e o agente repetia vias já refutadas.
+ *
+ * MEDIDO em prod (NVX LastMile, rodadas de 2026-09-08/09): agrupando os desfechos por identidade
+ * (`fingerprint`), o MESMO GAP foi declarado `corrigido` **8×** (`visao-escopo.md §1.3`), 6× em três
+ * outros e ≥3× em quinze — e `modelo-dados.md §7.2` teve **4 de 4** rodadas com o aviso "trecho
+ * apontado ficou IDÊNTICO". No mesmo período o núcleo de ~40 GAPs importantes sobreviveu a TODAS as
+ * validações (medição de herança: 47 = 40 herdados + 7 novos; 53 = 40 + 13; 49 = 49 + 0).
+ *
+ * A causa no código: `lastDeclaredOutcomes` lê **um** job (`LIMIT 1`). O agente recebia "na rodada
+ * anterior você disse X e o juiz manteve o GAP" e mais nada — sem saber que já havia tentado outras
+ * 6 vias, ele podia (e podia legitimamente) voltar a uma delas. `anchorHistories` (GAP-111/112) dá a
+ * CONTAGEM de rodadas dedicadas, não o CONTEÚDO do que foi tentado.
+ *
+ * O conserto é transporte: entregar a cadeia de vias já tentadas, em ordem, com corte declarado.
+ * Quem decide o que fazer com isso continua sendo o agente — inclusive contestar (`nao_e_defeito`) ou
+ * apontar para fora (`nao_e_deste_arquivo`).
+ */
+export const ATTEMPT_HISTORY_JOBS = 8;
+/** Quantos GAPs entram no bloco (os mais teimosos primeiro). Teto de custo, DECLARADO. */
+export const ATTEMPT_HISTORY_GAPS = 6;
+/** Quantas vias por GAP. As mais RECENTES são as que importam; o corte diz quantas ficaram fora. */
+export const ATTEMPT_HISTORY_VIAS = 5;
+/** Teto da nota de cada via — o bloco multiplica por via × GAP. */
+export const ATTEMPT_NOTE_MAX = 220;
+
+/** Uma via já tentada neste GAP, do jeito que o agente a declarou. */
+export interface GapAttempt {
+  verb: GapOutcomeVerb | "nao_declarado";
+  note: string;
+  contested: string | null;
+}
+
+/** A cadeia de tentativas de UM GAP, da mais antiga para a mais recente. */
+export interface GapAttemptHistory {
+  fingerprint: string;
+  titleFingerprint: string;
+  title: string;
+  anchor: string | null;
+  attempts: GapAttempt[];
+}
+
+/**
+ * A cadeia de desfechos declarados para ESTE arquivo, agrupada por identidade do GAP.
+ *
+ * Atravessa runs pelo mesmo motivo do `lastDeclaredOutcomes`/`focusRoundsByFile` (GAP-81): os arquivos
+ * teimosos do NVX atravessaram várias runs. `nao_declarado` fica FORA da cadeia: "ninguém disse" não é
+ * uma via tentada, e entrar aqui faria o agente se defender de algo que não afirmou.
+ */
+export async function declaredAttemptHistory(
+  db: Db,
+  projectId: string,
+  filePath: string,
+  jobs: number = ATTEMPT_HISTORY_JOBS,
+): Promise<GapAttemptHistory[]> {
+  try {
+    const rows = (await db.query(
+      `SELECT gap_outcomes FROM spec_chat_jobs
+        WHERE project_id = $1 AND lower(file_path) = lower($2)
+          AND gap_outcomes IS NOT NULL AND status = 'done'
+        ORDER BY created_at DESC LIMIT $3`,
+      [projectId, filePath, Math.max(1, jobs)],
+    )).rows as Array<{ gap_outcomes?: unknown }>;
+    const porFp = new Map<string, GapAttemptHistory>();
+    // `DESC` no SQL (queremos os N mais recentes) → percorrer ao contrário para a cadeia ficar
+    // cronológica: o agente lê "1ª via … 2ª via …" na ordem em que tentou.
+    for (const row of [...rows].reverse()) {
+      const raw = row?.gap_outcomes;
+      if (!Array.isArray(raw)) continue;
+      for (const o of raw as GapOutcome[]) {
+        const fp = typeof o?.fingerprint === "string" ? o.fingerprint : "";
+        if (!fp || o.verb === "nao_declarado") continue;
+        const rec = porFp.get(fp) ?? {
+          fingerprint: fp,
+          titleFingerprint: typeof o.titleFingerprint === "string" ? o.titleFingerprint : "",
+          title: typeof o.title === "string" ? o.title : "",
+          anchor: typeof o.anchor === "string" ? o.anchor : null,
+          attempts: [],
+        };
+        rec.attempts.push({ verb: o.verb, note: typeof o.note === "string" ? o.note : "", contested: o.contested ?? null });
+        // O título/âncora mais RECENTES ganham: é assim que o GAP é nomeado hoje.
+        rec.title = typeof o.title === "string" && o.title ? o.title : rec.title;
+        rec.anchor = typeof o.anchor === "string" && o.anchor ? o.anchor : rec.anchor;
+        porFp.set(fp, rec);
+      }
+    }
+    return [...porFp.values()];
+  } catch (e) {
+    // Mesma lei do `lastDeclaredOutcomes`: ler o histórico é um AJUSTE do pedido e nenhuma falha aqui
+    // pode derrubar a rodada que ia escrever o arquivo.
+    console.warn(`[GapOutcomes] declaredAttemptHistory falhou: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  }
+}
+
+/**
+ * Das cadeias lidas, as que falam de um GAP que ESTE despacho está mandando E que já têm mais de uma
+ * via tentada. Mesmo casamento por IDENTIDADE do `selectPriorOutcomes` (fingerprint efetivo, depois
+ * título, com veto de ambiguidade nos dois degraus): cadeia colada no GAP errado é falso positivo.
+ */
+export function selectAttemptHistory(
+  history: GapAttemptHistory[] | null | undefined,
+  dispatched: ValidationFinding[],
+  minAttempts = 2,
+): GapAttemptHistory[] {
+  if (!history || history.length === 0 || dispatched.length === 0) return [];
+  const eff = effectiveFingerprints(dispatched);
+  const titles = dispatched.map((f) => findingTitleFingerprint(f));
+  const out = new Set<GapAttemptHistory>();
+  for (let i = 0; i < dispatched.length; i += 1) {
+    const porFp = history.filter((h) => h.fingerprint === eff[i]);
+    if (porFp.length === 1) { out.add(porFp[0]); continue; }
+    if (porFp.length > 1) continue;
+    if (titles.filter((t) => t === titles[i]).length > 1) continue;
+    const porTitulo = history.filter((h) => h.titleFingerprint.length > 0 && h.titleFingerprint === titles[i]);
+    if (porTitulo.length === 1) out.add(porTitulo[0]);
+  }
+  return [...out]
+    .filter((h) => h.attempts.length >= minAttempts)
+    .sort((a, b) => b.attempts.length - a.attempts.length);
+}
+
+/**
+ * O bloco de FATO das vias já tentadas. Só entra GAP com 2+ tentativas — para o resto,
+ * `priorOutcomeFactBlock` (relato da rodada anterior) já diz tudo o que há para dizer.
+ *
+ * Não manda o agente fazer nada específico: diz o que já foi tentado e lista as SAÍDAS legítimas
+ * (editar dentro do trecho ancorado, apontar para fora, ou contestar com argumento). A escolha é dele
+ * — código que escolhesse a via seria a automação fixa que a Lei do Jean proíbe.
+ */
+export function attemptHistoryFactBlock(history: GapAttemptHistory[] | null | undefined): string {
+  if (!history || history.length === 0) return "";
+  const entram = history.slice(0, ATTEMPT_HISTORY_GAPS);
+  const linhas: string[] = [];
+  for (const h of entram) {
+    const onde = h.anchor ? ` (em: ${h.anchor})` : "";
+    linhas.push(`• ${h.title}${onde} — ${h.attempts.length} tentativa(s) anterior(es), NENHUMA fechou o GAP:`);
+    const vias = h.attempts.slice(-ATTEMPT_HISTORY_VIAS);
+    const foraVias = h.attempts.length - vias.length;
+    if (foraVias > 0) linhas.push(`    …⟨CORTADO: ${vias.length} de ${h.attempts.length} vias — as mais recentes⟩`);
+    vias.forEach((a, i) => {
+      const ordinal = h.attempts.length - vias.length + i + 1;
+      const nota = a.note ? `“${cutEvidence(a.note, ATTEMPT_NOTE_MAX)}”` : "(sem justificativa registrada)";
+      const extra = a.contested ? ` [contestado pelo código: ${a.contested}]` : "";
+      linhas.push(`    ${ordinal}ª via — você declarou \`${a.verb}\`: ${nota}${extra}`);
+    });
+  }
+  const cortados = history.length - entram.length;
+  return [
+    "--- VIAS QUE VOCÊ JÁ TENTOU NESTES GAPS (fato: seu próprio relato, rodadas anteriores) ---",
+    ...linhas,
+    cortados > 0 ? `• …⟨CORTADO: ${entram.length} de ${history.length} GAPs reincidentes — os mais teimosos⟩` : "",
+    "Cada via acima foi seguida de uma revalidação que MANTEVE o GAP. Repetir qualquer uma delas custa",
+    "uma rodada e não muda o resultado. Saídas legítimas: (a) editar DENTRO do trecho ancorado que o",
+    "GAP aponta, mudando o texto que o juiz lê; (b) `nao_e_deste_arquivo` apontando onde a decisão vive;",
+    "(c) `nao_e_defeito` com o argumento — que volta ao juiz e não fecha o GAP por si.",
+    "--- FIM DAS VIAS JÁ TENTADAS ---",
+    "",
+  ].filter(Boolean).join("\n");
+}
+
+/**
  * O último relato declarado para ESTE arquivo deste projeto.
  *
  * Atravessa runs de propósito, pela mesma razão de `focusRoundsByFile` (GAP-81): os arquivos teimosos

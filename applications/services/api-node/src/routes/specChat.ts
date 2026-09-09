@@ -52,6 +52,8 @@ import { focusFactBlock } from "../services/gapFocus.js";
 // 🔴 A1: prestação de contas por GAP — instrução no pedido, leitura vetada na resposta.
 import {
   gapOutcomeInstruction, parseGapOutcomes, priorOutcomeFactBlock, summarizeOutcomes,
+  // 🔴 GAP-131: a cadeia de vias já tentadas (profundidade > 1).
+  attemptHistoryFactBlock, type GapAttemptHistory,
   type GapOutcome,
 } from "../services/gapOutcomes.js";
 import type { FocusPlan } from "../services/gapFocus.js";
@@ -879,6 +881,12 @@ function buildGapFileRequest(
    * (ver `gapIndexBlock`); vazio = outro arquivo, ou árvore não medida.
    */
   indexBlock = "",
+  /**
+   * 🔴 GAP-131: a cadeia de vias que o agente JÁ TENTOU nestes GAPs (2+ tentativas), do próprio relato
+   * dele. Vazio = nenhum GAP desta leva tem histórico com mais de uma tentativa. Vem no fim da lista de
+   * parâmetros de propósito: é fato de ROTA, e a ordem no prompt é decidida no array abaixo.
+   */
+  attemptHistoryBlock = "",
 ): Record<string, unknown> {
   // A1: o corte do orçamento é DECLARADO. Antes, a lista era fatiada no meio de um item e o modelo
   // recebia um GAP pela metade sem saber que havia mais — e com a prestação de contas por número, um
@@ -955,6 +963,10 @@ function buildGapFileRequest(
     // depois da recusa por tamanho porque é da mesma natureza (correção de rota) e mais específico:
     // não diz "sua resposta era grande", diz "você mesmo disse que não conseguiu, e por quê".
     priorOutcomeBlock,
+    // 🔴 GAP-131: colado no relato da rodada anterior porque é o MESMO fato com profundidade — o relato
+    // diz "a última via falhou", este diz "estas N já falharam". Medido em prod: o mesmo GAP declarado
+    // `corrigido` 8× seguidas, porque o agente só via a última tentativa e podia voltar a uma anterior.
+    attemptHistoryBlock,
     // 🔴 A1: o contrato de prestação de contas fecha o pedido, colado na instrução de formato — as
     // duas coisas que o modelo tem de produzir ficam juntas, e o número que ele declara é o da lista
     // que acabou de ler. `gapsFit.length` (não `findings.length`): pedir desfecho de um GAP que o
@@ -1688,6 +1700,12 @@ export async function dispatchGapFileJob(opts: {
    */
   priorOutcomes?: GapOutcome[] | null;
   /**
+   * 🔴 GAP-131: as cadeias de tentativas (2+ vias já declaradas) dos GAPs desta leva, lidas pelo laço
+   * (`declaredAttemptHistory` + `selectAttemptHistory`). Só o laço autônomo as tem. Ausente = nenhum
+   * reincidente com histórico, ou a leitura falhou (e aí o laço não afirma nada).
+   */
+  attemptHistory?: GapAttemptHistory[] | null;
+  /**
    * 🔴 GAP-121: o laço mediu que não há margem para este arquivo crescer e despachou uma rodada de
    * CONSOLIDAÇÃO PURA — remoção de redeclaração, sem pedir o texto novo dos GAPs (que seguem ativos).
    * Só o laço autônomo sabe disso (é a aritmética do orçamento da run); o botão humano nunca manda.
@@ -1756,6 +1774,17 @@ export async function dispatchGapFileJob(opts: {
       + ` resumo=${JSON.stringify(summarizeOutcomes(opts.priorOutcomes!))}`,
     );
   }
+  // 🔴 GAP-131: as vias já tentadas. Logado pelo mesmo motivo de todos os outros fatos — o prompt não
+  // é persistido, só o `reply`. `gaps=0` com histórico presente é o sintoma de cadeia INERTE (o
+  // casamento por identidade vetou tudo), e é isso que separa "não avisei" de "não havia o que avisar".
+  const attemptHistoryBlock = attemptHistoryFactBlock(opts.attemptHistory);
+  if ((opts.attemptHistory ?? []).length > 0) {
+    const h = opts.attemptHistory!;
+    console.log(
+      `[SpecChat] vias já tentadas entregues alvo=${opts.filePath} gaps=${h.length}`
+      + ` pior=${Math.max(...h.map((x) => x.attempts.length))} vias chars=${attemptHistoryBlock.length}`,
+    );
+  }
   const priorBlock = priorRejectionFactBlock(opts.priorRejection);
   if (priorBlock) {
     const p = opts.priorRejection!;
@@ -1797,6 +1826,7 @@ export async function dispatchGapFileJob(opts: {
       ...buildGapFileRequest(
         target.text, opts.filePath, opts.findings, ctx, opts.projectId, siblings, target.digested, oracles,
         priorBlock, persistentBlock, focusBlock, priorOutcomeBlock, consolidationBlock, indexBlock,
+        attemptHistoryBlock,
       ),
       ...opts.llm,
     },

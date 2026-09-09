@@ -69,6 +69,8 @@ import { reconcileGapDelta, buildPersistentRefs, type PersistentGapRef } from ".
 // ele no despacho, e registrado no log da rodada para ser auditável fora do banco de jobs.
 import {
   lastDeclaredOutcomes, selectPriorOutcomes, summarizeOutcomes, type GapOutcome,
+  // 🔴 GAP-131: a cadeia de vias já tentadas neste arquivo (profundidade > 1).
+  declaredAttemptHistory, selectAttemptHistory,
 } from "./gapOutcomes.js";
 // 🔴 GAP-71 — os dois FATOS que dizem ao CTO que a errata dele não fechou o GAP (ver gapPersistence.ts).
 import { untouchedAnchors, stableRecurrenceRefs, mergeRecurrenceRefs, markUntouched } from "./gapPersistence.js";
@@ -2609,6 +2611,11 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
   // `fileRounds`/`anchorHistory` (a função já degrada para `null`): entregar o relato é um AJUSTE do
   // pedido, e nenhuma falha ao lê-lo pode derrubar a rodada que ia escrever o arquivo.
   const priorOutcomesAll = await lastDeclaredOutcomes(db, run.projectId, target);
+  // 🔴 GAP-131: a cadeia INTEIRA de vias já tentadas neste arquivo (o A1 lia UM job). Medido em prod: o
+  // mesmo GAP declarado `corrigido` 8× seguidas — o agente só recebia a última tentativa e voltava a
+  // uma anterior. A função já degrada para `[]`; ler o histórico é ajuste do pedido, nunca causa de
+  // falha da rodada que ia escrever o arquivo.
+  const attemptHistoryAll = await declaredAttemptHistory(db, run.projectId, target);
   const dispatched = focus.level === 0 ? fileFindings : (focus.findings as EnrichedFinding[]);
   // As refs de reincidência acompanham a lista restrita: mandar o fato de um GAP que NÃO está na lista
   // faria o agente trabalhar fora do foco, que é exatamente o que esta rodada existe para evitar.
@@ -2651,6 +2658,9 @@ async function startFileRound(db: Db, run: AutonomyRun): Promise<boolean> {
       // fingerprint, não por semelhança de título). Devolver o relato de um GAP que saiu da lista
       // seria pedir trabalho sobre defeito que o juiz já não vê.
       priorOutcomes: selectPriorOutcomes(priorOutcomesAll, dispatched),
+      // 🔴 GAP-131: só as cadeias de GAPs QUE ESTA RODADA ESTÁ MANDANDO e com 2+ tentativas — mesmo
+      // casamento por identidade do A1 (fingerprint, depois título, com veto de ambiguidade).
+      attemptHistory: selectAttemptHistory(attemptHistoryAll, dispatched),
       // 🔴 GAP-121: o pedido desta rodada é a REMOÇÃO, não a errata. Os GAPs continuam indo (o agente
       // precisa saber quais seções importam), mas rotulados como contexto ativo — ver
       // `consolidationOnlyFactBlock`.

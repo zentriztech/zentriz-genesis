@@ -10,6 +10,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   GAP_OUTCOME_VERBS, parseGapOutcomes, extractOutcomeBlock, summarizeOutcomes,
   selectPriorOutcomes, priorOutcomeFactBlock, gapOutcomeInstruction, lastDeclaredOutcomes,
+  declaredAttemptHistory, selectAttemptHistory, attemptHistoryFactBlock,
+  ATTEMPT_HISTORY_GAPS, ATTEMPT_HISTORY_VIAS, ATTEMPT_NOTE_MAX,
   type GapOutcome,
 } from "./gapOutcomes.js";
 import type { ValidationFinding } from "./specValidation.js";
@@ -255,5 +257,128 @@ describe("A1 — lastDeclaredOutcomes", () => {
     expect(await lastDeclaredOutcomes({ query: vi.fn().mockResolvedValue({ rows: [] }) }, "p", "a.md")).toBeNull();
     expect(await lastDeclaredOutcomes({ query: vi.fn().mockResolvedValue({ rows: [{ gap_outcomes: {} }] }) }, "p", "a.md")).toBeNull();
     expect(await lastDeclaredOutcomes({ query: vi.fn().mockRejectedValue(new Error("boom")) }, "p", "a.md")).toBeNull();
+  });
+});
+
+/**
+ * 🔴 GAP-131 — a memória de tentativas tinha PROFUNDIDADE 1.
+ *
+ * Medido em prod (NVX LastMile): agrupando desfechos por `fingerprint`, o MESMO GAP foi declarado
+ * `corrigido` 8× (`visao-escopo.md §1.3`), 6× em três outros, ≥3× em quinze; e `modelo-dados.md §7.2`
+ * teve 4 de 4 rodadas com o aviso "trecho apontado ficou IDÊNTICO". `lastDeclaredOutcomes` lê UM job,
+ * então o agente nunca soube quais vias já havia tentado.
+ */
+describe("🔴 GAP-131 — declaredAttemptHistory", () => {
+  /** Dois jobs (o SQL devolve DESC: o mais novo primeiro) sobre o mesmo GAP. */
+  const jobs = (fp = "fp-a") => [
+    { gap_outcomes: [{ index: 1, verb: "corrigido", note: "via NOVA: reescrevi a tabela", contested: null, fingerprint: fp, titleFingerprint: "t-a", title: "Título de hoje", anchor: "§1.3" }] },
+    { gap_outcomes: [{ index: 1, verb: "corrigido", note: "via ANTIGA: troquei o 409 por 422", contested: null, fingerprint: fp, titleFingerprint: "t-a", title: "Título de ontem", anchor: "§1.3" }] },
+  ];
+
+  it("junta as tentativas do MESMO fingerprint em ordem CRONOLÓGICA (a mais antiga primeiro)", async () => {
+    const db = { query: vi.fn().mockResolvedValue({ rows: jobs() }) };
+    const h = await declaredAttemptHistory(db, "p1", "visao-escopo.md");
+    expect(h).toHaveLength(1);
+    expect(h[0].attempts.map((a) => a.note)).toEqual([
+      "via ANTIGA: troquei o 409 por 422",
+      "via NOVA: reescrevi a tabela",
+    ]);
+    // Título/âncora do relato mais RECENTE — é como o GAP se chama hoje.
+    expect(h[0].title).toBe("Título de hoje");
+    const sql = db.query.mock.calls[0][0] as string;
+    expect(sql).toMatch(/ORDER BY created_at DESC LIMIT \$3/);
+    expect(sql).toMatch(/lower\(file_path\) = lower\(\$2\)/);
+  });
+
+  it("`nao_declarado` e desfecho sem fingerprint NÃO entram (ninguém tentou nada)", async () => {
+    const rows = [{ gap_outcomes: [
+      { index: 1, verb: "nao_declarado", note: "", fingerprint: "fp-a", titleFingerprint: "t-a", title: "T", anchor: null },
+      { index: 2, verb: "corrigido", note: "x", fingerprint: "", titleFingerprint: "", title: "T2", anchor: null },
+    ] }];
+    const h = await declaredAttemptHistory({ query: vi.fn().mockResolvedValue({ rows }) }, "p1", "a.md");
+    expect(h).toEqual([]);
+  });
+
+  it("falha de banco / valor não-array ⇒ [] (ler o histórico nunca derruba a rodada)", async () => {
+    expect(await declaredAttemptHistory({ query: vi.fn().mockRejectedValue(new Error("boom")) }, "p", "a.md")).toEqual([]);
+    expect(await declaredAttemptHistory({ query: vi.fn().mockResolvedValue({ rows: [{ gap_outcomes: {} }] }) }, "p", "a.md")).toEqual([]);
+  });
+});
+
+describe("🔴 GAP-131 — selectAttemptHistory + attemptHistoryFactBlock", () => {
+  const cadeia = (over = {}) => ({
+    fingerprint: "x", titleFingerprint: "tx", title: "GAP teimoso", anchor: "§1.3",
+    attempts: [
+      { verb: "corrigido" as const, note: "primeira via", contested: null },
+      { verb: "corrigido" as const, note: "segunda via", contested: null },
+    ],
+    ...over,
+  });
+
+  it("cadeia só volta para GAP que a rodada está mandando, e só com 2+ tentativas", () => {
+    const alvo = f();
+    const { outcomes } = parseGapOutcomes(bloco("1) corrigido: fechei"), [alvo], { appliedEdits: 1 });
+    const fp = outcomes[0].fingerprint;
+    const comDuas = cadeia({ fingerprint: fp, titleFingerprint: outcomes[0].titleFingerprint });
+    expect(selectAttemptHistory([comDuas], [alvo])).toHaveLength(1);
+    // Uma tentativa só: o relato da rodada anterior (A1) já diz tudo — não paga um bloco novo.
+    const comUma = { ...comDuas, attempts: comDuas.attempts.slice(0, 1) };
+    expect(selectAttemptHistory([comUma], [alvo])).toEqual([]);
+    // GAP de outro arquivo/âncora não casa: cadeia colada no GAP errado seria falso positivo.
+    expect(selectAttemptHistory([cadeia()], [alvo])).toEqual([]);
+  });
+
+  it("mais teimoso primeiro (ordena por número de tentativas)", () => {
+    const alvos = [f(), f({ anchor: "§9 Outro", title: "Outro GAP" })];
+    const { outcomes } = parseGapOutcomes(bloco("1) corrigido: a", "2) corrigido: b"), alvos, { appliedEdits: 1 });
+    const tres = cadeia({ fingerprint: outcomes[0].fingerprint, titleFingerprint: outcomes[0].titleFingerprint,
+      attempts: [1, 2, 3].map((n) => ({ verb: "corrigido" as const, note: `via ${n}`, contested: null })) });
+    const duas = cadeia({ fingerprint: outcomes[1].fingerprint, titleFingerprint: outcomes[1].titleFingerprint });
+    const sel = selectAttemptHistory([duas, tres], alvos);
+    expect(sel.map((h) => h.attempts.length)).toEqual([3, 2]);
+  });
+
+  it("sem cadeia nenhuma o bloco é VAZIO (bloco vazio no prompt seria ruído pago)", () => {
+    expect(attemptHistoryFactBlock([])).toBe("");
+    expect(attemptHistoryFactBlock(null)).toBe("");
+  });
+
+  it("o bloco diz quantas vias já falharam, cita cada uma e lista as SAÍDAS legítimas", () => {
+    const b = attemptHistoryFactBlock([cadeia()]);
+    expect(b).toContain("2 tentativa(s) anterior(es), NENHUMA fechou o GAP");
+    expect(b).toContain("1ª via");
+    expect(b).toContain("primeira via");
+    expect(b).toContain("2ª via");
+    expect(b).toContain("nao_e_deste_arquivo");
+    expect(b).toContain("nao_e_defeito");
+    expect(b).toContain("DENTRO do trecho ancorado");
+  });
+
+  it("corte de vias e corte de GAPs são DECLARADOS (GAP-128/129: teto pode existir, silêncio não)", () => {
+    const muitasVias = cadeia({
+      attempts: Array.from({ length: ATTEMPT_HISTORY_VIAS + 3 }, (_, i) => ({ verb: "corrigido" as const, note: `via ${i + 1}`, contested: null })),
+    });
+    const b = attemptHistoryFactBlock([muitasVias]);
+    expect(b).toContain(`CORTADO: ${ATTEMPT_HISTORY_VIAS} de ${ATTEMPT_HISTORY_VIAS + 3} vias`);
+    // Mantém as MAIS RECENTES e a numeração continua sendo a real (não reinicia em 1ª).
+    expect(b).toContain(`${ATTEMPT_HISTORY_VIAS + 3}ª via`);
+    expect(b).not.toContain("1ª via");
+
+    const muitosGaps = Array.from({ length: ATTEMPT_HISTORY_GAPS + 2 }, (_, i) => cadeia({ fingerprint: `x${i}`, title: `GAP ${i}` }));
+    const b2 = attemptHistoryFactBlock(muitosGaps);
+    expect(b2).toContain(`CORTADO: ${ATTEMPT_HISTORY_GAPS} de ${ATTEMPT_HISTORY_GAPS + 2} GAPs`);
+  });
+
+  it("nota longa vai cortada COM declaração (não faz o agente defender frase que não é dele)", () => {
+    const b = attemptHistoryFactBlock([cadeia({
+      attempts: [
+        { verb: "corrigido", note: "z".repeat(ATTEMPT_NOTE_MAX + 200), contested: null },
+        { verb: "permanece_aberto", note: "curta", contested: "declarou corrigido sem edição" },
+      ],
+    })]);
+    expect(b).toContain("CORTADO");
+    expect(b).toContain(String(ATTEMPT_NOTE_MAX + 200));
+    // Contestação do código viaja colada na via — é fato verificável, não opinião.
+    expect(b).toContain("[contestado pelo código: declarou corrigido sem edição]");
   });
 });
